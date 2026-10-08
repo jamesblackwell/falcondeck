@@ -135,6 +135,7 @@ beforeEach(() => {
 
 afterEach(() => {
   vi.useRealTimers();
+  vi.restoreAllMocks();
 });
 
 describe("ActivityWindow", () => {
@@ -164,13 +165,85 @@ describe("ActivityWindow", () => {
       await screen.findByRole("button", { name: /Migrate billing webhooks/ }),
     );
 
+    fireEvent.keyDown(
+      screen.getByRole("button", { name: /Migrate billing webhooks/ }),
+      { key: "Enter" },
+    );
+    expect(screen.getByRole("dialog", { name: /Preview/ })).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Open task" }));
     expect(
       emitted.find((entry) => entry.event === ACTIVITY_WINDOW_EVENTS.openThread)
         ?.payload,
-    ).toEqual({ workspaceId: "ws-1", threadId: "thread-1" });
+    ).toEqual({
+      workspaceId: "ws-1",
+      threadId: "thread-1",
+    });
     await waitFor(() => expect(invoked).toContain("focus_main_window"));
     // The whole point of detaching: the queue is still on screen.
     expect(screen.getByText("Migrate billing webhooks")).toBeInTheDocument();
+  });
+
+  it("loads and replies through the main window without opening the task", async () => {
+    vi.spyOn(document, "hasFocus").mockReturnValue(true);
+    render(<ActivityWindow />);
+    await waitFor(() => expect(listeners.size).toBeGreaterThan(0));
+    deliver(ACTIVITY_WINDOW_EVENTS.state, state());
+    fireEvent.click(
+      screen.getByRole("button", { name: /Migrate billing webhooks/ }),
+    );
+    fireEvent.keyDown(window, { key: "Enter" });
+    await waitFor(() =>
+      expect(
+        emitted.some((entry) => entry.event === ACTIVITY_WINDOW_EVENTS.preview),
+      ).toBe(true),
+    );
+    const load = emitted.find(
+      (entry) => entry.event === ACTIVITY_WINDOW_EVENTS.preview,
+    )!.payload as { callId: string };
+    deliver(ACTIVITY_WINDOW_EVENTS.previewResult, {
+      callId: load.callId,
+      detail: {
+        workspace: state().groups[0]!.workspace,
+        thread: state().groups[0]!.threads[0],
+        items: [
+          {
+            id: "reply",
+            kind: "assistant_message",
+            text: "Messages loaded in preview",
+            created_at: new Date().toISOString(),
+          },
+        ],
+        has_older: false,
+        is_partial: false,
+        oldest_item_id: "reply",
+        newest_item_id: "reply",
+      },
+    });
+    await screen.findByText("Messages loaded in preview");
+    const reply = screen.getByRole("textbox", { name: "Quick reply" });
+    fireEvent.change(reply, { target: { value: "Please follow up" } });
+    fireEvent.keyDown(reply, { key: "Enter" });
+    await waitFor(() =>
+      expect(
+        emitted.filter(
+          (entry) => entry.event === ACTIVITY_WINDOW_EVENTS.preview,
+        ),
+      ).toHaveLength(2),
+    );
+    const send = emitted.filter(
+      (entry) => entry.event === ACTIVITY_WINDOW_EVENTS.preview,
+    )[1]!.payload as { callId: string; text: string };
+    expect(send.text).toBe("Please follow up");
+    deliver(ACTIVITY_WINDOW_EVENTS.previewResult, { callId: send.callId });
+    await waitFor(() => expect(reply).toHaveValue(""));
+    fireEvent.keyDown(reply, { key: "Escape" });
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+    expect(
+      emitted.some(
+        (entry) => entry.event === ACTIVITY_WINDOW_EVENTS.openThread,
+      ),
+    ).toBe(false);
+    expect(invoked).not.toContain("focus_main_window");
   });
 
   it("opens the quick composer with Command-N and starts a task in place", async () => {
@@ -221,7 +294,11 @@ describe("ActivityWindow", () => {
     expect(
       emitted.find((entry) => entry.event === ACTIVITY_WINDOW_EVENTS.markRead)
         ?.payload,
-    ).toEqual({ workspaceId: "ws-1", threadId: "thread-1" });
+    ).toEqual({
+      workspaceId: "ws-1",
+      threadId: "thread-1",
+      readSeq: undefined,
+    });
   });
 
   it("round-trips an approval and reports the main window's failure on the card", async () => {

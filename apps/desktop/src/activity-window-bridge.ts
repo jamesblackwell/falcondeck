@@ -4,6 +4,7 @@ import {
   type InteractiveRequest,
   type InteractiveResponsePayload,
   type ProjectGroup,
+  type ThreadDetail,
 } from "@falcondeck/client-core";
 
 /* ================================================================
@@ -34,6 +35,8 @@ export const ACTIVITY_WINDOW_EVENTS = {
   startTask: "falcondeck://activity-start-task",
   /** Main → window: outcome of a quick task launch. */
   startTaskResult: "falcondeck://activity-start-task-result",
+  preview: "falcondeck://activity-preview",
+  previewResult: "falcondeck://activity-preview-result",
   /** Window → main: clear a thread's unread state. */
   markRead: "falcondeck://activity-mark-read",
   /** Window → main: answer an approval or question. */
@@ -62,7 +65,20 @@ export type ActivityStartTaskResult = {
   error?: string;
 };
 
-export type ActivityThreadRef = { workspaceId: string; threadId: string };
+export type ActivityThreadRef = {
+  workspaceId: string;
+  threadId: string;
+  readSeq?: number;
+};
+export type ActivityPreviewMessage = ActivityThreadRef & {
+  callId: string;
+  text?: string;
+};
+export type ActivityPreviewResult = {
+  callId: string;
+  detail?: ThreadDetail;
+  error?: string;
+};
 
 export type ActivityRespondMessage = {
   /** Correlates the reply, so the card can surface its own failure. */

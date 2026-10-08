@@ -162,6 +162,7 @@ import {
   ACTIVITY_WINDOW_LABEL,
   activityStateChanged,
   projectActivityWindowState,
+  type ActivityPreviewMessage,
   type ActivityRespondMessage,
   type ActivityStartTaskMessage,
   type ActivityThreadRef,
@@ -4871,13 +4872,13 @@ function AppInner() {
   );
 
   const handleMarkThreadRead = useCallback(
-    async (workspaceId: string, threadId: string) => {
+    async (workspaceId: string, threadId: string, previewReadSeq?: number) => {
       const client = apiFor(workspaceId);
       if (!client) return;
       const thread = viewSnapshot?.threads.find(
         (entry) => entry.workspace_id === workspaceId && entry.id === threadId,
       );
-      const readSeq = thread?.attention.last_agent_activity_seq ?? 0;
+      const readSeq = previewReadSeq ?? thread?.attention.last_agent_activity_seq ?? 0;
       try {
         const updated = await client.markThreadRead({
           workspace_id: workspaceId,
@@ -4903,6 +4904,64 @@ function AppInner() {
       }
     },
     [apiFor, setActionError, setSnapshot, viewSnapshot?.threads],
+  );
+
+  const handleLoadActivityPreview = useCallback(
+    async (workspaceId: string, threadId: string) => {
+      const client = apiFor(workspaceId);
+      if (!client) throw new Error(CONNECTION_COPY.notConnected);
+      return client.threadDetail(workspaceId, threadId, {
+        mode: "tail",
+        limit: 60,
+      });
+    },
+    [apiFor],
+  );
+
+  const activitySendingRef = useRef(new Set<string>());
+  const handleSendActivityPreview = useCallback(
+    async (workspaceId: string, threadId: string, text: string) => {
+      const client = apiFor(workspaceId);
+      if (!client) throw new Error(CONNECTION_COPY.notConnected);
+      const key = `${workspaceId}:${threadId}`;
+      if (activitySendingRef.current.has(key))
+        throw new Error("A reply is already being sent to this task.");
+      activitySendingRef.current.add(key);
+      try {
+        const { workspace, thread, is_partial } = await client.threadDetail(
+          workspaceId,
+          threadId,
+          { mode: "tail", limit: 1 },
+        );
+        if (is_partial)
+          throw new Error("Task is still loading. Try again shortly.");
+        await client.sendTurn({
+          workspace_id: workspaceId,
+          thread_id: threadId,
+          inputs: [{ type: "text", text }],
+          selected_skills: selectedSkillsFromText(
+            text,
+            composerSkillCatalog(
+              liveSkillsRef.current,
+              workspace,
+              thread.provider,
+            ),
+          ),
+          provider: thread.provider,
+          model_id: thread.agent.model_id,
+          reasoning_effort: thread.agent.reasoning_effort,
+          approval_policy: thread.agent.approval_policy,
+          service_tier: thread.agent.service_tier,
+          permission_mode: thread.agent.permission_mode,
+          sandbox_mode: thread.agent.sandbox_mode,
+          steer: false,
+          user_item_id: generateUserItemId(),
+        });
+      } finally {
+        activitySendingRef.current.delete(key);
+      }
+    },
+    [apiFor],
   );
 
   /* ================================================================
@@ -5110,6 +5169,7 @@ function AppInner() {
           void handleMarkThreadRead(
             event.payload.workspaceId,
             event.payload.threadId,
+            event.payload.readSeq,
           );
         }),
       );
@@ -5117,6 +5177,31 @@ function AppInner() {
         listen(ACTIVITY_WINDOW_EVENTS.newThread, () => {
           if (selectedWorkspaceId) handleNewThread(selectedWorkspaceId);
         }),
+      );
+      track(
+        listen<ActivityPreviewMessage>(
+          ACTIVITY_WINDOW_EVENTS.preview,
+          (event) => {
+            const { callId, workspaceId, threadId, text } = event.payload;
+            void (
+              text === undefined
+                ? handleLoadActivityPreview(workspaceId, threadId)
+                : handleSendActivityPreview(workspaceId, threadId, text)
+            )
+              .then((detail) =>
+                emit(ACTIVITY_WINDOW_EVENTS.previewResult, { callId, detail }),
+              )
+              .catch((error: unknown) =>
+                emit(ACTIVITY_WINDOW_EVENTS.previewResult, {
+                  callId,
+                  error:
+                    error instanceof Error
+                      ? error.message
+                      : "Activity action failed",
+                }),
+              );
+          },
+        ),
       );
       track(
         listen<ActivityStartTaskMessage>(
@@ -5169,6 +5254,8 @@ function AppInner() {
   }, [
     handleInteractiveResponseCallback,
     handleActivityStartTask,
+    handleLoadActivityPreview,
+    handleSendActivityPreview,
     handleMarkThreadRead,
     handleNewThread,
     handleSelectThread,
@@ -5963,6 +6050,8 @@ function AppInner() {
                       viewSnapshot?.interactive_requests ?? []
                     }
                     workspaceHosts={workspaceHostBadges}
+                    onLoadPreview={handleLoadActivityPreview}
+                    onSendPreview={handleSendActivityPreview}
                     onOpenThread={handleSelectThread}
                     onInteractiveResponse={handleInteractiveResponseCallback}
                     onMarkThreadRead={handleMarkThreadRead}

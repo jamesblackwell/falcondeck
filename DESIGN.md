@@ -361,6 +361,15 @@ Every interactive element must show a visible keyboard focus indicator.
 - An action that is only revealed on hover must also reveal itself on `focus-visible`, or keyboard users can tab to an invisible control.
 - Icon-only controls need an `aria-label` on web and an `accessibilityLabel` plus `accessibilityRole="button"` on mobile. A `title` alone is not sufficient.
 
+### Activity previews
+
+- Click a task to select it; Enter, Space, or double-click opens a modal preview.
+- Arrow keys and J/K move through the activity list. R marks the selected task read.
+- The preview uses the conversation renderer and loads recent history without changing the selected task in the main app.
+- Successfully loaded messages are marked read up to the loaded activity sequence while the window is focused; partial or failed loads stay unread.
+- Enter sends a quick reply, Shift+Enter inserts a newline, and Escape returns to Activity. Unsent drafts survive closing a preview while Activity stays mounted.
+- “Open task” opens the full conversation. The detached Activity window uses the same preview through the main window's connection.
+
 ### Shortcut tooltips
 
 Icon buttons and composer chips that a keyboard shortcut also drives use the shared `Tooltip` from `@falcondeck/ui`: a short label plus keycap tokens (`⌘`, `↵`), portalled so overflow parents cannot clip them. Do not use the native `title` attribute for those hints — it fights the custom tooltip and does not match the chrome. Truncated paths, overflow text, and status dots may still use `title`. The accessible name stays on `aria-label`; the tooltip is visual discoverability.

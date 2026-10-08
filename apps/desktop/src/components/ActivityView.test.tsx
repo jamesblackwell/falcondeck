@@ -11,6 +11,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import type {
   InteractiveRequest,
   ProjectGroup,
+  ThreadDetail,
   ThreadSummary,
   WorkspaceSummary,
 } from "@falcondeck/client-core";
@@ -105,6 +106,7 @@ function props(
 
 afterEach(() => {
   vi.useRealTimers();
+  vi.restoreAllMocks();
 });
 
 describe("ActivityView", () => {
@@ -178,9 +180,7 @@ describe("ActivityView", () => {
       screen.getByRole("heading", { name: "Needs a response" }),
     ).toBeInTheDocument();
     expect(screen.getByRole("heading", { name: "Failed" })).toBeInTheDocument();
-    expect(
-      screen.getByRole("heading", { name: "Ready" }),
-    ).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "Ready" })).toBeInTheDocument();
     expect(
       screen.getByRole("heading", { name: "Running" }),
     ).toBeInTheDocument();
@@ -402,13 +402,9 @@ describe("ActivityView", () => {
 
   it("offers to detach into its own window, and drops the offer once detached", () => {
     const onPopOut = vi.fn();
-    const { rerender } = render(
-      <ActivityView {...props({ onPopOut })} />,
-    );
+    const { rerender } = render(<ActivityView {...props({ onPopOut })} />);
 
-    fireEvent.click(
-      screen.getByRole("button", { name: "Open in new window" }),
-    );
+    fireEvent.click(screen.getByRole("button", { name: "Open in new window" }));
     expect(onPopOut).toHaveBeenCalledOnce();
 
     // The detached window has the native frame for this, and nothing to
@@ -436,6 +432,157 @@ describe("ActivityView", () => {
     expect(screen.getByText("All caught up")).toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "New task" }));
     expect(onNewThread).toHaveBeenCalledOnce();
+  });
+
+  describe("preview", () => {
+    function detail(): ThreadDetail {
+      return {
+        workspace,
+        thread: thread({
+          id: "first",
+          attention: {
+            ...thread({ id: "base" }).attention,
+            last_agent_activity_seq: 7,
+          },
+        }),
+        items: [
+          {
+            id: "reply",
+            kind: "assistant_message",
+            text: "Latest reply to review",
+            created_at: new Date().toISOString(),
+          },
+        ],
+        has_older: true,
+        oldest_item_id: "reply",
+        newest_item_id: "reply",
+        is_partial: false,
+      } as ThreadDetail;
+    }
+
+    it("selects on click, previews on Enter, marks only loaded messages read, and returns with Escape", async () => {
+      vi.spyOn(document, "hasFocus").mockReturnValue(true);
+      const onLoadPreview = vi.fn().mockResolvedValue(detail());
+      const onOpenThread = vi.fn();
+      const onMarkThreadRead = vi.fn();
+      const onClose = vi.fn();
+      render(
+        <ActivityView
+          {...props({
+            groups: queue(),
+            onLoadPreview,
+            onSendPreview: vi.fn(),
+            onOpenThread,
+            onMarkThreadRead,
+            onClose,
+          })}
+        />,
+      );
+      const row = screen.getByRole("button", { name: /first/ });
+      fireEvent.click(row);
+      expect(selectedThreadId()).toBe("first");
+      expect(onLoadPreview).not.toHaveBeenCalled();
+      fireEvent.keyDown(row, { key: "Enter" });
+      expect(
+        await screen.findByText("Latest reply to review"),
+      ).toBeInTheDocument();
+      expect(onMarkThreadRead).toHaveBeenCalledWith(workspace.id, "first", 7);
+      fireEvent.change(screen.getByRole("textbox", { name: "Quick reply" }), {
+        target: { value: "Unsent follow-up" },
+      });
+      fireEvent.keyDown(screen.getByRole("textbox", { name: "Quick reply" }), {
+        key: "Escape",
+      });
+      expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+      expect(onClose).not.toHaveBeenCalled();
+      expect(onOpenThread).not.toHaveBeenCalled();
+      await act(async () => {
+        fireEvent.keyDown(window, { key: "Enter" });
+      });
+      expect(screen.getByRole("textbox", { name: "Quick reply" })).toHaveValue(
+        "Unsent follow-up",
+      );
+    });
+
+    it("keeps failed replies and preserves newer draft text while a send is pending", async () => {
+      let resolveSend!: () => void;
+      const onSendPreview = vi
+        .fn()
+        .mockRejectedValueOnce(new Error("Host unavailable"))
+        .mockImplementationOnce(
+          () =>
+            new Promise<void>((resolve) => {
+              resolveSend = resolve;
+            }),
+        );
+      const onOpenThread = vi.fn();
+      render(
+        <ActivityView
+          {...props({
+            groups: queue(),
+            onLoadPreview: vi.fn().mockResolvedValue(detail()),
+            onSendPreview,
+            onOpenThread,
+          })}
+        />,
+      );
+      fireEvent.keyDown(window, { key: "Enter" });
+      await screen.findByText("Latest reply to review");
+      const reply = screen.getByRole("textbox", { name: "Quick reply" });
+      fireEvent.change(reply, { target: { value: "Follow-up" } });
+      fireEvent.keyDown(reply, { key: "Enter" });
+      expect(await screen.findByRole("alert")).toHaveTextContent(
+        "Host unavailable",
+      );
+      expect(reply).toHaveValue("Follow-up");
+      fireEvent.keyDown(reply, { key: "Enter" });
+      fireEvent.change(reply, { target: { value: "Next thought" } });
+      await act(async () => resolveSend());
+      expect(reply).toHaveValue("Next thought");
+      expect(onSendPreview).toHaveBeenCalledWith(
+        workspace.id,
+        "first",
+        "Follow-up",
+      );
+      expect(onOpenThread).not.toHaveBeenCalled();
+    });
+
+    it("does not mark a failed or partial load read and discards a load after closing", async () => {
+      vi.spyOn(document, "hasFocus").mockReturnValue(true);
+      let resolveLoad!: (value: ThreadDetail) => void;
+      const onLoadPreview = vi
+        .fn()
+        .mockRejectedValueOnce(new Error("Cannot load messages"))
+        .mockResolvedValueOnce({ ...detail(), is_partial: true })
+        .mockImplementationOnce(
+          () =>
+            new Promise<ThreadDetail>((resolve) => {
+              resolveLoad = resolve;
+            }),
+        );
+      const onMarkThreadRead = vi.fn();
+      render(
+        <ActivityView
+          {...props({
+            groups: queue(),
+            onLoadPreview,
+            onSendPreview: vi.fn(),
+            onMarkThreadRead,
+          })}
+        />,
+      );
+      fireEvent.keyDown(window, { key: "Enter" });
+      expect(await screen.findByRole("alert")).toHaveTextContent(
+        "Cannot load messages",
+      );
+      fireEvent.click(screen.getByRole("button", { name: "Refresh messages" }));
+      await screen.findByText("Latest reply to review");
+      expect(onMarkThreadRead).not.toHaveBeenCalled();
+      fireEvent.click(screen.getByRole("button", { name: "Refresh messages" }));
+      fireEvent.keyDown(window, { key: "Escape" });
+      await act(async () => resolveLoad(detail()));
+      expect(onMarkThreadRead).not.toHaveBeenCalled();
+    });
   });
 
   describe("keyboard", () => {
@@ -586,7 +733,8 @@ describe("ActivityView", () => {
     });
 
     it("shows a truncated last-agent preview with the full text on hover", () => {
-      const preview = "Implemented the fix and verified the complete desktop suite.";
+      const preview =
+        "Implemented the fix and verified the complete desktop suite.";
       const recent = finished();
       recent[0]!.threads[0]!.last_message_preview = preview;
       render(<ActivityView {...props({ groups: recent })} />);

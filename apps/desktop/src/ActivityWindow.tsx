@@ -7,6 +7,7 @@ import { Pin, PinOff, X } from "lucide-react";
 import { ActivityView } from "@falcondeck/chat-ui/activity-view";
 import { PromptInput } from "@falcondeck/chat-ui";
 import type {
+  ThreadDetail,
   InteractiveRequest,
   InteractiveResponsePayload,
 } from "@falcondeck/client-core";
@@ -14,6 +15,7 @@ import { Button, EmptyState, cn } from "@falcondeck/ui";
 
 import {
   ACTIVITY_WINDOW_EVENTS,
+  type ActivityPreviewResult,
   type ActivityRespondResult,
   type ActivityStartTaskResult,
   type ActivityWindowState,
@@ -148,10 +150,79 @@ export function ActivityWindow() {
   );
 
   const handleMarkThreadRead = useCallback(
-    (workspaceId: string, threadId: string) => {
-      void emit(ACTIVITY_WINDOW_EVENTS.markRead, { workspaceId, threadId });
+    (workspaceId: string, threadId: string, readSeq?: number) => {
+      void emit(ACTIVITY_WINDOW_EVENTS.markRead, {
+        workspaceId,
+        threadId,
+        readSeq,
+      });
     },
     [],
+  );
+
+  const requestPreview = useCallback(
+    async (workspaceId: string, threadId: string, text?: string) => {
+      const callId = `preview:${++callSeqRef.current}`;
+      return new Promise<ThreadDetail | undefined>((resolve, reject) => {
+        let settled = false;
+        const finish = (result: ActivityPreviewResult) => {
+          if (settled) return;
+          settled = true;
+          window.clearTimeout(timeout);
+          void unlisten.then((off) => off());
+          if (result.error) reject(new Error(result.error));
+          else resolve(result.detail);
+        };
+        const unlisten = listen<ActivityPreviewResult>(
+          ACTIVITY_WINDOW_EVENTS.previewResult,
+          (event) => {
+            if (event.payload.callId === callId) finish(event.payload);
+          },
+        );
+        const timeout = window.setTimeout(
+          () =>
+            finish({
+              callId,
+              error:
+                "FalconDeck did not confirm the Activity action. Check the task before retrying a reply.",
+            }),
+          START_TASK_TIMEOUT_MS,
+        );
+        void unlisten
+          .then(() =>
+            emit(ACTIVITY_WINDOW_EVENTS.preview, {
+              callId,
+              workspaceId,
+              threadId,
+              text,
+            }),
+          )
+          .catch((error: unknown) =>
+            finish({
+              callId,
+              error:
+                error instanceof Error
+                  ? error.message
+                  : "Could not contact FalconDeck",
+            }),
+          );
+      });
+    },
+    [],
+  );
+  const handleLoadPreview = useCallback(
+    async (workspaceId: string, threadId: string) => {
+      const detail = await requestPreview(workspaceId, threadId);
+      if (!detail) throw new Error("FalconDeck returned no messages.");
+      return detail;
+    },
+    [requestPreview],
+  );
+  const handleSendPreview = useCallback(
+    async (workspaceId: string, threadId: string, text: string) => {
+      await requestPreview(workspaceId, threadId, text);
+    },
+    [requestPreview],
   );
 
   const handleNewThread = useCallback(() => {
@@ -295,6 +366,8 @@ export function ActivityWindow() {
         groups={state.groups}
         interactiveRequests={state.interactiveRequests}
         workspaceHosts={state.workspaceHosts}
+        onLoadPreview={handleLoadPreview}
+        onSendPreview={handleSendPreview}
         onOpenThread={handleOpenThread}
         onInteractiveResponse={handleInteractiveResponse}
         onMarkThreadRead={handleMarkThreadRead}
@@ -314,7 +387,9 @@ export function ActivityWindow() {
           <section className="w-full max-w-2xl rounded-[var(--fd-radius-lg)] border border-border-strong bg-surface-1 p-4">
             <div className="mb-3 flex items-start justify-between gap-4">
               <div>
-                <p className="fd-type-eyebrow fd-type-eyebrow--sm text-accent">Quick launch</p>
+                <p className="fd-type-eyebrow fd-type-eyebrow--sm text-accent">
+                  Quick launch
+                </p>
                 <h2 className="mt-1 text-lg font-semibold text-fg-primary">
                   Start a task without leaving Activity
                 </h2>

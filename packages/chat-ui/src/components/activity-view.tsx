@@ -30,6 +30,10 @@ import {
   cn,
 } from "@falcondeck/ui";
 
+import {
+  ActivityPreview,
+  type ActivityPreviewActions,
+} from "./activity-preview";
 import { InteractiveRequestCard } from "./interactive-request-card";
 
 const RELATIVE_TIME_TICK_MS = 60_000;
@@ -44,6 +48,8 @@ const SECTION_ORDER: readonly ActivitySection[] = [
 ];
 
 export type ActivityViewProps = {
+  onLoadPreview?: ActivityPreviewActions["onLoadPreview"];
+  onSendPreview?: ActivityPreviewActions["onSendPreview"];
   groups: ProjectGroup[];
   interactiveRequests: InteractiveRequest[];
   workspaceHosts?: Record<string, { name: string; connected: boolean }>;
@@ -55,6 +61,7 @@ export type ActivityViewProps = {
   onMarkThreadRead: (
     workspaceId: string,
     threadId: string,
+    readSeq?: number,
   ) => Promise<void> | void;
   /** Omitted when Activity owns its window — the frame closes it instead. */
   onClose?: () => void;
@@ -95,7 +102,7 @@ const KEY_HINTS: readonly {
   description: string;
 }[] = [
   { key: "↑ ↓", alt: "J / K", description: "Move through the list" },
-  { key: "↵", description: "Open the selected task" },
+  { key: "↵", description: "Preview the selected task" },
   { key: "R", description: "Mark the selected task read" },
   { key: "T", description: "Show more recent tasks" },
   { key: "?", description: "Show keyboard shortcuts" },
@@ -141,9 +148,7 @@ function mergeResolvedEntries(
   resolvedEntries: Record<string, ResolvedEntry>,
 ) {
   const freshBlockedKeys = new Set(
-    entries
-      .filter((entry) => entry.section === "blocked")
-      .map(entryKey),
+    entries.filter((entry) => entry.section === "blocked").map(entryKey),
   );
   const merged = entries.filter((entry) => {
     const resolved = resolvedEntries[entryKey(entry)];
@@ -168,16 +173,17 @@ function resolvedRequestForEntry(
     : undefined;
 }
 
-function reconcileStableKeys(
-  previousKeys: string[],
-  entries: ActivityEntry[],
-) {
+function reconcileStableKeys(previousKeys: string[], entries: ActivityEntry[]) {
   const desiredKeys = entries.map(entryKey);
   const currentKeys = new Set(desiredKeys);
   const order = previousKeys.filter((key) => currentKeys.has(key));
   const placed = new Set(order);
 
-  for (let desiredIndex = 0; desiredIndex < desiredKeys.length; desiredIndex += 1) {
+  for (
+    let desiredIndex = 0;
+    desiredIndex < desiredKeys.length;
+    desiredIndex += 1
+  ) {
     const key = desiredKeys[desiredIndex];
     if (!key || placed.has(key)) continue;
 
@@ -190,7 +196,11 @@ function reconcileStableKeys(
       }
     }
     if (insertionIndex === -1) {
-      for (let index = desiredIndex + 1; index < desiredKeys.length; index += 1) {
+      for (
+        let index = desiredIndex + 1;
+        index < desiredKeys.length;
+        index += 1
+      ) {
         const followingKey = desiredKeys[index];
         if (followingKey && placed.has(followingKey)) {
           insertionIndex = order.indexOf(followingKey);
@@ -257,9 +267,7 @@ function previewForEntry(entry: ActivityEntry) {
   }
   if (entry.section === "blocked") return null;
   return (
-    entry.thread.last_tool ??
-    entry.thread.last_message_preview ??
-    "Working…"
+    entry.thread.last_tool ?? entry.thread.last_message_preview ?? "Working…"
   );
 }
 
@@ -299,6 +307,7 @@ type InboxRowProps = {
   section?: ActivitySection;
   selected: boolean;
   onOpen: () => void;
+  onActivate?: () => void;
   onMarkRead?: () => void;
   children?: ReactNode;
 };
@@ -315,21 +324,18 @@ const InboxRow = memo(function InboxRow({
   section,
   selected,
   onOpen,
+  onActivate,
   onMarkRead,
   children,
 }: InboxRowProps) {
   const offline = host?.connected === false;
-  const hostLabel = host
-    ? `${host.name}${offline ? " · Offline" : ""}`
-    : null;
+  const hostLabel = host ? `${host.name}${offline ? " · Offline" : ""}` : null;
 
   return (
     <article
       className={cn(
         "group rounded-[var(--fd-radius-md)] transition-colors duration-[var(--fd-duration-hover)]",
-        selected
-          ? "fd-row-selected"
-          : "hover:bg-interactive-hover",
+        selected ? "fd-row-selected" : "hover:bg-interactive-hover",
         offline && "opacity-60",
       )}
       data-activity-thread={threadId}
@@ -343,13 +349,23 @@ const InboxRow = memo(function InboxRow({
         <button
           type="button"
           onClick={onOpen}
+          onDoubleClick={onActivate}
+          onKeyDown={(event) => {
+            if (onActivate && (event.key === "Enter" || event.key === " ")) {
+              event.preventDefault();
+              event.stopPropagation();
+              onActivate();
+            }
+          }}
           className="fd-focus-inset min-w-0 flex-1 text-left"
         >
           <span className="flex items-baseline gap-3">
             <span
               className={cn(
                 "fd-type-supporting min-w-0 flex-1 truncate",
-                selected ? "text-fg-primary" : "text-fg-secondary group-hover:text-fg-primary",
+                selected
+                  ? "text-fg-primary"
+                  : "text-fg-secondary group-hover:text-fg-primary",
               )}
             >
               {title}
@@ -424,6 +440,7 @@ type ActivityRowProps = {
   selected: boolean;
   resolvedRequest?: InteractiveRequest;
   onOpenThread: ActivityViewProps["onOpenThread"];
+  onActivateThread?: ActivityViewProps["onOpenThread"];
   onMarkThreadRead: ActivityViewProps["onMarkThreadRead"];
   onRespond: (
     entry: ActivityEntry,
@@ -440,13 +457,13 @@ const ActivityRow = memo(
     selected,
     resolvedRequest,
     onOpenThread,
+    onActivateThread,
     onMarkThreadRead,
     onRespond,
   }: ActivityRowProps) {
     const offline = host?.connected === false;
     const request = resolvedRequest ?? entry.requests[0];
-    const canMarkRead =
-      entry.section === "failed" || entry.section === "ready";
+    const canMarkRead = entry.section === "failed" || entry.section === "ready";
 
     return (
       <InboxRow
@@ -461,6 +478,11 @@ const ActivityRow = memo(
         section={entry.section}
         selected={selected}
         onOpen={() => onOpenThread(entry.workspaceId, entry.thread.id)}
+        onActivate={
+          onActivateThread
+            ? () => onActivateThread(entry.workspaceId, entry.thread.id)
+            : undefined
+        }
         onMarkRead={
           canMarkRead
             ? () => {
@@ -488,7 +510,9 @@ const ActivityRow = memo(
                 />
               </fieldset>
             ) : (
-              <p className="fd-type-supporting text-warning">Loading request…</p>
+              <p className="fd-type-supporting text-warning">
+                Loading request…
+              </p>
             )}
           </div>
         ) : null}
@@ -514,6 +538,7 @@ const ActivityRow = memo(
     previous.nowMs === next.nowMs &&
     previous.selected === next.selected &&
     previous.resolvedRequest?.request_id === next.resolvedRequest?.request_id &&
+    previous.onActivateThread === next.onActivateThread &&
     previous.onOpenThread === next.onOpenThread &&
     previous.onMarkThreadRead === next.onMarkThreadRead &&
     previous.onRespond === next.onRespond,
@@ -526,6 +551,7 @@ type RecentTrailProps = {
   selectedKey: string | null;
   onToggle: () => void;
   onOpenThread: ActivityViewProps["onOpenThread"];
+  onActivateThread?: ActivityViewProps["onOpenThread"];
 };
 
 const RecentTrail = memo(function RecentTrail({
@@ -535,6 +561,7 @@ const RecentTrail = memo(function RecentTrail({
   selectedKey,
   onToggle,
   onOpenThread,
+  onActivateThread,
 }: RecentTrailProps) {
   if (entries.length === 0) return null;
   const visibleEntries = expanded
@@ -563,6 +590,11 @@ const RecentTrail = memo(function RecentTrail({
               timeLabel={timeAgo(entry.thread.updated_at, nowMs)}
               selected={selectedKey === key}
               onOpen={() => onOpenThread(entry.workspaceId, entry.thread.id)}
+              onActivate={
+                onActivateThread
+                  ? () => onActivateThread(entry.workspaceId, entry.thread.id)
+                  : undefined
+              }
             />
           );
         })}
@@ -581,7 +613,8 @@ const RecentTrail = memo(function RecentTrail({
             aria-controls="activity-recent-list"
             className={cn(
               "text-fg-muted",
-              selectedKey === RECENT_TOGGLE_KEY && "fd-row-selected text-fg-primary",
+              selectedKey === RECENT_TOGGLE_KEY &&
+                "fd-row-selected text-fg-primary",
             )}
             onClick={onToggle}
           >
@@ -598,6 +631,8 @@ export const ActivityView = memo(function ActivityView({
   interactiveRequests,
   workspaceHosts = {},
   onOpenThread,
+  onLoadPreview,
+  onSendPreview,
   onInteractiveResponse,
   onMarkThreadRead,
   onClose,
@@ -608,6 +643,38 @@ export const ActivityView = memo(function ActivityView({
   onReturnFocus,
   windowFocused,
 }: ActivityViewProps) {
+  const [preview, setPreview] = useState<{
+    workspaceId: string;
+    threadId: string;
+    title: string;
+  } | null>(null);
+  const [previewDrafts, setPreviewDrafts] = useState<Record<string, string>>(
+    {},
+  );
+  const activateThread = useCallback(
+    (workspaceId: string, threadId: string) => {
+      if (!onLoadPreview || !onSendPreview)
+        return onOpenThread(workspaceId, threadId);
+      const target = groups
+        .find((group) => group.workspace.id === workspaceId)
+        ?.threads.find((thread) => thread.id === threadId);
+      if (target) setPreview({ workspaceId, threadId, title: target.title });
+    },
+    [groups, onLoadPreview, onSendPreview, onOpenThread],
+  );
+  const selectThread = useCallback(
+    (workspaceId: string, threadId: string) => {
+      if (!onLoadPreview || !onSendPreview)
+        return onOpenThread(workspaceId, threadId);
+      const key = `${workspaceId}:${threadId}`;
+      const queued = collectActivityEntries(groups, interactiveRequests).some(
+        (entry) =>
+          entry.workspaceId === workspaceId && entry.thread.id === threadId,
+      );
+      setSelectedKey(queued ? key : `recent:${key}`);
+    },
+    [groups, interactiveRequests, onLoadPreview, onSendPreview, onOpenThread],
+  );
   const [nowMs, setNowMs] = useState(Date.now);
   const [recentExpanded, setRecentExpanded] = useState(false);
   const [selectedKey, setSelectedKey] = useState<string | null>(null);
@@ -721,14 +788,18 @@ export const ActivityView = memo(function ActivityView({
     const row = scrollRef.current?.querySelector(
       `[data-activity-key="${CSS.escape(selectedKey)}"]`,
     );
-    if (row instanceof HTMLElement && typeof row.scrollIntoView === "function") {
+    if (
+      row instanceof HTMLElement &&
+      typeof row.scrollIntoView === "function"
+    ) {
       row.scrollIntoView({ block: "nearest" });
     }
   }, [recentExpanded, selectedKey]);
 
   useEffect(() => {
     const handleKeyDown = (event: KeyboardEvent) => {
-      if (event.defaultPrevented || isTypingTarget(event.target)) return;
+      if (preview || event.defaultPrevented || isTypingTarget(event.target))
+        return;
       if (event.metaKey || event.ctrlKey || event.altKey) return;
 
       const step = (delta: number) => {
@@ -758,7 +829,7 @@ export const ActivityView = memo(function ActivityView({
         if (!target) return;
         event.preventDefault();
         if (row) setSelectedKey(row.key);
-        onOpenThread(target.workspaceId, target.thread.id);
+        activateThread(target.workspaceId, target.thread.id);
       };
 
       const markSelectedRead = () => {
@@ -809,6 +880,8 @@ export const ActivityView = memo(function ActivityView({
     window.addEventListener("keydown", handleKeyDown);
     return () => window.removeEventListener("keydown", handleKeyDown);
   }, [
+    preview,
+    activateThread,
     onClose,
     onMarkThreadRead,
     onOpenThread,
@@ -866,6 +939,11 @@ export const ActivityView = memo(function ActivityView({
       }
     >
       <MainViewBody ref={scrollRef}>
+        {!isEmpty && onLoadPreview && onSendPreview ? (
+          <p className="mb-4 px-2.5 text-xs text-fg-muted">
+            Select a task and press Enter to preview, or double-click. Escape returns here.
+          </p>
+        ) : null}
         {isEmpty ? (
           <EmptyState
             title="All caught up"
@@ -896,7 +974,12 @@ export const ActivityView = memo(function ActivityView({
                         entry,
                         resolvedEntries[entryKey(entry)],
                       )}
-                      onOpenThread={onOpenThread}
+                      onOpenThread={selectThread}
+                      onActivateThread={
+                        onLoadPreview && onSendPreview
+                          ? activateThread
+                          : undefined
+                      }
                       onMarkThreadRead={onMarkThreadRead}
                       onRespond={handleRespond}
                     />
@@ -911,12 +994,43 @@ export const ActivityView = memo(function ActivityView({
               nowMs={nowMs}
               selectedKey={selectedKey}
               onToggle={() => setRecentExpanded((current) => !current)}
-              onOpenThread={onOpenThread}
+              onOpenThread={selectThread}
+              onActivateThread={
+                onLoadPreview && onSendPreview ? activateThread : undefined
+              }
             />
           </div>
         )}
       </MainViewBody>
 
+      {preview && onLoadPreview && onSendPreview ? (
+        <ActivityPreview
+          key={`${preview.workspaceId}:${preview.threadId}`}
+          {...preview}
+          offline={workspaceHosts[preview.workspaceId]?.connected === false}
+          draft={
+            previewDrafts[`${preview.workspaceId}:${preview.threadId}`] ?? ""
+          }
+          onDraftChange={(value, submitted) => {
+            const key = `${preview.workspaceId}:${preview.threadId}`;
+            setPreviewDrafts((current) =>
+              submitted !== undefined && current[key] !== submitted
+                ? current
+                : { ...current, [key]: value },
+            );
+          }}
+          onLoadPreview={onLoadPreview}
+          onSendPreview={onSendPreview}
+          onRead={(sequence) =>
+            onMarkThreadRead(preview.workspaceId, preview.threadId, sequence)
+          }
+          onClose={() => setPreview(null)}
+          onOpen={() => {
+            setPreview(null);
+            onOpenThread(preview.workspaceId, preview.threadId);
+          }}
+        />
+      ) : null}
       {showKeys ? (
         <div
           role="dialog"
