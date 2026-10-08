@@ -5,7 +5,7 @@ import { spawn } from 'node:child_process';
 import { once } from 'node:events';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { mainPids, restartDesktop, withRestartLock } from './restart-desktop.mjs';
+import { mainPids, pruneDesktopBackups, restartDesktop, withRestartLock } from './restart-desktop.mjs';
 
 const binary = '/Applications/FalconDeck.app/Contents/MacOS/falcondeck-desktop';
 function fixture({ stale = false, stubborn = false, unhealthy = false, bootoutFails = false } = {}) {
@@ -82,19 +82,61 @@ test('failed installation copy leaves the running app untouched', async () => {
 test('installs a verified staged bundle, retains backup, then opens once', async () => {
   const f = fixture();
   const moves = [];
+  const removed = [];
+  let healthy = false;
   await restartDesktop({ ...f, installFrom: '/built/FalconDeck.app', files: {
     existsSync: () => true,
-    mkdtempSync: (prefix) => `${prefix}test`,
+    mkdtempSync: (prefix) => `${prefix}test01`,
     renameSync: (from, to) => moves.push([from, to]),
     rmdirSync: () => {},
-  } });
+    readdirSync: () => {
+      assert.ok(healthy, 'must retain older backups until the replacement is healthy');
+      return ['test01', 'older1', 'older2'].map((suffix) => ({
+        name: `.FalconDeck-backup-${suffix}`, isDirectory: () => true,
+      }));
+    },
+    rmSync: (path, options) => { assert.deepEqual(options, { recursive: true }); removed.push(path); },
+  }, health: async (url) => { const result = await f.health(url); healthy = result.ok; return result; } });
   assert.deepEqual(moves, [
-    ['/Applications/FalconDeck.app', '/Applications/.FalconDeck-backup-test/FalconDeck.app'],
-    ['/Applications/.FalconDeck-stage-test/FalconDeck.app', '/Applications/FalconDeck.app'],
+    ['/Applications/FalconDeck.app', '/Applications/.FalconDeck-backup-test01/FalconDeck.app'],
+    ['/Applications/.FalconDeck-stage-test01/FalconDeck.app', '/Applications/FalconDeck.app'],
   ]);
+  assert.deepEqual(removed, ['/Applications/.FalconDeck-backup-older1', '/Applications/.FalconDeck-backup-older2']);
   const verification = f.calls.findIndex(([c, ...args]) => c.endsWith('/codesign') && args.at(-1).includes('-stage-'));
   assert.ok(verification < f.calls.findIndex(([c]) => c.endsWith('/osascript')));
   assert.equal(f.calls.filter(([c]) => c.endsWith('/open')).length, 1);
+});
+test('an unhealthy replacement preserves all previous backups', async () => {
+  const f = fixture({ unhealthy: true });
+  await assert.rejects(restartDesktop({ ...f, installFrom: '/built/FalconDeck.app', files: {
+    existsSync: () => true,
+    mkdtempSync: (prefix) => `${prefix}test01`,
+    renameSync: () => {},
+    rmdirSync: () => {},
+    readdirSync: () => assert.fail('must not prune before health check succeeds'),
+    rmSync: () => assert.fail('must not delete backups'),
+  } }), /no automatic restart/);
+});
+test('backup pruning ignores unrelated directories and symlinks', () => {
+  const removed = [];
+  pruneDesktopBackups('/Applications/.FalconDeck-backup-test01', {
+    existsSync: () => true,
+    readdirSync: () => [
+      { name: '.FalconDeck-backup-test01', isDirectory: () => true },
+      { name: '.FalconDeck-backup-older1', isDirectory: () => true },
+      { name: '.FalconDeck-backup-linked', isDirectory: () => false },
+      { name: '.FalconDeck-backup-manual-archive', isDirectory: () => true },
+      { name: 'FalconDeck.app', isDirectory: () => true },
+      { name: '.FalconDeck-stage-test01', isDirectory: () => true },
+    ],
+    rmSync: (path) => removed.push(path),
+  });
+  assert.deepEqual(removed, ['/Applications/.FalconDeck-backup-older1']);
+});
+test('backup pruning refuses to delete anything without a valid retained app', () => {
+  const files = { existsSync: () => false, readdirSync: () => assert.fail('must not enumerate backups') };
+  assert.throws(() => pruneDesktopBackups('/Applications/.FalconDeck-backup-test01', files), /existing desktop backup/);
+  assert.throws(() => pruneDesktopBackups('/Applications/FalconDeck.app', files), /existing desktop backup/);
 });
 test('overlapping restart is rejected and lock is released on failure', { skip: process.platform !== 'darwin' }, async () => {
   const dir = mkdtempSync(join(tmpdir(), 'falcondeck-restart-test-'));

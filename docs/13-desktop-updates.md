@@ -52,6 +52,15 @@ Generated files:
 
 The generated schema files should change only when Tauri config or permissions change.
 
+## Local install backups
+
+`make desktop-install` retains the immediately previous app in
+`/Applications/.FalconDeck-backup-XXXXXX/FalconDeck.app` for manual rollback.
+After the replacement launches and its daemon passes the health check, the
+installer deletes older installer-created backup directories, keeping one
+previous app. Failed installs or health checks preserve existing backups.
+`make desktop-restart` does not rotate or prune backups.
+
 ## First-time setup
 
 Two separate signing systems are required for a downloadable Mac build:

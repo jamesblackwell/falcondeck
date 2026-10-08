@@ -1,7 +1,7 @@
 import { execFileSync, spawnSync } from 'node:child_process';
-import { closeSync, existsSync, mkdirSync, mkdtempSync, openSync, renameSync, rmdirSync } from 'node:fs';
+import { closeSync, existsSync, mkdirSync, mkdtempSync, openSync, readdirSync, renameSync, rmdirSync, rmSync } from 'node:fs';
 import { homedir } from 'node:os';
-import { dirname, join, resolve } from 'node:path';
+import { basename, dirname, join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 
 const executable = '/Applications/FalconDeck.app/Contents/MacOS/falcondeck-desktop';
@@ -11,6 +11,19 @@ const run = (command, args) => execFileSync(command, args, {
   encoding: 'utf8', timeout: 15_000, stdio: ['ignore', 'pipe', 'pipe'],
 });
 const sleep = (ms) => new Promise((done) => setTimeout(done, ms));
+const backupFiles = { existsSync, readdirSync, rmSync };
+
+export function pruneDesktopBackups(keep, files = backupFiles) {
+  if (dirname(keep) !== '/Applications' || !/^\.FalconDeck-backup-[A-Za-z0-9]{6}$/.test(basename(keep))
+    || !files.existsSync(join(keep, 'FalconDeck.app'))) {
+    throw new Error('Expected an existing desktop backup to retain.');
+  }
+  for (const entry of files.readdirSync('/Applications', { withFileTypes: true })) {
+    if (!entry.isDirectory() || !/^\.FalconDeck-backup-[A-Za-z0-9]{6}$/.test(entry.name)) continue;
+    const path = join('/Applications', entry.name);
+    if (path !== keep) files.rmSync(path, { recursive: true });
+  }
+}
 
 // MCP helpers share the binary but have arguments. Never kill by process name.
 export function mainPids(output) {
@@ -21,7 +34,7 @@ export function mainPids(output) {
 }
 
 export async function restartDesktop({ installFrom, io = run, delay = sleep, health = fetch,
-  files = { existsSync, mkdtempSync, renameSync, rmdirSync } } = {}) {
+  files = { ...backupFiles, mkdtempSync, renameSync, rmdirSync } } = {}) {
   const pids = () => mainPids(io('/bin/ps', ['-ww', '-axo', 'pid=,args=']));
   const waitFor = async (check, attempts, message) => {
     for (let attempt = 0; attempt < attempts; attempt++) {
@@ -65,9 +78,9 @@ export async function restartDesktop({ installFrom, io = run, delay = sleep, hea
     }
     await waitFor(() => pids().length === 0, 30, 'FalconDeck did not quit; installation aborted.');
   }
+  let backup;
   if (staged) {
-    // Keep the previous signed bundle for rollback; do not recursively delete apps.
-    let backup;
+    // Retain the previous signed bundle until the replacement is healthy.
     if (files.existsSync(app)) {
       backup = join(files.mkdtempSync('/Applications/.FalconDeck-backup-'), 'FalconDeck.app');
       files.renameSync(app, backup);
@@ -94,6 +107,10 @@ export async function restartDesktop({ installFrom, io = run, delay = sleep, hea
       return response.ok && pids().includes(running[0]);
     } catch { return false; }
   }, 60, 'FalconDeck launched but did not become healthy; no automatic restart was scheduled.');
+  if (backup) {
+    try { pruneDesktopBackups(dirname(backup), files); }
+    catch (error) { console.warn(`Could not prune older desktop backups: ${error.message}`); }
+  }
 }
 
 export async function withRestartLock(lock, action) {
