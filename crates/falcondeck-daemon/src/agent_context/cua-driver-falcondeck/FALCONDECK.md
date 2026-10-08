@@ -5,6 +5,12 @@ from the cua-driver release named in `VERSION`; this file is not.
 
 ## Browser windows, cookies, and connection reuse
 
+Keep browser work in the background. Reuse the same window, MCP connection,
+and session. Prefer typed browser tools with explicit `input_route: "dom_event"`
+clicks where supported, and verify the resulting page state. If an action
+requires foreground input, report it before switching focus; do not
+automatically retry with foreground delivery.
+
 For routine browser work, prefer one dedicated **normal window in the user's
 existing browser profile**, with their signed-in browser consent enabled in
 FalconDeck. A normal window shares that profile's cookies, storage, extensions,
