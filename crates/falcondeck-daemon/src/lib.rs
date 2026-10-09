@@ -30,6 +30,8 @@ pub mod harness_conformance;
 pub mod logging;
 pub(crate) mod opencode;
 pub mod opencode_conformance;
+#[cfg(unix)]
+mod process_limits;
 mod ship;
 mod skill_library;
 mod skills;
@@ -192,6 +194,10 @@ pub async fn spawn_embedded(config: DaemonConfig) -> Result<EmbeddedDaemonHandle
     // and never goes through that path, so every diagnostic it logged used to
     // be dropped on the floor.
     logging::init(&state_path);
+    #[cfg(unix)]
+    if let Err(error) = process_limits::prepare_file_descriptor_limit() {
+        tracing::warn!(%error, "failed to raise daemon file descriptor limit");
+    }
     let state = AppState::new_with_state_path_and_runtimes(
         "0.1.0".to_string(),
         provider_bins,
