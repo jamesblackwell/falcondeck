@@ -75,18 +75,15 @@ export function DictationHistoryCard({
     void refresh();
   }, [refresh, settings.historyRetentionHours]);
 
-  // A dictation finishing (or failing) while this panel is open should show
-  // up without reopening settings. The overlay events already broadcast the
-  // terminal states to every window.
+  // Native filing runs off the UI thread. Refresh after its index write,
+  // rather than racing a terminal overlay event against that detached write.
   useEffect(() => {
     if (!isTauriDesktop()) return;
     let cancelled = false;
     let unlisten: (() => void) | null = null;
     void import("@tauri-apps/api/event").then(({ listen }) =>
-      listen<{ state: string }>("falcondeck://dictation-state", (event) => {
-        if (event.payload.state === "completed" || event.payload.state === "failed") {
-          void refresh();
-        }
+      listen("falcondeck://dictation-history-changed", () => {
+        void refresh();
       }).then((stop) => {
         if (cancelled) stop();
         else unlisten = stop;
@@ -116,11 +113,13 @@ export function DictationHistoryCard({
       setEntries((current) =>
         current.map((item) => (item.id === updated.id ? updated : item)),
       );
-      onToast({
-        variant: "success",
-        title: "Transcribed again",
-        description: "Press ⌘⇧V to insert it, or copy it from the list.",
-      });
+      try {
+        if (!updated.text) throw new Error("No transcript was returned.");
+        await navigator.clipboard.writeText(updated.text);
+        onToast({ variant: "success", title: "Transcript copied", description: "Ready to paste wherever you need it." });
+      } catch {
+        onToast({ variant: "warning", title: "Transcript ready", description: "Clipboard copy failed. Use Copy transcript below to try again." });
+      }
     } catch (error) {
       onToast({
         variant: "danger",
@@ -262,7 +261,7 @@ export function DictationHistoryCard({
                   {entry.model ? (
                     <Badge variant="default">{entry.model}</Badge>
                   ) : (
-                    <Badge variant="default">Apple Speech</Badge>
+                    <Badge variant="default">{entry.provider === "parakeet" ? "Parakeet" : entry.provider === "open_router" ? "OpenRouter" : "Apple Speech"}</Badge>
                   )}
                   {entry.error ? (
                     <Badge variant="danger" dot>
@@ -287,7 +286,7 @@ export function DictationHistoryCard({
                     size="sm"
                     variant="secondary"
                     disabled={
-                      !entry.audioAvailable || busyId === entry.id || (!baseUrl && (entry.provider !== "parakeet" || Boolean(retryModel)))
+                      !entry.audioAvailable || busyId !== null || (!baseUrl && (entry.provider !== "parakeet" || Boolean(retryModel)))
                     }
                     onClick={() => void retry(entry)}
                   >

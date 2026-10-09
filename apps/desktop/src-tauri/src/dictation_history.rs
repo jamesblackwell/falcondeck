@@ -90,7 +90,10 @@ fn owns_recording(temp_dir: &Path, path: &Path) -> bool {
         .unwrap_or_default();
     path.parent() == Some(temp_dir)
         && name.starts_with(RECORDING_PREFIX)
-        && path.extension().and_then(|value| value.to_str()) == Some(RECORDING_EXTENSION)
+        && matches!(
+            path.extension().and_then(|value| value.to_str()),
+            Some("m4a" | "caf")
+        )
 }
 
 fn remove_recording(temp_dir: &Path, path: &Path) {
@@ -110,7 +113,10 @@ fn save(temp_dir: &Path, entries: &[DictationHistoryEntry]) {
     let path = index_path(temp_dir);
     match serde_json::to_vec(entries) {
         Ok(raw) => {
-            let _ = std::fs::write(path, raw);
+            let pending = path.with_extension("json.pending");
+            if std::fs::write(&pending, raw).is_ok() {
+                let _ = std::fs::rename(pending, path);
+            }
         }
         Err(_) => {
             // Losing the index only costs history, never audio; the recordings
@@ -171,7 +177,45 @@ pub fn record(
     outcome: RecordingOutcome<'_>,
     retention_hours: u32,
 ) -> bool {
-    if retention_hours == 0 || !owns_recording(temp_dir, path) || !path.is_file() {
+    record_with_policy(temp_dir, path, outcome, retention_hours, false)
+}
+
+/// Pending filing can finish after the transcription's detached final write.
+/// It must never overwrite an outcome that has already been saved.
+pub fn record_pending(
+    temp_dir: &Path,
+    path: &Path,
+    duration_seconds: Option<f64>,
+    provider: &str,
+    retention_hours: u32,
+) -> bool {
+    record_with_policy(
+        temp_dir,
+        path,
+        RecordingOutcome {
+            duration_seconds,
+            provider,
+            model: None,
+            text: None,
+            error: Some("Transcription was interrupted. Retry to recover the text.".into()),
+        },
+        retention_hours,
+        true,
+    )
+}
+
+fn record_with_policy(
+    temp_dir: &Path,
+    path: &Path,
+    outcome: RecordingOutcome<'_>,
+    retention_hours: u32,
+    only_if_missing: bool,
+) -> bool {
+    if retention_hours == 0
+        || !owns_recording(temp_dir, path)
+        || path.extension().and_then(|value| value.to_str()) != Some(RECORDING_EXTENSION)
+        || !path.is_file()
+    {
         return false;
     }
     let Some(id) = path.file_stem().and_then(|value| value.to_str()) else {
@@ -197,6 +241,7 @@ pub fn record(
         // A retry re-files the same recording; keep one row per recording so
         // the list reads as "what I said", not "what I attempted".
         match entries.iter_mut().find(|existing| existing.id == entry.id) {
+            Some(_) if only_if_missing => {}
             Some(existing) => {
                 existing.provider = entry.provider;
                 existing.model = entry.model;
@@ -358,6 +403,59 @@ mod tests {
             text,
             error,
         }
+    }
+
+    #[test]
+    fn pending_audio_survives_index_reload_and_delayed_filing_preserves_success() {
+        let (dir, _guard) = fresh_dir("pending-recovery");
+        let path = write_recording(&dir, "one", 4_000);
+        assert!(record_pending(&dir, &path, Some(1.0), "parakeet", 6));
+        *lock() = None;
+        let restored = entries(&dir, 6);
+        assert_eq!(restored.len(), 1);
+        assert_eq!(restored[0].provider, "parakeet");
+        assert!(restored[0].audio_available);
+        assert!(restored[0]
+            .error
+            .as_deref()
+            .unwrap()
+            .contains("interrupted"));
+        record(
+            &dir,
+            &path,
+            outcome(
+                Some(1.0),
+                "parakeet",
+                None,
+                Some("Recovered words".into()),
+                None,
+            ),
+            6,
+        );
+        record_pending(&dir, &path, Some(1.0), "parakeet", 6);
+        *lock() = None;
+        let restored = entries(&dir, 6);
+        assert_eq!(restored[0].text.as_deref(), Some("Recovered words"));
+        assert_eq!(restored[0].error, None);
+    }
+
+    #[test]
+    fn expiry_sweeps_abandoned_caf_capture_without_filing_it_as_m4a() {
+        let (dir, _guard) = fresh_dir("caf-expiry");
+        let path = dir.join(format!("{RECORDING_PREFIX}raw.caf"));
+        std::fs::write(&path, b"unfinished capture").unwrap();
+        assert!(!record_pending(&dir, &path, None, "system", 6));
+        prune(&dir, 1);
+        assert!(path.is_file());
+        let old = SystemTime::now() - std::time::Duration::from_secs(2 * 60 * 60);
+        std::fs::File::options()
+            .write(true)
+            .open(&path)
+            .unwrap()
+            .set_modified(old)
+            .unwrap();
+        prune(&dir, 1);
+        assert!(!path.is_file());
     }
 
     #[test]

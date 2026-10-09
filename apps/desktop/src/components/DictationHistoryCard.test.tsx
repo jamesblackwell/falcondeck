@@ -17,12 +17,12 @@ const invocations: Array<{ command: string; args: unknown }> = [];
 let history: DictationHistoryEntry[] = [];
 let retryResult: (() => DictationHistoryEntry) | null = null;
 
-type StateHandler = (event: { payload: { state: string } }) => void;
+type StateHandler = () => void;
 const stateListeners = new Set<StateHandler>();
 
 vi.mock("@tauri-apps/api/event", () => ({
-  listen: (_event: string, handler: StateHandler) => {
-    stateListeners.add(handler);
+  listen: (event: string, handler: StateHandler) => {
+    if (event === "falcondeck://dictation-history-changed") stateListeners.add(handler);
     return Promise.resolve(() => stateListeners.delete(handler));
   },
 }));
@@ -60,6 +60,7 @@ function entry(overrides: Partial<DictationHistoryEntry> = {}) {
 }
 
 beforeEach(() => {
+  vi.stubGlobal("navigator", { ...navigator, clipboard: { writeText: vi.fn().mockResolvedValue(undefined) } });
   stateListeners.clear();
   invocations.length = 0;
   history = [];
@@ -69,6 +70,7 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  vi.unstubAllGlobals();
   delete (window as { __TAURI_INTERNALS__?: unknown }).__TAURI_INTERNALS__;
   window.localStorage.clear();
 });
@@ -114,6 +116,9 @@ describe("DictationHistoryCard", () => {
     fireEvent.click(screen.getByRole("button", { name: /Retry/ }));
 
     await screen.findByText("the sentence I actually said");
+    expect(screen.getByRole("button", { name: "Copy transcript" })).toBeEnabled();
+    await waitFor(() => expect(navigator.clipboard.writeText).toHaveBeenCalledWith("the sentence I actually said"));
+    expect(onToast).toHaveBeenCalledWith(expect.objectContaining({ title: "Transcript copied" }));
     expect(
       invocations.find((call) => call.command === "dictation_history_retry"),
     ).toEqual({
@@ -124,6 +129,18 @@ describe("DictationHistoryCard", () => {
         model: DEFAULT_DICTATION_SETTINGS.fallbackModel,
       },
     });
+  });
+
+  it("keeps successful retry text available when automatic clipboard copy fails", async () => {
+    history = [entry()];
+    retryResult = () => entry({ text: "Recovered despite clipboard failure", error: null });
+    vi.mocked(navigator.clipboard.writeText).mockRejectedValueOnce(new Error("Denied"));
+    const onToast = vi.fn();
+    render(<DictationHistoryCard baseUrl="http://127.0.0.1:4123" onToast={onToast} />);
+    fireEvent.click(await screen.findByRole("button", { name: "Retry" }));
+    await screen.findByText("Recovered despite clipboard failure");
+    await waitFor(() => expect(onToast).toHaveBeenCalledWith(expect.objectContaining({ title: "Transcript ready", variant: "warning" })));
+    expect(screen.getByRole("button", { name: "Copy transcript" })).toBeEnabled();
   });
 
   it("surfaces a failed retry instead of pretending the transcript changed", async () => {
@@ -169,13 +186,13 @@ describe("DictationHistoryCard", () => {
     expect(screen.queryByRole("button", { name: /Retry/ })).toBeNull();
   });
 
-  it("refreshes the list when a dictation finishes while the panel is open", async () => {
+  it("refreshes the list after native history filing finishes", async () => {
     render(<DictationHistoryCard baseUrl="http://127.0.0.1:4123" onToast={vi.fn()} />);
     await waitFor(() => expect(stateListeners.size).toBe(1));
 
     history = [entry({ text: "fresh dictation", error: null })];
     for (const handler of stateListeners) {
-      handler({ payload: { state: "completed" } });
+      handler();
     }
     await screen.findByText("fresh dictation");
   });

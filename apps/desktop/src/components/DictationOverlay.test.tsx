@@ -7,6 +7,8 @@ type Handler = (message: { payload: unknown }) => void;
 
 const listeners = new Map<string, Set<Handler>>();
 const invoked: string[] = [];
+const invocationArgs: Array<unknown> = [];
+let rejectedCommand: string | null = null;
 
 vi.mock("@tauri-apps/api/event", () => ({
   listen: (event: string, handler: Handler) => {
@@ -18,8 +20,10 @@ vi.mock("@tauri-apps/api/event", () => ({
 }));
 
 vi.mock("@tauri-apps/api/core", () => ({
-  invoke: (command: string) => {
+  invoke: (command: string, args?: unknown) => {
     invoked.push(command);
+    invocationArgs.push(args);
+    if (command === rejectedCommand) return Promise.reject("Clipboard unavailable");
     return Promise.resolve();
   },
 }));
@@ -35,6 +39,8 @@ async function emit(event: string, payload: unknown) {
 beforeEach(() => {
   listeners.clear();
   invoked.length = 0;
+  invocationArgs.length = 0;
+  rejectedCommand = null;
 });
 
 afterEach(() => {
@@ -42,6 +48,50 @@ afterEach(() => {
 });
 
 describe("DictationOverlay", () => {
+  it("retries saved audio into the clipboard and leaves the recovered text visible", async () => {
+    render(<DictationOverlay />);
+    await emit("falcondeck://dictation-state", {
+      state: "failed", error: "A recording is waiting", retainedAudio: true,
+    });
+    await act(async () => { fireEvent.click(screen.getByRole("button", { name: "Retry transcription" })); });
+    expect(invoked.at(-1)).toBe("retry_dictation");
+    expect(invocationArgs.at(-1)).toEqual({ copyOnly: true });
+    expect(screen.getByRole("button", { name: "Retry transcription" })).toBeDisabled();
+    await emit("falcondeck://dictation-state", { state: "recovered", text: "Recovered words", retainedAudio: false });
+    expect(screen.getByText("Transcript copied")).toBeInTheDocument();
+    expect(screen.getByText("Recovered words")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Copied" })).toBeInTheDocument();
+    await act(async () => { fireEvent.click(screen.getByRole("button", { name: "Paste transcript" })); });
+    expect(invoked.at(-1)).toBe("retry_dictation_paste");
+  });
+
+  it("offers discard without retry or a safe-audio promise for an unreadable recording", async () => {
+    render(<DictationOverlay />);
+    await emit("falcondeck://dictation-state", {
+      state: "unrecoverable", error: "Its audio cannot be read.", retainedAudio: true,
+    });
+    expect(screen.getByText("Recording interrupted")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Retry transcription" })).not.toBeInTheDocument();
+    expect(screen.queryByText(/saved audio is available/i)).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Discard recording" })).toBeInTheDocument();
+  });
+
+  it("prioritizes copying when the recovery clipboard write failed", async () => {
+    render(<DictationOverlay initialEvent={{ state: "copy_failed", text: "Recovered words", error: "Clipboard copy failed", retainedAudio: true }} subscribeToEvents={false} />);
+    expect(screen.getByText("Couldn't copy")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Copy transcript" })).toHaveClass("text-surface-0");
+    expect(screen.getByText("Recovered words")).toBeInTheDocument();
+  });
+
+  it("shows clipboard errors and keeps the transcript available", async () => {
+    rejectedCommand = "copy_dictation_transcript";
+    render(<DictationOverlay initialEvent={{ state: "recovered", text: "Recovered words", retainedAudio: false }} subscribeToEvents={false} />);
+    await act(async () => { fireEvent.click(screen.getByRole("button", { name: "Copied" })); });
+    expect(screen.getByRole("alert")).toHaveTextContent("Could not copy");
+    expect(screen.getByText("Recovered words")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Copy transcript" })).toBeInTheDocument();
+  });
+
   it("offers a countdown undo after a cancelled take", async () => {
     vi.useFakeTimers({ shouldAdvanceTime: true });
     render(<DictationOverlay />);

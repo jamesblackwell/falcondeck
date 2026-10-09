@@ -60,8 +60,11 @@ The Tauri shell builds a small Objective-C bridge against AppKit,
 AVFoundation, ApplicationServices, and Speech. The bridge:
 
 1. listens for modifier-only key transitions using a session event tap;
-2. records one-channel AAC audio from the selected `AVCaptureDevice` to a
-   unique file in the macOS temporary directory;
+2. records 16 kHz mono PCM audio from the selected `AVCaptureDevice` to a
+   unique CAF file in the macOS temporary directory. CAF remains readable if
+   the process exits before the writer closes. Before transcription, the
+   bridge exports a compressed M4A, validates it, persists its recovery path,
+   then deletes the CAF source;
 3. sends lifecycle events to the Rust shell;
 4. transcribes with `SFSpeechURLRecognitionRequest`, or hands the temporary file
    to Rust for the daemon's OpenRouter endpoint;
@@ -115,17 +118,32 @@ the same permission identity.
 
 ## Retention and recovery
 
-The current temporary recording is stored in macOS user defaults only as a file
-path. The audio itself stays in the temporary directory.
+The current recording path and provider are persisted in macOS user defaults.
+Audio remains in the macOS temporary directory. Capture uses PCM CAF because
+an interrupted M4A writer leaves no finalized sample table (`moov`), even when
+its file contains many bytes. The CAF stays available across an interrupted
+capture or export; retry compresses it again before invoking the provider.
+An orderly quit stops capture without treating it as a cancellation.
 
-- Successful transcription and paste deletes the file and clears the retained
-  path.
-- Cancellation and explicit discard delete it immediately.
-- Empty transcription, provider failure, or paste failure keeps it available
-  for Retry or Discard.
-- FalconDeck refuses to overwrite a retained failed recording with a new one.
-
-No transcript history or raw-audio library is created in the MVP.
+- Successful transcription and delivery clears the retained path. Recording
+  history keeps the compressed audio for the configured retention window
+  (six hours by default); with history disabled it is deleted immediately.
+- Escape offers a ten-second Undo window, then deletes the cancelled take.
+  Explicit discard deletes the retained take and cancels any active export.
+- Empty transcription, provider failure, or delivery failure keeps audio for
+  Retry or Discard. New dictation does not overwrite a pending take.
+- Retry from the recovery card copies the transcript to the clipboard instead
+  of inserting into a destination that may have disappeared during restart.
+  A persistent card shows the recovered text with Copy, Paste transcript, and
+  Dismiss actions. Undo still uses the normal insertion path.
+- Retrying from recording history also copies the resulting transcript. If
+  clipboard copy fails, the successful text and its Copy action remain visible.
+- Unreadable legacy recordings are identified as interrupted, with Discard
+  available and no misleading Retry or “safe recording” promise. A filename
+  or non-empty file alone does not establish that its audio is readable.
+- Compressed audio is filed as pending before transcription starts. History
+  writes replace the index atomically; a delayed pending write cannot erase a
+  completed outcome. Abandoned CAF files are swept after the retention window.
 
 ## Optional Parakeet
 
@@ -143,7 +161,7 @@ and fixes its documented word-corruption case (FluidAudio #760 / #872). The
 cache version changes deliberately so old weights are never silently used or
 re-downloaded on app startup.
 
-The helper uses the existing 16 kHz mono AAC capture and paste workflow.
+The helper uses the same CAF capture, M4A export, and delivery workflow.
 Recording starts prewarming the installed model; inference loads local files
 without network fallback. Optional transcript cleanup and voice rewrite still
 use OpenRouter, as they do with Apple Speech. Failed or retained Parakeet
@@ -227,7 +245,8 @@ moving durable conversation state into the desktop shell.
    FalconDeck preserves the newer clipboard contents.
 6. Use Command-C and another slow Command shortcut; confirm neither produces a
    transcript.
-7. Record and press Escape; confirm no text is pasted and no retry remains.
+7. Record and press Escape; confirm no text is pasted, Undo restores the take
+   for ten seconds, and letting that window expire removes the cancelled audio.
 8. Force a transcription failure, relaunch FalconDeck, and confirm the next
    attempt offers Retry or Discard instead of overwriting the audio.
 9. Select OpenRouter, save a key, choose a transcription model, and repeat the
@@ -241,3 +260,11 @@ moving durable conversation state into the desktop shell.
     error instead of pasting the spoken instruction.
 13. Repeat the rewrite in a browser editor and in FalconDeck's own composer;
     confirm each replaces the live selection through ordinary paste / insert.
+
+14. Exit during transcription, relaunch, and retry from the recovery card;
+    confirm the text is copied, remains visible, and is not inserted into an
+    unrelated app. Paste transcript explicitly inserts the recovered text.
+15. Interrupt capture or M4A export; confirm retry can read the saved CAF and
+    export it again. An older incomplete M4A should offer Discard without Retry.
+16. Deny a clipboard write after a successful retry; confirm the transcript
+    stays visible with a working Copy action rather than reporting ASR failure.

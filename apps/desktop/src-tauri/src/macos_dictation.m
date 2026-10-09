@@ -12,6 +12,8 @@
 #include <unistd.h>
 
 extern void fd_dictation_emit(int32_t kind, const char *payload);
+bool fd_dictation_copy_text(const char *utf8_text);
+static BOOL FDRecordingIsReadable(NSURL *url);
 
 typedef struct {
   bool chord;
@@ -508,6 +510,9 @@ static CGKeyCode FDCopyVirtualKeyCode(void) {
 @property(nonatomic) BOOL cancelling;
 @property(nonatomic) BOOL recording;
 @property(nonatomic) BOOL stopping;
+@property(nonatomic) BOOL shuttingDown;
+@property(nonatomic) BOOL retryCopiesTranscript;
+@property(nonatomic, strong) AVAssetExportSession *recordingExport;
 @property(nonatomic) NSUInteger modifierGeneration;
 @property(nonatomic) NSUInteger rewriteModifierGeneration;
 @property(nonatomic) NSUInteger speechGeneration;
@@ -587,6 +592,7 @@ static CGKeyCode FDCopyVirtualKeyCode(void) {
                              url:(NSURL *)url;
 - (BOOL)claimSpeechCompletion:(NSUInteger)generation API_AVAILABLE(macos(10.15));
 - (void)surfaceRetainedRecordingIfNeeded;
+- (void)prepareRecordingForTranscription:(NSURL *)url provider:(FDProvider)provider;
 - (void)capturePasteTarget;
 - (void)recapturePasteTarget;
 - (void)returnFocusToPasteTarget;
@@ -713,6 +719,8 @@ static CGEventRef FDEventTapCallback(CGEventTapProxy proxy, CGEventType type,
     [NSUserDefaults.standardUserDefaults removeObjectForKey:FDRetainedRecordingProviderKey];
     self.retainedProvider = -1;
   }
+  // Persist recovery ownership before capture/export can be interrupted.
+  [NSUserDefaults.standardUserDefaults synchronize];
 }
 
 - (void)setRecordingDurationSeconds:(NSTimeInterval)duration {
@@ -1174,12 +1182,11 @@ static CGEventRef FDEventTapCallback(CGEventTapProxy proxy, CGEventType type,
 
 - (void)startRecordingAsRewrite:(BOOL)rewrite {
   BOOL featureOn = rewrite ? self.rewriteEnabled : self.enabled;
-  if (!featureOn || self.recording || self.stopping) return;
+  if (!featureOn || self.recording || self.stopping || self.recordingExport || self.shuttingDown) return;
   [self dropCancelledRecording];
   if (self.recordingURL &&
       [NSFileManager.defaultManager fileExistsAtPath:self.recordingURL.path]) {
-    FDEmit(FDEventFailedRetained,
-           @"A previous recording is waiting to be transcribed. Retry or discard it first.");
+    [self surfaceRetainedRecordingIfNeeded];
     return;
   }
   if (@available(macOS 10.14, *)) {
@@ -1241,7 +1248,8 @@ static CGEventRef FDEventTapCallback(CGEventTapProxy proxy, CGEventType type,
     [self clearRewriteSession];
   }
 
-  NSString *name = [NSString stringWithFormat:@"falcondeck-dictation-%@.m4a",
+  self.retryCopiesTranscript = NO;
+  NSString *name = [NSString stringWithFormat:@"falcondeck-dictation-%@.caf",
                                              NSUUID.UUID.UUIDString];
   NSURL *url = [NSURL fileURLWithPath:[NSTemporaryDirectory()
       stringByAppendingPathComponent:name]];
@@ -1275,21 +1283,21 @@ static CGEventRef FDEventTapCallback(CGEventTapProxy proxy, CGEventType type,
   [session addInput:input];
   [session addOutput:output];
   [session commitConfiguration];
-  // Speech models resample to 16 kHz mono internally, so recording above
-  // that only inflates the file. 32 kbps AAC yields identical transcripts
-  // while cutting the OpenRouter upload several-fold versus the previous
-  // 44.1 kHz high-quality encode — and the 8 MiB cap now covers far longer
-  // takes.
+  // M4A writes its sample table at close; a crash leaves its AAC unreadable.
+  // PCM CAF can be read without a closing header. Keep it until a compressed
+  // M4A has been completed and persisted for the existing provider pipeline.
   output.audioSettings = @{
-    AVFormatIDKey : @(kAudioFormatMPEG4AAC),
+    AVFormatIDKey : @(kAudioFormatLinearPCM),
     AVSampleRateKey : @16000,
     AVNumberOfChannelsKey : @1,
-    AVEncoderBitRateKey : @32000,
+    AVLinearPCMBitDepthKey : @16,
+    AVLinearPCMIsFloatKey : @NO,
+    AVLinearPCMIsBigEndianKey : @NO,
   };
   if (![[AVCaptureAudioFileOutput availableOutputFileTypes]
-          containsObject:AVFileTypeAppleM4A]) {
+          containsObject:AVFileTypeCoreAudioFormat]) {
     if (rewrite) [self clearRewriteSession];
-    FDEmit(FDEventFailed, @"This Mac cannot create an M4A dictation recording.");
+    FDEmit(FDEventFailed, @"This Mac cannot create a recoverable dictation recording.");
     return;
   }
   self.captureSession = session;
@@ -1347,7 +1355,7 @@ static CGEventRef FDEventTapCallback(CGEventTapProxy proxy, CGEventType type,
     return;
   }
   [output startRecordingToOutputFileURL:url
-                         outputFileType:AVFileTypeAppleM4A
+                         outputFileType:AVFileTypeCoreAudioFormat
                       recordingDelegate:self];
   self.fileOutputActive = YES;
   [self startAudioLevelMeter];
@@ -1417,9 +1425,17 @@ static CGEventRef FDEventTapCallback(CGEventTapProxy proxy, CGEventType type,
         ? [[[NSFileManager defaultManager] attributesOfItemAtPath:url.path error:nil]
               objectForKey:NSFileSize]
         : nil;
-    if (error || !url || fileSize.unsignedLongLongValue == 0) {
-      FDEmit(FDEventFailedRetained,
-             error.localizedDescription ?: @"The audio recording could not be completed.");
+    if (!url || fileSize.unsignedLongLongValue == 0) {
+      if (url) [NSFileManager.defaultManager removeItemAtURL:url error:nil];
+      [self setRetainedRecordingURL:nil provider:0];
+      FDEmit(FDEventFailed, @"The microphone did not save any audio. Try recording again.");
+      return;
+    }
+    if (error) {
+      FDEmit(FDRecordingIsReadable(url) ? FDEventFailedRetained : FDEventUnreadableRetained,
+             FDRecordingIsReadable(url)
+                 ? @"Recording stopped unexpectedly. Retry to transcribe the saved audio."
+                 : @"The recording stopped before its audio could be saved correctly. Discard it to record again.");
       return;
     }
     if (!FDRecordingDurationIsUsable(duration)) {
@@ -1431,20 +1447,75 @@ static CGEventRef FDEventTapCallback(CGEventTapProxy proxy, CGEventType type,
       return;
     }
     [self setRecordingDurationSeconds:duration];
-    if (self.recordingProvider == FDProviderSystem) {
-      if (@available(macOS 10.15, *)) {
-        // The OpenRouter path carries the path in FDEventAudioReady; Apple
-        // Speech never leaves this process, so announce it separately.
-        FDEmit(FDEventAudioRecorded, url.path);
-        [self transcribeSystemRecording:url];
-      } else {
-        FDEmit(FDEventFailedRetained,
-               @"Apple Speech requires macOS 10.15 or later. Your recording has been retained.");
-      }
-    } else {
-      FDEmit(self.recordingProvider == FDProviderParakeet ? FDEventParakeetAudioReady : FDEventAudioReady, url.path);
+    if (!self.shuttingDown) {
+      [self prepareRecordingForTranscription:url provider:self.recordingProvider];
     }
   });
+}
+
+// Validate restored files before offering Retry. Legacy M4A files without a
+// finalized sample table cannot be reconstructed; keep them for explicit
+// discard rather than claiming they are safe and retrying forever.
+static BOOL FDRecordingIsReadable(NSURL *url) {
+  AVAudioFile *file = [[AVAudioFile alloc] initForReading:url error:nil];
+  return file && file.length > 0 && file.processingFormat.sampleRate > 0;
+}
+
+- (void)prepareRecordingForTranscription:(NSURL *)url provider:(FDProvider)provider {
+  if (!FDRecordingIsReadable(url)) {
+    FDEmit(FDEventUnreadableRetained,
+           @"The app stopped before this recording was finalized. Its audio cannot be read. Discard it to record again.");
+    return;
+  }
+  if ([url.pathExtension isEqualToString:@"caf"]) {
+    if (self.recordingExport) return;
+    NSURL *compressedURL = [[url URLByDeletingPathExtension]
+        URLByAppendingPathExtension:@"m4a"];
+    // A previous interrupted export may have left an incomplete destination.
+    [NSFileManager.defaultManager removeItemAtURL:compressedURL error:nil];
+    AVAssetExportSession *export = [[AVAssetExportSession alloc]
+        initWithAsset:[AVURLAsset URLAssetWithURL:url options:nil]
+           presetName:AVAssetExportPresetAppleM4A];
+    if (!export) {
+      FDEmit(FDEventFailedRetained, @"Could not prepare the saved audio. Retry transcription to try again.");
+      return;
+    }
+    export.outputURL = compressedURL;
+    export.outputFileType = AVFileTypeAppleM4A;
+    self.recordingExport = export;
+    [export exportAsynchronouslyWithCompletionHandler:^{
+      dispatch_async(dispatch_get_main_queue(), ^{
+        if (self.recordingExport != export || ![self.recordingURL isEqual:url]) {
+          [NSFileManager.defaultManager removeItemAtURL:compressedURL error:nil];
+          return;
+        }
+        self.recordingExport = nil;
+        if (export.status != AVAssetExportSessionStatusCompleted ||
+            !FDRecordingIsReadable(compressedURL)) {
+          FDEmit(FDEventFailedRetained, @"Could not prepare the saved audio. Retry transcription to try again.");
+          return;
+        }
+        NSTimeInterval duration = self.recordingDurationSeconds;
+        [self setRetainedRecordingURL:compressedURL provider:provider];
+        [self setRecordingDurationSeconds:duration];
+        [NSFileManager.defaultManager removeItemAtURL:url error:nil];
+        [self prepareRecordingForTranscription:compressedURL provider:provider];
+      });
+    }];
+    return;
+  }
+  AVAudioFile *audio = [[AVAudioFile alloc] initForReading:url error:nil];
+  [self setRecordingDurationSeconds:audio.length / audio.processingFormat.sampleRate];
+  if (provider == FDProviderSystem) {
+    if (@available(macOS 10.15, *)) {
+      FDEmit(FDEventAudioRecorded, url.path);
+      [self transcribeSystemRecording:url];
+    } else {
+      FDEmit(FDEventFailedRetained, @"Apple Speech requires macOS 10.15 or later.");
+    }
+  } else {
+    FDEmit(provider == FDProviderParakeet ? FDEventParakeetAudioReady : FDEventAudioReady, url.path);
+  }
 }
 
 // Clears the in-flight speech task when the completing callback still owns
@@ -1937,7 +2008,9 @@ static CGEventRef FDEventTapCallback(CGEventTapProxy proxy, CGEventType type,
 // again) FalconDeck itself, the transcript goes through the deterministic
 // self-insert event instead of a synthetic paste into an external app.
 - (BOOL)pasteText:(NSString *)text attemptTargetedFirst:(BOOL)attemptTargetedFirst {
-  if (!AXIsProcessTrusted() || text.length == 0) return NO;
+  if (text.length == 0) return NO;
+  if (self.retryCopiesTranscript) return fd_dictation_copy_text(text.UTF8String);
+  if (!AXIsProcessTrusted()) return NO;
   // The target captured at key-down may be stale after seconds of
   // transcription. AX focus is cheap to re-read and never moves focus, so
   // prefer the live reading when it still matches the captured target — and
@@ -2058,7 +2131,9 @@ static CGEventRef FDEventTapCallback(CGEventTapProxy proxy, CGEventType type,
   return YES;
 }
 
-- (void)retryLastRecording {
+- (void)retryLastRecordingCopyOnly:(BOOL)copyOnly {
+  if (self.recording || self.stopping || self.recordingExport) return;
+  self.retryCopiesTranscript = copyOnly;
   [self recapturePasteTarget];
   if (self.pasteTargetProcessIdentifier <= 0) {
     [self capturePasteTarget];
@@ -2071,7 +2146,12 @@ static CGEventRef FDEventTapCallback(CGEventTapProxy proxy, CGEventType type,
   // Retry with the provider that recorded the audio; only legacy recordings
   // without a stored provider fall back to the current setting.
   self.cancelledRecordingPending = NO;
-  [self returnFocusToPasteTarget];
+  NSTimeInterval duration = self.recordingDurationSeconds;
+  FDProvider retainedProvider = self.retainedProvider >= 0 ? (FDProvider)self.retainedProvider : self.provider;
+  // Undo transfers the take out of its memory-only cancel window.
+  [self setRetainedRecordingURL:url provider:retainedProvider];
+  [self setRecordingDurationSeconds:duration];
+  if (!copyOnly) [self returnFocusToPasteTarget];
   FDProvider provider =
       self.retainedProvider >= 0 ? (FDProvider)self.retainedProvider : self.provider;
   if (@available(macOS 10.15, *)) {
@@ -2085,17 +2165,7 @@ static CGEventRef FDEventTapCallback(CGEventTapProxy proxy, CGEventType type,
   if (self.rewriteSession && self.rewriteSelection.length > 0) {
     FDEmit(FDEventRewriteSelection, self.rewriteSelection);
   }
-  if (provider == FDProviderSystem) {
-    if (@available(macOS 10.15, *)) {
-      FDEmit(FDEventAudioRecorded, url.path);
-      [self transcribeSystemRecording:url];
-    } else {
-      FDEmit(FDEventFailedRetained,
-             @"Apple Speech requires macOS 10.15 or later. Your recording has been retained.");
-    }
-  } else {
-    FDEmit(provider == FDProviderParakeet ? FDEventParakeetAudioReady : FDEventAudioReady, url.path);
-  }
+  [self prepareRecordingForTranscription:url provider:provider];
 }
 
 // Deletes the audio held for the undo window. Rust calls this when the window
@@ -2128,6 +2198,8 @@ static CGEventRef FDEventTapCallback(CGEventTapProxy proxy, CGEventType type,
     return;
   }
   self.cancelledRecordingPending = NO;
+  [self.recordingExport cancelExport];
+  self.recordingExport = nil;
   if (@available(macOS 10.15, *)) {
     self.speechGeneration += 1;
     [self.speechTask cancel];
@@ -2155,6 +2227,7 @@ static CGEventRef FDEventTapCallback(CGEventTapProxy proxy, CGEventType type,
 // failure card appeared) and runs the paste pipeline again without touching
 // any recording. Emits Completed on success, PasteFailed on another miss.
 - (void)retryPasteTranscript:(NSString *)text {
+  self.retryCopiesTranscript = NO;
   if (text.length == 0) {
     FDEmit(FDEventFailed, @"There is no transcript to paste.");
     return;
@@ -2180,21 +2253,29 @@ static CGEventRef FDEventTapCallback(CGEventTapProxy proxy, CGEventType type,
       self.stopping) {
     return;
   }
-  if (self.cancelledRecordingPending) return;
+  if (self.cancelledRecordingPending || self.recordingExport) return;
   if (@available(macOS 10.15, *)) {
     if (self.speechTask) return;
   }
   NSURL *url = self.recordingURL;
   if (!url || ![[NSFileManager defaultManager] fileExistsAtPath:url.path]) return;
+  if (!FDRecordingIsReadable(url)) {
+    FDEmit(FDEventUnreadableRetained,
+           @"The app stopped before this recording was finalized. Its audio cannot be read. Discard it to record again.");
+    return;
+  }
   FDEmit(FDEventFailedRetained,
          @"A recording is waiting to be transcribed. Retry or discard it from "
          @"the dictation overlay.");
 }
 
 - (void)shutdown {
+  self.shuttingDown = YES;
   [NSNotificationCenter.defaultCenter removeObserver:self];
   [self finishActivePasteboardSessionIfOwned];
   [self dropCancelledRecording];
+  [self.recordingExport cancelExport];
+  self.recordingExport = nil;
   [self stopAudioLevelMeter];
   if (@available(macOS 10.15, *)) {
     self.speechGeneration += 1;
@@ -2202,7 +2283,8 @@ static CGEventRef FDEventTapCallback(CGEventTapProxy proxy, CGEventType type,
     self.speechTask = nil;
     self.speechRecognizer = nil;
   }
-  if (self.recording) [self cancelRecording];
+  // An orderly quit must keep the take rather than turn it into Esc/discard.
+  if (self.recording) [self stopRecording];
   if (self.eventTapSource) {
     CFRunLoopRemoveSource(CFRunLoopGetMain(), self.eventTapSource,
                           kCFRunLoopCommonModes);
@@ -2337,6 +2419,34 @@ double fd_dictation_retained_recording_duration_seconds(void) {
     dispatch_sync(dispatch_get_main_queue(), read);
   }
   return isfinite(duration) && duration > 0 ? duration : 0;
+}
+
+// No microphone or permissions: verify that data already written to CAF is
+// readable while its writer is still open, unlike an unfinished M4A.
+bool fd_dictation_test_recovery_audio_contract(void) {
+  @autoreleasepool {
+    NSURL *base = [NSURL fileURLWithPath:[NSTemporaryDirectory()
+        stringByAppendingPathComponent:NSUUID.UUID.UUIDString]];
+    NSURL *caf = [base URLByAppendingPathExtension:@"caf"];
+    NSURL *invalid = [base URLByAppendingPathExtension:@"m4a"];
+    AVAudioFormat *format = [[AVAudioFormat alloc] initStandardFormatWithSampleRate:16000 channels:1];
+    AVAudioFile *writer = [[AVAudioFile alloc] initForWriting:caf settings:@{
+      AVFormatIDKey: @(kAudioFormatLinearPCM), AVSampleRateKey: @16000,
+      AVNumberOfChannelsKey: @1, AVLinearPCMBitDepthKey: @16,
+      AVLinearPCMIsFloatKey: @NO, AVLinearPCMIsBigEndianKey: @NO,
+    } error:nil];
+    AVAudioPCMBuffer *buffer = [[AVAudioPCMBuffer alloc] initWithPCMFormat:format frameCapacity:16000];
+    buffer.frameLength = 16000;
+    for (NSUInteger i = 0; i < 16000; i++) buffer.floatChannelData[0][i] = sin(i * 0.1) * 0.1;
+    BOOL wrote = [writer writeFromBuffer:buffer error:nil];
+    [@"unfinalized M4A" writeToURL:invalid atomically:YES encoding:NSUTF8StringEncoding error:nil];
+    BOOL result = wrote && FDRecordingIsReadable(caf) && !FDRecordingIsReadable(invalid);
+    // Keep the writer alive until after the read check.
+    (void)writer.length;
+    [NSFileManager.defaultManager removeItemAtURL:caf error:nil];
+    [NSFileManager.defaultManager removeItemAtURL:invalid error:nil];
+    return result;
+  }
 }
 
 bool fd_dictation_test_recording_duration_is_usable(double duration_seconds) {
@@ -2477,9 +2587,9 @@ void fd_dictation_drop_cancelled(void) {
   });
 }
 
-void fd_dictation_retry(void) {
+void fd_dictation_retry(bool copy_only) {
   dispatch_async(dispatch_get_main_queue(), ^{
-    [[FDDictationController sharedController] retryLastRecording];
+    [[FDDictationController sharedController] retryLastRecordingCopyOnly:copy_only];
   });
 }
 

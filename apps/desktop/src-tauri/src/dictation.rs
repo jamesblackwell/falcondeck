@@ -57,6 +57,7 @@ static ACTIVE_OPENROUTER_TRANSCRIPTION: AtomicU64 = AtomicU64::new(0);
 static LAST_TRANSCRIPT: RwLock<Option<String>> = RwLock::new(None);
 static REWRITE_SELECTION: RwLock<Option<String>> = RwLock::new(None);
 static REWRITE_ACTIVE: AtomicBool = AtomicBool::new(false);
+static RECOVERY_COPY: AtomicBool = AtomicBool::new(false);
 
 // Timeouts are per request rather than per client: a 30-second dictation and
 // a 30-minute one deserve very different ceilings.
@@ -92,6 +93,7 @@ mod event_kind {
     pub const REWRITE_INSTRUCTION: i32 = 13;
     pub const CLEANUP_TRANSCRIPT: i32 = 14;
     pub const PARAKEET_AUDIO_READY: i32 = 15;
+    pub const UNREADABLE_RETAINED: i32 = 16;
 }
 
 #[derive(Clone, Copy, Debug, Default, Deserialize)]
@@ -271,7 +273,7 @@ unsafe extern "C" {
     fn fd_dictation_drop_cancelled();
     fn fd_dictation_stop();
     fn fd_dictation_cancel();
-    fn fd_dictation_retry();
+    fn fd_dictation_retry(copy_only: bool);
     fn fd_dictation_discard();
     fn fd_dictation_retry_paste(text: *const std::ffi::c_char);
     fn fd_dictation_make_overlay_nonactivating(window: *mut std::ffi::c_void) -> bool;
@@ -282,6 +284,8 @@ unsafe extern "C" {
     fn fd_dictation_test_transient_pasteboard_round_trip() -> bool;
     #[cfg(test)]
     fn fd_dictation_test_recording_duration_is_usable(duration_seconds: f64) -> bool;
+    #[cfg(test)]
+    fn fd_dictation_test_recovery_audio_contract() -> bool;
     #[cfg(test)]
     fn fd_dictation_test_rewrite_selection_contract() -> bool;
     fn fd_dictation_copy_text(text: *const std::ffi::c_char) -> bool;
@@ -568,11 +572,13 @@ pub fn cancel_dictation() {
 /// pending undo-window task, so the audio this is about to transcribe is not
 /// deleted out from under it.
 #[tauri::command]
-pub fn retry_dictation() {
+pub fn retry_dictation(copy_only: Option<bool>) {
+    let copy_only = copy_only.unwrap_or(false);
+    RECOVERY_COPY.store(copy_only, Ordering::Release);
     SESSION_GENERATION.fetch_add(1, Ordering::AcqRel);
     #[cfg(target_os = "macos")]
     unsafe {
-        fd_dictation_retry();
+        fd_dictation_retry(copy_only);
     }
 }
 
@@ -581,6 +587,7 @@ pub fn retry_dictation() {
 /// The native side emits Completed or PasteFailed when the attempt resolves.
 #[tauri::command]
 pub fn retry_dictation_paste() -> Result<(), String> {
+    RECOVERY_COPY.store(false, Ordering::Release);
     let text = last_dictation_transcript()
         .ok_or_else(|| "There is no transcript to paste.".to_string())?;
     SESSION_GENERATION.fetch_add(1, Ordering::AcqRel);
@@ -809,7 +816,10 @@ pub fn shutdown() {
 }
 
 fn overlay_size(state: &str, has_transcript: bool) -> (f64, f64) {
-    if state == "failed" {
+    if matches!(
+        state,
+        "failed" | "copy_failed" | "unrecoverable" | "recovered"
+    ) {
         let height = if has_transcript {
             OVERLAY_FAILED_WITH_TRANSCRIPT_HEIGHT
         } else {
@@ -824,8 +834,10 @@ fn overlay_size(state: &str, has_transcript: bool) -> (f64, f64) {
 /// Only states that carry buttons take clicks: failure, a completed transcript
 /// with a manual-copy fallback, and a cancelled take that can still be undone.
 fn overlay_takes_clicks(event: &DictationEvent) -> bool {
-    event.state == "failed"
-        || (event.state == "completed" && event.text.is_some())
+    matches!(
+        event.state,
+        "failed" | "copy_failed" | "unrecoverable" | "recovered"
+    ) || (event.state == "completed" && event.text.is_some())
         || (event.state == "cancelled" && event.retained_audio)
 }
 
@@ -872,7 +884,15 @@ fn position_overlay(app: &AppHandle, width: f64) {
 }
 
 fn show_overlay(app: &AppHandle, state: &str, has_transcript: bool) {
-    set_overlay_mode(app, state, state == "failed", has_transcript);
+    set_overlay_mode(
+        app,
+        state,
+        matches!(
+            state,
+            "failed" | "copy_failed" | "unrecoverable" | "recovered"
+        ),
+        has_transcript,
+    );
     position_overlay(app, overlay_size(state, has_transcript).0);
     if let Some(window) = app.get_webview_window(DICTATION_WINDOW_LABEL) {
         let _ = window.show();
@@ -910,6 +930,9 @@ fn close_undo_window_after(app: AppHandle, generation: u64, delay: Duration) {
 }
 
 fn emit_event(app: &AppHandle, event: DictationEvent) {
+    if event.state == "recovered" {
+        show_overlay(app, "recovered", true);
+    }
     set_overlay_mode(
         app,
         event.state,
@@ -932,12 +955,23 @@ fn emit_failure_with_transcript(
     transcript: Option<String>,
 ) {
     SESSION_GENERATION.fetch_add(1, Ordering::AcqRel);
-    show_overlay(app, "failed", transcript.is_some());
+    let message = if transcript.is_some() && RECOVERY_COPY.load(Ordering::Acquire) {
+        "The transcript is ready, but clipboard copy failed. Use Copy transcript to try again."
+            .to_string()
+    } else {
+        message
+    };
+    let state = if transcript.is_some() && RECOVERY_COPY.load(Ordering::Acquire) {
+        "copy_failed"
+    } else {
+        "failed"
+    };
+    show_overlay(app, state, transcript.is_some());
     let mode = rewrite_mode();
     emit_event(
         app,
         DictationEvent {
-            state: "failed",
+            state,
             text: transcript,
             error: Some(message),
             retained_audio,
@@ -946,6 +980,24 @@ fn emit_failure_with_transcript(
     );
     if !retained_audio {
         clear_rewrite_session();
+    }
+}
+
+fn emit_completion(app: AppHandle, text: String, mode: Option<&'static str>) {
+    let generation = SESSION_GENERATION.fetch_add(1, Ordering::AcqRel) + 1;
+    let copied = RECOVERY_COPY.load(Ordering::Acquire);
+    emit_event(
+        &app,
+        DictationEvent {
+            state: if copied { "recovered" } else { "completed" },
+            text: Some(text),
+            error: None,
+            retained_audio: false,
+            mode,
+        },
+    );
+    if !copied {
+        hide_overlay_after(app, generation, COMPLETED_FALLBACK_WINDOW);
     }
 }
 
@@ -1184,6 +1236,12 @@ fn emit_rewriting(app: &AppHandle) {
     );
 }
 
+fn notify_history_changed() {
+    if let Some(app) = APP_HANDLE.get() {
+        let _ = app.emit("falcondeck://dictation-history-changed", ());
+    }
+}
+
 /// Keeps the recording for the retention window, or deletes it when history
 /// is switched off. Either way the audio stops being the recorder's problem.
 fn file_recording(
@@ -1237,6 +1295,7 @@ fn record_recording_detached(
             },
             retention_hours,
         );
+        notify_history_changed();
     });
 }
 
@@ -1261,6 +1320,7 @@ fn file_recording_detached(
             error,
             retention_hours,
         );
+        notify_history_changed();
     });
 }
 
@@ -1286,6 +1346,13 @@ async fn transcribe_recording(
     };
     let daemon_url = config.daemon_url.as_deref().unwrap_or_default();
     let retention_hours = config.history_retention_hours;
+    dictation_history::record_pending(
+        &dictation_temp_dir(),
+        &path,
+        duration_seconds,
+        provider_name,
+        retention_hours,
+    );
     let result = if matches!(provider, DictationProvider::Parakeet) {
         crate::parakeet::transcribe(&app, &path)
             .await
@@ -1329,6 +1396,7 @@ async fn transcribe_recording(
                 },
                 retention_hours,
             );
+            notify_history_changed();
             return Err(error);
         }
     };
@@ -1430,22 +1498,11 @@ async fn transcribe_recording(
         unsafe {
             fd_dictation_mark_completed();
         }
-        let generation = SESSION_GENERATION.fetch_add(1, Ordering::AcqRel) + 1;
         let mode = rewrite_mode();
         if mode.is_some() {
             clear_rewrite_session();
         }
-        emit_event(
-            &finish_app,
-            DictationEvent {
-                state: "completed",
-                text: Some(text),
-                error: None,
-                retained_audio: false,
-                mode,
-            },
-        );
-        hide_overlay_after(finish_app, generation, COMPLETED_FALLBACK_WINDOW);
+        emit_completion(finish_app, text, mode);
     })
     .map_err(|error| error.to_string())
 }
@@ -1498,6 +1555,7 @@ pub extern "C" fn fd_dictation_emit(kind: i32, payload: *const std::ffi::c_char)
     };
     match kind {
         event_kind::RECORDING => {
+            RECOVERY_COPY.store(false, Ordering::Release);
             let rewrite = payload == "rewrite";
             REWRITE_ACTIVE.store(rewrite, Ordering::Release);
             if !rewrite {
@@ -1541,18 +1599,7 @@ pub extern "C" fn fd_dictation_emit(kind: i32, payload: *const std::ffi::c_char)
             if mode.is_some() {
                 clear_rewrite_session();
             }
-            let generation = SESSION_GENERATION.fetch_add(1, Ordering::AcqRel) + 1;
-            emit_event(
-                &app,
-                DictationEvent {
-                    state: "completed",
-                    text: Some(payload),
-                    error: None,
-                    retained_audio: false,
-                    mode,
-                },
-            );
-            hide_overlay_after(app, generation, COMPLETED_FALLBACK_WINDOW);
+            emit_completion(app, payload, mode);
         }
         event_kind::FAILED => emit_failure(&app, payload, false),
         event_kind::CANCELLED => {
@@ -1678,23 +1725,7 @@ pub extern "C" fn fd_dictation_emit(kind: i32, payload: *const std::ffi::c_char)
                             }
                             let mode = rewrite_mode();
                             clear_rewrite_session();
-                            let generation =
-                                SESSION_GENERATION.fetch_add(1, Ordering::AcqRel) + 1;
-                            emit_event(
-                                &finish_app,
-                                DictationEvent {
-                                    state: "completed",
-                                    text: Some(text),
-                                    error: None,
-                                    retained_audio: false,
-                                    mode,
-                                },
-                            );
-                            hide_overlay_after(
-                                finish_app,
-                                generation,
-                                COMPLETED_FALLBACK_WINDOW,
-                            );
+                            emit_completion(finish_app, text, mode);
                         });
                     }
                     Err(error) => emit_failure(&app, error, true),
@@ -1737,11 +1768,38 @@ pub extern "C" fn fd_dictation_emit(kind: i32, payload: *const std::ffi::c_char)
             file_native_recording(None, Some(payload.clone()));
             emit_failure(&app, payload, true);
         }
+        event_kind::UNREADABLE_RETAINED => {
+            SESSION_GENERATION.fetch_add(1, Ordering::AcqRel);
+            show_overlay(&app, "unrecoverable", false);
+            emit_event(
+                &app,
+                DictationEvent {
+                    state: "unrecoverable",
+                    text: None,
+                    error: Some(payload),
+                    retained_audio: true,
+                    mode: None,
+                },
+            );
+        }
         // Apple Speech transcribes in-process, so this is the only chance to
         // learn which file the transcript (or failure) will belong to.
         event_kind::AUDIO_RECORDED => {
+            let recording = native_recorded_audio(PathBuf::from(payload));
+            if let Ok(config) = current_dictation_config() {
+                let pending = recording.clone();
+                tauri::async_runtime::spawn_blocking(move || {
+                    dictation_history::record_pending(
+                        &dictation_temp_dir(),
+                        &pending.path,
+                        pending.duration_seconds,
+                        "system",
+                        config.history_retention_hours,
+                    );
+                });
+            }
             if let Ok(mut current) = CURRENT_RECORDING.write() {
-                *current = Some(native_recorded_audio(PathBuf::from(payload)));
+                *current = Some(recording);
             }
         }
         // The paste target is FalconDeck itself: native paste is unreliable
@@ -1887,6 +1945,7 @@ mod tests {
             ("RewriteSelection", super::event_kind::REWRITE_SELECTION),
             ("RewriteInstruction", super::event_kind::REWRITE_INSTRUCTION),
             ("CleanupTranscript", super::event_kind::CLEANUP_TRANSCRIPT),
+            ("UnreadableRetained", super::event_kind::UNREADABLE_RETAINED),
             (
                 "ParakeetAudioReady",
                 super::event_kind::PARAKEET_AUDIO_READY,
@@ -1919,6 +1978,12 @@ mod tests {
     #[test]
     fn transient_pasteboard_round_trip_preserves_items_and_detects_new_owner() {
         assert!(unsafe { super::fd_dictation_test_transient_pasteboard_round_trip() });
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn native_recovery_reads_unclosed_caf_and_rejects_invalid_m4a() {
+        assert!(unsafe { super::fd_dictation_test_recovery_audio_contract() });
     }
 
     #[cfg(target_os = "macos")]

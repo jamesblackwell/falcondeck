@@ -11,6 +11,9 @@ type DictationState =
   | "rewriting"
   | "completed"
   | "failed"
+  | "copy_failed"
+  | "unrecoverable"
+  | "recovered"
   | "cancelled";
 
 export type DictationEvent = {
@@ -162,10 +165,14 @@ export function DictationOverlay({
 }: DictationOverlayProps = {}) {
   const [event, setEvent] = useState<DictationEvent>(initialEvent);
   const [copied, setCopied] = useState(false);
+  const [actionPending, setActionPending] = useState(false);
+  const [actionError, setActionError] = useState<string | null>(null);
   const [undoSecondsLeft, setUndoSecondsLeft] = useState(UNDO_WINDOW_SECONDS);
 
   useEffect(() => {
-    setCopied(false);
+    setCopied(event.state === "recovered");
+    setActionPending(false);
+    setActionError(null);
   }, [event]);
 
   // Wall-clock rather than a tick count, so a throttled timer cannot promise
@@ -197,70 +204,81 @@ export function DictationOverlay({
     };
   }, [subscribeToEvents]);
 
-  const failed = event.state === "failed";
+  const unrecoverable = event.state === "unrecoverable";
+  const recovered = event.state === "recovered";
+  const copyFailed = event.state === "copy_failed";
+  const failed = event.state === "failed" || unrecoverable || copyFailed;
+  const expanded = failed || recovered;
+  const runAction = async (command: string, args?: Record<string, unknown>) => {
+    setActionPending(true);
+    setActionError(null);
+    try {
+      await invoke(command, args);
+    } catch (error) {
+      setActionPending(false);
+      setActionError(String(error));
+    }
+  };
   const pasteFailed = failed && Boolean(event.text);
   const copyTranscript = () => {
     void invoke("copy_dictation_transcript").then(
       () => setCopied(true),
-      () => setCopied(false),
+      () => {
+        setCopied(false);
+        setActionError("Could not copy the transcript. Try Copy again.");
+      },
     );
   };
   const rewrite = event.mode === "rewrite";
-  const label =
-    event.state === "recording"
-      ? rewrite
-        ? "Listening for edit"
-        : "Listening"
-      : event.state === "transcribing"
-        ? rewrite
-          ? "Transcribing instruction"
-          : "Transcribing"
-        : event.state === "rewriting"
-          ? "Rewriting"
-          : event.state === "completed"
-            ? rewrite
-              ? "Rewrite pasted"
-              : "Paste sent"
-            : event.state === "cancelled"
-              ? "Cancelled"
-              : pasteFailed
-                ? "Couldn't paste"
-                : rewrite
-                  ? "Rewrite needs attention"
-                  : "Dictation needs attention";
+  const label = {
+    recording: rewrite ? "Listening for edit" : "Listening",
+    transcribing: rewrite ? "Transcribing instruction" : "Transcribing",
+    rewriting: "Rewriting",
+    completed: rewrite ? "Rewrite pasted" : "Paste sent",
+    cancelled: "Cancelled",
+    recovered: rewrite ? "Rewrite copied" : "Transcript copied",
+    unrecoverable: "Recording interrupted",
+    copy_failed: "Couldn't copy",
+    failed: pasteFailed ? "Couldn't paste" : rewrite ? "Rewrite needs attention" : "Dictation needs attention",
+  }[event.state];
 
   return (
     <main className="flex h-full w-full items-stretch justify-center p-2">
       <section
         className={
-          failed
+          expanded
             ? "flex h-full min-h-0 w-full flex-col overflow-y-auto rounded-[var(--fd-radius-xl)] border border-border-default bg-surface-1/95 px-4 py-3 backdrop-blur-xl"
             : "flex h-14 w-full items-center gap-3 rounded-full border border-border-default bg-surface-1/95 px-4 backdrop-blur-xl"
         }
         role="status"
         aria-live="polite"
       >
-        {failed ? (
+        {expanded ? (
           <>
             <div className="flex min-h-0 flex-1 items-start gap-3">
-              <span className="mt-0.5 rounded-full bg-danger-muted p-1.5 text-danger">
-                <X aria-hidden="true" className="h-4 w-4" />
+              <span className={`mt-0.5 rounded-full p-1.5 ${recovered ? "bg-success-muted text-success" : "bg-danger-muted text-danger"}`}>
+                {recovered ? <Check aria-hidden="true" className="h-4 w-4" /> : <X aria-hidden="true" className="h-4 w-4" />}
               </span>
               <div className="min-h-0 min-w-0 flex-1">
                 <p className="text-[length:var(--fd-text-sm)] font-medium text-fg-primary">
                   {label}
                 </p>
                 <p className="mt-0.5 line-clamp-2 text-[length:var(--fd-text-xs)] text-fg-muted">
-                  {event.error}
+                  {recovered ? "Ready to paste wherever you need it." : event.error}
                 </p>
                 {event.text ? (
                   <p className="mt-1.5 line-clamp-3 whitespace-pre-wrap break-words rounded-[var(--fd-radius-md)] bg-surface-2 px-2 py-1.5 text-[length:var(--fd-text-xs)] text-fg-primary">
                     {event.text}
                   </p>
                 ) : null}
-                {event.retainedAudio ? (
+                {event.retainedAudio && !unrecoverable ? (
                   <p className="mt-1 text-[length:var(--fd-text-xs)] text-fg-tertiary">
-                    Your recording is safe until you retry or discard it.
+                    Saved audio is available to retry. The recovered text will be copied to your clipboard.
+                  </p>
+                ) : null}
+                {actionError ? (
+                  <p role="alert" className="mt-1 text-[length:var(--fd-text-xs)] text-danger">
+                    {actionError}
                   </p>
                 ) : null}
               </div>
@@ -280,15 +298,17 @@ export function DictationOverlay({
                 <>
                   <Button
                     type="button"
-                    onClick={() => void invoke("retry_dictation_paste")}
-                    aria-label="Retry paste"
+                    variant={recovered || copyFailed ? "secondary" : "default"}
+                    disabled={actionPending}
+                    onClick={() => void runAction("retry_dictation_paste")}
+                    aria-label={recovered ? "Paste transcript" : "Retry paste"}
                   >
                     <ClipboardPaste aria-hidden="true" className="h-4 w-4" />
-                    Retry paste
+                    {recovered ? "Paste transcript" : "Retry paste"}
                   </Button>
                   <Button
                     type="button"
-                    variant="secondary"
+                    variant={recovered || copyFailed ? "default" : "secondary"}
                     onClick={copyTranscript}
                   >
                     {copied ? (
@@ -300,11 +320,12 @@ export function DictationOverlay({
                   </Button>
                 </>
               ) : null}
-              {event.retainedAudio ? (
+              {event.retainedAudio && !unrecoverable ? (
                 <Button
                   type="button"
                   variant={event.text ? "secondary" : "default"}
-                  onClick={() => void invoke("retry_dictation")}
+                  disabled={actionPending}
+                  onClick={() => void runAction("retry_dictation", { copyOnly: true })}
                 >
                   <RotateCcw aria-hidden="true" className="h-4 w-4" />
                   {rewrite ? "Retry rewrite" : "Retry transcription"}
@@ -317,7 +338,7 @@ export function DictationOverlay({
                 aria-label={
                   event.retainedAudio ? "Discard recording" : "Dismiss"
                 }
-                onClick={() => void invoke("discard_dictation")}
+                onClick={() => void invoke(recovered ? "dismiss_dictation_overlay" : "discard_dictation")}
               >
                 {event.retainedAudio ? (
                   <Trash2 aria-hidden="true" className="h-4 w-4" />
