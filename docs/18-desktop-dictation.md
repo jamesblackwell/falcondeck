@@ -131,11 +131,17 @@ No transcript history or raw-audio library is created in the MVP.
 
 Settings → Speech → Transcription has three engines: Apple Speech (default),
 Parakeet, and OpenRouter. Selecting Parakeet explicitly downloads NVIDIA
-Parakeet TDT 0.6B v3 through FluidAudio, using its INT8 Core ML encoder and
+Parakeet TDT 0.6B v3 through FluidAudio, using its corrected linear INT8 (`int8V2`) Core ML encoder and
 Apple Neural Engine. It requires Apple Silicon and macOS 14 or later. Model
 files are stored under the desktop application data directory in
-`parakeet-v3-int8`; they are not shipped inside the app. Setup shows download
-and compilation progress and can be retried after a failure.
+`parakeet-v3-int8-v2`; they are not shipped inside the app. Setup shows download
+and compilation progress and can be retried after a failure. Advanced options
+include an explicit Re-download model action for damaged caches. The readiness
+check requires the compiled components and vocabulary, not just a marker file.
+The linear encoder is about 143 MB larger than the original palettized export
+and fixes its documented word-corruption case (FluidAudio #760 / #872). The
+cache version changes deliberately so old weights are never silently used or
+re-downloaded on app startup.
 
 The helper uses the existing 16 kHz mono AAC capture and paste workflow.
 Recording starts prewarming the installed model; inference loads local files
@@ -148,7 +154,10 @@ Advanced options set the idle lifetime to 0–60 minutes (15 by default). Zero
 unloads after each operation and skips recording-start prewarming. Disabling
 dictation or selecting another engine stops the helper after its current
 operation. Idle expiry and app shutdown terminate the helper rather than
-retaining a runtime with allocator caches. Starting the app does not download
+retaining a runtime with allocator caches. Requests arriving during setup wait for its serialized worker; unexpected
+helper exits are reaped and replaced on the next request. Already-loaded
+prewarming skips unnecessary helper IPC, and queued prewarming rechecks whether
+the provider is still enabled. Starting the app does not download
 or load models, and status polling reads cached state without launching ASR.
 
 The sidecar is a Swift executable under `apps/desktop/parakeet-runtime`, pinned
@@ -160,10 +169,10 @@ party notices are bundled under `Resources/licenses/parakeet`.
 
 Local M4 Pro smoke test (48 GiB RAM, macOS 26.6.2): after download and model
 compilation, three fresh helper processes reached the first transcript of a
-7.16-second synthetic clip in 177–264 ms; repeat clips took 50–56 ms. Helper
-physical footprint was 37–41 MiB and RSS 78–83 MiB. Core ML also uses shared
+7.16-second synthetic clip in 192–336 ms; repeat clips took 51–56 ms. Helper
+physical footprint was 37 MiB and RSS 78–79 MiB. Core ML also uses shared
 system/Neural Engine resources: these process figures are **not total model
-RAM**. The compiled model cache was 469 MiB. This verifies the runtime path and
+RAM**. The corrected encoder adds about 143 MB to the original 469 MiB cache. This verifies the runtime path and
 startup speed, not recognition quality on the user's voice. Experiment scripts
 and raw measurements remain outside the repository under
 `~/.falcondeck/experiments/parakeet-startup`.

@@ -22,6 +22,9 @@ final class Output: @unchecked Sendable {
         }
         let directory = URL(fileURLWithPath: CommandLine.arguments[1], isDirectory: true)
             .appendingPathComponent(Repo.parakeetV3.folderName, isDirectory: true)
+        // The SDK's original "int8" encoder uses LUT palettization and has
+        // known word corruption (#760). Use the corrected linear INT8 export.
+        let precision = ParakeetEncoderPrecision.int8V2
         var manager: AsrManager?
         while let line = readLine() {
             do {
@@ -37,7 +40,12 @@ final class Output: @unchecked Sendable {
                                   userInfo: [NSLocalizedDescriptionKey: "Unknown operation."])
                 }
                 if operation == "prepare" {
-                    try await AsrModels.download(to: directory, version: .v3, encoderPrecision: .int8) { progress in
+                    let force = request["force"] == "true"
+                    if force, let current = manager {
+                        await current.cleanup()
+                        manager = nil
+                    }
+                    try await AsrModels.download(to: directory, force: force, version: .v3, encoderPrecision: precision) { progress in
                         let phase: String
                         switch progress.phase {
                         case .listing: phase = "Checking model files"
@@ -50,12 +58,16 @@ final class Output: @unchecked Sendable {
                 if manager == nil {
                     output.send(["progress": 1.0, "phase": "Loading model"])
                     // Inference must never download implicitly.
-                    let models = try AsrModels.loadLocal(from: directory, version: .v3, encoderPrecision: .int8)
+                    let models = try AsrModels.loadLocal(from: directory, version: .v3, encoderPrecision: precision)
                     let loaded = AsrManager()
                     try await loaded.loadModels(models)
                     manager = loaded
                 }
-                if operation == "transcribe", let path = request["path"], let manager {
+                if operation == "transcribe" {
+                    guard let path = request["path"], !path.isEmpty, let manager else {
+                        throw NSError(domain: "FalconDeckParakeet", code: 3,
+                                      userInfo: [NSLocalizedDescriptionKey: "Missing audio file path."])
+                    }
                     var state = try TdtDecoderState()
                     let result = try await manager.transcribe(URL(fileURLWithPath: path), decoderState: &state)
                     output.send(["ok": true, "text": result.text])

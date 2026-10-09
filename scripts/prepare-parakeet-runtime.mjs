@@ -17,6 +17,13 @@ execFileSync('swift', args, { stdio: 'inherit' })
 const binDir = execFileSync('swift', [...args, '--show-bin-path'], { encoding: 'utf8' }).trim()
 const destination = path.join(root, 'apps/desktop/src-tauri/binaries', `falcondeck-parakeet-${target}`)
 fs.mkdirSync(path.dirname(destination), { recursive: true })
-fs.copyFileSync(path.join(binDir, 'falcondeck-parakeet'), destination)
-fs.chmodSync(destination, 0o755)
+// Replace atomically so rebuilding cannot truncate a currently running helper.
+const staged = `${destination}.${process.pid}.tmp`
+try {
+  fs.copyFileSync(path.join(binDir, 'falcondeck-parakeet'), staged)
+  fs.chmodSync(staged, 0o755)
+  fs.renameSync(staged, destination)
+} finally {
+  fs.rmSync(staged, { force: true })
+}
 console.log(`Prepared ${destination}`)

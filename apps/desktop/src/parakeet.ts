@@ -1,5 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { isTauriDesktop } from "./api";
 
 export type ParakeetStatus = {
@@ -15,31 +15,65 @@ export type ParakeetStatus = {
 export function useParakeetStatus() {
   const [status, setStatus] = useState<ParakeetStatus | null>(null);
   const [preparing, setPreparing] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+  const [setupError, setSetupError] = useState<string | null>(null);
+  const [pollError, setPollError] = useState<string | null>(null);
+  const preparingRef = useRef(false);
+  const generation = useRef(0);
+  const mounted = useRef(false);
+
   useEffect(() => {
     if (!isTauriDesktop()) return;
+    mounted.current = true;
     let disposed = false;
-    const refresh = () => {
-      void invoke<ParakeetStatus>("parakeet_status").then((value) => {
-        if (!disposed) setStatus(value);
-      }).catch((reason: unknown) => {
-        if (!disposed) setError(String(reason));
-      });
+    let timer: number | undefined;
+    const refresh = async () => {
+      const started = generation.current;
+      let busy = false;
+      try {
+        const value = await invoke<ParakeetStatus>("parakeet_status");
+        if (!disposed && started === generation.current) {
+          setStatus(value);
+          setPollError(null);
+          busy = value.busy;
+        }
+      } catch (reason) {
+        if (!disposed && started === generation.current) setPollError(String(reason));
+      }
+      // Only one poll can be in flight. Idle settings need fewer IPC calls.
+      if (!disposed) timer = window.setTimeout(() => void refresh(), busy || preparingRef.current ? 1000 : 5000);
     };
-    refresh();
-    const timer = window.setInterval(refresh, 1000);
-    return () => { disposed = true; window.clearInterval(timer); };
+    void refresh();
+    return () => {
+      disposed = true;
+      mounted.current = false;
+      window.clearTimeout(timer);
+    };
   }, []);
-  const prepare = useCallback(async () => {
+
+  const prepare = useCallback(async (force = false) => {
+    if (!isTauriDesktop()) {
+      setSetupError("Parakeet is available in the FalconDeck Mac app.");
+      return;
+    }
+    if (preparingRef.current) return;
+    preparingRef.current = true;
+    generation.current += 1;
     setPreparing(true);
-    setError(null);
+    setSetupError(null);
     try {
-      setStatus(await invoke<ParakeetStatus>("prepare_parakeet"));
+      const value = await invoke<ParakeetStatus>("prepare_parakeet", { force });
+      if (mounted.current) {
+        setStatus(value);
+        setPollError(null);
+      }
     } catch (reason) {
-      setError(String(reason));
+      if (mounted.current) setSetupError(String(reason));
     } finally {
-      setPreparing(false);
+      // Ignore any poll that started before the terminal setup response.
+      generation.current += 1;
+      preparingRef.current = false;
+      if (mounted.current) setPreparing(false);
     }
   }, []);
-  return { status, preparing, error: error ?? status?.error, prepare };
+  return { status, preparing, error: setupError ?? pollError ?? status?.error, prepare };
 }

@@ -553,7 +553,7 @@ export function DictationSetup({
               {parakeet.error ? (
                 <div className="space-y-2">
                   <p role="alert" className="text-sm text-fg-secondary">{parakeet.error}</p>
-                  <Button variant="secondary" disabled={parakeet.preparing || parakeet.status?.busy} onClick={() => void parakeet.prepare()}>Retry setup</Button>
+                  <Button variant="secondary" disabled={parakeet.preparing || parakeet.status?.busy || parakeet.status?.supported === false} onClick={() => void parakeet.prepare()}>Retry setup</Button>
                 </div>
               ) : null}
               <details>
@@ -566,6 +566,14 @@ export function DictationSetup({
                       {[5, 10, 15, 30, 60].map((minutes) => <option key={minutes} value={minutes}>{minutes} minutes{minutes === 15 ? " (default)" : ""}</option>)}
                     </select>
                   </Field>
+                  {parakeet.status?.supported ? (
+                    <div className="mt-4 space-y-2">
+                      <Button variant="secondary" disabled={parakeet.preparing || parakeet.status.busy} onClick={() => void parakeet.prepare(true)}>
+                        Re-download model
+                      </Button>
+                      <p className="text-sm text-fg-secondary">Downloads a fresh copy if the installed model cannot load.</p>
+                    </div>
+                  ) : null}
                 </div>
               </details>
             </div>

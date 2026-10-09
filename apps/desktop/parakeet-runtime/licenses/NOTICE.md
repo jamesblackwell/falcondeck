@@ -8,7 +8,7 @@ License text: FluidAudio-LICENSE.txt
 fastcluster by Daniel Müllner, BSD 2-Clause.
 License text: fastcluster-LICENSE.md
 
-Parakeet TDT 0.6B v3 by NVIDIA; Core ML conversion and INT8 encoder by
+Parakeet TDT 0.6B v3 by NVIDIA; Core ML conversion and linear INT8 encoder by
 Fluid Inference. The model is downloaded separately on explicit setup.
 https://huggingface.co/nvidia/parakeet-tdt-0.6b-v3
 https://huggingface.co/FluidInference/parakeet-tdt-0.6b-v3-coreml

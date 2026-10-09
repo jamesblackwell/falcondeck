@@ -26,6 +26,15 @@ describe("DictationSetup voice rewrite", () => {
   });
   afterEach(() => window.localStorage.clear());
 
+  it("offers an explicit model repair in advanced settings", () => {
+    prepareParakeet.mockClear();
+    render(<DictationSetup baseUrl={null} onToast={() => {}} />);
+    fireEvent.click(screen.getByRole("button", { name: "Parakeet" }));
+    prepareParakeet.mockClear();
+    fireEvent.click(screen.getByRole("button", { name: "Re-download model" }));
+    expect(prepareParakeet).toHaveBeenCalledWith(true);
+  });
+
   it("keeps the OpenRouter online model and fallback controls", () => {
     render(<DictationSetup baseUrl={null} onToast={() => {}} />);
     fireEvent.click(screen.getByRole("button", { name: "OpenRouter" }));
