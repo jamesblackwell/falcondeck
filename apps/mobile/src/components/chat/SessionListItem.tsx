@@ -1,7 +1,7 @@
 import { memo, useCallback, useMemo } from 'react'
 import { Pressable, View } from 'react-native'
 import { StyleSheet, useUnistyles } from 'react-native-unistyles'
-import { Pin } from 'lucide-react-native'
+import { Bot, Pin } from 'lucide-react-native'
 
 import { deriveThreadAttentionPresentation } from '@falcondeck/client-core'
 import type { ThreadSummary, ThreadTag } from '@falcondeck/client-core'
@@ -89,6 +89,15 @@ function SessionListItemInner({
               color={stageColor(tag.color, theme)}
             />
           ))}
+        </View>
+      ) : null}
+      {thread.origin?.kind === 'agent_spawn' ? (
+        <View
+          accessible
+          accessibilityRole="image"
+          accessibilityLabel="Created by an agent"
+        >
+          <Bot size={theme.iconSize.xs} color={theme.colors.fg.muted} />
         </View>
       ) : null}
       {thread.is_pinned || thread.is_pinned_in_project ? (

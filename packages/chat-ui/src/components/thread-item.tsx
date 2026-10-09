@@ -1,6 +1,6 @@
 import * as React from 'react'
 import { memo, useMemo } from 'react'
-import { Archive, ArchiveRestore, CalendarClock, CircleStop, Pin, Split } from 'lucide-react'
+import { Archive, ArchiveRestore, Bot, CalendarClock, CircleStop, Pin, Split } from 'lucide-react'
 
 import {
   deriveThreadAttentionPresentation,
@@ -242,6 +242,16 @@ export const ThreadItem = memo(
                   <ThreadStageIcon stage={tag} />
                 </span>
               ))}
+            </span>
+          ) : null}
+          {thread.origin?.kind === 'agent_spawn' ? (
+            <span
+              role="img"
+              aria-label="Created by an agent"
+              title="Created by an agent"
+              className="flex shrink-0 items-center text-fg-muted"
+            >
+              <Bot aria-hidden="true" className="h-3 w-3" />
             </span>
           ) : null}
           {thread.variant ? (

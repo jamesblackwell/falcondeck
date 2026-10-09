@@ -60,6 +60,62 @@ describe('ThreadItem timestamp', () => {
   })
 })
 
+describe('ThreadItem agent origin', () => {
+  it('shows the agent marker beside the isolated-copy marker', () => {
+    render(
+      <ThreadItem
+        thread={{
+          ...thread('2026-08-31T14:08:59Z'),
+          origin: { kind: 'agent_spawn', parent_thread_id: 'parent-1' },
+          variant: {
+            slug: 'child-task',
+            path: '/tmp/child-task',
+            branch: 'fd/child-task',
+            kind: 'worktree',
+          },
+        }}
+        workspaceId="workspace-1"
+        isSelected={false}
+        onSelect={() => {}}
+      />,
+    )
+
+    const marker = screen.getByRole('img', { name: 'Created by an agent' })
+    expect(marker).toHaveAttribute('title', 'Created by an agent')
+    expect(marker.nextElementSibling).toBe(
+      screen.getByRole('img', { name: 'Isolated copy' }),
+    )
+  })
+
+  it('refreshes the marker when the daemon adds or changes the origin', () => {
+    const base = thread('2026-08-31T14:08:59Z')
+    const onSelect = vi.fn()
+    const renderRow = (value: ThreadSummary) => (
+      <ThreadItem
+        thread={value}
+        workspaceId="workspace-1"
+        isSelected={false}
+        onSelect={onSelect}
+      />
+    )
+    const { rerender } = render(renderRow(base))
+    expect(screen.queryByRole('img', { name: 'Created by an agent' })).not.toBeInTheDocument()
+
+    rerender(renderRow({
+      ...base,
+      origin: { kind: 'agent_spawn', parent_thread_id: 'parent-1' },
+    }))
+    expect(screen.getByRole('img', { name: 'Created by an agent' })).toBeInTheDocument()
+
+    rerender(renderRow({
+      ...base,
+      origin: { kind: 'automation', automation_id: 'automation-1', name: 'Daily check' },
+    }))
+    expect(screen.queryByRole('img', { name: 'Created by an agent' })).not.toBeInTheDocument()
+    expect(screen.getByRole('img', { name: 'Automation: Daily check' })).toBeInTheDocument()
+  })
+})
+
 describe('ThreadItem archive actions', () => {
   it('offers unarchive on an archived row instead of archive', () => {
     const onUnarchive = vi.fn()
