@@ -100,8 +100,8 @@ export default function NotificationSettingsScreen() {
 
       <SettingsSection title="Delivery">
         <PreferenceSwitch
-          label="Suppress while desktop is active"
-          description="Avoid a phone alert while the paired desktop window is focused."
+          label="Only push when away from desktop"
+          description="Send phone alerts after two minutes without keyboard or mouse activity on your Mac, even if FalconDeck is left open."
           value={current.suppress_when_desktop_active}
           disabled={isUpdating || !masterEnabled}
           onValueChange={(value) => void update({ suppress_when_desktop_active: value })}

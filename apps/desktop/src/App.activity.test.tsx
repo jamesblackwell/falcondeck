@@ -1,6 +1,7 @@
 import React, { useState } from "react";
 import {
   fireEvent,
+  act,
   render,
   screen,
   waitFor,
@@ -130,6 +131,17 @@ const testApi = vi.hoisted(() => ({
     markThreadRead: ReturnType<typeof vi.fn>;
   },
 }));
+const testPresence = vi.hoisted(() => ({ windowFocused: true, desktopPresent: true }));
+const testConnection = vi.hoisted(() => ({
+  loaded: false,
+  setSnapshot: null as React.Dispatch<React.SetStateAction<typeof testSnapshot>> | null,
+}));
+
+vi.mock("./hooks/useDesktopPresence", () => ({ useDesktopPresence: () => testPresence }));
+vi.mock("./desktop-notifications", async (importOriginal) => ({
+  ...await importOriginal<typeof import("./desktop-notifications")>(),
+  sendDesktopAttentionNotification: vi.fn().mockResolvedValue(true),
+}));
 
 vi.mock("./hooks/useDaemonConnection", () => ({
   useDaemonConnection: () => {
@@ -140,7 +152,13 @@ vi.mock("./hooks/useDaemonConnection", () => ({
       "thread-1",
     );
     const [snapshot, setSnapshot] = useState(testSnapshot);
-    const [threadDetail, setThreadDetail] = useState(null);
+    testConnection.setSnapshot = setSnapshot;
+    const [threadDetail, setThreadDetail] = useState(() => testConnection.loaded ? {
+      workspace: testSnapshot.workspaces[0],
+      thread: testSnapshot.threads[0],
+      items: [],
+      is_partial: false,
+    } : null);
     return {
       api: testApi.current,
       baseUrl: "http://127.0.0.1:8787",
@@ -247,11 +265,66 @@ vi.mock("./components/DiffPanel", () => ({
 }));
 
 import App from "./App";
+import { sendDesktopAttentionNotification } from "./desktop-notifications";
 
 describe("Activity takeover wiring", () => {
   beforeEach(() => {
     window.localStorage.clear();
     testApi.current = null;
+    testConnection.loaded = false;
+    testConnection.setSnapshot = null;
+    testPresence.windowFocused = true;
+    testPresence.desktopPresent = true;
+    testSnapshot.preferences.notifications.enabled = false;
+    vi.mocked(sendDesktopAttentionNotification).mockReset().mockResolvedValue(true);
+  });
+
+  it.each(["idle Mac", "unfocused window"])(
+    "keeps a loaded task unread and delivers a desktop alert with an %s",
+    async (scenario) => {
+      testConnection.loaded = true;
+      testPresence.desktopPresent = scenario !== "idle Mac";
+      testPresence.windowFocused = scenario !== "unfocused window";
+      testSnapshot.preferences.notifications.enabled = true;
+      testApi.current = {
+        createChat: vi.fn(), snapshot: vi.fn(), setClientActivity: vi.fn(),
+        markThreadRead: vi.fn(),
+      };
+      render(<App />);
+      await waitFor(() => expect(sendDesktopAttentionNotification).toHaveBeenCalledOnce());
+      expect(testApi.current.markThreadRead).not.toHaveBeenCalled();
+    },
+  );
+
+  it("does not read or suppress a new request behind Activity", async () => {
+    testConnection.loaded = true;
+    testSnapshot.preferences.notifications.enabled = true;
+    testApi.current = {
+      createChat: vi.fn(), snapshot: vi.fn(), setClientActivity: vi.fn(),
+      markThreadRead: vi.fn().mockResolvedValue({
+        ...testSnapshot.threads[0],
+        attention: { ...testSnapshot.threads[0].attention, last_read_seq: 2 },
+      }),
+    };
+    render(<App />);
+    await act(async () => {});
+    expect(testApi.current.markThreadRead).toHaveBeenCalled();
+    expect(sendDesktopAttentionNotification).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole("button", { name: "Activity" }));
+    await screen.findByRole("heading", { name: "Activity" });
+    testApi.current.markThreadRead.mockClear();
+    act(() => testConnection.setSnapshot?.((current) => ({
+      ...current,
+      threads: current.threads.map((thread) => ({
+        ...thread,
+        attention: { ...thread.attention, last_agent_activity_seq: 3 },
+      })),
+      interactive_requests: current.interactive_requests.map((request) => ({
+        ...request, request_id: "request-2",
+      })),
+    })));
+    await waitFor(() => expect(sendDesktopAttentionNotification).toHaveBeenCalledOnce());
+    expect(testApi.current.markThreadRead).not.toHaveBeenCalled();
   });
 
   it.each(["Chats plus", "Command-Shift-N"])(
@@ -297,7 +370,7 @@ describe("Activity takeover wiring", () => {
     },
   );
 
-  it("suppresses the rail and closes the takeover when a thread is selected", async () => {
+  it("suppresses the rail and closes the takeover when a task is opened", async () => {
     render(<App />);
     expect(await screen.findByText("Diff rail")).toBeInTheDocument();
 
@@ -307,11 +380,12 @@ describe("Activity takeover wiring", () => {
     ).toBeInTheDocument();
     expect(screen.queryByText("Diff rail")).not.toBeInTheDocument();
 
-    fireEvent.click(
+    fireEvent.doubleClick(
       within(screen.getByRole("main")).getByRole("button", {
         name: /Needs a decision/,
       }),
     );
+    fireEvent.click(await screen.findByRole("button", { name: "Open task" }));
     await waitFor(() => {
       expect(
         screen.queryByRole("heading", { name: "Activity" }),

@@ -1622,6 +1622,7 @@ pub fn run() {
             open_activity_window,
             focus_main_window,
             desktop_notifications::macos_notification_permission_state,
+            desktop_notifications::desktop_user_present,
             desktop_notifications::request_macos_notification_permission,
             desktop_notifications::send_macos_notification,
             sounds::play_system_sound,

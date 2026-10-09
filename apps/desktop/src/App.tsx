@@ -25,7 +25,6 @@ import {
   countActivityEntries,
   conversationItemsForSelection,
   deriveExtensionPanels,
-  deriveThreadAttentionPresentation,
   deriveExtensionSidebarFilters,
   deriveComposerSuggestions,
   deriveThreadTags,
@@ -216,6 +215,7 @@ import { OnboardingWizard } from "./components/OnboardingWizard";
 import type { SettingsSectionId } from "./components/settings/settings-utils";
 import { useAppUpdater } from "./hooks/useAppUpdater";
 import { useDaemonConnection } from "./hooks/useDaemonConnection";
+import { useDesktopPresence } from "./hooks/useDesktopPresence";
 import { useGitBranches } from "./hooks/useGitBranches";
 import { usePanelVisibility } from "./hooks/usePanelVisibility";
 import { useRemoteHosts } from "./hooks/useRemoteHosts";
@@ -231,7 +231,10 @@ import {
   shortcutHintTokens,
   useShortcutSettings,
 } from "./shortcuts";
-import { sendDesktopAttentionNotification } from "./desktop-notifications";
+import {
+  desktopAttentionNotification,
+  sendDesktopAttentionNotification,
+} from "./desktop-notifications";
 import { useDesktopDictation, useDictationSettings } from "./dictation";
 import { resolveMainView } from "./main-view-registry";
 import { extensionFrontendLoaders } from "virtual:falcondeck-extension-frontends";
@@ -501,6 +504,17 @@ function AppInner() {
   const [activeExtensionPanelKey, setActiveExtensionPanelKey] = useState<
     string | null
   >(null);
+  const activeMainViewId = isActivityOpen
+    ? "core.activity"
+    : isScheduledOpen
+      ? "core.scheduled"
+      : isExtensionsOpen
+        ? "core.extensions"
+        : isPluginsOpen
+          ? "core.plugins"
+          : isSettingsOpen
+            ? "core.settings"
+            : activeExtensionPanelKey;
   const [settingsSection, setSettingsSection] =
     useState<SettingsSectionId>("general");
   const [settingsRequestKey, setSettingsRequestKey] = useState(0);
@@ -668,9 +682,7 @@ function AppInner() {
     },
     [api, setSnapshot],
   );
-  const [windowFocused, setWindowFocused] = useState(
-    () => document.visibilityState !== "hidden",
-  );
+  const { windowFocused, desktopPresent } = useDesktopPresence(api);
   const [dismissedConditionVersions, setDismissedConditionVersions] = useState<
     Set<string>
   >(() => new Set(readStoredDismissedConditions()));
@@ -687,7 +699,9 @@ function AppInner() {
   );
   const selectionSeedRef = useRef<string | null>(null);
   const threadSettingsRequestRef = useRef(0);
-  const notifiedAttentionRef = useRef(new Map<string, string>());
+  const notifiedAttentionRef = useRef(
+    new Map<string, { key: string; sent: boolean }>(),
+  );
   const pendingNotificationKeysRef = useRef(new Set<string>());
   const announcedProjectReadinessRef = useRef<string | null>(null);
   const announcedUpdateVersionRef = useRef<string | null>(null);
@@ -1742,51 +1756,14 @@ function AppInner() {
     threadDetail,
   ]);
 
-  useEffect(() => {
-    const handleFocus = () => setWindowFocused(true);
-    const handleBlur = () => setWindowFocused(false);
-    const handleVisibility = () => {
-      setWindowFocused(
-        document.visibilityState !== "hidden" && document.hasFocus(),
-      );
-    };
-
-    window.addEventListener("focus", handleFocus);
-    window.addEventListener("blur", handleBlur);
-    document.addEventListener("visibilitychange", handleVisibility);
-    return () => {
-      window.removeEventListener("focus", handleFocus);
-      window.removeEventListener("blur", handleBlur);
-      document.removeEventListener("visibilitychange", handleVisibility);
-    };
-  }, []);
-
-  // The daemon uses a short activity lease when deciding whether a remote
-  // push would be redundant. Refresh it while this desktop window is the
-  // active surface, and let it expire naturally when the app disappears.
-  useEffect(() => {
-    if (!api) return;
-
-    const publishActivity = () => {
-      const active =
-        document.visibilityState !== "hidden" && document.hasFocus();
-      void api.setClientActivity(active).catch(() => {});
-    };
-
-    publishActivity();
-    const heartbeat = window.setInterval(publishActivity, 15_000);
-    window.addEventListener("focus", publishActivity);
-    window.addEventListener("blur", publishActivity);
-    document.addEventListener("visibilitychange", publishActivity);
-
-    return () => {
-      window.clearInterval(heartbeat);
-      window.removeEventListener("focus", publishActivity);
-      window.removeEventListener("blur", publishActivity);
-      document.removeEventListener("visibilitychange", publishActivity);
-      void api.setClientActivity(false).catch(() => {});
-    };
-  }, [api]);
+  const selectedConversationIsViewed =
+    windowFocused &&
+    desktopPresent &&
+    !activeMainViewId &&
+    !isUsageOpen &&
+    threadDetail?.workspace.id === selectedWorkspaceId &&
+    threadDetail?.thread.id === selectedThreadId &&
+    !threadDetail?.is_partial;
 
   // Set by "Mark as unread" so this effect does not immediately undo it while
   // the thread is still the selected one. Cleared as soon as the selection
@@ -1799,7 +1776,7 @@ function AppInner() {
   useEffect(() => {
     const client = apiFor(selectedWorkspaceId);
     if (!client || !selectedWorkspaceId || !selectedThread) return;
-    if (!windowFocused) return;
+    if (!selectedConversationIsViewed) return;
     const readSeq = selectedThread.attention.last_agent_activity_seq;
     const suppressed = suppressAutoReadRef.current;
     if (
@@ -1832,7 +1809,7 @@ function AppInner() {
         );
       })
       .catch(() => {});
-  }, [apiFor, selectedThread, selectedWorkspaceId, setSnapshot, windowFocused]);
+  }, [apiFor, selectedThread, selectedWorkspaceId, setSnapshot, selectedConversationIsViewed]);
 
   useEffect(() => {
     const count = countAwaitingResponseThreads(viewSnapshot?.threads ?? []);
@@ -1850,48 +1827,38 @@ function AppInner() {
     if (!viewSnapshot?.threads?.length) return;
 
     for (const thread of viewSnapshot.threads) {
-      const attention = deriveThreadAttentionPresentation(
+      const notification = desktopAttentionNotification(
         thread,
         viewSnapshot.interactive_requests,
+        viewSnapshot.preferences.notifications,
       );
-      const notificationEnabled =
-        viewSnapshot.preferences.notifications.enabled &&
-        (attention.level === "awaiting_response"
-          ? viewSnapshot.preferences.notifications.notify_on_input_required
-          : attention.level === "error"
-            ? viewSnapshot.preferences.notifications.notify_on_error
-            : attention.level === "unread"
-              ? viewSnapshot.preferences.notifications.notify_on_turn_complete
-              : false);
-      if (
-        attention.level === "none" ||
-        !notificationEnabled ||
-        (windowFocused && selectedThreadId === thread.id)
-      ) {
-        notifiedAttentionRef.current.delete(thread.id);
+      const threadKey = `${thread.workspace_id}:${thread.id}`;
+      if (!notification) {
+        notifiedAttentionRef.current.delete(threadKey);
         continue;
       }
-
-      const previous = notifiedAttentionRef.current.get(thread.id);
-      if (previous === attention.level) continue;
-
-      const body =
-        attention.level === "awaiting_response"
-          ? "The agent needs a response in this thread."
-          : attention.level === "error"
-            ? "The latest run ended with an error."
-            : "The latest turn finished.";
-      const notificationKey = `${thread.workspace_id}:${thread.id}:${attention.level}`;
+      const previous = notifiedAttentionRef.current.get(threadKey);
+      const delivery = previous?.key === notification.key
+        ? previous
+        : { key: notification.key, sent: false };
+      notifiedAttentionRef.current.set(threadKey, delivery);
+      if (selectedConversationIsViewed && selectedThreadId === thread.id) {
+        delivery.sent = true;
+        continue;
+      }
+      if (delivery.sent) continue;
+      const notificationKey = `${threadKey}:${notification.key}`;
       if (pendingNotificationKeysRef.current.has(notificationKey)) continue;
       pendingNotificationKeysRef.current.add(notificationKey);
 
       void sendDesktopAttentionNotification({
-        title: thread.title || "FalconDeck thread",
-        body,
+        title: notification.title,
+        body: notification.body,
       })
         .then((sent) => {
-          if (sent) {
-            notifiedAttentionRef.current.set(thread.id, attention.level);
+          // An older native send may finish after a new question/turn arrives.
+          if (sent && notifiedAttentionRef.current.get(threadKey) === delivery) {
+            delivery.sent = true;
           }
         })
         .finally(() => {
@@ -1903,7 +1870,7 @@ function AppInner() {
     viewSnapshot?.interactive_requests,
     viewSnapshot?.preferences,
     viewSnapshot?.threads,
-    windowFocused,
+    selectedConversationIsViewed,
   ]);
 
   // Surface connection errors as toasts
@@ -5900,18 +5867,6 @@ function AppInner() {
     setDismissedError(error);
     setActionError((current) => (current === error ? null : current));
   }, []);
-  const activeMainViewId = isActivityOpen
-    ? "core.activity"
-    : isScheduledOpen
-      ? "core.scheduled"
-      : isExtensionsOpen
-        ? "core.extensions"
-        : isPluginsOpen
-          ? "core.plugins"
-          : isSettingsOpen
-            ? "core.settings"
-            : activeExtensionPanelKey;
-
   return (
     <>
       {paletteRequest.key > 0 ? (

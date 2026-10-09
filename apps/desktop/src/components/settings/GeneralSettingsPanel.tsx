@@ -219,13 +219,13 @@ export function GeneralSettingsPanel({
         <SettingList>
           <SwitchRow
             title="Agent attention notifications"
-            description="Allow FalconDeck to notify paired devices about important agent events."
+            description="Allow desktop and phone alerts for important agent events."
             checked={current.notifications.enabled}
             onCheckedChange={(next) => onUpdatePreferences({ notifications: { enabled: next } })}
           />
           <SwitchRow
             title="Completed turns"
-            description="Notify when an agent finishes a turn while you are away from this desktop."
+            description="Notify when an agent finishes a turn you are not viewing."
             checked={current.notifications.notify_on_turn_complete}
             onCheckedChange={(next) =>
               onUpdatePreferences({ notifications: { notify_on_turn_complete: next } })
@@ -248,8 +248,8 @@ export function GeneralSettingsPanel({
             }
           />
           <SwitchRow
-            title="Suppress pushes while desktop is active"
-            description="Avoid sending a phone push while this desktop window is focused; the activity lease expires automatically when it is not."
+            title="Only push when away from desktop"
+            description="Send phone alerts after two minutes without keyboard or mouse activity on your Mac, even if FalconDeck is left open. Desktop alerts still appear."
             checked={current.notifications.suppress_when_desktop_active}
             onCheckedChange={(next) =>
               onUpdatePreferences({ notifications: { suppress_when_desktop_active: next } })

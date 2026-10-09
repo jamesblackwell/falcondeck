@@ -3223,6 +3223,9 @@ impl AppState {
     }
 
     pub fn desktop_is_active(&self) -> bool {
+        if let Some(present) = crate::desktop_presence::native_desktop_is_present() {
+            return present;
+        }
         let now = Utc::now();
         let mut lease = self
             .inner

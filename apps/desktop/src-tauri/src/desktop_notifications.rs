@@ -22,6 +22,11 @@ fn permission_label(status: AuthorizationStatus) -> &'static str {
 }
 
 #[tauri::command]
+pub(crate) fn desktop_user_present() -> Option<bool> {
+    falcondeck_daemon::desktop_presence::native_desktop_is_present()
+}
+
+#[tauri::command]
 pub(crate) async fn macos_notification_permission_state() -> Result<&'static str, String> {
     #[cfg(target_os = "macos")]
     {

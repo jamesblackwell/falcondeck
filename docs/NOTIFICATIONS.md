@@ -38,15 +38,28 @@ agent provider
 ```
 
 Push data contains the session, workspace, thread, and semantic kind needed
-for a tap to open the right context. It also includes the thread title so the
-OS notification can identify the conversation. Unlike encrypted updates and
-RPC payloads, that title is visible to the relay, Expo Push Service, and the
-device notification service; no transcript or message preview is included.
+for a tap to open the right context. It also includes the thread title and a
+bounded assistant reply preview for completed turns. Unlike encrypted updates
+and RPC payloads, this display text is visible to the relay, Expo Push Service,
+and the device notification service; full transcripts are not included.
 
-The relay suppresses a push to a device with a live relay connection. The
-desktop also publishes a short activity lease to the daemon; when enabled,
-the daemon suppresses remote pushes while the desktop window is focused. The
-lease expires automatically if the desktop crashes, sleeps, or loses focus.
+The relay suppresses a push to a device with a live relay connection. When
+desktop suppression is enabled, the Mac daemon checks the time since the last
+hardware keyboard or mouse input across all apps at notification delivery.
+Phone pushes resume after two minutes of inactivity. Switching to another app
+keeps phone alerts quiet; leaving FalconDeck open does not count as presence.
+The check reads elapsed time, without recording keys or mouse positions.
+
+On platforms without native idle detection, local client interaction refreshes
+a short activity lease. Window focus alone does not keep it alive indefinitely.
+The lease also expires if the client crashes or stops reporting.
+
+Desktop alerts are independent of phone suppression. Only a focused, recently
+used window actually displaying the loaded task suppresses that task's desktop
+alert and marks it read. Settings and Activity do not count as viewing the
+previously selected task. Alerts are deduplicated per turn or pending request,
+so a later completion or question can notify again without clearing older unread
+activity first.
 
 ## Preferences
 
@@ -57,7 +70,7 @@ Notification preferences are daemon-owned and included in snapshots and
 - completed turns;
 - approvals and questions;
 - failed turns;
-- suppress pushes while desktop is active.
+- only push when away from desktop (two minutes without Mac input).
 
 Desktop also has a device-local turn-complete chime, off by default, under
 Settings → General → Sounds. It plays on this computer when a thread leaves

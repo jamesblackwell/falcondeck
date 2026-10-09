@@ -505,7 +505,7 @@ pub struct NotificationPreferences {
     /// Notify when an agent turn fails.
     #[serde(default = "default_true")]
     pub notify_on_error: bool,
-    /// Suppress remote-device pushes while the desktop client is actively open.
+    /// Suppress remote-device pushes while the user has recently used the desktop.
     #[serde(default = "default_true")]
     pub suppress_when_desktop_active: bool,
 }
@@ -665,13 +665,11 @@ pub struct NotificationPreferencesPatch {
     pub suppress_when_desktop_active: Option<bool>,
 }
 
-/// Update sent by a local client to advertise whether the desktop UI is active.
-/// The daemon treats an active state as a short lease and expires it when the
-/// client stops heartbeating, so a crashed desktop cannot suppress pushes
-/// forever.
+/// Fallback presence update from a local client on platforms without native
+/// input-idle detection. The short lease expires when heartbeats stop.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ClientActivityRequest {
-    /// Whether the desktop client is currently visible and usable.
+    /// Whether the user has interacted with the local client within two minutes.
     pub active: bool,
 }
 

@@ -22,6 +22,7 @@ mod connector_oauth;
 mod connector_proxy;
 mod connectors;
 pub mod control;
+pub mod desktop_presence;
 mod error;
 pub mod extension_mcp;
 mod git;
