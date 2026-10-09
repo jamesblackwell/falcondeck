@@ -1763,7 +1763,9 @@ function AppInner() {
     !isUsageOpen &&
     threadDetail?.workspace.id === selectedWorkspaceId &&
     threadDetail?.thread.id === selectedThreadId &&
-    !threadDetail?.is_partial;
+    // A paginated tail is partial too; only an empty partial window is
+    // still waiting for the restored transcript to load.
+    !(threadDetail?.is_partial && threadDetail.items.length === 0);
 
   // Set by "Mark as unread" so this effect does not immediately undo it while
   // the thread is still the selected one. Cleared as soon as the selection

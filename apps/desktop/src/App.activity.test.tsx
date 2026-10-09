@@ -134,6 +134,8 @@ const testApi = vi.hoisted(() => ({
 const testPresence = vi.hoisted(() => ({ windowFocused: true, desktopPresent: true }));
 const testConnection = vi.hoisted(() => ({
   loaded: false,
+  partial: false,
+  hasItems: false,
   setSnapshot: null as React.Dispatch<React.SetStateAction<typeof testSnapshot>> | null,
 }));
 
@@ -156,8 +158,11 @@ vi.mock("./hooks/useDaemonConnection", () => ({
     const [threadDetail, setThreadDetail] = useState(() => testConnection.loaded ? {
       workspace: testSnapshot.workspaces[0],
       thread: testSnapshot.threads[0],
-      items: [],
-      is_partial: false,
+      items: testConnection.hasItems ? [{
+        kind: "assistant_message", id: "reply-1", text: "Latest reply",
+        created_at: "2026-08-13T09:00:00Z",
+      }] : [],
+      is_partial: testConnection.partial,
     } : null);
     return {
       api: testApi.current,
@@ -272,6 +277,8 @@ describe("Activity takeover wiring", () => {
     window.localStorage.clear();
     testApi.current = null;
     testConnection.loaded = false;
+    testConnection.partial = false;
+    testConnection.hasItems = false;
     testConnection.setSnapshot = null;
     testPresence.windowFocused = true;
     testPresence.desktopPresent = true;
@@ -293,6 +300,31 @@ describe("Activity takeover wiring", () => {
       render(<App />);
       await waitFor(() => expect(sendDesktopAttentionNotification).toHaveBeenCalledOnce());
       expect(testApi.current.markThreadRead).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each([true, false])(
+    "marks a paginated conversation read only once its messages are visible (loaded: %s)",
+    async (hasItems) => {
+      testConnection.loaded = true;
+      testConnection.partial = true;
+      testConnection.hasItems = hasItems;
+      testApi.current = {
+        createChat: vi.fn(), snapshot: vi.fn(), setClientActivity: vi.fn(),
+        markThreadRead: vi.fn().mockResolvedValue({
+          ...testSnapshot.threads[0],
+          attention: { ...testSnapshot.threads[0].attention, last_read_seq: 2 },
+        }),
+      };
+      render(<App />);
+      await act(async () => {});
+      if (hasItems) {
+        expect(testApi.current.markThreadRead).toHaveBeenCalledWith({
+          workspace_id: "workspace-1", thread_id: "thread-1", read_seq: 2,
+        });
+      } else {
+        expect(testApi.current.markThreadRead).not.toHaveBeenCalled();
+      }
     },
   );
 
