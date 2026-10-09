@@ -1034,7 +1034,8 @@ public extension SDK.
 ## Daemon-owned session thread tools
 
 The `falcondeck-extensions` bridge also advertises `falcondeck_list_threads`,
-`falcondeck_view_thread`, and `falcondeck_create_thread` beside the daemon-owned
+`falcondeck_view_thread`, `falcondeck_message_thread`, and
+`falcondeck_create_thread` beside the daemon-owned
 rename builtin. These require a calling thread and inherit its workspace. They
 are not extension-host APIs, control operations, or `threads:read` grants;
 `threads:read` remains summary-only with no previews or transcript access.
@@ -1052,3 +1053,13 @@ Admission is serialized and capped at three concurrent children per parent;
 running, waiting, queued, and unused idle children count until completed,
 or errored. Archiving an unused idle child releases its slot; archived running
 or waiting children continue to count. Calls return after dispatch, without waiting for a turn.
+
+Message sends bounded text (1–24000 characters) to an existing thread in the
+caller's workspace through normal `send_turn`, without overriding target
+provider, model, or permission settings. The daemon prefixes the caller's id
+and title as visible provenance, not an authority signal. `delivery: steer`
+(default) steers an active turn when available and falls back to queue;
+`delivery: queue` waits behind active work. Idle targets start a normal turn.
+Self-messaging and targets outside the workspace are rejected. The tool returns
+admission status without waiting for completion; replies can be read with view.
+Existing turn approvals remain in FalconDeck UI.

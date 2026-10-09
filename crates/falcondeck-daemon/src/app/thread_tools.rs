@@ -7,11 +7,12 @@ use serde::Deserialize;
 const LIST: &str = "falcondeck_list_threads";
 const VIEW: &str = "falcondeck_view_thread";
 const CREATE: &str = "falcondeck_create_thread";
+const MESSAGE: &str = "falcondeck_message_thread";
 const MAX_CHARS: usize = 24_000;
 const MAX_ITEMS: usize = 100;
 
 pub(super) fn is_builtin(name: &str) -> bool {
-    matches!(name, LIST | VIEW | CREATE)
+    matches!(name, LIST | VIEW | CREATE | MESSAGE)
 }
 
 pub(super) fn catalog() -> Vec<ExtensionAgentTool> {
@@ -26,6 +27,11 @@ pub(super) fn catalog() -> Vec<ExtensionAgentTool> {
             "limit": {"type":"integer", "minimum":1, "maximum":100},
             "max_chars": {"type":"integer", "minimum":512, "maximum":24000}
         }), vec!["thread_id"]),
+        (MESSAGE, "Message thread", "Send a message to an existing thread in this workspace, labelled with the sending thread. Defaults to steering its active turn, falling back to the queue when steering is unavailable; idle threads start a new turn. Use delivery=queue to wait for the active turn. Returns after admission, without waiting for a reply. Self-messaging is rejected; approvals remain in FalconDeck UI.", json!({
+            "thread_id": {"type":"string", "minLength":1},
+            "message": {"type":"string", "minLength":1, "maxLength":24000},
+            "delivery": {"type":"string", "enum":["steer","queue"], "default":"steer"}
+        }), vec!["thread_id", "message"]),
         (CREATE, "Create thread", "Create a sibling in this workspace and optionally send its first prompt. Returns after dispatch without waiting for completion. At most three concurrent children per parent; approvals remain in FalconDeck UI. Context defaults to none; briefing uses cached excerpts, transcript_tail uses bounded markdown.", json!({
             "provider": {"type":"string", "minLength":1},
             "isolation": {"type":"string", "enum":["project_folder","isolated"], "default":"project_folder"},
@@ -67,6 +73,23 @@ struct CreateArgs {
     prompt: Option<String>,
     #[serde(default)]
     context: Context,
+}
+
+#[derive(Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+enum MessageDelivery {
+    #[default]
+    Steer,
+    Queue,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct MessageArgs {
+    thread_id: String,
+    message: String,
+    #[serde(default)]
+    delivery: MessageDelivery,
 }
 
 fn args<T: serde::de::DeserializeOwned>(value: &Value) -> Result<T, DaemonError> {
@@ -167,6 +190,42 @@ impl AppState {
                     self.thread_handoff(&workspace, target, a.before, a.limit, a.max_chars)
                         .await?,
                 ))
+            }
+            MESSAGE => {
+                let a: MessageArgs = args(arguments)?;
+                if a.thread_id.trim().is_empty()
+                    || a.message.trim().is_empty()
+                    || a.message.chars().count() > MAX_CHARS
+                {
+                    return Err(DaemonError::BadRequest(
+                        "thread_id must be nonempty and message must be 1–24000 characters".into(),
+                    ));
+                }
+                if a.thread_id == parent {
+                    return Err(DaemonError::BadRequest(
+                        "cannot message the calling thread".into(),
+                    ));
+                }
+                // Resolve within the caller's workspace before any send-side mutations.
+                self.thread_summary(&workspace, &a.thread_id).await?;
+                let text = format!(
+                    "Message from FalconDeck thread {} ({}):\n\n{}",
+                    line(parent, 256),
+                    line(&parent_summary.title, 256),
+                    a.message
+                );
+                let request: SendTurnRequest = serde_json::from_value(json!({
+                    "workspace_id": workspace,
+                    "thread_id": a.thread_id,
+                    "inputs": [{"type":"text","text":text}],
+                    "steer": matches!(a.delivery, MessageDelivery::Steer)
+                }))?;
+                let result = self.send_turn(request).await?;
+                Ok(response(format!(
+                    "# Message accepted\n\n- Id: {}\n- Delivery: {}\n- Check replies with falcondeck_view_thread.\n",
+                    line(&a.thread_id, 256),
+                    line(result.message.as_deref().unwrap_or("accepted"), 256)
+                )))
             }
             CREATE => {
                 let a: CreateArgs = args(arguments)?;
@@ -592,7 +651,7 @@ mod tests {
     #[tokio::test]
     async fn catalog_and_list_use_only_summaries_and_cached_index() {
         let (app, _temp) = fixture().await;
-        for name in [LIST, VIEW, CREATE, BUILTIN_RENAME_THREAD_TOOL] {
+        for name in [LIST, VIEW, CREATE, MESSAGE, BUILTIN_RENAME_THREAD_TOOL] {
             assert!(
                 app.extension_agent_tools()
                     .await
@@ -634,6 +693,239 @@ mod tests {
             .unwrap();
         assert!(bounded.result.as_str().unwrap().chars().count() <= 512);
     }
+    #[tokio::test]
+    async fn message_queues_with_provenance_and_preserves_target_settings() {
+        let (app, _temp) = fixture().await;
+        let result = app
+            .invoke_extension_tool(call(CREATE, json!({"model":"target-model"})))
+            .await
+            .unwrap();
+        let id = created_id(&result);
+        app.with_thread_mut("workspace-1", &id, |t| {
+            t.status = ThreadStatus::Running;
+        })
+        .await
+        .unwrap();
+        for delivery in [None, Some("queue")] {
+            let mut arguments = json!({"thread_id":id,"message":"Please check the sync contract."});
+            if let Some(delivery) = delivery {
+                arguments["delivery"] = json!(delivery);
+            }
+            let result = app
+                .invoke_extension_tool(call(MESSAGE, arguments))
+                .await
+                .unwrap();
+            assert!(result.result.as_str().unwrap().contains("Delivery: queued"));
+        }
+        let workspaces = app.inner.workspaces.lock().await;
+        let target = &workspaces["workspace-1"].threads[&id];
+        assert_eq!(target.queued_requests.len(), 2);
+        for (queued, steer) in target.queued_requests.iter().zip([true, false]) {
+            assert_eq!(queued.request.steer, steer);
+            assert_eq!(
+                queued.summary.text,
+                "Message from FalconDeck thread thread-1 (Auth setup):\n\nPlease check the sync contract."
+            );
+            assert!(queued.request.provider.is_none());
+            assert!(queued.request.model_id.is_none());
+            assert!(queued.request.approval_policy.is_none());
+            assert!(queued.request.permission_mode.is_none());
+            assert!(queued.request.sandbox_mode.is_none());
+        }
+        assert_eq!(
+            target.summary.agent.model_id.as_deref(),
+            Some("target-model")
+        );
+    }
+
+    #[tokio::test]
+    async fn message_rejects_invalid_self_and_cross_workspace_targets() {
+        let (app, _temp) = fixture().await;
+        let (other, _other_temp) = fixture().await;
+        let mut foreign = other
+            .inner
+            .workspaces
+            .lock()
+            .await
+            .remove("workspace-1")
+            .unwrap();
+        foreign.summary.id = "workspace-2".into();
+        let mut target = foreign.threads.remove("thread-1").unwrap();
+        target.summary.id = "foreign-thread".into();
+        target.summary.workspace_id = "workspace-2".into();
+        foreign.threads.insert("foreign-thread".into(), target);
+        app.inner
+            .workspaces
+            .lock()
+            .await
+            .insert("workspace-2".into(), foreign);
+        for arguments in [
+            json!({"thread_id":"thread-1","message":"self"}),
+            json!({"thread_id":"foreign-thread","message":"cross workspace"}),
+            json!({"thread_id":"missing","message":"missing target"}),
+            json!({"thread_id":" ","message":"hello"}),
+            json!({"thread_id":"foreign-thread","message":" "}),
+            json!({"thread_id":"foreign-thread","message":"x".repeat(MAX_CHARS+1)}),
+            json!({"thread_id":"foreign-thread","message":"hello","delivery":"interrupt"}),
+            json!({"thread_id":"foreign-thread","message":"hello","approval_policy":"never"}),
+        ] {
+            assert!(
+                app.invoke_extension_tool(call(MESSAGE, arguments))
+                    .await
+                    .is_err()
+            );
+        }
+        let mut detached = call(
+            MESSAGE,
+            json!({"thread_id":"foreign-thread","message":"hello"}),
+        );
+        detached.thread_id = None;
+        assert!(app.invoke_extension_tool(detached).await.is_err());
+        let workspaces = app.inner.workspaces.lock().await;
+        assert!(
+            workspaces["workspace-2"].threads["foreign-thread"]
+                .items
+                .is_empty()
+        );
+        assert!(
+            workspaces["workspace-2"].threads["foreign-thread"]
+                .queued_requests
+                .is_empty()
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn message_dispatches_idle_then_steers_live_provider_input() {
+        use std::os::unix::fs::PermissionsExt;
+        let (app, temp) = fixture().await;
+        let script = temp.path().join("fake-claude-message");
+        let capture = temp.path().join("captured-messages");
+        std::fs::write(&script, format!("#!/bin/sh\nwhile IFS= read -r input; do\nprintf '%s\\n' \"$input\" >> '{}'\ndone\n", capture.display())).unwrap();
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let runtime = crate::claude::ClaudeRuntime::for_test(
+            temp.path().to_string_lossy().into(),
+            script.to_string_lossy().into(),
+        );
+        {
+            let mut workspaces = app.inner.workspaces.lock().await;
+            let ws = workspaces.get_mut("workspace-1").unwrap();
+            ws.claude_runtime = Some(runtime.clone());
+            ws.summary
+                .agents
+                .push(falcondeck_core::WorkspaceAgentSummary {
+                    models_loading: false,
+                    provider: AgentProvider::CLAUDE,
+                    label: "Claude".into(),
+                    account: Default::default(),
+                    models: vec![],
+                    collaboration_modes: vec![],
+                    skills: vec![],
+                    capabilities: falcondeck_core::AgentCapabilitySummary::claude(),
+                });
+        }
+        let result = app
+            .invoke_extension_tool(call(CREATE, json!({})))
+            .await
+            .unwrap();
+        let id = created_id(&result);
+        let result = app
+            .invoke_extension_tool(call(
+                MESSAGE,
+                json!({"thread_id":id,"message":"First message"}),
+            ))
+            .await
+            .unwrap();
+        assert!(
+            result
+                .result
+                .as_str()
+                .unwrap()
+                .contains("Delivery: turn started")
+        );
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            while !std::fs::read_to_string(&capture)
+                .unwrap_or_default()
+                .contains("First message")
+            {
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+        let result = app
+            .invoke_extension_tool(call(
+                MESSAGE,
+                json!({"thread_id":id,"message":"Second message"}),
+            ))
+            .await
+            .unwrap();
+        assert!(
+            result
+                .result
+                .as_str()
+                .unwrap()
+                .contains("Delivery: steered")
+        );
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            while !std::fs::read_to_string(&capture)
+                .unwrap_or_default()
+                .contains("Second message")
+            {
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+        let input = std::fs::read_to_string(&capture).unwrap();
+        assert_eq!(input.lines().count(), 2);
+        assert!(
+            input
+                .lines()
+                .all(|line| line.contains("Message from FalconDeck thread thread-1 (Auth setup)"))
+        );
+        let workspaces = app.inner.workspaces.lock().await;
+        let target = &workspaces["workspace-1"].threads[&id];
+        assert!(target.queued_requests.is_empty());
+        assert_eq!(
+            target
+                .items
+                .iter()
+                .filter(|item| matches!(item, ConversationItem::UserMessage { .. }))
+                .count(),
+            2
+        );
+        drop(workspaces);
+        runtime.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn message_to_idle_thread_uses_normal_dispatch_and_propagates_failure() {
+        let (app, _temp) = fixture().await;
+        let result = app
+            .invoke_extension_tool(call(CREATE, json!({})))
+            .await
+            .unwrap();
+        let id = created_id(&result);
+        // The missing executable proves this reached normal provider startup, rather than queueing.
+        let error = app
+            .invoke_extension_tool(call(
+                MESSAGE,
+                json!({"thread_id":id,"message":"Check this."}),
+            ))
+            .await
+            .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("could not find the `claude` executable"),
+            "{error}"
+        );
+        let workspaces = app.inner.workspaces.lock().await;
+        let target = &workspaces["workspace-1"].threads[&id];
+        assert!(target.queued_requests.is_empty());
+    }
+
     #[tokio::test]
     async fn view_is_markdown_with_contiguous_before_pages_and_caps() {
         let (app, _temp) = fixture().await;
