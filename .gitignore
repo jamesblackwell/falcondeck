@@ -35,3 +35,7 @@ apps/mobile/src/vendor/mermaid.min.txt
 /.env
 /.deepsec
 /.harness
+
+apps/desktop/src-tauri/binaries/falcondeck-parakeet-*
+apps/desktop/parakeet-runtime/.build/
+apps/desktop/parakeet-runtime/.swiftpm/

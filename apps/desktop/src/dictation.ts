@@ -28,7 +28,7 @@ export const DICTATION_RETENTION_CHOICES = [0, 1, 6, 24] as const;
 export type DictationShortcut = string;
 export type RewriteShortcut = string;
 export type DictationActivation = "hold" | "toggle";
-export type DictationProvider = "system" | "open_router";
+export type DictationProvider = "system" | "open_router" | "parakeet";
 export const DEFAULT_REWRITE_MODEL = "openai/gpt-5.6-luna";
 export const REWRITE_MODEL_CHOICES = [
   { id: "openai/gpt-5.6-luna", name: "GPT-5.6 Luna" },
@@ -63,6 +63,7 @@ export type DictationSettings = {
   shortcut: DictationShortcut;
   activation: DictationActivation;
   provider: DictationProvider;
+  parakeetIdleMinutes: number;
   inputDeviceId: string | null;
   model: string;
   // Cmd+Shift+V inside FalconDeck re-inserts the last transcript, for when a
@@ -129,6 +130,7 @@ export const DEFAULT_DICTATION_SETTINGS: DictationSettings = {
   shortcut: "right_command",
   activation: "hold",
   provider: "system",
+  parakeetIdleMinutes: 15,
   inputDeviceId: null,
   model: DEFAULT_TRANSCRIPTION_MODEL,
   repasteShortcutEnabled: true,
@@ -154,7 +156,7 @@ function isDictationActivation(value: unknown): value is DictationActivation {
 }
 
 function isDictationProvider(value: unknown): value is DictationProvider {
-  return value === "system" || value === "open_router";
+  return value === "system" || value === "open_router" || value === "parakeet";
 }
 
 export function normalizeRewritePrompt(value: unknown): string | null {
@@ -192,6 +194,8 @@ export function normalizeDictationSettings(value: unknown): DictationSettings {
     activation: isDictationActivation(candidate.activation)
       ? candidate.activation
       : DEFAULT_DICTATION_SETTINGS.activation,
+    parakeetIdleMinutes: typeof candidate.parakeetIdleMinutes === "number" && Number.isFinite(candidate.parakeetIdleMinutes)
+      ? Math.max(0, Math.min(60, Math.round(candidate.parakeetIdleMinutes))) : 15,
     provider: isDictationProvider(candidate.provider)
       ? candidate.provider
       : DEFAULT_DICTATION_SETTINGS.provider,
@@ -302,7 +306,7 @@ export function useDesktopDictation(baseUrl: string | null): void {
     let cancelled = false;
     void import("@tauri-apps/api/core").then(({ invoke }) => {
       if (cancelled) return;
-      const providerReady = settings.provider === "system" || Boolean(baseUrl);
+      const providerReady = settings.provider !== "open_router" || Boolean(baseUrl);
       const shortcutsCollide =
         settings.enabled && settings.shortcut === settings.rewriteShortcut;
       return invoke("configure_dictation", {

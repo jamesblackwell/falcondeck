@@ -14,6 +14,16 @@ import {
 } from "./dictation";
 
 describe("dictation settings", () => {
+  it("keeps Parakeet optional and persists its idle timeout", () => {
+    expect(normalizeDictationSettings({}).provider).toBe("system");
+    expect(normalizeDictationSettings({}).parakeetIdleMinutes).toBe(15);
+    writeDictationSettings({ ...DEFAULT_DICTATION_SETTINGS, provider: "parakeet", parakeetIdleMinutes: 10 });
+    expect(readDictationSettings()).toMatchObject({ provider: "parakeet", parakeetIdleMinutes: 10 });
+    expect(normalizeDictationSettings({ parakeetIdleMinutes: -1 }).parakeetIdleMinutes).toBe(0);
+    expect(normalizeDictationSettings({ parakeetIdleMinutes: 99 }).parakeetIdleMinutes).toBe(60);
+    expect(normalizeDictationSettings({ parakeetIdleMinutes: NaN }).parakeetIdleMinutes).toBe(15);
+    expect(nextRequiredDictationPermission({ microphone: "granted", speechRecognition: "denied", accessibility: true }, "parakeet")).toBeNull();
+  });
   afterEach(() => window.localStorage.clear());
 
   it("falls back field-by-field when stored settings are invalid", () => {

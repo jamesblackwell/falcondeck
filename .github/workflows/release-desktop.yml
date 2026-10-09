@@ -64,6 +64,12 @@ jobs:
           TARGET: ${{ matrix.target }}
         run: npm run computer-use-runtime:prepare -- --target="$TARGET" --download
 
+      - name: Prepare bundled Parakeet runtime
+        shell: bash
+        env:
+          TARGET: ${{ matrix.target }}
+        run: npm run parakeet-runtime:prepare -- --target="$TARGET"
+
       - name: Require updater signing credentials
         env:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}

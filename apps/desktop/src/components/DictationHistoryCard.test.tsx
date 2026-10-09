@@ -74,6 +74,15 @@ afterEach(() => {
 });
 
 describe("DictationHistoryCard", () => {
+  it("retries Parakeet locally without a daemon connection or cloud model override", async () => {
+    history = [entry({ provider: "parakeet", model: "nvidia/parakeet-tdt-0.6b-v3" })];
+    retryResult = () => ({ ...history[0], text: "Local transcript", error: null });
+    render(<DictationHistoryCard baseUrl={null} onToast={() => {}} />);
+    const retry = await screen.findByRole("button", { name: "Retry" });
+    expect(retry).toBeEnabled();
+    fireEvent.click(retry);
+    await waitFor(() => expect(invocations.find(call => call.command === "dictation_history_retry")).toEqual({ command: "dictation_history_retry", args: { id: history[0].id, model: null } }));
+  });
   it("says how long recordings are kept, and says so plainly when they are not", () => {
     expect(retentionSummary(6)).toContain("6 hours");
     expect(retentionSummary(1)).toContain("an hour");

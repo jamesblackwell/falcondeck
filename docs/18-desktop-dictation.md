@@ -127,6 +127,47 @@ path. The audio itself stays in the temporary directory.
 
 No transcript history or raw-audio library is created in the MVP.
 
+## Optional Parakeet
+
+Settings → Speech → Transcription has three engines: Apple Speech (default),
+Parakeet, and OpenRouter. Selecting Parakeet explicitly downloads NVIDIA
+Parakeet TDT 0.6B v3 through FluidAudio, using its INT8 Core ML encoder and
+Apple Neural Engine. It requires Apple Silicon and macOS 14 or later. Model
+files are stored under the desktop application data directory in
+`parakeet-v3-int8`; they are not shipped inside the app. Setup shows download
+and compilation progress and can be retried after a failure.
+
+The helper uses the existing 16 kHz mono AAC capture and paste workflow.
+Recording starts prewarming the installed model; inference loads local files
+without network fallback. Optional transcript cleanup and voice rewrite still
+use OpenRouter, as they do with Apple Speech. Failed or retained Parakeet
+recordings retry locally by default. Explicitly choosing an OpenRouter retry
+model sends that retained audio to the chosen cloud provider.
+
+Advanced options set the idle lifetime to 0–60 minutes (15 by default). Zero
+unloads after each operation and skips recording-start prewarming. Disabling
+dictation or selecting another engine stops the helper after its current
+operation. Idle expiry and app shutdown terminate the helper rather than
+retaining a runtime with allocator caches. Starting the app does not download
+or load models, and status polling reads cached state without launching ASR.
+
+The sidecar is a Swift executable under `apps/desktop/parakeet-runtime`, pinned
+to a FluidAudio revision. `npm run parakeet-runtime:prepare` builds it with
+Swift 6.2 or later and stages the target-specific executable for Tauri. Desktop
+dev/build hooks and release CI prepare it automatically. ASR does not use the
+SDK's TTS resource bundle or optional NeMo text-normalization library. Third
+party notices are bundled under `Resources/licenses/parakeet`.
+
+Local M4 Pro smoke test (48 GiB RAM, macOS 26.6.2): after download and model
+compilation, three fresh helper processes reached the first transcript of a
+7.16-second synthetic clip in 177–264 ms; repeat clips took 50–56 ms. Helper
+physical footprint was 37–41 MiB and RSS 78–83 MiB. Core ML also uses shared
+system/Neural Engine resources: these process figures are **not total model
+RAM**. The compiled model cache was 469 MiB. This verifies the runtime path and
+startup speed, not recognition quality on the user's voice. Experiment scripts
+and raw measurements remain outside the repository under
+`~/.falcondeck/experiments/parakeet-startup`.
+
 ## Permissions
 
 macOS requires Microphone and Accessibility access. Apple Speech also requires

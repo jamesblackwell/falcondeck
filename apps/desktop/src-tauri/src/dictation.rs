@@ -91,6 +91,7 @@ mod event_kind {
     pub const REWRITE_SELECTION: i32 = 12;
     pub const REWRITE_INSTRUCTION: i32 = 13;
     pub const CLEANUP_TRANSCRIPT: i32 = 14;
+    pub const PARAKEET_AUDIO_READY: i32 = 15;
 }
 
 #[derive(Clone, Copy, Debug, Default, Deserialize)]
@@ -107,6 +108,7 @@ pub enum DictationProvider {
     #[default]
     System,
     OpenRouter,
+    Parakeet,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize)]
@@ -126,6 +128,8 @@ pub struct DictationConfiguration {
     pub shortcut: String,
     pub activation: DictationActivation,
     pub provider: DictationProvider,
+    #[serde(default = "default_parakeet_idle_minutes")]
+    pub parakeet_idle_minutes: u32,
     pub input_device_id: Option<String>,
     pub daemon_url: Option<String>,
     pub model: String,
@@ -162,6 +166,10 @@ fn default_dictation_shortcut() -> String {
     "right_command".to_string()
 }
 
+fn default_parakeet_idle_minutes() -> u32 {
+    15
+}
+
 impl Default for DictationConfiguration {
     fn default() -> Self {
         Self {
@@ -169,6 +177,7 @@ impl Default for DictationConfiguration {
             shortcut: default_dictation_shortcut(),
             activation: DictationActivation::Hold,
             provider: DictationProvider::System,
+            parakeet_idle_minutes: 15,
             input_device_id: None,
             daemon_url: None,
             model: "openai/gpt-4o-mini-transcribe".to_string(),
@@ -351,6 +360,7 @@ fn provider_code(provider: DictationProvider) -> i32 {
     match provider {
         DictationProvider::System => 0,
         DictationProvider::OpenRouter => 1,
+        DictationProvider::Parakeet => 2,
     }
 }
 
@@ -443,6 +453,10 @@ pub fn configure_dictation(config: DictationConfiguration) -> Result<(), String>
             config.auto_cleanup_enabled,
         );
     }
+    crate::parakeet::configure(
+        config.enabled && matches!(config.provider, DictationProvider::Parakeet),
+        config.parakeet_idle_minutes,
+    );
     *CONFIG
         .write()
         .map_err(|_| "Dictation settings are unavailable.".to_string())? = config;
@@ -690,6 +704,7 @@ pub async fn dictation_history_clear() -> Result<usize, String> {
 /// wrong is worth another attempt, and re-recording is not.
 #[tauri::command]
 pub async fn dictation_history_retry(
+    app: AppHandle,
     id: String,
     model: Option<String>,
 ) -> Result<dictation_history::DictationHistoryEntry, String> {
@@ -700,29 +715,44 @@ pub async fn dictation_history_retry(
         .ok_or_else(|| "That recording is no longer available.".to_string())?;
     let path = PathBuf::from(&entry.path);
     validate_recording_path(&path)?;
-    let daemon_url = config
-        .daemon_url
-        .clone()
-        .ok_or_else(|| "FalconDeck is not connected.".to_string())?;
-    let model = model
-        .map(|model| model.trim().to_string())
-        .filter(|model| !model.is_empty())
-        .unwrap_or_else(|| config.model.clone());
+    let local = entry.provider == "parakeet" && model.is_none();
+    let model = if local {
+        crate::parakeet::MODEL.to_string()
+    } else {
+        model
+            .map(|model| model.trim().to_string())
+            .filter(|model| !model.is_empty())
+            .unwrap_or_else(|| config.model.clone())
+    };
     if model.len() > 200 {
-        return Err("The transcription model is invalid.".to_string());
+        return Err("The transcription model is invalid.".into());
     }
-    let audio = tokio::fs::read(&path)
+    let result = if local {
+        crate::parakeet::transcribe(&app, &path)
+            .await
+            .map(|text| Transcription {
+                text,
+                model: model.clone(),
+            })
+    } else {
+        let daemon_url = config
+            .daemon_url
+            .as_deref()
+            .ok_or("FalconDeck is not connected.")?;
+        validate_local_daemon_url(daemon_url)?;
+        let audio = tokio::fs::read(&path)
+            .await
+            .map_err(|error| format!("Could not read the kept recording: {error}"))?;
+        request_transcription(
+            daemon_url,
+            audio,
+            model.clone(),
+            config.fallback_model.clone(),
+            measured_recording_duration(entry.duration_seconds),
+        )
         .await
-        .map_err(|error| format!("Could not read the kept recording: {error}"))?;
-    match request_transcription(
-        &daemon_url,
-        audio,
-        model.clone(),
-        config.fallback_model.clone(),
-        measured_recording_duration(entry.duration_seconds),
-    )
-    .await
-    {
+    };
+    match result {
         Ok(transcription) => {
             let Transcription { text, model } = transcription;
             let text = cleanup_transcript(text, &config).await;
@@ -770,6 +800,7 @@ pub fn open_dictation_accessibility_settings() {
 }
 
 pub fn shutdown() {
+    crate::parakeet::shutdown();
     ACTIVE_OPENROUTER_TRANSCRIPTION.store(0, Ordering::Release);
     #[cfg(target_os = "macos")]
     unsafe {
@@ -1233,10 +1264,11 @@ fn file_recording_detached(
     });
 }
 
-async fn transcribe_openrouter(
+async fn transcribe_recording(
     app: AppHandle,
     recording: RecordedAudio,
     transcription_id: u64,
+    provider: DictationProvider,
 ) -> Result<(), String> {
     let RecordedAudio {
         path,
@@ -1247,23 +1279,35 @@ async fn transcribe_openrouter(
         .read()
         .map_err(|_| "Dictation settings are unavailable.".to_string())?
         .clone();
-    let daemon_url = config
-        .daemon_url
-        .as_deref()
-        .ok_or_else(|| "FalconDeck is not connected.".to_string())?;
-    let audio = tokio::fs::read(&path)
-        .await
-        .map_err(|error| format!("Could not read the retained recording: {error}"))?;
+    let provider_name = if matches!(provider, DictationProvider::Parakeet) {
+        "parakeet"
+    } else {
+        "open_router"
+    };
+    let daemon_url = config.daemon_url.as_deref().unwrap_or_default();
     let retention_hours = config.history_retention_hours;
-    let transcription = match request_transcription(
-        daemon_url,
-        audio,
-        config.model.clone(),
-        config.fallback_model.clone(),
-        duration_seconds,
-    )
-    .await
-    {
+    let result = if matches!(provider, DictationProvider::Parakeet) {
+        crate::parakeet::transcribe(&app, &path)
+            .await
+            .map(|text| Transcription {
+                text,
+                model: crate::parakeet::MODEL.into(),
+            })
+    } else {
+        validate_local_daemon_url(daemon_url)?;
+        let audio = tokio::fs::read(&path)
+            .await
+            .map_err(|error| format!("Could not read the retained recording: {error}"))?;
+        request_transcription(
+            daemon_url,
+            audio,
+            config.model.clone(),
+            config.fallback_model.clone(),
+            duration_seconds,
+        )
+        .await
+    };
+    let transcription = match result {
         Ok(transcription) => transcription,
         Err(error) => {
             // The audio stays put either way — the native side retains it for
@@ -1274,8 +1318,12 @@ async fn transcribe_openrouter(
                 &path,
                 dictation_history::RecordingOutcome {
                     duration_seconds,
-                    provider: "open_router",
-                    model: Some(config.model.clone()),
+                    provider: provider_name,
+                    model: Some(if matches!(provider, DictationProvider::Parakeet) {
+                        crate::parakeet::MODEL.into()
+                    } else {
+                        config.model.clone()
+                    }),
                     text: None,
                     error: Some(error.clone()),
                 },
@@ -1284,6 +1332,9 @@ async fn transcribe_openrouter(
             return Err(error);
         }
     };
+    if ACTIVE_OPENROUTER_TRANSCRIPTION.load(Ordering::Acquire) != transcription_id {
+        return Ok(());
+    }
     let Transcription { text, model } = transcription;
     let text = if REWRITE_ACTIVE.load(Ordering::Acquire) {
         let selection = REWRITE_SELECTION
@@ -1312,6 +1363,9 @@ async fn transcribe_openrouter(
         }
         cleanup_transcript(text, &config).await
     };
+    if ACTIVE_OPENROUTER_TRANSCRIPTION.load(Ordering::Acquire) != transcription_id {
+        return Ok(());
+    }
     remember_transcript(&text);
 
     let finish_app = app.clone();
@@ -1343,7 +1397,7 @@ async fn transcribe_openrouter(
             record_recording_detached(
                 path.clone(),
                 duration_seconds,
-                "open_router",
+                provider_name,
                 Some(model),
                 Some(text.clone()),
                 None,
@@ -1366,7 +1420,7 @@ async fn transcribe_openrouter(
         file_recording_detached(
             path.clone(),
             duration_seconds,
-            "open_router",
+            provider_name,
             Some(model),
             Some(text.clone()),
             None,
@@ -1452,6 +1506,12 @@ pub extern "C" fn fd_dictation_emit(kind: i32, payload: *const std::ffi::c_char)
                 }
             }
             SESSION_GENERATION.fetch_add(1, Ordering::AcqRel);
+            if CONFIG
+                .read()
+                .is_ok_and(|config| matches!(config.provider, DictationProvider::Parakeet))
+            {
+                crate::parakeet::prewarm(app.clone());
+            }
             show_overlay(&app, "recording", false);
             emit_event(
                 &app,
@@ -1641,7 +1701,12 @@ pub extern "C" fn fd_dictation_emit(kind: i32, payload: *const std::ffi::c_char)
                 }
             });
         }
-        event_kind::AUDIO_READY => {
+        event_kind::AUDIO_READY | event_kind::PARAKEET_AUDIO_READY => {
+            let provider = if kind == event_kind::PARAKEET_AUDIO_READY {
+                DictationProvider::Parakeet
+            } else {
+                DictationProvider::OpenRouter
+            };
             let recording = native_recorded_audio(PathBuf::from(payload));
             let transcription_id = NEXT_TRANSCRIPTION_ID.fetch_add(1, Ordering::Relaxed);
             if ACTIVE_OPENROUTER_TRANSCRIPTION
@@ -1657,7 +1722,7 @@ pub extern "C" fn fd_dictation_emit(kind: i32, payload: *const std::ffi::c_char)
             }
             tauri::async_runtime::spawn(async move {
                 if let Err(error) =
-                    transcribe_openrouter(app.clone(), recording, transcription_id).await
+                    transcribe_recording(app.clone(), recording, transcription_id, provider).await
                 {
                     if ACTIVE_OPENROUTER_TRANSCRIPTION
                         .compare_exchange(transcription_id, 0, Ordering::AcqRel, Ordering::Acquire)
@@ -1822,6 +1887,10 @@ mod tests {
             ("RewriteSelection", super::event_kind::REWRITE_SELECTION),
             ("RewriteInstruction", super::event_kind::REWRITE_INSTRUCTION),
             ("CleanupTranscript", super::event_kind::CLEANUP_TRANSCRIPT),
+            (
+                "ParakeetAudioReady",
+                super::event_kind::PARAKEET_AUDIO_READY,
+            ),
         ];
         for (name, value) in expected {
             assert!(

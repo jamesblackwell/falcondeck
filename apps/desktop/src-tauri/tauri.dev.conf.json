@@ -1,6 +1,6 @@
 {
   "build": {
-    "beforeDevCommand": "vite"
+    "beforeDevCommand": "node ../../scripts/prepare-parakeet-runtime.mjs && vite"
   },
   "app": {
     "windows": [

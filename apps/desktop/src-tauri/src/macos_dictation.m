@@ -28,6 +28,7 @@ typedef NS_ENUM(NSInteger, FDActivationMode) {
 typedef NS_ENUM(NSInteger, FDProvider) {
   FDProviderSystem = 0,
   FDProviderOpenRouter = 1,
+  FDProviderParakeet = 2,
 };
 
 static const CGKeyCode FDRightCommandKeyCode = 54;
@@ -1441,7 +1442,7 @@ static CGEventRef FDEventTapCallback(CGEventTapProxy proxy, CGEventType type,
                @"Apple Speech requires macOS 10.15 or later. Your recording has been retained.");
       }
     } else {
-      FDEmit(FDEventAudioReady, url.path);
+      FDEmit(self.recordingProvider == FDProviderParakeet ? FDEventParakeetAudioReady : FDEventAudioReady, url.path);
     }
   });
 }
@@ -2093,7 +2094,7 @@ static CGEventRef FDEventTapCallback(CGEventTapProxy proxy, CGEventType type,
              @"Apple Speech requires macOS 10.15 or later. Your recording has been retained.");
     }
   } else {
-    FDEmit(FDEventAudioReady, url.path);
+    FDEmit(provider == FDProviderParakeet ? FDEventParakeetAudioReady : FDEventAudioReady, url.path);
   }
 }
 

@@ -1,5 +1,7 @@
 import { useCallback, useEffect, useState } from "react";
 
+import { useParakeetStatus } from "../parakeet";
+
 import { createDaemonApiClient } from "@falcondeck/client-core";
 import {
   ActivityDiamond,
@@ -255,6 +257,8 @@ export function DictationSetup({
     null,
   );
 
+  const parakeet = useParakeetStatus();
+
   const updateSettings = useCallback(
     (patch: Partial<DictationSettings>) =>
       writeDictationSettings({ ...settings, ...patch }),
@@ -340,11 +344,13 @@ export function DictationSetup({
 
   const setEnabled = (enabled: boolean) => {
     updateSettings({ enabled });
+    if (enabled && settings.provider === "parakeet" && !parakeet.status?.installed) void parakeet.prepare();
   };
 
   const permissionsReady =
     permissions?.microphone === "granted" &&
     permissions.accessibility &&
+    (settings.provider !== "parakeet" || (parakeet.status?.supported && parakeet.status.installed)) &&
     (settings.provider !== "system" ||
       permissions.speechRecognition === "granted");
   const defaultAudioDeviceName = audioDevices.find(
@@ -504,7 +510,7 @@ export function DictationSetup({
       {compact ? null : (
         <SettingsSection
           title="Transcription"
-          description="Where recorded audio is turned into text. Apple Speech runs entirely on this Mac; OpenRouter sends audio from the daemon to a cloud model."
+          description="Apple Speech and Parakeet transcribe on this Mac. OpenRouter sends recorded audio to a cloud model."
         >
           <Field label="Engine">
             <SegmentedControl
@@ -512,11 +518,58 @@ export function DictationSetup({
               value={settings.provider}
               options={[
                 { value: "system", label: "Apple Speech" },
+                { value: "parakeet", label: "Parakeet" },
                 { value: "open_router", label: "OpenRouter" },
               ]}
-              onChange={(provider) => updateSettings({ provider })}
+              onChange={(provider) => {
+                updateSettings({ provider });
+                if (provider === "parakeet" && parakeet.status?.supported !== false && !parakeet.preparing && !parakeet.status?.busy) {
+                  void parakeet.prepare();
+                }
+              }}
             />
           </Field>
+
+          {settings.provider === "parakeet" ? (
+            <div className="space-y-4 border-t border-border-subtle pt-5">
+              <p className="text-sm text-fg-secondary">
+                Parakeet v3 uses this Mac’s Neural Engine. Download the model once;
+                recordings stay on this Mac. Optional cleanup and rewrite still use OpenRouter.
+              </p>
+              {parakeet.status?.supported === false ? (
+                <p role="alert" className="text-sm text-fg-secondary">Requires Apple Silicon and macOS 14 or later.</p>
+              ) : parakeet.preparing || parakeet.status?.busy ? (
+                <p role="status" className="text-sm text-fg-secondary">
+                  {parakeet.status?.phase || "Preparing Parakeet"}…
+                  {parakeet.status?.progress != null ? ` ${Math.round(parakeet.status.progress * 100)}%` : ""}
+                </p>
+              ) : parakeet.status?.installed ? (
+                <p role="status" className="text-sm text-fg-secondary">
+                  {parakeet.status.loaded ? "Ready — model loaded" : "Downloaded — loads when recording starts"}
+                </p>
+              ) : (
+                <Button variant="secondary" onClick={() => void parakeet.prepare()}>Download Parakeet</Button>
+              )}
+              {parakeet.error ? (
+                <div className="space-y-2">
+                  <p role="alert" className="text-sm text-fg-secondary">{parakeet.error}</p>
+                  <Button variant="secondary" disabled={parakeet.preparing || parakeet.status?.busy} onClick={() => void parakeet.prepare()}>Retry setup</Button>
+                </div>
+              ) : null}
+              <details>
+                <summary className="cursor-pointer text-sm text-fg-secondary">Advanced options</summary>
+                <div className="pt-4">
+                  <Field label="Keep model loaded" htmlFor="parakeet-idle-minutes" hint="Keeps repeat dictations fast. The model unloads after this long without use; disabling dictation or changing engines unloads it too.">
+                    <select id="parakeet-idle-minutes" className={SELECT_CLASS} value={settings.parakeetIdleMinutes} onChange={(event) => updateSettings({ parakeetIdleMinutes: Number(event.target.value) })}>
+                      {![0, 5, 10, 15, 30, 60].includes(settings.parakeetIdleMinutes) ? <option value={settings.parakeetIdleMinutes}>{settings.parakeetIdleMinutes} minutes</option> : null}
+                      <option value={0}>Unload after each dictation</option>
+                      {[5, 10, 15, 30, 60].map((minutes) => <option key={minutes} value={minutes}>{minutes} minutes{minutes === 15 ? " (default)" : ""}</option>)}
+                    </select>
+                  </Field>
+                </div>
+              </details>
+            </div>
+          ) : null}
 
           {settings.provider === "open_router" ? (
             <div className="space-y-5 border-t border-border-subtle pt-5">

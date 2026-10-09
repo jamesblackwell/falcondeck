@@ -52,9 +52,7 @@ export function DictationHistoryCard({
   const settings = useDictationSettings();
   const [entries, setEntries] = useState<DictationHistoryEntry[]>([]);
   const [models, setModels] = useState<SpeechModel[]>([]);
-  const [retryModel, setRetryModel] = useState(
-    settings.fallbackModel ?? settings.model,
-  );
+  const [retryModel, setRetryModel] = useState("");
   const [busyId, setBusyId] = useState<string | null>(null);
   const [now, setNow] = useState(0);
 
@@ -114,7 +112,7 @@ export function DictationHistoryCard({
   const retry = async (entry: DictationHistoryEntry) => {
     setBusyId(entry.id);
     try {
-      const updated = await retryDictationHistoryEntry(entry.id, retryModel);
+      const updated = await retryDictationHistoryEntry(entry.id, retryModel || (entry.provider === "parakeet" ? undefined : settings.fallbackModel ?? settings.model));
       setEntries((current) =>
         current.map((item) => (item.id === updated.id ? updated : item)),
       );
@@ -219,7 +217,7 @@ export function DictationHistoryCard({
           <Field
             label="Retry using"
             htmlFor="dictation-retry-model"
-            hint="Retrying sends the kept audio to this model instead of your usual one."
+            hint="Parakeet recordings retry locally by default. Choosing an OpenRouter model sends the kept audio to that cloud model."
           >
             <select
               id="dictation-retry-model"
@@ -227,7 +225,8 @@ export function DictationHistoryCard({
               value={retryModel}
               onChange={(event) => setRetryModel(event.target.value)}
             >
-              {!models.some((model) => model.id === retryModel) ? (
+              <option value="">Default retry (Parakeet stays local)</option>
+              {retryModel && !models.some((model) => model.id === retryModel) ? (
                 <option value={retryModel}>{retryModel}</option>
               ) : null}
               {models.map((model) => (
@@ -288,7 +287,7 @@ export function DictationHistoryCard({
                     size="sm"
                     variant="secondary"
                     disabled={
-                      !entry.audioAvailable || busyId === entry.id || !baseUrl
+                      !entry.audioAvailable || busyId === entry.id || (!baseUrl && (entry.provider !== "parakeet" || Boolean(retryModel)))
                     }
                     onClick={() => void retry(entry)}
                   >

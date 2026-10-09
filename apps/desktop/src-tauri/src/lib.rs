@@ -23,6 +23,7 @@ mod computer_use;
 mod desktop_notifications;
 mod dictation;
 mod dictation_history;
+mod parakeet;
 mod sounds;
 
 /// Kept in sync with ACTIVITY_WINDOW_LABEL in src/activity-window-bridge.ts.
@@ -1627,6 +1628,8 @@ pub fn run() {
             desktop_notifications::send_macos_notification,
             sounds::play_system_sound,
             dictation::configure_dictation,
+            parakeet::parakeet_status,
+            parakeet::prepare_parakeet,
             dictation::dictation_audio_devices,
             dictation::dictation_permission_status,
             dictation::request_dictation_permission,

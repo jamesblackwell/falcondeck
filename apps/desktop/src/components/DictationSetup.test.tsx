@@ -1,5 +1,5 @@
 import { fireEvent, render, screen, within } from "@testing-library/react";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 import {
   DEFAULT_REWRITE_PROMPT,
@@ -7,8 +7,32 @@ import {
 } from "../dictation";
 import { DictationSetup } from "./DictationSetup";
 
+const prepareParakeet = vi.hoisted(() => vi.fn());
+vi.mock("../parakeet", () => ({ useParakeetStatus: () => ({
+  status: { supported: true, installed: true, loaded: false, busy: false },
+  preparing: false, error: null, prepare: prepareParakeet,
+}) }));
+
 describe("DictationSetup voice rewrite", () => {
+  it("prepares Parakeet on selection and saves its advanced idle setting", () => {
+    prepareParakeet.mockClear();
+    render(<DictationSetup baseUrl={null} onToast={() => {}} />);
+    expect(prepareParakeet).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole("button", { name: "Parakeet" }));
+    expect(prepareParakeet).toHaveBeenCalledTimes(1);
+    expect(readDictationSettings().provider).toBe("parakeet");
+    fireEvent.change(screen.getByLabelText("Keep model loaded"), { target: { value: "0" } });
+    expect(readDictationSettings().parakeetIdleMinutes).toBe(0);
+  });
   afterEach(() => window.localStorage.clear());
+
+  it("keeps the OpenRouter online model and fallback controls", () => {
+    render(<DictationSetup baseUrl={null} onToast={() => {}} />);
+    fireEvent.click(screen.getByRole("button", { name: "OpenRouter" }));
+    expect(readDictationSettings().provider).toBe("open_router");
+    expect(screen.getByLabelText("Model")).toBeInTheDocument();
+    expect(screen.getByLabelText("Fallback model")).toBeInTheDocument();
+  });
 
   it("shows the OpenRouter key for title suggestions with Apple Speech selected", () => {
     render(<DictationSetup baseUrl={null} onToast={() => {}} />);
