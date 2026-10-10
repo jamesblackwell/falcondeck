@@ -115,11 +115,10 @@ export const DiffPanel = memo(function DiffPanel({
   useEffect(() => {
     const previous = previewContextRef.current
     previewContextRef.current = { workspaceId, threadId }
-    if (
-      selection &&
-      (previous.workspaceId !== workspaceId || previous.threadId !== threadId)
-    ) {
-      onSelectionChange(null)
+    if (previous.workspaceId !== workspaceId || previous.threadId !== threadId) {
+      setFilterQuery('')
+      setActiveTab('info')
+      if (selection) onSelectionChange(null)
     }
   }, [onSelectionChange, selection, threadId, workspaceId])
 
@@ -182,7 +181,6 @@ export const DiffPanel = memo(function DiffPanel({
   useEffect(() => {
     if (selectedFile) {
       setActiveTab(selectedView)
-      setFilterQuery('')
     }
   }, [selectedFile, selectedView])
 
@@ -255,8 +253,9 @@ export const DiffPanel = memo(function DiffPanel({
     selectedFile != null &&
     (selectedView === 'files' || !gitEnabled || (hasLoadedDiff && !hasParseableDiff))
 
+  let preview = null
   if (showFileViewer && selectedFile && selectedDirectory == null) {
-    return (
+    preview = (
       <div className="flex h-full min-h-0 flex-col bg-surface-1">
         <FileView
           key={`${workspaceId}:${selectedFile}`}
@@ -281,15 +280,11 @@ export const DiffPanel = memo(function DiffPanel({
         />
       </div>
     )
-  }
-
-  if (selectedFile && selectedDirectory == null) {
+  } else if (selectedFile && selectedDirectory == null) {
     const previewContent = content ?? file?.content ?? null
     const waitingForMarkdown =
-      isMarkdownFilePath(selectedFile) &&
-      isFileLoading &&
-      previewContent == null
-    return (
+      isMarkdownFilePath(selectedFile) && isFileLoading && previewContent == null
+    preview = (
       <div className="flex h-full min-h-0 flex-col bg-surface-1">
         <DiffView
           key={`${workspaceId}:${selectedFile}`}
@@ -309,36 +304,40 @@ export const DiffPanel = memo(function DiffPanel({
 
   return (
     <div className="flex h-full min-h-0 flex-col bg-surface-1">
-      <FileListView
-        key={`${workspaceId}:${threadId}`}
-        entries={status?.entries ?? EMPTY_ENTRIES}
-        files={workspaceFiles?.files ?? EMPTY_FILES}
-        filesTruncated={workspaceFiles?.truncated ?? false}
-        branch={status?.branch ?? null}
-        activeTab={activeTab}
-        isLoading={isLoading}
-        isFilesLoading={isFilesLoading}
-        error={error}
-        filesError={filesError}
-        onTabChange={(tab) => {
-          setActiveTab(tab)
-          if (selectedDirectory != null) onSelectionChange(null)
-        }}
-        onRefresh={refreshChanges}
-        onRefreshFiles={refreshWorkspaceFiles}
-        isReviewPending={isReviewPending}
-        onStartReview={api?.startReview && workspaceId && reviewThreadId ? startReview : null}
-        onSelectChangedFile={selectChangedFile}
-        onSelectWorkspaceFile={selectWorkspaceFile}
-        localRoot={localRoot}
-        onLocalPath={onLocalPath}
-        editors={editors}
-        query={filterQuery}
-        onQueryChange={setFilterQuery}
-        info={info}
-        showChanges={gitEnabled}
-        expandedDirectory={selectedDirectory}
-      />
+      {preview}
+      <div hidden={preview != null} className="h-full min-h-0">
+        <FileListView
+          isActive={preview == null}
+          key={`${workspaceId}:${threadId}`}
+          entries={status?.entries ?? EMPTY_ENTRIES}
+          files={workspaceFiles?.files ?? EMPTY_FILES}
+          filesTruncated={workspaceFiles?.truncated ?? false}
+          branch={status?.branch ?? null}
+          activeTab={activeTab}
+          isLoading={isLoading}
+          isFilesLoading={isFilesLoading}
+          error={error}
+          filesError={filesError}
+          onTabChange={(tab) => {
+            setActiveTab(tab)
+            if (selectedDirectory != null) onSelectionChange(null)
+          }}
+          onRefresh={refreshChanges}
+          onRefreshFiles={refreshWorkspaceFiles}
+          isReviewPending={isReviewPending}
+          onStartReview={api?.startReview && workspaceId && reviewThreadId ? startReview : null}
+          onSelectChangedFile={selectChangedFile}
+          onSelectWorkspaceFile={selectWorkspaceFile}
+          localRoot={localRoot}
+          onLocalPath={onLocalPath}
+          editors={editors}
+          query={filterQuery}
+          onQueryChange={setFilterQuery}
+          info={info}
+          showChanges={gitEnabled}
+          expandedDirectory={selectedDirectory}
+        />
+      </div>
     </div>
   )
 })

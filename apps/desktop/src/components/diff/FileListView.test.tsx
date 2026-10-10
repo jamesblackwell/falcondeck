@@ -1,5 +1,5 @@
 import { useState } from 'react'
-import { createEvent, fireEvent, render, screen } from '@testing-library/react'
+import { act, createEvent, fireEvent, render, screen } from '@testing-library/react'
 import { describe, expect, it, vi } from 'vitest'
 
 import { FileListView, type FileListViewProps } from './FileListView'
@@ -74,13 +74,42 @@ function renderContextMenuView(options: {
 }
 
 describe('FileListView', () => {
+  it('navigates directories with arrow keys and uses one tree tab stop', () => {
+    renderContextMenuView()
+    const folder = screen.getByRole('treeitem', { name: 'src' })
+    act(() => folder.focus())
+    fireEvent.keyDown(folder, { key: 'ArrowRight' })
+    const file = screen.getByRole('treeitem', { name: 'App.tsx' })
+    fireEvent.keyDown(folder, { key: 'ArrowRight' })
+    expect(file).toHaveFocus()
+    expect(folder.tabIndex).toBe(-1)
+    expect(file.tabIndex).toBe(0)
+    fireEvent.keyDown(file, { key: 'ArrowLeft' })
+    expect(folder).toHaveFocus()
+    fireEvent.keyDown(folder, { key: 'ArrowLeft' })
+    expect(screen.queryByRole('treeitem', { name: 'App.tsx' })).toBeNull()
+  })
+
+  it('allows collapsing search matches without changing browsing expansion', () => {
+    renderContextMenuView()
+    const input = screen.getByRole('textbox')
+    fireEvent.change(input, { target: { value: 'App' } })
+    expect(screen.getByRole('treeitem', { name: 'App.tsx' })).toBeVisible()
+    fireEvent.click(screen.getByRole('treeitem', { name: 'src' }))
+    expect(screen.queryByRole('treeitem', { name: 'App.tsx' })).toBeNull()
+    fireEvent.keyDown(input, { key: 'Escape' })
+    expect(screen.queryByRole('treeitem', { name: 'App.tsx' })).toBeNull()
+    fireEvent.click(screen.getByRole('treeitem', { name: 'src' }))
+    expect(screen.getByRole('treeitem', { name: 'App.tsx' })).toBeVisible()
+  })
+
   it('opens a file from its context menu in the default app or a detected editor', () => {
     const onLocalPath = vi.fn()
     const { onSelectWorkspaceFile } = renderContextMenuView({
       localRoot: '/Users/me/project',
       onLocalPath,
     })
-    const row = screen.getByRole('button', { name: 'README.md' })
+    const row = screen.getByRole('treeitem', { name: 'README.md' })
 
     const contextMenu = createEvent.contextMenu(row)
     fireEvent(row, contextMenu)
@@ -108,7 +137,7 @@ describe('FileListView', () => {
       const onLocalPath = vi.fn()
       renderContextMenuView({ localRoot: '/Users/me/project', onLocalPath })
 
-      fireEvent.contextMenu(screen.getByRole('button', { name: 'README.md' }))
+      fireEvent.contextMenu(screen.getByRole('treeitem', { name: 'README.md' }))
       fireEvent.click(screen.getByRole('menuitem', { name: 'Open in Default Editor' }))
       expect(onLocalPath).toHaveBeenCalledWith(
         'open-default-editor',
@@ -123,7 +152,7 @@ describe('FileListView', () => {
   it('offers Finder and editor actions for folders from the keyboard menu', () => {
     const onLocalPath = vi.fn()
     renderContextMenuView({ localRoot: '/Users/me/project', onLocalPath })
-    const folder = screen.getByRole('button', { name: 'src' })
+    const folder = screen.getByRole('treeitem', { name: 'src' })
 
     fireEvent.keyDown(folder, { key: 'F10', shiftKey: true })
     expect(screen.queryByRole('menuitem', { name: 'Preview File' })).toBeNull()
@@ -152,7 +181,7 @@ describe('FileListView', () => {
 
   it('keeps preview and relative path actions for remote workspaces', () => {
     renderContextMenuView()
-    fireEvent.contextMenu(screen.getByRole('button', { name: 'README.md' }))
+    fireEvent.contextMenu(screen.getByRole('treeitem', { name: 'README.md' }))
 
     expect(screen.getByRole('menuitem', { name: 'Preview File' })).toBeInTheDocument()
     expect(screen.getByRole('menuitem', { name: 'Copy Relative Path' })).toBeInTheDocument()

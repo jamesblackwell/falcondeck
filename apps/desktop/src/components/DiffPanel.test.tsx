@@ -1,4 +1,5 @@
-import { fireEvent, render, screen, waitFor } from '@testing-library/react'
+import { useState } from 'react'
+import { act, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { ToastProvider } from '@falcondeck/ui'
@@ -39,6 +40,66 @@ function renderPanel(
 }
 
 describe('DiffPanel', () => {
+  it('restores folders, search, scroll and focus after previewing a file', async () => {
+    api.workspaceFiles.mockResolvedValue({
+      files: ['.agents/skills/drums/SKILL.md', 'README.md'],
+      truncated: false,
+    })
+    api.workspaceFile.mockResolvedValue({
+      path: '.agents/skills/drums/SKILL.md',
+      content: '# Skill',
+      is_binary: false,
+      truncated: false,
+      version: 'v1',
+    })
+    function Host() {
+      const [selection, setSelection] = useState<DiffPanelSelection | null>(null)
+      return (
+        <ToastProvider>
+          <DiffPanel
+            api={api}
+            workspaceId="workspace-1"
+            threadId="thread-1"
+            refreshTrigger={0}
+            selection={selection}
+            onSelectionChange={setSelection}
+          />
+        </ToastProvider>
+      )
+    }
+    render(<Host />)
+    fireEvent.click(screen.getByRole('button', { name: 'files' }))
+    fireEvent.click(await screen.findByRole('treeitem', { name: '.agents' }))
+    fireEvent.click(screen.getByRole('treeitem', { name: 'skills' }))
+    fireEvent.click(screen.getByRole('treeitem', { name: 'drums' }))
+    const fileRow = screen.getByRole('treeitem', { name: 'SKILL.md' })
+    const scroller = screen.getByRole('tree').parentElement!
+    scroller.scrollTop = 180
+    fireEvent.scroll(scroller)
+    act(() => fileRow.focus())
+    fireEvent.click(fileRow)
+    fireEvent.click(await screen.findByRole('button', { name: 'Back to files' }))
+    expect(screen.getByRole('treeitem', { name: 'SKILL.md' })).toBeVisible()
+    expect(scroller.scrollTop).toBe(180)
+    expect(fileRow).toHaveFocus()
+
+    fireEvent.change(screen.getByRole('textbox'), {
+      target: { value: 'SKILL' },
+    })
+    fireEvent.click(screen.getByRole('treeitem', { name: 'SKILL.md' }))
+    fireEvent.click(await screen.findByRole('button', { name: 'Back to files' }))
+    expect(screen.getByRole('textbox')).toHaveValue('SKILL')
+    // Re-selecting the active tab should not erase a search either.
+    fireEvent.click(screen.getByRole('button', { name: 'files' }))
+    expect(screen.getByRole('textbox')).toHaveValue('SKILL')
+    fireEvent.keyDown(screen.getByRole('textbox'), { key: 'Escape' })
+    expect(screen.getByRole('textbox')).toHaveValue('')
+    expect(screen.getByRole('treeitem', { name: 'SKILL.md' })).toBeVisible()
+    fireEvent.click(screen.getByRole('button', { name: 'changes' }))
+    fireEvent.click(screen.getByRole('button', { name: 'files' }))
+    expect(await screen.findByRole('treeitem', { name: 'SKILL.md' })).toBeVisible()
+  })
+
   beforeEach(() => {
     vi.clearAllMocks()
     api.workspaceFiles.mockResolvedValue({ files: [], truncated: false })
@@ -57,18 +118,18 @@ describe('DiffPanel', () => {
       onSelectionChange,
     )
 
-    const folder = await screen.findByRole('button', { name: 'submissions' })
+    const folder = await screen.findByRole('treeitem', { name: 'submissions' })
     expect(folder.closest('[role="treeitem"]')).toHaveAttribute('aria-expanded', 'true')
-    expect(screen.getByRole('button', { name: 'acp' })).toBeVisible()
+    expect(screen.getByRole('treeitem', { name: 'acp' })).toBeVisible()
     expect(screen.queryByText('workspace path is not a file')).toBeNull()
     expect(screen.getByRole('button', { name: 'files' })).toHaveAttribute('aria-pressed', 'true')
 
     // Folder expansion remains interactive after opening a link.
     fireEvent.click(folder)
-    expect(screen.queryByRole('button', { name: 'acp' })).toBeNull()
+    expect(screen.queryByRole('treeitem', { name: 'acp' })).toBeNull()
     fireEvent.click(folder)
-    fireEvent.click(screen.getByRole('button', { name: 'acp' }))
-    fireEvent.click(screen.getByRole('button', { name: 'draft.md' }))
+    fireEvent.click(screen.getByRole('treeitem', { name: 'acp' }))
+    fireEvent.click(screen.getByRole('treeitem', { name: 'draft.md' }))
     expect(onSelectionChange).toHaveBeenCalledWith({
       workspaceId: 'workspace-1', filePath: 'docs/marketing/submissions/acp/draft.md', view: 'files',
     })
@@ -178,13 +239,15 @@ describe('DiffPanel', () => {
   })
 
   it('ignores a stale workspace file read after switching files', async () => {
-    let finishSlow: ((file: {
-      path: string
-      content: string
-      is_binary: boolean
-      truncated: boolean
-      version: string
-    }) => void) | undefined
+    let finishSlow:
+      | ((file: {
+          path: string
+          content: string
+          is_binary: boolean
+          truncated: boolean
+          version: string
+        }) => void)
+      | undefined
     const slow = new Promise<{
       path: string
       content: string

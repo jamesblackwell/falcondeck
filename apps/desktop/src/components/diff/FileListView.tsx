@@ -1,11 +1,14 @@
-import { memo, useCallback, useDeferredValue, useMemo, useState } from 'react'
 import {
-  GitBranch,
-  RefreshCw,
-  ScanSearch,
-  Search,
-  X,
-} from 'lucide-react'
+  memo,
+  useCallback,
+  useDeferredValue,
+  useMemo,
+  useState,
+  useRef,
+  useLayoutEffect,
+  useEffect,
+} from 'react'
+import { GitBranch, RefreshCw, ScanSearch, Search, X } from 'lucide-react'
 
 import type { GitStatusEntry } from '@falcondeck/client-core'
 import type { LocalPathEditor, LocalPathHandler, MenuPosition } from '@falcondeck/chat-ui'
@@ -16,11 +19,13 @@ import { FileBrowserContextMenu, type FileBrowserMenuTarget } from './FileBrowse
 import { FileTreeView } from './FileTreeView'
 import { FileTypeIcon } from './FileTypeIcon'
 import { InfoView, type ReviewInfoContext } from './InfoView'
+import { directoryPathsForMatches } from './file-tree'
 import { basePart, dirPart, isNotRepositoryError, statusLabel, statusToneClass } from './diff-utils'
 
 export type ReviewPanelTab = 'info' | 'changes' | 'files'
 
 export type FileListViewProps = {
+  isActive?: boolean
   entries: GitStatusEntry[]
   files: string[]
   filesTruncated: boolean
@@ -100,6 +105,7 @@ const FileRow = memo(function FileRow({
 })
 
 export const FileListView = memo(function FileListView({
+  isActive = true,
   entries,
   files,
   filesTruncated,
@@ -125,6 +131,26 @@ export const FileListView = memo(function FileListView({
   showChanges = true,
   expandedDirectory = null,
 }: FileListViewProps) {
+  const rootRef = useRef<HTMLDivElement>(null)
+  const returnFocusRef = useRef<HTMLElement | null>(null)
+  const [expanded, setExpanded] = useState<Set<string>>(() => new Set())
+  useEffect(() => {
+    if (expandedDirectory == null) return
+    const ancestors = directoryPathsForMatches([`${expandedDirectory}/`])
+    setExpanded((current) => new Set([...current, ...ancestors]))
+  }, [expandedDirectory])
+  useLayoutEffect(() => {
+    if (isActive) {
+      if (returnFocusRef.current?.isConnected) returnFocusRef.current.focus({ preventScroll: true })
+      returnFocusRef.current = null
+    } else {
+      const focused = document.activeElement
+      if (focused instanceof HTMLElement && rootRef.current?.contains(focused)) {
+        returnFocusRef.current = focused
+      }
+      setMenu(null)
+    }
+  }, [isActive])
   const [menu, setMenu] = useState<FileBrowserMenuTarget | null>(null)
   const deferredQuery = useDeferredValue(query.trim().toLowerCase())
   const statusByPath = useMemo(
@@ -185,7 +211,13 @@ export const FileListView = memo(function FileListView({
   const activeLoading = visibleTab === 'files' ? isFilesLoading : isLoading
 
   return (
-    <div className="flex h-full flex-col">
+    <div
+      ref={rootRef}
+      className="flex h-full flex-col"
+      onFocusCapture={(event) => {
+        returnFocusRef.current = event.target as HTMLElement
+      }}
+    >
       {/* h-12 matches the sidebar and session headers so the borders run as
           one continuous line across the window. */}
       <div className="flex h-12 shrink-0 items-center gap-2 border-b border-border-subtle px-3">
@@ -195,6 +227,7 @@ export const FileListView = memo(function FileListView({
               key={tab}
               type="button"
               onClick={() => {
+                if (tab === visibleTab) return
                 onTabChange(tab)
                 onQueryChange('')
               }}
@@ -266,6 +299,13 @@ export const FileListView = memo(function FileListView({
             <input
               value={query}
               onChange={(event) => onQueryChange(event.target.value)}
+              onKeyDown={(event) => {
+                if (event.key === 'Escape' && query) {
+                  event.preventDefault()
+                  event.stopPropagation()
+                  onQueryChange('')
+                }
+              }}
               placeholder={visibleTab === 'changes' ? 'Filter changed files' : 'Go to file'}
               className="min-w-0 flex-1 bg-transparent text-[length:var(--fd-text-sm)] text-fg-primary outline-none placeholder:text-fg-faint"
             />
@@ -352,12 +392,13 @@ export const FileListView = memo(function FileListView({
               </p>
             ) : null}
             <FileTreeView
+              expanded={expanded}
+              onExpandedChange={setExpanded}
               paths={filteredFiles}
               statusByPath={statusByPath}
               query={deferredQuery}
               onSelectFile={onSelectWorkspaceFile}
               onOpenContextMenu={openTreeContextMenu}
-              expandedDirectory={expandedDirectory}
             />
           </>
         )}
