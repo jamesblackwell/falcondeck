@@ -4,6 +4,8 @@ use falcondeck_core::ThreadDetailMode;
 use falcondeck_core::{ExtensionAgentTool, ExtensionToolResponse, ThreadOrigin};
 use serde::Deserialize;
 
+mod read;
+
 const LIST: &str = "falcondeck_list_threads";
 const VIEW: &str = "falcondeck_view_thread";
 const CREATE: &str = "falcondeck_create_thread";
@@ -21,11 +23,16 @@ pub(super) fn catalog() -> Vec<ExtensionAgentTool> {
             "limit": {"type":"integer", "minimum":1, "maximum":100},
             "max_chars": {"type":"integer", "minimum":512, "maximum":24000}
         }), vec![]),
-        (VIEW, "View thread", "Read a bounded transcript tail as handoff markdown. Use the returned before cursor for older items. Only this workspace is accessible.", json!({
+        (VIEW, "View thread", "Read compact user/assistant text (default: 20 messages, 6000 characters). Use before for older history, query for case-insensitive literal search with excerpts, and item_id plus offset to expand a message. Tools and reasoning are opt-in. Search scans at most 1000 items per call; follow its before cursor until no older items remain. Only this workspace is accessible.", json!({
             "thread_id": {"type":"string", "minLength":1},
             "before": {"type":"string", "minLength":1},
-            "limit": {"type":"integer", "minimum":1, "maximum":100},
-            "max_chars": {"type":"integer", "minimum":512, "maximum":24000}
+            "limit": {"type":"integer", "minimum":1, "maximum":100, "default":20},
+            "max_chars": {"type":"integer", "minimum":512, "maximum":24000, "default":6000},
+            "include_tools": {"type":"boolean", "default":false, "description":"Include tool output and other activity (files, plans, reviews)."},
+            "include_reasoning": {"type":"boolean", "default":false},
+            "query": {"type":"string", "minLength":1, "maxLength":256, "description":"Literal case-insensitive text search in selected item kinds; not a regular expression. Keep the same query and filters when paging."},
+            "item_id": {"type":"string", "minLength":1, "description":"Expand one item from a previous read; cannot combine with before or query. Explicit selection includes its kind regardless of filters."},
+            "offset": {"type":"integer", "minimum":0, "description":"Character offset within the expanded item's body; only with item_id. Follow next_offset for more."}
         }), vec!["thread_id"]),
         (MESSAGE, "Message thread", "Send a message to an existing thread in this workspace, labelled with the sending thread. Defaults to steering its active turn, falling back to the queue when steering is unavailable; idle threads start a new turn. Use delivery=queue to wait for the active turn. Returns after admission, without waiting for a reply. Self-messaging is rejected; approvals remain in FalconDeck UI.", json!({
             "thread_id": {"type":"string", "minLength":1},
@@ -180,16 +187,13 @@ impl AppState {
                 Ok(response(markdown))
             }
             VIEW => {
-                let a: ReadArgs = args(arguments)?;
+                let a: read::ViewArgs = args(arguments)?;
                 let target = a
                     .thread_id
                     .as_deref()
                     .filter(|s| !s.is_empty())
                     .ok_or_else(|| DaemonError::BadRequest("thread_id is required".into()))?;
-                Ok(response(
-                    self.thread_handoff(&workspace, target, a.before, a.limit, a.max_chars)
-                        .await?,
-                ))
+                Ok(response(read::view(self, &workspace, target, &a).await?))
             }
             MESSAGE => {
                 let a: MessageArgs = args(arguments)?;
@@ -362,156 +366,19 @@ impl AppState {
         limit: Option<usize>,
         cap: Option<usize>,
     ) -> Result<String, DaemonError> {
-        let limit = limit.unwrap_or(40).clamp(1, MAX_ITEMS);
-        let cap = cap.unwrap_or(MAX_CHARS).clamp(512, MAX_CHARS);
-        let detail = self
-            .thread_detail_with_request(&ThreadDetailRequest {
-                workspace_id: workspace.into(),
-                thread_id: thread.into(),
-                mode: if before.is_some() {
-                    ThreadDetailMode::Before
-                } else {
-                    ThreadDetailMode::Tail
-                },
-                limit: Some(limit),
-                before_item_id: before,
-                inline_images: Some(false),
-                tool_output_bytes: Some(2000),
-                strict_limit: Some(true),
-                compact_workspace: Some(true),
-                refresh_native: None,
-            })
-            .await?;
-        Ok(handoff_markdown(&detail, limit, cap))
+        read::view(
+            self,
+            workspace,
+            thread,
+            &read::ViewArgs {
+                before,
+                limit,
+                max_chars: cap,
+                ..Default::default()
+            },
+        )
+        .await
     }
-}
-
-/// Rust handoff projection: readable content only, never provider metadata or ConversationItem JSON.
-fn item_markdown(item: &ConversationItem) -> String {
-    match item {
-        ConversationItem::UserMessage {
-            text, attachments, ..
-        } => {
-            let mut body = format!("## User\n\n{}", capped(text.trim(), 12_000));
-            for attachment in attachments.iter().take(20) {
-                body.push_str(&format!(
-                    "\n- Attachment: {}",
-                    line(attachment.name.as_deref().unwrap_or("Image"), 256)
-                ));
-            }
-            body
-        }
-        ConversationItem::AssistantMessage { text, .. } => {
-            format!("## Assistant\n\n{}", capped(text.trim(), 12_000))
-        }
-        ConversationItem::Reasoning { content, .. } => {
-            format!("## Reasoning\n\n{}", capped(content, 2000))
-        }
-        ConversationItem::CodeReview { content, .. } => {
-            format!("## Code review\n\n{}", capped(content, 4000))
-        }
-        ConversationItem::ToolCall {
-            title,
-            output,
-            exit_code,
-            ..
-        } => format!(
-            "## Tool — {}\n\n{}{}",
-            line(title, 256),
-            exit_code
-                .filter(|c| *c != 0)
-                .map(|c| format!("Exit code: {c}\n\n"))
-                .unwrap_or_default(),
-            capped(output.as_deref().unwrap_or(""), 2000)
-        ),
-        ConversationItem::FileChange { changes, .. } => format!(
-            "## Files edited\n\n{}",
-            changes
-                .iter()
-                .take(100)
-                .map(|c| format!("- {}", line(&c.path, 256)))
-                .collect::<Vec<_>>()
-                .join("\n")
-        ),
-        ConversationItem::Plan { plan, .. } => format!(
-            "## Plan\n\n{}\n{}",
-            capped(plan.explanation.as_deref().unwrap_or(""), 1000),
-            plan.steps
-                .iter()
-                .take(50)
-                .map(|s| format!("- {}", line(&s.step, 400)))
-                .collect::<Vec<_>>()
-                .join("\n")
-        ),
-        ConversationItem::ContextCompaction { .. } => {
-            "## Context compaction\n\nEarlier conversation was summarized for continuity.".into()
-        }
-        ConversationItem::Artifact { artifact, .. } => format!(
-            "## Artifact — {}\n\n{}",
-            line(&artifact.title, 256),
-            capped(artifact.content.as_deref().unwrap_or(""), 4000)
-        ),
-        ConversationItem::Image { image, .. } => format!(
-            "## Image\n\n{}",
-            line(image.alt_text.as_deref().unwrap_or("Image"), 400)
-        ),
-        ConversationItem::WebSearch { search, .. } => {
-            format!("## Web search\n\n{}", line(&search.query, 400))
-        }
-        ConversationItem::Unsupported { reason, .. } => {
-            format!("## Unsupported output\n\n{}", line(reason, 400))
-        }
-        ConversationItem::Diff { .. } => "## Diff\n\nDiff omitted from bounded handoff.".into(),
-        ConversationItem::Service { message, .. } => {
-            format!("## Service\n\n{}", capped(message, 1000))
-        }
-        ConversationItem::InteractiveRequest { resolved, .. } => format!(
-            "## Interactive request\n\n{}",
-            if *resolved {
-                "Resolved in FalconDeck."
-            } else {
-                "Awaiting response in FalconDeck UI."
-            }
-        ),
-    }
-}
-
-fn handoff_markdown(detail: &ThreadDetail, limit: usize, cap: usize) -> String {
-    // Tail detail may prepend a non-contiguous user prompt; discard it to preserve the item cap and cursor.
-    let items = &detail.items[detail.items.len().saturating_sub(limit)..];
-    let mut sections = Vec::new();
-    let mut used = 0;
-    let budget = cap.saturating_sub(400);
-    let mut oldest = None;
-    for item in items.iter().rev() {
-        let section = item_markdown(item);
-        let size = section.chars().count() + 2;
-        if used + size > budget && !sections.is_empty() {
-            break;
-        }
-        let section = capped(&section, budget.saturating_sub(used + 2));
-        used += section.chars().count() + 2;
-        sections.push(section);
-        oldest = Some(workspace_ops::conversation_item_id(item));
-    }
-    let has_older = detail.has_older || sections.len() < detail.items.len();
-    sections.reverse();
-    let header = format!(
-        "# Thread {}\n\n{}\n\n",
-        line(&detail.thread.id, 128),
-        if has_older {
-            format!(
-                "Older items: before={}",
-                line(
-                    oldest.or(detail.oldest_item_id.as_deref()).unwrap_or(""),
-                    128
-                )
-            )
-        } else {
-            "No older items.".into()
-        }
-    );
-    capped(&format!("{header}{}", sections.join("\n\n")), cap)
 }
 
 #[cfg(test)]
@@ -957,7 +824,7 @@ mod tests {
             .await
             .unwrap();
         let text = page.result.as_str().unwrap();
-        assert!(text.contains("## User\n\nsecond") && text.contains("answer one"));
+        assert!(text.contains("## User") && text.contains("second") && text.contains("answer one"));
         assert!(text.contains("before=a1"));
         assert!(!text.contains("answer two"));
         set_items(
@@ -985,6 +852,200 @@ mod tests {
             );
         }
     }
+    #[tokio::test]
+    async fn character_budget_pagination_keeps_every_unshown_message() {
+        let (app, _temp) = fixture().await;
+        let bodies: Vec<_> = (0..15)
+            .map(|i| format!("message-{i}: {}", "x".repeat(500)))
+            .collect();
+        set_items(
+            &app,
+            bodies
+                .iter()
+                .enumerate()
+                .map(|(i, body)| assistant(&format!("a{i}"), body))
+                .collect(),
+        )
+        .await;
+        let mut before = None;
+        let mut seen = Vec::new();
+        loop {
+            let mut arguments = json!({"thread_id":"thread-1", "max_chars":1500});
+            if let Some(cursor) = &before {
+                arguments["before"] = json!(cursor);
+            }
+            let page = app
+                .invoke_extension_tool(call(VIEW, arguments))
+                .await
+                .unwrap();
+            let text = page.result.as_str().unwrap();
+            assert!(text.chars().count() <= 1500);
+            for line in text.lines().filter_map(|line| line.strip_prefix("Id: ")) {
+                let id = line.split(" | ").next().unwrap().to_string();
+                assert!(!seen.contains(&id), "duplicate {id}");
+                seen.push(id);
+            }
+            let next = text
+                .lines()
+                .find_map(|line| line.strip_prefix("Older items: before="))
+                .map(|line| line.split_whitespace().next().unwrap().to_string());
+            let Some(next) = next else {
+                break;
+            };
+            assert_ne!(before.as_ref(), Some(&next));
+            before = Some(next);
+        }
+        assert_eq!(seen.len(), bodies.len());
+        let page = app
+            .invoke_extension_tool(call(VIEW, json!({"thread_id":"thread-1"})))
+            .await
+            .unwrap();
+        assert!(page.result.as_str().unwrap().chars().count() <= 6000);
+    }
+
+    fn tool(id: &str, output: &str) -> ConversationItem {
+        serde_json::from_value(json!({
+            "kind":"tool_call", "id":id, "title":"exec", "tool_kind":"command", "output":output,
+            "status":"completed", "created_at":Utc::now()
+        }))
+        .unwrap()
+    }
+
+    #[tokio::test]
+    async fn compact_view_skips_activity_and_preserves_message_pagination() {
+        let (app, _temp) = fixture().await;
+        let mut items = vec![
+            user("u1", "original question"),
+            assistant("a1", "first answer"),
+        ];
+        for i in 0..150 {
+            items.push(tool(&format!("tool-{i}"), "NOISY TOOL OUTPUT"));
+        }
+        items.push(
+            serde_json::from_value(json!({"kind":"reasoning", "id":"r1",
+            "content":"PRIVATE REASONING", "created_at":Utc::now()}))
+            .unwrap(),
+        );
+        items.push(assistant("a2", "final answer"));
+        set_items(&app, items).await;
+        let page = app
+            .invoke_extension_tool(call(VIEW, json!({"thread_id":"thread-1","limit":2})))
+            .await
+            .unwrap();
+        let text = page.result.as_str().unwrap();
+        assert!(
+            text.contains("first answer") && text.contains("final answer"),
+            "{text}"
+        );
+        assert!(
+            !text.contains("NOISY") && !text.contains("PRIVATE REASONING"),
+            "{text}"
+        );
+        assert!(text.contains("before=a1"), "{text}");
+        let older = app
+            .invoke_extension_tool(call(VIEW, json!({"thread_id":"thread-1","before":"a1"})))
+            .await
+            .unwrap();
+        assert!(older.result.as_str().unwrap().contains("original question"));
+        let expanded = app
+            .invoke_extension_tool(call(
+                VIEW,
+                json!({"thread_id":"thread-1", "include_tools":true,"include_reasoning":true}),
+            ))
+            .await
+            .unwrap();
+        assert!(
+            expanded
+                .result
+                .as_str()
+                .unwrap()
+                .contains("NOISY TOOL OUTPUT")
+        );
+        assert!(
+            expanded
+                .result
+                .as_str()
+                .unwrap()
+                .contains("PRIVATE REASONING")
+        );
+    }
+
+    #[tokio::test]
+    async fn search_finds_literal_matches_beyond_previews_and_reports_incomplete_scans() {
+        let (app, _temp) = fixture().await;
+        let body = format!("{} Needle.* 終", "🦅".repeat(15_000));
+        let mut items = vec![user("u1", &body), tool("t1", &body)];
+        for i in 0..1000 {
+            items.push(assistant(&format!("a{i}"), "unrelated"));
+        }
+        set_items(&app, items).await;
+        let page = app
+            .invoke_extension_tool(call(
+                VIEW,
+                json!({"thread_id":"thread-1","query":"needle.*"}),
+            ))
+            .await
+            .unwrap();
+        let text = page.result.as_str().unwrap();
+        assert!(
+            text.contains("scanned 1000 items") && text.contains("before=a0"),
+            "{text}"
+        );
+        assert!(
+            text.contains("No matching messages in scanned history"),
+            "{text}"
+        );
+        let page = app.invoke_extension_tool(call(VIEW, json!({"thread_id":"thread-1","before":"a0","query":"needle.*","include_tools":true}))).await.unwrap();
+        let text = page.result.as_str().unwrap();
+        assert!(text.contains("Id: u1") && text.contains("Id: t1"), "{text}");
+        assert_eq!(text.matches("Needle.* 終").count(), 2, "{text}");
+        assert!(text.contains("No older items"), "{text}");
+        assert!(text.chars().count() < 2000, "{}", text.chars().count());
+    }
+
+    #[tokio::test]
+    async fn item_expansion_pages_unicode_body_without_loss() {
+        let (app, _temp) = fixture().await;
+        let body = "🦅終abc".repeat(5000);
+        set_items(&app, vec![tool("t1", &body)]).await;
+        let mut offset = 0;
+        let mut rebuilt = String::new();
+        loop {
+            let page = app.invoke_extension_tool(call(VIEW, json!({"thread_id":"thread-1", "item_id":"t1", "offset":offset,"max_chars":1000}))).await.unwrap();
+            let text = page.result.as_str().unwrap();
+            assert!(text.chars().count() <= 1000);
+            let (_, content) = text.rsplit_once("\n\n").unwrap();
+            rebuilt.push_str(content.trim_matches('…'));
+            let next = text
+                .split("next_offset=")
+                .nth(1)
+                .and_then(|value| value.lines().next())
+                .and_then(|value| value.parse::<usize>().ok());
+            let Some(next) = next else {
+                break;
+            };
+            assert!(next > offset);
+            offset = next;
+        }
+        assert_eq!(rebuilt, body);
+        for extra in [
+            json!({"offset":1}),
+            json!({"item_id":"t1","query":"abc"}),
+            json!({"item_id":"t1","before":"t1"}),
+            json!({"item_id":"t1","offset":30000}),
+            json!({"query":" "}),
+            json!({"query":"x".repeat(257)}),
+        ] {
+            let mut arguments = extra;
+            arguments["thread_id"] = json!("thread-1");
+            assert!(
+                app.invoke_extension_tool(call(VIEW, arguments))
+                    .await
+                    .is_err()
+            );
+        }
+    }
+
     #[tokio::test]
     async fn create_defaults_to_no_parent_context_and_persists_origin() {
         let (app, temp) = fixture().await;
@@ -1029,7 +1090,7 @@ mod tests {
             .pending_handoff_context
             .as_ref()
             .unwrap();
-        assert!(context.contains("## User\n\nparent tail text"));
+        assert!(context.contains("## User") && context.contains("parent tail text"));
         drop(workspaces);
         let result = app
             .invoke_extension_tool(call(CREATE, json!({"prompt":"do bounded work"})))

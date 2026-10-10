@@ -1042,8 +1042,23 @@ are not extension-host APIs, control operations, or `threads:read` grants;
 
 List reads daemon summaries plus existing search-index opening/recent excerpts
 without transcript hydration. View loads a bounded native-provider tail and
-formats handoff markdown in Rust, with `before` pagination, at most 100 items
-and 24000 characters. No ConversationItem JSON is returned.
+formats compact markdown in Rust. Defaults are 20 user/assistant messages and
+6000 characters (hard caps: 100 messages / 24000 characters). Tool output and
+other activity require `include_tools: true`; reasoning independently requires
+`include_reasoning: true`. Each section includes an item id and body character
+offset. Bodies preview at most 1200 characters; `item_id` expands one item,
+with `offset` / `next_offset` to retrieve the rest without rereading neighbours.
+Explicit item selection includes that kind regardless of the filters. Images
+are not inlined; diff bodies are omitted. No ConversationItem JSON is returned.
+
+`query` is case-insensitive literal text search, not a regular expression. It
+searches the original bodies of the selected kinds (including full tool output
+when opted in), returning excerpts around the first match per item. Search and
+ordinary reads scan at most 1000 underlying items per call and page backwards
+with `before`. Keep query and filters unchanged while paging. A no-match page
+with an older cursor is incomplete; only `No older items` means the beginning
+of available history was reached. Filtered activity still advances the cursor,
+and a character-budget boundary leaves unshown messages for the next page.
 
 Create uses normal thread start and optional first-turn dispatch with existing
 UI approvals. Optional context is `none` (default), `briefing` (summary/index),

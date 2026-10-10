@@ -53,10 +53,22 @@ markdown summaries with last previews and cached opening/recent user excerpts,
 when available; listing does not load transcripts. `limit` defaults to 30 (max
 100), and `max_chars` defaults to 24000 (512–24000).
 
-Use `falcondeck_view_thread` with `thread_id` to read handoff markdown. `limit`
-defaults to 40 items (max 100); `max_chars` has the same bounds as list. The
-newest content wins when the character budget fills. Individual bodies may be
-truncated. Pass the returned `before` item id to read older content.
+Use `falcondeck_view_thread` with `thread_id` for compact user/assistant text.
+Start with defaults: 20 messages / 6000 characters. Hard caps are 100 messages
+and 24000 characters (`max_chars` range 512–24000). Tool output and other
+activity are omitted unless `include_tools: true`; reasoning independently
+requires `include_reasoning: true`. Prefer targeted reads to loading whole threads.
+
+Pass the returned `before` cursor for older history. A call scans at most 1000
+underlying items; an empty filtered page can still have an older cursor. Only
+`No older items` means the beginning of available history was reached.
+
+Use `query` for case-insensitive literal search (1–256 characters, no regex).
+Matches include short excerpts and item ids; search examines original bodies,
+not just previews. Keep query and filters unchanged when paging. To expand a
+specific result, pass its `item_id` without query/before. Follow `next_offset`
+with `offset` (characters in the item body) to read more. This explicit selection
+includes the item's kind regardless of filters. Images and diff bodies are omitted.
 
 Use `falcondeck_create_thread` for independent sibling work. The workspace is
 inherited. Optional arguments: `provider`, `isolation` (`project_folder`, the
