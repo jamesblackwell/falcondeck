@@ -61,6 +61,14 @@ describe('agent directives', () => {
     )
   })
 
+  it('keeps an indented unfinished example visible while streaming', () => {
+    const text = 'Example:\n    ::git-push{branch'
+    expect(splitAgentMessageSegments(text, true)).toEqual([
+      { kind: 'markdown', text },
+    ])
+    expect(assistantMessageCopyText(text, true)).toBe(text)
+  })
+
   it('preserves directive-shaped examples inside Markdown code blocks', () => {
     const fenced = [
       '```text',

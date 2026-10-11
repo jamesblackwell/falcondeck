@@ -15,6 +15,18 @@ const DIRECTIVE_LINE_RE = /^::([a-z0-9][a-z0-9_-]*)\{(.*)\}\s*$/
 const INCOMPLETE_DIRECTIVE_RE = /^::[a-z0-9][a-z0-9_-]*\{/
 const DIRECTIVE_ATTRIBUTE_RE = /([a-zA-Z0-9_-]+)=(?:"([^"]*)"|'([^']*)'|([^\s]+))/g
 
+/** A whole line at column zero. Indented text is an example, not a directive,
+ * so trimming the indent would hide Markdown the parser keeps. */
+function columnZeroLine(line: string) {
+  const candidate = line.trimEnd()
+  return candidate === candidate.trimStart() ? candidate : null
+}
+
+function isTrailingIncompleteDirective(line: string) {
+  const candidate = columnZeroLine(line)
+  return candidate !== null && INCOMPLETE_DIRECTIVE_RE.test(candidate)
+}
+
 function parseDirectiveAttributes(raw: string) {
   const attrs: AgentDirectiveAttribute[] = []
   const unmatched: string[] = []
@@ -35,10 +47,8 @@ function parseDirectiveAttributes(raw: string) {
 }
 
 export function parseAgentDirectiveLine(line: string): AgentDirective | null {
-  const candidate = line.trimEnd()
-  // Transport directives start at column zero. Indented Markdown examples
-  // are content rather than actions.
-  if (candidate !== candidate.trimStart()) return null
+  const candidate = columnZeroLine(line)
+  if (!candidate) return null
   const match = DIRECTIVE_LINE_RE.exec(candidate)
   if (!match) return null
   return { name: match[1], ...parseDirectiveAttributes(match[2]) }
@@ -106,7 +116,7 @@ export function splitAgentMessageSegments(
       suppressTrailingIncompleteDirective &&
       !protectedByFence &&
       index === lines.length - 1 &&
-      INCOMPLETE_DIRECTIVE_RE.test(line.trim())
+      isTrailingIncompleteDirective(line)
     ) return
     buffer.push(line)
   })
@@ -152,7 +162,7 @@ export function agentMarkdownCopyText(text: string, streaming = false) {
       streaming &&
       !protectedByFence &&
       index === lines.length - 1 &&
-      INCOMPLETE_DIRECTIVE_RE.test(line.trim())
+      isTrailingIncompleteDirective(line)
     ) return
     copied.push(line)
   })
