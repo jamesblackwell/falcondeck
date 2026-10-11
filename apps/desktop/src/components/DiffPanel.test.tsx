@@ -102,6 +102,7 @@ describe('DiffPanel', () => {
 
   beforeEach(() => {
     vi.clearAllMocks()
+    api.gitStatus.mockResolvedValue({ branch: 'main', entries: [] })
     api.workspaceFiles.mockResolvedValue({ files: [], truncated: false })
   })
 
@@ -236,6 +237,69 @@ describe('DiffPanel', () => {
     expect(await screen.findByRole('button', { name: 'Back to changed files' })).toBeVisible()
     expect(await screen.findByText('new')).toBeVisible()
     expect(screen.getByText('old')).toBeVisible()
+  })
+
+  it('steps from the ends of the change list when the open file has left it', async () => {
+    const entries = [
+      { path: 'a.ts', status: 'modified' as const, insertions: 1, deletions: 0 },
+      { path: 'b.ts', status: 'modified' as const, insertions: 1, deletions: 0 },
+      { path: 'c.ts', status: 'modified' as const, insertions: 1, deletions: 0 },
+    ]
+    api.gitStatus.mockResolvedValue({ branch: 'main', entries })
+    api.gitDiff.mockResolvedValue({
+      diff: 'diff --git a/gone.ts b/gone.ts\n--- a/gone.ts\n+++ b/gone.ts\n@@ -1 +1 @@\n-old\n+new\n',
+      content: null,
+    })
+    const onSelectionChange = vi.fn()
+    const { rerender } = renderPanel(
+      { workspaceId: 'workspace-1', filePath: 'gone.ts', view: 'changes' },
+      'thread-1',
+      onSelectionChange,
+    )
+
+    await screen.findByRole('button', { name: 'Previous changed file' })
+    await waitFor(() => {
+      onSelectionChange.mockClear()
+      fireEvent.click(screen.getByRole('button', { name: 'Previous changed file' }))
+      expect(onSelectionChange).toHaveBeenLastCalledWith({
+        workspaceId: 'workspace-1',
+        filePath: 'c.ts',
+        view: 'changes',
+      })
+    })
+    onSelectionChange.mockClear()
+    fireEvent.click(screen.getByRole('button', { name: 'Next changed file' }))
+    expect(onSelectionChange).toHaveBeenLastCalledWith({
+      workspaceId: 'workspace-1',
+      filePath: 'a.ts',
+      view: 'changes',
+    })
+
+    onSelectionChange.mockClear()
+    rerender(
+      <ToastProvider>
+        <DiffPanel
+          api={api}
+          workspaceId="workspace-1"
+          threadId="thread-1"
+          refreshTrigger={0}
+          selection={{ workspaceId: 'workspace-1', filePath: 'b.ts', view: 'changes' }}
+          onSelectionChange={onSelectionChange}
+        />
+      </ToastProvider>,
+    )
+    fireEvent.click(await screen.findByRole('button', { name: 'Previous changed file' }))
+    expect(onSelectionChange).toHaveBeenLastCalledWith({
+      workspaceId: 'workspace-1',
+      filePath: 'a.ts',
+      view: 'changes',
+    })
+    fireEvent.click(screen.getByRole('button', { name: 'Next changed file' }))
+    expect(onSelectionChange).toHaveBeenLastCalledWith({
+      workspaceId: 'workspace-1',
+      filePath: 'c.ts',
+      view: 'changes',
+    })
   })
 
   it('ignores a stale workspace file read after switching files', async () => {

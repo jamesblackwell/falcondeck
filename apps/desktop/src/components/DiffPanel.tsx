@@ -232,10 +232,17 @@ export const DiffPanel = memo(function DiffPanel({
 
   const adjacentSelection = useCallback(
     (direction: -1 | 1) => {
-      if (!selectedFile || !status?.entries.length) return
-      const currentIndex = status.entries.findIndex((entry) => entry.path === selectedFile)
-      const nextIndex = (currentIndex + direction + status.entries.length) % status.entries.length
-      const next = status.entries[nextIndex]
+      const entries = status?.entries
+      if (!selectedFile || !entries?.length) return
+      const currentIndex = entries.findIndex((entry) => entry.path === selectedFile)
+      // The open path can leave git status while its diff stays on screen.
+      let nextIndex: number
+      if (currentIndex < 0) {
+        nextIndex = direction === 1 ? 0 : entries.length - 1
+      } else {
+        nextIndex = (currentIndex + direction + entries.length) % entries.length
+      }
+      const next = entries[nextIndex]
       if (next) selectFile(next.path, 'changes')
     },
     [selectFile, selectedFile, status?.entries],
