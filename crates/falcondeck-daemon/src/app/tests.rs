@@ -416,7 +416,10 @@ async fn restoring_a_partly_live_workspace_attaches_claude_without_losing_new_th
         })
         .await
         .unwrap();
-    let early_runtime = app.ensure_claude_runtime_for(&placeholder.id).await.unwrap();
+    let early_runtime = app
+        .ensure_claude_runtime_for(&placeholder.id)
+        .await
+        .unwrap();
     assert!(!app.inner.workspaces.lock().await[&placeholder.id].is_bootstrapped());
 
     super::workspace_ops::connect_workspace_internal(
