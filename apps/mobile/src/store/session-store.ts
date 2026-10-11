@@ -167,6 +167,7 @@ interface SessionActions {
   selectNewThread: (workspaceId: string) => void;
   applyThreadHandle: (handle: ThreadHandle) => void;
   applyThreadSummary: (thread: ThreadSummary) => void;
+  dropInteractiveRequest: (requestId: string) => void;
   /** Drops the thread from the sidebar immediately; restore with the undo. */
   archiveThreadLocally: (threadId: string) => ThreadArchiveUndo | null;
   restoreArchivedThread: (undo: ThreadArchiveUndo) => void;
@@ -1062,6 +1063,22 @@ export const useSessionStore = create<SessionStore>((set, get) => ({
       };
     });
     schedulePersistStateCache();
+  },
+
+  dropInteractiveRequest: (requestId) => {
+    set((state) => {
+      if (!state.snapshot?.interactive_requests.some((request) => request.request_id === requestId)) {
+        return state;
+      }
+      return {
+        snapshot: {
+          ...state.snapshot,
+          interactive_requests: state.snapshot.interactive_requests.filter(
+            (request) => request.request_id !== requestId,
+          ),
+        },
+      };
+    });
   },
 
   archiveThreadLocally: (threadId) => {

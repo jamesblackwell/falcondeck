@@ -498,6 +498,7 @@ export function useSessionActions() {
           { requestIdPrefix: "mobile-interactive" },
         );
         relay._setError(null);
+        useSessionStore.getState().dropInteractiveRequest(requestId);
       } catch (e) {
         const error =
           e instanceof Error ? e : new Error("Interactive response failed");

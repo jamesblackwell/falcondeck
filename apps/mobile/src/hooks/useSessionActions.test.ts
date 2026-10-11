@@ -17,6 +17,7 @@ import { useUIStore } from "@/store/ui-store";
 import { useSessionActions } from "./useSessionActions";
 
 import {
+  approval,
   assistantMessage,
   snapshot,
   snapshotEvent,
@@ -997,6 +998,9 @@ describe("respondInteractive", () => {
       _callRpc: rpc as RelayStoreState["_callRpc"],
       _setError: setError as RelayStoreState["_setError"],
     } as Partial<RelayStoreState>);
+    useSessionStore.getState().applyDaemonEvent(
+      snapshotEvent(snapshot({ interactive_requests: [approval({ request_id: "question-1" })] })),
+    );
     const harness = mountSessionActions();
     try {
       await act(async () => {
@@ -1024,6 +1028,11 @@ describe("respondInteractive", () => {
       { requestIdPrefix: "mobile-interactive" },
     );
     expect(setError).toHaveBeenCalledWith(null);
+    expect(
+      useSessionStore
+        .getState()
+        .snapshot?.interactive_requests.some((request) => request.request_id === "question-1"),
+    ).toBe(false);
   });
 
   it("reports and rethrows failures so the pinned answer remains retryable", async () => {
