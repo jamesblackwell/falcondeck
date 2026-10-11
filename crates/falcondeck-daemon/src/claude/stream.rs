@@ -526,9 +526,17 @@ pub(crate) fn result_is_cancelled(value: &Value) -> bool {
     if value.get("type").and_then(Value::as_str) != Some("result") {
         return false;
     }
+    // `result` on a success event is the assistant's answer, not a status
+    // code. Scanning it marks ordinary replies ("cancellation token") as
+    // interrupts. Only an error payload's result text is an abort signal.
+    let result_reports_abort = value
+        .get("is_error")
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+        && cancelled_signal(value.get("result").and_then(Value::as_str));
     if cancelled_signal(value.get("subtype").and_then(Value::as_str))
         || cancelled_signal(value.get("stop_reason").and_then(Value::as_str))
-        || cancelled_signal(value.get("result").and_then(Value::as_str))
+        || result_reports_abort
     {
         return true;
     }
@@ -729,6 +737,18 @@ mod tests {
             "subtype": "success",
             "is_error": false,
             "stop_reason": "cancelled"
+        })));
+        assert!(!result_is_cancelled(&json!({
+            "type": "result",
+            "subtype": "success",
+            "is_error": false,
+            "result": "Use a cancellation token and do not interrupt the running job."
+        })));
+        assert!(result_is_cancelled(&json!({
+            "type": "result",
+            "subtype": "error_during_execution",
+            "is_error": true,
+            "result": "Request was aborted"
         })));
     }
 
