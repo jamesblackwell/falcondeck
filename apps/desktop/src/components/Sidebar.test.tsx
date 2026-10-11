@@ -510,6 +510,97 @@ describe("DesktopSidebar", () => {
     expect(onSelectThread).toHaveBeenCalledWith("workspace-1", "pinned-thread");
   });
 
+  it("shows the project icon beside each pinned thread", () => {
+    renderSidebar({
+      groups: [
+        {
+          workspace: workspace({
+            id: "workspace-1",
+            path: "/Users/james/quizlet",
+          }),
+          threads: [
+            thread({
+              id: "pinned-thread",
+              title: "Pinned chat",
+              is_pinned: true,
+              is_pinned_in_project: false,
+            }),
+            thread({ id: "regular-thread", title: "Project chat" }),
+          ],
+        },
+        {
+          workspace: workspace({
+            id: "workspace-2",
+            path: "/Users/james/notes",
+          }),
+          threads: [
+            thread({
+              id: "folder-thread",
+              workspace_id: "workspace-2",
+              title: "Folder chat",
+              is_pinned: true,
+            }),
+          ],
+        },
+        {
+          workspace: workspace({
+            id: "chat-w",
+            path: "/Users/james/casual",
+            kind: "casual",
+          }),
+          threads: [
+            thread({
+              id: "casual-thread",
+              workspace_id: "chat-w",
+              title: "Casual chat",
+              is_pinned: true,
+            }),
+          ],
+        },
+      ],
+      selectedThreadId: "regular-thread",
+      workspaceColors: { "workspace-2": "cat-2" },
+      workspaceIconSrc: (workspaceId) =>
+        workspaceId === "workspace-1"
+          ? "https://example.test/quizlet.png"
+          : null,
+    });
+
+    const pinned = screen.getByRole("region", { name: "Pinned" });
+    const quizletRow = within(pinned).getByRole("button", {
+      name: "Pinned chat",
+    });
+    expect(quizletRow).toHaveAccessibleName("Pinned chat");
+    expect(quizletRow.querySelector("img")).toHaveAttribute(
+      "src",
+      "https://example.test/quizlet.png",
+    );
+    expect(
+      document.getElementById(quizletRow.getAttribute("aria-describedby") ?? ""),
+    ).toHaveTextContent("quizlet");
+
+    const notesRow = within(pinned).getByRole("button", {
+      name: "Folder chat",
+    });
+    expect(notesRow.querySelector("img")).toBeNull();
+    const folder = notesRow.querySelector("svg")?.parentElement;
+    expect(folder?.querySelector("svg")).toBeTruthy();
+    expect(folder).toHaveStyle({ color: "var(--fd-cat-2)" });
+    expect(
+      document.getElementById(notesRow.getAttribute("aria-describedby") ?? ""),
+    ).toHaveTextContent("notes");
+
+    const casualRow = within(pinned).getByRole("button", { name: "Casual chat" });
+    expect(casualRow.querySelector("img, svg")).toBeNull();
+    expect(casualRow).not.toHaveAttribute("aria-describedby");
+
+    const projects = screen.getByRole("region", { name: "Projects" });
+    expect(
+      within(projects).queryByRole("img", { name: "quizlet" }),
+    ).not.toBeInTheDocument();
+    expect(within(projects).queryByText("Pinned chat")).not.toBeInTheDocument();
+  });
+
   it("keeps pin-in-project chats at the top of their project instead of the global list", () => {
     renderSidebar({
       groups: [

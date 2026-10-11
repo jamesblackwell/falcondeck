@@ -1,5 +1,5 @@
 import * as React from 'react'
-import { memo, useMemo } from 'react'
+import { memo, useId, useMemo } from 'react'
 import { Archive, ArchiveRestore, Bot, CalendarClock, CircleStop, Pin, Split } from 'lucide-react'
 
 import {
@@ -12,6 +12,7 @@ import { ActivityDiamond, Badge, cn } from '@falcondeck/ui'
 
 import { ProviderIcon } from './provider-icon'
 import { ThreadStageIcon } from './thread-stage-icon'
+import { WorkspaceIcon } from './workspace-icon'
 
 /** The row's only explanation of the outline diamond, so it names the state
  *  rather than the mechanism. */
@@ -25,6 +26,13 @@ export type ThreadItemArchiveHandler = (
   workspaceId: string,
   threadId: string,
 ) => Promise<void> | void
+
+/** Project glyph for a thread row that is shown outside its folder. */
+export type ThreadProjectMark = {
+  src: string | null
+  color: string | null
+  label: string
+}
 
 export type ThreadItemProps = {
   thread: ThreadSummary
@@ -54,6 +62,11 @@ export type ThreadItemProps = {
   tags?: ThreadTag[]
   /** Display name for the thread's harness; labels the trailing mark. */
   providerLabel?: string | null
+  /**
+   * Project glyph for rows that sit outside their folder, such as the global
+   * Pinned list. Casual chats have no project and omit it.
+   */
+  projectMark?: ThreadProjectMark | null
 }
 
 function timeAgo(dateStr: string) {
@@ -95,12 +108,16 @@ export const ThreadItem = memo(
     nowTick = 0,
     tags = [],
     providerLabel = null,
+    projectMark = null,
     archiveConfirmPending = false,
     onArchiveConfirm,
     onArchiveCancel,
   }: ThreadItemProps) {
     const attention = deriveThreadAttentionPresentation(thread)
     const wasInterrupted = wasTurnInterruptedByShutdown(thread)
+    // Outside the title button. A name inside that flex button is joined onto
+    // the title with no space ("quizletPinned chat").
+    const projectDescriptionId = useId()
     const archiveConfirm = archiveConfirmPending && Boolean(onArchiveConfirm)
     const hoverAction = thread.is_archived
       ? onUnarchive
@@ -160,8 +177,14 @@ export const ThreadItem = memo(
           onRequestRename({ workspaceId, thread })
         }}
       >
+        {projectMark ? (
+          <span id={projectDescriptionId} className="sr-only">
+            {projectMark.label}
+          </span>
+        ) : null}
         <button
           type="button"
+          aria-describedby={projectMark ? projectDescriptionId : undefined}
           className={cn(
             'fd-focus-inset flex min-w-0 flex-1 items-center gap-1.5 rounded-[var(--fd-radius-sm)] text-left transition-opacity duration-[var(--fd-duration-fast)]',
             archiveConfirm && 'pointer-events-none opacity-40',
@@ -204,6 +227,14 @@ export const ThreadItem = memo(
               <span className="h-2.5 w-2.5 rounded-full bg-unread" />
             ) : null}
           </span>
+          {projectMark ? (
+            <span
+              title={projectMark.label}
+              className="flex h-4 w-4 shrink-0 items-center justify-center"
+            >
+              <WorkspaceIcon src={projectMark.src} color={projectMark.color} />
+            </span>
+          ) : null}
           <span
             className={cn(
               "fd-type-supporting min-w-0 flex-1 truncate transition-colors duration-[var(--fd-duration-fast)]",
@@ -389,6 +420,7 @@ export const ThreadItem = memo(
     prev.workspaceId === next.workspaceId &&
     prev.isSelected === next.isSelected &&
     prev.providerLabel === next.providerLabel &&
+    projectMarkEqual(prev.projectMark, next.projectMark) &&
     prev.nowTick === next.nowTick &&
     prev.onSelect === next.onSelect &&
     prev.onArchive === next.onArchive &&
@@ -400,6 +432,19 @@ export const ThreadItem = memo(
     prev.onRequestRename === next.onRequestRename &&
     tagsEqual(prev.tags, next.tags),
 )
+
+function projectMarkEqual(
+  a: ThreadItemProps['projectMark'],
+  b: ThreadItemProps['projectMark'],
+) {
+  if (a === b) return true
+  // A row that omits the prop and a row that passes null render the same
+  // empty slot. Compare those as equal, then compare real marks by value
+  // because each snapshot builds a new object.
+  if (a == null && b == null) return true
+  if (a == null || b == null) return false
+  return a.src === b.src && a.color === b.color && a.label === b.label
+}
 
 function tagsEqual(a: ThreadTag[] | undefined, b: ThreadTag[] | undefined) {
   if (a === b) return true

@@ -73,7 +73,11 @@ import {
   type ThreadContextMenuState,
   type WorkspaceContextMenuState,
 } from "./sidebar-menus";
-import { ThreadItem, type ThreadItemArchiveHandler } from "./thread-item";
+import {
+  ThreadItem,
+  type ThreadItemArchiveHandler,
+  type ThreadProjectMark,
+} from "./thread-item";
 import { WorkspaceGroup, type WorkspaceHostBadge } from "./workspace-group";
 import { WorkspaceIcon } from "./workspace-icon";
 
@@ -608,7 +612,22 @@ type PinnedThreadEntry = {
   thread: ThreadSummary;
   /** Resolved where the workspace is still in hand; the row only has the id. */
   providerLabel: string | null;
+  /** Null for casual chats, which have no project folder. */
+  projectMark: ThreadProjectMark | null;
 };
+
+function pinnedProjectMark(
+  workspace: ProjectGroup["workspace"],
+  iconSrc: string | null,
+  color: string | null,
+): ThreadProjectMark | null {
+  if (workspace.kind === "casual") return null;
+  // Same basename the project row shows. A trailing slash would make pop()
+  // empty, so fall through to the path itself.
+  const label = workspace.path.split("/").pop() || workspace.path;
+  if (!label) return null;
+  return { src: iconSrc, color, label };
+}
 
 const pinnedEntryKey = (entry: PinnedThreadEntry) =>
   `${entry.workspaceId}:${entry.thread.id}`;
@@ -783,7 +802,7 @@ const PinnedThreadList = memo(function PinnedThreadList({
         Pinned
       </h2>
       <div>
-        {entries.map(({ workspaceId, thread, providerLabel }) => (
+        {entries.map(({ workspaceId, thread, providerLabel, projectMark }) => (
           <ThreadItem
             key={`${workspaceId}:${thread.id}`}
             thread={thread}
@@ -803,6 +822,7 @@ const PinnedThreadList = memo(function PinnedThreadList({
             nowTick={nowTick}
             tags={threadTagsById?.[thread.id]}
             providerLabel={providerLabel}
+            projectMark={projectMark}
           />
         ))}
       </div>
@@ -2557,9 +2577,14 @@ export const WorkspaceSidebar = memo(function WorkspaceSidebar({
             workspaceId: group.workspace.id,
             thread,
             providerLabel: threadProviderLabel(group.workspace, thread),
+            projectMark: pinnedProjectMark(
+              group.workspace,
+              workspaceIconSrc?.(group.workspace.id) ?? null,
+              workspaceColors?.[group.workspace.id] ?? null,
+            ),
           })),
       ),
-    [displayGroups],
+    [displayGroups, workspaceColors, workspaceIconSrc],
   );
   const stablePinnedThreads = useStablePriorityOrder(
     pinnedCandidates,
