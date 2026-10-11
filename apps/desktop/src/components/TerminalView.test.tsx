@@ -179,7 +179,12 @@ describe('TerminalView socket lifecycle', () => {
       next_seq: 0,
     })
     socket.receive(replayChunk(0, '\u001b]0;build\u0007'))
+    socket.receive(replayChunk(1, '\u001b]0;build\u0007'))
+    expect(onTitleChange).toHaveBeenCalledTimes(1)
     expect(onTitleChange).toHaveBeenCalledWith('build')
+    socket.receive(replayChunk(2, '\u001b]0;ship\u0007'))
+    expect(onTitleChange).toHaveBeenCalledTimes(2)
+    expect(onTitleChange).toHaveBeenLastCalledWith('ship')
     socket.receive({ type: 'terminal_error', message: 'session not found' })
     expect(onExited).toHaveBeenCalledWith(null)
     socket.drop()
@@ -273,6 +278,27 @@ describe('TerminalChunkApplier', () => {
     applier.apply(chunk(2, 'old'))
     expect(terminal.writes).toEqual(['a'])
     expect(applier.lastSeq).toBe(3)
+  })
+
+  it('reports replay idle once after every in-flight replay chunk has parsed', () => {
+    const callbacks: Array<() => void> = []
+    const terminal = {
+      reset: vi.fn(),
+      write(_data: string | Uint8Array, callback?: () => void) {
+        if (callback) callbacks.push(callback)
+      },
+    }
+    const onReplayIdle = vi.fn()
+    const applier = new TerminalChunkApplier(terminal, vi.fn(), onReplayIdle)
+    applier.applyBytes(0, new Uint8Array([1]), true)
+    applier.applyBytes(1, new Uint8Array([2]), true)
+    expect(applier.replayDepth).toBe(2)
+    expect(onReplayIdle).not.toHaveBeenCalled()
+    callbacks[0]?.()
+    expect(onReplayIdle).not.toHaveBeenCalled()
+    callbacks[1]?.()
+    expect(onReplayIdle).toHaveBeenCalledTimes(1)
+    expect(applier.replayDepth).toBe(0)
   })
 
   it('applies replay chunks without forwarding input and then continues live', () => {

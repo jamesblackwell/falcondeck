@@ -504,12 +504,51 @@ function historyStateForItems(
   };
 }
 
+function hasArchivedThread(threads: DaemonSnapshot['threads']): boolean {
+  return threads.some((thread) => thread.is_archived);
+}
+
+/** Workspace of a live row, or null when the id is missing or archived. */
+function liveThreadWorkspaceId(threads: DaemonSnapshot['threads'], threadId: string): string | null {
+  for (const thread of threads) {
+    if (thread.id !== threadId) continue;
+    return thread.is_archived ? null : thread.workspace_id;
+  }
+  return null;
+}
+
+function recordHoldsHiddenThread(
+  record: Record<string, unknown>,
+  threads: DaemonSnapshot['threads'],
+): boolean {
+  for (const threadId in record) {
+    if (liveThreadWorkspaceId(threads, threadId) === null) return true;
+  }
+  return false;
+}
+
+/** Reconcile keeps an archived row when it is still in the list, and a null
+ * selection with a live workspace is the new-conversation draft. */
+function selectionNeedsLiveThreads(
+  snapshot: DaemonSnapshot,
+  selectedWorkspaceId: string | null,
+  selectedThreadId: string | null,
+): boolean {
+  if (!selectedWorkspaceId) return true;
+  if (!snapshot.workspaces.some((workspace) => workspace.id === selectedWorkspaceId)) return true;
+  if (selectedThreadId === null) return false;
+  return liveThreadWorkspaceId(snapshot.threads, selectedThreadId) !== selectedWorkspaceId;
+}
+
 function pruneThreadRecord<T>(
   record: Record<string, T>,
   visibleThreadIds: Set<string>,
 ): Record<string, T> {
-  const entries = Object.entries(record).filter(([threadId]) => visibleThreadIds.has(threadId));
-  return entries.length === Object.keys(record).length ? record : Object.fromEntries(entries);
+  for (const threadId in record) {
+    if (visibleThreadIds.has(threadId)) continue;
+    return Object.fromEntries(Object.entries(record).filter(([id]) => visibleThreadIds.has(id)));
+  }
+  return record;
 }
 
 function reconcileThreadDetail(
@@ -867,18 +906,28 @@ function applyEventsToState(state: SessionState, events: EventEnvelope[]): Sessi
   // Archived rows stay in the snapshot so a local undo can restore them, but
   // they are not an open conversation. A remote archive arrives as
   // thread-updated; selection and the transcript have to leave with it.
-  // Streaming events hit this on every chunk, so skip the copy when every
-  // row is already live.
+  // Streaming events hit this on every chunk. Copy and prune only when a
+  // cached transcript is still hidden, or the open selection would land on
+  // an archived row. `liveThreads` allocates that filtered list, so the
+  // steady state must not call it.
   let selectionSnapshot = nextSnapshot ?? state.snapshot;
-  if (nextSnapshot) {
-    const live = liveThreads(nextSnapshot.threads);
-    if (live !== nextSnapshot.threads) {
+  if (nextSnapshot && hasArchivedThread(nextSnapshot.threads)) {
+    const threads = nextSnapshot.threads;
+    const hidden =
+      recordHoldsHiddenThread(nextThreadItems, threads) ||
+      recordHoldsHiddenThread(nextThreadHistory, threads) ||
+      recordHoldsHiddenThread(nextThreadDetailErrors, threads) ||
+      (nextThreadDetail !== null && liveThreadWorkspaceId(threads, nextThreadDetail.thread.id) === null);
+    if (hidden || selectionNeedsLiveThreads(nextSnapshot, state.selectedWorkspaceId, state.selectedThreadId)) {
+      const live = liveThreads(threads);
       const liveIds = visibleThreadIdsOf(live);
-      nextThreadItems = pruneThreadRecord(nextThreadItems, liveIds);
-      nextThreadHistory = pruneThreadRecord(nextThreadHistory, liveIds);
-      nextThreadDetailErrors = pruneThreadRecord(nextThreadDetailErrors, liveIds);
-      if (nextThreadDetail && !liveIds.has(nextThreadDetail.thread.id)) {
-        nextThreadDetail = null;
+      if (hidden) {
+        nextThreadItems = pruneThreadRecord(nextThreadItems, liveIds);
+        nextThreadHistory = pruneThreadRecord(nextThreadHistory, liveIds);
+        nextThreadDetailErrors = pruneThreadRecord(nextThreadDetailErrors, liveIds);
+        if (nextThreadDetail && !liveIds.has(nextThreadDetail.thread.id)) {
+          nextThreadDetail = null;
+        }
       }
       selectionSnapshot = { ...nextSnapshot, threads: live };
     }

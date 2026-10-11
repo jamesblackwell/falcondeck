@@ -65,11 +65,13 @@ export function syncViewKey(view: { extension_id: string; view_id: string; scope
 
 /** Same rejection as snapshot upsert. Duplicated here because snapshot imports
  * this module. Fractional seconds of different widths are not string-ordered:
- * `.12Z` is newer than `.1Z`. */
+ * `.12Z` is newer than `.1Z`. Identical strings skip the second parse. */
 function threadSummaryIsStale(current: ThreadSummary, next: ThreadSummary): boolean {
+  const sameStamp = current.updated_at === next.updated_at
   const currentAt = Date.parse(current.updated_at)
-  const nextAt = Date.parse(next.updated_at)
-  if (Number.isNaN(currentAt) || Number.isNaN(nextAt)) return false
+  if (Number.isNaN(currentAt)) return false
+  const nextAt = sameStamp ? currentAt : Date.parse(next.updated_at)
+  if (Number.isNaN(nextAt)) return false
   if (nextAt < currentAt) return true
   const terminal = current.status === 'idle' || current.status === 'error'
   const nextTerminal = next.status === 'idle' || next.status === 'error'

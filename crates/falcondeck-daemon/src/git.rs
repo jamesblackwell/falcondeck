@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+
 use falcondeck_core::{
     GitBranchesResponse, GitDiffResponse, GitFileStatus, GitStatusEntry, GitStatusResponse,
 };
@@ -252,34 +254,50 @@ fn parse_porcelain_z(stdout: &[u8]) -> Vec<GitStatusEntry> {
 /// `<added>\t<deleted>\t`, then the original path, then the destination.
 /// Staged counts fill only entries that do not already have worktree counts.
 fn apply_numstat_z(entries: &mut [GitStatusEntry], stdout: &[u8], only_if_missing: bool) {
-    let mut fields = stdout
-        .split(|byte| *byte == 0)
-        .filter(|field| !field.is_empty());
-    while let Some(field) = fields.next() {
-        let line = String::from_utf8_lossy(field);
-        let mut parts = line.splitn(3, '\t');
-        let (Some(added), Some(removed), Some(path)) = (parts.next(), parts.next(), parts.next())
-        else {
-            continue;
-        };
-        let insertions = added.parse::<u32>().ok();
-        let deletions = removed.parse::<u32>().ok();
-        let path = if path.is_empty() {
-            let _original = fields.next();
-            match fields.next() {
-                Some(destination) => path_from_bytes(destination),
-                None => continue,
-            }
-        } else {
-            path.to_string()
-        };
-        if let Some(entry) = entries.iter_mut().find(|entry| entry.path == path) {
-            if !only_if_missing || entry.insertions.is_none() {
-                entry.insertions = insertions;
-            }
-            if !only_if_missing || entry.deletions.is_none() {
-                entry.deletions = deletions;
-            }
+    // The path map borrows the entries, so count updates are applied after it
+    // drops. First path wins, matching the old linear search.
+    let updates = {
+        let mut index_by_path = HashMap::with_capacity(entries.len());
+        for (index, entry) in entries.iter().enumerate() {
+            index_by_path.entry(entry.path.as_str()).or_insert(index);
+        }
+        let mut fields = stdout
+            .split(|byte| *byte == 0)
+            .filter(|field| !field.is_empty());
+        let mut updates = Vec::new();
+        while let Some(field) = fields.next() {
+            let line = String::from_utf8_lossy(field);
+            let mut parts = line.splitn(3, '\t');
+            let (Some(added), Some(removed), Some(path)) =
+                (parts.next(), parts.next(), parts.next())
+            else {
+                continue;
+            };
+            let insertions = added.parse::<u32>().ok();
+            let deletions = removed.parse::<u32>().ok();
+            let path = if path.is_empty() {
+                let _original = fields.next();
+                match fields.next() {
+                    Some(destination) => path_from_bytes(destination),
+                    None => continue,
+                }
+            } else {
+                path.to_string()
+            };
+            let Some(&index) = index_by_path.get(path.as_str()) else {
+                continue;
+            };
+            updates.push((index, insertions, deletions));
+        }
+        updates
+    };
+    for (index, insertions, deletions) in updates {
+        let entry = &mut entries[index];
+        if !only_if_missing || entry.insertions.is_none() {
+            entry.insertions = insertions;
+        }
+        if !only_if_missing || entry.deletions.is_none() {
+            entry.deletions = deletions;
         }
     }
 }

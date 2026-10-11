@@ -557,7 +557,12 @@ function retainedHistoryCursor(
   items: ConversationItem[],
   previous: string | null | undefined,
 ): string | null {
-  if (previous && items.some((item) => item.id === previous)) return previous;
+  // Streaming flushes keep the cursor on the pinned prompt or the first
+  // contiguous row. Scanning the whole tail is the older-page case.
+  if (previous) {
+    if (items[0]?.id === previous || items[1]?.id === previous) return previous;
+    if (items.some((item) => item.id === previous)) return previous;
+  }
   return items[0]?.id ?? previous ?? null;
 }
 

@@ -299,6 +299,16 @@ export const TerminalView = forwardRef<TerminalViewHandle, TerminalViewProps>(fu
       return searchAddon
     }
 
+    let pendingReplayTitle: string | null = null
+    let lastPublishedTitle: string | null = null
+
+    function publishTitle(title: string) {
+      pendingReplayTitle = null
+      if (title === lastPublishedTitle) return
+      lastPublishedTitle = title
+      onTitleChangeRef.current?.(title)
+    }
+
     apiRef.current = {
       focus: focusTerminal,
       fit,
@@ -369,6 +379,8 @@ export const TerminalView = forwardRef<TerminalViewHandle, TerminalViewProps>(fu
 
       applier = new TerminalChunkApplier(activeTerminal, (text) => {
         writeStatusNotice(activeTerminal, text)
+      }, () => {
+        if (pendingReplayTitle !== null) publishTitle(pendingReplayTitle)
       })
       activeTerminal.open(host)
       scheduleFit()
@@ -397,9 +409,14 @@ export const TerminalView = forwardRef<TerminalViewHandle, TerminalViewProps>(fu
         socket.send(payload)
       })
       activeTerminal.onTitleChange((title) => {
-        // Replay parses historical OSC titles while replayDepth is elevated.
+        // Scrollback replay parses a title per historical OSC. Hold the latest
+        // one until those writes finish so the tab strip updates once.
         // Keystrokes stay blocked above; the title is the window's name.
-        onTitleChangeRef.current?.(title)
+        if (applier && applier.replayDepth > 0) {
+          pendingReplayTitle = title
+          return
+        }
+        publishTitle(title)
       })
       activeTerminal.onResize(() => sendResize())
       activeTerminal.onSelectionChange(() => {

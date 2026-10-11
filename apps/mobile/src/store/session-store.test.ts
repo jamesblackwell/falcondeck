@@ -315,6 +315,53 @@ describe('session-store', () => {
       expect(state.threadItems['t1']).toBeUndefined()
     })
 
+    it('keeps the open transcript when later output arrives beside an archived row', () => {
+      const remaining = thread({ id: 't2', title: 'Keep' })
+      useSessionStore.getState().applyDaemonEvent(
+        snapshotEvent(snapshot({
+          threads: [thread({ id: 't1' }), remaining],
+        })),
+      )
+      useSessionStore.getState().selectThread('workspace-1', 't2')
+      useSessionStore.getState().setThreadDetail(threadDetail({
+        thread: remaining,
+        items: [assistantMessage('msg-keep', 'stay')],
+      }))
+      useSessionStore.getState().applyDaemonEvent(
+        threadUpdatedEvent(thread({
+          id: 't1',
+          is_archived: true,
+          updated_at: '2026-03-16T10:00:01Z',
+        })),
+      )
+      useSessionStore.getState().applyDaemonEvent(
+        conversationItemAddedEvent(assistantMessage('msg-2', 'next'), 't2'),
+      )
+
+      const state = useSessionStore.getState()
+      expect(state.selectedThreadId).toBe('t2')
+      expect(state.threadItems.t1).toBeUndefined()
+      expect(state.threadItems.t2?.map((item) => item.id)).toEqual(['msg-keep', 'msg-2'])
+      expect(state.threadDetail?.items.map((item) => item.id)).toEqual(['msg-keep', 'msg-2'])
+      expect(state.snapshot?.threads.find((entry) => entry.id === 't1')?.is_archived).toBe(true)
+    })
+
+    it('keeps a new-conversation draft while an archived row sits in the snapshot', () => {
+      useSessionStore.getState().applyDaemonEvent(
+        snapshotEvent(snapshot({
+          threads: [
+            thread({ id: 't1', is_archived: true }),
+            thread({ id: 't2' }),
+          ],
+        })),
+      )
+      useSessionStore.getState().selectNewThread('workspace-1')
+      useSessionStore.getState().applyDaemonEvent(
+        conversationItemAddedEvent(assistantMessage('msg-2', 'next'), 't2'),
+      )
+      expect(useSessionStore.getState().selectedThreadId).toBeNull()
+    })
+
     it('sets both workspace and thread when selecting a thread', () => {
       const { selectThread } = useSessionStore.getState()
       selectThread('w1', 't1')

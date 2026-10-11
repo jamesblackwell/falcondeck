@@ -192,6 +192,8 @@ export class TerminalChunkApplier {
     reset(): void
   }
   private readonly onNotice: (text: string) => void
+  /** Fires once when every replay write queued so far has finished parsing. */
+  private readonly onReplayIdle: (() => void) | undefined
 
   /**
    * Counts replay writes still being parsed by the emulator; user input must
@@ -205,9 +207,11 @@ export class TerminalChunkApplier {
       reset(): void
     },
     onNotice: (text: string) => void,
+    onReplayIdle?: () => void,
   ) {
     this.terminal = terminal
     this.onNotice = onNotice
+    this.onReplayIdle = onReplayIdle
   }
 
   apply(frame: TerminalServerFrame): void {
@@ -238,14 +242,22 @@ export class TerminalChunkApplier {
         this.inFlight += 1
         this.terminal.write(next.bytes, () => {
           this.inFlight -= 1
-          if (next.replay) this.replayDepth -= 1
+          this.finishReplayChunk(next.replay)
           this.pump()
         })
       } else {
         this.terminal.write(next.bytes)
-        if (next.replay) this.replayDepth -= 1
+        this.finishReplayChunk(next.replay)
       }
     }
+  }
+
+  /** Replay depth drops after the emulator has parsed the chunk, which is
+   * also when OSC titles from that chunk have already been reported. */
+  private finishReplayChunk(replay: boolean): void {
+    if (!replay) return
+    this.replayDepth -= 1
+    if (this.replayDepth === 0) this.onReplayIdle?.()
   }
 
   /** Highest applied sequence, for reconnect replays; null before any output. */
