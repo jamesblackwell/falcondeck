@@ -456,9 +456,10 @@ export const ChatInput = memo(function ChatInput({
     if (pending.value !== value) return
     selectionRangeRef.current = { start: pending.start, end: pending.end }
     setCaretIndex(pending.start)
-    inputRef.current?.setSelection?.(pending.start, pending.end)
+    const editor = isExpanded ? expandedInputRef.current : inputRef.current
+    editor?.setSelection?.(pending.start, pending.end)
     if (pending.submit) handleSubmit()
-  }, [handleSubmit, value])
+  }, [handleSubmit, isExpanded, value])
 
   const handleStop = useCallback(() => {
     if (disabled || sendDisabled || isStopping || !onStop) return
@@ -718,6 +719,10 @@ export const ChatInput = memo(function ChatInput({
             }}
             accessibilityHint={inputOverflows ? 'Scroll to review your full message' : undefined}
             onSelectionChange={(event) => {
+              // The expanded editor is a second controlled input. Its value
+              // updates make this hidden field report a selection, which would
+              // move the caret used for slash commands and inserts.
+              if (isExpanded) return
               const nextSelection = event.nativeEvent.selection
               selectionRangeRef.current = nextSelection
               setCaretIndex(nextSelection.start)

@@ -824,6 +824,30 @@ describe('ChatInput component', () => {
     expect(r.root.findAllByProps({ accessibilityLabel: 'Expanded prompt' })).toHaveLength(0)
   })
 
+  it('keeps the expanded editor caret when the collapsed input reports a selection', () => {
+    const draft = `/\n${'Line\n'.repeat(20)}`
+    const r = renderComponent(<ChatInput value={draft} {...chatInputDefaults} />)
+    act(() => {
+      r.root.findByProps({ testID: 'message-composer' }).props.onContentSizeChange({
+        nativeEvent: { contentSize: { width: 320, height: 500 } },
+      })
+    })
+    act(() => r.root.findByProps({ accessibilityLabel: 'Expand prompt' }).props.onPress())
+    act(() => {
+      r.root.findByProps({ accessibilityLabel: 'Expanded prompt' }).props.onSelectionChange({
+        nativeEvent: { selection: { start: 1, end: 1 } },
+      })
+    })
+    expect(textOf(r)).toContain('No commands or skills yet')
+
+    act(() => {
+      r.root.findByProps({ testID: 'message-composer' }).props.onSelectionChange({
+        nativeEvent: { selection: { start: draft.length, end: draft.length } },
+      })
+    })
+    expect(textOf(r)).toContain('No commands or skills yet')
+  })
+
   it('pins an empty draft so clearing the composer cannot balloon the input', () => {
     const onSubmit = vi.fn()
     const r = renderComponent(
