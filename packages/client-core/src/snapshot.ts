@@ -422,11 +422,94 @@ function isStaleThreadSummary(
   );
 }
 
+function sameGoal(
+  current: DaemonSnapshot["threads"][number]["goal"],
+  next: DaemonSnapshot["threads"][number]["goal"],
+) {
+  if (current === next) return true;
+  if (!current || !next) return false;
+  return (
+    current.objective === next.objective &&
+    current.status === next.status &&
+    (current.token_budget ?? null) === (next.token_budget ?? null) &&
+    (current.tokens_used ?? null) === (next.tokens_used ?? null) &&
+    (current.time_used_seconds ?? null) === (next.time_used_seconds ?? null) &&
+    (current.started_at ?? null) === (next.started_at ?? null)
+  );
+}
+
+function sameVariant(
+  current: DaemonSnapshot["threads"][number]["variant"],
+  next: DaemonSnapshot["threads"][number]["variant"],
+) {
+  if (current === next) return true;
+  if (!current || !next) return false;
+  return (
+    current.slug === next.slug &&
+    current.path === next.path &&
+    current.branch === next.branch &&
+    current.kind === next.kind &&
+    (current.base_branch ?? null) === (next.base_branch ?? null)
+  );
+}
+
+function sameHandoff(
+  current: DaemonSnapshot["threads"][number]["handoff_from"],
+  next: DaemonSnapshot["threads"][number]["handoff_from"],
+) {
+  if (current === next) return true;
+  if (!current || !next) return false;
+  return (
+    current.thread_id === next.thread_id &&
+    current.provider === next.provider &&
+    current.context_pending === next.context_pending
+  );
+}
+
+function sameOrigin(
+  current: DaemonSnapshot["threads"][number]["origin"],
+  next: DaemonSnapshot["threads"][number]["origin"],
+) {
+  if (current === next) return true;
+  if (!current || !next) return false;
+  if (current.kind !== next.kind) return false;
+  if (current.kind === "agent_spawn" && next.kind === "agent_spawn") {
+    return current.parent_thread_id === next.parent_thread_id;
+  }
+  if (current.kind === "scheduled_task" && next.kind === "scheduled_task") {
+    return current.task_id === next.task_id && current.title === next.title;
+  }
+  if (current.kind === "automation" && next.kind === "automation") {
+    return (
+      current.automation_id === next.automation_id && current.name === next.name
+    );
+  }
+  return false;
+}
+
+function sameQueuedTurns(
+  current: DaemonSnapshot["threads"][number]["queued_turns"],
+  next: DaemonSnapshot["threads"][number]["queued_turns"],
+) {
+  if (current.length !== next.length) return false;
+  return current.every(
+    (turn, index) =>
+      turn.id === next[index]?.id &&
+      turn.preview === next[index]?.preview &&
+      (turn.text ?? null) === (next[index]?.text ?? null) &&
+      (turn.attachment_count ?? 0) === (next[index]?.attachment_count ?? 0) &&
+      turn.queued_at === next[index]?.queued_at,
+  );
+}
+
 function isRunningAttentionOnlyUpdate(
   current: DaemonSnapshot["threads"][number],
   next: DaemonSnapshot["threads"][number],
 ) {
   if (current.status !== "running" || next.status !== "running") return false;
+  // Goal, variant, handoff, and origin are compared by field. Rebuilt objects
+  // with the same values stay attention-only; a real edit to the goal,
+  // worktree, creator, mode, or queue still lands.
   return (
     current.title === next.title &&
     current.last_message_preview === next.last_message_preview &&
@@ -436,18 +519,30 @@ function isRunningAttentionOnlyUpdate(
     current.is_archived === next.is_archived &&
     current.is_pinned === next.is_pinned &&
     current.is_pinned_in_project === next.is_pinned_in_project &&
-    current.goal === next.goal &&
-    current.variant === next.variant &&
+    sameGoal(current.goal, next.goal) &&
+    sameVariant(current.variant, next.variant) &&
+    sameHandoff(current.handoff_from, next.handoff_from) &&
+    sameOrigin(current.origin, next.origin) &&
     (current.native_session_id ?? null) === (next.native_session_id ?? null) &&
     current.provider === next.provider &&
     current.agent.model_id === next.agent.model_id &&
     current.agent.reasoning_effort === next.agent.reasoning_effort &&
+    current.agent.collaboration_mode_id === next.agent.collaboration_mode_id &&
+    current.agent.approval_policy === next.agent.approval_policy &&
+    current.agent.service_tier === next.agent.service_tier &&
+    (current.agent.permission_mode ?? null) ===
+      (next.agent.permission_mode ?? null) &&
+    (current.agent.sandbox_mode ?? null) === (next.agent.sandbox_mode ?? null) &&
     current.attention.unread === next.attention.unread &&
+    (current.attention.badge_label ?? null) ===
+      (next.attention.badge_label ?? null) &&
+    (current.attention.background_task_count ?? 0) ===
+      (next.attention.background_task_count ?? 0) &&
     current.attention.pending_approval_count ===
       next.attention.pending_approval_count &&
     current.attention.pending_question_count ===
       next.attention.pending_question_count &&
-    current.queued_turns.length === next.queued_turns.length
+    sameQueuedTurns(current.queued_turns, next.queued_turns)
   );
 }
 

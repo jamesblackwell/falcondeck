@@ -184,6 +184,136 @@ describe("thread status events", () => {
     expect(next.threads[0]?.last_message_preview).toBe("Hello so far");
   });
 
+  it("ignores a running attention bump when goal, variant, and handoff objects are rebuilt", () => {
+    const initial = thread({
+      status: "running",
+      variant: {
+        slug: "fix",
+        path: "/tmp/fix",
+        branch: "fix",
+        kind: "worktree",
+        base_branch: "main",
+      },
+      goal: { objective: "Ship it", status: "active", tokens_used: 10 },
+      handoff_from: {
+        thread_id: "source",
+        provider: "codex",
+        context_pending: true,
+      },
+    });
+    const snapshot = snapshotWith(initial);
+    const next = apply(
+      snapshot,
+      thread({
+        ...initial,
+        variant: {
+          slug: "fix",
+          path: "/tmp/fix",
+          branch: "fix",
+          kind: "worktree",
+          base_branch: "main",
+        },
+        goal: { objective: "Ship it", status: "active", tokens_used: 10 },
+        handoff_from: {
+          thread_id: "source",
+          provider: "codex",
+          context_pending: true,
+        },
+        updated_at: "2026-08-13T18:28:20Z",
+        attention: { ...initial.attention, last_agent_activity_seq: 4 },
+      }),
+    );
+
+    expect(next.threads).toBe(snapshot.threads);
+  });
+
+  it("applies a running update that changes permission mode or goal progress", () => {
+    const initial = thread({
+      status: "running",
+      goal: { objective: "Ship it", status: "active", tokens_used: 10 },
+      agent: {
+        model_id: "sonnet",
+        reasoning_effort: "medium",
+        collaboration_mode_id: null,
+        approval_policy: null,
+        service_tier: null,
+        permission_mode: "default",
+        sandbox_mode: "workspace-write",
+      },
+    });
+    const snapshot = snapshotWith(initial);
+    const next = apply(
+      snapshot,
+      thread({
+        ...initial,
+        goal: { objective: "Ship it", status: "active", tokens_used: 20 },
+        agent: { ...initial.agent, permission_mode: "bypassPermissions" },
+        updated_at: "2026-08-13T18:28:20Z",
+      }),
+    );
+
+    expect(next.threads[0]?.agent.permission_mode).toBe("bypassPermissions");
+    expect(next.threads[0]?.goal?.tokens_used).toBe(20);
+  });
+
+  it("applies a running update that edits a queued turn in place", () => {
+    const queued = {
+      id: "q1",
+      preview: "old",
+      text: "old prompt",
+      queued_at: "2026-08-13T18:28:00Z",
+    };
+    const initial = thread({ status: "running", queued_turns: [queued] });
+    const snapshot = snapshotWith(initial);
+    const next = apply(
+      snapshot,
+      thread({
+        ...initial,
+        queued_turns: [{ ...queued, preview: "new", text: "new prompt" }],
+        updated_at: "2026-08-13T18:28:20Z",
+      }),
+    );
+
+    expect(next.threads[0]?.queued_turns[0]?.text).toBe("new prompt");
+  });
+
+  it("applies a running update that records who created the thread", () => {
+    const initial = thread({ status: "running" });
+    const snapshot = snapshotWith(initial);
+    const next = apply(
+      snapshot,
+      thread({
+        ...initial,
+        origin: { kind: "agent_spawn", parent_thread_id: "parent-1" },
+        updated_at: "2026-08-13T18:28:20Z",
+      }),
+    );
+
+    expect(next.threads[0]?.origin).toEqual({
+      kind: "agent_spawn",
+      parent_thread_id: "parent-1",
+    });
+  });
+
+  it("ignores a running attention bump when the origin object is rebuilt", () => {
+    const initial = thread({
+      status: "running",
+      origin: { kind: "automation", automation_id: "auto-1", name: "Daily" },
+    });
+    const snapshot = snapshotWith(initial);
+    const next = apply(
+      snapshot,
+      thread({
+        ...initial,
+        origin: { kind: "automation", automation_id: "auto-1", name: "Daily" },
+        updated_at: "2026-08-13T18:28:20Z",
+        attention: { ...initial.attention, last_agent_activity_seq: 4 },
+      }),
+    );
+
+    expect(next.threads).toBe(snapshot.threads);
+  });
+
   it("applies a newer running update to an idle thread", () => {
     let snapshot = snapshotWith(settled);
     snapshot = apply(
