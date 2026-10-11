@@ -222,3 +222,87 @@ export function countActivityEntries(
   }
   return counts
 }
+
+export type ActivityInboxRow = {
+  key: string
+  thread: ThreadSummary
+  workspaceId: string
+  projectLabel: string
+  /** Null once the thread has settled: read, idle, nothing pending. */
+  section: ActivitySection | null
+  unread: boolean
+  requests: InteractiveRequest[]
+}
+
+export type ActivityInbox = {
+  /** Blocked and failed tasks, pinned above the feed until dealt with. */
+  needsYou: ActivityInboxRow[]
+  /** Everything else with agent activity, newest first. */
+  feed: ActivityInboxRow[]
+}
+
+/** A week reads as "this week's work" without becoming full history. */
+const INBOX_WINDOW_MS = 7 * 24 * 60 * 60 * 1000
+
+/**
+ * The sidebar Activity inbox: one mail-style list across every project.
+ *
+ * Unlike {@link collectActivityEntries}, read and running tasks stay in the
+ * same chronological feed, so opening a ready task un-bolds its row instead
+ * of moving it somewhere else under the pointer.
+ */
+export function collectActivityInbox(
+  groups: ProjectGroup[],
+  interactiveRequests: InteractiveRequest[],
+  options: { nowMs: number; windowMs?: number },
+): ActivityInbox {
+  const { nowMs, windowMs = INBOX_WINDOW_MS } = options
+  const sectioned = new Map<string, ActivityEntry>()
+  for (const entry of collectActivityEntries(groups, interactiveRequests)) {
+    sectioned.set(`${entry.workspaceId}:${entry.thread.id}`, entry)
+  }
+
+  const needsYou: ActivityInboxRow[] = []
+  const feed: ActivityInboxRow[] = []
+  for (const entry of sectioned.values()) {
+    if (entry.section !== 'blocked' && entry.section !== 'failed') continue
+    needsYou.push({
+      key: `${entry.workspaceId}:${entry.thread.id}`,
+      thread: entry.thread,
+      workspaceId: entry.workspaceId,
+      projectLabel: entry.projectLabel,
+      section: entry.section,
+      unread: true,
+      requests: entry.requests,
+    })
+  }
+
+  for (const group of groups) {
+    for (const thread of group.threads) {
+      if (thread.is_archived) continue
+      const key = `${group.workspace.id}:${thread.id}`
+      const entry = sectioned.get(key)
+      if (entry?.section === 'blocked' || entry?.section === 'failed') continue
+      if (!entry && thread.attention.last_agent_activity_seq <= 0) continue
+      const age = nowMs - new Date(thread.updated_at).getTime()
+      if (!entry && (!Number.isFinite(age) || age > windowMs)) continue
+
+      feed.push({
+        key,
+        thread,
+        workspaceId: group.workspace.id,
+        projectLabel: projectLabel(group.workspace.path),
+        section: entry?.section ?? null,
+        unread: entry?.section === 'ready',
+        requests: [],
+      })
+    }
+  }
+
+  feed.sort(
+    (left, right) =>
+      compareIsoDescending(left.thread.updated_at, right.thread.updated_at) ||
+      left.thread.id.localeCompare(right.thread.id),
+  )
+  return { needsYou, feed }
+}

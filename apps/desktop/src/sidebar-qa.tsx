@@ -6,7 +6,8 @@
    `?collapsed=workspace-1,workspace-2` folds projects shut to check the
    inline running/unread rollup on their rows. `?projects=12` pads the list
    with stale filler projects (plus one used an hour ago) to exercise the
-   project fold and its Show more row. */
+   project fold and its Show more row. `?activity=1` swaps in the Activity
+   inbox with a pending approval on the first running task. */
 import { StrictMode } from "react";
 import { createRoot } from "react-dom/client";
 
@@ -27,6 +28,7 @@ if (theme === "light" || theme === "dark") {
   updateAppearance({ theme });
 }
 const width = Number(params.get("width")) || 280;
+const activityMode = params.get("activity") === "1";
 const extraProjectCount = Math.max(0, Number(params.get("projects")) || 0);
 const collapsedWorkspaceIds = (params.get("collapsed") ?? "")
   .split(",")
@@ -253,6 +255,36 @@ for (let index = 0; index < extraProjectCount; index += 1) {
   });
 }
 
+function activityFixture() {
+  const running = groups
+    .flatMap((group) => group.threads)
+    .find((candidate) => candidate.status === "running");
+  return {
+    interactiveRequests: running
+      ? [
+          {
+            request_id: "qa-request",
+            workspace_id: running.workspace_id,
+            thread_id: running.id,
+            method: "command",
+            kind: "approval" as const,
+            title: "Run command",
+            detail: null,
+            command: "npm run test -- --watch=false",
+            path: null,
+            turn_id: null,
+            item_id: null,
+            questions: [],
+            created_at: minutesAgo(2),
+          },
+        ]
+      : [],
+    onPreviewThread: () => {},
+    onClose: () => {},
+    onPopOut: () => {},
+  };
+}
+
 createRoot(document.getElementById("root")!).render(
   <StrictMode>
     <div className="flex min-h-screen items-stretch bg-bg-0 p-6">
@@ -280,6 +312,7 @@ createRoot(document.getElementById("root")!).render(
           onDeleteThread={async () => {}}
           onTogglePinThread={async () => {}}
           onTogglePinThreadInProject={async () => {}}
+          {...(activityMode ? { activity: activityFixture() } : {})}
         />
       </div>
     </div>

@@ -45,6 +45,7 @@ export * from "./components/thread-item";
 export * from "./components/workspace-sidebar";
 export * from "./components/workspace-group";
 export * from "./components/workspace-icon";
+export * from "./components/activity-inbox";
 export * from "./components/attention-inbox";
 export * from "./components/extension-ui-renderer";
 export * from "./components/extension-sidebar-filters";

@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest'
 
 import {
   collectActivityEntries,
+  collectActivityInbox,
   collectRecentEntries,
   countActivityEntries,
 } from './activity'
@@ -269,5 +270,96 @@ describe('collectRecentEntries', () => {
     expect(
       collectRecentEntries([group(many)], [], { nowMs, limit: 3 }),
     ).toHaveLength(3)
+  })
+})
+
+describe('collectActivityInbox', () => {
+  const nowMs = Date.parse('2026-08-13T12:30:00Z')
+  const base = thread({ id: 'base' }).attention
+
+  it('pins blocked and failed tasks above a newest-first feed', () => {
+    const blocked = thread({ id: 'blocked', status: 'running' })
+    const failed = thread({
+      id: 'failed',
+      status: 'error',
+      attention: { ...base, level: 'error', unread: true, last_agent_activity_seq: 3 },
+    })
+    const ready = thread({
+      id: 'ready',
+      updated_at: '2026-08-13T12:10:00Z',
+      attention: { ...base, unread: true, last_agent_activity_seq: 2 },
+    })
+    const read = thread({
+      id: 'read',
+      updated_at: '2026-08-13T12:20:00Z',
+      attention: { ...base, last_agent_activity_seq: 2, last_read_seq: 2 },
+    })
+
+    const inbox = collectActivityInbox(
+      [group([read, ready, failed, blocked])],
+      [request('blocked')],
+      { nowMs },
+    )
+
+    expect(inbox.needsYou.map((row) => [row.thread.id, row.section])).toEqual([
+      ['blocked', 'blocked'],
+      ['failed', 'failed'],
+    ])
+    expect(inbox.needsYou[0]?.requests).toHaveLength(1)
+    expect(inbox.feed.map((row) => [row.thread.id, row.unread])).toEqual([
+      ['read', false],
+      ['ready', true],
+    ])
+  })
+
+  it('keeps a read task in the feed instead of moving it', () => {
+    const before = thread({
+      id: 'task',
+      attention: { ...base, unread: true, last_agent_activity_seq: 4 },
+    })
+    const after = thread({
+      id: 'task',
+      attention: { ...base, last_agent_activity_seq: 4, last_read_seq: 4 },
+    })
+
+    expect(collectActivityInbox([group([before])], [], { nowMs }).feed[0]).toMatchObject({
+      key: 'workspace:task',
+      unread: true,
+    })
+    expect(collectActivityInbox([group([after])], [], { nowMs }).feed[0]).toMatchObject({
+      key: 'workspace:task',
+      unread: false,
+      section: null,
+    })
+  })
+
+  it('skips archived, never-run, and out-of-window tasks but keeps old running ones', () => {
+    const archived = thread({
+      id: 'archived',
+      is_archived: true,
+      attention: { ...base, last_agent_activity_seq: 1 },
+    })
+    const neverRan = thread({ id: 'never-ran' })
+    const stale = thread({
+      id: 'stale',
+      updated_at: '2026-07-01T12:00:00Z',
+      attention: { ...base, last_agent_activity_seq: 1, last_read_seq: 1 },
+    })
+    const longRunning = thread({
+      id: 'long-running',
+      status: 'running',
+      updated_at: '2026-07-01T12:00:00Z',
+    })
+
+    const inbox = collectActivityInbox(
+      [group([archived, neverRan, stale, longRunning])],
+      [],
+      { nowMs },
+    )
+
+    expect(inbox.needsYou).toEqual([])
+    expect(inbox.feed.map((row) => [row.thread.id, row.section])).toEqual([
+      ['long-running', 'running'],
+    ])
   })
 })

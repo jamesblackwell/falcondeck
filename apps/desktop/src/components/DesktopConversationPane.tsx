@@ -103,6 +103,7 @@ type DesktopConversationPaneProps = {
   /** Sits at the head of the header's trailing group, before New. */
   headerLeadingControls?: ReactNode;
   onNewThread?: () => void;
+  onArchiveThread?: () => void;
   onRetryResponse?: (
     item: Extract<ConversationItem, { kind: "user_message" }>,
   ) => void;
@@ -166,6 +167,7 @@ export function DesktopConversationPane({
   onOpenExternalLink,
   headerControls,
   onNewThread,
+  onArchiveThread,
   onRetryResponse,
   onContinueInterruptedTurn,
   onDismissInterruptedTurn,
@@ -196,6 +198,7 @@ export function DesktopConversationPane({
         workspace={selectedWorkspace}
         thread={selectedThread}
         onNewThread={onNewThread}
+        onArchive={onArchiveThread}
         leadingActions={headerLeadingControls}
         compact
       >

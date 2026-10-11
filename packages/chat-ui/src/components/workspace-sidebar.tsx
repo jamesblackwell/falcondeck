@@ -32,6 +32,7 @@ import type {
   AgentProvider,
   ExtensionSidebarFilterDefinition,
   ExtensionSnapshot,
+  InteractiveRequest,
   LibraryWorkspace,
   ProjectGroup,
   ThreadSortMode,
@@ -53,6 +54,7 @@ import {
 } from "@falcondeck/ui";
 
 import { AddProjectMenu } from "./add-project-menu";
+import { ActivityInbox } from "./activity-inbox";
 import { AttentionInbox } from "./attention-inbox";
 import { ExtensionSidebarFilters } from "./extension-sidebar-filters";
 import { ThreadStageFilterMenu } from "./thread-stage-filter-menu";
@@ -105,6 +107,14 @@ function defaultProjectThreadId(group: ProjectGroup): string | null {
 type SidebarEmptyState = {
   title: string;
   description?: string;
+};
+
+export type WorkspaceSidebarActivity = {
+  interactiveRequests: InteractiveRequest[];
+  /** Opens a task without moving focus out of the inbox. */
+  onPreviewThread: (workspaceId: string, threadId: string) => void;
+  onClose: () => void;
+  onPopOut?: () => void;
 };
 
 export type WorkspaceSidebarProps = {
@@ -228,6 +238,11 @@ export type WorkspaceSidebarProps = {
   footer?: React.ReactNode;
   /** First-class navigation rendered before pinned threads and projects. */
   topNavigation?: React.ReactNode;
+  /**
+   * Swaps the navigation, pinned threads, and projects for the cross-project
+   * Activity inbox. The main pane stays the reading pane.
+   */
+  activity?: WorkspaceSidebarActivity | null;
   className?: string;
   headerClassName?: string;
   contentClassName?: string;
@@ -1210,6 +1225,7 @@ export const WorkspaceSidebar = memo(function WorkspaceSidebar({
   },
   footer,
   topNavigation,
+  activity = null,
   className,
   headerClassName,
   contentClassName,
@@ -1898,6 +1914,15 @@ export const WorkspaceSidebar = memo(function WorkspaceSidebar({
     [onSelectWorkspace],
   );
 
+  const previewActivityThread = activity?.onPreviewThread;
+  const handlePreviewThread = useCallback(
+    (workspaceId: string, threadId: string) => {
+      setOptimisticSelection({ workspaceId, threadId });
+      previewActivityThread?.(workspaceId, threadId);
+    },
+    [previewActivityThread],
+  );
+
   const handleSelectThread = useCallback(
     (workspaceId: string, threadId: string) => {
       setOptimisticSelection({ workspaceId, threadId });
@@ -2052,8 +2077,15 @@ export const WorkspaceSidebar = memo(function WorkspaceSidebar({
     if (!threadContextMenu || !onArchiveThread) return;
     const { workspaceId, thread } = threadContextMenu;
     setThreadContextMenu(null);
+    // The inbox has no confirm pill; the host offers Undo instead.
+    if (activity) {
+      void Promise.resolve(onArchiveThread(workspaceId, thread.id)).catch(
+        () => {},
+      );
+      return;
+    }
     requestArchiveConfirm(workspaceId, thread.id);
-  }, [onArchiveThread, requestArchiveConfirm, threadContextMenu]);
+  }, [activity, onArchiveThread, requestArchiveConfirm, threadContextMenu]);
 
   const handleUnarchiveFromContextMenu = useCallback(() => {
     if (!threadContextMenu || !onUnarchiveThread) return;
@@ -2850,12 +2882,30 @@ export const WorkspaceSidebar = memo(function WorkspaceSidebar({
             ))}
           </div>
         ) : null}
-        {newThreadRow || topNavigation ? (
-          <nav className="mb-4">
+        {newThreadRow || (topNavigation && !activity) ? (
+          <nav className={activity ? "mb-2" : "mb-4"}>
             {newThreadRow}
-            {topNavigation}
+            {activity ? null : topNavigation}
           </nav>
         ) : null}
+        {activity ? (
+          <ActivityInbox
+            groups={groups}
+            interactiveRequests={activity.interactiveRequests}
+            selectedWorkspaceId={visualSelectedWorkspaceId}
+            selectedThreadId={visualSelectedThreadId}
+            workspaceHosts={workspaceHosts}
+            nowTick={nowTick}
+            onPreviewThread={handlePreviewThread}
+            onOpenThread={handleSelectThread}
+            onArchiveThread={onArchiveThread}
+            onOpenContextMenu={handleOpenThreadContextMenu}
+            onClose={activity.onClose}
+            onPopOut={activity.onPopOut}
+          />
+        ) : null}
+        {/* Kept mounted while Activity is up so pagers and folds survive. */}
+        <div hidden={Boolean(activity)}>
         <PinnedThreadList
           entries={pinnedThreads}
           selectedThreadId={visualSelectedThreadId}
@@ -3174,6 +3224,7 @@ export const WorkspaceSidebar = memo(function WorkspaceSidebar({
             </Collapsible.Root>
           </section>
         ) : null}
+        </div>
       </SidebarContent>
       {footer ? (
         <div className="border-t border-border-subtle p-3">{footer}</div>

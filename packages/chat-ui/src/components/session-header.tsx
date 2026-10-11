@@ -1,6 +1,6 @@
 import { memo } from 'react'
 import * as React from 'react'
-import { Split, SquarePen } from 'lucide-react'
+import { Archive, Split, SquarePen } from 'lucide-react'
 
 import type { ThreadSummary, WorkspaceSummary } from '@falcondeck/client-core'
 import { ActivityDiamond, Badge, Button, StatusIndicator, Toolbar, ToolbarGroup, cn } from '@falcondeck/ui'
@@ -26,6 +26,8 @@ export type SessionHeaderProps = {
   compact?: boolean
   navigation?: React.ReactNode
   onNewThread?: () => void
+  /** Puts the open task away; shown only while a task is open. */
+  onArchive?: () => void
   /**
    * Rendered at the head of the trailing group, before New and the embedding
    * app's own controls. The isolated-thread Merge control lives here.
@@ -41,6 +43,7 @@ export const SessionHeader = memo(function SessionHeader({
   compact = false,
   navigation,
   onNewThread,
+  onArchive,
   leadingActions,
   children,
   className,
@@ -121,6 +124,18 @@ export const SessionHeader = memo(function SessionHeader({
 
       <ToolbarGroup align="end">
         {leadingActions}
+        {thread && onArchive && !thread.is_archived ? (
+          <Button
+            type="button"
+            variant="ghost"
+            size="icon"
+            onClick={onArchive}
+            aria-label="Archive task"
+            title="Archive task"
+          >
+            <Archive aria-hidden="true" className="h-4 w-4" />
+          </Button>
+        ) : null}
         {thread && onNewThread ? (
           <Button
             type="button"

@@ -108,6 +108,8 @@ interface ToastEntry {
   title: string
   description?: string
   duration?: number
+  /** One follow-up, such as Undo. Dismisses the toast when pressed. */
+  action?: { label: string; onClick: () => void }
 }
 
 interface ToastContextValue {
@@ -145,10 +147,19 @@ export function ToastProvider({ children }: { children: React.ReactNode }) {
               if (!open) removeToast(t.id)
             }}
           >
-            <div className="flex flex-col gap-1">
+            <div className="flex min-w-0 flex-1 flex-col gap-1">
               <ToastTitle>{t.title}</ToastTitle>
               {t.description ? <ToastDescription>{t.description}</ToastDescription> : null}
             </div>
+            {t.action ? (
+              <ToastPrimitive.Action
+                altText={t.action.label}
+                className="fd-focus shrink-0 self-center rounded-[var(--fd-radius-sm)] px-2 py-1 text-[length:var(--fd-text-xs)] font-medium text-fg-primary transition-colors hover:bg-surface-4"
+                onClick={t.action.onClick}
+              >
+                {t.action.label}
+              </ToastPrimitive.Action>
+            ) : null}
             <ToastClose />
           </Toast>
         ))}

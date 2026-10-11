@@ -22,6 +22,7 @@ import {
   composerProviderFor,
   composerSelectionFor,
   countAwaitingResponseThreads,
+  collectActivityInbox,
   countActivityEntries,
   conversationItemsForSelection,
   deriveExtensionPanels,
@@ -268,11 +269,6 @@ const ScheduledTasksView = lazy(() =>
     default: module.ScheduledTasksView,
   })),
 );
-const ActivityView = lazy(() =>
-  import("@falcondeck/chat-ui/activity-view").then((module) => ({
-    default: module.ActivityView,
-  })),
-);
 const DiffPanel = lazy(() =>
   import("./components/DiffPanel").then((module) => ({
     default: module.DiffPanel,
@@ -504,17 +500,15 @@ function AppInner() {
   const [activeExtensionPanelKey, setActiveExtensionPanelKey] = useState<
     string | null
   >(null);
-  const activeMainViewId = isActivityOpen
-    ? "core.activity"
-    : isScheduledOpen
-      ? "core.scheduled"
-      : isExtensionsOpen
-        ? "core.extensions"
-        : isPluginsOpen
-          ? "core.plugins"
-          : isSettingsOpen
-            ? "core.settings"
-            : activeExtensionPanelKey;
+  const activeMainViewId = isScheduledOpen
+    ? "core.scheduled"
+    : isExtensionsOpen
+      ? "core.extensions"
+      : isPluginsOpen
+        ? "core.plugins"
+        : isSettingsOpen
+          ? "core.settings"
+          : activeExtensionPanelKey;
   const [settingsSection, setSettingsSection] =
     useState<SettingsSectionId>("general");
   const [settingsRequestKey, setSettingsRequestKey] = useState(0);
@@ -839,7 +833,6 @@ function AppInner() {
     setSettingsRequestKey((current) => current + 1);
     setIsSettingsOpen(true);
     setIsScheduledOpen(false);
-    setIsActivityOpen(false);
     setIsExtensionsOpen(false);
   }, []);
 
@@ -1051,8 +1044,7 @@ function AppInner() {
   useEffect(() => {
     if (
       activeExtensionPanelKey &&
-      (isActivityOpen ||
-        isScheduledOpen ||
+      (isScheduledOpen ||
         isExtensionsOpen ||
         isPluginsOpen ||
         isSettingsOpen)
@@ -1061,7 +1053,6 @@ function AppInner() {
     }
   }, [
     activeExtensionPanelKey,
-    isActivityOpen,
     isExtensionsOpen,
     isPluginsOpen,
     isScheduledOpen,
@@ -3151,7 +3142,6 @@ function AppInner() {
     (workspaceId: string, threadId: string | null) => {
       setIsSettingsOpen(false);
       setIsScheduledOpen(false);
-      setIsActivityOpen(false);
       setIsExtensionsOpen(false);
       setIsPluginsOpen(false);
       setActiveExtensionPanelKey(null);
@@ -3166,7 +3156,6 @@ function AppInner() {
     (workspaceId: string, threadId: string) => {
       setIsSettingsOpen(false);
       setIsScheduledOpen(false);
-      setIsActivityOpen(false);
       setIsExtensionsOpen(false);
       setIsPluginsOpen(false);
       setActiveExtensionPanelKey(null);
@@ -3181,7 +3170,6 @@ function AppInner() {
     (workspaceId: string) => {
       setIsSettingsOpen(false);
       setIsScheduledOpen(false);
-      setIsActivityOpen(false);
       setIsExtensionsOpen(false);
       setIsPluginsOpen(false);
       setActiveExtensionPanelKey(null);
@@ -3255,7 +3243,6 @@ function AppInner() {
     if (selectedThreadId) return;
     setIsSettingsOpen(false);
     setIsScheduledOpen(false);
-    setIsActivityOpen(false);
     setIsExtensionsOpen(false);
     setIsPluginsOpen(false);
     setProjectMenuRequestKey((current) => current + 1);
@@ -3925,7 +3912,6 @@ function AppInner() {
     setSettingsRequestKey((current) => current + 1);
     setIsSettingsOpen(true);
     setIsScheduledOpen(false);
-    setIsActivityOpen(false);
     setIsExtensionsOpen(false);
     setIsPluginsOpen(false);
     setActiveExtensionPanelKey(null);
@@ -3940,7 +3926,6 @@ function AppInner() {
     setSettingsRequestKey((current) => current + 1);
     setIsSettingsOpen(true);
     setIsScheduledOpen(false);
-    setIsActivityOpen(false);
     setIsExtensionsOpen(false);
     setIsPluginsOpen(false);
     setActiveExtensionPanelKey(null);
@@ -3951,7 +3936,6 @@ function AppInner() {
     setSettingsRequestKey((current) => current + 1);
     setIsSettingsOpen(true);
     setIsScheduledOpen(false);
-    setIsActivityOpen(false);
     setIsExtensionsOpen(false);
     setIsPluginsOpen(false);
     setActiveExtensionPanelKey(null);
@@ -3984,25 +3968,45 @@ function AppInner() {
   const handleOpenScheduled = useCallback(() => {
     setIsSettingsOpen(false);
     setIsScheduledOpen(true);
-    setIsActivityOpen(false);
     setIsExtensionsOpen(false);
     setIsPluginsOpen(false);
     setActiveExtensionPanelKey(null);
   }, []);
 
-  const handleOpenActivity = useCallback(() => {
-    setIsSettingsOpen(false);
-    setIsScheduledOpen(false);
+  // Activity is a sidebar mode: the inbox replaces the project list and the
+  // main pane stays the reading pane for whichever task is selected.
+  const handleShowActivity = useCallback(() => {
+    if (!sidebarVisible) toggleSidebar();
     setIsActivityOpen(true);
-    setIsExtensionsOpen(false);
-    setIsPluginsOpen(false);
-    setActiveExtensionPanelKey(null);
-  }, []);
+    window.requestAnimationFrame(() => {
+      document
+        .querySelector<HTMLElement>("[data-activity-inbox]")
+        ?.focus({ preventScroll: true });
+    });
+  }, [sidebarVisible, toggleSidebar]);
+  const handleOpenActivity = useCallback(() => {
+    if (isActivityOpen && sidebarVisible) setIsActivityOpen(false);
+    else handleShowActivity();
+  }, [handleShowActivity, isActivityOpen, sidebarVisible]);
+
+  // Arrowing through the inbox previews each task without pulling focus
+  // into its composer; Enter in the inbox opens it properly.
+  const handlePreviewActivityThread = useCallback(
+    (workspaceId: string, threadId: string) => {
+      setIsSettingsOpen(false);
+      setIsScheduledOpen(false);
+      setIsExtensionsOpen(false);
+      setIsPluginsOpen(false);
+      setActiveExtensionPanelKey(null);
+      setSelectedWorkspaceId(workspaceId);
+      setSelectedThreadId(threadId);
+    },
+    [setSelectedWorkspaceId, setSelectedThreadId],
+  );
 
   const handleOpenExtensions = useCallback(() => {
     setIsSettingsOpen(false);
     setIsScheduledOpen(false);
-    setIsActivityOpen(false);
     setIsExtensionsOpen(true);
     setIsPluginsOpen(false);
     setActiveExtensionPanelKey(null);
@@ -4011,14 +4015,13 @@ function AppInner() {
   const handleOpenPlugins = useCallback(() => {
     setIsSettingsOpen(false);
     setIsScheduledOpen(false);
-    setIsActivityOpen(false);
     setIsExtensionsOpen(false);
     setIsPluginsOpen(true);
     setActiveExtensionPanelKey(null);
   }, []);
 
-  // Detaching gives Activity its own screen, so the takeover steps aside and
-  // the main window goes back to the thread it was on.
+  // Detaching gives Activity its own screen, so the sidebar goes back to
+  // projects.
   const handlePopOutActivity = useCallback(() => {
     setIsActivityOpen(false);
     void openActivityWindow().catch((error) => {
@@ -4031,6 +4034,24 @@ function AppInner() {
       });
     });
   }, [toast]);
+
+  const sidebarActivity = useMemo(
+    () =>
+      isActivityOpen
+        ? {
+            interactiveRequests: viewSnapshot?.interactive_requests ?? [],
+            onPreviewThread: handlePreviewActivityThread,
+            onClose: () => setIsActivityOpen(false),
+            onPopOut: isTauriDesktop() ? handlePopOutActivity : undefined,
+          }
+        : null,
+    [
+      handlePopOutActivity,
+      handlePreviewActivityThread,
+      isActivityOpen,
+      viewSnapshot?.interactive_requests,
+    ],
+  );
 
   // Same entry point as the keyboard binding, so the sidebar's search button
   // toggles the palette rather than stacking opens.
@@ -4080,7 +4101,6 @@ function AppInner() {
   const handleOpenExtensionPanel = useCallback((panelKey: string) => {
     setIsSettingsOpen(false);
     setIsScheduledOpen(false);
-    setIsActivityOpen(false);
     setIsExtensionsOpen(false);
     setIsPluginsOpen(false);
     setActiveExtensionPanelKey(panelKey);
@@ -4356,7 +4376,35 @@ function AppInner() {
           title: "Failed to archive thread",
           description: msg,
         });
+        // Lets one-click archive (inbox, header) skip advancing on failure.
+        throw error;
       }
+      // The inbox and header archive without a confirm step, so every
+      // archive gets a way back.
+      toast({
+        variant: "default",
+        title: "Task archived",
+        action: {
+          label: "Undo",
+          onClick: () => {
+            void client
+              .unarchiveThread(workspaceId, threadId)
+              .then(async () => {
+                if (!workspaceHostIndex.has(workspaceId) && api) {
+                  setSnapshot(await api.snapshot());
+                }
+              })
+              .catch((error: unknown) => {
+                toast({
+                  variant: "danger",
+                  title: "Failed to unarchive task",
+                  description:
+                    error instanceof Error ? error.message : undefined,
+                });
+              });
+          },
+        },
+      });
     },
     [
       api,
@@ -4369,6 +4417,42 @@ function AppInner() {
       workspaceHostIndex,
     ],
   );
+
+  // Archiving from the open task's header. With the Activity inbox up, the
+  // reading pane moves on to the next task the way mail does.
+  const handleArchiveOpenThread = useCallback(() => {
+    if (!selectedWorkspaceId || !selectedThreadId) return;
+    const workspaceId = selectedWorkspaceId;
+    const threadId = selectedThreadId;
+    let next: { workspaceId: string; threadId: string } | null = null;
+    if (isActivityOpen) {
+      const inbox = collectActivityInbox(
+        groups,
+        viewSnapshot?.interactive_requests ?? [],
+        { nowMs: Date.now() },
+      );
+      const rows = [...inbox.needsYou, ...inbox.feed];
+      const index = rows.findIndex(
+        (row) => row.workspaceId === workspaceId && row.thread.id === threadId,
+      );
+      const row = index === -1 ? null : (rows[index + 1] ?? rows[index - 1]);
+      if (row) next = { workspaceId: row.workspaceId, threadId: row.thread.id };
+    }
+    void handleArchiveThread(workspaceId, threadId).then(
+      () => {
+        if (next) handlePreviewActivityThread(next.workspaceId, next.threadId);
+      },
+      () => {},
+    );
+  }, [
+    groups,
+    handleArchiveThread,
+    handlePreviewActivityThread,
+    isActivityOpen,
+    selectedThreadId,
+    selectedWorkspaceId,
+    viewSnapshot?.interactive_requests,
+  ]);
 
   const handleArchiveAllThreads = useCallback(
     async (workspaceId: string) => {
@@ -5577,7 +5661,6 @@ function AppInner() {
       if (!next) return;
       setIsSettingsOpen(false);
       setIsScheduledOpen(false);
-      setIsActivityOpen(false);
       setIsExtensionsOpen(false);
       setIsPluginsOpen(false);
       setSelectedWorkspaceId(next.workspace_id);
@@ -5595,7 +5678,6 @@ function AppInner() {
       selectionHistoryIndexRef.current = nextIndex;
       setIsSettingsOpen(false);
       setIsScheduledOpen(false);
-      setIsActivityOpen(false);
       setIsExtensionsOpen(false);
       setIsPluginsOpen(false);
       setSelectedWorkspaceId(entry.workspaceId);
@@ -5653,7 +5735,6 @@ function AppInner() {
           setSettingsRequestKey((current) => current + 1);
           setIsSettingsOpen(true);
           setIsScheduledOpen(false);
-          setIsActivityOpen(false);
           setIsExtensionsOpen(false);
           setIsPluginsOpen(false);
           break;
@@ -5737,7 +5818,6 @@ function AppInner() {
         case "focusComposer":
           setIsSettingsOpen(false);
           setIsScheduledOpen(false);
-          setIsActivityOpen(false);
           setIsExtensionsOpen(false);
           setIsPluginsOpen(false);
           setComposerFocusRequestKey((current) => current + 1);
@@ -5759,7 +5839,6 @@ function AppInner() {
                   : ("model" as const);
           setIsSettingsOpen(false);
           setIsScheduledOpen(false);
-          setIsActivityOpen(false);
           setIsExtensionsOpen(false);
           setIsPluginsOpen(false);
           setComposerMenuRequest((current) => ({ key: current.key + 1, menu }));
@@ -5880,7 +5959,7 @@ function AppInner() {
             onOpenSettings={handleOpenSettings}
             onOpenBackup={handleOpenBackupSettings}
             onOpenUsage={handleOpenUsage}
-            onOpenActivity={handleOpenActivity}
+            onOpenActivity={handleShowActivity}
             onOpenKeyboardShortcuts={handleOpenKeyboardShortcuts}
             onOpenPlugins={handleOpenPlugins}
             onSearchMessages={handleSearchThreadMessages}
@@ -5953,6 +6032,7 @@ function AppInner() {
               isTauriDesktop() ? handlePopOutActivity : undefined
             }
             activityOpen={isActivityOpen}
+            activity={sidebarActivity}
             activityCount={
               activityCounts.blocked +
               activityCounts.failed +
@@ -5999,31 +6079,6 @@ function AppInner() {
         main={
           resolveMainView(
             {
-              "core.activity": (
-                <Suspense fallback={loadingThreadState}>
-                  <ActivityView
-                    groups={groups}
-                    interactiveRequests={
-                      viewSnapshot?.interactive_requests ?? []
-                    }
-                    workspaceHosts={workspaceHostBadges}
-                    onLoadPreview={handleLoadActivityPreview}
-                    onSendPreview={handleSendActivityPreview}
-                    onOpenThread={handleSelectThread}
-                    onInteractiveResponse={handleInteractiveResponseCallback}
-                    onMarkThreadRead={handleMarkThreadRead}
-                    onClose={() => setIsActivityOpen(false)}
-                    onNewThread={
-                      selectedWorkspaceId
-                        ? () => handleNewThread(selectedWorkspaceId)
-                        : undefined
-                    }
-                    onPopOut={
-                      isTauriDesktop() ? handlePopOutActivity : undefined
-                    }
-                  />
-                </Suspense>
-              ),
               "core.scheduled": (
                 <Suspense fallback={loadingThreadState}>
                   <ScheduledTasksView
@@ -6043,7 +6098,6 @@ function AppInner() {
                     }
                     onOpenThread={(workspaceId, threadId) => {
                       setIsScheduledOpen(false);
-                      setIsActivityOpen(false);
                       setIsExtensionsOpen(false);
                       setIsPluginsOpen(false);
                       setSelectedWorkspaceId(workspaceId);
@@ -6285,6 +6339,9 @@ function AppInner() {
               promptInputKey={`${conversationKey}:${activeProvider}:${activeCapabilities.supports_images ? "images" : "no-images"}`}
               onNewThread={
                 selectedThread ? handleNewThreadFromCurrent : undefined
+              }
+              onArchiveThread={
+                selectedThread ? handleArchiveOpenThread : undefined
               }
               onRetryResponse={
                 selectedThread &&
