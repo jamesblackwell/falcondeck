@@ -239,6 +239,34 @@ pub async fn preserve_recovery_copy(path: &Path, now: DateTime<Utc>) -> Option<P
     }
 }
 
+/// Ids that survive a cap. Queued and running rows are an overlap lock, so
+/// they stay even when they are the oldest. Terminal history fills whatever
+/// room remains. Live rows beyond the cap are still kept.
+fn run_ids_within_cap(
+    mut runs: Vec<&AutomationRun>,
+    limit: usize,
+) -> std::collections::BTreeSet<String> {
+    runs.sort_by(|left, right| {
+        right
+            .queued_at
+            .cmp(&left.queued_at)
+            .then(right.id.cmp(&left.id))
+    });
+    let mut keep = std::collections::BTreeSet::new();
+    for run in &runs {
+        if !run.status.is_terminal() {
+            keep.insert(run.id.clone());
+        }
+    }
+    for run in runs {
+        if keep.len() >= limit {
+            break;
+        }
+        keep.insert(run.id.clone());
+    }
+    keep
+}
+
 /// Applies every retention bound. Runs during mutations and after run
 /// completion; order matters only in that per-automation trimming happens
 /// before the global cap.
@@ -249,19 +277,13 @@ pub fn compact(state: &mut PersistedControlState, now: DateTime<Utc>) {
         .map(|a| a.id.clone())
         .collect::<Vec<_>>()
     {
-        let mut runs: Vec<&AutomationRun> = state
+        let runs: Vec<&AutomationRun> = state
             .runs
             .iter()
             .filter(|run| run.automation_id == automation_id)
             .collect();
         if runs.len() > RUNS_PER_AUTOMATION {
-            // Newest first by (queued_at, id).
-            runs.sort_by(|a, b| b.queued_at.cmp(&a.queued_at).then(b.id.cmp(&a.id)));
-            let keep: std::collections::BTreeSet<String> = runs
-                .into_iter()
-                .take(RUNS_PER_AUTOMATION)
-                .map(|r| r.id.clone())
-                .collect();
+            let keep = run_ids_within_cap(runs, RUNS_PER_AUTOMATION);
             let automation_id = automation_id.clone();
             state
                 .runs
@@ -270,9 +292,13 @@ pub fn compact(state: &mut PersistedControlState, now: DateTime<Utc>) {
     }
     if state.runs.len() > TOTAL_RUNS {
         let mut runs = std::mem::take(&mut state.runs);
-        runs.sort_by(|a, b| b.queued_at.cmp(&a.queued_at).then(b.id.cmp(&a.id)));
-        let keep: std::collections::BTreeSet<String> =
-            runs.iter().take(TOTAL_RUNS).map(|r| r.id.clone()).collect();
+        let keep = run_ids_within_cap(runs.iter().collect(), TOTAL_RUNS);
+        runs.sort_by(|left, right| {
+            right
+                .queued_at
+                .cmp(&left.queued_at)
+                .then(right.id.cmp(&left.id))
+        });
         runs.retain(|run| keep.contains(&run.id));
         state.runs = runs;
     }
@@ -696,6 +722,37 @@ mod tests {
         }
         compact(&mut state, now);
         assert_eq!(state.runs.len(), RUNS_PER_AUTOMATION);
+    }
+
+    #[test]
+    fn compaction_keeps_a_live_run_ahead_of_newer_history() {
+        let now = Utc::now();
+        let mut state = PersistedControlState::default();
+        state
+            .automations
+            .push(automation("automation-1", "2026-08-16T10:00:00Z"));
+        state.runs.push(run_with_status(
+            "run-live",
+            "automation-1",
+            "2026-08-16T09:00:00Z",
+            "running",
+        ));
+        for index in 0..RUNS_PER_AUTOMATION {
+            state.runs.push(run(
+                &format!("run-{index:03}"),
+                "automation-1",
+                "2026-08-16T10:00:00Z",
+            ));
+        }
+        compact(&mut state, now);
+        assert_eq!(state.runs.len(), RUNS_PER_AUTOMATION);
+        assert!(
+            state
+                .runs
+                .iter()
+                .any(|run| { run.id == "run-live" && run.status == AutomationRunStatus::Running })
+        );
+        assert!(state.runs.iter().all(|run| run.id != "run-000"));
     }
 
     #[test]
