@@ -293,14 +293,13 @@ fn list_files_from_disk(
             if !matches_needle(&relative, needle) {
                 continue;
             }
-            // Stop only after one match past the cap. An exact fit is the whole
-            // listing, matching `git ls-files`, which truncates when `len > limit`.
-            files.push(relative);
-            if files.len() > limit {
-                files.pop();
+            // The next match after a full cap is what proves the listing is
+            // incomplete. Stopping at `len == limit` marks an exact fit truncated.
+            if files.len() == limit {
                 truncated = true;
                 break;
             }
+            files.push(relative);
         }
         if truncated {
             break;
@@ -412,7 +411,7 @@ mod tests {
         for index in 0..3 {
             std::fs::write(root.path().join(format!("wanted-{index}.txt")), "").unwrap();
         }
-        // A match-free sibling after the cap must not count as another hit.
+        // A non-matching file elsewhere in the tree is not another hit.
         std::fs::write(root.path().join("later/notes.txt"), "").unwrap();
 
         let response = list_files_from_disk(root.path(), Some("wanted"), 3).unwrap();

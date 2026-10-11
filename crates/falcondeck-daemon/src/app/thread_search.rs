@@ -360,21 +360,19 @@ fn read_recent(file: &mut (impl Read + Seek), size: u64) -> std::io::Result<Vec<
     let mut window = TAIL_BYTES;
     loop {
         let start = size.saturating_sub(window);
-        // One read covers the boundary byte and the window. A second seek would
-        // be a different snapshot if the file shrinks, and would drop a prompt
-        // that begins exactly on the boundary.
+        // The byte before the window shares this read. A second read can see a
+        // different length and drop a prompt that starts on the boundary.
         let probe = u64::from(start > 0);
         file.seek(SeekFrom::Start(start - probe))?;
         let mut buffer = Vec::new();
         file.take(window + probe).read_to_end(&mut buffer)?;
-        let expected = (window + probe) as usize;
-        let messages = if start > 0 && buffer.len() < expected {
-            // The file shrank under the captured size. Parsing this slice would
-            // treat the wrong byte as the line boundary, so widen instead.
+        // Empty means this window is past the current end, so widen. A short
+        // read still ends at EOF: its first byte is the boundary for the rest.
+        let messages = if buffer.is_empty() {
             Vec::new()
         } else {
             let (body, skip_first_line) = if probe == 1 {
-                (&buffer[1..], buffer.first() != Some(&b'\n'))
+                (&buffer[1..], buffer[0] != b'\n')
             } else {
                 (&buffer[..], false)
             };
@@ -816,6 +814,22 @@ mod tests {
         bytes.extend(real.as_bytes());
 
         assert_eq!(read_tail(&bytes), vec!["real prompt".to_string()]);
+    }
+
+    #[test]
+    fn keeps_the_tail_prompt_when_the_file_is_shorter_than_its_captured_size() {
+        let prompt = format!("{}\n", claude_line("kept after shrink"));
+        let filler = assistant_line("note");
+        let repeats = (TAIL_BUDGET_BYTES as usize / filler.len()) + 2;
+        let mut bytes = filler.repeat(repeats).into_bytes();
+        bytes.extend(prompt.as_bytes());
+        // One byte past the real end. Discarding that short read cannot recover
+        // by widening: the captured size is already beyond the tail budget.
+        let size = bytes.len() as u64 + 1;
+        let mut cursor = std::io::Cursor::new(bytes);
+        let messages = read_recent(&mut cursor, size).expect("read");
+
+        assert_eq!(messages, vec!["kept after shrink".to_string()]);
     }
 
     #[test]
