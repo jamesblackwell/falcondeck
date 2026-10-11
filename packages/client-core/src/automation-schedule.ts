@@ -78,6 +78,7 @@ const RRULE_DAY: Record<string, number> = {
 
 const WEEKDAYS = [1, 2, 3, 4, 5];
 const WEEKENDS = [0, 6];
+const ALL_DAYS = [0, 1, 2, 3, 4, 5, 6];
 
 export type ScheduleCadenceInput = {
   trigger?: AutomationTrigger | null;
@@ -289,6 +290,10 @@ function describeDays(
   if (daysOfMonth.all && !daysOfWeek.all) {
     if (sameValues(daysOfWeek.values, WEEKDAYS)) return `Weekdays${inMonth}`;
     if (sameValues(daysOfWeek.values, WEEKENDS)) return `Weekends${inMonth}`;
+    // `0-6` and `1-7` list every weekday without being `*`. With an
+    // unrestricted day-of-month that still runs every day. A restricted
+    // day-of-month ORs with this field, so it must not be treated as `*`.
+    if (sameValues(daysOfWeek.values, ALL_DAYS)) return `Every day${inMonth}`;
     if (daysOfWeek.values.length === 1) {
       return `${DAY_PLURAL[daysOfWeek.values[0] ?? 0]}${inMonth}`;
     }
@@ -563,6 +568,7 @@ export function formatDueAt(
   } catch {
     time = title;
   }
+  if (dayDiff === 0) return { label: `today ${time}`, overdue: false, title };
   if (dayDiff === 1) return { label: `tomorrow ${time}`, overdue: false, title };
   if (dayDiff > 1 && dayDiff < 7) {
     const weekday = new Intl.DateTimeFormat(undefined, { weekday: "short" }).format(when);

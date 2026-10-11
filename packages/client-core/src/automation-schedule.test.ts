@@ -18,6 +18,9 @@ describe("formatCronCadence", () => {
     expect(formatCronCadence("20 2 * * 1,4")).toBe("Mon and Thu at 02:20");
     expect(formatCronCadence("30 3,12 * * *")).toBe("Every day at 03:30 and 12:30");
     expect(formatCronCadence("35 6 1 * *")).toBe("Monthly on the 1st at 06:35");
+    expect(formatCronCadence("0 9 * * 0-6")).toBe("Every day at 09:00");
+    expect(formatCronCadence("0 9 * * 1-7")).toBe("Every day at 09:00");
+    expect(formatCronCadence("0 9 * 1 0-6")).toBe("Every day in January at 09:00");
   });
 
   it("describes intervals and hourly clocks", () => {
@@ -32,6 +35,7 @@ describe("formatCronCadence", () => {
 
   it("returns null for expressions that are not worth guessing", () => {
     expect(formatCronCadence("0 8 1,15 * 1")).toBeNull();
+    expect(formatCronCadence("0 9 1,15 * 0-6")).toBeNull();
     expect(formatCronCadence("10,20 9-17 * * *")).toBeNull();
     expect(formatCronCadence("not a cron")).toBeNull();
     expect(formatCronCadence("0 8 * * * *")).toBeNull();
@@ -161,5 +165,25 @@ describe("formatDueAt", () => {
   it("returns null for missing timestamps", () => {
     expect(formatDueAt(null, now)).toBeNull();
     expect(formatDueAt("not-a-date", now)).toBeNull();
+  });
+
+  it("keeps a same-day time when the rounded hour count reaches 24", () => {
+    const morning = new Date(2026, 8, 7, 0, 10).getTime();
+    const evening = new Date(2026, 8, 7, 23, 50);
+    const time = new Intl.DateTimeFormat(undefined, {
+      hour: "numeric",
+      minute: "2-digit",
+    }).format(evening);
+    expect(formatDueAt(evening.toISOString(), morning)?.label).toBe(`today ${time}`);
+  });
+
+  it("keeps tomorrow when a 24-hour rounding crosses midnight", () => {
+    const now = new Date(2026, 8, 7, 0, 40).getTime();
+    const due = new Date(2026, 8, 8, 0, 20);
+    const time = new Intl.DateTimeFormat(undefined, {
+      hour: "numeric",
+      minute: "2-digit",
+    }).format(due);
+    expect(formatDueAt(due.toISOString(), now)?.label).toBe(`tomorrow ${time}`);
   });
 });

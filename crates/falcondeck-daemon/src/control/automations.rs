@@ -814,6 +814,11 @@ impl CronSpec {
                 format!("Weekdays{in_month}")
             } else if days == [0, 6] {
                 format!("Weekends{in_month}")
+            } else if days == [0, 1, 2, 3, 4, 5, 6] {
+                // An explicit Sun–Sat list still runs every day while the
+                // day-of-month field is unrestricted. Leave a restricted
+                // day-of-month alone: the two fields OR, unlike `*`.
+                format!("Every day{in_month}")
             } else if days.len() == 1 {
                 format!("{}{in_month}", DAY_PLURAL[days[0] as usize])
             } else if days.len() <= 4 {
@@ -965,6 +970,19 @@ mod tests {
             cron("0 0,2 * * *").describe().as_deref(),
             Some("Every day at 00:00 and 02:00")
         );
+        assert_eq!(
+            cron("0 9 * * 0-6").describe().as_deref(),
+            Some("Every day at 09:00")
+        );
+        assert_eq!(
+            cron("0 9 * * 1-7").describe().as_deref(),
+            Some("Every day at 09:00")
+        );
+        assert_eq!(
+            cron("0 9 * 1 0-6").describe().as_deref(),
+            Some("Every day in January at 09:00")
+        );
+        assert_eq!(cron("0 9 1,15 * 0-6").describe(), None);
         assert_eq!(
             schedule_summary(&AutomationTrigger::Cron {
                 expression: "0 8 * * 1-5".to_string(),
