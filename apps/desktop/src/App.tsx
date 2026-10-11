@@ -4318,18 +4318,17 @@ function AppInner() {
 
   const handleReorderQueuedTurns = useCallback(
     async (queuedIds: string[]) => {
-      if (!selectedWorkspaceId || !selectedThreadId) return;
-      const client = apiFor(selectedWorkspaceId);
-      if (!client) return;
       try {
+        if (!selectedWorkspaceId || !selectedThreadId) {
+          throw new Error(CONNECTION_COPY.notConnected);
+        }
+        const client = apiFor(selectedWorkspaceId);
+        if (!client) throw new Error(CONNECTION_COPY.notConnected);
         await client.reorderQueuedTurns(
           selectedWorkspaceId,
           selectedThreadId,
           queuedIds,
         );
-        if (!workspaceHostIndex.has(selectedWorkspaceId) && api) {
-          setSnapshot(await api.snapshot());
-        }
       } catch (error: unknown) {
         const msg =
           error instanceof Error
@@ -4340,6 +4339,17 @@ function AppInner() {
           title: "Failed to reorder queued messages",
           description: msg,
         });
+        // The queue keeps the dropped order until this rejects, then snaps back.
+        throw error;
+      }
+      // A snapshot miss must not report the reorder as failed. The queue
+      // already shows the dropped order, and the thread event confirms it.
+      if (!workspaceHostIndex.has(selectedWorkspaceId) && api) {
+        try {
+          setSnapshot(await api.snapshot());
+        } catch {
+          // The reorder is already saved.
+        }
       }
     },
     [

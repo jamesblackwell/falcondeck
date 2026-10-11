@@ -4464,6 +4464,23 @@ function RemoteApp() {
     }
   }
 
+  async function handleReorderQueuedTurns(queuedIds: string[]) {
+    try {
+      if (!selectedWorkspaceId || !selectedThreadId) {
+        throw new Error("FalconDeck is not connected.");
+      }
+      await callRpc("thread.queue.reorder", {
+        workspace_id: selectedWorkspaceId,
+        thread_id: selectedThreadId,
+        queued_ids: queuedIds,
+      });
+    } catch (e) {
+      reportError(e, "Failed to reorder queued messages");
+      // The queue keeps the dropped order until this rejects, then snaps back.
+      throw e;
+    }
+  }
+
   async function handleEditQueuedTurn(queuedId: string, text: string) {
     if (!selectedWorkspaceId || !selectedThreadId) return;
     try {
@@ -5426,6 +5443,7 @@ function RemoteApp() {
                 ) : null}
                 {selectedThread ? (
                   <QueuedTurns
+                    key={`${selectedWorkspaceId ?? ""}:${selectedThread.id}`}
                     queuedTurns={selectedThread.queued_turns}
                     canSteer={activeCapabilities.supports_steering}
                     onRemove={(queuedId) =>
@@ -5435,6 +5453,7 @@ function RemoteApp() {
                     onEdit={(queuedId, text) =>
                       void handleEditQueuedTurn(queuedId, text)
                     }
+                    onReorder={handleReorderQueuedTurns}
                     getAttachmentPreviewUrl={handleQueuedTurnAttachmentPreview}
                   />
                 ) : null}

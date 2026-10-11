@@ -1,5 +1,5 @@
 import React from 'react'
-import { fireEvent, render, screen, waitFor } from '@testing-library/react'
+import { act, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { describe, expect, it, vi } from 'vitest'
 
 import { QueuedTurns } from '@falcondeck/chat-ui'
@@ -15,6 +15,62 @@ const queuedTurns = [
 
 function openMenu() {
   fireEvent.click(screen.getByRole('button', { name: /Actions for queued message/ }))
+}
+
+function queuedRowIds() {
+  return [...document.querySelectorAll('[data-queued-turn-id]')].map((node) =>
+    node.getAttribute('data-queued-turn-id'),
+  )
+}
+
+function queuedRow(id: string) {
+  const row = document.querySelector(`[data-queued-turn-id="${id}"]`)
+  if (!(row instanceof HTMLElement)) throw new Error(`Missing queued row ${id}`)
+  return row
+}
+
+function mockQueuedRow(id: string, top: number, height = 40) {
+  const row = queuedRow(id)
+  Object.defineProperty(row, 'getBoundingClientRect', {
+    configurable: true,
+    value: () => ({
+      top,
+      bottom: top + height,
+      height,
+      left: 0,
+      right: 300,
+      width: 300,
+      x: 0,
+      y: top,
+      toJSON() {},
+    }),
+  })
+  Object.defineProperty(row, 'setPointerCapture', { configurable: true, value: vi.fn() })
+  Object.defineProperty(row, 'hasPointerCapture', {
+    configurable: true,
+    value: vi.fn(() => true),
+  })
+  Object.defineProperty(row, 'releasePointerCapture', { configurable: true, value: vi.fn() })
+  return row
+}
+
+function dragQueuedRow(id: string, clientY: number) {
+  const row = queuedRow(id)
+  fireEvent.pointerDown(row, {
+    pointerId: 1,
+    isPrimary: true,
+    button: 0,
+    clientX: 12,
+    clientY: 10,
+  })
+  fireEvent.pointerMove(row, {
+    pointerId: 1,
+    isPrimary: true,
+    button: 0,
+    clientX: 12,
+    clientY,
+  })
+  return row
 }
 
 describe('QueuedTurns', () => {
@@ -94,7 +150,35 @@ describe('QueuedTurns', () => {
     )
   })
 
-  it('reorders queued rows with drag and drop', () => {
+  it('reorders queued rows by dragging past the next row', () => {
+    const onReorder = vi.fn()
+    render(
+      <QueuedTurns
+        queuedTurns={[
+          queuedTurns[0]!,
+          { ...queuedTurns[0]!, id: 'queued-2', preview: 'second message' },
+          { ...queuedTurns[0]!, id: 'queued-3', preview: 'third message' },
+        ]}
+        canSteer
+        onSteer={vi.fn()}
+        onRemove={vi.fn()}
+        onReorder={onReorder}
+      />,
+    )
+    mockQueuedRow('queued-1', 0)
+    mockQueuedRow('queued-2', 40)
+    mockQueuedRow('queued-3', 80)
+
+    const first = dragQueuedRow('queued-1', 70)
+    expect(queuedRowIds()).toEqual(['queued-2', 'queued-1', 'queued-3'])
+    expect(first).toHaveAttribute('aria-grabbed', 'true')
+
+    fireEvent.pointerUp(first, { pointerId: 1, isPrimary: true, button: 0 })
+    expect(onReorder).toHaveBeenCalledWith(['queued-2', 'queued-1', 'queued-3'])
+    expect(queuedRowIds()).toEqual(['queued-2', 'queued-1', 'queued-3'])
+  })
+
+  it('does not reorder a queued row until the pointer actually moves', () => {
     const onReorder = vi.fn()
     render(
       <QueuedTurns
@@ -108,18 +192,383 @@ describe('QueuedTurns', () => {
         onReorder={onReorder}
       />,
     )
-    const first = document.querySelector('[data-queued-turn-id="queued-1"]')!
-    const second = document.querySelector('[data-queued-turn-id="queued-2"]')!
-    const dataTransfer = { effectAllowed: '', dropEffect: '', setData: vi.fn() }
-    fireEvent.dragStart(first, { dataTransfer })
-    fireEvent.dragOver(second, { dataTransfer, clientY: 1 })
-    fireEvent.drop(second, { dataTransfer, clientY: 1 })
-    fireEvent.dragEnd(first, { dataTransfer })
+    mockQueuedRow('queued-1', 0)
+    mockQueuedRow('queued-2', 40)
+    const first = dragQueuedRow('queued-1', 12)
+    fireEvent.pointerUp(first, { pointerId: 1, isPrimary: true, button: 0 })
+
+    expect(onReorder).not.toHaveBeenCalled()
+    expect(queuedRowIds()).toEqual(['queued-1', 'queued-2'])
+  })
+
+  it('cancels a queued reorder with Escape', () => {
+    const onReorder = vi.fn()
+    render(
+      <QueuedTurns
+        queuedTurns={[
+          queuedTurns[0]!,
+          { ...queuedTurns[0]!, id: 'queued-2', preview: 'second message' },
+        ]}
+        canSteer
+        onSteer={vi.fn()}
+        onRemove={vi.fn()}
+        onReorder={onReorder}
+      />,
+    )
+    mockQueuedRow('queued-1', 0)
+    mockQueuedRow('queued-2', 40)
+    const first = dragQueuedRow('queued-1', 70)
+    expect(queuedRowIds()).toEqual(['queued-2', 'queued-1'])
+
+    fireEvent.keyDown(window, { key: 'Escape' })
+    fireEvent.pointerUp(first, { pointerId: 1, isPrimary: true, button: 0 })
+
+    expect(onReorder).not.toHaveBeenCalled()
+    expect(queuedRowIds()).toEqual(['queued-1', 'queued-2'])
+  })
+
+  it('puts the queue back when a reorder is rejected', async () => {
+    const onReorder = vi.fn(() => Promise.reject(new Error('failed')))
+    render(
+      <QueuedTurns
+        queuedTurns={[
+          queuedTurns[0]!,
+          { ...queuedTurns[0]!, id: 'queued-2', preview: 'second message' },
+        ]}
+        canSteer
+        onSteer={vi.fn()}
+        onRemove={vi.fn()}
+        onReorder={onReorder}
+      />,
+    )
+    mockQueuedRow('queued-1', 0)
+    mockQueuedRow('queued-2', 40)
+    const first = dragQueuedRow('queued-1', 70)
+    fireEvent.pointerUp(first, { pointerId: 1, isPrimary: true, button: 0 })
+
+    expect(onReorder).toHaveBeenCalledWith(['queued-2', 'queued-1'])
+    await waitFor(() => expect(queuedRowIds()).toEqual(['queued-1', 'queued-2']))
+  })
+
+  it('does not save a reorder when the pointer gesture is cancelled', () => {
+    const onReorder = vi.fn()
+    render(
+      <QueuedTurns
+        queuedTurns={[
+          queuedTurns[0]!,
+          { ...queuedTurns[0]!, id: 'queued-2', preview: 'second message' },
+        ]}
+        canSteer
+        onSteer={vi.fn()}
+        onRemove={vi.fn()}
+        onReorder={onReorder}
+      />,
+    )
+    mockQueuedRow('queued-1', 0)
+    mockQueuedRow('queued-2', 40)
+    const first = dragQueuedRow('queued-1', 70)
+    expect(queuedRowIds()).toEqual(['queued-2', 'queued-1'])
+
+    fireEvent.pointerCancel(first, { pointerId: 1, isPrimary: true, button: 0 })
+
+    expect(onReorder).not.toHaveBeenCalled()
+    expect(queuedRowIds()).toEqual(['queued-1', 'queued-2'])
+  })
+
+  it('restores the order from before this drag when Escape is pressed', () => {
+    const onReorder = vi.fn()
+    render(
+      <QueuedTurns
+        queuedTurns={[
+          queuedTurns[0]!,
+          { ...queuedTurns[0]!, id: 'queued-2', preview: 'second message' },
+        ]}
+        canSteer
+        onSteer={vi.fn()}
+        onRemove={vi.fn()}
+        onReorder={onReorder}
+      />,
+    )
+    mockQueuedRow('queued-1', 0)
+    mockQueuedRow('queued-2', 40)
+    const first = dragQueuedRow('queued-1', 70)
+    fireEvent.pointerUp(first, { pointerId: 1, isPrimary: true, button: 0 })
+    expect(queuedRowIds()).toEqual(['queued-2', 'queued-1'])
+
+    mockQueuedRow('queued-2', 0)
+    mockQueuedRow('queued-1', 40)
+    dragQueuedRow('queued-2', 70)
+    expect(queuedRowIds()).toEqual(['queued-1', 'queued-2'])
+    fireEvent.keyDown(window, { key: 'Escape' })
+
+    expect(onReorder).toHaveBeenCalledTimes(1)
+    expect(queuedRowIds()).toEqual(['queued-2', 'queued-1'])
+  })
+
+  it('keeps a newer drop when an older reorder fails', async () => {
+    let rejectFirst: (error: Error) => void = () => {}
+    const firstSave = new Promise<void>((_resolve, reject) => {
+      rejectFirst = reject
+    })
+    const onReorder = vi.fn()
+    onReorder.mockImplementationOnce(() => firstSave)
+    onReorder.mockImplementationOnce(() => Promise.resolve())
+    render(
+      <QueuedTurns
+        queuedTurns={[
+          queuedTurns[0]!,
+          { ...queuedTurns[0]!, id: 'queued-2', preview: 'second message' },
+          { ...queuedTurns[0]!, id: 'queued-3', preview: 'third message' },
+        ]}
+        canSteer
+        onSteer={vi.fn()}
+        onRemove={vi.fn()}
+        onReorder={onReorder}
+      />,
+    )
+    mockQueuedRow('queued-1', 0)
+    mockQueuedRow('queued-2', 40)
+    mockQueuedRow('queued-3', 80)
+    const first = dragQueuedRow('queued-1', 70)
+    fireEvent.pointerUp(first, { pointerId: 1, isPrimary: true, button: 0 })
+    expect(onReorder).toHaveBeenCalledTimes(1)
+    expect(queuedRowIds()).toEqual(['queued-2', 'queued-1', 'queued-3'])
+
+    mockQueuedRow('queued-2', 0)
+    mockQueuedRow('queued-1', 40)
+    mockQueuedRow('queued-3', 80)
+    const middle = dragQueuedRow('queued-1', 110)
+    fireEvent.pointerUp(middle, { pointerId: 1, isPrimary: true, button: 0 })
+    expect(queuedRowIds()).toEqual(['queued-2', 'queued-3', 'queued-1'])
+
+    rejectFirst(new Error('failed'))
+    await waitFor(() => expect(onReorder).toHaveBeenCalledTimes(2))
+    expect(onReorder).toHaveBeenLastCalledWith(['queued-2', 'queued-3', 'queued-1'])
+    expect(queuedRowIds()).toEqual(['queued-2', 'queued-3', 'queued-1'])
+  })
+
+  it('includes a message that arrives before the drop is saved', () => {
+    const onReorder = vi.fn()
+    const turns = [
+      queuedTurns[0]!,
+      { ...queuedTurns[0]!, id: 'queued-2', preview: 'second message' },
+      { ...queuedTurns[0]!, id: 'queued-3', preview: 'third message' },
+    ]
+    const { rerender } = render(
+      <QueuedTurns
+        queuedTurns={turns}
+        canSteer
+        onSteer={vi.fn()}
+        onRemove={vi.fn()}
+        onReorder={onReorder}
+      />,
+    )
+    mockQueuedRow('queued-1', 0)
+    mockQueuedRow('queued-2', 40)
+    mockQueuedRow('queued-3', 80)
+    const first = dragQueuedRow('queued-1', 70)
+    expect(queuedRowIds()).toEqual(['queued-2', 'queued-1', 'queued-3'])
+
+    rerender(
+      <QueuedTurns
+        queuedTurns={[...turns, { ...queuedTurns[0]!, id: 'queued-4', preview: 'fourth message' }]}
+        canSteer
+        onSteer={vi.fn()}
+        onRemove={vi.fn()}
+        onReorder={onReorder}
+      />,
+    )
+    fireEvent.pointerUp(first, { pointerId: 1, isPrimary: true, button: 0 })
+
+    expect(onReorder).toHaveBeenCalledWith([
+      'queued-2',
+      'queued-1',
+      'queued-3',
+      'queued-4',
+    ])
+  })
+
+  it('omits a message that leaves before the drop is saved', () => {
+    const onReorder = vi.fn()
+    const { rerender } = render(
+      <QueuedTurns
+        queuedTurns={[
+          queuedTurns[0]!,
+          { ...queuedTurns[0]!, id: 'queued-2', preview: 'second message' },
+          { ...queuedTurns[0]!, id: 'queued-3', preview: 'third message' },
+        ]}
+        canSteer
+        onSteer={vi.fn()}
+        onRemove={vi.fn()}
+        onReorder={onReorder}
+      />,
+    )
+    mockQueuedRow('queued-1', 0)
+    mockQueuedRow('queued-2', 40)
+    mockQueuedRow('queued-3', 80)
+    const first = dragQueuedRow('queued-1', 70)
+    expect(queuedRowIds()).toEqual(['queued-2', 'queued-1', 'queued-3'])
+
+    rerender(
+      <QueuedTurns
+        queuedTurns={[
+          queuedTurns[0]!,
+          { ...queuedTurns[0]!, id: 'queued-2', preview: 'second message' },
+        ]}
+        canSteer
+        onSteer={vi.fn()}
+        onRemove={vi.fn()}
+        onReorder={onReorder}
+      />,
+    )
+    fireEvent.pointerUp(first, { pointerId: 1, isPrimary: true, button: 0 })
 
     expect(onReorder).toHaveBeenCalledWith(['queued-2', 'queued-1'])
   })
 
-  it('cancels a queued reorder when the drag ends outside the list', () => {
+  it('drops a rejected order when that drag is cancelled', async () => {
+    let rejectSave: (error: Error) => void = () => {}
+    const save = new Promise<void>((_resolve, reject) => {
+      rejectSave = reject
+    })
+    const onReorder = vi.fn(() => save)
+    render(
+      <QueuedTurns
+        queuedTurns={[
+          queuedTurns[0]!,
+          { ...queuedTurns[0]!, id: 'queued-2', preview: 'second message' },
+        ]}
+        canSteer
+        onSteer={vi.fn()}
+        onRemove={vi.fn()}
+        onReorder={onReorder}
+      />,
+    )
+    mockQueuedRow('queued-1', 0)
+    mockQueuedRow('queued-2', 40)
+    const first = dragQueuedRow('queued-1', 70)
+    fireEvent.pointerUp(first, { pointerId: 1, isPrimary: true, button: 0 })
+    expect(queuedRowIds()).toEqual(['queued-2', 'queued-1'])
+
+    mockQueuedRow('queued-2', 0)
+    mockQueuedRow('queued-1', 40)
+    dragQueuedRow('queued-2', 14)
+    expect(queuedRowIds()).toEqual(['queued-2', 'queued-1'])
+
+    await act(async () => {
+      rejectSave(new Error('failed'))
+    })
+    expect(queuedRowIds()).toEqual(['queued-2', 'queued-1'])
+    fireEvent.keyDown(window, { key: 'Escape' })
+
+    expect(onReorder).toHaveBeenCalledTimes(1)
+    expect(queuedRowIds()).toEqual(['queued-1', 'queued-2'])
+  })
+
+  it('restores the previous order when the dragged row leaves', () => {
+    const onReorder = vi.fn(() => new Promise<void>(() => {}))
+    const { rerender } = render(
+      <QueuedTurns
+        queuedTurns={[
+          queuedTurns[0]!,
+          { ...queuedTurns[0]!, id: 'queued-2', preview: 'second message' },
+          { ...queuedTurns[0]!, id: 'queued-3', preview: 'third message' },
+        ]}
+        canSteer
+        onSteer={vi.fn()}
+        onRemove={vi.fn()}
+        onReorder={onReorder}
+      />,
+    )
+    mockQueuedRow('queued-1', 0)
+    mockQueuedRow('queued-2', 40)
+    mockQueuedRow('queued-3', 80)
+    const first = dragQueuedRow('queued-1', 110)
+    fireEvent.pointerUp(first, { pointerId: 1, isPrimary: true, button: 0 })
+    expect(queuedRowIds()).toEqual(['queued-2', 'queued-3', 'queued-1'])
+
+    mockQueuedRow('queued-2', 0)
+    mockQueuedRow('queued-3', 40)
+    mockQueuedRow('queued-1', 80)
+    dragQueuedRow('queued-2', 14)
+    expect(queuedRowIds()).toEqual(['queued-2', 'queued-3', 'queued-1'])
+
+    rerender(
+      <QueuedTurns
+        queuedTurns={[
+          queuedTurns[0]!,
+          { ...queuedTurns[0]!, id: 'queued-3', preview: 'third message' },
+        ]}
+        canSteer
+        onSteer={vi.fn()}
+        onRemove={vi.fn()}
+        onReorder={onReorder}
+      />,
+    )
+
+    expect(onReorder).toHaveBeenCalledTimes(1)
+    expect(queuedRowIds()).toEqual(['queued-3', 'queued-1'])
+  })
+
+  it('keeps a deferred reorder on the queue it started on', async () => {
+    let resolveFirst: () => void = () => {}
+    const firstSave = new Promise<void>((resolve) => {
+      resolveFirst = resolve
+    })
+    const onReorder = vi.fn()
+    onReorder.mockImplementationOnce(() => firstSave)
+    onReorder.mockImplementationOnce(() => Promise.resolve())
+    const onLater = vi.fn()
+    const turns = [
+      queuedTurns[0]!,
+      { ...queuedTurns[0]!, id: 'queued-2', preview: 'second message' },
+      { ...queuedTurns[0]!, id: 'queued-3', preview: 'third message' },
+    ]
+    const { rerender } = render(
+      <QueuedTurns
+        queuedTurns={turns}
+        canSteer
+        onSteer={vi.fn()}
+        onRemove={vi.fn()}
+        onReorder={onReorder}
+      />,
+    )
+    mockQueuedRow('queued-1', 0)
+    mockQueuedRow('queued-2', 40)
+    mockQueuedRow('queued-3', 80)
+    const first = dragQueuedRow('queued-1', 70)
+    fireEvent.pointerUp(first, { pointerId: 1, isPrimary: true, button: 0 })
+    expect(onReorder).toHaveBeenCalledTimes(1)
+
+    mockQueuedRow('queued-2', 0)
+    mockQueuedRow('queued-1', 40)
+    mockQueuedRow('queued-3', 80)
+    const middle = dragQueuedRow('queued-1', 110)
+    fireEvent.pointerUp(middle, { pointerId: 1, isPrimary: true, button: 0 })
+    expect(queuedRowIds()).toEqual(['queued-2', 'queued-3', 'queued-1'])
+
+    rerender(
+      <QueuedTurns
+        queuedTurns={[...turns, { ...queuedTurns[0]!, id: 'queued-4', preview: 'fourth message' }]}
+        canSteer
+        onSteer={vi.fn()}
+        onRemove={vi.fn()}
+        onReorder={onLater}
+      />,
+    )
+    resolveFirst()
+    await waitFor(() => expect(onReorder).toHaveBeenCalledTimes(2))
+
+    expect(onReorder).toHaveBeenLastCalledWith([
+      'queued-2',
+      'queued-3',
+      'queued-1',
+      'queued-4',
+    ])
+    expect(onLater).not.toHaveBeenCalled()
+  })
+
+  it('reorders when the row cannot capture the pointer', () => {
     const onReorder = vi.fn()
     render(
       <QueuedTurns
@@ -133,14 +582,56 @@ describe('QueuedTurns', () => {
         onReorder={onReorder}
       />,
     )
-    const first = document.querySelector('[data-queued-turn-id="queued-1"]')!
-    const second = document.querySelector('[data-queued-turn-id="queued-2"]')!
-    const dataTransfer = { effectAllowed: '', dropEffect: '', setData: vi.fn() }
-    fireEvent.dragStart(first, { dataTransfer })
-    fireEvent.dragOver(second, { dataTransfer })
-    fireEvent.dragEnd(first, { dataTransfer })
+    const first = mockQueuedRow('queued-1', 0)
+    mockQueuedRow('queued-2', 40)
+    Object.defineProperty(first, 'setPointerCapture', {
+      configurable: true,
+      value: () => {
+        throw new Error('no capture')
+      },
+    })
+
+    dragQueuedRow('queued-1', 70)
+    fireEvent.pointerUp(first, { pointerId: 1, isPrimary: true, button: 0 })
+
+    expect(onReorder).toHaveBeenCalledWith(['queued-2', 'queued-1'])
+  })
+
+  it('does not start a reorder from the Steer button', () => {
+    const onReorder = vi.fn()
+    const onSteer = vi.fn()
+    render(
+      <QueuedTurns
+        queuedTurns={[
+          queuedTurns[0]!,
+          { ...queuedTurns[0]!, id: 'queued-2', preview: 'second message' },
+        ]}
+        canSteer
+        onSteer={onSteer}
+        onRemove={vi.fn()}
+        onReorder={onReorder}
+      />,
+    )
+    const steer = screen.getAllByRole('button', { name: 'Steer' })[0]!
+    fireEvent.pointerDown(steer, {
+      pointerId: 1,
+      isPrimary: true,
+      button: 0,
+      clientX: 12,
+      clientY: 10,
+    })
+    fireEvent.pointerMove(steer, {
+      pointerId: 1,
+      isPrimary: true,
+      button: 0,
+      clientX: 12,
+      clientY: 80,
+    })
+    fireEvent.pointerUp(steer, { pointerId: 1, isPrimary: true, button: 0 })
+    fireEvent.click(steer)
 
     expect(onReorder).not.toHaveBeenCalled()
+    expect(onSteer).toHaveBeenCalledWith('queued-1')
   })
 
   it('hides Edit message unless an edit handler is wired up', () => {

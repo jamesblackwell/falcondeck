@@ -81,7 +81,7 @@ type DesktopConversationPaneProps = {
   onRemoveQueuedTurn?: (queuedId: string) => void;
   onSteerQueuedTurn?: (queuedId: string) => void;
   onEditQueuedTurn?: (queuedId: string, text: string) => void;
-  onReorderQueuedTurns?: (queuedIds: string[]) => void;
+  onReorderQueuedTurns?: (queuedIds: string[]) => void | Promise<void>;
   composerSuggestions?: ComposerSuggestionOffer | null;
   onSubmitComposerSuggestion?: (suggestion: ComposerSuggestion) => void;
   onDismissComposerSuggestions?: () => void;
@@ -273,6 +273,7 @@ export function DesktopConversationPane({
       />
       {selectedThread && onRemoveQueuedTurn && onSteerQueuedTurn ? (
         <QueuedTurns
+          key={`${selectedWorkspaceId ?? ""}:${selectedThread.id}`}
           queuedTurns={selectedThread.queued_turns}
           canSteer={canSteerQueuedTurn}
           onRemove={onRemoveQueuedTurn}
