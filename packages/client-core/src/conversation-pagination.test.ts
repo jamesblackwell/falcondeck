@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import {
   applyConversationEventsToItems,
+  applyEventToThreadDetail,
   mergeThreadDetailPage,
 } from "./conversation";
 import type { ConversationItem, EventEnvelope, ThreadDetail } from "./types";
@@ -262,6 +263,38 @@ describe("mergeThreadDetailPage", () => {
     ]);
     expect(complete.oldest_item_id).toBe("user-1");
     expect(complete.has_older).toBe(false);
+  });
+
+  it("keeps the pinned-window cursor while streaming updates the tail", () => {
+    const prompt: ConversationItem = {
+      kind: "user_message",
+      id: "user-1",
+      text: "fix it",
+      attachments: [],
+      created_at: at,
+    };
+    const page: ThreadDetail = {
+      ...detail(["tool-5", "tool-6"], { hasOlder: true }),
+      items: [prompt, assistant("tool-5"), assistant("tool-6", "hel")],
+      oldest_item_id: "tool-5",
+    };
+    const streamed = applyEventToThreadDetail(page, {
+      seq: 8,
+      emitted_at: at,
+      workspace_id: "workspace-1",
+      thread_id: "thread-1",
+      event: {
+        type: "text",
+        item_id: "tool-6",
+        delta: "lo",
+        start_offset: 3,
+        end_offset: 5,
+        target: "assistant_text",
+      },
+    });
+
+    expect(streamed?.oldest_item_id).toBe("tool-5");
+    expect(streamed?.items[2]).toMatchObject({ text: "hello" });
   });
 
   it("never merges pages belonging to different threads", () => {

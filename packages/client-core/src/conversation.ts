@@ -551,6 +551,16 @@ function conversationItemKey(item: ConversationItem) {
   return `${item.kind}:${item.id}`;
 }
 
+/** A tail page can pin the latest prompt above the contiguous window. The
+ * cursor stays on that window until the cursor item itself leaves the list. */
+function retainedHistoryCursor(
+  items: ConversationItem[],
+  previous: string | null | undefined,
+): string | null {
+  if (previous && items.some((item) => item.id === previous)) return previous;
+  return items[0]?.id ?? previous ?? null;
+}
+
 /**
  * Merges one daemon-owned history page without letting a stale cached tail
  * survive inside the authoritative overlap. `refresh` preserves only the
@@ -1117,7 +1127,7 @@ export function applyEventToThreadDetail(
       return {
         ...detail,
         items,
-        oldest_item_id: items[0]?.id ?? detail.oldest_item_id,
+        oldest_item_id: retainedHistoryCursor(items, detail.oldest_item_id),
         newest_item_id: items.at(-1)?.id ?? detail.newest_item_id,
       };
     }
@@ -1142,7 +1152,7 @@ export function applyEventsToThreadDetail(
     next = {
       ...next,
       items,
-      oldest_item_id: items[0]?.id ?? next.oldest_item_id,
+      oldest_item_id: retainedHistoryCursor(items, next.oldest_item_id),
       newest_item_id: items.at(-1)?.id ?? next.newest_item_id,
     };
   };
