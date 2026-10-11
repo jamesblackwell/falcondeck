@@ -131,6 +131,7 @@ export const TerminalView = forwardRef<TerminalViewHandle, TerminalViewProps>(fu
         case 'terminal_error':
           sessionDead = true
           writeStatusNotice(terminal, `Terminal error: ${raw.message}`)
+          onExitedRef.current?.(null)
           break
         case 'terminal_pong':
           break
@@ -396,7 +397,8 @@ export const TerminalView = forwardRef<TerminalViewHandle, TerminalViewProps>(fu
         socket.send(payload)
       })
       activeTerminal.onTitleChange((title) => {
-        if (!applier || applier.replayDepth > 0) return
+        // Replay parses historical OSC titles while replayDepth is elevated.
+        // Keystrokes stay blocked above; the title is the window's name.
         onTitleChangeRef.current?.(title)
       })
       activeTerminal.onResize(() => sendResize())

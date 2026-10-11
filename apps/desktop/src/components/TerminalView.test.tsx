@@ -23,13 +23,21 @@ vi.mock('@xterm/xterm', () => ({
     unicode = { activeVersion: '6' }
     onData = vi.fn()
     onBinary = vi.fn()
-    onTitleChange = vi.fn()
+    titleHandler: ((title: string) => void) | null = null
+    onTitleChange = (handler: (title: string) => void) => {
+      this.titleHandler = handler
+    }
     onResize = vi.fn()
     onSelectionChange = vi.fn()
     attachCustomKeyEventHandler = vi.fn()
     loadAddon = vi.fn()
     open = vi.fn()
-    write = vi.fn()
+    write = (data: string | Uint8Array, callback?: () => void) => {
+      const text = typeof data === 'string' ? data : new TextDecoder().decode(data)
+      const match = /\u001b\]0;([^\u0007]*)\u0007/.exec(text)
+      if (match?.[1]) this.titleHandler?.(match[1])
+      callback?.()
+    }
     reset = vi.fn()
     refresh = vi.fn()
     focus = vi.fn()
@@ -147,6 +155,36 @@ describe('TerminalView socket lifecycle', () => {
     await new Promise((resolve) => setTimeout(resolve, 1300))
     expect(FakeSocket.instances).toHaveLength(1)
     expect(onExited).toHaveBeenCalledWith(42)
+  })
+
+  it('applies a replayed title and marks a missing session exited', async () => {
+    const onExited = vi.fn()
+    const onTitleChange = vi.fn()
+    render(
+      <TerminalView
+        session={fakeSession}
+        socketUrl="ws://127.0.0.1:4123/api/terminals/term-test/ws?since_seq=0"
+        active
+        onExited={onExited}
+        onTitleChange={onTitleChange}
+        createSocket={(url) => new FakeSocket(url) as unknown as WebSocket}
+      />,
+    )
+    await waitFor(() => expect(FakeSocket.instances).toHaveLength(1))
+    const socket = FakeSocket.instances[0]
+    socket.open()
+    socket.receive({
+      type: 'terminal_attached',
+      session: fakeSession,
+      next_seq: 0,
+    })
+    socket.receive(replayChunk(0, '\u001b]0;build\u0007'))
+    expect(onTitleChange).toHaveBeenCalledWith('build')
+    socket.receive({ type: 'terminal_error', message: 'session not found' })
+    expect(onExited).toHaveBeenCalledWith(null)
+    socket.drop()
+    await new Promise((resolve) => setTimeout(resolve, 1300))
+    expect(FakeSocket.instances).toHaveLength(1)
   })
 })
 
