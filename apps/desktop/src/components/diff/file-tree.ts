@@ -15,15 +15,21 @@ export function buildFileTree(paths: string[]): FileTreeNode[] {
     let currentPath = ''
     for (let index = 0; index < parts.length; index += 1) {
       const name = parts[index]
-      if (!name) continue
       currentPath = currentPath ? `${currentPath}/${name}` : name
       const kind = index === parts.length - 1 ? 'file' : 'directory'
       let node = siblings.get(name)
       if (!node) {
         node = { name, path: currentPath, kind, children: [], childMap: new Map() }
         siblings.set(name, node)
+      } else if (kind === 'directory') {
+        // A path listed on its own is a file until a nested path needs it as a folder.
+        // A later listing of that same path must not turn the folder back into a file.
+        node.kind = 'directory'
       }
-      if (kind === 'directory') siblings = node.childMap ?? new Map()
+      if (kind === 'directory') {
+        node.childMap ??= new Map()
+        siblings = node.childMap
+      }
     }
   }
 
