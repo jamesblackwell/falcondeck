@@ -20,8 +20,6 @@ Use these only when the review output needs a different workflow:
 
 - `systematic-debugging`: when a reported bug needs root-cause tracing or local
   reproduction before a fix.
-- `fresh-eyes-review`: when the user wants an editable second pass that can fix
-  concrete issues, not a read-only bug report.
 - `autoreview`: after separate implementation work fixes findings; do not run
   it from inside the read-only bug-hunter pass unless the user asked for that
   closeout.
