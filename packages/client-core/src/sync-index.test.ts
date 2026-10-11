@@ -22,6 +22,24 @@ describe('compact index coverage', () => {
     expect(trackSyncIndexEvent(touched, event({ type: 'thread-updated', thread }))).toBe(touched)
   })
 
+  it('does not count or cover a summary the thread list will reject', () => {
+    const current = { ...thread, status: 'idle' as const, updated_at: '2026-09-29T10:00:00.12Z' }
+    const snapshot = { ...base(), threads: [current], sync_index: { ...base().sync_index!,
+      counts: { workspace: { total: 1, running: 0, unread: 0, awaiting: 0 } } } }
+    const older = applySnapshotEvent(snapshot, event({ type: 'thread-updated', thread: {
+      ...current, status: 'running', updated_at: '2026-09-29T10:00:00.1Z',
+    } }))!
+    expect(older.threads[0].status).toBe('idle')
+    expect(older.sync_index).toBe(snapshot.sync_index)
+    expect(older.sync_index?.counts.workspace.running).toBe(0)
+    const sameTime = applySnapshotEvent(snapshot, event({ type: 'thread-updated', thread: {
+      ...current, status: 'running',
+    } }))!
+    expect(sameTime.threads[0].status).toBe('idle')
+    expect(sameTime.sync_index?.counts.workspace.running).toBe(0)
+    expect(sameTime.sync_index?.touched_threads.one).toBeUndefined()
+  })
+
   it('counts an unread transition once even for a running thread', () => {
     const current = { ...thread, status: 'running' as const }
     const snapshot = { ...base(), threads: [current], sync_index: { ...base().sync_index!,

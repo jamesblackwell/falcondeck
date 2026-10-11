@@ -63,6 +63,19 @@ export function syncViewKey(view: { extension_id: string; view_id: string; scope
   return JSON.stringify([view.extension_id, view.view_id, view.scope?.kind, view.scope?.id])
 }
 
+/** Same rejection as snapshot upsert. Duplicated here because snapshot imports
+ * this module. Fractional seconds of different widths are not string-ordered:
+ * `.12Z` is newer than `.1Z`. */
+function threadSummaryIsStale(current: ThreadSummary, next: ThreadSummary): boolean {
+  const currentAt = Date.parse(current.updated_at)
+  const nextAt = Date.parse(next.updated_at)
+  if (Number.isNaN(currentAt) || Number.isNaN(nextAt)) return false
+  if (nextAt < currentAt) return true
+  const terminal = current.status === 'idle' || current.status === 'error'
+  const nextTerminal = next.status === 'idle' || next.status === 'error'
+  return nextAt === currentAt && terminal && !nextTerminal
+}
+
 /** Remember changes after the base so a late page cannot revive archived rows
  * or overwrite newer state, including events raced against the initial RPC. */
 export function trackSyncIndexEvent(snapshot: DaemonSnapshot, event: EventEnvelope): DaemonSnapshot {
@@ -72,9 +85,12 @@ export function trackSyncIndexEvent(snapshot: DaemonSnapshot, event: EventEnvelo
   if (body.type === 'thread-updated' || body.type === 'thread-started') {
     const previous = snapshot.threads.find(thread => thread.id === body.thread.id)
     const current = body.thread
+    // A summary the thread list will reject must not move counts or coverage.
+    // Otherwise the badge sticks after upsert drops the row.
+    if (previous && threadSummaryIsStale(previous, current)) return snapshot
     let counts = index.counts
     // The base already counts unseen rows. Only adjust membership we can prove.
-    if (previous && previous.updated_at <= current.updated_at) {
+    if (previous) {
       const count = counts[current.workspace_id]
       if (count) {
         const active = (thread: ThreadSummary) => Number(!thread.is_archived)
