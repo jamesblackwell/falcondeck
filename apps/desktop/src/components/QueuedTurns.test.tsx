@@ -178,6 +178,37 @@ describe('QueuedTurns', () => {
     expect(queuedRowIds()).toEqual(['queued-2', 'queued-1', 'queued-3'])
   })
 
+  it('can drag again after a press ends outside the row', () => {
+    const onReorder = vi.fn()
+    render(
+      <QueuedTurns
+        queuedTurns={[
+          queuedTurns[0]!,
+          { ...queuedTurns[0]!, id: 'queued-2', preview: 'second message' },
+        ]}
+        canSteer
+        onSteer={vi.fn()}
+        onRemove={vi.fn()}
+        onReorder={onReorder}
+      />,
+    )
+    const first = mockQueuedRow('queued-1', 0)
+    mockQueuedRow('queued-2', 40)
+    fireEvent.pointerDown(first, {
+      pointerId: 1,
+      isPrimary: true,
+      button: 0,
+      clientX: 12,
+      clientY: 10,
+    })
+    fireEvent.pointerUp(window, { pointerId: 1, isPrimary: true, button: 0 })
+    expect(onReorder).not.toHaveBeenCalled()
+
+    dragQueuedRow('queued-1', 70)
+    fireEvent.pointerUp(first, { pointerId: 1, isPrimary: true, button: 0 })
+    expect(onReorder).toHaveBeenCalledWith(['queued-2', 'queued-1'])
+  })
+
   it('does not reorder a queued row until the pointer actually moves', () => {
     const onReorder = vi.fn()
     render(

@@ -430,6 +430,9 @@ export function QueuedTurns({
   // Set when the latest save fails while a drag is active, so ending that
   // drag snaps back instead of keeping the rejected order.
   const reorderRejectedRef = useRef(false)
+  // Removed when the gesture ends. A press that slips off the row before the
+  // drag threshold otherwise never receives pointerup and blocks the next drag.
+  const releaseWatchRef = useRef<(() => void) | null>(null)
   const [previewOrder, setPreviewOrder] = useState<string[] | null>(null)
   const [draggingId, setDraggingId] = useState<string | null>(null)
   onReorderRef.current = onReorder
@@ -472,6 +475,11 @@ export function QueuedTurns({
     ) {
       clearPreview()
     }
+  }
+
+  const stopPointerWatch = () => {
+    releaseWatchRef.current?.()
+    releaseWatchRef.current = null
   }
 
   const releaseDrag = (drag: QueuedDrag) => {
@@ -547,6 +555,7 @@ export function QueuedTurns({
     const drag = dragRef.current
     if (!drag) return
     if (pointerId != null && pointerId !== drag.pointerId) return
+    stopPointerWatch()
     dragRef.current = null
     releaseDrag(drag)
     setDraggingId(null)
@@ -568,6 +577,7 @@ export function QueuedTurns({
   const cancelDrag = () => {
     const drag = dragRef.current
     if (!drag) return
+    stopPointerWatch()
     dragRef.current = null
     releaseDrag(drag)
     setDraggingId(null)
@@ -619,6 +629,7 @@ export function QueuedTurns({
     const draggedMissing = !queuedTurns.some((queued) => queued.id === drag.id)
     // One row left cannot be reordered, and its pointer-up handler is gone.
     if (!draggedMissing && queuedTurns.length > 1) return
+    stopPointerWatch()
     dragRef.current = null
     releaseDrag(drag)
     setDraggingId(null)
@@ -626,6 +637,8 @@ export function QueuedTurns({
     if (reorderRejectedRef.current) clearPreview()
     else restoreOrder(drag.originOrder)
   }, [queuedTurns])
+
+  useEffect(() => () => stopPointerWatch(), [])
 
   useEffect(() => {
     if (!draggingId) return
@@ -691,6 +704,30 @@ export function QueuedTurns({
                 active: false,
                 originOrder: orderedIdsRef.current.slice(),
                 element: event.currentTarget,
+              }
+              try {
+                event.currentTarget.setPointerCapture?.(event.pointerId)
+              } catch {
+                // The window listener below still ends the gesture.
+              }
+              const pointerId = event.pointerId
+              const endWatch = () => stopPointerWatch()
+              const onUp = (native: PointerEvent) => {
+                if (native.pointerId !== pointerId) return
+                endWatch()
+                finishDrag(native.pointerId)
+              }
+              const onCancel = (native: PointerEvent) => {
+                if (native.pointerId !== pointerId) return
+                endWatch()
+                cancelDrag()
+              }
+              stopPointerWatch()
+              window.addEventListener('pointerup', onUp)
+              window.addEventListener('pointercancel', onCancel)
+              releaseWatchRef.current = () => {
+                window.removeEventListener('pointerup', onUp)
+                window.removeEventListener('pointercancel', onCancel)
               }
             }}
             onPointerMove={(event) => {
