@@ -27,66 +27,25 @@ pub async fn git_status(workspace_path: &str) -> Result<GitStatusResponse, Daemo
         None
     };
 
-    // Get file status
+    // -z is the machine format: paths are raw bytes, not C-quoted, and a
+    // rename is destination then original instead of `old -> new`.
     let status_output = Command::new("git")
-        .args(["status", "--porcelain=v1", "--untracked-files=all"])
+        .args(["status", "--porcelain=v1", "-z", "--untracked-files=all"])
         .current_dir(workspace_path)
         .output()
         .await
         .map_err(|e| DaemonError::Rpc(format!("failed to run git status: {e}")))?;
 
     if !status_output.status.success() {
-        return Err(DaemonError::Rpc(
-            "not a git repository".to_string(),
-        ));
+        return Err(DaemonError::Rpc("not a git repository".to_string()));
     }
 
-    let status_text = String::from_utf8_lossy(&status_output.stdout);
-    let mut entries: Vec<GitStatusEntry> = status_text
-        .lines()
-        .filter(|line| line.len() >= 4)
-        .map(|line| {
-            let xy = &line[..2];
-            let raw_path = &line[3..];
+    let mut entries = parse_porcelain_z(&status_output.stdout);
 
-            let (status, path) = match xy.trim() {
-                "A" | "AM" => (GitFileStatus::Added, raw_path.to_string()),
-                "M" | "MM" | "MT" => (GitFileStatus::Modified, raw_path.to_string()),
-                "D" => (GitFileStatus::Deleted, raw_path.to_string()),
-                "R" | "RM" => {
-                    if let Some((_old, new)) = raw_path.split_once(" -> ") {
-                        (GitFileStatus::Renamed, new.to_string())
-                    } else {
-                        (GitFileStatus::Renamed, raw_path.to_string())
-                    }
-                }
-                "C" => (GitFileStatus::Copied, raw_path.to_string()),
-                "??" => (GitFileStatus::Untracked, raw_path.to_string()),
-                s if s.starts_with('A') => (GitFileStatus::Added, raw_path.to_string()),
-                s if s.starts_with('M') => (GitFileStatus::Modified, raw_path.to_string()),
-                s if s.starts_with('D') => (GitFileStatus::Deleted, raw_path.to_string()),
-                s if s.starts_with('R') => {
-                    if let Some((_old, new)) = raw_path.split_once(" -> ") {
-                        (GitFileStatus::Renamed, new.to_string())
-                    } else {
-                        (GitFileStatus::Renamed, raw_path.to_string())
-                    }
-                }
-                _ => (GitFileStatus::Modified, raw_path.to_string()),
-            };
-
-            GitStatusEntry {
-                path,
-                status,
-                insertions: None,
-                deletions: None,
-            }
-        })
-        .collect();
-
-    // Get numstat for insertion/deletion counts
+    // Numstat quotes a different subset of paths than porcelain, and staged
+    // renames use `old/{a => b}`. -z keeps both sides as real paths.
     let numstat_output = Command::new("git")
-        .args(["diff", "--numstat"])
+        .args(["diff", "--numstat", "-z"])
         .current_dir(workspace_path)
         .output()
         .await;
@@ -94,24 +53,11 @@ pub async fn git_status(workspace_path: &str) -> Result<GitStatusResponse, Daemo
     if let Ok(output) = numstat_output
         && output.status.success()
     {
-        let numstat_text = String::from_utf8_lossy(&output.stdout);
-        for line in numstat_text.lines() {
-            let parts: Vec<&str> = line.splitn(3, '\t').collect();
-            if parts.len() == 3 {
-                let insertions = parts[0].parse::<u32>().ok();
-                let deletions = parts[1].parse::<u32>().ok();
-                let path = parts[2];
-                if let Some(entry) = entries.iter_mut().find(|e| e.path == path) {
-                    entry.insertions = insertions;
-                    entry.deletions = deletions;
-                }
-            }
-        }
+        apply_numstat_z(&mut entries, &output.stdout, false);
     }
 
-    // Also check staged numstat
     let staged_numstat = Command::new("git")
-        .args(["diff", "--numstat", "--cached"])
+        .args(["diff", "--numstat", "--cached", "-z"])
         .current_dir(workspace_path)
         .output()
         .await;
@@ -119,23 +65,7 @@ pub async fn git_status(workspace_path: &str) -> Result<GitStatusResponse, Daemo
     if let Ok(output) = staged_numstat
         && output.status.success()
     {
-        let text = String::from_utf8_lossy(&output.stdout);
-        for line in text.lines() {
-            let parts: Vec<&str> = line.splitn(3, '\t').collect();
-            if parts.len() == 3 {
-                let insertions = parts[0].parse::<u32>().ok();
-                let deletions = parts[1].parse::<u32>().ok();
-                let path = parts[2];
-                if let Some(entry) = entries.iter_mut().find(|e| e.path == path) {
-                    if entry.insertions.is_none() {
-                        entry.insertions = insertions;
-                    }
-                    if entry.deletions.is_none() {
-                        entry.deletions = deletions;
-                    }
-                }
-            }
-        }
+        apply_numstat_z(&mut entries, &output.stdout, true);
     }
 
     Ok(GitStatusResponse { branch, entries })
@@ -264,6 +194,94 @@ pub async fn git_diff(
         None
     };
     Ok(GitDiffResponse { diff, content })
+}
+
+fn path_from_bytes(bytes: &[u8]) -> String {
+    String::from_utf8_lossy(bytes).into_owned()
+}
+
+fn classify_status(xy: &str) -> GitFileStatus {
+    match xy.trim() {
+        "A" | "AM" => GitFileStatus::Added,
+        "M" | "MM" | "MT" => GitFileStatus::Modified,
+        "D" => GitFileStatus::Deleted,
+        "R" | "RM" => GitFileStatus::Renamed,
+        "C" => GitFileStatus::Copied,
+        "??" => GitFileStatus::Untracked,
+        value if value.starts_with('A') => GitFileStatus::Added,
+        value if value.starts_with('M') => GitFileStatus::Modified,
+        value if value.starts_with('D') => GitFileStatus::Deleted,
+        value if value.starts_with('R') => GitFileStatus::Renamed,
+        value if value.starts_with('C') => GitFileStatus::Copied,
+        _ => GitFileStatus::Modified,
+    }
+}
+
+/// Parse `git status --porcelain=v1 -z`.
+///
+/// Rename and copy records are two NUL fields: `XY <destination>` then the
+/// original path. Every other record is one field.
+fn parse_porcelain_z(stdout: &[u8]) -> Vec<GitStatusEntry> {
+    let mut fields = stdout
+        .split(|byte| *byte == 0)
+        .filter(|field| !field.is_empty());
+    let mut entries = Vec::new();
+    while let Some(record) = fields.next() {
+        if record.len() < 4 || record[2] != b' ' {
+            continue;
+        }
+        let Ok(xy) = std::str::from_utf8(&record[..2]) else {
+            continue;
+        };
+        if xy.bytes().any(|byte| byte == b'R' || byte == b'C') {
+            let _original = fields.next();
+        }
+        entries.push(GitStatusEntry {
+            path: path_from_bytes(&record[3..]),
+            status: classify_status(xy),
+            insertions: None,
+            deletions: None,
+        });
+    }
+    entries
+}
+
+/// Parse `git diff --numstat -z`.
+///
+/// A normal record is `<added>\t<deleted>\t<path>`. A rename or copy is
+/// `<added>\t<deleted>\t`, then the original path, then the destination.
+/// Staged counts fill only entries that do not already have worktree counts.
+fn apply_numstat_z(entries: &mut [GitStatusEntry], stdout: &[u8], only_if_missing: bool) {
+    let mut fields = stdout
+        .split(|byte| *byte == 0)
+        .filter(|field| !field.is_empty());
+    while let Some(field) = fields.next() {
+        let line = String::from_utf8_lossy(field);
+        let mut parts = line.splitn(3, '\t');
+        let (Some(added), Some(removed), Some(path)) = (parts.next(), parts.next(), parts.next())
+        else {
+            continue;
+        };
+        let insertions = added.parse::<u32>().ok();
+        let deletions = removed.parse::<u32>().ok();
+        let path = if path.is_empty() {
+            let _original = fields.next();
+            match fields.next() {
+                Some(destination) => path_from_bytes(destination),
+                None => continue,
+            }
+        } else {
+            path.to_string()
+        };
+        if let Some(entry) = entries.iter_mut().find(|entry| entry.path == path) {
+            if !only_if_missing || entry.insertions.is_none() {
+                entry.insertions = insertions;
+            }
+            if !only_if_missing || entry.deletions.is_none() {
+                entry.deletions = deletions;
+            }
+        }
+    }
 }
 
 async fn load_file_content(workspace_path: &str, path: Option<&str>) -> Option<String> {
@@ -435,5 +453,79 @@ mod tests {
         .unwrap();
 
         assert_eq!(diff.content, None);
+    }
+
+    #[tokio::test]
+    async fn git_status_uses_real_paths_when_git_would_quote_them() {
+        let temp_dir = tempdir().unwrap();
+        let repo = temp_dir.path();
+
+        run_git(repo, &["init"]).await;
+        run_git(repo, &["config", "user.email", "test@example.com"]).await;
+        run_git(repo, &["config", "user.name", "Test"]).await;
+        fs::create_dir_all(repo.join("dir with space"))
+            .await
+            .unwrap();
+        fs::write(repo.join("dir with space/file.txt"), "one\n")
+            .await
+            .unwrap();
+        fs::write(repo.join("quote\"name.txt"), "a\n")
+            .await
+            .unwrap();
+        fs::write(repo.join("old.txt"), "same\n").await.unwrap();
+        run_git(repo, &["add", "."]).await;
+        run_git(repo, &["commit", "-m", "init"]).await;
+
+        fs::write(repo.join("dir with space/file.txt"), "two\n")
+            .await
+            .unwrap();
+        fs::write(repo.join("quote\"name.txt"), "b\n")
+            .await
+            .unwrap();
+        fs::write(repo.join("arrow -> name.txt"), "z\n")
+            .await
+            .unwrap();
+        run_git(repo, &["mv", "old.txt", "dir with space/renamed.txt"]).await;
+
+        let status = git_status(repo.to_str().unwrap()).await.unwrap();
+        let spaced = status
+            .entries
+            .iter()
+            .find(|entry| entry.path == "dir with space/file.txt")
+            .expect("spaced path");
+        assert_eq!(spaced.status, GitFileStatus::Modified);
+        assert_eq!(spaced.insertions, Some(1));
+        assert_eq!(spaced.deletions, Some(1));
+
+        let quoted = status
+            .entries
+            .iter()
+            .find(|entry| entry.path == "quote\"name.txt")
+            .expect("quoted path");
+        assert_eq!(quoted.status, GitFileStatus::Modified);
+        assert_eq!(quoted.insertions, Some(1));
+        assert_eq!(quoted.deletions, Some(1));
+
+        let renamed = status
+            .entries
+            .iter()
+            .find(|entry| entry.path == "dir with space/renamed.txt")
+            .expect("renamed destination");
+        assert_eq!(renamed.status, GitFileStatus::Renamed);
+        assert_eq!(renamed.insertions, Some(0));
+        assert_eq!(renamed.deletions, Some(0));
+
+        let arrow = status
+            .entries
+            .iter()
+            .find(|entry| entry.path == "arrow -> name.txt")
+            .expect("arrow path");
+        assert_eq!(arrow.status, GitFileStatus::Untracked);
+        assert!(
+            status
+                .entries
+                .iter()
+                .all(|entry| !entry.path.starts_with('"'))
+        );
     }
 }
