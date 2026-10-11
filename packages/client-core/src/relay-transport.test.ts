@@ -91,6 +91,20 @@ describe('relay transport', () => {
     transport.dispose()
   })
 
+  it('accepts the next transfer after a chunk fails while its buffer was allocated', () => {
+    const { transport } = setup()
+    expect(() => transport.receive(JSON.stringify({
+      type: 'transport-chunk', id: 1, index: 0, total: 4, data: '!!!!',
+    }))).toThrow()
+    const payload = JSON.stringify({ ok: true })
+    const bytes = new TextEncoder().encode(payload)
+    expect(transport.receive(JSON.stringify({
+      type: 'transport-chunk', id: 2, index: 0, total: bytes.length,
+      data: bytesToBase64(bytes),
+    }))).toBe(payload)
+    transport.dispose()
+  })
+
   it('bounds declared sizes and clears stalled transfers', () => {
     vi.useFakeTimers()
     const { socket, transport } = setup()

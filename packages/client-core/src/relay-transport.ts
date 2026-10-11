@@ -86,25 +86,34 @@ export class RelayTransport {
             typeof frame.data !== 'string' || frame.data.length > Math.ceil(RELAY_CHUNK_BYTES / 3) * 4) {
           throw new Error('Invalid relay transport chunk')
         }
-        if (!this.incoming && frame.index === 0) {
+        // Allocate only after the frame shape is valid. A throw past this
+        // point used to leave `incoming` set, and the next chunk 0 was then
+        // rejected for the rest of the socket.
+        const startedHere = !this.incoming && frame.index === 0
+        if (startedHere) {
           this.incoming = { id: frame.id, index: 0, offset: 0, bytes: new Uint8Array(frame.total), started: Date.now() }
         }
-        const rx = this.incoming
-        const bytes = base64ToBytes(frame.data)
-        if (!rx || rx.id !== frame.id || rx.index !== frame.index || rx.bytes.length !== frame.total ||
-            !bytes.length || bytes.length > RELAY_CHUNK_BYTES || rx.offset + bytes.length > frame.total ||
-            (bytes.length < RELAY_CHUNK_BYTES && rx.offset + bytes.length !== frame.total) || Date.now() - rx.started > 900_000) {
-          throw new Error('Inconsistent relay transfer')
+        try {
+          const rx = this.incoming
+          const bytes = base64ToBytes(frame.data)
+          if (!rx || rx.id !== frame.id || rx.index !== frame.index || rx.bytes.length !== frame.total ||
+              !bytes.length || bytes.length > RELAY_CHUNK_BYTES || rx.offset + bytes.length > frame.total ||
+              (bytes.length < RELAY_CHUNK_BYTES && rx.offset + bytes.length !== frame.total) || Date.now() - rx.started > 900_000) {
+            throw new Error('Inconsistent relay transfer')
+          }
+          if (this.receiveTimer !== null) clearTimeout(this.receiveTimer)
+          this.receiveTimer = setTimeout(() => this.fail(), Math.min(30_000, 900_000 - (Date.now() - rx.started)))
+          rx.bytes.set(bytes, rx.offset)
+          rx.offset += bytes.length
+          rx.index++
+          this.socket.send(JSON.stringify({ type: 'transport-ack', id: frame.id, index: frame.index }))
+          if (rx.offset !== rx.bytes.length) return null
+          this.clearIncoming()
+          return decoder.decode(rx.bytes)
+        } catch (error) {
+          if (startedHere) this.clearIncoming()
+          throw error
         }
-        if (this.receiveTimer !== null) clearTimeout(this.receiveTimer)
-        this.receiveTimer = setTimeout(() => this.fail(), Math.min(30_000, 900_000 - (Date.now() - rx.started)))
-        rx.bytes.set(bytes, rx.offset)
-        rx.offset += bytes.length
-        rx.index++
-        this.socket.send(JSON.stringify({ type: 'transport-ack', id: frame.id, index: frame.index }))
-        if (rx.offset !== rx.bytes.length) return null
-        this.clearIncoming()
-        return decoder.decode(rx.bytes)
       }
       default: throw new Error('Unknown relay transport frame')
     }
