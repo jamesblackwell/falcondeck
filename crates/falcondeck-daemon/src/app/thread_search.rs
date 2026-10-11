@@ -360,12 +360,27 @@ fn read_recent(file: &mut (impl Read + Seek), size: u64) -> std::io::Result<Vec<
     let mut window = TAIL_BYTES;
     loop {
         let start = size.saturating_sub(window);
-        file.seek(SeekFrom::Start(start))?;
+        // One read covers the boundary byte and the window. A second seek would
+        // be a different snapshot if the file shrinks, and would drop a prompt
+        // that begins exactly on the boundary.
+        let probe = u64::from(start > 0);
+        file.seek(SeekFrom::Start(start - probe))?;
         let mut buffer = Vec::new();
-        file.take(window).read_to_end(&mut buffer)?;
-        let text = String::from_utf8_lossy(&buffer);
-        // Seeking into the file almost always lands mid-line; drop that piece.
-        let messages = user_messages(&text, true, start > 0);
+        file.take(window + probe).read_to_end(&mut buffer)?;
+        let expected = (window + probe) as usize;
+        let messages = if start > 0 && buffer.len() < expected {
+            // The file shrank under the captured size. Parsing this slice would
+            // treat the wrong byte as the line boundary, so widen instead.
+            Vec::new()
+        } else {
+            let (body, skip_first_line) = if probe == 1 {
+                (&buffer[1..], buffer.first() != Some(&b'\n'))
+            } else {
+                (&buffer[..], false)
+            };
+            let text = String::from_utf8_lossy(body);
+            user_messages(&text, true, skip_first_line)
+        };
         if !messages.is_empty() || start == 0 || window >= TAIL_BUDGET_BYTES {
             return Ok(last_messages(&messages));
         }
@@ -746,6 +761,61 @@ mod tests {
             excerpt.recent.last().map(String::as_str),
             Some("and the last prompt")
         );
+    }
+
+    fn assistant_line(content: &str) -> String {
+        format!(
+            "{}\n",
+            serde_json::json!({ "type": "assistant", "message": { "content": content } })
+        )
+    }
+
+    /// A non-user record whose encoded length, including the trailing newline, is `bytes`.
+    fn filler_line(bytes: usize) -> Vec<u8> {
+        let empty = assistant_line("");
+        assert!(
+            bytes >= empty.len(),
+            "filler smaller than an assistant record"
+        );
+        assistant_line(&"x".repeat(bytes - empty.len())).into_bytes()
+    }
+
+    fn read_tail(bytes: &[u8]) -> Vec<String> {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("session.jsonl");
+        std::fs::write(&path, bytes).expect("write");
+        let mut file = File::open(path).expect("open");
+        read_recent(&mut file, bytes.len() as u64).expect("read")
+    }
+
+    #[test]
+    fn keeps_a_prompt_that_starts_exactly_at_the_tail_window() {
+        let boundary = format!("{}\n", claude_line("boundary prompt"));
+        let later = format!("{}\n", claude_line("later prompt"));
+        let filler = filler_line(TAIL_BYTES as usize - boundary.len() - later.len());
+        let mut bytes = b"\n".to_vec();
+        bytes.extend(boundary.as_bytes());
+        bytes.extend(filler);
+        bytes.extend(later.as_bytes());
+
+        assert_eq!(
+            read_tail(&bytes),
+            vec!["boundary prompt".to_string(), "later prompt".to_string()]
+        );
+    }
+
+    #[test]
+    fn drops_a_record_when_the_tail_window_starts_mid_line() {
+        let spliced = format!("{}\n", claude_line("spliced prompt"));
+        let real = format!("{}\n", claude_line("real prompt"));
+        let filler = filler_line(TAIL_BYTES as usize - spliced.len() - real.len());
+        // The window begins on the spliced record's `{`, one byte into the line.
+        let mut bytes = b"pad\nX".to_vec();
+        bytes.extend(spliced.as_bytes());
+        bytes.extend(filler);
+        bytes.extend(real.as_bytes());
+
+        assert_eq!(read_tail(&bytes), vec!["real prompt".to_string()]);
     }
 
     #[test]
