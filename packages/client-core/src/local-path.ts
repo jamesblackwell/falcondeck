@@ -43,7 +43,7 @@ function hasControlChars(value: string) {
   })
 }
 
-export function unwrapPathCandidate(raw: string): string {
+function unwrapPathQuotes(raw: string): string {
   let text = raw.trim()
   if (
     text.length >= 2 &&
@@ -52,6 +52,11 @@ export function unwrapPathCandidate(raw: string): string {
   ) {
     text = text.slice(1, -1).trim()
   }
+  return text
+}
+
+export function unwrapPathCandidate(raw: string): string {
+  let text = unwrapPathQuotes(raw)
   if (text.length > 1 && !text.endsWith('/') && /[.,:;!?)]+$/.test(text)) {
     text = text.replace(/[.,:;!?)]+$/, '')
   }
@@ -178,12 +183,15 @@ export function parseWorkspaceFileReference(
     return null
   }
 
-  const { path, line } = splitLocationSuffix(
-    candidate.replace(/\\/g, '/').replace(/^\.\//, ''),
-  )
-  candidate = path
+  // Quotes in agent file references are delimiters, including when Markdown
+  // percent-encodes them. Keep filename punctuation and interior quotes intact.
+  const { path, line } = splitLocationSuffix(unwrapPathQuotes(candidate))
+  candidate = unwrapPathQuotes(path).replace(/\\/g, '/').replace(/^\.\//, '')
 
   if (
+    !candidate ||
+    candidate.includes('://') ||
+    /^(?:data|file|javascript|mailto|tel):/i.test(candidate) ||
     hasControlChars(candidate) ||
     candidate.startsWith('/') ||
     candidate.startsWith('~/') ||

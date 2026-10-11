@@ -162,6 +162,31 @@ describe('splitLocalPathSegments', () => {
 })
 
 describe('parseWorkspaceFileReference', () => {
+  it('unwraps quoted file links with spaces, including encoded quotes', () => {
+    const path = 'reports/Quizlet Study Groups UX.pdf'
+    for (const raw of [`"${path}"`, `'${path}'`, encodeURIComponent(`"${path}"`)]) {
+      expect(parseWorkspaceFileReference(raw)).toEqual({ path, line: null })
+    }
+    expect(parseWorkspaceFileReference('"./src/My File.ts":12')).toEqual({
+      path: 'src/My File.ts', line: 12,
+    })
+    expect(parseWorkspaceFileReference('"./src/My File.ts:12"')).toEqual({
+      path: 'src/My File.ts', line: 12,
+    })
+  })
+
+  it('validates quoted targets after unwrapping and keeps filename punctuation', () => {
+    expect(parseWorkspaceFileReference('"../secret.txt"')).toBeNull()
+    expect(parseWorkspaceFileReference('"/Users/James/file.pdf"')).toBeNull()
+    expect(parseWorkspaceFileReference('%22https%3A%2F%2Fexample.com%2Fa.pdf%22')).toBeNull()
+    expect(parseWorkspaceFileReference('reports/James\'s notes.pdf')).toEqual({
+      path: 'reports/James\'s notes.pdf', line: null,
+    })
+    expect(parseWorkspaceFileReference('reports/notes.')).toEqual({
+      path: 'reports/notes.', line: null,
+    })
+  })
+
   it('keeps the first line of every citation form', () => {
     expect(parseWorkspaceFileReference('src/app.ts:12')).toEqual({ path: 'src/app.ts', line: 12 })
     expect(parseWorkspaceFileReference('src/app.ts:12:4')).toEqual({ path: 'src/app.ts', line: 12 })

@@ -625,6 +625,22 @@ describe("local file paths", () => {
     expect(onOpenFile).toHaveBeenCalledWith("apps/desktop/src/App.tsx", "files", 12);
   });
 
+  it("opens a quoted PDF link with spaces using its real workspace path", () => {
+    const onOpenFile = vi.fn();
+    const filePath = "reports/Quizlet Study Groups UX.pdf";
+    render(
+      <FileDiffProvider onOpenFile={onOpenFile}>
+        <MessageMarkdown
+          text={`[Open PDF](${encodeURIComponent(`"${filePath}"`)})`}
+          defer={false}
+        />
+      </FileDiffProvider>,
+    );
+
+    fireEvent.click(screen.getByText("Open PDF"));
+    expect(onOpenFile).toHaveBeenCalledWith(filePath, "files", null);
+  });
+
   it("offers local file actions for an absolute agent-linked workspace file", async () => {
     const writeText = vi.fn().mockResolvedValue(undefined);
     Object.assign(navigator, { clipboard: { writeText } });
