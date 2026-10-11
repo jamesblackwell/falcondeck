@@ -241,6 +241,7 @@ fn remote_rpc_is_read_only(method: &str) -> bool {
             | "control.get"
             | "thread.detail"
             | "thread.item"
+            | "thread.queue.attachment_preview"
             | "preferences.read"
             | "speech.status"
             | "speech.models"
@@ -311,6 +312,7 @@ pub(super) const REMOTE_RPC_METHODS: &[&str] = &[
     "thread.queue.remove",
     "thread.queue.steer",
     "thread.queue.edit",
+    "thread.queue.attachment_preview",
     "thread.queue.reorder",
     "chat.create",
     "workspace.connect",
@@ -3212,6 +3214,12 @@ mod tests {
     fn registers_snapshot_and_thread_detail_before_optional_remote_actions() {
         assert_eq!(REMOTE_RPC_METHODS.first(), Some(&"snapshot.current"));
         assert_eq!(REMOTE_RPC_METHODS.get(1), Some(&"thread.detail"));
+    }
+
+    #[test]
+    fn queued_attachment_preview_is_registered_and_read_only() {
+        assert!(REMOTE_RPC_METHODS.contains(&"thread.queue.attachment_preview"));
+        assert!(remote_rpc_is_read_only("thread.queue.attachment_preview"));
     }
 
     #[test]
