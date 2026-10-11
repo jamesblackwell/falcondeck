@@ -2085,6 +2085,12 @@ async fn forged_bundle_with_victim_box_key_cannot_reattach_as_the_victim_device(
         &forged_bundle,
     )
     .unwrap();
+    let before = get_json::<PairingStatusResponse>(
+        &client,
+        &format!("{}/v1/pairings/{}", server.http_base, pairing.pairing_id),
+        Some(&pairing.daemon_token),
+    )
+    .await;
     let response = client
         .post(format!("{}/v1/pairings/claim", server.http_base))
         .json(&ClaimPairingRequest {
@@ -2107,6 +2113,18 @@ async fn forged_bundle_with_victim_box_key_cannot_reattach_as_the_victim_device(
         assert_ne!(attacker_claim.client_token, victim_claim.client_token);
     } else {
         assert_eq!(response.status(), StatusCode::CONFLICT);
+        let after = get_json::<PairingStatusResponse>(
+            &client,
+            &format!("{}/v1/pairings/{}", server.http_base, pairing.pairing_id),
+            Some(&pairing.daemon_token),
+        )
+        .await;
+        assert_eq!(after.claim_challenge, before.claim_challenge);
+        assert_eq!(
+            after.pairing_authority_signature,
+            before.pairing_authority_signature
+        );
+        assert_eq!(after.client_bundle, before.client_bundle);
     }
 
     // The victim's trusted device is untouched.

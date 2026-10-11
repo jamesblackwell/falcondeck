@@ -1313,17 +1313,6 @@ impl AppState {
                     "secure pairing authority signature is invalid".to_string(),
                 )
             })?;
-            let pairing_snapshot = {
-                let pairing = store
-                    .data
-                    .pairings
-                    .get_mut(&pairing_id)
-                    .ok_or_else(|| RelayError::NotFound("pairing not found".to_string()))?;
-                pairing.claim_challenge = Some(challenge.challenge.clone());
-                pairing.pairing_authority_signature = Some(pairing_authority_signature.to_string());
-                pairing.clone()
-            };
-
             let cached_client_tokens = store
                 .issued_client_tokens
                 .iter()
@@ -1405,6 +1394,20 @@ impl AppState {
                     })?;
                 let session_snapshot = session.meta();
                 let device_snapshot = session.devices.get(&claimed_device_id).cloned();
+                // Write the proof only after the re-claim is accepted. A
+                // rejected attempt used to replace the stored challenge and
+                // signature, and the daemon then failed closed on status.
+                let pairing_snapshot = {
+                    let pairing = store
+                        .data
+                        .pairings
+                        .get_mut(&pairing_id)
+                        .ok_or_else(|| RelayError::NotFound("pairing not found".to_string()))?;
+                    pairing.claim_challenge = Some(challenge.challenge.clone());
+                    pairing.pairing_authority_signature =
+                        Some(pairing_authority_signature.to_string());
+                    pairing.clone()
+                };
 
                 (
                     ClaimPairingResponse {
@@ -1495,6 +1498,8 @@ impl AppState {
                     .ok_or_else(|| RelayError::NotFound("pairing not found".to_string()))?;
                 pairing.client_bundle = request.client_bundle.clone();
                 pairing.device_id = Some(device_id.clone());
+                pairing.claim_challenge = Some(challenge.challenge.clone());
+                pairing.pairing_authority_signature = Some(pairing_authority_signature.to_string());
                 let daemon_bundle = pairing.daemon_bundle.clone();
                 let pairing_snapshot = pairing.clone();
 
