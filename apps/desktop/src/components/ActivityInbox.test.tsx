@@ -154,8 +154,8 @@ describe("ActivityInbox", () => {
     expect(props.onClose).toHaveBeenCalled();
   });
 
-  it("archives the open task with E and moves on to the next one", async () => {
-    const { props } = renderInbox({
+  it("archives the open task with E and moves on once it leaves the list", () => {
+    const { props, rerender } = renderInbox({
       selectedWorkspaceId: workspace.id,
       selectedThreadId: "ready",
     });
@@ -163,12 +163,73 @@ describe("ActivityInbox", () => {
       key: "e",
     });
     expect(props.onArchiveThread).toHaveBeenCalledWith(workspace.id, "ready");
-    await waitFor(() =>
-      expect(props.onPreviewThread).toHaveBeenCalledWith(workspace.id, "read"),
+
+    // The host clears the selection first; the snapshot lands after.
+    rerender(<ActivityInbox {...props} selectedThreadId={null} />);
+    expect(props.onPreviewThread).not.toHaveBeenCalled();
+
+    const archived = props.groups[0]!.threads.map((candidate) =>
+      candidate.id === "ready" ? { ...candidate, is_archived: true } : candidate,
     );
+    rerender(
+      <ActivityInbox
+        {...props}
+        groups={groups(archived)}
+        selectedThreadId={null}
+      />,
+    );
+    expect(props.onPreviewThread).toHaveBeenCalledWith(workspace.id, "read");
   });
 
-  it("does not advance when the archive fails", async () => {
+  it("moves on to the next visible task, not one the filter hides", () => {
+    const tasks = [
+      thread({ id: "first", attention: { ...seen, unread: true } }),
+      thread({
+        id: "read",
+        updated_at: new Date(Date.now() - 60_000).toISOString(),
+        attention: { ...seen, last_read_seq: 2 },
+      }),
+      thread({
+        id: "second",
+        updated_at: new Date(Date.now() - 120_000).toISOString(),
+        attention: { ...seen, unread: true },
+      }),
+    ];
+    const { props, rerender } = renderInbox({
+      groups: groups(tasks),
+      interactiveRequests: [],
+      selectedWorkspaceId: workspace.id,
+      selectedThreadId: "first",
+    });
+    fireEvent.click(screen.getByRole("radio", { name: /Unread/ }));
+    rerender(<ActivityInbox {...props} selectedThreadId={null} />);
+    rerender(
+      <ActivityInbox
+        {...props}
+        groups={groups([{ ...tasks[0]!, is_archived: true }, tasks[1]!, tasks[2]!])}
+        selectedThreadId={null}
+      />,
+    );
+    expect(props.onPreviewThread).toHaveBeenCalledWith(workspace.id, "second");
+  });
+
+  it("does not move on when the selection clears without an archive", () => {
+    const { props, rerender } = renderInbox({
+      selectedWorkspaceId: workspace.id,
+      selectedThreadId: "ready",
+    });
+    rerender(<ActivityInbox {...props} selectedThreadId={null} />);
+    rerender(
+      <ActivityInbox
+        {...props}
+        groups={groups([...props.groups[0]!.threads])}
+        selectedThreadId={null}
+      />,
+    );
+    expect(props.onPreviewThread).not.toHaveBeenCalled();
+  });
+
+  it("archives from the row button without moving on by itself", async () => {
     const onArchiveThread = vi.fn().mockRejectedValue(new Error("offline"));
     const { props } = renderInbox({
       selectedWorkspaceId: workspace.id,
@@ -177,8 +238,52 @@ describe("ActivityInbox", () => {
     });
     fireEvent.click(screen.getByRole("button", { name: "Archive Ready task" }));
     await waitFor(() => expect(onArchiveThread).toHaveBeenCalled());
-    await Promise.resolve();
     expect(props.onPreviewThread).not.toHaveBeenCalled();
+  });
+
+  it("points the list at the open task for assistive tech", () => {
+    renderInbox({ selectedWorkspaceId: workspace.id, selectedThreadId: "ready" });
+    const list = screen.getByRole("listbox", { name: "Activity" });
+    const active = document.getElementById(
+      list.getAttribute("aria-activedescendant") ?? "",
+    );
+    expect(active?.getAttribute("data-inbox-key")).toBe("workspace-1:ready");
+  });
+
+  it("keeps an answered task in its Needs you slot while it is open", () => {
+    const blocked = (id: string) => thread({ id, title: id, status: "running" });
+    const ask = (id: string, minute: number) => ({
+      ...request(id),
+      request_id: `request-${id}`,
+      created_at: `2026-08-13T09:0${minute}:00Z`,
+    });
+    const { props, rerender } = renderInbox({
+      groups: groups([blocked("one"), blocked("two"), blocked("three")]),
+      interactiveRequests: [ask("one", 1), ask("two", 2), ask("three", 3)],
+      selectedWorkspaceId: workspace.id,
+      selectedThreadId: "two",
+    });
+    expect(rowTitles()).toEqual([
+      "workspace-1:one",
+      "workspace-1:two",
+      "workspace-1:three",
+    ]);
+    // Answered: "two" is now just running, which would drop it to the feed.
+    rerender(
+      <ActivityInbox
+        {...props}
+        interactiveRequests={[ask("one", 1), ask("three", 3)]}
+      />,
+    );
+    const needsYou = screen.getByRole("group", { name: "Needs you" });
+    expect(
+      within(needsYou)
+        .getAllByRole("option")
+        .map((row) => row.getAttribute("data-inbox-key")),
+    ).toEqual(["workspace-1:one", "workspace-1:two", "workspace-1:three"]);
+
+    fireEvent.click(screen.getByRole("radio", { name: /Running/ }));
+    expect(rowTitles()).toEqual(["workspace-1:two"]);
   });
 
   it("keeps the open task visible under the Unread filter after it is read", () => {

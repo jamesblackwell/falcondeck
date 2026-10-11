@@ -22,7 +22,6 @@ import {
   composerProviderFor,
   composerSelectionFor,
   countAwaitingResponseThreads,
-  collectActivityInbox,
   countActivityEntries,
   conversationItemsForSelection,
   deriveExtensionPanels,
@@ -4367,28 +4366,28 @@ function AppInner() {
     async (workspaceId: string, threadId: string) => {
       const client = apiFor(workspaceId);
       if (!client) throw new Error(CONNECTION_COPY.notConnected);
+      const refreshLocal = async () => {
+        if (!workspaceHostIndex.has(workspaceId) && api) {
+          setSnapshot(await api.snapshot());
+        }
+      };
       try {
         await client.archiveThread(workspaceId, threadId);
-        if (selectedThreadId === threadId) {
-          setSelectedThreadId(null);
-        }
-        if (!workspaceHostIndex.has(workspaceId) && api) {
-          const nextSnapshot = await api.snapshot();
-          setSnapshot(nextSnapshot);
-        }
-        setActionError(null);
       } catch (error: unknown) {
         const msg =
-          error instanceof Error ? error.message : "Failed to archive thread";
+          error instanceof Error ? error.message : "Failed to archive task";
         setActionError(msg);
         toast({
           variant: "danger",
-          title: "Failed to archive thread",
+          title: "Failed to archive task",
           description: msg,
         });
-        // Lets one-click archive (inbox, header) skip advancing on failure.
-        throw error;
+        return;
       }
+      if (selectedThreadId === threadId) {
+        setSelectedThreadId(null);
+      }
+      setActionError(null);
       // The inbox and header archive without a confirm step, so every
       // archive gets a way back.
       toast({
@@ -4399,11 +4398,7 @@ function AppInner() {
           onClick: () => {
             void client
               .unarchiveThread(workspaceId, threadId)
-              .then(async () => {
-                if (!workspaceHostIndex.has(workspaceId) && api) {
-                  setSnapshot(await api.snapshot());
-                }
-              })
+              .then(refreshLocal)
               .catch((error: unknown) => {
                 toast({
                   variant: "danger",
@@ -4415,6 +4410,9 @@ function AppInner() {
           },
         },
       });
+      // A refresh miss must not read as a failed archive; thread events
+      // bring the list up to date anyway.
+      await refreshLocal().catch(() => {});
     },
     [
       api,
@@ -4428,41 +4426,14 @@ function AppInner() {
     ],
   );
 
-  // Archiving from the open task's header. With the Activity inbox up, the
-  // reading pane moves on to the next task the way mail does.
+  // The Activity inbox moves the reading pane on to the next task once the
+  // open one leaves the list, so the header only has to archive.
   const handleArchiveOpenThread = useCallback(() => {
     if (!selectedWorkspaceId || !selectedThreadId) return;
-    const workspaceId = selectedWorkspaceId;
-    const threadId = selectedThreadId;
-    let next: { workspaceId: string; threadId: string } | null = null;
-    if (isActivityOpen) {
-      const inbox = collectActivityInbox(
-        groups,
-        viewSnapshot?.interactive_requests ?? [],
-        { nowMs: Date.now() },
-      );
-      const rows = [...inbox.needsYou, ...inbox.feed];
-      const index = rows.findIndex(
-        (row) => row.workspaceId === workspaceId && row.thread.id === threadId,
-      );
-      const row = index === -1 ? null : (rows[index + 1] ?? rows[index - 1]);
-      if (row) next = { workspaceId: row.workspaceId, threadId: row.thread.id };
-    }
-    void handleArchiveThread(workspaceId, threadId).then(
-      () => {
-        if (next) handlePreviewActivityThread(next.workspaceId, next.threadId);
-      },
+    void handleArchiveThread(selectedWorkspaceId, selectedThreadId).catch(
       () => {},
     );
-  }, [
-    groups,
-    handleArchiveThread,
-    handlePreviewActivityThread,
-    isActivityOpen,
-    selectedThreadId,
-    selectedWorkspaceId,
-    viewSnapshot?.interactive_requests,
-  ]);
+  }, [handleArchiveThread, selectedThreadId, selectedWorkspaceId]);
 
   const handleArchiveAllThreads = useCallback(
     async (workspaceId: string) => {

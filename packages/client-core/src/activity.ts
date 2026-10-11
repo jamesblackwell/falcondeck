@@ -230,6 +230,11 @@ export type ActivityInboxRow = {
   projectLabel: string
   /** Null once the thread has settled: read, idle, nothing pending. */
   section: ActivitySection | null
+  /**
+   * Whether the row is new to the user: everything in Needs you, and
+   * finished turns they have not read. A running task's streaming output
+   * does not count until the turn ends.
+   */
   unread: boolean
   requests: InteractiveRequest[]
 }

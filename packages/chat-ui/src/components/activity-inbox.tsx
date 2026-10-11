@@ -1,9 +1,19 @@
 import * as React from "react";
-import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import {
+  memo,
+  useCallback,
+  useEffect,
+  useId,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 import { Archive, ArrowLeft, PanelsTopLeft } from "lucide-react";
 
 import {
   collectActivityInbox,
+  projectLabel,
+  type ActivityInbox as ActivityInboxModel,
   type ActivityInboxRow,
   type InteractiveRequest,
   type ProjectGroup,
@@ -29,6 +39,11 @@ const FILTERS: readonly { id: ActivityInboxFilter; label: string }[] = [
 ];
 
 const FEED_PAGE = 60;
+/**
+ * How long after the open task is cleared we still treat its archive as
+ * "move on to the next one". Long enough for a snapshot round trip.
+ */
+const ADVANCE_WINDOW_MS = 5_000;
 
 export type ActivityInboxProps = {
   groups: ProjectGroup[];
@@ -56,6 +71,16 @@ export type ActivityInboxProps = {
 };
 
 type Bucket = "needs" | "feed";
+
+/** The open row, pinned to the bucket and slot it had when it was opened. */
+type HeldRow = { key: string; bucket: Bucket; index: number };
+
+/** The open row and its neighbour, for moving on once it is archived. */
+type PendingAdvance = {
+  key: string;
+  next: ActivityInboxRow | null;
+  clearedAt: number | null;
+};
 
 function timeLabel(dateStr: string, nowMs: number) {
   const date = new Date(dateStr);
@@ -109,10 +134,101 @@ function rowPreview(row: ActivityInboxRow) {
   return row.thread.last_message_preview ?? "";
 }
 
-function matchesFilter(row: ActivityInboxRow, filter: ActivityInboxFilter) {
-  if (filter === "unread") return row.unread;
-  if (filter === "running") return row.section === "running";
+function matchesFilter(
+  row: ActivityInboxRow,
+  bucket: Bucket,
+  filter: ActivityInboxFilter,
+) {
+  // Needs you is always unread work, and never "running" from the user's
+  // point of view: it is waiting on them.
+  if (filter === "running") return bucket === "feed" && row.section === "running";
+  if (filter === "unread") return bucket === "needs" || row.unread;
   return true;
+}
+
+function holdFor(key: string | null, inbox: ActivityInboxModel): HeldRow | null {
+  if (!key) return null;
+  for (const bucket of ["needs", "feed"] as const) {
+    const rows = bucket === "needs" ? inbox.needsYou : inbox.feed;
+    const index = rows.findIndex((row) => row.key === key);
+    if (index !== -1) return { key, bucket, index };
+  }
+  return null;
+}
+
+/**
+ * The held row as it is now. A task can leave both lists while it is open —
+ * a week-old failure that has just been read, say — so fall back to a
+ * settled row for it rather than letting it vanish. Archived tasks do go.
+ */
+function currentHeldRow(
+  held: HeldRow,
+  inbox: ActivityInboxModel,
+  groups: ProjectGroup[],
+): ActivityInboxRow | null {
+  const live =
+    inbox.needsYou.find((row) => row.key === held.key) ??
+    inbox.feed.find((row) => row.key === held.key);
+  if (live) return live;
+  for (const group of groups) {
+    for (const thread of group.threads) {
+      if (`${group.workspace.id}:${thread.id}` !== held.key) continue;
+      if (thread.is_archived) return null;
+      return {
+        key: held.key,
+        thread,
+        workspaceId: group.workspace.id,
+        projectLabel: projectLabel(group.workspace.path),
+        section: null,
+        unread: false,
+        requests: [],
+      };
+    }
+  }
+  return null;
+}
+
+/** Filter one bucket, keeping the held row in it whatever the filter says. */
+function placeRows(
+  rows: ActivityInboxRow[],
+  bucket: Bucket,
+  filter: ActivityInboxFilter,
+  held: HeldRow | null,
+  heldRow: ActivityInboxRow | null,
+) {
+  const result = rows.filter(
+    (row) => row.key !== held?.key && matchesFilter(row, bucket, filter),
+  );
+  if (!held || !heldRow || held.bucket !== bucket) return result;
+
+  const natural = rows.findIndex((row) => row.key === held.key);
+  let insertAt: number;
+  if (natural !== -1) {
+    // Still in its own bucket: its natural slot among the visible rows.
+    const before = new Set(rows.slice(0, natural).map((row) => row.key));
+    insertAt = result.filter((row) => before.has(row.key)).length;
+  } else if (bucket === "needs") {
+    // Answered or read: keep the slot it had in Needs you.
+    insertAt = Math.min(held.index, result.length);
+  } else {
+    // Moved up into Needs you while open: keep the feed's date order.
+    insertAt = result.findIndex(
+      (row) => row.thread.updated_at < heldRow.thread.updated_at,
+    );
+    if (insertAt === -1) insertAt = result.length;
+  }
+  result.splice(insertAt, 0, heldRow);
+  return result;
+}
+
+function liveThreadKeys(groups: ProjectGroup[]) {
+  const keys = new Set<string>();
+  for (const group of groups) {
+    for (const thread of group.threads) {
+      if (!thread.is_archived) keys.add(`${group.workspace.id}:${thread.id}`);
+    }
+  }
+  return keys;
 }
 
 function isTypingTarget(target: EventTarget | null) {
@@ -139,6 +255,7 @@ function StatusMark({ row }: { row: ActivityInboxRow }) {
 }
 
 type InboxRowProps = {
+  id: string;
   row: ActivityInboxRow;
   selected: boolean;
   nowMs: number;
@@ -150,6 +267,7 @@ type InboxRowProps = {
 };
 
 const InboxRow = memo(function InboxRow({
+  id,
   row,
   selected,
   nowMs,
@@ -161,10 +279,10 @@ const InboxRow = memo(function InboxRow({
 }: InboxRowProps) {
   const offline = host?.connected === false;
   const preview = rowPreview(row);
-  const emphasised = row.unread || row.section === "blocked";
 
   return (
     <div
+      id={id}
       role="option"
       aria-selected={selected}
       data-inbox-key={row.key}
@@ -197,7 +315,7 @@ const InboxRow = memo(function InboxRow({
           <span
             className={cn(
               "min-w-0 flex-1 truncate text-[length:var(--fd-text-sm)]",
-              emphasised
+              row.unread
                 ? "font-semibold text-fg-primary"
                 : "text-fg-secondary",
             )}
@@ -208,8 +326,7 @@ const InboxRow = memo(function InboxRow({
             className={cn(
               "shrink-0 text-[length:var(--fd-text-2xs)] tabular-nums",
               row.unread ? "text-fg-secondary" : "text-fg-muted",
-              onArchive &&
-                "group-hover:invisible group-focus-within:invisible",
+              onArchive && "group-hover:invisible",
             )}
           >
             {timeLabel(row.thread.updated_at, nowMs)}
@@ -240,7 +357,8 @@ const InboxRow = memo(function InboxRow({
             type="button"
             aria-label={`Archive ${row.thread.title}`}
             tabIndex={-1}
-            className="fd-focus absolute right-2 top-1.5 flex h-6 w-6 items-center justify-center rounded-[var(--fd-radius-sm)] text-fg-muted opacity-0 transition-opacity hover:bg-surface-4 hover:text-fg-primary focus-visible:opacity-100 group-hover:opacity-100"
+            // Out of the tab order: the focused list archives with E.
+            className="absolute right-2 top-1.5 flex h-6 w-6 items-center justify-center rounded-[var(--fd-radius-sm)] text-fg-muted opacity-0 transition-opacity hover:bg-surface-4 hover:text-fg-primary group-hover:opacity-100"
             onClick={(event) => {
               event.stopPropagation();
               onArchive(row);
@@ -302,6 +420,7 @@ export const ActivityInbox = memo(function ActivityInbox({
   const [filter, setFilter] = useState<ActivityInboxFilter>("all");
   const [feedLimit, setFeedLimit] = useState(FEED_PAGE);
   const listRef = useRef<HTMLDivElement>(null);
+  const idPrefix = useId();
   // nowTick advances once a minute; the clock only needs that resolution.
   const nowMs = useMemo(() => Date.now(), [nowTick]);
   const inbox = useMemo(
@@ -317,56 +436,21 @@ export const ActivityInbox = memo(function ActivityInbox({
   // The open row stays where it was when you opened it. Reading a failed
   // task or answering a question would otherwise move it out of Needs you,
   // and the Unread filter would drop it, right under the pointer.
-  const heldRef = useRef<{ key: string; row: ActivityInboxRow; bucket: Bucket } | null>(null);
-  const liveBucket = (key: string | null): Bucket | null => {
-    if (!key) return null;
-    if (inbox.needsYou.some((row) => row.key === key)) return "needs";
-    if (inbox.feed.some((row) => row.key === key)) return "feed";
-    return null;
-  };
-  if (heldRef.current?.key !== selectedKey) {
-    const bucket = liveBucket(selectedKey);
-    const row =
-      bucket === "needs"
-        ? inbox.needsYou.find((candidate) => candidate.key === selectedKey)
-        : inbox.feed.find((candidate) => candidate.key === selectedKey);
-    heldRef.current =
-      selectedKey && bucket && row ? { key: selectedKey, row, bucket } : null;
+  const [held, setHeld] = useState<HeldRow | null>(null);
+  if ((held?.key ?? null) !== selectedKey) {
+    const nextHeld = holdFor(selectedKey, inbox);
+    if (nextHeld?.key !== held?.key) setHeld(nextHeld);
   }
-  const held = heldRef.current;
 
   const { needsYou, feed, hiddenCount } = useMemo(() => {
-    const currentHeld =
-      held &&
-      (inbox.needsYou.find((row) => row.key === held.key) ??
-        inbox.feed.find((row) => row.key === held.key));
-    const heldRow = held ? (currentHeld ?? null) : null;
-    const place = (rows: ActivityInboxRow[], bucket: Bucket) => {
-      const result = rows.filter(
-        (row) =>
-          row.key !== held?.key && (bucket === "needs" || matchesFilter(row, filter)),
-      );
-      if (held && heldRow && held.bucket === bucket) {
-        const index = rows.findIndex((row) => row.key === held.key);
-        const insertAt =
-          index === -1
-            ? bucket === "needs"
-              ? result.length
-              : result.findIndex(
-                  (row) => row.thread.updated_at < heldRow.thread.updated_at,
-                )
-            : result.filter((row) => rows.indexOf(row) < index).length;
-        result.splice(insertAt === -1 ? result.length : insertAt, 0, heldRow);
-      }
-      return result;
-    };
-    const filteredFeed = place(inbox.feed, "feed");
+    const heldRow = held ? currentHeldRow(held, inbox, groups) : null;
+    const filteredFeed = placeRows(inbox.feed, "feed", filter, held, heldRow);
     return {
-      needsYou: filter === "running" ? [] : place(inbox.needsYou, "needs"),
+      needsYou: placeRows(inbox.needsYou, "needs", filter, held, heldRow),
       feed: filteredFeed.slice(0, feedLimit),
       hiddenCount: Math.max(0, filteredFeed.length - feedLimit),
     };
-  }, [feedLimit, filter, held, inbox]);
+  }, [feedLimit, filter, groups, held, inbox]);
 
   const orderedRows = useMemo(() => [...needsYou, ...feed], [needsYou, feed]);
   const unreadCount = useMemo(
@@ -387,31 +471,49 @@ export const ActivityInbox = memo(function ActivityInbox({
     (row: ActivityInboxRow) => onOpenThread(row.workspaceId, row.thread.id),
     [onOpenThread],
   );
-
-  const orderedRowsRef = useRef(orderedRows);
-  orderedRowsRef.current = orderedRows;
   const archiveRow = useCallback(
     (row: ActivityInboxRow) => {
       if (!onArchiveThread) return;
-      // Like mail: archiving the open task moves the reading pane on to the
-      // next one instead of leaving it blank.
-      const rows = orderedRowsRef.current;
-      const index = rows.findIndex((candidate) => candidate.key === row.key);
-      const next =
-        row.key === selectedKey
-          ? (rows[index + 1] ?? rows[index - 1] ?? null)
-          : null;
       void Promise.resolve(
         onArchiveThread(row.workspaceId, row.thread.id),
-      ).then(
-        () => {
-          if (next) onPreviewThread(next.workspaceId, next.thread.id);
-        },
-        () => {},
-      );
+      ).catch(() => {});
     },
-    [onArchiveThread, onPreviewThread, selectedKey],
+    [onArchiveThread],
   );
+
+  // Like mail, archiving the open task moves the reading pane on to the next
+  // visible one instead of leaving it blank — whether the archive came from
+  // this list, the task header, or the context menu. The host clears the
+  // selection when the open task is archived; once the task has actually
+  // left the live list, select its neighbour.
+  const advanceRef = useRef<PendingAdvance | null>(null);
+  useEffect(() => {
+    if (selectedKey) {
+      const index = orderedRows.findIndex((row) => row.key === selectedKey);
+      advanceRef.current =
+        index === -1
+          ? null
+          : {
+              key: selectedKey,
+              next: orderedRows[index + 1] ?? orderedRows[index - 1] ?? null,
+              clearedAt: null,
+            };
+      return;
+    }
+    const pending = advanceRef.current;
+    if (!pending) return;
+    pending.clearedAt ??= Date.now();
+    if (Date.now() - pending.clearedAt > ADVANCE_WINDOW_MS) {
+      advanceRef.current = null;
+      return;
+    }
+    const live = liveThreadKeys(groups);
+    // Still live: the selection went elsewhere (a new task), or the snapshot
+    // with the archive has not landed yet. Wait for the next groups update.
+    if (live.has(pending.key)) return;
+    advanceRef.current = null;
+    if (pending.next && live.has(pending.next.key)) selectRow(pending.next);
+  }, [groups, orderedRows, selectRow, selectedKey]);
 
   useEffect(() => {
     if (!selectedKey) return;
@@ -424,9 +526,10 @@ export const ActivityInbox = memo(function ActivityInbox({
   }, [selectedKey]);
 
   const handleKeyDown = (event: React.KeyboardEvent<HTMLDivElement>) => {
-    if (isTypingTarget(event.target)) return;
+    if (event.defaultPrevented || isTypingTarget(event.target)) return;
     if (event.metaKey || event.ctrlKey || event.altKey) return;
     const index = orderedRows.findIndex((row) => row.key === selectedKey);
+    const current = index === -1 ? null : orderedRows[index];
     const step = (delta: number) => {
       event.preventDefault();
       if (orderedRows.length === 0) return;
@@ -439,13 +542,14 @@ export const ActivityInbox = memo(function ActivityInbox({
       const next = orderedRows[nextIndex];
       if (next && next.key !== selectedKey) selectRow(next);
     };
-    const current = index === -1 ? null : orderedRows[index];
     switch (event.key) {
       case "ArrowDown":
       case "j":
+      case "J":
         return step(1);
       case "ArrowUp":
       case "k":
+      case "K":
         return step(-1);
       case "Enter":
         if (!current) return;
@@ -475,9 +579,11 @@ export const ActivityInbox = memo(function ActivityInbox({
     return result;
   }, [feed, nowMs]);
 
+  const optionId = (row: ActivityInboxRow) => `${idPrefix}-${row.key}`;
   const renderRow = (row: ActivityInboxRow) => (
     <InboxRow
       key={row.key}
+      id={optionId(row)}
       row={row}
       selected={row.key === selectedKey}
       nowMs={nowMs}
@@ -563,9 +669,14 @@ export const ActivityInbox = memo(function ActivityInbox({
         role="listbox"
         aria-label="Activity"
         tabIndex={0}
+        aria-activedescendant={
+          selectedKey && orderedRows.some((row) => row.key === selectedKey)
+            ? `${idPrefix}-${selectedKey}`
+            : undefined
+        }
         data-activity-inbox=""
         onKeyDown={handleKeyDown}
-        className="fd-focus-inset outline-none"
+        className="fd-focus-inset"
       >
         {isEmpty ? (
           <p className="px-4 py-10 text-center text-[length:var(--fd-text-xs)] text-fg-muted">
