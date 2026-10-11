@@ -2338,6 +2338,22 @@ async fn try_enqueue_turn(
     }))
 }
 
+/// Stored summaries do not carry live approval counts. Broadcasting one
+/// unchanged publishes zeros and clears a badge that is still waiting.
+async fn publish_queued_thread_summary(
+    app: &AppState,
+    workspace_id: &str,
+    thread_id: &str,
+    summary: ThreadSummary,
+) {
+    let summary = app.build_thread_summary_from_clone(summary).await;
+    app.emit(
+        Some(workspace_id.to_string()),
+        Some(thread_id.to_string()),
+        UnifiedEvent::ThreadUpdated { thread: summary },
+    );
+}
+
 /// Removes a queued turn before it dispatches.
 pub(super) async fn remove_queued_turn(
     app: &AppState,
@@ -2375,11 +2391,7 @@ pub(super) async fn remove_queued_turn(
     if changed {
         app.persist_local_state().await?;
     }
-    app.emit(
-        Some(workspace_id.to_string()),
-        Some(thread_id.to_string()),
-        UnifiedEvent::ThreadUpdated { thread: summary },
-    );
+    publish_queued_thread_summary(app, workspace_id, thread_id, summary).await;
     Ok(CommandResponse {
         ok: true,
         message: Some(if changed { "removed" } else { "already gone" }.to_string()),
@@ -2456,11 +2468,7 @@ pub(super) async fn steer_queued_turn(
             // reaches a phone, so a second Steer tap (or a chip the client
             // still holds after a successful first steer) must not banner
             // "queued turn not found". Rebroadcast the live queue instead.
-            app.emit(
-                Some(workspace_id.to_string()),
-                Some(thread_id.to_string()),
-                UnifiedEvent::ThreadUpdated { thread: summary },
-            );
+            publish_queued_thread_summary(app, workspace_id, thread_id, summary).await;
             return Ok(CommandResponse {
                 ok: true,
                 message: Some("already gone".to_string()),
@@ -2510,11 +2518,7 @@ pub(super) async fn steer_queued_turn(
     };
     if let Some(summary) = restored {
         app.persist_local_state().await?;
-        app.emit(
-            Some(workspace_id.to_string()),
-            Some(thread_id.to_string()),
-            UnifiedEvent::ThreadUpdated { thread: summary },
-        );
+        publish_queued_thread_summary(app, workspace_id, thread_id, summary).await;
     }
     Err(error)
 }
@@ -2587,11 +2591,7 @@ pub(super) async fn edit_queued_turn(
         thread.summary.clone()
     };
     app.persist_local_state().await?;
-    app.emit(
-        Some(workspace_id.to_string()),
-        Some(thread_id.to_string()),
-        UnifiedEvent::ThreadUpdated { thread: summary },
-    );
+    publish_queued_thread_summary(app, workspace_id, thread_id, summary).await;
     Ok(CommandResponse {
         ok: true,
         message: Some("edited".to_string()),
@@ -2650,11 +2650,7 @@ pub(super) async fn reorder_queued_turns(
         thread.summary.clone()
     };
     app.persist_local_state().await?;
-    app.emit(
-        Some(workspace_id.to_string()),
-        Some(thread_id.to_string()),
-        UnifiedEvent::ThreadUpdated { thread: summary },
-    );
+    publish_queued_thread_summary(app, workspace_id, thread_id, summary).await;
     Ok(CommandResponse {
         ok: true,
         message: Some("reordered".to_string()),
@@ -2803,11 +2799,7 @@ impl AppState {
                 (next, thread.summary.clone())
             };
             let (next, summary) = next;
-            app.emit(
-                Some(workspace_id.clone()),
-                Some(thread_id.clone()),
-                UnifiedEvent::ThreadUpdated { thread: summary },
-            );
+            publish_queued_thread_summary(&app, &workspace_id, &thread_id, summary).await;
             match send_turn_waiting_for_provider_start(&app, next.request.clone()).await {
                 Ok(_) => {
                     let mut workspaces = app.inner.workspaces.lock().await;
@@ -2843,11 +2835,8 @@ impl AppState {
                         tracing::warn!(%persist_error, thread = %thread_id, "failed to persist restored queued turn");
                     }
                     if let Some(summary) = restored_summary {
-                        app.emit(
-                            Some(workspace_id.clone()),
-                            Some(thread_id.clone()),
-                            UnifiedEvent::ThreadUpdated { thread: summary },
-                        );
+                        publish_queued_thread_summary(&app, &workspace_id, &thread_id, summary)
+                            .await;
                     }
                     tracing::warn!(%error, thread = %thread_id, "queued turn failed to dispatch and was restored");
                 }

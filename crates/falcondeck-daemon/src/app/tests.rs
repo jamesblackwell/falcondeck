@@ -7871,6 +7871,34 @@ async fn sends_against_a_running_thread_queue_can_be_reordered_and_removed() {
     let snapshot = app.snapshot().await;
     let first_id = snapshot.threads[0].queued_turns[0].id.clone();
     let second_id = snapshot.threads[0].queued_turns[1].id.clone();
+    // The stored summary's approval counts stay at zero. The reorder event
+    // has to carry the live count or the row badge clears while the plan
+    // review is still waiting.
+    app.inner.interactive_requests.lock().await.insert(
+        (workspace_id.clone(), "plan-1".to_string()),
+        super::PendingServerRequest {
+            raw_id: json!("plan-1"),
+            params: serde_json::Value::Null,
+            request: InteractiveRequest {
+                request_id: "plan-1".to_string(),
+                workspace_id: workspace_id.clone(),
+                thread_id: Some("thread-q".to_string()),
+                method: "x.ai/exit_plan_mode".to_string(),
+                kind: InteractiveRequestKind::PlanApproval,
+                approval_options: None,
+                approval_decisions: None,
+                title: "Review plan".to_string(),
+                detail: None,
+                command: None,
+                path: None,
+                turn_id: None,
+                item_id: None,
+                questions: Vec::new(),
+                created_at: Utc::now(),
+            },
+        },
+    );
+    let mut events = app.subscribe();
     app.reorder_queued_turns(
         &workspace_id,
         "thread-q",
@@ -7878,6 +7906,20 @@ async fn sends_against_a_running_thread_queue_can_be_reordered_and_removed() {
     )
     .await
     .unwrap();
+    let reordered = std::iter::from_fn(|| events.try_recv().ok())
+        .find_map(|envelope| match &envelope.event {
+            UnifiedEvent::ThreadUpdated { thread } if thread.id == "thread-q" => {
+                Some(thread.clone())
+            }
+            _ => None,
+        })
+        .expect("reorder publishes a thread update");
+    assert_eq!(reordered.queued_turns[0].preview, "second follow-up");
+    assert_eq!(reordered.attention.pending_approval_count, 1);
+    assert_eq!(
+        reordered.attention.level,
+        falcondeck_core::ThreadAttentionLevel::AwaitingResponse
+    );
     let snapshot = app.snapshot().await;
     assert_eq!(
         snapshot.threads[0].queued_turns[0].preview,
