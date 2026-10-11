@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 
-import type { ThreadSummary } from './types'
+import type { InteractiveRequest, ThreadSummary } from './types'
 import {
   deriveThreadAttentionPresentation,
   summarizeThreadAttention,
@@ -164,5 +164,48 @@ describe('background activity', () => {
 
   it('stays quiet for daemons that do not report the count', () => {
     expect(deriveThreadAttentionPresentation(thread()).showBackgroundActivity).toBe(false)
+  })
+})
+
+describe('pending requests missing from the summary', () => {
+  const planApproval = {
+    request_id: 'plan-1',
+    workspace_id: 'workspace-1',
+    thread_id: 'thread-1',
+    method: 'x.ai/exit_plan_mode',
+    kind: 'plan_approval',
+    approval_decisions: [],
+    title: 'Review implementation plan',
+    detail: null,
+    command: null,
+    path: null,
+    turn_id: null,
+    item_id: null,
+    questions: [],
+    created_at: '2026-08-12T10:00:00Z',
+  } satisfies InteractiveRequest
+
+  it('treats a plan approval as awaiting a response', () => {
+    const presentation = deriveThreadAttentionPresentation(thread(), [planApproval])
+    expect(presentation.pendingApprovalCount).toBe(1)
+    expect(presentation.level).toBe('awaiting_response')
+    expect(presentation.showBadge).toBe(true)
+  })
+
+  it('does not borrow a plan approval from another thread', () => {
+    const presentation = deriveThreadAttentionPresentation(thread({ id: 'thread-2' }), [
+      planApproval,
+    ])
+    expect(presentation.pendingApprovalCount).toBe(0)
+    expect(presentation.level).toBe('none')
+  })
+
+  it('does not borrow a plan approval from another workspace', () => {
+    const presentation = deriveThreadAttentionPresentation(
+      thread({ workspace_id: 'workspace-2' }),
+      [planApproval],
+    )
+    expect(presentation.pendingApprovalCount).toBe(0)
+    expect(presentation.level).toBe('none')
   })
 })

@@ -42,7 +42,7 @@ export function deriveThreadAttentionPresentation(
       (request) =>
         request.workspace_id === thread.workspace_id &&
         request.thread_id === thread.id &&
-        request.kind === 'approval',
+        (request.kind === 'approval' || request.kind === 'plan_approval'),
     ).length
   const pendingQuestionCount =
     thread.attention.pending_question_count ||

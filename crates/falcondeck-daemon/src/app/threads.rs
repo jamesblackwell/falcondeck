@@ -656,12 +656,14 @@ impl AppState {
         let workspace = workspaces
             .get_mut(workspace_id)
             .ok_or_else(|| DaemonError::NotFound("workspace not found".to_string()))?;
-        Ok(Arc::clone(workspace.claude_runtime.get_or_insert_with(|| {
-            ClaudeRuntime::for_workspace(
-                workspace.summary.path.clone(),
-                self.provider_bin(&AgentProvider::CLAUDE),
-            )
-        })))
+        Ok(Arc::clone(workspace.claude_runtime.get_or_insert_with(
+            || {
+                ClaudeRuntime::for_workspace(
+                    workspace.summary.path.clone(),
+                    self.provider_bin(&AgentProvider::CLAUDE),
+                )
+            },
+        )))
     }
 
     pub(super) async fn agy_runtime_for(
@@ -760,7 +762,10 @@ impl AppState {
         if status_changed && let Err(error) = self.persist_local_state().await {
             tracing::warn!(%error, "failed to persist thread status change");
         }
-        Ok(summary)
+        // Approval counts live on the interactive-request map, not this stored
+        // summary. Callers broadcast the returned value, and a replay of a
+        // zero count clears a thread that is still waiting on the user.
+        Ok(self.build_thread_summary_from_clone(summary).await)
     }
 
     pub(crate) async fn with_thread_mut<F>(
@@ -849,8 +854,11 @@ impl AppState {
         mut summary: ThreadSummary,
     ) -> ThreadSummary {
         let interactive_requests = self.inner.interactive_requests.lock().await;
-        let (pending_approval_count, pending_question_count) =
-            interactive_request_counts(&interactive_requests, &summary.id);
+        let (pending_approval_count, pending_question_count) = interactive_request_counts(
+            &interactive_requests,
+            &summary.workspace_id,
+            &summary.id,
+        );
         refresh_thread_attention(&mut summary, pending_approval_count, pending_question_count);
         summary
     }
@@ -3270,19 +3278,32 @@ fn conversation_item_identity(item: &ConversationItem) -> &str {
 
 pub(super) fn interactive_request_counts(
     requests: &HashMap<(String, String), PendingServerRequest>,
+    workspace_id: &str,
     thread_id: &str,
 ) -> (u32, u32) {
     requests
         .values()
-        .filter(|request| request.request.thread_id.as_deref() == Some(thread_id))
+        .filter(|request| {
+            request.request.workspace_id == workspace_id
+                && request.request.thread_id.as_deref() == Some(thread_id)
+        })
         .fold(
             (0_u32, 0_u32),
-            |(approvals, questions), request| match request.request.kind {
-                InteractiveRequestKind::Approval => (approvals + 1, questions),
-                InteractiveRequestKind::Question => (approvals, questions + 1),
-                InteractiveRequestKind::PlanApproval => (approvals + 1, questions),
+            |(approvals, questions), request| {
+                let (next_approvals, next_questions) =
+                    interactive_request_attention_delta(&request.request.kind);
+                (approvals + next_approvals, questions + next_questions)
             },
         )
+}
+
+/// Plan review is an approval: the row badge and the dock count both wait on
+/// the user. Question prompts are the other waiting state.
+pub(super) fn interactive_request_attention_delta(kind: &InteractiveRequestKind) -> (u32, u32) {
+    match kind {
+        InteractiveRequestKind::Approval | InteractiveRequestKind::PlanApproval => (1, 0),
+        InteractiveRequestKind::Question => (0, 1),
+    }
 }
 
 pub(super) fn refresh_thread_attention(
@@ -4437,5 +4458,215 @@ mod tests {
                 "task_notification status '{raw_status}' must not become a service message"
             );
         }
+    }
+
+    #[tokio::test]
+    async fn thread_updates_keep_pending_plan_approvals() {
+        let temp_dir = tempdir().unwrap();
+        let app = AppState::new_with_state_path(
+            "test".to_string(),
+            HashMap::new(),
+            temp_dir.path().join("daemon-state.json"),
+        );
+        let mut thread = isolated_codex_thread();
+        thread.summary.id = "thread-1".to_string();
+        thread.summary.workspace_id = "workspace-1".to_string();
+        thread.summary.status = ThreadStatus::Running;
+        let workspace = falcondeck_core::WorkspaceSummary {
+            kind: falcondeck_core::WorkspaceKind::Project,
+            id: "workspace-1".to_string(),
+            path: temp_dir.path().to_string_lossy().to_string(),
+            status: falcondeck_core::WorkspaceStatus::Ready,
+            agents: Vec::new(),
+            skills: Vec::new(),
+            default_provider: AgentProvider::CODEX,
+            models: Vec::new(),
+            collaboration_modes: Vec::new(),
+            account: falcondeck_core::AccountSummary::default(),
+            current_thread_id: Some("thread-1".to_string()),
+            connected_at: Utc::now(),
+            updated_at: Utc::now(),
+            last_error: None,
+            icon: None,
+        };
+        app.inner.workspaces.lock().await.insert(
+            "workspace-1".to_string(),
+            ManagedWorkspace {
+                summary: workspace,
+                codex_session: None,
+                claude_runtime: None,
+                agy_runtime: None,
+                opencode_runtime: None,
+                acp_runtimes: HashMap::new(),
+                threads: HashMap::from([("thread-1".to_string(), thread)]),
+            },
+        );
+        let request = falcondeck_core::InteractiveRequest {
+            request_id: "plan-1".to_string(),
+            workspace_id: "workspace-1".to_string(),
+            thread_id: Some("thread-1".to_string()),
+            method: "x.ai/exit_plan_mode".to_string(),
+            kind: InteractiveRequestKind::PlanApproval,
+            approval_options: None,
+            approval_decisions: None,
+            title: "Review implementation plan".to_string(),
+            detail: Some("Ship the patch.".to_string()),
+            command: None,
+            path: None,
+            turn_id: None,
+            item_id: None,
+            questions: Vec::new(),
+            created_at: Utc::now(),
+        };
+        app.inner.interactive_requests.lock().await.insert(
+            ("workspace-1".to_string(), request.request_id.clone()),
+            PendingServerRequest {
+                raw_id: json!("plan-1"),
+                request,
+                params: Value::Null,
+            },
+        );
+
+        let waiting = app
+            .upsert_thread("workspace-1", "thread-1", |thread| {
+                thread.status = ThreadStatus::WaitingForInput;
+            })
+            .await
+            .unwrap();
+        assert_eq!(waiting.attention.pending_approval_count, 1);
+        assert_eq!(
+            waiting.attention.level,
+            ThreadAttentionLevel::AwaitingResponse
+        );
+
+        let renamed = app
+            .upsert_thread("workspace-1", "thread-1", |thread| {
+                thread.title = "Renamed while waiting".to_string();
+            })
+            .await
+            .unwrap();
+        assert_eq!(renamed.title, "Renamed while waiting");
+        assert_eq!(renamed.status, ThreadStatus::WaitingForInput);
+        assert_eq!(renamed.attention.pending_approval_count, 1);
+        assert_eq!(
+            renamed.attention.level,
+            ThreadAttentionLevel::AwaitingResponse
+        );
+    }
+
+    #[tokio::test]
+    async fn codex_approval_broadcasts_the_pending_count() {
+        let temp_dir = tempdir().unwrap();
+        let app = AppState::new_with_state_path(
+            "test".to_string(),
+            HashMap::new(),
+            temp_dir.path().join("daemon-state.json"),
+        );
+        let mut thread = isolated_codex_thread();
+        thread.summary.id = "thread-1".to_string();
+        thread.summary.workspace_id = "workspace-1".to_string();
+        thread.summary.status = ThreadStatus::Running;
+        let workspace = falcondeck_core::WorkspaceSummary {
+            kind: falcondeck_core::WorkspaceKind::Project,
+            id: "workspace-1".to_string(),
+            path: temp_dir.path().to_string_lossy().to_string(),
+            status: falcondeck_core::WorkspaceStatus::Ready,
+            agents: Vec::new(),
+            skills: Vec::new(),
+            default_provider: AgentProvider::CODEX,
+            models: Vec::new(),
+            collaboration_modes: Vec::new(),
+            account: falcondeck_core::AccountSummary::default(),
+            current_thread_id: Some("thread-1".to_string()),
+            connected_at: Utc::now(),
+            updated_at: Utc::now(),
+            last_error: None,
+            icon: None,
+        };
+        app.inner.workspaces.lock().await.insert(
+            "workspace-1".to_string(),
+            ManagedWorkspace {
+                summary: workspace,
+                codex_session: None,
+                claude_runtime: None,
+                agy_runtime: None,
+                opencode_runtime: None,
+                acp_runtimes: HashMap::new(),
+                threads: HashMap::from([("thread-1".to_string(), thread)]),
+            },
+        );
+        let mut events = app.subscribe();
+
+        app.ingest_server_request(
+            "workspace-1",
+            json!(1),
+            "item/commandExecution/requestApproval",
+            json!({
+                "threadId": "thread-1",
+                "reason": "Run tests",
+                "command": "cargo test"
+            }),
+        )
+        .await
+        .unwrap();
+
+        let emitted = std::iter::from_fn(|| events.try_recv().ok()).collect::<Vec<_>>();
+        let updates = emitted
+            .iter()
+            .filter_map(|envelope| match &envelope.event {
+                UnifiedEvent::ThreadUpdated { thread } if thread.id == "thread-1" => Some(thread),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert!(!updates.is_empty(), "approval publishes a thread update");
+        for updated in updates {
+            assert_eq!(updated.status, ThreadStatus::WaitingForInput);
+            assert_eq!(updated.attention.pending_approval_count, 1);
+            assert_eq!(
+                updated.attention.level,
+                ThreadAttentionLevel::AwaitingResponse
+            );
+        }
+    }
+
+    fn pending_plan(workspace_id: &str, thread_id: &str) -> PendingServerRequest {
+        PendingServerRequest {
+            raw_id: json!("plan-1"),
+            params: Value::Null,
+            request: falcondeck_core::InteractiveRequest {
+                request_id: "plan-1".to_string(),
+                workspace_id: workspace_id.to_string(),
+                thread_id: Some(thread_id.to_string()),
+                method: "x.ai/exit_plan_mode".to_string(),
+                kind: InteractiveRequestKind::PlanApproval,
+                approval_options: None,
+                approval_decisions: None,
+                title: "Review implementation plan".to_string(),
+                detail: None,
+                command: None,
+                path: None,
+                turn_id: None,
+                item_id: None,
+                questions: Vec::new(),
+                created_at: Utc::now(),
+            },
+        }
+    }
+
+    #[test]
+    fn approval_counts_do_not_cross_workspaces() {
+        let mut requests = HashMap::new();
+        requests.insert(
+            ("workspace-a".to_string(), "plan-1".to_string()),
+            pending_plan("workspace-a", "thread-1"),
+        );
+        assert_eq!(
+            interactive_request_counts(&requests, "workspace-a", "thread-1"),
+            (1, 0)
+        );
+        assert_eq!(
+            interactive_request_counts(&requests, "workspace-b", "thread-1"),
+            (0, 0)
+        );
     }
 }

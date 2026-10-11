@@ -3113,6 +3113,26 @@ async fn handle_claude_exit_plan_mode(
     }
 }
 
+/// Marks the thread as waiting and broadcasts the summary. The sidebar and
+/// dock badge read that summary; the request event only updates the card list.
+async fn publish_thread_waiting_for_input(
+    app: &AppState,
+    workspace_id: &str,
+    thread_id: &str,
+) -> Result<(), DaemonError> {
+    let thread = app
+        .upsert_thread(workspace_id, thread_id, |thread| {
+            thread.status = ThreadStatus::WaitingForInput;
+        })
+        .await?;
+    app.emit(
+        Some(workspace_id.to_string()),
+        Some(thread_id.to_string()),
+        UnifiedEvent::ThreadUpdated { thread },
+    );
+    Ok(())
+}
+
 async fn wait_for_claude_hook_reply(
     app: &AppState,
     workspace_id: &str,
@@ -3144,11 +3164,9 @@ async fn wait_for_claude_hook_reply(
         completed: false,
     };
 
-    let _ = app
-        .with_thread_mut(workspace_id, thread_id, |thread| {
-            thread.status = ThreadStatus::WaitingForInput;
-        })
-        .await;
+    // A missing thread must not fail the hook. The request card still goes
+    // out below, and the row badge catches up on the next summary.
+    let _ = publish_thread_waiting_for_input(app, workspace_id, thread_id).await;
     app.emit(
         Some(workspace_id.to_string()),
         Some(thread_id.to_string()),
@@ -3318,10 +3336,7 @@ pub(super) async fn ingest_server_request(
         );
 
         if let Some(thread_id) = request.thread_id.clone() {
-            app.with_thread_mut(workspace_id, &thread_id, |thread| {
-                thread.status = ThreadStatus::WaitingForInput;
-            })
-            .await?;
+            publish_thread_waiting_for_input(app, workspace_id, &thread_id).await?;
         }
 
         app.emit(
