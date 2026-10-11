@@ -867,16 +867,20 @@ function applyEventsToState(state: SessionState, events: EventEnvelope[]): Sessi
   // Archived rows stay in the snapshot so a local undo can restore them, but
   // they are not an open conversation. A remote archive arrives as
   // thread-updated; selection and the transcript have to leave with it.
-  const selectionSnapshot = nextSnapshot
-    ? { ...nextSnapshot, threads: liveThreads(nextSnapshot.threads) }
-    : state.snapshot;
-  if (nextSnapshot && selectionSnapshot?.threads !== nextSnapshot.threads) {
-    const liveIds = visibleThreadIdsOf(selectionSnapshot!.threads);
-    nextThreadItems = pruneThreadRecord(nextThreadItems, liveIds);
-    nextThreadHistory = pruneThreadRecord(nextThreadHistory, liveIds);
-    nextThreadDetailErrors = pruneThreadRecord(nextThreadDetailErrors, liveIds);
-    if (nextThreadDetail && !liveIds.has(nextThreadDetail.thread.id)) {
-      nextThreadDetail = null;
+  // Streaming events hit this on every chunk, so skip the copy when every
+  // row is already live.
+  let selectionSnapshot = nextSnapshot ?? state.snapshot;
+  if (nextSnapshot) {
+    const live = liveThreads(nextSnapshot.threads);
+    if (live !== nextSnapshot.threads) {
+      const liveIds = visibleThreadIdsOf(live);
+      nextThreadItems = pruneThreadRecord(nextThreadItems, liveIds);
+      nextThreadHistory = pruneThreadRecord(nextThreadHistory, liveIds);
+      nextThreadDetailErrors = pruneThreadRecord(nextThreadDetailErrors, liveIds);
+      if (nextThreadDetail && !liveIds.has(nextThreadDetail.thread.id)) {
+        nextThreadDetail = null;
+      }
+      selectionSnapshot = { ...nextSnapshot, threads: live };
     }
   }
 
@@ -1066,10 +1070,12 @@ export const useSessionStore = create<SessionStore>((set, get) => ({
   },
 
   dropInteractiveRequest: (requestId) => {
+    let dropped = false;
     set((state) => {
       if (!state.snapshot?.interactive_requests.some((request) => request.request_id === requestId)) {
         return state;
       }
+      dropped = true;
       return {
         snapshot: {
           ...state.snapshot,
@@ -1079,6 +1085,9 @@ export const useSessionStore = create<SessionStore>((set, get) => ({
         },
       };
     });
+    // Streaming turns do not persist, and the next compact snapshot is
+    // debounced, so a relaunch would otherwise restore the answered prompt.
+    if (dropped) schedulePersistStateCache();
   },
 
   archiveThreadLocally: (threadId) => {

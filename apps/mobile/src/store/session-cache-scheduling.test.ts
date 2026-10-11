@@ -8,7 +8,7 @@ vi.mock('@/storage/mobile-session-cache', () => ({
   persistMobileSessionCache: persistCache,
 }))
 
-import { assistantMessage, snapshot, thread, userMessage, workspace } from '@/test/factories'
+import { approval, assistantMessage, snapshot, thread, userMessage, workspace } from '@/test/factories'
 
 import {
   __resetSessionCachePersistThrottleForTests,
@@ -86,6 +86,28 @@ describe('send and new-thread cache scheduling', () => {
     const cached = persistCache.mock.calls[0][0] as MobileSessionCache
     expect(cached.selectedThreadId).toBe('new-thread')
     expect(cached.threadHistories['new-thread'].items.map(item => item.id)).toEqual(['first', 'second'])
+  })
+
+  it('writes a resolved interactive request out of the cache before the next snapshot', () => {
+    useSessionStore.setState({
+      snapshot: snapshot({
+        interactive_requests: [approval({ request_id: 'question-1' })],
+      }),
+    })
+    useSessionStore.getState().dropInteractiveRequest('question-1')
+    expect(useSessionStore.getState().snapshot?.interactive_requests).toEqual([])
+    expect(persistCache).not.toHaveBeenCalled()
+
+    vi.advanceTimersByTime(1_000)
+    expect(persistCache).toHaveBeenCalledTimes(1)
+    const cached = persistCache.mock.calls[0][0] as MobileSessionCache
+    expect(cached.snapshot.interactive_requests).toEqual([])
+  })
+
+  it('does not schedule a cache write when the interactive request is already gone', () => {
+    useSessionStore.getState().dropInteractiveRequest('missing')
+    vi.advanceTimersByTime(1_000)
+    expect(persistCache).not.toHaveBeenCalled()
   })
 
   it('flushes deferred work before the relay checkpoint and cancels the pending write', () => {
