@@ -1004,6 +1004,254 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn search_finds_commands_diffs_and_reasoning_summaries() {
+        let (app, _temp) = fixture().await;
+        let long_title = format!("{} unique_long_title_token", "x".repeat(120));
+        set_items(
+            &app,
+            vec![
+                serde_json::from_value(json!({
+                    "kind": "diff",
+                    "id": "d1",
+                    "diff": "+++ unique_diff_token",
+                    "created_at": Utc::now()
+                }))
+                .unwrap(),
+                serde_json::from_value(json!({
+                    "kind": "file_change",
+                    "id": "f1",
+                    "status": "completed",
+                    "changes": [{
+                        "path": "src/a.rs",
+                        "change_kind": "update",
+                        "diff": "fn unique_patch_token() {}"
+                    }],
+                    "created_at": Utc::now()
+                }))
+                .unwrap(),
+                serde_json::from_value(json!({
+                    "kind": "tool_call",
+                    "id": "shell",
+                    "title": "Shell",
+                    "tool_kind": "command",
+                    "status": "completed",
+                    "output": "finished",
+                    "detail": {
+                        "kind": "command_execution",
+                        "command": "cargo test unique_shell_command",
+                        "cwd": "/tmp"
+                    },
+                    "created_at": Utc::now()
+                }))
+                .unwrap(),
+                serde_json::from_value(json!({
+                    "kind": "tool_call",
+                    "id": "titled",
+                    "title": "run unique-title-token please",
+                    "tool_kind": "command",
+                    "status": "completed",
+                    "output": "ok",
+                    "created_at": Utc::now()
+                }))
+                .unwrap(),
+                serde_json::from_value(json!({
+                    "kind": "tool_call",
+                    "id": "long",
+                    "title": long_title,
+                    "tool_kind": "command",
+                    "status": "completed",
+                    "output": "done",
+                    "created_at": Utc::now()
+                }))
+                .unwrap(),
+                serde_json::from_value(json!({
+                    "kind": "reasoning",
+                    "id": "r1",
+                    "content": "",
+                    "summary": "secret_summary_token",
+                    "created_at": Utc::now()
+                }))
+                .unwrap(),
+                assistant("a-tail", "unrelated"),
+            ],
+        )
+        .await;
+
+        let find = async |query: &str, include_tools: bool, include_reasoning: bool| {
+            app.invoke_extension_tool(call(
+                VIEW,
+                json!({
+                    "thread_id": "thread-1",
+                    "query": query,
+                    "include_tools": include_tools,
+                    "include_reasoning": include_reasoning,
+                }),
+            ))
+            .await
+            .unwrap()
+            .result
+            .as_str()
+            .unwrap()
+            .to_string()
+        };
+        let shell = find("unique_shell_command", true, false).await;
+        assert!(
+            shell.contains("Id: shell") && shell.contains("cargo test unique_shell_command"),
+            "{shell}"
+        );
+        let titled = find("unique-title-token", true, false).await;
+        assert!(
+            titled.contains("Id: titled") && titled.contains("unique-title-token"),
+            "{titled}"
+        );
+        let long = find("unique_long_title_token", true, false).await;
+        assert!(
+            long.contains("Id: long") && long.contains("unique_long_title_token"),
+            "{long}"
+        );
+        let diff = find("unique_diff_token", true, false).await;
+        assert!(
+            diff.contains("Id: d1") && diff.contains("unique_diff_token"),
+            "{diff}"
+        );
+        let patch = find("unique_patch_token", true, false).await;
+        assert!(
+            patch.contains("Id: f1") && patch.contains("unique_patch_token"),
+            "{patch}"
+        );
+
+        let summary = find("secret_summary_token", false, true).await;
+        assert!(
+            summary.contains("Id: r1") && summary.contains("secret_summary_token"),
+            "{summary}"
+        );
+
+        let expanded = app
+            .invoke_extension_tool(call(VIEW, json!({"thread_id":"thread-1","item_id":"d1"})))
+            .await
+            .unwrap();
+        let expanded = expanded.result.as_str().unwrap();
+        assert!(expanded.contains("unique_diff_token"), "{expanded}");
+        assert!(!expanded.contains("Diff omitted"), "{expanded}");
+    }
+
+    #[tokio::test]
+    async fn view_lists_every_file_and_keeps_long_titles_visible() {
+        let (app, _temp) = fixture().await;
+        let hidden_diff = format!("unique_hidden_patch_token\n{}", "a".repeat(2500));
+        let image_title = format!("{} unique_image_title", "y".repeat(120));
+        let artifact_title = format!("{} unique_artifact_title", "z".repeat(120));
+        set_items(
+            &app,
+            vec![
+                serde_json::from_value(json!({
+                    "kind": "file_change",
+                    "id": "patch",
+                    "status": "failed",
+                    "changes": [
+                        {
+                            "path": "src/first.rs",
+                            "change_kind": "update",
+                            "diff": hidden_diff,
+                        },
+                        {
+                            "path": "src/kept.rs",
+                            "change_kind": "delete",
+                            "diff": "",
+                        },
+                        {
+                            "path": "src/old.rs",
+                            "change_kind": "update",
+                            "move_path": "src/renamed.rs",
+                            "diff": "",
+                        }
+                    ],
+                    "created_at": Utc::now()
+                }))
+                .unwrap(),
+                serde_json::from_value(json!({
+                    "kind": "image",
+                    "id": "img1",
+                    "title": image_title,
+                    "image": {
+                        "id": "asset1",
+                        "name": "unique_image_file.png",
+                        "url": "https://example.test/img.png",
+                        "alt_text": "a screenshot"
+                    },
+                    "created_at": Utc::now()
+                }))
+                .unwrap(),
+                serde_json::from_value(json!({
+                    "kind": "artifact",
+                    "id": "art1",
+                    "artifact": {
+                        "title": artifact_title,
+                        "artifact_kind": "document",
+                        "content": "plain body",
+                        "payload": null
+                    },
+                    "created_at": Utc::now()
+                }))
+                .unwrap(),
+            ],
+        )
+        .await;
+
+        let listed = app
+            .invoke_extension_tool(call(
+                VIEW,
+                json!({"thread_id":"thread-1","include_tools":true}),
+            ))
+            .await
+            .unwrap();
+        let listed = listed.result.as_str().unwrap();
+        assert!(
+            listed.contains("Files edited (failed)")
+                && listed.contains("src/kept.rs")
+                && listed.contains("delete")
+                && listed.contains("src/old.rs -> src/renamed.rs")
+                && listed.contains("unique_image_title")
+                && listed.contains("unique_image_file.png")
+                && listed.contains("unique_artifact_title"),
+            "{listed}"
+        );
+        assert!(!listed.contains("unique_hidden_patch_token"), "{listed}");
+
+        let found = app
+            .invoke_extension_tool(call(
+                VIEW,
+                json!({
+                    "thread_id": "thread-1",
+                    "include_tools": true,
+                    "query": "unique_hidden_patch_token"
+                }),
+            ))
+            .await
+            .unwrap();
+        let found = found.result.as_str().unwrap();
+        assert!(
+            found.contains("Id: patch") && found.contains("unique_hidden_patch_token"),
+            "{found}"
+        );
+
+        let expanded = app
+            .invoke_extension_tool(call(
+                VIEW,
+                json!({"thread_id":"thread-1","item_id":"patch"}),
+            ))
+            .await
+            .unwrap();
+        let expanded = expanded.result.as_str().unwrap();
+        assert!(
+            expanded.contains("unique_hidden_patch_token")
+                && expanded.contains("src/kept.rs")
+                && expanded.contains("src/renamed.rs"),
+            "{expanded}"
+        );
+    }
+
+    #[tokio::test]
     async fn item_expansion_pages_unicode_body_without_loss() {
         let (app, _temp) = fixture().await;
         let body = "🦅終abc".repeat(5000);

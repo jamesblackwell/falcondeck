@@ -107,9 +107,10 @@ pub(super) async fn view(
         for (index, item) in items.iter().enumerate().rev() {
             let id = workspace_ops::conversation_item_id(item);
             if selected(item, args) {
-                let (heading, body) = item_parts(item);
+                // Plain reads list file paths. Search has to see patch bodies.
+                let (heading, body) = item_parts(item, query.is_some());
                 let offset = if let Some(query) = &query {
-                    let Some(found) = query.find(&body) else {
+                    let Some(offset) = match_offset(query, item, &body) else {
                         scanned += 1;
                         before = Some(id.into());
                         if scanned == SCAN_LIMIT {
@@ -118,7 +119,7 @@ pub(super) async fn view(
                         }
                         continue;
                     };
-                    body[..found.start()].chars().count().saturating_sub(120)
+                    offset
                 } else {
                     0
                 };
@@ -199,7 +200,9 @@ fn selected(item: &ConversationItem, args: &ViewArgs) -> bool {
 }
 
 // Search and expansion use original text, not the capped handoff preview.
-fn item_parts(item: &ConversationItem) -> (String, Cow<'_, str>) {
+// `detailed` includes patch bodies; a plain read lists the paths only, so one
+// diff cannot crowd the other files out of the excerpt or copy a whole patch.
+fn item_parts(item: &ConversationItem, detailed: bool) -> (String, Cow<'_, str>) {
     let (heading, text) = match item {
         ConversationItem::UserMessage {
             text, attachments, ..
@@ -212,12 +215,20 @@ fn item_parts(item: &ConversationItem) -> (String, Cow<'_, str>) {
             return (heading, Cow::Borrowed(text));
         }
         ConversationItem::AssistantMessage { text, .. } => ("Assistant", text.as_str()),
-        ConversationItem::Reasoning { content, .. } => ("Reasoning", content.as_str()),
+        ConversationItem::Reasoning {
+            content, summary, ..
+        } => {
+            return (
+                "Reasoning".into(),
+                reasoning_body(summary.as_deref(), content),
+            );
+        }
         ConversationItem::CodeReview { content, .. } => ("Code review", content.as_str()),
         ConversationItem::ToolCall {
             title,
             output,
             exit_code,
+            detail,
             ..
         } => {
             let exit = exit_code
@@ -226,26 +237,22 @@ fn item_parts(item: &ConversationItem) -> (String, Cow<'_, str>) {
                 .unwrap_or_default();
             return (
                 format!("Tool — {}{exit}", line(title, 100)),
-                Cow::Borrowed(output.as_deref().unwrap_or("")),
+                tool_body(title, detail, output.as_deref().unwrap_or("")),
             );
         }
         ConversationItem::Artifact { artifact, .. } => {
             return (
                 format!("Artifact — {}", line(&artifact.title, 100)),
-                Cow::Borrowed(artifact.content.as_deref().unwrap_or("")),
+                artifact_body(artifact),
             );
         }
         ConversationItem::Service { message, .. } => ("Service", message.as_str()),
-        ConversationItem::FileChange { changes, .. } => {
+        ConversationItem::FileChange {
+            changes, status, ..
+        } => {
             return (
-                "Files edited".into(),
-                Cow::Owned(
-                    changes
-                        .iter()
-                        .map(|change| format!("- {}", change.path))
-                        .collect::<Vec<_>>()
-                        .join("\n"),
-                ),
+                file_change_heading(status),
+                Cow::Owned(file_change_body(changes, detailed)),
             );
         }
         ConversationItem::Plan { plan, .. } => {
@@ -266,12 +273,29 @@ fn item_parts(item: &ConversationItem) -> (String, Cow<'_, str>) {
             "Context compaction",
             "Earlier conversation was summarized for continuity.",
         ),
-        ConversationItem::Image { image, .. } => {
-            ("Image", image.alt_text.as_deref().unwrap_or("Image"))
+        ConversationItem::Image { title, image, .. } => {
+            let label = title
+                .as_deref()
+                .map(str::trim)
+                .filter(|title| !title.is_empty())
+                .or_else(|| {
+                    image
+                        .name
+                        .as_deref()
+                        .map(str::trim)
+                        .filter(|name| !name.is_empty())
+                })
+                .unwrap_or("Image");
+            return (
+                format!("Image — {}", line(label, 100)),
+                image_body(title.as_deref(), image),
+            );
         }
-        ConversationItem::WebSearch { search, .. } => ("Web search", search.query.as_str()),
+        ConversationItem::WebSearch { search, .. } => {
+            return ("Web search".into(), web_search_body(search));
+        }
         ConversationItem::Unsupported { reason, .. } => ("Unsupported output", reason.as_str()),
-        ConversationItem::Diff { .. } => ("Diff", "Diff omitted from bounded handoff."),
+        ConversationItem::Diff { diff, .. } => return ("Diff".into(), Cow::Borrowed(diff)),
         ConversationItem::InteractiveRequest { resolved, .. } => (
             "Interactive request",
             if *resolved {
@@ -282,6 +306,187 @@ fn item_parts(item: &ConversationItem) -> (String, Cow<'_, str>) {
         ),
     };
     (heading.into(), Cow::Borrowed(text))
+}
+
+/// Char offset of a literal match in `body`. `Some(0)` when the match is only
+/// in a title the heading still displays. `None` means no match.
+fn match_offset(query: &regex::Regex, item: &ConversationItem, body: &str) -> Option<usize> {
+    if let Some(found) = query.find(body) {
+        return Some(body[..found.start()].chars().count().saturating_sub(120));
+    }
+    let title = match item {
+        ConversationItem::ToolCall { title, .. } => Some(title.as_str()),
+        ConversationItem::Artifact { artifact, .. } => Some(artifact.title.as_str()),
+        ConversationItem::Image { title, .. } => title.as_deref(),
+        _ => None,
+    };
+    title
+        .is_some_and(|title| query.is_match(title))
+        .then_some(0)
+}
+
+fn tool_body<'a>(
+    title: &'a str,
+    detail: &'a Option<Box<falcondeck_core::ToolCallDetail>>,
+    output: &'a str,
+) -> Cow<'a, str> {
+    let command = match detail.as_deref() {
+        Some(falcondeck_core::ToolCallDetail::CommandExecution { command, .. })
+            if !command.is_empty() =>
+        {
+            Some(command.as_str())
+        }
+        _ => None,
+    };
+    // Headings keep 100 characters. A longer title, and a shell command that
+    // is not already in that title or the output, stay in the body.
+    let title_extra = title.chars().count() > 100 && !output.contains(title);
+    let command_extra = command.is_some_and(|command| {
+        command != title && !output.contains(command) && !title.contains(command)
+    });
+    if !title_extra && !command_extra {
+        return Cow::Borrowed(output);
+    }
+    let mut body = String::new();
+    if title_extra {
+        body.push_str(title);
+        body.push('\n');
+    }
+    if let Some(command) = command
+        && command_extra
+    {
+        body.push_str(command);
+        body.push('\n');
+    }
+    body.push_str(output);
+    Cow::Owned(body)
+}
+
+fn reasoning_body<'a>(summary: Option<&'a str>, content: &'a str) -> Cow<'a, str> {
+    match summary.map(str::trim).filter(|summary| !summary.is_empty()) {
+        Some(summary) if content.is_empty() => Cow::Borrowed(summary),
+        Some(summary) if !content.contains(summary) => Cow::Owned(format!("{summary}\n{content}")),
+        _ => Cow::Borrowed(content),
+    }
+}
+
+fn file_change_heading(status: &str) -> String {
+    if status.is_empty()
+        || matches!(
+            status.to_ascii_lowercase().as_str(),
+            "completed" | "complete" | "success" | "succeeded" | "done"
+        )
+    {
+        "Files edited".into()
+    } else {
+        format!("Files edited ({status})")
+    }
+}
+
+fn push_file_change_line(out: &mut String, change: &falcondeck_core::ConversationFileChange) {
+    out.push_str("- ");
+    if !change.change_kind.is_empty() {
+        out.push_str(&change.change_kind);
+        out.push(' ');
+    }
+    out.push_str(&change.path);
+    if let Some(dest) = &change.move_path {
+        out.push_str(" -> ");
+        out.push_str(dest);
+    }
+}
+
+fn file_change_body(changes: &[falcondeck_core::ConversationFileChange], detailed: bool) -> String {
+    let mut out = String::new();
+    for (index, change) in changes.iter().enumerate() {
+        if index > 0 {
+            out.push('\n');
+        }
+        push_file_change_line(&mut out, change);
+    }
+    if !detailed {
+        return out;
+    }
+    for change in changes {
+        if change.diff.is_empty() {
+            continue;
+        }
+        out.push_str("\n\n");
+        push_file_change_line(&mut out, change);
+        out.push('\n');
+        out.push_str(&change.diff);
+    }
+    out
+}
+
+fn artifact_body(artifact: &falcondeck_core::ConversationArtifact) -> Cow<'_, str> {
+    let content = artifact.content.as_deref().unwrap_or("");
+    if artifact.title.chars().count() > 100 && !content.contains(&artifact.title) {
+        return Cow::Owned(format!("{}\n{content}", artifact.title));
+    }
+    Cow::Borrowed(content)
+}
+
+fn image_body<'a>(
+    title: Option<&'a str>,
+    image: &'a falcondeck_core::ConversationImage,
+) -> Cow<'a, str> {
+    let alt = image.alt_text.as_deref().unwrap_or("");
+    let title = title.map(str::trim).filter(|title| !title.is_empty());
+    let name = image
+        .name
+        .as_deref()
+        .map(str::trim)
+        .filter(|name| !name.is_empty());
+    let mut extra = String::new();
+    if let Some(title) = title.filter(|title| !alt.contains(*title)) {
+        extra.push_str(title);
+        extra.push('\n');
+    }
+    if let Some(name) =
+        name.filter(|name| title != Some(*name) && !alt.contains(*name) && !extra.contains(*name))
+    {
+        extra.push_str(name);
+        extra.push('\n');
+    }
+    if extra.is_empty() {
+        return if alt.is_empty() {
+            Cow::Borrowed("Image")
+        } else {
+            Cow::Borrowed(alt)
+        };
+    }
+    if alt.is_empty() {
+        extra.pop();
+    } else {
+        extra.push_str(alt);
+    }
+    Cow::Owned(extra)
+}
+
+fn web_search_body(search: &falcondeck_core::ConversationWebSearch) -> Cow<'_, str> {
+    let extras = search.queries.iter().any(|query| query != &search.query)
+        || search.url.is_some()
+        || search.pattern.is_some();
+    if !extras {
+        return Cow::Borrowed(&search.query);
+    }
+    let mut text = search.query.clone();
+    for query in &search.queries {
+        if query != &search.query {
+            text.push('\n');
+            text.push_str(query);
+        }
+    }
+    if let Some(url) = &search.url {
+        text.push('\n');
+        text.push_str(url);
+    }
+    if let Some(pattern) = &search.pattern {
+        text.push('\n');
+        text.push_str(pattern);
+    }
+    Cow::Owned(text)
 }
 
 fn excerpt(heading: &str, id: &str, body: &str, offset: usize, length: usize) -> String {
@@ -307,7 +512,7 @@ fn expand(
     offset: usize,
     cap: usize,
 ) -> Result<String, DaemonError> {
-    let (heading, body) = item_parts(item);
+    let (heading, body) = item_parts(item, true);
     if offset > body.chars().count() {
         return Err(DaemonError::BadRequest(
             "offset exceeds item body length".into(),
