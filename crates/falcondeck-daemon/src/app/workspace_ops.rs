@@ -1506,6 +1506,16 @@ pub(super) async fn archive_thread(
     }
     drop(workspaces);
     let summary = app.thread_summary(workspace_id, thread_id).await?;
+    // Compact peers never see the snapshot body, so the archived summary has
+    // to travel on its own. Otherwise the phone copies the old live row back
+    // from its previous index and can keep sending into a closed thread.
+    app.emit(
+        Some(workspace_id.to_string()),
+        Some(thread_id.to_string()),
+        UnifiedEvent::ThreadUpdated {
+            thread: summary.clone(),
+        },
+    );
     app.emit(
         Some(workspace_id.to_string()),
         Some(thread_id.to_string()),
@@ -1526,6 +1536,7 @@ pub(super) async fn archive_all_threads(
         .get_mut(workspace_id)
         .ok_or_else(|| DaemonError::NotFound("workspace not found".to_string()))?;
     let mut changed = false;
+    let mut archived_threads = Vec::new();
     for thread in workspace.threads.values_mut() {
         if !thread.summary.is_archived
             && !matches!(
@@ -1537,6 +1548,7 @@ pub(super) async fn archive_all_threads(
             && thread.dispatching_request.is_none()
         {
             thread.summary.is_archived = true;
+            archived_threads.push(thread.summary.clone());
             changed = true;
         }
     }
@@ -1558,6 +1570,13 @@ pub(super) async fn archive_all_threads(
     drop(workspaces);
 
     if changed {
+        for thread in archived_threads {
+            app.emit(
+                Some(workspace_id.to_string()),
+                Some(thread.id.clone()),
+                UnifiedEvent::ThreadUpdated { thread },
+            );
+        }
         app.emit(
             Some(workspace_id.to_string()),
             None,

@@ -863,11 +863,27 @@ function applyEventsToState(state: SessionState, events: EventEnvelope[]): Sessi
     }
   }
 
+  // Archived rows stay in the snapshot so a local undo can restore them, but
+  // they are not an open conversation. A remote archive arrives as
+  // thread-updated; selection and the transcript have to leave with it.
+  const selectionSnapshot = nextSnapshot
+    ? { ...nextSnapshot, threads: liveThreads(nextSnapshot.threads) }
+    : state.snapshot;
+  if (nextSnapshot && selectionSnapshot?.threads !== nextSnapshot.threads) {
+    const liveIds = visibleThreadIdsOf(selectionSnapshot!.threads);
+    nextThreadItems = pruneThreadRecord(nextThreadItems, liveIds);
+    nextThreadHistory = pruneThreadRecord(nextThreadHistory, liveIds);
+    nextThreadDetailErrors = pruneThreadRecord(nextThreadDetailErrors, liveIds);
+    if (nextThreadDetail && !liveIds.has(nextThreadDetail.thread.id)) {
+      nextThreadDetail = null;
+    }
+  }
+
   // preserveEmptyThreadSelection: a null thread id here is the new-conversation
   // draft. Without it, every streamed event from a busy thread re-selects that
   // thread and its transcript takes over the draft screen.
   const nextSelection = reconcileSnapshotSelection(
-    nextSnapshot ?? state.snapshot,
+    selectionSnapshot,
     state.selectedWorkspaceId,
     state.selectedThreadId,
     { preserveEmptyThreadSelection: true },

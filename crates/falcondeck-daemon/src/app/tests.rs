@@ -7359,11 +7359,16 @@ async fn archive_all_threads_updates_once_and_is_idempotent() {
     assert!(!thread("thread-waiting").is_archived);
     assert!(!thread("thread-queued").is_archived);
     assert_eq!(thread("thread-running").status, ThreadStatus::Running);
+    let emitted = std::iter::from_fn(|| events.try_recv().ok()).collect::<Vec<_>>();
+    assert!(emitted.iter().any(|event| matches!(
+        &event.event,
+        UnifiedEvent::ThreadUpdated { thread }
+            if thread.id == "thread-active" && thread.is_archived
+    )));
     assert!(matches!(
-        events.try_recv().unwrap().event,
-        UnifiedEvent::Snapshot { .. }
+        emitted.last().map(|event| &event.event),
+        Some(UnifiedEvent::Snapshot { .. })
     ));
-    assert!(events.try_recv().is_err());
 
     assert!(app.archive_all_threads(&workspace_id).await.unwrap().ok);
     assert!(events.try_recv().is_err());

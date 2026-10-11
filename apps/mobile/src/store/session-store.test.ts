@@ -287,6 +287,34 @@ describe('session-store', () => {
       expect(state.threadItems['t1']).toBeUndefined()
     })
 
+    it('leaves a remotely archived thread when the summary arrives as an event', () => {
+      const remaining = thread({ id: 't2', title: 'Keep' })
+      useSessionStore.getState().applyDaemonEvent(
+        snapshotEvent(snapshot({
+          threads: [thread({ id: 't1' }), remaining],
+        })),
+      )
+      useSessionStore.getState().selectThread('workspace-1', 't1')
+      useSessionStore.getState().setThreadDetail(threadDetail({
+        thread: thread({ id: 't1' }),
+        items: [assistantMessage('msg-1', 'hello')],
+      }))
+
+      useSessionStore.getState().applyDaemonEvent(
+        threadUpdatedEvent(thread({
+          id: 't1',
+          is_archived: true,
+          updated_at: '2026-03-16T10:00:01Z',
+        })),
+      )
+
+      const state = useSessionStore.getState()
+      expect(state.snapshot?.threads.find((entry) => entry.id === 't1')?.is_archived).toBe(true)
+      expect(state.selectedThreadId).toBe('t2')
+      expect(state.threadDetail).toBeNull()
+      expect(state.threadItems['t1']).toBeUndefined()
+    })
+
     it('sets both workspace and thread when selecting a thread', () => {
       const { selectThread } = useSessionStore.getState()
       selectThread('w1', 't1')
