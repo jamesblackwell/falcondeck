@@ -49,6 +49,8 @@ export function draftWithProvider(
   }
 }
 
+const DEFAULT_NO_ACTION_MARKER = 'FALCONDECK_NO_ACTION'
+
 export function emptyAutomationDraft(
   settings: AgentControlSettings | null,
   workspacePath = '',
@@ -63,7 +65,7 @@ export function emptyAutomationDraft(
     runAt: '',
     instruction: '',
     conditional: false,
-    noActionMarker: 'FALCONDECK_NO_ACTION',
+    noActionMarker: DEFAULT_NO_ACTION_MARKER,
     workspacePath,
     provider: 'codex',
     threadKind: 'managed',
@@ -95,7 +97,8 @@ export function automationDraftFromDefinition(automation: Automation): Automatio
     runAt: automation.trigger.kind === 'once' ? automation.trigger.run_at : '',
     instruction: task.instruction,
     conditional: task.kind === 'conditional_prompt',
-    noActionMarker: task.kind === 'conditional_prompt' ? task.no_action_marker : '',
+    noActionMarker:
+      task.kind === 'conditional_prompt' ? task.no_action_marker : DEFAULT_NO_ACTION_MARKER,
     workspacePath: automation.target.workspace_path,
     provider: automation.target.provider,
     threadKind: thread.kind,
@@ -115,17 +118,30 @@ function commaSeparated(value: string) {
   return value.split(',').map((item) => item.trim()).filter(Boolean)
 }
 
+const INTERVAL_ERROR = 'Intervals must be a whole number of at least 60 seconds.'
+
+/** `null` unless `value` is a safe integer of at least 60. The daemon stores
+ * `every_seconds` as a `u64`, and integers above `Number.MAX_SAFE_INTEGER`
+ * do not round-trip through JSON as that same integer. */
+function intervalSeconds(value: string): number | null {
+  const parsed = Number(value.trim())
+  if (!Number.isSafeInteger(parsed) || parsed < 60) return null
+  return parsed
+}
+
+function requireIntervalSeconds(value: string): number {
+  const seconds = intervalSeconds(value)
+  if (seconds == null) throw new Error(INTERVAL_ERROR)
+  return seconds
+}
+
 export function automationDraftArguments(draft: AutomationDraft): Record<string, unknown> {
-  const intervalSeconds = Number(draft.everySeconds)
-  if (draft.scheduleKind === 'interval' && !Number.isFinite(intervalSeconds)) {
-    throw new Error('Interval must be a finite number of seconds.')
-  }
   const trigger = draft.scheduleKind === 'cron'
     ? { kind: 'cron', expression: draft.expression.trim(), timezone: draft.timezone.trim() }
     : draft.scheduleKind === 'interval'
       ? {
           kind: 'interval',
-          every_seconds: intervalSeconds,
+          every_seconds: requireIntervalSeconds(draft.everySeconds),
           // The persisted anchor is part of the schedule. Re-anchoring an edit
           // to the time it was saved would silently move every future run.
           anchor_at: draft.anchorAt.trim() || new Date().toISOString(),
@@ -173,11 +189,8 @@ export function automationDraftError(draft: AutomationDraft): string | null {
     return 'Cron expressions use exactly five fields.'
   }
   if (draft.scheduleKind === 'cron' && !draft.timezone.trim()) return 'A timezone is required.'
-  if (
-    draft.scheduleKind === 'interval' &&
-    (!Number.isFinite(Number(draft.everySeconds)) || Number(draft.everySeconds) < 60)
-  ) {
-    return 'Intervals must be at least 60 seconds.'
+  if (draft.scheduleKind === 'interval' && intervalSeconds(draft.everySeconds) == null) {
+    return INTERVAL_ERROR
   }
   if (draft.scheduleKind === 'once' && !draft.runAt.trim()) {
     return 'A one-time schedule needs an RFC 3339 timestamp with an offset.'

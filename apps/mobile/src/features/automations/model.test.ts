@@ -102,22 +102,43 @@ describe('automation drafts', () => {
       name: 'Task',
       instruction: 'Do it',
     })).toBe('Workspace path must be absolute.')
+    const intervalError = 'Intervals must be a whole number of at least 60 seconds.'
     expect(automationDraftError({
       ...emptyAutomationDraft(null, '/tmp/project'),
       name: 'Task',
       instruction: 'Do it',
       scheduleKind: 'interval',
       everySeconds: '30',
-    })).toBe('Intervals must be at least 60 seconds.')
+    })).toBe(intervalError)
 
-    const nonNumeric = {
-      ...emptyAutomationDraft(null, '/tmp/project'),
-      name: 'Task',
-      instruction: 'Do it',
-      scheduleKind: 'interval' as const,
-      everySeconds: 'not-a-number',
+    for (const everySeconds of ['not-a-number', '60.5', 'Infinity', '1e21']) {
+      const nonNumeric = {
+        ...emptyAutomationDraft(null, '/tmp/project'),
+        name: 'Task',
+        instruction: 'Do it',
+        scheduleKind: 'interval' as const,
+        everySeconds,
+      }
+      expect(automationDraftError(nonNumeric)).toBe(intervalError)
+      expect(() => automationDraftArguments(nonNumeric)).toThrow(intervalError)
     }
-    expect(automationDraftError(nonNumeric)).toBe('Intervals must be at least 60 seconds.')
-    expect(() => automationDraftArguments(nonNumeric)).toThrow(/finite number/)
+
+    for (const [everySeconds, every_seconds] of [
+      [' 3600 ', 3600],
+      ['60.0', 60],
+      ['1e3', 1000],
+    ] as const) {
+      const draft = {
+        ...emptyAutomationDraft(null, '/tmp/project'),
+        name: 'Task',
+        instruction: 'Do it',
+        scheduleKind: 'interval' as const,
+        everySeconds,
+      }
+      expect(automationDraftError(draft)).toBeNull()
+      expect(automationDraftArguments(draft)).toMatchObject({
+        trigger: { kind: 'interval', every_seconds },
+      })
+    }
   })
 })
