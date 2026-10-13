@@ -161,6 +161,8 @@ const groups: ProjectGroup[] = [
         title: "Kanban drag fix",
         provider: "acp-grok",
         updated_at: minutesAgo(60 * 26),
+        last_message_preview:
+          "**Fixed the drop target.** Cards now land in the `Done` column.",
         attention: {
           level: "unread",
           badge_label: null,
@@ -202,6 +204,24 @@ const groups: ProjectGroup[] = [
           pending_question_count: 0,
           last_agent_activity_seq: 9,
           last_read_seq: 4,
+        },
+      }),
+      thread({
+        id: "thread-8",
+        workspace_id: "workspace-2",
+        title: "Nightly dependency audit",
+        provider: "claude",
+        updated_at: minutesAgo(60 * 20),
+        last_message_preview:
+          "<falcondeck_automation>Sent by scheduled task</falcondeck_automation> Audit finished: two minor bumps.",
+        attention: {
+          level: "unread",
+          badge_label: null,
+          unread: true,
+          pending_approval_count: 0,
+          pending_question_count: 0,
+          last_agent_activity_seq: 4,
+          last_read_seq: 1,
         },
       }),
       thread({
@@ -312,7 +332,9 @@ createRoot(document.getElementById("root")!).render(
           onDeleteThread={async () => {}}
           onTogglePinThread={async () => {}}
           onTogglePinThreadInProject={async () => {}}
-          {...(activityMode ? { activity: activityFixture() } : {})}
+          {...(activityMode
+            ? { activity: activityFixture(), onNewChat: () => {} }
+            : {})}
         />
       </div>
     </div>

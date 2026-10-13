@@ -311,4 +311,129 @@ describe("ActivityInbox", () => {
     expect(screen.queryAllByRole("option")).toHaveLength(0);
     expect(screen.getByText("Nothing unread.")).toBeTruthy();
   });
+
+  it("keeps a streaming task in place and lifts it when the turn ends", () => {
+    const minutesAgo = (minutes: number) =>
+      new Date(Date.now() - minutes * 60_000).toISOString();
+    const newer = thread({
+      id: "newer",
+      updated_at: minutesAgo(1),
+      attention: { ...seen, last_read_seq: 2 },
+    });
+    const working = thread({
+      id: "working",
+      status: "running",
+      updated_at: minutesAgo(5),
+      attention: { ...seen, level: "running" },
+    });
+    const { props, rerender } = renderInbox({
+      groups: groups([newer, working]),
+      interactiveRequests: [],
+    });
+    expect(rowTitles()).toEqual(["workspace-1:newer", "workspace-1:working"]);
+
+    // Streaming bumps updated_at on every event; the row stays put.
+    const streaming = { ...working, updated_at: new Date().toISOString() };
+    rerender(<ActivityInbox {...props} groups={groups([newer, streaming])} />);
+    expect(rowTitles()).toEqual(["workspace-1:newer", "workspace-1:working"]);
+
+    // The turn ends with output the user has not read: new mail.
+    const done = {
+      ...streaming,
+      status: "idle" as const,
+      attention: { ...seen, last_agent_activity_seq: 3, unread: true },
+    };
+    rerender(<ActivityInbox {...props} groups={groups([newer, done])} />);
+    expect(rowTitles()).toEqual(["workspace-1:working", "workspace-1:newer"]);
+  });
+
+  it("does not move the open task when its own activity lands", () => {
+    const minutesAgo = (minutes: number) =>
+      new Date(Date.now() - minutes * 60_000).toISOString();
+    const top = thread({
+      id: "top",
+      updated_at: minutesAgo(1),
+      attention: { ...seen, last_read_seq: 2 },
+    });
+    const open = thread({
+      id: "open",
+      updated_at: minutesAgo(10),
+      attention: { ...seen, last_read_seq: 2 },
+    });
+    const { props, rerender } = renderInbox({
+      groups: groups([top, open]),
+      interactiveRequests: [],
+      selectedWorkspaceId: workspace.id,
+      selectedThreadId: "open",
+    });
+    const replied = {
+      ...open,
+      updated_at: new Date().toISOString(),
+      attention: { ...seen, last_agent_activity_seq: 4, last_read_seq: 4 },
+    };
+    rerender(<ActivityInbox {...props} groups={groups([top, replied])} />);
+    expect(rowTitles()).toEqual(["workspace-1:top", "workspace-1:open"]);
+
+    // Moving on does not release it either: the user saw that turn.
+    rerender(
+      <ActivityInbox
+        {...props}
+        groups={groups([top, replied])}
+        selectedThreadId="top"
+      />,
+    );
+    expect(rowTitles()).toEqual(["workspace-1:top", "workspace-1:open"]);
+  });
+
+  it("holds the rows on screen while the pointer is over the list", () => {
+    const first = thread({ id: "first", attention: { ...seen, unread: true } });
+    const second = thread({
+      id: "second",
+      updated_at: new Date(Date.now() - 60_000).toISOString(),
+      attention: { ...seen, unread: true },
+    });
+    const { props, rerender } = renderInbox({
+      groups: groups([first, second]),
+      interactiveRequests: [],
+      selectedWorkspaceId: workspace.id,
+      selectedThreadId: "first",
+    });
+    fireEvent.click(screen.getByRole("radio", { name: /Unread/ }));
+    const list = screen.getByRole("listbox", { name: "Activity" });
+    fireEvent.pointerEnter(list);
+
+    // "first" was read and the user moved on to "second".
+    const read = { ...first, attention: { ...seen, last_read_seq: 2 } };
+    const fresh = thread({
+      id: "fresh",
+      updated_at: new Date(Date.now() + 1_000).toISOString(),
+      attention: { ...seen, unread: true },
+    });
+    rerender(
+      <ActivityInbox
+        {...props}
+        groups={groups([read, second, fresh])}
+        selectedThreadId="second"
+      />,
+    );
+    expect(rowTitles()).toEqual(["workspace-1:first", "workspace-1:second"]);
+
+    fireEvent.pointerLeave(list);
+    expect(rowTitles()).toEqual(["workspace-1:fresh", "workspace-1:second"]);
+  });
+
+  it("strips the scheduler envelope and markdown from previews", () => {
+    renderInbox({
+      groups: groups([
+        thread({
+          id: "auto",
+          last_message_preview:
+            "<falcondeck_automation>Sent by scheduled task</falcondeck_automation>\n**Audit** done in `main`",
+          attention: { ...seen, unread: true },
+        }),
+      ]),
+      interactiveRequests: [],
+    });
+    expect(screen.getByText("Audit done in main")).toBeTruthy();
+  });
 });

@@ -2620,32 +2620,37 @@ export const WorkspaceSidebar = memo(function WorkspaceSidebar({
     orderedGroups[0]?.workspace.id ??
     null;
 
-  const newThreadRow =
-    onNewChat || (onNewThread && newThreadWorkspaceId) ? (
-      <Tooltip label={onNewChat ? "New chat" : "New thread"} shortcut={newThreadShortcut}>
-        <button
-          type="button"
-          onClick={() => {
-            if (onNewChat) void onNewChat();
-            else if (newThreadWorkspaceId) handleNewThread(newThreadWorkspaceId);
-          }}
-          className="fd-focus group mb-1 flex w-full items-center gap-1.5 rounded-[var(--fd-radius-md)] py-1.5 pl-1.5 pr-3 text-left text-[length:var(--fd-text-sm)] font-medium text-fg-primary transition-colors hover:bg-surface-3"
-        >
-          <span className="flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-surface-3 text-fg-secondary transition-colors group-hover:bg-surface-4 group-hover:text-fg-primary">
-            <Plus aria-hidden="true" className="h-3.5 w-3.5" />
+  const newThreadLabel = onNewChat ? "New chat" : "New thread";
+  const canStartNewThread = Boolean(
+    onNewChat || (onNewThread && newThreadWorkspaceId),
+  );
+  const startNewThread = useCallback(() => {
+    if (onNewChat) void onNewChat();
+    else if (newThreadWorkspaceId) handleNewThread(newThreadWorkspaceId);
+  }, [handleNewThread, newThreadWorkspaceId, onNewChat]);
+
+  const newThreadRow = canStartNewThread ? (
+    <Tooltip label={newThreadLabel} shortcut={newThreadShortcut}>
+      <button
+        type="button"
+        onClick={startNewThread}
+        className="fd-focus group mb-1 flex w-full items-center gap-1.5 rounded-[var(--fd-radius-md)] py-1.5 pl-1.5 pr-3 text-left text-[length:var(--fd-text-sm)] font-medium text-fg-primary transition-colors hover:bg-surface-3"
+      >
+        <span className="flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-surface-3 text-fg-secondary transition-colors group-hover:bg-surface-4 group-hover:text-fg-primary">
+          <Plus aria-hidden="true" className="h-3.5 w-3.5" />
+        </span>
+        <span className="min-w-0 flex-1">{newThreadLabel}</span>
+        {newThreadShortcut?.length ? (
+          <span
+            aria-hidden="true"
+            className="fd-readout shrink-0 text-[length:var(--fd-text-xs)] text-fg-muted"
+          >
+            {newThreadShortcut.join("")}
           </span>
-          <span className="min-w-0 flex-1">{onNewChat ? "New chat" : "New thread"}</span>
-          {newThreadShortcut?.length ? (
-            <span
-              aria-hidden="true"
-              className="fd-readout shrink-0 text-[length:var(--fd-text-xs)] text-fg-muted"
-            >
-              {newThreadShortcut.join("")}
-            </span>
-          ) : null}
-        </button>
-      </Tooltip>
-    ) : null;
+        ) : null}
+      </button>
+    </Tooltip>
+  ) : null;
 
   const handleRenameSubmit = useCallback(
     async (event: React.FormEvent<HTMLFormElement>) => {
@@ -2907,10 +2912,11 @@ export const WorkspaceSidebar = memo(function WorkspaceSidebar({
             ))}
           </div>
         ) : null}
-        {newThreadRow || (topNavigation && !activity) ? (
-          <nav className={activity ? "mb-2" : "mb-4"}>
+        {/* Activity carries its own new-task button in its header. */}
+        {!activity && (newThreadRow || topNavigation) ? (
+          <nav className="mb-4">
             {newThreadRow}
-            {activity ? null : topNavigation}
+            {topNavigation}
           </nav>
         ) : null}
         {activity ? (
@@ -2927,6 +2933,9 @@ export const WorkspaceSidebar = memo(function WorkspaceSidebar({
             onOpenContextMenu={handleOpenThreadContextMenu}
             onClose={activity.onClose}
             onPopOut={activity.onPopOut}
+            onNewChat={canStartNewThread ? startNewThread : undefined}
+            newChatLabel={newThreadLabel}
+            newChatShortcut={newThreadShortcut}
           />
         ) : null}
         {/* Kept mounted while Activity is up so pagers and folds survive. */}

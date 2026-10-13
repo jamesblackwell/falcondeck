@@ -8,7 +8,7 @@ import {
   useRef,
   useState,
 } from "react";
-import { Archive, ArrowLeft, PanelsTopLeft } from "lucide-react";
+import { Archive, ArrowLeft, PanelsTopLeft, SquarePen } from "lucide-react";
 
 import {
   collectActivityInbox,
@@ -28,6 +28,10 @@ import { ActivityDiamond, Tooltip, cn } from "@falcondeck/ui";
    opens the task in the main pane, which acts as the reading pane, so the
    inbox never takes over the window. Tasks that need a response or failed
    are pinned above a newest-first feed grouped by day.
+
+   Rows hold still. A task only moves up when an agent finishes new work
+   while it is not open, and nothing reflows while the pointer is over the
+   list; whatever changed underneath settles once it leaves.
    ================================================================ */
 
 export type ActivityInboxFilter = "all" | "unread" | "running";
@@ -68,6 +72,10 @@ export type ActivityInboxProps = {
   }) => void;
   onClose: () => void;
   onPopOut?: () => void;
+  /** Starts a new task; shown in the inbox header beside the title. */
+  onNewChat?: () => void;
+  newChatLabel?: string;
+  newChatShortcut?: string[];
 };
 
 type Bucket = "needs" | "feed";
@@ -80,6 +88,19 @@ type PendingAdvance = {
   key: string;
   next: ActivityInboxRow | null;
   clearedAt: number | null;
+};
+
+/** Where a feed row sorts, and what it looked like when it got there. */
+type FeedSlot = { at: string; seq: number; running: boolean };
+
+/** The rows on screen, by key, held while the pointer is over the list. */
+type FrozenLayout = {
+  filter: ActivityInboxFilter;
+  feedLimit: number;
+  needsYou: string[];
+  feed: string[];
+  /** Feed times as shown, so day headings cannot split while held. */
+  orderAt: ReadonlyMap<string, string>;
 };
 
 function timeLabel(dateStr: string, nowMs: number) {
@@ -125,13 +146,30 @@ function requestSummary(request: InteractiveRequest | undefined) {
   return `${label}: ${request.command ?? request.title}`;
 }
 
+/**
+ * One readable line from a message preview: no scheduler envelope, no
+ * markdown punctuation, no line breaks.
+ */
+function plainPreview(text: string | null | undefined) {
+  if (!text) return "";
+  return text
+    .replace(/<falcondeck_automation>[\s\S]*?(?:<\/falcondeck_automation>|$)/g, "")
+    .replace(/^\s*(?:#{1,6}\s+|>\s*|[-*+]\s+)/gm, "")
+    .replace(/\*\*|__|`/g, "")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
 function rowPreview(row: ActivityInboxRow) {
   if (row.section === "blocked") return requestSummary(row.requests[0]);
   if (row.section === "failed") return row.thread.last_error ?? "The run failed";
   if (row.section === "running") {
-    return row.thread.last_tool ?? row.thread.last_message_preview ?? "Working…";
+    return (
+      row.thread.last_tool ??
+      (plainPreview(row.thread.last_message_preview) || "Working…")
+    );
   }
-  return row.thread.last_message_preview ?? "";
+  return plainPreview(row.thread.last_message_preview);
 }
 
 function matchesFilter(
@@ -157,25 +195,25 @@ function holdFor(key: string | null, inbox: ActivityInboxModel): HeldRow | null 
 }
 
 /**
- * The held row as it is now. A task can leave both lists while it is open —
+ * A row as it is now. A task can leave both lists while it is on screen —
  * a week-old failure that has just been read, say — so fall back to a
  * settled row for it rather than letting it vanish. Archived tasks do go.
  */
-function currentHeldRow(
-  held: HeldRow,
+function rowForKey(
+  key: string,
   inbox: ActivityInboxModel,
   groups: ProjectGroup[],
 ): ActivityInboxRow | null {
   const live =
-    inbox.needsYou.find((row) => row.key === held.key) ??
-    inbox.feed.find((row) => row.key === held.key);
+    inbox.needsYou.find((row) => row.key === key) ??
+    inbox.feed.find((row) => row.key === key);
   if (live) return live;
   for (const group of groups) {
     for (const thread of group.threads) {
-      if (`${group.workspace.id}:${thread.id}` !== held.key) continue;
+      if (`${group.workspace.id}:${thread.id}` !== key) continue;
       if (thread.is_archived) return null;
       return {
-        key: held.key,
+        key,
         thread,
         workspaceId: group.workspace.id,
         projectLabel: projectLabel(group.workspace.path),
@@ -195,6 +233,7 @@ function placeRows(
   filter: ActivityInboxFilter,
   held: HeldRow | null,
   heldRow: ActivityInboxRow | null,
+  orderAt: ReadonlyMap<string, string>,
 ) {
   const result = rows.filter(
     (row) => row.key !== held?.key && matchesFilter(row, bucket, filter),
@@ -212,9 +251,9 @@ function placeRows(
     insertAt = Math.min(held.index, result.length);
   } else {
     // Moved up into Needs you while open: keep the feed's date order.
-    insertAt = result.findIndex(
-      (row) => row.thread.updated_at < heldRow.thread.updated_at,
-    );
+    const at = (row: ActivityInboxRow) =>
+      orderAt.get(row.key) ?? row.thread.updated_at;
+    insertAt = result.findIndex((row) => at(row) < at(heldRow));
     if (insertAt === -1) insertAt = result.length;
   }
   result.splice(insertAt, 0, heldRow);
@@ -229,6 +268,59 @@ function liveThreadKeys(groups: ProjectGroup[]) {
     }
   }
   return keys;
+}
+
+/**
+ * Newest-first, but only for news. A row's place is fixed when it first
+ * appears and moves again only when an agent finishes work the user has not
+ * watched: a turn ending, or new activity on an idle task. Streaming output
+ * (which bumps updated_at constantly), title changes, transcript loads, and
+ * anything that happens while the task is open leave it where it is.
+ */
+function useStableFeedOrder(
+  inbox: ActivityInboxModel,
+  selectedKey: string | null,
+): { inbox: ActivityInboxModel; orderAt: ReadonlyMap<string, string> } {
+  const slotsRef = useRef(new Map<string, FeedSlot>());
+
+  return useMemo(() => {
+    const slots = slotsRef.current;
+    for (const row of [...inbox.needsYou, ...inbox.feed]) {
+      const seq = row.thread.attention.last_agent_activity_seq;
+      const running = row.section === "running";
+      const slot = slots.get(row.key);
+      if (!slot) {
+        slots.set(row.key, { at: row.thread.updated_at, seq, running });
+        continue;
+      }
+      if (
+        row.key !== selectedKey &&
+        !running &&
+        (slot.running || seq > slot.seq)
+      ) {
+        slot.at = row.thread.updated_at;
+      }
+      slot.seq = seq;
+      slot.running = running;
+    }
+    const live = new Set(
+      [...inbox.needsYou, ...inbox.feed].map((row) => row.key),
+    );
+    for (const key of slots.keys()) {
+      if (!live.has(key)) slots.delete(key);
+    }
+
+    const orderAt = new Map<string, string>();
+    for (const [key, slot] of slots) orderAt.set(key, slot.at);
+    const at = (row: ActivityInboxRow) =>
+      orderAt.get(row.key) ?? row.thread.updated_at;
+    const feed = [...inbox.feed].sort(
+      (left, right) =>
+        (at(left) < at(right) ? 1 : at(left) > at(right) ? -1 : 0) ||
+        left.key.localeCompare(right.key),
+    );
+    return { inbox: { needsYou: inbox.needsYou, feed }, orderAt };
+  }, [inbox, selectedKey]);
 }
 
 function isTypingTarget(target: EventTarget | null) {
@@ -257,6 +349,8 @@ function StatusMark({ row }: { row: ActivityInboxRow }) {
 type InboxRowProps = {
   id: string;
   row: ActivityInboxRow;
+  /** When the row landed in the inbox, which is what it sorts by. */
+  at: string;
   selected: boolean;
   nowMs: number;
   host?: { name: string; connected: boolean };
@@ -269,6 +363,7 @@ type InboxRowProps = {
 const InboxRow = memo(function InboxRow({
   id,
   row,
+  at,
   selected,
   nowMs,
   host,
@@ -329,26 +424,29 @@ const InboxRow = memo(function InboxRow({
               onArchive && "group-hover:invisible",
             )}
           >
-            {timeLabel(row.thread.updated_at, nowMs)}
+            {timeLabel(at, nowMs)}
           </span>
         </span>
-        <span className="mt-0.5 flex items-baseline gap-2">
-          <span
-            className={cn(
-              "min-w-0 flex-1 truncate text-[length:var(--fd-text-xs)]",
-              row.section === "failed"
-                ? "text-danger"
-                : row.section === "blocked"
-                  ? "text-warning"
-                  : "text-fg-muted",
-            )}
-            title={preview || undefined}
-          >
-            {preview || " "}
-          </span>
-          <span className="max-w-[45%] shrink-0 truncate text-[length:var(--fd-text-2xs)] text-fg-muted">
+        <span
+          className="mt-0.5 block truncate text-[length:var(--fd-text-xs)] text-fg-muted"
+          title={preview || undefined}
+        >
+          <span className="text-fg-secondary">
             {host ? `${row.projectLabel} · ${host.name}` : row.projectLabel}
           </span>
+          {preview ? (
+            <>
+              <span aria-hidden="true"> · </span>
+              <span
+                className={cn(
+                  row.section === "failed" && "text-danger",
+                  row.section === "blocked" && "text-warning",
+                )}
+              >
+                {preview}
+              </span>
+            </>
+          ) : null}
         </span>
       </span>
       {onArchive ? (
@@ -416,6 +514,9 @@ export const ActivityInbox = memo(function ActivityInbox({
   onOpenContextMenu,
   onClose,
   onPopOut,
+  onNewChat,
+  newChatLabel = "New chat",
+  newChatShortcut,
 }: ActivityInboxProps) {
   const [filter, setFilter] = useState<ActivityInboxFilter>("all");
   const [feedLimit, setFeedLimit] = useState(FEED_PAGE);
@@ -423,7 +524,7 @@ export const ActivityInbox = memo(function ActivityInbox({
   const idPrefix = useId();
   // nowTick advances once a minute; the clock only needs that resolution.
   const nowMs = useMemo(() => Date.now(), [nowTick]);
-  const inbox = useMemo(
+  const collected = useMemo(
     () => collectActivityInbox(groups, interactiveRequests, { nowMs }),
     [groups, interactiveRequests, nowMs],
   );
@@ -432,6 +533,7 @@ export const ActivityInbox = memo(function ActivityInbox({
     selectedWorkspaceId && selectedThreadId
       ? `${selectedWorkspaceId}:${selectedThreadId}`
       : null;
+  const { inbox, orderAt } = useStableFeedOrder(collected, selectedKey);
 
   // The open row stays where it was when you opened it. Reading a failed
   // task or answering a question would otherwise move it out of Needs you,
@@ -442,15 +544,72 @@ export const ActivityInbox = memo(function ActivityInbox({
     if (nextHeld?.key !== held?.key) setHeld(nextHeld);
   }
 
-  const { needsYou, feed, hiddenCount } = useMemo(() => {
-    const heldRow = held ? currentHeldRow(held, inbox, groups) : null;
-    const filteredFeed = placeRows(inbox.feed, "feed", filter, held, heldRow);
+  const live = useMemo(() => {
+    const heldRow = held ? rowForKey(held.key, inbox, groups) : null;
+    const filteredFeed = placeRows(
+      inbox.feed,
+      "feed",
+      filter,
+      held,
+      heldRow,
+      orderAt,
+    );
     return {
-      needsYou: placeRows(inbox.needsYou, "needs", filter, held, heldRow),
+      needsYou: placeRows(
+        inbox.needsYou,
+        "needs",
+        filter,
+        held,
+        heldRow,
+        orderAt,
+      ),
       feed: filteredFeed.slice(0, feedLimit),
       hiddenCount: Math.max(0, filteredFeed.length - feedLimit),
     };
-  }, [feedLimit, filter, groups, held, inbox]);
+  }, [feedLimit, filter, groups, held, inbox, orderAt]);
+
+  // While the pointer is over the list, the rows on screen stay put: a task
+  // read under Unread or answered in Needs you keeps its row, and new work
+  // waits. Leaving the list lets it all settle. Rows still update in place,
+  // and archived ones still go.
+  const [hovering, setHovering] = useState(false);
+  const [frozen, setFrozen] = useState<FrozenLayout | null>(null);
+  const frozenStale =
+    !frozen ||
+    frozen.filter !== filter ||
+    frozen.feedLimit !== feedLimit ||
+    // Selection from elsewhere (header archive, palette) must stay visible.
+    (selectedKey !== null &&
+      !frozen.needsYou.includes(selectedKey) &&
+      !frozen.feed.includes(selectedKey) &&
+      [...live.needsYou, ...live.feed].some((row) => row.key === selectedKey));
+  useEffect(() => {
+    if (!hovering || !frozenStale) return;
+    setFrozen({
+      filter,
+      feedLimit,
+      needsYou: live.needsYou.map((row) => row.key),
+      feed: live.feed.map((row) => row.key),
+      orderAt,
+    });
+  }, [feedLimit, filter, frozenStale, hovering, live, orderAt]);
+
+  const holding = hovering && !frozenStale && frozen !== null;
+  const { needsYou, feed, hiddenCount, shownAt } = useMemo(() => {
+    if (!holding || !frozen) return { ...live, shownAt: orderAt };
+    const rows = (keys: string[]) =>
+      keys.flatMap((key) => rowForKey(key, inbox, groups) ?? []);
+    return {
+      needsYou: rows(frozen.needsYou),
+      feed: rows(frozen.feed),
+      hiddenCount: live.hiddenCount,
+      shownAt: frozen.orderAt,
+    };
+  }, [frozen, groups, holding, inbox, live, orderAt]);
+  const rowAt = useCallback(
+    (row: ActivityInboxRow) => shownAt.get(row.key) ?? row.thread.updated_at,
+    [shownAt],
+  );
 
   const orderedRows = useMemo(() => [...needsYou, ...feed], [needsYou, feed]);
   const unreadCount = useMemo(
@@ -569,15 +728,27 @@ export const ActivityInbox = memo(function ActivityInbox({
   };
 
   const feedGroups = useMemo(() => {
-    const result: { label: string; rows: ActivityInboxRow[] }[] = [];
+    const result: { key: string; label: string; rows: ActivityInboxRow[] }[] =
+      [];
+    const seen = new Map<string, number>();
     for (const row of feed) {
-      const label = dayLabel(row.thread.updated_at, nowMs);
+      const label = dayLabel(rowAt(row), nowMs);
       const last = result[result.length - 1];
-      if (last?.label === label) last.rows.push(row);
-      else result.push({ label, rows: [row] });
+      if (last?.label === label) {
+        last.rows.push(row);
+        continue;
+      }
+      // A held row can sit out of date order, so a label may come back.
+      const repeat = seen.get(label) ?? 0;
+      seen.set(label, repeat + 1);
+      result.push({
+        key: repeat ? `${label}:${repeat}` : label,
+        label,
+        rows: [row],
+      });
     }
     return result;
-  }, [feed, nowMs]);
+  }, [feed, nowMs, rowAt]);
 
   const optionId = (row: ActivityInboxRow) => `${idPrefix}-${row.key}`;
   const renderRow = (row: ActivityInboxRow) => (
@@ -585,6 +756,7 @@ export const ActivityInbox = memo(function ActivityInbox({
       key={row.key}
       id={optionId(row)}
       row={row}
+      at={rowAt(row)}
       selected={row.key === selectedKey}
       nowMs={nowMs}
       host={workspaceHosts[row.workspaceId]}
@@ -599,7 +771,7 @@ export const ActivityInbox = memo(function ActivityInbox({
 
   return (
     <section aria-label="Activity" className="-mx-3 flex min-h-0 flex-col">
-      <div className="flex items-center gap-1 px-2.5 pb-2">
+      <div className="flex items-center gap-0.5 pb-1 pl-1.5 pr-2">
         <Tooltip label="Back to projects" shortcut={["esc"]}>
           <button
             type="button"
@@ -610,7 +782,7 @@ export const ActivityInbox = memo(function ActivityInbox({
             <ArrowLeft aria-hidden="true" className="h-4 w-4" />
           </button>
         </Tooltip>
-        <h2 className="min-w-0 flex-1 truncate text-[length:var(--fd-text-sm)] font-semibold text-fg-primary">
+        <h2 className="min-w-0 flex-1 truncate pl-0.5 text-[length:var(--fd-text-sm)] font-semibold text-fg-primary">
           Activity
         </h2>
         {onPopOut ? (
@@ -625,11 +797,23 @@ export const ActivityInbox = memo(function ActivityInbox({
             </button>
           </Tooltip>
         ) : null}
+        {onNewChat ? (
+          <Tooltip label={newChatLabel} shortcut={newChatShortcut}>
+            <button
+              type="button"
+              onClick={onNewChat}
+              aria-label={newChatLabel}
+              className="fd-focus flex h-7 w-7 shrink-0 items-center justify-center rounded-[var(--fd-radius-md)] text-fg-muted transition-colors hover:bg-surface-3 hover:text-fg-primary"
+            >
+              <SquarePen aria-hidden="true" className="h-4 w-4" />
+            </button>
+          </Tooltip>
+        ) : null}
       </div>
       <div
         role="radiogroup"
         aria-label="Filter activity"
-        className="mx-3 mb-1 flex gap-0.5 rounded-[var(--fd-radius-md)] bg-surface-2 p-0.5"
+        className="flex items-center gap-1 px-3 pb-2"
       >
         {FILTERS.map((option) => {
           const count =
@@ -650,15 +834,22 @@ export const ActivityInbox = memo(function ActivityInbox({
                 setFeedLimit(FEED_PAGE);
               }}
               className={cn(
-                "fd-focus flex flex-1 items-center justify-center gap-1 rounded-[var(--fd-radius-sm)] px-2 py-1 text-[length:var(--fd-text-xs)] transition-colors",
+                "fd-focus flex h-6 items-center gap-1 rounded-full px-2.5 text-[length:var(--fd-text-xs)] transition-colors",
                 active
-                  ? "bg-surface-1 font-medium text-fg-primary shadow-[var(--fd-shadow-sm)]"
-                  : "text-fg-muted hover:text-fg-secondary",
+                  ? "bg-surface-3 font-medium text-fg-primary"
+                  : "text-fg-muted hover:bg-surface-2 hover:text-fg-secondary",
               )}
             >
               {option.label}
               {count ? (
-                <span className="tabular-nums text-fg-muted">{count}</span>
+                <span
+                  className={cn(
+                    "tabular-nums",
+                    active ? "text-fg-secondary" : "text-fg-muted",
+                  )}
+                >
+                  {count}
+                </span>
               ) : null}
             </button>
           );
@@ -676,6 +867,11 @@ export const ActivityInbox = memo(function ActivityInbox({
         }
         data-activity-inbox=""
         onKeyDown={handleKeyDown}
+        onPointerEnter={() => setHovering(true)}
+        onPointerLeave={() => {
+          setHovering(false);
+          setFrozen(null);
+        }}
         className="fd-focus-inset"
       >
         {isEmpty ? (
@@ -694,7 +890,7 @@ export const ActivityInbox = memo(function ActivityInbox({
           </div>
         ) : null}
         {feedGroups.map((group) => (
-          <div key={group.label} role="group" aria-label={group.label}>
+          <div key={group.key} role="group" aria-label={group.label}>
             <GroupHeading label={group.label} />
             {group.rows.map(renderRow)}
           </div>
