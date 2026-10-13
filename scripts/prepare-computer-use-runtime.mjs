@@ -3,8 +3,9 @@ import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 import { execFileSync } from 'node:child_process'
+import { preparePatchedBinary, UPSTREAM_VERSION } from './cua-driver/build-runtime.mjs'
 
-const CUA_DRIVER_VERSION = '0.33.4'
+const CUA_DRIVER_VERSION = UPSTREAM_VERSION
 const RELEASE_TAG = `cua-driver-rs-v${CUA_DRIVER_VERSION}`
 const RELEASE_BASE = `https://github.com/trycua/cua/releases/download/${RELEASE_TAG}`
 const SKILL_FILES = [
@@ -13,10 +14,6 @@ const SKILL_FILES = [
   'RECORDING.md', 'EMBEDDING.md', 'README.md',
 ]
 const ASSET_SHA256 = {
-  [`cua-driver-rs-${CUA_DRIVER_VERSION}-darwin-arm64.tar.gz`]:
-    '5c3da8a8e6190f0606207242eddf15f42e8d02c26916f0670cfc66d50f1ca1b4',
-  [`cua-driver-rs-${CUA_DRIVER_VERSION}-darwin-x86_64.tar.gz`]:
-    '2d3a218b014838c4b00dba87d011f26aeebcf5d405f7eeb34869d63121ee69f7',
   [`cua-driver-rs-v${CUA_DRIVER_VERSION}-skills.tar.gz`]:
     '5f33bb04b06b5abf4f95266eeb0ed5bbdd020155eb40f737081e6ac5f31b8246',
 }
@@ -38,16 +35,6 @@ function hostTarget() {
   }
 }
 
-function supportedAsset(target) {
-  if (target === 'aarch64-apple-darwin') {
-    return `cua-driver-rs-${CUA_DRIVER_VERSION}-darwin-arm64.tar.gz`
-  }
-  if (target === 'x86_64-apple-darwin') {
-    return `cua-driver-rs-${CUA_DRIVER_VERSION}-darwin-x86_64.tar.gz`
-  }
-  return null
-}
-
 async function downloadVerified(asset) {
   const expected = ASSET_SHA256[asset]
   if (!expected) throw new Error(`No pinned checksum for ${asset}`)
@@ -63,20 +50,20 @@ async function downloadVerified(asset) {
   return archive
 }
 
-function extractTarGz(archive, destination) {
+function extractTarGz(archive) {
   const temporaryDirectory = fs.mkdtempSync(path.join(os.tmpdir(), 'falcondeck-cua-'))
   const archivePath = path.join(temporaryDirectory, 'asset.tar.gz')
   fs.writeFileSync(archivePath, archive)
   try {
     execFileSync('tar', ['-xzf', archivePath, '-C', temporaryDirectory])
-    return { temporaryDirectory, extractedRoot: findExtractedRoot(temporaryDirectory, destination) }
+    return { temporaryDirectory, extractedRoot: findExtractedRoot(temporaryDirectory) }
   } catch (error) {
     fs.rmSync(temporaryDirectory, { recursive: true, force: true })
     throw error
   }
 }
 
-function findExtractedRoot(temporaryDirectory, kind) {
+function findExtractedRoot(temporaryDirectory) {
   const stack = [temporaryDirectory]
   while (stack.length > 0) {
     const current = stack.pop()
@@ -84,10 +71,7 @@ function findExtractedRoot(temporaryDirectory, kind) {
     for (const entry of entries) {
       const full = path.join(current, entry.name)
       if (entry.name === 'asset.tar.gz') continue
-      if (kind === 'binary' && entry.isFile() && entry.name === 'cua-driver') {
-        return full
-      }
-      if (kind === 'skills' && entry.isFile() && entry.name === 'SKILL.md') {
+      if (entry.isFile() && entry.name === 'SKILL.md') {
         return current
       }
       if (entry.isDirectory()) stack.push(full)
@@ -97,8 +81,7 @@ function findExtractedRoot(temporaryDirectory, kind) {
 }
 
 async function prepareBinary(target) {
-  const asset = supportedAsset(target)
-  if (!asset) {
+  if (!['aarch64-apple-darwin', 'x86_64-apple-darwin'].includes(target)) {
     console.log(`Skipping bundled cua-driver for unsupported target ${target}`)
     return
   }
@@ -111,37 +94,7 @@ async function prepareBinary(target) {
     'binaries',
     `cua-driver-${target}`,
   )
-  fs.mkdirSync(path.dirname(destination), { recursive: true })
-  if (!forceDownload && binaryVersion(destination) === CUA_DRIVER_VERSION) {
-    console.log(`Using existing bundled cua-driver ${CUA_DRIVER_VERSION} for ${target}`)
-    return
-  }
-
-  const archive = await downloadVerified(asset)
-  const extracted = extractTarGz(archive, 'binary')
-  try {
-    if (!extracted.extractedRoot) {
-      throw new Error(`Archive ${asset} did not contain a cua-driver binary`)
-    }
-    fs.copyFileSync(extracted.extractedRoot, destination)
-    fs.chmodSync(destination, 0o755)
-  } finally {
-    fs.rmSync(extracted.temporaryDirectory, { recursive: true, force: true })
-  }
-  console.log(`Prepared bundled cua-driver ${CUA_DRIVER_VERSION} for ${target}`)
-}
-
-function binaryVersion(binary) {
-  if (!fs.existsSync(binary)) return null
-  try {
-    return execFileSync(binary, ['--version'], {
-      encoding: 'utf8',
-      stdio: ['ignore', 'pipe', 'ignore'],
-      timeout: 5000,
-    }).trim().match(/^cua-driver (\S+)$/)?.[1] ?? null
-  } catch {
-    return null
-  }
+  await preparePatchedBinary({ repoRoot, target, destination, force: forceDownload })
 }
 
 async function prepareSkills() {
@@ -164,7 +117,7 @@ async function prepareSkills() {
   }
 
   const archive = await downloadVerified(`cua-driver-rs-v${CUA_DRIVER_VERSION}-skills.tar.gz`)
-  const extracted = extractTarGz(archive, 'skills')
+  const extracted = extractTarGz(archive)
   try {
     if (!extracted.extractedRoot) {
       throw new Error('Skills archive did not contain a cua-driver directory')

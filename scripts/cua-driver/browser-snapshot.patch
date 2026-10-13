@@ -1,0 +1,310 @@
+--- a/crates/cua-driver-core/src/browser/semantic.rs
++++ b/crates/cua-driver-core/src/browser/semantic.rs
+@@ -996,15 +996,34 @@
+     }
+ }
+ 
++// AX node ids are local to a CDP frame/target. Joining multiple frame trees
++// must not turn matching ids into links between unrelated documents.
++type AxKey<'a> = (Option<&'a str>, Option<&'a str>, Option<&'a str>, &'a str);
++
++fn ax_key<'a>(frame: &'a FrameRef, ax_id: &'a str) -> AxKey<'a> {
++    (
++        frame.oopif_target_id.as_deref(),
++        frame
++            .identity
++            .as_ref()
++            .map(|identity| identity.frame_id.as_str()),
++        frame
++            .identity
++            .as_ref()
++            .map(|identity| identity.loader_id.as_str()),
++        ax_id,
++    )
++}
++
+ fn scoped_indices(
+     nodes: &[SemanticNode],
+     query: Option<&str>,
+     scope_backend_node_id: Option<i64>,
+ ) -> Vec<usize> {
+-    let by_ax_id: HashMap<&str, usize> = nodes
++    let by_ax_id: HashMap<AxKey<'_>, usize> = nodes
+         .iter()
+         .enumerate()
+-        .map(|(idx, node)| (node.ax_id.as_str(), idx))
++        .map(|(idx, node)| (ax_key(&node.frame, &node.ax_id), idx))
+         .collect();
+     let mut allowed = HashSet::new();
+     if let Some(scope_backend) = scope_backend_node_id {
+@@ -1014,18 +1033,20 @@
+         {
+             let mut stack = vec![scope.ax_id.as_str()];
+             while let Some(ax_id) = stack.pop() {
+-                if !allowed.insert(ax_id.to_owned()) {
++                let key = ax_key(&scope.frame, ax_id);
++                if !allowed.insert(key) {
+                     continue;
+                 }
+-                if let Some(idx) = by_ax_id.get(ax_id) {
++                if let Some(idx) = by_ax_id.get(&key) {
+                     stack.extend(nodes[*idx].child_ax_ids.iter().map(String::as_str));
+                 }
+             }
+         }
+     }
+     let query = query.map(|value| value.trim().to_ascii_lowercase());
+-    let in_scope =
+-        |node: &SemanticNode| scope_backend_node_id.is_none() || allowed.contains(&node.ax_id);
++    let in_scope = |node: &SemanticNode| {
++        scope_backend_node_id.is_none() || allowed.contains(&ax_key(&node.frame, &node.ax_id))
++    };
+     let exact_match_exists = query.as_ref().is_some_and(|query| {
+         !query.is_empty()
+             && nodes
+@@ -1087,16 +1108,19 @@
+ }
+ 
+ fn with_ancestors(nodes: &[SemanticNode], selected: &[usize]) -> HashSet<usize> {
+-    let by_ax_id: HashMap<&str, usize> = nodes
++    let by_ax_id: HashMap<AxKey<'_>, usize> = nodes
+         .iter()
+         .enumerate()
+-        .map(|(idx, node)| (node.ax_id.as_str(), idx))
++        .map(|(idx, node)| (ax_key(&node.frame, &node.ax_id), idx))
+         .collect();
+     let mut keep: HashSet<usize> = selected.iter().copied().collect();
+     for idx in selected {
+         let mut parent = nodes[*idx].parent_ax_id.as_deref();
+         while let Some(parent_id) = parent {
+-            let Some(parent_idx) = by_ax_id.get(parent_id).copied() else {
++            let Some(parent_idx) = by_ax_id
++                .get(&ax_key(&nodes[*idx].frame, parent_id))
++                .copied()
++            else {
+                 break;
+             };
+             if !keep.insert(parent_idx) {
+@@ -1109,10 +1133,10 @@
+ }
+ 
+ fn render_outline(nodes: &[SemanticNode], selected: &HashSet<usize>) -> String {
+-    let by_ax_id: HashMap<&str, usize> = nodes
++    let by_ax_id: HashMap<AxKey<'_>, usize> = nodes
+         .iter()
+         .enumerate()
+-        .map(|(idx, node)| (node.ax_id.as_str(), idx))
++        .map(|(idx, node)| (ax_key(&node.frame, &node.ax_id), idx))
+         .collect();
+     let mut ordered: Vec<usize> = selected.iter().copied().collect();
+     ordered.sort_by_key(|idx| nodes[*idx].document_order);
+@@ -1123,11 +1147,15 @@
+             continue;
+         }
+         let mut depth = 0;
++        let mut visited = HashSet::from([idx]);
+         let mut parent = node.parent_ax_id.as_deref();
+         while let Some(parent_id) = parent {
+-            let Some(parent_idx) = by_ax_id.get(parent_id).copied() else {
++            let Some(parent_idx) = by_ax_id.get(&ax_key(&node.frame, parent_id)).copied() else {
+                 break;
+             };
++            if !visited.insert(parent_idx) {
++                break;
++            }
+             if selected.contains(&parent_idx)
+                 && !matches!(nodes[parent_idx].role.as_str(), "rootwebarea" | "webarea")
+             {
+@@ -1185,6 +1213,103 @@
+ 
+     fn frame() -> FrameRef {
+         FrameRef::main_unproven()
++    }
++
++    fn outline_node(id: &str, parent: Option<&str>, order: usize) -> SemanticNode {
++        SemanticNode {
++            ax_id: id.into(),
++            parent_ax_id: parent.map(str::to_owned),
++            child_ax_ids: vec![],
++            backend_node_id: Some(order as i64 + 1),
++            role: "button".into(),
++            name: Some(id.into()),
++            value: None,
++            states: BTreeMap::new(),
++            frame: frame(),
++            visibility: BrowserVisibility::InViewport,
++            actions: vec![BrowserActionKind::Click],
++            document_order: order,
++        }
++    }
++
++    #[test]
++    fn falcondeck_outline_self_cycle_terminates() {
++        let nodes = vec![outline_node("a", Some("a"), 0)];
++        assert_eq!(
++            render_outline(&nodes, &HashSet::from([0])),
++            "- button \"a\""
++        );
++    }
++
++    #[test]
++    fn falcondeck_outline_parent_cycle_terminates() {
++        let nodes = vec![
++            outline_node("a", Some("b"), 0),
++            outline_node("b", Some("a"), 1),
++        ];
++        let selected = with_ancestors(&nodes, &[0]);
++        assert_eq!(selected.len(), 2);
++        assert_eq!(
++            render_outline(&nodes, &selected),
++            "  - button \"a\"\n  - button \"b\""
++        );
++    }
++
++    #[test]
++    fn falcondeck_outline_preserves_acyclic_ancestors_and_missing_parents() {
++        let nodes = vec![
++            outline_node("a", None, 0),
++            outline_node("b", Some("a"), 1),
++            outline_node("c", Some("b"), 2),
++            outline_node("d", Some("missing"), 3),
++        ];
++        let selected = with_ancestors(&nodes, &[2, 3]);
++        assert_eq!(
++            render_outline(&nodes, &selected),
++            "- button \"a\"\n  - button \"b\"\n    - button \"c\"\n- button \"d\""
++        );
++    }
++
++    #[test]
++    fn falcondeck_outline_keeps_reused_ax_ids_in_their_own_frames() {
++        use super::super::store::{FrameIdentity, FrameKind};
++        let mut nodes = vec![
++            outline_node("a", None, 0),
++            outline_node("b", Some("a"), 1),
++            outline_node("a", Some("b"), 2),
++            outline_node("b", None, 3),
++        ];
++        nodes[0].child_ax_ids = vec!["b".into()];
++        for node in &mut nodes[2..] {
++            node.frame.kind = FrameKind::Oopif;
++            node.frame.oopif_target_id = Some("child-target".into());
++            node.frame.identity = Some(FrameIdentity {
++                frame_id: "child".into(),
++                loader_id: "load".into(),
++            });
++        }
++        let selected = with_ancestors(&nodes, &[1]);
++        assert_eq!(selected, HashSet::from([0, 1]));
++        assert_eq!(
++            render_outline(&nodes, &HashSet::from([0, 1, 2, 3])),
++            "- button \"a\"\n  - button \"b\"\n  - button \"a\"\n- button \"b\""
++        );
++        assert_eq!(scoped_indices(&nodes, None, Some(1)), vec![0, 1]);
++    }
++
++    #[test]
++    fn falcondeck_page_keeps_budget_and_action_refs() {
++        let document = SemanticDocument {
++            nodes: vec![outline_node("a", None, 0), outline_node("b", None, 1)],
++            ..Default::default()
++        };
++        let first = document.page(0, 1, None, None);
++        assert_eq!(first.next_offset, Some(1));
++        assert_eq!(first.selected[0].to_ref_entry().unwrap().backend_node_id, 1);
++        let second = document.page(first.next_offset.unwrap(), 1, None, None);
++        assert_eq!(second.next_offset, None);
++        assert_eq!(second.selected[0].actions, vec![BrowserActionKind::Click]);
++        assert_eq!(second.outline, "- button \"b\"");
+     }
+ 
+     #[test]
+--- a/crates/cua-driver/src/serve.rs
++++ b/crates/cua-driver/src/serve.rs
+@@ -23,6 +23,9 @@
+ 
+ use std::collections::{HashMap, HashSet};
+ use std::sync::{Mutex, OnceLock};
++
++#[path = "falcondeck_snapshot_watchdog.rs"]
++mod snapshot_watchdog;
+ 
+ pub use cua_driver_core::daemon::{
+     is_daemon_listening, send_request, socket_path_for_namespace, DaemonRequest, DaemonResponse,
+@@ -427,6 +430,27 @@
+     crate::telemetry::capture_tool_completed(timer.finish(&response), transport);
+ }
+ 
++async fn call_trusted_connection_tool(
++    connection: &TrustedConnectionSession,
++    name: String,
++    arguments: serde_json::Value,
++) -> DaemonResponse {
++    let _deadline = match snapshot_watchdog::SnapshotDeadline::for_tool(&name) {
++        Ok(deadline) => deadline,
++        Err(error) => return DaemonResponse::err(error, 1),
++    };
++    match connection.session.call_tool(name, arguments.to_string()).await {
++        Ok(result) => match serde_json::from_str(&result.raw_json) {
++            Ok(value) => DaemonResponse::ok(value),
++            Err(error) => DaemonResponse::err(
++                format!("trusted session returned invalid result: {error}"),
++                70,
++            ),
++        },
++        Err(error) => DaemonResponse::err(error.to_string(), 77),
++    }
++}
++
+ async fn invoke_daemon_tool(
+     sdk: &std::sync::Arc<crate::sdk_adapter::SdkAdapter>,
+     req: DaemonRequest,
+@@ -541,6 +565,12 @@
+         sdk.begin_tool_call(&tool_name, &args, transport, client_kind)
+     });
+ 
++    // Tokio cancellation cannot preempt a synchronous traversal that never
++    // yields. Bound each browser snapshot on an independent native thread.
++    let _deadline = match snapshot_watchdog::SnapshotDeadline::for_tool(&tool_name) {
++        Ok(deadline) => deadline,
++        Err(error) => return DaemonResponse::err(error, 1),
++    };
+     let result_value = match sdk.invoke_raw(&tool_name, args).await {
+         Ok(result) => result,
+         Err(error) => {
+@@ -1263,16 +1293,7 @@
+                                         let arguments = req.args.unwrap_or_else(|| {
+                                             serde_json::Value::Object(serde_json::Map::new())
+                                         });
+-                                        match connection.session.call_tool(name, arguments.to_string()).await {
+-                                            Ok(result) => match serde_json::from_str(&result.raw_json) {
+-                                                Ok(value) => DaemonResponse::ok(value),
+-                                                Err(error) => DaemonResponse::err(
+-                                                    format!("trusted session returned invalid result: {error}"),
+-                                                    70,
+-                                                ),
+-                                            },
+-                                            Err(error) => DaemonResponse::err(error.to_string(), 77),
+-                                        }
++                                        call_trusted_connection_tool(connection, name, arguments).await
+                                     }
+                                     None => DaemonResponse::err(
+                                         "this accepted connection has no trusted session binding",
+@@ -2053,16 +2074,7 @@
+                                         let arguments = req.args.unwrap_or_else(|| {
+                                             serde_json::Value::Object(serde_json::Map::new())
+                                         });
+-                                        match connection.session.call_tool(name, arguments.to_string()).await {
+-                                            Ok(result) => match serde_json::from_str(&result.raw_json) {
+-                                                Ok(value) => DaemonResponse::ok(value),
+-                                                Err(error) => DaemonResponse::err(
+-                                                    format!("trusted session returned invalid result: {error}"),
+-                                                    70,
+-                                                ),
+-                                            },
+-                                            Err(error) => DaemonResponse::err(error.to_string(), 77),
+-                                        }
++                                        call_trusted_connection_tool(connection, name, arguments).await
+                                     }
+                                     None => DaemonResponse::err(
+                                         "this accepted connection has no trusted session binding",

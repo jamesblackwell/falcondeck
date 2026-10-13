@@ -8,8 +8,9 @@ that Mac in the background. No second app, no CLI install, no PATH, no
 `cua-driver skills install`.
 
 The current bundle pins **cua-driver-rs v0.33.4** (released 2026-10-05, tag
-`cua-driver-rs-v0.33.4` in `trycua/cua`), with matching release skills and
-SHA256-pinned Mac assets. Plain SemVer releases are stable upstream; GitHub's
+`cua-driver-rs-v0.33.4` in `trycua/cua`), with matching release skills. The Mac
+binary is built from SHA256-pinned upstream source with the local browser
+snapshot patch in `scripts/cua-driver/`. Plain SemVer releases are stable upstream; GitHub's
 pre-release label keeps the monorepo-wide Latest pointer product-independent.
 The initial verification below used v0.23.2. At that time, the local
 `~/.local/bin/cua-driver` on the dev Mac is 0.2.0 and the skill copies in
@@ -214,18 +215,22 @@ FalconDeck.app  (com.falcondeck.desktop, Developer ID signed)
 
 **Build pipeline**
 
-- `scripts/prepare-computer-use-runtime.mjs`, modelled on
-  `prepare-extension-runtime.mjs`: `CUA_DRIVER_VERSION = "0.33.4"`, pinned
-  sha256 per asset from `checksums.txt`; download the per-arch darwin
-  tarball for `--target`, extract only `cua-driver`, write
-  `apps/desktop/src-tauri/binaries/cua-driver-<triple>`, chmod 755. A
+- `scripts/prepare-computer-use-runtime.mjs` pins upstream `0.33.4`, verifies
+  the source archive's SHA256, applies `scripts/cua-driver/browser-snapshot.patch`
+  and adds `snapshot-watchdog.rs`, then builds the Mac binary with
+  `cargo build --locked --release` for `--target`. It uses FalconDeck's installed
+  Rust toolchain and targets, defaults to two Cargo jobs, and caches compilation
+  under `target/cua-driver`. It atomically replaces
+  `apps/desktop/src-tauri/binaries/cua-driver-<triple>`. A
   `--skills` mode downloads `cua-driver-rs-v<ver>-skills.tar.gz`, verifies,
   and refreshes the checked-in
   `crates/falcondeck-daemon/src/agent_context/cua-driver/` (`SKILL.md`,
   `WORKFLOW.md`, `RUNTIME.md`, `VISUAL.md`, platform guides, `BROWSER.md`,
   `RECORDING.md`, `EMBEDDING.md`, `README.md`, plus a `VERSION` file).
-  Existing binaries are reused only when `--version` matches the pin.
-  One script, one tag, no drift.
+  Existing binaries are reused only when their SHA256 matches a build marker
+  covering the pinned source, target, traversal patch, and watchdog source.
+  An unpatched binary with the same upstream version cannot pass this check.
+  `--download` forces source download and rebuild, including in release CI.
 - `tauri.conf.json`: `externalBin: ["binaries/deno", "binaries/cua-driver"]`;
   `.gitignore`: `binaries/cua-driver-*`; `beforeBuildCommand` and
   `.github/workflows/release-desktop.yml` run the new prepare step with
@@ -235,6 +240,29 @@ FalconDeck.app  (com.falcondeck.desktop, Developer ID signed)
   still passes with the re-signed nested binary (deno already proves the
   path).
 - DMG grows by roughly 30 MB per arch.
+
+**Browser snapshot CPU recovery**
+
+An installed-helper profile on 2026-10-13 found two `get_browser_state`
+requests consuming two CPU cores inside semantic outline rendering. Tests
+reproduced infinite loops for self-parent and two-node parent cycles, and
+cross-frame ancestor contamination when CDP AX ids were reused. The local
+patch keys ancestry and scoped reads by frame/target/document identity and
+stops outline traversal at an already visited ancestor. Ordinary outlines,
+pagination, and action references retain their existing contracts.
+
+Every browser state request has a 120-second deadline, including trusted
+session calls. One native watchdog thread blocks between requests; it can
+stop synchronous non-yielding work that a Tokio timeout cannot preempt.
+Completed or cancelled requests remove only their own deadline. Browser
+preparation/consent, recording, and other automation actions are unaffected.
+Expiry exits only the helper with status 75. FalconDeck reaps the child,
+removes its stale endpoint and cached health, and exposes a recovery message.
+The next turn starts a fresh helper under the current user preferences and
+grants. Existing browser/session references must be rebound after recovery;
+other requests sharing the stalled helper will disconnect. There is no
+automatic restart loop. Host-owned CLI health/capture probes are also killed
+and reaped when their timeout expires.
 
 **Tauri (`apps/desktop/src-tauri`)**
 

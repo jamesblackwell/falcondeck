@@ -32,6 +32,9 @@ pub const HOST_BUNDLE_ID: &str = "com.falcondeck.desktop";
 pub const PINNED_DRIVER_VERSION: &str = "0.33.4";
 const READY_TIMEOUT: Duration = Duration::from_secs(10);
 const STOP_TIMEOUT: Duration = Duration::from_secs(3);
+// The bundled snapshot watchdog uses EX_TEMPFAIL so the next turn can retry
+// with a fresh helper, rather than retaining a spinning browser traversal.
+const STALLED_SNAPSHOT_EXIT: i32 = 75;
 const HEALTH_INCLUDE: &[&str] = &[
     "bundle_identity",
     "tcc_accessibility",
@@ -538,6 +541,7 @@ async fn call_tool(
             .env("CUA_DRIVER_EMBEDDED", "1")
             .env("CUA_DRIVER_RS_UPDATE_CHECK", "false")
             .env("CUA_DRIVER_RS_TELEMETRY_ENABLED", "false")
+            .kill_on_drop(true)
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .output(),
@@ -817,14 +821,29 @@ async fn thumbnail_data_url(capture_path: &Path) -> Option<String> {
 }
 
 fn reap_dead_child(inner: &mut HostInner) {
-    let dead = match inner.child.as_mut() {
-        Some(child) => !matches!(child.try_wait(), Ok(None)),
-        None => false,
+    let exited = match inner.child.as_mut() {
+        Some(child) => match child.try_wait() {
+            Ok(Some(status)) => Some(Ok(status)),
+            Ok(None) => None,
+            Err(error) => Some(Err(error)),
+        },
+        None => None,
     };
-    if dead {
-        inner.child = None;
-        inner.stdin = None;
+    let Some(exited) = exited else {
+        return;
+    };
+    inner.child = None;
+    inner.stdin = None;
+    inner.last_health = None;
+    if let Some(socket) = inner.socket_path.take() {
+        let _ = std::fs::remove_file(socket);
     }
+    inner.last_error = Some(match exited {
+        Ok(status) if status.code() == Some(STALLED_SNAPSHOT_EXIT) =>
+            "A browser snapshot stalled and the computer-use helper stopped. Start a new turn or restart computer use in Settings to retry.".to_string(),
+        Ok(status) => format!("Computer-use helper exited: {status}"),
+        Err(error) => format!("Could not check computer-use helper: {error}"),
+    });
 }
 
 fn socket_is_live(path: &Path) -> bool {
@@ -1053,6 +1072,113 @@ impl AppState {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(target_os = "macos")]
+    #[tokio::test]
+    async fn stalled_snapshot_is_reaped_and_next_use_starts_a_fresh_helper() {
+        use std::os::unix::fs::PermissionsExt;
+        use tokio::io::AsyncWriteExt;
+
+        let temp = tempfile::tempdir().unwrap();
+        let binary = temp.path().join("fake-driver");
+        std::fs::write(
+            &binary,
+            r#"#!/usr/bin/python3
+import sys, socket, os, json
+if sys.argv[1] == 'serve':
+    server = socket.socket(socket.AF_UNIX)
+    server.bind(sys.argv[sys.argv.index('--socket') + 1])
+    server.listen()
+    while True:
+        connection, _ = server.accept()
+        with connection:
+            if connection.recv(5) == b'stall':
+                os._exit(75)
+else:
+    print(json.dumps({'overall': 'ok', 'driver_version': '0.33.4', 'checks': [
+        {'name': 'tcc_accessibility', 'status': 'pass'},
+        {'name': 'tcc_screen_recording', 'status': 'pass'}]}))
+"#,
+        )
+        .unwrap();
+        std::fs::set_permissions(&binary, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let host = ComputerUseHost::new(
+            Some(binary.display().to_string()),
+            &temp.path().join("state.json"),
+        );
+        let prefs = ComputerUsePreferences {
+            enabled: true,
+            existing_profile: true,
+            ..Default::default()
+        };
+        let first = host.ensure_ready(&prefs).await.unwrap().unwrap();
+        assert!(host.snapshot(&prefs, true).await.health.is_some());
+        let mut socket = tokio::net::UnixStream::connect(&first.socket_path)
+            .await
+            .unwrap();
+        socket.write_all(b"stall").await.unwrap();
+        {
+            let mut inner = host.inner.lock().await;
+            let status = timeout(Duration::from_secs(3), inner.child.as_mut().unwrap().wait())
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(status.code(), Some(STALLED_SNAPSHOT_EXIT));
+        }
+        let stopped = host.snapshot(&prefs, true).await;
+        assert!(!stopped.running);
+        assert!(stopped.health.is_none());
+        assert!(
+            stopped
+                .last_error
+                .unwrap()
+                .contains("browser snapshot stalled")
+        );
+        assert!(!first.socket_path.exists());
+        let second = host.ensure_ready(&prefs).await.unwrap().unwrap();
+        assert_ne!(first.socket_path, second.socket_path);
+        let recovered = host.snapshot(&prefs, true).await;
+        assert!(recovered.running);
+        assert!(recovered.last_error.is_none());
+        assert_eq!(recovered.generation, Some(2));
+        assert!(recovered.existing_profile);
+        host.stop().await;
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn timed_out_tool_call_reaps_its_proxy_process() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp = tempfile::tempdir().unwrap();
+        let binary = temp.path().join("sleeping-driver");
+        let pid_file = temp.path().join("pid");
+        let quoted_pid_file = pid_file.to_string_lossy().replace('\'', "'\\''");
+        std::fs::write(
+            &binary,
+            format!("#!/bin/sh\nprintf '%s' \"$$\" > '{quoted_pid_file}'\nexec /bin/sleep 30\n"),
+        )
+        .unwrap();
+        std::fs::set_permissions(&binary, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let result = call_tool(
+            &binary,
+            Path::new("/unused.sock"),
+            "health_report",
+            serde_json::json!({}),
+            Duration::from_secs(2),
+        )
+        .await;
+        assert!(result.unwrap_err().contains("timed out"));
+        let pid: i32 = std::fs::read_to_string(pid_file).unwrap().parse().unwrap();
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(3);
+        while unsafe { libc::kill(pid, 0) } == 0 {
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "timed-out proxy was left alive"
+            );
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    }
 
     #[test]
     fn existing_profile_requires_explicit_launch_consent() {
