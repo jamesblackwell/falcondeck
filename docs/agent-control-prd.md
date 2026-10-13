@@ -3137,8 +3137,7 @@ The feature is complete only when:
 9. credentials are not exposed;
 10. graphical and conversational changes remain synchronised;
 11. the full repository formatting, Rust tests, linting, TypeScript checks and relevant application tests pass;
-12. implementation documentation is committed;
-13. the temporary `docs/chatgpt-write-test.md` file is deleted.
+12. implementation documentation is committed.
 
 ---
 

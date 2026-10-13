@@ -15,7 +15,6 @@ export {
   useSelectedThreadHistory,
   useSelectedThreadDetailError,
   useConversationItems,
-  useApprovals,
   useInteractiveRequests,
   useThinkingDisplay,
   useThrottledSnapshot,

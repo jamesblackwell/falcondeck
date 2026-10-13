@@ -1544,8 +1544,6 @@ export function useInteractiveRequests() {
   );
 }
 
-/** @deprecated Use the accurately named `useInteractiveRequests`. */
-export const useApprovals = useInteractiveRequests;
 /* v8 ignore stop */
 
 /**
