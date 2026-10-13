@@ -3012,11 +3012,29 @@ fn refresh_title_prompt_keeps_the_current_name_and_later_messages() {
             created_at: Utc::now(),
         },
     ];
-    let prompt =
-        super::conversation_helpers::build_refresh_ai_thread_title_prompt(&items, "Auth setup");
+    let prompt = super::conversation_helpers::build_refresh_ai_thread_title_prompt(
+        &items,
+        "Auth setup",
+        falcondeck_core::DEFAULT_TITLE_SUGGESTION_PROMPT,
+    );
     assert!(prompt.contains("Current title: Auth setup"));
     assert!(prompt.contains("moved on from that name"));
     assert!(prompt.contains("billing webhook"));
+    assert!(prompt.contains(falcondeck_core::DEFAULT_TITLE_SUGGESTION_PROMPT));
+    let style = "Use 2–3 words in ALL CAPS.";
+    for prompt in [
+        super::conversation_helpers::build_ai_thread_title_prompt(&items, style),
+        super::conversation_helpers::build_refresh_ai_thread_title_prompt(
+            &items,
+            "Auth setup",
+            style,
+        ),
+    ] {
+        assert!(prompt.contains(style));
+        assert!(prompt.contains("return only the title"));
+        assert!(prompt.contains("billing webhook"));
+        assert!(!prompt.contains("3 to 7 words"));
+    }
 }
 
 #[tokio::test]

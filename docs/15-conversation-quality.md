@@ -7,6 +7,14 @@ the shared protocol or any transcript renderer.
 
 ## Product bar
 
+Settings → Speech → Rename suggestions includes a saved **Title prompt** for
+the style of generated task titles and the rename dialog's **Suggest title**
+action on desktop, web, and mobile. The daemon persists it with global
+preferences. Custom instructions replace the default 3–7 word style; for
+example, `Use 2–3 words in ALL CAPS. Keep titles simple and specific.` Reset
+prompt restores the default. Saving the prompt applies to future generation
+and suggestions; existing titles change through the rename action.
+
 Every supported output must:
 
 1. preserve provider order and stable identity while it streams;

@@ -1,8 +1,8 @@
 import { useEffect, useState } from 'react'
 
 import type { FalconDeckPreferences, UpdatePreferencesPayload } from '@falcondeck/client-core'
-import { DEFAULT_TITLE_SUGGESTION_MODEL } from '@falcondeck/client-core'
-import { Button, Input, SettingsSection } from '@falcondeck/ui'
+import { DEFAULT_TITLE_SUGGESTION_MODEL, DEFAULT_TITLE_SUGGESTION_PROMPT } from '@falcondeck/client-core'
+import { Button, Input, SettingsSection, Textarea } from '@falcondeck/ui'
 
 type TitleSuggestionModelCardProps = {
   preferences: FalconDeckPreferences
@@ -16,6 +16,10 @@ export function TitleSuggestionModelCard({
   const model = preferences.title_suggestion_model ?? DEFAULT_TITLE_SUGGESTION_MODEL
   const [draft, setDraft] = useState(model)
   useEffect(() => setDraft(model), [model])
+  const prompt = preferences.title_suggestion_prompt ?? DEFAULT_TITLE_SUGGESTION_PROMPT
+  const [promptDraft, setPromptDraft] = useState(prompt)
+  useEffect(() => setPromptDraft(prompt), [prompt])
+  const promptCandidate = promptDraft.trim() || DEFAULT_TITLE_SUGGESTION_PROMPT
 
   const candidate = draft.trim()
   const valid = candidate.length > 0 && candidate.length <= 200 && !/\s/.test(candidate)
@@ -69,6 +73,44 @@ export function TitleSuggestionModelCard({
           Enter an OpenRouter model ID without spaces.
         </p>
       ) : null}
+      <label className="block space-y-1.5">
+        <span className="block text-[length:var(--fd-text-sm)] font-medium text-fg-secondary">
+          Title prompt
+        </span>
+        <Textarea
+          aria-label="Title prompt"
+          aria-describedby="title-prompt-description"
+          value={promptDraft}
+          onChange={(event) => setPromptDraft(event.target.value)}
+          maxLength={2000}
+          rows={4}
+          placeholder="Use 2–3 words in ALL CAPS. Keep titles simple and specific."
+        />
+      </label>
+      <p id="title-prompt-description" className="text-[length:var(--fd-text-xs)] text-fg-tertiary">
+        Set the style for new generated titles and Suggest title on any device. For example,
+        “Use 2–3 words in ALL CAPS.” Existing titles change when you rename them.
+      </p>
+      <div className="flex gap-3">
+        <Button
+          type="button"
+          disabled={promptCandidate === prompt}
+          onClick={() => onUpdatePreferences({ title_suggestion_prompt: promptCandidate })}
+        >
+          Save prompt
+        </Button>
+        <Button
+          type="button"
+          variant="ghost"
+          disabled={prompt === DEFAULT_TITLE_SUGGESTION_PROMPT && promptDraft === prompt}
+          onClick={() => {
+            setPromptDraft(DEFAULT_TITLE_SUGGESTION_PROMPT)
+            onUpdatePreferences({ title_suggestion_prompt: DEFAULT_TITLE_SUGGESTION_PROMPT })
+          }}
+        >
+          Reset prompt
+        </Button>
+      </div>
     </SettingsSection>
   )
 }

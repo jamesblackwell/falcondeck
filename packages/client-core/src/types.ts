@@ -418,6 +418,8 @@ export type FalconDeckPreferences = {
   utility_models?: UtilityModelPreferences;
   /** OpenRouter model used by Rename's Suggest title action. */
   title_suggestion_model?: string;
+  /** Style instructions for generated titles and on-demand rename suggestions. */
+  title_suggestion_prompt?: string;
   /** Older daemons omit this; `normalizePreferences` always fills it in. */
   computer_use?: ComputerUsePreferences;
 };
@@ -508,6 +510,7 @@ export type UpdatePreferencesPayload = {
   notifications?: UpdateNotificationPreferences | null;
   utility_models?: UpdateUtilityModelPreferences | null;
   title_suggestion_model?: string;
+  title_suggestion_prompt?: string;
 };
 
 export type ToolArtifactKind =

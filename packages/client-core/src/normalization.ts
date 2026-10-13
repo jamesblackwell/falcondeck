@@ -367,6 +367,8 @@ const DEFAULT_UTILITY_MODEL_PREFERENCES: UtilityModelPreferences = {
 };
 
 export const DEFAULT_TITLE_SUGGESTION_MODEL = "openai/gpt-6-luna";
+export const DEFAULT_TITLE_SUGGESTION_PROMPT =
+  "Use 3 to 7 words.\nPrefer concrete task nouns.\nAvoid generic titles like Debugging or Code Help.";
 
 const DEFAULT_COMPUTER_USE_PREFERENCES: NonNullable<
   FalconDeckPreferences["computer_use"]
@@ -388,6 +390,7 @@ const DEFAULT_PREFERENCES: FalconDeckPreferences = {
   notifications: DEFAULT_NOTIFICATION_PREFERENCES,
   utility_models: DEFAULT_UTILITY_MODEL_PREFERENCES,
   title_suggestion_model: DEFAULT_TITLE_SUGGESTION_MODEL,
+  title_suggestion_prompt: DEFAULT_TITLE_SUGGESTION_PROMPT,
   computer_use: DEFAULT_COMPUTER_USE_PREFERENCES,
 };
 
@@ -2325,6 +2328,7 @@ export function normalizePreferences(value: unknown): FalconDeckPreferences {
     },
     utility_models: normalizeUtilityModelPreferences(raw.utility_models),
     title_suggestion_model: normalizeTitleSuggestionModel(raw.title_suggestion_model),
+    title_suggestion_prompt: normalizeTitleSuggestionPrompt(raw.title_suggestion_prompt),
     computer_use: normalizeComputerUsePreferences(raw.computer_use),
   };
 }
@@ -2334,6 +2338,13 @@ function normalizeTitleSuggestionModel(value: unknown): string {
   return model && model.length <= 200 && !/\s/.test(model)
     ? model
     : DEFAULT_TITLE_SUGGESTION_MODEL;
+}
+
+function normalizeTitleSuggestionPrompt(value: unknown): string {
+  const prompt = typeof value === "string" ? value.trim() : "";
+  return prompt
+    ? Array.from(prompt).slice(0, 2000).join("")
+    : DEFAULT_TITLE_SUGGESTION_PROMPT;
 }
 
 function normalizeComputerUsePreferences(

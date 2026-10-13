@@ -14,9 +14,9 @@ use std::sync::Mutex;
 
 use falcondeck_core::{
     AgentProvider, ConversationAutoExpandPreferencesPatch, DEFAULT_TITLE_SUGGESTION_MODEL,
-    FalconDeckPreferences, ToolDetailsMode, UpdatePreferencesRequest, WorkspaceIconPreference,
-    crypto::verify_pairing_public_key_bundle, normalize_workspace_colors,
-    normalize_workspace_icons,
+    DEFAULT_TITLE_SUGGESTION_PROMPT, FalconDeckPreferences, ToolDetailsMode,
+    UpdatePreferencesRequest, WorkspaceIconPreference, crypto::verify_pairing_public_key_bundle,
+    normalize_workspace_colors, normalize_workspace_icons,
 };
 use serde::Deserialize;
 use serde_json::Value;
@@ -183,6 +183,9 @@ pub(super) fn merge_preferences_from_value(value: Value) -> FalconDeckPreference
     }
     if let Some(model) = value.get("title_suggestion_model").and_then(Value::as_str) {
         preferences.title_suggestion_model = normalize_title_suggestion_model(model);
+    }
+    if let Some(prompt) = value.get("title_suggestion_prompt").and_then(Value::as_str) {
+        preferences.title_suggestion_prompt = normalize_title_suggestion_prompt(prompt);
     }
 
     if let Some(workspace_order) = value.get("workspace_order").and_then(Value::as_array) {
@@ -385,6 +388,9 @@ pub(super) fn apply_preferences_patch(
     if let Some(model) = request.title_suggestion_model {
         preferences.title_suggestion_model = normalize_title_suggestion_model(&model);
     }
+    if let Some(prompt) = request.title_suggestion_prompt {
+        preferences.title_suggestion_prompt = normalize_title_suggestion_prompt(&prompt);
+    }
     if let Some(workspace_order) = request.workspace_order {
         preferences.workspace_order = workspace_order
             .into_iter()
@@ -497,6 +503,15 @@ pub(super) fn apply_preferences_patch(
                         choices
                     });
         }
+    }
+}
+
+fn normalize_title_suggestion_prompt(value: &str) -> String {
+    let prompt = value.trim();
+    if prompt.is_empty() {
+        DEFAULT_TITLE_SUGGESTION_PROMPT.to_string()
+    } else {
+        prompt.chars().take(2000).collect()
     }
 }
 
@@ -1279,6 +1294,51 @@ mod tests {
         assert_eq!(
             preferences.title_suggestion_model,
             DEFAULT_TITLE_SUGGESTION_MODEL
+        );
+    }
+
+    #[tokio::test]
+    async fn title_suggestion_prompt_persists_and_resets_without_changing_the_model() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let path = temp_dir.path().join("falcondeck.json");
+        let mut preferences = merge_preferences_from_value(serde_json::json!({}));
+        assert_eq!(
+            preferences.title_suggestion_prompt,
+            DEFAULT_TITLE_SUGGESTION_PROMPT
+        );
+        apply_preferences_patch(
+            &mut preferences,
+            UpdatePreferencesRequest {
+                title_suggestion_prompt: Some(" Use 2–3 words.\nALL CAPS. ".to_string()),
+                ..UpdatePreferencesRequest::default()
+            },
+        );
+        fs::write(&path, serde_json::to_vec(&preferences).unwrap())
+            .await
+            .unwrap();
+        let mut reloaded = load_preferences(&path).await.unwrap();
+        assert_eq!(
+            reloaded.title_suggestion_prompt,
+            "Use 2–3 words.\nALL CAPS."
+        );
+        assert_eq!(
+            reloaded.title_suggestion_model,
+            DEFAULT_TITLE_SUGGESTION_MODEL
+        );
+        apply_preferences_patch(
+            &mut reloaded,
+            UpdatePreferencesRequest {
+                title_suggestion_prompt: Some(" \n ".to_string()),
+                ..UpdatePreferencesRequest::default()
+            },
+        );
+        assert_eq!(
+            reloaded.title_suggestion_prompt,
+            DEFAULT_TITLE_SUGGESTION_PROMPT
+        );
+        assert_eq!(
+            normalize_title_suggestion_prompt(&"🎯".repeat(2001)),
+            "🎯".repeat(2000)
         );
     }
 

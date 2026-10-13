@@ -1715,8 +1715,11 @@ pub(super) fn is_provisional_thread_title(title: &str) -> bool {
     trimmed.ends_with("...") || trimmed.ends_with('…')
 }
 
-pub(super) fn build_ai_thread_title_prompt(items: &[ConversationItem]) -> String {
-    format_ai_thread_title_prompt(items, None, 4)
+pub(super) fn build_ai_thread_title_prompt(
+    items: &[ConversationItem],
+    style_prompt: &str,
+) -> String {
+    format_ai_thread_title_prompt(items, None, 4, style_prompt)
 }
 
 /// On-demand retitling: the conversation may have moved on from the opening
@@ -1724,14 +1727,16 @@ pub(super) fn build_ai_thread_title_prompt(items: &[ConversationItem]) -> String
 pub(super) fn build_refresh_ai_thread_title_prompt(
     items: &[ConversationItem],
     current_title: &str,
+    style_prompt: &str,
 ) -> String {
-    format_ai_thread_title_prompt(items, Some(current_title), 8)
+    format_ai_thread_title_prompt(items, Some(current_title), 8, style_prompt)
 }
 
 fn format_ai_thread_title_prompt(
     items: &[ConversationItem],
     current_title: Option<&str>,
     recent_limit: usize,
+    style_prompt: &str,
 ) -> String {
     let mut excerpts = Vec::new();
     let current_title = current_title.map(str::trim).filter(|title| {
@@ -1800,12 +1805,12 @@ The conversation may have moved on from that name. Write a title that reflects t
 Write a short, specific thread title for this coding conversation.\n\
 \n\
 Rules:\n\
-- 3 to 7 words\n\
 - no quotes\n\
 - no trailing punctuation\n\
-- prefer concrete task nouns\n\
-- avoid generic titles like Debugging or Code Help\n\
 - return only the title\n\
+\n\
+Title style instructions:\n\
+{style_prompt}\n\
 \n\
 {}\n",
         excerpts.join("\n\n")

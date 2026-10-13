@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import {
   DEFAULT_TITLE_SUGGESTION_MODEL,
+  DEFAULT_TITLE_SUGGESTION_PROMPT,
   normalizeConversationItem,
   normalizeDaemonSnapshot,
   normalizeEventEnvelope,
@@ -19,6 +20,16 @@ import type { ConversationItem } from "./types";
 import { providerOutputKindLabel } from "./conversation";
 
 describe("rename suggestion model preferences", () => {
+  it("defaults older daemons and bounds custom title prompts", () => {
+    for (const value of [undefined, null, false, "", " \n "]) {
+      expect(normalizePreferences({ title_suggestion_prompt: value }).title_suggestion_prompt)
+        .toBe(DEFAULT_TITLE_SUGGESTION_PROMPT);
+    }
+    expect(normalizePreferences({ title_suggestion_prompt: " Use 2–3 words.\nALL CAPS. " })
+      .title_suggestion_prompt).toBe("Use 2–3 words.\nALL CAPS.");
+    expect(normalizePreferences({ title_suggestion_prompt: "🎯".repeat(2001) })
+      .title_suggestion_prompt).toBe("🎯".repeat(2000));
+  });
   it("defaults older daemons and preserves a chosen OpenRouter model", () => {
     expect(normalizePreferences({}).title_suggestion_model).toBe(
       DEFAULT_TITLE_SUGGESTION_MODEL,

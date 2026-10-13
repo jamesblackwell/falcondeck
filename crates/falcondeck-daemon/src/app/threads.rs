@@ -904,6 +904,13 @@ impl AppState {
         workspace_id: String,
         thread_id: String,
     ) {
+        let style_prompt = self
+            .inner
+            .preferences
+            .lock()
+            .await
+            .title_suggestion_prompt
+            .clone();
         let title_input = {
             let mut workspaces = self.inner.workspaces.lock().await;
             let Some(workspace) = workspaces.get_mut(&workspace_id) else {
@@ -928,7 +935,7 @@ impl AppState {
                     .summary
                     .working_directory(&workspace.summary.path)
                     .to_string(),
-                prompt: build_ai_thread_title_prompt(&thread.items),
+                prompt: build_ai_thread_title_prompt(&thread.items, &style_prompt),
             }
         };
 
@@ -1240,6 +1247,13 @@ impl AppState {
     ) -> Result<falcondeck_core::SuggestThreadTitleResponse, DaemonError> {
         self.ensure_claude_thread_history(workspace_id, thread_id)
             .await?;
+        let style_prompt = self
+            .inner
+            .preferences
+            .lock()
+            .await
+            .title_suggestion_prompt
+            .clone();
         let prompt = {
             let workspaces = self.inner.workspaces.lock().await;
             let workspace = workspaces
@@ -1258,7 +1272,11 @@ impl AppState {
                     "this thread doesn't have enough conversation to suggest a title".to_string(),
                 ));
             }
-            build_refresh_ai_thread_title_prompt(&thread.items, &thread.summary.title)
+            build_refresh_ai_thread_title_prompt(
+                &thread.items,
+                &thread.summary.title,
+                &style_prompt,
+            )
         };
 
         let title = self.request_openrouter_thread_title(&prompt).await?;

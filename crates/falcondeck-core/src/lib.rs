@@ -59,6 +59,8 @@ pub struct DaemonCapabilities {
 
 /// Default OpenRouter model for on-demand title suggestions.
 pub const DEFAULT_TITLE_SUGGESTION_MODEL: &str = "openai/gpt-6-luna";
+/// Default style instructions for generated titles and on-demand suggestions.
+pub const DEFAULT_TITLE_SUGGESTION_PROMPT: &str = "Use 3 to 7 words.\nPrefer concrete task nouns.\nAvoid generic titles like Debugging or Code Help.";
 
 /// Global FalconDeck preferences persisted by the daemon.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -96,6 +98,9 @@ pub struct FalconDeckPreferences {
     /// OpenRouter model used when the user requests a title in the rename dialog.
     #[serde(default = "default_title_suggestion_model")]
     pub title_suggestion_model: String,
+    /// Style instructions for generated titles and on-demand rename suggestions.
+    #[serde(default = "default_title_suggestion_prompt")]
+    pub title_suggestion_prompt: String,
     /// Host-local computer-use settings. Older daemons omit this.
     #[serde(default)]
     pub computer_use: ComputerUsePreferences,
@@ -114,6 +119,7 @@ impl Default for FalconDeckPreferences {
             notifications: NotificationPreferences::default(),
             utility_models: UtilityModelPreferences::default(),
             title_suggestion_model: default_title_suggestion_model(),
+            title_suggestion_prompt: default_title_suggestion_prompt(),
             computer_use: ComputerUsePreferences::default(),
         }
     }
@@ -121,6 +127,10 @@ impl Default for FalconDeckPreferences {
 
 fn default_title_suggestion_model() -> String {
     DEFAULT_TITLE_SUGGESTION_MODEL.to_string()
+}
+
+fn default_title_suggestion_prompt() -> String {
+    DEFAULT_TITLE_SUGGESTION_PROMPT.to_string()
 }
 
 /// Host-local computer-use settings persisted with other preferences.
@@ -632,6 +642,9 @@ pub struct UpdatePreferencesRequest {
     /// Optional OpenRouter model for on-demand rename suggestions.
     #[serde(default)]
     pub title_suggestion_model: Option<String>,
+    /// Optional title style instructions. Empty text restores the default prompt.
+    #[serde(default)]
+    pub title_suggestion_prompt: Option<String>,
 }
 
 /// Partial update payload for background utility model preferences.
