@@ -17,6 +17,7 @@ import {
   GitCommitHorizontal,
   ImageIcon,
   Info,
+  PanelRightOpen,
   PauseCircle,
   Radio,
   Search,
@@ -71,6 +72,7 @@ import {
   toolLifecycle,
   toolLifecycleLabel,
   webSearchActionLabel,
+  workspaceRelativeFilePath,
   type ConversationItem,
   type ConversationCitation,
   type ConversationLiveActivityGroup,
@@ -88,13 +90,17 @@ import {
   cn,
 } from "@falcondeck/ui";
 
-import { FileDiffLink, useOpenFileDiff } from "../lib/file-diff-context";
+import {
+  FileDiffLink,
+  useFileDiffContext,
+  useOpenFileDiff,
+} from "../lib/file-diff-context";
 import { useLocalPathHandler } from "../lib/local-path-context";
 import { extractFilePath, fileBaseName } from "../lib/tool-file-path";
 import { WebLinkAnchor } from "../lib/web-link-context";
 import { CodeBlock } from "./code-block";
 import { DiffBlock } from "./diff-block";
-import { useParsedDiff } from "./diff-lines";
+import { looksLikeUnifiedDiff, useParsedDiff } from "./diff-lines";
 import { MessageMarkdown } from "./message-markdown";
 import { PlanStepList } from "./plan-steps";
 import {
@@ -2467,18 +2473,19 @@ function DiffMessage({
   );
 }
 
-function FileChangeDiff({
-  change,
-}: {
-  change: Extract<ConversationItem, { kind: "file_change" }>["changes"][number];
-}) {
+type FileChange = Extract<
+  ConversationItem,
+  { kind: "file_change" }
+>["changes"][number];
+
+function FileChangeDiff({ change }: { change: FileChange }) {
   const parsed = useParsedDiff(change.diff);
-  if (!change.diff.trim()) return null;
   return parsed.status === "unparsed" ? (
     <CodeBlock
       code={change.diff}
       language="diff"
       filePath={change.move_path ?? change.path}
+      bare
     />
   ) : (
     <DiffBlock
@@ -2486,13 +2493,12 @@ function FileChangeDiff({
       parsed={parsed}
       title={change.move_path ?? change.path}
       filePath={change.move_path ?? change.path}
+      bare
     />
   );
 }
 
-function fileChangeKindLabel(
-  change: Extract<ConversationItem, { kind: "file_change" }>["changes"][number],
-) {
+function fileChangeKindLabel(change: FileChange) {
   if (change.move_path) return "Renamed";
   switch (change.change_kind.toLowerCase()) {
     case "add":
@@ -2504,6 +2510,164 @@ function fileChangeKindLabel(
     default:
       return change.change_kind || "Changed";
   }
+}
+
+type DiffLineStat = { additions: number; deletions: number };
+
+/**
+ * Added and removed line counts, read off the `+`/`-` prefixes without a full
+ * parse so collapsed rows stay cheap. Null when the text is not a diff.
+ */
+function diffLineStat(diff: string): DiffLineStat | null {
+  if (!looksLikeUnifiedDiff(diff)) return null;
+  let additions = 0;
+  let deletions = 0;
+  for (const line of diff.split("\n")) {
+    if (line.startsWith("+")) {
+      if (!line.startsWith("+++ ")) additions += 1;
+    } else if (line.startsWith("-")) {
+      if (!line.startsWith("--- ")) deletions += 1;
+    }
+  }
+  return { additions, deletions };
+}
+
+/** Where a changed file lives: its folder, or where a rename came from. */
+function fileChangeLocation(change: FileChange, workspaceRoot: string | null) {
+  if (change.move_path) {
+    return `from ${workspaceRelativeFilePath(change.path, workspaceRoot)}`;
+  }
+  const path = workspaceRelativeFilePath(change.path, workspaceRoot);
+  const name = fileBaseName(path);
+  return path
+    .slice(0, Math.max(0, path.length - name.length))
+    .replace(/\/+$/, "");
+}
+
+function DiffStat({ stat }: { stat: DiffLineStat }) {
+  return (
+    <span className="shrink-0 font-mono text-[length:var(--fd-text-2xs)] tabular-nums">
+      <span className="text-success">+{stat.additions}</span>{" "}
+      <span className="text-danger">−{stat.deletions}</span>
+    </span>
+  );
+}
+
+/** Copy and open-in-panel, revealed while the row is hovered or focused. */
+function FileChangeActions({
+  change,
+  group,
+}: {
+  change: FileChange;
+  group: "file" | "card";
+}) {
+  const fileContext = useFileDiffContext();
+  const currentPath = change.move_path ?? change.path;
+  const displayPath = workspaceRelativeFilePath(
+    currentPath,
+    fileContext?.workspaceRoot ?? null,
+  );
+  return (
+    <span
+      className={cn(
+        "flex shrink-0 items-center opacity-0 transition-opacity",
+        group === "file"
+          ? "group-focus-within/file:opacity-100 group-hover/file:opacity-100"
+          : "group-focus-within/card:opacity-100 group-hover/card:opacity-100",
+      )}
+    >
+      {change.diff.trim() ? (
+        <CopyButton text={change.diff} label="Copy diff" />
+      ) : null}
+      {fileContext ? (
+        <button
+          type="button"
+          title={`Open ${currentPath} in the changes panel`}
+          aria-label={`Open ${displayPath} in the changes panel`}
+          onClick={() => fileContext.openFile(currentPath)}
+          className="fd-focus inline-flex h-6 w-6 shrink-0 items-center justify-center rounded-[var(--fd-radius-sm)] text-fg-muted transition-colors hover:bg-surface-3 hover:text-fg-secondary"
+        >
+          <PanelRightOpen aria-hidden="true" className="h-3 w-3" />
+        </button>
+      ) : null}
+    </span>
+  );
+}
+
+function FileChangeRow({
+  change,
+  stat,
+}: {
+  change: FileChange;
+  stat: DiffLineStat | null;
+}) {
+  const [open, setOpen] = useState(false);
+  const workspaceRoot = useFileDiffContext()?.workspaceRoot ?? null;
+  const currentPath = change.move_path ?? change.path;
+  const displayPath = workspaceRelativeFilePath(currentPath, workspaceRoot);
+  const name = fileBaseName(displayPath);
+  const location = fileChangeLocation(change, workspaceRoot);
+  const kindLabel = fileChangeKindLabel(change);
+  const hasDiff = change.diff.trim().length > 0;
+  // "Updated" is the unremarkable case; only call out the others.
+  const showKind = kindLabel !== "Updated";
+
+  return (
+    <Collapsible.Root open={open} onOpenChange={setOpen}>
+      <div className="group/file flex min-h-8 items-center gap-1 pr-2 transition-colors hover:bg-surface-2">
+        <Collapsible.Trigger asChild disabled={!hasDiff}>
+          <button
+            type="button"
+            disabled={!hasDiff}
+            aria-expanded={hasDiff ? open : undefined}
+            aria-label={`${displayPath}, ${kindLabel}`}
+            title={currentPath}
+            className="fd-focus flex min-w-0 flex-1 items-center gap-2 py-1.5 pl-3 text-left text-[length:var(--fd-text-xs)]"
+          >
+            <ChevronRight
+              aria-hidden="true"
+              className={cn(
+                "h-3 w-3 shrink-0 text-fg-muted transition-transform duration-[var(--fd-duration-fast)]",
+                open && "rotate-90",
+                !hasDiff && "invisible",
+              )}
+            />
+            <span className="flex min-w-0 flex-1 items-baseline gap-2">
+              <span className="shrink-0 font-medium text-fg-secondary">
+                {name}
+              </span>
+              {location ? (
+                <span className="min-w-0 truncate text-fg-muted">
+                  {location}
+                </span>
+              ) : null}
+            </span>
+            {showKind ? (
+              <span
+                className={cn(
+                  "shrink-0 rounded-[var(--fd-radius-sm)] px-1.5 text-[length:var(--fd-text-2xs)] font-medium",
+                  kindLabel === "Added" && "bg-success-muted/40 text-success",
+                  kindLabel === "Deleted" && "bg-danger-muted/40 text-danger",
+                  kindLabel !== "Added" &&
+                    kindLabel !== "Deleted" &&
+                    "bg-surface-3 text-fg-tertiary",
+                )}
+              >
+                {kindLabel}
+              </span>
+            ) : null}
+            {stat ? <DiffStat stat={stat} /> : null}
+          </button>
+        </Collapsible.Trigger>
+        <FileChangeActions change={change} group="file" />
+      </div>
+      {hasDiff ? (
+        <Collapsible.Content className="overflow-hidden border-t border-border-subtle data-[state=closed]:animate-collapse data-[state=open]:animate-expand">
+          <FileChangeDiff change={change} />
+        </Collapsible.Content>
+      ) : null}
+    </Collapsible.Root>
+  );
 }
 
 function FileChangeMessage({
@@ -2525,12 +2689,30 @@ function FileChangeMessage({
   const count = item.changes.length;
   const onlyChange = count === 1 ? item.changes[0] : null;
   const label = onlyChange
-    ? `${fileChangeKindLabel(onlyChange)} ${fileBaseName(onlyChange.path)}`
+    ? `${fileChangeKindLabel(onlyChange)} ${fileBaseName(onlyChange.move_path ?? onlyChange.path)}`
     : count > 0
       ? `${count} files changed`
       : lifecycle === "running" || lifecycle === "queued"
         ? "Preparing file changes…"
         : "File change";
+  const workspaceRoot = useFileDiffContext()?.workspaceRoot ?? null;
+  const stats = useMemo(
+    () => item.changes.map((change) => diffLineStat(change.diff)),
+    [item.changes],
+  );
+  const total = useMemo(
+    () =>
+      stats.some(Boolean)
+        ? stats.reduce<DiffLineStat>(
+            (sum, stat) => ({
+              additions: sum.additions + (stat?.additions ?? 0),
+              deletions: sum.deletions + (stat?.deletions ?? 0),
+            }),
+            { additions: 0, deletions: 0 },
+          )
+        : null,
+    [stats],
+  );
   const StatusIcon =
     lifecycle === "failed" || lifecycle === "denied"
       ? CircleX
@@ -2541,83 +2723,79 @@ function FileChangeMessage({
   return (
     <Collapsible.Root open={open} onOpenChange={setOpen}>
       <div className="overflow-hidden rounded-[var(--fd-radius-lg)] border border-border-subtle bg-surface-1">
-        <Collapsible.Trigger asChild disabled={count === 0}>
-          <button
-            type="button"
-            disabled={count === 0}
-            aria-expanded={count > 0 ? open : undefined}
-            aria-label={`${label}, ${lifecycleLabel}`}
-            className="fd-focus flex min-h-9 w-full items-center gap-2 px-3 py-2 text-left"
-          >
-            {lifecycle === "running" || lifecycle === "queued" ? (
-              <ActivityDiamond />
-            ) : (
-              <StatusIcon
-                aria-hidden="true"
-                className={cn(
-                  "h-3.5 w-3.5 shrink-0",
-                  lifecycle === "succeeded" && "text-success",
-                  (lifecycle === "failed" || lifecycle === "denied") &&
-                    "text-danger",
-                  lifecycle === "interrupted" && "text-warning",
-                )}
-              />
-            )}
-            <span className="min-w-0 flex-1 truncate text-[length:var(--fd-text-sm)] text-fg-secondary">
-              {label}
-            </span>
-            <span className="text-[length:var(--fd-text-2xs)] text-fg-muted">
-              {lifecycleLabel}
-            </span>
-            {count > 0 ? (
-              <ChevronRight
-                aria-hidden="true"
-                className={cn(
-                  "h-3 w-3 shrink-0 text-fg-muted transition-transform duration-[var(--fd-duration-fast)]",
-                  open && "rotate-90",
-                )}
-              />
-            ) : null}
-          </button>
-        </Collapsible.Trigger>
-        <Collapsible.Content className="overflow-hidden data-[state=closed]:animate-collapse data-[state=open]:animate-expand">
-          <div className="space-y-3 border-t border-border-subtle p-2">
-            {item.changes.map((change, index) => (
-              <section key={`${change.path}-${index}`} className="space-y-1.5">
-                <div className="flex min-w-0 items-center gap-2 px-1 text-[length:var(--fd-text-xs)]">
-                  <FileDiff
-                    aria-hidden="true"
-                    className="h-3.5 w-3.5 shrink-0 text-fg-muted"
-                  />
-                  {change.move_path ? (
-                    <>
-                      <span className="min-w-0 truncate font-mono text-fg-secondary">
-                        {change.path}
-                      </span>
-                      <span
-                        aria-hidden="true"
-                        className="shrink-0 text-fg-muted"
-                      >
-                        →
-                      </span>
-                      <FileDiffLink
-                        filePath={change.move_path}
-                        className="min-w-0 truncate font-mono text-fg-secondary"
-                      />
-                    </>
-                  ) : (
-                    <FileDiffLink
-                      filePath={change.path}
-                      className="min-w-0 truncate font-mono text-fg-secondary"
-                    />
+        <div className="group/card flex items-center gap-1 transition-colors hover:bg-surface-2">
+          <Collapsible.Trigger asChild disabled={count === 0}>
+            <button
+              type="button"
+              disabled={count === 0}
+              aria-expanded={count > 0 ? open : undefined}
+              aria-label={`${label}, ${lifecycleLabel}`}
+              className={cn(
+                "fd-focus flex min-h-9 min-w-0 flex-1 items-center gap-2 py-2 pl-3 text-left",
+                onlyChange ? "pr-1" : "pr-3",
+              )}
+            >
+              {lifecycle === "running" || lifecycle === "queued" ? (
+                <ActivityDiamond />
+              ) : (
+                <StatusIcon
+                  aria-hidden="true"
+                  className={cn(
+                    "h-3.5 w-3.5 shrink-0",
+                    lifecycle === "succeeded" && "text-success",
+                    (lifecycle === "failed" || lifecycle === "denied") &&
+                      "text-danger",
+                    lifecycle === "interrupted" && "text-warning",
                   )}
-                  <span className="ml-auto shrink-0 uppercase tracking-widest text-fg-muted">
-                    {fileChangeKindLabel(change)}
+                />
+              )}
+              <span className="flex min-w-0 flex-1 items-baseline gap-2">
+                <span className="shrink-0 text-[length:var(--fd-text-sm)] text-fg-secondary">
+                  {label}
+                </span>
+                {onlyChange ? (
+                  <span className="min-w-0 truncate text-[length:var(--fd-text-xs)] text-fg-muted">
+                    {fileChangeLocation(onlyChange, workspaceRoot)}
                   </span>
-                </div>
-                <FileChangeDiff change={change} />
-              </section>
-            ))}
+                ) : null}
+              </span>
+              {total ? <DiffStat stat={total} /> : null}
+              {lifecycle === "succeeded" ? null : (
+                <span className="text-[length:var(--fd-text-2xs)] text-fg-muted">
+                  {lifecycleLabel}
+                </span>
+              )}
+              {count > 0 ? (
+                <ChevronRight
+                  aria-hidden="true"
+                  className={cn(
+                    "h-3 w-3 shrink-0 text-fg-muted transition-transform duration-[var(--fd-duration-fast)]",
+                    open && "rotate-90",
+                  )}
+                />
+              ) : null}
+            </button>
+          </Collapsible.Trigger>
+          {onlyChange ? (
+            <span className="pr-2">
+              <FileChangeActions change={onlyChange} group="card" />
+            </span>
+          ) : null}
+        </div>
+        <Collapsible.Content className="overflow-hidden data-[state=closed]:animate-collapse data-[state=open]:animate-expand">
+          <div className="divide-y divide-border-subtle border-t border-border-subtle">
+            {onlyChange ? (
+              // The header already names a lone file; go straight to its diff.
+              <FileChangeDiff change={onlyChange} />
+            ) : (
+              item.changes.map((change, index) => (
+                <FileChangeRow
+                  key={`${change.path}-${index}`}
+                  change={change}
+                  stat={stats[index] ?? null}
+                />
+              ))
+            )}
           </div>
         </Collapsible.Content>
       </div>

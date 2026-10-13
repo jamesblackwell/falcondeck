@@ -21,6 +21,7 @@ export const CodeBlock = memo(function CodeBlock({
   filePath = null,
   previewLines = DEFAULT_PREVIEW_LINES,
   highlight = true,
+  bare = false,
 }: {
   code: string
   language?: string | null
@@ -30,6 +31,8 @@ export const CodeBlock = memo(function CodeBlock({
   previewLines?: number
   /** Keep streamed content plain until it settles to avoid tokenizing every delta. */
   highlight?: boolean
+  /** Drop the frame and header; the caller already names the file and offers copy. */
+  bare?: boolean
 }) {
   const [expanded, setExpanded] = useState(false)
 
@@ -62,22 +65,29 @@ export const CodeBlock = memo(function CodeBlock({
   const tokens = useShikiTokens(visibleLines, highlight ? resolvedLanguage : null)
 
   if (parsedDiff.status !== 'unparsed') {
-    return <DiffBlock diff={code} parsed={parsedDiff} previewRows={previewLines} />
+    return <DiffBlock diff={code} parsed={parsedDiff} previewRows={previewLines} bare={bare} />
   }
 
   return (
-    <div className="overflow-hidden rounded-[var(--fd-radius-lg)] border border-border-default bg-surface-1">
-      <div className="flex items-center justify-between border-b border-border-subtle px-3 py-1.5 text-[length:var(--fd-text-xs)] text-fg-muted">
-        <span className="min-w-0 truncate">{filePath ?? language ?? resolvedLanguage ?? 'code'}</span>
-        <div className="flex shrink-0 items-center gap-2">
-          {(lines.length > previewLineCount || displayLimited) && previewLines > 0 ? (
-            <span className="tabular-nums">
-              {code.length > displayCode.length ? `${lines.length}+` : lines.length} lines
-            </span>
-          ) : null}
-          <CopyButton text={code} variant="labeled" />
+    <div
+      className={cn(
+        'overflow-hidden bg-surface-1',
+        !bare && 'rounded-[var(--fd-radius-lg)] border border-border-default',
+      )}
+    >
+      {bare ? null : (
+        <div className="flex items-center justify-between border-b border-border-subtle px-3 py-1.5 text-[length:var(--fd-text-xs)] text-fg-muted">
+          <span className="min-w-0 truncate">{filePath ?? language ?? resolvedLanguage ?? 'code'}</span>
+          <div className="flex shrink-0 items-center gap-2">
+            {(lines.length > previewLineCount || displayLimited) && previewLines > 0 ? (
+              <span className="tabular-nums">
+                {code.length > displayCode.length ? `${lines.length}+` : lines.length} lines
+              </span>
+            ) : null}
+            <CopyButton text={code} variant="labeled" />
+          </div>
         </div>
-      </div>
+      )}
       <div className="relative">
         <pre
           data-syntax-highlighting={

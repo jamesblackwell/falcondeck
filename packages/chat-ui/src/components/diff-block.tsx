@@ -28,6 +28,7 @@ export const DiffBlock = memo(function DiffBlock({
   previewRows = DEFAULT_PREVIEW_ROWS,
   title,
   filePath = null,
+  bare = false,
 }: {
   diff: string
   /** Parsed once by the caller, which also decides whether a diff renderer fits. */
@@ -38,6 +39,8 @@ export const DiffBlock = memo(function DiffBlock({
   title?: string
   /** Authoritative current path when provider metadata supersedes patch headers. */
   filePath?: string | null
+  /** Drop the frame and header; the caller already names the file and offers copy. */
+  bare?: boolean
 }) {
   const [expanded, setExpanded] = useState(false)
   const fileRows = useMemo(
@@ -63,36 +66,50 @@ export const DiffBlock = memo(function DiffBlock({
   )
 
   return (
-    <div className="overflow-hidden rounded-[var(--fd-radius-lg)] border border-border-default bg-surface-1">
-      <div className="flex items-center justify-between gap-2 border-b border-border-subtle px-3 py-1.5 text-[length:var(--fd-text-xs)] text-fg-muted">
-        <span className="min-w-0 truncate font-mono">
-          {filePath ? (
-            <FileDiffLink filePath={filePath} className="text-fg-secondary" />
-          ) : paths.length === 1 ? (
-            <FileDiffLink filePath={paths[0]} className="text-fg-secondary" />
-          ) : paths.length > 1 ? (
-            `${paths.length} files changed`
-          ) : (
-            title ?? 'diff'
-          )}
-        </span>
-        <div className="flex shrink-0 items-center gap-2">
-          {parsed.status === 'too-large' ? null : (
-            <span className="tabular-nums">
-              {totalRows} line{totalRows === 1 ? '' : 's'}
-            </span>
-          )}
-          <CopyButton text={diff} variant="labeled" />
+    <div
+      className={cn(
+        'overflow-hidden bg-surface-1',
+        !bare && 'rounded-[var(--fd-radius-lg)] border border-border-default',
+      )}
+    >
+      {bare ? null : (
+        <div className="flex items-center justify-between gap-2 border-b border-border-subtle px-3 py-1.5 text-[length:var(--fd-text-xs)] text-fg-muted">
+          <span className="min-w-0 truncate font-mono">
+            {filePath ? (
+              <FileDiffLink filePath={filePath} className="block max-w-full truncate text-left text-fg-secondary" />
+            ) : paths.length === 1 ? (
+              <FileDiffLink filePath={paths[0]} className="block max-w-full truncate text-left text-fg-secondary" />
+            ) : paths.length > 1 ? (
+              `${paths.length} files changed`
+            ) : (
+              title ?? 'diff'
+            )}
+          </span>
+          <div className="flex shrink-0 items-center gap-2">
+            {parsed.status === 'too-large' ? null : (
+              <span className="tabular-nums">
+                {totalRows} line{totalRows === 1 ? '' : 's'}
+              </span>
+            )}
+            <CopyButton text={diff} variant="labeled" />
+          </div>
         </div>
-      </div>
+      )}
 
       {parsed.status === 'too-large' ? (
-        <p className="p-3 text-[length:var(--fd-text-xs)] text-fg-muted">
+        <p className="px-3 py-2 text-[length:var(--fd-text-xs)] text-fg-muted">
           Diff too large to display.
         </p>
       ) : (
         <div className="relative">
-          <div className="overflow-x-auto p-1 font-mono text-[length:var(--fd-text-2xs)] leading-5">
+          <div
+            className={cn(
+              'overflow-x-auto font-mono text-[length:var(--fd-text-2xs)] leading-5',
+              // Bare blocks sit under the caller's divider, which already
+              // draws the first hunk header's top rule.
+              bare ? 'pb-1 [&>div:first-child>div:first-child]:border-t-0' : 'p-1',
+            )}
+          >
             {visibleFileRows.map((file, index) => (
               <DiffFileSection
                 key={file.path ?? index}

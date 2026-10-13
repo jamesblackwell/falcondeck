@@ -29,15 +29,40 @@ function fileChange(
 describe('structured file-change output', () => {
   it('summarizes terminal state and reveals paths, rename, and rendered diff', () => {
     render(<MessageCard item={fileChange()} />)
-    const disclosure = screen.getByRole('button', { name: 'Renamed old.ts, Completed' })
+    const disclosure = screen.getByRole('button', { name: 'Renamed new.ts, Completed' })
     expect(disclosure).toHaveAttribute('aria-expanded', 'false')
+    expect(screen.getByText('+1')).toBeVisible()
+    expect(screen.getByText('−1')).toBeVisible()
     fireEvent.click(disclosure)
     expect(disclosure).toHaveAttribute('aria-expanded', 'true')
-    expect(screen.getAllByText('src/old.ts')).toHaveLength(1)
-    expect(screen.getByText('→')).toBeVisible()
-    expect(screen.getAllByText('src/new.ts')).toHaveLength(2)
+    // A lone file opens straight onto its diff; the header names it.
+    expect(screen.queryByRole('button', { name: 'src/new.ts, Renamed' })).toBeNull()
+    expect(screen.getByText('from src/old.ts')).toBeVisible()
     expect(screen.getByText('new')).toBeVisible()
     expect(screen.getByText('old')).toBeVisible()
+  })
+
+  it('lists several files collapsed with workspace-relative paths', () => {
+    render(
+      <FileDiffProvider onOpenFile={vi.fn()} workspaceRoot="/Users/me/repo">
+        <MessageCard
+          item={fileChange({
+            changes: [
+              { path: '/Users/me/repo/docs/a.md', change_kind: 'add', diff: '--- /dev/null\n+++ b/docs/a.md\n@@ -0,0 +1,2 @@\n+one\n+two', move_path: null },
+              { path: '/Users/me/repo/src/b.ts', change_kind: 'update', diff: PATCH, move_path: null },
+            ],
+          })}
+        />
+      </FileDiffProvider>,
+    )
+    fireEvent.click(screen.getByRole('button', { name: '2 files changed, Completed' }))
+    expect(screen.getByText('+3')).toBeVisible()
+    const added = screen.getByRole('button', { name: 'docs/a.md, Added' })
+    expect(added).toHaveAttribute('aria-expanded', 'false')
+    expect(screen.getByText('docs')).toBeVisible()
+    expect(screen.queryByText('two')).toBeNull()
+    fireEvent.click(added)
+    expect(screen.getByText('two')).toBeVisible()
   })
 
   it('keeps an announced patch visible before its first change arrives', () => {
@@ -52,11 +77,9 @@ describe('structured file-change output', () => {
         <MessageCard item={fileChange()} />
       </FileDiffProvider>,
     )
-    fireEvent.click(screen.getByRole('button', { name: 'Renamed old.ts, Completed' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Renamed new.ts, Completed' }))
 
-    const destinationLinks = screen.getAllByTitle('Open src/new.ts in the changes panel')
-    expect(destinationLinks).toHaveLength(2)
-    fireEvent.click(destinationLinks[0]!)
+    fireEvent.click(screen.getByRole('button', { name: 'Open src/new.ts in the changes panel' }))
 
     expect(onOpenFile).toHaveBeenCalledWith('src/new.ts')
     expect(screen.queryByTitle('Open src/old.ts in the changes panel')).toBeNull()

@@ -135,30 +135,32 @@ export const DiffChangeLine = memo(function DiffChangeLine({
   tokens: ThemedToken[] | null
 }) {
   const prefix = change.content[0] ?? ' '
+  const tint =
+    change.type === 'add' ? 'bg-success-muted/20' : change.type === 'del' ? 'bg-danger-muted/20' : null
 
   return (
-    <div
-      className={cn(
-        'flex',
-        change.type === 'add' && 'bg-success-muted/20',
-        change.type === 'del' && 'bg-danger-muted/20',
-      )}
-    >
-      <span className="sticky left-0 z-10 w-7 shrink-0 select-none bg-inherit pr-0.5 text-right text-fg-muted">
-        {oldLineNumber(change)}
+    <div className={cn('flex', tint)}>
+      {/* The whole gutter sticks, on an opaque base: the row tint is
+          translucent, so code scrolled sideways would show through it. */}
+      <span className="sticky left-0 z-10 flex shrink-0 select-none bg-surface-1">
+        <span className={cn('flex', tint)}>
+          <span className="w-8 shrink-0 pr-1 text-right text-fg-faint">
+            {oldLineNumber(change)}
+          </span>
+          <span className="w-8 shrink-0 pr-1 text-right text-fg-faint">
+            {newLineNumber(change)}
+          </span>
+          <span
+            className={cn(
+              'w-4 shrink-0 text-center',
+              change.type === 'add' ? 'text-success' : change.type === 'del' ? 'text-danger' : 'text-fg-faint',
+            )}
+          >
+            {prefix}
+          </span>
+        </span>
       </span>
-      <span className="w-7 shrink-0 select-none pr-1 text-right text-fg-muted">
-        {newLineNumber(change)}
-      </span>
-      <span
-        className={cn(
-          'w-3 shrink-0 select-none text-center',
-          change.type === 'add' ? 'text-success' : change.type === 'del' ? 'text-danger' : 'text-fg-muted',
-        )}
-      >
-        {prefix}
-      </span>
-      <span className="whitespace-pre">
+      <span className="whitespace-pre pr-3">
         {tokens
           ? tokens.map((token, index) => (
               <span key={index} style={{ color: token.color }}>
