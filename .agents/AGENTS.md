@@ -1,4 +1,4 @@
-# Agent Assets
+# Agent assets
 
-- Active repo skills live in `.agents/skills/`; archived skills live in `.agents/archived-skills/` so they stay out of active agent discovery.
-- Use `scripts/skills archive <name>` and `scripts/skills restore <name>` instead of moving skill folders by hand.
+Repository-specific skills live in `.agents/skills/`. Each skill's `SKILL.md`
+describes when to use it and how to run its supporting tools.

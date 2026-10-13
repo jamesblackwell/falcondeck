@@ -1,73 +1,44 @@
-# React + TypeScript + Vite
+# FalconDeck Desktop
 
-This template provides a minimal setup to get React working in Vite with HMR and some ESLint rules.
+The macOS app is a Tauri shell around the FalconDeck daemon. React renders the
+interface; the daemon owns agent processes, turn execution, and remote connections.
+Shared UI lives in `packages/ui` and `packages/chat-ui`.
 
-Currently, two official plugins are available:
+## Develop
 
-- [@vitejs/plugin-react](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react) uses [Oxc](https://oxc.rs)
-- [@vitejs/plugin-react-swc](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react-swc) uses [SWC](https://swc.rs/)
+Run commands from the repository root. Install Node.js/npm, Rust stable, and
+Xcode command line tools with Swift 6.2 or later for the bundled speech helper.
 
-## React Compiler
-
-The React Compiler is not enabled on this template because of its impact on dev & build performances. To add it, see [this documentation](https://react.dev/learn/react-compiler/installation).
-
-## Expanding the ESLint configuration
-
-If you are developing a production application, we recommend updating the configuration to enable type-aware lint rules:
-
-```js
-export default defineConfig([
-  globalIgnores(['dist']),
-  {
-    files: ['**/*.{ts,tsx}'],
-    extends: [
-      // Other configs...
-
-      // Remove tseslint.configs.recommended and replace with this
-      tseslint.configs.recommendedTypeChecked,
-      // Alternatively, use this for stricter rules
-      tseslint.configs.strictTypeChecked,
-      // Optionally, add this for stylistic rules
-      tseslint.configs.stylisticTypeChecked,
-
-      // Other configs...
-    ],
-    languageOptions: {
-      parserOptions: {
-        project: ['./tsconfig.node.json', './tsconfig.app.json'],
-        tsconfigRootDir: import.meta.dirname,
-      },
-      // other options...
-    },
-  },
-])
+```sh
+npm install
+make desktop-dev
 ```
 
-You can also install [eslint-plugin-react-x](https://github.com/Rel1cx/eslint-react/tree/main/packages/plugins/eslint-plugin-react-x) and [eslint-plugin-react-dom](https://github.com/Rel1cx/eslint-react/tree/main/packages/plugins/eslint-plugin-react-dom) for React-specific lint rules:
+The frontend runs at `http://localhost:1420`. To run only the frontend against
+an existing daemon, use `make frontend-dev`.
 
-```js
-// eslint.config.js
-import reactX from 'eslint-plugin-react-x'
-import reactDom from 'eslint-plugin-react-dom'
+## Check changes
 
-export default defineConfig([
-  globalIgnores(['dist']),
-  {
-    files: ['**/*.{ts,tsx}'],
-    extends: [
-      // Other configs...
-      // Enable lint rules for React
-      reactX.configs['recommended-typescript'],
-      // Enable lint rules for React DOM
-      reactDom.configs.recommended,
-    ],
-    languageOptions: {
-      parserOptions: {
-        project: ['./tsconfig.node.json', './tsconfig.app.json'],
-        tsconfigRootDir: import.meta.dirname,
-      },
-      // other options...
-    },
-  },
-])
+```sh
+npm run typecheck --workspace falcondeck-desktop
+npm run lint --workspace falcondeck-desktop
+npm run test --workspace falcondeck-desktop
+cargo test -p falcondeck-daemon
 ```
+
+Run the checks relevant to your change. Read [the design system](../../DESIGN.md)
+before changing shared UI or branding.
+
+## Build and install
+
+```sh
+make desktop-install
+```
+
+This builds, installs, and starts the packaged Mac app, then checks daemon
+health. Icon generation requires ImageMagick's `magick` command. To restart an
+already installed app without rebuilding, use `make desktop-restart`.
+
+See [desktop releases](../../docs/13-desktop-updates.md) for signing and updater
+configuration, [dictation](../../docs/18-desktop-dictation.md) for speech
+features, and [the documentation index](../../docs/README.md) for other guides.

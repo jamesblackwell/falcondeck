@@ -6,10 +6,10 @@ This file is the shared visual source of truth for FalconDeck across desktop, mo
 
 Primary implementation sources:
 
-- Web tokens: [packages/ui/src/styles.css](/Users/James/www/sites/falcondeck/packages/ui/src/styles.css)
-- Mobile tokens: [apps/mobile/src/theme/tokens.ts](/Users/James/www/sites/falcondeck/apps/mobile/src/theme/tokens.ts)
-- Brand assets: [assets/brand](/Users/James/www/sites/falcondeck/assets/brand)
-- Asset generator: [scripts/generate-brand-assets.mjs](/Users/James/www/sites/falcondeck/scripts/generate-brand-assets.mjs)
+- Web tokens: [packages/ui/src/styles.css](packages/ui/src/styles.css)
+- Mobile tokens: [apps/mobile/src/theme/tokens.ts](apps/mobile/src/theme/tokens.ts)
+- Brand assets: [assets/brand](assets/brand)
+- Asset generator: [scripts/generate-brand-assets.mjs](scripts/generate-brand-assets.mjs)
 
 ## Visual Direction
 
@@ -403,10 +403,10 @@ Do not introduce a third scrim alpha.
 
 Primary source files:
 
-- [logomark-dark.svg](/Users/James/www/sites/falcondeck/assets/brand/logomark-dark.svg): full-bleed square app icon on dark background
-- [logomark-light.svg](/Users/James/www/sites/falcondeck/assets/brand/logomark-light.svg): full-bleed square app icon on light background
-- [logomark-mark-dark.svg](/Users/James/www/sites/falcondeck/assets/brand/logomark-mark-dark.svg): transparent dark falcon mark
-- [logomark-mark-light.svg](/Users/James/www/sites/falcondeck/assets/brand/logomark-mark-light.svg): transparent light falcon mark
+- [logomark-dark.svg](assets/brand/logomark-dark.svg): full-bleed square app icon on dark background
+- [logomark-light.svg](assets/brand/logomark-light.svg): full-bleed square app icon on light background
+- [logomark-mark-dark.svg](assets/brand/logomark-mark-dark.svg): transparent dark falcon mark
+- [logomark-mark-light.svg](assets/brand/logomark-mark-light.svg): transparent light falcon mark
 
 Usage:
 

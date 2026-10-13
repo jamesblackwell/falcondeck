@@ -32,23 +32,23 @@ Tauri's updater works with the existing Rust plugin, JavaScript UI, Tauri signin
 
 Source-of-truth files:
 
-- [Cargo.toml](/Users/James/www/sites/falcondeck/Cargo.toml): workspace version
-- [package.json](/Users/James/www/sites/falcondeck/package.json): release prep scripts
-- [apps/desktop/src-tauri/tauri.conf.json](/Users/James/www/sites/falcondeck/apps/desktop/src-tauri/tauri.conf.json): updater endpoint, bundled updater artifacts, public key, macOS entitlements
-- [apps/desktop/src-tauri/entitlements.plist](/Users/James/www/sites/falcondeck/apps/desktop/src-tauri/entitlements.plist): Hardened Runtime entitlements for WebView JIT and microphone access
-- [apps/desktop/src-tauri/src/lib.rs](/Users/James/www/sites/falcondeck/apps/desktop/src-tauri/src/lib.rs): Tauri updater plugin registration and restart/shutdown behavior
-- [apps/desktop/src/hooks/useAppUpdater.ts](/Users/James/www/sites/falcondeck/apps/desktop/src/hooks/useAppUpdater.ts): startup polling, 4-hour checks, download/install state
-- [apps/desktop/src/components/SettingsView.tsx](/Users/James/www/sites/falcondeck/apps/desktop/src/components/SettingsView.tsx): user-facing updater UI
-- [scripts/prepare-desktop-release.mjs](/Users/James/www/sites/falcondeck/scripts/prepare-desktop-release.mjs): sync version fields and check the CI updater key against the committed public key
-- [release-desktop.yml](/Users/James/www/sites/falcondeck/.github/workflows/release-desktop.yml): GitHub Actions release pipeline
-- [scripts/verify-desktop-release.mjs](/Users/James/www/sites/falcondeck/scripts/verify-desktop-release.mjs): check both Mac targets, installer assets, and updater metadata after packaging
+- [Cargo.toml](../Cargo.toml): workspace version
+- [package.json](../package.json): release prep scripts
+- [apps/desktop/src-tauri/tauri.conf.json](../apps/desktop/src-tauri/tauri.conf.json): updater endpoint, bundled updater artifacts, public key, macOS entitlements
+- [apps/desktop/src-tauri/entitlements.plist](../apps/desktop/src-tauri/entitlements.plist): Hardened Runtime entitlements for WebView JIT and microphone access
+- [apps/desktop/src-tauri/src/lib.rs](../apps/desktop/src-tauri/src/lib.rs): Tauri updater plugin registration and restart/shutdown behavior
+- [apps/desktop/src/hooks/useAppUpdater.ts](../apps/desktop/src/hooks/useAppUpdater.ts): startup polling, 4-hour checks, download/install state
+- [apps/desktop/src/components/SettingsView.tsx](../apps/desktop/src/components/SettingsView.tsx): user-facing updater UI
+- [scripts/prepare-desktop-release.mjs](../scripts/prepare-desktop-release.mjs): sync version fields and check the CI updater key against the committed public key
+- [release-desktop.yml](../.github/workflows/release-desktop.yml): GitHub Actions release pipeline
+- [scripts/verify-desktop-release.mjs](../scripts/verify-desktop-release.mjs): check both Mac targets, installer assets, and updater metadata after packaging
 
 Generated files:
 
-- [apps/desktop/src-tauri/gen/schemas/acl-manifests.json](/Users/James/www/sites/falcondeck/apps/desktop/src-tauri/gen/schemas/acl-manifests.json)
-- [apps/desktop/src-tauri/gen/schemas/capabilities.json](/Users/James/www/sites/falcondeck/apps/desktop/src-tauri/gen/schemas/capabilities.json)
-- [apps/desktop/src-tauri/gen/schemas/desktop-schema.json](/Users/James/www/sites/falcondeck/apps/desktop/src-tauri/gen/schemas/desktop-schema.json)
-- [apps/desktop/src-tauri/gen/schemas/macOS-schema.json](/Users/James/www/sites/falcondeck/apps/desktop/src-tauri/gen/schemas/macOS-schema.json)
+- [apps/desktop/src-tauri/gen/schemas/acl-manifests.json](../apps/desktop/src-tauri/gen/schemas/acl-manifests.json)
+- [apps/desktop/src-tauri/gen/schemas/capabilities.json](../apps/desktop/src-tauri/gen/schemas/capabilities.json)
+- [apps/desktop/src-tauri/gen/schemas/desktop-schema.json](../apps/desktop/src-tauri/gen/schemas/desktop-schema.json)
+- [apps/desktop/src-tauri/gen/schemas/macOS-schema.json](../apps/desktop/src-tauri/gen/schemas/macOS-schema.json)
 
 The generated schema files should change only when Tauri config or permissions change.
 
@@ -134,18 +134,18 @@ GitHub Actions needs these secrets before the release workflow can publish insta
 
 ## Versioning rules
 
-- `[workspace.package].version` in [Cargo.toml](/Users/James/www/sites/falcondeck/Cargo.toml) is the canonical desktop release version.
+- `[workspace.package].version` in [Cargo.toml](../Cargo.toml) is the canonical desktop release version.
 - `npm run desktop:version:sync` copies that version into:
-  - [package.json](/Users/James/www/sites/falcondeck/package.json)
-  - [apps/desktop/package.json](/Users/James/www/sites/falcondeck/apps/desktop/package.json)
-  - [apps/desktop/src-tauri/tauri.conf.json](/Users/James/www/sites/falcondeck/apps/desktop/src-tauri/tauri.conf.json)
+  - [package.json](../package.json)
+  - [apps/desktop/package.json](../apps/desktop/package.json)
+  - [apps/desktop/src-tauri/tauri.conf.json](../apps/desktop/src-tauri/tauri.conf.json)
 - Do not hand-edit the desktop app version in multiple places and assume they will stay in sync.
 
 ## Releasing
 
-GitHub Actions secrets and the Mac-only notarizing workflow are in place. First public cut is [desktop-v0.1.0](https://github.com/jamesblackwell/falcondeck/releases/tag/desktop-v0.1.0). Agent procedure: [.agents/skills/desktop-mac-release/SKILL.md](/Users/James/www/sites/falcondeck/.agents/skills/desktop-mac-release/SKILL.md).
+GitHub Actions secrets and the Mac-only notarizing workflow are in place. First public cut is [desktop-v0.1.0](https://github.com/jamesblackwell/falcondeck/releases/tag/desktop-v0.1.0). Agent procedure: [.agents/skills/desktop-mac-release/SKILL.md](../.agents/skills/desktop-mac-release/SKILL.md).
 
-1. Bump `[workspace.package].version` in [Cargo.toml](/Users/James/www/sites/falcondeck/Cargo.toml) and run `npm run desktop:version:sync`.
+1. Bump `[workspace.package].version` in [Cargo.toml](../Cargo.toml) and run `npm run desktop:version:sync`.
 2. Push `main`, then `git tag desktop-vX.Y.Z && git push origin desktop-vX.Y.Z` (or run the `release-desktop` workflow manually). That creates a **draft** GitHub Release.
 3. Wait for both macOS jobs (Apple Silicon and Intel) and the `verify-updater` job. The verifier checks that the draft has both DMGs, update archives and signatures, and that `latest.json` points to the same signed files.
 4. Install from that DMG (not `make desktop-install`) and confirm Gatekeeper is silent, the daemon starts, and one real agent turn works.
@@ -214,7 +214,7 @@ Do not pass empty `APPLE_ID` / `APPLE_PASSWORD` into `tauri-action`. GitHub inje
 
 ### The app compiles in CI then fails at link with `___isPlatformVersionAtLeast`
 
-ObjC `@available` checks need `libclang_rt.osx`. [apps/desktop/src-tauri/build.rs](/Users/James/www/sites/falcondeck/apps/desktop/src-tauri/build.rs) must keep linking it for release builds (`rustc` uses `-nodefaultlibs`).
+ObjC `@available` checks need `libclang_rt.osx`. [apps/desktop/src-tauri/build.rs](../apps/desktop/src-tauri/build.rs) must keep linking it for release builds (`rustc` uses `-nodefaultlibs`).
 
 ### `tsc -b` fails in the desktop package script
 
@@ -225,7 +225,7 @@ Packaged/CI builds use `npm run build:frontend` (Vite) via `beforeBuildCommand`.
 Check:
 
 - the published release includes updater metadata such as `latest.json`
-- the updater endpoint in [apps/desktop/src-tauri/tauri.conf.json](/Users/James/www/sites/falcondeck/apps/desktop/src-tauri/tauri.conf.json) still points at the correct GitHub Releases URL
+- the updater endpoint in [apps/desktop/src-tauri/tauri.conf.json](../apps/desktop/src-tauri/tauri.conf.json) still points at the correct GitHub Releases URL
 - the embedded updater public key matches the private key that signed the release
 - the desktop app version is newer than the currently installed version
 
@@ -234,8 +234,8 @@ Check:
 Check:
 
 - whether the app is a packaged desktop build or a dev build
-- whether the updater plugin is enabled in [apps/desktop/src-tauri/src/lib.rs](/Users/James/www/sites/falcondeck/apps/desktop/src-tauri/src/lib.rs)
-- whether the updater permission is present in [apps/desktop/src-tauri/capabilities/default.json](/Users/James/www/sites/falcondeck/apps/desktop/src-tauri/capabilities/default.json)
+- whether the updater plugin is enabled in [apps/desktop/src-tauri/src/lib.rs](../apps/desktop/src-tauri/src/lib.rs)
+- whether the updater permission is present in [apps/desktop/src-tauri/capabilities/default.json](../apps/desktop/src-tauri/capabilities/default.json)
 
 ### Local desktop builds fail on missing native npm bindings
 
@@ -258,7 +258,7 @@ The CI secret and the committed `tauri.conf.json` key differ. Keep the existing 
 
 ## Related docs
 
-- [desktop-mac-release skill](/Users/James/www/sites/falcondeck/.agents/skills/desktop-mac-release/SKILL.md)
-- [10-repo-layout.md](/Users/James/www/sites/falcondeck/docs/10-repo-layout.md)
-- [11-deployment-ops.md](/Users/James/www/sites/falcondeck/docs/11-deployment-ops.md)
-- [06-architecture-decisions.md](/Users/James/www/sites/falcondeck/docs/06-architecture-decisions.md)
+- [desktop-mac-release skill](../.agents/skills/desktop-mac-release/SKILL.md)
+- [10-repo-layout.md](10-repo-layout.md)
+- [11-deployment-ops.md](11-deployment-ops.md)
+- [06-architecture-decisions.md](06-architecture-decisions.md)

@@ -11,7 +11,7 @@ falcondeck_relay_port: 8787
 # Public https endpoint used by clients
 falcondeck_relay_public_url: https://relay.example.com
 
-# Public hostname for the hosted remote web client
+# Public hostname for the mobile pairing landing (served from the public site)
 falcondeck_app_domain: app.example.com
 
 # Public hostname for the marketing site

@@ -5,7 +5,7 @@ Ansible lives in-repo so deployment stays reviewable and reproducible, but real 
 ## Layout
 
 - `playbooks/bootstrap.yml` prepares a fresh Ubuntu host
-- `playbooks/relay.yml` deploys the relay plus the hosted remote web app and site behind Caddy
+- `playbooks/relay.yml` deploys the relay, builds the web apps, and serves the public site and pairing landing behind Caddy
 - `inventory/example/hosts.yml` is a safe example inventory
 - `group_vars/all.example.yml` documents the variables you need
 - `roles/common` handles base packages and directories
@@ -25,20 +25,14 @@ These paths are gitignored:
 - `.vault-pass`
 - `.env`
 
-Keep your real Hetzner IPs, SSH users, TLS email, and any future secrets there.
+Keep real server addresses, SSH users, TLS email, and secrets there.
 
-## Recommended First Deployment Model
+## Deployment model
 
-Use a plain systemd service plus Caddy reverse proxy first.
-
-Why:
-
-- simplest path for contributors to understand
-- fewer moving parts than Docker
-- easy to debug on a small VM
-- good fit for a single Rust binary
-
-Docker can be added later if we need container-based distribution or multi-service packaging.
+The relay runs as a systemd service behind Caddy. Docker is not required.
+The playbook also builds the browser client, but the current Caddy template
+serves the public site on the pairing hostname. Hosting the browser client
+separately requires a static-site configuration for its built assets.
 
 ## Quick Start
 
@@ -55,9 +49,9 @@ cp group_vars/all.example.yml group_vars/all.local.yml
 
 DNS checklist before deploy:
 
-- `falcondeck.com` -> server IP
-- `app.falcondeck.com` -> server IP
-- `connect.falcondeck.com` -> server IP
+- `falcondeck_site_domain` -> server IP
+- `falcondeck_app_domain` -> server IP
+- `falcondeck_relay_domain` -> server IP
 
 If you use Cloudflare, make sure all three records exist before expecting TLS to work on every hostname. The relay and app/site can be proxied later, but the names must resolve first.
 
@@ -68,7 +62,7 @@ cd /path/to/falcondeck/ops/ansible
 ansible-playbook -i inventory/local/hosts.yml playbooks/bootstrap.yml
 ```
 
-4. Deploy the relay, hosted remote web app, and the public site:
+4. Deploy the relay and web assets:
 
 ```bash
 cd /path/to/falcondeck/ops/ansible
@@ -85,11 +79,15 @@ Or from the repo root:
 
 The deploy playbook syncs your current checkout to the server, builds the Linux relay there, installs the npm workspace at the repo root, builds both web apps there, and configures Caddy for:
 
-- `connect.falcondeck.com` -> relay
-- `app.falcondeck.com` -> hosted remote web app
-- `falcondeck.com` -> public site
+- `falcondeck_relay_domain` -> relay
+- `falcondeck_app_domain` -> public site and mobile pairing landing
+- `falcondeck_site_domain` -> public site
 
-It also builds the Linux daemon on the server and publishes it for remote provisioning:
+For FalconDeck's hosted deployment, those names are `connect.falcondeck.com`,
+`app.falcondeck.com`, and `falcondeck.com`. Use your own domains when self-hosting.
+
+It also builds the Linux daemon on the server and publishes it for remote provisioning
+at your configured relay URL (shown here with the hosted URL):
 
 - `https://connect.falcondeck.com/dist/falcondeck-daemon-x86_64-linux`
 - `https://connect.falcondeck.com/dist/falcondeck-daemon-x86_64-linux.sha256`

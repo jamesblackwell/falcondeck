@@ -14,6 +14,6 @@ Use [Discussions](https://github.com/jamesblackwell/falcondeck/discussions) for 
 4. Keep the change focused and run the relevant checks. `make test-desktop`, `make test-rust`, and `make typecheck` cover the main development paths; the [mobile guide](docs/14-mobile-app.md) covers mobile checks.
 5. Open a pull request explaining the problem, the resulting behaviour, and how you verified it. Include screenshots for visual changes.
 
-If you are finding your way around, start with the [repository layout](docs/10-repo-layout.md). Documentation improvements and reports about the [first-run experience](docs/GETTING-STARTED.md) are useful contributions too.
+If you are finding your way around, start with the [documentation index](docs/README.md) and [repository layout](docs/10-repo-layout.md). Documentation improvements and reports about the [first-run experience](docs/GETTING-STARTED.md) are useful contributions too.
 
 FalconDeck is MIT licensed. Contributions are made under the same [license](LICENSE).

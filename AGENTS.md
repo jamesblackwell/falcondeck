@@ -26,11 +26,11 @@ FalconDeck is a monorepo for a local daemon-first agent control plane:
 
 ## Mobile App
 
-- React Native 0.81 + Expo SDK 54. Entry point: `apps/mobile/src/entry.ts`.
+- React Native 0.83 + Expo SDK 55. Entry point: `apps/mobile/src/entry.ts`.
 - Package manager: **npm** (not pnpm). Always run `npm install` from monorepo root after changing any `package.json`.
 - `react-native-nitro-modules` must be a direct dependency (auto-linking needs it for the `NitroModules` pod).
 - `plugins/withLibz.js` links `libz` for `react-native-mmkv`'s CRC32 — do not remove.
-- `metro.config.js` blocklists root `react`/`react-native`/`react-dom` to prevent duplicate bundling. The root has newer versions for the desktop app; loading both crashes the mobile app.
+- `metro.config.js` pins React, React Native, and React DOM resolution to the workspace root. Preserve this single-runtime setup; duplicate copies crash the mobile app.
 - `babel.config.js` must include `react-native-unistyles/plugin` with `root: __dirname`.
 - EAS builds: `make mobile-build` (ad-hoc install link) or `eas build --profile preview-testflight` (TestFlight).
 - OTA updates: `make mobile-deploy` pushes JS-only changes without rebuilding.

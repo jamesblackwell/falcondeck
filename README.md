@@ -11,6 +11,7 @@
     <a href="https://github.com/jamesblackwell/falcondeck/releases">Download for Mac</a> ·
     <a href="https://apps.apple.com/app/falcondeck/id6760899257">Download for iPhone and iPad</a> ·
     <a href="docs/GETTING-STARTED.md">Getting started</a> ·
+    <a href="docs/README.md">Documentation</a> ·
     <a href="https://github.com/jamesblackwell/falcondeck/discussions">Questions and feedback</a>
   </p>
 </div>
@@ -62,11 +63,8 @@ FalconDeck currently works with:
 
 Codex, Claude Code, and Antigravity have direct integrations. OpenCode can use its native service or ACP, while Pi, Grok, Cursor, and other compatible agents connect through ACP. Support varies with the features each agent exposes.
 
-Hermes is qualified at source revision `1d6b278` for streaming, native session
-recovery, file-edit approvals, cancellation and vision prompts across the Mac,
-paired iOS and browser clients. Older Hermes 0.14.0 builds miss live tool
-completion events. See [setup and tested limits](docs/HERMES-ACP-QUALIFICATION.md);
-FalconDeck preserves the existing Hermes profile and does not upgrade it automatically.
+For Hermes setup, supported revisions, and tested limits, see the
+[qualification guide](docs/HERMES-ACP-QUALIFICATION.md).
 
 ## What you can do
 
@@ -145,7 +143,8 @@ make remote-web-dev
 
 The mobile app uses Expo. If you want to build your own version, see the [mobile development guide](docs/14-mobile-app.md).
 
-For technical detail, start with the [architecture overview](docs/00-architecture-overview.md), [agent integration guide](docs/02-agent-integration-paths.md), and [adapter guide](docs/ADAPTERS.md).
+For technical detail, start with the [documentation index](docs/README.md),
+[repository layout](docs/10-repo-layout.md), and [adapter guide](docs/ADAPTERS.md).
 
 ## Self-hosting
 
