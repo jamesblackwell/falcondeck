@@ -3687,9 +3687,15 @@ function AppInner() {
     ],
   );
 
+  // A dropped folder or app bundle is a passing hiccup, not a lasting
+  // error, so it gets a toast instead of the sticky sidebar banner.
   const handleNativeFileDropError = useCallback((message: string) => {
-    setActionError(message);
-  }, []);
+    toast({
+      variant: "warning",
+      title: "Couldn't attach that",
+      description: message,
+    });
+  }, [toast]);
   // Native drags never reach the document in a Tauri webview, so the drop
   // affordance and the files both come from the platform event.
   const nativeFileDragActive = useNativeFileDrop({
