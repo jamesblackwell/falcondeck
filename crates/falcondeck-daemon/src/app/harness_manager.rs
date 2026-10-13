@@ -126,7 +126,7 @@ const KNOWN_HARNESSES: &[KnownHarness] = &[
         id: "pi",
         label: "Pi",
         bin: "pi-acp",
-        npm_package: Some("@earendil-works/pi-coding-agent"),
+        npm_package: Some("pi-acp"),
         upgrade_command: Some(
             "npm install -g --ignore-scripts @earendil-works/pi-coding-agent pi-acp",
         ),
@@ -983,7 +983,43 @@ struct AuthProbeResult {
     failure: Option<String>,
 }
 
+/// pi-acp ignores --version and starts its JSON-RPC transport. Read the
+/// adapter's own manifest instead of launching it or using the Pi engine's
+/// unrelated version. Canonicalization handles npm launcher symlinks.
+fn pi_acp_package_version(executable: &str) -> Option<Result<Option<String>, ProbeFailure>> {
+    let path = std::fs::canonicalize(executable).ok()?;
+    let is_adapter = Path::new(executable)
+        .file_name()
+        .is_some_and(|name| name == "pi-acp")
+        || path.components().any(|part| part.as_os_str() == "pi-acp");
+    let unavailable = || is_adapter.then_some(Err(ProbeFailure::Unreadable));
+    for directory in path.parent()?.ancestors() {
+        let manifest = directory.join("package.json");
+        let Ok(contents) = std::fs::read_to_string(manifest) else {
+            continue;
+        };
+        let Ok(package) = serde_json::from_str::<serde_json::Value>(&contents) else {
+            return unavailable();
+        };
+        if package.get("name").and_then(serde_json::Value::as_str) != Some("pi-acp") {
+            return unavailable();
+        }
+        return Some(
+            package
+                .get("version")
+                .and_then(serde_json::Value::as_str)
+                .and_then(parse_version)
+                .map(Some)
+                .ok_or(ProbeFailure::Unreadable),
+        );
+    }
+    unavailable()
+}
+
 async fn probe_binary_version(executable: &str) -> Result<Option<String>, ProbeFailure> {
+    if let Some(version) = pi_acp_package_version(executable) {
+        return version;
+    }
     let args: &[&str] = if Path::new(executable)
         .file_name()
         .is_some_and(|name| name == "hermes")
@@ -1395,6 +1431,20 @@ fn remote_probe_script() -> String {
     let mut script = String::from(
         r#"fd_version() {
   case "$1" in
+    pi-acp|*/pi-acp|*/pi-acp/dist/index.js)
+      node -e 'const fs = require("fs"), path = require("path");
+        let dir = path.dirname(fs.realpathSync(process.argv[1]));
+        for (;;) {
+          const file = path.join(dir, "package.json");
+          if (fs.existsSync(file)) {
+            const pkg = JSON.parse(fs.readFileSync(file, "utf8"));
+            if (pkg.name !== "pi-acp" || typeof pkg.version !== "string" || !/^v?\d+\.\d+(?:\.\d+)?$/.test(pkg.version)) process.exit(1);
+            console.log(pkg.version); break;
+          }
+          const parent = path.dirname(dir);
+          if (parent === dir) process.exit(1);
+          dir = parent;
+        }' "$1" ;;
     hermes|*/hermes) "$1" acp --version ;;
     unreal-agent-runner|*/unreal-agent-runner) return 0 ;;
     *) "$1" --version ;;
@@ -1636,6 +1686,78 @@ INSTALL
         .unwrap();
         let error = run_local_upgrade(&command).await.unwrap_err();
         assert!(error.contains("exit code 23: update failed"), "{error}");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn pi_adapter_inventory_reads_manifest_without_starting_transport() {
+        use std::os::unix::{fs::PermissionsExt, fs::symlink};
+
+        let directory = tempfile::tempdir().unwrap();
+        let package = directory
+            .path()
+            .join("Pi install's directory/node_modules/pi-acp");
+        std::fs::create_dir_all(package.join("dist")).unwrap();
+        let binary = package.join("dist/index.js");
+        // Executing the adapter would fail; its version lives in the manifest.
+        std::fs::write(&binary, "#!/bin/sh\nexit 23\n").unwrap();
+        std::fs::set_permissions(&binary, std::fs::Permissions::from_mode(0o755)).unwrap();
+        std::fs::write(
+            package.join("package.json"),
+            r#"{"name":"pi-acp","version":"0.0.33"}"#,
+        )
+        .unwrap();
+        let launcher = directory.path().join("pi-acp");
+        symlink(&binary, &launcher).unwrap();
+        let harness = KNOWN_HARNESSES.iter().find(|h| h.id == "pi").unwrap();
+        assert_eq!(harness.npm_package, Some("pi-acp"));
+        let mut summary = harness.summary();
+        probe_configured_bin(&mut summary, launcher.to_str().unwrap()).await;
+        assert_eq!(summary.version.as_deref(), Some("0.0.33"));
+        assert_eq!(summary.install_state, HarnessInstallState::Installed);
+        assert_eq!(summary.failure, None);
+
+        let script = remote_probe_script();
+        let function = script.split("\nset -- ").next().unwrap();
+        let node = crate::agent_binary::resolve_agent_binary("node", "node").executable;
+        let node_dir = Path::new(&node).parent().unwrap();
+        let output = TokioCommand::new("/bin/sh")
+            .args([
+                "-c",
+                &format!("{function}\nfd_version \"$1\""),
+                "probe",
+                launcher.to_str().unwrap(),
+            ])
+            .env("PATH", format!("{}:/usr/bin:/bin", node_dir.display()))
+            .output()
+            .await
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(String::from_utf8_lossy(&output.stdout).trim(), "0.0.33");
+
+        std::fs::write(
+            package.join("package.json"),
+            r#"{"name":"pi-acp","version":"invalid"}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            probe_binary_version(launcher.to_str().unwrap()).await,
+            Err(ProbeFailure::Unreadable)
+        );
+        std::fs::write(package.join("package.json"), "malformed JSON").unwrap();
+        assert_eq!(
+            probe_binary_version(launcher.to_str().unwrap()).await,
+            Err(ProbeFailure::Unreadable)
+        );
+        std::fs::remove_file(package.join("package.json")).unwrap();
+        assert_eq!(
+            probe_binary_version(launcher.to_str().unwrap()).await,
+            Err(ProbeFailure::Unreadable)
+        );
     }
 
     #[test]
