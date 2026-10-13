@@ -99,7 +99,12 @@ pub(crate) fn hydrate_thread_response(
         if items.is_empty() {
             items = hydrate_thread_items_from_session_file(&path, workspace_path);
         } else {
-            supplement_thread_items_with_session_tool_calls(&mut items, &path, workspace_path);
+            supplement_thread_items_with_session_tool_calls(
+                &mut items,
+                &path,
+                workspace_path,
+                &thread_item_timestamp_fallback_ids(value),
+            );
         }
     }
     let summary = hydrate_thread_summary(summary, value, &items);
@@ -174,7 +179,12 @@ pub(crate) fn conversation_items_from_read(
         if items.is_empty() {
             items = hydrate_thread_items_from_session_file(&path, workspace_path);
         } else {
-            supplement_thread_items_with_session_tool_calls(&mut items, &path, workspace_path);
+            supplement_thread_items_with_session_tool_calls(
+                &mut items,
+                &path,
+                workspace_path,
+                &thread_item_timestamp_fallback_ids(value),
+            );
         }
     }
     items
@@ -1554,6 +1564,21 @@ pub(crate) fn hydrate_thread_items(value: &Value) -> Vec<ConversationItem> {
 
 fn extract_thread_session_path(value: &Value) -> Option<String> {
     extract_thread_record(value).and_then(|thread| extract_string(thread, &["path"]))
+}
+
+fn thread_item_timestamp_fallback_ids(value: &Value) -> HashSet<String> {
+    extract_thread_record(value)
+        .and_then(|thread| thread.get("turns"))
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|turn| turn.get("items").and_then(Value::as_array))
+        .flatten()
+        .filter(|item| {
+            extract_datetime_or_timestamp(item, &["createdAt", "created_at", "timestamp"]).is_none()
+        })
+        .filter_map(|item| extract_string(item, &["id"]))
+        .collect()
 }
 
 fn hydrate_thread_summary(
@@ -3312,6 +3337,7 @@ mod tests {
             &mut items,
             file.path().to_str().unwrap(),
             "/Users/james/project-a",
+            &HashSet::new(),
         );
 
         assert!(matches!(
@@ -3323,6 +3349,65 @@ mod tests {
                 && tool_id == "tool-from-session"
                 && output == "done"
         ));
+    }
+
+    #[test]
+    fn structured_final_answer_uses_native_timestamp_after_late_tool_supplements() {
+        let mut file = NamedTempFile::new().unwrap();
+        for entry in [
+            json!({"type": "session_meta", "payload": {"id": "thread", "cwd": "/project"}}),
+            json!({
+                "timestamp": "2026-10-02T15:38:40Z", "type": "response_item",
+                "payload": {"id": "explicit", "type": "message", "role": "assistant",
+                    "content": [{"type": "output_text", "text": "Stored explicit message."}]}
+            }),
+            json!({
+                "timestamp": "2026-10-02T15:38:45Z", "type": "response_item",
+                "payload": {"id": "late-tool", "type": "custom_tool_call",
+                    "call_id": "call-1", "name": "exec", "status": "completed"}
+            }),
+            json!({
+                "timestamp": "2026-10-02T15:38:48.625Z", "type": "response_item",
+                "payload": {"id": "final", "type": "message", "role": "assistant",
+                    "phase": "final_answer", "content": [{"type": "output_text",
+                        "text": "Stored final answer."}]}
+            }),
+        ] {
+            writeln!(file, "{entry}").unwrap();
+        }
+        let summary = parse_threads(
+            "workspace",
+            "/project",
+            &json!({
+                "data": [{"id": "thread", "cwd": "/project"}]
+            }),
+        )
+        .remove(0)
+        .summary;
+        let (hydrated, _) = hydrate_thread_response_for_refresh(
+            summary,
+            &json!({"thread": {
+                "id": "thread", "path": file.path(), "turns": [{
+                    "id": "turn-1", "status": "inProgress", "startedAt": "2026-10-02T15:09:06Z",
+                    "items": [
+                        {"id": "explicit", "type": "agentMessage", "text": "Current explicit message.",
+                            "createdAt": "2026-10-02T15:38:39Z"},
+                        {"id": "final", "type": "agentMessage", "text": "Current final answer.",
+                            "status": "inProgress", "phase": "final_answer"}
+                    ]
+                }]
+            }}),
+            "/project",
+        );
+        assert!(matches!(&hydrated.items[..], [
+            ConversationItem::AssistantMessage {id: explicit_id, text: explicit_text, created_at: explicit_at, ..},
+            ConversationItem::ToolCall {id: tool_id, ..},
+            ConversationItem::AssistantMessage {id: final_id, text: final_text, created_at: final_at,
+                lifecycle: ContentLifecycle::Streaming, ..}
+        ] if explicit_id == "explicit" && explicit_text == "Current explicit message."
+            && explicit_at.to_rfc3339() == "2026-10-02T15:38:39+00:00"
+            && tool_id == "late-tool" && final_id == "final" && final_text == "Current final answer."
+            && final_at.to_rfc3339() == "2026-10-02T15:38:48.625+00:00"));
     }
 
     #[test]

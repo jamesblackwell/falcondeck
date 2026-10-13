@@ -227,8 +227,26 @@ pub(super) fn supplement_thread_items_with_session_tool_calls(
     items: &mut Vec<ConversationItem>,
     session_path: &str,
     workspace_path: &str,
+    timestamp_fallback_ids: &HashSet<String>,
 ) {
-    let session_items = hydrate_thread_items_from_session_file(session_path, workspace_path);
+    let mut session_items = hydrate_thread_items_from_session_file(session_path, workspace_path);
+    let native_timestamps = session_items
+        .iter_mut()
+        .map(|item| {
+            let (id, created_at) = session_item_identity_and_timestamp(item);
+            (id.to_string(), *created_at)
+        })
+        .collect::<HashMap<_, _>>();
+    for item in items.iter_mut() {
+        let (id, created_at) = session_item_identity_and_timestamp(item);
+        if timestamp_fallback_ids.contains(id)
+            && let Some(native_time) = native_timestamps.get(id)
+        {
+            // Structured turns omit per-item timestamps. Correct their turn
+            // start fallback without replacing current content or lifecycle.
+            *created_at = *native_time;
+        }
+    }
     let mut tool_ids = items
         .iter()
         .filter_map(|item| match item {
@@ -245,6 +263,28 @@ pub(super) fn supplement_thread_items_with_session_tool_calls(
         }
     }
     items.sort_by_key(conversation_item_created_at);
+}
+
+fn session_item_identity_and_timestamp(
+    item: &mut ConversationItem,
+) -> (&str, &mut chrono::DateTime<Utc>) {
+    match item {
+        ConversationItem::UserMessage { id, created_at, .. }
+        | ConversationItem::AssistantMessage { id, created_at, .. }
+        | ConversationItem::Reasoning { id, created_at, .. }
+        | ConversationItem::CodeReview { id, created_at, .. }
+        | ConversationItem::ContextCompaction { id, created_at, .. }
+        | ConversationItem::Artifact { id, created_at, .. }
+        | ConversationItem::Unsupported { id, created_at, .. }
+        | ConversationItem::Image { id, created_at, .. }
+        | ConversationItem::WebSearch { id, created_at, .. }
+        | ConversationItem::FileChange { id, created_at, .. }
+        | ConversationItem::ToolCall { id, created_at, .. }
+        | ConversationItem::Plan { id, created_at, .. }
+        | ConversationItem::Diff { id, created_at, .. }
+        | ConversationItem::Service { id, created_at, .. }
+        | ConversationItem::InteractiveRequest { id, created_at, .. } => (id.as_str(), created_at),
+    }
 }
 
 #[derive(Clone)]
@@ -695,6 +735,7 @@ mod tests {
             &mut items,
             file.path().to_str().unwrap(),
             "/project",
+            &HashSet::new(),
         );
         assert_eq!(items.len(), 3);
         assert!(items.iter().any(|item| matches!(item,
