@@ -8,6 +8,25 @@ import {
 
 const created_at = "2026-08-10T12:00:00Z";
 
+describe("large transcript code fences", () => {
+  it.each(["export", "handoff"] as const)(
+    "preserves large backtick-heavy tool output in %s mode",
+    (mode) => {
+      const output = "`x".repeat(150_000) + "\n`````\nlatest result";
+      const tool = everyConversationItem().find(
+        (item) => item.kind === "tool_call",
+      )!;
+      const markdown = conversationItemsToMarkdown([{ ...tool, output }], {
+        mode,
+      });
+
+      expect(markdown).toContain(
+        `\n\n\`\`\`\`\`\`text\n${output}\n\`\`\`\`\`\`\n`,
+      );
+    },
+  );
+});
+
 function everyConversationItem(): ConversationItem[] {
   return [
     {

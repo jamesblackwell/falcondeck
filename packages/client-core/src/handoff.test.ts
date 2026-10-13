@@ -3,6 +3,26 @@ import { describe, expect, it } from "vitest";
 import { boundHandoffTranscript, buildHandoffPrompt } from "./handoff";
 
 describe("handoff context", () => {
+  it.each([
+    { boundary: "marker width", transcript: "x".repeat(2_900) },
+    { boundary: "Unicode", transcript: "😀".repeat(1_400) },
+  ])(
+    "reports the actual omitted count at $boundary boundaries",
+    ({ transcript }) => {
+      const bounded = boundHandoffTranscript(transcript, 2_000);
+      const match = /\n\n\[Omitted ([\d,]+) characters[^\]]+\]\n\n/.exec(bounded)!;
+      expect(match).not.toBeNull();
+      const omitted = Number(match[1].replace(/,/g, ""));
+      expect(omitted).toBe(
+        transcript.length - (bounded.length - match[0].length),
+      );
+      expect(bounded.length).toBeLessThanOrEqual(2_000);
+      expect(bounded).not.toMatch(
+        /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/,
+      );
+    },
+  );
+
   it("keeps a transcript that fits verbatim", () => {
     const transcript = `objective:${"a".repeat(200)}`;
     expect(boundHandoffTranscript(transcript, 10_000)).toBe(transcript);

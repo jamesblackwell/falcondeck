@@ -139,8 +139,12 @@ function markdownLinkLabel(value: string): string {
 }
 
 function codeFence(content: string, language: string | null = null): string {
-  const runs = content.match(/`+/g) ?? [];
-  const fence = "`".repeat(Math.max(3, ...runs.map((run) => run.length + 1)));
+  let fenceLength = 3;
+  // Large tool output can contain more runs than a function call accepts.
+  for (const match of content.matchAll(/`+/g)) {
+    fenceLength = Math.max(fenceLength, match[0].length + 1);
+  }
+  const fence = "`".repeat(fenceLength);
   const safeLanguage =
     language && /^[a-z0-9_+-]+$/i.test(language) ? language : "";
   return `${fence}${safeLanguage}\n${content}\n${fence}`;

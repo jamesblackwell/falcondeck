@@ -49,18 +49,20 @@ export function boundHandoffTranscript(
     return safeSlice(transcript, 0, maxChars);
   }
   const headChars = Math.floor(budget * HANDOFF_HEAD_SHARE);
-  const tailChars = budget - headChars;
-  const marker = formatOmissionMarker(
-    transcript.length - headChars - tailChars,
-    transcript.length,
-  );
-  // The exact omitted count can lengthen the marker a few characters past
-  // the estimate; shrink the tail by the difference to stay inside maxChars.
-  const tailBudget = Math.max(0, tailChars - (marker.length - estimate.length));
-  return `${safeSlice(transcript, 0, headChars)}${marker}${safeSlice(
-    transcript,
-    transcript.length - tailBudget,
-  )}`;
+  const head = safeSlice(transcript, 0, headChars);
+  let tailChars = budget - headChars;
+  for (;;) {
+    const tail = safeSlice(transcript, transcript.length - tailChars);
+    // Count the slices actually retained, including Unicode boundary fixes.
+    const marker = formatOmissionMarker(
+      transcript.length - head.length - tail.length,
+      transcript.length,
+    );
+    const overflow = head.length + marker.length + tail.length - maxChars;
+    if (overflow <= 0) return `${head}${marker}${tail}`;
+    // Shrinking the tail may widen the count again (e.g. 999 -> 1,000).
+    tailChars = Math.max(0, tailChars - overflow);
+  }
 }
 
 /**
