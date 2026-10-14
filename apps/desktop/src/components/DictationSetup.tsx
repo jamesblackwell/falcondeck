@@ -1,5 +1,7 @@
 import { useCallback, useEffect, useState } from "react";
 
+import { DictationDictionary } from "./DictationDictionary";
+
 import { useParakeetStatus } from "../parakeet";
 
 import { createDaemonApiClient } from "@falcondeck/client-core";
@@ -506,6 +508,8 @@ export function DictationSetup({
           </Field>
         )}
       </SettingsSection>
+
+      {compact ? null : <DictationDictionary />}
 
       {compact ? null : (
         <SettingsSection

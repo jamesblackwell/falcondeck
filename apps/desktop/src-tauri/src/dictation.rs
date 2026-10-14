@@ -26,7 +26,7 @@ const MAX_RECORDING_BYTES: u64 = 8 * 1024 * 1024;
 // on one line each. A paste failure also has to show the transcript itself —
 // the shorter box was sized before that preview existed and clipped the
 // actions behind overflow:hidden.
-const OVERLAY_PILL_WIDTH: f64 = 504.0;
+const OVERLAY_PILL_WIDTH: f64 = 720.0;
 const OVERLAY_PILL_HEIGHT: f64 = 84.0;
 const OVERLAY_FAILED_WIDTH: f64 = 720.0;
 const OVERLAY_FAILED_HEIGHT: f64 = 156.0;
@@ -44,7 +44,7 @@ const CANCEL_UNDO_WINDOW: Duration = Duration::from_secs(10);
 // External apps cannot acknowledge a synthetic paste reliably. Keep the
 // completed transcript reachable long enough for the writer to notice a miss
 // and explicitly copy it to the clipboard.
-const COMPLETED_FALLBACK_WINDOW: Duration = Duration::from_secs(8);
+const COMPLETED_FALLBACK_WINDOW: Duration = Duration::from_secs(15);
 
 static APP_HANDLE: OnceLock<AppHandle> = OnceLock::new();
 static CONFIG: LazyLock<RwLock<DictationConfiguration>> =
@@ -278,6 +278,10 @@ unsafe extern "C" {
     fn fd_dictation_retry_paste(text: *const std::ffi::c_char);
     fn fd_dictation_make_overlay_nonactivating(window: *mut std::ffi::c_void) -> bool;
     fn fd_dictation_paste_text(text: *const std::ffi::c_char) -> bool;
+    fn fd_dictation_replace_transcript(
+        original: *const std::ffi::c_char,
+        replacement: *const std::ffi::c_char,
+    ) -> bool;
     #[cfg(test)]
     fn fd_dictation_test_overlay_panel_contract() -> bool;
     #[cfg(test)]
@@ -288,6 +292,8 @@ unsafe extern "C" {
     fn fd_dictation_test_recovery_audio_contract() -> bool;
     #[cfg(test)]
     fn fd_dictation_test_rewrite_selection_contract() -> bool;
+    #[cfg(test)]
+    fn fd_dictation_test_transcript_replacement_ranges() -> bool;
     fn fd_dictation_copy_text(text: *const std::ffi::c_char) -> bool;
     fn fd_dictation_mark_completed();
     fn fd_dictation_open_accessibility_settings();
@@ -454,7 +460,7 @@ pub fn configure_dictation(config: DictationConfiguration) -> Result<(), String>
             config.history_retention_hours > 0,
             config.rewrite_enabled,
             rewrite_shortcut.as_ptr(),
-            config.auto_cleanup_enabled,
+            true, // Route Apple Speech through local dictionary corrections even without cloud cleanup.
         );
     }
     crate::parakeet::configure(
@@ -600,6 +606,124 @@ pub fn retry_dictation_paste() -> Result<(), String> {
     Ok(())
 }
 
+/// Dictionary editing needs a keyboard-focused window, unlike the floating panel.
+#[tauri::command]
+pub fn open_dictation_dictionary(app: AppHandle) -> Result<(), String> {
+    SESSION_GENERATION.fetch_add(1, Ordering::AcqRel);
+    dismiss_dictation_overlay();
+    let window = app
+        .get_webview_window(MAIN_WINDOW_LABEL)
+        .ok_or("FalconDeck's main window is unavailable.")?;
+    window.show().map_err(|e| e.to_string())?;
+    window.set_focus().map_err(|e| e.to_string())?;
+    app.emit_to(
+        MAIN_WINDOW_LABEL,
+        "falcondeck://open-dictation-dictionary",
+        last_dictation_transcript(),
+    )
+    .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn fix_dictation_transcript(app: AppHandle, original: String) -> Result<(), String> {
+    if last_dictation_transcript().as_deref() != Some(original.as_str()) {
+        return Err("This transcript is no longer current.".into());
+    }
+    let generation = SESSION_GENERATION.fetch_add(1, Ordering::AcqRel) + 1;
+    let copy_only = RECOVERY_COPY.load(Ordering::Acquire);
+    let result =
+        fix_dictation_transcript_inner(app.clone(), original.clone(), generation, copy_only).await;
+    if let Err(error) = &result {
+        if SESSION_GENERATION.load(Ordering::Acquire) == generation
+            && last_dictation_transcript().as_deref() == Some(original.as_str())
+        {
+            SESSION_GENERATION.fetch_add(1, Ordering::AcqRel);
+            show_overlay(&app, "fix_failed", true);
+            emit_event(
+                &app,
+                DictationEvent {
+                    state: "fix_failed",
+                    text: Some(original),
+                    error: Some(error.clone()),
+                    retained_audio: false,
+                    mode: None,
+                },
+            );
+            return Ok(());
+        }
+    }
+    result
+}
+
+async fn fix_dictation_transcript_inner(
+    app: AppHandle,
+    original: String,
+    generation: u64,
+    copy_only: bool,
+) -> Result<(), String> {
+    if last_dictation_transcript().as_deref() != Some(original.as_str()) {
+        return Err("This transcript is no longer current.".into());
+    }
+    let config = current_dictation_config()?;
+    let daemon_url = config.daemon_url.as_deref().ok_or(
+        "Connect FalconDeck and configure an OpenRouter key in Speech settings to use Fix.",
+    )?;
+    validate_local_daemon_url(daemon_url)?;
+    // Retire the completion timer while the request runs, but keep the original
+    // transcript recoverable if the model fails.
+    let corrected = crate::dictation_dictionary::apply(&app, original.clone());
+    let text = request_rewrite(
+        daemon_url, corrected, "Correct spelling, grammar, and punctuation, and tidy unclear wording. Keep the meaning, voice, and approximate length.".to_string(),
+        config.rewrite_model, Some(TRANSCRIPT_CLEANUP_PROMPT.to_string()),
+    ).await.map_err(|error| error.replace("The rewrite timed out. Your recording is retained, so you can retry.", "Fix timed out. Your original transcript is still available."))?;
+    let (sender, receiver) = tokio::sync::oneshot::channel();
+    let finish_app = app.clone();
+    app.run_on_main_thread(move || {
+        if SESSION_GENERATION.load(Ordering::Acquire) != generation || last_dictation_transcript().as_deref() != Some(original.as_str()) {
+            let _ = sender.send(Err("A newer dictation has started. The original text was left in place.".to_string()));
+            return;
+        }
+        if copy_only {
+            remember_transcript(&text);
+            match copy_dictation_transcript() {
+                Ok(()) => emit_completion(finish_app, text, None),
+                Err(error) => {
+                    show_overlay(&finish_app, "copy_failed", true);
+                    emit_event(&finish_app, DictationEvent {
+                        state: "copy_failed", text: Some(text), error: Some(error),
+                        retained_audio: false, mode: None,
+                    });
+                }
+            }
+            let _ = sender.send(Ok(()));
+            return;
+        }
+        #[cfg(target_os = "macos")]
+        let pasted = match (CString::new(original.as_str()), CString::new(text.as_str())) {
+            (Ok(original), Ok(replacement)) => unsafe { fd_dictation_replace_transcript(original.as_ptr(), replacement.as_ptr()) },
+            _ => false,
+        };
+        #[cfg(not(target_os = "macos"))]
+        let pasted = false;
+        remember_transcript(&text);
+        if pasted {
+            RECOVERY_COPY.store(false, Ordering::Release);
+            emit_completion(finish_app, text, None);
+        } else {
+            // No guessing at an editor's current selection. Keep corrected text
+            // reachable when the destination cannot expose a verifiable range.
+            show_overlay(&finish_app, "fixed", true);
+            emit_event(&finish_app, DictationEvent {
+                state: "fixed", text: Some(text),
+                error: Some("Select the original passage, then choose Paste correction to replace it, or Copy transcript.".into()),
+                retained_audio: false, mode: None,
+            });
+        }
+        let _ = sender.send(Ok(()));
+    }).map_err(|e| e.to_string())?;
+    receiver.await.map_err(|e| e.to_string())?
+}
+
 #[tauri::command]
 pub fn discard_dictation() {
     ACTIVE_OPENROUTER_TRANSCRIPTION.store(0, Ordering::Release);
@@ -611,6 +735,7 @@ pub fn discard_dictation() {
 
 #[tauri::command]
 pub fn dismiss_dictation_overlay() {
+    SESSION_GENERATION.fetch_add(1, Ordering::AcqRel);
     if let Some(app) = APP_HANDLE.get() {
         if let Some(window) = app.get_webview_window(DICTATION_WINDOW_LABEL) {
             let _ = window.hide();
@@ -818,7 +943,7 @@ pub fn shutdown() {
 fn overlay_size(state: &str, has_transcript: bool) -> (f64, f64) {
     if matches!(
         state,
-        "failed" | "copy_failed" | "unrecoverable" | "recovered"
+        "failed" | "copy_failed" | "unrecoverable" | "recovered" | "fixed" | "fix_failed"
     ) {
         let height = if has_transcript {
             OVERLAY_FAILED_WITH_TRANSCRIPT_HEIGHT
@@ -836,7 +961,7 @@ fn overlay_size(state: &str, has_transcript: bool) -> (f64, f64) {
 fn overlay_takes_clicks(event: &DictationEvent) -> bool {
     matches!(
         event.state,
-        "failed" | "copy_failed" | "unrecoverable" | "recovered"
+        "failed" | "copy_failed" | "unrecoverable" | "recovered" | "fixed" | "fix_failed"
     ) || (event.state == "completed" && event.text.is_some())
         || (event.state == "cancelled" && event.retained_audio)
 }
@@ -889,7 +1014,7 @@ fn show_overlay(app: &AppHandle, state: &str, has_transcript: bool) {
         state,
         matches!(
             state,
-            "failed" | "copy_failed" | "unrecoverable" | "recovered"
+            "failed" | "copy_failed" | "unrecoverable" | "recovered" | "fixed" | "fix_failed"
         ),
         has_transcript,
     );
@@ -1156,6 +1281,10 @@ const TRANSCRIPT_CLEANUP_PROMPT: &str = "You lightly edit speech-to-text transcr
 - Return ONLY the edited transcript. No preamble, explanation, code fences, surrounding quotation marks, or sign-off.";
 
 async fn cleanup_transcript(text: String, config: &DictationConfiguration) -> String {
+    let text = APP_HANDLE.get().map_or_else(
+        || text.clone(),
+        |app| crate::dictation_dictionary::apply(app, text.clone()),
+    );
     if !config.auto_cleanup_enabled {
         return text;
     }
@@ -1666,7 +1795,13 @@ pub extern "C" fn fd_dictation_emit(kind: i32, payload: *const std::ffi::c_char)
                 );
                 return;
             };
-            emit_rewriting(&app);
+            if !cleanup
+                || CONFIG
+                    .read()
+                    .is_ok_and(|config| config.auto_cleanup_enabled)
+            {
+                emit_rewriting(&app);
+            }
             tauri::async_runtime::spawn(async move {
                 let config = match current_dictation_config() {
                     Ok(config) => config,
@@ -1835,6 +1970,12 @@ mod tests {
         dictation_audio_devices, measured_recording_duration, parse_audio_level, permission_label,
         validate_local_daemon_url, validate_recording_path,
     };
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn transcript_replacement_requires_the_original_range_and_unchanged_text() {
+        assert!(unsafe { super::fd_dictation_test_transcript_replacement_ranges() });
+    }
 
     #[tokio::test]
     async fn cleanup_is_opt_in_and_preserves_offline_transcripts() {

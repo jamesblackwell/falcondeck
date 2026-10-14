@@ -23,6 +23,7 @@ mod computer_use;
 mod desktop_notifications;
 mod dictation;
 mod dictation_history;
+mod dictation_dictionary;
 mod parakeet;
 mod sounds;
 
@@ -1642,6 +1643,10 @@ pub fn run() {
             dictation::dismiss_dictation_overlay,
             dictation::last_dictation_transcript,
             dictation::copy_dictation_transcript,
+            dictation::fix_dictation_transcript,
+            dictation::open_dictation_dictionary,
+            dictation_dictionary::dictation_dictionary,
+            dictation_dictionary::save_dictation_dictionary,
             dictation::dictation_history,
             dictation::dictation_history_retry,
             dictation::dictation_history_delete,

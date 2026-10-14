@@ -3,7 +3,7 @@ import { useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { Button } from "@falcondeck/ui";
-import { Check, ClipboardPaste, Copy, Mic, RotateCcw, Trash2, X } from "lucide-react";
+import { Check, ClipboardPaste, Copy, Mic, RotateCcw, Trash2, X, BookOpen, WandSparkles } from "lucide-react";
 
 type DictationState =
   | "recording"
@@ -14,6 +14,8 @@ type DictationState =
   | "copy_failed"
   | "unrecoverable"
   | "recovered"
+  | "fixed"
+  | "fix_failed"
   | "cancelled";
 
 export type DictationEvent = {
@@ -164,6 +166,8 @@ export function DictationOverlay({
   subscribeToEvents = true,
 }: DictationOverlayProps = {}) {
   const [event, setEvent] = useState<DictationEvent>(initialEvent);
+  const eventRef = useRef(event);
+  eventRef.current = event;
   const [copied, setCopied] = useState(false);
   const [actionPending, setActionPending] = useState(false);
   const [actionError, setActionError] = useState<string | null>(null);
@@ -206,15 +210,23 @@ export function DictationOverlay({
 
   const unrecoverable = event.state === "unrecoverable";
   const recovered = event.state === "recovered";
+  const fixed = event.state === "fixed";
+  const readyToPaste = recovered || fixed;
   const copyFailed = event.state === "copy_failed";
-  const failed = event.state === "failed" || unrecoverable || copyFailed;
-  const expanded = failed || recovered;
+  const failed = event.state === "failed" || event.state === "fix_failed" || unrecoverable || copyFailed;
+  const expanded = failed || recovered || fixed || Boolean(actionError);
   const runAction = async (command: string, args?: Record<string, unknown>) => {
+    const actionEvent = event;
     setActionPending(true);
     setActionError(null);
     try {
       await invoke(command, args);
+      if (eventRef.current !== actionEvent) return;
+      if (command === "open_dictation_dictionary" || command === "fix_dictation_transcript") {
+        setActionPending(false);
+      }
     } catch (error) {
+      if (eventRef.current !== actionEvent) return;
       setActionPending(false);
       setActionError(String(error));
     }
@@ -229,11 +241,25 @@ export function DictationOverlay({
       },
     );
   };
+  const postTranscriptActions = event.text && event.mode !== "rewrite" ? (
+    <>
+      <Button type="button" size="sm" variant="secondary" disabled={actionPending} onClick={() => void runAction("open_dictation_dictionary")}>
+        <BookOpen aria-hidden="true" className="h-3.5 w-3.5" />
+        Update dictionary
+      </Button>
+      <Button type="button" size="sm" variant="secondary" disabled={actionPending} onClick={() => void runAction("fix_dictation_transcript", { original: event.text })}>
+        <WandSparkles aria-hidden="true" className="h-3.5 w-3.5" />
+        {actionPending ? "Working…" : "Fix"}
+      </Button>
+    </>
+  ) : null;
   const rewrite = event.mode === "rewrite";
   const label = {
     recording: rewrite ? "Listening for edit" : "Listening",
     transcribing: rewrite ? "Transcribing instruction" : "Transcribing",
     rewriting: "Rewriting",
+    fixed: "Text fixed",
+    fix_failed: "Couldn’t fix",
     completed: rewrite ? "Rewrite pasted" : "Paste sent",
     cancelled: "Cancelled",
     recovered: rewrite ? "Rewrite copied" : "Transcript copied",
@@ -256,8 +282,8 @@ export function DictationOverlay({
         {expanded ? (
           <>
             <div className="flex min-h-0 flex-1 items-start gap-3">
-              <span className={`mt-0.5 rounded-full p-1.5 ${recovered ? "bg-success-muted text-success" : "bg-danger-muted text-danger"}`}>
-                {recovered ? <Check aria-hidden="true" className="h-4 w-4" /> : <X aria-hidden="true" className="h-4 w-4" />}
+              <span className={`mt-0.5 rounded-full p-1.5 ${readyToPaste ? "bg-success-muted text-success" : "bg-danger-muted text-danger"}`}>
+                {readyToPaste ? <Check aria-hidden="true" className="h-4 w-4" /> : <X aria-hidden="true" className="h-4 w-4" />}
               </span>
               <div className="min-h-0 min-w-0 flex-1">
                 <p className="text-[length:var(--fd-text-sm)] font-medium text-fg-primary">
@@ -294,6 +320,7 @@ export function DictationOverlay({
               </Button>
             </div>
             <div className="mt-3 flex shrink-0 flex-wrap justify-end gap-2">
+              {postTranscriptActions}
               {event.text ? (
                 <>
                   <Button
@@ -301,10 +328,10 @@ export function DictationOverlay({
                     variant={recovered || copyFailed ? "secondary" : "default"}
                     disabled={actionPending}
                     onClick={() => void runAction("retry_dictation_paste")}
-                    aria-label={recovered ? "Paste transcript" : "Retry paste"}
+                    aria-label={fixed ? "Paste correction" : recovered ? "Paste transcript" : "Retry paste"}
                   >
                     <ClipboardPaste aria-hidden="true" className="h-4 w-4" />
-                    {recovered ? "Paste transcript" : "Retry paste"}
+                    {fixed ? "Paste correction" : recovered ? "Paste transcript" : "Retry paste"}
                   </Button>
                   <Button
                     type="button"
@@ -379,6 +406,8 @@ export function DictationOverlay({
                 </span>
               </button>
             ) : event.state === "completed" && event.text ? (
+              <div className="ml-auto flex shrink-0 items-center gap-2">
+              {postTranscriptActions}
               <button
                 type="button"
                 className="fd-focus ml-auto inline-flex shrink-0 items-center gap-2 rounded-full border border-border-default px-3 py-1.5 text-[length:var(--fd-text-xs)] font-medium text-fg-primary hover:bg-surface-3"
@@ -391,6 +420,7 @@ export function DictationOverlay({
                 )}
                 {copied ? "Copied" : rewrite ? "Copy rewrite" : "Copy transcript"}
               </button>
+              </div>
             ) : (
               <span className="ml-auto shrink-0 font-mono text-[length:var(--fd-text-xs)] text-fg-muted">
                 {event.state === "recording" ? "Esc to cancel" : ""}

@@ -43,8 +43,9 @@ status window, and paste-at-cursor behavior.
   FalconDeck overlay briefly became active, the original app is reactivated;
   if the user switched to a different app, insertion stops and the transcript
   is offered for Copy instead of being pasted into the wrong place.
-- A completed transcript remains in the top pill for eight seconds with a Copy
-  action. Explicit copy leaves the transcript on the clipboard; automatic paste
+- A completed transcript remains in the top pill for fifteen seconds with Copy,
+  Update dictionary, and Fix actions. Explicit copy leaves the transcript on the
+  clipboard; automatic paste
   still restores the clipboard contents it temporarily replaced.
 - If the destination cannot accept the paste, the overlay grows into a recovery
   card: the transcript is shown as plain text (not a quotation), with Retry
@@ -53,6 +54,28 @@ status window, and paste-at-cursor behavior.
   the normally routed one), Copy as the secondary action, and
   Retry transcription / Discard still available. The window is sized to
   keep those controls on-screen.
+
+## Corrections after transcription
+
+Settings → Speech → Correction dictionary stores up to 100 find/replace pairs
+on this Mac. Entries match whole words or phrases without case sensitivity;
+the replacement uses the saved spelling. Longer phrases win and replacements
+do not cascade through other entries. All engines use the dictionary before
+delivery, including when cloud cleanup is disabled. Dictionary updates apply
+to future transcriptions and history retries.
+
+Update dictionary opens Speech settings with the latest transcript visible and
+the Heard as field focused. Existing entries can be edited or removed.
+
+Fix runs the selected rewrite model with the transcript-cleanup prompt, even
+when automatic cleanup is off. It requires the daemon connection and the
+existing OpenRouter speech key. Before replacing pasted text, FalconDeck
+checks the recorded insertion range, current editor, current text, and caret
+or selection. If that range cannot be verified (including editors with limited
+Accessibility support), the corrected transcript remains in a recovery card.
+Select the original passage and choose Paste correction, or copy the correction.
+A failed model request keeps the original transcript available. Starting a new
+dictation or dismissing the overlay retires an in-flight Fix.
 
 ## Native flow
 
@@ -79,7 +102,7 @@ FalconDeck inserts directly into its own React composer rather than routing its
 transcript back through the native paste machinery. For external apps, macOS
 does not expose an acknowledgement that an editor consumed a synthetic paste;
 the completed pill therefore retains the transcript and its Copy action for
-eight seconds even after the shortcut was dispatched.
+fifteen seconds even after the shortcut was dispatched.
 
 Microphone selection is independent of the macOS output route. FalconDeck uses
 an input-only `AVCaptureSession`, so starting dictation does not create a
@@ -227,8 +250,8 @@ dictation. Empty selections fail instead of typing the instruction. The model
 is told to treat the passage as material to edit, never as a question to
 answer, and not to polish it into generic LLM prose.
 
-Local downloaded models, vocabulary/dictionary hints, learned writing-style
-profiles, and Windows support are deliberately outside this version. A local
+Vocabulary hints, learned writing-style profiles, and Windows support are
+deliberately outside this version. A local
 model should plug into the same post-recording provider boundary without
 moving durable conversation state into the desktop shell.
 

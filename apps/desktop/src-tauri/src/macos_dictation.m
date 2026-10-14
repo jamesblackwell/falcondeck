@@ -497,9 +497,22 @@ static CGKeyCode FDCopyVirtualKeyCode(void) {
   return FDCharacterVirtualKeyCode((UniChar)'c', FDQwertyCKeyCode);
 }
 
+static BOOL FDTranscriptRangeMatches(NSString *value, NSString *original, CFRange pasted, CFRange selected) {
+  if (!value || original.length == 0 || pasted.location < 0 || pasted.length != (CFIndex)original.length) return NO;
+  NSUInteger location = (NSUInteger)pasted.location;
+  NSUInteger length = (NSUInteger)pasted.length;
+  if (location > value.length || length > value.length - location) return NO;
+  BOOL caretMatches = (selected.length == 0 && selected.location == pasted.location + pasted.length) || (selected.location == pasted.location && selected.length == pasted.length);
+  return caretMatches && [[value substringWithRange:NSMakeRange(location, length)] isEqualToString:original];
+}
+
 @interface FDDictationController : NSObject <AVCaptureFileOutputRecordingDelegate> {
   AXUIElementRef _pasteTargetElement;
+  AXUIElementRef _lastPastedElement;
 }
+@property(nonatomic) CFRange lastPastedRange;
+@property(nonatomic) BOOL lastPastedRangeKnown;
+@property(nonatomic) pid_t lastPastedApplicationPid;
 @property(nonatomic) BOOL enabled;
 @property(nonatomic) BOOL rewriteEnabled;
 @property(nonatomic) BOOL autoCleanupEnabled;
@@ -696,6 +709,7 @@ static CGEventRef FDEventTapCallback(CGEventTapProxy proxy, CGEventType type,
 }
 
 - (void)dealloc {
+  if (_lastPastedElement) CFRelease(_lastPastedElement);
   if (_pasteTargetElement) CFRelease(_pasteTargetElement);
 }
 
@@ -1999,6 +2013,43 @@ static BOOL FDRecordingIsReadable(NSURL *url) {
   self.pasteboardRestoreItems = nil;
 }
 
+// Only replace the range recorded by the last paste, in the same editor,
+// with the caret still at its end (or that exact passage selected).
+- (BOOL)replaceTranscript:(NSString *)original withText:(NSString *)replacement {
+  if (!self.lastPastedRangeKnown || !_lastPastedElement || self.recording || self.stopping) return NO;
+  if (NSWorkspace.sharedWorkspace.frontmostApplication.processIdentifier != self.lastPastedApplicationPid) return NO;
+  AXUIElementRef focused = FDCopyFocusedUIElement(NULL);
+  BOOL sameEditor = focused && CFEqual(focused, _lastPastedElement);
+  if (focused) CFRelease(focused);
+  if (!sameEditor) return NO;
+  CFTypeRef rangeValue = NULL, fullValue = NULL;
+  CFRange selected = CFRangeMake(-1, 0);
+  AXUIElementCopyAttributeValue(_lastPastedElement, kAXSelectedTextRangeAttribute, &rangeValue);
+  AXUIElementCopyAttributeValue(_lastPastedElement, kAXValueAttribute, &fullValue);
+  BOOL validRange = rangeValue && CFGetTypeID(rangeValue) == AXValueGetTypeID() && AXValueGetValue((AXValueRef)rangeValue, kAXValueCFRangeType, &selected);
+  NSString *value = fullValue && CFGetTypeID(fullValue) == CFStringGetTypeID() ? (__bridge NSString *)fullValue : nil;
+  CFRange pasted = self.lastPastedRange;
+  BOOL matches = validRange && FDTranscriptRangeMatches(value, original, pasted, selected);
+  if (rangeValue) CFRelease(rangeValue);
+  if (fullValue) CFRelease(fullValue);
+  if (!matches) return NO;
+  AXValueRef selection = AXValueCreate(kAXValueCFRangeType, &pasted);
+  AXError result = AXUIElementSetAttributeValue(_lastPastedElement, kAXSelectedTextRangeAttribute, selection);
+  CFRelease(selection);
+  if (result != kAXErrorSuccess) return NO;
+  // Verify that a controlled editor accepted the selection before Command-V.
+  AXUIElementRef element = (AXUIElementRef)CFRetain(_lastPastedElement);
+  BOOL verified = [FDSelectedTextFromElement(element) isEqualToString:original];
+  BOOL pastedText = verified && [self pasteText:replacement];
+  if (!pastedText) {
+    AXValueRef previous = AXValueCreate(kAXValueCFRangeType, &selected);
+    AXUIElementSetAttributeValue(element, kAXSelectedTextRangeAttribute, previous);
+    CFRelease(previous);
+  }
+  CFRelease(element);
+  return pastedText;
+}
+
 - (BOOL)pasteText:(NSString *)text {
   return [self pasteText:text attemptTargetedFirst:NO];
 }
@@ -2021,6 +2072,22 @@ static BOOL FDRecordingIsReadable(NSURL *url) {
           ? self.pasteTargetApplicationProcessIdentifier
           : self.pasteTargetProcessIdentifier;
   if (targetApplicationProcessIdentifier <= 0) return NO;
+
+  self.lastPastedRangeKnown = NO;
+  if (_lastPastedElement) { CFRelease(_lastPastedElement); _lastPastedElement = NULL; }
+  if (_pasteTargetElement) {
+    CFTypeRef rangeValue = NULL;
+    if (AXUIElementCopyAttributeValue(_pasteTargetElement, kAXSelectedTextRangeAttribute, &rangeValue) == kAXErrorSuccess && rangeValue) {
+      CFRange range;
+      if (CFGetTypeID(rangeValue) == AXValueGetTypeID() && AXValueGetValue((AXValueRef)rangeValue, kAXValueCFRangeType, &range) && range.location >= 0 && range.length >= 0) {
+        self.lastPastedRange = CFRangeMake(range.location, (CFIndex)text.length);
+        self.lastPastedRangeKnown = YES;
+        self.lastPastedApplicationPid = targetApplicationProcessIdentifier;
+        _lastPastedElement = (AXUIElementRef)CFRetain(_pasteTargetElement);
+      }
+      CFRelease(rangeValue);
+    }
+  }
 
   // FalconDeck owns its composer and can update it directly. Cross-process AX
   // selected-text writes are deliberately not used: controlled web fields can
@@ -2606,6 +2673,11 @@ void fd_dictation_discard(void) {
   });
 }
 
+bool fd_dictation_replace_transcript(const char *original, const char *replacement) {
+  if (!original || !replacement) return false;
+  return [[FDDictationController sharedController] replaceTranscript:[NSString stringWithUTF8String:original] withText:[NSString stringWithUTF8String:replacement]];
+}
+
 bool fd_dictation_paste_text(const char *utf8_text) {
   if (!utf8_text) return false;
   NSString *text = [NSString stringWithUTF8String:utf8_text];
@@ -2694,4 +2766,20 @@ void fd_dictation_shutdown(void) {
   dispatch_async(dispatch_get_main_queue(), ^{
     [[FDDictationController sharedController] shutdown];
   });
+}
+
+bool fd_dictation_test_transcript_replacement_ranges(void) {
+  @autoreleasepool {
+    NSString *value = @"Earlier text. Laravel 😀 later";
+    NSString *original = @"Laravel 😀";
+    CFRange pasted = CFRangeMake(14, (CFIndex)original.length);
+    CFRange caret = CFRangeMake(pasted.location + pasted.length, 0);
+    return FDTranscriptRangeMatches(value, original, pasted, caret) &&
+      FDTranscriptRangeMatches(value, original, pasted, pasted) &&
+      !FDTranscriptRangeMatches(value, original, pasted, CFRangeMake(0, 0)) &&
+      !FDTranscriptRangeMatches(@"Earlier text. Edited 😀 later", original, pasted, caret) &&
+      !FDTranscriptRangeMatches(value, original, CFRangeMake(1000, pasted.length), caret) &&
+      !FDTranscriptRangeMatches(nil, original, pasted, caret) &&
+      !FDTranscriptRangeMatches(value, @"", pasted, caret);
+  }
 }

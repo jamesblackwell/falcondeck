@@ -9,6 +9,8 @@ const listeners = new Map<string, Set<Handler>>();
 const invoked: string[] = [];
 const invocationArgs: Array<unknown> = [];
 let rejectedCommand: string | null = null;
+let deferFix = false;
+let rejectFix: ((reason: string) => void) | undefined;
 
 vi.mock("@tauri-apps/api/event", () => ({
   listen: (event: string, handler: Handler) => {
@@ -21,6 +23,9 @@ vi.mock("@tauri-apps/api/event", () => ({
 
 vi.mock("@tauri-apps/api/core", () => ({
   invoke: (command: string, args?: unknown) => {
+    if (command === "fix_dictation_transcript" && deferFix) {
+      return new Promise<void>((_resolve, reject) => { rejectFix = reject; });
+    }
     invoked.push(command);
     invocationArgs.push(args);
     if (command === rejectedCommand) return Promise.reject("Clipboard unavailable");
@@ -41,6 +46,8 @@ beforeEach(() => {
   invoked.length = 0;
   invocationArgs.length = 0;
   rejectedCommand = null;
+  deferFix = false;
+  rejectFix = undefined;
 });
 
 afterEach(() => {
@@ -48,6 +55,48 @@ afterEach(() => {
 });
 
 describe("DictationOverlay", () => {
+  it("offers dictionary and Fix after dictation and sends the original transcript", async () => {
+    render(<DictationOverlay initialEvent={{ state: "completed", text: "I use Larab.", retainedAudio: false }} subscribeToEvents={false} />);
+    await act(async () => { fireEvent.click(screen.getByRole("button", { name: "Fix" })); });
+    expect(invoked.at(-1)).toBe("fix_dictation_transcript");
+    expect(invocationArgs.at(-1)).toEqual({ original: "I use Larab." });
+    await act(async () => { fireEvent.click(screen.getByRole("button", { name: "Update dictionary" })); });
+    expect(invoked.at(-1)).toBe("open_dictation_dictionary");
+  });
+
+  it("keeps the original transcript accessible when Fix fails", async () => {
+    rejectedCommand = "fix_dictation_transcript";
+    render(<DictationOverlay initialEvent={{ state: "completed", text: "Original text", retainedAudio: false }} subscribeToEvents={false} />);
+    await act(async () => { fireEvent.click(screen.getByRole("button", { name: "Fix" })); });
+    expect(screen.getByRole("alert")).toHaveTextContent("Clipboard unavailable");
+    expect(screen.getByText("Original text")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Fix" })).toBeEnabled();
+  });
+
+  it("ignores an old Fix failure after a new recording starts", async () => {
+    deferFix = true;
+    render(<DictationOverlay initialEvent={{ state: "completed", text: "Original text", retainedAudio: false }} />);
+    await act(async () => { fireEvent.click(screen.getByRole("button", { name: "Fix" })); });
+    await emit("falcondeck://dictation-state", { state: "recording", retainedAudio: false });
+    await act(async () => { rejectFix?.("Old request failed"); });
+    expect(screen.getByText("Listening")).toBeInTheDocument();
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+  });
+
+  it("offers a replacement paste when the fixed text cannot be inserted automatically", async () => {
+    render(<DictationOverlay initialEvent={{ state: "fixed", text: "Corrected text", error: "Select the original passage first.", retainedAudio: false }} subscribeToEvents={false} />);
+    expect(screen.getByText("Text fixed")).toBeInTheDocument();
+    expect(screen.getByText("Corrected text")).toBeInTheDocument();
+    await act(async () => { fireEvent.click(screen.getByRole("button", { name: "Paste correction" })); });
+    expect(invoked.at(-1)).toBe("retry_dictation_paste");
+  });
+
+  it("keeps voice rewrite completions focused on their copy action", () => {
+    render(<DictationOverlay initialEvent={{ state: "completed", text: "Rewritten text", retainedAudio: false, mode: "rewrite" }} subscribeToEvents={false} />);
+    expect(screen.queryByRole("button", { name: "Fix" })).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Copy rewrite" })).toBeInTheDocument();
+  });
+
   it("retries saved audio into the clipboard and leaves the recovered text visible", async () => {
     render(<DictationOverlay />);
     await emit("falcondeck://dictation-state", {

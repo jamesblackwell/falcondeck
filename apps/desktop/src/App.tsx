@@ -1,3 +1,4 @@
+import { DICTIONARY_REQUEST_EVENT, DICTIONARY_REQUEST_KEY } from "./components/DictationDictionary";
 import { ExternalLinkHandler } from "./external-links";
 import {
   lazy,
@@ -834,6 +835,21 @@ function AppInner() {
     setIsScheduledOpen(false);
     setIsExtensionsOpen(false);
   }, []);
+
+  useEffect(() => {
+    if (!isTauriDesktop()) return;
+    let disposed = false;
+    let unlisten: (() => void) | undefined;
+    void import("@tauri-apps/api/event").then(({ listen }) => {
+      if (disposed) return;
+      void listen<string | null>("falcondeck://open-dictation-dictionary", ({ payload }) => {
+        sessionStorage.setItem(DICTIONARY_REQUEST_KEY, payload ?? "");
+        openSpeechSettings();
+        window.dispatchEvent(new Event(DICTIONARY_REQUEST_EVENT));
+      }).then((off) => { if (disposed) off(); else unlisten = off; });
+    });
+    return () => { disposed = true; unlisten?.(); };
+  }, [openSpeechSettings]);
 
   // System-wide dictation aimed at FalconDeck itself arrives here instead of
   // through a native paste, which is unreliable against the webview. Also the
