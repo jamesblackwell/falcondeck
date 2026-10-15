@@ -105,6 +105,22 @@ describe('collectActivityEntries', () => {
       ])
   })
 
+  it('files a parked thread with background work under running even when unread', () => {
+    const parked = thread({
+      id: 'parked',
+      attention: {
+        ...thread({ id: 'base' }).attention,
+        level: 'unread',
+        unread: true,
+        background_task_count: 1,
+      },
+    })
+
+    expect(collectActivityEntries([group([parked])], [])).toMatchObject([
+      { section: 'running', thread: { id: 'parked' } },
+    ])
+  })
+
   it('recognizes both blocked signals and keeps request payloads oldest-first', () => {
     const countOnly = thread({
       id: 'count-only',

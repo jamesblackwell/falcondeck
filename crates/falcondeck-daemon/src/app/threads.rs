@@ -1490,6 +1490,9 @@ impl AppState {
         // parent for another turn. The thread reports the count so the UI can
         // say "idle, but work is still in flight" instead of "done".
         let mut outstanding_tasks = OutstandingTasks::default();
+        // What the thread summary last advertised, so the per-iteration sync
+        // below only takes the thread lock when the visible count moves.
+        let mut published_background_count = 0u32;
         let mut background_task_tools = HashMap::<String, String>::new();
         let mut running_tool_titles = HashMap::<String, String>::new();
         let mut last_line_at = tokio::time::Instant::now();
@@ -1581,6 +1584,18 @@ impl AppState {
                 }
             });
             'stdout: loop {
+                // The one place a parked thread's background count is
+                // published. Runs after every line and at least every
+                // CLAUDE_STALL_CHECK_INTERVAL, so task events land at once
+                // and expiry is noticed even while keep-alives flow.
+                if parked_between_turns {
+                    let visible = outstanding_tasks.visible_count();
+                    if visible != published_background_count {
+                        published_background_count = visible;
+                        self.publish_background_task_count(&workspace_id, &thread_id, visible)
+                            .await;
+                    }
+                }
                 let line = match timeout(CLAUDE_STALL_CHECK_INTERVAL, line_rx.recv()).await {
                     Ok(Some(line)) => line,
                     Ok(None) if parked_between_turns => {
@@ -1591,16 +1606,6 @@ impl AppState {
                     }
                     Ok(None) => break,
                     Err(_) => {
-                        // Background work ages out of the count on a clock,
-                        // not an event; a no-op when nothing expired.
-                        if parked_between_turns {
-                            self.publish_background_task_count(
-                                &workspace_id,
-                                &thread_id,
-                                outstanding_tasks.visible_count(),
-                            )
-                            .await;
-                        }
                         // Total stream silence — not even thinking heartbeats.
                         // Either a tool is legitimately long-running or the CLI
                         // wedged; a thread that just sits there is what reads
@@ -1720,14 +1725,6 @@ impl AppState {
                             if let Some(tasks) = claude_background_tasks(&value) {
                                 background_tasks = tasks.blocking;
                                 outstanding_tasks.replace(tasks.all);
-                                if parked_between_turns {
-                                    self.publish_background_task_count(
-                                        &workspace_id,
-                                        &thread_id,
-                                        outstanding_tasks.visible_count(),
-                                    )
-                                    .await;
-                                }
                             }
                             if let Some(task) = claude_task_started(&value) {
                                 if task.holds_turn_open {
@@ -1741,14 +1738,7 @@ impl AppState {
                             }
                             if let Some(task) = claude_task_finished(&value) {
                                 background_tasks.remove(&task.task_id);
-                                if outstanding_tasks.remove(&task.task_id) && parked_between_turns {
-                                    self.publish_background_task_count(
-                                        &workspace_id,
-                                        &thread_id,
-                                        outstanding_tasks.visible_count(),
-                                    )
-                                    .await;
-                                }
+                                outstanding_tasks.remove(&task.task_id);
                                 let tool_id = task
                                     .tool_use_id
                                     .or_else(|| background_task_tools.remove(&task.task_id));
@@ -2071,6 +2061,7 @@ impl AppState {
                                         cancelled = saw_cancelled_result,
                                         "claude turn finished at result"
                                     );
+                                    let background_count = outstanding_tasks.visible_count();
                                     if !is_error
                                         && !saw_cancelled_result
                                         && self
@@ -2081,11 +2072,12 @@ impl AppState {
                                                 turn_error.clone(),
                                                 saw_agent_output,
                                                 result_reported_success,
-                                                outstanding_tasks.visible_count(),
+                                                background_count,
                                             )
                                             .await
                                     {
                                         parked_between_turns = true;
+                                        published_background_count = background_count;
                                         assistant_id =
                                             format!("claude-assistant-{}", Uuid::new_v4().simple());
                                         assistant_message_key = None;

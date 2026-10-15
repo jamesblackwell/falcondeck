@@ -72,8 +72,10 @@ function activitySectionForThread(
 
   const attention = deriveThreadAttentionPresentation(thread)
   if (attention.level === 'error' && attention.unread) return 'failed'
-  if (thread.status === 'idle' && attention.unread) return 'ready'
+  // Before `ready`: a parked turn with background work still running is
+  // working, not finished, however unread its last reply is.
   if (attention.level === 'running') return 'running'
+  if (thread.status === 'idle' && attention.unread) return 'ready'
   return null
 }
 
