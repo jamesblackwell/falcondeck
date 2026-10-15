@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 
 import type {
   FalconDeckPreferences,
@@ -15,18 +15,34 @@ import { AgentsPanel } from "./settings/AgentsPanel";
 import { AgentControlPanel } from "./settings/AgentControlPanel";
 import { AppearanceSettingsPanel } from "./settings/AppearanceSettingsPanel";
 import { ConnectorsPanel } from "./settings/ConnectorsPanel";
+import { ConversationSettingsPanel } from "./settings/ConversationSettingsPanel";
 import { GeneralSettingsPanel } from "./settings/GeneralSettingsPanel";
 import { HarnessesPanel } from "./settings/HarnessesPanel";
 import { ExtensionsPanel } from "./settings/ExtensionsPanel";
 import { KeyboardShortcutsPanel } from "./settings/KeyboardShortcutsPanel";
+import { ModelsKeysPanel } from "./settings/ModelsKeysPanel";
+import { NotificationsSettingsPanel } from "./settings/NotificationsSettingsPanel";
 import { RemoteAccessPanel } from "./settings/RemoteAccessPanel";
 import { ServersPanel, type ServersPanelProps } from "./settings/ServersPanel";
 import { SettingsSidebar } from "./settings/SettingsSidebar";
 import { ComputerUsePanel } from "./settings/ComputerUsePanel";
 import { BackupPanel } from "./settings/BackupPanel";
 import { SpeechSettingsPanel } from "./settings/SpeechSettingsPanel";
-import { UsagePanel } from "./settings/UsagePanel";
 import type { SettingsSectionId } from "./settings/settings-utils";
+
+/** Finds the element whose own text is exactly `title` (a section or row
+ * heading) and returns the row or card around it. */
+function findSettingAnchor(root: HTMLElement, title: string) {
+  const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+  for (let node = walker.nextNode(); node; node = walker.nextNode()) {
+    const element = node.parentElement;
+    if (!element || element.textContent?.trim() !== title) continue;
+    return (
+      element.closest<HTMLElement>("[data-settings-anchor]") ?? element
+    );
+  }
+  return null;
+}
 
 export type SettingsViewProps = {
   /** Section shown when the view mounts so app-level deep links can land on a panel. */
@@ -74,20 +90,59 @@ export function SettingsView(props: SettingsViewProps) {
   const [activeSection, setActiveSection] = useState<SettingsSectionId>(
     props.initialSection ?? "general",
   );
+  const [focusRequest, setFocusRequest] = useState<{
+    setting: string;
+    key: number;
+  } | null>(null);
+  const contentRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
     setActiveSection(props.initialSection ?? "general");
   }, [props.initialSection, props.sectionRequestKey]);
 
+  const selectSection = (section: SettingsSectionId, setting?: string) => {
+    setActiveSection(section);
+    setFocusRequest(setting ? { setting, key: Date.now() } : null);
+    if (!setting && contentRef.current) contentRef.current.scrollTop = 0;
+  };
+
+  // Panels load their data asynchronously, so poll briefly for the target.
+  useEffect(() => {
+    if (!focusRequest) return;
+    let attempts = 0;
+    let timer: number | undefined;
+    const tryFocus = () => {
+      const root = contentRef.current;
+      const anchor = root ? findSettingAnchor(root, focusRequest.setting) : null;
+      if (anchor) {
+        anchor.scrollIntoView?.({ block: "center", behavior: "smooth" });
+        anchor.animate?.(
+          [
+            { boxShadow: "inset 0 0 0 2px var(--color-accent)" },
+            { boxShadow: "inset 0 0 0 2px transparent" },
+          ],
+          { duration: 1800, easing: "ease-out" },
+        );
+        return;
+      }
+      if (++attempts < 20) timer = window.setTimeout(tryFocus, 100);
+    };
+    tryFocus();
+    return () => window.clearTimeout(timer);
+  }, [focusRequest, activeSection]);
+
   return (
     <section className="flex h-full min-h-0 bg-surface-1">
       <SettingsSidebar
         activeSection={activeSection}
-        onSelectSection={setActiveSection}
+        onSelectSection={selectSection}
         onClose={props.onClose}
       />
 
-      <div className="min-h-0 flex-1 overflow-y-auto px-8 py-10">
+      <div
+        ref={contentRef}
+        className="min-h-0 flex-1 overflow-y-auto px-8 py-10"
+      >
         <div className="mx-auto w-full max-w-4xl">
           {activeSection === "appearance" ? (
             <AppearanceSettingsPanel />
@@ -100,8 +155,30 @@ export function SettingsView(props: SettingsViewProps) {
               hosts={props.hosts}
               onToast={props.onToast}
             />
+          ) : activeSection === "notifications" ? (
+            <NotificationsSettingsPanel
+              preferences={props.preferences}
+              onUpdatePreferences={props.onUpdatePreferences}
+            />
+          ) : activeSection === "conversations" ? (
+            <ConversationSettingsPanel
+              preferences={props.preferences}
+              onUpdatePreferences={props.onUpdatePreferences}
+            />
+          ) : activeSection === "models" ? (
+            <ModelsKeysPanel
+              baseUrl={props.baseUrl}
+              workspace={props.workspace}
+              preferences={props.preferences}
+              onUpdatePreferences={props.onUpdatePreferences}
+              onToast={props.onToast}
+            />
           ) : activeSection === "agents" ? (
-            <AgentsPanel baseUrl={props.baseUrl} onToast={props.onToast} />
+            <AgentsPanel
+              baseUrl={props.baseUrl}
+              workspace={props.workspace}
+              onToast={props.onToast}
+            />
           ) : activeSection === "agent-control" ? (
             <AgentControlPanel baseUrl={props.baseUrl} onToast={props.onToast} />
           ) : activeSection === "harnesses" ? (
@@ -110,8 +187,6 @@ export function SettingsView(props: SettingsViewProps) {
               hosts={props.hosts}
               onToast={props.onToast}
             />
-          ) : activeSection === "usage" ? (
-            <UsagePanel baseUrl={props.baseUrl} onToast={props.onToast} />
           ) : activeSection === "connectors" ? (
             <ConnectorsPanel
               baseUrl={props.baseUrl}
@@ -131,9 +206,8 @@ export function SettingsView(props: SettingsViewProps) {
           ) : activeSection === "speech" ? (
             <SpeechSettingsPanel
               baseUrl={props.baseUrl}
-              preferences={props.preferences}
-              onUpdatePreferences={props.onUpdatePreferences}
               onToast={props.onToast}
+              onOpenModelsKeys={() => selectSection("models")}
             />
           ) : activeSection === "computer-use" ? (
             <ComputerUsePanel
@@ -144,7 +218,6 @@ export function SettingsView(props: SettingsViewProps) {
             <BackupPanel baseUrl={props.baseUrl} onToast={props.onToast} />
           ) : activeSection === "general" ? (
             <GeneralSettingsPanel
-              workspace={props.workspace}
               preferences={props.preferences}
               updater={props.updater}
               updaterProgressPercent={props.updaterProgressPercent}

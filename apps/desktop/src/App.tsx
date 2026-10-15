@@ -214,7 +214,10 @@ import { ResumeStoppedThreadsDialog } from "./components/ResumeStoppedThreadsDia
 import { StartupRestoreOverlay } from "./components/StartupRestoreOverlay";
 import { UsageDialog } from "./components/UsageDialog";
 import { OnboardingWizard } from "./components/OnboardingWizard";
-import type { SettingsSectionId } from "./components/settings/settings-utils";
+import {
+  SETTINGS_SEARCH_INPUT_ID,
+  type SettingsSectionId,
+} from "./components/settings/settings-utils";
 import { useAppUpdater } from "./hooks/useAppUpdater";
 import { useDaemonConnection } from "./hooks/useDaemonConnection";
 import { useDesktopPresence } from "./hooks/useDesktopPresence";
@@ -829,13 +832,21 @@ function AppInner() {
     baseUrl,
     onTranscript: handleVoiceTranscript,
   });
-  const openSpeechSettings = useCallback(() => {
-    setSettingsSection("speech");
+  const openSettingsSection = useCallback((section: SettingsSectionId) => {
+    setSettingsSection(section);
     setSettingsRequestKey((current) => current + 1);
     setIsSettingsOpen(true);
     setIsScheduledOpen(false);
     setIsExtensionsOpen(false);
   }, []);
+  const openSpeechSettings = useCallback(
+    () => openSettingsSection("speech"),
+    [openSettingsSection],
+  );
+  const openModelsKeysSettings = useCallback(
+    () => openSettingsSection("models"),
+    [openSettingsSection],
+  );
 
   useEffect(() => {
     if (!isTauriDesktop()) return;
@@ -5817,8 +5828,11 @@ function AppInner() {
             setTerminalFindKey((current) => current + 1);
             break;
           }
-          if (!isSettingsOpen && selectedThreadId)
+          if (isSettingsOpen) {
+            document.getElementById(SETTINGS_SEARCH_INPUT_ID)?.focus();
+          } else if (selectedThreadId) {
             setFindRequestKey((current) => current + 1);
+          }
           break;
         }
         case "navigateBack":
@@ -6443,7 +6457,7 @@ function AppInner() {
                         onRetry: () => void voiceRecorder.retry(),
                         onDiscard: () => void voiceRecorder.discard(),
                         onDismiss: voiceRecorder.dismiss,
-                        onOpenSettings: openSpeechSettings,
+                        onOpenSettings: openModelsKeysSettings,
                       }
                     : undefined,
                 onAlternateSubmit: handleAlternateSubmitCallback,

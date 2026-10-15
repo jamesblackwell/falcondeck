@@ -149,7 +149,7 @@ describe('SidebarOptionsMenu', () => {
 
     fireEvent.click(screen.getByRole('button', { name: 'Options' }))
     fireEvent.click(screen.getByRole('menuitem', { name: /Dictation/i }))
-    fireEvent.click(screen.getByRole('menuitem', { name: /Speech settings…/i }))
+    fireEvent.click(screen.getByRole('menuitem', { name: /Voice settings…/i }))
 
     expect(onOpenSpeechSettings).toHaveBeenCalledOnce()
     expect(screen.queryByRole('menu', { name: 'Options menu' })).not.toBeInTheDocument()

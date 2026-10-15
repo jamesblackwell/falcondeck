@@ -3,10 +3,8 @@ import { Keyboard, Plus, RotateCcw, Search, X } from 'lucide-react'
 
 import {
   Button,
-  SegmentedControl,
   SettingsPage,
   SettingsPageHeader,
-  SettingsSection,
 } from '@falcondeck/ui'
 
 import {
@@ -14,7 +12,6 @@ import {
   bindingsFor,
   resetAllShortcuts,
   resetShortcutBindings,
-  setFollowUpBehavior,
   setShortcutBindings,
   shortcutConflict,
   shortcutFromEvent,
@@ -167,21 +164,6 @@ export function KeyboardShortcutsPanel() {
           </Button>
         }
       />
-
-      <SettingsSection
-        title="Running follow-ups"
-        description="Choose what Send does while an agent is working. “Invert Queue / Steer” uses the other behavior once."
-      >
-        <SegmentedControl
-          ariaLabel="Default follow-up behavior"
-          value={settings.followUpBehavior}
-          options={[
-            { value: 'queue', label: 'Queue' },
-            { value: 'steer', label: 'Steer' },
-          ]}
-          onChange={setFollowUpBehavior}
-        />
-      </SettingsSection>
 
       <div className="sticky top-0 z-10 -mx-2 flex flex-wrap gap-2 bg-surface-1/95 px-2 py-3 backdrop-blur">
         <label className="fd-focus-within flex min-w-64 flex-1 items-center gap-2 rounded-[var(--fd-radius-lg)] border border-border-default bg-surface-2 px-3">

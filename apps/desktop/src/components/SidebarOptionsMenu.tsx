@@ -341,7 +341,7 @@ export const SidebarOptionsMenu = memo(function SidebarOptionsMenu({
                         }}
                         className={SUBMENU_ITEM_CLASS}
                       >
-                        <span>Speech settings…</span>
+                        <span>Voice settings…</span>
                       </button>
                     </>
                   ) : null}

@@ -48,10 +48,18 @@ describe("DictationSetup voice rewrite", () => {
     expect(screen.getByLabelText("Fallback model")).toBeInTheDocument();
   });
 
-  it("shows the OpenRouter key for title suggestions with Apple Speech selected", () => {
-    render(<DictationSetup baseUrl={null} onToast={() => {}} />);
-    expect(screen.getByLabelText("API key")).toBeInTheDocument();
-    expect(screen.getByText(/Used for title suggestions/)).toBeInTheDocument();
+  it("links to Models & keys for the OpenRouter key instead of editing it here", () => {
+    const onOpenModelsKeys = vi.fn();
+    render(
+      <DictationSetup
+        baseUrl={null}
+        onToast={() => {}}
+        onOpenModelsKeys={onOpenModelsKeys}
+      />,
+    );
+    expect(screen.queryByLabelText("API key")).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "Add key" }));
+    expect(onOpenModelsKeys).toHaveBeenCalled();
   });
 
   it("opens the custom prompt pre-filled with the built-in prompt", () => {

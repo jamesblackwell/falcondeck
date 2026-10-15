@@ -1015,7 +1015,7 @@ export const PromptInput = memo(function PromptInput({
                         onClick={voice.onOpenSettings}
                         className="fd-focus inline-flex items-center rounded-[var(--fd-radius-md)] px-2 py-1 text-[length:var(--fd-text-xs)] text-fg-secondary transition-colors hover:bg-surface-3 hover:text-fg-primary"
                       >
-                        Open Speech settings
+                        Add OpenRouter key
                       </button>
                     ) : null}
                     {voice.hasPending ? (

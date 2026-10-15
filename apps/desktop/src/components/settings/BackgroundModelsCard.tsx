@@ -66,8 +66,8 @@ export function BackgroundModelsCard({
 
   return (
     <SettingsSection
-      title="Automatic task titles"
-      description="New tasks get a title from the first available, signed-in agent below. Leave a model blank to use that agent's default. The Suggest title action uses OpenRouter, configured in Speech settings."
+      title="Automatic titles"
+      description="New threads are named by the first signed-in agent in this list, on its own subscription. Leave a model blank to use that agent's default."
       actions={
         <Button
           type="button"

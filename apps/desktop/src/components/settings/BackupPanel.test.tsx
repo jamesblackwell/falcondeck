@@ -86,7 +86,7 @@ describe('BackupPanel', () => {
       <BackupPanel baseUrl="http://127.0.0.1:4317" onToast={vi.fn()} />,
     )
 
-    expect(screen.getByRole('heading', { name: 'Backup & Data' })).toBeInTheDocument()
+    expect(screen.getByRole('heading', { name: 'Backup & data' })).toBeInTheDocument()
     expect(screen.getByRole('button', { name: /Export Full Backup/i })).toBeInTheDocument()
     expect(screen.getByRole('button', { name: /Select Backup File/i })).toBeInTheDocument()
     expect(screen.getByRole('button', { name: /Reset Local Storage/i })).toBeInTheDocument()

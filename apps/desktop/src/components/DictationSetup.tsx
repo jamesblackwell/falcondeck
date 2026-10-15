@@ -14,6 +14,7 @@ import {
   Input,
   SegmentedControl,
   SettingList,
+  SettingRow,
   SettingsSection,
   SwitchRow,
   Textarea,
@@ -70,6 +71,8 @@ type DictationSetupProps = {
   baseUrl: string | null;
   onToast: (toast: DictationSetupToast) => void;
   compact?: boolean;
+  /** Opens Settings → Models & keys, where the shared OpenRouter key lives. */
+  onOpenModelsKeys?: () => void;
 };
 
 const SELECT_CLASS =
@@ -93,8 +96,8 @@ type SpeechCredentialFieldProps = {
 
 /**
  * Masked OpenRouter key field against the daemon secret. Shared by
- * Settings → Speech and the optional onboarding step so save/remove/status
- * stay one implementation.
+ * Settings → Models & keys and the optional onboarding step so
+ * save/remove/status stay one implementation.
  */
 export function SpeechCredentialField({
   baseUrl,
@@ -525,16 +528,41 @@ function RewriteModelFields({
   );
 }
 
+/** Read-only OpenRouter key status for pages that link to where it is set. */
+function useOpenRouterKeyConfigured(baseUrl: string | null) {
+  const [configured, setConfigured] = useState<boolean | null>(null);
+  useEffect(() => {
+    if (!baseUrl) {
+      setConfigured(null);
+      return;
+    }
+    let cancelled = false;
+    createDaemonApiClient(baseUrl)
+      .speechCredentialStatus()
+      .then((status) => {
+        if (!cancelled) setConfigured(status.configured);
+      })
+      .catch(() => {
+        if (!cancelled) setConfigured(null);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [baseUrl]);
+  return configured;
+}
+
 export function DictationSetup({
   baseUrl,
   onToast,
   compact = false,
+  onOpenModelsKeys,
 }: DictationSetupProps) {
   const settings = useDictationSettings();
   const [permissions, setPermissions] =
     useState<DictationPermissionStatus | null>(null);
   const [permissionBusy, setPermissionBusy] = useState(false);
-  const [configured, setConfigured] = useState<boolean | null>(null);
+  const configured = useOpenRouterKeyConfigured(compact ? null : baseUrl);
   const [models, setModels] = useState<SpeechModel[]>([]);
   const [audioDevices, setAudioDevices] = useState<DictationAudioDevice[]>([]);
   const [rewritePromptOpen, setRewritePromptOpen] = useState(false);
@@ -792,8 +820,6 @@ export function DictationSetup({
         )}
       </SettingsSection>
 
-      {compact ? null : <DictationDictionary />}
-
       {compact ? null : (
         <SettingsSection
           title="Transcription"
@@ -929,19 +955,33 @@ export function DictationSetup({
                 updateSettings({ autoCleanupEnabled })
               }
             />
-          </SettingList>
-
-          <div className="space-y-5 border-t border-border-subtle pt-5">
-            <SpeechCredentialField
-              baseUrl={baseUrl}
-              onToast={onToast}
-              id="openrouter-speech-key"
-              hint="Used for title suggestions, voice rewrite, and optional cloud speech. Stored on this computer; paired devices never see the key."
-              onConfiguredChange={setConfigured}
+            <SettingRow
+              title="OpenRouter key"
+              description={
+                configured
+                  ? "Set. Used for OpenRouter transcription, cleanup, and voice rewrite."
+                  : configured === false
+                    ? "Not set. OpenRouter transcription, cleanup, and voice rewrite need one."
+                    : "Needed for OpenRouter transcription, cleanup, and voice rewrite."
+              }
+              control={
+                onOpenModelsKeys ? (
+                  <Button
+                    type="button"
+                    size="sm"
+                    variant="secondary"
+                    onClick={onOpenModelsKeys}
+                  >
+                    {configured ? "Manage key" : "Add key"}
+                  </Button>
+                ) : null
+              }
             />
-          </div>
+          </SettingList>
         </SettingsSection>
       )}
+
+      {compact ? null : <DictationDictionary />}
 
       <SettingsSection
         title="Voice rewrite"
@@ -1060,12 +1100,12 @@ export function DictationSetup({
         {compact && settings.rewriteEnabled ? (
           <p className="text-[length:var(--fd-text-xs)] text-fg-muted">
             Rewrite needs an OpenRouter key. Continue to add one, or skip and
-            set it later in Settings → Speech.
+            set it later in Settings → Models & keys.
           </p>
         ) : null}
         {!compact && settings.rewriteEnabled && configured === false ? (
           <p className="text-[length:var(--fd-text-xs)] text-fg-muted">
-            Save an OpenRouter key in Transcription above before rewrite can run.
+            Add an OpenRouter key in Models & keys before rewrite can run.
           </p>
         ) : null}
       </SettingsSection>

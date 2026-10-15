@@ -97,7 +97,7 @@ const PROVIDERS: ProviderConfig[] = [
     providerId: 'openrouter',
     name: 'OpenRouter',
     signInHint:
-      'Add an OpenRouter API key in OpenCode or Settings → Speech, then reload usage.',
+      'Add an OpenRouter API key in OpenCode or Settings → Models & keys, then reload usage.',
     expiredHint: 'Your OpenRouter API key was rejected. Check the key, then reload usage.',
   },
 ]

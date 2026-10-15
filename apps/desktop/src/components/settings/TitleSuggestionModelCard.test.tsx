@@ -77,7 +77,7 @@ describe('TitleSuggestionModelCard', () => {
         onUpdatePreferences={onUpdatePreferences}
       />,
     )
-    fireEvent.click(screen.getByRole('button', { name: 'Reset' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Reset model' }))
     expect(onUpdatePreferences).toHaveBeenCalledWith({
       title_suggestion_model: DEFAULT_TITLE_SUGGESTION_MODEL,
     })

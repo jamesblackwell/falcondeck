@@ -61,7 +61,7 @@ export function SettingsSection({
   contentClassName?: string
 }) {
   return (
-    <Card className={className}>
+    <Card className={className} data-settings-anchor="">
       <CardHeader className="gap-1.5">
         <div className="flex flex-wrap items-start justify-between gap-3">
           <div className="min-w-0 flex-1 space-y-1.5">
@@ -110,6 +110,7 @@ export function SettingRow({
     // focusable, keyboard-operable element, so this must not be a <button>.
     <div
       onClick={onActivate}
+      data-settings-anchor=""
       className={cn(
         'flex w-full items-start justify-between gap-4 px-5 py-3.5 text-left',
         onActivate ? 'cursor-pointer transition-colors hover:bg-surface-2' : null,

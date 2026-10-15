@@ -721,7 +721,7 @@ async fn fix_dictation_transcript_inner(
     }
     let config = current_dictation_config()?;
     let daemon_url = config.daemon_url.as_deref().ok_or(
-        "Connect FalconDeck and configure an OpenRouter key in Speech settings to use Fix.",
+        "Connect FalconDeck and add an OpenRouter key in Settings → Models & keys to use Fix.",
     )?;
     validate_local_daemon_url(daemon_url)?;
     // Retire the completion timer while the request runs, but keep the original

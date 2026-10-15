@@ -1,19 +1,21 @@
 import { useCallback, useEffect, useState } from 'react'
 
+import type { WorkspaceSummary } from '@falcondeck/client-core'
 import {
   ActivityDiamond,
   Badge,
   Button,
   Card,
-
-  SettingsPage,
-
-  SettingsPageHeader,
   CardContent,
   CardDescription,
   CardHeader,
   CardTitle,
   Input,
+  SettingList,
+  SettingRow,
+  SettingsPage,
+  SettingsPageHeader,
+  SettingsSection,
 } from '@falcondeck/ui'
 import { Bot, Plus, Trash2, X } from 'lucide-react'
 
@@ -42,6 +44,8 @@ type ProvidersOverview = {
 
 export type AgentsPanelProps = {
   baseUrl: string | null
+  /** Current workspace, whose connected agents report sign-in status. */
+  workspace?: WorkspaceSummary | null
   onToast: (toast: {
     variant: 'success' | 'danger' | 'warning' | 'default'
     title: string
@@ -109,12 +113,18 @@ const CUSTOM_AGENT_RESERVED_IDS = [
   ...RECOMMENDED_AGENTS.map((agent) => agent.id),
 ]
 
-export function AgentsPanel({ baseUrl, onToast }: AgentsPanelProps) {
+export function AgentsPanel({ baseUrl, workspace, onToast }: AgentsPanelProps) {
   const [overview, setOverview] = useState<ProvidersOverview | null>(null)
   const [loadError, setLoadError] = useState<string | null>(null)
   const [isLoading, setIsLoading] = useState(true)
   const [isAdding, setIsAdding] = useState(false)
   const configuredProviderIds = new Set(overview?.resolved.map((provider) => provider.id))
+  const statusAgents = workspace?.agents ?? []
+  const launchError =
+    workspace?.last_error &&
+    /could not find|could not be started|failed to start/i.test(workspace.last_error)
+      ? workspace.last_error
+      : null
 
   const load = useCallback(async () => {
     if (!baseUrl) return
@@ -187,6 +197,59 @@ export function AgentsPanel({ baseUrl, onToast }: AgentsPanelProps) {
         title="Agents"
         description="FalconDeck orchestrates agents; it doesn&apos;t replace them. Codex and Claude are built in — any CLI speaking the Agent Client Protocol (OpenCode, Grok, Pi, Cursor, …) can be added here. Changes apply immediately, no restart needed."
       />
+
+      {statusAgents.length > 0 || launchError ? (
+        <SettingsSection
+          title="Status on this computer"
+          description="Sign-in state for each agent connected to the current project."
+        >
+          {statusAgents.length > 0 ? (
+            <SettingList>
+              {statusAgents.map((agent) => (
+                <SettingRow
+                  key={agent.provider}
+                  title={<span className="capitalize">{agent.provider}</span>}
+                  description={`${agent.account.label} · ${agent.models.length} models`}
+                  control={
+                    <Badge
+                      variant={
+                        agent.account.status === 'ready'
+                          ? 'success'
+                          : agent.account.status === 'needs_auth'
+                            ? 'warning'
+                            : 'default'
+                      }
+                      dot
+                    >
+                      {agent.account.status === 'ready'
+                        ? 'Ready'
+                        : agent.account.status === 'needs_auth'
+                          ? 'Needs auth'
+                          : 'Unknown'}
+                    </Badge>
+                  }
+                />
+              ))}
+            </SettingList>
+          ) : null}
+          {launchError ? (
+            <div className="rounded-[var(--fd-radius-lg)] border border-warning/25 bg-warning-muted p-4">
+              <p className="text-[length:var(--fd-text-sm)] font-medium text-fg-primary">
+                FalconDeck could not launch one of the local agent CLIs
+              </p>
+              <p className="mt-2 text-[length:var(--fd-text-sm)] text-fg-tertiary">
+                FalconDeck auto-detects `claude` and `codex` from the app PATH, common install
+                locations, and your login shell. If a provider still fails to launch, relaunch the
+                app after installing the CLI or set `FALCONDECK_CLAUDE_BIN` / `FALCONDECK_CODEX_BIN`
+                before starting FalconDeck.
+              </p>
+              <p className="mt-3 rounded-[var(--fd-radius-lg)] bg-surface-1 px-3 py-2 text-[length:var(--fd-text-sm)] text-fg-secondary">
+                {launchError}
+              </p>
+            </div>
+          ) : null}
+        </SettingsSection>
+      ) : null}
 
       <Card>
         <CardHeader>

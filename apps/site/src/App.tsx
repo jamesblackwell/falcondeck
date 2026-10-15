@@ -369,7 +369,7 @@ export default function App({ location = window.location }: { location?: Pick<Lo
         <section className="site-faq" aria-labelledby="faq-heading">
           <h2 id="faq-heading">A few things to know</h2>
           <details><summary>Is FalconDeck free?</summary><p>Yes. The apps and the hosted relay are free. Your agent’s own subscription still applies, and optional OpenRouter features bill your own key.</p></details>
-          <details><summary>What does OpenRouter power?</summary><p>Optional cloud transcription, voice rewrite, title suggestions, and Read Aloud. Add your key in Settings → Speech on your Mac; only the audio or text for that action is sent. Dictation can also run on-device with Apple Speech.</p></details>
+          <details><summary>What does OpenRouter power?</summary><p>Optional cloud transcription, voice rewrite, title suggestions, and Read Aloud. Add your key in Settings → Models &amp; keys on your Mac; only the audio or text for that action is sent. Dictation can also run on-device with Apple Speech.</p></details>
           <details><summary>Do I need to change editors or move my code?</summary><p>No. Open your existing folders and keep your editor. FalconDeck sits alongside it.</p></details>
           <details><summary>Does my Mac need to stay on?</summary><p>For work on your Mac, keep it awake and online with FalconDeck running. For an always-on setup, run agents on another machine over SSH.</p></details>
           <details><summary>Where does my work live?</summary><p>Your code stays in your folders and your agents own their sessions. Remote traffic is end-to-end encrypted between paired devices, through our free relay or your own.</p></details>

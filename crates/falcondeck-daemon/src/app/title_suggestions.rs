@@ -26,7 +26,7 @@ impl AppState {
             .clone();
         let api_key = self.openrouter_key_cached().await?.ok_or_else(|| {
             DaemonError::BadRequest(
-                "Add an OpenRouter API key in Speech settings to suggest a title.".to_string(),
+                "Add an OpenRouter key in Settings → Models & keys to suggest a title.".to_string(),
             )
         })?;
         request_title(

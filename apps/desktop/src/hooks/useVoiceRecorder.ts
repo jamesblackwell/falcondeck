@@ -341,14 +341,14 @@ export function useVoiceRecorder({
       setState("failed");
       return;
     }
-    // Re-check credentials unless already confirmed so a key saved in Speech
+    // Re-check credentials unless already confirmed so a key saved in
     // settings takes effect immediately. Only an explicit "no key" blocks;
     // an unreachable daemon (null) records optimistically and the transcribe
     // call reports the real problem with the recording safely preserved.
     const isConfigured =
       configured === true ? true : await refreshConfigured();
     if (isConfigured === false) {
-      setError("Add an OpenRouter API key in Speech settings first.");
+      setError("Add an OpenRouter key in Settings → Models & keys first.");
       setState("failed");
       return;
     }

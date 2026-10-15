@@ -146,7 +146,7 @@ export function BackupPanel({ baseUrl, onToast }: BackupPanelProps) {
   return (
     <SettingsPage>
       <SettingsPageHeader
-        title="Backup & Data"
+        title="Backup & data"
         description="Export and import your workspaces, preferences, extensions, automations, and connectors across machines or fresh installations."
       />
 
@@ -160,12 +160,12 @@ export function BackupPanel({ baseUrl, onToast }: BackupPanelProps) {
       />
 
       <SettingsSection
-        title="Export Backup"
+        title="Export backup"
         description="Generate a portable JSON archive of your full FalconDeck setup."
       >
         <SettingList>
           <SettingRow
-            title="Full FalconDeck Archive"
+            title="Full FalconDeck archive"
             description="Includes workspace pins, appearance & conversation preferences, extension data (Notes, tags), automations, and connectors."
             control={
               <Button
@@ -175,7 +175,7 @@ export function BackupPanel({ baseUrl, onToast }: BackupPanelProps) {
                 className="gap-2"
               >
                 <ArrowDownToLine className="h-4 w-4" />
-                {isExporting ? 'Exporting…' : 'Export Full Backup…'}
+                {isExporting ? 'Exporting…' : 'Export full backup…'}
               </Button>
             }
           />
@@ -183,13 +183,13 @@ export function BackupPanel({ baseUrl, onToast }: BackupPanelProps) {
       </SettingsSection>
 
       <SettingsSection
-        title="Import Backup"
+        title="Import backup"
         description="Restore settings, projects, and extensions from a previous backup file."
       >
         {!pendingBackup ? (
           <SettingList>
             <SettingRow
-              title="Restore from Archive"
+              title="Restore from archive"
               description="Upload a .json backup file to inspect and restore."
               control={
                 <Button
@@ -199,7 +199,7 @@ export function BackupPanel({ baseUrl, onToast }: BackupPanelProps) {
                   className="gap-2"
                 >
                   <ArrowUpFromLine className="h-4 w-4" />
-                  {isInspecting ? 'Inspecting…' : 'Select Backup File…'}
+                  {isInspecting ? 'Inspecting…' : 'Select backup file…'}
                 </Button>
               }
             />
@@ -305,7 +305,7 @@ export function BackupPanel({ baseUrl, onToast }: BackupPanelProps) {
                 className="gap-2"
               >
                 <RefreshCw className={`h-4 w-4 ${isImporting ? 'animate-spin' : ''}`} />
-                {isImporting ? 'Restoring…' : 'Confirm & Restore Backup'}
+                {isImporting ? 'Restoring…' : 'Confirm & restore backup'}
               </Button>
             </div>
           </div>
@@ -313,12 +313,12 @@ export function BackupPanel({ baseUrl, onToast }: BackupPanelProps) {
       </SettingsSection>
 
       <SettingsSection
-        title="Developer / Testing Clean Slate"
+        title="Clean slate for testing"
         description="Quickly reset application state when testing fresh onboarding flows."
       >
         <SettingList>
           <SettingRow
-            title="Reset WebKit State"
+            title="Reset WebKit state"
             description="Clears desktop localStorage preferences (theme, sounds, shortcuts) and reactivates the onboarding wizard."
             control={
               <Button
@@ -327,12 +327,12 @@ export function BackupPanel({ baseUrl, onToast }: BackupPanelProps) {
                 className="gap-2"
               >
                 <Trash2 className="h-4 w-4" />
-                Reset Local Storage
+                Reset local storage
               </Button>
             }
           />
           <SettingRow
-            title="Full Daemon & WebKit Stash (CLI)"
+            title="Full daemon & WebKit stash (CLI)"
             description="Run 'npm run state:fresh' in your terminal to stash ~/.falcondeck and WebKit data, or 'npm run state:restore' to put it back."
             control={
               <code className="rounded bg-surface-2 px-2 py-1 text-[length:var(--fd-text-xs)] text-fg-muted font-mono">

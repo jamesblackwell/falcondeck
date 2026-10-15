@@ -6,9 +6,12 @@ import type {
 } from "@falcondeck/client-core";
 import {
   Archive,
+  Bell,
   Blocks,
   Bot,
+  KeyRound,
   Keyboard,
+  MessagesSquare,
   Mic,
   Monitor,
   Palette,
@@ -25,106 +28,269 @@ import type { AppUpdaterState } from "../../hooks/useAppUpdater";
 export type SettingsSectionId =
   | "general"
   | "appearance"
+  | "notifications"
+  | "conversations"
   | "keyboard"
-  | "servers"
   | "agents"
-  | "agent-control"
   | "harnesses"
-  | "usage"
   | "connectors"
-  | "extensions"
-  | "speech"
+  | "agent-control"
   | "computer-use"
+  | "speech"
+  | "models"
+  | "extensions"
   | "remote"
+  | "servers"
   | "backup";
+
+/** DOM id of the settings search field, so ⌘F can focus it from the app. */
+export const SETTINGS_SEARCH_INPUT_ID = "settings-search";
 
 export type SettingsNavItem = {
   id: SettingsSectionId;
   label: string;
   description: string;
   icon: typeof Settings;
+  /** Setting titles on the page, so search can land on the right one. Keep
+   * them identical to the on-page titles: search scrolls to the exact text. */
+  settings: string[];
+  /** Extra words people might type that do not appear as a title. */
+  keywords?: string[];
 };
 
-export const SETTINGS_NAV: SettingsNavItem[] = [
+export type SettingsNavGroup = {
+  label: string;
+  items: SettingsNavItem[];
+};
+
+export const SETTINGS_GROUPS: SettingsNavGroup[] = [
   {
-    id: "general",
-    label: "General",
-    description: "Core app behavior and future defaults",
-    icon: Settings,
+    label: "App",
+    items: [
+      {
+        id: "general",
+        label: "General",
+        description: "Startup, updates, and onboarding",
+        icon: Settings,
+        settings: [
+          "Automatically continue stopped sessions",
+          "Updates",
+          "First-run onboarding",
+        ],
+        keywords: ["version", "release", "resume", "restart", "welcome"],
+      },
+      {
+        id: "appearance",
+        label: "Appearance",
+        description: "Theme, fonts, and text size",
+        icon: Palette,
+        settings: ["Theme and type"],
+        keywords: ["dark", "light", "font", "palette", "colour", "color", "text size"],
+      },
+      {
+        id: "notifications",
+        label: "Notifications",
+        description: "Alerts and sounds",
+        icon: Bell,
+        settings: [
+          "Agent attention notifications",
+          "Completed turns",
+          "Approvals and questions",
+          "Failed turns",
+          "Only push when away from desktop",
+          "Play a sound when a turn finishes",
+        ],
+        keywords: ["push", "phone", "chime", "alert", "sound"],
+      },
+      {
+        id: "conversations",
+        label: "Conversations",
+        description: "Follow-ups, tool detail, and thinking",
+        icon: MessagesSquare,
+        settings: [
+          "Running follow-ups",
+          "Tool detail",
+          "Thinking",
+          "Group read-only tool bursts",
+          "Collapse long messages you send",
+          "Show expand/collapse all controls",
+          "Auto-open approvals",
+          "Auto-open errors",
+          "Auto-open failed tests",
+          "Auto-open the first diff",
+        ],
+        keywords: ["queue", "steer", "density", "reasoning", "transcript", "expand"],
+      },
+      {
+        id: "keyboard",
+        label: "Keyboard shortcuts",
+        description: "Customize every command",
+        icon: Keyboard,
+        settings: [],
+        keywords: ["hotkey", "keybinding", "shortcut"],
+      },
+    ],
   },
   {
-    id: "appearance",
-    label: "Appearance",
-    description: "Theme, fonts, and text size",
-    icon: Palette,
-  },
-  {
-    id: "keyboard",
-    label: "Keyboard shortcuts",
-    description: "Customize every command",
-    icon: Keyboard,
-  },
-  {
-    id: "servers",
-    label: "Servers",
-    description: "Run agents on remote machines",
-    icon: Server,
-  },
-  {
-    id: "agents",
     label: "Agents",
-    description: "Built-in and custom ACP agents",
-    icon: Bot,
+    items: [
+      {
+        id: "agents",
+        label: "Agents",
+        description: "Status, built-in, and custom ACP agents",
+        icon: Bot,
+        settings: ["Status on this computer", "Built in", "Recommended"],
+        keywords: ["acp", "claude", "codex", "opencode", "grok", "cursor", "provider"],
+      },
+      {
+        id: "harnesses",
+        label: "Harnesses",
+        description: "CLI installs, versions, and upgrades",
+        icon: Terminal,
+        settings: [],
+        keywords: ["cli", "upgrade", "install", "version"],
+      },
+      {
+        id: "connectors",
+        label: "Connectors",
+        description: "MCP servers and agent tools",
+        icon: Plug,
+        settings: ["MCP servers"],
+        keywords: ["mcp", "tools"],
+      },
+      {
+        id: "agent-control",
+        label: "Agent control",
+        description: "What agents may do in FalconDeck",
+        icon: ShieldCheck,
+        settings: [
+          "Agent control enabled",
+          "Inject FalconDeck agent context",
+          "Scheduling defaults",
+          "Allow elevated automations",
+          "Confirmation preferences",
+          "Recent control changes",
+        ],
+        keywords: ["automations", "schedule", "permissions", "mcp"],
+      },
+      {
+        id: "computer-use",
+        label: "Computer use",
+        description: "Let agents operate apps on this Mac",
+        icon: Monitor,
+        settings: [
+          "Allow agents to use this Mac",
+          "Show the agent cursor",
+          "Allow agents to use my signed-in browser profile",
+        ],
+        keywords: ["cua", "browser", "chrome", "accessibility", "screen recording"],
+      },
+    ],
   },
   {
-    id: "agent-control",
-    label: "Agent control",
-    description: "Conversational control and automations access",
-    icon: ShieldCheck,
+    label: "Voice & AI",
+    items: [
+      {
+        id: "speech",
+        label: "Voice",
+        description: "Dictation, transcription, and rewrite",
+        icon: Mic,
+        settings: [
+          "Desktop dictation",
+          "System-wide dictation",
+          "Re-paste last transcript with ⌘⇧V",
+          "Correction dictionary",
+          "Transcription",
+          "Automatically clean up transcriptions",
+          "Voice rewrite",
+          "Recording history",
+        ],
+        keywords: ["speech", "microphone", "parakeet", "apple speech", "openrouter", "cleanup", "dictate"],
+      },
+      {
+        id: "models",
+        label: "Models & keys",
+        description: "OpenRouter key and thread titles",
+        icon: KeyRound,
+        settings: ["OpenRouter", "Title style", "Suggest title", "Automatic titles"],
+        keywords: ["api key", "rename", "title prompt", "utility model", "background model"],
+      },
+      {
+        id: "extensions",
+        label: "Extensions",
+        description: "Add capabilities to FalconDeck",
+        icon: Blocks,
+        settings: [],
+        keywords: ["plugins", "notes", "tags"],
+      },
+    ],
   },
   {
-    id: "harnesses",
-    label: "Harnesses",
-    description: "CLI installs, versions, and upgrades",
-    icon: Terminal,
-  },
-  {
-    id: "connectors",
-    label: "Connectors",
-    description: "MCP servers and agent tools",
-    icon: Plug,
-  },
-  {
-    id: "extensions",
-    label: "Extensions",
-    description: "Add capabilities to FalconDeck",
-    icon: Blocks,
-  },
-  {
-    id: "speech",
-    label: "Speech",
-    description: "Transcription and OpenRouter",
-    icon: Mic,
-  },
-  {
-    id: "computer-use",
-    label: "Computer use",
-    description: "Let agents operate apps on this Mac",
-    icon: Monitor,
-  },
-  {
-    id: "remote",
-    label: "Remote access",
-    description: "Pairing, devices, and relay status",
-    icon: Wifi,
-  },
-  {
-    id: "backup",
-    label: "Backup & Data",
-    description: "Export, import, and reset app state",
-    icon: Archive,
+    label: "Devices & data",
+    items: [
+      {
+        id: "remote",
+        label: "Remote access",
+        description: "Pairing, devices, and relay status",
+        icon: Wifi,
+        settings: ["Pair a new device", "Trusted devices", "Connection status"],
+        keywords: ["mobile", "iphone", "phone", "relay", "qr"],
+      },
+      {
+        id: "servers",
+        label: "Servers",
+        description: "Run agents on remote machines",
+        icon: Server,
+        settings: [],
+        keywords: ["ssh", "remote host", "daemon"],
+      },
+      {
+        id: "backup",
+        label: "Backup & data",
+        description: "Export, import, and reset app state",
+        icon: Archive,
+        settings: ["Export backup", "Import backup", "Clean slate for testing"],
+        keywords: ["restore", "archive", "reset"],
+      },
+    ],
   },
 ];
+
+export const SETTINGS_NAV: SettingsNavItem[] = SETTINGS_GROUPS.flatMap(
+  (group) => group.items,
+);
+
+export type SettingsSearchResult = {
+  item: SettingsNavItem;
+  /** On-page setting titles that matched; empty when only the page matched. */
+  matches: string[];
+};
+
+/** Every query word must start a word in the page's text or a setting, so
+ * "clean up" finds cleanup settings without matching "backup". */
+export function searchSettings(query: string): SettingsSearchResult[] {
+  const words = query
+    .toLowerCase()
+    .split(/\s+/)
+    .filter(Boolean)
+    .map(
+      (word) =>
+        new RegExp(`(^|[^\\p{L}\\p{N}])${word.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}`, "u"),
+    );
+  if (words.length === 0) return [];
+  const hits = (text: string) =>
+    words.every((word) => word.test(text.toLowerCase()));
+  return SETTINGS_NAV.flatMap((item) => {
+    const matches = item.settings.filter(hits);
+    const pageText = [
+      item.label,
+      item.description,
+      ...(item.keywords ?? []),
+      ...item.settings,
+    ].join(" ");
+    return matches.length > 0 || hits(pageText) ? [{ item, matches }] : [];
+  });
+}
 
 export const TOOL_DETAIL_OPTIONS: Array<{
   value: ToolDetailsMode;

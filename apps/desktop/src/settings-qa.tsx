@@ -1,21 +1,16 @@
 /* Standalone settings fixture: `npm run dev` → /settings-qa.html.
    Renders the settings shell with stubbed props so page layout, hierarchy and
    spacing can be checked without launching the app or a daemon.
-   `?section=speech|computer-use|general|appearance|keyboard|connectors` picks the panel,
+   `?section=<SettingsSectionId>` picks the panel,
    `?theme=light|dark` the mode, `?baseUrl=` points panels at a live daemon. */
-import { StrictMode, useState } from "react";
+import { StrictMode } from "react";
 import { createRoot } from "react-dom/client";
 
 import { initAppearance, updateAppearance } from "@falcondeck/ui";
 
-import { AppearanceSettingsPanel } from "./components/settings/AppearanceSettingsPanel";
-import { ConnectorsPanel } from "./components/settings/ConnectorsPanel";
-import { GeneralSettingsPanel } from "./components/settings/GeneralSettingsPanel";
-import { KeyboardShortcutsPanel } from "./components/settings/KeyboardShortcutsPanel";
-import { SettingsSidebar } from "./components/settings/SettingsSidebar";
-import { ComputerUsePanel } from "./components/settings/ComputerUsePanel";
-import { SpeechSettingsPanel } from "./components/settings/SpeechSettingsPanel";
+import { SettingsView } from "./components/SettingsView";
 import type { SettingsSectionId } from "./components/settings/settings-utils";
+import type { HostManager } from "./hosts";
 
 import "./index.css";
 
@@ -66,55 +61,45 @@ const CONNECTOR_WORKSPACES = [
   kind: "project" as const,
 }));
 
-export function Fixture() {
-  const [section, setSection] = useState<SettingsSectionId>(
-    (params.get("section") as SettingsSectionId | null) ?? "speech",
-  );
+const noop = () => {};
 
+export function Fixture() {
   return (
-    <section className="flex h-screen min-h-0 bg-surface-1">
-      <SettingsSidebar
-        activeSection={section}
-        onSelectSection={setSection}
-        onClose={() => {}}
+    <div className="h-screen">
+      <SettingsView
+        initialSection={
+          (params.get("section") as SettingsSectionId | null) ?? "speech"
+        }
+        workspace={null}
+        localWorkspaces={CONNECTOR_WORKSPACES as never}
+        baseUrl={baseUrl}
+        hostManager={{} as HostManager}
+        hosts={[]}
+        onToast={noop}
+        preferences={null}
+        remoteStatus={null}
+        pairingLink={null}
+        relayUrl=""
+        isStartingRemote={false}
+        remoteControlsDisabled
+        remoteControlsUnavailableReason="Fixture"
+        revokingDeviceId={null}
+        updater={UPDATER}
+        updaterProgressPercent={null}
+        onUpdatePreferences={noop}
+        onStartPairing={noop}
+        onRefreshRemoteStatus={noop}
+        onRevokeDevice={noop}
+        onCheckForUpdates={noop}
+        onDownloadUpdate={noop}
+        onRestartToInstallUpdate={noop}
+        onShowOnboardingAtNextLaunch={noop}
+        onClose={noop}
+        extensions={{ extensions: [] } as never}
+        onSetExtensionEnabled={async () => {}}
+        onSetExtensionPermission={async () => {}}
       />
-      <div className="min-h-0 flex-1 overflow-y-auto px-8 py-10">
-        <div className="mx-auto w-full max-w-4xl">
-          {section === "appearance" ? (
-            <AppearanceSettingsPanel />
-          ) : section === "keyboard" ? (
-            <KeyboardShortcutsPanel />
-          ) : section === "general" ? (
-            <GeneralSettingsPanel
-              workspace={null}
-              preferences={null}
-              updater={UPDATER}
-              updaterProgressPercent={null}
-              onUpdatePreferences={() => {}}
-              onCheckForUpdates={() => {}}
-              onDownloadUpdate={() => {}}
-              onRestartToInstallUpdate={() => {}}
-              onShowOnboardingAtNextLaunch={() => {}}
-            />
-          ) : section === "connectors" ? (
-            <ConnectorsPanel
-              baseUrl={baseUrl}
-              workspaces={CONNECTOR_WORKSPACES}
-              onToast={() => {}}
-            />
-          ) : section === "computer-use" ? (
-            <ComputerUsePanel baseUrl={baseUrl} onToast={() => {}} />
-          ) : (
-            <SpeechSettingsPanel
-              baseUrl={baseUrl}
-              preferences={null}
-              onUpdatePreferences={() => {}}
-              onToast={() => {}}
-            />
-          )}
-        </div>
-      </div>
-    </section>
+    </div>
   );
 }
 
