@@ -103,11 +103,11 @@ mod remote_lifecycle;
 mod rewrite_models;
 mod runtime_health;
 mod scheduled_tasks;
+mod snapshot_projection;
 mod speech;
 mod speech_audio;
-mod storage;
 mod startup_resume;
-mod snapshot_projection;
+mod storage;
 mod sync_index;
 mod thread_search;
 mod thread_tools;
@@ -2350,7 +2350,9 @@ impl AppState {
                         .iter()
                         .any(|existing| existing.provider == agent.provider)
                     {
-                        summary.agents.push(snapshot_projection::agent(agent, !compact));
+                        summary
+                            .agents
+                            .push(snapshot_projection::agent(agent, !compact));
                     }
                 }
                 summary

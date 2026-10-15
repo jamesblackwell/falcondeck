@@ -1258,7 +1258,13 @@ fn claude_model(
 pub fn curated_models() -> Vec<ModelSummary> {
     vec![
         claude_model("haiku", "Haiku 4.5", false, "medium", claude_base_efforts()),
-        claude_model("sonnet", "Sonnet 5.5", true, "medium", claude_base_efforts()),
+        claude_model(
+            "sonnet",
+            "Sonnet 5.5",
+            true,
+            "medium",
+            claude_base_efforts(),
+        ),
         claude_model("opus", "Opus 5.5", false, "high", claude_max_efforts()),
         claude_model("fable", "Fable 5.1", false, "high", claude_max_efforts()),
     ]

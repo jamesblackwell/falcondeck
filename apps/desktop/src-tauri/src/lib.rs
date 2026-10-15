@@ -720,7 +720,10 @@ fn missing_local_path_error(path: &Path) -> String {
     let machine = "this computer";
 
     let shown = path.display();
-    match (path.file_name().and_then(|name| name.to_str()), path.parent()) {
+    match (
+        path.file_name().and_then(|name| name.to_str()),
+        path.parent(),
+    ) {
         // The folder is there but the file is not: say so, because that is
         // almost always an agent naming a file it renamed or never wrote.
         (Some(name), Some(parent)) if parent.is_dir() => {
@@ -1859,8 +1862,8 @@ mod tests {
     fn missing_file_in_an_existing_folder_names_the_file() {
         let dir = env::temp_dir().join("falcondeck-missing-name-test");
         fs::create_dir_all(&dir).unwrap();
-        let error = resolve_existing_local_path(&dir.join("gone.txt").display().to_string())
-            .unwrap_err();
+        let error =
+            resolve_existing_local_path(&dir.join("gone.txt").display().to_string()).unwrap_err();
         let _ = fs::remove_dir_all(&dir);
         assert!(error.contains("gone.txt"), "{error}");
     }

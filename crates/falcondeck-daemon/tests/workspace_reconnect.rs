@@ -124,7 +124,13 @@ fn started(root: &Path) -> Vec<String> {
 
 async fn ready(app: &AppState) {
     timeout(Duration::from_secs(15), async {
-        while !app.snapshot().await.workspaces.iter().all(|workspace| workspace.status == WorkspaceStatus::Ready) {
+        while !app
+            .snapshot()
+            .await
+            .workspaces
+            .iter()
+            .all(|workspace| workspace.status == WorkspaceStatus::Ready)
+        {
             sleep(Duration::from_millis(10)).await;
         }
     })

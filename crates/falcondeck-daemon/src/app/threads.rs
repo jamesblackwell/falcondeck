@@ -854,11 +854,8 @@ impl AppState {
         mut summary: ThreadSummary,
     ) -> ThreadSummary {
         let interactive_requests = self.inner.interactive_requests.lock().await;
-        let (pending_approval_count, pending_question_count) = interactive_request_counts(
-            &interactive_requests,
-            &summary.workspace_id,
-            &summary.id,
-        );
+        let (pending_approval_count, pending_question_count) =
+            interactive_request_counts(&interactive_requests, &summary.workspace_id, &summary.id);
         refresh_thread_attention(&mut summary, pending_approval_count, pending_question_count);
         summary
     }
@@ -3305,14 +3302,11 @@ pub(super) fn interactive_request_counts(
             request.request.workspace_id == workspace_id
                 && request.request.thread_id.as_deref() == Some(thread_id)
         })
-        .fold(
-            (0_u32, 0_u32),
-            |(approvals, questions), request| {
-                let (next_approvals, next_questions) =
-                    interactive_request_attention_delta(&request.request.kind);
-                (approvals + next_approvals, questions + next_questions)
-            },
-        )
+        .fold((0_u32, 0_u32), |(approvals, questions), request| {
+            let (next_approvals, next_questions) =
+                interactive_request_attention_delta(&request.request.kind);
+            (approvals + next_approvals, questions + next_questions)
+        })
 }
 
 /// Plan review is an approval: the row badge and the dock count both wait on

@@ -107,9 +107,7 @@ pub async fn git_branches(workspace_path: &str) -> Result<GitBranchesResponse, D
         .map_err(|e| DaemonError::Rpc(format!("failed to run git for-each-ref: {e}")))?;
 
     if !list_output.status.success() {
-        return Err(DaemonError::Rpc(
-            "not a git repository".to_string(),
-        ));
+        return Err(DaemonError::Rpc("not a git repository".to_string()));
     }
 
     let branches = String::from_utf8_lossy(&list_output.stdout)
