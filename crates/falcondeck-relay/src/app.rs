@@ -531,6 +531,18 @@ pub(crate) struct TrustedDeviceRecord {
     /// Never exposed through the trusted-devices API responses.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) push_token: Option<String>,
+    /// Bumped under the store lock before a full-row snapshot is taken.
+    /// Postgres applies that snapshot only when the generation is newer, so
+    /// a slow earlier write cannot restore a revoked row or an old token.
+    /// Presence heartbeats do not bump it; they update `last_seen_at` only.
+    #[serde(default)]
+    pub(crate) persist_generation: u64,
+}
+
+impl TrustedDeviceRecord {
+    fn bump_persist_generation(&mut self) {
+        self.persist_generation = self.persist_generation.saturating_add(1);
+    }
 }
 
 #[derive(Default)]
@@ -1381,6 +1393,7 @@ impl AppState {
                     // token. Reuse the process-local token when available;
                     // after restart, a proven re-claim rotates it.
                     existing.client_token = secret_verifier(&client_token);
+                    existing.bump_persist_generation();
                 }
                 session.updated_at = now;
                 session.clear_legacy_device_fields();
@@ -1459,6 +1472,7 @@ impl AppState {
                         .cloned()
                         .unwrap_or_else(|| format!("client-{}", Uuid::new_v4().simple()));
                     existing.client_token = secret_verifier(&client_token);
+                    existing.bump_persist_generation();
                     (existing_device_id, client_token)
                 } else {
                     let device_id = format!("device-{}", Uuid::new_v4().simple());
@@ -1475,6 +1489,7 @@ impl AppState {
                             last_seen_at: Some(now),
                             revoked_at: None,
                             push_token: None,
+                            persist_generation: 1,
                         },
                     );
                     (device_id, client_token)
@@ -1531,9 +1546,14 @@ impl AppState {
             PersistMode::Immediate,
         )
         .await?;
+        // Insert is allowed: a claim is what creates the row, and a retry
+        // after a failed insert must be able to create it. A newer generation
+        // still wins when the row is already there, so this cannot clear a
+        // revocation that was persisted first.
         self.persist_device_state(
             &session_snapshot,
             device_snapshot.as_ref(),
+            true,
             PersistMode::Immediate,
         )
         .await?;
@@ -2934,6 +2954,7 @@ impl AppState {
                     device_snapshot = None;
                 } else {
                     device.revoked_at = Some(Utc::now());
+                    device.bump_persist_generation();
                     device_snapshot = Some(device.clone());
                 }
                 session.updated_at = Utc::now();
@@ -2964,7 +2985,7 @@ impl AppState {
         };
         match device_snapshot.as_ref() {
             Some(device) => {
-                self.persist_device_state(&session, Some(device), PersistMode::Immediate)
+                self.persist_device_state(&session, Some(device), false, PersistMode::Immediate)
                     .await?;
             }
             None => {
@@ -2972,7 +2993,7 @@ impl AppState {
                     .backend
                     .remove_device(session_id, device_id)
                     .await?;
-                self.persist_device_state(&session, None, PersistMode::Immediate)
+                self.persist_device_state(&session, None, false, PersistMode::Immediate)
                     .await?;
             }
         }
@@ -3025,12 +3046,18 @@ impl AppState {
             device.push_token = push_token
                 .map(|value| value.trim().to_string())
                 .filter(|value| !value.is_empty());
+            device.bump_persist_generation();
             let device_snapshot = device.clone();
             session.updated_at = Utc::now();
             (session.meta(), device_snapshot)
         };
-        self.persist_device_state(&session, Some(&device_snapshot), PersistMode::Immediate)
-            .await?;
+        self.persist_device_state(
+            &session,
+            Some(&device_snapshot),
+            false,
+            PersistMode::Immediate,
+        )
+        .await?;
         Ok(())
     }
 
@@ -3298,6 +3325,7 @@ impl AppState {
                     .is_some_and(|token| dead_tokens.contains(token))
                 {
                     device.push_token = None;
+                    device.bump_persist_generation();
                     cleared_devices.push(device.clone());
                 }
             }
@@ -3309,7 +3337,7 @@ impl AppState {
         };
         for device in &cleared_devices {
             if let Err(error) = self
-                .persist_device_state(&session, Some(device), PersistMode::Immediate)
+                .persist_device_state(&session, Some(device), false, PersistMode::Immediate)
                 .await
             {
                 warn!(session_id, device_id = %device.device_id, %error, "failed to persist cleared push token");
@@ -3378,32 +3406,43 @@ impl AppState {
     }
 
     async fn touch_presence(&self, session_id: &str, role: RelayPeerRole, device_id: Option<&str>) {
-        let mut session_snapshot = None;
-        let mut touched_device = None;
-        let mut store = self.inner.store.lock().await;
-        if let Some(session) = store.data.sessions.get_mut(session_id) {
+        let touched = {
+            let mut store = self.inner.store.lock().await;
+            let Some(session) = store.data.sessions.get_mut(session_id) else {
+                return;
+            };
             let now = Utc::now();
             session.migrate_legacy_device_fields();
-            match role {
-                RelayPeerRole::Daemon => session.daemon_last_seen_at = Some(now),
-                RelayPeerRole::Client => {
-                    if let Some(current_device_id) = device_id
-                        && let Some(device) = session.devices.get_mut(current_device_id)
-                    {
-                        device.last_seen_at = Some(now);
-                        touched_device = Some(device.clone());
-                    }
+            // Heartbeats must not snapshot the token, revocation, or push
+            // token. Those writes used to land after a revoke or re-claim
+            // and put the old row back.
+            let device_touch = match role {
+                RelayPeerRole::Daemon => {
+                    session.daemon_last_seen_at = Some(now);
+                    None
                 }
-            }
+                RelayPeerRole::Client => device_id.and_then(|current_device_id| {
+                    let device = session.devices.get_mut(current_device_id)?;
+                    device.last_seen_at = Some(now);
+                    Some((current_device_id.to_string(), now))
+                }),
+            };
             session.updated_at = now;
-            session_snapshot = Some(session.meta());
-        }
-        drop(store);
-        if let Some(session) = session_snapshot.as_ref() {
-            let _ = self
-                .persist_device_state(session, touched_device.as_ref(), PersistMode::Deferred)
-                .await;
-        }
+            (session.meta(), device_touch)
+        };
+        let (session, device_touch) = touched;
+        let (touched_device_id, device_last_seen_at) = match device_touch {
+            Some((id, seen_at)) => (Some(id), Some(seen_at)),
+            None => (None, None),
+        };
+        let _ = self
+            .persist_last_seen(
+                &session,
+                touched_device_id.as_deref(),
+                device_last_seen_at,
+                PersistMode::Deferred,
+            )
+            .await;
     }
 
     async fn broadcast_presence(&self, session_id: &str) {
@@ -3730,7 +3769,7 @@ impl AppState {
             for device in devices {
                 self.inner
                     .backend
-                    .persist_device(session, Some(device))
+                    .persist_device(session, Some(device), true)
                     .await?;
             }
         }
@@ -3757,9 +3796,27 @@ impl AppState {
         &self,
         session: &SessionMeta,
         device: Option<&TrustedDeviceRecord>,
+        allow_insert: bool,
         mode: PersistMode,
     ) -> Result<(), RelayError> {
-        self.inner.backend.persist_device(session, device).await?;
+        self.inner
+            .backend
+            .persist_device(session, device, allow_insert)
+            .await?;
+        self.schedule_flush(mode).await
+    }
+
+    async fn persist_last_seen(
+        &self,
+        session: &SessionMeta,
+        device_id: Option<&str>,
+        device_last_seen_at: Option<DateTime<Utc>>,
+        mode: PersistMode,
+    ) -> Result<(), RelayError> {
+        self.inner
+            .backend
+            .touch_last_seen(session, device_id, device_last_seen_at)
+            .await?;
         self.schedule_flush(mode).await
     }
 
@@ -4029,6 +4086,7 @@ impl SessionRecord {
                     last_seen_at: self.client_last_seen_at,
                     revoked_at: self.revoked_at,
                     push_token: None,
+                    persist_generation: 1,
                 },
             );
         }
@@ -4574,6 +4632,9 @@ fn normalize_persisted_secrets(state: &mut PersistedState) -> bool {
         for device in session.devices.values_mut() {
             if !device.client_token.starts_with(SECRET_VERIFIER_PREFIX) {
                 device.client_token = secret_verifier(&device.client_token);
+                // The hashed token has to win against any snapshot taken
+                // before normalization. A generation of 0 would not.
+                device.bump_persist_generation();
                 changed = true;
             }
         }
@@ -4816,6 +4877,7 @@ mod tests {
                 last_seen_at: None,
                 revoked_at: None,
                 push_token: None,
+                persist_generation: 0,
             },
         );
         state.sessions.insert(session.session_id.clone(), session);
@@ -4832,6 +4894,7 @@ mod tests {
             &session.devices["device-1"].client_token,
             "client-secret"
         ));
+        assert_eq!(session.devices["device-1"].persist_generation, 1);
         assert!(verify_secret(&pairing.pairing_code, "PAIRCODE"));
         assert!(verify_secret(&pairing.daemon_token, "daemon-token"));
         assert!(!normalize_persisted_secrets(&mut state));

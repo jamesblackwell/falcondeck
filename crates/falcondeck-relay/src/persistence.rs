@@ -48,6 +48,19 @@ pub(crate) trait PersistenceBackend: Send + Sync {
         &self,
         session: &SessionMeta,
         device: Option<&TrustedDeviceRecord>,
+        allow_insert: bool,
+    ) -> Result<(), RelayError>;
+
+    /// Record a heartbeat without writing credentials or revocation.
+    ///
+    /// Presence runs on every ping and used to upsert the whole device row
+    /// from a snapshot taken before the store lock was released. A revoke,
+    /// token rotation, or delete that landed first was then restored.
+    async fn touch_last_seen(
+        &self,
+        session: &SessionMeta,
+        device_id: Option<&str>,
+        device_last_seen_at: Option<DateTime<Utc>>,
     ) -> Result<(), RelayError>;
 
     async fn persist_action(
@@ -156,6 +169,16 @@ impl PersistenceBackend for FileBackend {
         &self,
         _session: &SessionMeta,
         _device: Option<&TrustedDeviceRecord>,
+        _allow_insert: bool,
+    ) -> Result<(), RelayError> {
+        Ok(())
+    }
+
+    async fn touch_last_seen(
+        &self,
+        _session: &SessionMeta,
+        _device_id: Option<&str>,
+        _device_last_seen_at: Option<DateTime<Utc>>,
     ) -> Result<(), RelayError> {
         Ok(())
     }
@@ -509,11 +532,32 @@ impl PersistenceBackend for PostgresBackend {
         &self,
         session: &SessionMeta,
         device: Option<&TrustedDeviceRecord>,
+        allow_insert: bool,
     ) -> Result<(), RelayError> {
         with_reconnect!(self, |client| {
             upsert_session(client, session).await?;
             if let Some(device) = device {
-                upsert_device(client, &session.session_id, device).await?;
+                if allow_insert {
+                    upsert_device(client, &session.session_id, device).await?;
+                } else {
+                    update_device_if_newer(client, &session.session_id, device).await?;
+                }
+            }
+            Ok(())
+        })
+    }
+
+    async fn touch_last_seen(
+        &self,
+        session: &SessionMeta,
+        device_id: Option<&str>,
+        device_last_seen_at: Option<DateTime<Utc>>,
+    ) -> Result<(), RelayError> {
+        with_reconnect!(self, |client| {
+            touch_session_last_seen(client, session).await?;
+            if let (Some(device_id), Some(last_seen_at)) = (device_id, device_last_seen_at) {
+                touch_device_last_seen(client, &session.session_id, device_id, last_seen_at)
+                    .await?;
             }
             Ok(())
         })
@@ -831,6 +875,8 @@ async fn init_postgres_schema(client: &PostgresClient) -> Result<(), RelayError>
             );
             ALTER TABLE relay_devices ADD COLUMN IF NOT EXISTS push_token TEXT NULL;
             ALTER TABLE relay_devices ADD COLUMN IF NOT EXISTS identity_public_key TEXT NULL;
+            ALTER TABLE relay_devices
+                ADD COLUMN IF NOT EXISTS persist_generation BIGINT NOT NULL DEFAULT 0;
             CREATE TABLE IF NOT EXISTS relay_updates (
                 session_id TEXT NOT NULL REFERENCES relay_sessions(session_id) ON DELETE CASCADE,
                 seq BIGINT NOT NULL,
@@ -927,7 +973,7 @@ async fn load_postgres_state_from_client(
 
     for row in client
         .query(
-            "SELECT session_id, device_id, client_token, label, public_key, identity_public_key, created_at, last_seen_at, revoked_at, push_token FROM relay_devices ORDER BY created_at ASC",
+            "SELECT session_id, device_id, client_token, label, public_key, identity_public_key, created_at, last_seen_at, revoked_at, push_token, persist_generation FROM relay_devices ORDER BY created_at ASC",
             &[],
         )
         .await
@@ -945,6 +991,10 @@ async fn load_postgres_state_from_client(
                 last_seen_at: row.get("last_seen_at"),
                 revoked_at: row.get("revoked_at"),
                 push_token: row.get("push_token"),
+                persist_generation: row
+                    .get::<_, i64>("persist_generation")
+                    .try_into()
+                    .map_err(|_| RelayError::StateLoad("invalid device generation".to_string()))?,
             };
             session.devices.insert(device.device_id.clone(), device);
         }
@@ -1108,24 +1158,71 @@ async fn upsert_pairing(
     Ok(())
 }
 
+const UPSERT_DEVICE_SQL: &str = "\
+INSERT INTO relay_devices (session_id, device_id, client_token, label, public_key, identity_public_key, created_at, last_seen_at, revoked_at, push_token, persist_generation)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+ON CONFLICT (session_id, device_id) DO UPDATE SET
+  client_token = EXCLUDED.client_token,
+  label = EXCLUDED.label,
+  public_key = EXCLUDED.public_key,
+  identity_public_key = EXCLUDED.identity_public_key,
+  created_at = LEAST(relay_devices.created_at, EXCLUDED.created_at),
+  last_seen_at = GREATEST(relay_devices.last_seen_at, EXCLUDED.last_seen_at),
+  revoked_at = EXCLUDED.revoked_at,
+  push_token = EXCLUDED.push_token,
+  persist_generation = EXCLUDED.persist_generation
+WHERE relay_devices.persist_generation < EXCLUDED.persist_generation";
+
+const UPDATE_DEVICE_IF_NEWER_SQL: &str = "\
+UPDATE relay_devices SET
+  client_token = $3,
+  label = $4,
+  public_key = $5,
+  identity_public_key = $6,
+  created_at = LEAST(relay_devices.created_at, $7),
+  last_seen_at = GREATEST(relay_devices.last_seen_at, $8),
+  revoked_at = $9,
+  push_token = $10,
+  persist_generation = $11
+WHERE session_id = $1
+  AND device_id = $2
+  AND persist_generation < $11";
+
+/// Heartbeat only. No INSERT, so a deleted device stays deleted, and no
+/// credential or revocation column is assigned.
+const TOUCH_DEVICE_LAST_SEEN_SQL: &str = "\
+UPDATE relay_devices
+SET last_seen_at = GREATEST(last_seen_at, $3)
+WHERE session_id = $1 AND device_id = $2";
+
+/// Same idea for the session row: a ping must not rewrite `daemon_token`.
+const TOUCH_SESSION_LAST_SEEN_SQL: &str = "\
+UPDATE relay_sessions
+SET daemon_last_seen_at = GREATEST(daemon_last_seen_at, $2),
+    updated_at = GREATEST(updated_at, $3)
+WHERE session_id = $1";
+
+fn device_generation_param(device: &TrustedDeviceRecord) -> Result<i64, RelayError> {
+    i64::try_from(device.persist_generation)
+        .map_err(|_| RelayError::StatePersist("device generation overflow".to_string()))
+}
+
+/// True when `incoming` must replace a stored device generation.
+/// Full-row SQL uses this same strict order (`stored < incoming`).
+#[cfg(test)]
+fn device_persist_generation_supersedes(stored: u64, incoming: u64) -> bool {
+    incoming > stored
+}
+
 async fn upsert_device(
     client: &mut PostgresClient,
     session_id: &str,
     device: &TrustedDeviceRecord,
 ) -> Result<(), RelayError> {
+    let generation = device_generation_param(device)?;
     client
         .execute(
-            "INSERT INTO relay_devices (session_id, device_id, client_token, label, public_key, identity_public_key, created_at, last_seen_at, revoked_at, push_token)
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
-             ON CONFLICT (session_id, device_id) DO UPDATE SET
-               client_token = EXCLUDED.client_token,
-               label = EXCLUDED.label,
-               public_key = EXCLUDED.public_key,
-               identity_public_key = EXCLUDED.identity_public_key,
-               created_at = EXCLUDED.created_at,
-               last_seen_at = EXCLUDED.last_seen_at,
-               revoked_at = EXCLUDED.revoked_at,
-               push_token = EXCLUDED.push_token",
+            UPSERT_DEVICE_SQL,
             &[
                 &session_id,
                 &device.device_id,
@@ -1137,7 +1234,70 @@ async fn upsert_device(
                 &device.last_seen_at,
                 &device.revoked_at,
                 &device.push_token,
+                &generation,
             ],
+        )
+        .await
+        .map_err(|error| RelayError::StatePersist(error.to_string()))?;
+    Ok(())
+}
+
+async fn update_device_if_newer(
+    client: &mut PostgresClient,
+    session_id: &str,
+    device: &TrustedDeviceRecord,
+) -> Result<(), RelayError> {
+    let generation = device_generation_param(device)?;
+    client
+        .execute(
+            UPDATE_DEVICE_IF_NEWER_SQL,
+            &[
+                &session_id,
+                &device.device_id,
+                &device.client_token,
+                &device.label,
+                &device.public_key,
+                &device.identity_public_key,
+                &device.created_at,
+                &device.last_seen_at,
+                &device.revoked_at,
+                &device.push_token,
+                &generation,
+            ],
+        )
+        .await
+        .map_err(|error| RelayError::StatePersist(error.to_string()))?;
+    Ok(())
+}
+
+async fn touch_session_last_seen(
+    client: &mut PostgresClient,
+    session: &SessionMeta,
+) -> Result<(), RelayError> {
+    client
+        .execute(
+            TOUCH_SESSION_LAST_SEEN_SQL,
+            &[
+                &session.session_id,
+                &session.daemon_last_seen_at,
+                &session.updated_at,
+            ],
+        )
+        .await
+        .map_err(|error| RelayError::StatePersist(error.to_string()))?;
+    Ok(())
+}
+
+async fn touch_device_last_seen(
+    client: &mut PostgresClient,
+    session_id: &str,
+    device_id: &str,
+    last_seen_at: DateTime<Utc>,
+) -> Result<(), RelayError> {
+    client
+        .execute(
+            TOUCH_DEVICE_LAST_SEEN_SQL,
+            &[&session_id, &device_id, &last_seen_at],
         )
         .await
         .map_err(|error| RelayError::StatePersist(error.to_string()))?;
@@ -1283,8 +1443,8 @@ async fn flush_postgres_state(
 
         for device in session.devices.values() {
             tx.execute(
-                "INSERT INTO relay_devices (session_id, device_id, client_token, label, public_key, identity_public_key, created_at, last_seen_at, revoked_at, push_token)
-                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)",
+                "INSERT INTO relay_devices (session_id, device_id, client_token, label, public_key, identity_public_key, created_at, last_seen_at, revoked_at, push_token, persist_generation)
+                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)",
                 &[
                     &session.session_id,
                     &device.device_id,
@@ -1296,6 +1456,7 @@ async fn flush_postgres_state(
                     &device.last_seen_at,
                     &device.revoked_at,
                     &device.push_token,
+                    &device_generation_param(device)?,
                 ],
             )
             .await
@@ -1454,6 +1615,43 @@ mod tests {
                 .expect_err("remote NoTls PostgreSQL must be rejected");
             assert!(error.to_string().contains("require TLS"));
         }
+    }
+
+    #[test]
+    fn a_newer_device_generation_is_the_only_full_row_write_that_applies() {
+        assert!(device_persist_generation_supersedes(0, 1));
+        assert!(device_persist_generation_supersedes(4, 5));
+        assert!(!device_persist_generation_supersedes(5, 5));
+        assert!(!device_persist_generation_supersedes(6, 5));
+    }
+
+    #[test]
+    fn presence_touch_sql_cannot_restore_a_token_revocation_or_deleted_device() {
+        let device_sql = TOUCH_DEVICE_LAST_SEEN_SQL.to_ascii_lowercase();
+        assert!(device_sql.starts_with("update"));
+        assert!(device_sql.contains("last_seen_at"));
+        assert!(!device_sql.contains("insert"));
+        assert!(!device_sql.contains("client_token"));
+        assert!(!device_sql.contains("revoked_at"));
+        assert!(!device_sql.contains("push_token"));
+        assert!(!device_sql.contains("persist_generation"));
+
+        let session_sql = TOUCH_SESSION_LAST_SEEN_SQL.to_ascii_lowercase();
+        assert!(session_sql.starts_with("update"));
+        assert!(session_sql.contains("daemon_last_seen_at"));
+        assert!(!session_sql.contains("daemon_token"));
+        assert!(!session_sql.contains("insert"));
+    }
+
+    #[test]
+    fn full_device_writes_apply_only_when_the_generation_moved_forward() {
+        assert!(UPDATE_DEVICE_IF_NEWER_SQL.contains("persist_generation < $11"));
+        assert!(
+            UPSERT_DEVICE_SQL
+                .contains("WHERE relay_devices.persist_generation < EXCLUDED.persist_generation")
+        );
+        assert!(UPDATE_DEVICE_IF_NEWER_SQL.starts_with("UPDATE"));
+        assert!(!UPDATE_DEVICE_IF_NEWER_SQL.contains("INSERT"));
     }
 
     #[cfg(unix)]
