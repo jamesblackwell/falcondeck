@@ -61,6 +61,7 @@ export function NotificationsSettingsPanel({
             title="Completed turns"
             description="Notify when an agent finishes a turn you are not viewing."
             checked={current.notifications.notify_on_turn_complete}
+            disabled={!current.notifications.enabled}
             onCheckedChange={(next) =>
               onUpdatePreferences({ notifications: { notify_on_turn_complete: next } })
             }
@@ -69,6 +70,7 @@ export function NotificationsSettingsPanel({
             title="Approvals and questions"
             description="Notify when an agent is blocked waiting for your decision or answer."
             checked={current.notifications.notify_on_input_required}
+            disabled={!current.notifications.enabled}
             onCheckedChange={(next) =>
               onUpdatePreferences({ notifications: { notify_on_input_required: next } })
             }
@@ -77,6 +79,7 @@ export function NotificationsSettingsPanel({
             title="Failed turns"
             description="Notify when an agent turn ends with an error that may need investigation."
             checked={current.notifications.notify_on_error}
+            disabled={!current.notifications.enabled}
             onCheckedChange={(next) =>
               onUpdatePreferences({ notifications: { notify_on_error: next } })
             }
@@ -85,6 +88,7 @@ export function NotificationsSettingsPanel({
             title="Only push when away from desktop"
             description="Send phone alerts after two minutes without keyboard or mouse activity on your Mac, even if FalconDeck is left open. Desktop alerts still appear."
             checked={current.notifications.suppress_when_desktop_active}
+            disabled={!current.notifications.enabled}
             onCheckedChange={(next) =>
               onUpdatePreferences({ notifications: { suppress_when_desktop_active: next } })
             }

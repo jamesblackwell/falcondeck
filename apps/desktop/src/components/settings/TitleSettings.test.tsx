@@ -3,13 +3,13 @@ import { describe, expect, it, vi } from 'vitest'
 
 import { DEFAULT_TITLE_SUGGESTION_MODEL, DEFAULT_TITLE_SUGGESTION_PROMPT, normalizePreferences } from '@falcondeck/client-core'
 
-import { TitleSuggestionModelCard } from './TitleSuggestionModelCard'
+import { TitleSettings } from './TitleSettings'
 
-describe('TitleSuggestionModelCard', () => {
+describe('TitleSettings', () => {
   it('saves title style instructions independently of the model', () => {
     const onUpdatePreferences = vi.fn()
     render(
-      <TitleSuggestionModelCard
+      <TitleSettings
         preferences={normalizePreferences({})}
         onUpdatePreferences={onUpdatePreferences}
       />,
@@ -27,13 +27,13 @@ describe('TitleSuggestionModelCard', () => {
   it('reflects saved preferences and restores the default prompt', () => {
     const onUpdatePreferences = vi.fn()
     const { rerender } = render(
-      <TitleSuggestionModelCard
+      <TitleSettings
         preferences={normalizePreferences({})}
         onUpdatePreferences={onUpdatePreferences}
       />,
     )
     rerender(
-      <TitleSuggestionModelCard
+      <TitleSettings
         preferences={normalizePreferences({ title_suggestion_prompt: 'Use ALL CAPS.' })}
         onUpdatePreferences={onUpdatePreferences}
       />,
@@ -54,7 +54,7 @@ describe('TitleSuggestionModelCard', () => {
   it('shows Luna by default and saves a custom OpenRouter model', () => {
     const onUpdatePreferences = vi.fn()
     render(
-      <TitleSuggestionModelCard
+      <TitleSettings
         preferences={normalizePreferences({})}
         onUpdatePreferences={onUpdatePreferences}
       />,
@@ -72,7 +72,7 @@ describe('TitleSuggestionModelCard', () => {
   it('resets the saved model to Luna', () => {
     const onUpdatePreferences = vi.fn()
     render(
-      <TitleSuggestionModelCard
+      <TitleSettings
         preferences={normalizePreferences({ title_suggestion_model: 'openai/gpt-5.6-luna' })}
         onUpdatePreferences={onUpdatePreferences}
       />,

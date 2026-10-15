@@ -6,6 +6,7 @@
 import { StrictMode } from "react";
 import { createRoot } from "react-dom/client";
 
+import type { WorkspaceSummary } from "@falcondeck/client-core";
 import { initAppearance, updateAppearance } from "@falcondeck/ui";
 
 import { SettingsView } from "./components/SettingsView";
@@ -71,7 +72,8 @@ export function Fixture() {
           (params.get("section") as SettingsSectionId | null) ?? "speech"
         }
         workspace={null}
-        localWorkspaces={CONNECTOR_WORKSPACES as never}
+        // Only id, path and kind are read by the connectors panel.
+        localWorkspaces={CONNECTOR_WORKSPACES as unknown as WorkspaceSummary[]}
         baseUrl={baseUrl}
         hostManager={{} as HostManager}
         hosts={[]}
@@ -95,7 +97,7 @@ export function Fixture() {
         onRestartToInstallUpdate={noop}
         onShowOnboardingAtNextLaunch={noop}
         onClose={noop}
-        extensions={{ extensions: [] } as never}
+        extensions={{ catalog: [], views: [] }}
         onSetExtensionEnabled={async () => {}}
         onSetExtensionPermission={async () => {}}
       />

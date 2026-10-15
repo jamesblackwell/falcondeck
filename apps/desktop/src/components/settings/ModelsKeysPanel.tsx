@@ -6,9 +6,10 @@ import type {
 import { normalizePreferences } from '@falcondeck/client-core'
 import { SettingsPage, SettingsPageHeader, SettingsSection } from '@falcondeck/ui'
 
-import { SpeechCredentialField, type DictationSetupToast } from '../DictationSetup'
+import type { DictationSetupToast } from '../DictationSetup'
+import { OpenRouterKeyField } from './OpenRouterKeyField'
 import { BackgroundModelsCard } from './BackgroundModelsCard'
-import { TitleSuggestionModelCard } from './TitleSuggestionModelCard'
+import { TitleSettings } from './TitleSettings'
 
 type ModelsKeysPanelProps = {
   baseUrl: string | null
@@ -39,7 +40,7 @@ export function ModelsKeysPanel({
         title="OpenRouter"
         description="One optional key powers cloud transcription, transcript cleanup, voice rewrite, Read Aloud, and Suggest title. Only the audio or text for that action is sent."
       >
-        <SpeechCredentialField
+        <OpenRouterKeyField
           baseUrl={baseUrl}
           onToast={onToast}
           id="openrouter-key"
@@ -47,7 +48,7 @@ export function ModelsKeysPanel({
         />
       </SettingsSection>
 
-      <TitleSuggestionModelCard
+      <TitleSettings
         preferences={current}
         onUpdatePreferences={onUpdatePreferences}
       />

@@ -4,17 +4,17 @@ import type { FalconDeckPreferences, UpdatePreferencesPayload } from '@falcondec
 import { DEFAULT_TITLE_SUGGESTION_MODEL, DEFAULT_TITLE_SUGGESTION_PROMPT } from '@falcondeck/client-core'
 import { Button, Field, Input, SettingsSection, Textarea } from '@falcondeck/ui'
 
-type TitleSuggestionModelCardProps = {
+type TitleSettingsProps = {
   preferences: FalconDeckPreferences
   onUpdatePreferences: (payload: UpdatePreferencesPayload) => void
 }
 
 /** Title style (shared by automatic and suggested titles) and the OpenRouter
  * model behind Suggest title in the rename dialog. */
-export function TitleSuggestionModelCard({
+export function TitleSettings({
   preferences,
   onUpdatePreferences,
-}: TitleSuggestionModelCardProps) {
+}: TitleSettingsProps) {
   const model = preferences.title_suggestion_model ?? DEFAULT_TITLE_SUGGESTION_MODEL
   const [draft, setDraft] = useState(model)
   useEffect(() => setDraft(model), [model])

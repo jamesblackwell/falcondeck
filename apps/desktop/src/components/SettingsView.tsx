@@ -90,21 +90,23 @@ export function SettingsView(props: SettingsViewProps) {
   const [activeSection, setActiveSection] = useState<SettingsSectionId>(
     props.initialSection ?? "general",
   );
-  const [focusRequest, setFocusRequest] = useState<{
-    setting: string;
-    key: number;
-  } | null>(null);
+  // A fresh object per request, so repeating the same search result still
+  // scrolls to it again.
+  const [focusRequest, setFocusRequest] = useState<{ setting: string } | null>(
+    null,
+  );
   const contentRef = useRef<HTMLDivElement>(null);
-
-  useEffect(() => {
-    setActiveSection(props.initialSection ?? "general");
-  }, [props.initialSection, props.sectionRequestKey]);
 
   const selectSection = (section: SettingsSectionId, setting?: string) => {
     setActiveSection(section);
-    setFocusRequest(setting ? { setting, key: Date.now() } : null);
+    setFocusRequest(setting ? { setting } : null);
     if (!setting && contentRef.current) contentRef.current.scrollTop = 0;
   };
+
+  useEffect(() => {
+    selectSection(props.initialSection ?? "general");
+    // Deep links fire on section or request-key changes only.
+  }, [props.initialSection, props.sectionRequestKey]);
 
   // Panels load their data asynchronously, so poll briefly for the target.
   useEffect(() => {
@@ -114,8 +116,18 @@ export function SettingsView(props: SettingsViewProps) {
     const tryFocus = () => {
       const root = contentRef.current;
       const anchor = root ? findSettingAnchor(root, focusRequest.setting) : null;
-      if (anchor) {
-        anchor.scrollIntoView?.({ block: "center", behavior: "smooth" });
+      if (!anchor) {
+        if (++attempts < 20) timer = window.setTimeout(tryFocus, 100);
+        return;
+      }
+      const reduceMotion = window.matchMedia?.(
+        "(prefers-reduced-motion: reduce)",
+      ).matches;
+      anchor.scrollIntoView?.({
+        block: "center",
+        behavior: reduceMotion ? "auto" : "smooth",
+      });
+      if (!reduceMotion) {
         anchor.animate?.(
           [
             { boxShadow: "inset 0 0 0 2px var(--color-accent)" },
@@ -123,13 +135,11 @@ export function SettingsView(props: SettingsViewProps) {
           ],
           { duration: 1800, easing: "ease-out" },
         );
-        return;
       }
-      if (++attempts < 20) timer = window.setTimeout(tryFocus, 100);
     };
     tryFocus();
     return () => window.clearTimeout(timer);
-  }, [focusRequest, activeSection]);
+  }, [focusRequest]);
 
   return (
     <section className="flex h-full min-h-0 bg-surface-1">

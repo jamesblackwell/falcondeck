@@ -31,6 +31,7 @@ export type SettingsSectionId =
   | "notifications"
   | "conversations"
   | "keyboard"
+  | "extensions"
   | "agents"
   | "harnesses"
   | "connectors"
@@ -38,7 +39,6 @@ export type SettingsSectionId =
   | "computer-use"
   | "speech"
   | "models"
-  | "extensions"
   | "remote"
   | "servers"
   | "backup";
@@ -129,6 +129,14 @@ export const SETTINGS_GROUPS: SettingsNavGroup[] = [
         settings: [],
         keywords: ["hotkey", "keybinding", "shortcut"],
       },
+      {
+        id: "extensions",
+        label: "Extensions",
+        description: "Add capabilities to FalconDeck",
+        icon: Blocks,
+        settings: [],
+        keywords: ["plugins", "notes", "tags"],
+      },
     ],
   },
   {
@@ -214,14 +222,6 @@ export const SETTINGS_GROUPS: SettingsNavGroup[] = [
         icon: KeyRound,
         settings: ["OpenRouter", "Title style", "Suggest title", "Automatic titles"],
         keywords: ["api key", "rename", "title prompt", "utility model", "background model"],
-      },
-      {
-        id: "extensions",
-        label: "Extensions",
-        description: "Add capabilities to FalconDeck",
-        icon: Blocks,
-        settings: [],
-        keywords: ["plugins", "notes", "tags"],
       },
     ],
   },

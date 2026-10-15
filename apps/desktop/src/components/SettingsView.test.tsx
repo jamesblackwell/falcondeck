@@ -75,6 +75,18 @@ describe('SettingsView deep links', () => {
     expect(screen.queryByRole('button', { name: /Automations/ })).not.toBeInTheDocument()
   })
 
+  it('disables per-event notification switches while attention notifications are off', () => {
+    render(
+      <SettingsView
+        {...props}
+        initialSection="notifications"
+        preferences={{ notifications: { enabled: false } } as SettingsViewProps['preferences']}
+      />,
+    )
+    expect(screen.getByRole('switch', { name: 'Agent attention notifications' })).toBeEnabled()
+    expect(screen.getByRole('switch', { name: 'Failed turns' })).toBeDisabled()
+  })
+
   it('searches settings and opens the page holding the match', () => {
     render(<SettingsView {...props} initialSection="general" />)
     fireEvent.change(screen.getByRole('searchbox', { name: 'Search settings' }), {

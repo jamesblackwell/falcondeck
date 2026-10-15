@@ -116,6 +116,9 @@ export function BackgroundModelsCard({
                   Model
                 </span>
                 <input
+                  // Uncontrolled so typing does not save per keystroke; the key
+                  // remounts it when the saved model changes, e.g. on Reset.
+                  key={modelFor(provider)}
                   type="text"
                   list={listId}
                   defaultValue={modelFor(provider)}
