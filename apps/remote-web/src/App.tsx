@@ -601,6 +601,12 @@ function RemoteApp() {
   // offline banner can stay put across the whole backoff cycle.
   const [hasConnectedOnce, setHasConnectedOnce] = useState(false);
   const selectionSeedRef = useRef<string | null>(null);
+  // "New task" on a folder opens the ordinary new-thread draft so the harness
+  // and model stay choosable; the thread is filed once the draft creates it.
+  const pendingNewThreadFolderRef = useRef<{
+    workspaceId: string;
+    folderId: string;
+  } | null>(null);
   const sendingConversationKeyRef = useRef<string | null>(null);
   const sendingBaselineAgentItemIdRef = useRef<string | null>(null);
   const threadSettingsRequestRef = useRef(0);
@@ -2981,6 +2987,26 @@ function RemoteApp() {
     }
   }
 
+  function fileNewThreadIntoPendingFolder(workspaceId: string, threadId: string) {
+    const pending = pendingNewThreadFolderRef.current;
+    if (!pending || pending.workspaceId !== workspaceId) return;
+    pendingNewThreadFolderRef.current = null;
+    void submitQueuedAction("preferences.update", {
+      project_folder: {
+        action: "move_thread",
+        workspace_id: workspaceId,
+        thread_id: threadId,
+        folder_id: pending.folderId,
+      },
+    }).catch((error: unknown) => {
+      toast({
+        variant: "danger",
+        title: "Couldn't add the task to its folder",
+        description: error instanceof Error ? error.message : "Please try again",
+      });
+    });
+  }
+
   /**
    * `override` sends a prompt the user did not type — today, a chosen composer
    * suggestion. It carries no attachments and leaves the composer's own draft
@@ -3079,6 +3105,7 @@ function RemoteApp() {
           }),
         );
         activeThreadId = handle.thread.id;
+        fileNewThreadIntoPendingFolder(selectedWorkspace.id, activeThreadId);
         const startedConversationKey = draftKeyFor(
           selectedWorkspace.id,
           activeThreadId,
@@ -3876,6 +3903,7 @@ function RemoteApp() {
   );
   const handleSelectThread = useCallback(
     (workspaceId: string, threadId: string) => {
+      pendingNewThreadFolderRef.current = null;
       setThreadDetail(null);
       setActiveExtensionPanelKey(null);
       setSelectedWorkspaceId(workspaceId);
@@ -3885,6 +3913,7 @@ function RemoteApp() {
     [],
   );
   const handleNewThread = useCallback((workspaceId: string) => {
+    pendingNewThreadFolderRef.current = null;
     setThreadDetail(null);
     setActiveExtensionPanelKey(null);
     setSelectedWorkspaceId(workspaceId);
@@ -4540,6 +4569,7 @@ function RemoteApp() {
         }),
       );
       activeThreadId = handle.thread.id;
+      fileNewThreadIntoPendingFolder(selectedWorkspace.id, activeThreadId);
       setSnapshot((current) =>
         current
           ? {
@@ -4851,43 +4881,10 @@ function RemoteApp() {
 
   const handleNewThreadInFolder = useCallback(
     async (workspaceId: string, folderId: string) => {
-      const workspace = snapshot?.workspaces.find(
-        (entry) => entry.id === workspaceId,
-      );
-      const handle = normalizeThreadHandle(
-        await submitQueuedAction("thread.start", {
-          workspace_id: workspaceId,
-          provider: workspace?.default_provider,
-        }),
-      );
-      setSnapshot((current) =>
-        current
-          ? {
-              ...current,
-              threads: [
-                handle.thread,
-                ...current.threads.filter(
-                  (thread) => thread.id !== handle.thread.id,
-                ),
-              ],
-            }
-          : current,
-      );
-      handleSelectThread(workspaceId, handle.thread.id);
-      await handleProjectFolderMutation({
-        action: "move_thread",
-        workspace_id: workspaceId,
-        thread_id: handle.thread.id,
-        folder_id: folderId,
-      });
+      handleNewThread(workspaceId);
+      pendingNewThreadFolderRef.current = { workspaceId, folderId };
     },
-    [
-      snapshot?.workspaces,
-      setSnapshot,
-      handleSelectThread,
-      handleProjectFolderMutation,
-      submitQueuedAction,
-    ],
+    [handleNewThread],
   );
 
   const handleWorkspaceOrderChange = useCallback(

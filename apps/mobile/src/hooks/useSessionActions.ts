@@ -1,4 +1,5 @@
 import { useCallback, useRef, useState } from "react";
+import { Alert } from "react-native";
 
 import {
   approvalPolicyForProvider,
@@ -33,6 +34,7 @@ import type {
 
 import { isDemoSession } from "@/features/demo/demoRpc";
 import { isRelayTransportError } from "@/lib/connection-copy";
+import { mutateProjectFolder } from "@/lib/project-folders";
 import {
   triggerMessageAcceptedHaptic,
   triggerMessageFailedHaptic,
@@ -197,6 +199,20 @@ export function useSessionActions() {
       useSessionStore
         .getState()
         .selectThread(handle.workspace.id, handle.thread.id);
+    }
+    // "New task" on a folder opens this draft; file the thread it created.
+    if (session.pendingNewThreadFolderId) {
+      void mutateProjectFolder({
+        action: "move_thread",
+        workspace_id: handle.workspace.id,
+        thread_id: handle.thread.id,
+        folder_id: session.pendingNewThreadFolderId,
+      }).catch((error: unknown) => {
+        Alert.alert(
+          "Couldn't add the task to its folder",
+          error instanceof Error ? error.message : "Please try again",
+        );
+      });
     }
     return handle;
   }, []);

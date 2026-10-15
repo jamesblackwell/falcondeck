@@ -1,5 +1,3 @@
-import { normalizeThreadHandle, type ThreadHandle } from '@falcondeck/client-core';
-import { mutateProjectFolder } from '@/lib/project-folders';
 /**
  * Drawer content wrapper that keeps the sidebar cheap while it is closed.
  *
@@ -125,25 +123,14 @@ export function SidebarDrawerContent({
 
   const handleNewThreadInFolder = useCallback(
     async (workspaceId: string, folderId: string) => {
-      const workspace = useSessionStore
-        .getState()
-        .snapshot?.workspaces.find((entry) => entry.id === workspaceId);
-      const handle = normalizeThreadHandle(
-        await useRelayStore.getState()._callRpc<ThreadHandle>("thread.start", {
-          workspace_id: workspaceId,
-          provider: workspace?.default_provider,
-        }),
-      );
-      useSessionStore.getState().applyThreadHandle(handle);
-      handleSelectThread(workspaceId, handle.thread.id);
-      await mutateProjectFolder({
-        action: "move_thread",
-        workspace_id: workspaceId,
-        thread_id: handle.thread.id,
-        folder_id: folderId,
-      });
+      // Open the ordinary draft so the harness and model stay choosable; the
+      // first send files the new thread into the folder.
+      triggerThreadSelectionHaptic();
+      useSessionStore.getState().selectNewThread(workspaceId, folderId);
+      router.navigate("/(app)");
+      handleClose();
     },
-    [handleSelectThread],
+    [handleClose, router],
   );
 
   const handleNewChat = useCallback(async () => {

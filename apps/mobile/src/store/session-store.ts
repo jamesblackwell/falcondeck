@@ -112,6 +112,8 @@ interface SessionState {
    * error instead of a false "No messages yet" empty state. */
   threadDetailErrors: Record<string, string>;
   pendingQueuedTurns: PendingQueuedTurns;
+  /** Folder that the new-thread draft files its thread into once started. */
+  pendingNewThreadFolderId?: string | null;
 }
 
 const MAX_RETAINED_THREADS = 5;
@@ -164,7 +166,7 @@ interface SessionActions {
   exportCache: () => MobileSessionCache | null;
   selectThread: (workspaceId: string, threadId: string) => void;
   selectWorkspace: (workspaceId: string) => void;
-  selectNewThread: (workspaceId: string) => void;
+  selectNewThread: (workspaceId: string, folderId?: string | null) => void;
   applyThreadHandle: (handle: ThreadHandle) => void;
   applyThreadSummary: (thread: ThreadSummary) => void;
   dropInteractiveRequest: (requestId: string) => void;
@@ -197,6 +199,7 @@ const initialState: SessionState = {
   threadDetail: null,
   threadDetailErrors: {},
   pendingQueuedTurns: {},
+  pendingNewThreadFolderId: null,
 };
 
 const EMPTY_ITEMS: ConversationItem[] = [];
@@ -1042,6 +1045,7 @@ export const useSessionStore = create<SessionStore>((set, get) => ({
       selectedWorkspaceId: workspaceId,
       selectedThreadId: threadId,
       threadDetail: state.threadDetail?.thread.id === threadId ? state.threadDetail : null,
+      pendingNewThreadFolderId: null,
     }));
     schedulePersistStateCache();
   },
@@ -1056,16 +1060,18 @@ export const useSessionStore = create<SessionStore>((set, get) => ({
       selectedWorkspaceId: workspaceId,
       selectedThreadId: threadId,
       threadDetail: state.threadDetail?.thread.id === threadId ? state.threadDetail : null,
+      pendingNewThreadFolderId: null,
     }));
     schedulePersistStateCache();
   },
 
-  selectNewThread: (workspaceId) => {
+  selectNewThread: (workspaceId, folderId = null) => {
     set((state) => retainThreadHistories({
       ...state,
       selectedWorkspaceId: workspaceId,
       selectedThreadId: null,
       threadDetail: null,
+      pendingNewThreadFolderId: folderId,
     }));
     schedulePersistStateCache();
   },
