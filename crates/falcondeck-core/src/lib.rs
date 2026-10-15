@@ -3993,8 +3993,11 @@ pub struct ProviderUsageWindow {
 pub struct ProviderUsageCost {
     /// Amount consumed in this window, in whole US cents.
     pub used_usd_cents: u64,
-    /// Spending cap for this window, in whole US cents.
-    pub limit_usd_cents: u64,
+    /// Spending cap for this window, in whole US cents. Omitted when the
+    /// provider reports spend without a cap (for example an uncapped
+    /// OpenRouter key).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub limit_usd_cents: Option<u64>,
 }
 
 /// One banked provider usage-limit reset, e.g. a Codex "Full reset" credit.
@@ -4103,6 +4106,13 @@ pub struct ProviderUsageOverview {
     /// `not_installed`.
     #[serde(default)]
     pub zai: ProviderUsage,
+    /// OpenRouter prepaid spend (API key from OpenCode `openrouter`,
+    /// `OPENROUTER_API_KEY`, or the FalconDeck speech secret).
+    ///
+    /// Older daemons omit this field; clients treat the default as
+    /// `not_installed`.
+    #[serde(default)]
+    pub openrouter: ProviderUsage,
     /// When the daemon last fetched live dashboards for this snapshot.
     /// Cache hits keep the original timestamp. Older daemons omit this.
     #[serde(default, skip_serializing_if = "Option::is_none")]

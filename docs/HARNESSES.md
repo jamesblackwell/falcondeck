@@ -90,9 +90,9 @@ release native ownership.
 
 `GET /api/provider-usage` (and relay RPC `providers.usage`) returns live
 subscription usage snapshots for Codex, Claude Code, Grok, Cursor,
-Antigravity, and Z.AI coding plan, surfaced in Settings → Usage. Types live
-in `falcondeck-core` (`ProviderUsageOverview`) and `client-core`; the daemon
-implementation is `crates/falcondeck-daemon/src/app/provider_usage.rs`.
+Antigravity, Z.AI coding plan, and OpenRouter, surfaced in Settings → Usage.
+Types live in `falcondeck-core` (`ProviderUsageOverview`) and `client-core`;
+the daemon implementation is `crates/falcondeck-daemon/src/app/provider_usage.rs`.
 
 - Codex reads `~/.codex/auth.json` (`CODEX_HOME` respected) and calls the
   ChatGPT usage endpoint with the CLI's own token. Windows are labeled from
@@ -136,9 +136,20 @@ implementation is `crates/falcondeck-daemon/src/app/provider_usage.rs`.
   window, unit 6 / number 1 (or unit 7) the weekly window, and `TIME_LIMIT`
   the monthly MCP tool budget. A rejected key reports `error`, not
   `expired` — API keys do not rotate like OAuth. Older daemons omit `zai`.
+- OpenRouter reads the API key OpenCode stores in
+  `~/.local/share/opencode/auth.json` (`openrouter`; also
+  `Library/Application Support/opencode` and `OPENROUTER_API_KEY`), then the
+  FalconDeck speech secret if neither is set, and GETs `/api/v1/key`. Windows
+  are **Today**, **This week**, and **This month** from `usage_daily` /
+  `usage_weekly` / `usage_monthly` (UTC; week starts Monday). A matching
+  per-key `limit` + `limit_reset`, or `effective_budget`, becomes the cap on
+  that window; uncapped keys report spend without a bar. A rejected key
+  reports `error`, not `expired`. The card is hidden when no key is found.
+  Older daemons omit `openrouter`.
 - OpenCode and Pi are not on this panel as themselves: OpenCode is a
   multiplexer over other providers' tokens (Claude/Codex already appear as
-  themselves; Z.AI coding-plan keys stored by OpenCode appear as Z.AI), and
+  themselves; Z.AI coding-plan keys stored by OpenCode appear as Z.AI;
+  OpenRouter keys stored by OpenCode appear as OpenRouter), and
   Pi is API-key / BYOK with no subscription windows.
 - Each provider resolves independently (`ok` / `not_installed` /
   `unauthenticated` / `expired` / `error`), so one failing never blanks the

@@ -11,6 +11,7 @@ describe("providerMark", () => {
     expect(providerMark("agy")?.title).toBe("Gemini");
     expect(providerMark("antigravity")?.title).toBe("Gemini");
     expect(providerMark("pi")?.title).toBe("Pi");
+    expect(providerMark("openrouter")?.title).toBe("OpenRouter");
   });
 
   it("accepts aliases, ACP prefixes, and mixed case", () => {

@@ -1,6 +1,6 @@
 use falcondeck_core::{
     ConsumeProviderResetCreditOutcome, ConsumeProviderResetCreditRequest,
-    ConsumeProviderResetCreditResponse, ProviderUsage, ProviderUsageOverview,
+    ConsumeProviderResetCreditResponse, ProviderUsage, ProviderUsageCost, ProviderUsageOverview,
     ProviderUsageResetCredit, ProviderUsageResetCredits, ProviderUsageWindow,
 };
 use serde_json::json;
@@ -83,6 +83,32 @@ fn provider_usage_window_tolerates_missing_optionals() {
 }
 
 #[test]
+fn provider_usage_cost_omits_limit_when_uncapped() {
+    let payload = json!({
+        "label": "This month",
+        "used_percent": 0,
+        "cost": { "used_usd_cents": 2550 }
+    });
+    let window: ProviderUsageWindow = serde_json::from_value(payload.clone()).expect("window");
+    assert_eq!(
+        window.cost,
+        Some(ProviderUsageCost {
+            used_usd_cents: 2550,
+            limit_usd_cents: None,
+        })
+    );
+    assert_eq!(
+        serde_json::to_value(window).expect("serialized window"),
+        json!({
+            "label": "This month",
+            "used_percent": 0,
+            "resets_at": null,
+            "cost": { "used_usd_cents": 2550 }
+        })
+    );
+}
+
+#[test]
 fn provider_usage_ok_defaults_missing_reset_credits() {
     let usage: ProviderUsage = serde_json::from_value(json!({
         "status": "ok",
@@ -161,7 +187,8 @@ fn consume_reset_credit_response_round_trips() {
             "grok": { "status": "not_installed" },
             "cursor": { "status": "not_installed" },
             "agy": { "status": "not_installed" },
-            "zai": { "status": "not_installed" }
+            "zai": { "status": "not_installed" },
+            "openrouter": { "status": "not_installed" }
         }
     });
     let response: ConsumeProviderResetCreditResponse =
@@ -205,7 +232,8 @@ fn provider_usage_overview_round_trips() {
         "grok": { "status": "not_installed" },
         "cursor": { "status": "not_installed" },
         "agy": { "status": "not_installed" },
-        "zai": { "status": "not_installed" }
+        "zai": { "status": "not_installed" },
+        "openrouter": { "status": "not_installed" }
     });
 
     let overview: ProviderUsageOverview =
@@ -229,6 +257,7 @@ fn provider_usage_overview_defaults_missing_grok() {
     assert_eq!(overview.cursor, ProviderUsage::NotInstalled);
     assert_eq!(overview.agy, ProviderUsage::NotInstalled);
     assert_eq!(overview.zai, ProviderUsage::NotInstalled);
+    assert_eq!(overview.openrouter, ProviderUsage::NotInstalled);
     assert_eq!(overview.refreshed_at, None);
 }
 
@@ -244,5 +273,6 @@ fn provider_usage_overview_defaults_missing_cursor() {
     assert_eq!(overview.cursor, ProviderUsage::NotInstalled);
     assert_eq!(overview.agy, ProviderUsage::NotInstalled);
     assert_eq!(overview.zai, ProviderUsage::NotInstalled);
+    assert_eq!(overview.openrouter, ProviderUsage::NotInstalled);
     assert_eq!(overview.refreshed_at, None);
 }

@@ -10,9 +10,12 @@
 //! `~/.grok/auth.json`, Cursor Agent queries the dashboard Connect-RPC usage
 //! endpoints with the token from the CLI's keychain entry (macOS) or
 //! `~/.cursor/auth.json`, Antigravity queries Cloud Code quota endpoints
-//! with the token from `~/.gemini/oauth_creds.json`, and Z.AI coding-plan
-//! usage is read from `GET /api/monitor/usage/quota/limit` with the API key
-//! OpenCode stores under `zai-coding-plan` (or `ZAI_CODING_PLAN_API_KEY`).
+//! with the token from `~/.gemini/oauth_creds.json`, Z.AI coding-plan usage is
+//! read from `GET /api/monitor/usage/quota/limit` with the API key OpenCode
+//! stores under `zai-coding-plan` (or `ZAI_CODING_PLAN_API_KEY`), and
+//! OpenRouter spend is read from `GET /api/v1/key` with the key OpenCode
+//! stores under `openrouter`, `OPENROUTER_API_KEY`, or the FalconDeck speech
+//! secret.
 //! Tokens are used as-is — the daemon never refreshes another tool's
 //! credentials, because rotating a refresh token out from under the owning
 //! CLI breaks its next run.
@@ -32,7 +35,7 @@ use std::sync::{Mutex as StdMutex, OnceLock};
 use std::time::{Duration, Instant};
 
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
-use chrono::{DateTime, SecondsFormat, Utc};
+use chrono::{DateTime, Datelike, NaiveDate, SecondsFormat, Utc};
 use falcondeck_core::{
     AgentProvider, ConsumeProviderResetCreditOutcome, ConsumeProviderResetCreditRequest,
     ConsumeProviderResetCreditResponse, ProviderUsage, ProviderUsageCost, ProviderUsageOverview,
@@ -94,6 +97,9 @@ const AGY_LOAD_BODY: &str = r#"{"metadata":{"ideType":"IDE_UNSPECIFIED","platfor
 const ZAI_USAGE_PATH: &str = "/api/monitor/usage/quota/limit";
 const ZAI_HOST: &str = "https://api.z.ai";
 const ZHIPU_HOST: &str = "https://open.bigmodel.cn";
+
+const OPENROUTER_USAGE_URL: &str = "https://openrouter.ai/api/v1/key";
+const OPENROUTER_ENV_KEY: &str = "OPENROUTER_API_KEY";
 
 // ---------------------------------------------------------------------------
 // Shared helpers
@@ -1581,6 +1587,31 @@ fn json_u64(value: Option<&Value>) -> Option<u64> {
     value.as_str()?.parse().ok()
 }
 
+fn json_f64(value: Option<&Value>) -> Option<f64> {
+    let value = value?;
+    if let Some(number) = value.as_f64() {
+        return number.is_finite().then_some(number);
+    }
+    value
+        .as_str()?
+        .parse()
+        .ok()
+        .filter(|number: &f64| number.is_finite())
+}
+
+fn usd_to_cents(value: Option<&Value>) -> Option<u64> {
+    let usd = json_f64(value)?;
+    if usd < 0.0 {
+        return None;
+    }
+    let cents = (usd * 100.0).round();
+    if cents > u64::MAX as f64 {
+        Some(u64::MAX)
+    } else {
+        Some(cents as u64)
+    }
+}
+
 fn epoch_millis_to_iso(value: Option<&Value>) -> Option<String> {
     let millis = match value? {
         Value::String(text) => text.parse::<i64>().ok()?,
@@ -1617,7 +1648,7 @@ fn normalize_cursor_usage(
                 (Some(used_usd_cents), Some(limit_usd_cents)) if limit_usd_cents > 0 => {
                     Some(ProviderUsageCost {
                         used_usd_cents,
-                        limit_usd_cents,
+                        limit_usd_cents: Some(limit_usd_cents),
                     })
                 }
                 _ => None,
@@ -1945,7 +1976,7 @@ fn zai_quota_url(host: &str) -> String {
     format!("{host}{ZAI_USAGE_PATH}")
 }
 
-fn zai_auth_paths() -> Vec<PathBuf> {
+fn opencode_auth_paths() -> Vec<PathBuf> {
     let mut paths = Vec::new();
     if let Some(home) = std::env::var_os("HOME") {
         let home = PathBuf::from(home);
@@ -2183,7 +2214,7 @@ fn normalize_zai_usage(raw: &Value) -> ProviderUsage {
 
 #[cfg(not(test))]
 async fn read_zai_auth_raw() -> Option<String> {
-    for path in zai_auth_paths() {
+    for path in opencode_auth_paths() {
         let Ok(raw) = fs::read_to_string(&path).await else {
             continue;
         };
@@ -2256,6 +2287,299 @@ async fn fetch_zai_usage() -> ProviderUsage {
 }
 
 // ---------------------------------------------------------------------------
+// OpenRouter prepaid spend
+// ---------------------------------------------------------------------------
+
+#[derive(Clone, Copy)]
+enum OpenRouterPeriod {
+    Day,
+    Week,
+    Month,
+}
+
+impl OpenRouterPeriod {
+    const ALL: [Self; 3] = [Self::Day, Self::Week, Self::Month];
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::Day => "Today",
+            Self::Week => "This week",
+            Self::Month => "This month",
+        }
+    }
+
+    fn interval_name(self) -> &'static str {
+        match self {
+            Self::Day => "daily",
+            Self::Week => "weekly",
+            Self::Month => "monthly",
+        }
+    }
+
+    fn usage_keys(self) -> (&'static str, &'static str) {
+        match self {
+            Self::Day => ("usageDaily", "usage_daily"),
+            Self::Week => ("usageWeekly", "usage_weekly"),
+            Self::Month => ("usageMonthly", "usage_monthly"),
+        }
+    }
+}
+
+fn openrouter_interval_matches(value: Option<&Value>, period: OpenRouterPeriod) -> bool {
+    value
+        .and_then(Value::as_str)
+        .is_some_and(|interval| interval.eq_ignore_ascii_case(period.interval_name()))
+}
+
+fn openrouter_payload(raw: &Value) -> &Value {
+    raw.get("data")
+        .filter(|value| value.is_object())
+        .unwrap_or(raw)
+}
+
+fn utc_midnight(date: NaiveDate) -> DateTime<Utc> {
+    date.and_hms_opt(0, 0, 0)
+        .expect("midnight is a valid time")
+        .and_utc()
+}
+
+fn openrouter_period_end(now: DateTime<Utc>, period: OpenRouterPeriod) -> DateTime<Utc> {
+    let today = now.date_naive();
+    match period {
+        OpenRouterPeriod::Day => utc_midnight(today.succ_opt().expect("next day")),
+        OpenRouterPeriod::Week => {
+            let days = 7 - u64::from(today.weekday().num_days_from_monday());
+            utc_midnight(
+                today
+                    .checked_add_days(chrono::Days::new(days))
+                    .expect("next Monday"),
+            )
+        }
+        OpenRouterPeriod::Month => {
+            let (year, month) = if today.month() == 12 {
+                (today.year() + 1, 1)
+            } else {
+                (today.year(), today.month() + 1)
+            };
+            utc_midnight(NaiveDate::from_ymd_opt(year, month, 1).expect("next month"))
+        }
+    }
+}
+
+fn openrouter_period_end_iso(now: DateTime<Utc>, period: OpenRouterPeriod) -> String {
+    openrouter_period_end(now, period).to_rfc3339_opts(SecondsFormat::Millis, true)
+}
+
+fn parse_openrouter_auth(raw: &str) -> Option<String> {
+    let value: Value = serde_json::from_str(raw).ok()?;
+    let entry = value.get("openrouter")?;
+    match entry.get("type").and_then(Value::as_str) {
+        Some(kind) if !kind.eq_ignore_ascii_case("api") => return None,
+        _ => {}
+    }
+    non_empty_string(entry.get("key")).or_else(|| non_empty_string(entry.get("apiKey")))
+}
+
+fn openrouter_credentials_from_env_map(get: impl Fn(&str) -> Option<String>) -> Option<String> {
+    get(OPENROUTER_ENV_KEY).filter(|value| !value.is_empty())
+}
+
+fn openrouter_credentials_from_env() -> Option<String> {
+    openrouter_credentials_from_env_map(|name| std::env::var(name).ok())
+}
+
+fn openrouter_headers(api_key: &str) -> Vec<(&'static str, String)> {
+    vec![
+        ("authorization", format!("Bearer {api_key}")),
+        ("accept", "application/json".to_string()),
+        ("http-referer", "https://falcondeck.com".to_string()),
+        ("x-title", "FalconDeck".to_string()),
+    ]
+}
+
+fn openrouter_budget_for<'a>(payload: &'a Value, period: OpenRouterPeriod) -> Option<&'a Value> {
+    let matches_period = |value: &Value| {
+        openrouter_interval_matches(json_field(value, "resetInterval", "reset_interval"), period)
+    };
+    if let Some(budget) = payload
+        .get("effective_budget")
+        .filter(|value| value.is_object())
+        && matches_period(budget)
+    {
+        return Some(budget);
+    }
+    payload
+        .get("budgets")
+        .and_then(Value::as_array)
+        .and_then(|budgets| budgets.iter().find(|budget| matches_period(budget)))
+}
+
+fn openrouter_cap(payload: &Value, period: OpenRouterPeriod) -> Option<(u64, Option<String>)> {
+    if let Some(budget) = openrouter_budget_for(payload, period) {
+        let limit_cents = usd_to_cents(json_field(budget, "limitUsd", "limit_usd"))?;
+        if limit_cents == 0 {
+            return None;
+        }
+        let resets_at = timestamp_value_to_iso(json_field(budget, "resetsAt", "resets_at"));
+        return Some((limit_cents, resets_at));
+    }
+    if !openrouter_interval_matches(json_field(payload, "limitReset", "limit_reset"), period) {
+        return None;
+    }
+    let limit_cents = usd_to_cents(payload.get("limit"))?;
+    (limit_cents > 0).then_some((limit_cents, None))
+}
+
+fn openrouter_window(
+    payload: &Value,
+    period: OpenRouterPeriod,
+    now: DateTime<Utc>,
+) -> ProviderUsageWindow {
+    let (camel, snake) = period.usage_keys();
+    let spent_cents = usd_to_cents(json_field(payload, camel, snake)).unwrap_or(0);
+    let computed_reset = openrouter_period_end_iso(now, period);
+    let (used_percent, cost, resets_at) = match openrouter_cap(payload, period) {
+        Some((limit_cents, budget_reset)) => {
+            let used_percent = clamp_percent((spent_cents as f64) / (limit_cents as f64) * 100.0);
+            (
+                used_percent,
+                Some(ProviderUsageCost {
+                    used_usd_cents: spent_cents,
+                    limit_usd_cents: Some(limit_cents),
+                }),
+                Some(budget_reset.unwrap_or(computed_reset)),
+            )
+        }
+        None => (
+            0,
+            Some(ProviderUsageCost {
+                used_usd_cents: spent_cents,
+                limit_usd_cents: None,
+            }),
+            Some(computed_reset),
+        ),
+    };
+    ProviderUsageWindow {
+        label: period.label().to_string(),
+        used_percent,
+        resets_at,
+        cost,
+    }
+}
+
+fn openrouter_plan_label(payload: &Value) -> Option<String> {
+    json_field(payload, "isFreeTier", "is_free_tier")
+        .and_then(Value::as_bool)
+        .filter(|value| *value)
+        .map(|_| "Free".to_string())
+}
+
+fn normalize_openrouter_usage(raw: &Value, now: DateTime<Utc>) -> ProviderUsage {
+    if !raw.is_object() {
+        return ProviderUsage::Error {
+            message: "OpenRouter usage response was malformed.".to_string(),
+            plan_label: None,
+            account_email: None,
+        };
+    }
+    let payload = openrouter_payload(raw);
+    if !payload.is_object() {
+        return ProviderUsage::Error {
+            message: "OpenRouter usage response was malformed.".to_string(),
+            plan_label: None,
+            account_email: None,
+        };
+    }
+    let windows = OpenRouterPeriod::ALL
+        .into_iter()
+        .map(|period| openrouter_window(payload, period, now))
+        .collect();
+    usage_ok(
+        non_empty_string(payload.get("label")),
+        openrouter_plan_label(payload),
+        windows,
+    )
+}
+
+#[cfg(not(test))]
+async fn read_openrouter_auth_raw() -> Option<String> {
+    for path in opencode_auth_paths() {
+        let Ok(raw) = fs::read_to_string(&path).await else {
+            continue;
+        };
+        let trimmed = raw.trim().to_string();
+        if parse_openrouter_auth(&trimmed).is_some() {
+            return Some(trimmed);
+        }
+    }
+    None
+}
+
+#[cfg(test)]
+async fn read_openrouter_auth_raw() -> Option<String> {
+    test_openrouter_auth_file().lock().unwrap().clone()
+}
+
+#[cfg(not(test))]
+async fn read_openrouter_credentials() -> Option<String> {
+    if let Some(raw) = read_openrouter_auth_raw().await
+        && let Some(api_key) = parse_openrouter_auth(&raw)
+    {
+        return Some(api_key);
+    }
+    openrouter_credentials_from_env()
+}
+
+#[cfg(test)]
+async fn read_openrouter_credentials() -> Option<String> {
+    parse_openrouter_auth(&read_openrouter_auth_raw().await?)
+}
+
+async fn fetch_openrouter_usage_with_key(api_key: &str) -> ProviderUsage {
+    let Ok(response) = fetch_usage_json(OPENROUTER_USAGE_URL, &openrouter_headers(api_key)).await
+    else {
+        return ProviderUsage::Error {
+            message: "OpenRouter usage request failed.".to_string(),
+            plan_label: None,
+            account_email: None,
+        };
+    };
+    match response.status {
+        401 | 403 => ProviderUsage::Error {
+            message: "OpenRouter API key was rejected. Check the key, then reload usage."
+                .to_string(),
+            plan_label: None,
+            account_email: None,
+        },
+        429 => ProviderUsage::Error {
+            message: "OpenRouter usage is rate limited right now. Try again shortly.".to_string(),
+            plan_label: None,
+            account_email: None,
+        },
+        status if !(200..300).contains(&status) => ProviderUsage::Error {
+            message: format!("OpenRouter usage request failed (HTTP {status})."),
+            plan_label: None,
+            account_email: None,
+        },
+        _ => match response.body {
+            Some(body) => normalize_openrouter_usage(&body, Utc::now()),
+            None => ProviderUsage::Error {
+                message: "OpenRouter usage response was malformed.".to_string(),
+                plan_label: None,
+                account_email: None,
+            },
+        },
+    }
+}
+
+async fn fetch_openrouter_usage() -> ProviderUsage {
+    let Some(api_key) = read_openrouter_credentials().await else {
+        return ProviderUsage::Unauthenticated;
+    };
+    fetch_openrouter_usage_with_key(&api_key).await
+}
+
+// ---------------------------------------------------------------------------
 // Public entry point
 // ---------------------------------------------------------------------------
 
@@ -2271,6 +2595,7 @@ fn usage_cache_ttl(overview: &ProviderUsageOverview) -> Duration {
         &overview.cursor,
         &overview.agy,
         &overview.zai,
+        &overview.openrouter,
     ]
     .iter()
     .any(|usage| matches!(usage, ProviderUsage::Error { .. }));
@@ -2292,9 +2617,9 @@ fn cached_usage_snapshot(
 
 impl AppState {
     /// Reads usage snapshots for the local Codex, Claude Code, Grok, Cursor,
-    /// Antigravity, and Z.AI coding-plan subscriptions. Serves the daemon
-    /// cache when it is still fresh unless `refresh` is set. Each provider
-    /// resolves independently so one failing never blanks the others.
+    /// Antigravity, Z.AI coding-plan, and OpenRouter subscriptions. Serves the
+    /// daemon cache when it is still fresh unless `refresh` is set. Each
+    /// provider resolves independently so one failing never blanks the others.
     pub async fn provider_usage_overview(&self, refresh: bool) -> ProviderUsageOverview {
         let now = Instant::now();
         if !refresh {
@@ -2338,13 +2663,14 @@ impl AppState {
     }
 
     async fn fetch_provider_usage_overview(&self) -> ProviderUsageOverview {
-        let (codex, claude_code, grok, cursor, agy, zai) = tokio::join!(
+        let (codex, claude_code, grok, cursor, agy, zai, openrouter) = tokio::join!(
             self.codex_usage(),
             self.claude_code_usage(),
             self.grok_usage(),
             self.cursor_usage(),
             self.agy_usage(),
-            self.zai_usage()
+            self.zai_usage(),
+            self.openrouter_usage()
         );
         ProviderUsageOverview {
             codex,
@@ -2353,6 +2679,7 @@ impl AppState {
             cursor,
             agy,
             zai,
+            openrouter,
             refreshed_at: Some(Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true)),
         }
     }
@@ -2418,6 +2745,18 @@ impl AppState {
         }
         fetch_zai_usage().await
     }
+
+    async fn openrouter_usage(&self) -> ProviderUsage {
+        if read_openrouter_credentials().await.is_some() {
+            return fetch_openrouter_usage().await;
+        }
+        match self.openrouter_key_cached().await {
+            Ok(Some(api_key)) if !api_key.is_empty() => {
+                fetch_openrouter_usage_with_key(&api_key).await
+            }
+            _ => ProviderUsage::NotInstalled,
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -2479,6 +2818,12 @@ fn test_zai_auth_file() -> &'static StdMutex<Option<String>> {
     FILE.get_or_init(|| StdMutex::new(None))
 }
 
+#[cfg(test)]
+fn test_openrouter_auth_file() -> &'static StdMutex<Option<String>> {
+    static FILE: OnceLock<StdMutex<Option<String>>> = OnceLock::new();
+    FILE.get_or_init(|| StdMutex::new(None))
+}
+
 /// Serializes tests that mutate the process-global fixtures.
 #[cfg(test)]
 async fn usage_test_guard() -> tokio::sync::MutexGuard<'static, ()> {
@@ -2527,6 +2872,7 @@ mod tests {
         *test_agy_oauth_file().lock().unwrap() = None;
         *test_agy_account_email().lock().unwrap() = None;
         *test_zai_auth_file().lock().unwrap() = None;
+        *test_openrouter_auth_file().lock().unwrap() = None;
     }
 
     fn fake_codex_jwt(account_id: &str, email: Option<&str>, fedramp: bool) -> String {
@@ -3586,7 +3932,7 @@ mod tests {
                     resets_at: epoch_millis_to_iso(Some(&json!("1789802081000"))),
                     cost: Some(ProviderUsageCost {
                         used_usd_cents: 38168,
-                        limit_usd_cents: 40000,
+                        limit_usd_cents: Some(40000),
                     }),
                 }],
                 reset_credits: None,
@@ -3718,7 +4064,7 @@ mod tests {
                     resets_at: epoch_millis_to_iso(Some(&json!("1789802081000"))),
                     cost: Some(ProviderUsageCost {
                         used_usd_cents: 1520,
-                        limit_usd_cents: 40000,
+                        limit_usd_cents: Some(40000),
                     }),
                 }],
                 reset_credits: None,
@@ -4153,6 +4499,255 @@ mod tests {
         }
     }
 
+    fn openrouter_auth_json(key: &str) -> String {
+        json!({ "openrouter": { "type": "api", "key": key } }).to_string()
+    }
+
+    fn monday_afternoon() -> DateTime<Utc> {
+        DateTime::parse_from_rfc3339("2026-10-12T15:30:00Z")
+            .unwrap()
+            .with_timezone(&Utc)
+    }
+
+    #[test]
+    fn openrouter_period_end_uses_utc_calendar_windows() {
+        let now = monday_afternoon();
+        assert_eq!(
+            openrouter_period_end_iso(now, OpenRouterPeriod::Day),
+            "2026-10-13T00:00:00.000Z"
+        );
+        assert_eq!(
+            openrouter_period_end_iso(now, OpenRouterPeriod::Week),
+            "2026-10-19T00:00:00.000Z"
+        );
+        assert_eq!(
+            openrouter_period_end_iso(now, OpenRouterPeriod::Month),
+            "2026-11-01T00:00:00.000Z"
+        );
+        let sunday = DateTime::parse_from_rfc3339("2026-10-18T09:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        assert_eq!(
+            openrouter_period_end_iso(sunday, OpenRouterPeriod::Week),
+            "2026-10-19T00:00:00.000Z"
+        );
+    }
+
+    #[test]
+    fn parse_openrouter_auth_reads_api_keys() {
+        assert_eq!(
+            parse_openrouter_auth(&openrouter_auth_json("sk-or-test")).as_deref(),
+            Some("sk-or-test")
+        );
+        let raw = json!({
+            "openrouter": { "type": "oauth", "key": "sk-or-test" }
+        })
+        .to_string();
+        assert!(parse_openrouter_auth(&raw).is_none());
+    }
+
+    #[test]
+    fn openrouter_env_reads_the_api_key() {
+        let key = openrouter_credentials_from_env_map(|name| match name {
+            "OPENROUTER_API_KEY" => Some("sk-or-env".to_string()),
+            _ => None,
+        });
+        assert_eq!(key.as_deref(), Some("sk-or-env"));
+        assert!(openrouter_credentials_from_env_map(|_| None).is_none());
+    }
+
+    #[test]
+    fn normalize_openrouter_usage_maps_uncapped_spend_windows() {
+        let raw = json!({
+            "data": {
+                "label": "FalconDeck",
+                "usage_daily": 1.5,
+                "usage_weekly": 10,
+                "usage_monthly": 25.5,
+                "limit": null
+            }
+        });
+        assert_eq!(
+            normalize_openrouter_usage(&raw, monday_afternoon()),
+            ProviderUsage::Ok {
+                account_email: Some("FalconDeck".to_string()),
+                plan_label: None,
+                windows: vec![
+                    ProviderUsageWindow {
+                        label: "Today".to_string(),
+                        used_percent: 0,
+                        resets_at: Some("2026-10-13T00:00:00.000Z".to_string()),
+                        cost: Some(ProviderUsageCost {
+                            used_usd_cents: 150,
+                            limit_usd_cents: None,
+                        }),
+                    },
+                    ProviderUsageWindow {
+                        label: "This week".to_string(),
+                        used_percent: 0,
+                        resets_at: Some("2026-10-19T00:00:00.000Z".to_string()),
+                        cost: Some(ProviderUsageCost {
+                            used_usd_cents: 1000,
+                            limit_usd_cents: None,
+                        }),
+                    },
+                    ProviderUsageWindow {
+                        label: "This month".to_string(),
+                        used_percent: 0,
+                        resets_at: Some("2026-11-01T00:00:00.000Z".to_string()),
+                        cost: Some(ProviderUsageCost {
+                            used_usd_cents: 2550,
+                            limit_usd_cents: None,
+                        }),
+                    },
+                ],
+                reset_credits: None,
+            }
+        );
+    }
+
+    #[test]
+    fn normalize_openrouter_usage_attaches_a_matching_key_limit() {
+        let raw = json!({
+            "data": {
+                "usage_daily": 1.5,
+                "usage_weekly": 10,
+                "usage_monthly": 25.5,
+                "limit": 50,
+                "limit_reset": "monthly",
+                "is_free_tier": true
+            }
+        });
+        match normalize_openrouter_usage(&raw, monday_afternoon()) {
+            ProviderUsage::Ok {
+                plan_label,
+                windows,
+                ..
+            } => {
+                assert_eq!(plan_label.as_deref(), Some("Free"));
+                assert_eq!(windows[0].cost.as_ref().unwrap().limit_usd_cents, None);
+                assert_eq!(windows[1].cost.as_ref().unwrap().limit_usd_cents, None);
+                assert_eq!(
+                    windows[2].cost,
+                    Some(ProviderUsageCost {
+                        used_usd_cents: 2550,
+                        limit_usd_cents: Some(5000),
+                    })
+                );
+                assert_eq!(windows[2].used_percent, 51);
+            }
+            other => panic!("expected ok variant, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn normalize_openrouter_usage_prefers_an_effective_budget() {
+        let raw = json!({
+            "data": {
+                "usage_daily": 1.5,
+                "usage_weekly": 10,
+                "usage_monthly": 25.5,
+                "effective_budget": {
+                    "limit_usd": 50,
+                    "spend_usd": 32.5,
+                    "reset_interval": "weekly",
+                    "resets_at": "2026-10-19T00:00:00.000Z"
+                }
+            }
+        });
+        match normalize_openrouter_usage(&raw, monday_afternoon()) {
+            ProviderUsage::Ok { windows, .. } => {
+                assert_eq!(windows[1].label, "This week");
+                assert_eq!(
+                    windows[1].cost,
+                    Some(ProviderUsageCost {
+                        used_usd_cents: 1000,
+                        limit_usd_cents: Some(5000),
+                    })
+                );
+                assert_eq!(windows[1].used_percent, 20);
+                assert_eq!(
+                    windows[1].resets_at.as_deref(),
+                    Some("2026-10-19T00:00:00.000Z")
+                );
+                assert_eq!(windows[2].cost.as_ref().unwrap().limit_usd_cents, None);
+            }
+            other => panic!("expected ok variant, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn normalize_openrouter_usage_flags_malformed_payloads() {
+        match normalize_openrouter_usage(&json!("nope"), monday_afternoon()) {
+            ProviderUsage::Error { message, .. } => {
+                assert!(message.contains("malformed"), "{message}");
+            }
+            other => panic!("expected error variant, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn openrouter_usage_reports_unauthenticated_without_credentials() {
+        let _guard = usage_test_guard().await;
+        clear_fixtures();
+        assert_eq!(
+            fetch_openrouter_usage().await,
+            ProviderUsage::Unauthenticated
+        );
+    }
+
+    #[tokio::test]
+    async fn openrouter_usage_reports_error_not_expired_on_401() {
+        let _guard = usage_test_guard().await;
+        clear_fixtures();
+        *test_openrouter_auth_file().lock().unwrap() = Some(openrouter_auth_json("sk-or-bad"));
+        test_http_fixtures()
+            .lock()
+            .unwrap()
+            .insert(OPENROUTER_USAGE_URL.to_string(), error_response(401));
+        match fetch_openrouter_usage().await {
+            ProviderUsage::Error { message, .. } => {
+                assert!(message.contains("rejected"), "{message}");
+            }
+            other => panic!("expected error variant, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn openrouter_usage_normalizes_a_successful_response() {
+        let _guard = usage_test_guard().await;
+        clear_fixtures();
+        *test_openrouter_auth_file().lock().unwrap() = Some(openrouter_auth_json("sk-or-test"));
+        test_http_fixtures().lock().unwrap().insert(
+            OPENROUTER_USAGE_URL.to_string(),
+            ok_response(json!({
+                "data": {
+                    "label": "FalconDeck",
+                    "usage_daily": 2,
+                    "usage_weekly": 8,
+                    "usage_monthly": 12.34
+                }
+            })),
+        );
+        match fetch_openrouter_usage().await {
+            ProviderUsage::Ok {
+                account_email,
+                windows,
+                ..
+            } => {
+                assert_eq!(account_email.as_deref(), Some("FalconDeck"));
+                assert_eq!(windows.len(), 3);
+                assert_eq!(windows[0].label, "Today");
+                assert_eq!(windows[0].cost.as_ref().unwrap().used_usd_cents, 200);
+                assert_eq!(windows[1].cost.as_ref().unwrap().used_usd_cents, 800);
+                assert_eq!(windows[2].label, "This month");
+                assert_eq!(windows[2].cost.as_ref().unwrap().used_usd_cents, 1234);
+                assert_eq!(windows[2].cost.as_ref().unwrap().limit_usd_cents, None);
+            }
+            other => panic!("expected ok variant, got {other:?}"),
+        }
+    }
+
     fn sample_overview(codex: ProviderUsage) -> ProviderUsageOverview {
         ProviderUsageOverview {
             codex,
@@ -4161,6 +4756,7 @@ mod tests {
             cursor: ProviderUsage::NotInstalled,
             agy: ProviderUsage::NotInstalled,
             zai: ProviderUsage::NotInstalled,
+            openrouter: ProviderUsage::NotInstalled,
             refreshed_at: Some("2026-08-30T12:00:00.000Z".to_string()),
         }
     }

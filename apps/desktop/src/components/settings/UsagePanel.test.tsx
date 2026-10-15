@@ -265,6 +265,114 @@ describe('UsagePanel', () => {
     expect(screen.getByRole('progressbar', { name: 'Monthly MCP limit' })).toBeInTheDocument()
   })
 
+  it('renders OpenRouter spend with day, week, and month toggles', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue(
+        jsonResponse(
+          overviewWith({
+            codex: { status: 'not_installed' },
+            claude_code: { status: 'not_installed' },
+            openrouter: {
+              status: 'ok',
+              account_email: 'FalconDeck',
+              plan_label: null,
+              windows: [
+                {
+                  label: 'Today',
+                  used_percent: 0,
+                  resets_at: '2099-10-13T00:00:00.000Z',
+                  cost: { used_usd_cents: 150 },
+                },
+                {
+                  label: 'This week',
+                  used_percent: 0,
+                  resets_at: '2099-10-19T00:00:00.000Z',
+                  cost: { used_usd_cents: 1000 },
+                },
+                {
+                  label: 'This month',
+                  used_percent: 0,
+                  resets_at: '2099-11-01T00:00:00.000Z',
+                  cost: { used_usd_cents: 1234 },
+                },
+              ],
+            },
+          }),
+        ),
+      ),
+    )
+
+    render(<UsagePanel baseUrl="http://127.0.0.1:4317" onToast={vi.fn()} />)
+
+    expect(await screen.findByText('OpenRouter')).toBeInTheDocument()
+    expect(screen.getByText('FalconDeck')).toBeInTheDocument()
+    expect(screen.getByText('$12.34 spent')).toBeInTheDocument()
+    expect(screen.queryByRole('progressbar')).toBeNull()
+
+    fireEvent.click(screen.getByRole('button', { name: 'Day' }))
+    expect(screen.getByText('$1.50 spent')).toBeInTheDocument()
+    expect(screen.queryByText('$12.34 spent')).toBeNull()
+
+    fireEvent.click(screen.getByRole('button', { name: 'Week' }))
+    expect(screen.getByText('$10.00 spent')).toBeInTheDocument()
+  })
+
+  it('renders an OpenRouter cap bar when the selected period has a limit', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue(
+        jsonResponse(
+          overviewWith({
+            codex: { status: 'not_installed' },
+            claude_code: { status: 'not_installed' },
+            openrouter: {
+              status: 'ok',
+              account_email: null,
+              plan_label: null,
+              windows: [
+                {
+                  label: 'Today',
+                  used_percent: 0,
+                  resets_at: null,
+                  cost: { used_usd_cents: 150 },
+                },
+                {
+                  label: 'This week',
+                  used_percent: 0,
+                  resets_at: null,
+                  cost: { used_usd_cents: 1000 },
+                },
+                {
+                  label: 'This month',
+                  used_percent: 51,
+                  resets_at: '2099-11-01T00:00:00.000Z',
+                  cost: { used_usd_cents: 2550, limit_usd_cents: 5000 },
+                },
+              ],
+            },
+          }),
+        ),
+      ),
+    )
+
+    render(<UsagePanel baseUrl="http://127.0.0.1:4317" onToast={vi.fn()} />)
+
+    expect(await screen.findByText('$25.50 / $50')).toBeInTheDocument()
+    expect(screen.getByRole('progressbar', { name: 'This month' })).toBeInTheDocument()
+  })
+
+  it('hides OpenRouter when an older daemon omits the field', async () => {
+    const payload = overviewWith({})
+    delete payload.openrouter
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(jsonResponse(payload)))
+
+    render(<UsagePanel baseUrl="http://127.0.0.1:4317" onToast={vi.fn()} />)
+
+    expect(await screen.findByText('Codex')).toBeInTheDocument()
+    expect(screen.queryByText('OpenRouter')).toBeNull()
+  })
+
   it('hides Z.AI when an older daemon omits the field', async () => {
     const payload = overviewWith({})
     delete payload.zai

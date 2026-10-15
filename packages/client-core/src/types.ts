@@ -60,7 +60,8 @@ export type AccountSummary = {
 /** USD-cent spend figures for a usage-metered plan window. */
 export type ProviderUsageCost = {
   used_usd_cents: number;
-  limit_usd_cents: number;
+  /** Omitted when the provider reports spend without a cap. */
+  limit_usd_cents?: number | null;
 };
 
 /**
@@ -129,6 +130,8 @@ export type ProviderUsageOverview = {
   agy?: ProviderUsage;
   /** Older daemons omit this field; treat missing as not installed. */
   zai?: ProviderUsage;
+  /** Older daemons omit this field; treat missing as not installed. */
+  openrouter?: ProviderUsage;
   /**
    * When the daemon last fetched live dashboards for this snapshot.
    * Cache hits keep the original timestamp. Older daemons omit this.

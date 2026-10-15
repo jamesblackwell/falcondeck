@@ -14,6 +14,7 @@ import {
   CardDescription,
   CardHeader,
   CardTitle,
+  SegmentedControl,
 } from '@falcondeck/ui'
 import type {
   ConsumeProviderResetCreditResponse,
@@ -91,7 +92,23 @@ const PROVIDERS: ProviderConfig[] = [
     expiredHint:
       'Your Z.AI coding-plan API key was rejected. Add a new key with `opencode auth login`, then reload usage.',
   },
+  {
+    key: 'openrouter',
+    providerId: 'openrouter',
+    name: 'OpenRouter',
+    signInHint:
+      'Add an OpenRouter API key in OpenCode or Settings → Speech, then reload usage.',
+    expiredHint: 'Your OpenRouter API key was rejected. Check the key, then reload usage.',
+  },
 ]
+
+const OPENROUTER_PERIODS = [
+  { value: 'day', label: 'Day', windowLabel: 'Today' },
+  { value: 'week', label: 'Week', windowLabel: 'This week' },
+  { value: 'month', label: 'Month', windowLabel: 'This month' },
+] as const
+
+type OpenRouterPeriod = (typeof OPENROUTER_PERIODS)[number]['value']
 
 function barColorClass(usedPercent: number): string {
   if (usedPercent >= 95) return 'bg-danger'
@@ -126,11 +143,24 @@ function formatReset(resetsAt: string | null): string | null {
   return `Resets ${formatted}`
 }
 
+function formatUsdCents(cents: number, wholeIfInteger = false): string {
+  const value = cents / 100
+  if (wholeIfInteger && Number.isInteger(value)) return value.toFixed(0)
+  return value.toFixed(2)
+}
+
 function usageWindowValue(window: ProviderUsageWindow): string {
   if (!window.cost) return `${window.used_percent}% used`
-  const used = window.cost.used_usd_cents / 100
-  const limit = window.cost.limit_usd_cents / 100
-  return `$${used.toFixed(2)} / $${limit % 1 === 0 ? limit.toFixed(0) : limit.toFixed(2)}`
+  const used = formatUsdCents(window.cost.used_usd_cents)
+  const limit = window.cost.limit_usd_cents
+  if (limit == null || limit <= 0) return `$${used} spent`
+  return `$${used} / $${formatUsdCents(limit, true)}`
+}
+
+function windowShowsBar(window: ProviderUsageWindow): boolean {
+  if (!window.cost) return true
+  const limit = window.cost.limit_usd_cents
+  return limit != null && limit > 0
 }
 
 function usageIdentity(usage: ProviderUsage | undefined): {
@@ -190,6 +220,24 @@ function consumeOutcomeToast(
   }
 }
 
+function UsageBar({ window }: { window: ProviderUsageWindow }) {
+  return (
+    <div
+      role="progressbar"
+      aria-label={window.label}
+      aria-valuenow={window.used_percent}
+      aria-valuemin={0}
+      aria-valuemax={100}
+      className="h-1.5 w-full overflow-hidden rounded-[var(--fd-radius-full)] bg-surface-3"
+    >
+      <div
+        className={`h-full rounded-[var(--fd-radius-full)] ${barColorClass(window.used_percent)}`}
+        style={{ width: `${Math.max(window.used_percent, 2)}%` }}
+      />
+    </div>
+  )
+}
+
 function UsageWindowRow({ window }: { window: ProviderUsageWindow }) {
   const reset = formatReset(window.resets_at)
   return (
@@ -200,19 +248,40 @@ function UsageWindowRow({ window }: { window: ProviderUsageWindow }) {
           {usageWindowValue(window)}
         </span>
       </div>
-      <div
-        role="progressbar"
-        aria-label={window.label}
-        aria-valuenow={window.used_percent}
-        aria-valuemin={0}
-        aria-valuemax={100}
-        className="h-1.5 w-full overflow-hidden rounded-[var(--fd-radius-full)] bg-surface-3"
-      >
-        <div
-          className={`h-full rounded-[var(--fd-radius-full)] ${barColorClass(window.used_percent)}`}
-          style={{ width: `${Math.max(window.used_percent, 2)}%` }}
+      {windowShowsBar(window) ? <UsageBar window={window} /> : null}
+      {reset ? (
+        <p className="text-[length:var(--fd-text-xs)] text-fg-muted">{reset}</p>
+      ) : null}
+    </div>
+  )
+}
+
+function OpenRouterSpend({ windows }: { windows: ProviderUsageWindow[] }) {
+  const [period, setPeriod] = useState<OpenRouterPeriod>('month')
+  const selectedLabel = OPENROUTER_PERIODS.find((item) => item.value === period)?.windowLabel
+  const window = windows.find((item) => item.label === selectedLabel) ?? windows[0]
+  if (!window) {
+    return (
+      <p className="text-[length:var(--fd-text-sm)] text-fg-muted">
+        No usage reported for this key.
+      </p>
+    )
+  }
+  const reset = formatReset(window.resets_at)
+  return (
+    <div className="space-y-2">
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <SegmentedControl
+          ariaLabel="OpenRouter spend period"
+          value={period}
+          options={OPENROUTER_PERIODS.map(({ value, label }) => ({ value, label }))}
+          onChange={setPeriod}
         />
+        <span className="text-[length:var(--fd-text-xs)] tabular-nums text-fg-muted">
+          {usageWindowValue(window)}
+        </span>
       </div>
+      {windowShowsBar(window) ? <UsageBar window={window} /> : null}
       {reset ? (
         <p className="text-[length:var(--fd-text-xs)] text-fg-muted">{reset}</p>
       ) : null}
@@ -306,6 +375,9 @@ function UsageBody({
             No usage limits reported for this plan.
           </p>
         )
+      }
+      if (config.key === 'openrouter') {
+        return <OpenRouterSpend windows={usage.windows} />
       }
       return (
         <div className="space-y-3">
@@ -442,7 +514,7 @@ export function UsagePanel({ baseUrl, onToast, hideHeader = false }: UsagePanelP
       {!hideHeader ? (
         <SettingsPageHeader
           title="Usage"
-          description="How much of your Codex, Claude Code, Antigravity, Grok, Cursor, and Z.AI subscriptions you&apos;ve used on this Mac. Credentials stay with each CLI — FalconDeck only reads the numbers."
+          description="How much of your Codex, Claude Code, Antigravity, Grok, Cursor, Z.AI, and OpenRouter usage on this Mac. Credentials stay with each CLI — FalconDeck only reads the numbers."
         />
       ) : null}
 
@@ -491,7 +563,7 @@ export function UsagePanel({ baseUrl, onToast, hideHeader = false }: UsagePanelP
             <div className="flex flex-col items-center gap-2 rounded-[var(--fd-radius-lg)] border border-dashed border-border-subtle px-6 py-10 text-center">
               <p className="text-[length:var(--fd-text-sm)] text-fg-secondary">
                 No supported subscriptions detected yet. Install Codex, Claude Code, Antigravity,
-                Grok, or Cursor, or add a Z.AI coding-plan key, to see usage.
+                Grok, or Cursor, or add a Z.AI or OpenRouter key, to see usage.
               </p>
             </div>
           ) : (
