@@ -327,8 +327,9 @@ payload. Concurrent retries must therefore preserve both ID and content.
 
 Completion uses `/api/experimental/session/{sessionID}/wait`, which waits for
 the entire foreground drain, including steered successors. The terminal verdict
-comes from the durable `idle` record after the admitted message. Failed and
-interrupted outcomes stay errors; an intermediate tool response or absence from
+comes from the durable `idle` record after the admitted message. Final output
+is projected before interpreting that verdict. Failed and interrupted outcomes
+stay errors; an intermediate tool response or absence from
 the active map cannot finish a turn. The monitor polls authoritative message,
 permission, and form APIs while waiting. Text can arrive in larger blocks than
 it does through ACP.
@@ -336,7 +337,8 @@ it does through ACP.
 History walks `cursor.next` toward older messages until every page is read.
 Assistant content without its own ID receives a stable ID from its message,
 type, and position so text and reasoning blocks cannot overwrite one another.
-Agent timestamps survive hydration. Selected skills use explicit file/name
+Agent timestamps and stored image/file bytes survive hydration, including
+attachment-only user messages. Selected skills use explicit file/name
 preambles because `$skill` text alone no longer expands in V2; those preambles
 are removed from the displayed user text during reload. Session deletion uses
 `DELETE /api/session/{sessionID}`.
@@ -347,8 +349,11 @@ The flat `/api/model` catalog is the runner registry. Enabled membership and
 variants are read again before each prompt, so provider hot reloads are checked
 against current state. The old preview model-API allowlist is removed; any
 enabled model can run. Missing explicit models resolve through OpenCode's
-configured default, while agent-specific models are preserved. Reasoning effort
-is sent only when that model publishes the matching variant.
+configured default, while agent-specific models are preserved. Selecting
+**OpenCode default** again restores the configured model rather than retaining
+the last explicit choice. Reasoning presets are sent only when the
+live model registry publishes them; the effort picker's **default** entry uses
+base model settings rather than silently choosing the lowest preset.
 
 Permission replies use `decision: "once" | "always" | "reject"`. **Always
 approve** in FalconDeck sends one-time approvals for that thread and does not

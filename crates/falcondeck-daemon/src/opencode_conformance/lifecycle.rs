@@ -101,6 +101,8 @@ async fn qualify_form(runtime: &OpenCodeRuntime, session: &str) -> Result<(), Da
             Some(json!({"title":"FalconDeck qualification", "fields":[
                 {"key":"choice","type":"string","required":true,"options":[{"label":"Friendly label","value":"internal-value"}]},
                 {"key":"count","type":"integer","required":true},
+                {"key":"amount","type":"number","required":true},
+                {"key":"dependent","type":"string","required":true,"when":[{"key":"amount","op":"eq","value":3}]},
                 {"key":"enabled","type":"boolean","required":true},
                 {"key":"tags","type":"multiselect","required":true,"options":[{"label":"One","value":"one"}]}
             ]})),
@@ -124,7 +126,9 @@ async fn qualify_form(runtime: &OpenCodeRuntime, session: &str) -> Result<(), Da
             id,
             vec![
                 vec!["Friendly label".into()],
-                vec!["3".into()],
+                vec!["3.0".into()],
+                vec!["3.0".into()],
+                vec!["active".into()],
                 vec!["false".into()],
                 vec!["One".into()],
             ],

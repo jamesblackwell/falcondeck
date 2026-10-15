@@ -28,6 +28,9 @@ pub(super) fn form_answers(form: &Value, answers: &[Vec<String>]) -> Result<Valu
                     };
                     let matches = match value {
                         Value::Array(values) => values.contains(&condition["value"]),
+                        value if value.is_number() && condition["value"].is_number() => {
+                            value.as_f64() == condition["value"].as_f64()
+                        }
                         value => value == &condition["value"],
                     };
                     if condition["op"] == "ne" {
@@ -95,7 +98,8 @@ pub(super) fn form_answers(form: &Value, answers: &[Vec<String>]) -> Result<Valu
                 let number: Value =
                     serde_json::from_str(mapped[0].trim()).map_err(|_| invalid())?;
                 if !number.is_number()
-                    || (field["type"] == "integer" && !number.is_i64() && !number.is_u64())
+                    || (field["type"] == "integer"
+                        && !number.as_f64().is_some_and(|value| value.fract() == 0.0))
                 {
                     return Err(invalid());
                 }
@@ -156,6 +160,25 @@ mod tests {
                 &[vec!["1.5".into()]]
             )
             .is_err()
+        );
+    }
+
+    #[test]
+    fn numeric_conditions_follow_javascript_number_equality() {
+        let form = json!({"fields":[
+            {"key":"count","type":"number"},
+            {"key":"dependent","type":"string","when":[{"key":"count","op":"eq","value":3}]}
+        ]});
+        assert_eq!(
+            form_answers(&form, &[vec!["3.0".into()], vec!["kept".into()]]).unwrap(),
+            json!({"count":3.0,"dependent":"kept"})
+        );
+        assert!(
+            form_answers(
+                &json!({"fields":[{"key":"count","type":"integer"}]}),
+                &[vec!["3.0".into()]]
+            )
+            .is_ok()
         );
     }
 

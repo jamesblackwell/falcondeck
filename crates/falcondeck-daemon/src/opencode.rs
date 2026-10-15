@@ -250,17 +250,7 @@ impl OpenCodeRuntime {
         // has a default. Resolve it through OpenCode, preserving agent defaults.
         let initialized = async {
             if self.session_model_ref(&session_id).await?.is_none() {
-                let model = self
-                    .request(reqwest::Method::GET, "/api/model/default", None)
-                    .await?;
-                if let Some(model) = model.get("data").filter(|model| model.is_object()) {
-                    self.request(
-                        reqwest::Method::POST,
-                        &format!("/api/session/{session_id}/model"),
-                        Some(json!({"model": model})),
-                    )
-                    .await?;
-                }
+                self.set_model(&session_id, "default", None).await?;
             }
             Ok::<_, DaemonError>(())
         }
@@ -285,10 +275,8 @@ impl OpenCodeRuntime {
         runner_models(&self.provider_catalog().await?)
     }
 
-    /// The session's effective model as `provider/model`, or `None` when the
-    /// session has no model set. `None` is itself a blocking condition (see
-    /// [`native_model_block_reason`]): a runner with no resolvable model
-    /// admits prompts and then silently never runs them.
+    /// The session's selected model as `provider/model`. New sessions resolve
+    /// OpenCode's configured default before admission when no model is set.
     pub async fn session_model_ref(&self, session_id: &str) -> Result<Option<String>, DaemonError> {
         let session = self
             .request(
@@ -321,10 +309,32 @@ impl OpenCodeRuntime {
         model: &str,
         variant: Option<&str>,
     ) -> Result<(), DaemonError> {
-        let Some(mut model) = model_ref(model) else {
-            // The synthetic `default` catalog entry deliberately preserves
-            // OpenCode's own configured model.
-            return Ok(());
+        let mut model = if model == "default" {
+            let response = self
+                .request(reqwest::Method::GET, "/api/model/default", None)
+                .await?;
+            let model = response
+                .get("data")
+                .filter(|model| {
+                    model
+                        .get("providerID")
+                        .and_then(Value::as_str)
+                        .is_some_and(|id| !id.is_empty())
+                        && model
+                            .get("id")
+                            .and_then(Value::as_str)
+                            .is_some_and(|id| !id.is_empty())
+                })
+                .ok_or_else(|| {
+                    DaemonError::BadRequest("OpenCode has no configured default model".into())
+                })?;
+            model.clone()
+        } else {
+            model_ref(model).ok_or_else(|| {
+                DaemonError::BadRequest(format!(
+                    "OpenCode model must be provider-qualified: {model}"
+                ))
+            })?
         };
         if let Some(variant) = variant
             && let Some(object) = model.as_object_mut()
@@ -411,16 +421,23 @@ impl OpenCodeRuntime {
         session_id: &str,
         message_id: &str,
     ) -> Result<Vec<Value>, DaemonError> {
+        self.wait_for_settlement(session_id).await?;
+        let messages = self.messages_since(session_id, message_id).await?;
+        terminal_outcome(&messages)?;
+        Ok(messages)
+    }
+
+    /// Wait without interpreting the terminal verdict, so callers can project
+    /// the final transcript before surfacing a failed or interrupted outcome.
+    pub(crate) async fn wait_for_settlement(&self, session_id: &str) -> Result<(), DaemonError> {
         self.request_inner(
             reqwest::Method::POST,
             &format!("/api/experimental/session/{session_id}/wait"),
             None,
             None,
         )
-        .await?;
-        let messages = self.messages_since(session_id, message_id).await?;
-        terminal_outcome(&messages)?;
-        Ok(messages)
+        .await
+        .map(|_| ())
     }
 
     pub async fn session_is_active(&self, session_id: &str) -> Result<bool, DaemonError> {
@@ -708,7 +725,7 @@ fn session_is_active(value: &Value, session_id: &str) -> Result<bool, DaemonErro
         })
 }
 
-fn terminal_outcome(messages: &[Value]) -> Result<(), DaemonError> {
+pub(crate) fn terminal_outcome(messages: &[Value]) -> Result<(), DaemonError> {
     if let Some(idle) = messages
         .iter()
         .rev()
@@ -821,12 +838,15 @@ fn runner_models(value: &Value) -> Result<HashMap<String, RunnerModel>, DaemonEr
 /// requested effort, or `None` when the runner would reject it.
 pub fn runner_variant<'a>(effort: Option<&'a str>, model: Option<&RunnerModel>) -> Option<&'a str> {
     let effort = effort?;
-    // A model the registry does not describe is blocked separately; leaving
-    // its effort alone keeps this function from silently changing a request
-    // the caller is about to refuse anyway.
-    let Some(model) = model else {
-        return Some(effort);
-    };
+    // V2's base settings apply when no preset is selected. This is valid even
+    // when the catalog does not enumerate a variant called "default".
+    if effort == "default" {
+        return None;
+    }
+    // Unavailable models are blocked separately. The synthetic default model
+    // has no preset picker; retaining an old model's effort here could override
+    // its configured default with a variant that the new model cannot run.
+    let model = model?;
     model
         .variants
         .iter()
@@ -1218,12 +1238,13 @@ mod tests {
         assert_eq!(runner_variant(Some("high"), gpt), Some("high"));
         assert_eq!(runner_variant(Some("max"), gpt), None);
         assert_eq!(runner_variant(None, gpt), None);
+        assert_eq!(runner_variant(Some("default"), gpt), None);
         assert_eq!(
             runner_variant(Some("low"), registry.get("opencode/no-variants-field")),
             None
         );
-        // An unregistered model is refused by the gate, not silently retuned.
-        assert_eq!(runner_variant(Some("medium"), None), Some("medium"));
+        // A stale effort must not leak through the synthetic default entry.
+        assert_eq!(runner_variant(Some("medium"), None), None);
     }
 
     #[test]

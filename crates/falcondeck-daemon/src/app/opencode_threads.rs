@@ -5,7 +5,7 @@ use std::sync::Arc;
 use chrono::Utc;
 use falcondeck_core::{
     AccountStatus, AgentCapabilitySummary, ApprovalDecision, CollaborationModeSummary,
-    ContentLifecycle, ConversationItem, InteractiveQuestion, InteractiveQuestionOption,
+    ContentLifecycle, ConversationItem, ImageInput, InteractiveQuestion, InteractiveQuestionOption,
     InteractiveRequest, InteractiveRequestKind, ModelSummary, ReasoningEffortSummary, ServiceLevel,
     ThreadStatus, TurnInputItem, UnifiedEvent,
 };
@@ -286,34 +286,7 @@ impl AppState {
                     .await?
                     .messages(&session_id)
                     .await?;
-                // A message-level provider error inside the stored history is
-                // turn content, not a sync failure: the transcript itself was
-                // fully fetched, so it still counts as synced. Any other
-                // projection failure (e.g. an internal error after a partial
-                // walk) must leave the thread eligible for retry on the next
-                // open.
-                let projection_synced = match project_messages(
-                    &app,
-                    &workspace_id,
-                    &thread_id,
-                    &messages,
-                    true,
-                )
-                .await
-                {
-                    Ok(()) => true,
-                    Err(error) => {
-                        tracing::debug!(%error, %thread_id, "native OpenCode hydration projected a provider error");
-                        matches!(error, DaemonError::Rpc(_))
-                    }
-                };
-                if projection_synced {
-                    Ok(())
-                } else {
-                    Err(DaemonError::Rpc(
-                        "OpenCode transcript projection failed mid-hydration".to_string(),
-                    ))
-                }
+                project_messages(&app, &workspace_id, &thread_id, &messages, true).await
             }
             .await;
             match result {
@@ -358,22 +331,6 @@ impl AppState {
     }
 }
 
-/// The workspace catalog entry for one OpenCode model id, which carries the
-/// variants the model accepts as reasoning efforts.
-fn catalog_model<'a>(
-    workspace: &'a super::ManagedWorkspace,
-    model_id: &str,
-) -> Option<&'a ModelSummary> {
-    workspace
-        .summary
-        .agents
-        .iter()
-        .find(|agent| agent.provider.as_str().eq_ignore_ascii_case("opencode"))?
-        .models
-        .iter()
-        .find(|model| model.id == model_id)
-}
-
 pub(super) async fn start_opencode_turn(
     app: &AppState,
     workspace_id: &str,
@@ -394,24 +351,9 @@ pub(super) async fn start_opencode_turn(
             DaemonError::BadRequest("native OpenCode thread has no session id".to_string())
         })?;
         let model_id = thread.summary.agent.model_id.clone();
-        // Only a variant the catalog lists for this model may ride along:
-        // OpenCode rejects an unknown one, and a thread keeps its effort when
-        // the model changes underneath it.
-        let variant = thread
-            .summary
-            .agent
-            .reasoning_effort
-            .clone()
-            .filter(|effort| {
-                model_id.as_deref().is_some_and(|model_id| {
-                    catalog_model(workspace, model_id).is_some_and(|model| {
-                        model
-                            .supported_reasoning_efforts
-                            .iter()
-                            .any(|candidate| candidate.reasoning_effort == *effort)
-                    })
-                })
-            });
+        // Validate against the live registry below; workspace metadata can be
+        // older than a provider hot reload.
+        let variant = thread.summary.agent.reasoning_effort.clone();
         let (prompt, files) = opencode_prompt_from_inputs(inputs, selected_skills);
         (
             session_id,
@@ -472,12 +414,12 @@ pub(super) async fn start_opencode_turn(
     let thread_id = thread_id.to_string();
     tokio::spawn(async move {
         let outcome = async {
-            let wait = runtime.wait_until_idle(&session_id, &message_id);
+            let wait = runtime.wait_for_settlement(&session_id);
             tokio::pin!(wait);
             let mut permissions = tokio::time::interval(std::time::Duration::from_millis(400));
             let mut projection = tokio::time::interval(std::time::Duration::from_millis(1500));
             let mut projected = std::collections::HashMap::<String, Value>::new();
-            let current_messages = loop {
+            loop {
                 tokio::select! {
                     result = &mut wait => {
                         break result?;
@@ -552,8 +494,9 @@ pub(super) async fn start_opencode_turn(
                         }
                     }
                 }
-            };
-            project_messages(&app, &workspace_id, &thread_id, &current_messages, false).await
+            }
+            let current_messages = runtime.messages_since(&session_id, &message_id).await?;
+            project_settled_messages(&app, &workspace_id, &thread_id, &current_messages).await
         }
         .await;
         let mut interrupted = false;
@@ -566,7 +509,7 @@ pub(super) async fn start_opencode_turn(
             Ok(()) => (ThreadStatus::Idle, None, ToolSettlement::Completed, true),
             Err(_) if interrupted => {
                 // The user stopped the turn; OpenCode acknowledges with a
-                // `step.failed` ("Provider turn interrupted"). Keep the
+                // durable interrupted idle record. Keep the
                 // partial transcript and settle quietly instead of reporting
                 // a failed turn.
                 let mut projected = false;
@@ -688,8 +631,8 @@ pub(super) fn native_default_model() -> ModelSummary {
 /// when the JSON object is parsed into a sorted map, and an alphabetical
 /// picker ("high, low, max") reads as noise.
 fn effort_rank(effort: &str) -> usize {
-    const ORDER: [&str; 8] = [
-        "off", "none", "minimal", "low", "medium", "high", "xhigh", "max",
+    const ORDER: [&str; 9] = [
+        "default", "off", "none", "minimal", "low", "medium", "high", "xhigh", "max",
     ];
     ORDER
         .iter()
@@ -712,6 +655,10 @@ pub(super) fn variant_efforts(model: &Value) -> Vec<ReasoningEffortSummary> {
             .collect(),
         _ => Vec::new(),
     };
+    let mut ids = ids;
+    if !ids.is_empty() && !ids.iter().any(|id| id == "default") {
+        ids.push("default".to_string());
+    }
     let mut efforts = ids
         .into_iter()
         .map(|id| ReasoningEffortSummary {
@@ -725,16 +672,6 @@ pub(super) fn variant_efforts(model: &Value) -> Vec<ReasoningEffortSummary> {
             .then_with(|| left.reasoning_effort.cmp(&right.reasoning_effort))
     });
     efforts
-}
-
-/// The variant OpenCode itself falls back to: an explicit `default`, else the
-/// first one it lists.
-fn default_variant(efforts: &[ReasoningEffortSummary]) -> Option<String> {
-    efforts
-        .iter()
-        .find(|effort| effort.reasoning_effort == "default")
-        .or_else(|| efforts.first())
-        .map(|effort| effort.reasoning_effort.clone())
 }
 
 fn parse_native_models(catalog: &Value) -> Result<Vec<ModelSummary>, DaemonError> {
@@ -766,7 +703,8 @@ fn parse_native_models(catalog: &Value) -> Result<Vec<ModelSummary>, DaemonError
             id: format!("{provider_id}/{model_id}"),
             label: format!("{model_label} · {provider_id}"),
             is_default: false,
-            default_reasoning_effort: default_variant(&supported_reasoning_efforts),
+            default_reasoning_effort: (!supported_reasoning_efforts.is_empty())
+                .then(|| "default".to_string()),
             supported_reasoning_efforts,
             service_tiers: Vec::new(),
             default_service_tier: None,
@@ -1350,6 +1288,38 @@ fn native_created_at(value: &Value, fallback: chrono::DateTime<Utc>) -> chrono::
         .unwrap_or(fallback)
 }
 
+async fn project_settled_messages(
+    app: &AppState,
+    workspace_id: &str,
+    thread_id: &str,
+    messages: &[Value],
+) -> Result<(), DaemonError> {
+    project_messages(app, workspace_id, thread_id, messages, false).await?;
+    crate::opencode::terminal_outcome(messages)
+}
+
+fn native_user_attachments(message: &Value, message_id: &str) -> Vec<ImageInput> {
+    message["files"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .enumerate()
+        .filter_map(|(index, file)| {
+            // Use OpenCode's stored bytes: a local file may have moved or changed
+            // since admission, and inline attachments have no source URI.
+            let data = file["data"].as_str()?;
+            let mime = file["mime"].as_str()?;
+            Some(ImageInput {
+                id: format!("opencode-{message_id}-file-{index}"),
+                name: file["name"].as_str().map(str::to_owned),
+                mime_type: Some(mime.to_string()),
+                url: format!("data:{mime};base64,{data}"),
+                local_path: None,
+            })
+        })
+        .collect()
+}
+
 async fn project_messages(
     app: &AppState,
     workspace_id: &str,
@@ -1357,8 +1327,13 @@ async fn project_messages(
     messages: &[Value],
     replay: bool,
 ) -> Result<(), DaemonError> {
-    let mut provider_error = None;
-    for message in messages {
+    // A durable idle verdict supersedes intermediate assistant failures from
+    // retries and clean interruptions. Older preview records without an idle
+    // verdict still retain their message-level error in history.
+    let last_idle = messages
+        .iter()
+        .rposition(|message| message["type"] == "idle");
+    for (index, message) in messages.iter().enumerate() {
         let message_created_at = native_created_at(message, Utc::now());
         let message_id = message
             .get("id")
@@ -1370,7 +1345,8 @@ async fn project_messages(
                 .and_then(Value::as_str)
                 .and_then(super::harness_user_text::visible_user_prompt)
                 .unwrap_or_default();
-            if !text.is_empty() {
+            let attachments = native_user_attachments(message, message_id);
+            if !text.is_empty() || !attachments.is_empty() {
                 push_projected_item(
                     app,
                     workspace_id,
@@ -1378,7 +1354,7 @@ async fn project_messages(
                     ConversationItem::UserMessage {
                         id: format!("opencode-{message_id}"),
                         text: text.to_string(),
-                        attachments: Vec::new(),
+                        attachments,
                         turn_id: None,
                         previous_turn_id: None,
                         created_at: message_created_at,
@@ -1390,7 +1366,7 @@ async fn project_messages(
             }
             continue;
         }
-        if message.get("type").and_then(Value::as_str) != Some("assistant") {
+        if !matches!(message["type"].as_str(), Some("assistant" | "idle")) {
             continue;
         }
         for (index, content) in message
@@ -1508,13 +1484,24 @@ async fn project_messages(
                 _ => {}
             }
         }
-        if let Some(error) = message.get("error") {
-            let message_text = error
-                .pointer("/data/message")
-                .or_else(|| error.get("message"))
+        let has_error = match message["type"].as_str() {
+            Some("idle") => message["outcome"] == "failed",
+            Some("assistant") => {
+                last_idle.is_none_or(|idle| index > idle)
+                    && message.get("error").is_some_and(|error| !error.is_null())
+            }
+            _ => false,
+        };
+        if has_error {
+            let message_text = message
+                .get("error")
+                .and_then(|error| {
+                    error
+                        .get("message")
+                        .or_else(|| error.pointer("/data/message"))
+                })
                 .and_then(Value::as_str)
-                .map(str::to_owned)
-                .unwrap_or_else(|| error.to_string());
+                .unwrap_or("OpenCode turn failed");
             push_projected_item(
                 app,
                 workspace_id,
@@ -1522,21 +1509,16 @@ async fn project_messages(
                 ConversationItem::Service {
                     id: format!("opencode-error-{message_id}"),
                     level: ServiceLevel::Error,
-                    message: message_text.clone(),
+                    message: message_text.to_string(),
                     created_at: message_created_at,
                 },
                 true,
                 replay,
             )
             .await?;
-            provider_error = Some(message_text);
         }
     }
-    if let Some(error) = provider_error {
-        Err(DaemonError::Rpc(error))
-    } else {
-        Ok(())
-    }
+    Ok(())
 }
 
 pub(super) fn requested_native_transport(config: &AcpProviderConfig) -> bool {
@@ -1552,8 +1534,7 @@ mod tests {
 
     use super::*;
 
-    #[tokio::test]
-    async fn native_history_replay_keeps_all_content_blocks_and_original_times() {
+    async fn history_fixture() -> (tempfile::TempDir, AppState) {
         use falcondeck_core::{AgentProvider, WorkspaceKind, WorkspaceStatus, WorkspaceSummary};
         use std::collections::HashMap;
 
@@ -1596,6 +1577,12 @@ mod tests {
         })
         .await
         .unwrap();
+        (temp, app)
+    }
+
+    #[tokio::test]
+    async fn native_history_replay_keeps_all_content_blocks_and_original_times() {
+        let (_temp, app) = history_fixture().await;
         let preamble = super::super::harness_user_text::falcondeck_skill_path_preamble(
             "/skills/review/SKILL.md",
         );
@@ -1650,6 +1637,75 @@ mod tests {
             if id == "opencode-tool" && created_at.timestamp_millis() == 3000
                 && completed_at.is_some_and(|time| time.timestamp_millis() == 4000))
         ));
+    }
+
+    #[tokio::test]
+    async fn native_reload_retains_attachment_only_user_messages() {
+        let (_temp, app) = history_fixture().await;
+        let history = [
+            json!({"id":"image-only","type":"user","time":{"created":1000},"text":"","files":[
+                {"data":"aGVsbG8=","mime":"image/png","name":"shot.png","source":{"type":"inline"}},
+                {"data":"cGRm","mime":"application/pdf","name":"document.pdf","source":{"type":"uri","uri":"file:///gone/document.pdf"}}
+            ]}),
+        ];
+        for _ in 0..2 {
+            project_messages(&app, "workspace", "thread", &history, true)
+                .await
+                .unwrap();
+        }
+        let workspaces = app.inner.workspaces.lock().await;
+        let items = &workspaces["workspace"].threads["thread"].items;
+        let [
+            ConversationItem::UserMessage {
+                text, attachments, ..
+            },
+        ] = items.as_slice()
+        else {
+            panic!("attachment-only input must survive replay: {items:?}");
+        };
+        assert!(text.is_empty());
+        assert_eq!(attachments.len(), 2);
+        assert_eq!(attachments[0].url, "data:image/png;base64,aGVsbG8=");
+        assert_eq!(attachments[1].url, "data:application/pdf;base64,cGRm");
+        assert_eq!(attachments[1].name.as_deref(), Some("document.pdf"));
+    }
+
+    #[tokio::test]
+    async fn native_idle_verdict_owns_provider_errors_during_replay() {
+        for outcome in ["succeeded", "interrupted", "failed"] {
+            let (_temp, app) = history_fixture().await;
+            let history = [
+                json!({"id":"assistant","type":"assistant","content":[{"type":"text","text":"Final output"}],"error":{"message":"intermediate error"}}),
+                json!({"id":"idle","type":"idle","outcome":outcome,"error":{"message":"terminal failure"}}),
+            ];
+            project_messages(&app, "workspace", "thread", &history, true)
+                .await
+                .unwrap();
+            let settled = project_settled_messages(&app, "workspace", "thread", &history).await;
+            assert_eq!(settled.is_err(), outcome != "succeeded");
+            let workspaces = app.inner.workspaces.lock().await;
+            let items = &workspaces["workspace"].threads["thread"].items;
+            assert!(items.iter().any(|item| matches!(item, ConversationItem::AssistantMessage {text, ..} if text == "Final output")));
+            let errors = items
+                .iter()
+                .filter_map(|item| match item {
+                    ConversationItem::Service {
+                        level: ServiceLevel::Error,
+                        message,
+                        ..
+                    } => Some(message.as_str()),
+                    _ => None,
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(
+                errors,
+                if outcome == "failed" {
+                    vec!["terminal failure"]
+                } else {
+                    vec![]
+                }
+            );
+        }
     }
 
     #[test]
@@ -1816,10 +1872,10 @@ mod tests {
                 .iter()
                 .map(|effort| effort.reasoning_effort.as_str())
                 .collect::<Vec<_>>(),
-            vec!["low", "high", "max"]
+            vec!["default", "low", "high", "max"]
         );
-        // OpenCode itself falls back to the first variant it lists.
-        assert_eq!(glm.default_reasoning_effort.as_deref(), Some("low"));
+        // An omitted variant uses base settings, not the lowest published preset.
+        assert_eq!(glm.default_reasoning_effort.as_deref(), Some("default"));
 
         // A model without variants offers no effort picker at all.
         let plain = models

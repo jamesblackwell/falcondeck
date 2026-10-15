@@ -378,6 +378,37 @@ async fn probe_session_routes(runtime: &OpenCodeRuntime, cwd: &str, report: &mut
     let agent = runtime.set_agent(&session_id, "build").await;
     report.record("session agent is settable", agent, |()| "build".to_string());
 
+    let default_model = async {
+        let read_model = || async {
+            runtime
+                .request(
+                    reqwest::Method::GET,
+                    &format!("/api/session/{session_id}"),
+                    None,
+                )
+                .await
+                .map(|session| session["data"]["model"].clone())
+        };
+        let expected = read_model().await?;
+        runtime
+            .set_model(&session_id, UNRESOLVABLE_MODEL, None)
+            .await?;
+        let stale_effort = crate::opencode::runner_variant(Some("low"), None);
+        runtime
+            .set_model(&session_id, "default", stale_effort)
+            .await?;
+        if expected.is_null() || read_model().await? != expected {
+            return Err(DaemonError::Rpc(
+                "Selecting default left the previous model or effort in place".into(),
+            ));
+        }
+        Ok::<_, DaemonError>(())
+    }
+    .await;
+    report.record("default model can be reselected", default_model, |()| {
+        "configured default restored".into()
+    });
+
     // Interrupting an idle session is a no-op for OpenCode but still exercises
     // the route and its body expectations.
     let interrupt = runtime.interrupt(&session_id).await;
