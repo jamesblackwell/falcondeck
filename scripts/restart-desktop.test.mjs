@@ -5,18 +5,22 @@ import { spawn } from 'node:child_process';
 import { once } from 'node:events';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { mainPids, pruneDesktopBackups, restartDesktop, withRestartLock } from './restart-desktop.mjs';
+import { mainPids, pruneDesktopBackups, restartDesktop, waitForDesktopHealth, withRestartLock } from './restart-desktop.mjs';
 
 const binary = '/Applications/FalconDeck.app/Contents/MacOS/falcondeck-desktop';
 function fixture({ stale = false, stubborn = false, unhealthy = false, bootoutFails = false } = {}) {
   const calls = [];
   let running = true;
+  let elapsed = 0;
   return {
     calls,
-    delay: async () => {},
+    now: () => elapsed,
+    log: () => {},
+    delay: async (ms) => { elapsed += ms; },
     health: async (url) => {
       assert.equal(url, 'http://127.0.0.1:59182/api/health');
-      return { ok: !unhealthy };
+      return { ok: !unhealthy, status: unhealthy ? 503 : 200,
+        json: async () => ({ ok: true, version: '0.1.3', workspaces: 90 }) };
     },
     io(command, args) {
       calls.push([command, ...args]);
@@ -66,6 +70,77 @@ test('failed health check does not trigger another restart', async () => {
   const f = fixture({ unhealthy: true });
   await assert.rejects(restartDesktop(f), /no automatic restart/);
   assert.equal(f.calls.filter(([c]) => c.endsWith('/open')).length, 1);
+});
+test('finds the daemon when a connector listener appears first', async () => {
+  const f = fixture();
+  const original = f.io;
+  await restartDesktop({ ...f, io: (command, args) => command.endsWith('/lsof')
+    ? 'p123\nf31\nn127.0.0.1:59183\nf13\nn127.0.0.1:59182\n'
+    : original(command, args),
+  health: async (url) => url.includes(':59183/') ? { ok: false, status: 404 } : f.health(url) });
+  assert.equal(f.calls.filter(([c]) => c.endsWith('/open')).length, 1);
+});
+test('waits for daemon readiness beyond the old thirty-second window', async () => {
+  const f = fixture();
+  let probes = 0;
+  await restartDesktop({ ...f, health: async (url) => ++probes <= 70
+    ? { ok: false, status: 503 } : f.health(url) });
+  assert.ok(probes > 60);
+  assert.equal(f.calls.filter(([c]) => c.endsWith('/open')).length, 1);
+});
+test('an unrelated HTTP success is not daemon health', async () => {
+  const f = fixture();
+  await assert.rejects(restartDesktop({ ...f, health: async () => ({ ok: true, status: 200,
+    json: async () => ({ connected: true }) }) }), /no automatic restart/);
+});
+test('health failures report the observed PID, port, response, and log path', async () => {
+  const f = fixture({ unhealthy: true });
+  await assert.rejects(restartDesktop(f), (error) => {
+    assert.match(error.message, /PID 123/);
+    assert.match(error.message, /59182.*HTTP 503/);
+    assert.match(error.message, /\.falcondeck\/logs\/daemon\.log/);
+    return true;
+  });
+});
+test('a launch without a main process reports that state instead of claiming it launched', async () => {
+  const f = fixture();
+  const original = f.io;
+  await assert.rejects(waitForDesktopHealth({ ...f,
+    io: (command, args) => command.endsWith('/ps') ? `456 ${binary} mcp-extensions` : original(command, args),
+  }), /No installed FalconDeck main process found/);
+  assert.ok(!f.calls.some(([c]) => c.endsWith('/open') || c.endsWith('/lsof')));
+});
+test('health timeout includes request time rather than counting polling attempts', async () => {
+  const f = fixture();
+  let elapsed = 0;
+  let probes = 0;
+  await assert.rejects(waitForDesktopHealth({ ...f, timeoutMs: 2000,
+    now: () => elapsed,
+    delay: async (ms) => { elapsed += ms; },
+    health: async () => { probes++; elapsed += 1500; return { ok: false, status: 503 }; },
+  }), /within 2s/);
+  assert.equal(probes, 1);
+  assert.equal(elapsed, 2000);
+});
+test('an unhealthy first listener cannot delay probing the daemon', async () => {
+  const f = fixture();
+  const original = f.io;
+  let daemonProbed = false;
+  let overlapped = false;
+  await waitForDesktopHealth({ ...f,
+    io: (command, args) => command.endsWith('/lsof')
+      ? 'p123\nn127.0.0.1:59183\nn127.0.0.1:59182\n' : original(command, args),
+    health: async (url) => {
+      if (url.includes(':59183/')) {
+        await new Promise((resolve) => setImmediate(resolve));
+        overlapped = daemonProbed;
+        throw new Error('timed out');
+      }
+      daemonProbed = true;
+      return f.health(url);
+    },
+  });
+  assert.ok(overlapped, 'listeners must be probed concurrently');
 });
 test('failed installation copy leaves the running app untouched', async () => {
   const f = fixture();

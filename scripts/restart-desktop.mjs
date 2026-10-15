@@ -33,7 +33,65 @@ export function mainPids(output) {
   });
 }
 
+export async function waitForDesktopHealth({ io = run, delay = sleep, health = fetch,
+  now = () => performance.now(), log = console.log, timeoutMs = 120_000 } = {}) {
+  const pids = () => mainPids(io('/bin/ps', ['-ww', '-axo', 'pid=,args=']));
+  const started = now();
+  const deadline = started + timeoutMs;
+  let nextReport = started + 10_000;
+  let lastCheck = 'No installed FalconDeck main process found.';
+  while (now() < deadline) {
+    const running = pids();
+    if (running.length !== 1) {
+      lastCheck = running.length ? `Multiple installed main processes found: ${running.join(', ')}.`
+        : 'No installed FalconDeck main process found.';
+    } else {
+      const pid = running[0];
+      let listeners = '';
+      try { listeners = io('/usr/sbin/lsof', ['-nP', '-a', '-p', String(pid), '-iTCP', '-sTCP:LISTEN', '-Fn']); }
+      catch { /* A newly launched main process may not have a listener yet. */ }
+      const ports = [...new Set([...listeners.matchAll(/^n127\.0\.0\.1:(\d+)$/gm)].map((match) => match[1]))];
+      lastCheck = `PID ${pid} has no loopback TCP listener yet.`;
+      if (ports.length && now() < deadline) {
+        // Connector proxies share the main PID. lsof's first socket is not
+        // necessarily the daemon, and an HTTP 200 alone does not identify it.
+        const results = await Promise.all(ports.map(async (port) => {
+          try {
+            const response = await health(`http://127.0.0.1:${port}/api/health`, {
+              signal: AbortSignal.timeout(Math.max(1, Math.ceil(Math.min(1000, deadline - now())))),
+              redirect: 'error',
+            });
+            if (response.ok) {
+              const body = await response.json();
+              if (body?.ok === true && typeof body.version === 'string'
+                && Number.isInteger(body.workspaces) && body.workspaces >= 0) return null;
+            } else {
+              await response.body?.cancel();
+            }
+            return `port ${port}: HTTP ${response.status} (not daemon health)`;
+          } catch (error) { return `port ${port}: ${error.message}`; }
+        }));
+        const healthy = results.indexOf(null);
+        if (healthy >= 0) {
+          if (pids().includes(pid)) return { pid, port: Number(ports[healthy]) };
+          lastCheck = `PID ${pid} exited during its health check.`;
+        } else {
+          lastCheck = `PID ${pid}; ${results.join('; ')}.`;
+        }
+      }
+    }
+    if (now() >= nextReport) {
+      log(`Waiting for FalconDeck daemon (${Math.round((now() - started) / 1000)}s): ${lastCheck}`);
+      nextReport = now() + 10_000;
+    }
+    if (now() < deadline) await delay(Math.min(500, deadline - now()));
+  }
+  throw new Error(`FalconDeck did not become healthy within ${timeoutMs / 1000}s; no automatic restart was scheduled.\n`
+    + `Last check: ${lastCheck}\nDaemon log: ${join(homedir(), '.falcondeck', 'logs', 'daemon.log')}`);
+}
+
 export async function restartDesktop({ installFrom, io = run, delay = sleep, health = fetch,
+  now = () => performance.now(), log = console.log,
   files = { ...backupFiles, mkdtempSync, renameSync, rmdirSync } } = {}) {
   const pids = () => mainPids(io('/bin/ps', ['-ww', '-axo', 'pid=,args=']));
   const waitFor = async (check, attempts, message) => {
@@ -94,19 +152,7 @@ export async function restartDesktop({ installFrom, io = run, delay = sleep, hea
   }
   // One launch only. Failure reports an error, never reschedules another restart.
   io('/usr/bin/open', ['-g', app]);
-  await waitFor(async () => {
-    const running = pids();
-    if (running.length !== 1) return false;
-    let listeners;
-    try { listeners = io('/usr/sbin/lsof', ['-nP', '-a', '-p', String(running[0]), '-iTCP', '-sTCP:LISTEN', '-Fn']); }
-    catch { return false; }
-    const port = listeners.match(/^n127\.0\.0\.1:(\d+)$/m)?.[1];
-    if (!port) return false;
-    try {
-      const response = await health(`http://127.0.0.1:${port}/api/health`, { signal: AbortSignal.timeout(1000) });
-      return response.ok && pids().includes(running[0]);
-    } catch { return false; }
-  }, 60, 'FalconDeck launched but did not become healthy; no automatic restart was scheduled.');
+  await waitForDesktopHealth({ io, delay, health, now, log });
   if (backup) {
     try { pruneDesktopBackups(dirname(backup), files); }
     catch (error) { console.warn(`Could not prune older desktop backups: ${error.message}`); }
