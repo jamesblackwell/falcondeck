@@ -12,12 +12,11 @@ use std::{
     sync::Arc,
 };
 
-use futures_util::StreamExt;
 use serde_json::{Value, json};
 use tokio::{
     io::{AsyncBufReadExt, BufReader},
     process::{Child, Command},
-    sync::{Mutex, mpsc},
+    sync::Mutex,
     time::{Duration, timeout},
 };
 use uuid::Uuid;
@@ -25,49 +24,17 @@ use uuid::Uuid;
 use crate::agent_binary::strip_terminal_advertising_env;
 use crate::error::DaemonError;
 
+mod forms;
+use forms::form_answers;
+
 const STARTUP_TIMEOUT: Duration = Duration::from_secs(12);
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(20);
-const IDLE_POLL_INTERVAL: Duration = Duration::from_millis(250);
-const INACTIVE_TERMINAL_GRACE: Duration = Duration::from_secs(5);
-const POLL_ERROR_GRACE: Duration = Duration::from_secs(5);
-/// How many recent server error lines to retain for diagnosing a turn that
-/// dies without emitting anything on its session event stream.
-const MAX_RETAINED_SERVER_ERRORS: usize = 16;
-/// How long an observed-active turn may go without events or message
-/// progress before FalconDeck declares it stalled. Generous on purpose:
-/// model calls and tool executions routinely run quiet for tens of seconds.
-const ACTIVITY_STALL: Duration = Duration::from_secs(120);
-const LISTENING_PREFIX: &str = "opencode server listening on http://127.0.0.1:";
+const LISTENING_PREFIX: &str = "server listening on http://127.0.0.1:";
 const MAX_MESSAGE_PAGE_SIZE: usize = 200;
-/// The v2 runner's registry loads asynchronously after the server reports its
-/// port: `/api/model` returns an empty list for roughly the first second even
-/// when providers are connected. Retried long enough to outlast a slow
-/// registry load without stalling thread creation when the list is genuinely
-/// empty.
-const RUNNER_REGISTRY_ATTEMPTS: u32 = 10;
-const RUNNER_REGISTRY_RETRY: Duration = Duration::from_millis(500);
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Delivery {
     Queue,
     Steer,
-}
-
-/// Signals extracted from a session's durable event stream.
-#[derive(Debug, Clone, PartialEq, Eq)]
-enum SessionEvent {
-    /// The drain loop is executing: a model step or message part moved.
-    Activity,
-    /// A durable lifecycle event useful for diagnosing a runner that never
-    /// advances beyond prompt promotion, but not proof of model execution.
-    Observed(String),
-    /// A step failure carrying a provider-facing message.
-    Failed(String),
-}
-
-enum SessionPoll {
-    Active,
-    Inactive(Vec<Value>),
 }
 
 struct MessagePage {
@@ -127,21 +94,6 @@ pub struct OpenCodeRuntime {
     child: Mutex<Child>,
     /// OS pid of the `opencode serve` child, for the crash-orphan registry.
     server_pid: Option<u32>,
-    /// Recent `level=ERROR` lines from the server's own log.
-    ///
-    /// OpenCode reports a turn that dies before its first step — an
-    /// unresolvable or unsupported model, most commonly — only here: nothing
-    /// reaches the session event stream and no assistant record is written.
-    /// Retained purely to explain such a turn to the user; never used to make
-    /// a control-flow decision, so a change to OpenCode's log format costs a
-    /// diagnostic detail rather than correctness.
-    server_errors: Mutex<Vec<String>>,
-    /// Settled `/api/model` registry, keyed by `provider/model`. This is the
-    /// list the v2 runner resolves a turn against, and it disagrees with the
-    /// v1 `/config/providers` catalog on both which models can run and which
-    /// reasoning variants they accept. Cached because it only changes with a
-    /// credential change, which restarts this runtime.
-    runner_models: Mutex<Option<HashMap<String, RunnerModel>>>,
     /// When the daemon last called this server. Read by the idle-retirement
     /// timer in `app::runtime_health`.
     activity: crate::activity::ActivityClock,
@@ -169,18 +121,13 @@ impl OpenCodeRuntime {
         command
             .args(configured_args)
             .args(["serve", "--port", "0", "--hostname", "127.0.0.1"])
-            // A turn that cannot resolve its model fails inside the runner
-            // without emitting a session event or an assistant record. The
-            // server's own error log is the only channel that carries the
-            // cause, and it is silent unless logs are printed. ERROR keeps the
-            // stream quiet enough to retain in memory; the port banner stays on
-            // stdout, so startup detection is unaffected.
-            .args(["--print-logs", "--log-level", "ERROR"])
+            .args(["--print-logs", "--log-level", "error"])
             .current_dir(cwd)
             .envs(env)
             // These must follow the user-supplied environment: allowing a
             // provider config to replace either value would expose an
             // unauthenticated or unexpectedly credentialed local server.
+            .env("OPENCODE_PASSWORD", &password)
             .env("OPENCODE_SERVER_PASSWORD", &password)
             .env("OPENCODE_SERVER_USERNAME", "opencode");
         for (key, value) in crate::connectors::MCP_CLI_TIMEOUT_ENV {
@@ -190,6 +137,8 @@ impl OpenCodeRuntime {
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
+        #[cfg(unix)]
+        command.process_group(0);
         // In-process cleanup only. A daemon that dies without dropping the
         // runtime still orphans the server, which is what the pid registry
         // (`register_server_process`/`reap_orphaned_servers`) is for.
@@ -209,12 +158,14 @@ impl OpenCodeRuntime {
         let port = match timeout(STARTUP_TIMEOUT, port_rx).await {
             Ok(Ok(port)) => port,
             Ok(Err(_)) => {
+                kill_owned_process_group(&child);
                 let _ = child.kill().await;
                 return Err(DaemonError::Process(
                     "OpenCode server exited before reporting its port".to_string(),
                 ));
             }
             Err(_) => {
+                kill_owned_process_group(&child);
                 let _ = child.kill().await;
                 return Err(DaemonError::Process(
                     "OpenCode server did not report a localhost port in time".to_string(),
@@ -234,31 +185,14 @@ impl OpenCodeRuntime {
                 })?,
             child: Mutex::new(child),
             server_pid,
-            server_errors: Mutex::new(Vec::new()),
-            runner_models: Mutex::new(None),
             activity: crate::activity::ActivityClock::new(),
             served_prompt: std::sync::atomic::AtomicBool::new(false),
         });
-        // Keep draining stderr so a noisy server cannot block.  Diagnostics
-        // remain in the daemon log rather than being silently discarded, and
-        // error lines are retained for `recent_server_errors`.
         if let Some(stderr) = stderr {
-            let errors = Arc::downgrade(&runtime);
             tokio::spawn(async move {
                 let mut lines = BufReader::new(stderr).lines();
                 while let Ok(Some(line)) = lines.next_line().await {
                     tracing::debug!(%line, "OpenCode server stderr");
-                    if !native_stderr_is_error(&line) {
-                        continue;
-                    }
-                    let Some(runtime) = errors.upgrade() else {
-                        return;
-                    };
-                    let mut retained = runtime.server_errors.lock().await;
-                    if retained.len() == MAX_RETAINED_SERVER_ERRORS {
-                        retained.remove(0);
-                    }
-                    retained.push(summarize_server_error(&line));
                 }
             });
         }
@@ -270,34 +204,29 @@ impl OpenCodeRuntime {
     }
 
     pub async fn health(&self) -> Result<Value, DaemonError> {
-        self.request(reqwest::Method::GET, "/global/health", None)
-            .await
+        self.request(reqwest::Method::GET, "/api/info", None).await
     }
 
     /// Verifies the endpoints and request fields the native transport relies
     /// on against the server's own OpenAPI document, so an incompatible
     /// OpenCode build falls back to ACP before a turn is ever admitted.
     pub async fn validate_contract(&self) -> Result<(), DaemonError> {
-        let doc = self.request(reqwest::Method::GET, "/doc", None).await?;
+        let doc = self
+            .request(reqwest::Method::GET, "/openapi.json", None)
+            .await?;
         contract_supported(&doc)
     }
 
-    /// Recent `level=ERROR` lines from the server's own log, newest last.
-    ///
-    /// A turn whose model cannot be resolved fails inside the runner and
-    /// reports nothing over HTTP; these lines are the only account of why.
-    pub async fn recent_server_errors(&self) -> Vec<String> {
-        self.server_errors.lock().await.clone()
-    }
-
-    async fn silent_empty_turn_cause(&self) -> Option<String> {
-        self.recent_server_errors()
-            .await
-            .last()
-            .cloned()
-            .map(|cause| {
-                format!("OpenCode completed with no assistant text; OpenCode reported: {cause}")
-            })
+    /// A new session is idle, so this must return promptly before selecting
+    /// native transport. A documented but unimplemented wait is not compatible.
+    pub async fn validate_idle_wait(&self, session_id: &str) -> Result<(), DaemonError> {
+        self.request(
+            reqwest::Method::POST,
+            &format!("/api/experimental/session/{session_id}/wait"),
+            None,
+        )
+        .await
+        .map(|_| ())
     }
 
     pub async fn create_session(
@@ -310,61 +239,50 @@ impl OpenCodeRuntime {
         let value = self
             .request(reqwest::Method::POST, "/api/session", Some(body))
             .await?;
-        value
+        let session_id = value
             .pointer("/data/id")
             .and_then(Value::as_str)
             .map(str::to_owned)
             .ok_or_else(|| {
                 DaemonError::Rpc("OpenCode session creation returned no session id".to_string())
-            })
+            })?;
+        // New sessions can have no explicit model even though the location
+        // has a default. Resolve it through OpenCode, preserving agent defaults.
+        let initialized = async {
+            if self.session_model_ref(&session_id).await?.is_none() {
+                let model = self
+                    .request(reqwest::Method::GET, "/api/model/default", None)
+                    .await?;
+                if let Some(model) = model.get("data").filter(|model| model.is_object()) {
+                    self.request(
+                        reqwest::Method::POST,
+                        &format!("/api/session/{session_id}/model"),
+                        Some(json!({"model": model})),
+                    )
+                    .await?;
+                }
+            }
+            Ok::<_, DaemonError>(())
+        }
+        .await;
+        if let Err(error) = initialized {
+            self.delete_session(&session_id).await;
+            return Err(error);
+        }
+        Ok(session_id)
     }
 
     /// Native model catalog. This response is intentionally kept inside the
     /// daemon: provider records may contain credentials that must never be
     /// projected into a FalconDeck snapshot.
     pub async fn provider_catalog(&self) -> Result<Value, DaemonError> {
-        self.request(reqwest::Method::GET, "/config/providers", None)
-            .await
+        self.request(reqwest::Method::GET, "/api/model", None).await
     }
 
-    /// The models the v2 runner can resolve, keyed by `provider/model`.
-    ///
-    /// `/config/providers` (v1) and `/api/model` (the runner's registry)
-    /// disagree in two ways that both end a turn after admission, with no
-    /// assistant record and nothing on the session event stream:
-    ///
-    /// * variants — v1 claims `openrouter/google/gemini-3.7-flash` takes
-    ///   low/medium/high; the runner lists none and fails the turn with
-    ///   `SessionRunnerModel.VariantUnavailableError`.
-    /// * APIs — v1 lists every model of every API-key provider; the runner
-    ///   implements only some model APIs and fails the rest with
-    ///   `SessionRunnerModel.UnsupportedApiError`.
-    ///
-    /// The v1 catalog still drives the model picker, because the ACP transport
-    /// runs everything it lists, variants included.
-    ///
-    /// An empty read shortly after startup means "not loaded yet", so it is
-    /// retried; the settled answer is cached for the runtime's life, since a
-    /// credential change restarts the runtime.
+    /// Read the live registry so hot-reloaded providers and variants are
+    /// checked against the same catalog the runner will use for this turn.
     pub async fn runner_models(&self) -> Result<HashMap<String, RunnerModel>, DaemonError> {
-        if let Some(cached) = self.runner_models.lock().await.as_ref() {
-            return Ok(cached.clone());
-        }
-        let mut models = HashMap::new();
-        for attempt in 0..RUNNER_REGISTRY_ATTEMPTS {
-            if attempt > 0 {
-                tokio::time::sleep(RUNNER_REGISTRY_RETRY).await;
-            }
-            let value = self
-                .request(reqwest::Method::GET, "/api/model", None)
-                .await?;
-            models = runner_models(&value)?;
-            if !models.is_empty() {
-                break;
-            }
-        }
-        *self.runner_models.lock().await = Some(models.clone());
-        Ok(models)
+        runner_models(&self.provider_catalog().await?)
     }
 
     /// The session's effective model as `provider/model`, or `None` when the
@@ -433,13 +351,10 @@ impl OpenCodeRuntime {
     }
 
     pub async fn delete_session(&self, session_id: &str) {
-        // The v2 API has no session delete; the implemented route is the v1
-        // `DELETE /session/{id}` (the v2 path is a catch-all that serves the
-        // web app's HTML with a 200 status).
         let _ = self
             .request(
                 reqwest::Method::DELETE,
-                &format!("/session/{session_id}"),
+                &format!("/api/session/{session_id}"),
                 None,
             )
             .await;
@@ -467,6 +382,16 @@ impl OpenCodeRuntime {
             Some(prompt_request_body(message_id, prompt, delivery)),
         )
         .await
+        .and_then(|admission| {
+            if admission.pointer("/data/id").and_then(Value::as_str) != Some(message_id)
+                || admission.pointer("/data/sessionID").and_then(Value::as_str) != Some(session_id)
+            {
+                return Err(DaemonError::Rpc(
+                    "OpenCode prompt admission could not be confirmed; do not resend with a new message id".to_string(),
+                ));
+            }
+            Ok(admission)
+        })
     }
 
     pub async fn interrupt(&self, session_id: &str) -> Result<(), DaemonError> {
@@ -479,252 +404,23 @@ impl OpenCodeRuntime {
         .map(|_| ())
     }
 
+    /// OpenCode 2 waits for the whole foreground drain, including successors
+    /// started by steering. This read never resends an ambiguously admitted input.
     pub async fn wait_until_idle(
         &self,
         session_id: &str,
         message_id: &str,
-        after_seq: Option<u64>,
     ) -> Result<Vec<Value>, DaemonError> {
-        // OpenCode 1.18 advertises `session.wait`, but the route returns 503
-        // (`Session wait is not available yet`). Wait on the session's durable
-        // event stream instead: `session.next.step.*` events prove the drain
-        // is executing even when the session is absent from the active map
-        // and the model call has not produced its first token yet, and
-        // `session.next.step.failed` carries the provider's own error text.
-        // Completion itself stays with the message projection and active-map
-        // polling below, which is the only implemented terminal signal.
-        //
-        // The stream replays the session's entire durable history when
-        // connected without a cursor, so the admission's sequence number is
-        // required: without it a prior turn's `step.failed` would instantly
-        // fail every later turn in the session. Without a baseline the
-        // waiter falls back to pure polling.
-        let (event_tx, mut event_rx) = mpsc::channel::<SessionEvent>(64);
-        let event_task = after_seq.map(|after| {
-            tokio::spawn(session_event_task(
-                self.client.clone(),
-                self.base_url.clone(),
-                self.password.clone(),
-                session_id.to_string(),
-                after,
-                event_tx,
-            ))
-        });
-        let outcome = self
-            .wait_until_idle_inner(session_id, message_id, &mut event_rx)
-            .await;
-        if let Some(task) = event_task {
-            task.abort();
-        }
-        match outcome {
-            Ok(messages) => Ok(messages),
-            Err(error) => Err(self
-                .enrich_turn_error(session_id, message_id, after_seq, error)
-                .await),
-        }
-    }
-
-    async fn wait_until_idle_inner(
-        &self,
-        session_id: &str,
-        message_id: &str,
-        event_rx: &mut mpsc::Receiver<SessionEvent>,
-    ) -> Result<Vec<Value>, DaemonError> {
-        let mut inactive_since = None;
-        let mut inactive_messages = None;
-        let mut poll_error_since = None;
-        let mut activity_seen = false;
-        let mut observed_events = HashSet::new();
-        // Once the event channel closes it stays closed; selecting on it
-        // again would busy-loop, so polling takes over entirely.
-        let mut events_open = true;
-        loop {
-            let poll_result = if events_open {
-                tokio::select! {
-                    event = event_rx.recv() => {
-                        match event {
-                            Some(SessionEvent::Activity) => {
-                                activity_seen = true;
-                                observed_events.insert("runner_activity".to_string());
-                                inactive_since = None;
-                                inactive_messages = None;
-                            }
-                            Some(SessionEvent::Observed(event_type)) => {
-                                observed_events.insert(event_type);
-                            }
-                            Some(SessionEvent::Failed(message)) => {
-                                return Err(DaemonError::Rpc(format!(
-                                    "OpenCode turn failed: {message}"
-                                )));
-                            }
-                            // The stream ended; polling below takes over.
-                            None => events_open = false,
-                        }
-                        // Drain any further queued events before polling.
-                        continue;
-                    }
-                    result = self.poll_session(session_id, message_id) => result,
-                }
-            } else {
-                self.poll_session(session_id, message_id).await
-            };
-            let poll = match poll_result {
-                Ok(poll) => {
-                    poll_error_since = None;
-                    poll
-                }
-                Err(error) => {
-                    let since = poll_error_since.get_or_insert_with(tokio::time::Instant::now);
-                    if since.elapsed() >= POLL_ERROR_GRACE {
-                        return Err(error);
-                    }
-                    tokio::time::sleep(IDLE_POLL_INTERVAL).await;
-                    continue;
-                }
-            };
-            let SessionPoll::Inactive(messages) = poll else {
-                inactive_since = None;
-                inactive_messages = None;
-                tokio::time::sleep(IDLE_POLL_INTERVAL).await;
-                continue;
-            };
-            if messages_are_settled(&messages) {
-                // OpenCode can store a completed empty assistant while the
-                // real API failure only appears on stderr. Treat that like
-                // idle-without-output so the turn is not a blank success.
-                if assistant_turn_lacks_visible_output(&messages)
-                    && let Some(cause) = self.silent_empty_turn_cause().await
-                {
-                    return Err(DaemonError::Rpc(cause));
-                }
-                return Ok(messages);
-            }
-            if self.has_pending_input(session_id).await {
-                // A pending permission or question means the turn is blocked
-                // on FalconDeck's user even when the session is absent from
-                // the active map. Waiting on the user must never trip the
-                // idle-without-response timer below.
-                inactive_since = None;
-                inactive_messages = None;
-                tokio::time::sleep(IDLE_POLL_INTERVAL).await;
-                continue;
-            }
-            // Before the first observed activity a short grace catches turns
-            // that fail before their first model call; once activity was seen
-            // the turn is real and only a long stall gives up.
-            let stall_grace = if activity_seen {
-                ACTIVITY_STALL
-            } else {
-                INACTIVE_TERMINAL_GRACE
-            };
-            if inactive_messages.as_ref() != Some(&messages) {
-                inactive_since = Some(tokio::time::Instant::now());
-                inactive_messages = Some(messages);
-            } else if inactive_since.is_some_and(|since| since.elapsed() >= stall_grace) {
-                let mut observed_events = observed_events.into_iter().collect::<Vec<_>>();
-                observed_events.sort();
-                let observed_events = if observed_events.is_empty() {
-                    "none".to_string()
-                } else {
-                    observed_events.join(", ")
-                };
-                return Err(DaemonError::Rpc(if activity_seen {
-                    format!(
-                        "OpenCode session stalled mid-turn without a terminal assistant response; \
-                         observed native events: {observed_events}"
-                    )
-                } else {
-                    format!(
-                        "OpenCode session became idle without a terminal assistant response; the \
-                         turn produced no assistant output and never reached observable runner \
-                         activity; observed native events: {observed_events}"
-                    )
-                }));
-            }
-            tokio::time::sleep(IDLE_POLL_INTERVAL).await;
-        }
-    }
-
-    async fn enrich_turn_error(
-        &self,
-        session_id: &str,
-        message_id: &str,
-        admitted_seq: Option<u64>,
-        error: DaemonError,
-    ) -> DaemonError {
-        let session = self
-            .request(
-                reqwest::Method::GET,
-                &format!("/api/session/{session_id}"),
-                None,
-            )
-            .await
-            .ok();
-        let active = self.session_is_active(session_id).await.ok();
-        let agent = session
-            .as_ref()
-            .and_then(|session| session.pointer("/data/agent"))
-            .and_then(Value::as_str)
-            .unwrap_or("unknown");
-        let provider = session
-            .as_ref()
-            .and_then(|session| session.pointer("/data/model/providerID"))
-            .and_then(Value::as_str)
-            .unwrap_or("unknown");
-        let model = session
-            .as_ref()
-            .and_then(|session| session.pointer("/data/model/id"))
-            .and_then(Value::as_str)
-            .unwrap_or("unknown");
-        // A turn that cannot resolve its model reports nothing over HTTP, so
-        // without this the user sees only "no assistant response" for what is
-        // really "this model is not usable on this OpenCode install".
-        let reported = self
-            .recent_server_errors()
-            .await
-            .last()
-            .map(|cause| format!("; OpenCode reported: {cause}"))
-            .unwrap_or_default();
-        DaemonError::Rpc(format!(
-            "{error}{reported}; diagnostics: session={session_id}, message={message_id}, \
-             admitted_seq={}, active={}, agent={agent}, model={provider}/{model}",
-            admitted_seq
-                .map(|sequence| sequence.to_string())
-                .unwrap_or_else(|| "unknown".to_string()),
-            active
-                .map(|active| active.to_string())
-                .unwrap_or_else(|| "unknown".to_string()),
-        ))
-    }
-
-    /// Whether the session is waiting on a permission or question reply.
-    /// Read failures deliberately report no pending input so they cannot mask
-    /// the caller's own failure handling.
-    async fn has_pending_input(&self, session_id: &str) -> bool {
-        let pending = async {
-            Ok::<_, DaemonError>(
-                !self.pending_permissions(session_id).await?.is_empty()
-                    || !self.pending_questions(session_id).await?.is_empty(),
-            )
-        };
-        pending.await.unwrap_or_else(|error| {
-            tracing::debug!(%error, "OpenCode pending-input check failed");
-            false
-        })
-    }
-
-    async fn poll_session(
-        &self,
-        session_id: &str,
-        message_id: &str,
-    ) -> Result<SessionPoll, DaemonError> {
-        if self.session_is_active(session_id).await? {
-            Ok(SessionPoll::Active)
-        } else {
-            self.messages_since(session_id, message_id)
-                .await
-                .map(SessionPoll::Inactive)
-        }
+        self.request_inner(
+            reqwest::Method::POST,
+            &format!("/api/experimental/session/{session_id}/wait"),
+            None,
+            None,
+        )
+        .await?;
+        let messages = self.messages_since(session_id, message_id).await?;
+        terminal_outcome(&messages)?;
+        Ok(messages)
     }
 
     pub async fn session_is_active(&self, session_id: &str) -> Result<bool, DaemonError> {
@@ -823,7 +519,7 @@ impl OpenCodeRuntime {
         self.request(
             reqwest::Method::POST,
             &format!("/api/session/{session_id}/permission/{request_id}/reply"),
-            Some(json!({ "reply": reply })),
+            Some(json!({ "decision": reply })),
         )
         .await
         .map(|_| ())
@@ -833,11 +529,11 @@ impl OpenCodeRuntime {
         let value = self
             .request(
                 reqwest::Method::GET,
-                &format!("/api/session/{session_id}/question"),
+                &format!("/api/session/{session_id}/form"),
                 None,
             )
             .await?;
-        response_data_array(value, "questions")
+        response_data_array(value, "forms")
     }
 
     pub async fn reply_question(
@@ -846,10 +542,18 @@ impl OpenCodeRuntime {
         request_id: &str,
         answers: Vec<Vec<String>>,
     ) -> Result<(), DaemonError> {
+        let form = self
+            .request(
+                reqwest::Method::GET,
+                &format!("/api/session/{session_id}/form/{request_id}"),
+                None,
+            )
+            .await?;
+        let answer = form_answers(&form["data"], &answers)?;
         self.request(
             reqwest::Method::POST,
-            &format!("/api/session/{session_id}/question/{request_id}/reply"),
-            Some(json!({ "answers": answers })),
+            &format!("/api/session/{session_id}/form/{request_id}/reply"),
+            Some(json!({ "answer": answer })),
         )
         .await
         .map(|_| ())
@@ -861,7 +565,11 @@ impl OpenCodeRuntime {
     }
 
     pub async fn shutdown(&self) {
-        let _ = self.child.lock().await.kill().await;
+        tracing::debug!(pid = ?self.server_pid, "Stopping private OpenCode server");
+        let mut child = self.child.lock().await;
+        kill_owned_process_group(&child);
+        let _ = child.kill().await;
+        tracing::debug!(pid = ?self.server_pid, "Private OpenCode server stopped");
     }
 
     /// How long since the daemon last called this server.
@@ -875,7 +583,18 @@ impl OpenCodeRuntime {
             .load(std::sync::atomic::Ordering::Acquire)
     }
 
-    async fn request(
+    pub async fn requires_authentication(&self) -> Result<bool, DaemonError> {
+        let response = self
+            .client
+            .get(format!("{}/api/session", self.base_url))
+            .timeout(REQUEST_TIMEOUT)
+            .send()
+            .await
+            .map_err(|error| DaemonError::Process(error.to_string()))?;
+        Ok(response.status() == reqwest::StatusCode::UNAUTHORIZED)
+    }
+
+    pub(crate) async fn request(
         &self,
         method: reqwest::Method,
         path: &str,
@@ -892,6 +611,7 @@ impl OpenCodeRuntime {
         body: Option<Value>,
         request_timeout: Option<Duration>,
     ) -> Result<Value, DaemonError> {
+        tracing::debug!(%method, path, "OpenCode native request started");
         let mut request = self
             .client
             .request(method, format!("{}{}", self.base_url, path))
@@ -907,6 +627,7 @@ impl OpenCodeRuntime {
             DaemonError::Process(format!("OpenCode native request failed: {error}"))
         })?;
         let status = response.status();
+        tracing::debug!(%status, path, "OpenCode native request responded");
         let text = response.text().await.map_err(|error| {
             DaemonError::Process(format!("could not read OpenCode response: {error}"))
         })?;
@@ -922,6 +643,26 @@ impl OpenCodeRuntime {
     }
 }
 
+impl Drop for OpenCodeRuntime {
+    fn drop(&mut self) {
+        kill_owned_process_group(self.child.get_mut());
+    }
+}
+
+fn kill_owned_process_group(child: &Child) {
+    #[cfg(unix)]
+    if let Some(pid) = child.id().and_then(|id| libc::pid_t::try_from(id).ok()) {
+        // SAFETY: this child was spawned in a new process group with its PID
+        // as the group ID. Include its MCP helpers, which can hold daemon
+        // requests open after the server process itself exits.
+        unsafe {
+            libc::kill(-pid, libc::SIGKILL);
+        }
+    }
+    #[cfg(not(unix))]
+    let _ = child;
+}
+
 async fn monitor_stdout(
     stdout: tokio::process::ChildStdout,
     port_tx: tokio::sync::oneshot::Sender<u16>,
@@ -935,111 +676,6 @@ async fn monitor_stdout(
             let _ = port_tx.send(port);
         }
         tracing::debug!(%line, "OpenCode server startup output");
-    }
-}
-
-/// Streams one session's durable event feed and forwards the signals the turn
-/// waiter cares about. `after` must be the admitted prompt's sequence number:
-/// the feed replays the session's entire durable history when connected
-/// without a cursor, which would resurrect prior turns' failures. The task
-/// ends when the stream closes or the receiver is dropped; the waiter's
-/// polling covers both cases.
-async fn session_event_task(
-    client: reqwest::Client,
-    base_url: String,
-    password: String,
-    session_id: String,
-    after: u64,
-    events: mpsc::Sender<SessionEvent>,
-) {
-    let request = client
-        .get(format!(
-            "{base_url}/api/session/{session_id}/event?after={after}"
-        ))
-        .header("accept", "text/event-stream")
-        .basic_auth("opencode", Some(&password));
-    // The feed is long-lived by design: the client configures only a
-    // connect timeout, so the request itself has no total timeout.
-    let response = match request.send().await {
-        Ok(response) if response.status().is_success() => response,
-        Ok(response) => {
-            tracing::debug!(
-                status = %response.status(),
-                "OpenCode session event stream unavailable; falling back to polling"
-            );
-            return;
-        }
-        Err(error) => {
-            tracing::debug!(%error, "OpenCode session event stream failed; falling back to polling");
-            return;
-        }
-    };
-    let mut stream = response.bytes_stream();
-    // Buffer raw bytes and decode only complete lines: TCP chunk boundaries
-    // can split a multi-byte UTF-8 sequence, and a lossy per-chunk decode
-    // would corrupt that line's JSON.
-    let mut buffer: Vec<u8> = Vec::new();
-    while let Some(chunk) = stream.next().await {
-        let chunk = match chunk {
-            Ok(chunk) => chunk,
-            Err(error) => {
-                tracing::debug!(%error, "OpenCode session event stream ended");
-                return;
-            }
-        };
-        buffer.extend_from_slice(&chunk);
-        while let Some(newline) = buffer.iter().position(|byte| *byte == b'\n') {
-            let line_bytes = buffer.drain(..=newline).collect::<Vec<_>>();
-            let Ok(line) = std::str::from_utf8(&line_bytes) else {
-                continue;
-            };
-            let line = line.trim_end_matches('\r');
-            let Some(payload) = line.strip_prefix("data:") else {
-                continue;
-            };
-            if let Ok(event) = serde_json::from_str::<Value>(payload.trim())
-                && let Some(signal) = classify_session_event(&event)
-                && events.send(signal).await.is_err()
-            {
-                return;
-            }
-        }
-    }
-}
-
-/// Maps a durable session event onto the waiter's signals. Only the
-/// `session.next.*` durable manifest can appear on this stream; admission
-/// echoes and configuration switches are deliberately ignored because they do
-/// not prove the drain is executing.
-fn classify_session_event(event: &Value) -> Option<SessionEvent> {
-    let event_type = event.get("type").and_then(Value::as_str)?;
-    match event_type {
-        "session.next.step.failed" => {
-            let message = event
-                .pointer("/data/error/message")
-                .or_else(|| event.pointer("/properties/error/message"))
-                .and_then(Value::as_str)
-                .unwrap_or("the OpenCode session reported an error without details");
-            Some(SessionEvent::Failed(message.to_string()))
-        }
-        "session.next.step.started"
-        | "session.next.step.ended"
-        | "session.next.text.started"
-        | "session.next.text.delta"
-        | "session.next.text.ended"
-        | "session.next.reasoning.started"
-        | "session.next.reasoning.delta"
-        | "session.next.reasoning.ended"
-        | "session.next.tool.called"
-        | "session.next.tool.success"
-        | "session.next.tool.failed"
-        | "session.next.tool.progress"
-        | "session.next.shell.started"
-        | "session.next.shell.ended" => Some(SessionEvent::Activity),
-        event_type if event_type.starts_with("session.next.") => {
-            Some(SessionEvent::Observed(event_type.to_string()))
-        }
-        _ => None,
     }
 }
 
@@ -1072,53 +708,31 @@ fn session_is_active(value: &Value, session_id: &str) -> Result<bool, DaemonErro
         })
 }
 
-fn native_stderr_is_error(line: &str) -> bool {
-    let lower = line.to_ascii_lowercase();
-    lower.contains("level=error")
-        || lower.contains("stream error")
-        || lower.contains("ai_apicallerror")
-}
-
-fn native_content_is_visible(content: &Value) -> bool {
-    match content.get("type").and_then(Value::as_str) {
-        Some("text") | Some("reasoning") => content
-            .get("text")
-            .and_then(Value::as_str)
-            .is_some_and(|text| !text.trim().is_empty()),
-        Some("tool") => true,
-        _ => false,
-    }
-}
-
-fn assistant_turn_lacks_visible_output(messages: &[Value]) -> bool {
-    let Some(message) = messages
+fn terminal_outcome(messages: &[Value]) -> Result<(), DaemonError> {
+    if let Some(idle) = messages
         .iter()
         .rev()
-        .find(|message| message.get("type").and_then(Value::as_str) == Some("assistant"))
-    else {
-        return true;
-    };
-    if message.get("error").is_some_and(|error| !error.is_null()) {
-        return false;
+        .find(|message| message["type"] == "idle")
+    {
+        match idle["outcome"].as_str() {
+            Some("failed") | Some("interrupted") => {
+                let message = idle
+                    .pointer("/error/message")
+                    .and_then(Value::as_str)
+                    .unwrap_or(if idle["outcome"] == "interrupted" {
+                        "OpenCode turn interrupted"
+                    } else {
+                        "OpenCode turn failed"
+                    });
+                return Err(DaemonError::Rpc(format!("OpenCode reported: {message}")));
+            }
+            Some("succeeded") => return Ok(()),
+            _ => {}
+        }
     }
-    let Some(contents) = message.get("content").and_then(Value::as_array) else {
-        return true;
-    };
-    !contents.iter().any(native_content_is_visible)
-}
-
-fn messages_are_settled(messages: &[Value]) -> bool {
-    let Some(message) = messages
-        .iter()
-        .rev()
-        .find(|message| message.get("type").and_then(Value::as_str) == Some("assistant"))
-    else {
-        return false;
-    };
-    message
-        .pointer("/time/completed")
-        .is_some_and(|completed| !completed.is_null())
-        || message.get("error").is_some_and(|error| !error.is_null())
+    Err(DaemonError::Rpc(
+        "OpenCode became idle without a terminal outcome for the admitted input".to_string(),
+    ))
 }
 
 fn messages_path(session_id: &str, cursor: Option<&str>) -> String {
@@ -1136,14 +750,11 @@ fn messages_path(session_id: &str, cursor: Option<&str>) -> String {
 }
 
 fn prompt_request_body(message_id: &str, prompt: Value, delivery: Delivery) -> Value {
-    json!({
-        "id": message_id,
-        "prompt": prompt,
-        "delivery": delivery.as_str(),
-        // OpenCode admits the message but does not wake the agent loop when
-        // this flag is omitted or false.
-        "resume": true,
-    })
+    let mut body = prompt;
+    body["id"] = json!(message_id);
+    body["delivery"] = json!(delivery.as_str());
+    body["resume"] = json!(true);
+    body
 }
 
 fn response_message_page(value: Value) -> Result<MessagePage, DaemonError> {
@@ -1166,29 +777,12 @@ fn model_ref(model: &str) -> Option<Value> {
 pub struct RunnerModel {
     /// Reasoning variant ids the runner accepts alongside this model.
     pub variants: Vec<String>,
-    /// The model's API as the runner names it in its own error message:
-    /// `aisdk:<package>` or `native`.
-    pub api: String,
 }
-
-/// Model APIs the v2 runner implements, verified live on OpenCode 1.18.18 by
-/// prompting one model of each and reading the server error log.
-///
-/// Every other API — `@openrouter/ai-sdk-provider` and `@ai-sdk/deepinfra`
-/// among them — is admitted by the v2 route and then dies in
-/// `SessionRunnerModel.resolve` with `UnsupportedApiError`. An allowlist is
-/// unavoidable here: nothing OpenCode serves enumerates the runner's supported
-/// APIs. It fails in the safe direction — an API added by a later release is
-/// treated as native-incapable, and the thread runs over ACP, which executes
-/// every model the v1 catalog lists.
-const RUNNER_MODEL_APIS: &[&str] = &["aisdk:@ai-sdk/openai-compatible", "aisdk:@ai-sdk/anthropic"];
 
 /// `provider/model` → what the runner will accept for it.
 ///
-/// Variants are published as an array; entries are tolerated as bare ids or as
-/// objects carrying one, since only the empty case is observable on OpenCode
-/// 1.18.18 and a future release naming them differently should degrade to
-/// "no variant" rather than to a failed turn.
+/// Only enabled catalog entries may be selected. Reasoning variants come
+/// from this same live registry, rather than a separate preview catalog.
 fn runner_models(value: &Value) -> Result<HashMap<String, RunnerModel>, DaemonError> {
     let models = value.get("data").and_then(Value::as_array).ok_or_else(|| {
         DaemonError::Rpc(
@@ -1215,15 +809,10 @@ fn runner_models(value: &Value) -> Result<HashMap<String, RunnerModel>, DaemonEr
                         .collect()
                 })
                 .unwrap_or_default();
-            let api_type = model
-                .pointer("/api/type")
-                .and_then(Value::as_str)
-                .unwrap_or_default();
-            let api = match model.pointer("/api/package").and_then(Value::as_str) {
-                Some(package) => format!("{api_type}:{package}"),
-                None => api_type.to_string(),
-            };
-            Some((format!("{provider_id}/{id}"), RunnerModel { variants, api }))
+            if model.get("enabled").and_then(Value::as_bool) == Some(false) {
+                return None;
+            }
+            Some((format!("{provider_id}/{id}"), RunnerModel { variants }))
         })
         .collect())
 }
@@ -1245,86 +834,54 @@ pub fn runner_variant<'a>(effort: Option<&'a str>, model: Option<&RunnerModel>) 
         .then_some(effort)
 }
 
-/// Why the v2 runner cannot execute the session's model, or `None` when it
-/// can.
-///
-/// A session without an explicit model is blocked too. On an install with no
-/// configured default (`model` absent from opencode.json), OpenCode 1.18.19
-/// admits the prompt and then does nothing at all — no step event, no
-/// assistant record, not even a server error log line — so the turn just
-/// times out as "no assistant response" (observed live 2026-08-21, session
-/// ses_fdc7fe965ffe…). Blocking sends default-model threads over ACP, where
-/// OpenCode's own adapter picks a usable model.
-///
-/// Both halves are dynamic where OpenCode lets them be: membership comes from
-/// the runner's own registry, so a release that teaches the v2 runner to
-/// execute OAuth or coding-plan credentials needs no FalconDeck change.
+/// Refuse unavailable or disabled models before admitting a prompt. Unlike
+/// the 1.x preview, OpenCode 2's model registry is the execution catalog.
 pub fn native_model_block_reason(
     session_model: Option<&str>,
     runner_models: &HashMap<String, RunnerModel>,
 ) -> Option<String> {
-    if runner_models.is_empty() {
-        return Some(
-            "OpenCode's native runner has no models registered, so no model can execute \
-             natively"
-                .to_string(),
-        );
-    }
     let Some(model_id) = session_model else {
         return Some(
-            "the session has no model set, and OpenCode's native runner silently ignores a \
-             prompt it cannot resolve a model for; pick a model, or configure a default in \
-             opencode.json"
-                .to_string(),
+            "OpenCode has no model selected; choose a model or configure a default".to_string(),
         );
     };
-    let Some(model) = runner_models.get(model_id) else {
-        return Some(format!(
-            "OpenCode's native runner does not list the model '{model_id}' \
-             (OAuth and coding-plan providers only run over ACP)"
-        ));
-    };
-    if RUNNER_MODEL_APIS.iter().any(|api| *api == model.api) {
-        return None;
-    }
-    Some(format!(
-        "OpenCode's native runner cannot execute '{model_id}': its API ({}) is not one the \
-         runner implements",
-        model.api
+    (!runner_models.contains_key(model_id)).then(|| format!(
+        "OpenCode does not list '{model_id}' as an enabled model; check its provider credentials and model configuration"
     ))
 }
 
-/// Paths the native transport calls. `DELETE /session/{sessionID}` is the v1
-/// route: the v2 API has no session delete.
-///
-/// The `CONTRACT_*` tables below are the transport's complete list of
-/// assumptions about OpenCode's experimental v2 API, checked against the
-/// server's own `/doc` at attach so upstream drift demotes new threads to ACP
-/// instead of failing user turns. Anything the transport starts sending must
-/// be added here in the same change; see "Keeping up with OpenCode releases"
-/// in docs/ADAPTERS.md for the per-release checklist.
-const CONTRACT_PATHS: &[&str] = &[
-    "/api/model",
-    "/api/session",
-    "/api/session/active",
-    "/api/session/{sessionID}",
-    "/api/session/{sessionID}/prompt",
-    "/api/session/{sessionID}/message",
-    "/api/session/{sessionID}/model",
-    "/api/session/{sessionID}/agent",
-    "/api/session/{sessionID}/interrupt",
-    "/api/session/{sessionID}/permission",
-    "/api/session/{sessionID}/permission/{requestID}/reply",
-    "/api/session/{sessionID}/question",
-    "/api/session/{sessionID}/question/{requestID}/reply",
-    "/session/{sessionID}",
+/// Requests and consumed schemas validated against the running server before
+/// choosing native transport. OpenCode 1.x and incompatible builds use ACP.
+const CONTRACT_ENDPOINTS: &[(&str, &str)] = &[
+    ("/api/info", "get"),
+    ("/api/model", "get"),
+    ("/api/agent", "get"),
+    ("/api/model/default", "get"),
+    ("/api/session", "post"),
+    ("/api/session/active", "get"),
+    ("/api/session/{sessionID}", "get"),
+    ("/api/session/{sessionID}", "delete"),
+    ("/api/session/{sessionID}/prompt", "post"),
+    ("/api/session/{sessionID}/message", "get"),
+    ("/api/session/{sessionID}/model", "post"),
+    ("/api/session/{sessionID}/agent", "post"),
+    ("/api/session/{sessionID}/interrupt", "post"),
+    ("/api/session/{sessionID}/permission", "get"),
+    (
+        "/api/session/{sessionID}/permission/{requestID}/reply",
+        "post",
+    ),
+    ("/api/session/{sessionID}/form", "get"),
+    ("/api/session/{sessionID}/form/{formID}", "get"),
+    ("/api/session/{sessionID}/form/{formID}/reply", "post"),
+    ("/api/experimental/session/{sessionID}/wait", "post"),
 ];
 
 /// Request fields the durable prompt admission body must accept. Older
 /// OpenCode builds reject `resume` (the body is `additionalProperties:
 /// false`), which would otherwise surface only after a thread is pinned to
 /// the native transport.
-const CONTRACT_PROMPT_FIELDS: &[&str] = &["id", "prompt", "delivery", "resume"];
+const CONTRACT_PROMPT_FIELDS: &[&str] = &["id", "text", "files", "delivery", "resume"];
 
 /// Request-body properties the native transport sends, per `(path, method)`.
 ///
@@ -1337,24 +894,32 @@ const CONTRACT_BODY_FIELDS: &[(&str, &[&str])] = &[
     ("/api/session/{sessionID}/agent", &["agent"]),
     (
         "/api/session/{sessionID}/permission/{requestID}/reply",
-        &["reply"],
+        &["decision"],
     ),
-    (
-        "/api/session/{sessionID}/question/{requestID}/reply",
-        &["answers"],
-    ),
+    ("/api/session/{sessionID}/form/{formID}/reply", &["answer"]),
 ];
 
 /// Named schemas whose properties FalconDeck populates by hand.
 const CONTRACT_SCHEMA_FIELDS: &[(&str, &[&str])] = &[
-    ("ModelRef", &["id", "providerID"]),
-    ("PromptInput", &["text", "files"]),
+    ("Model.Ref", &["id", "providerID"]),
+    ("Model.Info", &["id", "providerID", "enabled", "variants"]),
+    (
+        "Session.Inbox.User",
+        &["id", "sessionID", "payload", "delivery"],
+    ),
+    (
+        "Session.Message.Assistant",
+        &["id", "type", "content", "time"],
+    ),
+    ("Session.Message.Idle", &["id", "type", "outcome"]),
+    ("Form.Info", &["id", "fields"]),
+    ("Form.Reply", &["answer"]),
 ];
 
 /// String values FalconDeck sends verbatim. A renamed variant would be
 /// accepted by the schema check above and rejected at runtime.
 const CONTRACT_ENUM_VALUES: &[(&str, &[&str])] =
-    &[("PermissionV2Reply", &["once", "always", "reject"])];
+    &[("Permission.Reply", &["once", "always", "reject"])];
 
 /// Resolves a possibly-`$ref`'d schema against the document's components.
 fn resolve_schema<'a>(doc: &'a Value, schema: &'a Value) -> Option<&'a Value> {
@@ -1380,11 +945,17 @@ fn contract_supported(doc: &Value) -> Result<(), DaemonError> {
     let paths = doc
         .get("paths")
         .filter(|paths| paths.is_object())
-        .ok_or_else(|| DaemonError::Rpc("OpenCode /doc had no paths object".to_string()))?;
-    for path in CONTRACT_PATHS {
-        if !paths.get(*path).is_some_and(Value::is_object) {
+        .ok_or_else(|| {
+            DaemonError::Rpc("OpenCode /openapi.json had no paths object".to_string())
+        })?;
+    for (path, method) in CONTRACT_ENDPOINTS {
+        if !paths
+            .get(*path)
+            .and_then(|endpoint| endpoint.get(*method))
+            .is_some_and(Value::is_object)
+        {
             return Err(DaemonError::Rpc(format!(
-                "OpenCode /doc is missing the {path} endpoint"
+                "OpenCode /openapi.json is missing {method} {path}"
             )));
         }
     }
@@ -1400,7 +971,9 @@ fn contract_supported(doc: &Value) -> Result<(), DaemonError> {
         .and_then(|schema| schema.get("properties"))
         .and_then(Value::as_object)
         .ok_or_else(|| {
-            DaemonError::Rpc("OpenCode /doc did not describe the prompt request body".to_string())
+            DaemonError::Rpc(
+                "OpenCode /openapi.json did not describe the prompt request body".to_string(),
+            )
         })?;
     for field in CONTRACT_PROMPT_FIELDS {
         if !prompt_properties.contains_key(*field) {
@@ -1415,7 +988,9 @@ fn contract_supported(doc: &Value) -> Result<(), DaemonError> {
         .and_then(|get| get.get("parameters"))
         .and_then(Value::as_array)
         .ok_or_else(|| {
-            DaemonError::Rpc("OpenCode /doc did not describe the message list query".to_string())
+            DaemonError::Rpc(
+                "OpenCode /openapi.json did not describe the message list query".to_string(),
+            )
         })?;
     for parameter in ["cursor", "limit", "order"] {
         if !message_parameters
@@ -1432,7 +1007,9 @@ fn contract_supported(doc: &Value) -> Result<(), DaemonError> {
             .and_then(|schema| schema.get("properties"))
             .and_then(Value::as_object)
             .ok_or_else(|| {
-                DaemonError::Rpc(format!("OpenCode /doc did not describe the {path} body"))
+                DaemonError::Rpc(format!(
+                    "OpenCode /openapi.json did not describe the {path} body"
+                ))
             })?;
         for field in *fields {
             if !properties.contains_key(*field) {
@@ -1447,7 +1024,9 @@ fn contract_supported(doc: &Value) -> Result<(), DaemonError> {
             .pointer(&format!("/components/schemas/{name}/properties"))
             .and_then(Value::as_object)
             .ok_or_else(|| {
-                DaemonError::Rpc(format!("OpenCode /doc no longer defines the {name} schema"))
+                DaemonError::Rpc(format!(
+                    "OpenCode /openapi.json no longer defines the {name} schema"
+                ))
             })?;
         for field in *fields {
             if !properties.contains_key(*field) {
@@ -1462,7 +1041,9 @@ fn contract_supported(doc: &Value) -> Result<(), DaemonError> {
             .pointer(&format!("/components/schemas/{name}/enum"))
             .and_then(Value::as_array)
             .ok_or_else(|| {
-                DaemonError::Rpc(format!("OpenCode /doc no longer defines the {name} enum"))
+                DaemonError::Rpc(format!(
+                    "OpenCode /openapi.json no longer defines the {name} enum"
+                ))
             })?;
         for value in *values {
             if !declared.iter().any(|entry| entry.as_str() == Some(value)) {
@@ -1472,12 +1053,11 @@ fn contract_supported(doc: &Value) -> Result<(), DaemonError> {
             }
         }
     }
-    let delivery = prompt_properties
-        .get("delivery")
-        .and_then(|delivery| delivery.get("enum"))
+    let delivery = doc
+        .pointer("/components/schemas/Session.Inbox.Delivery/enum")
         .and_then(Value::as_array)
         .ok_or_else(|| {
-            DaemonError::Rpc("OpenCode /doc did not declare the prompt delivery values".to_string())
+            DaemonError::Rpc("OpenCode schema did not declare prompt delivery values".to_string())
         })?;
     for value in [Delivery::Queue.as_str(), Delivery::Steer.as_str()] {
         if !delivery.iter().any(|entry| entry.as_str() == Some(value)) {
@@ -1487,18 +1067,6 @@ fn contract_supported(doc: &Value) -> Result<(), DaemonError> {
         }
     }
     Ok(())
-}
-
-/// Reduces one `level=ERROR` server log line to its cause, dropping the
-/// stack trace that follows the first escaped newline.
-fn summarize_server_error(line: &str) -> String {
-    let cause = line
-        .split_once("cause=\"")
-        .map(|(_, rest)| rest)
-        .and_then(|rest| rest.split_once("\\n").map(|(head, _)| head))
-        .or_else(|| line.split_once("cause=\"").map(|(_, rest)| rest))
-        .unwrap_or(line);
-    cause.trim_end_matches(['"', ' ']).trim().to_string()
 }
 
 /// Crash-orphan registry for `opencode serve` children.
@@ -1563,6 +1131,61 @@ fn session_create_body(cwd: &str, model: Option<&str>, agent: Option<&str>) -> V
 mod tests {
     use super::*;
 
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn private_server_shutdown_and_drop_close_descendant_pipes() {
+        for explicit_shutdown in [true, false] {
+            let mut command = Command::new("/bin/sh");
+            command
+                .args(["-c", "sleep 30 & echo ready; wait"])
+                .stdout(Stdio::piped())
+                .stderr(Stdio::null())
+                .kill_on_drop(true)
+                .process_group(0);
+            let mut child = command.spawn().unwrap();
+            let mut stdout = BufReader::new(child.stdout.take().unwrap()).lines();
+            assert_eq!(stdout.next_line().await.unwrap().as_deref(), Some("ready"));
+            let runtime = OpenCodeRuntime {
+                base_url: "http://127.0.0.1:1".into(),
+                password: "test".into(),
+                client: reqwest::Client::new(),
+                server_pid: child.id(),
+                child: Mutex::new(child),
+                activity: crate::activity::ActivityClock::new(),
+                served_prompt: std::sync::atomic::AtomicBool::new(false),
+            };
+            if explicit_shutdown {
+                runtime.shutdown().await;
+            }
+            drop(runtime);
+            // Killing just the parent leaves sleep holding stdout open.
+            assert!(
+                timeout(Duration::from_secs(2), stdout.next_line())
+                    .await
+                    .unwrap()
+                    .unwrap()
+                    .is_none()
+            );
+        }
+    }
+
+    #[test]
+    fn only_a_terminal_outcome_after_admission_settles_a_turn() {
+        assert!(terminal_outcome(&[json!({"type":"assistant","time":{"completed":1}})]).is_err());
+        assert!(terminal_outcome(&[json!({"type":"idle","outcome":"succeeded"})]).is_ok());
+        let error = terminal_outcome(&[
+            json!({"type":"idle","outcome":"failed","error":{"message":"provider failure"}}),
+        ])
+        .unwrap_err();
+        assert!(error.to_string().contains("provider failure"));
+        assert!(
+            terminal_outcome(&[json!({"type":"idle","outcome":"interrupted"})])
+                .unwrap_err()
+                .to_string()
+                .contains("interrupted")
+        );
+    }
+
     #[test]
     fn a_native_turn_only_sends_variants_the_runner_accepts() {
         let registry = runner_models(&json!({
@@ -1590,8 +1213,7 @@ mod tests {
 
         let gemini = registry.get("openrouter/google/gemini-3.7-flash");
         let gpt = registry.get("opencode/gpt-5.2");
-        // The v1 catalog advertises low/medium/high for this model and the
-        // runner accepts none, which is the disagreement that kills a turn.
+        // Never send an effort that this model does not advertise.
         assert_eq!(runner_variant(Some("medium"), gemini), None);
         assert_eq!(runner_variant(Some("high"), gpt), Some("high"));
         assert_eq!(runner_variant(Some("max"), gpt), None);
@@ -1605,204 +1227,9 @@ mod tests {
     }
 
     #[test]
-    fn session_events_classify_liveness_and_failure() {
-        use super::SessionEvent;
-        assert_eq!(
-            classify_session_event(&json!({
-                "type": "session.next.step.started"
-            })),
-            Some(SessionEvent::Activity)
-        );
-        assert_eq!(
-            classify_session_event(&json!({
-                "type": "session.next.text.delta"
-            })),
-            Some(SessionEvent::Activity)
-        );
-        assert_eq!(
-            classify_session_event(&json!({
-                "type": "session.next.tool.called"
-            })),
-            Some(SessionEvent::Activity)
-        );
-        assert_eq!(
-            classify_session_event(&json!({
-                "type": "session.next.step.failed",
-                "data": { "error": { "type": "unknown", "message": "provider auth failed" } }
-            })),
-            Some(SessionEvent::Failed("provider auth failed".to_string()))
-        );
-        assert_eq!(
-            classify_session_event(&json!({ "type": "session.next.step.failed" })),
-            Some(SessionEvent::Failed(
-                "the OpenCode session reported an error without details".to_string()
-            ))
-        );
-        // Admission echoes are diagnostic only and must not count as drain
-        // liveness.
-        assert_eq!(
-            classify_session_event(&json!({ "type": "session.next.prompt.admitted" })),
-            Some(SessionEvent::Observed(
-                "session.next.prompt.admitted".to_string()
-            ))
-        );
-        assert_eq!(
-            classify_session_event(&json!({ "type": "session.next.prompted" })),
-            Some(SessionEvent::Observed("session.next.prompted".to_string()))
-        );
-        // Status and legacy global-event types never appear on the durable
-        // session stream and must stay unclassified.
-        assert_eq!(
-            classify_session_event(&json!({ "type": "session.idle" })),
-            None
-        );
-        assert_eq!(
-            classify_session_event(&json!({ "type": "session.error" })),
-            None
-        );
-        assert_eq!(
-            classify_session_event(&json!({ "type": "message.part.updated" })),
-            None
-        );
-    }
-
-    /// Live end-to-end exercise of the native waiter against a real
-    /// `opencode serve`: admits a prompt against a session whose model cannot
-    /// resolve, so the drain fails locally before any provider call.
-    ///
-    /// OpenCode reports this failure *only* in its own error log — no session
-    /// event, no assistant record — so the waiter must both terminate and
-    /// carry the server's stated cause. An earlier revision read the same
-    /// silence as proof that the whole native runner was broken, and this
-    /// assertion exists to keep that misreading from returning. Costs no model
-    /// usage. Run explicitly with `--ignored`.
-    #[test]
-    #[ignore = "live OpenCode server e2e; requires the opencode binary"]
-    fn live_unresolvable_model_reports_the_servers_own_cause() {
-        let runtime = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .unwrap();
-        runtime.block_on(async {
-            let scratch = std::env::temp_dir().join("falcondecks-live-opencode-probe");
-            std::fs::create_dir_all(&scratch).unwrap();
-            let runtime = OpenCodeRuntime::spawn(
-                &["opencode".to_string()],
-                scratch.to_str().unwrap(),
-                &HashMap::new(),
-            )
-            .await
-            .expect("spawn opencode serve");
-            let session_id = runtime
-                .create_session(
-                    scratch.to_str().unwrap(),
-                    Some("no-such-provider/no-such-model"),
-                    None,
-                )
-                .await
-                .expect("create session");
-            let admission = runtime
-                .prompt(
-                    &session_id,
-                    "msg_live_probe",
-                    "live waiter probe",
-                    &[],
-                    Delivery::Queue,
-                )
-                .await
-                .expect("admit prompt");
-            let after_seq = admission
-                .pointer("/data/admittedSeq")
-                .and_then(Value::as_u64);
-            let outcome = tokio::time::timeout(
-                Duration::from_secs(60),
-                runtime.wait_until_idle(&session_id, "msg_live_probe", after_seq),
-            )
-            .await
-            .expect("waiter must terminate");
-            runtime.delete_session(&session_id).await;
-            runtime.shutdown().await;
-            let error = outcome.expect_err("invalid model must fail the turn");
-            let error = error.to_string();
-            assert!(
-                error.contains("OpenCode reported:"),
-                "the turn error must carry the server's own cause: {error}"
-            );
-            assert!(
-                error.contains("no-such-model"),
-                "the reported cause must name the unresolvable model: {error}"
-            );
-        });
-    }
-
-    /// Live proof that observed drain activity suppresses the short
-    /// outputless-turn grace: with `Activity` events arriving, the waiter must
-    /// still be waiting well past the 5-second grace that a stalled session
-    /// would otherwise trip. See the unresolvable-model test above
-    /// for the cost-free failure setup (see `live_unresolvable_model_reports_the_servers_own_cause`).
-    #[test]
-    #[ignore = "live OpenCode server e2e; requires the opencode binary"]
-    fn live_activity_events_suppress_the_short_grace() {
-        let runtime = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .unwrap();
-        runtime.block_on(async {
-            let scratch = std::env::temp_dir().join("falcondecks-live-opencode-probe");
-            std::fs::create_dir_all(&scratch).unwrap();
-            let runtime = OpenCodeRuntime::spawn(
-                &["opencode".to_string()],
-                scratch.to_str().unwrap(),
-                &HashMap::new(),
-            )
-            .await
-            .expect("spawn opencode serve");
-            let session_id = runtime
-                .create_session(
-                    scratch.to_str().unwrap(),
-                    Some("no-such-provider/no-such-model"),
-                    None,
-                )
-                .await
-                .expect("create session");
-            runtime
-                .prompt(
-                    &session_id,
-                    "msg_live_activity",
-                    "live activity probe",
-                    &[],
-                    Delivery::Queue,
-                )
-                .await
-                .expect("admit prompt");
-            let (event_tx, mut event_rx) = mpsc::channel::<SessionEvent>(16);
-            let feeder = tokio::spawn(async move {
-                // Roughly one step/text delta per second, as a streaming turn
-                // would produce.
-                for _ in 0..12 {
-                    tokio::time::sleep(Duration::from_secs(1)).await;
-                    let _ = event_tx.send(SessionEvent::Activity).await;
-                }
-            });
-            let waiter =
-                runtime.wait_until_idle_inner(&session_id, "msg_live_activity", &mut event_rx);
-            // 10 seconds is double the short grace; without activity
-            // suppression the waiter errors at ~5 seconds.
-            let outcome = tokio::time::timeout(Duration::from_secs(10), waiter).await;
-            feeder.abort();
-            runtime.delete_session(&session_id).await;
-            runtime.shutdown().await;
-            assert!(
-                outcome.is_err(),
-                "waiter must still be waiting while activity events arrive"
-            );
-        });
-    }
-
-    #[test]
     fn parses_the_ephemeral_server_port() {
         assert_eq!(
-            parse_listening_port("opencode server listening on http://127.0.0.1:54499"),
+            parse_listening_port("server listening on http://127.0.0.1:54499"),
             Some(54499)
         );
         assert_eq!(parse_listening_port("not a server"), None);
@@ -1821,7 +1248,7 @@ mod tests {
             prompt_request_body("msg_test", json!({ "text": "hello" }), Delivery::Queue),
             json!({
                 "id": "msg_test",
-                "prompt": { "text": "hello" },
+                "text": "hello",
                 "delivery": "queue",
                 "resume": true,
             })
@@ -1845,41 +1272,6 @@ mod tests {
         );
         assert!(!session_is_active(&json!({ "data": {} }), "ses_idle").unwrap());
         assert!(session_is_active(&json!({ "sessions": {} }), "ses_busy").is_err());
-    }
-
-    #[test]
-    fn admitted_message_settles_only_after_a_terminal_assistant_message() {
-        let messages =
-            vec![json!({ "id": "msg_assistant", "type": "assistant", "time": { "created": 1 } })];
-        assert!(!messages_are_settled(&messages));
-
-        let mut completed = messages.clone();
-        completed[0]["time"]["completed"] = json!(2);
-        assert!(messages_are_settled(&completed));
-
-        completed.push(
-            json!({ "id": "msg_still_running", "type": "assistant", "time": { "created": 3 } }),
-        );
-        assert!(!messages_are_settled(&completed));
-
-        let failed = vec![
-            json!({ "id": "msg_assistant", "type": "assistant", "error": { "name": "APIError" } }),
-        ];
-        assert!(messages_are_settled(&failed));
-        assert!(!assistant_turn_lacks_visible_output(&failed));
-
-        let empty_completed = vec![json!({
-            "id": "msg_empty",
-            "type": "assistant",
-            "time": { "created": 1, "completed": 2 },
-            "content": [{ "type": "text", "text": "" }]
-        })];
-        assert!(messages_are_settled(&empty_completed));
-        assert!(assistant_turn_lacks_visible_output(&empty_completed));
-        assert!(native_stderr_is_error(
-            r#"timestamp=2026-06-27T15:45:21.351Z level=ERROR message="stream error" error.error="AI_APICallError: Authentication Failed""#
-        ));
-        assert!(!native_stderr_is_error("info: idle"));
     }
 
     #[test]
@@ -1960,7 +1352,7 @@ mod tests {
     }
 
     #[test]
-    fn contract_validation_requires_prompt_fields_and_v1_delete() {
+    fn contract_validation_requires_prompt_fields_and_wait() {
         let doc = contract_doc_fixture();
         if let Err(error) = contract_supported(&doc) {
             panic!("fixture doc must validate: {error}");
@@ -1997,14 +1389,18 @@ mod tests {
             .pointer_mut("/paths")
             .and_then(Value::as_object_mut)
             .unwrap()
-            .remove("/session/{sessionID}");
+            .remove("/api/experimental/session/{sessionID}/wait");
         let error = contract_supported(&missing_delete).unwrap_err();
-        assert!(error.to_string().contains("/session/{sessionID}"));
+        assert!(
+            error
+                .to_string()
+                .contains("/api/experimental/session/{sessionID}/wait")
+        );
 
         assert!(contract_supported(&json!({ "openapi": "3.1.0" })).is_err());
     }
 
-    /// A minimal `/doc` that satisfies every contract rule.
+    /// A minimal `/openapi.json` that satisfies every contract rule.
     ///
     /// Built from the same constant tables the validator reads, so it proves
     /// only that `contract_supported` accepts a document of the shape we
@@ -2031,11 +1427,14 @@ mod tests {
         }
 
         let mut paths = json!({});
-        for path in CONTRACT_PATHS {
-            paths[path] = json!({ "get": { "responses": {} } });
+        for (path, method) in CONTRACT_ENDPOINTS {
+            if paths.get(*path).is_none() {
+                paths[path] = json!({});
+            }
+            paths[path][method] = json!({"responses":{}});
         }
         for (path, fields) in CONTRACT_BODY_FIELDS {
-            paths[path] = body(fields, None);
+            paths[path]["post"] = body(fields, None)["post"].clone();
         }
         paths["/api/session/{sessionID}/prompt"] = body(
             CONTRACT_PROMPT_FIELDS,
@@ -2065,6 +1464,10 @@ mod tests {
         for (name, values) in CONTRACT_ENUM_VALUES {
             schemas.insert(name.to_string(), json!({ "enum": values }));
         }
+        schemas.insert(
+            "Session.Inbox.Delivery".to_string(),
+            json!({"enum":["queue","steer"]}),
+        );
         json!({
             "openapi": "3.1.0",
             "paths": paths,
@@ -2083,6 +1486,14 @@ mod tests {
         };
 
         let error = strip(&|doc| {
+            doc["paths"]["/api/session/{sessionID}"]
+                .as_object_mut()
+                .unwrap()
+                .remove("delete");
+        });
+        assert!(error.to_string().contains("delete"), "{error}");
+
+        let error = strip(&|doc| {
             doc["paths"]["/api/session"]["post"]["requestBody"]["content"]["application/json"]
                 ["schema"]["properties"]
                 .as_object_mut()
@@ -2092,7 +1503,7 @@ mod tests {
         assert!(error.to_string().contains("model"), "{error}");
 
         let error = strip(&|doc| {
-            doc["components"]["schemas"]["ModelRef"]["properties"]
+            doc["components"]["schemas"]["Model.Ref"]["properties"]
                 .as_object_mut()
                 .expect("fixture schema is an object")
                 .remove("providerID");
@@ -2100,83 +1511,14 @@ mod tests {
         assert!(error.to_string().contains("providerID"), "{error}");
 
         let error = strip(&|doc| {
-            doc["components"]["schemas"]["PermissionV2Reply"]["enum"] = json!(["once", "always"]);
+            doc["components"]["schemas"]["Permission.Reply"]["enum"] = json!(["once", "always"]);
         });
         assert!(error.to_string().contains("reject"), "{error}");
 
         let error = strip(&|doc| {
-            doc["paths"]["/api/session/{sessionID}/prompt"]["post"]["requestBody"]["content"]["application/json"]
-                ["schema"]["properties"]["delivery"]["enum"] = json!(["queue"]);
+            doc["components"]["schemas"]["Session.Inbox.Delivery"]["enum"] = json!(["queue"]);
         });
         assert!(error.to_string().contains("steer"), "{error}");
-    }
-
-    #[test]
-    fn server_error_summary_keeps_the_cause_and_drops_the_stack() {
-        let line = r#"timestamp=2026-08-15T05:44:47.527Z level=ERROR message="Failed to drain Session" cause="SessionRunnerModel.ModelUnavailableError: Model unavailable: google/gemini-3.5-flash\n    at <anonymous> (/$bunfs/root/chunk.js:6:22145)" sessionID=ses_abc"#;
-        assert_eq!(
-            summarize_server_error(line),
-            "SessionRunnerModel.ModelUnavailableError: Model unavailable: google/gemini-3.5-flash"
-        );
-        // A line in an unexpected shape must degrade to something readable
-        // rather than being dropped: it is the only account of the failure.
-        assert_eq!(
-            summarize_server_error("level=ERROR boom"),
-            "level=ERROR boom"
-        );
-    }
-
-    #[test]
-    fn native_gate_blocks_models_the_runner_cannot_resolve() {
-        // Shape observed live on OpenCode 1.18.18: the runner registry lists
-        // every API-key provider's models (OAuth and coding-plan providers are
-        // absent even when `/config/providers` calls them connected), but
-        // implements only some of their APIs.
-        let registry = runner_models(&json!({
-            "location": { "directory": "/work" },
-            "data": [
-                {
-                    "id": "grok-code",
-                    "providerID": "opencode",
-                    "api": { "type": "aisdk", "package": "@ai-sdk/openai-compatible" },
-                    "variants": []
-                },
-                {
-                    "id": "google/gemini-3.7-flash",
-                    "providerID": "openrouter",
-                    "api": { "type": "aisdk", "package": "@openrouter/ai-sdk-provider" },
-                    "variants": []
-                }
-            ]
-        }))
-        .unwrap();
-
-        assert_eq!(
-            native_model_block_reason(Some("opencode/grok-code"), &registry),
-            None
-        );
-        // No explicit model: on an install with no configured default the
-        // runner admits the prompt and then silently does nothing, so the
-        // session must not pin to the native transport (ACP picks a model).
-        let reason = native_model_block_reason(None, &registry)
-            .expect("a session without a model must be blocked");
-        assert!(reason.contains("no model set"), "{reason}");
-        // A registered model whose API the runner does not implement is
-        // admitted and then dies in SessionRunnerModel.resolve; it must be
-        // blocked before admission with a reason that names the API.
-        let reason =
-            native_model_block_reason(Some("openrouter/google/gemini-3.7-flash"), &registry)
-                .expect("an unimplemented model API must be blocked");
-        assert!(reason.contains("google/gemini-3.7-flash"), "{reason}");
-        assert!(reason.contains("@openrouter/ai-sdk-provider"), "{reason}");
-        // A v1-only provider never reaches the registry at all.
-        let reason = native_model_block_reason(Some("zai-coding-plan/glm-5.3"), &registry)
-            .expect("a v1-only provider must be blocked");
-        assert!(reason.contains("zai-coding-plan/glm-5.3"), "{reason}");
-        // An empty registry means nothing can resolve, explicit model or not.
-        assert!(native_model_block_reason(None, &HashMap::new()).is_some());
-        assert!(native_model_block_reason(Some("opencode/grok-code"), &HashMap::new()).is_some());
-        assert!(runner_models(&json!({ "providers": [] })).is_err());
     }
 
     #[test]

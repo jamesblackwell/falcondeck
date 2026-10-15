@@ -2,8 +2,8 @@
 //!
 //! Run the cost-free checks with:
 //! `cargo run -p falcondeck-daemon --example opencode_conformance`
-//! Add `--live` to also run one real turn against the configured default
-//! model, which is the only check that spends tokens.
+//! Add `--live` for token-spending execution, steering, interruption, and
+//! history/reload checks against an enabled inexpensive model.
 //!
 //! The checks here deliberately concentrate on assumptions that fail *quietly*
 //! if OpenCode changes them. A renamed field or a dropped route announces
@@ -22,6 +22,8 @@ use crate::{
     error::DaemonError,
     opencode::{Delivery, OpenCodeRuntime},
 };
+
+mod lifecycle;
 
 /// A model reference that cannot resolve for anyone. Used to prove the waiter
 /// terminates and explains itself; never reaches a provider, so it is free.
@@ -84,7 +86,7 @@ impl Report {
     pub fn render(&self) -> String {
         let mut out = format!("OpenCode native conformance: {}\n", self.command.join(" "));
         if !self.live {
-            out.push_str("(cost-free mode; pass --live to also run one real turn)\n");
+            out.push_str("(cost-free mode; pass --live for execution and reload checks)\n");
         }
         for check in &self.checks {
             out.push_str(&format!(
@@ -205,33 +207,42 @@ pub async fn run_probe(options: &ProbeOptions) -> Report {
 
     let health = runtime.health().await;
     report.record("health responds", health, |_| "ok".to_string());
+    let authentication = runtime
+        .requires_authentication()
+        .await
+        .and_then(|required| {
+            if required {
+                Ok(())
+            } else {
+                Err(DaemonError::Rpc(
+                    "Private OpenCode server accepted unauthenticated access".into(),
+                ))
+            }
+        });
+    report.record(
+        "private server requires authentication",
+        authentication,
+        |()| "unauthenticated access rejected".into(),
+    );
 
     // The schema drift check. This is the cheap, deterministic layer: it turns
     // a removed route or renamed field into a loud failure at attach instead of
     // a 400 on someone's turn.
     let contract = runtime.validate_contract().await;
-    report.record("contract matches /doc", contract, |()| {
+    report.record("contract matches /openapi.json", contract, |()| {
         "routes, request bodies, schemas and enum values all present".to_string()
     });
 
     match runtime.provider_catalog().await {
         Ok(catalog) => {
-            let providers = catalog
-                .get("providers")
-                .and_then(Value::as_array)
-                .map(Vec::len)
-                .unwrap_or_default();
-            let models: usize = catalog
-                .get("providers")
-                .and_then(Value::as_array)
-                .map(|providers| {
-                    providers
-                        .iter()
-                        .filter_map(|provider| provider.get("models").and_then(Value::as_object))
-                        .map(|models| models.len())
-                        .sum()
-                })
-                .unwrap_or_default();
+            let entries = catalog.get("data").and_then(Value::as_array);
+            let models = entries.map(Vec::len).unwrap_or_default();
+            let providers = entries
+                .into_iter()
+                .flatten()
+                .filter_map(|model| model["providerID"].as_str())
+                .collect::<std::collections::HashSet<_>>()
+                .len();
             // An empty catalog parses fine and renders as an empty picker, so
             // shape drift here is invisible without a count assertion.
             let status = if models > 0 {
@@ -278,6 +289,7 @@ pub async fn run_probe(options: &ProbeOptions) -> Report {
     }
 
     probe_session_routes(&runtime, &cwd, &mut report).await;
+    lifecycle::probe_interactions(&runtime, &cwd, &mut report).await;
     probe_silent_model_failure(&runtime, &cwd, &mut report).await;
     if options.live {
         let live_model = match runtime.runner_models().await {
@@ -294,7 +306,10 @@ pub async fn run_probe(options: &ProbeOptions) -> Report {
             _ => None,
         };
         match live_model.as_deref() {
-            Some(model) => probe_live_turn(&runtime, &cwd, Some(model), &mut report).await,
+            Some(model) => {
+                probe_live_turn(&runtime, &cwd, Some(model), &mut report).await;
+                lifecycle::probe_execution(&runtime, options, &cwd, model, &mut report).await;
+            }
             None => report.push(
                 "live turn reaches an assistant reply",
                 CheckStatus::Skipped,
@@ -339,6 +354,11 @@ async fn probe_session_routes(runtime: &OpenCodeRuntime, cwd: &str, report: &mut
     report.record("active session listing parses", active, |active| {
         format!("active={active}")
     });
+    report.record(
+        "idle wait is implemented",
+        runtime.validate_idle_wait(&session_id).await,
+        |()| "idle drain returned".into(),
+    );
 
     let messages = runtime.messages(&session_id).await;
     report.record("message pagination walks", messages, |messages| {
@@ -361,17 +381,17 @@ async fn probe_session_routes(runtime: &OpenCodeRuntime, cwd: &str, report: &mut
     // Interrupting an idle session is a no-op for OpenCode but still exercises
     // the route and its body expectations.
     let interrupt = runtime.interrupt(&session_id).await;
-    report.record("interrupt is accepted", interrupt, |()| "204".to_string());
+    report.record("interrupt is accepted", interrupt, |()| {
+        "accepted".to_string()
+    });
 
     runtime.delete_session(&session_id).await;
 }
 
 /// The regression guard for the bug this suite exists because of.
 ///
-/// A session pinned to an unresolvable model fails inside OpenCode's runner
-/// before any step event: the session stream stays empty and no assistant
-/// record appears. FalconDeck must terminate that wait and report OpenCode's
-/// own stated cause rather than inferring anything about the transport.
+/// An unresolvable model can be admitted before runner validation. The durable
+/// failed idle record must terminate the wait with OpenCode's own cause.
 async fn probe_silent_model_failure(runtime: &OpenCodeRuntime, cwd: &str, report: &mut Report) {
     let session_id = match runtime
         .create_session(cwd, Some(UNRESOLVABLE_MODEL), Some("build"))
@@ -388,7 +408,7 @@ async fn probe_silent_model_failure(runtime: &OpenCodeRuntime, cwd: &str, report
         }
     };
     let message_id = format!("msg_{}", Uuid::new_v4().simple());
-    let admission = match runtime
+    match runtime
         .prompt(
             &session_id,
             &message_id,
@@ -398,7 +418,7 @@ async fn probe_silent_model_failure(runtime: &OpenCodeRuntime, cwd: &str, report
         )
         .await
     {
-        Ok(admission) => admission,
+        Ok(_) => (),
         Err(error) => {
             report.push(
                 "unresolvable model is explained",
@@ -409,12 +429,9 @@ async fn probe_silent_model_failure(runtime: &OpenCodeRuntime, cwd: &str, report
             return;
         }
     };
-    let after_seq = admission
-        .pointer("/data/admittedSeq")
-        .and_then(Value::as_u64);
     let waited = tokio::time::timeout(
         SILENT_TURN_TIMEOUT,
-        runtime.wait_until_idle(&session_id, &message_id, after_seq),
+        runtime.wait_until_idle(&session_id, &message_id),
     )
     .await;
     runtime.delete_session(&session_id).await;
@@ -473,8 +490,8 @@ async fn probe_live_turn(
             Delivery::Steer,
         )
         .await;
-    let admission = match admission {
-        Ok(admission) => admission,
+    match admission {
+        Ok(_) => (),
         Err(error) => {
             report.push(
                 "live turn reaches an assistant reply",
@@ -485,12 +502,9 @@ async fn probe_live_turn(
             return;
         }
     };
-    let after_seq = admission
-        .pointer("/data/admittedSeq")
-        .and_then(Value::as_u64);
     let waited = tokio::time::timeout(
         LIVE_TURN_TIMEOUT,
-        runtime.wait_until_idle(&session_id, &message_id, after_seq),
+        runtime.wait_until_idle(&session_id, &message_id),
     )
     .await;
     runtime.delete_session(&session_id).await;

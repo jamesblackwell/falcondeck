@@ -381,7 +381,7 @@ pub(super) async fn start_opencode_turn(
     inputs: &[TurnInputItem],
     selected_skills: &[ResolvedSelectedSkill],
 ) -> Result<(), DaemonError> {
-    let (session_id, model_id, variant, agent_id, prompt, files) = {
+    let (session_id, model_id, variant, agent_id, prompt, files, message_id) = {
         let workspaces = app.inner.workspaces.lock().await;
         let workspace = workspaces
             .get(workspace_id)
@@ -420,16 +420,17 @@ pub(super) async fn start_opencode_turn(
             thread.summary.agent.collaboration_mode_id.clone(),
             prompt,
             files,
+            native_message_id(
+                thread
+                    .dispatching_request
+                    .as_ref()
+                    .map(|request| request.id.as_str()),
+            ),
         )
     };
     let runtime = app.opencode_runtime_for(workspace_id).await?;
+    runtime.validate_contract().await?;
     let runner_models = runtime.runner_models().await?;
-    // The workspace catalog comes from OpenCode's v1 provider config, which
-    // advertises variants the v2 runner does not implement (openrouter models
-    // list low/medium/high there and none in the runner registry). Such a
-    // variant is accepted by `set_model` and then kills the turn after
-    // admission with `VariantUnavailableError`, so drop it and let the model
-    // run at its own default rather than losing the turn.
     let variant = crate::opencode::runner_variant(
         variant.as_deref(),
         model_id
@@ -444,12 +445,7 @@ pub(super) async fn start_opencode_turn(
         // last so changing Build/Plan does not silently replace that choice.
         runtime.set_model(&session_id, model_id, variant).await?;
     }
-    // A thread stays pinned to the native transport, but its model can change
-    // mid-thread to one the v2 runner cannot resolve (the picker lists every
-    // configured provider and every model it offers; the runner executes a
-    // subset). Such a turn would be admitted and then die with no session
-    // event and no assistant record, so refuse it before admission with the
-    // actual reason.
+    // Changing a model must be checked before admitting any new input.
     let session_model = runtime.session_model_ref(&session_id).await?;
     if let Some(reason) =
         crate::opencode::native_model_block_reason(session_model.as_deref(), &runner_models)
@@ -459,10 +455,9 @@ pub(super) async fn start_opencode_turn(
              thread to use this model over ACP"
         )));
     }
-    let message_id = format!("msg_{}", Uuid::new_v4().simple());
     // A successful response is durable admission. No ACP retry is permitted
     // beyond this point because that could execute the same request twice.
-    let admission = runtime
+    runtime
         .prompt(&session_id, &message_id, &prompt, &files, Delivery::Queue)
         .await?;
     let _ = app
@@ -472,18 +467,12 @@ pub(super) async fn start_opencode_turn(
             thread.opencode_interrupt_requested = false;
         })
         .await;
-    // The admission's sequence number scopes the event stream to this turn;
-    // without it the stream replays prior turns' failures.
-    let after_seq = admission
-        .pointer("/data/admittedSeq")
-        .and_then(Value::as_u64);
-
     let app = app.clone();
     let workspace_id = workspace_id.to_string();
     let thread_id = thread_id.to_string();
     tokio::spawn(async move {
         let outcome = async {
-            let wait = runtime.wait_until_idle(&session_id, &message_id, after_seq);
+            let wait = runtime.wait_until_idle(&session_id, &message_id);
             tokio::pin!(wait);
             let mut permissions = tokio::time::interval(std::time::Duration::from_millis(400));
             let mut projection = tokio::time::interval(std::time::Duration::from_millis(1500));
@@ -714,13 +703,19 @@ fn effort_rank(effort: &str) -> usize {
 /// publishes exactly these as the `thought_level` config option, so the
 /// catalog is an equivalent source that does not need a session first.
 pub(super) fn variant_efforts(model: &Value) -> Vec<ReasoningEffortSummary> {
-    let Some(variants) = model.get("variants").and_then(Value::as_object) else {
-        return Vec::new();
+    let variants = model.get("variants");
+    let ids = match variants {
+        Some(Value::Object(variants)) => variants.keys().cloned().collect::<Vec<_>>(),
+        Some(Value::Array(variants)) => variants
+            .iter()
+            .filter_map(|variant| variant.get("id").and_then(Value::as_str).map(str::to_owned))
+            .collect(),
+        _ => Vec::new(),
     };
-    let mut efforts = variants
-        .keys()
+    let mut efforts = ids
+        .into_iter()
         .map(|id| ReasoningEffortSummary {
-            reasoning_effort: id.clone(),
+            reasoning_effort: id,
             description: String::new(),
         })
         .collect::<Vec<_>>();
@@ -743,45 +738,39 @@ fn default_variant(efforts: &[ReasoningEffortSummary]) -> Option<String> {
 }
 
 fn parse_native_models(catalog: &Value) -> Result<Vec<ModelSummary>, DaemonError> {
-    let providers = catalog
-        .get("providers")
+    let entries = catalog
+        .get("data")
         .and_then(Value::as_array)
         .ok_or_else(|| {
             DaemonError::Rpc(
-                "OpenCode native provider catalog did not contain a providers array".to_string(),
+                "OpenCode native model catalog did not contain a data array".to_string(),
             )
         })?;
     let mut models = vec![native_default_model()];
-    for provider in providers {
-        let Some(provider_id) = provider.get("id").and_then(Value::as_str) else {
+    for model in entries {
+        if model.get("enabled").and_then(Value::as_bool) == Some(false) {
+            continue;
+        }
+        let (Some(provider_id), Some(model_id)) = (
+            model.get("providerID").and_then(Value::as_str),
+            model.get("id").and_then(Value::as_str),
+        ) else {
             continue;
         };
-        let provider_label = provider
+        let model_label = model
             .get("name")
             .and_then(Value::as_str)
-            .unwrap_or(provider_id);
-        let Some(provider_models) = provider.get("models").and_then(Value::as_object) else {
-            continue;
-        };
-        for model in provider_models.values() {
-            let Some(model_id) = model.get("id").and_then(Value::as_str) else {
-                continue;
-            };
-            let model_label = model
-                .get("name")
-                .and_then(Value::as_str)
-                .unwrap_or(model_id);
-            let supported_reasoning_efforts = variant_efforts(model);
-            models.push(ModelSummary {
-                id: format!("{provider_id}/{model_id}"),
-                label: format!("{model_label} · {provider_label}"),
-                is_default: false,
-                default_reasoning_effort: default_variant(&supported_reasoning_efforts),
-                supported_reasoning_efforts,
-                service_tiers: Vec::new(),
-                default_service_tier: None,
-            });
-        }
+            .unwrap_or(model_id);
+        let supported_reasoning_efforts = variant_efforts(model);
+        models.push(ModelSummary {
+            id: format!("{provider_id}/{model_id}"),
+            label: format!("{model_label} · {provider_id}"),
+            is_default: false,
+            default_reasoning_effort: default_variant(&supported_reasoning_efforts),
+            supported_reasoning_efforts,
+            service_tiers: Vec::new(),
+            default_service_tier: None,
+        });
     }
     models[1..].sort_by(|left, right| {
         left.label
@@ -975,6 +964,76 @@ async fn surface_permissions(
     Ok(())
 }
 
+fn form_question(field: &Value) -> InteractiveQuestion {
+    let key = field["key"].as_str().unwrap_or("field");
+    let title = field["title"].as_str().unwrap_or(key);
+    let mut question = field["description"].as_str().unwrap_or(title).to_string();
+    let options = match field["type"].as_str() {
+        Some("multiselect") => {
+            let choices = field["options"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(|option| option["label"].as_str())
+                .collect::<Vec<_>>()
+                .join(", ");
+            question = format!(
+                "{question}\nChoices: {choices}\nEnter one or more choices separated by commas or new lines."
+            );
+            None
+        }
+        Some("boolean") => Some(
+            vec!["True", "False"]
+                .into_iter()
+                .map(|label| InteractiveQuestionOption {
+                    label: label.to_string(),
+                    description: String::new(),
+                })
+                .collect(),
+        ),
+        Some("external") => {
+            question = format!(
+                "{question}\nOpen {} and select Continue when finished.",
+                field["url"].as_str().unwrap_or("the OpenCode form URL")
+            );
+            Some(vec![InteractiveQuestionOption {
+                label: "Continue".to_string(),
+                description: String::new(),
+            }])
+        }
+        _ => field
+            .get("options")
+            .and_then(Value::as_array)
+            .map(|options| {
+                options
+                    .iter()
+                    .filter_map(|option| {
+                        Some(InteractiveQuestionOption {
+                            label: option["label"].as_str()?.to_string(),
+                            description: option["description"].as_str().unwrap_or("").to_string(),
+                        })
+                    })
+                    .collect()
+            }),
+    };
+    InteractiveQuestion {
+        id: key.to_string(),
+        header: title.to_string(),
+        question,
+        is_other: match field["type"].as_str() {
+            Some("boolean" | "external") => false,
+            Some("multiselect") => true,
+            _ => field["custom"].as_bool().unwrap_or(options.is_none()),
+        },
+        is_secret: ["password", "secret", "token", "api_key"]
+            .iter()
+            .any(|word| {
+                key.to_ascii_lowercase().contains(word) || title.to_ascii_lowercase().contains(word)
+            }),
+        options,
+    }
+}
+
 async fn surface_questions(
     app: &AppState,
     workspace_id: &str,
@@ -996,47 +1055,12 @@ async fn surface_questions(
             continue;
         }
         let questions = pending
-            .get("questions")
+            .get("fields")
             .and_then(Value::as_array)
             .into_iter()
             .flatten()
-            .enumerate()
-            .map(|(index, question)| InteractiveQuestion {
-                id: index.to_string(),
-                header: question
-                    .get("header")
-                    .and_then(Value::as_str)
-                    .unwrap_or("Question")
-                    .to_string(),
-                question: question
-                    .get("question")
-                    .and_then(Value::as_str)
-                    .unwrap_or("OpenCode needs more information")
-                    .to_string(),
-                is_other: question
-                    .get("custom")
-                    .and_then(Value::as_bool)
-                    .unwrap_or(true),
-                is_secret: false,
-                options: question
-                    .get("options")
-                    .and_then(Value::as_array)
-                    .map(|options| {
-                        options
-                            .iter()
-                            .filter_map(|option| {
-                                Some(InteractiveQuestionOption {
-                                    label: option.get("label")?.as_str()?.to_string(),
-                                    description: option
-                                        .get("description")
-                                        .and_then(Value::as_str)
-                                        .unwrap_or("")
-                                        .to_string(),
-                                })
-                            })
-                            .collect()
-                    }),
-            })
+            .filter(|field| !field["hidden"].as_bool().unwrap_or(false))
+            .map(form_question)
             .collect::<Vec<_>>();
         let request = InteractiveRequest {
             request_id: request_id.to_string(),
@@ -1046,7 +1070,10 @@ async fn surface_questions(
             kind: InteractiveRequestKind::Question,
             approval_options: None,
             approval_decisions: None,
-            title: "OpenCode question".to_string(),
+            title: pending["title"]
+                .as_str()
+                .unwrap_or("OpenCode question")
+                .to_string(),
             detail: None,
             command: None,
             path: None,
@@ -1101,14 +1128,21 @@ async fn surface_questions(
 }
 
 /// Takes the steer idempotency key to send: a retained unresolved key is
-/// reusable only for an identical prompt, because OpenCode resolves a reused
-/// message id to its stored admission and rejects a differing payload with a
-/// conflict. Any other input mints a fresh id.
+/// reusable only for an identical prompt: OpenCode 2 returns the first stored
+/// admission without comparing payloads. Other input needs a fresh id.
 fn take_steer_message_id(retained: &mut Option<(String, Value)>, prompt: &Value) -> String {
     match retained.take() {
         Some((id, retained_prompt)) if retained_prompt == *prompt => id,
         _ => format!("msg_{}", Uuid::new_v4().simple()),
     }
+}
+
+fn native_message_id(queued_id: Option<&str>) -> String {
+    // A persisted queue dispatch can be replayed after losing the HTTP reply
+    // or restarting the daemon. Reuse its durable identity across that boundary.
+    queued_id
+        .map(|id| format!("msg_falcondeck_queue_{id}"))
+        .unwrap_or_else(|| format!("msg_{}", Uuid::new_v4().simple()))
 }
 
 pub(super) async fn steer_opencode_turn(
@@ -1167,10 +1201,8 @@ pub(super) async fn steer_opencode_turn(
     result.map(|_| ())
 }
 
-/// OpenCode expands inline `$name` mentions itself by loading the skill's
-/// SKILL.md, so FalconDeck never inlines skill bodies — it just has to hand
-/// over the native mention. The mention is path-derived (see
-/// `skills::parse_markdown_skill`), not the FalconDeck alias.
+/// Preserve the authored native mention alongside the explicit V2 skill
+/// preamble. Native names are path-derived rather than FalconDeck aliases.
 fn opencode_skill_mention(skill: &ResolvedSelectedSkill) -> String {
     let native_name = skill
         .summary
@@ -1209,6 +1241,22 @@ fn opencode_prompt_from_inputs(
             .map(opencode_skill_mention)
             .collect::<Vec<_>>()
             .join("\n");
+    }
+    let preambles = selected_skills
+        .iter()
+        .map(|skill| {
+            skill
+                .summary
+                .source_path
+                .as_deref()
+                .map(super::harness_user_text::falcondeck_skill_path_preamble)
+                .unwrap_or_else(|| {
+                    super::harness_user_text::falcondeck_skill_name_preamble(&skill.summary.label)
+                })
+        })
+        .collect::<Vec<_>>();
+    if !preambles.is_empty() {
+        text = format!("{}\n\n{text}", preambles.join("\n"));
     }
     let files = inputs
         .iter()
@@ -1294,6 +1342,14 @@ async fn push_projected_item(
     }
 }
 
+fn native_created_at(value: &Value, fallback: chrono::DateTime<Utc>) -> chrono::DateTime<Utc> {
+    value
+        .pointer("/time/created")
+        .and_then(Value::as_i64)
+        .and_then(chrono::DateTime::from_timestamp_millis)
+        .unwrap_or(fallback)
+}
+
 async fn project_messages(
     app: &AppState,
     workspace_id: &str,
@@ -1303,12 +1359,17 @@ async fn project_messages(
 ) -> Result<(), DaemonError> {
     let mut provider_error = None;
     for message in messages {
+        let message_created_at = native_created_at(message, Utc::now());
         let message_id = message
             .get("id")
             .and_then(Value::as_str)
             .unwrap_or("assistant");
         if message.get("type").and_then(Value::as_str) == Some("user") {
-            let text = message.get("text").and_then(Value::as_str).unwrap_or("");
+            let text = message
+                .get("text")
+                .and_then(Value::as_str)
+                .and_then(super::harness_user_text::visible_user_prompt)
+                .unwrap_or_default();
             if !text.is_empty() {
                 push_projected_item(
                     app,
@@ -1320,7 +1381,7 @@ async fn project_messages(
                         attachments: Vec::new(),
                         turn_id: None,
                         previous_turn_id: None,
-                        created_at: Utc::now(),
+                        created_at: message_created_at,
                     },
                     true,
                     replay,
@@ -1332,16 +1393,22 @@ async fn project_messages(
         if message.get("type").and_then(Value::as_str) != Some("assistant") {
             continue;
         }
-        for content in message
+        for (index, content) in message
             .get("content")
             .and_then(Value::as_array)
             .into_iter()
             .flatten()
+            .enumerate()
         {
+            let content_created_at = native_created_at(content, message_created_at);
+            let fallback_id = format!(
+                "{message_id}-{}-{index}",
+                content["type"].as_str().unwrap_or("content")
+            );
             let content_id = content
                 .get("id")
                 .and_then(Value::as_str)
-                .unwrap_or(message_id);
+                .unwrap_or(&fallback_id);
             match content.get("type").and_then(Value::as_str) {
                 Some("text") => {
                     let text = content.get("text").and_then(Value::as_str).unwrap_or("");
@@ -1358,7 +1425,7 @@ async fn project_messages(
                                 citations: Vec::new(),
                                 lifecycle: ContentLifecycle::Complete,
                                 error: None,
-                                created_at: Utc::now(),
+                                created_at: content_created_at,
                             },
                             true,
                             replay,
@@ -1379,7 +1446,7 @@ async fn project_messages(
                                 content: text.to_string(),
                                 lifecycle: ContentLifecycle::Complete,
                                 duration_ms: None,
-                                created_at: Utc::now(),
+                                created_at: content_created_at,
                             },
                             true,
                             replay,
@@ -1399,7 +1466,7 @@ async fn project_messages(
                         .unwrap_or("completed");
                     let status = match raw_status {
                         "error" | "failed" => "failed",
-                        "pending" | "running" => "in_progress",
+                        "pending" | "running" | "streaming" => "in_progress",
                         _ => "completed",
                     };
                     let output = tool_state_output(state);
@@ -1424,8 +1491,14 @@ async fn project_messages(
                             exit_code: None,
                             display: Box::new(display),
                             detail: None,
-                            created_at: Utc::now(),
-                            completed_at: (status != "in_progress").then(Utc::now),
+                            created_at: content_created_at,
+                            completed_at: (status != "in_progress").then(|| {
+                                content
+                                    .pointer("/time/completed")
+                                    .and_then(Value::as_i64)
+                                    .and_then(chrono::DateTime::from_timestamp_millis)
+                                    .unwrap_or(content_created_at)
+                            }),
                         },
                         true,
                         replay,
@@ -1450,7 +1523,7 @@ async fn project_messages(
                     id: format!("opencode-error-{message_id}"),
                     level: ServiceLevel::Error,
                     message: message_text.clone(),
-                    created_at: Utc::now(),
+                    created_at: message_created_at,
                 },
                 true,
                 replay,
@@ -1478,6 +1551,140 @@ mod tests {
     use falcondeck_core::{ImageInput, SkillProviderTranslations, SkillSummary};
 
     use super::*;
+
+    #[tokio::test]
+    async fn native_history_replay_keeps_all_content_blocks_and_original_times() {
+        use falcondeck_core::{AgentProvider, WorkspaceKind, WorkspaceStatus, WorkspaceSummary};
+        use std::collections::HashMap;
+
+        let temp = tempfile::tempdir().unwrap();
+        let app = AppState::new_with_state_path(
+            "test".into(),
+            HashMap::new(),
+            temp.path().join("state.json"),
+        );
+        app.inner.workspaces.lock().await.insert(
+            "workspace".into(),
+            super::super::ManagedWorkspace {
+                summary: WorkspaceSummary {
+                    id: "workspace".into(),
+                    path: temp.path().to_string_lossy().into_owned(),
+                    kind: WorkspaceKind::Project,
+                    status: WorkspaceStatus::Ready,
+                    agents: vec![],
+                    skills: vec![],
+                    default_provider: AgentProvider::OPENCODE,
+                    models: vec![],
+                    collaboration_modes: vec![],
+                    account: Default::default(),
+                    current_thread_id: None,
+                    connected_at: Utc::now(),
+                    updated_at: Utc::now(),
+                    last_error: None,
+                    icon: None,
+                },
+                codex_session: None,
+                claude_runtime: None,
+                agy_runtime: None,
+                opencode_runtime: None,
+                acp_runtimes: HashMap::new(),
+                threads: HashMap::new(),
+            },
+        );
+        app.upsert_thread("workspace", "thread", |thread| {
+            thread.provider = AgentProvider::OPENCODE
+        })
+        .await
+        .unwrap();
+        let preamble = super::super::harness_user_text::falcondeck_skill_path_preamble(
+            "/skills/review/SKILL.md",
+        );
+        let history = [
+            json!({"id":"user","type":"user","time":{"created":1000},"text":format!("{preamble}\n\nReview this")}),
+            json!({"id":"assistant","type":"assistant","time":{"created":2000},"content":[
+                {"type":"text","text":"First"}, {"type":"reasoning","text":"Thinking"},
+                {"type":"text","text":"Second"},
+                {"id":"tool","type":"tool","name":"shell","time":{"created":3000,"completed":4000},"state":{"status":"completed","content":"done"}}
+            ]}),
+        ];
+        for _ in 0..2 {
+            project_messages(&app, "workspace", "thread", &history, true)
+                .await
+                .unwrap();
+        }
+        let workspaces = app.inner.workspaces.lock().await;
+        let items = &workspaces["workspace"].threads["thread"].items;
+        assert_eq!(
+            items.len(),
+            5,
+            "replay must retain all blocks without duplicates"
+        );
+        assert!(items.iter().any(
+            |item| matches!(item, ConversationItem::UserMessage {text, created_at, ..}
+            if text == "Review this" && created_at.timestamp_millis() == 1000)
+        ));
+        let text_blocks = items
+            .iter()
+            .filter_map(|item| match item {
+                ConversationItem::AssistantMessage {
+                    id,
+                    text,
+                    created_at,
+                    ..
+                } => {
+                    assert_eq!(created_at.timestamp_millis(), 2000);
+                    Some((id.as_str(), text.as_str()))
+                }
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            text_blocks,
+            [
+                ("opencode-assistant-text-0", "First"),
+                ("opencode-assistant-text-2", "Second")
+            ]
+        );
+        assert!(items.iter().any(
+            |item| matches!(item, ConversationItem::ToolCall {id, created_at, completed_at, ..}
+            if id == "opencode-tool" && created_at.timestamp_millis() == 3000
+                && completed_at.is_some_and(|time| time.timestamp_millis() == 4000))
+        ));
+    }
+
+    #[test]
+    fn queued_admission_identity_survives_a_dispatch_retry() {
+        assert_eq!(
+            native_message_id(Some("queued-123")),
+            native_message_id(Some("queued-123"))
+        );
+        assert_ne!(
+            native_message_id(Some("queued-123")),
+            native_message_id(Some("queued-456"))
+        );
+        assert_ne!(native_message_id(None), native_message_id(None));
+    }
+
+    #[test]
+    fn native_forms_keep_keys_and_expose_boolean_and_external_choices() {
+        let question = form_question(&json!({"key":"enabled","title":"Enabled?","type":"boolean"}));
+        assert_eq!(question.id, "enabled");
+        assert_eq!(
+            question
+                .options
+                .unwrap()
+                .iter()
+                .map(|o| o.label.as_str())
+                .collect::<Vec<_>>(),
+            ["True", "False"]
+        );
+        let external = form_question(
+            &json!({"key":"connect","type":"external","url":"https://example.test/connect"}),
+        );
+        assert!(external.question.contains("https://example.test/connect"));
+        assert_eq!(external.options.unwrap()[0].label, "Continue");
+        assert!(form_question(&json!({"key":"password","type":"string"})).is_secret);
+    }
 
     fn resolved_skill(alias: &str, native_name: Option<&str>) -> ResolvedSelectedSkill {
         ResolvedSelectedSkill {
@@ -1511,10 +1718,12 @@ mod tests {
             id: None,
             text: "/autore-view please review my changes".to_string(),
         }];
-        let skills = vec![resolved_skill("/autore-view", Some("autoreview"))];
+        let mut skills = vec![resolved_skill("/autore-view", Some("autoreview"))];
 
+        skills[0].summary.source_path = Some("/project/skills/autoreview/SKILL.md".to_string());
         let (text, files) = opencode_prompt_from_inputs(&inputs, &skills);
-        assert_eq!(text, "$autoreview please review my changes");
+        assert!(text.ends_with("$autoreview please review my changes"));
+        assert!(text.contains("SKILL.md"));
         assert!(files.is_empty());
     }
 
@@ -1527,7 +1736,7 @@ mod tests {
         let skills = vec![resolved_skill("/autore-view", Some("autoreview"))];
 
         let (text, _) = opencode_prompt_from_inputs(&inputs, &skills);
-        assert_eq!(text, "$autoreview review please");
+        assert!(text.ends_with("$autoreview review please"));
     }
 
     #[test]
@@ -1543,7 +1752,7 @@ mod tests {
 
         let (text, files) = opencode_prompt_from_inputs(&inputs, &skills);
         // No translation available: fall back to the canonical alias.
-        assert_eq!(text, "$autore-view");
+        assert!(text.ends_with("$autore-view"));
         assert_eq!(files.len(), 1);
     }
 
@@ -1572,42 +1781,29 @@ mod tests {
     #[test]
     fn native_catalog_keeps_an_explicit_default_and_qualifies_models() {
         let models = parse_native_models(&serde_json::json!({
-            "providers": [{
-                "id": "openrouter",
-                "name": "OpenRouter",
-                "models": {
-                    "grok": { "id": "x-ai/grok-4.6", "name": "Grok 4.6" },
-                    "claude": { "id": "anthropic/claude-sonnet", "name": "Claude Sonnet" }
-                }
-            }],
-            "default": { "openrouter": "x-ai/grok-4.6" }
+            "data": [
+                {"providerID":"openrouter","id":"x-ai/grok-4.6","name":"Grok 4.6","enabled":true},
+                {"providerID":"openrouter","id":"anthropic/claude-sonnet","name":"Claude Sonnet","enabled":true},
+                {"providerID":"openrouter","id":"disabled","enabled":false}
+            ]
         }))
         .expect("catalog parses");
 
         assert_eq!(models[0].id, "default");
         assert!(models[0].is_default);
         assert!(models.iter().any(|model| {
-            model.id == "openrouter/x-ai/grok-4.6" && model.label == "Grok 4.6 · OpenRouter"
+            model.id == "openrouter/x-ai/grok-4.6" && model.label == "Grok 4.6 · openrouter"
         }));
     }
 
     #[test]
     fn native_catalog_publishes_model_variants_as_reasoning_efforts() {
         let models = parse_native_models(&serde_json::json!({
-            "providers": [{
-                "id": "zai-coding-plan",
-                "name": "Z.ai",
-                "models": {
-                    "glm": {
-                        "id": "glm-5.3",
-                        "name": "GLM-5.3",
-                        // Parsing sorts the object, so the catalog's own order
-                        // is gone by the time this is read.
-                        "variants": { "max": {}, "low": {}, "high": {} }
-                    },
-                    "plain": { "id": "plain", "name": "Plain" }
-                }
-            }]
+            "data": [
+                {"providerID":"zai-coding-plan","id":"glm-5.3","name":"GLM-5.3","enabled":true,
+                 "variants":[{"id":"max"},{"id":"low"},{"id":"high"}]},
+                {"providerID":"zai-coding-plan","id":"plain","name":"Plain","enabled":true,"variants":[]}
+            ]
         }))
         .expect("catalog parses");
 
@@ -1739,7 +1935,7 @@ mod tests {
         assert!(retained.is_none());
 
         // A different steer must not reuse the id: OpenCode resolves a reused
-        // id to its stored admission and conflicts on a differing payload.
+        // id to its stored admission without comparing a differing payload.
         let mut retained = Some(("msg_retry_me".to_string(), prompt.clone()));
         let other = json!({ "text": "different steer", "files": [] });
         let fresh = take_steer_message_id(&mut retained, &other);

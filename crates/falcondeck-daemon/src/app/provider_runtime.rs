@@ -213,18 +213,9 @@ impl ProviderRuntime {
                                         // without `resume`) before a thread
                                         // is pinned to this transport.
                                         runtime.validate_contract().await?;
-                                        // The v2 runner resolves models only
-                                        // against its own registry, a strict
-                                        // subset of the configured catalog:
-                                        // OAuth and coding-plan credentials
-                                        // are v1-only, and even among the
-                                        // registered models the runner
-                                        // implements only some model APIs. A
-                                        // model it cannot resolve would be
-                                        // admitted and then die without a
-                                        // session event or assistant record,
-                                        // so the thread must not pin to the
-                                        // native transport at all.
+                                        // OpenCode 2's live catalog is also its
+                                        // execution registry. Refuse unavailable
+                                        // models before admitting any input.
                                         let runner_models = runtime.runner_models().await?;
                                         let session_model =
                                             runtime.session_model_ref(&session_id).await?;
@@ -240,6 +231,7 @@ impl ProviderRuntime {
                                         runtime.messages(&session_id).await?;
                                         runtime.pending_permissions(&session_id).await?;
                                         runtime.pending_questions(&session_id).await?;
+                                        runtime.validate_idle_wait(&session_id).await?;
                                         Ok::<_, DaemonError>(())
                                     }
                                     .await;

@@ -277,57 +277,15 @@ MCP servers, model/config discovery, and persisted session reload. OpenCode
 continues to own its agents, permissions, project rules, tools, formatters,
 linters, and provider authentication.
 
-### OpenCode 2
+### OpenCode 2 native transport and ACP fallback
 
-OpenCode **2.0.29** is qualified through `opencode acp` (2026-10-15): model and
-mode discovery, streamed text, tool lifecycle, cancellation, session reload,
-and reload after restarting the ACP process all pass the live conformance
-probe. `make qa-opencode` also passes through the daemon with `auto`, selecting
-ACP and completing a real turn. The probe discovers 605 models and Build/Plan
-modes on the qualification machine; those counts depend on local credentials.
-A separate daemon turn verified MCP discovery and a read through FalconDeck's
-control server using Code Mode. ACP projects those calls as `execute` tool
-rows; it does not expose the nested MCP calls as separate rows.
-
-The native HTTP adapter below targets the **1.x preview API**, not the released
-OpenCode 2 API. `auto` falls back to ACP before a prompt is sent; explicitly
-configured `native` fails to start on 2.x. Use `"transport": "acp"` to skip
-that compatibility attempt. Existing threads remain pinned to their original
-transport, so changing the setting does not migrate a native thread.
-
-Upgrade with `opencode upgrade` to reach the latest 1.x, then
-`opencode upgrade --major`. Keep a backup of the binary and config. Supported
-V1 configuration is normalized in memory, but **V1 plugin implementations do
-not run in V2**, including plugins auto-discovered in `~/.config/opencode/plugins`.
-A legacy plugin can block location activation and cause ACP `session/new` to
-fail with `Internal service failure`; disable or port it before retrying.
-See the [upstream migration guide](https://opencode.ai/v2/docs/migrate-v1/).
-
-The most useful follow-on work is migrating the native adapter against the
-[released API](https://opencode.ai/v2/docs/api):
-
-- Startup now uses lower-case log levels, a `server listening on ...` banner,
-  and a generated password; the schema lives at `/openapi.json`, with server
-  identity at `/api/info`.
-- Prompt fields are flattened (`text` and `files` replace `prompt`); permission
-  replies use `decision`; questions become forms. Session deletion now has a
-  native `DELETE /api/session/{sessionID}` route.
-- The released model catalog replaces the split preview registries. Qualify
-  providers and reasoning variants before retiring the old runner allowlist.
-- Native steering, inbox editing, session fork/move, background tools, and
-  Code Mode offer useful integration points. Code Mode is enabled for MCP by
-  default; extension-bridge calls and nested tool attribution need further
-  qualification beyond the control-server read above.
-- The shared background service could reduce per-workspace process counts, but
-  adopting it also requires preserving workspace-specific MCP configuration,
-  credentials, and ownership. Keep that separate from the API migration.
-
-### OpenCode 1.x native transport and ACP fallback
-
-FalconDeck keeps the generic ACP adapter for OpenCode and every other ACP
-harness. The native OpenCode server is a separate transport that unlocks
-native session hydration and mid-turn `delivery: "steer"`; ACP remains a
-permanent fallback.
+The native transport targets the [released OpenCode 2 API](https://opencode.ai/v2/docs/api/).
+OpenCode **2.0.29** is qualified as of 2026-10-15. It supports native session
+hydration, model and reasoning-variant selection, Build/Plan modes, mid-turn
+`delivery: "steer"`, tools, permissions, forms, interruption, and reload.
+OpenCode continues to own the session and its history; FalconDeck retains the
+same native session ID across restarts and never substitutes an ACP session
+for an existing native thread.
 
 An OpenCode entry can declare a transport:
 
@@ -337,161 +295,112 @@ An OpenCode entry can declare a transport:
     "opencode": {
       "label": "OpenCode",
       "command": ["opencode", "acp"],
-      "transport": "acp"
+      "transport": "auto"
     }
   }
 }
 ```
 
-`auto` tries the native server for each new thread and falls back to ACP if
-startup, session creation, or the read/permission/question compatibility probe
-fails — or if the thread's model cannot execute natively. OpenCode 1.18's v2
-runner resolves models only against its own registry (`GET /api/model`), which
-is a strict subset of the configured catalog in two independent ways
-(both verified live on 1.18.18):
+`auto` tries native for each new thread. Before pinning it, FalconDeck checks
+`/openapi.json`, creates an idle session, reads messages/permissions/forms,
+checks its effective model, and calls the implemented experimental idle wait.
+An incompatible build falls back to ACP before any prompt is sent. Explicit
+`native` reports the failure; `acp` skips native probing. These settings apply
+to new threads. OpenCode 1.x uses ACP because its preview native API differs.
 
-* **Providers.** API-key providers (deepinfra, openrouter, OpenCode Zen) are
-  registered; OAuth and coding-plan credentials (`zai-coding-plan`, ChatGPT,
-  the Gemini plugin) are v1-only and never appear.
-* **Model APIs.** Among the registered models the runner implements only
-  `aisdk:@ai-sdk/openai-compatible` and `aisdk:@ai-sdk/anthropic` — in
-  practice, OpenCode Zen's models. Everything else, including every openrouter
-  model (`@openrouter/ai-sdk-provider`) and every deepinfra model
-  (`@ai-sdk/deepinfra`), fails with `SessionRunnerModel.UnsupportedApiError`.
-  Nothing OpenCode serves enumerates this set, so `RUNNER_MODEL_APIS` in
-  `crates/falcondeck-daemon/src/opencode.rs` is an allowlist; it fails toward
-  ACP, which runs everything the v1 catalog lists.
+The private server binds to `127.0.0.1`, uses a generated password that overrides
+inherited password variables, and receives workspace-specific MCP configuration.
+FalconDeck owns the server process group and terminates its helpers on cleanup.
+The shared background service is not used: adopting it requires separate work
+on workspace configuration, credentials, and process ownership.
 
-A model the runner cannot resolve is admitted by `/api/session/{id}/prompt` and
-then dies in `SessionRunnerModel.resolve` with no session event and no
-assistant record — only a server log line — so FalconDeck checks the session's
-effective model against the registry before pinning a thread to the native
-transport, and again before every native prompt admission (the model can change
-mid-thread). The registry loads asynchronously for roughly a second after
-server startup and reads as empty until then, so an empty answer is retried
-before it is believed. A session without an explicit model always passes the
-gate: the v2 runner resolves its default inside its own registry.
+### Admission, execution, and history
 
-The same registry settles reasoning efforts. OpenCode calls them *variants* and
-the two catalogs disagree: `/config/providers` advertises low/medium/high for
-`openrouter/google/gemini-3.7-flash` while `/api/model` lists none for it, and
-sending a variant the runner does not know kills the turn after admission with
-`SessionRunnerModel.VariantUnavailableError`. A native turn therefore sends an
-effort only when the runner registry lists it, and otherwise lets the model run
-at its own default; the picker keeps offering the v1 catalog's efforts because
-the ACP transport does honour them. `native` surfaces the gate's reason as the
-thread-creation error instead of falling back; `acp` always uses the generic
-adapter. A thread is pinned to the transport that created it: FalconDeck never
-switches an active turn, and never blindly resends an input after an ambiguous
-native admission.
+Prompt fields are flattened (`id`, `text`, `files`, `delivery`, `resume`).
+FalconDeck sets `resume: true`, verifies the returned message and session IDs,
+and never falls back or automatically resends after an ambiguous admission.
+Persisted queued requests derive a stable native message ID from their queue
+ID so a dispatch retry cannot duplicate admission. A failed steer retains its
+ID for a retry with the same payload. A different payload receives a new ID:
+OpenCode's idempotency rule is **first admission wins**, without comparing the
+payload. Concurrent retries must therefore preserve both ID and content.
 
-Native turns currently project authoritative text, reasoning, tool, permission,
-and question records from OpenCode's session APIs. Text and tool records may
-arrive at FalconDeck in larger completed blocks than they do over ACP. Use the
-Agents settings panel's **Use ACP** action if that tradeoff or a particular
-OpenCode release proves unreliable; the change applies to new threads and does
-not mutate existing sessions.
+Completion uses `/api/experimental/session/{sessionID}/wait`, which waits for
+the entire foreground drain, including steered successors. The terminal verdict
+comes from the durable `idle` record after the admitted message. Failed and
+interrupted outcomes stay errors; an intermediate tool response or absence from
+the active map cannot finish a turn. The monitor polls authoritative message,
+permission, and form APIs while waiting. Text can arrive in larger blocks than
+it does through ACP.
 
-For a repeatable live check through the same daemon HTTP path as the desktop
-app, run `make qa-opencode`. The smoke test uses an isolated FalconDeck state
-directory, inherits the user's normal OpenCode authentication, connects the
-current repository as a workspace, creates an OpenCode thread, sends one turn,
-and prints the selected transport, native session id, terminal status, error,
-and assistant output as JSON. Override the defaults with, for example,
-`make qa-opencode OPENCODE_TRANSPORT=native OPENCODE_MODEL=openrouter/google/gemini-3.7-flash`.
-The command makes one small real model request when execution reaches a working
-provider, so it is intentionally not part of the ordinary automated test suite.
+History walks `cursor.next` toward older messages until every page is read.
+Assistant content without its own ID receives a stable ID from its message,
+type, and position so text and reasoning blocks cannot overwrite one another.
+Agent timestamps survive hydration. Selected skills use explicit file/name
+preambles because `$skill` text alone no longer expands in V2; those preambles
+are removed from the displayed user text during reload. Session deletion uses
+`DELETE /api/session/{sessionID}`.
 
-ACP stdout is JSONL, but OpenCode 1.18 can prepend Warp `OSC 777` terminal
-notifications to a JSON-RPC object on the same physical line. FalconDeck strips
-only complete leading OSC records before decoding the attached JSON. Arbitrary
-non-JSON output and control bytes inside a JSON payload are not rewritten. The
-shared ACP conformance probe uses the same decoder, so `cargo run -p
-falcondeck-daemon --example acp_conformance -- --live -- opencode acp` checks
-this exact wire behavior outside the desktop app.
+### Models and interactive requests
 
-OpenCode 1.18 advertises `session.wait` but can return a 503 response saying the
-service is not available yet. FalconDeck therefore detects turn completion from
-the implemented active-session endpoint and the admitted message's terminal
-state. The native compatibility probe includes that endpoint, so `auto` falls
-back to ACP before admitting a turn when an OpenCode release lacks it. Native
-prompt admission explicitly sets `resume: true`; without it, OpenCode only
-admits the input. Prompt message ids are globally unique across OpenCode's
-durable store — reusing one returns a `ConflictError` even in a different
-session — which the daemon's per-turn UUIDs already satisfy. The probe also
-validates the endpoints and prompt request fields against the server's own
-`/doc` OpenAPI document, so a build that rejects any part of the native request
-shape falls back to ACP before a thread is pinned to the native transport.
-A turn that reaches the runner with a model the registry cannot resolve is the
-one failure mode neither check can catch after admission; the runner-registry
-gate above exists to make that state unreachable, and the turn error still
-carries the server's own logged cause if it ever occurs.
+The flat `/api/model` catalog is the runner registry. Enabled membership and
+variants are read again before each prompt, so provider hot reloads are checked
+against current state. The old preview model-API allowlist is removed; any
+enabled model can run. Missing explicit models resolve through OpenCode's
+configured default, while agent-specific models are preserved. Reasoning effort
+is sent only when that model publishes the matching variant.
 
-Two further 1.18 quirks are handled: message pagination continues with
-`cursor.next` toward older items (`cursor.previous` points toward newer items
-and is empty at the head of a newest-first listing), and session deletion uses
-the v1 `DELETE /session/{id}` route because the v2 API has no delete. While a
-turn runs, FalconDeck also subscribes to the session's durable event stream,
-scoped with `after` to the prompt's admission sequence so prior turns' events
-cannot replay into the wait: `session.next.step.*` events prove the drain is
-executing (so a slow first model token cannot trip a timeout while the session
-is absent from the active map) and `session.next.step.failed` surfaces the
-provider's own error text. Completion itself is detected from the projected
-terminal assistant message together with the active map, with polling as the
-fallback when the stream cannot be established. A turn that fails before its
-first model call produces no assistant message and no error record anywhere in
-the session API, so after such a turn the waiter reports that case explicitly
-rather than a generic timeout; while a permission or question is pending, the
-waiter treats the session as active regardless of the active map.
+Permission replies use `decision: "once" | "always" | "reject"`. **Always
+approve** in FalconDeck sends one-time approvals for that thread and does not
+persist a global OpenCode rule. Native threads hide the filesystem sandbox
+picker because OpenCode has no matching per-session control.
 
-When a workspace attaches, the native path loads OpenCode's provider model
-catalog and its visible primary agents. The composer therefore exposes native
-model selection plus OpenCode modes such as **Build** and **Plan**. The
-permission picker offers **Ask to approve** and **Always approve**. The latter
-answers each request for that thread with OpenCode's one-time approval; it does
-not persist a global OpenCode permission rule. OpenCode has no matching
-per-session filesystem sandbox setting, so FalconDeck hides the sandbox picker
-for native threads instead of displaying a disabled or misleading control.
+Questions use V2 forms. FalconDeck reads the authoritative form before replying,
+maps stable field keys and option labels to typed values, applies hidden
+defaults and conditions, and keeps a rejected reply pending for correction.
+Strings, numbers, integers, booleans, multiselect, and external confirmation are
+supported. The shared question UI presents visible fields in order; multiselect
+accepts comma/newline-separated labels, and conditional fields are filtered when
+converting the reply rather than dynamically hidden in the UI.
 
-The native server is started on `127.0.0.1` with a unique generated password,
-rather than exposing an unauthenticated listener. If native mode proves
-unstable in practice, select `acp`; that route remains supported and covered by
-the ACP conformance suite.
+### Qualification and upgrades
 
-### Keeping up with OpenCode releases
+Run the cost-free native checks from a real project (agents are project-scoped):
 
-The v2 API is experimental and moves quickly. FalconDeck's posture is that an
-upstream change should cost native features, never correctness: every request
-shape the native transport sends is declared in the `CONTRACT_*` tables in
-`crates/falcondeck-daemon/src/opencode.rs`, validated at attach against the
-server's own `/doc`, and any mismatch routes new threads to ACP. The
-runner-registry gate is dynamic where OpenCode allows it — membership comes
-from `/api/model` live, so the day the v2 runner learns to execute OAuth or
-coding-plan credentials, those models start running natively with no FalconDeck
-change. The model-API allowlist is the one part that cannot be read from the
-server; a release that implements a new API needs that constant extended.
+```sh
+cargo run -p falcondeck-daemon --example opencode_conformance
+cargo run -p falcondeck-daemon --example opencode_conformance -- --live
+make qa-opencode OPENCODE_TRANSPORT=native OPENCODE_MODEL=openrouter/openai/gpt-5.6-luna
+```
 
-When a new OpenCode version lands, run this checklist before trusting it:
+The first command verifies authentication, the schema, model discovery, idle
+wait, permission allow/deny, typed forms, and a durable invalid-model error.
+`--live` additionally qualifies a real reply, model variant, foreground tool,
+steering with repeated-ID deduplication, interruption, more than 200 messages
+of history, and reload through a fresh private server. The daemon smoke uses
+isolated FalconDeck state with the user's normal OpenCode credentials.
+Qualification also exercised real question and permission requests through the
+daemon, followed by a forced daemon restart, history hydration, and continuation
+with the same native session ID. Graceful standalone daemon exit has a separate
+thread-search indexing delay after native server cleanup completes.
 
-1. `cargo run -p falcondeck-daemon --example opencode_conformance` from a real
-   project directory (agents are project-scoped; add `--live` for the one
-   check that spends tokens).
-2. The `make qa-opencode` matrix: default `auto`, then
-   `OPENCODE_TRANSPORT=native` and `OPENCODE_MODEL=<a coding-plan model>` to
-   confirm both the native path and the gate's refusal still behave.
-3. Diff the API surface against the previous release:
-   `curl -su opencode:$PW http://127.0.0.1:$PORT/doc | jq -S .` piped to a
-   file, compared with the same capture from the prior version. Changes that
-   touch the `CONTRACT_*` tables are breakage; new surface is opportunity.
+The ACP path remains covered by its conformance suite, including cancellation,
+process restart, reload, tools, and MCP discovery. Its JSONL decoder strips only
+complete leading Warp OSC terminal records before parsing a JSON-RPC object.
 
-Opportunities to watch for in that diff, each currently worked around:
-`session.wait` returning something other than 503 (replaces active-map
-polling), a v2 session delete (replaces the v1 route), OAuth providers
-appearing in `/api/model` (retires the ACP-only restriction for those models),
-and the runner accepting further model APIs (widen `RUNNER_MODEL_APIS`; probe
-by prompting one model per API and reading the server error log). When adding a new request field or endpoint to the transport, add it
-to the `CONTRACT_*` tables in the same change — an assumption that is not in
-those tables is one the attach-time check cannot defend.
+Upgrade with `opencode upgrade` within the installed major. A migration from
+1.x requires `opencode upgrade --major` and a backup of the binary and config.
+Supported V1 configuration is normalized in memory, but **V1 plugins do not run
+in V2**, including plugins discovered in `~/.config/opencode/plugins`. A legacy
+plugin can block location activation. Disable or port it before retrying; see
+the [upstream migration guide](https://opencode.ai/v2/docs/migrate-v1/).
+
+When upgrading, rerun native and ACP conformance plus the daemon smoke in `auto`
+and `native` modes. Compare `/openapi.json` with the previous release, and add
+new transport assumptions to the `CONTRACT_*` tables in `opencode.rs`. The idle
+wait remains experimental even though the rest of this integration uses the
+released API. Inbox editing, session fork/move, background-tool controls, and
+nested Code Mode tool attribution remain separate opportunities.
 
 ## Cursor
 

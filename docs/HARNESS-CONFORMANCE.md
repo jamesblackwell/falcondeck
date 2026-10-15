@@ -110,6 +110,16 @@ questions the daemon asks at workspace attach.
 - **cheap live turn** (`--live`) — `thread/start` plus `turn/start` on a
   mini/nano-class model still produces assistant text.
 
+### OpenCode native
+
+The cost-free probe checks the released V2 schema, private-server authentication,
+enabled model registry, idle wait, permission allow/deny, typed form replies,
+and a durable invalid-model failure. `--live` adds model/variant selection,
+foreground tools, repeated-ID steer deduplication, interruption, pagination past
+200 messages, and identical history through a fresh private server. Sessions
+are agent-owned and deleted after the checks. `make qa-opencode` separately
+checks a real turn through the daemon HTTP path; see [ADAPTERS.md](ADAPTERS.md#opencode).
+
 ### Antigravity
 
 Antigravity is print-mode stream-json, like Claude, with its own event names.
