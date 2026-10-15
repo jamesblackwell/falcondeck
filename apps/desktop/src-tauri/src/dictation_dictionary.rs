@@ -51,13 +51,12 @@ fn validate(entries: Vec<Correction>) -> Result<Vec<Correction>, String> {
         let find = entry.find.trim().to_string();
         let replace = entry.replace.trim().to_string();
         if find.is_empty()
-            || replace.is_empty()
             || find.chars().count() > 200
             || replace.chars().count() > 200
             || find.contains('\0')
             || replace.contains('\0')
         {
-            return Err("Each correction needs a word or phrase and a replacement, up to 200 characters each.".into());
+            return Err("Each correction needs a word or phrase to find, up to 200 characters per field. Leave the replacement blank to remove it.".into());
         }
         if result
             .iter()
@@ -148,6 +147,15 @@ mod tests {
             "Laravel, Laravel's larabian; John Smyth and Jon. Élodie."
         );
     }
+    #[test]
+    fn blank_replacements_remove_whole_words() {
+        let entries = validate(vec![entry(" um ", "  ")]).unwrap();
+        assert_eq!(entries[0].replace, "");
+        assert_eq!(replace("UM", &entries), "");
+        assert_eq!(replace("um hello um", &entries), " hello ");
+        assert_eq!(replace("umbrella number", &entries), "umbrella number");
+    }
+
     #[test]
     fn rejects_duplicates_and_invalid_entries() {
         assert!(validate(vec![entry("Larab", "Laravel"), entry("larab", "Laravel")]).is_err());

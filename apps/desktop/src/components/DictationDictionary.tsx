@@ -66,14 +66,14 @@ export function DictationDictionary() {
       }}>
         <div className="grid gap-3 sm:grid-cols-2">
           <Field label="Heard as" htmlFor="dictation-dictionary-find"><Input ref={findRef} id="dictation-dictionary-find" value={find} maxLength={200} placeholder="Larab" disabled={!ready || pending} onChange={(event) => setFind(event.target.value)} /></Field>
-          <Field label="Replace with" htmlFor="dictation-dictionary-replace"><Input id="dictation-dictionary-replace" value={replacement} maxLength={200} placeholder="Laravel" disabled={!ready || pending} onChange={(event) => setReplacement(event.target.value)} /></Field>
+          <Field label="Replace with" htmlFor="dictation-dictionary-replace" hint="Leave blank to remove the word or phrase."><Input id="dictation-dictionary-replace" value={replacement} maxLength={200} placeholder="Leave blank to remove" disabled={!ready || pending} onChange={(event) => setReplacement(event.target.value)} /></Field>
         </div>
-        <Button type="submit" variant="secondary" disabled={!ready || pending || !find.trim() || !replacement.trim()}>Save correction</Button>
+        <Button type="submit" variant="secondary" disabled={!ready || pending || !find.trim()}>Save correction</Button>
         <p className="text-sm text-fg-muted">Saved corrections apply to future transcriptions. Saving the same heard spelling updates its replacement.</p>
       </form>
       {entries.length ? <ul className="divide-y divide-border-subtle">
         {entries.map((entry) => <li key={entry.find} className="flex items-center gap-3 py-2">
-          <span className="min-w-0 flex-1 break-words text-sm text-fg-primary">{entry.find} → {entry.replace}</span>
+          <span className="min-w-0 flex-1 break-words text-sm text-fg-primary">{entry.find} → {entry.replace || "(remove)"}</span>
           <Button type="button" size="sm" variant="ghost" disabled={pending} onClick={() => { setFind(entry.find); setReplacement(entry.replace); findRef.current?.focus(); }}>Edit</Button>
           <Button type="button" size="sm" variant="ghost" disabled={pending} aria-label={`Remove correction for ${entry.find}`} onClick={() => void save(entries.filter((item) => item.find !== entry.find))}>Remove</Button>
         </li>)}
