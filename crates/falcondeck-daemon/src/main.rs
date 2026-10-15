@@ -69,6 +69,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     .filter(|value| !value.is_empty())
             }),
         state_path: None,
+        background_restore: true,
     };
 
     run(config).await?;

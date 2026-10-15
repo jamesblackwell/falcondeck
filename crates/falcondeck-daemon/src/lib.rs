@@ -37,8 +37,8 @@ mod skill_library;
 mod skills;
 mod ssh_config;
 pub mod stdio_helper;
-pub mod unreal_agent_acp;
 mod terminal;
+pub mod unreal_agent_acp;
 mod variant;
 mod workspace_files;
 mod workspace_icons;
@@ -76,6 +76,11 @@ pub struct DaemonConfig {
     pub computer_use_bin: Option<String>,
     /// Optional persisted state location for daemon-local state.
     pub state_path: Option<PathBuf>,
+    /// Restores sessions, extensions, and the transcript index after the
+    /// listener is up. Control state is loaded either way. Tests that only
+    /// drive the control API turn this off so they do not scan the user's
+    /// real session files.
+    pub background_restore: bool,
 }
 
 impl Default for DaemonConfig {
@@ -91,6 +96,7 @@ impl Default for DaemonConfig {
             deno_bin: "deno".to_string(),
             computer_use_bin: None,
             state_path: None,
+            background_restore: true,
         }
     }
 }
@@ -229,30 +235,38 @@ pub async fn spawn_embedded(config: DaemonConfig) -> Result<EmbeddedDaemonHandle
     // touch OS keychains and other slow or unavailable services, so it must
     // never delay the local API from coming online.
     let restore_state = state.clone();
-    let restore_task = tokio::spawn(async move {
-        // Prior daemons that died ungracefully strand their agent children:
-        // an `opencode serve` holds ~80-90MB forever, and an ACP agent holds
-        // both memory and the binary version it was started on. Reap them
-        // before this daemon starts spawning its own.
-        if let Some(state_dir) = restore_state.state_dir() {
-            opencode::reap_orphaned_servers(&state_dir).await;
-            agent_orphans::reap(&state_dir, agent_orphans::ACP_REGISTRY_FILE, "acp agent").await;
-        }
-        if let Err(error) = restore_state.restore_local_state().await {
-            tracing::warn!("failed to restore daemon local state: {error}");
-            restore_state.finish_local_restore();
-            restore_state.emit_event(
-                None,
-                None,
-                falcondeck_core::UnifiedEvent::Snapshot {
-                    snapshot: restore_state.snapshot().await,
-                },
-            );
-        }
-        // Warm the message-search excerpts once threads are known, so the
-        // first search does not pay for the whole session-file walk.
-        restore_state.start_thread_search_index();
+    let restore_task = config.background_restore.then(|| {
+        tokio::spawn(async move {
+            // Prior daemons that died ungracefully strand their agent children:
+            // an `opencode serve` holds ~80-90MB forever, and an ACP agent holds
+            // both memory and the binary version it was started on. Reap them
+            // before this daemon starts spawning its own.
+            if let Some(state_dir) = restore_state.state_dir() {
+                opencode::reap_orphaned_servers(&state_dir).await;
+                agent_orphans::reap(&state_dir, agent_orphans::ACP_REGISTRY_FILE, "acp agent")
+                    .await;
+            }
+            if let Err(error) = restore_state.restore_local_state().await {
+                tracing::warn!("failed to restore daemon local state: {error}");
+                restore_state.finish_local_restore();
+                restore_state.emit_event(
+                    None,
+                    None,
+                    falcondeck_core::UnifiedEvent::Snapshot {
+                        snapshot: restore_state.snapshot().await,
+                    },
+                );
+            }
+            // Warm the message-search excerpts once threads are known, so the
+            // first search does not pay for the whole session-file walk.
+            restore_state.start_thread_search_index();
+        })
     });
+    if !config.background_restore {
+        // begin_local_restore already moved the phase to loading. Nothing
+        // else will finish it when the background task is skipped.
+        state.finish_local_restore();
+    }
     let router = api::router(state.clone());
 
     let join_handle = tokio::spawn(async move {
@@ -266,7 +280,7 @@ pub async fn spawn_embedded(config: DaemonConfig) -> Result<EmbeddedDaemonHandle
     Ok(EmbeddedDaemonHandle {
         local_addr,
         state,
-        restore_task: Some(restore_task),
+        restore_task,
         shutdown: Some(shutdown_tx),
         join_handle,
     })

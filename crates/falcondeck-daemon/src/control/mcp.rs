@@ -230,20 +230,26 @@ fn discover_response(id: Value) -> Value {
 }
 
 fn initialize_response(id: Value, params: &Value) -> Value {
-    let requested = params
-        .get("protocolVersion")
-        .and_then(Value::as_str)
-        .unwrap_or(LEGACY_PROTOCOL_VERSION);
     success_response(
         id,
         json!({
-            "protocolVersion": requested,
+            "protocolVersion": negotiated_protocol_version(params),
             "capabilities": {
                 "tools": { "listChanged": false }
             },
             "serverInfo": server_info(),
         }),
     )
+}
+
+/// Echo a protocol version only when this server speaks it. Repeating an
+/// unknown client version would report that negotiation succeeded.
+fn negotiated_protocol_version(params: &Value) -> &'static str {
+    match params.get("protocolVersion").and_then(Value::as_str) {
+        Some(version) if version == PROTOCOL_VERSION => PROTOCOL_VERSION,
+        Some(version) if version == LEGACY_PROTOCOL_VERSION => LEGACY_PROTOCOL_VERSION,
+        _ => LEGACY_PROTOCOL_VERSION,
+    }
 }
 
 fn server_info() -> Value {
@@ -405,14 +411,10 @@ async fn handle_tool_call(
             &format!("unknown tool {name:?}; available tools are {TOOL_ORDER:?}"),
         );
     }
-    let arguments = params.get("arguments").cloned().unwrap_or(Value::Null);
-    if !arguments.is_object() {
-        return error_response(
-            id,
-            INVALID_PARAMS,
-            "tools/call arguments must be a JSON object",
-        );
-    }
+    let arguments = match call_arguments(params) {
+        Ok(arguments) => arguments,
+        Err(message) => return error_response(id, INVALID_PARAMS, message),
+    };
     let (route, body) = match name {
         "falcondeck_search" => ("/api/control/search", arguments),
         "falcondeck_get" => ("/api/control/get", arguments),
@@ -479,6 +481,16 @@ async fn handle_tool_call(
     tool_result(id, payload, false)
 }
 
+/// MCP treats omitted `arguments` as `{}`. A present non-object is a
+/// protocol error; the daemon never sees it.
+fn call_arguments(params: &Value) -> Result<Value, &'static str> {
+    match params.get("arguments") {
+        None => Ok(json!({})),
+        Some(value) if value.is_object() => Ok(value.clone()),
+        Some(_) => Err("tools/call arguments must be a JSON object"),
+    }
+}
+
 /// Builds a `tools/call` result with both structured and text content.
 fn tool_result(id: Value, structured: Value, is_error: bool) -> Value {
     let text = serde_json::to_string(&structured).unwrap_or_else(|_| "{\"ok\":false}".to_string());
@@ -521,25 +533,49 @@ mod tests {
 
     #[test]
     fn tool_catalogue_is_fixed_and_conservative() {
-        let compatibility = CompatibilityState::default();
-        let tools: Vec<Value> = TOOL_ORDER
-            .iter()
-            .map(|name| tool_definition(name, &compatibility))
-            .collect();
+        let listed = tools_list_response(json!(1), &CompatibilityState::default());
+        let tools = listed["result"]["tools"].as_array().unwrap();
         let names: Vec<&str> = tools
             .iter()
             .map(|tool| tool["name"].as_str().unwrap())
             .collect();
-        assert_eq!(names, TOOL_ORDER.to_vec(), "catalogue order is fixed");
-        for tool in &tools {
-            assert!(tool["inputSchema"]["type"] == "object");
-        }
-        let execute = tools[2].clone();
+        assert_eq!(
+            names,
+            vec!["falcondeck_search", "falcondeck_get", "falcondeck_execute"]
+        );
+
+        let search = &tools[0];
+        assert_eq!(search["inputSchema"]["type"], json!("object"));
+        assert_eq!(search["inputSchema"]["additionalProperties"], json!(false));
+        assert!(search["inputSchema"].get("required").is_none());
+        assert_eq!(search["annotations"]["readOnlyHint"], json!(true));
+        assert_eq!(search["annotations"]["destructiveHint"], json!(false));
+
+        let get = &tools[1];
+        assert_eq!(get["inputSchema"]["required"], json!(["resource"]));
+        assert_eq!(get["annotations"]["readOnlyHint"], json!(true));
+        assert_eq!(get["annotations"]["destructiveHint"], json!(false));
+
+        let execute = &tools[2];
+        let required = execute["inputSchema"]["required"].as_array().unwrap();
+        assert!(required.iter().any(|field| field == "operation"));
+        assert!(required.iter().any(|field| field == "arguments"));
         assert_eq!(execute["annotations"]["readOnlyHint"], json!(false));
         assert_eq!(execute["annotations"]["destructiveHint"], json!(true));
+        assert_eq!(execute["annotations"]["idempotentHint"], json!(false));
         assert_eq!(execute["annotations"]["openWorldHint"], json!(false));
-        let get = &tools[1];
-        assert_eq!(get["annotations"]["readOnlyHint"], json!(true));
+    }
+
+    #[test]
+    fn omitted_tool_arguments_default_to_an_empty_object() {
+        assert_eq!(call_arguments(&json!({})).unwrap(), json!({}));
+        assert_eq!(
+            call_arguments(&json!({ "arguments": { "query": "automation" } })).unwrap()["query"],
+            json!("automation")
+        );
+        assert!(call_arguments(&json!({ "arguments": null })).is_err());
+        assert!(call_arguments(&json!({ "arguments": [] })).is_err());
+        assert!(call_arguments(&json!({ "arguments": "not-an-object" })).is_err());
     }
 
     #[test]
@@ -565,7 +601,81 @@ mod tests {
         let response = handle_line("{not json", &client, &context, compatibility)
             .await
             .expect("parse errors are answered");
+        assert_eq!(response["jsonrpc"], json!("2.0"));
+        assert!(response["id"].is_null());
         assert_eq!(response["error"]["code"], json!(PARSE_ERROR));
+        assert!(
+            response["error"]["message"]
+                .as_str()
+                .unwrap()
+                .contains("malformed")
+        );
+    }
+
+    #[tokio::test]
+    async fn protocol_negotiation_rejects_unknown_versions() {
+        let client = reqwest::Client::new();
+        let context = context("http://127.0.0.1:1");
+        let compatibility = &mut CompatibilityState::default();
+
+        let unknown = handle_line(
+            r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"1999-01-01"}}"#,
+            &client,
+            &context,
+            compatibility,
+        )
+        .await
+        .unwrap();
+        assert_eq!(unknown["id"], json!(1));
+        assert_eq!(
+            unknown["result"]["protocolVersion"],
+            json!(LEGACY_PROTOCOL_VERSION)
+        );
+
+        let omitted = handle_line(
+            r#"{"jsonrpc":"2.0","id":2,"method":"initialize","params":{}}"#,
+            &client,
+            &context,
+            compatibility,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            omitted["result"]["protocolVersion"],
+            json!(LEGACY_PROTOCOL_VERSION)
+        );
+
+        let modern = handle_line(
+            r#"{"jsonrpc":"2.0","id":"modern","method":"initialize","params":{"protocolVersion":"2026-07-28"}}"#,
+            &client,
+            &context,
+            compatibility,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            modern,
+            json!({
+                "jsonrpc": "2.0",
+                "id": "modern",
+                "result": {
+                    "protocolVersion": PROTOCOL_VERSION,
+                    "capabilities": { "tools": { "listChanged": false } },
+                    "serverInfo": { "name": "falcondeck", "version": env!("CARGO_PKG_VERSION") }
+                }
+            })
+        );
+        // initialize is the legacy handshake even when the client names the
+        // modern version, so the catalogue stays uncached.
+        let list = handle_line(
+            r#"{"jsonrpc":"2.0","id":4,"method":"tools/list"}"#,
+            &client,
+            &context,
+            compatibility,
+        )
+        .await
+        .unwrap();
+        assert!(list["result"].get("ttlMs").is_none());
     }
 
     #[tokio::test]
@@ -584,15 +694,45 @@ mod tests {
             .is_none(),
             "notifications are never answered"
         );
+        assert!(
+            handle_line(
+                r#"{"jsonrpc":"2.0","method":"notifications/cancelled"}"#,
+                &client,
+                &context,
+                compatibility
+            )
+            .await
+            .is_none()
+        );
+        assert!(
+            handle_line(
+                r#"{"jsonrpc":"2.0","id":4,"result":{"ok":true}}"#,
+                &client,
+                &context,
+                compatibility
+            )
+            .await
+            .is_none(),
+            "client responses are not answered again"
+        );
         let response = handle_line(
-            r#"{"jsonrpc":"2.0","id":7,"method":"resources/list"}"#,
+            r#"{"jsonrpc":"2.0","id":"missing","method":"resources/list"}"#,
             &client,
             &context,
             compatibility,
         )
         .await
         .unwrap();
+        assert_eq!(response["jsonrpc"], json!("2.0"));
+        assert_eq!(response["id"], json!("missing"));
+        assert!(response.get("result").is_none());
         assert_eq!(response["error"]["code"], json!(METHOD_NOT_FOUND));
+        assert!(
+            response["error"]["message"]
+                .as_str()
+                .unwrap()
+                .contains("resources/list")
+        );
     }
 
     #[tokio::test]

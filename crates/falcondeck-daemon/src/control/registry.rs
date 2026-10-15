@@ -831,11 +831,33 @@ mod tests {
 
     #[test]
     fn search_limit_is_enforced() {
-        let results = search_ids(ControlSearchRequest {
+        let limited = search_ids(ControlSearchRequest {
             limit: 2,
             ..Default::default()
         });
-        assert!(results.len() <= 2);
+        assert_eq!(
+            limited,
+            vec![
+                ops::SETTINGS_UPDATE.to_string(),
+                ops::AUTOMATION_CREATE.to_string(),
+            ]
+        );
+
+        // Zero is outside the public range and clamps to one result, in
+        // registry order. It must not mean "return everything" or "return
+        // nothing".
+        let clamped = search_ids(ControlSearchRequest {
+            limit: 0,
+            ..Default::default()
+        });
+        assert_eq!(clamped, vec![ops::SETTINGS_UPDATE.to_string()]);
+
+        let everything = search_ids(ControlSearchRequest {
+            limit: 10_000,
+            ..Default::default()
+        });
+        assert_eq!(everything.len(), capabilities().len());
+        assert!(everything.len() > 2);
     }
 
     #[test]

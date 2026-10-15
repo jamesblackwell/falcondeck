@@ -2402,6 +2402,12 @@ fn audit_summary(request: &ControlExecuteRequest, response: &ControlExecuteRespo
     }
 }
 
+/// `task` and `task.*` are the instruction body. Projecting either of them
+/// on a list would publish that body on the high-cardinality surface.
+fn automation_list_field_hides_instruction(field: &str) -> bool {
+    field == "task" || field.starts_with("task.")
+}
+
 fn list_automations(
     state: &store::PersistedControlState,
     request: &ControlGetRequest,
@@ -2440,7 +2446,7 @@ fn list_automations(
             let fields: Vec<String> = request
                 .fields
                 .iter()
-                .filter(|field| !field.starts_with("task."))
+                .filter(|field| !automation_list_field_hides_instruction(field))
                 .cloned()
                 .collect();
             let mut projected = if fields.is_empty() {

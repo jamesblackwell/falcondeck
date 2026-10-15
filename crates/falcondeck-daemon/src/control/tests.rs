@@ -1316,6 +1316,7 @@ async fn instructions_never_appear_in_list_projections() {
                 resource: "automations".into(),
                 fields: vec![
                     "id".to_string(),
+                    "task".to_string(),
                     "task.instruction".to_string(),
                     "task.no_action_marker".to_string(),
                 ],

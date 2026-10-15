@@ -2025,6 +2025,9 @@ impl AppState {
         // Flag first: reconnect/respawn paths check this before spawning new
         // agent processes, so nothing new starts while we tear down.
         self.inner.shutting_down.store(true, Ordering::Release);
+        // The control scheduler only notices the flag between waits. Wake it
+        // or shutdown sits until the idle poll, up to 60 seconds.
+        self.control().notify_scheduler();
         self.inner.computer_use.stop().await;
         self.inner.terminals.shutdown_all().await;
         self.inner.scheduled_notify.notify_waiters();
