@@ -42,6 +42,28 @@ describe("DictationDictionary", () => {
     expect(screen.getByRole("button", { name: "Save correction" })).toBeEnabled();
   });
 
+  it("renames an edited rule instead of keeping the old spelling", async () => {
+    await act(async () => { render(<DictationDictionary />); });
+    fireEvent.click(screen.getByRole("button", { name: "Edit" }));
+    fireEvent.change(screen.getByLabelText("Heard as"), { target: { value: "Larrab" } });
+    await act(async () => { fireEvent.click(screen.getByRole("button", { name: "Save correction" })); });
+    expect(invoke).toHaveBeenLastCalledWith("save_dictation_dictionary", {
+      entries: [{ find: "Larrab", replace: "Laravel" }],
+    });
+    expect(screen.queryByText("Larab → Laravel")).not.toBeInTheDocument();
+  });
+
+  it("cancels editing without changing the saved dictionary", async () => {
+    await act(async () => { render(<DictationDictionary />); });
+    fireEvent.click(screen.getByRole("button", { name: "Edit" }));
+    fireEvent.change(screen.getByLabelText("Heard as"), { target: { value: "different" } });
+    fireEvent.click(screen.getByRole("button", { name: "Cancel edit" }));
+    expect(screen.getByLabelText("Heard as")).toHaveValue("");
+    expect(screen.getByLabelText("Replace with")).toHaveValue("");
+    expect(screen.getByText("Larab → Laravel")).toBeInTheDocument();
+    expect(invoke).not.toHaveBeenCalledWith("save_dictation_dictionary", expect.anything());
+  });
+
   it("keeps saved corrections and the draft when storage fails", async () => {
     await act(async () => { render(<DictationDictionary />); });
     invoke.mockRejectedValueOnce("Disk full");

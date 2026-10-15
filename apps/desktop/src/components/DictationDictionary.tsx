@@ -11,6 +11,7 @@ export function DictationDictionary() {
   const [entries, setEntries] = useState<Correction[]>([]);
   const [find, setFind] = useState("");
   const [replacement, setReplacement] = useState("");
+  const [editingFind, setEditingFind] = useState<string | null>(null);
   const [transcript, setTranscript] = useState<string | null>(null);
   const [ready, setReady] = useState(false);
   const [pending, setPending] = useState(false);
@@ -44,6 +45,12 @@ export function DictationDictionary() {
     findRef.current?.focus();
   }, [ready]);
 
+  const clearDraft = () => {
+    setFind("");
+    setReplacement("");
+    setEditingFind(null);
+  };
+
   const save = async (next: Correction[]) => {
     setPending(true); setError(null);
     try {
@@ -60,22 +67,24 @@ export function DictationDictionary() {
       {transcript ? <p className="max-h-36 overflow-y-auto whitespace-pre-wrap rounded-[var(--fd-radius-md)] bg-surface-2 p-3 text-sm text-fg-secondary">{transcript}</p> : null}
       <form className="space-y-3" onSubmit={(event) => {
         event.preventDefault();
+        if (!ready || pending || !find.trim()) return;
         const correction = { find: find.trim(), replace: replacement.trim() };
-        const next = entries.filter((entry) => entry.find.toLowerCase() !== correction.find.toLowerCase());
-        void save([...next, correction]).then((saved) => { if (saved) { setFind(""); setReplacement(""); } });
+        const next = entries.filter((entry) => entry.find !== editingFind && entry.find.toLowerCase() !== correction.find.toLowerCase());
+        void save([...next, correction]).then((saved) => { if (saved) clearDraft(); });
       }}>
         <div className="grid gap-3 sm:grid-cols-2">
           <Field label="Heard as" htmlFor="dictation-dictionary-find"><Input ref={findRef} id="dictation-dictionary-find" value={find} maxLength={200} placeholder="Larab" disabled={!ready || pending} onChange={(event) => setFind(event.target.value)} /></Field>
           <Field label="Replace with" htmlFor="dictation-dictionary-replace" hint="Leave blank to remove the word or phrase."><Input id="dictation-dictionary-replace" value={replacement} maxLength={200} placeholder="Leave blank to remove" disabled={!ready || pending} onChange={(event) => setReplacement(event.target.value)} /></Field>
         </div>
         <Button type="submit" variant="secondary" disabled={!ready || pending || !find.trim()}>Save correction</Button>
+        {editingFind !== null ? <Button type="button" variant="ghost" disabled={pending} onClick={clearDraft}>Cancel edit</Button> : null}
         <p className="text-sm text-fg-muted">Saved corrections apply to future transcriptions. Saving the same heard spelling updates its replacement.</p>
       </form>
       {entries.length ? <ul className="divide-y divide-border-subtle">
         {entries.map((entry) => <li key={entry.find} className="flex items-center gap-3 py-2">
           <span className="min-w-0 flex-1 break-words text-sm text-fg-primary">{entry.find} → {entry.replace || "(remove)"}</span>
-          <Button type="button" size="sm" variant="ghost" disabled={pending} onClick={() => { setFind(entry.find); setReplacement(entry.replace); findRef.current?.focus(); }}>Edit</Button>
-          <Button type="button" size="sm" variant="ghost" disabled={pending} aria-label={`Remove correction for ${entry.find}`} onClick={() => void save(entries.filter((item) => item.find !== entry.find))}>Remove</Button>
+          <Button type="button" size="sm" variant="ghost" disabled={pending} onClick={() => { setEditingFind(entry.find); setFind(entry.find); setReplacement(entry.replace); findRef.current?.focus(); }}>Edit</Button>
+          <Button type="button" size="sm" variant="ghost" disabled={pending} aria-label={`Remove correction for ${entry.find}`} onClick={() => void save(entries.filter((item) => item.find !== entry.find)).then((saved) => { if (saved && editingFind === entry.find) clearDraft(); })}>Remove</Button>
         </li>)}
       </ul> : ready ? <p className="text-sm text-fg-muted">No saved corrections yet.</p> : null}
       {error ? <p role="alert" className="text-sm text-danger">{error}</p> : null}

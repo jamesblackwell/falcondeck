@@ -10,6 +10,7 @@ type DictationState =
   | "transcribing"
   | "rewriting"
   | "completed"
+  | "filtered"
   | "failed"
   | "copy_failed"
   | "unrecoverable"
@@ -233,9 +234,11 @@ export function DictationOverlay({
   };
   const pasteFailed = failed && Boolean(event.text);
   const copyTranscript = () => {
+    const actionEvent = event;
     void invoke("copy_dictation_transcript").then(
-      () => setCopied(true),
+      () => { if (eventRef.current === actionEvent) setCopied(true); },
       () => {
+        if (eventRef.current !== actionEvent) return;
         setCopied(false);
         setActionError("Could not copy the transcript. Try Copy again.");
       },
@@ -260,6 +263,7 @@ export function DictationOverlay({
     rewriting: "Rewriting",
     fixed: "Text fixed",
     fix_failed: "Couldn’t fix",
+    filtered: "Words removed",
     completed: rewrite ? "Rewrite pasted" : "Paste sent",
     cancelled: "Cancelled",
     recovered: rewrite ? "Rewrite copied" : "Transcript copied",
@@ -381,7 +385,7 @@ export function DictationOverlay({
             <span className="flex h-8 w-8 items-center justify-center rounded-full bg-surface-3 text-fg-primary">
               {event.state === "recording" ? (
                 <Mic aria-hidden="true" className="h-4 w-4" />
-              ) : event.state === "completed" ? (
+              ) : (event.state === "completed" || event.state === "filtered") ? (
                 <Check aria-hidden="true" className="h-4 w-4 text-success" />
               ) : event.state === "cancelled" ? (
                 <X aria-hidden="true" className="h-4 w-4 text-fg-muted" />

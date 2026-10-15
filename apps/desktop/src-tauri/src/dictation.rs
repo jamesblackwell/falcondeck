@@ -1166,27 +1166,54 @@ fn emit_failure_with_transcript(
 fn emit_completion(app: AppHandle, text: String, mode: Option<&'static str>) {
     let generation = SESSION_GENERATION.fetch_add(1, Ordering::AcqRel) + 1;
     let copied = RECOVERY_COPY.load(Ordering::Acquire);
+    let state = completion_state(&text, copied);
     emit_event(
         &app,
         DictationEvent {
-            state: if copied { "recovered" } else { "completed" },
+            state,
             text: Some(text),
             error: None,
             retained_audio: false,
             mode,
         },
     );
-    if !copied {
+    if !copied || state == "filtered" {
         hide_overlay_after(app, generation, COMPLETED_FALLBACK_WINDOW);
     }
 }
 
-fn remember_transcript(text: &str) {
-    if text.is_empty() {
-        return;
+fn completion_state(text: &str, copied: bool) -> &'static str {
+    if text.trim().is_empty() {
+        "filtered"
+    } else if copied {
+        "recovered"
+    } else {
+        "completed"
     }
+}
+
+fn remember_transcript(text: &str) {
     if let Ok(mut last) = LAST_TRANSCRIPT.write() {
-        *last = Some(text.to_string());
+        *last = (!text.trim().is_empty()).then(|| text.to_string());
+    }
+}
+
+fn paste_dictation_transcript(text: &str) -> Result<bool, String> {
+    // A removal dictionary can legitimately erase an entire transcript. Finish
+    // the take without touching the clipboard, selection, or destination.
+    if text.trim().is_empty() {
+        return Ok(true);
+    }
+    let text =
+        CString::new(text).map_err(|_| "The transcript contained unsupported text.".to_string())?;
+    #[cfg(target_os = "macos")]
+    {
+        Ok(unsafe { fd_dictation_paste_text(text.as_ptr()) })
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = text;
+        Ok(false)
     }
 }
 
@@ -1334,10 +1361,14 @@ const TRANSCRIPT_CLEANUP_PROMPT: &str = "You lightly edit speech-to-text transcr
 - Return ONLY the edited transcript. No preamble, explanation, code fences, surrounding quotation marks, or sign-off.";
 
 async fn cleanup_transcript(text: String, config: &DictationConfiguration) -> String {
-    let text = APP_HANDLE.get().map_or_else(
-        || text.clone(),
-        |app| crate::dictation_dictionary::apply(app, text.clone()),
-    );
+    let text = if let Some(app) = APP_HANDLE.get() {
+        crate::dictation_dictionary::apply(app, text)
+    } else {
+        text
+    };
+    if text.trim().is_empty() {
+        return String::new();
+    }
     if !config.auto_cleanup_enabled {
         return text;
     }
@@ -1651,18 +1682,13 @@ async fn transcribe_recording(
         {
             return;
         }
-        let Ok(c_text) = CString::new(text.as_str()) else {
-            emit_failure(
-                &finish_app,
-                "The transcript contained unsupported text.".to_string(),
-                true,
-            );
-            return;
+        let pasted = match paste_dictation_transcript(&text) {
+            Ok(pasted) => pasted,
+            Err(error) => {
+                emit_failure(&finish_app, error, true);
+                return;
+            }
         };
-        #[cfg(target_os = "macos")]
-        let pasted = unsafe { fd_dictation_paste_text(c_text.as_ptr()) };
-        #[cfg(not(target_os = "macos"))]
-        let pasted = false;
         if !pasted {
             record_recording_detached(
                 path.clone(),
@@ -1908,15 +1934,13 @@ pub extern "C" fn fd_dictation_emit(kind: i32, payload: *const std::ffi::c_char)
                                 return;
                             }
                             remember_transcript(&text);
-                            let Ok(c_text) = CString::new(text.as_str()) else {
-                                emit_failure(
-                                    &finish_app,
-                                    "The transcript contained unsupported text.".to_string(),
-                                    true,
-                                );
-                                return;
+                            let pasted = match paste_dictation_transcript(&text) {
+                                Ok(pasted) => pasted,
+                                Err(error) => {
+                                    emit_failure(&finish_app, error, true);
+                                    return;
+                                }
                             };
-                            let pasted = unsafe { fd_dictation_paste_text(c_text.as_ptr()) };
                             if !pasted {
                                 file_native_recording(Some(text.clone()), None);
                                 emit_failure_with_transcript(
@@ -2082,6 +2106,42 @@ mod tests {
         assert!(!transcription_error_is_missing_speech(
             "Transcription timed out. Your recording is retained, so you can retry."
         ));
+    }
+
+    #[test]
+    fn fully_removed_transcripts_finish_without_delivery_or_stale_recovery_text() {
+        let previous = super::last_dictation_transcript();
+        super::remember_transcript("Previous transcript");
+        assert!(super::paste_dictation_transcript(" \t\n").unwrap());
+        super::remember_transcript("");
+        assert_eq!(super::last_dictation_transcript(), None);
+        assert_eq!(super::completion_state("", false), "filtered");
+        assert_eq!(super::completion_state("", true), "filtered");
+        assert_eq!(super::completion_state("text", false), "completed");
+        assert_eq!(super::completion_state("text", true), "recovered");
+        assert!(super::paste_dictation_transcript("bad\0text").is_err());
+        *super::LAST_TRANSCRIPT.write().unwrap() = previous;
+    }
+
+    #[tokio::test]
+    async fn fully_removed_transcripts_skip_cloud_cleanup() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let config = super::DictationConfiguration {
+            auto_cleanup_enabled: true,
+            daemon_url: Some(format!("http://{}", listener.local_addr().unwrap())),
+            ..Default::default()
+        };
+        let text = tokio::time::timeout(
+            std::time::Duration::from_millis(300),
+            super::cleanup_transcript(" \n\t".to_string(), &config),
+        )
+        .await
+        .expect("empty transcripts must not wait for a rewrite response");
+        assert_eq!(text, "");
+        assert!(
+            matches!(listener.accept(), Err(error) if error.kind() == std::io::ErrorKind::WouldBlock)
+        );
     }
 
     #[tokio::test]

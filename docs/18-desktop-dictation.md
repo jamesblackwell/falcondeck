@@ -63,7 +63,10 @@ status window, and paste-at-cursor behavior.
 Settings → Speech → Correction dictionary stores up to 100 find/replace pairs
 on this Mac. Entries match whole words or phrases without case sensitivity;
 the replacement uses the saved spelling. Leave the replacement blank to remove
-the matched word or phrase; saved removals appear as “(remove)” in the list. Longer phrases win and replacements
+the matched word or phrase; saved removals appear as “(remove)” in the list.
+Removal also closes the adjoining space without changing paragraph breaks.
+When rules remove the entire transcript, the take completes as “Words removed”
+without pasting, replacing the clipboard, or offering an older transcript. Longer phrases win and replacements
 do not cascade through other entries. All engines use the dictionary before
 delivery, including when cloud cleanup is disabled. Dictionary updates apply
 to future transcriptions and history retries.

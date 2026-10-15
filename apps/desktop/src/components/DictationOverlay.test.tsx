@@ -9,6 +9,8 @@ const listeners = new Map<string, Set<Handler>>();
 const invoked: string[] = [];
 const invocationArgs: Array<unknown> = [];
 let rejectedCommand: string | null = null;
+let deferCopy = false;
+let rejectCopy: ((reason: string) => void) | undefined;
 let deferFix = false;
 let rejectFix: ((reason: string) => void) | undefined;
 
@@ -23,6 +25,9 @@ vi.mock("@tauri-apps/api/event", () => ({
 
 vi.mock("@tauri-apps/api/core", () => ({
   invoke: (command: string, args?: unknown) => {
+    if (command === "copy_dictation_transcript" && deferCopy) {
+      return new Promise<void>((_resolve, reject) => { rejectCopy = reject; });
+    }
     if (command === "fix_dictation_transcript" && deferFix) {
       return new Promise<void>((_resolve, reject) => { rejectFix = reject; });
     }
@@ -48,6 +53,8 @@ beforeEach(() => {
   rejectedCommand = null;
   deferFix = false;
   rejectFix = undefined;
+  deferCopy = false;
+  rejectCopy = undefined;
 });
 
 afterEach(() => {
@@ -55,6 +62,13 @@ afterEach(() => {
 });
 
 describe("DictationOverlay", () => {
+  it("shows a completed removal without offering copy or paste actions", () => {
+    render(<DictationOverlay initialEvent={{ state: "filtered", text: "", retainedAudio: false }} subscribeToEvents={false} />);
+    expect(screen.getByText("Words removed")).toBeInTheDocument();
+    expect(screen.queryByRole("button")).not.toBeInTheDocument();
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+  });
+
   it("offers dictionary and Fix after dictation and sends the original transcript", async () => {
     render(<DictationOverlay initialEvent={{ state: "completed", text: "I use Larab.", retainedAudio: false }} subscribeToEvents={false} />);
     await act(async () => { fireEvent.click(screen.getByRole("button", { name: "Fix" })); });
@@ -79,6 +93,16 @@ describe("DictationOverlay", () => {
     await act(async () => { fireEvent.click(screen.getByRole("button", { name: "Fix" })); });
     await emit("falcondeck://dictation-state", { state: "recording", retainedAudio: false });
     await act(async () => { rejectFix?.("Old request failed"); });
+    expect(screen.getByText("Listening")).toBeInTheDocument();
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+  });
+
+  it("ignores an old Copy failure after a new recording starts", async () => {
+    deferCopy = true;
+    render(<DictationOverlay initialEvent={{ state: "completed", text: "Original text", retainedAudio: false }} />);
+    fireEvent.click(screen.getByRole("button", { name: "Copy transcript" }));
+    await emit("falcondeck://dictation-state", { state: "recording", retainedAudio: false });
+    await act(async () => { rejectCopy?.("Old clipboard request failed"); });
     expect(screen.getByText("Listening")).toBeInTheDocument();
     expect(screen.queryByRole("alert")).not.toBeInTheDocument();
   });

@@ -83,6 +83,9 @@ fn word(character: char) -> bool {
 // Match the original text once, longest phrases first. Replacement text never
 // feeds back into the dictionary, and substrings inside other words stay intact.
 fn replace(text: &str, entries: &[Correction]) -> String {
+    if entries.is_empty() {
+        return text.to_string();
+    }
     let mut entries: Vec<_> = entries.iter().collect();
     entries.sort_by_key(|entry| std::cmp::Reverse(entry.find.chars().count()));
     let mut output = String::with_capacity(text.len());
@@ -110,8 +113,20 @@ fn replace(text: &str, entries: &[Correction]) -> String {
             Some((end, &entry.replace))
         });
         if let Some((length, replacement)) = matched {
-            output.push_str(replacement);
             position += length;
+            if replacement.is_empty() {
+                // Remove only the gap adjoining a deleted word. Keep line
+                // breaks, indentation, and whitespace elsewhere intact.
+                if output.is_empty() || output.ends_with([' ', '\t', '\n', '\r']) {
+                    let after = &text[position..];
+                    position += after.len() - after.trim_start_matches([' ', '\t']).len();
+                }
+                if position == text.len() || text[position..].starts_with(['\n', '\r']) {
+                    output.truncate(output.trim_end_matches([' ', '\t']).len());
+                }
+            } else {
+                output.push_str(replacement);
+            }
         } else {
             let character = remaining.chars().next().unwrap();
             output.push(character);
@@ -152,7 +167,13 @@ mod tests {
         let entries = validate(vec![entry(" um ", "  ")]).unwrap();
         assert_eq!(entries[0].replace, "");
         assert_eq!(replace("UM", &entries), "");
-        assert_eq!(replace("um hello um", &entries), " hello ");
+        assert_eq!(replace("um hello um", &entries), "hello");
+        assert_eq!(replace("I um use um Laravel", &entries), "I use Laravel");
+        assert_eq!(
+            replace("first um\n\tsecond um", &entries),
+            "first\n\tsecond"
+        );
+        assert_eq!(replace("um um", &entries), "");
         assert_eq!(replace("umbrella number", &entries), "umbrella number");
     }
 

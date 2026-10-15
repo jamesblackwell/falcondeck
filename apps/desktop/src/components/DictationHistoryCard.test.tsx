@@ -131,6 +131,18 @@ describe("DictationHistoryCard", () => {
     });
   });
 
+  it("treats a transcript emptied by removal rules as success without changing the clipboard", async () => {
+    history = [entry()];
+    retryResult = () => entry({ text: "", error: null });
+    const onToast = vi.fn();
+    render(<DictationHistoryCard baseUrl="http://127.0.0.1:4123" onToast={onToast} />);
+    fireEvent.click(await screen.findByRole("button", { name: "Retry" }));
+    await waitFor(() => expect(onToast).toHaveBeenCalledWith(expect.objectContaining({ title: "Words removed", variant: "success" })));
+    expect(navigator.clipboard.writeText).not.toHaveBeenCalled();
+    expect(screen.queryByRole("button", { name: "Copy transcript" })).not.toBeInTheDocument();
+    expect(screen.getByText("Words removed by dictionary")).toBeInTheDocument();
+  });
+
   it("keeps successful retry text available when automatic clipboard copy fails", async () => {
     history = [entry()];
     retryResult = () => entry({ text: "Recovered despite clipboard failure", error: null });

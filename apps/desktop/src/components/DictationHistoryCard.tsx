@@ -113,6 +113,10 @@ export function DictationHistoryCard({
       setEntries((current) =>
         current.map((item) => (item.id === updated.id ? updated : item)),
       );
+      if (updated.text !== null && !updated.text.trim()) {
+        onToast({ variant: "success", title: "Words removed", description: "The correction dictionary left nothing to paste." });
+        return;
+      }
       try {
         if (!updated.text) throw new Error("No transcript was returned.");
         await navigator.clipboard.writeText(updated.text);
@@ -279,7 +283,7 @@ export function DictationHistoryCard({
                       : "mt-1.5 line-clamp-3 text-[length:var(--fd-text-sm)] text-fg-primary"
                   }
                 >
-                  {entry.text ?? entry.error ?? "No transcript"}
+                  {entry.text !== null && !entry.text.trim() && !entry.error ? "Words removed by dictionary" : entry.text ?? entry.error ?? "No transcript"}
                 </p>
                 <div className="mt-2.5 flex flex-wrap items-center gap-2">
                   <Button
