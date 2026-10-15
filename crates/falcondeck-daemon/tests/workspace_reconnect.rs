@@ -289,6 +289,35 @@ async fn ninety_one_idle_projects_start_no_servers_and_connect_once_on_use() {
 }
 
 #[tokio::test]
+async fn lazy_legacy_workspace_ids_survive_a_restart_without_starting_providers() {
+    let (temp, app) = fixture(false, 1).await;
+    set_interrupted(temp.path(), false);
+    let state_path = temp.path().join("state.json");
+    let mut state: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&state_path).unwrap()).unwrap();
+    state["workspaces"][0]["id"] = serde_json::Value::Null;
+    std::fs::write(&state_path, serde_json::to_vec(&state).unwrap()).unwrap();
+    app.restore_local_state().await.unwrap();
+    let id = app.snapshot().await.workspaces[0].id.clone();
+    let state: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&state_path).unwrap()).unwrap();
+    assert_eq!(state["workspaces"][0]["id"], id);
+    app.shutdown().await.unwrap();
+
+    let restored = AppState::new_with_state_path("test".into(), HashMap::new(), state_path);
+    restored.restore_local_state().await.unwrap();
+    assert_eq!(restored.snapshot().await.workspaces[0].id, id);
+    assert!(!std::fs::read_dir(temp.path()).unwrap().any(|entry| {
+        entry
+            .unwrap()
+            .file_name()
+            .to_string_lossy()
+            .starts_with("spawned-")
+    }));
+    restored.shutdown().await.unwrap();
+}
+
+#[tokio::test]
 #[ignore = "controlled reconnect latency measurement; run with --ignored --nocapture"]
 async fn measure_eight_workspace_reconnect() {
     for sample in 0..3 {

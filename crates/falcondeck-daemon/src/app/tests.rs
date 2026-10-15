@@ -5040,24 +5040,18 @@ async fn restore_keeps_workspace_visible_when_reconnect_fails() {
     assert_eq!(initial_snapshot.threads.len(), 1);
     assert_eq!(
         initial_snapshot.workspaces[0].status,
-        WorkspaceStatus::Connecting
+        WorkspaceStatus::Ready
     );
     assert_eq!(
         initial_snapshot.workspaces[0].last_error.as_deref(),
         Some("Previous reconnect failed")
     );
 
-    let final_snapshot = {
-        let mut snapshot = initial_snapshot;
-        for _ in 0..20 {
-            if matches!(snapshot.workspaces[0].status, WorkspaceStatus::Disconnected) {
-                break;
-            }
-            sleep(TokioDuration::from_millis(50)).await;
-            snapshot = app.snapshot().await;
-        }
-        snapshot
-    };
+    // Archived sessions stay lazy. Explicitly restore this project to exercise
+    // the failed-provider path without eagerly starting archived work.
+    app.restore_workspaces(persisted.workspaces.clone(), false)
+        .await;
+    let final_snapshot = app.snapshot().await;
 
     let workspace = &final_snapshot.workspaces[0];
     assert_eq!(workspace.status, WorkspaceStatus::Disconnected);
@@ -5149,36 +5143,21 @@ async fn workspace_id_survives_daemon_restarts() {
         );
         app.restore_local_state().await.unwrap();
 
-        // Wait for the failed reconnect to settle so persist_local_state has
-        // written the restored workspace (with its id) back to disk.
-        for _ in 0..20 {
-            let snapshot = app.snapshot().await;
-            if matches!(snapshot.workspaces[0].status, WorkspaceStatus::Disconnected) {
-                break;
-            }
-            sleep(TokioDuration::from_millis(50)).await;
-        }
-
         let snapshot = app.snapshot().await;
         assert_eq!(snapshot.workspaces.len(), 1);
+        assert_eq!(snapshot.workspaces[0].status, WorkspaceStatus::Ready);
         match &minted_id {
             None => minted_id = Some(snapshot.workspaces[0].id.clone()),
             Some(id) => assert_eq!(&snapshot.workspaces[0].id, id),
         }
 
-        // The disconnect shows in the snapshot before the follow-up persist
-        // lands on disk, so poll the state file rather than read it once.
-        let mut persisted_id = None;
-        for _ in 0..20 {
-            let persisted_after: PersistedAppState =
-                serde_json::from_slice(&tokio::fs::read(&state_path).await.unwrap()).unwrap();
-            persisted_id = persisted_after.workspaces[0].id.clone();
-            if persisted_id.as_deref() == minted_id.as_deref() {
-                break;
-            }
-            sleep(TokioDuration::from_millis(50)).await;
-        }
-        assert_eq!(persisted_id.as_deref(), minted_id.as_deref());
+        // Lazy restoration saves the id without waiting for a provider.
+        let persisted_after: PersistedAppState =
+            serde_json::from_slice(&tokio::fs::read(&state_path).await.unwrap()).unwrap();
+        assert_eq!(
+            persisted_after.workspaces[0].id.as_deref(),
+            minted_id.as_deref()
+        );
     }
 }
 

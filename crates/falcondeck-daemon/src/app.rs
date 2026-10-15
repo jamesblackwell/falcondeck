@@ -1565,6 +1565,9 @@ impl AppState {
         // remote restoration and overwrite a valid pairing with `remote: null`.
         self.restore_scheduled_tasks().await?;
         scheduled_tasks::migrate_compatible(self).await;
+        // Lazy projects never reach connect's persistence path. Save their
+        // identities and interruption markers after remote state is restored.
+        self.persist_local_state().await?;
         // Interrupted projects become actionable first. Unrelated harness
         // probes must not hold the recovery dialog's Continue action behind
         // every project the user has ever opened.
