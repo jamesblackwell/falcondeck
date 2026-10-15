@@ -184,13 +184,14 @@ impl AppState {
         provider: &AgentProvider,
     ) {
         let provider = provider.clone();
-        // Codex and Claude publish their catalogs through their own connect
-        // paths; only ACP/native providers hydrate lazily.
+        // Restored built-in providers also stay lazy until the composer needs
+        // their catalogs. ACP/native providers retain their own startup path.
+        let is_builtin = matches!(provider.as_str(), "codex" | "claude" | "agy");
         let is_acp = self
             .fresh_acp_provider_configs()
             .iter()
             .any(|config| config.id.eq_ignore_ascii_case(provider.as_str()));
-        if !is_acp {
+        if !is_builtin && !is_acp {
             return;
         }
         let app = self.clone();
@@ -269,6 +270,9 @@ impl AppState {
         workspace_id: &str,
         provider: &AgentProvider,
     ) -> Result<(), DaemonError> {
+        if matches!(provider.as_str(), "codex" | "claude" | "agy") {
+            return self.connect_workspace_on_demand(workspace_id).await;
+        }
         if provider.as_str().eq_ignore_ascii_case("grok") {
             self.seed_grok_placeholder_catalog(workspace_id).await;
         }

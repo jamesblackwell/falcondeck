@@ -576,6 +576,8 @@ pub(super) async fn create(
         selected_skills: request.selected_skills,
         created_at: now,
     };
+    app.connect_workspace_on_demand(&detail.summary.workspace_id)
+        .await?;
     let workspace = app
         .inner
         .workspaces
@@ -687,6 +689,7 @@ pub(super) async fn update(
         .as_deref()
         .unwrap_or(&current.summary.workspace_id);
     let workspace = if execution_settings_changed {
+        app.connect_workspace_on_demand(target_workspace_id).await?;
         Some(
             app.inner
                 .workspaces
@@ -1589,6 +1592,8 @@ async fn validate_run_dependencies(
     app: &AppState,
     task: &ScheduledTaskDetail,
 ) -> Result<(), DaemonError> {
+    app.connect_workspace_on_demand(&task.summary.workspace_id)
+        .await?;
     let workspace = app
         .inner
         .workspaces

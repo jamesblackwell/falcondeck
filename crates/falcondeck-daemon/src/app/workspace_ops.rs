@@ -70,7 +70,7 @@ pub(super) async fn connect_workspace(
         if summary.status == WorkspaceStatus::Connecting {
             return Ok(summary);
         }
-        return connect_workspace_internal(app, request, None).await;
+        return app.connect_workspace_internal(request, None).await;
     }
 
     let persisted_workspace = app
@@ -1181,6 +1181,8 @@ async fn start_thread_internal(
     app: &AppState,
     request: StartThreadRequest,
 ) -> Result<ThreadHandle, DaemonError> {
+    app.connect_workspace_on_demand(&request.workspace_id)
+        .await?;
     let (provider, default_model_id, workspace_path) = {
         let workspaces = app.inner.workspaces.lock().await;
         let workspace = workspaces
@@ -2968,6 +2970,8 @@ async fn send_turn_with_startup_mode(
             ));
         }
     }
+    app.connect_workspace_on_demand(&request.workspace_id)
+        .await?;
     // Keep an ACP transcript-replay gate alive through provider startup. A
     // background session/load that starts during this window will then recheck
     // the Running status and leave the new prompt's accumulators untouched.
@@ -3805,6 +3809,7 @@ pub(super) async fn remove_workspace(
         return Err(DaemonError::NotFound("workspace not found".to_string()));
     };
 
+    app.inner.lazy_workspaces.lock().await.remove(workspace_id);
     if let Some(session) = removed.codex_session {
         let _ = session.shutdown().await;
     }
@@ -3894,6 +3899,7 @@ pub(super) async fn close_workspace(
         return Err(DaemonError::NotFound("workspace not found".to_string()));
     };
 
+    app.inner.lazy_workspaces.lock().await.remove(workspace_id);
     if let Some(session) = removed.codex_session {
         let _ = session.shutdown().await;
     }
@@ -5114,6 +5120,8 @@ pub(super) async fn thread_detail(
     app: &AppState,
     request: &ThreadDetailRequest,
 ) -> Result<ThreadDetail, DaemonError> {
+    app.connect_workspace_on_demand(&request.workspace_id)
+        .await?;
     app.ensure_claude_thread_history(&request.workspace_id, &request.thread_id)
         .await?;
     if request.refresh_native.unwrap_or(false) {

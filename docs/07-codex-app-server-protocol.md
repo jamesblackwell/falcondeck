@@ -16,6 +16,13 @@ Codex app-server is a long-lived process that exposes the full Codex agent harne
 
 ## Lifecycle
 
+Saved sidebar projects restore as usable placeholders without starting providers.
+Only unarchived interrupted sessions and queued work trigger startup discovery.
+Opening a conversation, selecting a built-in provider, starting a task, or
+dispatching a due automation connects its project on demand. Startup discovery
+and on-demand connections share four slots. A restore retries once in its
+original worker; after two 30-second timeouts it settles back to on-demand use.
+
 FalconDeck owns one app-server process group per connected workspace. A
 workspace remains warm for five minutes after its last Codex request or event
 so ordinary follow-up messages avoid a restart. Once the grace period expires,

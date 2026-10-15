@@ -124,7 +124,6 @@ pub(crate) use speech::*;
 use storage::*;
 use threads::{interactive_request_attention_delta, refresh_thread_attention};
 
-const WORKSPACE_RESTORE_TIMEOUT: Duration = Duration::from_secs(30);
 pub(crate) const SHUTDOWN_INTERRUPTED_TURN_ERROR: &str =
     "FalconDeck was closed while this turn was running";
 
@@ -303,6 +302,10 @@ struct InnerState {
     /// Per-path gates prevent simultaneous first-time connect requests from
     /// spawning duplicate provider bootstraps for one workspace.
     workspace_connect_gates: Mutex<WorkspaceConnectGates>,
+    /// Saved sidebar projects whose providers have not been needed this boot.
+    lazy_workspaces: Mutex<HashSet<String>>,
+    /// Shared by startup, timeout retries, and on-demand workspace discovery.
+    workspace_start_slots: Semaphore,
     /// Global cap for concurrently starting optional provider runtimes.
     runtime_lifecycle: runtime_health::RuntimeLifecycle,
     saved_workspaces: Mutex<HashMap<String, PersistedWorkspaceState>>,
@@ -942,6 +945,10 @@ impl AppState {
                 acp_hydration_gates: Mutex::new(HashMap::new()),
                 codex_runtime_gates: Mutex::new(HashMap::new()),
                 workspace_connect_gates: Mutex::new(HashMap::new()),
+                lazy_workspaces: Mutex::new(HashSet::new()),
+                workspace_start_slots: Semaphore::new(
+                    workspace_restore::WORKSPACE_RESTORE_CONCURRENCY,
+                ),
                 runtime_lifecycle: runtime_health::RuntimeLifecycle::default(),
                 saved_workspaces: Mutex::new(HashMap::new()),
                 persistence: Mutex::new(()),
@@ -1302,7 +1309,15 @@ impl AppState {
                 .map(|workspace| workspace.summary.clone())
         };
         if let Some(summary) = existing {
-            return Ok(summary);
+            self.connect_workspace_on_demand(&summary.id).await?;
+            return self
+                .inner
+                .workspaces
+                .lock()
+                .await
+                .get(&summary.id)
+                .map(|workspace| workspace.summary.clone())
+                .ok_or_else(|| DaemonError::NotFound("workspace not found".to_string()));
         }
         self.connect_workspace_internal(
             ConnectWorkspaceRequest {
@@ -1471,13 +1486,23 @@ impl AppState {
             if !workspace.in_sidebar {
                 continue;
             }
-            self.restore_workspace_placeholder(
-                &workspace,
-                WorkspaceStatus::Connecting,
-                workspace.last_error.clone(),
-            )
-            .await?;
-            workspaces_to_restore.push(workspace);
+            let needs_restore = workspace_restore::needs_startup_connection(&workspace);
+            let summary = self
+                .restore_workspace_placeholder(
+                    &workspace,
+                    if needs_restore {
+                        WorkspaceStatus::Connecting
+                    } else {
+                        WorkspaceStatus::Ready
+                    },
+                    workspace.last_error.clone(),
+                )
+                .await?;
+            if needs_restore {
+                workspaces_to_restore.push(workspace);
+            } else {
+                self.inner.lazy_workspaces.lock().await.insert(summary.id);
+            }
         }
 
         // This is the recovery UX boundary: every persisted thread is now in
@@ -1581,85 +1606,6 @@ impl AppState {
             scheduled_tasks::start_scheduler(self);
         }
         Ok(())
-    }
-
-    /// Reconnects one persisted project after a daemon restart.
-    ///
-    /// The short timeout keeps a hung Codex listing from blocking every other
-    /// project and the scheduler. Timing out must not flip the placeholder to
-    /// Disconnected: that locked the composer behind "add a project" even when
-    /// a lazy ACP provider (Grok) was already usable. Retry the connect in the
-    /// background instead, and leave the project Connecting until it succeeds
-    /// or fails for a real reason.
-    async fn restore_one_persisted_workspace(
-        &self,
-        workspace: PersistedWorkspaceState,
-        auto_resume: bool,
-    ) {
-        let path = workspace.path.clone();
-        let result = timeout(
-            WORKSPACE_RESTORE_TIMEOUT,
-            self.connect_workspace_internal(
-                ConnectWorkspaceRequest {
-                    path: path.clone(),
-                    kind: workspace_kind_for_path(&path),
-                },
-                Some(&workspace),
-            ),
-        )
-        .await;
-
-        match result {
-            Ok(Ok(_)) => {
-                if auto_resume {
-                    self.spawn_interrupted_thread_resume(&workspace).await;
-                }
-            }
-            Ok(Err(error)) => {
-                tracing::warn!("failed to restore workspace {path}: {error}");
-                let _ = self
-                    .update_workspace_placeholder_status(
-                        &path,
-                        WorkspaceStatus::Disconnected,
-                        Some(error.to_string()),
-                    )
-                    .await;
-            }
-            Err(_) => {
-                tracing::warn!(
-                    "workspace restore timed out for {path}; retrying in the background"
-                );
-                let app = self.clone();
-                tokio::spawn(async move {
-                    match app
-                        .connect_workspace_internal(
-                            ConnectWorkspaceRequest {
-                                path: path.clone(),
-                                kind: workspace_kind_for_path(&path),
-                            },
-                            Some(&workspace),
-                        )
-                        .await
-                    {
-                        Ok(_) => {
-                            if auto_resume {
-                                app.spawn_interrupted_thread_resume(&workspace).await;
-                            }
-                        }
-                        Err(error) => {
-                            tracing::warn!("failed to restore workspace {path}: {error}");
-                            let _ = app
-                                .update_workspace_placeholder_status(
-                                    &path,
-                                    WorkspaceStatus::Disconnected,
-                                    Some(error.to_string()),
-                                )
-                                .await;
-                        }
-                    }
-                });
-            }
-        }
     }
 
     pub(crate) async fn restore_scheduled_tasks(&self) -> Result<(), DaemonError> {
@@ -1777,6 +1723,7 @@ impl AppState {
             // `title_is_provider_preview` properly.
             threads.insert(state.thread_id.clone(), thread);
         }
+        let connects_on_demand = status == WorkspaceStatus::Ready;
         let mut summary = WorkspaceSummary {
             id: workspace_id.clone(),
             path: path_string.clone(),
@@ -1790,7 +1737,12 @@ impl AppState {
                         label: "Codex".to_string(),
                         account: falcondeck_core::AccountSummary {
                             status: falcondeck_core::AccountStatus::Unknown,
-                            label: "Codex reconnecting".to_string(),
+                            label: if connects_on_demand {
+                                "Codex connects on demand"
+                            } else {
+                                "Codex reconnecting"
+                            }
+                            .to_string(),
                         },
                         models: Vec::new(),
                         collaboration_modes: Vec::new(),
@@ -1803,7 +1755,12 @@ impl AppState {
                         label: "Claude".to_string(),
                         account: falcondeck_core::AccountSummary {
                             status: falcondeck_core::AccountStatus::Unknown,
-                            label: "Claude reconnecting".to_string(),
+                            label: if connects_on_demand {
+                                "Claude connects on demand"
+                            } else {
+                                "Claude reconnecting"
+                            }
+                            .to_string(),
                         },
                         models: claude_models,
                         collaboration_modes: Vec::new(),
@@ -1816,7 +1773,12 @@ impl AppState {
                         label: "Antigravity".to_string(),
                         account: falcondeck_core::AccountSummary {
                             status: falcondeck_core::AccountStatus::Unknown,
-                            label: "Antigravity reconnecting".to_string(),
+                            label: if connects_on_demand {
+                                "Antigravity connects on demand"
+                            } else {
+                                "Antigravity reconnecting"
+                            }
+                            .to_string(),
                         },
                         models: Vec::new(),
                         collaboration_modes: Vec::new(),
@@ -1836,7 +1798,12 @@ impl AppState {
             collaboration_modes: Vec::new(),
             account: falcondeck_core::AccountSummary {
                 status: falcondeck_core::AccountStatus::Unknown,
-                label: "Reconnecting".to_string(),
+                label: if connects_on_demand {
+                    "Connects on demand"
+                } else {
+                    "Reconnecting"
+                }
+                .to_string(),
             },
             current_thread_id,
             connected_at: now,
@@ -3640,7 +3607,19 @@ impl AppState {
         request: ConnectWorkspaceRequest,
         persisted_workspace: Option<&PersistedWorkspaceState>,
     ) -> Result<WorkspaceSummary, DaemonError> {
-        workspace_ops::connect_workspace_internal(self, request, persisted_workspace).await
+        let _slot = self
+            .inner
+            .workspace_start_slots
+            .acquire()
+            .await
+            .map_err(|_| DaemonError::Process("workspace startup gate closed".to_string()))?;
+        if self.is_shutting_down() {
+            return Err(DaemonError::Process("daemon is shutting down".to_string()));
+        }
+        let summary =
+            workspace_ops::connect_workspace_internal(self, request, persisted_workspace).await?;
+        self.inner.lazy_workspaces.lock().await.remove(&summary.id);
+        Ok(summary)
     }
 
     pub async fn start_thread(
