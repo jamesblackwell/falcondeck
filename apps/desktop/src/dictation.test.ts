@@ -5,9 +5,11 @@ import {
   DEFAULT_DICTATION_SETTINGS,
   DEFAULT_REWRITE_PROMPT,
   REWRITE_MODEL_CHOICES,
+  formatRewriteModelMeta,
   nextRequiredDictationPermission,
   normalizeDictationSettings,
   normalizeRewritePrompt,
+  parseRewriteCatalog,
   readDictationSettings,
   useDictationSettings,
   writeDictationSettings,
@@ -130,6 +132,7 @@ describe("dictation settings", () => {
     expect(upgraded.rewriteEnabled).toBe(false);
     expect(upgraded.rewriteShortcut).toBe("right_option");
     expect(upgraded.rewriteModel).toBe("openai/gpt-5.6-luna");
+    expect(upgraded.rewriteReasoning).toBeNull();
     expect(
       normalizeDictationSettings({
         ...DEFAULT_DICTATION_SETTINGS,
@@ -156,6 +159,7 @@ describe("dictation settings", () => {
     expect(DEFAULT_REWRITE_PROMPT).toContain(
       "Do not even the prose out into uniform polish",
     );
+    expect(DEFAULT_REWRITE_PROMPT).toContain("tidy the passage");
   });
 
   it("persists a custom rewrite prompt and restores the built-in one", () => {
@@ -175,6 +179,60 @@ describe("dictation settings", () => {
 
   it("truncates an oversized rewrite prompt", () => {
     expect(normalizeRewritePrompt("a".repeat(8_001))?.length).toBe(8_000);
+  });
+
+  it("keeps a known reasoning effort and drops anything else", () => {
+    expect(
+      normalizeDictationSettings({
+        ...DEFAULT_DICTATION_SETTINGS,
+        rewriteReasoning: "high",
+      }).rewriteReasoning,
+    ).toBe("high");
+    expect(
+      normalizeDictationSettings({
+        ...DEFAULT_DICTATION_SETTINGS,
+        rewriteReasoning: "turbo",
+      }).rewriteReasoning,
+    ).toBeNull();
+  });
+
+  it("reads a rewrite catalog and formats its figures", () => {
+    const parsed = parseRewriteCatalog({
+      stale: true,
+      models: [
+        {
+          id: "openai/gpt-6-luna",
+          name: "GPT-6 Luna",
+          group: "fast",
+          intelligence: 38.1,
+          prompt_per_million: 0.1,
+          completion_per_million: 0.5,
+          reasoning_efforts: ["none", "low", "nope"],
+          reasoning_mandatory: false,
+        },
+        {
+          id: "openai/gpt-6-luna",
+          name: "GPT-6 Luna again",
+          group: "frontier",
+        },
+        { id: "not a model", name: "Bad", group: "fast" },
+      ],
+    });
+    expect(parsed?.stale).toBe(true);
+    expect(parsed?.models).toEqual([
+      {
+        id: "openai/gpt-6-luna",
+        name: "GPT-6 Luna",
+        group: "fast",
+        intelligence: 38.1,
+        promptPerMillion: 0.1,
+        completionPerMillion: 0.5,
+        reasoningEfforts: ["none", "low"],
+        reasoningMandatory: false,
+      },
+    ]);
+    expect(formatRewriteModelMeta(parsed!.models[0]!)).toBe("38 · $0.10 / $0.50");
+    expect(parseRewriteCatalog({ models: [] })).toBeNull();
   });
 
   it("offers gpt-oss-120b among the fast rewrite models", () => {

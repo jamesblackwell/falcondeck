@@ -1,9 +1,11 @@
-import { fireEvent, render, screen, within } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import {
+  DEFAULT_DICTATION_SETTINGS,
   DEFAULT_REWRITE_PROMPT,
   readDictationSettings,
+  writeDictationSettings,
 } from "../dictation";
 import { DictationSetup } from "./DictationSetup";
 
@@ -24,7 +26,10 @@ describe("DictationSetup voice rewrite", () => {
     fireEvent.change(screen.getByLabelText("Keep model loaded"), { target: { value: "0" } });
     expect(readDictationSettings().parakeetIdleMinutes).toBe(0);
   });
-  afterEach(() => window.localStorage.clear());
+  afterEach(() => {
+    window.localStorage.clear();
+    vi.unstubAllGlobals();
+  });
 
   it("offers an explicit model repair in advanced settings", () => {
     prepareParakeet.mockClear();
@@ -126,7 +131,89 @@ describe("DictationSetup voice rewrite", () => {
   it("lists gpt-oss-120b as a rewrite model", () => {
     render(<DictationSetup baseUrl={null} onToast={() => {}} />);
     expect(
-      screen.getByRole("option", { name: "GPT-OSS 120B" }),
+      screen.getByRole("button", { name: "GPT-OSS 120B" }),
     ).toBeInTheDocument();
+  });
+
+  it("loads the OpenRouter shortlist and saves a model and reasoning effort", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL) => {
+        const url = String(input);
+        if (url.endsWith("/api/speech/rewrite-models")) {
+          return new Response(
+            JSON.stringify({
+              stale: false,
+              fetched_at_ms: 1,
+              models: [
+                {
+                  id: "openai/gpt-6-luna",
+                  name: "GPT-6 Luna",
+                  group: "fast",
+                  intelligence: 38.1,
+                  prompt_per_million: 0.1,
+                  completion_per_million: 0.5,
+                  reasoning_efforts: ["none", "low", "high"],
+                  reasoning_mandatory: false,
+                },
+                {
+                  id: "anthropic/claude-opus-5.5",
+                  name: "Claude Opus 5.5",
+                  group: "frontier",
+                  intelligence: 57.6,
+                  prompt_per_million: 4,
+                  completion_per_million: 20,
+                  reasoning_efforts: ["low", "high"],
+                  reasoning_mandatory: true,
+                },
+              ],
+            }),
+            { headers: { "content-type": "application/json" } },
+          );
+        }
+        return new Response(
+          JSON.stringify({
+            configured: false,
+            storage: "daemon_secret_store",
+          }),
+          { headers: { "content-type": "application/json" } },
+        );
+      }),
+    );
+
+    writeDictationSettings({
+      ...DEFAULT_DICTATION_SETTINGS,
+      rewriteModel: "openai/gpt-6-luna",
+      rewriteReasoning: "max",
+    });
+    render(
+      <DictationSetup baseUrl="http://127.0.0.1:9" onToast={() => {}} />,
+    );
+
+    expect(
+      await screen.findByRole("button", { name: "GPT-6 Luna" }),
+    ).toBeInTheDocument();
+    await waitFor(() => {
+      expect(readDictationSettings().rewriteReasoning).toBeNull();
+    });
+    fireEvent.click(screen.getByRole("button", { name: "GPT-6 Luna" }));
+    fireEvent.click(screen.getByRole("button", { name: "Low" }));
+    expect(readDictationSettings().rewriteModel).toBe("openai/gpt-6-luna");
+    expect(readDictationSettings().rewriteReasoning).toBe("low");
+    expect(screen.getByRole("button", { name: "Off" })).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "Claude Opus 5.5" }));
+    expect(readDictationSettings().rewriteModel).toBe(
+      "anthropic/claude-opus-5.5",
+    );
+    expect(readDictationSettings().rewriteReasoning).toBe("low");
+    expect(screen.queryByRole("button", { name: "Off" })).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Low" })).toHaveAttribute(
+      "aria-pressed",
+      "true",
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "Auto" }));
+    expect(readDictationSettings().rewriteReasoning).toBeNull();
   });
 });

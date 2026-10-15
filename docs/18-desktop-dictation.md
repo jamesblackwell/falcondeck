@@ -15,8 +15,11 @@ status window, and paste-at-cursor behavior.
   talk without stealing Command-C; chords are swallowed so they do not type
   into the focused app.
 - Voice rewrite is a second, off-by-default mode. Select text, hold Right
-  Option (configurable), and speak how to edit it. FalconDeck rewrites through
-  OpenRouter (default GPT-5.6 Luna) and pastes over the selection.
+  Option (configurable), and optionally speak how to edit it. Silence, or a
+  clip with no detected speech, tidies the selection. FalconDeck rewrites
+  through OpenRouter (default GPT-5.6 Luna) and pastes over the selection.
+  Settings loads a short fast-and-frontier model list from OpenRouter, caches
+  it on this computer, and can send a reasoning effort with the rewrite.
 - Hold mode waits 180 ms before recording and cancels if another key is pressed,
   so ordinary modifier shortcuts continue to work. Toggle mode starts and stops
   on modifier-only presses.

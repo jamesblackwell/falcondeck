@@ -313,6 +313,7 @@ pub fn router(state: AppState) -> Router {
                 .delete(delete_speech_openrouter_key),
         )
         .route("/api/speech/models", get(speech_models))
+        .route("/api/speech/rewrite-models", get(speech_rewrite_models))
         .route(
             "/api/speech/transcribe",
             post(speech_transcribe).layer(DefaultBodyLimit::max(12 * 1024 * 1024)),
@@ -472,6 +473,12 @@ async fn speech_models(
     State(state): State<AppState>,
 ) -> Result<Json<Vec<crate::app::SpeechModel>>, DaemonError> {
     Ok(Json(state.speech_models().await?))
+}
+
+async fn speech_rewrite_models(
+    State(state): State<AppState>,
+) -> Result<Json<crate::app::RewriteModelCatalog>, DaemonError> {
+    Ok(Json(state.rewrite_model_catalog().await?))
 }
 
 async fn speech_transcribe(

@@ -100,6 +100,7 @@ mod provider_usage;
 mod project_folders;
 mod remote_bridge;
 mod remote_lifecycle;
+mod rewrite_models;
 mod runtime_health;
 mod scheduled_tasks;
 mod speech;
@@ -121,6 +122,7 @@ use conversation_helpers::*;
 use provider_runtime::*;
 use remote_bridge::*;
 use remote_lifecycle::*;
+pub(crate) use rewrite_models::RewriteModelCatalog;
 pub(crate) use speech::*;
 use storage::*;
 use threads::{interactive_request_attention_delta, refresh_thread_attention};
@@ -373,6 +375,12 @@ struct InnerState {
     extension_event_queues: extension_events::ExtensionEventQueues,
     /// Cached OpenRouter speech credential from the daemon secret store.
     speech_credentials: speech::SpeechCredentialCache,
+    /// Last OpenRouter rewrite shortlist, served while a refresh is in flight.
+    rewrite_catalog: StdMutex<Option<rewrite_models::StoredRewriteCatalog>>,
+    /// A missing catalog file is remembered so a paste does not reread it.
+    rewrite_catalog_disk_checked: AtomicBool,
+    /// One refresh at a time. Settings can open twice while the first fetch runs.
+    rewrite_catalog_refresh: Mutex<()>,
     remote: Mutex<RemoteBridgeState>,
     /// Coalesces at-least-once relay delivery for mutating RPCs across bridge
     /// reconnects so an action cannot execute twice in one daemon process.
@@ -980,6 +988,9 @@ impl AppState {
                 extension_bridge_capabilities: Mutex::new(HashMap::new()),
                 extension_event_queues: StdMutex::new(HashMap::new()),
                 speech_credentials: speech::SpeechCredentialCache::default(),
+                rewrite_catalog: StdMutex::new(None),
+                rewrite_catalog_disk_checked: AtomicBool::new(false),
+                rewrite_catalog_refresh: Mutex::new(()),
                 remote: Mutex::new(RemoteBridgeState {
                     status: RemoteConnectionStatus::Inactive,
                     relay_url: None,

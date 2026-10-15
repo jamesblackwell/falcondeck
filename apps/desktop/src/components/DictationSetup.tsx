@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 
 import { DictationDictionary } from "./DictationDictionary";
 
@@ -17,6 +17,7 @@ import {
   SettingsSection,
   SwitchRow,
   Textarea,
+  cn,
 } from "@falcondeck/ui";
 import {
   ChevronDown,
@@ -28,10 +29,15 @@ import {
 } from "lucide-react";
 
 import {
+  DEFAULT_REWRITE_MODEL,
   DEFAULT_REWRITE_PROMPT,
   REWRITE_MODEL_CHOICES,
+  REWRITE_REASONING_EFFORTS,
+  REWRITE_REASONING_LABELS,
+  formatRewriteModelMeta,
   nextRequiredDictationPermission,
   normalizeRewritePrompt,
+  parseRewriteCatalog,
   readDictationAudioDevices,
   readDictationPermissions,
   readDictationSettings,
@@ -42,6 +48,8 @@ import {
   type DictationPermission,
   type DictationPermissionStatus,
   type DictationSettings,
+  type RewriteCatalogModel,
+  type RewriteReasoningEffort,
 } from "../dictation";
 import {
   REWRITE_SHORTCUT_SUGGESTIONS,
@@ -239,6 +247,281 @@ export function SpeechCredentialField({
         </a>
       </div>
     </Field>
+  );
+}
+
+function modelChoiceClass(selected: boolean) {
+  return cn(
+    "fd-focus rounded-[var(--fd-radius-md)] border px-2.5 py-1.5 text-left text-[length:var(--fd-text-xs)] font-medium transition-colors",
+    selected
+      ? "border-accent/50 bg-accent/10 text-fg-primary"
+      : "border-border-subtle bg-surface-2 text-fg-secondary hover:bg-surface-3",
+  );
+}
+
+function effortFits(
+  model: RewriteCatalogModel | undefined,
+  effort: RewriteReasoningEffort | null,
+): boolean {
+  if (!model || effort == null) return true;
+  if (model.reasoningMandatory && effort === "none") return false;
+  return model.reasoningEfforts.includes(effort);
+}
+
+function ModelChoices({
+  label,
+  models,
+  selectedId,
+  onSelect,
+}: {
+  label: string;
+  models: Array<{ id: string; name: string; meta: string | null }>;
+  selectedId: string;
+  onSelect: (id: string) => void;
+}) {
+  if (models.length === 0) return null;
+  return (
+    <div className="space-y-1.5">
+      <p className="text-[length:var(--fd-text-xs)] font-medium text-fg-muted">
+        {label}
+      </p>
+      <div
+        role="group"
+        aria-label={`${label} models`}
+        className="grid grid-cols-2 gap-2 xl:grid-cols-3"
+      >
+        {models.map((model) => {
+          const selected = model.id === selectedId;
+          return (
+            <button
+              key={model.id}
+              type="button"
+              aria-pressed={selected}
+              title={model.id}
+              onClick={() => onSelect(model.id)}
+              className={modelChoiceClass(selected)}
+            >
+              <span className="block">{model.name}</span>
+              {model.meta ? (
+                <span
+                  className="mt-0.5 block font-normal text-fg-muted"
+                  aria-hidden="true"
+                >
+                  {model.meta}
+                </span>
+              ) : null}
+            </button>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+function RewriteModelFields({
+  baseUrl,
+  settings,
+  onChange,
+}: {
+  baseUrl: string | null;
+  settings: DictationSettings;
+  onChange: (patch: Partial<DictationSettings>) => void;
+}) {
+  const [catalog, setCatalog] = useState<RewriteCatalogModel[] | null>(null);
+  const [stale, setStale] = useState(false);
+  const [catalogState, setCatalogState] = useState<
+    "loading" | "ready" | "offline"
+  >(baseUrl ? "loading" : "offline");
+  const catalogRef = useRef<RewriteCatalogModel[] | null>(null);
+
+  useEffect(() => {
+    if (!baseUrl) {
+      catalogRef.current = null;
+      setCatalog(null);
+      setStale(false);
+      setCatalogState("offline");
+      return;
+    }
+    let cancelled = false;
+    if (!catalogRef.current) setCatalogState("loading");
+    const keepCurrent = () => {
+      if (catalogRef.current) {
+        setStale(true);
+        setCatalogState("ready");
+      } else {
+        setCatalogState("offline");
+      }
+    };
+    void fetch(`${baseUrl}/api/speech/rewrite-models`)
+      .then(async (response) => {
+        if (!response.ok) throw new Error("Model list failed");
+        return parseRewriteCatalog(await response.json());
+      })
+      .then((parsed) => {
+        if (cancelled) return;
+        if (!parsed) {
+          keepCurrent();
+          return;
+        }
+        catalogRef.current = parsed.models;
+        setCatalog(parsed.models);
+        setStale(parsed.stale);
+        setCatalogState("ready");
+      })
+      .catch(() => {
+        if (!cancelled) keepCurrent();
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [baseUrl]);
+
+  const modelId = settings.rewriteModel.trim();
+  const known = catalog?.find((model) => model.id === modelId);
+  const efforts: RewriteReasoningEffort[] = known
+    ? known.reasoningEfforts.filter(
+        (effort) => !(known.reasoningMandatory && effort === "none"),
+      )
+    : [...REWRITE_REASONING_EFFORTS];
+  const selectedEffort =
+    settings.rewriteReasoning && efforts.includes(settings.rewriteReasoning)
+      ? settings.rewriteReasoning
+      : "auto";
+
+  useEffect(() => {
+    if (!known || effortFits(known, settings.rewriteReasoning)) return;
+    onChange({ rewriteReasoning: null });
+  }, [known, settings.rewriteReasoning, onChange]);
+
+  const selectModel = (id: string) => {
+    const next = catalog?.find((model) => model.id === id);
+    onChange({
+      rewriteModel: id,
+      ...(effortFits(next, settings.rewriteReasoning)
+        ? {}
+        : { rewriteReasoning: null }),
+    });
+  };
+
+  const fast =
+    catalog
+      ?.filter((model) => model.group === "fast")
+      .map((model) => ({
+        id: model.id,
+        name: model.name,
+        meta: formatRewriteModelMeta(model),
+      })) ?? [];
+  const frontier =
+    catalog
+      ?.filter((model) => model.group === "frontier")
+      .map((model) => ({
+        id: model.id,
+        name: model.name,
+        meta: formatRewriteModelMeta(model),
+      })) ?? [];
+  const suggested = REWRITE_MODEL_CHOICES.map((model) => ({
+    id: model.id,
+    name: model.name,
+    meta: null,
+  }));
+
+  const hint =
+    catalogState === "loading"
+      ? "Loading the current OpenRouter list."
+      : catalogState === "ready"
+        ? stale
+          ? "Saved list from this computer. OpenRouter could not be reached just now."
+          : "Fast models are cheap enough for every paste. Frontier models lead the intelligence index. Figures are that index, then dollars per million tokens, in and out."
+        : "OpenRouter's list is unavailable. These suggestions stay on this computer, or paste any model id.";
+
+  return (
+    <div className="space-y-4">
+      <Field label="Rewrite model" htmlFor="rewrite-model" hint={hint}>
+        {catalogState === "loading" ? (
+          <p className="text-[length:var(--fd-text-xs)] text-fg-muted">
+            Loading models from OpenRouter…
+          </p>
+        ) : catalogState === "ready" ? (
+          <div className="space-y-3">
+            <ModelChoices
+              label="Fast"
+              models={fast}
+              selectedId={modelId}
+              onSelect={selectModel}
+            />
+            <ModelChoices
+              label="Frontier"
+              models={frontier}
+              selectedId={modelId}
+              onSelect={selectModel}
+            />
+          </div>
+        ) : (
+          <ModelChoices
+            label="Suggested"
+            models={suggested}
+            selectedId={modelId}
+            onSelect={selectModel}
+          />
+        )}
+        <Input
+          id="rewrite-model"
+          className="mt-2 max-w-md"
+          value={settings.rewriteModel}
+          aria-label="Rewrite model id"
+          onChange={(event) => {
+            const rewriteModel = event.target.value;
+            const next = catalog?.find(
+              (model) => model.id === rewriteModel.trim(),
+            );
+            onChange({
+              rewriteModel,
+              ...(effortFits(next, settings.rewriteReasoning)
+                ? {}
+                : { rewriteReasoning: null }),
+            });
+          }}
+          placeholder={DEFAULT_REWRITE_MODEL}
+          spellCheck={false}
+          autoComplete="off"
+        />
+        {catalogState === "ready" && modelId && !known ? (
+          <p className="text-[length:var(--fd-text-xs)] text-fg-muted">
+            Not in the current shortlist. FalconDeck still sends this id.
+          </p>
+        ) : null}
+      </Field>
+      <Field
+        label="Reasoning"
+        hint="Auto uses the fastest effort the model allows. Raise it when an edit needs more thought."
+      >
+        <div
+          role="group"
+          aria-label="Reasoning effort"
+          className="flex flex-wrap gap-1.5"
+        >
+          <button
+            type="button"
+            aria-pressed={selectedEffort === "auto"}
+            onClick={() => onChange({ rewriteReasoning: null })}
+            className={modelChoiceClass(selectedEffort === "auto")}
+          >
+            Auto
+          </button>
+          {efforts.map((effort) => (
+            <button
+              key={effort}
+              type="button"
+              aria-pressed={selectedEffort === effort}
+              onClick={() => onChange({ rewriteReasoning: effort })}
+              className={modelChoiceClass(selectedEffort === effort)}
+            >
+              {REWRITE_REASONING_LABELS[effort]}
+            </button>
+          ))}
+        </div>
+      </Field>
+    </div>
   );
 }
 
@@ -664,8 +947,8 @@ export function DictationSetup({
         title="Voice rewrite"
         description={
           compact
-            ? "Select text, hold a different shortcut, and speak how to edit it. Needs an OpenRouter key — you can add one later in setup."
-            : "Select text in any app, hold a different shortcut, and speak how to edit it. FalconDeck transcribes the instruction, rewrites the selection through OpenRouter, and pastes over it."
+            ? "Select text and hold a different shortcut. Speak how to edit it, or say nothing to tidy it. Needs an OpenRouter key — you can add one later in setup."
+            : "Select text in any app and hold a different shortcut. Speak how to edit it, or say nothing to tidy it. FalconDeck rewrites the selection through OpenRouter and pastes over it."
         }
       >
         <SettingList>
@@ -682,7 +965,7 @@ export function DictationSetup({
             }
           />
         </SettingList>
-        <div className={compact ? undefined : "grid gap-5 sm:grid-cols-2"}>
+        <div className={compact ? undefined : "max-w-xl"}>
           <Field
             label="Rewrite shortcut"
             hint="Must be a different shortcut from dictation."
@@ -699,51 +982,14 @@ export function DictationSetup({
               }
             />
           </Field>
-          {compact ? null : (
-            <Field
-              label="Rewrite model"
-              htmlFor="rewrite-model"
-              hint="Luna is the default. GPT-OSS, Gemma, Mercury, and Gemini Flash Lite are cheaper or faster; you can also paste any OpenRouter model id."
-            >
-              <select
-                className={SELECT_CLASS}
-                value={
-                  REWRITE_MODEL_CHOICES.some(
-                    (model) => model.id === settings.rewriteModel,
-                  )
-                    ? settings.rewriteModel
-                    : ""
-                }
-                onChange={(event) => {
-                  if (!event.target.value) return;
-                  updateSettings({ rewriteModel: event.target.value });
-                }}
-              >
-                {!REWRITE_MODEL_CHOICES.some(
-                  (model) => model.id === settings.rewriteModel,
-                ) ? (
-                  <option value="">Custom</option>
-                ) : null}
-                {REWRITE_MODEL_CHOICES.map((model) => (
-                  <option key={model.id} value={model.id}>
-                    {model.name}
-                  </option>
-                ))}
-              </select>
-              <Input
-                id="rewrite-model"
-                className="mt-2 max-w-md"
-                value={settings.rewriteModel}
-                onChange={(event) =>
-                  updateSettings({ rewriteModel: event.target.value })
-                }
-                placeholder="openai/gpt-5.6-luna"
-                spellCheck={false}
-                autoComplete="off"
-              />
-            </Field>
-          )}
         </div>
+        {compact ? null : (
+          <RewriteModelFields
+            baseUrl={baseUrl}
+            settings={settings}
+            onChange={updateSettings}
+          />
+        )}
         {compact ? null : (
           <div className="space-y-2">
             <button

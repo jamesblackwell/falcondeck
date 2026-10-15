@@ -97,7 +97,7 @@ const UNCOMPRESSED_BYTES_PER_SECOND: f64 = 32_000.0;
 /// One client for every OpenRouter call. Reusing the pool skips the DNS +
 /// TCP + TLS handshake on each dictation after the first; timeouts are set
 /// per request because transcription and synthesis have different budgets.
-pub(super) static OPENROUTER_CLIENT: LazyLock<reqwest::Client> = LazyLock::new(|| {
+pub(in crate::app) static OPENROUTER_CLIENT: LazyLock<reqwest::Client> = LazyLock::new(|| {
     reqwest::Client::builder()
         .connect_timeout(CONNECT_TIMEOUT)
         .build()
@@ -163,6 +163,10 @@ pub struct SpeechRewriteRequest {
     pub model: Option<String>,
     #[serde(default)]
     pub prompt: Option<String>,
+    /// `none`, `minimal`, `low`, `medium`, `high`, `xhigh`, or `max`.
+    /// Absent means the fastest effort the model allows.
+    #[serde(default)]
+    pub reasoning: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -352,7 +356,7 @@ impl AppState {
                         model,
                     });
                 }
-                last_error = "OpenRouter returned an empty transcription".to_string();
+                last_error = EMPTY_TRANSCRIPTION_ERROR.to_string();
             } else {
                 last_error = transcription_error(status.as_u16(), &body);
                 if !should_try_fallback(status.as_u16()) {
@@ -467,11 +471,7 @@ impl AppState {
                 "That selection is too long to rewrite in one pass.".to_string(),
             ));
         }
-        if instruction.chars().count() < 3 {
-            return Err(DaemonError::BadRequest(
-                "No rewrite instruction was heard.".to_string(),
-            ));
-        }
+        let instruction = resolve_rewrite_instruction(instruction, request.prompt.as_deref());
         if instruction.chars().count() > MAX_REWRITE_INSTRUCTION_CHARS {
             return Err(DaemonError::BadRequest(
                 "The rewrite instruction is too long.".to_string(),
@@ -498,10 +498,15 @@ impl AppState {
             "model": model,
             "messages": [
                 {"role": "system", "content": system_prompt},
-                {"role": "user", "content": rewrite_user_message(selection, instruction)},
+                {"role": "user", "content": rewrite_user_message(selection, &instruction)},
             ],
         });
-        if let Some(effort) = rewrite_reasoning_effort(model) {
+        let known = self.cached_rewrite_choice(model).await;
+        if let Some(effort) = super::rewrite_models::resolve_rewrite_reasoning(
+            model,
+            request.reasoning.as_deref(),
+            known.as_ref(),
+        ) {
             body["reasoning"] = json!({ "effort": effort });
         }
         let response = OPENROUTER_CLIENT
@@ -740,6 +745,9 @@ fn rewrite_system_prompt() -> &'static str {
         "in the original passage.\n",
         "- Preserve the original meaning unless the instruction explicitly asks you to ",
         "change it.\n",
+        "- If the instruction is missing, or only asks to polish, tidy, clean up, or fix ",
+        "the writing, correct errors and tidy the passage. Keep the meaning and the ",
+        "writer's voice. That is not a request to restyle it.\n",
         "- Write the rewrite in the same language as the passage. The instruction may be ",
         "in English even when the passage is not; that is not a request to translate.\n",
         "- Match the passage's voice, rhythm, and formality unless the instruction asks ",
@@ -763,6 +771,31 @@ fn rewrite_system_prompt() -> &'static str {
     )
 }
 
+/// Keep in sync with the rewrite-instruction constants in desktop dictation.rs.
+const MIN_REWRITE_INSTRUCTION_CHARS: usize = 3;
+const DEFAULT_REWRITE_INSTRUCTION: &str = "Correct spelling, grammar, and punctuation, and tidy unclear wording. Keep the meaning, voice, and approximate length.";
+const CUSTOM_PROMPT_REWRITE_INSTRUCTION: &str = "Apply the system instructions to this passage.";
+pub(crate) const EMPTY_TRANSCRIPTION_ERROR: &str = "OpenRouter returned an empty transcription";
+
+/// A spoken instruction is optional. Silence keeps the writer's prompt in
+/// charge: the built-in prompt tidies, and a custom prompt is applied as written.
+fn resolve_rewrite_instruction(instruction: &str, custom_prompt: Option<&str>) -> String {
+    let trimmed = instruction.trim();
+    if trimmed.chars().count() >= MIN_REWRITE_INSTRUCTION_CHARS
+        && trimmed.chars().any(|character| character.is_alphanumeric())
+    {
+        return trimmed.to_string();
+    }
+    if custom_prompt
+        .map(str::trim)
+        .is_some_and(|prompt| !prompt.is_empty())
+    {
+        CUSTOM_PROMPT_REWRITE_INSTRUCTION.to_string()
+    } else {
+        DEFAULT_REWRITE_INSTRUCTION.to_string()
+    }
+}
+
 fn resolve_rewrite_prompt(custom: Option<&str>) -> Result<String, DaemonError> {
     let trimmed = custom.map(str::trim).filter(|value| !value.is_empty());
     let prompt = trimmed.unwrap_or_else(|| rewrite_system_prompt());
@@ -772,16 +805,6 @@ fn resolve_rewrite_prompt(custom: Option<&str>) -> Result<String, DaemonError> {
         ));
     }
     Ok(prompt.to_string())
-}
-
-fn rewrite_reasoning_effort(model: &str) -> Option<&'static str> {
-    if model.contains("gpt-oss") {
-        Some("low")
-    } else if model.contains("gpt-5") {
-        Some("none")
-    } else {
-        None
-    }
 }
 
 fn rewrite_user_message(selection: &str, instruction: &str) -> String {
@@ -1259,7 +1282,38 @@ mod tests {
         assert!(prompt.contains("never answer"));
         assert!(prompt.contains("Match the passage's voice"));
         assert!(prompt.contains("generic LLM prose"));
+        assert!(prompt.contains("tidy the passage"));
         assert!(prompt.contains("Return ONLY the rewritten passage"));
+    }
+
+    #[test]
+    fn missing_rewrite_instruction_tidies_the_passage() {
+        assert_eq!(
+            resolve_rewrite_instruction("", None),
+            DEFAULT_REWRITE_INSTRUCTION
+        );
+        assert_eq!(
+            resolve_rewrite_instruction("  hi ", None),
+            DEFAULT_REWRITE_INSTRUCTION
+        );
+        assert_eq!(
+            resolve_rewrite_instruction("...", None),
+            DEFAULT_REWRITE_INSTRUCTION
+        );
+        assert_eq!(resolve_rewrite_instruction("polish", None), "polish");
+        assert_eq!(
+            resolve_rewrite_instruction("make this shorter", None),
+            "make this shorter"
+        );
+        assert_eq!(
+            resolve_rewrite_instruction("", Some("Translate the passage into French.")),
+            CUSTOM_PROMPT_REWRITE_INSTRUCTION
+        );
+        assert_eq!(resolve_rewrite_instruction("polish", Some("  ")), "polish");
+        assert_eq!(
+            resolve_rewrite_instruction("", Some("   ")),
+            DEFAULT_REWRITE_INSTRUCTION
+        );
     }
 
     #[test]
@@ -1274,16 +1328,6 @@ mod tests {
             resolve_rewrite_prompt(None).unwrap(),
             rewrite_system_prompt()
         );
-    }
-
-    #[test]
-    fn gpt_oss_uses_low_reasoning_for_rewrite_speed() {
-        assert_eq!(rewrite_reasoning_effort("openai/gpt-oss-120b"), Some("low"));
-        assert_eq!(
-            rewrite_reasoning_effort("openai/gpt-5.6-luna"),
-            Some("none")
-        );
-        assert_eq!(rewrite_reasoning_effort("google/gemma-4-31b-it"), None);
     }
 
     #[test]
@@ -1368,6 +1412,7 @@ mod tests {
                 instruction: "make this shorter".to_string(),
                 model: None,
                 prompt: None,
+                reasoning: None,
             })
             .await
             .unwrap_err();
@@ -1385,6 +1430,7 @@ mod tests {
                 instruction: "make this shorter".to_string(),
                 model: Some("openai/gpt-5.6-luna".to_string()),
                 prompt: None,
+                reasoning: None,
             })
             .await
             .unwrap_err();

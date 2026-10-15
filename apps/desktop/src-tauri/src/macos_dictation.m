@@ -206,6 +206,22 @@ static BOOL FDRecordingDurationIsUsable(NSTimeInterval duration) {
       duration >= FDMinimumUsableRecordingDurationSeconds;
 }
 
+// Apple Speech reports silence as kAFAssistantErrorDomain 1110. Match that
+// code, or a description that actually says no speech was detected. Broader
+// phrases such as "no speech recognition" are permission and model failures.
+static BOOL FDErrorIsMissingSpeech(NSError *error) {
+  if (!error) return NO;
+  NSString *domain = error.domain.lowercaseString ?: @"";
+  if (error.code == 1110 &&
+      ([domain containsString:@"assistant"] || [domain containsString:@"speech"])) {
+    return YES;
+  }
+  NSString *description = error.localizedDescription.lowercaseString ?: @"";
+  return [description containsString:@"no speech detected"] ||
+         [description containsString:@"no speech was detected"] ||
+         [description containsString:@"did not detect any speech"];
+}
+
 static os_log_t FDPasteLog(void) {
   static os_log_t log;
   static dispatch_once_t onceToken;
@@ -1574,6 +1590,13 @@ static BOOL FDRecordingIsReadable(NSURL *url) {
       if (error) {
         dispatch_async(dispatch_get_main_queue(), ^{
           if (![self claimSpeechCompletion:generation]) return;
+          // A selected passage does not need a spoken instruction. Silence
+          // still tidies it; a real recognizer failure stays a failure.
+          if (self.rewriteSession && self.rewriteSelection.length > 0 &&
+              FDErrorIsMissingSpeech(error)) {
+            FDEmit(FDEventRewriteInstruction, @"");
+            return;
+          }
           FDEmit(FDEventFailedRetained,
                  error.localizedDescription
                      ?: @"Apple Speech could not transcribe the recording.");
@@ -1586,6 +1609,11 @@ static BOOL FDRecordingIsReadable(NSURL *url) {
     dispatch_async(dispatch_get_main_queue(), ^{
       if (![self claimSpeechCompletion:generation]) return;
       if (text.length < 3) {
+        if (self.rewriteSession && self.rewriteSelection.length > 0) {
+          // The desktop shell decides whether this clip is a real instruction.
+          FDEmit(FDEventRewriteInstruction, text ?: @"");
+          return;
+        }
         FDEmit(FDEventFailedRetained,
                error.localizedDescription ?: @"No speech was detected. Your recording has been retained.");
         return;

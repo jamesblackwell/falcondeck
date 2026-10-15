@@ -2,13 +2,13 @@ use std::{
     ffi::{CStr, CString},
     path::{Path, PathBuf},
     sync::{
-        atomic::{AtomicBool, AtomicU64, Ordering},
         LazyLock, OnceLock, RwLock,
+        atomic::{AtomicBool, AtomicU64, Ordering},
     },
     time::Duration,
 };
 
-use base64::{engine::general_purpose::STANDARD, Engine as _};
+use base64::{Engine as _, engine::general_purpose::STANDARD};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tauri::{AppHandle, Emitter, LogicalSize, Manager, PhysicalPosition};
@@ -41,6 +41,15 @@ const RECORDING_BYTES_PER_SECOND: f64 = 4_000.0;
 // How long the cancelled pill stays up offering Undo. Mirrored by
 // UNDO_WINDOW_SECONDS in DictationOverlay.tsx, which counts it down.
 const CANCEL_UNDO_WINDOW: Duration = Duration::from_secs(10);
+// Shorter than this is not a confirmed transcript or a real edit instruction.
+const MIN_CONFIRMED_SPEECH_CHARS: usize = 3;
+// Keep in sync with resolve_rewrite_instruction() in falcondeck-daemon speech.rs.
+const DEFAULT_REWRITE_INSTRUCTION: &str = "Correct spelling, grammar, and punctuation, and tidy unclear wording. Keep the meaning, voice, and approximate length.";
+const CUSTOM_PROMPT_REWRITE_INSTRUCTION: &str = "Apply the system instructions to this passage.";
+const OPENROUTER_NO_SPEECH_ERROR: &str =
+    "No speech was detected. Your recording is safe, so you can retry.";
+/// Keep in sync with EMPTY_TRANSCRIPTION_ERROR in falcondeck-daemon speech.rs.
+const OPENROUTER_EMPTY_TRANSCRIPTION_ERROR: &str = "OpenRouter returned an empty transcription";
 // External apps cannot acknowledge a synthetic paste reliably. Keep the
 // completed transcript reachable long enough for the writer to notice a miss
 // and explicitly copy it to the clipboard.
@@ -154,6 +163,9 @@ pub struct DictationConfiguration {
     pub rewrite_model: String,
     #[serde(default)]
     pub rewrite_prompt: Option<String>,
+    /// OpenRouter reasoning effort. Absent lets the daemon pick the fastest one.
+    #[serde(default)]
+    pub rewrite_reasoning: Option<String>,
 }
 
 fn default_rewrite_model() -> String {
@@ -190,6 +202,7 @@ impl Default for DictationConfiguration {
             rewrite_shortcut: default_rewrite_shortcut(),
             rewrite_model: default_rewrite_model(),
             rewrite_prompt: None,
+            rewrite_reasoning: None,
         }
     }
 }
@@ -243,6 +256,8 @@ struct RewriteRequest {
     model: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     prompt: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    reasoning: Option<String>,
 }
 
 #[cfg(target_os = "macos")]
@@ -350,6 +365,35 @@ pub fn create_overlay_window(app: &AppHandle) -> Result<(), String> {
 
 fn rewrite_mode() -> Option<&'static str> {
     REWRITE_ACTIVE.load(Ordering::Acquire).then_some("rewrite")
+}
+
+/// Uses a heard edit instruction when it is a real request. Silence uses the
+/// built-in tidy instruction, unless the writer supplied their own prompt.
+fn rewrite_instruction(heard: &str, custom_prompt: Option<&str>) -> String {
+    let trimmed = heard.trim();
+    if usable_rewrite_instruction(trimmed) {
+        return trimmed.to_string();
+    }
+    if custom_prompt
+        .map(str::trim)
+        .is_some_and(|prompt| !prompt.is_empty())
+    {
+        CUSTOM_PROMPT_REWRITE_INSTRUCTION.to_string()
+    } else {
+        DEFAULT_REWRITE_INSTRUCTION.to_string()
+    }
+}
+
+fn usable_rewrite_instruction(trimmed: &str) -> bool {
+    trimmed.chars().count() >= MIN_CONFIRMED_SPEECH_CHARS
+        && trimmed.chars().any(|character| character.is_alphanumeric())
+}
+
+fn transcription_error_is_missing_speech(error: &str) -> bool {
+    let error = error.trim();
+    error == crate::parakeet::NO_SPEECH_ERROR
+        || error == OPENROUTER_NO_SPEECH_ERROR
+        || error == OPENROUTER_EMPTY_TRANSCRIPTION_ERROR
 }
 
 fn clear_rewrite_session() {
@@ -467,10 +511,21 @@ pub fn configure_dictation(config: DictationConfiguration) -> Result<(), String>
         config.enabled && matches!(config.provider, DictationProvider::Parakeet),
         config.parakeet_idle_minutes,
     );
+    let mut config = config;
+    config.rewrite_reasoning = normalize_rewrite_reasoning(config.rewrite_reasoning.take());
     *CONFIG
         .write()
         .map_err(|_| "Dictation settings are unavailable.".to_string())? = config;
     Ok(())
+}
+
+fn normalize_rewrite_reasoning(value: Option<String>) -> Option<String> {
+    let effort = value?.trim().to_ascii_lowercase();
+    const EFFORTS: [&str; 7] = ["none", "minimal", "low", "medium", "high", "xhigh", "max"];
+    EFFORTS
+        .iter()
+        .find(|known| **known == effort)
+        .map(|known| (*known).to_string())
 }
 
 #[tauri::command]
@@ -674,7 +729,7 @@ async fn fix_dictation_transcript_inner(
     let corrected = crate::dictation_dictionary::apply(&app, original.clone());
     let text = request_rewrite(
         daemon_url, corrected, "Correct spelling, grammar, and punctuation, and tidy unclear wording. Keep the meaning, voice, and approximate length.".to_string(),
-        config.rewrite_model, Some(TRANSCRIPT_CLEANUP_PROMPT.to_string()),
+        config.rewrite_model, Some(TRANSCRIPT_CLEANUP_PROMPT.to_string()), None,
     ).await.map_err(|error| error.replace("The rewrite timed out. Your recording is retained, so you can retry.", "Fix timed out. Your original transcript is still available."))?;
     let (sender, receiver) = tokio::sync::oneshot::channel();
     let finish_app = app.clone();
@@ -1257,10 +1312,8 @@ async fn request_transcription(
         .unwrap_or_default()
         .trim()
         .to_string();
-    if text.chars().count() < 3 {
-        return Err(
-            "No speech was detected. Your recording is safe, so you can retry.".to_string(),
-        );
+    if text.chars().count() < MIN_CONFIRMED_SPEECH_CHARS {
+        return Err(OPENROUTER_NO_SPEECH_ERROR.to_string());
     }
     let model = body
         .get("model")
@@ -1291,7 +1344,8 @@ async fn cleanup_transcript(text: String, config: &DictationConfiguration) -> St
     let Some(daemon_url) = config.daemon_url.as_deref() else {
         return text;
     };
-    // The cleanup policy is independent of the user's voice-rewrite prompt.
+    // Cleanup keeps its own prompt, and it does not inherit the reasoning
+    // effort chosen for a spoken edit. Automatic stays on the fast effort.
     request_rewrite(
         daemon_url,
         text.clone(),
@@ -1299,6 +1353,7 @@ async fn cleanup_transcript(text: String, config: &DictationConfiguration) -> St
             .to_string(),
         config.rewrite_model.clone(),
         Some(TRANSCRIPT_CLEANUP_PROMPT.to_string()),
+        None,
     )
     .await
     .unwrap_or(text)
@@ -1310,6 +1365,7 @@ async fn request_rewrite(
     instruction: String,
     model: String,
     prompt: Option<String>,
+    reasoning: Option<String>,
 ) -> Result<String, String> {
     let response = OPENROUTER_CLIENT
         .post(format!("{daemon_url}/api/speech/rewrite"))
@@ -1319,6 +1375,7 @@ async fn request_rewrite(
             instruction,
             model,
             prompt,
+            reasoning,
         })
         .send()
         .await
@@ -1505,6 +1562,21 @@ async fn transcribe_recording(
     };
     let transcription = match result {
         Ok(transcription) => transcription,
+        // Rewrite does not need a spoken instruction. A selected passage and
+        // a silent or unrecognized take still tidy the text.
+        Err(error)
+            if REWRITE_ACTIVE.load(Ordering::Acquire)
+                && transcription_error_is_missing_speech(&error) =>
+        {
+            Transcription {
+                text: String::new(),
+                model: if matches!(provider, DictationProvider::Parakeet) {
+                    crate::parakeet::MODEL.into()
+                } else {
+                    config.model.clone()
+                },
+            }
+        }
         Err(error) => {
             // The audio stays put either way — the native side retains it for
             // the overlay's Retry — but filing it here is what lets the writer
@@ -1549,9 +1621,10 @@ async fn transcribe_recording(
         request_rewrite(
             daemon_url,
             selection,
-            text,
+            rewrite_instruction(&text, config.rewrite_prompt.as_deref()),
             config.rewrite_model.clone(),
             config.rewrite_prompt.clone(),
+            config.rewrite_reasoning.clone(),
         )
         .await?
     } else {
@@ -1820,9 +1893,10 @@ pub extern "C" fn fd_dictation_emit(kind: i32, payload: *const std::ffi::c_char)
                     request_rewrite(
                         &daemon_url,
                         selection,
-                        instruction,
+                        rewrite_instruction(&instruction, config.rewrite_prompt.as_deref()),
                         config.rewrite_model,
-                        config.rewrite_prompt,
+                        config.rewrite_prompt.clone(),
+                        config.rewrite_reasoning,
                     )
                     .await
                 };
@@ -1968,13 +2042,46 @@ pub extern "C" fn fd_dictation_emit(kind: i32, payload: *const std::ffi::c_char)
 mod tests {
     use super::{
         dictation_audio_devices, measured_recording_duration, parse_audio_level, permission_label,
-        validate_local_daemon_url, validate_recording_path,
+        rewrite_instruction, transcription_error_is_missing_speech, validate_local_daemon_url,
+        validate_recording_path,
     };
 
     #[cfg(target_os = "macos")]
     #[test]
     fn transcript_replacement_requires_the_original_range_and_unchanged_text() {
         assert!(unsafe { super::fd_dictation_test_transcript_replacement_ranges() });
+    }
+
+    #[test]
+    fn missing_speech_during_rewrite_becomes_a_tidy_instruction() {
+        let tidy = super::DEFAULT_REWRITE_INSTRUCTION;
+        assert_eq!(rewrite_instruction("", None), tidy);
+        assert_eq!(rewrite_instruction("  um ", None), tidy);
+        assert_eq!(rewrite_instruction("...", None), tidy);
+        assert_eq!(rewrite_instruction("polish", None), "polish");
+        assert_eq!(
+            rewrite_instruction("", Some("Translate the passage into French.")),
+            super::CUSTOM_PROMPT_REWRITE_INSTRUCTION
+        );
+        assert_eq!(
+            rewrite_instruction("make this shorter", Some("Translate everything.")),
+            "make this shorter"
+        );
+        assert!(transcription_error_is_missing_speech(
+            crate::parakeet::NO_SPEECH_ERROR
+        ));
+        assert!(transcription_error_is_missing_speech(
+            super::OPENROUTER_NO_SPEECH_ERROR
+        ));
+        assert!(transcription_error_is_missing_speech(
+            super::OPENROUTER_EMPTY_TRANSCRIPTION_ERROR
+        ));
+        assert!(!transcription_error_is_missing_speech(
+            "No speech recognition model is installed."
+        ));
+        assert!(!transcription_error_is_missing_speech(
+            "Transcription timed out. Your recording is retained, so you can retry."
+        ));
     }
 
     #[tokio::test]

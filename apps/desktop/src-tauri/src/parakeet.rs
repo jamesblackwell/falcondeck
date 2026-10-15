@@ -354,6 +354,8 @@ pub fn prewarm(app: AppHandle) {
     }
 }
 
+pub const NO_SPEECH_ERROR: &str = "Parakeet did not detect any speech.";
+
 pub async fn transcribe(app: &AppHandle, path: &Path) -> Result<String, String> {
     let result = request(app, "transcribe", Some(path), false).await?;
     result
@@ -362,7 +364,7 @@ pub async fn transcribe(app: &AppHandle, path: &Path) -> Result<String, String> 
         .map(str::trim)
         .filter(|text| !text.is_empty())
         .map(str::to_string)
-        .ok_or_else(|| "Parakeet did not detect any speech.".into())
+        .ok_or_else(|| NO_SPEECH_ERROR.into())
 }
 
 pub fn shutdown() {

@@ -2143,6 +2143,8 @@ export type SpeechRewriteRequest = {
   instruction: string;
   model?: string | null;
   prompt?: string | null;
+  /** OpenRouter reasoning effort. Omit to use the fastest effort the model allows. */
+  reasoning?: string | null;
 };
 
 export type SpeechRewriteResponse = {
