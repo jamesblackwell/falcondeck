@@ -1077,7 +1077,10 @@ mod tests {
         );
         persist_preferences(&path, &preferences).await.unwrap();
         assert!(
-            !load_preferences(&path).await.unwrap().auto_resume_interrupted_sessions
+            !load_preferences(&path)
+                .await
+                .unwrap()
+                .auto_resume_interrupted_sessions
         );
         apply_preferences_patch(
             &mut preferences,
@@ -1087,7 +1090,12 @@ mod tests {
             },
         );
         persist_preferences(&path, &preferences).await.unwrap();
-        assert!(load_preferences(&path).await.unwrap().auto_resume_interrupted_sessions);
+        assert!(
+            load_preferences(&path)
+                .await
+                .unwrap()
+                .auto_resume_interrupted_sessions
+        );
     }
 
     #[test]

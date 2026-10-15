@@ -106,8 +106,6 @@ export const ThreadItem = memo(
     onUnarchive,
     onOpenContextMenu,
     onRequestRename,
-    const folderControls = useProjectFolders()
-    const canDrag = Boolean(folderControls.onProjectFolderMutation && !thread.is_archived)
     nowTick = 0,
     tags = [],
     providerLabel = null,
@@ -116,10 +114,12 @@ export const ThreadItem = memo(
     onArchiveConfirm,
     onArchiveCancel,
   }: ThreadItemProps) {
+    const folderControls = useProjectFolders()
+    const canDrag = Boolean(folderControls.onProjectFolderMutation && !thread.is_archived)
     const attention = deriveThreadAttentionPresentation(thread)
     const wasInterrupted = wasTurnInterruptedByShutdown(thread)
-    // Outside the title button. A name inside that flex button is joined onto
-    // the title with no space ("quizletPinned chat").
+    // The project name stays outside the title button so that button's name
+    // stays the thread title. Text inside the button is joined into the name.
     const projectDescriptionId = useId()
     const archiveConfirm = archiveConfirmPending && Boolean(onArchiveConfirm)
     const hoverAction = thread.is_archived
@@ -132,14 +132,6 @@ export const ThreadItem = memo(
     const timeString = useMemo(
       () => timeAgo(thread.updated_at),
       [nowTick, thread.updated_at],
-        draggable={canDrag || undefined}
-        onDragStart={canDrag ? (event) => {
-          const task = { workspaceId, threadId: thread.id }
-          event.dataTransfer.setData(TASK_DRAG_TYPE, JSON.stringify(task))
-          event.dataTransfer.effectAllowed = 'move'
-          folderControls.setDraggedTask(task)
-        } : undefined}
-        onDragEnd={canDrag ? () => folderControls.setDraggedTask(null) : undefined}
     )
     const fullTimestamp = useMemo(
       () => formatThreadTimestamp(thread.updated_at),
@@ -148,6 +140,14 @@ export const ThreadItem = memo(
 
     return (
       <div
+        draggable={canDrag || undefined}
+        onDragStart={canDrag ? (event) => {
+          const task = { workspaceId, threadId: thread.id }
+          event.dataTransfer.setData(TASK_DRAG_TYPE, JSON.stringify(task))
+          event.dataTransfer.effectAllowed = 'move'
+          folderControls.setDraggedTask(task)
+        } : undefined}
+        onDragEnd={canDrag ? () => folderControls.setDraggedTask(null) : undefined}
         data-archive-confirm={archiveConfirm ? "true" : undefined}
         className={cn(
           // A container so the provider label can bow out on a narrow sidebar

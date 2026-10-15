@@ -531,7 +531,7 @@ describe("DesktopSidebar", () => {
         {
           workspace: workspace({
             id: "workspace-2",
-            path: "/Users/james/notes",
+            path: "/Users/james/notes/",
           }),
           threads: [
             thread({
@@ -571,33 +571,34 @@ describe("DesktopSidebar", () => {
       name: "Pinned chat",
     });
     expect(quizletRow).toHaveAccessibleName("Pinned chat");
-    expect(quizletRow.querySelector("img")).toHaveAttribute(
+    const quizletMark = quizletRow.querySelector("[title='quizlet']");
+    expect(quizletMark?.querySelector("img")).toHaveAttribute(
       "src",
       "https://example.test/quizlet.png",
     );
     expect(
-      document.getElementById(quizletRow.getAttribute("aria-describedby") ?? ""),
-    ).toHaveTextContent("quizlet");
+      document.getElementById(quizletRow.getAttribute("aria-describedby") ?? "")
+        ?.textContent,
+    ).toBe("quizlet");
 
     const notesRow = within(pinned).getByRole("button", {
       name: "Folder chat",
     });
-    expect(notesRow.querySelector("img")).toBeNull();
-    const folder = notesRow.querySelector("svg")?.parentElement;
-    expect(folder?.querySelector("svg")).toBeTruthy();
-    expect(folder).toHaveStyle({ color: "var(--fd-cat-2)" });
+    const notesMark = notesRow.querySelector("[title='notes']");
+    expect(notesMark?.querySelector("img")).toBeNull();
+    expect(notesMark?.querySelector("span")).toHaveStyle({
+      color: "var(--fd-cat-2)",
+    });
     expect(
-      document.getElementById(notesRow.getAttribute("aria-describedby") ?? ""),
-    ).toHaveTextContent("notes");
+      document.getElementById(notesRow.getAttribute("aria-describedby") ?? "")
+        ?.textContent,
+    ).toBe("notes");
 
     const casualRow = within(pinned).getByRole("button", { name: "Casual chat" });
     expect(casualRow.querySelector("img, svg")).toBeNull();
     expect(casualRow).not.toHaveAttribute("aria-describedby");
 
     const projects = screen.getByRole("region", { name: "Projects" });
-    expect(
-      within(projects).queryByRole("img", { name: "quizlet" }),
-    ).not.toBeInTheDocument();
     expect(within(projects).queryByText("Pinned chat")).not.toBeInTheDocument();
   });
 

@@ -608,6 +608,7 @@ const FlatThreadList = memo(function FlatThreadList({
     </>
   );
 });
+
 const ThreadList = memo(function ThreadList(
   props: React.ComponentProps<typeof FlatThreadList>,
 ) {
@@ -655,7 +656,6 @@ const ThreadList = memo(function ThreadList(
   );
 });
 
-
 type PinnedThreadEntry = {
   workspaceId: string;
   thread: ThreadSummary;
@@ -671,9 +671,9 @@ function pinnedProjectMark(
   color: string | null,
 ): ThreadProjectMark | null {
   if (workspace.kind === "casual") return null;
-  // Same basename the project row shows. A trailing slash would make pop()
-  // empty, so fall through to the path itself.
-  const label = workspace.path.split("/").pop() || workspace.path;
+  // Folder name. Empty segments from a trailing slash are skipped; a blank
+  // path leaves the row unmarked.
+  const label = workspace.path.split("/").filter(Boolean).pop();
   if (!label) return null;
   return { src: iconSrc, color, label };
 }
@@ -1121,9 +1121,9 @@ const ProjectGroupRow = memo(function ProjectGroupRow({
   nowTick: number;
   threadTagsById?: Record<string, ThreadTag[]>;
 }) {
+  const workspaceId = group.workspace.id;
   const folderControls = useProjectFolders();
   const taskDrop = useTaskDropTarget(workspaceId, null);
-  const workspaceId = group.workspace.id;
   const workspacePath = group.workspace.path;
   const defaultThreadId = defaultProjectThreadId(group);
 
@@ -1208,13 +1208,13 @@ const ProjectGroupRow = memo(function ProjectGroupRow({
       host={host}
       isSelected={isSelected}
       onSelect={handleSelect}
+      onNewThread={handleNewThread}
       onCreateFolder={folderControls.onProjectFolderMutation ? () => {
         onWorkspaceOpenChange(workspaceId, true);
         folderControls.edit({ workspaceId });
       } : undefined}
       taskDropProps={taskDrop.props}
       isTaskDropTarget={taskDrop.over}
-      onNewThread={handleNewThread}
       onSearchThreads={handleSearchThreads}
       onOpenContextMenu={handleOpenContextMenu}
       color={color}
@@ -1247,10 +1247,10 @@ const ProjectGroupRow = memo(function ProjectGroupRow({
   );
 });
 
+export const WorkspaceSidebar = memo(function WorkspaceSidebar({
   projectFolders,
   onProjectFolderMutation,
   onNewThreadInFolder,
-export const WorkspaceSidebar = memo(function WorkspaceSidebar({
   groups,
   workspaceHosts,
   selectedWorkspaceId,
@@ -2902,12 +2902,12 @@ export const WorkspaceSidebar = memo(function WorkspaceSidebar({
   const showHeader =
     Boolean(title) || Boolean(onSearch) || Boolean(headerClassName);
 
+  return (
     <ProjectFoldersProvider
       projectFolders={projectFolders}
       onProjectFolderMutation={onProjectFolderMutation}
       onNewThreadInFolder={onNewThreadInFolder}
     >
-  return (
     <SidebarShell className={className}>
       {showHeader ? (
         <SidebarHeader
@@ -3567,12 +3567,12 @@ export const WorkspaceSidebar = memo(function WorkspaceSidebar({
                   .find((group) => group.workspace.id === draggingWorkspaceId)
                   ?.workspace.path.split("/")
                   .pop() ?? "Project"}
-    </ProjectFoldersProvider>
               </span>
             </div>,
             document.body,
           )
         : null}
     </SidebarShell>
+    </ProjectFoldersProvider>
   );
 });
