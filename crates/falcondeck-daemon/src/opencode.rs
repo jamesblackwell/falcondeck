@@ -153,6 +153,16 @@ impl OpenCodeRuntime {
         let stdout = child.stdout.take().ok_or_else(|| {
             DaemonError::Process("OpenCode server did not expose stdout".to_string())
         })?;
+        // Drain both pipes while startup is pending: diagnostics can fill
+        // stderr before OpenCode writes its listening banner to stdout.
+        if let Some(stderr) = child.stderr.take() {
+            tokio::spawn(async move {
+                let mut lines = BufReader::new(stderr).lines();
+                while let Ok(Some(line)) = lines.next_line().await {
+                    tracing::debug!(%line, "OpenCode server stderr");
+                }
+            });
+        }
         let (port_tx, port_rx) = tokio::sync::oneshot::channel();
         tokio::spawn(monitor_stdout(stdout, port_tx));
         let port = match timeout(STARTUP_TIMEOUT, port_rx).await {
@@ -172,7 +182,6 @@ impl OpenCodeRuntime {
                 ));
             }
         };
-        let stderr = child.stderr.take();
         let server_pid = child.id();
         let runtime = Arc::new(Self {
             base_url: format!("http://127.0.0.1:{port}"),
@@ -188,14 +197,6 @@ impl OpenCodeRuntime {
             activity: crate::activity::ActivityClock::new(),
             served_prompt: std::sync::atomic::AtomicBool::new(false),
         });
-        if let Some(stderr) = stderr {
-            tokio::spawn(async move {
-                let mut lines = BufReader::new(stderr).lines();
-                while let Ok(Some(line)) = lines.next_line().await {
-                    tracing::debug!(%line, "OpenCode server stderr");
-                }
-            });
-        }
         if let Err(error) = runtime.health().await {
             runtime.shutdown().await;
             return Err(error);
@@ -1150,6 +1151,46 @@ fn session_create_body(cwd: &str, model: Option<&str>, agent: Option<&str>) -> V
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn startup_drains_stderr_before_the_listening_banner() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server = tokio::spawn(async move {
+            let router = axum::Router::new().route(
+                "/api/info",
+                axum::routing::get(|| async { axum::Json(json!({"ok":true})) }),
+            );
+            axum::serve(listener, router).await.unwrap();
+        });
+        let temp = tempfile::tempdir().unwrap();
+        let script = temp.path().join("noisy-server.sh");
+        std::fs::write(
+            &script,
+            format!(
+                r#"
+            i=0
+            while [ "$i" -lt 20000 ]; do
+                printf 'startup diagnostic before listening\n'
+                i=$((i + 1))
+            done >&2
+            printf 'server listening on http://127.0.0.1:{port}\n'
+            exec sleep 30
+        "#
+            ),
+        )
+        .unwrap();
+        let started = OpenCodeRuntime::spawn(
+            &["/bin/sh".into(), script.to_string_lossy().into_owned()],
+            &temp.path().to_string_lossy(),
+            &HashMap::new(),
+        )
+        .await;
+        server.abort();
+        let runtime = started.expect("startup diagnostics must not block the listening banner");
+        runtime.shutdown().await;
+    }
 
     #[cfg(unix)]
     #[tokio::test]
