@@ -1412,9 +1412,11 @@ static CGEventRef FDEventTapCallback(CGEventTapProxy proxy, CGEventType type,
   [self.audioFileOutput stopRecording];
 }
 
-// Only the file-output delegate or -sessionDidFinishStarting: clear `stopping`.
-// Without a capture session neither will ever run, and a stuck `stopping`
-// silently swallows every later shortcut press until FalconDeck restarts.
+// `stopping` is normally cleared by the file-output delegate, or by
+// -sessionDidFinishStarting: while the microphone warms up. Both need a capture
+// session; without one, neither runs and a stuck `stopping` swallows every
+// later shortcut press until FalconDeck restarts. Returns YES when it settled
+// the stop itself.
 - (BOOL)finishOrphanedStop {
   if (self.captureSession) return NO;
   BOOL wasCancelled = self.cancelling;
@@ -1422,10 +1424,17 @@ static CGEventRef FDEventTapCallback(CGEventTapProxy proxy, CGEventType type,
   self.fileOutputActive = NO;
   self.stopping = NO;
   self.cancelling = NO;
-  if (wasCancelled) {
+  // Audio already on disk stays recoverable rather than being reported lost.
+  // Surfacing is silent while both features are off, so only take that branch
+  // when it will actually replace the overlay's recording state.
+  if ((self.enabled || self.rewriteEnabled) && self.recordingURL &&
+      [NSFileManager.defaultManager fileExistsAtPath:self.recordingURL.path]) {
+    [self surfaceRetainedRecordingIfNeeded];
+  } else if (wasCancelled) {
     FDEmit(FDEventCancelled, @"");
   } else {
-    FDEmit(FDEventFailed, @"The microphone stopped before the recording finished. Try recording again.");
+    FDEmit(FDEventFailed,
+           @"The microphone stopped before the recording finished. Try recording again.");
   }
   return YES;
 }
@@ -1448,6 +1457,7 @@ static CGEventRef FDEventTapCallback(CGEventTapProxy proxy, CGEventType type,
     // The output can also finish on its own (microphone unplugged or taken
     // over). Leaving `recording` set would route the next press into a stop
     // that waits for this callback again and never returns.
+    BOOL finishedUnrequested = self.recording;
     self.recording = NO;
     self.stopping = NO;
     NSURL *url = self.recordingURL ?: outputFileURL;
@@ -1502,6 +1512,8 @@ static CGEventRef FDEventTapCallback(CGEventTapProxy proxy, CGEventType type,
       return;
     }
     [self setRecordingDurationSeconds:duration];
+    // -stopRecording announces processing; an unrequested finish has not yet.
+    if (finishedUnrequested) FDEmit(FDEventProcessing, @"");
     if (!self.shuttingDown) {
       [self prepareRecordingForTranscription:url provider:self.recordingProvider];
     }
