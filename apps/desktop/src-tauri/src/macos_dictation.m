@@ -629,6 +629,7 @@ static BOOL FDTranscriptRangeMatches(NSString *value, NSString *original, CFRang
 - (BOOL)postPasteShortcut;
 - (void)finishActivePasteboardSessionIfOwned;
 - (void)dropCancelledRecording;
+- (BOOL)finishOrphanedStop;
 - (void)retryPasteTranscript:(NSString *)text;
 - (BOOL)postPasteShortcutToPid:(pid_t)processIdentifier;
 @end
@@ -1397,6 +1398,7 @@ static CGEventRef FDEventTapCallback(CGEventTapProxy proxy, CGEventType type,
   self.stopping = YES;
   [self stopAudioLevelMeter];
   FDEmit(FDEventProcessing, @"");
+  if ([self finishOrphanedStop]) return;
   [self.audioFileOutput stopRecording];
 }
 
@@ -1406,7 +1408,26 @@ static CGEventRef FDEventTapCallback(CGEventTapProxy proxy, CGEventType type,
   self.recording = NO;
   self.stopping = YES;
   [self stopAudioLevelMeter];
+  if ([self finishOrphanedStop]) return;
   [self.audioFileOutput stopRecording];
+}
+
+// Only the file-output delegate or -sessionDidFinishStarting: clear `stopping`.
+// Without a capture session neither will ever run, and a stuck `stopping`
+// silently swallows every later shortcut press until FalconDeck restarts.
+- (BOOL)finishOrphanedStop {
+  if (self.captureSession) return NO;
+  BOOL wasCancelled = self.cancelling;
+  self.audioFileOutput = nil;
+  self.fileOutputActive = NO;
+  self.stopping = NO;
+  self.cancelling = NO;
+  if (wasCancelled) {
+    FDEmit(FDEventCancelled, @"");
+  } else {
+    FDEmit(FDEventFailed, @"The microphone stopped before the recording finished. Try recording again.");
+  }
+  return YES;
 }
 
 - (void)captureOutput:(AVCaptureFileOutput *)output
@@ -1424,6 +1445,10 @@ static CGEventRef FDEventTapCallback(CGEventTapProxy proxy, CGEventType type,
     self.captureSession = nil;
     self.audioFileOutput = nil;
     self.fileOutputActive = NO;
+    // The output can also finish on its own (microphone unplugged or taken
+    // over). Leaving `recording` set would route the next press into a stop
+    // that waits for this callback again and never returns.
+    self.recording = NO;
     self.stopping = NO;
     NSURL *url = self.recordingURL ?: outputFileURL;
     NSTimeInterval duration = CMTimeGetSeconds(output.recordedDuration);
