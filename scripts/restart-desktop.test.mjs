@@ -3,6 +3,7 @@ import { test } from 'node:test';
 import { mkdirSync, mkdtempSync, rmdirSync, unlinkSync } from 'node:fs';
 import { spawn } from 'node:child_process';
 import { once } from 'node:events';
+import { createServer } from 'node:http';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { mainPids, pruneDesktopBackups, restartDesktop, waitForDesktopHealth, withRestartLock } from './restart-desktop.mjs';
@@ -122,37 +123,165 @@ test('health timeout includes request time rather than counting polling attempts
   assert.equal(probes, 1);
   assert.equal(elapsed, 2000);
 });
-test('an unhealthy first listener cannot delay probing the daemon', async () => {
+test('a healthy daemon returns immediately and cancels stalled connector probes', async () => {
   const f = fixture();
   const original = f.io;
-  let daemonProbed = false;
-  let overlapped = false;
-  await waitForDesktopHealth({ ...f,
+  let releaseConnector;
+  let connectorSignal;
+  const waiting = waitForDesktopHealth({ ...f,
     io: (command, args) => command.endsWith('/lsof')
       ? 'p123\nn127.0.0.1:59183\nn127.0.0.1:59182\n' : original(command, args),
-    health: async (url) => {
+    health: async (url, { signal }) => {
       if (url.includes(':59183/')) {
-        await new Promise((resolve) => setImmediate(resolve));
-        overlapped = daemonProbed;
-        throw new Error('timed out');
+        connectorSignal = signal;
+        return new Promise((resolve) => { releaseConnector = () => resolve({ ok: false, status: 503 }); });
       }
-      daemonProbed = true;
       return f.health(url);
     },
   });
-  assert.ok(overlapped, 'listeners must be probed concurrently');
+  try {
+    assert.equal(await Promise.race([
+      waiting.then(() => 'healthy'),
+      new Promise((resolve) => setImmediate(() => resolve('still waiting'))),
+    ]), 'healthy');
+    assert.ok(connectorSignal.aborted, 'cancel requests that lost the health probe race');
+  } finally { releaseConnector(); await waiting; }
+});
+test('health succeeds only while exactly one installed main process remains', async () => {
+  const f = fixture();
+  const original = f.io;
+  let reads = 0;
+  await assert.rejects(waitForDesktopHealth({ ...f,
+    io: (command, args) => {
+      const output = original(command, args);
+      return command.endsWith('/ps') && ++reads > 1 ? `${output}\n789 ${binary}` : output;
+    },
+  }), /Multiple installed main processes found: 123, 789/);
+});
+test('a process check that exhausts the deadline cannot report success', async () => {
+  const f = fixture();
+  const original = f.io;
+  let elapsed = 0;
+  let reads = 0;
+  const timeouts = [];
+  await assert.rejects(waitForDesktopHealth({ ...f, timeoutMs: 1000, now: () => elapsed,
+    delay: async (ms) => { elapsed += ms; },
+    io: (command, args, options) => {
+      timeouts.push(options?.timeout);
+      if (command.endsWith('/ps') && ++reads === 2) elapsed = 1000;
+      return original(command, args);
+    },
+  }), /within 1s/);
+  assert.ok(timeouts.every((timeout) => timeout > 0 && timeout <= 1000));
+});
+test('listener inspection failures retain the command error in diagnostics', async () => {
+  const f = fixture();
+  const original = f.io;
+  await assert.rejects(waitForDesktopHealth({ ...f,
+    io: (command, args) => {
+      if (command.endsWith('/lsof')) throw new Error('lsof permission denied');
+      return original(command, args);
+    },
+  }), /PID 123.*lsof permission denied/);
+});
+test('real HTTP probes cancel a stalled JSON body when another port is healthy', async () => {
+  const f = fixture();
+  const original = f.io;
+  let notifyStalled;
+  let stalledResponse;
+  const stalledStarted = new Promise((resolve) => { notifyStalled = resolve; });
+  const stalled = createServer((_request, response) => {
+    stalledResponse = response;
+    response.writeHead(200, { 'Content-Type': 'application/json' });
+    response.write('{"ok":');
+    notifyStalled();
+  });
+  const daemon = createServer(async (_request, response) => {
+    await stalledStarted;
+    response.writeHead(200, { 'Content-Type': 'application/json' });
+    response.end(JSON.stringify({ ok: true, version: '0.1.3', workspaces: 90 }));
+  });
+  const servers = [stalled, daemon];
+  try {
+    await Promise.all(servers.map((server) => {
+      server.listen(0, '127.0.0.1');
+      return once(server, 'listening');
+    }));
+    const port = daemon.address().port;
+    const result = await waitForDesktopHealth({ ...f, health: fetch,
+      io: (command, args) => command.endsWith('/lsof')
+        ? `p123\nn127.0.0.1:${stalled.address().port}\nn127.0.0.1:${port}\n` : original(command, args),
+    });
+    assert.deepEqual(result, { pid: 123, port });
+    if (!stalledResponse.destroyed) await once(stalledResponse, 'close', { signal: AbortSignal.timeout(2000) });
+  } finally {
+    await Promise.all(servers.map((server) => new Promise((resolve) => {
+      server.close(resolve);
+      server.closeAllConnections();
+    })));
+  }
 });
 test('failed installation copy leaves the running app untouched', async () => {
   const f = fixture();
   const original = f.io;
+  const removed = [];
   f.io = (command, args) => {
     if (command.endsWith('/ditto')) throw new Error('copy failed');
     return original(command, args);
   };
   await assert.rejects(restartDesktop({ ...f, installFrom: '/built/FalconDeck.app',
-    files: { mkdtempSync: () => '/Applications/.FalconDeck-stage-test' },
+    files: { mkdtempSync: () => '/Applications/.FalconDeck-stage-test',
+      rmSync: (path, options) => removed.push([path, options]) },
   }), /copy failed/);
   assert.ok(!f.calls.some(([c]) => c.endsWith('/osascript') || c.endsWith('/kill') || c.endsWith('/open')));
+  assert.deepEqual(removed, [['/Applications/.FalconDeck-stage-test', { recursive: true, force: true }]]);
+});
+test('failed staged verification cleans the copied bundle without quitting the app', async () => {
+  const f = fixture();
+  const original = f.io;
+  const removed = [];
+  await assert.rejects(restartDesktop({ ...f, installFrom: '/built/FalconDeck.app',
+    io: (command, args) => {
+      if (command.endsWith('/codesign') && args.at(-1).includes('-stage-')) throw new Error('invalid staged signature');
+      return original(command, args);
+    },
+    files: { mkdtempSync: () => '/Applications/.FalconDeck-stage-test',
+      rmSync: (path) => removed.push(path) },
+  }), /invalid staged signature/);
+  assert.deepEqual(removed, ['/Applications/.FalconDeck-stage-test']);
+  assert.ok(!f.calls.some(([c]) => c.endsWith('/osascript') || c.endsWith('/kill') || c.endsWith('/open')));
+});
+test('a refused quit cleans the staged bundle and leaves the installed bundle in place', async () => {
+  const f = fixture({ stubborn: true });
+  const removed = [];
+  await assert.rejects(restartDesktop({ ...f, installFrom: '/built/FalconDeck.app', files: {
+    mkdtempSync: () => '/Applications/.FalconDeck-stage-test',
+    renameSync: () => assert.fail('must not replace an app that did not quit'),
+    rmSync: (path) => removed.push(path),
+  } }), /did not quit/);
+  assert.deepEqual(removed, ['/Applications/.FalconDeck-stage-test']);
+  assert.ok(!f.calls.some(([c]) => c.endsWith('/open')));
+});
+test('failed bundle promotion restores the previous app and cleans the stage', async () => {
+  const f = fixture();
+  const moves = [];
+  const removed = [];
+  await assert.rejects(restartDesktop({ ...f, installFrom: '/built/FalconDeck.app', files: {
+    existsSync: () => true,
+    mkdtempSync: (prefix) => `${prefix}test01`,
+    renameSync: (from, to) => {
+      moves.push([from, to]);
+      if (from.includes('-stage-')) throw new Error('promotion failed');
+    },
+    rmSync: (path) => removed.push(path),
+  } }), /promotion failed/);
+  assert.deepEqual(moves, [
+    ['/Applications/FalconDeck.app', '/Applications/.FalconDeck-backup-test01/FalconDeck.app'],
+    ['/Applications/.FalconDeck-stage-test01/FalconDeck.app', '/Applications/FalconDeck.app'],
+    ['/Applications/.FalconDeck-backup-test01/FalconDeck.app', '/Applications/FalconDeck.app'],
+  ]);
+  assert.deepEqual(removed, ['/Applications/.FalconDeck-stage-test01']);
+  assert.ok(!f.calls.some(([c]) => c.endsWith('/open')));
 });
 test('installs a verified staged bundle, retains backup, then opens once', async () => {
   const f = fixture();
@@ -163,34 +292,38 @@ test('installs a verified staged bundle, retains backup, then opens once', async
     existsSync: () => true,
     mkdtempSync: (prefix) => `${prefix}test01`,
     renameSync: (from, to) => moves.push([from, to]),
-    rmdirSync: () => {},
     readdirSync: () => {
       assert.ok(healthy, 'must retain older backups until the replacement is healthy');
       return ['test01', 'older1', 'older2'].map((suffix) => ({
         name: `.FalconDeck-backup-${suffix}`, isDirectory: () => true,
       }));
     },
-    rmSync: (path, options) => { assert.deepEqual(options, { recursive: true }); removed.push(path); },
+    rmSync: (path, options) => {
+      assert.deepEqual(options, path.includes('-stage-') ? { recursive: true, force: true } : { recursive: true });
+      removed.push(path);
+    },
   }, health: async (url) => { const result = await f.health(url); healthy = result.ok; return result; } });
   assert.deepEqual(moves, [
     ['/Applications/FalconDeck.app', '/Applications/.FalconDeck-backup-test01/FalconDeck.app'],
     ['/Applications/.FalconDeck-stage-test01/FalconDeck.app', '/Applications/FalconDeck.app'],
   ]);
-  assert.deepEqual(removed, ['/Applications/.FalconDeck-backup-older1', '/Applications/.FalconDeck-backup-older2']);
+  assert.deepEqual(removed, ['/Applications/.FalconDeck-backup-older1', '/Applications/.FalconDeck-backup-older2',
+    '/Applications/.FalconDeck-stage-test01']);
   const verification = f.calls.findIndex(([c, ...args]) => c.endsWith('/codesign') && args.at(-1).includes('-stage-'));
   assert.ok(verification < f.calls.findIndex(([c]) => c.endsWith('/osascript')));
   assert.equal(f.calls.filter(([c]) => c.endsWith('/open')).length, 1);
 });
 test('an unhealthy replacement preserves all previous backups', async () => {
   const f = fixture({ unhealthy: true });
+  const removed = [];
   await assert.rejects(restartDesktop({ ...f, installFrom: '/built/FalconDeck.app', files: {
     existsSync: () => true,
     mkdtempSync: (prefix) => `${prefix}test01`,
     renameSync: () => {},
-    rmdirSync: () => {},
     readdirSync: () => assert.fail('must not prune before health check succeeds'),
-    rmSync: () => assert.fail('must not delete backups'),
+    rmSync: (path) => removed.push(path),
   } }), /no automatic restart/);
+  assert.deepEqual(removed, ['/Applications/.FalconDeck-stage-test01']);
 });
 test('backup pruning ignores unrelated directories and symlinks', () => {
   const removed = [];

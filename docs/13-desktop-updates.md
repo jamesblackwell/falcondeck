@@ -59,13 +59,15 @@ The generated schema files should change only when Tauri config or permissions c
 After the replacement launches and its daemon passes the health check, the
 installer deletes older installer-created backup directories, keeping one
 previous app. Failed installs or health checks preserve existing backups.
+Temporary staging copies are cleaned up on both success and failure.
 `make desktop-restart` does not rotate or prune backups.
 
 Both commands launch the installed app once and allow up to two minutes for
 daemon health. The check probes all loopback listeners owned by the installed
 main process and validates the daemon health response, since connector proxies
-also listen inside that process. While waiting, it reports progress every ten
-seconds. A timeout reports the last observed process/listener state and the
+also listen inside that process. The first valid daemon response cancels the
+remaining probes. While waiting, it reports progress every ten seconds. A
+timeout reports the last observed process/listener state and the
 daemon log path (`~/.falcondeck/logs/daemon.log`); it never schedules a retry.
 
 ## First-time setup

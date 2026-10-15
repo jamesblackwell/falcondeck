@@ -1,5 +1,5 @@
 import { execFileSync, spawnSync } from 'node:child_process';
-import { closeSync, existsSync, mkdirSync, mkdtempSync, openSync, readdirSync, renameSync, rmdirSync, rmSync } from 'node:fs';
+import { closeSync, existsSync, mkdirSync, mkdtempSync, openSync, readdirSync, renameSync, rmSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { basename, dirname, join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
@@ -7,8 +7,8 @@ import { pathToFileURL } from 'node:url';
 const executable = '/Applications/FalconDeck.app/Contents/MacOS/falcondeck-desktop';
 const app = '/Applications/FalconDeck.app';
 const staleJob = 'com.falcondeck.apply-writer-fix';
-const run = (command, args) => execFileSync(command, args, {
-  encoding: 'utf8', timeout: 15_000, stdio: ['ignore', 'pipe', 'pipe'],
+const run = (command, args, { timeout = 15_000 } = {}) => execFileSync(command, args, {
+  encoding: 'utf8', timeout, stdio: ['ignore', 'pipe', 'pipe'],
 });
 const sleep = (ms) => new Promise((done) => setTimeout(done, ms));
 const backupFiles = { existsSync, readdirSync, rmSync };
@@ -33,50 +33,74 @@ export function mainPids(output) {
   });
 }
 
+async function probeDaemonPorts(ports, health, timeoutMs) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(new Error('Health request timed out')), timeoutMs);
+  try {
+    // The first valid daemon response wins; a stalled connector must not hold
+    // up readiness. Promise.any observes losing rejections after cancellation.
+    return await Promise.any(ports.map(async (port) => {
+      try {
+        const response = await health(`http://127.0.0.1:${port}/api/health`, {
+          signal: controller.signal, redirect: 'error',
+        });
+        if (response.ok) {
+          const body = await response.json();
+          if (body?.ok === true && typeof body.version === 'string'
+            && Number.isInteger(body.workspaces) && body.workspaces >= 0) return Number(port);
+        } else {
+          await response.body?.cancel();
+        }
+        throw new Error(`HTTP ${response.status} (not daemon health)`);
+      } catch (error) { throw new Error(`port ${port}: ${error.message}`); }
+    }));
+  } finally {
+    clearTimeout(timer);
+    controller.abort();
+  }
+}
+
 export async function waitForDesktopHealth({ io = run, delay = sleep, health = fetch,
   now = () => performance.now(), log = console.log, timeoutMs = 120_000 } = {}) {
-  const pids = () => mainPids(io('/bin/ps', ['-ww', '-axo', 'pid=,args=']));
   const started = now();
   const deadline = started + timeoutMs;
+  const read = (command, args) => io(command, args, {
+    timeout: Math.max(1, Math.ceil(Math.min(15_000, deadline - now()))),
+  });
+  const pids = () => mainPids(read('/bin/ps', ['-ww', '-axo', 'pid=,args=']));
   let nextReport = started + 10_000;
   let lastCheck = 'No installed FalconDeck main process found.';
   while (now() < deadline) {
     const running = pids();
+    if (now() >= deadline) {
+      lastCheck = 'Deadline elapsed while inspecting installed main processes.';
+      break;
+    }
     if (running.length !== 1) {
       lastCheck = running.length ? `Multiple installed main processes found: ${running.join(', ')}.`
         : 'No installed FalconDeck main process found.';
     } else {
       const pid = running[0];
       let listeners = '';
-      try { listeners = io('/usr/sbin/lsof', ['-nP', '-a', '-p', String(pid), '-iTCP', '-sTCP:LISTEN', '-Fn']); }
-      catch { /* A newly launched main process may not have a listener yet. */ }
-      const ports = [...new Set([...listeners.matchAll(/^n127\.0\.0\.1:(\d+)$/gm)].map((match) => match[1]))];
       lastCheck = `PID ${pid} has no loopback TCP listener yet.`;
+      try { listeners = read('/usr/sbin/lsof', ['-nP', '-a', '-p', String(pid), '-iTCP', '-sTCP:LISTEN', '-Fn']); }
+      catch (error) { lastCheck = `PID ${pid}; could not inspect listening ports: ${error.message}`; }
+      const ports = [...new Set([...listeners.matchAll(/^n127\.0\.0\.1:(\d+)$/gm)].map((match) => match[1]))];
       if (ports.length && now() < deadline) {
         // Connector proxies share the main PID. lsof's first socket is not
         // necessarily the daemon, and an HTTP 200 alone does not identify it.
-        const results = await Promise.all(ports.map(async (port) => {
-          try {
-            const response = await health(`http://127.0.0.1:${port}/api/health`, {
-              signal: AbortSignal.timeout(Math.max(1, Math.ceil(Math.min(1000, deadline - now())))),
-              redirect: 'error',
-            });
-            if (response.ok) {
-              const body = await response.json();
-              if (body?.ok === true && typeof body.version === 'string'
-                && Number.isInteger(body.workspaces) && body.workspaces >= 0) return null;
-            } else {
-              await response.body?.cancel();
-            }
-            return `port ${port}: HTTP ${response.status} (not daemon health)`;
-          } catch (error) { return `port ${port}: ${error.message}`; }
-        }));
-        const healthy = results.indexOf(null);
-        if (healthy >= 0) {
-          if (pids().includes(pid)) return { pid, port: Number(ports[healthy]) };
-          lastCheck = `PID ${pid} exited during its health check.`;
-        } else {
-          lastCheck = `PID ${pid}; ${results.join('; ')}.`;
+        let port;
+        try {
+          port = await probeDaemonPorts(ports, health, Math.max(1, Math.ceil(Math.min(1000, deadline - now()))));
+        } catch (error) {
+          lastCheck = `PID ${pid}; ${error.errors.map((failure) => failure.message).join('; ')}.`;
+        }
+        if (port !== undefined) {
+          const current = pids();
+          if (now() >= deadline) lastCheck = `PID ${pid}; deadline elapsed while verifying its health.`;
+          else if (current.length === 1 && current[0] === pid) return { pid, port };
+          else lastCheck = current.length > 1 ? `Multiple installed main processes found: ${current.join(', ')}.`
+            : `PID ${pid} exited during its health check.`;
         }
       }
     }
@@ -92,7 +116,7 @@ export async function waitForDesktopHealth({ io = run, delay = sleep, health = f
 
 export async function restartDesktop({ installFrom, io = run, delay = sleep, health = fetch,
   now = () => performance.now(), log = console.log,
-  files = { ...backupFiles, mkdtempSync, renameSync, rmdirSync } } = {}) {
+  files = { ...backupFiles, mkdtempSync, renameSync } } = {}) {
   const pids = () => mainPids(io('/bin/ps', ['-ww', '-axo', 'pid=,args=']));
   const waitFor = async (check, attempts, message) => {
     for (let attempt = 0; attempt < attempts; attempt++) {
@@ -116,46 +140,54 @@ export async function restartDesktop({ installFrom, io = run, delay = sleep, hea
       }
     }, 20, 'The stale restart service is still registered; refusing to restart.');
   }
-  let staged;
-  if (installFrom) {
-    io('/usr/bin/codesign', ['--verify', '--deep', '--strict', installFrom]);
-    // Complete the potentially failing copy before touching the running app.
-    staged = join(files.mkdtempSync('/Applications/.FalconDeck-stage-'), 'FalconDeck.app');
-    io('/usr/bin/ditto', [installFrom, staged]);
-    io('/usr/bin/codesign', ['--verify', '--deep', '--strict', staged]);
-  }
-  if (pids().length) {
-    try {
-      io('/usr/bin/osascript', ['-e', 'with timeout of 8 seconds', '-e',
-        'tell application id "com.falcondeck.desktop" to quit', '-e', 'end timeout']);
-    } catch { /* A busy app may not handle Apple Events; use exact main PIDs below. */ }
-    for (let attempt = 0; attempt < 10 && pids().length; attempt++) await delay(500);
-    for (const pid of pids()) {
-      // Recheck immediately before signalling; never retain deployment-time PIDs.
-      if (pids().includes(pid)) io('/bin/kill', ['-TERM', String(pid)]);
+  let stageDirectory;
+  try {
+    let staged;
+    if (installFrom) {
+      io('/usr/bin/codesign', ['--verify', '--deep', '--strict', installFrom]);
+      // Complete the potentially failing copy before touching the running app.
+      stageDirectory = files.mkdtempSync('/Applications/.FalconDeck-stage-');
+      staged = join(stageDirectory, 'FalconDeck.app');
+      io('/usr/bin/ditto', [installFrom, staged]);
+      io('/usr/bin/codesign', ['--verify', '--deep', '--strict', staged]);
     }
-    await waitFor(() => pids().length === 0, 30, 'FalconDeck did not quit; installation aborted.');
-  }
-  let backup;
-  if (staged) {
-    // Retain the previous signed bundle until the replacement is healthy.
-    if (files.existsSync(app)) {
-      backup = join(files.mkdtempSync('/Applications/.FalconDeck-backup-'), 'FalconDeck.app');
-      files.renameSync(app, backup);
-      console.log(`Previous app retained at ${backup}`);
+    if (pids().length) {
+      try {
+        io('/usr/bin/osascript', ['-e', 'with timeout of 8 seconds', '-e',
+          'tell application id "com.falcondeck.desktop" to quit', '-e', 'end timeout']);
+      } catch { /* A busy app may not handle Apple Events; use exact main PIDs below. */ }
+      for (let attempt = 0; attempt < 10 && pids().length; attempt++) await delay(500);
+      for (const pid of pids()) {
+        // Recheck immediately before signalling; never retain deployment-time PIDs.
+        if (pids().includes(pid)) io('/bin/kill', ['-TERM', String(pid)]);
+      }
+      await waitFor(() => pids().length === 0, 30, 'FalconDeck did not quit; installation aborted.');
     }
-    try { files.renameSync(staged, app); } catch (error) {
-      if (backup) files.renameSync(backup, app);
-      throw error;
+    let backup;
+    if (staged) {
+      // Retain the previous signed bundle until the replacement is healthy.
+      if (files.existsSync(app)) {
+        backup = join(files.mkdtempSync('/Applications/.FalconDeck-backup-'), 'FalconDeck.app');
+        files.renameSync(app, backup);
+        log(`Previous app retained at ${backup}`);
+      }
+      try { files.renameSync(staged, app); } catch (error) {
+        if (backup) files.renameSync(backup, app);
+        throw error;
+      }
     }
-    files.rmdirSync(dirname(staged));
-  }
-  // One launch only. Failure reports an error, never reschedules another restart.
-  io('/usr/bin/open', ['-g', app]);
-  await waitForDesktopHealth({ io, delay, health, now, log });
-  if (backup) {
-    try { pruneDesktopBackups(dirname(backup), files); }
-    catch (error) { console.warn(`Could not prune older desktop backups: ${error.message}`); }
+    // One launch only. Failure reports an error, never reschedules another restart.
+    io('/usr/bin/open', ['-g', app]);
+    await waitForDesktopHealth({ io, delay, health, now, log });
+    if (backup) {
+      try { pruneDesktopBackups(dirname(backup), files); }
+      catch (error) { console.warn(`Could not prune older desktop backups: ${error.message}`); }
+    }
+  } finally {
+    if (stageDirectory) {
+      try { files.rmSync(stageDirectory, { recursive: true, force: true }); }
+      catch (error) { console.warn(`Could not remove desktop staging directory ${stageDirectory}: ${error.message}`); }
+    }
   }
 }
 
