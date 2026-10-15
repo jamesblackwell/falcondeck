@@ -628,13 +628,7 @@ const ThreadList = memo(function ThreadList(
     return <FlatThreadList {...props} />;
   return (
     <>
-      {root.pinnedInProject.length > 0 ? (
-        <FlatThreadList
-          key="project-pinned"
-          {...props}
-          group={{ ...props.group, threads: root.pinnedInProject }}
-        />
-      ) : null}
+      {/* Folders lead, then project pins, then ordinary tasks. */}
       {partition.folders.map(({ folder, threads }) => (
         <ProjectFolderSection
           key={folder.id}
@@ -644,6 +638,13 @@ const ThreadList = memo(function ThreadList(
           <FlatThreadList {...props} group={{ ...props.group, threads }} />
         </ProjectFolderSection>
       ))}
+      {root.pinnedInProject.length > 0 ? (
+        <FlatThreadList
+          key="project-pinned"
+          {...props}
+          group={{ ...props.group, threads: root.pinnedInProject }}
+        />
+      ) : null}
       {root.unpinned.length > 0 ? (
         <FlatThreadList
           key="project-root"

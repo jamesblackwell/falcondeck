@@ -81,7 +81,7 @@ describe('mobile folder rows', () => {
       ),
     ).toMatchObject({ type: 'folder', count: 0 })
   })
-  it('places project-pinned tasks first, folders next, and ordinary root tasks last', () => {
+  it('places folders first, project-pinned tasks next, and ordinary root tasks last', () => {
     const source = [
       {
         ...groups[0],
@@ -95,9 +95,9 @@ describe('mobile folder rows', () => {
     expect(result.map((row) => row.key)).toEqual([
       'section:projects',
       'workspace:workspace-1',
-      'thread:pin',
       'folder:chores',
       'thread:background',
+      'thread:pin',
       'thread:root',
     ])
   })

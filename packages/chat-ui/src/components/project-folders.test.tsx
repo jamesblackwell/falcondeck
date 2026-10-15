@@ -89,7 +89,7 @@ describe('project folder sidebar', () => {
     ).toBeInTheDocument()
   })
 
-  it('keeps project pins above folders and ordinary tasks below', () => {
+  it('puts folders above project pins, with ordinary tasks below', () => {
     const { props, rerender } = setup()
     const tasks = props.groups[0].threads.map((task) =>
       task.id === 'root' ? { ...task, is_pinned_in_project: true } : task,
@@ -104,8 +104,8 @@ describe('project folder sidebar', () => {
     const names = screen
       .getAllByRole('button')
       .map((button) => button.getAttribute('aria-label') ?? button.textContent)
-    expect(names.indexOf('Main task')).toBeLessThan(names.indexOf('Chores'))
-    expect(names.indexOf('Chores')).toBeLessThan(names.indexOf('Ordinary task'))
+    expect(names.indexOf('Chores')).toBeLessThan(names.indexOf('Main task'))
+    expect(names.indexOf('Main task')).toBeLessThan(names.indexOf('Ordinary task'))
   })
 
   it('moves a dragged task into a folder and back onto its project header', () => {

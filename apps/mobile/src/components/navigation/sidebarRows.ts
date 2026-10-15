@@ -270,8 +270,9 @@ export function buildSidebarRows(
       isCollapsed: !isOpen,
     }))
 
-    const rows: SidebarRow[] = [workspaceRow, ...threadRows.slice(0, sortedPinnedInProject.length)]
-    const rootTail: SidebarRow[] = threadRows.slice(sortedPinnedInProject.length)
+    // Folders lead, then project pins, then ordinary tasks.
+    const rows: SidebarRow[] = [workspaceRow]
+    const rootTail: SidebarRow[] = threadRows
 
     if (hiddenCount > 0 || canCollapse) {
       rootTail.push({
