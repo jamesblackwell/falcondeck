@@ -322,18 +322,16 @@ pub(super) async fn connect_workspace_internal(
         app.restore_workspace_placeholder(&placeholder, WorkspaceStatus::Connecting, None)
             .await?;
     }
-    // The three bootstraps are independent (separate binaries, separate
-    // session stores), and each spawns CLI probes that take seconds. Run
-    // Claude and Antigravity as tasks alongside the Codex connect so a
-    // workspace connect costs the slowest provider, not the sum of all of
-    // them. Tasks (not a join) so the fatal no-provider path below can still
-    // fail fast: abort drops the probe futures, whose `kill_on_drop` children
-    // die with them.
-    let claude_task = tokio::spawn(ClaudeRuntime::connect(
+    // Run independent provider bootstraps alongside Codex so discovery costs
+    // the slowest provider. Each JoinSet owns one task and aborts it on failure
+    // or cancellation; kill_on_drop then stops its CLI probes.
+    let mut claude_tasks = tokio::task::JoinSet::new();
+    claude_tasks.spawn(ClaudeRuntime::connect(
         path_string.clone(),
         app.provider_bin(&AgentProvider::CLAUDE),
     ));
-    let agy_task = tokio::spawn(crate::agy::AgyRuntime::connect(
+    let mut agy_tasks = tokio::task::JoinSet::new();
+    agy_tasks.spawn(crate::agy::AgyRuntime::connect(
         path_string.clone(),
         app.provider_bin(&AgentProvider::AGY),
     ));
@@ -415,13 +413,16 @@ pub(super) async fn connect_workspace_internal(
             )
         }
         Err(error) => {
-            // Degrading to a Claude-only workspace is only useful when
-            // Claude is actually installed; with no working provider at
-            // all, surface the connect failure as before.
-            let claude_resolved = app.resolve_provider_binary(&AgentProvider::CLAUDE);
-            if !Path::new(&claude_resolved.executable).is_file() {
-                claude_task.abort();
-                agy_task.abort();
+            // Built-in and optional providers connect independently. An ACP
+            // or Antigravity project must not require Codex or Claude.
+            let has_alternative =
+                [AgentProvider::CLAUDE, AgentProvider::AGY]
+                    .iter()
+                    .any(|provider| {
+                        Path::new(&app.resolve_provider_binary(provider).executable).is_file()
+                    })
+                    || !app.fresh_acp_provider_configs().is_empty();
+            if !has_alternative {
                 return Err(error);
             }
             let message = error.to_string();
@@ -454,9 +455,13 @@ pub(super) async fn connect_workspace_internal(
         collaboration_modes: claude_collaboration_modes,
         capabilities: claude_capabilities,
         threads: claude_threads,
-    } = claude_task.await.map_err(|error| {
-        DaemonError::Process(format!("claude bootstrap task failed: {error}"))
-    })??;
+    } = claude_tasks
+        .join_next()
+        .await
+        .expect("one Claude bootstrap task")
+        .map_err(|error| {
+            DaemonError::Process(format!("claude bootstrap task failed: {error}"))
+        })??;
     let crate::agy::AgyBootstrap {
         runtime: agy_runtime,
         account: agy_account,
@@ -464,8 +469,10 @@ pub(super) async fn connect_workspace_internal(
         skills: agy_native_skills,
         capabilities: agy_capabilities,
         threads: agy_threads,
-    } = agy_task
+    } = agy_tasks
+        .join_next()
         .await
+        .expect("one Antigravity bootstrap task")
         .map_err(|error| DaemonError::Process(format!("agy bootstrap task failed: {error}")))??;
     let skill_path = path_string.clone();
     let file_backed_skills =
@@ -719,28 +726,11 @@ pub(super) async fn connect_workspace_internal(
         // orphaning the approvals those processes are still waiting on — and
         // roll running threads back to the hydrated/persisted view, which
         // still records the last turn as interrupted by shutdown.
-        let previous = workspaces.remove(&workspace_id);
-        let (
-            previous_summary,
-            previous_codex_session,
-            previous_claude_runtime,
-            previous_acp_runtimes,
-            previous_opencode_runtime,
-            previous_threads,
-        ) = previous
-            .map(|workspace| {
-                (
-                    Some(workspace.summary),
-                    workspace.codex_session,
-                    workspace.claude_runtime,
-                    workspace.acp_runtimes,
-                    workspace.opencode_runtime,
-                    workspace.threads,
-                )
-            })
-            .unwrap_or_default();
+        let previous = workspaces.remove(&workspace_id).ok_or_else(|| {
+            DaemonError::NotFound("workspace was closed while connecting".to_string())
+        })?;
         let mut threads = hydrated_threads;
-        carry_over_live_threads(&mut threads, previous_threads);
+        carry_over_live_threads(&mut threads, previous.threads);
         threads.retain(|_, thread| {
             !is_saved_codex_subagent(
                 Some(&thread.summary.provider),
@@ -752,18 +742,32 @@ pub(super) async fn connect_workspace_internal(
         // A turn may have attached a provider while this connect was
         // hydrating history. Keep those handles so installing the hydrated
         // workspace cannot orphan a running turn.
-        let codex_session = previous_codex_session.filter(|session| !session.is_closed());
-        let claude_runtime = previous_claude_runtime.unwrap_or(claude_runtime);
-        if let Some(previous) = previous_summary {
-            if let Some(current) = previous.current_thread_id
-                && threads.contains_key(&current)
+        let codex_session = previous
+            .codex_session
+            .filter(|session| !session.is_closed());
+        let claude_runtime = previous.claude_runtime.unwrap_or(claude_runtime);
+        // Optional providers negotiate their catalogs independently. A first
+        // built-in-provider connect must not replace live metadata with the
+        // static placeholders above.
+        for agent in &mut summary.agents {
+            if !matches!(agent.provider.as_str(), "codex" | "claude" | "agy")
+                && let Some(prior) = previous
+                    .summary
+                    .agents
+                    .iter()
+                    .find(|prior| prior.provider == agent.provider)
             {
-                summary.current_thread_id = Some(current);
+                *agent = prior.clone();
             }
-            if previous.updated_at > summary.updated_at {
-                summary.default_provider = previous.default_provider;
-                summary.updated_at = previous.updated_at;
-            }
+        }
+        if let Some(current) = previous.summary.current_thread_id
+            && threads.contains_key(&current)
+        {
+            summary.current_thread_id = Some(current);
+        }
+        if previous.summary.updated_at > summary.updated_at {
+            summary.default_provider = previous.summary.default_provider;
+            summary.updated_at = previous.summary.updated_at;
         }
         workspaces.insert(
             workspace_id.clone(),
@@ -772,8 +776,8 @@ pub(super) async fn connect_workspace_internal(
                 codex_session,
                 claude_runtime: Some(claude_runtime),
                 agy_runtime: Some(agy_runtime),
-                opencode_runtime: previous_opencode_runtime,
-                acp_runtimes: previous_acp_runtimes,
+                opencode_runtime: previous.opencode_runtime,
+                acp_runtimes: previous.acp_runtimes,
                 threads,
             },
         );

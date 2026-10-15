@@ -5029,6 +5029,7 @@ async fn restore_keeps_workspace_visible_when_reconnect_fails() {
         HashMap::from([
             (AgentProvider::CODEX, "missing-codex".to_string()),
             (AgentProvider::CLAUDE, "missing-claude".to_string()),
+            (AgentProvider::AGY, "missing-agy".to_string()),
         ]),
         PathBuf::from(&state_path),
     );

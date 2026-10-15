@@ -969,6 +969,66 @@ mod tests {
     use crate::app::PersistedWorkspaceState;
 
     #[tokio::test]
+    async fn an_early_workspace_write_preserves_pairing_while_secrets_are_loading() {
+        let temp = tempfile::tempdir().unwrap();
+        let project = temp.path().join("project");
+        std::fs::create_dir(&project).unwrap();
+        let state_path = temp.path().join("state.json");
+        let remote: crate::app::PersistedRemoteState = serde_json::from_value(json!({
+            "relay_url": "https://relay.example.invalid", "daemon_token": "fixture-only-token",
+            "pairing_id": "fixture-pairing", "pairing_code": "ABCDEFGHJKLM",
+            "expires_at": Utc::now() + Duration::minutes(5), "secure_storage_key": "fixture-missing-secrets"
+        })).unwrap();
+        persist_app_state(
+            &state_path,
+            &PersistedAppState {
+                workspaces: vec![PersistedWorkspaceState {
+                    path: project.to_string_lossy().into_owned(),
+                    id: Some("workspace".into()),
+                    in_sidebar: true,
+                    ..Default::default()
+                }],
+                remote: Some(remote.clone()),
+            },
+        )
+        .await
+        .unwrap();
+        let app = crate::app::AppState::new_with_state_path(
+            "test".into(),
+            HashMap::new(),
+            state_path.clone(),
+        );
+        let mut events = app.subscribe();
+        // Force the real keychain-loading path to stay pending after the first
+        // snapshot makes lazy projects available to local clients.
+        let (locked, ready) = tokio::sync::oneshot::channel();
+        let (release, released) = std::sync::mpsc::channel();
+        let keychain = spawn_blocking(move || {
+            let _store = test_remote_secret_store().lock().unwrap();
+            let _ = locked.send(());
+            let _ = released.recv();
+        });
+        ready.await.unwrap();
+        let restore = tokio::spawn({
+            let app = app.clone();
+            async move { app.restore_local_state().await }
+        });
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop {
+                let event = events.recv().await.unwrap();
+                if matches!(&event.event, falcondeck_core::UnifiedEvent::Snapshot { snapshot } if !snapshot.workspaces.is_empty()) { break; }
+            }
+        }).await.unwrap();
+        app.persist_local_state().await.unwrap();
+        let before_resume = load_persisted_app_state(&state_path).await.unwrap();
+        release.send(()).unwrap();
+        keychain.await.unwrap();
+        restore.await.unwrap().unwrap();
+        app.shutdown().await.unwrap();
+        assert_eq!(before_resume.remote.unwrap().pairing_id, remote.pairing_id);
+    }
+
+    #[tokio::test]
     async fn atomic_state_files_are_owner_only() {
         let temp_dir = tempfile::tempdir().unwrap();
         let path = temp_dir.path().join("daemon-state.json");

@@ -690,8 +690,8 @@ struct RemoteBridgeState {
     /// Device-indexed bundles let revocation rotate the data key for every
     /// remaining device without ever re-wrapping it to the revoked one.
     trusted_client_devices: HashMap<String, PairingPublicKeyBundle>,
-    /// Persisted remote state that failed to resume (e.g. a transient
-    /// secure-storage error at startup). Held so `persist_local_state` can
+    /// Persisted remote state awaiting restoration or unable to resume (e.g.
+    /// a transient secure-storage error). Held so `persist_local_state` can
     /// round-trip it instead of writing `remote: null` — which would
     /// permanently destroy the pairing over a transient keychain failure.
     unresumed_remote: Option<Box<PersistedRemoteState>>,
@@ -1465,6 +1465,16 @@ impl AppState {
         persist_preferences(&self.inner.preferences_path, &preferences).await?;
 
         let persisted = load_persisted_app_state(&self.inner.state_path).await?;
+        // Clients can mutate lazy projects as soon as the first snapshot is
+        // published. Keep the pairing durable while its keychain read is pending.
+        if let Some(remote) = &persisted.remote {
+            let mut current = self.inner.remote.lock().await;
+            if current.pairing.is_none() {
+                current
+                    .unresumed_remote
+                    .get_or_insert_with(|| Box::new(remote.clone()));
+            }
+        }
         // Attention seqs are stamped from this counter but persist across
         // restarts, so a counter that restarts at 1 makes cross-boot values
         // incomparable: a mark-read written with a small this-boot seq can
@@ -1885,7 +1895,7 @@ impl AppState {
                     thread.summary.status = ThreadStatus::Error;
                     thread.summary.last_error = Some(SHUTDOWN_INTERRUPTED_TURN_ERROR.to_string());
                 }
-                if thread.summary.last_error.is_none() {
+                if status == WorkspaceStatus::Disconnected && thread.summary.last_error.is_none() {
                     thread.summary.last_error = last_error.clone();
                 }
             }
@@ -3649,6 +3659,15 @@ impl AppState {
         request: ConnectWorkspaceRequest,
         persisted_workspace: Option<&PersistedWorkspaceState>,
     ) -> Result<WorkspaceSummary, DaemonError> {
+        let path = normalize_workspace_path(request.path.trim());
+        let registered_id = self
+            .inner
+            .workspaces
+            .lock()
+            .await
+            .values()
+            .find(|workspace| workspace.summary.path == path)
+            .map(|workspace| workspace.summary.id.clone());
         let _slot = self
             .inner
             .workspace_start_slots
@@ -3657,6 +3676,13 @@ impl AppState {
             .map_err(|_| DaemonError::Process("workspace startup gate closed".to_string()))?;
         if self.is_shutting_down() {
             return Err(DaemonError::Process("daemon is shutting down".to_string()));
+        }
+        if let Some(id) = registered_id
+            && !self.inner.workspaces.lock().await.contains_key(&id)
+        {
+            return Err(DaemonError::NotFound(
+                "workspace was closed while waiting to connect".to_string(),
+            ));
         }
         let summary =
             workspace_ops::connect_workspace_internal(self, request, persisted_workspace).await?;

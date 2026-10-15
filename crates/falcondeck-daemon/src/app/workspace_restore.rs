@@ -3,7 +3,8 @@ use futures_util::{StreamExt, stream};
 use tokio::time::{Duration, timeout};
 
 use super::{
-    AppState, PersistedWorkspaceState, persisted_turn_was_cut_off, workspace_kind_for_path,
+    AppState, PersistedWorkspaceState, normalize_workspace_path, persisted_turn_was_cut_off,
+    workspace_kind_for_path,
 };
 use crate::error::DaemonError;
 
@@ -48,13 +49,26 @@ impl AppState {
     /// user action, rather than keeping startup or the scheduler waiting.
     async fn restore_one_persisted_workspace(
         &self,
-        workspace: PersistedWorkspaceState,
+        mut workspace: PersistedWorkspaceState,
         auto_resume: bool,
         deadline: Duration,
     ) {
+        workspace.path = normalize_workspace_path(&workspace.path);
         let path = &workspace.path;
         for attempt in 0..2 {
             if self.is_shutting_down() {
+                return;
+            }
+            // A project can be closed before its worker is admitted or while
+            // a previous attempt is timing out. Restoration must not re-add it.
+            if !self
+                .inner
+                .workspaces
+                .lock()
+                .await
+                .values()
+                .any(|current| current.summary.path == *path)
+            {
                 return;
             }
             let result = timeout(
