@@ -31,7 +31,7 @@ sequence:
    shortcut (Right Command and fn are suggested; any other key or chord can
    be recorded), hold/toggle mode, optionally enable voice rewrite and its
    shortcut. Apple Speech is the zero-key default. Microphone, engine, and
-   rewrite prompt stay in Settings → Speech.
+   rewrite prompt stay in Settings → Voice.
 5. **Let agents use your Mac** — grant Accessibility and Screen Recording to
    FalconDeck. Continue enables bundled computer use; Skip setup leaves it
    off. macOS caches those grants per process, so the step offers Restart

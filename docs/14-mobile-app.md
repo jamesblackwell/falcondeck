@@ -44,7 +44,7 @@ Mobile App
 ### Speech transcription security
 
 Mobile supports on-device transcription and OpenRouter transcription through the paired daemon.
-The OpenRouter API key is entered in desktop Speech settings and stored only in the computer's OS
+The OpenRouter API key is entered in desktop Settings → Models & keys and stored only in the computer's OS
 credential store. It is never copied to mobile, FalconDeck configuration, or the relay.
 
 For cloud transcription, mobile retains the recording locally and sends it in an end-to-end

@@ -60,7 +60,7 @@ status window, and paste-at-cursor behavior.
 
 ## Corrections after transcription
 
-Settings → Speech → Correction dictionary stores up to 100 find/replace pairs
+Settings → Voice → Correction dictionary stores up to 100 find/replace pairs
 on this Mac. Entries match whole words or phrases without case sensitivity;
 the replacement uses the saved spelling. Leave the replacement blank to remove
 the matched word or phrase; saved removals appear as “(remove)” in the list.
@@ -71,7 +71,7 @@ do not cascade through other entries. All engines use the dictionary before
 delivery, including when cloud cleanup is disabled. Dictionary updates apply
 to future transcriptions and history retries.
 
-Update dictionary opens Speech settings with the latest transcript visible and
+Update dictionary opens Voice settings with the latest transcript visible and
 the Heard as field focused. Existing entries can be edited or removed.
 
 Fix runs the selected rewrite model with the transcript-cleanup prompt, even
@@ -177,7 +177,7 @@ An orderly quit stops capture without treating it as a cancellation.
 
 ## Optional Parakeet
 
-Settings → Speech → Transcription has three engines: Apple Speech (default),
+Settings → Voice → Transcription has three engines: Apple Speech (default),
 Parakeet, and OpenRouter. Selecting Parakeet explicitly downloads NVIDIA
 Parakeet TDT 0.6B v3 through FluidAudio, using its corrected linear INT8 (`int8V2`) Core ML encoder and
 Apple Neural Engine. It requires Apple Silicon and macOS 14 or later. Model
@@ -249,7 +249,7 @@ shortcut is lifted for that copy so a held Right Option does not turn it into
 Option-Command-C. The spoken instruction is transcribed with the same engine
 as dictation, then the selection is rewritten through
 OpenRouter (default `openai/gpt-5.6-luna`, with faster options such as
-`openai/gpt-oss-120b`) using the existing speech API key. Settings → Speech
+`openai/gpt-oss-120b`) using the existing speech API key. Settings → Voice
 has a Custom prompt control that opens pre-filled with the built-in system
 prompt; Reset restores that original.
 The rewritten text is delivered with the same Command-V paste path as
