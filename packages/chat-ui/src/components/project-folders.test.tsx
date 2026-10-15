@@ -109,38 +109,58 @@ describe('project folder sidebar', () => {
   })
 
   it('moves a dragged task into a folder and back onto its project header', () => {
-    const { mutate } = setup()
-    const dataTransfer = { setData: vi.fn(), effectAllowed: '', dropEffect: '' }
-    fireEvent.dragStart(
-      screen.getByRole('button', { name: 'Main task' }).closest('[draggable]')!,
-      { dataTransfer },
-    )
-    const target = document.querySelector('[data-project-folder="chores"]')!
-    fireEvent.dragOver(target, { dataTransfer })
-    fireEvent.drop(target, { dataTransfer })
+    const { mutate, props } = setup()
+    // jsdom has no layout, so point the hit test at the intended target.
+    let pointerTarget: Element | null = null
+    document.elementFromPoint = vi.fn(() => pointerTarget)
+    const drag = (rowName: string, target: Element) => {
+      const row = screen.getByRole('button', { name: rowName }).parentElement!
+      fireEvent.pointerDown(row, { pointerId: 1, button: 0, clientX: 10, clientY: 10 })
+      pointerTarget = target
+      fireEvent.pointerMove(window, { pointerId: 1, clientX: 10, clientY: 40 })
+      fireEvent.pointerUp(window, { pointerId: 1, clientX: 10, clientY: 40 })
+      fireEvent.click(row)
+    }
+
+    drag('Main task', document.querySelector('[data-project-folder="chores"]')!)
     expect(mutate).toHaveBeenCalledWith({
       action: 'move_thread',
       workspace_id: 'project',
       thread_id: 'root',
       folder_id: 'chores',
     })
-    fireEvent.dragStart(
-      screen
-        .getByRole('button', { name: 'Background' })
-        .closest('[draggable]')!,
-      { dataTransfer },
+    // Releasing the drag must not also open the dragged task.
+    expect(props.onSelectThread).not.toHaveBeenCalled()
+
+    drag(
+      'Background',
+      screen.getByRole('button', { name: 'demo' }).closest('[data-task-drop-workspace]')!,
     )
-    const projectHeader = screen.getByRole('button', {
-      name: 'demo',
-    }).parentElement!
-    fireEvent.dragOver(projectHeader, { dataTransfer })
-    fireEvent.drop(projectHeader, { dataTransfer })
     expect(mutate).toHaveBeenLastCalledWith({
       action: 'move_thread',
       workspace_id: 'project',
       thread_id: 'background',
       folder_id: null,
     })
+  })
+
+  it('treats a short press as a click and Escape as a cancelled drag', () => {
+    const { mutate, props } = setup()
+    document.elementFromPoint = vi.fn(() =>
+      document.querySelector('[data-project-folder="chores"]'),
+    )
+    const row = screen.getByRole('button', { name: 'Main task' }).parentElement!
+    fireEvent.pointerDown(row, { pointerId: 1, button: 0, clientX: 10, clientY: 10 })
+    fireEvent.pointerMove(window, { pointerId: 1, clientX: 11, clientY: 11 })
+    fireEvent.pointerUp(window, { pointerId: 1 })
+    fireEvent.click(row)
+    expect(props.onSelectThread).toHaveBeenCalledWith('project', 'root')
+
+    fireEvent.pointerDown(row, { pointerId: 2, button: 0, clientX: 10, clientY: 10 })
+    fireEvent.pointerMove(window, { pointerId: 2, clientX: 10, clientY: 60 })
+    fireEvent.keyDown(window, { key: 'Escape' })
+    fireEvent.pointerUp(window, { pointerId: 2 })
+    expect(mutate).not.toHaveBeenCalled()
   })
 
   it('offers a keyboard-accessible move menu and project root destination', async () => {

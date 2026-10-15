@@ -1,4 +1,4 @@
-import { TASK_DRAG_TYPE, useProjectFolders } from './project-folders'
+import { useProjectFolders } from './project-folders'
 import * as React from 'react'
 import { memo, useId, useMemo } from 'react'
 import { Archive, ArchiveRestore, Bot, CalendarClock, CircleStop, Pin, Split } from 'lucide-react'
@@ -108,6 +108,7 @@ export const ThreadItem = memo(
   }: ThreadItemProps) {
     const folderControls = useProjectFolders()
     const canDrag = Boolean(folderControls.onProjectFolderMutation && !thread.is_archived)
+    const isDragged = folderControls.draggedTask?.threadId === thread.id
     const attention = deriveThreadAttentionPresentation(thread)
     const wasInterrupted = wasTurnInterruptedByShutdown(thread)
     // The project name stays outside the title button so that button's name
@@ -132,14 +133,16 @@ export const ThreadItem = memo(
 
     return (
       <div
-        draggable={canDrag || undefined}
-        onDragStart={canDrag ? (event) => {
-          const task = { workspaceId, threadId: thread.id }
-          event.dataTransfer.setData(TASK_DRAG_TYPE, JSON.stringify(task))
-          event.dataTransfer.effectAllowed = 'move'
-          folderControls.setDraggedTask(task)
-        } : undefined}
-        onDragEnd={canDrag ? () => folderControls.setDraggedTask(null) : undefined}
+        onPointerDown={
+          canDrag
+            ? (event) =>
+                folderControls.startTaskDrag(
+                  event,
+                  { workspaceId, threadId: thread.id },
+                  thread.title,
+                )
+            : undefined
+        }
         data-archive-confirm={archiveConfirm ? "true" : undefined}
         className={cn(
           // A container so the provider label can bow out on a narrow sidebar
@@ -154,6 +157,7 @@ export const ThreadItem = memo(
           isSelected
             ? 'fd-row-selected'
             : 'hover:bg-interactive-hover active:bg-interactive-selected',
+          isDragged && 'opacity-50',
         )}
         onClick={() => {
           // While the confirm pill is up, the row itself is the dismiss

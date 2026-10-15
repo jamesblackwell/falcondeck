@@ -6,6 +6,7 @@ import { FolderPlus, Globe, Search, SquarePen } from 'lucide-react'
 import type { WorkspaceSummary } from '@falcondeck/client-core'
 import { ActivityDiamond, cn } from '@falcondeck/ui'
 
+import type { TaskDropTargetProps } from './project-folders'
 import { WorkspaceIcon } from './workspace-icon'
 
 // Present when the workspace lives on an enrolled remote server rather than
@@ -21,7 +22,7 @@ export type WorkspaceGroupProps = {
   isSelected: boolean
   onSelect: () => void
   onCreateFolder?: () => void
-  taskDropProps?: React.HTMLAttributes<HTMLElement>
+  taskDropProps?: TaskDropTargetProps
   isTaskDropTarget?: boolean
   onNewThread?: () => void
   /** Search this project's threads; revealed on row hover. */

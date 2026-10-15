@@ -37,10 +37,17 @@ import {
   type FolderEditorTarget as Editor,
   type FolderTaskTarget as DraggedTask,
 } from './project-folder-dialogs'
+type TaskDropTarget = { workspaceId: string; folderId: string | null }
 type FolderContext = ProjectFolderControls & {
   folders: readonly ProjectFolder[]
   draggedTask: DraggedTask | null
-  setDraggedTask: (task: DraggedTask | null) => void
+  dropTarget: TaskDropTarget | null
+  /** Pointer-down handler for a task row; becomes a drag past a few pixels. */
+  startTaskDrag: (
+    event: React.PointerEvent<HTMLElement>,
+    task: DraggedTask,
+    label: string,
+  ) => void
   edit: (editor: Editor) => void
   move: (task: DraggedTask) => void
   menu: (folder: ProjectFolder, x: number, y: number) => void
@@ -49,14 +56,30 @@ type FolderContext = ProjectFolderControls & {
 const Context = createContext<FolderContext>({
   folders: EMPTY_PROJECT_FOLDERS,
   draggedTask: null,
-  setDraggedTask: () => {},
+  dropTarget: null,
+  startTaskDrag: () => {},
   edit: () => {},
   move: () => {},
   menu: () => {},
   perform: () => {},
 })
 export const useProjectFolders = () => useContext(Context)
-export const TASK_DRAG_TYPE = 'application/x-falcondeck-task'
+const TASK_DRAG_THRESHOLD_PX = 4
+
+/** The innermost folder or project header under the pointer that accepts
+ * tasks from `workspaceId`. HTML5 drag-and-drop never delivers drops in the
+ * Tauri webview, so drags hit-test with pointer events instead. */
+function taskDropTargetAt(
+  x: number,
+  y: number,
+  workspaceId: string,
+): TaskDropTarget | null {
+  const element = document
+    .elementFromPoint?.(x, y)
+    ?.closest<HTMLElement>('[data-task-drop-workspace]')
+  if (!element || element.dataset.taskDropWorkspace !== workspaceId) return null
+  return { workspaceId, folderId: element.dataset.taskDropFolder || null }
+}
 const MENU_ITEM =
   'fd-focus flex min-h-9 w-full items-center gap-2 rounded-[var(--fd-radius-sm)] px-2.5 text-left text-sm text-fg-secondary hover:bg-interactive-hover'
 
@@ -67,6 +90,14 @@ export function ProjectFoldersProvider({
   onNewThreadInFolder,
 }: ProjectFolderControls & { children: React.ReactNode }) {
   const [draggedTask, setDraggedTask] = useState<DraggedTask | null>(null)
+  const [dropTarget, setDropTarget] = useState<TaskDropTarget | null>(null)
+  const [dragGhost, setDragGhost] = useState<{
+    label: string
+    x: number
+    y: number
+  } | null>(null)
+  const endTaskDragRef = useRef<(() => void) | null>(null)
+  useEffect(() => () => endTaskDragRef.current?.(), [])
   const [editor, setEditor] = useState<Editor | null>(null)
   const [moveTarget, setMoveTarget] = useState<DraggedTask | null>(null)
   const [menu, setMenu] = useState<{
@@ -86,6 +117,88 @@ export function ProjectFoldersProvider({
     },
     [onProjectFolderMutation],
   )
+  const startTaskDrag = useCallback(
+    (
+      event: React.PointerEvent<HTMLElement>,
+      task: DraggedTask,
+      label: string,
+    ) => {
+      if (event.button !== 0 || !onProjectFolderMutation) return
+      endTaskDragRef.current?.()
+      const { pointerId, clientX: startX, clientY: startY } = event
+      let active = false
+      let target: TaskDropTarget | null = null
+      const finish = () => {
+        window.removeEventListener('pointermove', onMove)
+        window.removeEventListener('pointerup', onUp)
+        window.removeEventListener('pointercancel', onCancel)
+        window.removeEventListener('keydown', onKeyDown, true)
+        endTaskDragRef.current = null
+        setDraggedTask(null)
+        setDropTarget(null)
+        setDragGhost(null)
+      }
+      const onMove = (move: PointerEvent) => {
+        if (move.pointerId !== pointerId) return
+        if (!active) {
+          const distance = Math.hypot(move.clientX - startX, move.clientY - startY)
+          if (distance < TASK_DRAG_THRESHOLD_PX) return
+          active = true
+          window.getSelection()?.removeAllRanges()
+          setDraggedTask(task)
+        }
+        move.preventDefault()
+        const next = taskDropTargetAt(move.clientX, move.clientY, task.workspaceId)
+        if (
+          next?.workspaceId !== target?.workspaceId ||
+          next?.folderId !== target?.folderId
+        ) {
+          target = next
+          setDropTarget(next)
+        }
+        setDragGhost({ label, x: move.clientX, y: move.clientY })
+      }
+      const onUp = (up: PointerEvent) => {
+        if (up.pointerId !== pointerId) return
+        const dropped = active ? target : null
+        finish()
+        if (!active) return
+        // The release would otherwise click whatever row it ended on.
+        const swallow = (click: MouseEvent) => {
+          click.preventDefault()
+          click.stopPropagation()
+        }
+        window.addEventListener('click', swallow, { capture: true, once: true })
+        window.setTimeout(
+          () => window.removeEventListener('click', swallow, { capture: true }),
+          0,
+        )
+        if (dropped) {
+          perform({
+            action: 'move_thread',
+            workspace_id: dropped.workspaceId,
+            thread_id: task.threadId,
+            folder_id: dropped.folderId,
+          })
+        }
+      }
+      const onCancel = (cancel: PointerEvent) => {
+        if (cancel.pointerId === pointerId) finish()
+      }
+      const onKeyDown = (key: KeyboardEvent) => {
+        if (key.key !== 'Escape' || !active) return
+        key.preventDefault()
+        key.stopPropagation()
+        finish()
+      }
+      window.addEventListener('pointermove', onMove)
+      window.addEventListener('pointerup', onUp)
+      window.addEventListener('pointercancel', onCancel)
+      window.addEventListener('keydown', onKeyDown, true)
+      endTaskDragRef.current = finish
+    },
+    [onProjectFolderMutation, perform],
+  )
   const startTask = useCallback(
     async (workspaceId: string, folderId: string) => {
       try {
@@ -104,7 +217,8 @@ export function ProjectFoldersProvider({
       onProjectFolderMutation,
       onNewThreadInFolder: onNewThreadInFolder ? startTask : undefined,
       draggedTask,
-      setDraggedTask,
+      dropTarget,
+      startTaskDrag,
       edit: setEditor,
       move: setMoveTarget,
       menu: (folder, x, y) => setMenu({ folder, x, y }),
@@ -116,12 +230,26 @@ export function ProjectFoldersProvider({
       onNewThreadInFolder,
       startTask,
       draggedTask,
+      dropTarget,
+      startTaskDrag,
       perform,
     ],
   )
   return (
     <Context.Provider value={value}>
       {children}
+      {dragGhost
+        ? createPortal(
+            <div
+              aria-hidden="true"
+              className="pointer-events-none fixed z-50 max-w-60 truncate rounded-[var(--fd-radius-md)] border border-border-default bg-surface-2 px-2.5 py-1.5 text-sm text-fg-primary shadow-[var(--fd-shadow-lg)]"
+              style={{ left: dragGhost.x + 12, top: dragGhost.y + 8 }}
+            >
+              {dragGhost.label}
+            </div>,
+            document.body,
+          )
+        : null}
       {error
         ? createPortal(
             <div
@@ -271,47 +399,27 @@ function FolderMenu({
   )
 }
 
+export type TaskDropTargetProps = {
+  'data-task-drop-workspace': string
+  'data-task-drop-folder': string
+}
+
+/** Marks a folder (or, with `folderId` null, the project root) as a place a
+ * dragged task can land. */
 export function useTaskDropTarget(
   workspaceId: string,
   folderId: string | null,
 ) {
-  const { draggedTask, setDraggedTask, perform, onProjectFolderMutation } =
-    useProjectFolders()
-  const [over, setOver] = useState(false)
-  const accepts = Boolean(
-    onProjectFolderMutation && draggedTask?.workspaceId === workspaceId,
-  )
-  useEffect(() => {
-    if (!accepts) setOver(false)
-  }, [accepts])
+  const { dropTarget } = useProjectFolders()
+  const props: TaskDropTargetProps = {
+    'data-task-drop-workspace': workspaceId,
+    'data-task-drop-folder': folderId ?? '',
+  }
   return {
-    over: over && accepts,
-    props: {
-      onDragOver: (event: React.DragEvent) => {
-        if (!accepts) return
-        event.preventDefault()
-        event.stopPropagation()
-        event.dataTransfer.dropEffect = 'move'
-        setOver(true)
-      },
-      onDragLeave: (event: React.DragEvent) => {
-        if (!event.currentTarget.contains(event.relatedTarget as Node | null))
-          setOver(false)
-      },
-      onDrop: (event: React.DragEvent) => {
-        setOver(false)
-        if (!accepts || !draggedTask) return
-        event.preventDefault()
-        event.stopPropagation()
-        perform({
-          action: 'move_thread',
-          workspace_id: workspaceId,
-          thread_id: draggedTask.threadId,
-          folder_id: folderId,
-        })
-        setDraggedTask(null)
-      },
-    },
+    over:
+      dropTarget?.workspaceId === workspaceId &&
+      dropTarget.folderId === folderId,
+    props,
   }
 }
 
