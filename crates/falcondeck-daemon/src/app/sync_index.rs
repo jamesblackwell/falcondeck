@@ -19,6 +19,7 @@ struct FrozenIndex {
     threads: Vec<ThreadSummary>,
     workspaces: BTreeMap<String, FrozenWorkspace>,
     extensions: ExtensionSnapshot,
+    folders: Vec<falcondeck_core::ProjectFolder>,
     bytes: usize,
     #[cfg(test)]
     page_order_builds: usize,
@@ -238,7 +239,9 @@ fn freeze(mut snapshot: DaemonSnapshot, selected: Option<&str>) -> (SyncIndex, F
     let order_bytes = threads.len() * 4 * std::mem::size_of::<usize>()
         + workspaces.len() * std::mem::size_of::<FrozenWorkspace>()
         + workspaces.keys().map(String::len).sum::<usize>();
-    let bytes = serde_json::to_vec(&threads).map_or(CACHE_BYTES, |s| s.len())
+    let folders = index.snapshot.preferences.project_folders.clone();
+    let bytes = serde_json::to_vec(&folders).map_or(CACHE_BYTES, |s| s.len())
+        + serde_json::to_vec(&threads).map_or(CACHE_BYTES, |s| s.len())
         + serde_json::to_vec(&extensions).map_or(CACHE_BYTES, |s| s.len())
         + order_bytes;
     (
@@ -249,6 +252,7 @@ fn freeze(mut snapshot: DaemonSnapshot, selected: Option<&str>) -> (SyncIndex, F
             threads,
             workspaces,
             extensions,
+            folders,
             bytes,
             #[cfg(test)]
             page_order_builds: 0,
@@ -297,6 +301,7 @@ impl AppState {
         cursor: usize,
         sort: &str,
         limit: usize,
+        folder_id: Option<&str>,
     ) -> Result<SyncThreadPage, String> {
         let mut cache = self.inner.sync_indexes.lock().await;
         let view = cache
@@ -304,7 +309,27 @@ impl AppState {
             .iter_mut()
             .find(|v| v.token == token && v.created.elapsed() < CACHE_TTL)
             .ok_or("sync_index_expired")?;
+        // Membership is frozen with the index, like the task order. Live moves
+        // also emit the task summary so clients need not restart their index.
+        let members = folder_id.map(|id| {
+            view.folders
+                .iter()
+                .find(|folder| folder.id == id && folder.workspace_id == workspace)
+                .map(|folder| folder.thread_ids.iter().cloned().collect::<HashSet<_>>())
+                .unwrap_or_default()
+        });
         let (threads, rows) = view.workspace_rows(workspace, sort);
+        let filtered;
+        let rows = if let Some(members) = members {
+            filtered = rows
+                .iter()
+                .copied()
+                .filter(|&i| members.contains(&threads[i].id))
+                .collect::<Vec<_>>();
+            filtered.as_slice()
+        } else {
+            rows
+        };
         if cursor > rows.len() {
             return Err("invalid sync page cursor".into());
         }
@@ -507,6 +532,94 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn project_folder_pages_are_bounded_scoped_and_frozen() {
+        let temp = tempfile::tempdir().unwrap();
+        let app = AppState::new_with_state_path(
+            "test".into(),
+            Default::default(),
+            temp.path().join("state.json"),
+        );
+        let mut source = fixture();
+        source
+            .preferences
+            .project_folders
+            .push(falcondeck_core::ProjectFolder {
+                id: "chores".into(),
+                workspace_id: "workspace-0".into(),
+                name: "Chores".into(),
+                collapsed: false,
+                thread_ids: vec![
+                    "thread-3".into(),
+                    "thread-40".into(),
+                    "thread-49".into(),
+                    "thread-1999".into(),
+                ],
+            });
+        let (index, frozen) = freeze_fixture(source, None);
+        app.inner
+            .sync_indexes
+            .lock()
+            .await
+            .entries
+            .push_back(frozen);
+        let first = app
+            .sync_index_threads(
+                &index.token,
+                "workspace-0",
+                0,
+                "alphabetical",
+                2,
+                Some("chores"),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            first
+                .threads
+                .iter()
+                .map(|thread| thread.id.as_str())
+                .collect::<Vec<_>>(),
+            ["thread-3", "thread-40"]
+        );
+        assert_eq!(first.next_cursor, Some(2));
+        // A live metadata edit cannot shift the meaning of this cursor.
+        app.inner.preferences.lock().await.project_folders.clear();
+        let second = app
+            .sync_index_threads(
+                &index.token,
+                "workspace-0",
+                2,
+                "alphabetical",
+                2,
+                Some("chores"),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            second
+                .threads
+                .iter()
+                .map(|thread| thread.id.as_str())
+                .collect::<Vec<_>>(),
+            ["thread-49"]
+        );
+        assert!(second.next_cursor.is_none());
+        assert!(serde_json::to_vec(&second).unwrap().len() <= PAGE_BYTES);
+        let foreign = app
+            .sync_index_threads(
+                &index.token,
+                "workspace-39",
+                0,
+                "alphabetical",
+                50,
+                Some("chores"),
+            )
+            .await
+            .unwrap();
+        assert!(foreign.threads.is_empty());
+    }
+
+    #[tokio::test]
     async fn large_library_has_bounded_initial_index_and_complete_frozen_pages() {
         let source = fixture();
         let full_size = serde_json::to_vec(&source).unwrap().len();
@@ -542,7 +655,14 @@ mod tests {
         let mut ids = std::collections::HashSet::new();
         loop {
             let page = app
-                .sync_index_threads(&index.token, "workspace-0", cursor, "alphabetical", 10)
+                .sync_index_threads(
+                    &index.token,
+                    "workspace-0",
+                    cursor,
+                    "alphabetical",
+                    10,
+                    None,
+                )
                 .await
                 .unwrap();
             assert!(serde_json::to_vec(&page).unwrap().len() <= PAGE_BYTES);
@@ -568,7 +688,7 @@ mod tests {
         app.inner.sync_indexes.lock().await.entries.push_back(next);
         assert_ne!(index.token, other.token);
         assert_eq!(
-            app.sync_index_threads(&index.token, "workspace-0", 0, "alphabetical", 10)
+            app.sync_index_threads(&index.token, "workspace-0", 0, "alphabetical", 10, None)
                 .await
                 .unwrap()
                 .threads[0]
@@ -577,7 +697,7 @@ mod tests {
         );
         app.inner.sync_indexes.lock().await.entries[0].created = Instant::now() - CACHE_TTL;
         assert_eq!(
-            app.sync_index_threads(&index.token, "workspace-0", 0, "alphabetical", 10)
+            app.sync_index_threads(&index.token, "workspace-0", 0, "alphabetical", 10, None)
                 .await
                 .unwrap_err(),
             "sync_index_expired"

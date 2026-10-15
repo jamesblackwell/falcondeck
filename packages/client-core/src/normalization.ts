@@ -385,6 +385,7 @@ const DEFAULT_PREFERENCES: FalconDeckPreferences = {
   workspace_order: [],
   hidden_workspace_ids: [],
   workspace_colors: {},
+  project_folders: [],
   workspace_icons: {},
   conversation: DEFAULT_CONVERSATION_PREFERENCES,
   notifications: DEFAULT_NOTIFICATION_PREFERENCES,
@@ -2303,6 +2304,7 @@ export function normalizePreferences(value: unknown): FalconDeckPreferences {
         ]
       : [],
     workspace_colors: normalizeWorkspaceColors(raw.workspace_colors),
+    project_folders: normalizeProjectFolders(raw.project_folders),
     workspace_icons: normalizeWorkspaceIcons(raw.workspace_icons),
     conversation: {
       tool_details_mode: toolDetailsMode,
@@ -2584,3 +2586,4 @@ export function normalizeHarnessUpgradeJob(
     error: optionalTrimmedString(raw.error),
   };
 }
+import { normalizeProjectFolders } from './project-folders';

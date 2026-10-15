@@ -1,6 +1,6 @@
 import { memo, useCallback, useRef, useState } from 'react'
 import { Pressable, View } from 'react-native'
-import { Archive, ArchiveRestore, ChevronRight, Pencil, Pin, Sparkles } from 'lucide-react-native'
+import { Archive, ArchiveRestore, ChevronRight, FolderInput, Pencil, Pin, Sparkles } from 'lucide-react-native'
 import * as Haptics from 'expo-haptics'
 import { StyleSheet, useUnistyles } from 'react-native-unistyles'
 
@@ -15,12 +15,14 @@ interface ThreadOptionsSheetProps {
   workspaceId: string
   thread: ThreadSummary
   onClose: () => void
+  onMoveToFolder?: () => void
 }
 
 export const ThreadOptionsSheet = memo(function ThreadOptionsSheet({
   workspaceId,
   thread,
   onClose,
+  onMoveToFolder,
 }: ThreadOptionsSheetProps) {
   const { theme } = useUnistyles()
   const {
@@ -306,7 +308,12 @@ export const ThreadOptionsSheet = memo(function ThreadOptionsSheet({
             onPress={thread.is_archived ? handleUnarchive : handleArchive}
           >
             <View style={styles.itemLabel}>
-              {thread.is_archived ? (
+              {onMoveToFolder ? <Pressable style={styles.item} accessibilityRole="button" accessibilityLabel="Move to folder"
+            disabled={pendingAction !== null} onPress={onMoveToFolder}>
+            <View style={styles.itemLabel}><FolderInput size={theme.iconSize.sm} color={theme.colors.fg.secondary} />
+              <Text variant="label" color="primary">Move to folder…</Text></View>
+          </Pressable> : null}
+          {thread.is_archived ? (
                 <ArchiveRestore size={theme.iconSize.sm} color={theme.colors.info.default} />
               ) : (
                 <Archive size={theme.iconSize.sm} color={theme.colors.info.default} />

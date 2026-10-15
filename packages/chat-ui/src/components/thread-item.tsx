@@ -1,3 +1,4 @@
+import { TASK_DRAG_TYPE, useProjectFolders } from './project-folders'
 import * as React from 'react'
 import { memo, useId, useMemo } from 'react'
 import { Archive, ArchiveRestore, Bot, CalendarClock, CircleStop, Pin, Split } from 'lucide-react'
@@ -105,6 +106,8 @@ export const ThreadItem = memo(
     onUnarchive,
     onOpenContextMenu,
     onRequestRename,
+    const folderControls = useProjectFolders()
+    const canDrag = Boolean(folderControls.onProjectFolderMutation && !thread.is_archived)
     nowTick = 0,
     tags = [],
     providerLabel = null,
@@ -129,6 +132,14 @@ export const ThreadItem = memo(
     const timeString = useMemo(
       () => timeAgo(thread.updated_at),
       [nowTick, thread.updated_at],
+        draggable={canDrag || undefined}
+        onDragStart={canDrag ? (event) => {
+          const task = { workspaceId, threadId: thread.id }
+          event.dataTransfer.setData(TASK_DRAG_TYPE, JSON.stringify(task))
+          event.dataTransfer.effectAllowed = 'move'
+          folderControls.setDraggedTask(task)
+        } : undefined}
+        onDragEnd={canDrag ? () => folderControls.setDraggedTask(null) : undefined}
     )
     const fullTimestamp = useMemo(
       () => formatThreadTimestamp(thread.updated_at),

@@ -124,7 +124,7 @@ export function trackSyncIndexEvent(snapshot: DaemonSnapshot, event: EventEnvelo
   return snapshot
 }
 
-export function mergeSyncThreadPage(snapshot: DaemonSnapshot, page: SyncThreadPage, sort: string): DaemonSnapshot {
+export function mergeSyncThreadPage(snapshot: DaemonSnapshot, page: SyncThreadPage, sort: string, scope: 'workspace' | 'folder' = 'workspace'): DaemonSnapshot {
   const index = snapshot.sync_index
   if (!index || index.token !== page.token) return snapshot
   const rows = new Map(snapshot.threads.map(thread => [thread.id, thread]))
@@ -135,7 +135,7 @@ export function mergeSyncThreadPage(snapshot: DaemonSnapshot, page: SyncThreadPa
     delete carried[thread.id]
   }
   // Only a complete workspace traversal proves a carried row no longer exists.
-  if (page.next_cursor === null) {
+  if (scope === 'workspace' && page.next_cursor === null) {
     for (const id of Object.keys(carried)) {
       if (rows.get(id)?.workspace_id !== page.workspace_id) continue
       if (!index.touched_threads[id]) rows.delete(id)

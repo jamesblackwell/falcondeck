@@ -1,5 +1,7 @@
+import { ProjectFolderSheet, ProjectFolderPickerSheet } from './ProjectFolderSheet';
+import { mutateProjectFolder } from '@/lib/project-folders';
 import { useSessionStore } from '@/store'
-import { isSyncThreadPageInFlight, loadSyncThreadPage } from '@/hooks/sync-index'
+import { isSyncThreadPageInFlight, loadSyncThreadPage, loadSyncProjectFolderPage } from '@/hooks/sync-index'
 import {
   memo,
   useCallback,
@@ -9,7 +11,7 @@ import {
   useState,
   type ReactNode,
 } from "react";
-import { Pressable, View } from "react-native";
+import { Alert, Pressable, View } from "react-native";
 import { Image } from "expo-image";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { StyleSheet, useUnistyles } from "react-native-unistyles";
@@ -21,6 +23,7 @@ import {
   Eye,
   EyeOff,
   FolderClosed,
+  FolderPlus,
   FolderOpen,
   ListFilter,
   Plus,
@@ -37,12 +40,15 @@ import type {
   ExtensionSnapshot,
   ExtensionUiTone,
   ProjectGroup,
+  ProjectFolder,
+  ProjectFolderMutation,
   ThreadSortMode,
   ThreadSummary,
   ThreadTag,
   SyncIndexCoverage,
 } from "@falcondeck/client-core";
 import {
+  EMPTY_PROJECT_FOLDERS,
   filterProjectGroupsByExtensions,
   isThreadSortMode,
   isWorkspaceColorId,
@@ -103,6 +109,8 @@ interface SidebarViewProps {
   threadTagOptions?: readonly ThreadTag[];
   extensionSnapshot?: ExtensionSnapshot | null;
   extensionSidebarFilters?: readonly ExtensionSidebarFilterDefinition[];
+  projectFolders?: readonly ProjectFolder[];
+  onNewThreadInFolder?: (workspaceId: string, folderId: string) => Promise<void>;
   workspaceColors?: Record<string, string>;
   hiddenWorkspaceIds?: readonly string[];
 }
@@ -185,10 +193,19 @@ export const SidebarView = memo(function SidebarView({
   threadTagOptions = [],
   extensionSnapshot,
   extensionSidebarFilters = [],
+  projectFolders = EMPTY_PROJECT_FOLDERS,
+  onNewThreadInFolder,
   workspaceColors,
   hiddenWorkspaceIds = EMPTY_HIDDEN_WORKSPACE_IDS,
 }: SidebarViewProps) {
   const workspaceIconSrc = useWorkspaceIcons(groups, !isVisible);
+  const [folderEditor, setFolderEditor] = useState<{ workspaceId: string; folder?: ProjectFolder } | null>(null);
+  const [folderMoveTarget, setFolderMoveTarget] = useState<{ workspaceId: string; threadId: string } | null>(null);
+  const [isFolderPaging, setIsFolderPaging] = useState(false);
+  const performFolderMutation = useCallback((mutation: ProjectFolderMutation) => {
+    void mutateProjectFolder(mutation).catch((error: unknown) => Alert.alert('Could not update folder',
+      error instanceof Error ? error.message : 'Please try again'));
+  }, []);
   const [workspaceOptions, setWorkspaceOptions] = useState<{
     workspaceId: string;
     workspaceName: string;
@@ -378,6 +395,52 @@ export const SidebarView = memo(function SidebarView({
     return selected ?? listedGroups[0]?.workspace.id ?? null;
   }, [listedGroups, selectedWorkspaceId]);
 
+  const expandedFolderScopes = projectFolders
+    .filter(
+      (folder) =>
+        !folder.collapsed &&
+        !collapsedWorkspaces.has(folder.workspace_id) &&
+        listedGroups.some((group) => group.workspace.id === folder.workspace_id),
+    )
+    .map((folder) => `${folder.workspace_id}\t${folder.id}`)
+    .join("\n");
+  useEffect(() => {
+    if (!isVisible || !syncIndex?.token || !expandedFolderScopes) {
+      setIsFolderPaging(false);
+      return;
+    }
+    let cancelled = false;
+    const token = syncIndex.token;
+    void (async () => {
+      setIsFolderPaging(true);
+      try {
+        for (const scope of expandedFolderScopes.split("\n")) {
+          const [workspaceId, folderId] = scope.split("\t");
+          const key = `${workspaceId}:folder:${folderId}:${sortMode}`;
+          while (!cancelled) {
+            const index = useSessionStore.getState().snapshot?.sync_index;
+            if (index?.token !== token || index.cursors[key] === null) break;
+            const previous = index.cursors[key];
+            await loadSyncProjectFolderPage(workspaceId, folderId, sortMode);
+            const next = useSessionStore.getState().snapshot?.sync_index;
+            if (next?.token !== token || next.cursors[key] === previous) break;
+          }
+        }
+      } catch (error) {
+        if (!cancelled)
+          Alert.alert(
+            "Could not load folder",
+            error instanceof Error ? error.message : "Please try again",
+          );
+      } finally {
+        if (!cancelled) setIsFolderPaging(false);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [isVisible, syncIndex?.token, expandedFolderScopes, sortMode]);
+
   const builtRows = useMemo(
     () =>
       buildSidebarRows(
@@ -392,9 +455,11 @@ export const SidebarView = memo(function SidebarView({
         syncIndex?.cursors,
         hiddenProjectCount > 0,
         listedGroups,
+        projectFolders,
       ),
     [
       listedGroups,
+      projectFolders,
       collapsedWorkspaces,
       visibleThreadCounts,
       selectedThreadId,
@@ -806,6 +871,10 @@ export const SidebarView = memo(function SidebarView({
                 </View>
               ) : null}
             </Pressable>
+            <Button variant="ghost" size="icon" accessibilityLabel={`Create folder in ${item.workspaceName}`}
+              onPress={() => setFolderEditor({ workspaceId: item.workspaceId })}>
+              <FolderPlus size={theme.iconSize.xs} color={theme.colors.fg.muted} />
+            </Button>
             <Button
               variant="ghost"
               size="icon"
@@ -821,6 +890,26 @@ export const SidebarView = memo(function SidebarView({
         );
       }
 
+      if (item.type === 'folder') {
+        return <CollapsibleRow rowKey={item.key} isCollapsed={item.isCollapsed}>
+          <View style={styles.folderHeader}>
+            <Pressable style={styles.workspaceLeft} accessibilityRole="button" accessibilityLabel={item.folder.name}
+              accessibilityState={{ expanded: !item.folder.collapsed }} accessibilityHint="Double tap and hold for folder options"
+              onPress={() => performFolderMutation({ action: 'set_collapsed', workspace_id: item.workspaceId, folder_id: item.folder.id, collapsed: !item.folder.collapsed })}
+              onLongPress={() => setFolderEditor({ workspaceId: item.workspaceId, folder: item.folder })}>
+              <ChevronDown size={theme.iconSize.xs} color={theme.colors.fg.muted} style={item.folder.collapsed ? styles.sectionChevronCollapsed : undefined} />
+              {item.folder.collapsed ? <FolderClosed size={theme.iconSize.xs} color={theme.colors.fg.muted} /> : <FolderOpen size={theme.iconSize.xs} color={theme.colors.fg.muted} />}
+              <Text variant="body" color="secondary" numberOfLines={1} style={styles.workspaceName}>{item.folder.name}</Text>
+              <Text variant="meta" color="muted">{item.count}</Text>
+            </Pressable>
+            {onNewThreadInFolder ? <Button variant="ghost" size="icon" accessibilityLabel={`New task in ${item.folder.name}`}
+              onPress={() => { void onNewThreadInFolder(item.workspaceId, item.folder.id).catch((error: unknown) => Alert.alert('Could not create task', error instanceof Error ? error.message : 'Please try again')); }}>
+              <SquarePen size={theme.iconSize.xs} color={theme.colors.fg.muted} />
+            </Button> : null}
+          </View>
+        </CollapsibleRow>;
+      }
+
       if (item.type === "overflow") {
         const overflowLabel = item.isExpanded ? "Show less" : "Show more";
         const isLoading = overflowLoading.has(`${syncIndex?.token}:${item.workspaceId}:${sortMode}`);
@@ -829,7 +918,11 @@ export const SidebarView = memo(function SidebarView({
             <Pressable
               style={styles.overflowRow}
               onPress={() =>
-                handleOverflowPress(
+                item.folderId ? setVisibleThreadCounts((current) => {
+                  const next = new Map(current);
+                  next.set(`folder:${item.folderId}`, item.isExpanded ? VISIBLE_THREAD_LIMIT : item.visibleCount + SHOW_MORE_STEP);
+                  return next;
+                }) : handleOverflowPress(
                   item.workspaceId,
                   item.visibleCount,
                   item.isExpanded,
@@ -859,6 +952,7 @@ export const SidebarView = memo(function SidebarView({
 
       return (
         <CollapsibleRow rowKey={item.key} isCollapsed={item.isCollapsed}>
+          <View style={item.folderId ? styles.folderContent : undefined}>
           <SessionListItem
             thread={item.thread}
             workspaceId={item.workspaceId}
@@ -868,12 +962,15 @@ export const SidebarView = memo(function SidebarView({
             nowTick={nowTick}
             tags={threadTagsById?.[item.thread.id]}
           />
+          </View>
         </CollapsibleRow>
       );
     },
     [
       nowTick,
       onNewThread,
+      onNewThreadInFolder,
+      performFolderMutation,
       onNewChat,
       onSelectThread,
       openThreadOptions,
@@ -983,7 +1080,7 @@ export const SidebarView = memo(function SidebarView({
           />
         )}
         <LoadingPill
-          visible={!syncStatus.isBusy && isPaging}
+          visible={!syncStatus.isBusy && (isPaging || isFolderPaging)}
           label="Loading tasks…"
           accessibilityLabel="Loading tasks"
         />
@@ -1056,9 +1153,18 @@ export const SidebarView = memo(function SidebarView({
         <ThreadOptionsSheet
           workspaceId={optionsTarget.workspaceId}
           thread={optionsTarget.thread}
+          onMoveToFolder={projectFolders.some((folder) => folder.workspace_id === optionsTarget.workspaceId) ? () => {
+            setFolderMoveTarget({ workspaceId: optionsTarget.workspaceId, threadId: optionsTarget.thread.id });
+            setOptionsTarget(null);
+          } : undefined}
           onClose={closeThreadOptions}
         />
       ) : null}
+
+      {folderEditor ? <ProjectFolderSheet key={folderEditor.folder?.id ?? folderEditor.workspaceId}
+        workspaceId={folderEditor.workspaceId} folder={folderEditor.folder} onNewTask={onNewThreadInFolder} onClose={() => setFolderEditor(null)} /> : null}
+      {folderMoveTarget ? <ProjectFolderPickerSheet workspaceId={folderMoveTarget.workspaceId} threadId={folderMoveTarget.threadId}
+        folders={projectFolders} onClose={() => setFolderMoveTarget(null)} /> : null}
 
       {workspaceOptions ? (
         <WorkspaceOptionsSheet
@@ -1093,6 +1199,8 @@ export const SidebarView = memo(function SidebarView({
 });
 
 const styles = StyleSheet.create((theme) => ({
+  folderHeader: { flexDirection: 'row', alignItems: 'center', paddingLeft: theme.spacing[6], paddingRight: theme.spacing[2], minHeight: theme.minTouchTarget },
+  folderContent: { paddingLeft: theme.spacing[4] },
   container: {
     flex: 1,
     backgroundColor: theme.colors.surface[1],

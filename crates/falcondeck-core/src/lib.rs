@@ -11,6 +11,9 @@ pub mod backup;
 pub mod control;
 /// Cryptography helpers for pairing, key exchange, and encrypted payloads.
 pub mod crypto;
+/// Synced project folder metadata and atomic edits.
+pub mod project_folders;
+pub use project_folders::*;
 /// Bounded, multiplexed relay socket transport.
 pub mod relay_transport;
 /// Compact, revision-bound remote index pages.
@@ -86,6 +89,9 @@ pub struct FalconDeckPreferences {
     /// Missing keys mean auto-discover (local favicon, then a domain hint).
     #[serde(default)]
     pub workspace_icons: BTreeMap<String, WorkspaceIconPreference>,
+    /// Virtual folders and task membership shared by connected clients.
+    #[serde(default)]
+    pub project_folders: Vec<ProjectFolder>,
     /// Conversation and thread display preferences.
     #[serde(default)]
     pub conversation: ConversationPreferences,
@@ -115,6 +121,7 @@ impl Default for FalconDeckPreferences {
             hidden_workspace_ids: Vec::new(),
             workspace_colors: BTreeMap::new(),
             workspace_icons: BTreeMap::new(),
+            project_folders: Vec::new(),
             conversation: ConversationPreferences::default(),
             notifications: NotificationPreferences::default(),
             utility_models: UtilityModelPreferences::default(),
@@ -615,6 +622,9 @@ pub enum ToolDetailsMode {
 /// Partial preferences update payload accepted by the daemon API.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 pub struct UpdatePreferencesRequest {
+    /// Atomic project folder edit; does not replace other clients' edits.
+    #[serde(default)]
+    pub project_folder: Option<ProjectFolderMutation>,
     /// Optional startup recovery policy update.
     #[serde(default)]
     pub auto_resume_interrupted_sessions: Option<bool>,

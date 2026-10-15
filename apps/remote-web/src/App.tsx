@@ -1,3 +1,4 @@
+import type { ProjectFolderMutation } from '@falcondeck/client-core';
 import { cancelRelayTransport, receiveRelayTransport } from '@falcondeck/client-core';
 import {
   Suspense,
@@ -4839,6 +4840,56 @@ function RemoteApp() {
     persistThreadSortMode(mode);
   }, []);
 
+  const handleProjectFolderMutation = useCallback(
+    async (mutation: ProjectFolderMutation) => {
+      await submitQueuedAction("preferences.update", {
+        project_folder: mutation,
+      });
+    },
+    [submitQueuedAction],
+  );
+
+  const handleNewThreadInFolder = useCallback(
+    async (workspaceId: string, folderId: string) => {
+      const workspace = snapshot?.workspaces.find(
+        (entry) => entry.id === workspaceId,
+      );
+      const handle = normalizeThreadHandle(
+        await submitQueuedAction("thread.start", {
+          workspace_id: workspaceId,
+          provider: workspace?.default_provider,
+        }),
+      );
+      setSnapshot((current) =>
+        current
+          ? {
+              ...current,
+              threads: [
+                handle.thread,
+                ...current.threads.filter(
+                  (thread) => thread.id !== handle.thread.id,
+                ),
+              ],
+            }
+          : current,
+      );
+      handleSelectThread(workspaceId, handle.thread.id);
+      await handleProjectFolderMutation({
+        action: "move_thread",
+        workspace_id: workspaceId,
+        thread_id: handle.thread.id,
+        folder_id: folderId,
+      });
+    },
+    [
+      snapshot?.workspaces,
+      setSnapshot,
+      handleSelectThread,
+      handleProjectFolderMutation,
+      submitQueuedAction,
+    ],
+  );
+
   const handleWorkspaceOrderChange = useCallback(
     async (workspaceIds: string[]) => {
       try {
@@ -5229,6 +5280,9 @@ function RemoteApp() {
                 closeWorkspaceReason={closeWorkspaceReason}
                 threadSort={threadSort}
                 onThreadSortChange={handleThreadSortChange}
+                projectFolders={snapshot?.preferences.project_folders}
+                onProjectFolderMutation={handleProjectFolderMutation}
+                onNewThreadInFolder={handleNewThreadInFolder}
                 onWorkspaceOrderChange={handleWorkspaceOrderChange}
                 hiddenWorkspaceIds={snapshot?.preferences.hidden_workspace_ids}
                 onWorkspaceHiddenChange={handleWorkspaceHiddenChange}
@@ -5301,6 +5355,9 @@ function RemoteApp() {
           closeWorkspaceReason={closeWorkspaceReason}
           threadSort={threadSort}
           onThreadSortChange={handleThreadSortChange}
+          projectFolders={snapshot?.preferences.project_folders}
+          onProjectFolderMutation={handleProjectFolderMutation}
+          onNewThreadInFolder={handleNewThreadInFolder}
           onWorkspaceOrderChange={handleWorkspaceOrderChange}
           hiddenWorkspaceIds={snapshot?.preferences.hidden_workspace_ids}
           onWorkspaceHiddenChange={handleWorkspaceHiddenChange}

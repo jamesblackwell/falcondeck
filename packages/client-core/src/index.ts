@@ -55,3 +55,4 @@ export * from "./extension-ui";
 export * from "./mermaid";
 
 export { useStreamingText } from "./streaming-text";
+export * from './project-folders'

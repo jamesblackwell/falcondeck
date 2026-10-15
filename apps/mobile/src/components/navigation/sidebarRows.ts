@@ -1,5 +1,9 @@
 import {
   compareThreads,
+  EMPTY_PROJECT_FOLDERS,
+  projectFoldersForWorkspace,
+  partitionProjectFolders,
+  type ProjectFolder,
   partitionSidebarThreads,
   summarizeThreadAttention,
   type ProjectGroup,
@@ -93,7 +97,16 @@ export type SidebarRow =
     }
   | {
       key: string
+      type: 'folder'
+      workspaceId: string
+      folder: ProjectFolder
+      count: number
+      isCollapsed: boolean
+    }
+  | {
+      key: string
       type: 'thread'
+      folderId?: string
       workspaceId: string
       thread: ThreadSummary
       /**
@@ -106,6 +119,7 @@ export type SidebarRow =
   | {
       key: string
       type: 'overflow'
+      folderId?: string
       workspaceId: string
       hiddenCount: number
       /** The count currently shown — "Show more" advances from here. */
@@ -149,6 +163,7 @@ export function buildSidebarRows(
   remoteCursors: Record<string, number | null> = {},
   showProjectsHeading = false,
   pinnedGroups: ProjectGroup[] = groups,
+  projectFolders: readonly ProjectFolder[] = EMPTY_PROJECT_FOLDERS,
 ): SidebarRow[] {
   const compare = compareThreads(sortMode)
   const chatGroups = groups.filter((group) => group.workspace.kind === 'casual')
@@ -223,11 +238,14 @@ export function buildSidebarRows(
       unreadTone: attention.unreadTone,
     }
 
+    const folders = projectFoldersForWorkspace(projectFolders, group.workspace.id)
+    const partition = folders.length ? partitionProjectFolders(group.threads, folders) : null
+    const rootThreads = partition ? deriveThreads(partition.root) : derived
     const {
       pinnedInProject: sortedPinnedInProject,
       unpinned: sortedUnpinned,
       unpinnedIndexes,
-    } = sortedProjectThreads(derived, sortMode)
+    } = sortedProjectThreads(rootThreads, sortMode)
 
     const requestedCount = visibleThreadCounts.get(group.workspace.id) ?? VISIBLE_THREAD_LIMIT
 
@@ -252,10 +270,11 @@ export function buildSidebarRows(
       isCollapsed: !isOpen,
     }))
 
-    const rows: SidebarRow[] = [workspaceRow, ...threadRows]
+    const rows: SidebarRow[] = [workspaceRow, ...threadRows.slice(0, sortedPinnedInProject.length)]
+    const rootTail: SidebarRow[] = threadRows.slice(sortedPinnedInProject.length)
 
     if (hiddenCount > 0 || canCollapse) {
-      rows.push({
+      rootTail.push({
         key: `overflow:${group.workspace.id}`,
         type: 'overflow',
         workspaceId: group.workspace.id,
@@ -266,6 +285,26 @@ export function buildSidebarRows(
       })
     }
 
+    for (const { folder, threads } of partition?.folders ?? []) {
+      const sorted = sortedProjectThreads(deriveThreads(threads), sortMode)
+      const members = [...sorted.pinnedInProject, ...sorted.unpinned]
+      const limit = visibleThreadCounts.get(`folder:${folder.id}`) ?? VISIBLE_THREAD_LIMIT
+      const visibleMembers = members.slice(0, limit)
+      const selected = members.slice(limit).find((thread) => thread.id === selectedThreadId)
+      const collapsed = !isOpen || folder.collapsed
+      rows.push({ key: `folder:${folder.id}`, type: 'folder', workspaceId: group.workspace.id,
+        folder, count: members.length, isCollapsed: !isOpen })
+      for (const thread of [...visibleMembers, ...(selected ? [selected] : [])]) {
+        rows.push({ key: `thread:${thread.id}`, type: 'thread', workspaceId: group.workspace.id,
+          folderId: folder.id, thread, isCollapsed: collapsed })
+      }
+      if (members.length > VISIBLE_THREAD_LIMIT) rows.push({
+        key: `overflow:folder:${folder.id}`, type: 'overflow', workspaceId: group.workspace.id, folderId: folder.id,
+        hiddenCount: Math.max(0, members.length - limit), visibleCount: visibleMembers.length,
+        isExpanded: limit >= members.length, isCollapsed: collapsed,
+      })
+    }
+    rows.push(...rootTail)
     return rows
   })
 

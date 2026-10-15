@@ -397,7 +397,26 @@ export type UtilityModelPreferences = {
 export type FalconDeckPreferences = {
   version: number;
   /** Daemon resumes shutdown-interrupted sessions on startup. Older daemons omit this. */
+export type ProjectFolder = {
+  id: string;
+  workspace_id: string;
+  name: string;
+  collapsed: boolean;
+  thread_ids: string[];
+};
+
+/** Applied atomically to current daemon metadata, so concurrent edits compose. */
+export type ProjectFolderMutation = { workspace_id: string } & (
+  | { action: "create"; name: string }
+  | { action: "rename"; folder_id: string; name: string }
+  | { action: "set_collapsed"; folder_id: string; collapsed: boolean }
+  | { action: "delete"; folder_id: string }
+  | { action: "move_thread"; thread_id: string; folder_id: string | null }
+);
+
   auto_resume_interrupted_sessions?: boolean;
+  /** Virtual project folders, shared through daemon preferences. */
+  project_folders?: ProjectFolder[];
   /** Older daemons omit this until project order has been saved. */
   workspace_order?: string[];
   /** Project ids hidden from the sidebar by default. */
@@ -504,6 +523,7 @@ export type UpdatePreferencesPayload = {
   auto_resume_interrupted_sessions?: boolean;
   workspace_order?: string[] | null;
   hidden_workspace_ids?: string[] | null;
+  project_folder?: ProjectFolderMutation;
   workspace_colors?: Record<string, string> | null;
   workspace_icons?: Record<string, WorkspaceIconPreference> | null;
   conversation?: UpdateConversationPreferences | null;

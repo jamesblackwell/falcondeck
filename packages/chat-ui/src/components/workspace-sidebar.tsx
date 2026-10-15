@@ -1,3 +1,5 @@
+import { partitionProjectFolders, projectFoldersForWorkspace } from '@falcondeck/client-core';
+import { ProjectFoldersProvider, ProjectFolderSection, useProjectFolders, useTaskDropTarget, type ProjectFolderControls } from './project-folders';
 import * as React from "react";
 import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
@@ -121,7 +123,7 @@ export type WorkspaceSidebarActivity = {
   onPopOut?: () => void;
 };
 
-export type WorkspaceSidebarProps = {
+export type WorkspaceSidebarProps = ProjectFolderControls & {
   groups: ProjectGroup[];
   // Host badges for workspaces that live on enrolled remote servers,
   // keyed by workspace id.
@@ -435,7 +437,7 @@ function useOrderedThreads(threads: ThreadSummary[], sortMode: ThreadSortMode) {
   );
 }
 
-const ThreadList = memo(function ThreadList({
+const FlatThreadList = memo(function FlatThreadList({
   group,
   sortMode,
   selectedThreadId,
@@ -606,6 +608,53 @@ const ThreadList = memo(function ThreadList({
     </>
   );
 });
+const ThreadList = memo(function ThreadList(
+  props: React.ComponentProps<typeof FlatThreadList>,
+) {
+  const { folders } = useProjectFolders();
+  const projectFolders = useMemo(
+    () => projectFoldersForWorkspace(folders, props.group.workspace.id),
+    [folders, props.group.workspace.id],
+  );
+  const partition = useMemo(
+    () => projectFolders.length ? partitionProjectFolders(props.group.threads, projectFolders) : null,
+    [props.group.threads, projectFolders],
+  );
+  const root = useMemo(
+    () => partition ? partitionSidebarThreads(partition.root) : null,
+    [partition],
+  );
+  if (props.viewingArchived || !partition || !root)
+    return <FlatThreadList {...props} />;
+  return (
+    <>
+      {root.pinnedInProject.length > 0 ? (
+        <FlatThreadList
+          key="project-pinned"
+          {...props}
+          group={{ ...props.group, threads: root.pinnedInProject }}
+        />
+      ) : null}
+      {partition.folders.map(({ folder, threads }) => (
+        <ProjectFolderSection
+          key={folder.id}
+          folder={folder}
+          count={threads.filter((thread) => !thread.is_pinned).length}
+        >
+          <FlatThreadList {...props} group={{ ...props.group, threads }} />
+        </ProjectFolderSection>
+      ))}
+      {root.unpinned.length > 0 ? (
+        <FlatThreadList
+          key="project-root"
+          {...props}
+          group={{ ...props.group, threads: root.unpinned }}
+        />
+      ) : null}
+    </>
+  );
+});
+
 
 type PinnedThreadEntry = {
   workspaceId: string;
@@ -1072,6 +1121,8 @@ const ProjectGroupRow = memo(function ProjectGroupRow({
   nowTick: number;
   threadTagsById?: Record<string, ThreadTag[]>;
 }) {
+  const folderControls = useProjectFolders();
+  const taskDrop = useTaskDropTarget(workspaceId, null);
   const workspaceId = group.workspace.id;
   const workspacePath = group.workspace.path;
   const defaultThreadId = defaultProjectThreadId(group);
@@ -1157,6 +1208,12 @@ const ProjectGroupRow = memo(function ProjectGroupRow({
       host={host}
       isSelected={isSelected}
       onSelect={handleSelect}
+      onCreateFolder={folderControls.onProjectFolderMutation ? () => {
+        onWorkspaceOpenChange(workspaceId, true);
+        folderControls.edit({ workspaceId });
+      } : undefined}
+      taskDropProps={taskDrop.props}
+      isTaskDropTarget={taskDrop.over}
       onNewThread={handleNewThread}
       onSearchThreads={handleSearchThreads}
       onOpenContextMenu={handleOpenContextMenu}
@@ -1190,6 +1247,9 @@ const ProjectGroupRow = memo(function ProjectGroupRow({
   );
 });
 
+  projectFolders,
+  onProjectFolderMutation,
+  onNewThreadInFolder,
 export const WorkspaceSidebar = memo(function WorkspaceSidebar({
   groups,
   workspaceHosts,
@@ -2842,6 +2902,11 @@ export const WorkspaceSidebar = memo(function WorkspaceSidebar({
   const showHeader =
     Boolean(title) || Boolean(onSearch) || Boolean(headerClassName);
 
+    <ProjectFoldersProvider
+      projectFolders={projectFolders}
+      onProjectFolderMutation={onProjectFolderMutation}
+      onNewThreadInFolder={onNewThreadInFolder}
+    >
   return (
     <SidebarShell className={className}>
       {showHeader ? (
@@ -3502,6 +3567,7 @@ export const WorkspaceSidebar = memo(function WorkspaceSidebar({
                   .find((group) => group.workspace.id === draggingWorkspaceId)
                   ?.workspace.path.split("/")
                   .pop() ?? "Project"}
+    </ProjectFoldersProvider>
               </span>
             </div>,
             document.body,

@@ -97,6 +97,7 @@ mod notifications;
 mod opencode_threads;
 mod provider_runtime;
 mod provider_usage;
+mod project_folders;
 mod remote_bridge;
 mod remote_lifecycle;
 mod runtime_health;
@@ -3212,7 +3213,7 @@ impl AppState {
 
     pub async fn update_preferences(
         &self,
-        request: UpdatePreferencesRequest,
+        mut request: UpdatePreferencesRequest,
     ) -> Result<FalconDeckPreferences, DaemonError> {
         let mut preferences = self.inner.preferences.lock().await;
         let icons_changed = request.workspace_icons.is_some();
@@ -3230,10 +3231,23 @@ impl AppState {
             UnifiedEvent::PreferencesUpdated {
                 preferences: updated.clone(),
             },
+        let moved_thread = if let Some(mutation) = &request.project_folder {
+            self.validate_project_folder_mutation(mutation).await?;
+            if let falcondeck_core::ProjectFolderAction::MoveThread { thread_id, .. } = &mutation.action {
+                Some((mutation.workspace_id.clone(), thread_id.clone()))
+            } else {
+                None
+            }
+        } else {
+            None
+        };
         );
         if icons_changed {
             self.refresh_workspace_icons().await;
         }
+            if let Some(mutation) = request.project_folder.take() {
+                project_folders::apply_mutation(&mut next.project_folders, mutation)?;
+            }
         Ok(updated)
     }
 
@@ -3247,6 +3261,15 @@ impl AppState {
                 app.emit(
                     Some(workspace_id),
                     None,
+        if let Some((workspace_id, thread_id)) = moved_thread {
+            if let Ok(thread) = self.thread_summary(&workspace_id, &thread_id).await {
+                self.emit(
+                    Some(workspace_id),
+                    Some(thread_id),
+                    UnifiedEvent::ThreadUpdated { thread },
+                );
+            }
+        }
                     UnifiedEvent::Snapshot {
                         snapshot: app.snapshot().await,
                     },

@@ -1,3 +1,4 @@
+import { ProjectFolderMoveMenuItem, useProjectFolders } from './project-folders'
 import * as React from 'react'
 import { memo, useEffect, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
@@ -188,6 +189,7 @@ export const ThreadContextMenu = memo(function ThreadContextMenu({
   onCreateStage?: () => void
   menuRef: React.RefObject<HTMLDivElement | null>
 }) {
+  const folderControls = useProjectFolders()
   const [copiedField, setCopiedField] = useState<'path' | 'session' | null>(
     null,
   )
@@ -273,6 +275,7 @@ export const ThreadContextMenu = memo(function ThreadContextMenu({
   const iconClassName = 'h-3.5 w-3.5 text-fg-muted'
   const canSetStage = stageOptions.length > 0
   const rowCount =
+    Number(Boolean(folderControls.onProjectFolderMutation && folderControls.folders.some((folder) => folder.workspace_id === target.workspaceId))) +
     Number(canPin) +
     Number(canPinInProject) +
     Number(canRename) +
@@ -589,6 +592,7 @@ export const ThreadContextMenu = memo(function ThreadContextMenu({
           ) : null}
         </div>
       ) : null}
+      <ProjectFolderMoveMenuItem workspaceId={target.workspaceId} threadId={target.thread.id} onClose={onClose} />
       {workspacePath || sessionId ? (
         <div
           role="separator"

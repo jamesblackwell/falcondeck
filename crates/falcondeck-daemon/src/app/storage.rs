@@ -202,6 +202,13 @@ pub(super) fn merge_preferences_from_value(value: Value) -> FalconDeckPreference
         }
     }
 
+    if let Some(folders) = value.get("project_folders").and_then(Value::as_array) {
+        preferences.project_folders = folders
+            .iter()
+            .filter_map(|folder| serde_json::from_value(folder.clone()).ok())
+            .collect();
+    }
+
     if let Some(hidden_workspace_ids) = value.get("hidden_workspace_ids").and_then(Value::as_array)
     {
         for workspace_id in hidden_workspace_ids.iter().filter_map(Value::as_str) {

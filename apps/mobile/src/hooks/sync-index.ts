@@ -76,6 +76,33 @@ export function loadSyncThreadPage(workspaceId: string, sort: ThreadSortMode = '
   })
 }
 
+/** Folder pages have independent coverage; they cannot prune unrelated carried rows. */
+export function loadSyncProjectFolderPage(workspaceId: string, folderId: string, sort: ThreadSortMode = 'last_updated') {
+  const index = useSessionStore.getState().snapshot?.sync_index
+  if (!index) return Promise.resolve()
+  const sortKey = `folder:${folderId}:${sort}`
+  const cursor = index.cursors[`${workspaceId}:${sortKey}`]
+  if (cursor === null) return Promise.resolve()
+  const scope = requestScope(index.token)
+  return once(`${index.token}:${workspaceId}:${sortKey}`, scope, async () => {
+    try {
+      const page = await useRelayStore.getState()._callRpc<SyncThreadPage>('sync.threads', {
+        token: index.token, workspace_id: workspaceId, folder_id: folderId, cursor: cursor ?? 0, sort, limit: 50,
+      }, { requestIdPrefix: 'mobile-folder-page' })
+      if (!isCurrent(scope)) return
+      useSessionStore.setState(state => state.snapshot ? { snapshot: mergeSyncThreadPage(state.snapshot, page, sortKey, 'folder') } : state)
+      persistSessionCacheNow()
+    } catch (error) {
+      if (!isCurrent(scope)) return
+      if (error instanceof Error && error.message.includes('sync_index_expired')) {
+        useRelayStore.setState({ hasSyncedOnce: false })
+        return
+      }
+      throw error
+    }
+  })
+}
+
 export function loadSyncExtensions(token: string) {
   const index = useSessionStore.getState().snapshot?.sync_index
   if (!index || index.token !== token || index.extensions_loaded) return Promise.resolve()

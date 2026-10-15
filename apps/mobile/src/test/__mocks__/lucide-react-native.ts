@@ -87,3 +87,6 @@ export const Volume2 = createIcon('Volume2')
 export const Zap = createIcon('Zap')
 export const SquarePen = createIcon('SquarePen')
 export const X = createIcon('X')
+
+export const FolderInput = createIcon('FolderInput')
+export const FolderPlus = createIcon('FolderPlus')

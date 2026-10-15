@@ -1,3 +1,4 @@
+import type { ProjectFolderMutation } from '@falcondeck/client-core';
 import { DICTIONARY_REQUEST_EVENT, DICTIONARY_REQUEST_KEY } from "./components/DictationDictionary";
 import { ExternalLinkHandler } from "./external-links";
 import {
@@ -3796,6 +3797,55 @@ function AppInner() {
     [api, setSnapshot, toast],
   );
 
+  const handleProjectFolderMutation = useCallback(
+    async (mutation: ProjectFolderMutation) => {
+      if (!api) throw new Error(CONNECTION_COPY.stillConnecting);
+      await api.updatePreferences({ project_folder: mutation });
+    },
+    [api],
+  );
+
+  const handleNewThreadInFolder = useCallback(
+    async (workspaceId: string, folderId: string) => {
+      const client = apiFor(workspaceId);
+      if (!client) throw new Error(CONNECTION_COPY.stillConnecting);
+      const workspace = viewSnapshot?.workspaces.find(
+        (entry) => entry.id === workspaceId,
+      );
+      const handle = await client.startThread({
+        workspace_id: workspaceId,
+        provider: workspace?.default_provider,
+      });
+      setSnapshot((current) =>
+        current
+          ? {
+              ...current,
+              threads: [
+                handle.thread,
+                ...current.threads.filter(
+                  (thread) => thread.id !== handle.thread.id,
+                ),
+              ],
+            }
+          : current,
+      );
+      handleSelectThread(workspaceId, handle.thread.id);
+      await handleProjectFolderMutation({
+        action: "move_thread",
+        workspace_id: workspaceId,
+        thread_id: handle.thread.id,
+        folder_id: folderId,
+      });
+    },
+    [
+      apiFor,
+      viewSnapshot?.workspaces,
+      setSnapshot,
+      handleSelectThread,
+      handleProjectFolderMutation,
+    ],
+  );
+
   const handleWorkspaceOrderChange = useCallback(
     async (workspaceIds: string[]) => {
       if (!api)
@@ -6004,6 +6054,9 @@ function AppInner() {
             onRemoveWorkspace={handleRemoveWorkspace}
             threadSort={threadSort}
             onThreadSortChange={handleThreadSortChange}
+            projectFolders={viewSnapshot?.preferences.project_folders}
+            onProjectFolderMutation={handleProjectFolderMutation}
+            onNewThreadInFolder={handleNewThreadInFolder}
             onWorkspaceOrderChange={handleWorkspaceOrderChange}
             hiddenWorkspaceIds={viewSnapshot?.preferences.hidden_workspace_ids}
             onWorkspaceHiddenChange={handleWorkspaceHiddenChange}

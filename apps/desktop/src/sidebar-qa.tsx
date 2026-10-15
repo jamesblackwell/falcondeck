@@ -7,11 +7,14 @@
    inline running/unread rollup on their rows. `?projects=12` pads the list
    with stale filler projects (plus one used an hour ago) to exercise the
    project fold and its Show more row. `?activity=1` swaps in the Activity
-   inbox with a pending approval on the first running task. */
-import { StrictMode } from "react";
+   inbox with a pending approval on the first running task.
+   `?folders=1` enables an interactive project-folder fixture. */
+import { StrictMode, useState } from "react";
 import { createRoot } from "react-dom/client";
 
 import type {
+  ProjectFolder,
+  ProjectFolderMutation,
   ProjectGroup,
   ThreadSummary,
   WorkspaceSummary,
@@ -305,8 +308,29 @@ function activityFixture() {
   };
 }
 
-createRoot(document.getElementById("root")!).render(
-  <StrictMode>
+function SidebarFixture() {
+  const [folders, setFolders] = useState<ProjectFolder[]>(() => params.get('folders') === '1' ? [{
+    id: 'chores', workspace_id: 'workspace-1', name: 'Chores', collapsed: true,
+    thread_ids: groups[0].threads.slice(2, 5).map((thread) => thread.id),
+  }] : []);
+  const mutateFolder = async (mutation: ProjectFolderMutation) => {
+    setFolders((current) => {
+      if (mutation.action === 'create') return [...current, { id: crypto.randomUUID(), workspace_id: mutation.workspace_id,
+        name: mutation.name, collapsed: false, thread_ids: [] }];
+      return current.flatMap((folder) => {
+        if (folder.workspace_id !== mutation.workspace_id) return [folder];
+        if (mutation.action === 'move_thread') return [{ ...folder, thread_ids: [
+          ...folder.thread_ids.filter((id) => id !== mutation.thread_id),
+          ...(folder.id === mutation.folder_id ? [mutation.thread_id] : []),
+        ] }];
+        if (folder.id !== mutation.folder_id) return [folder];
+        if (mutation.action === 'delete') return [];
+        if (mutation.action === 'rename') return [{ ...folder, name: mutation.name }];
+        return [{ ...folder, collapsed: mutation.collapsed }];
+      });
+    });
+  };
+  return (
     <div className="flex min-h-screen items-stretch bg-bg-0 p-6">
       <div
         style={{ width }}
@@ -314,6 +338,8 @@ createRoot(document.getElementById("root")!).render(
       >
         <DesktopSidebar
           groups={groups}
+          projectFolders={folders}
+          onProjectFolderMutation={mutateFolder}
           selectedWorkspaceId="workspace-1"
           selectedThreadId="thread-1"
           {...(collapsedWorkspaceIds.length > 0
@@ -338,5 +364,7 @@ createRoot(document.getElementById("root")!).render(
         />
       </div>
     </div>
-  </StrictMode>,
-);
+  );
+}
+
+createRoot(document.getElementById("root")!).render(<StrictMode><SidebarFixture /></StrictMode>);

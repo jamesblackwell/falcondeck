@@ -1,3 +1,5 @@
+import { normalizeThreadHandle, type ThreadHandle } from '@falcondeck/client-core';
+import { mutateProjectFolder } from '@/lib/project-folders';
 /**
  * Drawer content wrapper that keeps the sidebar cheap while it is closed.
  *
@@ -121,6 +123,29 @@ export function SidebarDrawerContent({
     [handleClose, router],
   );
 
+  const handleNewThreadInFolder = useCallback(
+    async (workspaceId: string, folderId: string) => {
+      const workspace = useSessionStore
+        .getState()
+        .snapshot?.workspaces.find((entry) => entry.id === workspaceId);
+      const handle = normalizeThreadHandle(
+        await useRelayStore.getState()._callRpc<ThreadHandle>("thread.start", {
+          workspace_id: workspaceId,
+          provider: workspace?.default_provider,
+        }),
+      );
+      useSessionStore.getState().applyThreadHandle(handle);
+      handleSelectThread(workspaceId, handle.thread.id);
+      await mutateProjectFolder({
+        action: "move_thread",
+        workspace_id: workspaceId,
+        thread_id: handle.thread.id,
+        folder_id: folderId,
+      });
+    },
+    [handleSelectThread],
+  );
+
   const handleNewChat = useCallback(async () => {
     // Chat creation is an RPC, so acknowledge the tap and dismiss the drawer
     // before waiting for the desktop. Otherwise a slow connection leaves the
@@ -173,6 +198,8 @@ export function SidebarDrawerContent({
       threadTagOptions={threadTags.tags}
       extensionSnapshot={snapshot?.extensions}
       extensionSidebarFilters={extensionSidebarFilters}
+      projectFolders={snapshot?.preferences.project_folders}
+      onNewThreadInFolder={handleNewThreadInFolder}
       workspaceColors={snapshot?.preferences.workspace_colors}
       hiddenWorkspaceIds={snapshot?.preferences.hidden_workspace_ids}
     />

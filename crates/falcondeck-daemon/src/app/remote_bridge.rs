@@ -1128,6 +1128,7 @@ impl AppState {
                             .and_then(Value::as_u64)
                             .unwrap_or(50)
                             .clamp(1, 50) as usize,
+                        params.get("folder_id").and_then(Value::as_str),
                     )
                     .await?,
                 )

@@ -342,6 +342,19 @@ Rules:
 - If a menu is positioned manually, the width constant used for viewport clamping must match the rendered width, or the menu will overflow the screen edge.
 - One action may also appear inline on hover as a shortcut (thread archive, or unarchive on an archived row), but the context menu remains the complete list.
 
+### Project folders
+
+- Within a project, show tasks pinned in the project first, then folders, then
+  ordinary tasks. Global pins keep their separate section.
+- Folders are a single level of virtual task organization. Names, membership,
+  and collapsed state belong to daemon preferences and sync to paired clients.
+- Desktop: create from the project hover control, drag tasks onto a folder or
+  the project header, and expose move/rename/delete in context menus.
+- Mobile: create from the project folder button and use long-press sheets for
+  folder options and moving tasks.
+- Deleting a folder returns its tasks to the project root. It does not archive
+  tasks or move their working directories.
+
 ### Collapsible side panels
 
 The desktop shell has two optional panels around the main column.

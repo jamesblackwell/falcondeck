@@ -1,7 +1,7 @@
 import * as React from 'react'
 import { memo, startTransition, useCallback, useState } from 'react'
 import * as Collapsible from '@radix-ui/react-collapsible'
-import { Globe, Search, SquarePen } from 'lucide-react'
+import { FolderPlus, Globe, Search, SquarePen } from 'lucide-react'
 
 import type { WorkspaceSummary } from '@falcondeck/client-core'
 import { ActivityDiamond, cn } from '@falcondeck/ui'
@@ -20,6 +20,9 @@ export type WorkspaceGroupProps = {
   host?: WorkspaceHostBadge | null
   isSelected: boolean
   onSelect: () => void
+  onCreateFolder?: () => void
+  taskDropProps?: React.HTMLAttributes<HTMLElement>
+  isTaskDropTarget?: boolean
   onNewThread?: () => void
   /** Search this project's threads; revealed on row hover. */
   onSearchThreads?: () => void
@@ -52,6 +55,9 @@ export const WorkspaceGroup = memo(function WorkspaceGroup({
   host,
   isSelected,
   onSelect,
+  onCreateFolder,
+  taskDropProps,
+  isTaskDropTarget,
   onNewThread,
   onSearchThreads,
   onOpenContextMenu,
@@ -91,6 +97,7 @@ export const WorkspaceGroup = memo(function WorkspaceGroup({
       <section className="min-w-0 overflow-hidden">
         <div
           {...dragHandleProps}
+          {...taskDropProps}
           onClick={(event) => {
             // The drag wrapper includes the row's vertical padding. When a
             // click lands there, the trigger is not the event target, so
@@ -116,6 +123,7 @@ export const WorkspaceGroup = memo(function WorkspaceGroup({
             isSelected ? 'text-fg-primary' : 'text-fg-secondary',
             'hover:bg-interactive-hover hover:text-fg-primary active:bg-interactive-selected',
             dragHandleProps?.className,
+            isTaskDropTarget && 'bg-interactive-selected ring-1 ring-accent',
           )}
         >
           {/* Stretched to the full row height (not just text height) so
@@ -203,6 +211,13 @@ export const WorkspaceGroup = memo(function WorkspaceGroup({
                 </span>
               ) : null}
             </span>
+          ) : null}
+          {onCreateFolder ? (
+            <button type="button" data-no-workspace-drag="true" onClick={onCreateFolder}
+              title={`Create folder in ${pathLabel}`} aria-label={`Create folder in ${pathLabel}`}
+              className="fd-focus shrink-0 self-center rounded-[var(--fd-radius-sm)] p-0.5 text-fg-muted opacity-0 transition-opacity hover:bg-surface-3 focus-visible:opacity-100 group-hover:opacity-100">
+              <FolderPlus aria-hidden="true" className="h-3.5 w-3.5" />
+            </button>
           ) : null}
           {onSearchThreads ? (
             <button
