@@ -40,10 +40,10 @@ const RELATIVE_TIME_TICK_MS = 60_000;
 const RESOLVED_HOLD_MS = 1_500;
 const RECENT_PREVIEW_LIMIT = 5;
 const RECENT_TOGGLE_KEY = "recent:toggle";
+/** Needs you, then what is still going. Finished work is grouped separately. */
 const SECTION_ORDER: readonly ActivitySection[] = [
   "blocked",
   "failed",
-  "ready",
   "running",
 ];
 
@@ -93,7 +93,7 @@ const SECTION_META: Record<ActivitySection, { title: string }> = {
   blocked: { title: "Needs a response" },
   failed: { title: "Failed" },
   ready: { title: "Ready" },
-  running: { title: "Running" },
+  running: { title: "Working" },
 };
 
 const KEY_HINTS: readonly {
@@ -104,17 +104,21 @@ const KEY_HINTS: readonly {
   { key: "↑ ↓", alt: "J / K", description: "Move through the list" },
   { key: "↵", description: "Preview the selected task" },
   { key: "R", description: "Mark the selected task read" },
-  { key: "T", description: "Show more recent tasks" },
+  { key: "T", description: "Show more finished tasks" },
   { key: "?", description: "Show keyboard shortcuts" },
   { key: "esc", description: "Clear the selection" },
 ];
 
+function threadIdentity(workspaceId: string, threadId: string) {
+  return `${workspaceId}:${threadId}`;
+}
+
 function entryKey(entry: ActivityEntry) {
-  return `${entry.workspaceId}:${entry.thread.id}`;
+  return threadIdentity(entry.workspaceId, entry.thread.id);
 }
 
 function recentKey(entry: RecentEntry) {
-  return `recent:${entry.workspaceId}:${entry.thread.id}`;
+  return `recent:${threadIdentity(entry.workspaceId, entry.thread.id)}`;
 }
 
 function isTypingTarget(target: EventTarget | null) {
@@ -173,35 +177,24 @@ function resolvedRequestForEntry(
     : undefined;
 }
 
-function reconcileStableKeys(previousKeys: string[], entries: ActivityEntry[]) {
-  const desiredKeys = entries.map(entryKey);
-  const currentKeys = new Set(desiredKeys);
-  const order = previousKeys.filter((key) => currentKeys.has(key));
+/** Insert keys from `desired` that `order` does not already have, beside their neighbors. */
+function placeNewKeys(order: string[], desired: readonly string[]) {
   const placed = new Set(order);
-
-  for (
-    let desiredIndex = 0;
-    desiredIndex < desiredKeys.length;
-    desiredIndex += 1
-  ) {
-    const key = desiredKeys[desiredIndex];
+  for (let desiredIndex = 0; desiredIndex < desired.length; desiredIndex += 1) {
+    const key = desired[desiredIndex];
     if (!key || placed.has(key)) continue;
 
     let insertionIndex = -1;
     for (let index = desiredIndex - 1; index >= 0; index -= 1) {
-      const precedingKey = desiredKeys[index];
+      const precedingKey = desired[index];
       if (precedingKey && placed.has(precedingKey)) {
         insertionIndex = order.indexOf(precedingKey) + 1;
         break;
       }
     }
     if (insertionIndex === -1) {
-      for (
-        let index = desiredIndex + 1;
-        index < desiredKeys.length;
-        index += 1
-      ) {
-        const followingKey = desiredKeys[index];
+      for (let index = desiredIndex + 1; index < desired.length; index += 1) {
+        const followingKey = desired[index];
         if (followingKey && placed.has(followingKey)) {
           insertionIndex = order.indexOf(followingKey);
           break;
@@ -216,6 +209,15 @@ function reconcileStableKeys(previousKeys: string[], entries: ActivityEntry[]) {
   return order;
 }
 
+function reconcileStableKeys(previousKeys: string[], entries: ActivityEntry[]) {
+  const desiredKeys = entries.map(entryKey);
+  const currentKeys = new Set(desiredKeys);
+  return placeNewKeys(
+    previousKeys.filter((key) => currentKeys.has(key)),
+    desiredKeys,
+  );
+}
+
 function useStableOrder(entries: ActivityEntry[]) {
   const orderRef = useRef(new Map<string, string[]>());
   const bySection = new Map<ActivitySection, ActivityEntry[]>();
@@ -225,6 +227,7 @@ function useStableOrder(entries: ActivityEntry[]) {
     bySection.set(entry.section, sectionEntries);
   }
 
+  // Running stays in recency order so the task that just moved sits at the top.
   for (const section of ["blocked", "failed", "ready"] as const) {
     const sectionEntries = bySection.get(section) ?? [];
     const order = reconcileStableKeys(
@@ -305,6 +308,8 @@ type InboxRowProps = {
   timeLabel: string;
   queued?: number;
   section?: ActivitySection;
+  /** Unread finished work. Settled rows stay in place, but drop the weight. */
+  unread?: boolean;
   selected: boolean;
   onOpen: () => void;
   onActivate?: () => void;
@@ -322,6 +327,7 @@ const InboxRow = memo(function InboxRow({
   timeLabel,
   queued = 0,
   section,
+  unread = false,
   selected,
   onOpen,
   onActivate,
@@ -363,7 +369,8 @@ const InboxRow = memo(function InboxRow({
             <span
               className={cn(
                 "fd-type-supporting min-w-0 flex-1 truncate",
-                selected
+                unread && "font-semibold",
+                selected || unread
                   ? "text-fg-primary"
                   : "text-fg-secondary group-hover:text-fg-primary",
               )}
@@ -544,87 +551,163 @@ const ActivityRow = memo(
     previous.onRespond === next.onRespond,
 );
 
-type RecentTrailProps = {
-  entries: RecentEntry[];
+type CompletedItem =
+  | { kind: "ready"; entry: ActivityEntry; threadKey: string }
+  | { kind: "recent"; entry: RecentEntry; threadKey: string };
+
+function readyCompleted(entry: ActivityEntry): CompletedItem {
+  return { kind: "ready", entry, threadKey: entryKey(entry) };
+}
+
+function recentCompleted(entry: RecentEntry): CompletedItem {
+  return {
+    kind: "recent",
+    entry,
+    threadKey: threadIdentity(entry.workspaceId, entry.thread.id),
+  };
+}
+
+function completedActivityKey(item: CompletedItem) {
+  return item.kind === "ready" ? entryKey(item.entry) : recentKey(item.entry);
+}
+
+/**
+ * Unread finishes sit above settled ones. While the pointer is over the list,
+ * a row that was unread stays in that band after it is marked read. Anything
+ * else — a new finish, a failure just acknowledged — takes its normal place.
+ */
+function layoutCompleted({
+  hovering,
+  expanded,
+  ready,
+  recent,
+  previewLimit,
+  readyHold,
+}: {
+  hovering: boolean;
   expanded: boolean;
+  ready: ActivityEntry[];
+  recent: RecentEntry[];
+  previewLimit: number;
+  readyHold: string[] | null;
+}): { items: CompletedItem[]; readyHold: string[] | null } {
+  const visibleRecent = expanded ? recent : recent.slice(0, previewLimit);
+  if (!hovering) {
+    return {
+      items: [
+        ...ready.map(readyCompleted),
+        ...visibleRecent.map(recentCompleted),
+      ],
+      readyHold: null,
+    };
+  }
+
+  const readyByKey = new Map(ready.map((entry) => [entryKey(entry), entry]));
+  const recentByKey = new Map(
+    recent.map((entry) => [
+      threadIdentity(entry.workspaceId, entry.thread.id),
+      entry,
+    ]),
+  );
+  const readyKeys = ready.map(entryKey);
+  const alive = (readyHold ?? readyKeys).filter(
+    (key) => readyByKey.has(key) || recentByKey.has(key),
+  );
+  const topKeys = placeNewKeys([...alive], readyKeys);
+  const parked = new Set(topKeys);
+  const items: CompletedItem[] = [];
+  for (const key of topKeys) {
+    const readyEntry = readyByKey.get(key);
+    if (readyEntry) {
+      items.push(readyCompleted(readyEntry));
+      continue;
+    }
+    const recentEntry = recentByKey.get(key);
+    if (recentEntry) items.push(recentCompleted(recentEntry));
+  }
+  for (const entry of visibleRecent) {
+    if (!parked.has(threadIdentity(entry.workspaceId, entry.thread.id))) {
+      items.push(recentCompleted(entry));
+    }
+  }
+  return { items, readyHold: topKeys };
+}
+
+function CompletedTask({
+  item,
+  host,
+  nowMs,
+  selected,
+  onOpen,
+  onActivate,
+  onMarkRead,
+}: {
+  item: CompletedItem;
+  host?: { name: string; connected: boolean };
   nowMs: number;
-  selectedKey: string | null;
-  onToggle: () => void;
-  onOpenThread: ActivityViewProps["onOpenThread"];
-  onActivateThread?: ActivityViewProps["onOpenThread"];
+  selected: boolean;
+  onOpen: (workspaceId: string, threadId: string) => void;
+  onActivate?: (workspaceId: string, threadId: string) => void;
+  onMarkRead: ActivityViewProps["onMarkThreadRead"];
+}) {
+  const { workspaceId, thread } = item.entry;
+  const ready = item.kind === "ready";
+  return (
+    <InboxRow
+      activityKey={completedActivityKey(item)}
+      threadId={thread.id}
+      title={thread.title}
+      preview={
+        item.kind === "ready"
+          ? previewForEntry(item.entry)
+          : thread.last_message_preview
+      }
+      projectLabel={item.entry.projectLabel}
+      host={host}
+      timeLabel={timeAgo(thread.updated_at, nowMs)}
+      queued={thread.queued_turns.length}
+      section={ready ? "ready" : undefined}
+      unread={ready}
+      selected={selected}
+      onOpen={() => onOpen(workspaceId, thread.id)}
+      onActivate={
+        onActivate ? () => onActivate(workspaceId, thread.id) : undefined
+      }
+      onMarkRead={
+        ready
+          ? () => {
+              void Promise.resolve(onMarkRead(workspaceId, thread.id)).catch(
+                () => {},
+              );
+            }
+          : undefined
+      }
+    />
+  );
+}
+
+type SelectableRow = {
+  key: string;
+  section?: ActivitySection;
+  entry?: ActivityEntry;
+  recent?: RecentEntry;
+  action?: "toggle-recent";
 };
 
-const RecentTrail = memo(function RecentTrail({
-  entries,
-  expanded,
-  nowMs,
-  selectedKey,
-  onToggle,
-  onOpenThread,
-  onActivateThread,
-}: RecentTrailProps) {
-  if (entries.length === 0) return null;
-  const visibleEntries = expanded
-    ? entries
-    : entries.slice(0, RECENT_PREVIEW_LIMIT);
-  const hiddenCount = entries.length - visibleEntries.length;
+function rowThreadKey(row: SelectableRow) {
+  if (row.entry) return entryKey(row.entry);
+  if (row.recent) return threadIdentity(row.recent.workspaceId, row.recent.thread.id);
+  return null;
+}
 
-  return (
-    <section aria-labelledby="activity-recent">
-      <div className="mb-1.5 flex items-baseline gap-2 px-2.5">
-        <h2 id="activity-recent" className="fd-type-eyebrow text-fg-muted">
-          Recent
-        </h2>
-        <span className="fd-type-meta text-fg-muted">{entries.length}</span>
-      </div>
-      <div id="activity-recent-list">
-        {visibleEntries.map((entry) => {
-          const key = recentKey(entry);
-          return (
-            <InboxRow
-              key={key}
-              activityKey={key}
-              title={entry.thread.title}
-              preview={entry.thread.last_message_preview}
-              projectLabel={entry.projectLabel}
-              timeLabel={timeAgo(entry.thread.updated_at, nowMs)}
-              selected={selectedKey === key}
-              onOpen={() => onOpenThread(entry.workspaceId, entry.thread.id)}
-              onActivate={
-                onActivateThread
-                  ? () => onActivateThread(entry.workspaceId, entry.thread.id)
-                  : undefined
-              }
-            />
-          );
-        })}
-      </div>
-      {entries.length > RECENT_PREVIEW_LIMIT ? (
-        <div className="px-2.5 pt-1">
-          <Button
-            type="button"
-            size="sm"
-            variant="ghost"
-            data-activity-key={RECENT_TOGGLE_KEY}
-            data-selected={
-              selectedKey === RECENT_TOGGLE_KEY ? "true" : undefined
-            }
-            aria-expanded={expanded}
-            aria-controls="activity-recent-list"
-            className={cn(
-              "text-fg-muted",
-              selectedKey === RECENT_TOGGLE_KEY &&
-                "fd-row-selected text-fg-primary",
-            )}
-            onClick={onToggle}
-          >
-            {expanded ? "Show fewer" : `Show ${hiddenCount} more`}
-          </Button>
-        </div>
-      ) : null}
-    </section>
-  );
-});
+/** Keep the highlight when a finished row changes from unread to settled. */
+function selectionFor(selectedKey: string | null, rows: readonly SelectableRow[]) {
+  if (!selectedKey || rows.some((row) => row.key === selectedKey)) return selectedKey;
+  const bare = selectedKey.startsWith("recent:")
+    ? selectedKey.slice("recent:".length)
+    : selectedKey;
+  return rows.find((row) => rowThreadKey(row) === bare)?.key ?? null;
+}
 
 export const ActivityView = memo(function ActivityView({
   groups,
@@ -677,6 +760,8 @@ export const ActivityView = memo(function ActivityView({
   );
   const [nowMs, setNowMs] = useState(Date.now);
   const [recentExpanded, setRecentExpanded] = useState(false);
+  const [listHovered, setListHovered] = useState(false);
+  const readyHoldRef = useRef<string[] | null>(null);
   const [selectedKey, setSelectedKey] = useState<string | null>(null);
   const [showKeys, setShowKeys] = useState(false);
   const scrollRef = useRef<HTMLDivElement>(null);
@@ -743,50 +828,72 @@ export const ActivityView = memo(function ActivityView({
   const runningCount = sections.get("running")?.length ?? 0;
   const attentionCount = visibleEntries.length - runningCount;
 
-  const recentEntries = useMemo(
-    () => collectRecentEntries(groups, interactiveRequests, { nowMs }),
-    [groups, interactiveRequests, nowMs],
+  const recentEntries = useMemo(() => {
+    // A resolved request stays on screen briefly. That thread is already in
+    // the queue, so it must not also appear under Completed.
+    const heldThreadKeys = new Set(Object.keys(resolvedEntries));
+    return collectRecentEntries(groups, interactiveRequests, { nowMs }).filter(
+      (entry) =>
+        !heldThreadKeys.has(threadIdentity(entry.workspaceId, entry.thread.id)),
+    );
+  }, [groups, interactiveRequests, nowMs, resolvedEntries]);
+  const readyEntries = sections.get("ready") ?? [];
+  const completedLayout = layoutCompleted({
+    hovering: listHovered,
+    expanded: recentExpanded,
+    ready: readyEntries,
+    recent: recentEntries,
+    previewLimit: RECENT_PREVIEW_LIMIT,
+    readyHold: readyHoldRef.current,
+  });
+  readyHoldRef.current = completedLayout.readyHold;
+  const shownCompletedKeys = new Set(
+    completedLayout.items.map((item) => item.threadKey),
   );
-  const visibleRecentEntries = useMemo(
-    () =>
-      recentExpanded
-        ? recentEntries
-        : recentEntries.slice(0, RECENT_PREVIEW_LIMIT),
-    [recentEntries, recentExpanded],
-  );
+  const hiddenFinished = recentEntries.filter(
+    (entry) =>
+      !shownCompletedKeys.has(
+        threadIdentity(entry.workspaceId, entry.thread.id),
+      ),
+  ).length;
+  const showFinishedToggle = recentExpanded
+    ? recentEntries.length > RECENT_PREVIEW_LIMIT
+    : hiddenFinished > 0;
+  const completedCount = readyEntries.length + recentEntries.length;
 
   const selectable = useMemo(() => {
-    const rows: {
-      key: string;
-      section?: ActivitySection;
-      entry?: ActivityEntry;
-      recent?: RecentEntry;
-      action?: "toggle-recent";
-    }[] = [];
+    const rows: SelectableRow[] = [];
     for (const section of SECTION_ORDER) {
       for (const entry of sections.get(section) ?? []) {
         rows.push({ key: entryKey(entry), section, entry });
       }
     }
-    for (const recent of visibleRecentEntries) {
-      rows.push({ key: recentKey(recent), recent });
+    for (const item of completedLayout.items) {
+      if (item.kind === "ready") {
+        rows.push({
+          key: completedActivityKey(item),
+          section: "ready",
+          entry: item.entry,
+        });
+      } else {
+        rows.push({ key: completedActivityKey(item), recent: item.entry });
+      }
     }
-    if (recentEntries.length > RECENT_PREVIEW_LIMIT) {
+    if (showFinishedToggle) {
       rows.push({ key: RECENT_TOGGLE_KEY, action: "toggle-recent" });
     }
     return rows;
-  }, [recentEntries.length, sections, visibleRecentEntries]);
+  }, [completedLayout.items, sections, showFinishedToggle]);
+
+  // The activity key gains a `recent:` prefix once an unread finish is marked
+  // read. Follow that row before paint so the highlight and j/k stay on it.
+  const activeSelection = selectionFor(selectedKey, selectable);
+  if (activeSelection !== selectedKey) setSelectedKey(activeSelection);
 
   useEffect(() => {
-    if (selectedKey && !selectable.some((row) => row.key === selectedKey)) {
-      setSelectedKey(null);
-    }
-  }, [selectable, selectedKey]);
-
-  useEffect(() => {
-    if (!selectedKey) return;
+    if (!activeSelection) return;
     const row = scrollRef.current?.querySelector(
-      `[data-activity-key="${CSS.escape(selectedKey)}"]`,
+      `[data-activity-key="${CSS.escape(activeSelection)}"]`,
     );
     if (
       row instanceof HTMLElement &&
@@ -794,7 +901,7 @@ export const ActivityView = memo(function ActivityView({
     ) {
       row.scrollIntoView({ block: "nearest" });
     }
-  }, [recentExpanded, selectedKey]);
+  }, [recentExpanded, activeSelection]);
 
   useEffect(() => {
     const handleKeyDown = (event: KeyboardEvent) => {
@@ -861,7 +968,7 @@ export const ActivityView = memo(function ActivityView({
           return markSelectedRead();
         case "t":
         case "T":
-          if (recentEntries.length <= RECENT_PREVIEW_LIMIT) return;
+          if (!showFinishedToggle) return;
           event.preventDefault();
           return setRecentExpanded((current) => !current);
         case "?":
@@ -886,8 +993,8 @@ export const ActivityView = memo(function ActivityView({
     onMarkThreadRead,
     onOpenThread,
     onReturnFocus,
-    recentEntries.length,
     selectable,
+    showFinishedToggle,
     selectedKey,
     showKeys,
   ]);
@@ -898,7 +1005,7 @@ export const ActivityView = memo(function ActivityView({
       : attentionCount > 0
         ? `${attentionCount} need${attentionCount === 1 ? "s" : ""} attention`
         : runningCount > 0
-          ? `${runningCount} running`
+          ? `${runningCount} working`
           : null;
   const isEmpty = visibleEntries.length === 0 && recentEntries.length === 0;
 
@@ -938,7 +1045,12 @@ export const ActivityView = memo(function ActivityView({
         ) : undefined
       }
     >
-      <MainViewBody ref={scrollRef}>
+      <MainViewBody
+        ref={scrollRef}
+        data-activity-root=""
+        onPointerEnter={() => setListHovered(true)}
+        onPointerLeave={() => setListHovered(false)}
+      >
         {!isEmpty && onLoadPreview && onSendPreview ? (
           <p className="mb-4 px-2.5 text-xs text-fg-muted">
             Select a task and press Enter to preview, or double-click. Escape returns here.
@@ -947,7 +1059,7 @@ export const ActivityView = memo(function ActivityView({
         {isEmpty ? (
           <EmptyState
             title="All caught up"
-            description="Tasks that need a response, failed, or are still running will show up here."
+            description="Tasks that need a response, failed, or are still working will show up here."
             className="py-16"
           />
         ) : (
@@ -969,7 +1081,7 @@ export const ActivityView = memo(function ActivityView({
                       entry={entry}
                       host={workspaceHosts[entry.workspaceId]}
                       nowMs={nowMs}
-                      selected={selectedKey === entryKey(entry)}
+                      selected={activeSelection === entryKey(entry)}
                       resolvedRequest={resolvedRequestForEntry(
                         entry,
                         resolvedEntries[entryKey(entry)],
@@ -988,17 +1100,61 @@ export const ActivityView = memo(function ActivityView({
               );
             })}
 
-            <RecentTrail
-              entries={recentEntries}
-              expanded={recentExpanded}
-              nowMs={nowMs}
-              selectedKey={selectedKey}
-              onToggle={() => setRecentExpanded((current) => !current)}
-              onOpenThread={selectThread}
-              onActivateThread={
-                onLoadPreview && onSendPreview ? activateThread : undefined
-              }
-            />
+            {completedLayout.items.length > 0 ? (
+              <MainViewSection
+                title="Completed"
+                count={completedCount}
+                data-activity-list="completed"
+              >
+                <div id="activity-recent-list">
+                  {completedLayout.items.map((item) => (
+                    <CompletedTask
+                      key={item.threadKey}
+                      item={item}
+                      host={workspaceHosts[item.entry.workspaceId]}
+                      nowMs={nowMs}
+                      selected={activeSelection === completedActivityKey(item)}
+                      onOpen={selectThread}
+                      onActivate={
+                        onLoadPreview && onSendPreview
+                          ? activateThread
+                          : undefined
+                      }
+                      onMarkRead={onMarkThreadRead}
+                    />
+                  ))}
+                </div>
+                {showFinishedToggle ? (
+                  <div className="px-2.5 pt-1">
+                    <Button
+                      type="button"
+                      size="sm"
+                      variant="ghost"
+                      data-activity-key={RECENT_TOGGLE_KEY}
+                      data-selected={
+                        activeSelection === RECENT_TOGGLE_KEY
+                          ? "true"
+                          : undefined
+                      }
+                      aria-expanded={recentExpanded}
+                      aria-controls="activity-recent-list"
+                      className={cn(
+                        "text-fg-muted",
+                        activeSelection === RECENT_TOGGLE_KEY &&
+                          "fd-row-selected text-fg-primary",
+                      )}
+                      onClick={() =>
+                        setRecentExpanded((current) => !current)
+                      }
+                    >
+                      {recentExpanded
+                        ? "Show fewer"
+                        : `Show ${hiddenFinished} more`}
+                    </Button>
+                  </div>
+                ) : null}
+              </MainViewSection>
+            ) : null}
           </div>
         )}
       </MainViewBody>

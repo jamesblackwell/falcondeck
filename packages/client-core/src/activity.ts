@@ -50,21 +50,13 @@ function compareEntries(left: ActivityEntry, right: ActivityEntry) {
   const sectionRank = SECTION_RANK[left.section] - SECTION_RANK[right.section]
   if (sectionRank !== 0) return sectionRank
 
-  if (left.section === 'blocked' && right.section === 'blocked') {
-    return left.sortKey.localeCompare(right.sortKey)
-  }
+  if (left.section === 'blocked') return left.sortKey.localeCompare(right.sortKey)
 
-  if (
-    (left.section === 'failed' && right.section === 'failed') ||
-    (left.section === 'ready' && right.section === 'ready')
-  ) {
-    return (
-      compareIsoDescending(left.thread.updated_at, right.thread.updated_at) ||
-      left.thread.id.localeCompare(right.thread.id)
-    )
-  }
-
-  return left.sortKey.localeCompare(right.sortKey)
+  // Failed, ready, and running: the task that just moved comes first.
+  return (
+    compareIsoDescending(left.thread.updated_at, right.thread.updated_at) ||
+    left.thread.id.localeCompare(right.thread.id)
+  )
 }
 
 function activitySectionForThread(
@@ -115,9 +107,7 @@ export function collectActivityEntries(
       const sortKey =
         section === 'blocked'
           ? `${requests[0]?.kind === 'approval' ? '0' : requests[0] ? '1' : '2'}:${requests[0]?.created_at ?? ''}:${thread.id}`
-          : section === 'running'
-            ? `${thread.title}:${thread.id}`
-            : `${thread.updated_at}:${thread.id}`
+          : `${thread.updated_at}:${thread.id}`
 
       entries.push({
         section,

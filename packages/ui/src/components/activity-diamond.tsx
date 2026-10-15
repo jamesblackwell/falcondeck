@@ -5,10 +5,6 @@ type ActivityDiamondProps = {
   /** `current` inherits the surrounding text colour — for diamonds inside
    *  buttons and chips that already carry their own foreground. */
   tone?: 'accent' | 'current'
-  /** `outline` marks work that is in flight without the agent generating —
-   *  a backgrounded command the thread is waiting on. Same shape, less ink,
-   *  so it reads as "still live" rather than "streaming now". */
-  variant?: 'solid' | 'outline'
   className?: string
 }
 
@@ -30,7 +26,6 @@ const MARK: Record<NonNullable<ActivityDiamondProps['size']>, string> = {
 export function ActivityDiamond({
   size = 'sm',
   tone = 'accent',
-  variant = 'solid',
   className,
 }: ActivityDiamondProps) {
   return (
@@ -45,14 +40,7 @@ export function ActivityDiamond({
       <span
         className={cn(
           'block rotate-45',
-          variant === 'outline'
-            ? cn(
-                'border',
-                tone === 'current' ? 'border-current' : 'border-accent',
-              )
-            : tone === 'current'
-              ? 'bg-current'
-              : 'bg-accent',
+          tone === 'current' ? 'bg-current' : 'bg-accent',
           MARK[size],
         )}
       />

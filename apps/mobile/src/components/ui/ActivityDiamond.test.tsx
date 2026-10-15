@@ -33,7 +33,7 @@ describe('ActivityDiamond clock', () => {
     const timing = vi.spyOn(Animated, 'timing')
     const loop = vi.spyOn(Animated, 'loop').mockReturnValue({ start, stop, reset: vi.fn() })
     const first = renderComponent(<ActivityDiamond color="#fff" />)
-    const second = renderComponent(<ActivityDiamond color="#fff" variant="outline" />)
+    const second = renderComponent(<ActivityDiamond color="#fff" size={18} />)
     expect(loop).toHaveBeenCalledTimes(1)
     expect(start).toHaveBeenCalledTimes(1)
     expect(timing).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({

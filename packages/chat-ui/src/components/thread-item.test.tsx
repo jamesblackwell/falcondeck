@@ -144,12 +144,9 @@ describe('ThreadItem archive actions', () => {
 })
 
 describe('ThreadItem background activity', () => {
-  /** The turn parked but the work it started has not: without this mark the
-   *  row is indistinguishable from a finished thread, and the agent starts
-   *  talking again out of nowhere. */
-  it('marks an idle thread whose background work is still running', () => {
+  it('leaves the status slot empty when only background work remains', () => {
     const base = thread('2026-08-31T14:08:59Z')
-    render(
+    const { container } = render(
       <ThreadItem
         thread={{
           ...base,
@@ -161,23 +158,31 @@ describe('ThreadItem background activity', () => {
       />,
     )
 
-    expect(
-      screen.getByRole('img', { name: 'Background task still running' }),
-    ).toBeInTheDocument()
+    expect(container.querySelector('.animate-diamond-activity')).toBeNull()
+    expect(container.querySelector('.bg-unread')).toBeNull()
   })
 
-  it('says nothing when no background work is outstanding', () => {
-    render(
+  it('keeps the unread dot when background work remains on an unseen thread', () => {
+    const base = thread('2026-08-31T14:08:59Z')
+    const { container } = render(
       <ThreadItem
-        thread={thread('2026-08-31T14:08:59Z')}
+        thread={{
+          ...base,
+          attention: {
+            ...base.attention,
+            unread: true,
+            last_agent_activity_seq: 4,
+            last_read_seq: 1,
+            background_task_count: 1,
+          },
+        }}
         workspaceId="workspace-1"
         isSelected={false}
         onSelect={() => {}}
       />,
     )
 
-    expect(
-      screen.queryByRole('img', { name: /Background task/ }),
-    ).not.toBeInTheDocument()
+    expect(container.querySelector('.animate-diamond-activity')).toBeNull()
+    expect(container.querySelector('.bg-unread')).not.toBeNull()
   })
 })

@@ -57,7 +57,6 @@ import {
 
 import { AddProjectMenu } from "./add-project-menu";
 import { ActivityInbox } from "./activity-inbox";
-import { AttentionInbox } from "./attention-inbox";
 import { ExtensionSidebarFilters } from "./extension-sidebar-filters";
 import { ThreadStageFilterMenu } from "./thread-stage-filter-menu";
 import { ThreadSortMenu } from "./thread-sort-menu";
@@ -3017,11 +3016,6 @@ export const WorkspaceSidebar = memo(function WorkspaceSidebar({
           onRequestRenameThread={handleRequestRenameThread}
           nowTick={nowTick}
           threadTagsById={threadTagsById}
-        />
-        <AttentionInbox
-          groups={displayGroups}
-          selectedThreadId={visualSelectedThreadId}
-          onSelectThread={handleSelectThread}
         />
         <section aria-labelledby="fd-projects-heading">
           {/* The action icons match the per-project new-thread button: that

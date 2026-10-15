@@ -164,6 +164,28 @@ describe('collectActivityEntries', () => {
     ])
   })
 
+  it('sorts running tasks by newest update, not title', () => {
+    const older = thread({
+      id: 'older',
+      title: 'Alpha',
+      status: 'running',
+      updated_at: '2026-08-13T08:00:00Z',
+      attention: { ...thread({ id: 'base' }).attention, level: 'running' },
+    })
+    const newer = thread({
+      id: 'newer',
+      title: 'Zebra',
+      status: 'running',
+      updated_at: '2026-08-13T10:00:00Z',
+      attention: { ...thread({ id: 'base' }).attention, level: 'running' },
+    })
+
+    expect(collectActivityEntries([group([older, newer])], []).map((entry) => entry.thread.id)).toEqual([
+      'newer',
+      'older',
+    ])
+  })
+
   it('counts only attention sections', () => {
     const blocked = thread({
       id: 'blocked',

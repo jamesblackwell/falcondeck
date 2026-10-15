@@ -70,20 +70,20 @@ export type MainViewBodyProps = {
   layout?: 'directory' | 'workspace'
   className?: string
   children: React.ReactNode
-}
+} & Omit<React.HTMLAttributes<HTMLDivElement>, 'className' | 'children'>
 
 export const MainViewBody = React.forwardRef<HTMLDivElement, MainViewBodyProps>(
-  function MainViewBody({ layout = 'directory', className, children }, ref) {
+  function MainViewBody({ layout = 'directory', className, children, ...props }, ref) {
     if (layout === 'workspace') {
       return (
-        <div ref={ref} className={cn('min-h-0 flex-1 overflow-hidden', className)}>
+        <div ref={ref} className={cn('min-h-0 flex-1 overflow-hidden', className)} {...props}>
           {children}
         </div>
       )
     }
 
     return (
-      <div ref={ref} className={cn('min-h-0 flex-1 overflow-y-auto', className)}>
+      <div ref={ref} className={cn('min-h-0 flex-1 overflow-y-auto', className)} {...props}>
         <div className="mx-auto w-full max-w-4xl px-6 py-6">{children}</div>
       </div>
     )

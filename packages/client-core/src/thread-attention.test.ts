@@ -116,10 +116,7 @@ describe('summarizeThreadAttention', () => {
 })
 
 describe('background activity', () => {
-  /** A parked Claude turn that backgrounded a command reads as finished
-   *  everywhere else; the outline diamond is the only thing that says the
-   *  agent will be back. */
-  it('marks a parked thread whose background work is still running', () => {
+  it('does not treat leftover background work as a live turn', () => {
     const presentation = deriveThreadAttentionPresentation(
       thread({
         status: 'idle',
@@ -136,12 +133,12 @@ describe('background activity', () => {
       }),
     )
 
-    expect(presentation.showBackgroundActivity).toBe(true)
-    expect(presentation.backgroundTaskCount).toBe(2)
     expect(presentation.showSpinner).toBe(false)
+    expect(presentation.level).toBe('unread')
+    expect(presentation.showUnreadDot).toBe(true)
   })
 
-  it('defers to the running spinner while a turn is live', () => {
+  it('keeps the running spinner when the turn itself is live', () => {
     const presentation = deriveThreadAttentionPresentation(
       thread({
         status: 'running',
@@ -159,11 +156,7 @@ describe('background activity', () => {
     )
 
     expect(presentation.showSpinner).toBe(true)
-    expect(presentation.showBackgroundActivity).toBe(false)
-  })
-
-  it('stays quiet for daemons that do not report the count', () => {
-    expect(deriveThreadAttentionPresentation(thread()).showBackgroundActivity).toBe(false)
+    expect(presentation.showUnreadDot).toBe(false)
   })
 })
 

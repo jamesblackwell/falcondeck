@@ -7,9 +7,6 @@ import { useAnimationActive } from './AnimationVisibility'
 interface ActivityDiamondProps {
   size?: number
   color: string
-  /** `outline` marks work in flight without the agent generating — a
-   *  backgrounded command the thread is waiting on. Same shape, less ink. */
-  variant?: 'solid' | 'outline'
 }
 
 const CYCLE_DURATION_MS = 2400
@@ -68,7 +65,6 @@ function releaseClock() {
 export const ActivityDiamond = memo(function ActivityDiamond({
   size = 14,
   color,
-  variant = 'solid',
 }: ActivityDiamondProps) {
   const reducedMotion = useReducedMotion()
   const active = useAnimationActive()
@@ -83,11 +79,9 @@ export const ActivityDiamond = memo(function ActivityDiamond({
     () => ({
       width: size * 0.58,
       height: size * 0.58,
-      ...(variant === 'outline'
-        ? { borderWidth: 1, borderColor: color }
-        : { backgroundColor: color }),
+      backgroundColor: color,
     }),
-    [color, size, variant],
+    [color, size],
   )
 
   return <Animated.View accessible={false} style={[styles.base, diamondStyle, reducedMotion || !active ? staticStyle : animatedStyle]} />
