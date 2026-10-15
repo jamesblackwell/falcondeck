@@ -26,6 +26,16 @@ export function wasTurnInterruptedByShutdown(thread: ThreadSummary) {
   )
 }
 
+/** A turn is in flight, or the turn parked while work it started (a
+ * backgrounded command) is still running and will wake the thread when it
+ * reports. Both read as "working": an idle mark there looks finished. */
+export function isThreadWorking(thread: ThreadSummary) {
+  return (
+    thread.status === 'running' ||
+    (thread.status === 'idle' && (thread.attention.background_task_count ?? 0) > 0)
+  )
+}
+
 export function deriveThreadAttentionPresentation(
   thread: ThreadSummary,
   interactiveRequests: InteractiveRequest[] = [],
@@ -89,7 +99,7 @@ function resolveThreadAttentionLevel(
 ): ThreadAttentionLevel {
   if (thread.status === 'error' || thread.attention.level === 'error') return 'error'
   if (pendingApprovalCount + pendingQuestionCount > 0) return 'awaiting_response'
-  if (thread.status === 'running') return 'running'
+  if (isThreadWorking(thread)) return 'running'
   if (thread.attention.unread || thread.attention.last_agent_activity_seq > thread.attention.last_read_seq) return 'unread'
   return 'none'
 }

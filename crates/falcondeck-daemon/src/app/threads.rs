@@ -98,6 +98,11 @@ fn codex_thread_is_idle_for_release(thread: &ManagedThread) -> bool {
 /// rather than intervenes, and names the tool when one is mid-flight.
 const CLAUDE_STALL_WARN_AFTER: Duration = Duration::from_secs(300);
 const CLAUDE_STALL_CHECK_INTERVAL: Duration = Duration::from_secs(60);
+/// How long a backgrounded task keeps a parked thread reading as "working".
+/// The CLI cannot say whether a shell command is a test run the agent is
+/// waiting on or a dev server meant to outlive the turn, and a dev server
+/// would otherwise keep the spinner going forever.
+const CLAUDE_BACKGROUND_WORK_VISIBLE_FOR: Duration = Duration::from_secs(30 * 60);
 /// Stderr lines kept for the failure message when the CLI dies without a
 /// `result` event. `bounded_turn_error` clamps the final string anyway.
 const CLAUDE_STDERR_TAIL_LINES: usize = 6;
@@ -1484,7 +1489,7 @@ impl AppState {
         // agent is not finished with the thread: its notification wakes the
         // parent for another turn. The thread reports the count so the UI can
         // say "idle, but work is still in flight" instead of "done".
-        let mut outstanding_tasks = HashSet::<String>::new();
+        let mut outstanding_tasks = OutstandingTasks::default();
         let mut background_task_tools = HashMap::<String, String>::new();
         let mut running_tool_titles = HashMap::<String, String>::new();
         let mut last_line_at = tokio::time::Instant::now();
@@ -1586,6 +1591,16 @@ impl AppState {
                     }
                     Ok(None) => break,
                     Err(_) => {
+                        // Background work ages out of the count on a clock,
+                        // not an event; a no-op when nothing expired.
+                        if parked_between_turns {
+                            self.publish_background_task_count(
+                                &workspace_id,
+                                &thread_id,
+                                outstanding_tasks.visible_count(),
+                            )
+                            .await;
+                        }
                         // Total stream silence — not even thinking heartbeats.
                         // Either a tool is legitimately long-running or the CLI
                         // wedged; a thread that just sits there is what reads
@@ -1704,12 +1719,12 @@ impl AppState {
                             }
                             if let Some(tasks) = claude_background_tasks(&value) {
                                 background_tasks = tasks.blocking;
-                                outstanding_tasks = tasks.all;
+                                outstanding_tasks.replace(tasks.all);
                                 if parked_between_turns {
                                     self.publish_background_task_count(
                                         &workspace_id,
                                         &thread_id,
-                                        outstanding_tasks.len() as u32,
+                                        outstanding_tasks.visible_count(),
                                     )
                                     .await;
                                 }
@@ -1730,7 +1745,7 @@ impl AppState {
                                     self.publish_background_task_count(
                                         &workspace_id,
                                         &thread_id,
-                                        outstanding_tasks.len() as u32,
+                                        outstanding_tasks.visible_count(),
                                     )
                                     .await;
                                 }
@@ -2066,7 +2081,7 @@ impl AppState {
                                                 turn_error.clone(),
                                                 saw_agent_output,
                                                 result_reported_success,
-                                                outstanding_tasks.len() as u32,
+                                                outstanding_tasks.visible_count(),
                                             )
                                             .await
                                     {
@@ -3511,8 +3526,48 @@ struct ClaudeTaskFinished {
 fn claude_task_holds_turn_open(task_type: Option<&str>) -> bool {
     // Match on "agent" rather than excluding known shell types: an unknown
     // task type that never completes is what wedges a turn, so anything not
-    // recognisably an agent is treated as fire-and-forget.
-    task_type.is_some_and(|task_type| task_type.contains("agent"))
+    // recognisably an agent is treated as fire-and-forget. A workflow is a
+    // script of agents and finishes like one. Teammates are left out: an idle
+    // teammate waits for messages indefinitely.
+    task_type.is_some_and(|task_type| {
+        task_type.contains("agent") || task_type == "local_workflow"
+    })
+}
+
+/// Tasks the CLI still lists, with when each was first seen, so a parked
+/// thread can stop advertising work that has plainly settled into running
+/// indefinitely (see `CLAUDE_BACKGROUND_WORK_VISIBLE_FOR`).
+#[derive(Default)]
+struct OutstandingTasks {
+    started_at: HashMap<String, tokio::time::Instant>,
+}
+
+impl OutstandingTasks {
+    fn insert(&mut self, task_id: String) {
+        self.started_at
+            .entry(task_id)
+            .or_insert_with(tokio::time::Instant::now);
+    }
+
+    fn remove(&mut self, task_id: &str) -> bool {
+        self.started_at.remove(task_id).is_some()
+    }
+
+    /// Adopts the CLI's authoritative list, keeping first-seen times for
+    /// tasks it already knew about.
+    fn replace(&mut self, task_ids: HashSet<String>) {
+        self.started_at.retain(|task_id, _| task_ids.contains(task_id));
+        for task_id in task_ids {
+            self.insert(task_id);
+        }
+    }
+
+    fn visible_count(&self) -> u32 {
+        self.started_at
+            .values()
+            .filter(|started_at| started_at.elapsed() < CLAUDE_BACKGROUND_WORK_VISIBLE_FOR)
+            .count() as u32
+    }
 }
 
 /// The CLI's authoritative task list, split by what it means for the turn.
@@ -4386,6 +4441,39 @@ mod tests {
             tasks.all,
             HashSet::from(["bash-1".to_string(), "agent-1".to_string()])
         );
+    }
+
+    #[test]
+    fn workflows_hold_the_turn_open_but_teammates_do_not() {
+        assert!(claude_task_holds_turn_open(Some("local_workflow")));
+        assert!(claude_task_holds_turn_open(Some("remote_agent")));
+        assert!(!claude_task_holds_turn_open(Some("in_process_teammate")));
+        assert!(!claude_task_holds_turn_open(Some("local_bash")));
+    }
+
+    #[test]
+    fn background_work_stops_reading_as_live_after_the_window() {
+        let mut tasks = OutstandingTasks::default();
+        tasks.insert("dev-server".to_string());
+        // Backdate it to just past the window.
+        let expired = tokio::time::Instant::now()
+            - CLAUDE_BACKGROUND_WORK_VISIBLE_FOR
+            - Duration::from_secs(1);
+        tasks.started_at.insert("dev-server".to_string(), expired);
+        tasks.replace(HashSet::from([
+            "dev-server".to_string(),
+            "tests".to_string(),
+        ]));
+
+        // The authoritative list must not reset the older task's clock.
+        assert_eq!(tasks.started_at["dev-server"], expired);
+        assert_eq!(tasks.visible_count(), 1);
+
+        assert!(tasks.remove("tests"));
+        assert_eq!(tasks.visible_count(), 0);
+        assert!(!tasks.remove("tests"));
+        tasks.replace(HashSet::new());
+        assert!(tasks.started_at.is_empty());
     }
 
     #[test]

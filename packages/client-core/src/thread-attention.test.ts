@@ -116,7 +116,9 @@ describe('summarizeThreadAttention', () => {
 })
 
 describe('background activity', () => {
-  it('does not treat leftover background work as a live turn', () => {
+  /** A parked Claude turn that backgrounded a command is still working: the
+   *  command's report starts the next turn. */
+  it('shows the running spinner while background work is outstanding', () => {
     const presentation = deriveThreadAttentionPresentation(
       thread({
         status: 'idle',
@@ -133,9 +135,38 @@ describe('background activity', () => {
       }),
     )
 
+    expect(presentation.showSpinner).toBe(true)
+    expect(presentation.level).toBe('running')
+    expect(presentation.showUnreadDot).toBe(false)
+  })
+
+  it('settles once the background work is gone', () => {
+    const presentation = deriveThreadAttentionPresentation(
+      thread({
+        status: 'idle',
+        attention: {
+          level: 'unread',
+          badge_label: null,
+          unread: true,
+          pending_approval_count: 0,
+          pending_question_count: 0,
+          background_task_count: 0,
+          last_agent_activity_seq: 4,
+          last_read_seq: 1,
+        },
+      }),
+    )
+
     expect(presentation.showSpinner).toBe(false)
-    expect(presentation.level).toBe('unread')
     expect(presentation.showUnreadDot).toBe(true)
+  })
+
+  it('lets a failure outrank background work', () => {
+    const presentation = deriveThreadAttentionPresentation(
+      thread({ status: 'error', attention: { ...thread().attention, background_task_count: 1 } }),
+    )
+
+    expect(presentation.level).toBe('error')
   })
 
   it('keeps the running spinner when the turn itself is live', () => {

@@ -144,7 +144,7 @@ describe('ThreadItem archive actions', () => {
 })
 
 describe('ThreadItem background activity', () => {
-  it('leaves the status slot empty when only background work remains', () => {
+  it('spins while background work is still running', () => {
     const base = thread('2026-08-31T14:08:59Z')
     const { container } = render(
       <ThreadItem
@@ -158,11 +158,11 @@ describe('ThreadItem background activity', () => {
       />,
     )
 
-    expect(container.querySelector('.animate-diamond-activity')).toBeNull()
+    expect(container.querySelector('.animate-diamond-activity')).not.toBeNull()
     expect(container.querySelector('.bg-unread')).toBeNull()
   })
 
-  it('keeps the unread dot when background work remains on an unseen thread', () => {
+  it('spins over the unread dot until the background work reports', () => {
     const base = thread('2026-08-31T14:08:59Z')
     const { container } = render(
       <ThreadItem
@@ -182,7 +182,7 @@ describe('ThreadItem background activity', () => {
       />,
     )
 
-    expect(container.querySelector('.animate-diamond-activity')).toBeNull()
-    expect(container.querySelector('.bg-unread')).not.toBeNull()
+    expect(container.querySelector('.animate-diamond-activity')).not.toBeNull()
+    expect(container.querySelector('.bg-unread')).toBeNull()
   })
 })

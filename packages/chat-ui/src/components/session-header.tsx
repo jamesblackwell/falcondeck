@@ -2,7 +2,7 @@ import { memo } from 'react'
 import * as React from 'react'
 import { Archive, Split, SquarePen } from 'lucide-react'
 
-import type { ThreadSummary, WorkspaceSummary } from '@falcondeck/client-core'
+import { isThreadWorking, type ThreadSummary, type WorkspaceSummary } from '@falcondeck/client-core'
 import { ActivityDiamond, Badge, Button, StatusIndicator, Toolbar, ToolbarGroup, cn } from '@falcondeck/ui'
 
 import { ProviderIcon } from './provider-icon'
@@ -64,7 +64,7 @@ export const SessionHeader = memo(function SessionHeader({
       <div className="flex min-w-0 items-center gap-3">
         {navigation}
         {thread ? (
-          thread.status === 'running' ? (
+          isThreadWorking(thread) ? (
             <ActivityDiamond size="md" />
           ) : (
             <StatusIndicator status={threadStatusDisplay(thread.status)} size="md" />

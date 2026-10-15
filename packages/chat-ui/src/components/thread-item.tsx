@@ -483,6 +483,7 @@ function threadRenderEqual(a: ThreadSummary, b: ThreadSummary) {
     a.attention.badge_label === b.attention.badge_label &&
     a.attention.pending_approval_count === b.attention.pending_approval_count &&
     a.attention.pending_question_count === b.attention.pending_question_count &&
+    a.attention.background_task_count === b.attention.background_task_count &&
     a.attention.last_agent_activity_seq ===
       b.attention.last_agent_activity_seq &&
     a.attention.last_read_seq === b.attention.last_read_seq
