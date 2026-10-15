@@ -277,7 +277,52 @@ MCP servers, model/config discovery, and persisted session reload. OpenCode
 continues to own its agents, permissions, project rules, tools, formatters,
 linters, and provider authentication.
 
-### Native transport rollout and ACP fallback
+### OpenCode 2
+
+OpenCode **2.0.29** is qualified through `opencode acp` (2026-10-15): model and
+mode discovery, streamed text, tool lifecycle, cancellation, session reload,
+and reload after restarting the ACP process all pass the live conformance
+probe. `make qa-opencode` also passes through the daemon with `auto`, selecting
+ACP and completing a real turn. The probe discovers 605 models and Build/Plan
+modes on the qualification machine; those counts depend on local credentials.
+A separate daemon turn verified MCP discovery and a read through FalconDeck's
+control server using Code Mode. ACP projects those calls as `execute` tool
+rows; it does not expose the nested MCP calls as separate rows.
+
+The native HTTP adapter below targets the **1.x preview API**, not the released
+OpenCode 2 API. `auto` falls back to ACP before a prompt is sent; explicitly
+configured `native` fails to start on 2.x. Use `"transport": "acp"` to skip
+that compatibility attempt. Existing threads remain pinned to their original
+transport, so changing the setting does not migrate a native thread.
+
+Upgrade with `opencode upgrade` to reach the latest 1.x, then
+`opencode upgrade --major`. Keep a backup of the binary and config. Supported
+V1 configuration is normalized in memory, but **V1 plugin implementations do
+not run in V2**, including plugins auto-discovered in `~/.config/opencode/plugins`.
+A legacy plugin can block location activation and cause ACP `session/new` to
+fail with `Internal service failure`; disable or port it before retrying.
+See the [upstream migration guide](https://opencode.ai/v2/docs/migrate-v1/).
+
+The most useful follow-on work is migrating the native adapter against the
+[released API](https://opencode.ai/v2/docs/api):
+
+- Startup now uses lower-case log levels, a `server listening on ...` banner,
+  and a generated password; the schema lives at `/openapi.json`, with server
+  identity at `/api/info`.
+- Prompt fields are flattened (`text` and `files` replace `prompt`); permission
+  replies use `decision`; questions become forms. Session deletion now has a
+  native `DELETE /api/session/{sessionID}` route.
+- The released model catalog replaces the split preview registries. Qualify
+  providers and reasoning variants before retiring the old runner allowlist.
+- Native steering, inbox editing, session fork/move, background tools, and
+  Code Mode offer useful integration points. Code Mode is enabled for MCP by
+  default; extension-bridge calls and nested tool attribution need further
+  qualification beyond the control-server read above.
+- The shared background service could reduce per-workspace process counts, but
+  adopting it also requires preserving workspace-specific MCP configuration,
+  credentials, and ownership. Keep that separate from the API migration.
+
+### OpenCode 1.x native transport and ACP fallback
 
 FalconDeck keeps the generic ACP adapter for OpenCode and every other ACP
 harness. The native OpenCode server is a separate transport that unlocks

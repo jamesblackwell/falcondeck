@@ -222,6 +222,16 @@ the daemon implementation is `crates/falcondeck-daemon/src/app/provider_usage.rs
   and over SSH. Its bootstrap script exits without changing existing installs,
   so it is used only when AGY is missing. Bootstrap downloads use curl's
   `--compressed` flag because the endpoint can return gzip-encoded script bytes.
+- OpenCode updates the resolved CLI with `opencode upgrade`, locally and over
+  SSH. The CLI preserves the installed major: 1.x checks `opencode-ai`, while
+  2.x checks `@opencode/cli`. Missing installs use the official `/v2/install`
+  script; the original `/install` still distributes 1.x and would downgrade an
+  existing 2.x install. A major migration remains an explicit
+  `opencode upgrade --major` operation because plugins break across majors.
+  Cached latest-version knowledge is discarded when that migration switches
+  registries. Local upgrade jobs verify the CLI can run before reporting success.
+  OpenCode's `Upgrade failed` diagnostic is treated as failure even when its
+  CLI exits zero; both local and SSH jobs retain the error in their details.
 - A cheap re-probe that carries over `latest_version` recomputes
   `update_available` against the new current version, so a successful
   upgrade cannot keep the pre-upgrade badge.

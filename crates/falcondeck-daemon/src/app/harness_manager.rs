@@ -58,6 +58,7 @@ const AGY_NATIVE_INSTALL: &str =
     "curl -fsSL --compressed https://antigravity.google/cli/install.sh | bash";
 /// Official Claude Code native installer (also used when nothing is installed).
 const CLAUDE_NATIVE_INSTALL: &str = "curl -fsSL https://claude.ai/install.sh | bash";
+const OPENCODE_NATIVE_INSTALL: &str = "curl -fsSL https://opencode.ai/v2/install | bash";
 
 /// A harness FalconDeck knows how to detect and (optionally) manage. Entries
 /// without `npm_package` get no latest-version check; entries without
@@ -117,8 +118,8 @@ const KNOWN_HARNESSES: &[KnownHarness] = &[
         id: "opencode",
         label: "OpenCode",
         bin: "opencode",
-        npm_package: Some("opencode-ai"),
-        upgrade_command: Some("curl -fsSL https://opencode.ai/install | bash"),
+        npm_package: Some("@opencode/cli"),
+        upgrade_command: Some(OPENCODE_NATIVE_INSTALL),
         auth_probe: None,
         builtin: false,
     },
@@ -354,6 +355,7 @@ impl AppState {
         let upgrade_command = match harness.id {
             "claude" => claude_upgrade_command_for_host(&host),
             "agy" => agy_upgrade_command_for_host(&host),
+            "opencode" => opencode_upgrade_command_for_host(&host),
             _ => upgrade_command.to_string(),
         };
 
@@ -380,7 +382,7 @@ impl AppState {
             let result = if host == LOCAL_HOST {
                 let result = run_local_upgrade(&upgrade_command).await;
                 match result {
-                    Ok(output) if harness.id == "codex" || harness.id == "claude" => {
+                    Ok(output) if matches!(harness.id, "codex" | "claude" | "opencode") => {
                         let resolved =
                             crate::agent_binary::resolve_agent_binary(harness.bin, harness.bin);
                         match probe_binary_version(&resolved.executable).await {
@@ -406,6 +408,11 @@ impl AppState {
                     Ok(output) => Err(output.failure_detail()),
                     Err(error) => Err(error.to_string()),
                 }
+            };
+            let result = if harness.id == "opencode" {
+                result.and_then(opencode_upgrade_result)
+            } else {
+                result
             };
             match result {
                 Ok(output) => {
@@ -652,7 +659,10 @@ impl AppState {
         };
         let packages: Vec<(&str, &str)> = KNOWN_HARNESSES
             .iter()
-            .filter_map(|harness| Some((harness.id, harness.npm_package?)))
+            .filter_map(|harness| {
+                let summary = summaries.iter().find(|summary| summary.id == harness.id)?;
+                Some((harness.id, latest_package(harness, summary)?))
+            })
             .collect();
         let results = join_all(
             packages
@@ -735,6 +745,56 @@ fn agy_upgrade_command_for_path(path: Option<&str>) -> String {
     }
 }
 
+/// OpenCode's original installer still distributes 1.x. Let an existing CLI
+/// update itself within its major version; switching majors also breaks user
+/// plugins and must remain an explicit `opencode upgrade --major` operation.
+fn opencode_upgrade_command_for_host(host: &str) -> String {
+    if host == LOCAL_HOST {
+        let resolution = crate::agent_binary::resolve_agent_binary("opencode", "opencode");
+        return opencode_upgrade_command_for_path(
+            Path::new(&resolution.executable)
+                .is_file()
+                .then_some(resolution.executable.as_str()),
+        );
+    }
+    format!(
+        concat!(
+            r#"p=$(command -v opencode 2>/dev/null) || true; "#,
+            r#"if [ ! -f "$p" ]; then for p in "$HOME/.local/bin/opencode" "$HOME/.cargo/bin/opencode" "$HOME/go/bin/opencode" "$HOME/.opencode/bin/opencode" /opt/homebrew/bin/opencode /usr/local/bin/opencode /usr/bin/opencode; do [ -f "$p" ] && break; done; fi; "#,
+            r#"if [ -f "$p" ]; then "$p" upgrade; else {}; fi"#,
+        ),
+        OPENCODE_NATIVE_INSTALL,
+    )
+}
+
+fn opencode_upgrade_command_for_path(path: Option<&str>) -> String {
+    match path {
+        Some(path) => format!("{} upgrade", shell_quote(path)),
+        None => OPENCODE_NATIVE_INSTALL.to_string(),
+    }
+}
+
+fn opencode_upgrade_result(output: String) -> Result<String, String> {
+    // OpenCode 1.x catches installer errors, prints this diagnostic, and
+    // exits zero. A still-runnable old binary is not proof of an update.
+    if output.to_ascii_lowercase().contains("upgrade failed") {
+        return Err(format!("OpenCode reported an upgrade failure:\n{output}"));
+    }
+    Ok(output)
+}
+
+fn latest_package(harness: &KnownHarness, summary: &HarnessSummary) -> Option<&'static str> {
+    if harness.id == "opencode"
+        && summary
+            .version
+            .as_deref()
+            .is_some_and(|version| version.starts_with("1."))
+    {
+        return Some("opencode-ai");
+    }
+    harness.npm_package
+}
+
 /// Picks the Claude upgrade that will actually move the binary FalconDeck
 /// probes. Packaged macOS prefers `~/.local/bin/claude` (native installer)
 /// over Homebrew npm; a hardcoded `npm install -g` updates the other copy.
@@ -794,6 +854,7 @@ fn refine_upgrade_command(summary: &mut HarnessSummary) {
         .filter(|_| summary.installed);
     let command = match summary.id.as_str() {
         "agy" => agy_upgrade_command_for_path(path),
+        "opencode" => opencode_upgrade_command_for_path(path),
         "claude" => match path {
             Some(path) => claude_upgrade_command_for_path(path),
             None => CLAUDE_NATIVE_INSTALL.to_string(),
@@ -811,6 +872,19 @@ fn carry_latest_version(
     latest: &Option<String>,
     previous_update: Option<bool>,
 ) {
+    if summary.id == "opencode"
+        && summary
+            .version
+            .as_deref()
+            .zip(latest.as_deref())
+            .is_some_and(|(version, latest)| version.split('.').next() != latest.split('.').next())
+    {
+        // A manual major migration switches registries. The previous
+        // registry's latest is no longer evidence that this CLI is current.
+        summary.latest_version = None;
+        summary.update_available = None;
+        return;
+    }
     summary.latest_version = latest.clone();
     summary.update_available = match (summary.version.as_deref(), latest.as_deref()) {
         (Some(version), Some(latest_ver)) => Some(is_update_available(version, latest_ver)),
@@ -1619,6 +1693,95 @@ INSTALL
     }
 
     use super::*;
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn opencode_upgrade_keeps_the_existing_major_and_surfaces_failures() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let directory = tempfile::tempdir().unwrap();
+        let binary = directory.path().join("opencode copy's binary");
+        std::fs::write(&binary, "#!/bin/sh\nprintf '%s\\n' \"$*\"\n").unwrap();
+        std::fs::set_permissions(&binary, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let mut summary = KNOWN_HARNESSES
+            .iter()
+            .find(|harness| harness.id == "opencode")
+            .unwrap()
+            .summary();
+        summary.installed = true;
+        summary.resolved_path = Some(binary.to_string_lossy().into_owned());
+        refine_upgrade_command(&mut summary);
+        let command = summary.upgrade_command.unwrap();
+        assert_eq!(run_local_upgrade(&command).await.unwrap().trim(), "upgrade");
+
+        // A failed update must not fall back to the old installer (which
+        // downgrades 2.x) or replace the CLI with a different installation.
+        std::fs::write(
+            &binary,
+            "#!/bin/sh\nprintf 'update failed\\n' >&2\nexit 23\n",
+        )
+        .unwrap();
+        let error = run_local_upgrade(&command).await.unwrap_err();
+        assert!(error.contains("exit code 23: update failed"), "{error}");
+
+        let remote_bin = directory.path().join("opencode");
+        std::fs::rename(&binary, &remote_bin).unwrap();
+        let output = TokioCommand::new("/bin/sh")
+            .args(["-c", &opencode_upgrade_command_for_host("test-host")])
+            .env("PATH", directory.path())
+            .output()
+            .await
+            .unwrap();
+        assert_eq!(output.status.code(), Some(23));
+        assert_eq!(
+            String::from_utf8_lossy(&output.stderr).trim(),
+            "update failed"
+        );
+
+        // The real 1.x CLI reports installer failure this way and exits zero.
+        std::fs::write(
+            &remote_bin,
+            "#!/bin/sh\nprintf '\\033[31mUpgrade failed\\033[0m\\n'\n",
+        )
+        .unwrap();
+        let output = run_local_upgrade(&opencode_upgrade_command_for_path(remote_bin.to_str()))
+            .await
+            .unwrap();
+        assert!(opencode_upgrade_result(output).is_err());
+        let output = TokioCommand::new("/bin/sh")
+            .args(["-c", &opencode_upgrade_command_for_host("test-host")])
+            .env("PATH", directory.path())
+            .output()
+            .await
+            .unwrap();
+        assert!(output.status.success());
+        assert!(opencode_upgrade_result(String::from_utf8(output.stdout).unwrap()).is_err());
+        assert!(
+            opencode_upgrade_result(
+                "opencode upgrade skipped: 1.19.0 is already installed".to_string()
+            )
+            .is_ok()
+        );
+        assert!(opencode_upgrade_result("Upgrade complete".to_string()).is_ok());
+    }
+
+    #[test]
+    fn opencode_release_lookup_tracks_the_installed_major() {
+        let harness = KNOWN_HARNESSES.iter().find(|h| h.id == "opencode").unwrap();
+        let mut summary = harness.summary();
+        assert_eq!(latest_package(harness, &summary), Some("@opencode/cli"));
+        assert_eq!(
+            opencode_upgrade_command_for_path(None),
+            OPENCODE_NATIVE_INSTALL
+        );
+        summary.version = Some("1.19.0".to_string());
+        assert_eq!(latest_package(harness, &summary), Some("opencode-ai"));
+        summary.version = Some("2.0.29".to_string());
+        assert_eq!(latest_package(harness, &summary), Some("@opencode/cli"));
+        carry_latest_version(&mut summary, &Some("1.19.0".to_string()), Some(false));
+        assert_eq!(summary.latest_version, None);
+        assert_eq!(summary.update_available, None);
+    }
 
     #[cfg(unix)]
     #[tokio::test]
