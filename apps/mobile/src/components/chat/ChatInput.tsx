@@ -13,6 +13,7 @@ import {
   TextInput,
   Pressable,
   Modal,
+  ScrollView,
   KeyboardAvoidingView,
   Platform,
   useWindowDimensions,
@@ -169,6 +170,8 @@ const MAX_INPUT_HEIGHT = 320
 // to nothing the overflow — the send button — slides under the keyboard.
 // Cap growth to a fraction of the window so the composer always fits.
 const MAX_INPUT_HEIGHT_WINDOW_FRACTION = 0.48
+/** Room left for the slash menu above a raised keyboard on a phone. */
+const SLASH_MENU_WINDOW_FRACTION = 0.3
 const COMPOSER_COLLAPSE_MS = 180
 const COMPOSER_COLLAPSE_TIMING = {
   duration: COMPOSER_COLLAPSE_MS,
@@ -320,6 +323,9 @@ export const ChatInput = memo(function ChatInput({
     ),
   )
   const [inputContentHeight, setInputContentHeight] = useState(0)
+  // A project can carry dozens of skills; the menu scrolls inside the card
+  // instead of pushing the composer up past the header.
+  const slashMenuMaxHeight = Math.round(windowHeight * SLASH_MENU_WINDOW_FRACTION)
   const draftIsEmpty = value.length === 0
   const inputOverflows = !draftIsEmpty && inputContentHeight > maxInputHeight + 1
   useEffect(() => {
@@ -853,7 +859,13 @@ export const ChatInput = memo(function ChatInput({
           </View>
         ) : null}
         {slashQuery && !voiceProvider ? (
-          <View style={styles.skillMenu}>
+          <ScrollView
+            style={[styles.skillMenu, { maxHeight: slashMenuMaxHeight }]}
+            keyboardShouldPersistTaps="handled"
+            showsVerticalScrollIndicator={false}
+            nestedScrollEnabled
+            testID="slash-menu"
+          >
             {slashItems.length > 0 ? (
               slashItems.map((item, index) => {
                 const lastItem = index === slashItems.length - 1
@@ -996,7 +1008,7 @@ export const ChatInput = memo(function ChatInput({
                 </Text>
               </View>
             )}
-          </View>
+          </ScrollView>
         ) : null}
         {statusNotice ? (
           <Text
@@ -1396,6 +1408,7 @@ const styles = StyleSheet.create((theme) => ({
     paddingTop: theme.spacing[1.5],
   },
   skillMenu: {
+    flexGrow: 0,
     marginHorizontal: theme.spacing[2],
     marginBottom: theme.spacing[1],
     borderRadius: theme.radius.xl,
@@ -1428,8 +1441,12 @@ const styles = StyleSheet.create((theme) => ({
     justifyContent: 'center',
     backgroundColor: glassFill(theme.isDark),
   },
+  // Grow/shrink with an auto basis: inside the scrolling menu a zero basis
+  // (flex: 1) measures every row to nothing.
   skillItemBody: {
-    flex: 1,
+    flexGrow: 1,
+    flexShrink: 1,
+    minWidth: 0,
     gap: 2,
   },
   skillHeading: {
