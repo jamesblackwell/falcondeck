@@ -23,7 +23,7 @@ Do not ship an unsigned zip. Gatekeeper blocks internet-downloaded Mac apps that
 3. `git tag desktop-vX.Y.Z && git push origin desktop-vX.Y.Z` (creates a **draft** release).
 4. Watch both `publish-tauri` jobs. Use [scripts/watch-release.sh](scripts/watch-release.sh) `<run-id>` plus the long-running-background-tasks `monitor` tool. Do not poll in the agent loop.
 5. Confirm the draft has `FalconDeck_*_aarch64.dmg`, `FalconDeck_*_x64.dmg`, `FalconDeck_{aarch64,x64}.app.tar.gz` plus `.sig`, and `latest.json` with `darwin-aarch64` and `darwin-x86_64`.
-6. Download a DMG from the draft (not `make desktop-install`). Gatekeeper must be silent; daemon starts; one real Codex or Claude turn works.
+6. Download both DMGs from the draft (not `make desktop-install`). Tauri notarizes the `.app`, then signs the DMG with no ticket. Submit each DMG with `notarytool`, `stapler staple` it, and `gh release upload --clobber` the versioned DMGs plus the `FalconDeck_{aarch64,x64}.dmg` aliases. `stapler validate` must succeed, and `spctl --assess --type open --context context:primary-signature` must report `Notarized Developer ID`. Then confirm the app inside: daemon starts, and one real Codex or Claude turn works.
 7. `gh release edit desktop-vX.Y.Z --draft=false`.
 8. Point README (and site copy if it still says “coming soon”) at the release URL.
 
