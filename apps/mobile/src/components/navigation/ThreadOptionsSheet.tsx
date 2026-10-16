@@ -1,12 +1,12 @@
 import { memo, useCallback, useRef, useState } from 'react'
 import { Pressable, View } from 'react-native'
-import { Archive, ArchiveRestore, ChevronRight, FolderInput, Pencil, Pin, Sparkles } from 'lucide-react-native'
+import { Archive, ArchiveRestore, FolderInput, Pencil, Pin, Sparkles } from 'lucide-react-native'
 import * as Haptics from 'expo-haptics'
 import { StyleSheet, useUnistyles } from 'react-native-unistyles'
 
 import type { ThreadSummary } from '@falcondeck/client-core'
 
-import { Button, Input, NativeSheet, Text } from '@/components/ui'
+import { Button, Input, NativeSheet, SheetGroup, SheetRow, Text } from '@/components/ui'
 import { useThreadActions } from '@/hooks/useThreadActions'
 import { triggerThreadArchiveHaptic } from '@/lib/haptics'
 import { useSessionStore } from '@/store/session-store'
@@ -190,7 +190,7 @@ export const ThreadOptionsSheet = memo(function ThreadOptionsSheet({
       contentStyle={styles.content}
     >
       <Text variant="label" color="primary" weight="semibold" style={styles.title}>
-        {mode === 'rename' ? 'Rename thread' : 'Thread options'}
+        {mode === 'rename' ? 'Rename task' : 'Task options'}
       </Text>
       <Text variant="caption" color="muted" numberOfLines={1} style={styles.subtitle}>
         {thread.title || 'New thread'}
@@ -241,88 +241,65 @@ export const ThreadOptionsSheet = memo(function ThreadOptionsSheet({
         </>
       ) : (
         <>
-          <Pressable
-            style={styles.item}
-            accessibilityRole="button"
-            accessibilityLabel={thread.is_pinned ? 'Unpin thread' : 'Pin thread'}
-            onPress={() => void handleTogglePin()}
-            disabled={pendingAction !== null}
-          >
-            <View style={styles.itemLabel}>
-              <Pin size={theme.iconSize.sm} color={theme.colors.fg.secondary} />
-              <Text variant="label" color="primary">
-                {thread.is_pinned ? 'Unpin' : 'Pin'}
-              </Text>
-            </View>
-          </Pressable>
-          {canPinInProject ? (
-            <Pressable
-              style={styles.item}
-              accessibilityRole="button"
-              accessibilityLabel={
-                thread.is_pinned_in_project ? 'Unpin from project' : 'Pin in project'
-              }
-              onPress={() => void handleTogglePinInProject()}
+          <SheetGroup>
+            <SheetRow
+              label={thread.is_pinned ? 'Unpin' : 'Pin'}
+              accessibilityLabel={thread.is_pinned ? 'Unpin thread' : 'Pin thread'}
+              icon={(color) => <Pin size={theme.iconSize.sm} color={color} />}
+              onPress={() => void handleTogglePin()}
               disabled={pendingAction !== null}
-            >
-              <View style={styles.itemLabel}>
-                <Pin size={theme.iconSize.sm} color={theme.colors.fg.secondary} />
-                <Text variant="label" color="primary">
-                  {thread.is_pinned_in_project ? 'Unpin from project' : 'Pin in project'}
-                </Text>
-              </View>
-            </Pressable>
-          ) : null}
-          <Pressable
-            style={styles.item}
-            accessibilityRole="button"
-            accessibilityLabel="Rename thread"
-            onPress={startRename}
-          >
-            <View style={styles.itemLabel}>
-              <Pencil size={theme.iconSize.sm} color={theme.colors.fg.secondary} />
-              <Text variant="label" color="primary">Rename</Text>
-            </View>
+            />
+            {canPinInProject ? (
+              <SheetRow
+                label={thread.is_pinned_in_project ? 'Unpin from project' : 'Pin in project'}
+                icon={(color) => <Pin size={theme.iconSize.sm} color={color} />}
+                onPress={() => void handleTogglePinInProject()}
+                disabled={pendingAction !== null}
+              />
+            ) : null}
             {/* The only row that opens something rather than acting on the
-                thread, so it is the only one that earns a chevron. */}
-            <ChevronRight size={theme.iconSize.xs} color={theme.colors.fg.muted} />
-          </Pressable>
-          {canMarkUnread ? (
-            <Pressable
-              style={styles.item}
-              accessibilityRole="button"
-              accessibilityLabel="Mark thread as unread"
-              onPress={() => void handleMarkUnread()}
-              disabled={pendingAction !== null}
-            >
-              <View style={styles.itemLabel}>
-                <View style={styles.unreadDot} />
-                <Text variant="label" color="primary">Mark as unread</Text>
-              </View>
-            </Pressable>
-          ) : null}
-          <Pressable
-            style={[styles.item, styles.archiveItem]}
-            accessibilityRole="button"
-            accessibilityLabel={thread.is_archived ? 'Unarchive thread' : 'Archive thread'}
-            onPress={thread.is_archived ? handleUnarchive : handleArchive}
-          >
-            <View style={styles.itemLabel}>
-              {onMoveToFolder ? <Pressable style={styles.item} accessibilityRole="button" accessibilityLabel="Move to folder"
-            disabled={pendingAction !== null} onPress={onMoveToFolder}>
-            <View style={styles.itemLabel}><FolderInput size={theme.iconSize.sm} color={theme.colors.fg.secondary} />
-              <Text variant="label" color="primary">Move to folder…</Text></View>
-          </Pressable> : null}
-          {thread.is_archived ? (
-                <ArchiveRestore size={theme.iconSize.sm} color={theme.colors.info.default} />
-              ) : (
-                <Archive size={theme.iconSize.sm} color={theme.colors.info.default} />
-              )}
-              <Text variant="label" color="info">
-                {thread.is_archived ? 'Unarchive' : 'Archive'}
-              </Text>
-            </View>
-          </Pressable>
+                task, so it is the only one that earns a chevron. */}
+            <SheetRow
+              label="Rename"
+              accessibilityLabel="Rename thread"
+              icon={(color) => <Pencil size={theme.iconSize.sm} color={color} />}
+              navigates
+              onPress={startRename}
+            />
+            {canMarkUnread ? (
+              <SheetRow
+                label="Mark as unread"
+                accessibilityLabel="Mark thread as unread"
+                icon={() => <View style={styles.unreadDot} />}
+                onPress={() => void handleMarkUnread()}
+                disabled={pendingAction !== null}
+              />
+            ) : null}
+            {onMoveToFolder ? (
+              <SheetRow
+                label="Move to folder…"
+                accessibilityLabel="Move to folder"
+                icon={(color) => <FolderInput size={theme.iconSize.sm} color={color} />}
+                onPress={onMoveToFolder}
+                disabled={pendingAction !== null}
+              />
+            ) : null}
+          </SheetGroup>
+          <SheetGroup style={styles.secondGroup}>
+            <SheetRow
+              label={thread.is_archived ? 'Unarchive' : 'Archive'}
+              accessibilityLabel={thread.is_archived ? 'Unarchive thread' : 'Archive thread'}
+              tone="info"
+              icon={(color) =>
+                thread.is_archived ? (
+                  <ArchiveRestore size={theme.iconSize.sm} color={color} />
+                ) : (
+                  <Archive size={theme.iconSize.sm} color={color} />
+                )
+              }
+              onPress={thread.is_archived ? handleUnarchive : handleArchive}
+            />
+          </SheetGroup>
           {actionError ? (
             <Text variant="caption" color="danger" style={styles.errorText}>
               {actionError}
@@ -343,23 +320,10 @@ const styles = StyleSheet.create((theme) => ({
   },
   subtitle: {
     paddingHorizontal: theme.spacing[2],
-    marginBottom: theme.spacing[2],
+    marginBottom: theme.spacing[3],
   },
-  item: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-    minHeight: theme.minTouchTarget,
-    paddingVertical: theme.spacing[3],
-    paddingHorizontal: theme.spacing[2],
-    borderRadius: theme.radius.lg,
-    backgroundColor: theme.colors.surface[2],
-    marginBottom: theme.spacing[2],
-  },
-  itemLabel: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: theme.spacing[3],
+  secondGroup: {
+    marginTop: theme.spacing[3],
   },
   // Sized into the same box the lucide icons occupy so the labels line up.
   unreadDot: {
@@ -369,9 +333,6 @@ const styles = StyleSheet.create((theme) => ({
     borderRadius: theme.iconSize.sm / 2,
     backgroundColor: theme.colors.unread,
     transform: [{ scale: 0.5 }],
-  },
-  archiveItem: {
-    backgroundColor: theme.colors.info.muted,
   },
   renameInput: {
     marginTop: theme.spacing[2],

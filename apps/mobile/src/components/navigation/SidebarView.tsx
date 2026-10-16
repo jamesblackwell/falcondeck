@@ -20,11 +20,13 @@ import { FlashList } from "@shopify/flash-list";
 import {
   ArrowUpDown,
   ChevronDown,
+  ChevronRight,
   Eye,
   EyeOff,
   FolderClosed,
   FolderPlus,
   FolderOpen,
+  Inbox,
   ListFilter,
   Plus,
   Settings,
@@ -61,8 +63,11 @@ import {
   Text,
   Button,
   EmptyState,
+  GlassButton,
   LoadingPill,
   OptionSheet,
+  ScrollEdge,
+  SymbolIcon,
   SyncBanner,
 } from "@/components/ui";
 import {
@@ -172,7 +177,9 @@ const CollapsibleRow = memo(function CollapsibleRow({
   );
 });
 
-const FLOATING_ACTION_HEIGHT = 60;
+const FLOATING_ACTION_HEIGHT = 56;
+/** Matches the floating header row on the conversation screen. */
+const GLASS_ROW_HEIGHT = 52;
 const EMPTY_HIDDEN_WORKSPACE_IDS: readonly string[] = [];
 
 export const SidebarView = memo(function SidebarView({
@@ -1006,31 +1013,51 @@ export const SidebarView = memo(function SidebarView({
       {/* The title stays even when there is nothing to close: it keeps the
           panel's top edge on the same line as the conversation header. */}
       <View style={styles.header}>
-        <Text variant="label" color="primary" weight="semibold">
-          Threads
+        <Text variant="heading" size="2xl" weight="bold" color="primary" style={styles.headerTitle}>
+          Tasks
         </Text>
         {onClose ? (
-          <Pressable
-            style={({ pressed }) => [
-              styles.closeButton,
-              pressed ? styles.closeButtonPressed : undefined,
-            ]}
+          <GlassButton
             onPress={onClose}
-            accessibilityRole="button"
             accessibilityLabel="Close sidebar"
-            hitSlop={8}
+            hitSlop={4}
           >
-            <X size={theme.iconSize.md} color={theme.colors.fg.secondary} />
-          </Pressable>
+            <SymbolIcon name="xmark" fallback={X} size={16} weight="semibold" color={theme.colors.fg.primary} />
+          </GlassButton>
         ) : null}
       </View>
 
       {onOpenActivity ? (
-        <Pressable style={[styles.activityButton, activityOpen ? styles.filterButtonActive : null]}
-          onPress={onOpenActivity} accessibilityRole="button" accessibilityLabel="Activity"
-          accessibilityState={{ selected: activityOpen }}>
-          <Text variant="label" color={activityOpen ? "accent" : "secondary"}>Activity</Text>
-          <Text variant="meta">Across all projects</Text>
+        <Pressable
+          style={({ pressed }) => [
+            styles.activityButton,
+            activityOpen ? styles.activityButtonActive : pressed ? styles.activityButtonPressed : null,
+          ]}
+          onPress={onOpenActivity}
+          accessibilityRole="button"
+          accessibilityLabel="Activity"
+          accessibilityHint="Tasks that need you, finished work, and what is running, across all projects"
+          accessibilityState={{ selected: activityOpen }}
+        >
+          <View style={[styles.activityGlyph, activityOpen ? styles.activityGlyphActive : null]}>
+            <SymbolIcon
+              name="tray.full"
+              fallback={Inbox}
+              size={16}
+              color={activityOpen ? theme.colors.accent.default : theme.colors.fg.secondary}
+            />
+          </View>
+          <View style={styles.activityCopy}>
+            <Text variant="label" weight="medium" color={activityOpen ? "accent" : "primary"}>Activity</Text>
+            <Text variant="meta" color="muted">Across all projects</Text>
+          </View>
+          <SymbolIcon
+            name="chevron.right"
+            fallback={ChevronRight}
+            size={12}
+            weight="semibold"
+            color={theme.colors.fg.faint}
+          />
         </Pressable>
       ) : null}
       <SyncBanner status={syncStatus} />
@@ -1087,66 +1114,75 @@ export const SidebarView = memo(function SidebarView({
       </View>
 
       {hasFloatingDock ? (
-        <View
-          style={[
-            styles.floatingDock,
-            { bottom: Math.max(insets.bottom, theme.spacing[3]) },
-          ]}
-          pointerEvents="box-none"
-        >
-          {canStartNew ? (
-            <Pressable
-              style={({ pressed }) => [
-                styles.floatingNewButton,
-                pressed ? styles.floatingNewButtonPressed : undefined,
-              ]}
-              onPress={() => {
-                if (onNewChat) void onNewChat();
-                else if (newThreadWorkspaceId) onNewThread(newThreadWorkspaceId);
-              }}
-              accessibilityRole="button"
-              accessibilityLabel={onNewChat ? "New chat" : "New thread"}
-              accessibilityHint={
-                onNewChat
-                  ? "Starts a conversation outside a project"
-                  : "Starts a conversation in the open project"
-              }
-            >
-              <SquarePen
-                size={theme.iconSize.lg}
-                color={theme.colors.surface[0]}
-              />
-              <Text
-                variant="label"
-                size="md"
-                weight="semibold"
-                style={styles.floatingNewLabel}
+        <>
+          {/* The list fades into the panel behind the floating controls. */}
+          <ScrollEdge
+            edge="bottom"
+            color={theme.colors.surface[1]}
+            height={FLOATING_ACTION_HEIGHT + Math.max(insets.bottom, theme.spacing[3]) + theme.spacing[6]}
+            solid={Math.max(insets.bottom, theme.spacing[3]) * 0.6}
+          />
+          <View
+            style={[
+              styles.floatingDock,
+              { bottom: Math.max(insets.bottom - 6, theme.spacing[3]) },
+            ]}
+            pointerEvents="box-none"
+          >
+            {canStartNew ? (
+              <GlassButton
+                shape="pill"
+                size={FLOATING_ACTION_HEIGHT}
+                tint={theme.colors.accent.default}
+                style={styles.floatingNewButton}
+                onPress={() => {
+                  if (onNewChat) void onNewChat();
+                  else if (newThreadWorkspaceId) onNewThread(newThreadWorkspaceId);
+                }}
+                accessibilityLabel={onNewChat ? "New chat" : "New thread"}
+                accessibilityHint={
+                  onNewChat
+                    ? "Starts a conversation outside a project"
+                    : "Starts a conversation in the open project"
+                }
               >
-                New
-              </Text>
-            </Pressable>
-          ) : null}
+                <SymbolIcon
+                  name="square.and.pencil"
+                  fallback={SquarePen}
+                  size={21}
+                  weight="medium"
+                  color={theme.colors.surface[0]}
+                />
+                <Text
+                  variant="label"
+                  size="md"
+                  weight="semibold"
+                  style={styles.floatingNewLabel}
+                >
+                  New
+                </Text>
+              </GlassButton>
+            ) : null}
 
-          {onOpenSettings ? (
-            <Pressable
-              style={({ pressed }) => [
-                styles.floatingSettingsButton,
-                settingsOpen ? styles.floatingSettingsButtonSelected : undefined,
-                pressed ? styles.floatingSettingsButtonPressed : undefined,
-              ]}
-              onPress={onOpenSettings}
-              accessibilityRole="button"
-              accessibilityLabel="Settings"
-              accessibilityHint="Opens mobile settings and automations"
-              accessibilityState={{ selected: settingsOpen }}
-            >
-              <Settings
-                size={theme.iconSize.lg}
-                color={theme.colors.fg.primary}
-              />
-            </Pressable>
-          ) : null}
-        </View>
+            {onOpenSettings ? (
+              <GlassButton
+                size={FLOATING_ACTION_HEIGHT}
+                style={styles.floatingSettingsButton}
+                onPress={onOpenSettings}
+                accessibilityLabel="Settings"
+                accessibilityHint="Opens mobile settings and automations"
+                accessibilityState={{ selected: settingsOpen }}
+              >
+                <SymbolIcon
+                  name={settingsOpen ? "gearshape.fill" : "gearshape"}
+                  fallback={Settings}
+                  size={23}
+                  color={theme.colors.fg.primary}
+                />
+              </GlassButton>
+            ) : null}
+          </View>
+        </>
       ) : null}
 
       {optionsTarget ? (
@@ -1206,11 +1242,36 @@ const styles = StyleSheet.create((theme) => ({
     backgroundColor: theme.colors.surface[1],
   },
   activityButton: {
-    minHeight: theme.minTouchTarget,
-    paddingHorizontal: theme.spacing[4],
+    minHeight: 52,
+    marginHorizontal: theme.spacing[2],
+    marginTop: theme.spacing[1],
+    paddingHorizontal: theme.spacing[2],
     flexDirection: "row",
     alignItems: "center",
-    justifyContent: "space-between",
+    gap: theme.spacing[3],
+    borderRadius: theme.radius.lg,
+    borderCurve: "continuous",
+  },
+  activityButtonActive: {
+    backgroundColor: theme.colors.accent.muted,
+  },
+  activityButtonPressed: {
+    backgroundColor: theme.isDark ? "rgba(255, 255, 255, 0.06)" : "rgba(9, 9, 11, 0.045)",
+  },
+  activityGlyph: {
+    width: 32,
+    height: 32,
+    borderRadius: theme.radius.full,
+    alignItems: "center",
+    justifyContent: "center",
+    backgroundColor: theme.colors.surface[3],
+  },
+  activityGlyphActive: {
+    backgroundColor: theme.colors.accent.muted,
+  },
+  activityCopy: {
+    flex: 1,
+    gap: 1,
   },
   list: {
     flex: 1,
@@ -1221,23 +1282,19 @@ const styles = StyleSheet.create((theme) => ({
     justifyContent: "center",
     gap: theme.spacing[2],
   },
+  // Same height and inset as the conversation's floating header row, so the
+  // panel's title and close button sit where the sidebar button was.
   header: {
     flexDirection: "row",
     alignItems: "center",
     justifyContent: "space-between",
-    minHeight: theme.minTouchTarget,
+    height: GLASS_ROW_HEIGHT,
     paddingLeft: theme.spacing[4],
-    paddingRight: theme.spacing[2],
-    paddingTop: theme.spacing[1],
+    paddingRight: theme.spacing[4],
   },
-  closeButton: {
-    width: theme.minTouchTarget,
-    height: theme.minTouchTarget,
-    alignItems: "center",
-    justifyContent: "center",
-    borderRadius: theme.radius.full,
+  headerTitle: {
+    letterSpacing: -0.4,
   },
-  closeButtonPressed: { backgroundColor: theme.colors.surface[2] },
   floatingDock: {
     position: "absolute",
     left: 0,
@@ -1251,44 +1308,12 @@ const styles = StyleSheet.create((theme) => ({
   floatingNewButton: {
     position: "absolute",
     left: theme.spacing[4],
-    height: FLOATING_ACTION_HEIGHT,
-    minWidth: 152,
-    flexDirection: "row",
-    alignItems: "center",
-    justifyContent: "center",
-    gap: theme.spacing[3],
-    paddingHorizontal: theme.spacing[6],
-    borderRadius: theme.radius.full,
-    borderCurve: "continuous",
-    backgroundColor: theme.colors.fg.primary,
-    ...theme.shadow.lg,
-  },
-  floatingNewButtonPressed: {
-    opacity: 0.82,
-    transform: [{ scale: 0.98 }],
+    minWidth: 140,
   },
   floatingNewLabel: { color: theme.colors.surface[0] },
   floatingSettingsButton: {
     position: "absolute",
     right: theme.spacing[4],
-    width: FLOATING_ACTION_HEIGHT,
-    height: FLOATING_ACTION_HEIGHT,
-    alignItems: "center",
-    justifyContent: "center",
-    borderRadius: theme.radius.full,
-    borderCurve: "continuous",
-    backgroundColor: theme.colors.surface[2],
-    borderWidth: 1,
-    borderColor: theme.colors.border.emphasis,
-    ...theme.shadow.lg,
-  },
-  floatingSettingsButtonSelected: {
-    backgroundColor: theme.colors.surface[4],
-    borderColor: theme.colors.border.strong,
-  },
-  floatingSettingsButtonPressed: {
-    backgroundColor: theme.colors.surface[3],
-    transform: [{ scale: 0.96 }],
   },
   workspaceHeader: {
     flexDirection: "row",

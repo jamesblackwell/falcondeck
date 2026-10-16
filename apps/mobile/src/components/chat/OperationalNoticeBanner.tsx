@@ -10,6 +10,7 @@ import {
 
 import { Text } from "@/components/ui";
 import { CodeBlock } from "./CodeBlock";
+import { layeredFill } from "@/theme/color";
 
 interface OperationalNoticeBannerProps {
   conditions: readonly OperationalCondition[];
@@ -184,16 +185,17 @@ const styles = StyleSheet.create((theme) => ({
     borderWidth: 1,
     borderRadius: theme.radius.md,
   },
+  // Opaque: the notice floats under the glass header, over the transcript.
   level_error: {
-    backgroundColor: theme.colors.danger.muted,
+    ...layeredFill(theme.colors.surface[1], theme.colors.danger.muted),
     borderColor: theme.colors.danger.default,
   },
   level_warning: {
-    backgroundColor: theme.colors.warning.muted,
+    ...layeredFill(theme.colors.surface[1], theme.colors.warning.muted),
     borderColor: theme.colors.warning.default,
   },
   level_info: {
-    backgroundColor: theme.colors.info.muted,
+    ...layeredFill(theme.colors.surface[1], theme.colors.info.muted),
     borderColor: theme.colors.border.subtle,
   },
   message: {

@@ -5,7 +5,7 @@ import { ChevronUp, Sparkles, X } from 'lucide-react-native'
 
 import type { ComposerSuggestion, ComposerSuggestionOffer } from '@falcondeck/client-core'
 
-import { Text } from '@/components/ui'
+import { GlassSurface, glassFillStrong, Text } from '@/components/ui'
 
 interface ComposerSuggestionPillProps {
   offer: ComposerSuggestionOffer | null
@@ -35,7 +35,14 @@ export const ComposerSuggestionPill = memo(function ComposerSuggestionPill({
   const alternatives = offer.actions.length - 1
 
   return (
-    <View style={styles.container} accessibilityRole="menubar">
+    <GlassSurface
+      radius={18}
+      intensity={70}
+      highlight={false}
+      style={styles.container}
+      contentStyle={styles.content}
+    >
+      <View style={styles.row} accessibilityRole="menubar">
       <Pressable
         style={styles.primary}
         onPress={() => onSubmit(offer.primary)}
@@ -71,38 +78,39 @@ export const ComposerSuggestionPill = memo(function ComposerSuggestionPill({
       >
         <X size={theme.iconSize.xs} color={theme.colors.fg.muted} />
       </Pressable>
-    </View>
+      </View>
+    </GlassSurface>
   )
 })
 
 const styles = StyleSheet.create((theme) => ({
+  // A small glass capsule floating above the composer, like the composer
+  // itself; it reads as an offer attached to the input.
   container: {
-    flexDirection: 'row',
-    alignItems: 'stretch',
     alignSelf: 'center',
     maxWidth: '92%',
-    // Tighter than the goal banner: the pill reads as attached to the input.
-    marginBottom: theme.spacing[1],
-    borderRadius: theme.radius.full,
-    borderCurve: 'continuous',
-    borderWidth: 1,
-    borderColor: theme.colors.border.default,
-    backgroundColor: theme.colors.surface[2],
-    overflow: 'hidden',
+    marginBottom: theme.spacing[2],
+  },
+  content: {
+    minHeight: 36,
+  },
+  row: {
+    flexDirection: 'row',
+    alignItems: 'stretch',
+    minHeight: 36,
   },
   primary: {
     flexDirection: 'row',
     alignItems: 'center',
     flexShrink: 1,
     gap: theme.spacing[1.5],
-    paddingLeft: theme.spacing[3],
+    paddingLeft: theme.spacing[3] + 2,
     paddingRight: theme.spacing[2],
-    paddingVertical: theme.spacing[1],
   },
   trailing: {
     justifyContent: 'center',
-    paddingHorizontal: theme.spacing[2],
-    borderLeftWidth: 1,
-    borderLeftColor: theme.colors.border.subtle,
+    paddingHorizontal: 10,
+    borderLeftWidth: StyleSheet.hairlineWidth,
+    borderLeftColor: glassFillStrong(theme.isDark),
   },
 }))

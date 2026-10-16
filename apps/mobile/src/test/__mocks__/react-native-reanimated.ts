@@ -36,7 +36,17 @@ export function useAnimatedKeyboard() {
 let reducedMotion = false
 export function useReducedMotion() { return reducedMotion }
 export function __setReducedMotionForTests(value: boolean) { reducedMotion = value }
-export function withTiming(val: any) { return val }
+// Animations settle immediately in tests, so completion callbacks run at once —
+// a sheet that slides away before closing still reports its close.
+export function withTiming(val: any, _config?: any, callback?: (finished: boolean) => void) {
+  callback?.(true)
+  return val
+}
+export function withSpring(val: any, _config?: any, callback?: (finished: boolean) => void) {
+  callback?.(true)
+  return val
+}
+export function runOnJS(fn: any) { return fn }
 export function withRepeat(val: any) { return val }
 export function withSequence(...vals: any[]) { return vals[0] }
 export function withDelay(_delay: any, val: any) { return val }
@@ -51,6 +61,8 @@ export function interpolate(value: number, input: number[], output: number[]) {
 }
 export const Easing = {
   out: (fn: any) => fn,
+  in: (fn: any) => fn,
+  inOut: (fn: any) => fn,
   cubic: (t: any) => t,
   linear: (t: any) => t,
 }

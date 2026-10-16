@@ -33,11 +33,38 @@ describe('ThreadOptionsSheet', () => {
       />,
     )
 
-    expect(textOf(renderer)).toContain('Thread options')
+    expect(textOf(renderer)).toContain('Task options')
     expect(textOf(renderer)).toContain('Pin')
     expect(textOf(renderer)).toContain('Pin in project')
     expect(textOf(renderer)).toContain('Rename')
     expect(textOf(renderer)).toContain('Archive')
+  })
+
+  it('lists Move to folder as its own row, not inside Archive', () => {
+    const onMoveToFolder = vi.fn()
+    const renderer = renderComponent(
+      <ThreadOptionsSheet
+        workspaceId="workspace-1"
+        thread={thread({ id: 'thread-1', workspace_id: 'workspace-1' })}
+        onMoveToFolder={onMoveToFolder}
+        onClose={vi.fn()}
+      />,
+    )
+
+    const pressables = renderer.root.findAllByType('Pressable' as never)
+    const archive = pressables.find((node) => node.props.accessibilityLabel === 'Archive thread')
+    const move = pressables.find((node) => node.props.accessibilityLabel === 'Move to folder')
+    expect(archive).toBeDefined()
+    expect(move).toBeDefined()
+    // A folder move used to render inside the Archive button, so the two
+    // actions shared one tap target.
+    expect(
+      archive!.findAll((node) => node.props.accessibilityLabel === 'Move to folder'),
+    ).toHaveLength(0)
+    act(() => {
+      move!.props.onPress()
+    })
+    expect(onMoveToFolder).toHaveBeenCalledOnce()
   })
 
   it('hides pin in project for casual chats', () => {
@@ -74,7 +101,7 @@ describe('ThreadOptionsSheet', () => {
 
     act(() => rename.props.onPress())
 
-    expect(textOf(renderer)).toContain('Rename thread')
+    expect(textOf(renderer)).toContain('Rename task')
     expect(textOf(renderer)).toContain('Save')
     expect(textOf(renderer)).toContain('Suggest title')
     expect(onClose).not.toHaveBeenCalled()

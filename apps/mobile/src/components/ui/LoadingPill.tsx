@@ -3,6 +3,7 @@ import { View } from 'react-native'
 import { StyleSheet, useUnistyles } from 'react-native-unistyles'
 
 import { ActivityDiamond } from './ActivityDiamond'
+import { GlassSurface } from './GlassSurface'
 import { Text } from './Text'
 
 /** Loads faster than this never show a pill: a flash of "Loading…" over a
@@ -40,6 +41,7 @@ export const LoadingPill = memo(function LoadingPill({
 
   return (
     <View style={styles.wrapper} pointerEvents="none">
+      <GlassSurface radius={16} intensity={70} highlight={false} pointerEvents="none">
       <View
         style={styles.pill}
         accessible
@@ -56,6 +58,7 @@ export const LoadingPill = memo(function LoadingPill({
           {label}
         </Text>
       </View>
+      </GlassSurface>
     </View>
   )
 })
@@ -69,17 +72,12 @@ const styles = StyleSheet.create((theme) => ({
     alignItems: 'center',
     zIndex: 1,
   },
+  // A glass chip, like the rest of the floating chrome.
   pill: {
     flexDirection: 'row',
     alignItems: 'center',
     gap: theme.spacing[1.5],
-    paddingHorizontal: theme.spacing[3],
-    paddingVertical: theme.spacing[1],
-    borderRadius: theme.radius.full,
-    borderCurve: 'continuous',
-    borderWidth: 1,
-    borderColor: theme.colors.border.default,
-    backgroundColor: theme.colors.surface[2],
-    ...theme.shadow.md,
+    minHeight: 32,
+    paddingHorizontal: theme.spacing[3] + 2,
   },
 }))

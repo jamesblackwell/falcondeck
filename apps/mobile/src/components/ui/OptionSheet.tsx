@@ -11,6 +11,7 @@ import {
 
 import { NativeSheet } from './NativeSheet'
 import { PaletteSwatch, type PaletteSwatchColors } from './PaletteSwatch'
+import { SymbolIcon } from './SymbolIcon'
 import { Text } from './Text'
 
 /** Leaves a row of context above the revealed selection. */
@@ -107,14 +108,19 @@ export const OptionSheet = memo(function OptionSheet({
         keyboardShouldPersistTaps="handled"
         onContentSizeChange={revealSelected}
       >
-        {visibleItems.map((item) => {
+        <View style={visibleItems.length > 0 ? styles.group : null}>
+        {visibleItems.map((item, index) => {
           const isSelected = selected !== undefined && item.value === selected
           const secondary = item.disabled ? item.disabledReason : item.description
 
           return (
             <Pressable
               key={item.value}
-              style={[styles.item, isSelected ? styles.itemSelected : null]}
+              style={({ pressed }) => [
+                styles.item,
+                index > 0 ? styles.itemDivided : null,
+                pressed && !item.disabled ? styles.itemPressed : null,
+              ]}
               onLayout={
                 isSelected
                   ? (event) => {
@@ -151,10 +157,19 @@ export const OptionSheet = memo(function OptionSheet({
                   </Text>
                 ) : null}
               </View>
-              {isSelected ? <Check size={theme.iconSize.sm} color={theme.colors.accent.default} /> : null}
+              {isSelected ? (
+                <SymbolIcon
+                  name="checkmark"
+                  fallback={Check}
+                  size={15}
+                  weight="semibold"
+                  color={theme.colors.accent.default}
+                />
+              ) : null}
             </Pressable>
           )
         })}
+        </View>
         {visibleItems.length === 0 ? (
           <Text
             variant="caption"
@@ -176,23 +191,28 @@ const styles = StyleSheet.create((theme) => ({
   },
   title: {
     paddingHorizontal: theme.spacing[2],
-    paddingBottom: theme.spacing[2],
+    paddingBottom: theme.spacing[3],
   },
   list: {
     // Long option lists (models) scroll instead of pushing the sheet off-screen.
     maxHeight: 360,
   },
   searchInput: {
-    minHeight: theme.minTouchTarget,
-    marginHorizontal: theme.spacing[2],
+    minHeight: 40,
     marginBottom: theme.spacing[2],
-    borderWidth: 1,
-    borderColor: theme.colors.border.default,
-    borderRadius: theme.radius.lg,
-    backgroundColor: theme.colors.surface[2],
-    paddingHorizontal: theme.spacing[3],
+    borderRadius: theme.radius.full,
+    borderCurve: 'continuous',
+    backgroundColor: theme.isDark ? 'rgba(255, 255, 255, 0.08)' : 'rgba(9, 9, 11, 0.06)',
+    paddingHorizontal: theme.spacing[4],
     color: theme.colors.fg.primary,
     fontSize: theme.fontSize.sm,
+  },
+  // Inset grouped, as iOS lists options inside a sheet.
+  group: {
+    borderRadius: 20,
+    borderCurve: 'continuous',
+    overflow: 'hidden',
+    backgroundColor: theme.isDark ? 'rgba(255, 255, 255, 0.07)' : 'rgba(255, 255, 255, 0.78)',
   },
   empty: {
     paddingHorizontal: theme.spacing[3],
@@ -204,13 +224,16 @@ const styles = StyleSheet.create((theme) => ({
     alignItems: 'center',
     justifyContent: 'space-between',
     gap: theme.spacing[3],
-    minHeight: theme.minTouchTarget,
+    minHeight: 50,
     paddingVertical: theme.spacing[2],
-    paddingHorizontal: theme.spacing[2],
-    borderRadius: theme.radius.lg,
+    paddingHorizontal: theme.spacing[4],
   },
-  itemSelected: {
-    backgroundColor: theme.colors.surface[2],
+  itemDivided: {
+    borderTopWidth: StyleSheet.hairlineWidth,
+    borderTopColor: theme.isDark ? 'rgba(255, 255, 255, 0.1)' : 'rgba(9, 9, 11, 0.09)',
+  },
+  itemPressed: {
+    backgroundColor: theme.isDark ? 'rgba(255, 255, 255, 0.08)' : 'rgba(9, 9, 11, 0.05)',
   },
   itemBody: {
     flex: 1,

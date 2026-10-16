@@ -1,20 +1,35 @@
-import { memo, useRef, type ReactNode } from 'react'
+import { memo, useCallback, useRef, type ReactNode } from 'react'
 import {
-  Animated,
   KeyboardAvoidingView,
   Modal,
   PanResponder,
   Platform,
   Pressable,
   View,
+  useWindowDimensions,
+  type LayoutChangeEvent,
   type StyleProp,
   type ViewStyle,
 } from 'react-native'
+import Animated, {
+  Easing,
+  runOnJS,
+  useAnimatedStyle,
+  useReducedMotion,
+  useSharedValue,
+  withSpring,
+  withTiming,
+} from 'react-native-reanimated'
 import { X } from 'lucide-react-native'
 import { useSafeAreaInsets } from 'react-native-safe-area-context'
 import { StyleSheet, useUnistyles } from 'react-native-unistyles'
 
 import { useTabletLayout } from '@/hooks/useTabletLayout'
+import { useGlassMode } from '@/lib/glass'
+import { withAlpha } from '@/theme/color'
+
+import { GlassSurface, glassFill } from './GlassSurface'
+import { SymbolIcon } from './SymbolIcon'
 
 interface NativeSheetProps {
   children: ReactNode
@@ -25,15 +40,25 @@ interface NativeSheetProps {
 
 /** Widest a sheet gets on a tablet before it stops growing and centres. */
 const TABLET_SHEET_MAX_WIDTH = 560
+/** iOS 26 floats sheets this far in from the screen edges. */
+const SHEET_INSET = 8
+/** Concentric with the display's own corners at that inset. */
+const SHEET_RADIUS = 34
 
 const DISMISS_DRAG_DISTANCE = 80
 const DISMISS_FLING_VELOCITY = 0.8
+const OPEN_SPRING = { damping: 26, stiffness: 300, mass: 0.9 } as const
+const CLOSE_TIMING = { duration: 200, easing: Easing.in(Easing.cubic) } as const
 
 /**
- * The app's bottom sheet: slides up from the bottom, takes only the height
- * its content needs, and closes from a tap on the dimmed backdrop, a drag
- * down on the grabber, an explicit close button, or the system back gesture.
- * The button is the escape hatch that does not depend on knowing a gesture.
+ * The app's bottom sheet: rises from the bottom, takes only the height its
+ * content needs, and closes from a tap on the dimmed backdrop, a drag down
+ * on the grabber, the close button, or the system back gesture. The button
+ * is the escape hatch that does not depend on knowing a gesture.
+ *
+ * It floats as an iOS 26 glass card — inset from the screen edges with a
+ * large continuous corner — tinted toward the palette so option lists stay
+ * easy to read over whatever is behind them.
  *
  * Deliberately NOT the native iOS form sheet: on an iPhone that presents as
  * a nearly full-screen card regardless of content height, with no visible
@@ -47,11 +72,50 @@ export const NativeSheet = memo(function NativeSheet({
 }: NativeSheetProps) {
   const { theme } = useUnistyles()
   const insets = useSafeAreaInsets()
+  const { height: windowHeight } = useWindowDimensions()
   const { isTablet } = useTabletLayout()
+  const glassMode = useGlassMode()
+  const reducedMotion = useReducedMotion()
 
   const onCloseRef = useRef(onClose)
   onCloseRef.current = onClose
-  const dragY = useRef(new Animated.Value(0)).current
+  const closingRef = useRef(false)
+  const sheetHeight = useRef(0)
+  // Starts below the screen; the first layout springs it into place.
+  const offset = useSharedValue(windowHeight)
+  const hasOpened = useRef(false)
+
+  const finishClose = useCallback(() => {
+    onCloseRef.current()
+  }, [])
+
+  // Every dismissal path runs the sheet back down before the parent unmounts
+  // it, so closing mirrors opening instead of vanishing mid-screen.
+  const requestClose = useCallback(() => {
+    if (closingRef.current) return
+    closingRef.current = true
+    if (reducedMotion) {
+      finishClose()
+      return
+    }
+    const distance = Math.max(sheetHeight.current, 240) + SHEET_INSET + insets.bottom
+    offset.value = withTiming(distance, CLOSE_TIMING, (finished) => {
+      if (finished) runOnJS(finishClose)()
+    })
+  }, [finishClose, insets.bottom, offset, reducedMotion])
+  const requestCloseRef = useRef(requestClose)
+  requestCloseRef.current = requestClose
+
+  const handleLayout = useCallback(
+    (event: LayoutChangeEvent) => {
+      sheetHeight.current = event.nativeEvent.layout.height
+      if (hasOpened.current) return
+      hasOpened.current = true
+      offset.value = reducedMotion ? 0 : withSpring(0, OPEN_SPRING)
+    },
+    [offset, reducedMotion],
+  )
+
   // The pan responder lives on the grabber only; putting it on the whole
   // sheet would steal vertical drags from scrollable content inside.
   const panResponder = useRef(
@@ -59,62 +123,92 @@ export const NativeSheet = memo(function NativeSheet({
       onStartShouldSetPanResponder: () => true,
       onMoveShouldSetPanResponder: (_event, gesture) => gesture.dy > 4,
       onPanResponderMove: (_event, gesture) => {
-        if (gesture.dy > 0) dragY.setValue(gesture.dy)
+        // Upward drags meet resistance instead of detaching the sheet.
+        offset.value = gesture.dy > 0 ? gesture.dy : gesture.dy / 6
       },
       onPanResponderRelease: (_event, gesture) => {
         if (gesture.dy > DISMISS_DRAG_DISTANCE || gesture.vy > DISMISS_FLING_VELOCITY) {
-          onCloseRef.current()
+          requestCloseRef.current()
           return
         }
-        Animated.spring(dragY, { toValue: 0, useNativeDriver: true }).start()
+        offset.value = withSpring(0, OPEN_SPRING)
+      },
+      onPanResponderTerminate: () => {
+        offset.value = withSpring(0, OPEN_SPRING)
       },
     }),
   ).current
 
+  const sheetStyle = useAnimatedStyle(() => ({
+    transform: [{ translateY: offset.value }],
+  }))
+
+  const bottomInset = isTablet ? insets.bottom + theme.spacing[4] : SHEET_INSET
+  // The card sits over the home indicator, so its own padding clears it.
+  const contentBottomPadding = isTablet
+    ? theme.spacing[4]
+    : Math.max(insets.bottom - SHEET_INSET, theme.spacing[3]) + theme.spacing[1]
+
   return (
-    <Modal transparent animationType="slide" onRequestClose={onClose}>
+    <Modal transparent animationType="fade" onRequestClose={requestClose} statusBarTranslucent>
       <KeyboardAvoidingView
         behavior={Platform.OS === 'ios' ? 'padding' : undefined}
         style={styles.root}
       >
         <Pressable
           style={[styles.backdrop, { backgroundColor: theme.colors.overlay }]}
-          onPress={onClose}
+          onPress={requestClose}
           accessibilityRole="button"
           accessibilityLabel={accessibilityLabel}
         />
         <Animated.View
+          onLayout={handleLayout}
           style={[
-            styles.content,
+            styles.frame,
             // A sheet pinned to the full width of an iPad puts its controls a
             // hand-span apart; floating it keeps the same bottom-sheet shape
             // at a size the thumb can still cover.
-            isTablet ? styles.contentTablet : null,
-            {
-              paddingBottom: isTablet
-                ? theme.spacing[4]
-                : insets.bottom + theme.spacing[4],
-            },
-            isTablet ? { marginBottom: insets.bottom + theme.spacing[4] } : null,
-            { transform: [{ translateY: dragY }] },
+            isTablet ? styles.frameTablet : null,
+            { marginBottom: bottomInset },
+            sheetStyle,
           ]}
+          accessibilityViewIsModal
         >
-          <View style={styles.grabberZone} {...panResponder.panHandlers}>
-            <View style={styles.grabber} />
-          </View>
-          <Pressable
-            onPress={onClose}
-            accessibilityRole="button"
-            accessibilityLabel={accessibilityLabel}
-            hitSlop={8}
-            style={({ pressed }) => [
-              styles.closeButton,
-              pressed && styles.closeButtonPressed,
-            ]}
+          <GlassSurface
+            radius={SHEET_RADIUS}
+            // Glass under a reading surface: tinted toward the palette so
+            // busy content behind cannot compete with the options.
+            tint={withAlpha(
+              theme.colors.surface[1],
+              glassMode === 'liquid' ? (theme.isDark ? 0.62 : 0.7) : 0.86,
+            )}
+            intensity={80}
+            highlight={false}
+            contentStyle={[styles.card, { paddingBottom: contentBottomPadding }]}
           >
-            <X size={theme.iconSize.sm} color={theme.colors.fg.muted} />
-          </Pressable>
-          <View style={contentStyle}>{children}</View>
+            <View style={styles.grabberZone} {...panResponder.panHandlers}>
+              <View style={styles.grabber} />
+            </View>
+            <Pressable
+              onPress={requestClose}
+              accessibilityRole="button"
+              accessibilityLabel={accessibilityLabel}
+              hitSlop={8}
+              style={({ pressed }) => [
+                styles.closeButton,
+                pressed && styles.closeButtonPressed,
+              ]}
+            >
+              <SymbolIcon
+                name="xmark"
+                fallback={X}
+                size={12}
+                weight="bold"
+                color={theme.colors.fg.secondary}
+              />
+            </Pressable>
+            <View style={contentStyle}>{children}</View>
+          </GlassSurface>
         </Animated.View>
       </KeyboardAvoidingView>
     </Modal>
@@ -127,20 +221,18 @@ const styles = StyleSheet.create((theme) => ({
     justifyContent: 'flex-end',
   },
   backdrop: {
-    flex: 1,
+    ...StyleSheet.absoluteFillObject,
   },
-  content: {
-    backgroundColor: theme.colors.surface[1],
-    borderTopLeftRadius: theme.radius['2xl'],
-    borderTopRightRadius: theme.radius['2xl'],
-    borderCurve: 'continuous',
+  frame: {
+    marginHorizontal: SHEET_INSET,
   },
-  contentTablet: {
+  frameTablet: {
     width: '100%',
     maxWidth: TABLET_SHEET_MAX_WIDTH,
     alignSelf: 'center',
-    borderBottomLeftRadius: theme.radius['2xl'],
-    borderBottomRightRadius: theme.radius['2xl'],
+  },
+  card: {
+    paddingTop: 0,
   },
   grabberZone: {
     alignItems: 'center',
@@ -151,22 +243,23 @@ const styles = StyleSheet.create((theme) => ({
   // full width and sheet content keeps its own header space.
   closeButton: {
     position: 'absolute',
-    top: theme.spacing[2],
+    top: theme.spacing[3],
     right: theme.spacing[3],
-    width: theme.spacing[8],
-    height: theme.spacing[8],
+    width: 30,
+    height: 30,
     alignItems: 'center',
     justifyContent: 'center',
     borderRadius: theme.radius.full,
-    backgroundColor: theme.colors.surface[3],
+    backgroundColor: glassFill(theme.isDark),
+    zIndex: 1,
   },
   closeButtonPressed: {
-    backgroundColor: theme.colors.surface[4],
+    backgroundColor: theme.isDark ? 'rgba(255, 255, 255, 0.18)' : 'rgba(9, 9, 11, 0.1)',
   },
   grabber: {
-    width: theme.spacing[8] + theme.spacing[1],
-    height: theme.spacing[1],
+    width: 36,
+    height: 5,
     borderRadius: theme.radius.full,
-    backgroundColor: theme.colors.border.emphasis,
+    backgroundColor: theme.isDark ? 'rgba(255, 255, 255, 0.22)' : 'rgba(9, 9, 11, 0.16)',
   },
 }))

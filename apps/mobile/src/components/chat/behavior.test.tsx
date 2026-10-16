@@ -33,7 +33,15 @@ vi.mock("react-native-reanimated", () => ({
   useAnimatedStyle: (fn: any) => fn(),
   useDerivedValue: (fn: any) => ({ value: fn() }),
   useReducedMotion: () => false,
-  withTiming: (value: any) => value,
+  withTiming: (value: any, _config?: any, callback?: (finished: boolean) => void) => {
+    callback?.(true);
+    return value;
+  },
+  withSpring: (value: any, _config?: any, callback?: (finished: boolean) => void) => {
+    callback?.(true);
+    return value;
+  },
+  runOnJS: (fn: any) => fn,
   withRepeat: (value: any) => value,
   withSequence: (...values: any[]) => values[0],
   withDelay: (_delay: any, value: any) => value,
@@ -50,6 +58,7 @@ vi.mock("react-native-reanimated", () => ({
   cancelAnimation: () => {},
   Easing: {
     out: (fn: any) => fn,
+    in: (fn: any) => fn,
     cubic: (t: any) => t,
     linear: (t: any) => t,
   },
@@ -416,7 +425,10 @@ describe("chat behavior components", () => {
       />,
     );
 
-    expect(textOf(renderer)).toContain("Codex · gpt-5");
+    // The chip carries Codex's mark, so it names only the model; screen
+    // readers still hear the agent.
+    expect(textOf(renderer)).toContain("gpt-5");
+    expect(textOf(renderer)).not.toContain("Codex · gpt-5");
     expect(textOf(renderer)).toContain("Medium");
     expect(textOf(renderer)).not.toContain("Claude");
 

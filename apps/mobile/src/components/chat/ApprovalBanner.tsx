@@ -14,6 +14,7 @@ import {
 import { Text, Button } from "@/components/ui";
 import { CodeBlock } from "./CodeBlock";
 import { useExternalUrl } from "./useExternalUrl";
+import { layeredFill } from "@/theme/color";
 
 interface ApprovalBannerProps {
   approval: ApprovalRequest;
@@ -269,8 +270,9 @@ export const ApprovalBanner = memo(function ApprovalBanner({
 
 const styles = StyleSheet.create((theme) => ({
   container: {
-    backgroundColor: theme.colors.warning.muted,
-    borderRadius: theme.radius.lg,
+    // Opaque: the request floats over the transcript, above the composer.
+    ...layeredFill(theme.colors.surface[1], theme.colors.warning.muted),
+    borderRadius: theme.radius.xl,
     borderCurve: "continuous",
     borderWidth: 1,
     borderColor: theme.colors.warning.default,

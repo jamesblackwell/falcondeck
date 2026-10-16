@@ -7,6 +7,7 @@ import * as Haptics from 'expo-haptics'
 import {
   formatModelLabel,
   modelFastTier,
+  providerMark,
   NO_AGENT_CAPABILITIES,
   resolveServiceTier,
   resolveModelOption,
@@ -18,10 +19,10 @@ import {
 } from '@falcondeck/client-core'
 
 import {
-  glassEdge,
   glassFill,
   OptionSheet,
   ProviderIcon,
+  SymbolIcon,
   Text,
   type OptionSheetItem,
 } from '@/components/ui'
@@ -136,6 +137,13 @@ export const InputToolbar = memo(function InputToolbar({
         : 'Default'
       : null
   const agentModelLabel = agentModelChipLabel(providerLabel, modelDisplayLabel)
+  // The chip already carries the agent's own mark, so a known agent shows just
+  // the model and the row keeps room for effort and fast mode. Agents without
+  // a mark keep their name in words. Screen readers always hear both.
+  const agentModelChipText =
+    modelDisplayLabel && providerMark(selectedProvider)
+      ? modelDisplayLabel
+      : agentModelLabel
   const showHandoff =
     handoffProviders.length > 0 && Boolean(onHandoffProviderSelect)
   const showAgentModelChip =
@@ -280,7 +288,8 @@ export const InputToolbar = memo(function InputToolbar({
 
         {showAgentModelChip ? (
           <Chip
-            label={agentModelLabel}
+            label={agentModelChipText}
+            accessibilityText={agentModelLabel}
             accessibilityLabel="Agent and model"
             disabled={disabled || (modelsLoading && models.length === 0 && !showHandoff && !showProviderSelector)}
             onPress={openModelSheet}
@@ -342,12 +351,15 @@ export const InputToolbar = memo(function InputToolbar({
 
 const Chip = memo(function Chip({
   label,
+  accessibilityText,
   accessibilityLabel,
   disabled,
   onPress,
   provider,
 }: {
   label: string
+  /** Fuller wording for VoiceOver when the painted label is abbreviated. */
+  accessibilityText?: string
   accessibilityLabel: string
   disabled: boolean
   onPress: () => void
@@ -357,9 +369,13 @@ const Chip = memo(function Chip({
 
   return (
     <Pressable
-      style={[styles.chip, disabled && styles.controlDisabled]}
+      style={({ pressed }) => [
+        styles.chip,
+        pressed && !disabled ? styles.chipPressed : null,
+        disabled && styles.controlDisabled,
+      ]}
       accessibilityRole="button"
-      accessibilityLabel={`${accessibilityLabel}: ${label}`}
+      accessibilityLabel={`${accessibilityLabel}: ${accessibilityText ?? label}`}
       accessibilityState={{ disabled }}
       hitSlop={12}
       onPress={onPress}
@@ -372,10 +388,16 @@ const Chip = memo(function Chip({
           color={theme.colors.fg.secondary}
         />
       ) : null}
-      <Text variant="caption" color="secondary" size="xs" numberOfLines={1}>
+      <Text variant="caption" color="secondary" size="xs" weight="medium" numberOfLines={1} style={styles.chipLabel}>
         {label}
       </Text>
-      <ChevronDown size={theme.iconSize.xs} color={theme.colors.fg.muted} />
+      <SymbolIcon
+        name="chevron.down"
+        fallback={ChevronDown}
+        size={9}
+        weight="bold"
+        color={theme.colors.fg.muted}
+      />
     </Pressable>
   )
 })
@@ -396,7 +418,12 @@ const FastChip = memo(function FastChip({
 
   return (
     <Pressable
-      style={[styles.chip, active && styles.fastChipActive, disabled && styles.controlDisabled]}
+      style={({ pressed }) => [
+        styles.chip,
+        active ? styles.fastChipActive : styles.fastChipIdle,
+        pressed && !disabled ? styles.chipPressed : null,
+        disabled && styles.controlDisabled,
+      ]}
       accessibilityRole="switch"
       accessibilityLabel="Fast mode"
       accessibilityState={{ disabled, checked: active }}
@@ -404,17 +431,29 @@ const FastChip = memo(function FastChip({
       onPress={onPress}
       disabled={disabled}
     >
-      {/* The bolt fills in when the tier is on, so state survives without color. */}
-      <Zap size={theme.iconSize.xs} color={color} fill={active ? color : 'none'} />
-      <Text
-        variant="caption"
-        color={active ? 'primary' : 'secondary'}
-        size="xs"
-        numberOfLines={1}
-        style={active ? { color } : undefined}
-      >
-        {label}
-      </Text>
+      {/* The bolt fills in when the tier is on, so state survives without
+          colour. Off, it is a bare bolt so the row keeps room for the model
+          and effort; on, it names the tier it switched to. */}
+      <SymbolIcon
+        name={active ? 'bolt.fill' : 'bolt'}
+        fallback={Zap}
+        size={theme.iconSize.xs}
+        weight="semibold"
+        color={color}
+        filled={active}
+      />
+      {active ? (
+        <Text
+          variant="caption"
+          color="primary"
+          size="xs"
+          weight="medium"
+          numberOfLines={1}
+          style={{ color }}
+        >
+          {label}
+        </Text>
+      ) : null}
     </Pressable>
   )
 })
@@ -427,25 +466,36 @@ const styles = StyleSheet.create((theme) => ({
   container: {
     flexDirection: 'row',
     alignItems: 'center',
-    gap: theme.spacing[2],
+    gap: theme.spacing[1.5],
   },
   chip: {
     flexDirection: 'row',
     alignItems: 'center',
-    gap: theme.spacing[1.5],
-    // Painted height sits near the 44pt target; hitSlop covers the rest.
-    minHeight: 34,
-    paddingHorizontal: theme.spacing[3],
-    paddingVertical: theme.spacing[1.5],
+    gap: 5,
+    // Painted height matches the 36pt composer controls; hitSlop covers the
+    // rest of the 44pt target. No hairline: on glass a fill reads as the
+    // control, and an outline would draw a second edge inside the material.
+    height: 36,
+    paddingHorizontal: 10,
     backgroundColor: glassFill(theme.isDark),
-    borderWidth: StyleSheet.hairlineWidth,
-    borderColor: glassEdge(theme.isDark),
     borderRadius: theme.radius.full,
+    borderCurve: 'continuous',
     // Chips shrink so a long mode label never pushes the send button off-row.
     flexShrink: 1,
   },
+  chipLabel: {
+    flexShrink: 1,
+  },
+  chipPressed: {
+    backgroundColor: theme.isDark ? 'rgba(255, 255, 255, 0.18)' : 'rgba(9, 9, 11, 0.1)',
+  },
   fastChipActive: {
     backgroundColor: theme.colors.accent.muted,
+  },
+  fastChipIdle: {
+    width: 36,
+    paddingHorizontal: 0,
+    justifyContent: 'center',
   },
   controlDisabled: {
     opacity: 0.55,

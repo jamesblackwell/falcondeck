@@ -52,7 +52,10 @@ function SessionListItemInner({
     <Pressable
       accessibilityRole="button"
       accessibilityHint="Double tap and hold for thread options"
-      style={[styles.container, isSelected ? styles.selected : undefined]}
+      style={({ pressed }) => [
+        styles.container,
+        isSelected ? styles.selected : pressed ? styles.pressed : undefined,
+      ]}
       onPress={handlePress}
       onLongPress={handleLongPress}
     >
@@ -120,19 +123,25 @@ function SessionListItemInner({
 }
 
 const styles = StyleSheet.create((theme) => ({
+  // Inset from the panel edge so the selection reads as a rounded pill, the
+  // way iOS 26 sidebars draw it, rather than a full-bleed band.
   container: {
     flexDirection: 'row',
     alignItems: 'center',
     minHeight: theme.minTouchTarget,
-    paddingLeft: theme.spacing[2],
-    paddingRight: theme.spacing[3],
+    marginHorizontal: theme.spacing[2],
+    paddingLeft: theme.spacing[1],
+    paddingRight: theme.spacing[2],
     paddingVertical: theme.spacing[2],
-    borderRadius: theme.radius.md,
+    borderRadius: theme.radius.lg,
     borderCurve: 'continuous',
     gap: theme.spacing[1.5],
   },
   selected: {
-    backgroundColor: theme.colors.accent.dim,
+    backgroundColor: theme.colors.accent.muted,
+  },
+  pressed: {
+    backgroundColor: theme.isDark ? 'rgba(255, 255, 255, 0.06)' : 'rgba(9, 9, 11, 0.045)',
   },
   title: {
     flex: 1,

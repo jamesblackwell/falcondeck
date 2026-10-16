@@ -1,5 +1,4 @@
 import { memo, useCallback, useEffect } from 'react'
-import { Pressable } from 'react-native'
 import { StyleSheet, useUnistyles } from 'react-native-unistyles'
 import Animated, {
   useSharedValue,
@@ -7,8 +6,10 @@ import Animated, {
   withTiming,
   Easing,
 } from 'react-native-reanimated'
-import { ChevronDown } from 'lucide-react-native'
+import { ArrowDown } from 'lucide-react-native'
 import * as Haptics from 'expo-haptics'
+
+import { GlassButton, SymbolIcon } from '@/components/ui'
 
 const FAB_SIZE = 40
 
@@ -17,23 +18,27 @@ interface JumpToBottomFabProps {
   onPress: () => void
 }
 
+/** A glass circle that floats above the composer once the reader has
+    scrolled away from the newest message. The parent positions it. */
 export const JumpToBottomFab = memo(function JumpToBottomFab({
   visible,
   onPress,
 }: JumpToBottomFabProps) {
   const { theme } = useUnistyles()
   const opacity = useSharedValue(0)
-  const translateY = useSharedValue(20)
+  const translateY = useSharedValue(12)
+  const scale = useSharedValue(0.9)
 
   useEffect(() => {
     const config = { duration: 200, easing: Easing.out(Easing.cubic) }
     opacity.value = withTiming(visible ? 1 : 0, config)
-    translateY.value = withTiming(visible ? 0 : 20, config)
-  }, [visible, opacity, translateY])
+    translateY.value = withTiming(visible ? 0 : 12, config)
+    scale.value = withTiming(visible ? 1 : 0.9, config)
+  }, [visible, opacity, translateY, scale])
 
   const animatedStyle = useAnimatedStyle(() => ({
     opacity: opacity.value,
-    transform: [{ translateY: translateY.value }],
+    transform: [{ translateY: translateY.value }, { scale: scale.value }],
   }))
 
   const handlePress = useCallback(() => {
@@ -43,34 +48,26 @@ export const JumpToBottomFab = memo(function JumpToBottomFab({
 
   return (
     <Animated.View style={[styles.wrapper, animatedStyle]} pointerEvents={visible ? 'auto' : 'none'}>
-      <Pressable
-        style={styles.button}
+      <GlassButton
+        size={FAB_SIZE}
         onPress={handlePress}
-        accessibilityRole="button"
         accessibilityLabel="Jump to latest message"
         hitSlop={(theme.minTouchTarget - FAB_SIZE) / 2}
       >
-        <ChevronDown size={theme.iconSize.md} color={theme.colors.fg.primary} />
-      </Pressable>
+        <SymbolIcon
+          name="arrow.down"
+          fallback={ArrowDown}
+          size={17}
+          weight="semibold"
+          color={theme.colors.fg.primary}
+        />
+      </GlassButton>
     </Animated.View>
   )
 })
 
-const styles = StyleSheet.create((theme) => ({
+const styles = StyleSheet.create(() => ({
   wrapper: {
-    position: 'absolute',
-    bottom: theme.spacing[3],
     alignSelf: 'center',
-  },
-  button: {
-    width: FAB_SIZE,
-    height: FAB_SIZE,
-    borderRadius: theme.radius.full,
-    backgroundColor: theme.colors.surface[3],
-    borderWidth: 1,
-    borderColor: theme.colors.border.default,
-    alignItems: 'center',
-    justifyContent: 'center',
-    ...theme.shadow.md,
   },
 }))

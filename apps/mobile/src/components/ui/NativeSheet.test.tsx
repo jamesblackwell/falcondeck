@@ -27,7 +27,9 @@ describe('NativeSheet', () => {
     // the native iOS form sheet fills the screen regardless of content.
     expect(modal.props.transparent).toBe(true)
     expect(modal.props.presentationStyle).toBeUndefined()
-    expect(modal.props.animationType).toBe('slide')
+    // The backdrop fades while the card itself rises from the bottom edge, so
+    // the dimmed page never slides up with it.
+    expect(modal.props.animationType).toBe('fade')
 
     modal.props.onRequestClose()
     expect(onClose).toHaveBeenCalledOnce()
@@ -73,5 +75,36 @@ describe('NativeSheet', () => {
       grabberZone!.props.onPanResponderRelease(undefined, { dy: 120, vy: 0.2 })
     })
     expect(onClose).toHaveBeenCalledOnce()
+  })
+
+  it('closes only once when several dismissals race', () => {
+    const { renderer, onClose } = renderSheet()
+    const [backdrop, button] = renderer.root
+      .findAllByType('Pressable' as never)
+      .filter((node) => node.props.accessibilityLabel === 'Close options')
+
+    backdrop!.props.onPress()
+    button!.props.onPress()
+    renderer.root.findByType('Modal' as never).props.onRequestClose()
+    expect(onClose).toHaveBeenCalledOnce()
+  })
+
+  it('rises from below the screen once it knows its height', () => {
+    const { renderer } = renderSheet()
+    const frame = renderer.root
+      .findAllByType('Animated.View' as never)
+      .find((node) => typeof node.props.onLayout === 'function')
+    expect(frame).toBeDefined()
+
+    const offset = () =>
+      [frame!.props.style]
+        .flat(Infinity)
+        .find((style) => style && Array.isArray(style.transform))?.transform[0].translateY
+
+    // Before layout the card waits off screen, not at its resting place.
+    expect(offset()).toBeGreaterThan(0)
+    act(() => {
+      frame!.props.onLayout({ nativeEvent: { layout: { height: 320 } } })
+    })
   })
 })

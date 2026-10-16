@@ -56,19 +56,25 @@ export const LiveActivityLane = memo(function LiveActivityLane({
 })
 
 const styles = StyleSheet.create((theme) => ({
+  // Floats above the composer as one opaque card: tool rows are content and
+  // must stay legible over the transcript scrolling behind them.
   container: {
     maxHeight: 220,
-    borderTopWidth: 1,
-    borderTopColor: theme.colors.border.subtle,
+    marginHorizontal: 10,
+    marginBottom: theme.spacing[2],
+    borderRadius: 22,
+    borderCurve: 'continuous',
+    borderWidth: StyleSheet.hairlineWidth,
+    borderColor: theme.colors.border.emphasis,
     backgroundColor: theme.colors.surface[1],
+    overflow: 'hidden',
   },
   scrollArea: {
     maxHeight: 220,
   },
   scrollContent: {
-    paddingHorizontal: theme.spacing[4],
-    paddingVertical: theme.spacing[3],
-    gap: theme.spacing[3],
+    padding: theme.spacing[2],
+    gap: theme.spacing[2],
   },
   group: {
     borderWidth: 1,

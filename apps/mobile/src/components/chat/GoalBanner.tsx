@@ -5,7 +5,7 @@ import { Target } from 'lucide-react-native'
 
 import type { ThreadGoal } from '@falcondeck/client-core'
 
-import { Text } from '@/components/ui'
+import { GlassSurface, Text } from '@/components/ui'
 
 import { goalStatusLabel, goalStatusTone, useGoalElapsedLabel } from './goal'
 
@@ -27,7 +27,7 @@ export const GoalBanner = memo(function GoalBanner({ goal, onPress }: GoalBanner
 
   return (
     <Pressable
-      style={styles.container}
+      style={styles.pressable}
       onPress={onPress}
       hitSlop={8}
       accessibilityRole="button"
@@ -36,40 +36,45 @@ export const GoalBanner = memo(function GoalBanner({ goal, onPress }: GoalBanner
       }. ${goalStatusLabel(goal.status)}.`}
       accessibilityHint="Opens goal options"
     >
-      <Target
-        size={theme.iconSize.xs}
-        color={
-          tone === 'accent'
-            ? theme.colors.accent.default
-            : tone === 'success'
-              ? theme.colors.success.default
-              : theme.colors.fg.muted
-        }
-      />
-      <Text variant="caption" size="xs" weight="semibold" color="secondary">
-        Goal
-      </Text>
-      <Text variant="caption" size="xs" color="muted" style={styles.elapsed}>
-        {elapsed ?? goalStatusLabel(goal.status)}
-      </Text>
+      <GlassSurface
+        radius={16}
+        interactive
+        intensity={70}
+        highlight={false}
+        contentStyle={styles.container}
+      >
+        <Target
+          size={theme.iconSize.xs}
+          color={
+            tone === 'accent'
+              ? theme.colors.accent.default
+              : tone === 'success'
+                ? theme.colors.success.default
+                : theme.colors.fg.muted
+          }
+        />
+        <Text variant="caption" size="xs" weight="semibold" color="secondary">
+          Goal
+        </Text>
+        <Text variant="caption" size="xs" color="muted" style={styles.elapsed}>
+          {elapsed ?? goalStatusLabel(goal.status)}
+        </Text>
+      </GlassSurface>
     </Pressable>
   )
 })
 
 const styles = StyleSheet.create((theme) => ({
+  pressable: {
+    alignSelf: 'center',
+    marginBottom: theme.spacing[2],
+  },
   container: {
     flexDirection: 'row',
     alignItems: 'center',
-    alignSelf: 'center',
     gap: theme.spacing[1.5],
-    marginBottom: theme.spacing[2],
-    paddingHorizontal: theme.spacing[3],
-    paddingVertical: theme.spacing[1],
-    borderRadius: theme.radius.full,
-    borderCurve: 'continuous',
-    borderWidth: 1,
-    borderColor: theme.colors.border.default,
-    backgroundColor: theme.colors.surface[2],
+    minHeight: 32,
+    paddingHorizontal: theme.spacing[3] + 2,
   },
   elapsed: {
     fontVariant: ['tabular-nums'],

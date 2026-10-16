@@ -188,7 +188,8 @@ describe("SidebarView component", () => {
     );
     expect(textOf(r)).toContain("New");
     expect(textOf(r)).not.toContain("New thread");
-    expect(newThread.props.style({ pressed: false })).toEqual(
+    // The glass button anchors bottom-left of the dock, as before.
+    expect([newThread.props.style].flat()).toEqual(
       expect.arrayContaining([
         expect.objectContaining({ position: "absolute", left: 16 }),
       ]),

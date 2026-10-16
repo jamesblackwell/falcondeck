@@ -1,14 +1,21 @@
+import type React from "react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   AppState,
-  Pressable,
+  ScrollView,
+  useWindowDimensions,
   View,
+  type LayoutChangeEvent,
   type TextInput,
 } from "react-native";
+import Animated, {
+  useAnimatedStyle,
+  useSharedValue,
+  type SharedValue,
+} from "react-native-reanimated";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { StyleSheet, useUnistyles } from "react-native-unistyles";
 import { FlashList } from "@shopify/flash-list";
-import { ChevronLeft, MoreHorizontal, SquarePen } from "lucide-react-native";
 import { DrawerActions, useIsFocused } from "@react-navigation/native";
 import { useDrawerStatus } from "@react-navigation/drawer";
 import { useNavigation } from "expo-router";
@@ -81,6 +88,7 @@ import {
   EmptyState,
   ErrorBanner,
   LoadingState,
+  ScrollEdge,
   SyncBanner,
 } from "@/components/ui";
 import {
@@ -99,7 +107,9 @@ import {
   ThinkingIndicator,
   OperationalNoticeBanner,
 } from "@/components/chat";
-import { ConnectionHeader, ThreadOptionsSheet } from "@/components/navigation";
+import { ThreadOptionsSheet } from "@/components/navigation";
+import { ThreadHeader } from "@/components/navigation/ThreadHeader";
+import { estimatedFloatingHeaderHeight } from "@/components/navigation/FloatingHeader";
 import { ConnectionDebugScreen } from "@/components/debug/ConnectionDebugScreen";
 import { DemoBanner } from "@/features/demo/DemoBanner";
 import {
@@ -125,6 +135,8 @@ import { READING_MAX_WIDTH, useTabletLayout } from "@/hooks/useTabletLayout";
 import { AnimationVisibility } from '@/components/ui/AnimationVisibility';
 
 const keyExtractor = (block: ConversationRenderBlock) => block.id;
+/** A one-line composer with its toolbar, before the dock has measured itself. */
+const ESTIMATED_DOCK_HEIGHT = 112;
 
 export default function HomeScreen() {
   const isFocused = useIsFocused();
@@ -292,6 +304,26 @@ export default function HomeScreen() {
   // screen by its full height and stack the composer under the header.
   const keyboardInset = useKeyboardInset();
   const isKeyboardVisible = keyboardInset > 0;
+  const { height: windowHeight } = useWindowDimensions();
+  // The header and composer float over the transcript. Their measured
+  // heights live in shared values so the list's spacers follow them on the
+  // UI thread — typing a new line must not re-render this whole screen.
+  const headerHeight = useSharedValue(estimatedFloatingHeaderHeight(insets.top));
+  const dockHeight = useSharedValue(ESTIMATED_DOCK_HEIGHT + insets.bottom);
+  const handleHeaderLayout = useCallback(
+    (event: LayoutChangeEvent) => {
+      headerHeight.value = event.nativeEvent.layout.height;
+    },
+    [headerHeight],
+  );
+  const handleDockLayout = useCallback(
+    (event: LayoutChangeEvent) => {
+      dockHeight.value = event.nativeEvent.layout.height;
+    },
+    [dockHeight],
+  );
+  // A pending question or plan never pushes the composer off the screen.
+  const requestMaxHeight = Math.round(windowHeight * 0.42);
   const [appState, setAppState] = useState(AppState.currentState);
   const [detailLoadingThreadId, setDetailLoadingThreadId] = useState<
     string | null
@@ -1267,168 +1299,90 @@ export default function HomeScreen() {
   // pane still takes scroll and drag gestures on a wide screen.
   const listContentStyle = useMemo(
     () => ({
-      paddingBottom: theme.spacing[4],
       paddingHorizontal: readingGutter,
     }),
-    [readingGutter, theme.spacing],
+    [readingGutter],
+  );
+
+  const projectLabel =
+    workspace?.kind === "casual" ? "Chat" : getWorkspaceTitle(workspace?.path);
+  const headerTitle = selectedThread
+    ? selectedThread.title || "New task"
+    : workspace?.kind === "casual"
+      ? "New chat"
+      : "New task";
+  const headerAccessibilityLabel =
+    workspace?.kind === "casual"
+      ? `Casual chat${selectedThread ? `: ${selectedThread.title || "New thread"}` : ""}`
+      : `Project: ${getWorkspaceTitle(workspace?.path)}${selectedThread ? `. Thread: ${selectedThread.title || "New thread"}` : ""}`;
+  // Keyboard up: the dock rides on the keyboard. Keyboard down: it floats
+  // just above the home indicator, the way iOS 26 seats its floating bars.
+  const dockBottomPadding = isKeyboardVisible
+    ? theme.spacing[2]
+    : Math.max(insets.bottom - 10, theme.spacing[3]);
+
+  const emptyStateFrame = (content: React.ReactNode) => (
+    <ChromeInsetFrame top={headerHeight} bottom={dockHeight}>
+      {content}
+    </ChromeInsetFrame>
   );
 
   return (
     <AnimationVisibility active={isFocused && !pauseLiveTranscript}>
-    <View
-      style={[
-        styles.container,
-        { paddingTop: insets.top, paddingBottom: keyboardInset },
-      ]}
-    >
-      <View style={styles.header}>
-        <Pressable
-          style={styles.headerLeft}
-          // With the sidebar already on screen there is nothing to open, and a
-          // back chevron pointing at a visible panel reads as a dead control.
-          onPress={hasPermanentSidebar ? undefined : handleOpenDrawer}
-          disabled={hasPermanentSidebar}
-          hitSlop={theme.spacing[2]}
-          accessibilityRole={hasPermanentSidebar ? "header" : "button"}
-          accessibilityLabel={
-            workspace?.kind === "casual"
-              ? `Casual chat${selectedThread ? `: ${selectedThread.title || "New thread"}` : ""}`
-              : `Project: ${getWorkspaceTitle(workspace?.path)}${selectedThread ? `. Thread: ${selectedThread.title || "New thread"}` : ""}`
-          }
-          accessibilityHint={
-            hasPermanentSidebar ? undefined : "Opens the project and thread list"
-          }
-        >
-          {hasPermanentSidebar ? null : (
-            <ChevronLeft size={theme.iconSize.md} color={theme.colors.fg.muted} />
-          )}
-          <View style={styles.headerLabels}>
-            <Text
-              variant="label"
-              color="primary"
-              weight="semibold"
-              numberOfLines={1}
-            >
-              {workspace?.kind === "casual" ? "Chat" : getWorkspaceTitle(workspace?.path)}
-            </Text>
-            {selectedThread ? (
-              <Text variant="caption" color="muted" numberOfLines={1}>
-                {selectedThread.title || "New thread"}
-              </Text>
-            ) : null}
-          </View>
-        </Pressable>
-        <View style={styles.headerRight}>
-          {selectedThread ? (
-            <>
-              <Pressable
-                onPress={handleNewThreadFromCurrent}
-                accessibilityRole="button"
-                accessibilityLabel="New thread with current settings"
-                style={({ pressed }) => [
-                  styles.headerIconButton,
-                  pressed && styles.headerIconButtonPressed,
-                ]}
-              >
-                <SquarePen
-                  size={theme.iconSize.md}
-                  color={theme.colors.fg.secondary}
-                />
-              </Pressable>
-              <Pressable
-                onPress={handleOpenThreadOptions}
-                accessibilityRole="button"
-                accessibilityLabel="Thread options"
-                style={({ pressed }) => [
-                  styles.headerIconButton,
-                  pressed && styles.headerIconButtonPressed,
-                ]}
-              >
-                <MoreHorizontal
-                  size={theme.iconSize.md}
-                  color={theme.colors.fg.secondary}
-                />
-              </Pressable>
-            </>
-          ) : null}
-          <ConnectionHeader
-            connectionStatus={connectionStatus}
-            isEncrypted={isEncrypted}
-            machinePresence={machinePresence}
-            onPress={openConnectionDebug}
-          />
-        </View>
-      </View>
-
-      <DemoBanner />
-
-      <SyncBanner status={syncStatus} />
-
-      <ErrorBanner message={error} onDismiss={handleDismissError} />
-
-      {operationalConditions.length > 0 ? (
-        <OperationalNoticeBanner
-          conditions={operationalConditions}
-          onDismiss={dismissOperationalCondition}
-        />
-      ) : null}
-
-      {activeInteractiveRequest ? (
-        <InteractiveRequestBanner
-          key={activeInteractiveRequest.request_id}
-          request={activeInteractiveRequest}
-          pendingCount={interactiveQueue.length}
-          onRespond={handleActiveInteractiveResponse}
-        />
-      ) : null}
-
-      <View style={styles.listContainer}>
+    <View style={styles.container}>
+      <View style={[styles.listContainer, { marginBottom: keyboardInset }]}>
         {isSyncing ? (
           // The sync banner above already names this wait, so the pane only
           // shows motion — a second copy of the same sentence read as a bug.
-          <LoadingState fill />
+          emptyStateFrame(<LoadingState fill />)
         ) : !selectedThread && blocks.length === 0 && !showThinking ? (
-          <View style={styles.newThreadState}>
-            <Text variant="heading" color="primary">
-              {workspace?.kind === "casual" ? "What’s on your mind?" : "Let's build"}
-            </Text>
-            <Text variant="body" size="lg" color="muted">
-              {workspace?.kind === "casual"
-                ? "This chat isn’t attached to a project"
-                : (workspace?.path.split("/").pop() ?? "Select a project")}
-            </Text>
-          </View>
+          emptyStateFrame(
+            <View style={styles.newThreadState}>
+              <Text variant="heading" size="2xl" weight="semibold" color="primary">
+                {workspace?.kind === "casual" ? "What’s on your mind?" : "Let's build"}
+              </Text>
+              <Text variant="body" size="md" color="muted">
+                {workspace?.kind === "casual"
+                  ? "This chat isn’t attached to a project"
+                  : (workspace?.path.split("/").pop() ?? "Select a project")}
+              </Text>
+            </View>,
+          )
         ) : blocks.length === 0 &&
           isSelectedThreadLoading &&
           !showThinking ? (
-          <LoadingState fill label="Loading task…" />
+          emptyStateFrame(<LoadingState fill label="Loading task…" />)
         ) : blocks.length === 0 &&
           liveActivityGroups.length === 0 &&
           !isThreadRunning &&
           !showThinking &&
           selectedThreadDetailError ? (
-          <View style={styles.syncState}>
-            <Text variant="label" color="secondary" weight="semibold">
-              Couldn&apos;t sync this conversation
-            </Text>
-            <Text variant="caption" color="muted" style={styles.syncErrorText}>
-              {selectedThreadDetailError}
-            </Text>
-            <Button
-              variant="ghost"
-              size="sm"
-              label="Try again"
-              onPress={handleRetryThreadLoad}
-            />
-          </View>
+          emptyStateFrame(
+            <View style={styles.syncState}>
+              <Text variant="label" color="secondary" weight="semibold">
+                Couldn&apos;t sync this conversation
+              </Text>
+              <Text variant="caption" color="muted" style={styles.syncErrorText}>
+                {selectedThreadDetailError}
+              </Text>
+              <Button
+                variant="ghost"
+                size="sm"
+                label="Try again"
+                onPress={handleRetryThreadLoad}
+              />
+            </View>,
+          )
         ) : blocks.length === 0 &&
           liveActivityGroups.length === 0 &&
           !isThreadRunning &&
           !showThinking ? (
-          <EmptyState
-            title="No messages yet"
-            description="Send a message to get started"
-          />
+          emptyStateFrame(
+            <EmptyState
+              title="No messages yet"
+              description="Send a message to get started"
+            />,
+          )
         ) : (
           <FlashList
             key={selectedThreadId}
@@ -1440,6 +1394,9 @@ export default function HomeScreen() {
             getItemType={conversationRenderBlockType}
             accessibilityLabel="Conversation"
             showsVerticalScrollIndicator={false}
+            // Drag the transcript down to put the keyboard away, as Messages does.
+            keyboardDismissMode="interactive"
+            keyboardShouldPersistTaps="handled"
             // Anchoring and open-at-the-bottom stay with FlashList; the pin to
             // the tail does not (see useScrollToBottom — its sticky near-bottom
             // flag drags readers back down while content streams).
@@ -1460,66 +1417,135 @@ export default function HomeScreen() {
             scrollEventThrottle={16}
             contentContainerStyle={listContentStyle}
             ListHeaderComponent={
-              selectedThreadHistory.hasOlder ? (
-                <View style={styles.loadOlderContainer}>
-                  <Button
-                    variant="ghost"
-                    size="sm"
-                    label="Load older messages"
-                    accessibilityLabel="Load older messages"
-                    onPress={handleLoadOlder}
-                    loading={isLoadingOlder}
-                  />
-                </View>
-              ) : null
+              <>
+                {/* The transcript runs under the floating header; this keeps
+                    its first message clear of the glass at rest. */}
+                <ChromeSpacer height={headerHeight} />
+                {selectedThreadHistory.hasOlder ? (
+                  <View style={styles.loadOlderContainer}>
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      label="Load older messages"
+                      accessibilityLabel="Load older messages"
+                      onPress={handleLoadOlder}
+                      loading={isLoadingOlder}
+                    />
+                  </View>
+                ) : null}
+              </>
             }
             ListFooterComponent={
               <>
                 {showThinking ? <ThinkingIndicator submitting={isSubmitting && !isThreadRunning} /> : null}
                 <View style={styles.listBottomSpacer} />
+                {/* Same for the composer dock: the newest message rests just
+                    above the glass and scrolls on underneath it. */}
+                <ChromeSpacer height={dockHeight} />
               </>
             }
           />
         )}
-        <JumpToBottomFab visible={showJumpButton} onPress={scrollToBottom} />
-        <TranscriptRefreshPill visible={isRefreshingSelectedThread} />
       </View>
 
-      <View style={styles.composerColumn}>
-        <LiveActivityLane groups={liveActivityGroups} />
-
-        {selectedThread && wasTurnInterruptedByShutdown(selectedThread) ? (
-          <InterruptedTurnNotice
-            onContinue={handleContinueInterruptedTurn}
-            onDismiss={handleDismissInterruptedTurn}
-            isContinuing={isSubmitting}
+      <ThreadHeader
+        onLayout={handleHeaderLayout}
+        title={headerTitle}
+        subtitle={projectLabel}
+        accessibilityLabel={headerAccessibilityLabel}
+        // With the sidebar already on screen there is nothing to open.
+        onOpenSidebar={hasPermanentSidebar ? undefined : handleOpenDrawer}
+        onPressTitle={selectedThread ? handleOpenThreadOptions : undefined}
+        onNewThread={selectedThread ? handleNewThreadFromCurrent : undefined}
+        onOpenOptions={selectedThread ? handleOpenThreadOptions : undefined}
+        connectionStatus={connectionStatus}
+        isEncrypted={isEncrypted}
+        machinePresence={machinePresence}
+        onPressConnection={openConnectionDebug}
+      >
+        <DemoBanner floating />
+        <SyncBanner status={syncStatus} floating />
+        <ErrorBanner message={error} onDismiss={handleDismissError} floating />
+        {operationalConditions.length > 0 ? (
+          <OperationalNoticeBanner
+            conditions={operationalConditions}
+            onDismiss={dismissOperationalCondition}
           />
         ) : null}
+        <View style={styles.refreshPillAnchor} pointerEvents="box-none">
+          <TranscriptRefreshPill visible={isRefreshingSelectedThread} />
+        </View>
+      </ThreadHeader>
 
-        <GoalBanner
-          goal={selectedThread?.goal ?? null}
-          onPress={() => setIsGoalSheetOpen(true)}
+      <View
+        style={[styles.dock, { bottom: keyboardInset }]}
+        pointerEvents="box-none"
+        onLayout={handleDockLayout}
+      >
+        <ScrollEdge
+          edge="bottom"
+          height={(isKeyboardVisible ? 0 : insets.bottom) + theme.spacing[10]}
+          solid={isKeyboardVisible ? 0 : insets.bottom * 0.5}
         />
+        <View
+          style={[styles.composerColumn, { paddingBottom: dockBottomPadding }]}
+          pointerEvents="box-none"
+        >
+          <View style={styles.jumpAnchor} pointerEvents="box-none">
+            <JumpToBottomFab visible={showJumpButton} onPress={scrollToBottom} />
+          </View>
 
-        <ComposerSuggestionPill
-          offer={composerSuggestionOffer}
-          onSubmit={handleSubmitComposerSuggestion}
-          onShowAlternatives={() => setIsSuggestionSheetOpen(true)}
-          onDismiss={handleDismissComposerSuggestions}
-        />
+          <LiveActivityLane groups={liveActivityGroups} />
 
-        <QueuedTurns
-          queuedTurns={queuedTurns}
-          canSteer={capabilities.supports_steering}
-          onRemove={handleRemoveQueuedTurn}
-          onSteer={handleSteerQueuedTurn}
-          onEdit={handleEditQueuedTurn}
-          getAttachmentPreview={handleQueuedTurnAttachmentPreview}
-        />
+          {selectedThread && wasTurnInterruptedByShutdown(selectedThread) ? (
+            <InterruptedTurnNotice
+              onContinue={handleContinueInterruptedTurn}
+              onDismiss={handleDismissInterruptedTurn}
+              isContinuing={isSubmitting}
+            />
+          ) : null}
 
-        {/* The keyboard already covers the home indicator, so keeping the inset
-            while it is up would float the composer above the keyboard. */}
-        <View style={{ paddingBottom: isKeyboardVisible ? 0 : insets.bottom }}>
+          <GoalBanner
+            goal={selectedThread?.goal ?? null}
+            onPress={() => setIsGoalSheetOpen(true)}
+          />
+
+          <ComposerSuggestionPill
+            offer={composerSuggestionOffer}
+            onSubmit={handleSubmitComposerSuggestion}
+            onShowAlternatives={() => setIsSuggestionSheetOpen(true)}
+            onDismiss={handleDismissComposerSuggestions}
+          />
+
+          {activeInteractiveRequest ? (
+            // A request is answered where the thumb already is, right above
+            // the composer. Long plans and question sets scroll in place
+            // rather than pushing the dock up under the header.
+            <ScrollView
+              style={[styles.requestScroll, { maxHeight: requestMaxHeight }]}
+              contentContainerStyle={styles.requestScrollContent}
+              keyboardShouldPersistTaps="handled"
+              showsVerticalScrollIndicator={false}
+              bounces={false}
+            >
+              <InteractiveRequestBanner
+                key={activeInteractiveRequest.request_id}
+                request={activeInteractiveRequest}
+                pendingCount={interactiveQueue.length}
+                onRespond={handleActiveInteractiveResponse}
+              />
+            </ScrollView>
+          ) : null}
+
+          <QueuedTurns
+            queuedTurns={queuedTurns}
+            canSteer={capabilities.supports_steering}
+            onRemove={handleRemoveQueuedTurn}
+            onSteer={handleSteerQueuedTurn}
+            onEdit={handleEditQueuedTurn}
+            getAttachmentPreview={handleQueuedTurnAttachmentPreview}
+          />
+
           <ChatInput
             textInputRef={composerInputRef}
             value={draft}
@@ -1637,51 +1663,45 @@ export default function HomeScreen() {
   );
 }
 
+/** Holds space for floating chrome inside the transcript's scroll content.
+    Driven from a shared value so the composer growing a line, or a banner
+    arriving under the header, never re-renders the whole thread screen. */
+function ChromeSpacer({ height }: { height: SharedValue<number> }) {
+  const style = useAnimatedStyle(() => ({ height: height.value }));
+  return <Animated.View style={style} />;
+}
+
+/** Centres an empty or loading pane in the space the chrome leaves visible. */
+function ChromeInsetFrame({
+  top,
+  bottom,
+  children,
+}: {
+  top: SharedValue<number>;
+  bottom: SharedValue<number>;
+  children: React.ReactNode;
+}) {
+  const style = useAnimatedStyle(() => ({
+    paddingTop: top.value,
+    paddingBottom: bottom.value,
+  }));
+  return <Animated.View style={[{ flex: 1 }, style]}>{children}</Animated.View>;
+}
+
 const styles = StyleSheet.create((theme) => ({
   container: {
     flex: 1,
     backgroundColor: theme.colors.surface[0],
   },
-  header: {
-    flexDirection: "row",
-    alignItems: "center",
-    justifyContent: "space-between",
-    paddingHorizontal: theme.spacing[4],
-    paddingVertical: theme.spacing[1],
-    borderBottomWidth: 1,
-    borderBottomColor: theme.colors.border.subtle,
-  },
-  headerLeft: {
-    flex: 1,
-    minHeight: theme.minTouchTarget,
-    flexDirection: "row",
-    alignItems: "center",
-    gap: theme.spacing[1],
-    marginRight: theme.spacing[3],
-  },
-  headerLabels: {
-    flex: 1,
-    minWidth: 0,
-  },
-  headerRight: {
-    flexDirection: "row",
-    alignItems: "center",
-    gap: theme.spacing[1],
-  },
-  headerIconButton: {
-    minWidth: theme.minTouchTarget,
-    minHeight: theme.minTouchTarget,
-    alignItems: "center",
-    justifyContent: "center",
-    borderRadius: theme.radius.sm,
-    borderCurve: "continuous",
-  },
-  headerIconButtonPressed: {
-    backgroundColor: theme.colors.surface[2],
-  },
   listContainer: {
     flex: 1,
     minHeight: 2,
+  },
+  dock: {
+    position: "absolute",
+    left: 0,
+    right: 0,
+    zIndex: 10,
   },
   // Keeps the composer on the same reading column as the transcript above it.
   composerColumn: {
@@ -1689,8 +1709,27 @@ const styles = StyleSheet.create((theme) => ({
     maxWidth: READING_MAX_WIDTH,
     alignSelf: "center",
   },
+  // The jump button floats a little above whatever tops the dock.
+  jumpAnchor: {
+    position: "absolute",
+    top: -(theme.spacing[12] + theme.spacing[1]),
+    left: 0,
+    right: 0,
+    alignItems: "center",
+  },
+  // Zero-height anchor so the refresh pill hangs just under the header
+  // without adding to the height the transcript reserves for it.
+  refreshPillAnchor: {
+    height: 0,
+  },
+  requestScroll: {
+    flexGrow: 0,
+  },
+  requestScrollContent: {
+    paddingBottom: theme.spacing[1],
+  },
   listBottomSpacer: {
-    height: theme.spacing[6],
+    height: theme.spacing[4],
   },
   syncState: {
     flex: 1,
@@ -1707,6 +1746,7 @@ const styles = StyleSheet.create((theme) => ({
     alignItems: "center",
     justifyContent: "center",
     gap: theme.spacing[2],
+    paddingHorizontal: theme.spacing[6],
   },
   loadOlderContainer: {
     alignItems: "center",

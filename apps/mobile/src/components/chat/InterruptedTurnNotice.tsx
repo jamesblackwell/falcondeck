@@ -4,6 +4,7 @@ import { StyleSheet, useUnistyles } from 'react-native-unistyles'
 import { CircleStop, X } from 'lucide-react-native'
 
 import { Text } from '@/components/ui'
+import { layeredFill } from '@/theme/color'
 
 interface InterruptedTurnNoticeProps {
   onContinue: () => void
@@ -63,14 +64,16 @@ const styles = StyleSheet.create((theme) => ({
     flexDirection: 'row',
     alignItems: 'center',
     gap: theme.spacing[2],
-    marginHorizontal: theme.spacing[3],
+    marginHorizontal: 10,
     marginBottom: theme.spacing[2],
     paddingHorizontal: theme.spacing[3],
     paddingVertical: theme.spacing[2],
-    borderRadius: theme.radius.md,
-    borderWidth: 1,
+    borderRadius: theme.radius.xl,
+    borderCurve: 'continuous',
+    borderWidth: StyleSheet.hairlineWidth,
     borderColor: theme.colors.danger.default,
-    backgroundColor: theme.colors.danger.muted,
+    // Opaque: the notice floats over the transcript, above the composer.
+    ...layeredFill(theme.colors.surface[1], theme.colors.danger.muted),
   },
   copy: {
     flex: 1,

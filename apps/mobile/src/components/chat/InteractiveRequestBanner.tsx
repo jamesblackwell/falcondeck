@@ -15,6 +15,7 @@ import {
 import { Button, Input, Text } from "@/components/ui";
 import { ApprovalBanner } from "./ApprovalBanner";
 import { MarkdownRenderer } from "./MarkdownRenderer";
+import { layeredFill } from "@/theme/color";
 
 type Props = {
   request: InteractiveRequest;
@@ -552,14 +553,15 @@ const styles = StyleSheet.create((theme) => ({
     gap: theme.spacing[2],
     borderWidth: 1,
     borderColor: theme.colors.info.default,
-    borderRadius: theme.radius.lg,
+    borderRadius: theme.radius.xl,
     borderCurve: "continuous",
-    backgroundColor: theme.colors.info.muted,
+    // Opaque: the request floats over the transcript, above the composer.
+    ...layeredFill(theme.colors.surface[1], theme.colors.info.muted),
     padding: theme.spacing[3],
   },
   planContainer: {
     borderColor: theme.colors.warning.default,
-    backgroundColor: theme.colors.warning.muted,
+    ...layeredFill(theme.colors.surface[1], theme.colors.warning.muted),
   },
   header: { flexDirection: "row", alignItems: "center", gap: theme.spacing[2] },
   icon: {

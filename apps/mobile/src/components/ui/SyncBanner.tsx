@@ -5,11 +5,15 @@ import { StyleSheet, useUnistyles } from 'react-native-unistyles'
 import { CloudOff } from 'lucide-react-native'
 
 import type { SessionSyncStatus } from '@/lib/session-status'
+import { layeredFill } from '@/theme/color'
+
 import { ActivityDiamond } from './ActivityDiamond'
 import { Text } from './Text'
 
 interface SyncBannerProps {
   status: SessionSyncStatus
+  /** Renders as a rounded card that floats over content under a glass header. */
+  floating?: boolean
 }
 
 /**
@@ -18,12 +22,12 @@ interface SyncBannerProps {
  * anything yet. Show what is happening immediately, then disappear the moment
  * the session is usable.
  */
-export const SyncBanner = memo(function SyncBanner({ status }: SyncBannerProps) {
+export const SyncBanner = memo(function SyncBanner({ status, floating = false }: SyncBannerProps) {
   if (!status.isBusy) return null
-  return <SyncBannerContent status={status} />
+  return <SyncBannerContent status={status} floating={floating} />
 })
 
-function SyncBannerContent({ status }: SyncBannerProps) {
+function SyncBannerContent({ status, floating }: SyncBannerProps) {
   const { theme } = useUnistyles()
   const [now, setNow] = useState(() => Date.now())
 
@@ -67,7 +71,19 @@ function SyncBannerContent({ status }: SyncBannerProps) {
       entering={FadeIn.duration(150)}
       exiting={FadeOut.duration(150)}
       layout={LinearTransition.duration(150)}
-      style={[styles.container, isStalled ? styles.stalled : styles.busy]}
+      style={[
+        styles.container,
+        isStalled ? styles.stalled : styles.busy,
+        floating
+          ? [
+              styles.floating,
+              layeredFill(
+                theme.colors.surface[1],
+                isStalled ? theme.colors.warning.muted : theme.colors.info.muted,
+              ),
+            ]
+          : null,
+      ]}
       accessibilityRole="progressbar"
       accessibilityLiveRegion="polite"
       accessibilityLabel={accessibilityLabel}
@@ -120,5 +136,15 @@ const styles = StyleSheet.create((theme) => ({
   message: {
     flex: 1,
     gap: theme.spacing[1] / 2,
+  },
+  floating: {
+    marginHorizontal: theme.spacing[3],
+    borderRadius: theme.radius.xl,
+    borderCurve: 'continuous',
+    borderBottomWidth: StyleSheet.hairlineWidth,
+    borderWidth: StyleSheet.hairlineWidth,
+    borderColor: theme.colors.border.emphasis,
+    ...theme.shadow.sm,
+    shadowOpacity: theme.isDark ? 0.3 : 0.06,
   },
 }))

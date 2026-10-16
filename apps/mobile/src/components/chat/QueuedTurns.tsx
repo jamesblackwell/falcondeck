@@ -10,6 +10,9 @@ import type { MobileQueuedTurn } from '@/lib/queued-turns'
 import {
   ActivityDiamond,
   Button,
+  GlassSurface,
+  glassFill,
+  glassFillStrong,
   Input,
   NativeSheet,
   OptionSheet,
@@ -259,7 +262,13 @@ export const QueuedTurns = memo(function QueuedTurns({
 
   return (
     <View style={styles.container}>
-      <View style={styles.card} accessibilityLabel="Queued messages">
+      <GlassSurface
+        radius={22}
+        intensity={70}
+        highlight={false}
+        style={styles.card}
+      >
+      <View accessibilityLabel="Queued messages">
         {queuedTurns.map((queued, index) => (
           <QueuedTurnRow
             key={queued.id}
@@ -274,6 +283,7 @@ export const QueuedTurns = memo(function QueuedTurns({
           />
         ))}
       </View>
+      </GlassSurface>
 
       {open ? (
         <OptionSheet
@@ -337,16 +347,13 @@ const styles = StyleSheet.create((theme) => ({
   container: {
     // Mirror the composer's own padding so this card's edges line up with the
     // prompt card below it, exactly as on desktop.
-    paddingHorizontal: theme.spacing[3],
-    paddingBottom: theme.spacing[2],
+    paddingHorizontal: 10,
+    paddingBottom: theme.spacing[1.5],
   },
+  // Glass, like the composer it stacks on: the queue is chrome over the
+  // transcript, not part of it.
   card: {
-    borderRadius: theme.radius.xl,
-    borderCurve: 'continuous',
-    borderWidth: 1,
-    borderColor: theme.colors.border.default,
-    backgroundColor: theme.colors.surface[2],
-    overflow: 'hidden',
+    paddingHorizontal: theme.spacing[1],
   },
   editor: {
     gap: theme.spacing[3],
@@ -377,8 +384,8 @@ const styles = StyleSheet.create((theme) => ({
     minHeight: theme.minTouchTarget,
   },
   rowDivided: {
-    borderTopWidth: 1,
-    borderTopColor: theme.colors.border.subtle,
+    borderTopWidth: StyleSheet.hairlineWidth,
+    borderTopColor: glassFillStrong(theme.isDark),
   },
   rowPending: {
     opacity: 0.6,
@@ -406,19 +413,19 @@ const styles = StyleSheet.create((theme) => ({
     gap: theme.spacing[1],
     paddingHorizontal: theme.spacing[2],
     paddingVertical: theme.spacing[1.5],
-    borderRadius: theme.radius.md,
+    borderRadius: theme.radius.full,
     borderCurve: 'continuous',
-    backgroundColor: theme.colors.surface[3],
+    backgroundColor: glassFill(theme.isDark),
   },
   steerButtonPressed: {
-    backgroundColor: theme.colors.surface[4],
+    backgroundColor: glassFillStrong(theme.isDark),
   },
   steerButtonDisabled: {
     opacity: 0.5,
   },
   removeButton: {
     padding: theme.spacing[1.5],
-    borderRadius: theme.radius.md,
+    borderRadius: theme.radius.full,
     borderCurve: 'continuous',
   },
   removeButtonPressed: {

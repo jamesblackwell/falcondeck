@@ -23,4 +23,14 @@ export {
   glassEdge,
   glassFill,
   glassFillStrong,
+  type GlassSurfaceProps,
 } from './GlassSurface'
+export {
+  GlassButton,
+  GlassButtonGroup,
+  GlassGroupItem,
+  GLASS_CONTROL_SIZE,
+} from './GlassButton'
+export { SymbolIcon, hasNativeSymbols } from './SymbolIcon'
+export { ScrollEdge } from './ScrollEdge'
+export { SheetGroup, SheetRow, type SheetRowTone } from './SheetMenu'
