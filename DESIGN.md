@@ -199,6 +199,7 @@ Depth:
 - Use surface steps before shadows
 - Shadows should be soft and secondary
 - Accent glow should stay subtle and only reinforce important focus or active states
+- Mobile floating chrome is the exception: it lifts on glass, not surface steps (see Floating chrome below)
 
 ## Component Guidance
 
@@ -326,6 +327,18 @@ Mobile uses one wait glyph, `ActivityDiamond`, in three placements. Do not add a
 - **Inline control** — diamond on the control (`Button` `loading`, Show more). Keep the control's label next to the diamond; do not replace a whole row with a status sentence.
 
 Connection and session waits stay on `SyncBanner`. That banner names a wait that lasts; it is not a stand-in for paging or a thread fetch. Use **task** in this copy, not thread.
+
+### Floating chrome and Liquid Glass (mobile)
+
+Chrome floats on glass and content stays opaque. The header controls, composer, sidebar dock, jump-to-latest button, suggestion and goal pills, loading pill, and sheets are glass. Transcript rows, tool cards, pending requests, the live activity lane, and notices are opaque surface cards, because they have to stay readable over whatever scrolls behind them.
+
+- Build glass from `GlassSurface`, `GlassButton`, and `GlassButtonGroup`. They choose between Liquid Glass (iOS 26), blur (older iOS), and an opaque fill (Android, Reduce Transparency) through `useGlassMode()`. Do not branch on platform or OS version yourself.
+- Never animate `opacity` on a view that contains glass. UIKit stops drawing the glass and leaves a bare shadow ring. Show and hide with scale or translate instead.
+- Pass `fill` only when the glass box has a fixed size (buttons, the header capsule). In a stack sized by its content, filling glass stretches and pushes its neighbours away.
+- Glass that always sits over text, like the jump button, takes a palette `tint`. Elsewhere the elevated ring and shadow supply the edge, so do not add borders.
+- Chrome and menu icons use `SymbolIcon`: an SF Symbol name plus the lucide icon to draw where symbols are unavailable.
+- The transcript runs under the header and the dock. Floating chrome measures itself into shared values that size the list's spacers. Do not pad the list by a constant.
+- Sheets are inset glass cards (`NativeSheet`). List actions in one grouped card with `SheetGroup` and `SheetRow`, or with `OptionSheet`, not as a separate card per row.
 
 ### Context menus (per-item actions)
 
