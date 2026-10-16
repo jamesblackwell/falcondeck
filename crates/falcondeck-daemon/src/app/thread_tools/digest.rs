@@ -477,6 +477,7 @@ struct Snapshot {
     summary: ThreadSummary,
     root: String,
     digest: Option<Digest>,
+    hydrate_error: Option<String>,
 }
 
 impl AppState {
@@ -504,6 +505,7 @@ impl AppState {
                     digest: (!thread.items.is_empty()).then(|| digest(&thread.items, since, &root)),
                     summary: thread.summary.clone(),
                     root,
+                    hydrate_error: None,
                 })
             })
             .collect()
@@ -563,11 +565,16 @@ pub(super) async fn summary(
                     compact_workspace: Some(true),
                     refresh_native: None,
                 })
-                .await?;
-            if !detail.items.is_empty() {
-                let mut d = digest(&detail.items, None, &snapshot.root);
-                d.complete &= !detail.has_older;
-                snapshot.digest = Some(d);
+                .await;
+            // One unreadable native session must not hide the other digests.
+            match detail {
+                Ok(detail) if !detail.items.is_empty() => {
+                    let mut d = digest(&detail.items, None, &snapshot.root);
+                    d.complete &= !detail.has_older;
+                    snapshot.digest = Some(d);
+                }
+                Ok(_) => {}
+                Err(error) => snapshot.hydrate_error = Some(line(&error.to_string(), 200)),
             }
         }
     }
@@ -580,7 +587,14 @@ pub(super) async fn summary(
         let summary = app.build_thread_summary_from_clone(snapshot.summary).await;
         let requests = pending.remove(&summary.id).unwrap_or_default();
         let entry = capped(
-            &render_summary(app, &summary, &requests, snapshot.digest.as_ref(), now),
+            &render_summary(
+                app,
+                &summary,
+                &requests,
+                snapshot.digest.as_ref(),
+                snapshot.hydrate_error.as_deref(),
+                now,
+            ),
             per_thread,
         );
         if markdown.chars().count() + entry.chars().count() + 120 > cap {
@@ -604,6 +618,7 @@ fn render_summary(
     summary: &ThreadSummary,
     pending: &[InteractiveRequest],
     digest: Option<&Digest>,
+    hydrate_error: Option<&str>,
     now: DateTime<Utc>,
 ) -> String {
     let mut text = format!(
@@ -667,7 +682,10 @@ fn render_summary(
         if let Some(error) = &summary.last_error {
             text.push_str(&format!("- Error: {}\n", line(error, 300)));
         }
-        text.push_str("- Transcript: not loaded; pass hydrate=true or use falcondeck_view_thread for outcome, files, commits, and checks.\n");
+        match hydrate_error {
+            Some(error) => text.push_str(&format!("- Transcript: could not load ({error}).\n")),
+            None => text.push_str("- Transcript: not loaded; pass hydrate=true or use falcondeck_view_thread for outcome, files, commits, and checks.\n"),
+        }
         return text;
     };
     if let Some(user) = &d.last_user {

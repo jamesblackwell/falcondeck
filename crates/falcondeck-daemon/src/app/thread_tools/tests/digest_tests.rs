@@ -222,6 +222,29 @@ async fn summary_without_loaded_items_stays_cheap_and_bounded() {
     ] {
         assert!(out.contains(part), "missing {part:?} in\n{out}");
     }
+    // Hydrating an unreadable native session still reports every thread.
+    add_thread(
+        &app,
+        "loaded",
+        "Loaded",
+        ThreadStatus::Idle,
+        1,
+        vec![assistant("a", "done")],
+    )
+    .await;
+    let out = text(
+        &app,
+        SUMMARY,
+        json!({"thread_ids":["thread-1","loaded"],"hydrate":true}),
+    )
+    .await;
+    assert!(
+        out.contains("## Auth setup")
+            && out.contains("Last assistant outcome")
+            && out.contains("done"),
+        "{out}"
+    );
+    assert!(out.contains("- Transcript: "), "{out}");
     for i in 0..20 {
         add_thread(
             &app,
