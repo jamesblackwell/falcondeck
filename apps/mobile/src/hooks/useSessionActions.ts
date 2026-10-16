@@ -227,7 +227,7 @@ export function useSessionActions() {
   const submitTurn = useCallback(async (override?: {
     text: string
     resumeInterrupted?: boolean
-  }) => {
+  }): Promise<boolean> => {
     const relay = useRelayStore.getState();
     const session = useSessionStore.getState();
     const ui = useUIStore.getState();
@@ -241,14 +241,14 @@ export function useSessionActions() {
     // React may deliver a second tap before the disabled composer has painted.
     // Zustand updates synchronously, so this closes that window for typed
     // turns, suggestions, resumptions, and /compact alike.
-    if (ui.pendingSubmissions[submittedKey]) return;
+    if (ui.pendingSubmissions[submittedKey]) return false;
     if (
       !workspace ||
       (!override?.resumeInterrupted &&
         !submittedDraft.trim() &&
         submittedAttachments.length === 0)
     )
-      return;
+      return false;
     const activeThread = threadForSelection(
       session.snapshot?.threads ?? [],
       session.selectedWorkspaceId,
@@ -265,18 +265,18 @@ export function useSessionActions() {
     if (compactCommand) {
       if (!activeThread) {
         relay._setError("Start a conversation before compacting it.");
-        return;
+        return false;
       }
       if (submittedAttachments.length > 0) {
         relay._setError("Remove attachments before compacting.");
-        return;
+        return false;
       }
       if (
         activeThread.status === "running" ||
         activeThread.status === "waiting_for_input"
       ) {
         relay._setError("Wait for the current turn to finish before compacting.");
-        return;
+        return false;
       }
       ui.setIsSubmitting(true, submittedKey);
       try {
@@ -302,7 +302,7 @@ export function useSessionActions() {
       } finally {
         ui.setIsSubmitting(false, submittedKey);
       }
-      return;
+      return false;
     }
     const imageBlockReason = imageAttachmentSendBlockReason(
       workspaceAgentCapabilities(workspace, provider),
@@ -310,13 +310,16 @@ export function useSessionActions() {
     );
     if (imageBlockReason) {
       relay._setError(imageBlockReason);
-      return;
+      return false;
     }
     const submittedSkills = selectedSkillsFromText(
       submittedDraft,
       composerSkillCatalog(liveSkillsRef.current, workspace, provider),
     );
 
+    // True once the daemon has taken the turn (started or queued), so the
+    // caller can show the agent spinning up before the thread reports running.
+    let accepted = false;
     ui.setIsSubmitting(true, submittedKey);
     // Empty the composer in the same tick as the tap. The optimistic copy goes
     // into the transcript or queue below, so text left in the input for a
@@ -462,6 +465,7 @@ export function useSessionActions() {
       // copy is no longer needed.
       ui.endSubmission(pendingConversationKey);
       relay._setError(null);
+      accepted = true;
     } catch (e) {
       const restoreKey = activeThreadId
         ? draftKeyFor(workspace.id, activeThreadId)
@@ -482,7 +486,7 @@ export function useSessionActions() {
           submittedAttachments,
         );
       }
-      if (discardSubmission) return;
+      if (discardSubmission) return false;
       if (!isRelayTransportError(e)) {
         relay._setError(
           e instanceof Error ? e.message : "Failed to send message",
@@ -496,6 +500,7 @@ export function useSessionActions() {
         ui.setIsSubmitting(false, pendingConversationKey);
       }
     }
+    return accepted;
   }, [startThread]);
 
   const respondInteractive = useCallback(

@@ -96,7 +96,7 @@ describe('send feedback before recovery encryption', () => {
     const rpc = vi.fn().mockReturnValue(response.promise)
     useRelayStore.setState({ _callRpc: rpc as RelayState['_callRpc'] })
     const send = mountSend()
-    let submission!: Promise<void>
+    let submission!: Promise<boolean>
     act(() => { submission = send() })
     expect(useUIStore.getState().draft).toBe('')
     expect(writes.mock.calls.filter(([key]) => key === DRAFTS || key === IN_FLIGHT).map(([key]) => key)).toEqual([])
@@ -110,7 +110,7 @@ describe('send feedback before recovery encryption', () => {
     expect(stored(DRAFTS)['w1:t1']).toBeUndefined()
     expect(rpc).toHaveBeenCalledTimes(1)
     response.resolve({ ok: true })
-    await act(async () => submission)
+    await act(async () => { await submission })
   })
 
   it('preserves typing during the frame yield and persists it before dispatch', async () => {
@@ -125,13 +125,29 @@ describe('send feedback before recovery encryption', () => {
     })
     useRelayStore.setState({ _callRpc: rpc as RelayState['_callRpc'] })
     const send = mountSend()
-    let submission!: Promise<void>
+    let submission!: Promise<boolean>
     act(() => { submission = send() })
     act(() => useUIStore.getState().setDraft('New typing'))
     await paint()
     response.resolve({ ok: true })
-    await act(async () => submission)
+    await act(async () => { await submission })
     expect(useUIStore.getState().draft).toBe('New typing')
+    // The screen keys its "agent is starting" indicator off acceptance.
+    await expect(submission).resolves.toBe(true)
+  })
+
+  it('reports a rejected send as not accepted', async () => {
+    selectThread()
+    useUIStore.getState().setDraft('Will fail')
+    const rpc = vi.fn().mockRejectedValue(new Error('Daemon refused the turn'))
+    useRelayStore.setState({ _callRpc: rpc as RelayState['_callRpc'] })
+    const send = mountSend()
+    let submission!: Promise<boolean>
+    act(() => { submission = send() })
+    await paint()
+    await act(async () => { await submission })
+    await expect(submission).resolves.toBe(false)
+    expect(useUIStore.getState().draft).toBe('Will fail')
   })
 
   it('starts the original workspace and picker selection after navigation in the frame yield', async () => {
@@ -143,7 +159,7 @@ describe('send feedback before recovery encryption', () => {
     const rpc = vi.fn().mockResolvedValueOnce({ workspace: workspace({ id: 'w1' }), thread: thread({ id: 'new-thread', workspace_id: 'w1' }) }).mockResolvedValueOnce({ ok: true })
     useRelayStore.setState({ _callRpc: rpc as RelayState['_callRpc'] })
     const send = mountSend()
-    let submission!: Promise<void>
+    let submission!: Promise<boolean>
     act(() => { submission = send() })
     expect(rpc).not.toHaveBeenCalled()
     act(() => {
@@ -155,7 +171,7 @@ describe('send feedback before recovery encryption', () => {
     expect(rpc).toHaveBeenNthCalledWith(1, 'thread.start', expect.objectContaining({ workspace_id: 'w1', provider: 'claude', isolation: 'isolated' }), expect.anything())
     expect(useSessionStore.getState().selectedWorkspaceId).toBe('w2')
     await paint()
-    await act(async () => submission)
+    await act(async () => { await submission })
     expect(useUIStore.getState().draft).toBe('Keep this other draft')
   })
 
@@ -163,14 +179,14 @@ describe('send feedback before recovery encryption', () => {
     selectThread()
     useUIStore.getState().setDraft('Sent text')
     const send = mountSend()
-    let submission!: Promise<void>
+    let submission!: Promise<boolean>
     act(() => { submission = send() })
     expect(stored(IN_FLIGHT)['w1:t1']).toBeUndefined()
     appStateListeners.forEach((listener) => listener('background'))
     expect(stored(IN_FLIGHT)['w1:t1']?.text).toBe('Sent text')
     expect(stored(DRAFTS)['w1:t1']).toBeUndefined()
     await paint()
-    await act(async () => submission)
+    await act(async () => { await submission })
   })
 
   it('cancels a cleared composer checkpoint instead of recreating data or dispatching', async () => {
@@ -179,11 +195,11 @@ describe('send feedback before recovery encryption', () => {
     const rpc = vi.fn().mockResolvedValue({ ok: true })
     useRelayStore.setState({ _callRpc: rpc as RelayState['_callRpc'] })
     const send = mountSend()
-    let submission!: Promise<void>
+    let submission!: Promise<boolean>
     act(() => { submission = send() })
     act(() => clearEncryptedComposerPersistence())
     await paint()
-    await act(async () => submission)
+    await act(async () => { await submission })
     expect(rpc).not.toHaveBeenCalled()
     expect(storage.getString(IN_FLIGHT)).toBeUndefined()
     expect(storage.getString(DRAFTS)).toBeUndefined()
@@ -196,12 +212,12 @@ describe('send feedback before recovery encryption', () => {
     const rpc = vi.fn().mockResolvedValue({ ok: true })
     useRelayStore.setState({ _callRpc: rpc as RelayState['_callRpc'] })
     const send = mountSend()
-    let submission!: Promise<void>
+    let submission!: Promise<boolean>
     act(() => { submission = send() })
     useRelayStore.setState({ sessionId: 'replacement' })
     clearEncryptedComposerPersistence()
     await paint()
-    await act(async () => submission)
+    await act(async () => { await submission })
     expect(rpc).not.toHaveBeenCalled()
   })
 
@@ -211,13 +227,13 @@ describe('send feedback before recovery encryption', () => {
     const rpc = vi.fn().mockResolvedValue({ ok: true })
     useRelayStore.setState({ _callRpc: rpc as RelayState['_callRpc'] })
     const send = mountSend()
-    let submission!: Promise<void>
+    let submission!: Promise<boolean>
     act(() => { submission = send() })
     setSessionStorageEncryptionKey(new Uint8Array(32).fill(17))
     const replacementCrypto = { dataKey: new Uint8Array(32).fill(17) }
     useRelayStore.setState({ _getSessionCrypto: (() => replacementCrypto) as RelayState['_getSessionCrypto'] })
     await paint()
-    await act(async () => submission)
+    await act(async () => { await submission })
     expect(rpc).not.toHaveBeenCalled()
     expect(useSessionStore.getState().threadItems.t1 ?? []).toEqual([])
     expect(useUIStore.getState().draft).toBe('Keep my message')
@@ -238,7 +254,7 @@ describe('send feedback before recovery encryption', () => {
     })
     useRelayStore.setState({ _callRpc: rpc as RelayState['_callRpc'] })
     const send = mountSend()
-    let firstSubmission!: Promise<void>
+    let firstSubmission!: Promise<boolean>
     act(() => { firstSubmission = send() })
     await paint()
     await paint()
@@ -246,16 +262,16 @@ describe('send feedback before recovery encryption', () => {
       useSessionStore.getState().selectNewThread('w1')
       useUIStore.getState().setDraft('Second new thread')
     })
-    let secondSubmission!: Promise<void>
+    let secondSubmission!: Promise<boolean>
     act(() => { secondSubmission = send() })
     first.resolve({ ok: true })
-    await act(async () => firstSubmission)
+    await act(async () => { await firstSubmission })
     expect(useUIStore.getState().inFlightSubmissions['w1:new']?.text).toBe('Second new thread')
     expect(useUIStore.getState().isSubmitting).toBe(true)
     await paint()
     await paint()
     second.resolve({ ok: true })
-    await act(async () => secondSubmission)
+    await act(async () => { await secondSubmission })
   })
 
 })

@@ -648,7 +648,7 @@ describe("submitTurn guards", () => {
         await new Promise((resolve) => setTimeout(resolve, 0));
       });
       pendingRpc.reject(new Error("offline"));
-      await act(async () => submission);
+      await act(async () => { await submission; });
 
       expect(useUIStore.getState().draft).toBe("Failed message\n\nNew draft");
       expect(useUIStore.getState().attachments).toEqual([
@@ -707,7 +707,7 @@ describe("submitTurn guards", () => {
         workspace: workspace({ id: "w1", current_thread_id: "t-new" }),
         thread: thread({ id: "t-new", workspace_id: "w1" }),
       });
-      await act(async () => submission);
+      await act(async () => { await submission; });
 
       expect(useSessionStore.getState().selectedThreadId).toBe("t-existing");
       expect(useUIStore.getState().draft).toBe(
@@ -769,7 +769,7 @@ describe("submitTurn guards", () => {
       expect(notificationAsync).not.toHaveBeenCalled();
 
       pendingRpc.resolve({ ok: true });
-      await act(async () => submission);
+      await act(async () => { await submission; });
 
       expect(useUIStore.getState().draft).toBe("");
       expect(useUIStore.getState().inFlightSubmissions["w1:t1"]).toBeUndefined();

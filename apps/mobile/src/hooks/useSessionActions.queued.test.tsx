@@ -84,7 +84,7 @@ describe('instant queued sends', () => {
     selectBusyThread(status)
     const { response, rpc } = slowSend()
     const { renderer, submit } = mountQueue()
-    let submission!: Promise<void>
+    let submission!: Promise<boolean>
     act(() => { submission = submit() })
     try {
       expect(useUIStore.getState().draft).toBe('')
@@ -94,7 +94,7 @@ describe('instant queued sends', () => {
       expect(rows(renderer)[0]!.props.disabled).toBe(true)
     } finally {
       response.resolve({ ok: true, message: 'queued' })
-      await act(async () => submission)
+      await act(async () => { await submission })
     }
   })
 
@@ -102,7 +102,7 @@ describe('instant queued sends', () => {
     selectBusyThread()
     const { response, started } = slowSend()
     const { renderer, submit } = mountQueue()
-    let submission!: Promise<void>
+    let submission!: Promise<boolean>
     act(() => { submission = submit() })
     await act(async () => { await started.promise })
 
@@ -114,7 +114,7 @@ describe('instant queued sends', () => {
 
     if (order === 'response-first') {
       response.resolve({ ok: true, message: 'queued' })
-      await act(async () => submission)
+      await act(async () => { await submission })
       expect(rows(renderer)).toHaveLength(1)
       expect(rows(renderer)[0]!.props.disabled).toBe(true)
     }
@@ -124,7 +124,7 @@ describe('instant queued sends', () => {
     expect(useSessionStore.getState().pendingQueuedTurns.t1).toBeUndefined()
     if (order === 'event-first') {
       response.resolve({ ok: true, message: 'queued' })
-      await act(async () => submission)
+      await act(async () => { await submission })
     }
     expect(rows(renderer)).toHaveLength(1)
   })
@@ -138,11 +138,11 @@ describe('instant queued sends', () => {
     })
     const { response } = slowSend()
     const { renderer, submit } = mountQueue()
-    let submission!: Promise<void>
+    let submission!: Promise<boolean>
     act(() => { submission = submit() })
     expect(rows(renderer)).toHaveLength(2)
     response.resolve({ ok: true, message: 'queued' })
-    await act(async () => submission)
+    await act(async () => { await submission })
     expect(rows(renderer)).toHaveLength(2)
     act(confirmQueue)
     expect(rows(renderer)).toHaveLength(2)
@@ -153,10 +153,10 @@ describe('instant queued sends', () => {
     selectBusyThread()
     const { response } = slowSend()
     const { renderer, submit } = mountQueue()
-    let first!: Promise<void>
+    let first!: Promise<boolean>
     act(() => { first = submit() })
     response.resolve({ ok: true, message: 'queued' })
-    await act(async () => first)
+    await act(async () => { await first })
     act(() => useUIStore.getState().setDraft('Also update the changelog'))
     await act(async () => { await submit() })
     expect(rows(renderer)).toHaveLength(2)
@@ -186,13 +186,13 @@ describe('instant queued sends', () => {
     })
     const { response } = slowSend()
     const { renderer, submit } = mountQueue()
-    let submission!: Promise<void>
+    let submission!: Promise<boolean>
     act(() => { submission = submit() })
     expect(rows(renderer)).toHaveLength(1)
     act(() => useSessionStore.getState().selectThread('w1', 't2'))
     expect(rows(renderer)).toHaveLength(0)
     response.resolve({ ok: true, message: 'queued' })
-    await act(async () => submission)
+    await act(async () => { await submission })
     expect(rows(renderer)).toHaveLength(0)
     act(() => useSessionStore.getState().selectThread('w1', 't1'))
     expect(rows(renderer)).toHaveLength(1)
@@ -207,13 +207,13 @@ describe('instant queued sends', () => {
     useUIStore.getState().setAttachments([attachment])
     const { response, started } = slowSend()
     const { renderer, submit } = mountQueue()
-    let submission!: Promise<void>
+    let submission!: Promise<boolean>
     act(() => { submission = submit() })
     expect(textOf(renderer)).toContain('Also update the changelog')
     expect(textOf(renderer)).toContain('1')
     await act(async () => { await started.promise })
     response.reject(new Error('offline'))
-    await act(async () => submission)
+    await act(async () => { await submission })
     expect(rows(renderer)).toHaveLength(0)
     expect(useUIStore.getState().draft).toBe('Also update the changelog')
     expect(useUIStore.getState().attachments).toEqual([attachment])
@@ -223,11 +223,11 @@ describe('instant queued sends', () => {
     selectBusyThread()
     const { response, started } = slowSend()
     const { renderer, submit } = mountQueue()
-    let submission!: Promise<void>
+    let submission!: Promise<boolean>
     act(() => { submission = submit() })
     const params = await started.promise
     response.resolve({ ok: true, message })
-    await act(async () => submission)
+    await act(async () => { await submission })
     expect(rows(renderer)).toHaveLength(0)
     expect(useSessionStore.getState().threadItems.t1).toEqual([
       expect.objectContaining({ id: params.user_item_id, text: 'Also update the changelog', pending: true }),
@@ -238,14 +238,14 @@ describe('instant queued sends', () => {
     selectBusyThread()
     const { response, started } = slowSend()
     const { renderer, submit } = mountQueue()
-    let submission!: Promise<void>
+    let submission!: Promise<boolean>
     act(() => { submission = submit() })
     const params = await started.promise
     const echo = userMessage(params.user_item_id as string, 'Also update the changelog')
     act(() => useSessionStore.getState().applyDaemonEvent(conversationItemAddedEvent(echo, 't1')))
     expect(rows(renderer)).toHaveLength(0)
     response.resolve({ ok: true, message })
-    await act(async () => submission)
+    await act(async () => { await submission })
     expect(rows(renderer)).toHaveLength(0)
     expect(useSessionStore.getState().threadItems.t1).toEqual([echo])
   })
@@ -255,11 +255,11 @@ describe('instant queued sends', () => {
     useSessionStore.getState().applyThreadSummary(thread({ id: 't1', workspace_id: 'w1', status: 'idle' }))
     const { response } = slowSend()
     const { renderer, submit } = mountQueue()
-    let submission!: Promise<void>
+    let submission!: Promise<boolean>
     act(() => { submission = submit() })
     expect(rows(renderer)).toHaveLength(0)
     response.resolve({ ok: true, message: 'queued' })
-    await act(async () => submission)
+    await act(async () => { await submission })
     expect(rows(renderer)).toHaveLength(1)
     expect(useSessionStore.getState().threadItems.t1).toEqual([])
     act(confirmQueue)

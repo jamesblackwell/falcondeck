@@ -79,6 +79,7 @@ import { useInterruptTurn } from "@/hooks/useInterruptTurn";
 import { useAutoMarkThreadRead } from "@/hooks/useAutoMarkThreadRead";
 import { useThreadActions } from "@/hooks/useThreadActions";
 import { useKeyboardInset } from "@/hooks/useKeyboardInset";
+import { useAwaitingTurnStart } from "@/hooks/useAwaitingTurnStart";
 import { useConversationPresentation } from "@/hooks/useRenderBlocks";
 import { useScrollToBottom } from "@/hooks/useScrollToBottom";
 import { useResponseCompletionAnnouncement } from "@/hooks/useResponseCompletionAnnouncement";
@@ -553,10 +554,20 @@ export default function HomeScreen() {
     return [];
   }, [resolvedModel]);
   const isThreadRunning = selectedThread?.status === "running";
+  const { isAwaiting: isAwaitingTurnStart, markAccepted: markTurnAccepted } =
+    useAwaitingTurnStart(selectedThreadId, selectedThread?.status ?? null);
+  const lastBlock = blocks[blocks.length - 1];
+  // Only while the user's own message is still the newest thing on screen:
+  // once any output lands, the transcript speaks for itself.
+  const awaitingFirstOutput =
+    isAwaitingTurnStart &&
+    lastBlock?.kind === "item" &&
+    lastBlock.item.kind === "user_message";
   const showThinking = shouldShowThinkingIndicator(
     presentation,
     isThreadRunning,
-    isSubmitting && selectedThread?.status !== "waiting_for_input",
+    (isSubmitting && selectedThread?.status !== "waiting_for_input") ||
+      awaitingFirstOutput,
   );
   const isSelectedThreadLoading =
     !!selectedThreadId && detailLoadingThreadId === selectedThreadId;
@@ -1556,7 +1567,9 @@ export default function HomeScreen() {
               // their message land; only a reader far enough up for the jump
               // button keeps their place.
               scrollToBottomIfNear();
-              void submitTurn();
+              void submitTurn().then((accepted) => {
+                if (accepted) markTurnAccepted();
+              });
             }}
             onStop={() => {
               if (isStopping) return;
