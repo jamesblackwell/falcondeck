@@ -1040,8 +1040,20 @@ rename builtin. These require a calling thread and inherit its workspace. They
 are not extension-host APIs, control operations, or `threads:read` grants;
 `threads:read` remains summary-only with no previews or transcript access.
 
-List reads daemon summaries plus existing search-index opening/recent excerpts
-without transcript hydration. View loads a bounded native-provider tail and
+List reads daemon summaries, the latest message of transcripts already in
+memory, and existing search-index opening/recent excerpts without transcript
+hydration. It defaults to unarchived threads sorted by last activity (newest
+first), 30 entries, and 24000 characters. `sort` is `updated`, `created`
+(native session file start, best effort; unknown sorts last), or `title`, with
+optional `order`. `offset` pages; the footer names the next offset. Filters:
+`status` (one or many of idle/running/waiting_for_input/error/awaiting_approval),
+`provider`, `folder` (project folder name or id), `archived`
+(exclude/include/only), `pinned`, `has_pending_approval`, and
+`updated_since`/`updated_before` (RFC 3339, `YYYY-MM-DD`, or ages like `24h`).
+`query` is a case-insensitive literal match on title, id, previews, goal, and
+cached excerpts. Each entry shows last activity, folder, attention counts, and a
+labelled preview that falls back from the summary preview to the latest loaded
+assistant or user message, then cached recent/opening user excerpts. View loads a bounded native-provider tail and
 formats compact markdown in Rust. Defaults are 20 user/assistant messages and
 6000 characters (hard caps: 100 messages / 24000 characters). Tool output and
 other activity require `include_tools: true`; reasoning independently requires

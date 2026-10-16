@@ -51,9 +51,15 @@ for standing schedules that are not about this conversation.
 ## Sibling threads
 
 Use `falcondeck_list_threads` to find work in this workspace. Results are bounded
-markdown summaries with last previews and cached opening/recent user excerpts,
-when available; listing does not load transcripts. `limit` defaults to 30 (max
-100), and `max_chars` defaults to 24000 (512–24000).
+markdown summaries with last activity, folder, attention, a labelled preview, and
+cached opening/recent user excerpts; listing does not load transcripts. Defaults:
+unarchived threads, newest activity first, `limit` 30 (max 100), `max_chars`
+24000 (512–24000). Page with the returned `offset`, keeping sort and filters
+unchanged. `sort`: `updated`, `created`, or `title`, plus `order`. Filters:
+`status` (string or array: idle, running, waiting_for_input, error,
+awaiting_approval), `provider`, `folder`, `archived` (exclude/include/only),
+`pinned`, `has_pending_approval`, `updated_since`/`updated_before` (RFC 3339,
+`YYYY-MM-DD`, or `30m`/`24h`/`7d`), and `query` (case-insensitive literal).
 
 Use `falcondeck_view_thread` with `thread_id` for compact user/assistant text.
 Start with defaults: 20 messages / 6000 characters. Hard caps are 100 messages

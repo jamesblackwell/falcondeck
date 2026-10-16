@@ -4,6 +4,7 @@ use falcondeck_core::ThreadDetailMode;
 use falcondeck_core::{ExtensionAgentTool, ExtensionToolResponse, ThreadOrigin};
 use serde::Deserialize;
 
+mod list;
 mod read;
 mod actions;
 
@@ -22,10 +23,7 @@ pub(super) fn is_builtin(name: &str) -> bool {
 
 pub(super) fn catalog() -> Vec<ExtensionAgentTool> {
     [
-        (LIST, "List threads", "List this workspace's threads as bounded markdown with cached opening/recent user excerpts. Does not hydrate transcripts.", json!({
-            "limit": {"type":"integer", "minimum":1, "maximum":100},
-            "max_chars": {"type":"integer", "minimum":512, "maximum":24000}
-        }), vec![]),
+        (LIST, "List threads", "List this workspace's threads as bounded markdown: status, last activity, folder, a preview, and cached user excerpts. Defaults to unarchived threads by last activity, newest first. Filter by status, provider, folder, pinned/archived, pending approval, update time, or literal query; page with offset. Does not hydrate transcripts.", list::schema(), vec![]),
         (VIEW, "View thread", "Read compact user/assistant text (default: 20 messages, 6000 characters). Use before for older history, query for case-insensitive literal search with excerpts, and item_id plus offset to expand a message. Tools and reasoning are opt-in. Search scans at most 1000 items per call; follow its before cursor until no older items remain. Only this workspace is accessible.", json!({
             "thread_id": {"type":"string", "minLength":1},
             "before": {"type":"string", "minLength":1},
@@ -57,15 +55,6 @@ pub(super) fn catalog() -> Vec<ExtensionAgentTool> {
         name: name.into(), extension_id: "falcondeck".into(), tool_id: name.trim_start_matches("falcondeck_").into(), title: title.into(), description: description.into(),
         input_schema: json!({"type":"object","additionalProperties":false,"properties":properties,"required":required}),
     }).collect()
-}
-
-#[derive(Deserialize, Default)]
-#[serde(deny_unknown_fields)]
-struct ReadArgs {
-    thread_id: Option<String>,
-    before: Option<String>,
-    limit: Option<usize>,
-    max_chars: Option<usize>,
 }
 
 #[derive(Deserialize, Default)]
@@ -172,38 +161,9 @@ impl AppState {
                 .await;
         }
         match name {
-            LIST => {
-                let a: ReadArgs = args(arguments)?;
-                if a.thread_id.is_some() || a.before.is_some() {
-                    return Err(DaemonError::BadRequest(
-                        "list accepts only limit and max_chars".into(),
-                    ));
-                }
-                let cap = a.max_chars.unwrap_or(MAX_CHARS).clamp(512, MAX_CHARS);
-                let summaries = {
-                    let workspaces = self.inner.workspaces.lock().await;
-                    let ws = workspaces
-                        .get(&workspace)
-                        .ok_or_else(|| DaemonError::NotFound("workspace not found".into()))?;
-                    let mut summaries: Vec<_> =
-                        ws.threads.values().map(|t| t.summary.clone()).collect();
-                    summaries.sort_by(|a, b| b.updated_at.cmp(&a.updated_at).then(a.id.cmp(&b.id)));
-                    summaries
-                };
-                let mut markdown = String::from("# Workspace threads\n\n");
-                let total = summaries.len();
-                let mut shown = 0;
-                for summary in summaries.iter().take(a.limit.unwrap_or(30).clamp(1, 100)) {
-                    let entry = self.thread_briefing(summary);
-                    if markdown.chars().count() + entry.chars().count() + 100 > cap {
-                        break;
-                    }
-                    markdown.push_str(&entry);
-                    shown += 1;
-                }
-                markdown.push_str(&format!("\nShown {shown} of {total} threads.\n"));
-                Ok(response(markdown))
-            }
+            LIST => Ok(response(
+                list::list(self, &workspace, args(arguments)?).await?,
+            )),
             VIEW => {
                 let a: read::ViewArgs = args(arguments)?;
                 let target = a
@@ -580,7 +540,14 @@ mod tests {
                     .any(|t| t.name == name)
             );
         }
-        set_items(&app, vec![user("secret", "transcript must not leak")]).await;
+        set_items(
+            &app,
+            vec![
+                user("secret", "transcript must not leak"),
+                assistant("latest", "latest loaded reply"),
+            ],
+        )
+        .await;
         app.inner.thread_search.lock().unwrap().sessions.insert(
             "session-parent".into(),
             thread_search::SessionExcerpt {
@@ -600,7 +567,7 @@ mod tests {
             "thread-1",
             "Provider: claude",
             "Status: idle",
-            "Last preview:",
+            "Last assistant: latest loaded reply",
             "opening goal",
             "recent change",
         ] {
