@@ -1078,3 +1078,44 @@ and title as visible provenance, not an authority signal. `delivery: steer`
 Self-messaging and targets outside the workspace are rejected. The tool returns
 admission status without waiting for completion; replies can be read with view.
 Existing turn approvals remain in FalconDeck UI.
+
+### Coordinator actions
+
+Four more daemon-owned tools let a coordinating thread act on its workspace.
+Each calls an operation the UI already uses; none adds new stored state.
+
+- `falcondeck_organize_thread` archives/unarchives, pins (`global` or
+  `project`) or unpins, and moves a thread to a synced project folder by id or
+  exact case-insensitive name (`null` returns it to the project root;
+  `create_folder: true` creates a missing name). It uses the same
+  `archive_thread`, `update_thread`, and `ProjectFolderMutation` paths as the
+  sidebar. Archiving does not stop a running turn.
+- `falcondeck_interrupt_thread` is the Stop button for another running or
+  waiting thread in the workspace. Self-interrupts are rejected; queued messages
+  stay queued.
+- `falcondeck_answer_question` answers a pending `question` request, but only
+  in a thread whose `agent_spawn` origin names the caller. Approvals, plan
+  approvals, MCP elicitations, and questions marked secret are rejected and stay
+  in FalconDeck UI. Answers pass through `respond_to_interactive_request`, which
+  validates them as it does for the UI.
+- `falcondeck_wait_thread` waits up to 25 seconds (below the bridge's 30-second
+  HTTP timeout) for a thread to stop running. It then reports status, last
+  preview or error, and pending requests with the request and question ids that
+  answering needs.
+
+`falcondeck_create_thread` also accepts `title`, `folder` / `create_folder`
+(resolved after cap admission, so a rejected call creates nothing), and
+`notify_parent`. With `notify_parent`, a daemon watcher on the event stream
+queues a labelled notice to the parent (normal `send_turn`, `steer: false`)
+when the child first enters `waiting_for_input` and when it stops running after
+having run. The parent therefore wakes on completion instead of polling.
+Subscriptions live only in memory: a daemon restart ends the child's turn and
+the parent's turn too. Notices are skipped during shutdown and for archived
+parents.
+
+Rejected: cross-project creation, because workspace scope is the authorization
+boundary for every thread tool. Also rejected: a coordinator notes store. Notes
+would be new durable conversation content that belongs neither to the daemon's
+routing state nor to native agent storage. The coordinator's own transcript
+(readable with view) and files in the repository already serve as handoff
+storage.

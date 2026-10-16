@@ -15,7 +15,9 @@ not optional flavour.
 - `falcondeck-extensions` — session tools, including
   `falcondeck_suggest_follow_ups`, `falcondeck_rename_thread`,
   `falcondeck_list_threads`, `falcondeck_view_thread`, `falcondeck_message_thread`,
-  and `falcondeck_create_thread`.
+  `falcondeck_create_thread`, `falcondeck_wait_thread`,
+  `falcondeck_organize_thread`, `falcondeck_interrupt_thread`, and
+  `falcondeck_answer_question`.
 
 ## Next actions
 
@@ -96,3 +98,22 @@ to wait for its current turn. Self-messaging is rejected. The tool returns
 admission status (`steered`, `queued`, or `turn started`), not the recipient's
 reply; use view to read replies. Existing target settings and UI approvals
 apply. Send only when the user's task authorizes contacting another agent.
+
+## Coordinating children
+
+`falcondeck_create_thread` also takes `title`, `folder` (folder id or exact name;
+add `create_folder: true` to create it), and `notify_parent`. With
+`notify_parent: true`, FalconDeck queues a daemon-labelled notice to this thread
+when the child needs input and when it stops running. Dispatch children, then end
+your turn; do not poll in a loop. Notices do not survive a daemon restart.
+
+`falcondeck_wait_thread` waits up to 25 seconds for one thread to stop running.
+It reports the status and the pending requests with the ids needed to answer.
+`falcondeck_answer_question` answers a plain question from a child this thread
+created. Approvals, plan approvals, MCP prompts, and secret questions stay with
+the user in FalconDeck UI, so tell the user when one is blocking.
+
+`falcondeck_interrupt_thread` stops another thread's running turn.
+`falcondeck_organize_thread` archives, pins (`global`/`project`/`none`), or moves
+a thread to a project folder. Interrupt or archive only work you started or the
+user asked you to manage.

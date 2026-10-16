@@ -5,6 +5,9 @@ use falcondeck_core::{ExtensionAgentTool, ExtensionToolResponse, ThreadOrigin};
 use serde::Deserialize;
 
 mod read;
+mod actions;
+
+pub(super) use actions::ChildWatch;
 
 const LIST: &str = "falcondeck_list_threads";
 const VIEW: &str = "falcondeck_view_thread";
@@ -14,7 +17,7 @@ const MAX_CHARS: usize = 24_000;
 const MAX_ITEMS: usize = 100;
 
 pub(super) fn is_builtin(name: &str) -> bool {
-    matches!(name, LIST | VIEW | CREATE | MESSAGE)
+    actions::is_action(name) || matches!(name, LIST | VIEW | CREATE | MESSAGE)
 }
 
 pub(super) fn catalog() -> Vec<ExtensionAgentTool> {
@@ -44,9 +47,13 @@ pub(super) fn catalog() -> Vec<ExtensionAgentTool> {
             "isolation": {"type":"string", "enum":["project_folder","isolated"], "default":"project_folder"},
             "model": {"type":"string", "minLength":1},
             "prompt": {"type":"string", "minLength":1, "maxLength":24000},
-            "context": {"type":"string", "enum":["none","briefing","transcript_tail"], "default":"none"}
+            "context": {"type":"string", "enum":["none","briefing","transcript_tail"], "default":"none"},
+            "title": {"type":"string", "minLength":1, "maxLength":200},
+            "folder": {"type":"string", "minLength":1, "description":"Project folder id or exact name for the new thread."},
+            "create_folder": {"type":"boolean", "default":false, "description":"Create the named folder when no folder matches."},
+            "notify_parent": {"type":"boolean", "default":false, "description":"Queue a daemon notification to this thread whenever the child stops running or starts waiting for input. In memory; does not survive a daemon restart."}
         }), vec![]),
-    ].into_iter().map(|(name,title,description,properties,required)| ExtensionAgentTool {
+    ].into_iter().chain(actions::catalog()).map(|(name,title,description,properties,required)| ExtensionAgentTool {
         name: name.into(), extension_id: "falcondeck".into(), tool_id: name.trim_start_matches("falcondeck_").into(), title: title.into(), description: description.into(),
         input_schema: json!({"type":"object","additionalProperties":false,"properties":properties,"required":required}),
     }).collect()
@@ -80,6 +87,12 @@ struct CreateArgs {
     prompt: Option<String>,
     #[serde(default)]
     context: Context,
+    title: Option<String>,
+    folder: Option<String>,
+    #[serde(default)]
+    create_folder: bool,
+    #[serde(default)]
+    notify_parent: bool,
 }
 
 #[derive(Deserialize, Default)]
@@ -153,6 +166,11 @@ impl AppState {
             .ok_or_else(|| DaemonError::NotFound("calling thread not found".into()))?;
         // A fallback workspace path must not authorize a missing calling thread.
         let parent_summary = self.thread_summary(&workspace, parent).await?;
+        if actions::is_action(name) {
+            return self
+                .invoke_thread_action(name, arguments, &workspace, parent)
+                .await;
+        }
         match name {
             LIST => {
                 let a: ReadArgs = args(arguments)?;
@@ -237,9 +255,10 @@ impl AppState {
                     .as_ref()
                     .is_some_and(|p| p.trim().is_empty() || p.chars().count() > MAX_CHARS)
                     || a.model.as_ref().is_some_and(|m| m.trim().is_empty())
+                    || a.title.as_ref().is_some_and(|t| t.trim().is_empty() || t.chars().count() > 200)
                 {
                     return Err(DaemonError::BadRequest(
-                        "prompt must be 1–24000 characters and model must be nonempty".into(),
+                        "prompt must be 1–24000 characters, model nonempty, and title 1–200 characters".into(),
                     ));
                 }
                 // Serializes admission through dispatch; a simultaneous fourth call cannot race the count.
@@ -259,6 +278,14 @@ impl AppState {
                         return Err(DaemonError::BadRequest("parent already has 3 concurrent children; finish a child or archive an unused idle child first".into()));
                     }
                 }
+                // Resolved after admission so a rejected call never creates a folder.
+                let folder_id = match &a.folder {
+                    Some(folder) => Some(
+                        self.resolve_project_folder(&workspace, folder, a.create_folder)
+                            .await?,
+                    ),
+                    None => None,
+                };
                 let context = match a.context {
                     Context::None => None,
                     Context::Briefing => Some(self.thread_briefing(&parent_summary)),
@@ -294,6 +321,28 @@ impl AppState {
                     })
                 })
                 .await?;
+                if let Some(title) = &a.title {
+                    self.update_thread(serde_json::from_value(
+                        json!({"workspace_id": workspace, "thread_id": id, "title": title.trim()}),
+                    )?)
+                    .await?;
+                }
+                if folder_id.is_some() {
+                    self.update_preferences(falcondeck_core::UpdatePreferencesRequest {
+                        project_folder: Some(falcondeck_core::ProjectFolderMutation {
+                            workspace_id: workspace.clone(),
+                            action: falcondeck_core::ProjectFolderAction::MoveThread {
+                                thread_id: id.clone(),
+                                folder_id,
+                            },
+                        }),
+                        ..Default::default()
+                    })
+                    .await?;
+                }
+                if a.notify_parent {
+                    self.watch_child(&workspace, &id, parent);
+                }
                 self.persist_local_state().await?;
                 let thread = self.thread_summary(&workspace, &id).await?;
                 self.emit(
@@ -306,6 +355,9 @@ impl AppState {
                     line(&id, 256),
                     line(parent, 256)
                 );
+                if a.notify_parent {
+                    markdown.push_str("- This thread will be notified when the child stops running or needs input.\n");
+                }
                 if let Some(prompt) = a.prompt {
                     let request: SendTurnRequest = serde_json::from_value(
                         json!({"workspace_id": workspace, "thread_id": id, "inputs":[{"type":"text","text":prompt}]}),
@@ -387,7 +439,7 @@ mod tests {
     use falcondeck_core::{ThreadAgentParams, ThreadAttention};
     use tempfile::tempdir;
     mod model_settings_tests;
-    async fn fixture() -> (AppState, tempfile::TempDir) {
+    pub(super) async fn fixture() -> (AppState, tempfile::TempDir) {
         let temp_dir = tempdir().unwrap();
         let workspace_path = temp_dir.path().join("project-a");
         std::fs::create_dir_all(&workspace_path).unwrap();
@@ -469,7 +521,7 @@ mod tests {
 
         (app, temp_dir)
     }
-    fn call(name: &str, arguments: Value) -> falcondeck_core::InvokeExtensionToolRequest {
+    pub(super) fn call(name: &str, arguments: Value) -> falcondeck_core::InvokeExtensionToolRequest {
         falcondeck_core::InvokeExtensionToolRequest {
             name: name.into(),
             arguments,
@@ -506,7 +558,7 @@ mod tests {
             .unwrap()
             .items = items;
     }
-    fn created_id(result: &ExtensionToolResponse) -> String {
+    pub(super) fn created_id(result: &ExtensionToolResponse) -> String {
         result
             .result
             .as_str()

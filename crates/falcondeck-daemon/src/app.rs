@@ -334,6 +334,8 @@ struct InnerState {
     thread_search_scan: Mutex<()>,
     /// Serializes child admission through first-turn dispatch.
     agent_spawn_gate: Mutex<()>,
+    /// Children whose settles notify their parent; `None` until the watcher starts.
+    agent_spawn_watches: StdMutex<Option<HashMap<String, thread_tools::ChildWatch>>>,
     /// Active realtime transcript parts keyed by (thread id, provider role).
     realtime_transcripts: StdMutex<HashMap<(String, String), RealtimeTranscriptState>>,
     /// Pending Claude PreToolUse hook replies keyed by (workspace_id, request_id);
@@ -970,6 +972,7 @@ impl AppState {
                 thread_search_scanned_at: StdMutex::new(None),
                 thread_search_scan: Mutex::new(()),
                 agent_spawn_gate: Mutex::new(()),
+                agent_spawn_watches: StdMutex::new(None),
                 realtime_transcripts: StdMutex::new(HashMap::new()),
                 claude_approvals: Mutex::new(HashMap::new()),
                 claude_always_allowed_tools: Mutex::new(HashMap::new()),
