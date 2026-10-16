@@ -44,6 +44,7 @@ function renderView() {
 function renderContextMenuView(options: {
   activeTab?: 'changes' | 'files'
   entries?: FileListViewProps['entries']
+  files?: string[]
   localRoot?: string | null
   onLocalPath?: FileListViewProps['onLocalPath']
 } = {}) {
@@ -52,7 +53,7 @@ function renderContextMenuView(options: {
   render(
     <StatefulFileListView
       entries={options.entries ?? [entry]}
-      files={['README.md', 'src/App.tsx']}
+      files={options.files ?? ['README.md', 'src/App.tsx']}
       filesTruncated={false}
       branch="main"
       activeTab={options.activeTab ?? 'files'}
@@ -144,6 +145,41 @@ describe('FileListView', () => {
         '/Users/me/project/README.md',
         undefined,
       )
+    } finally {
+      userAgent.mockRestore()
+    }
+  })
+
+  it('opens a local HTML report in Chrome', () => {
+    const userAgent = vi.spyOn(navigator, 'userAgent', 'get').mockReturnValue('Macintosh')
+    try {
+      const onLocalPath = vi.fn()
+      renderContextMenuView({
+        files: ['report.html'],
+        localRoot: '/Users/me/project',
+        onLocalPath,
+      })
+
+      fireEvent.contextMenu(screen.getByRole('treeitem', { name: 'report.html' }))
+      fireEvent.click(screen.getByRole('menuitem', { name: 'Open in Chrome' }))
+      expect(onLocalPath).toHaveBeenCalledWith('open-with', '/Users/me/project/report.html', 'chrome')
+    } finally {
+      userAgent.mockRestore()
+    }
+  })
+
+  it.each(['remote', 'deleted', 'directory'] as const)('withholds Chrome for a %s HTML path', (kind) => {
+    const userAgent = vi.spyOn(navigator, 'userAgent', 'get').mockReturnValue('Macintosh')
+    try {
+      renderContextMenuView({
+        activeTab: kind === 'deleted' ? 'changes' : 'files',
+        entries: [{ ...entry, path: 'report.html', status: 'deleted' }],
+        files: [kind === 'directory' ? 'report.html/index.html' : 'report.html'],
+        localRoot: kind === 'remote' ? null : '/Users/me/project',
+        onLocalPath: vi.fn(),
+      })
+      fireEvent.contextMenu(screen.getByRole(kind === 'deleted' ? 'button' : 'treeitem', { name: /report\.html/ }))
+      expect(screen.queryByRole('menuitem', { name: 'Open in Chrome' })).toBeNull()
     } finally {
       userAgent.mockRestore()
     }

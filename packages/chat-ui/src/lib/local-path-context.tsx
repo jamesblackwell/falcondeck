@@ -13,6 +13,7 @@ import {
   ClipboardCopy,
   Copy,
   FolderOpen,
+  Globe,
   Save,
   SquareCode,
 } from 'lucide-react'
@@ -66,6 +67,10 @@ export function revealInFolderLabel() {
   }
   if (/Windows/i.test(ua)) return 'Show in Explorer'
   return 'Show in folder'
+}
+
+export function canOpenInChrome(path: string, kind: LocalPathKind | null) {
+  return kind === 'file' && /\.html?$/i.test(path) && revealInFolderLabel() === 'Reveal in Finder'
 }
 
 export async function copyTextToClipboard(text: string) {
@@ -232,6 +237,7 @@ function LocalPathMenu({
 }) {
   const iconClassName = 'h-3.5 w-3.5 text-fg-muted'
   const isFile = kind === 'file'
+  const showChrome = canOpenInChrome(menu.path, kind)
   const showDefaultEditor = isFile && revealInFolderLabel() === 'Reveal in Finder'
   const runAction = (action: LocalPathAction, editorId?: string) => {
     onClose()
@@ -245,7 +251,7 @@ function LocalPathMenu({
   return (
     <MenuSurface
       position={{ x: menu.x, y: menu.y }}
-      itemCount={3 + editors.length + (isFile ? 2 : 0) + Number(showDefaultEditor)}
+      itemCount={3 + editors.length + (isFile ? 2 : 0) + Number(showDefaultEditor) + Number(showChrome)}
       ariaLabel={`Actions for ${menu.path}`}
       onClose={onClose}
     >
@@ -254,6 +260,13 @@ function LocalPathMenu({
         label="Open"
         onClick={() => runAction('open')}
       />
+      {showChrome ? (
+        <MenuRow
+          icon={<Globe className={iconClassName} />}
+          label="Open in Chrome"
+          onClick={() => runAction('open-with', 'chrome')}
+        />
+      ) : null}
       {showDefaultEditor ? (
         <MenuRow
           icon={<SquareCode className={iconClassName} />}

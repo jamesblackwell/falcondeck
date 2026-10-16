@@ -1,4 +1,4 @@
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
 
 import {
@@ -13,6 +13,7 @@ const FILE = "/Users/qa/notes.md";
 function renderPathMenu(
   handler: (action: string, path: string, editorId?: string) => void,
   options: {
+    path?: string;
     editors?: readonly LocalPathEditor[];
     describePath?: LocalPathKindResolver | null;
   } = {},
@@ -23,16 +24,48 @@ function renderPathMenu(
       editors={options.editors ?? []}
       describePath={options.describePath ?? null}
     >
-      <LocalPathLink path={FILE}>notes.md</LocalPathLink>
+      <LocalPathLink path={options.path ?? FILE}>notes.md</LocalPathLink>
     </LocalPathProvider>,
   );
 }
 
-function openContextMenu() {
-  fireEvent.contextMenu(screen.getByRole("link", { name: `Open ${FILE}` }));
+function openContextMenu(path = FILE) {
+  fireEvent.contextMenu(screen.getByRole("link", { name: `Open ${path}` }));
 }
 
 describe("LocalPathProvider menu", () => {
+  it.each(["report.html", "report.htm", "REPORT.HTML"])("opens %s in Chrome on macOS", async (name) => {
+    const userAgent = vi.spyOn(navigator, "userAgent", "get").mockReturnValue("Macintosh");
+    try {
+      const handler = vi.fn();
+      const path = `/Users/qa/research reports/${name}`;
+      renderPathMenu(handler, { path, describePath: () => Promise.resolve("file") });
+
+      openContextMenu(path);
+      fireEvent.click(await screen.findByRole("menuitem", { name: "Open in Chrome" }));
+      expect(handler).toHaveBeenCalledWith("open-with", path, "chrome");
+      expect(screen.queryByRole("menu")).toBeNull();
+    } finally {
+      userAgent.mockRestore();
+    }
+  });
+
+  it.each([
+    { path: "/Users/qa/report.html", kind: "directory" as const, platform: "Macintosh" },
+    { path: "/Users/qa/report.html", kind: null, platform: "Macintosh" },
+    { path: FILE, kind: "file" as const, platform: "Macintosh" },
+    { path: "/home/qa/report.html", kind: "file" as const, platform: "Linux" },
+  ])("withholds Chrome for $path ($kind, $platform)", async ({ path, kind, platform }) => {
+    const userAgent = vi.spyOn(navigator, "userAgent", "get").mockReturnValue(platform);
+    try {
+      renderPathMenu(vi.fn(), { path, describePath: () => Promise.resolve(kind) });
+      await act(async () => openContextMenu(path));
+      expect(screen.queryByRole("menuitem", { name: "Open in Chrome" })).toBeNull();
+    } finally {
+      userAgent.mockRestore();
+    }
+  });
+
   it("offers the macOS default editor for files", async () => {
     const userAgent = vi.spyOn(navigator, "userAgent", "get").mockReturnValue("Macintosh");
     try {

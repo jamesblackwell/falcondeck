@@ -1026,6 +1026,8 @@ struct InstalledEditor {
 #[cfg(target_os = "macos")]
 fn editor_app_name(editor: &str) -> Option<&'static str> {
     match editor {
+        // Offered separately for HTML files, never as a general-purpose editor.
+        "chrome" => Some("Google Chrome"),
         "zed" => Some("Zed"),
         "vscode" => Some("Visual Studio Code"),
         "cursor" => Some("Cursor"),

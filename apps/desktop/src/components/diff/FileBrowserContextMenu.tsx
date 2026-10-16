@@ -1,6 +1,7 @@
-import { ArrowUpRight, Copy, Eye, FolderOpen, GitCompare, SquareCode } from 'lucide-react'
+import { ArrowUpRight, Copy, Eye, FolderOpen, GitCompare, Globe, SquareCode } from 'lucide-react'
 
 import {
+  canOpenInChrome,
   copyTextToClipboard,
   MenuRow,
   MenuSurface,
@@ -41,6 +42,7 @@ export function FileBrowserContextMenu({
   const exists = target.source === 'files' || entry?.status !== 'deleted'
   const canOpenLocally = Boolean(localPath && onLocalPath && exists)
   const isFile = target.kind === 'file'
+  const showChrome = canOpenLocally && canOpenInChrome(target.path, target.kind)
   const revealLabel = revealInFolderLabel()
   const canOpenDefaultEditor = canOpenLocally && isFile && revealLabel === 'Reveal in Finder'
   const openFolderLabel =
@@ -56,6 +58,7 @@ export function FileBrowserContextMenu({
     Number(Boolean(entry && target.source === 'files')) +
     (canOpenLocally ? 1 + editors.length + Number(isFile) : 0) +
     Number(canOpenDefaultEditor) +
+    Number(showChrome) +
     1 +
     Number(Boolean(localPath))
 
@@ -117,6 +120,13 @@ export function FileBrowserContextMenu({
             label={isFile ? 'Open in Default App' : openFolderLabel}
             onClick={() => runLocalAction('open')}
           />
+          {showChrome ? (
+            <MenuRow
+              icon={<Globe className={iconClassName} />}
+              label="Open in Chrome"
+              onClick={() => runLocalAction('open-with', 'chrome')}
+            />
+          ) : null}
           {canOpenDefaultEditor ? (
             <MenuRow
               icon={<SquareCode className={iconClassName} />}
