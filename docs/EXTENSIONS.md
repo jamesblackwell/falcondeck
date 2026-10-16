@@ -1034,7 +1034,8 @@ public extension SDK.
 ## Daemon-owned session thread tools
 
 The `falcondeck-extensions` bridge also advertises `falcondeck_list_threads`,
-`falcondeck_view_thread`, `falcondeck_message_thread`, and
+`falcondeck_view_thread`, `falcondeck_thread_summary`,
+`falcondeck_thread_changes`, `falcondeck_message_thread`, and
 `falcondeck_create_thread` beside the daemon-owned
 rename builtin. These require a calling thread and inherit its workspace. They
 are not extension-host APIs, control operations, or `threads:read` grants;
@@ -1062,6 +1063,23 @@ offset. Bodies preview at most 1200 characters; `item_id` expands one item,
 with `offset` / `next_offset` to retrieve the rest without rereading neighbours.
 Explicit item selection includes that kind regardless of the filters. Images
 are not inlined; diff bodies are omitted. No ConversationItem JSON is returned.
+
+View headers carry thread status and an `ATTENTION:` line for pending
+approvals, pending questions, waiting-for-input, or error. Item headings show
+the item timestamp. `role` (`user`/`assistant`) restricts a read to that role's
+messages; `preview_chars` (200–24000, default 1200) widens body previews.
+
+`falcondeck_thread_summary` digests 1–20 threads from the summary, the pending
+interactive request map, and items already in memory, scanning at most 2000
+newest items: last user request, last assistant outcome, files changed (file
+change items plus Edit/Write tools), commits (parsed from `git commit` output),
+and the latest tests/typecheck/autoreview command with its outcome. Unloaded
+threads report cached excerpts unless `hydrate: true`, which loads a 200-item
+native tail for up to five threads. `falcondeck_thread_changes` takes `since`
+(RFC 3339 or `90s`/`15m`/`2h`/`1d`), excludes the caller (and archived threads
+unless asked), and lists one delta line per thread, attention first. It never
+hydrates and returns an exact `Now` for the next window. Both are heuristics
+over the transcript, not git or CI state.
 
 `query` is case-insensitive literal text search, not a regular expression. It
 searches the original bodies of the selected kinds (including full tool output

@@ -5,6 +5,7 @@ use falcondeck_core::{ExtensionAgentTool, ExtensionToolResponse, ThreadOrigin};
 use serde::Deserialize;
 
 mod list;
+mod digest;
 mod read;
 mod actions;
 
@@ -14,11 +15,13 @@ const LIST: &str = "falcondeck_list_threads";
 const VIEW: &str = "falcondeck_view_thread";
 const CREATE: &str = "falcondeck_create_thread";
 const MESSAGE: &str = "falcondeck_message_thread";
+const SUMMARY: &str = "falcondeck_thread_summary";
+const CHANGES: &str = "falcondeck_thread_changes";
 const MAX_CHARS: usize = 24_000;
 const MAX_ITEMS: usize = 100;
 
 pub(super) fn is_builtin(name: &str) -> bool {
-    actions::is_action(name) || matches!(name, LIST | VIEW | CREATE | MESSAGE)
+    actions::is_action(name) || matches!(name, LIST | VIEW | CREATE | MESSAGE | SUMMARY | CHANGES)
 }
 
 pub(super) fn catalog() -> Vec<ExtensionAgentTool> {
@@ -33,8 +36,22 @@ pub(super) fn catalog() -> Vec<ExtensionAgentTool> {
             "include_reasoning": {"type":"boolean", "default":false},
             "query": {"type":"string", "minLength":1, "maxLength":256, "description":"Literal case-insensitive text search in selected item kinds; not a regular expression. Keep the same query and filters when paging."},
             "item_id": {"type":"string", "minLength":1, "description":"Expand one item from a previous read; cannot combine with before or query. Explicit selection includes its kind regardless of filters."},
-            "offset": {"type":"integer", "minimum":0, "description":"Character offset within the expanded item's body; only with item_id. Follow next_offset for more."}
+            "offset": {"type":"integer", "minimum":0, "description":"Character offset within the expanded item's body; only with item_id. Follow next_offset for more."},
+            "role": {"type":"string", "enum":["user","assistant"], "description":"Only this role's messages, newest last; tools and reasoning are excluded. role=assistant with limit=1 returns the final assistant message."},
+            "preview_chars": {"type":"integer", "minimum":200, "maximum":24000, "default":1200, "description":"Body characters per item before truncation (search excerpts stay 600)."}
         }), vec!["thread_id"]),
+        (SUMMARY, "Summarize threads", "Compact digest per thread: status, last activity, attention (pending approvals/questions), turn state, last user request, last assistant outcome, files changed, commits, tests/typecheck/autoreview runs, and errors. Reads summaries and already-loaded items; hydrate=true loads a bounded native tail for up to 5 unloaded threads. Only this workspace is accessible.", json!({
+            "thread_id": {"type":"string", "minLength":1},
+            "thread_ids": {"type":"array", "items":{"type":"string", "minLength":1}, "maxItems":20},
+            "hydrate": {"type":"boolean", "default":false},
+            "max_chars": {"type":"integer", "minimum":512, "maximum":24000, "default":8000}
+        }), vec![]),
+        (CHANGES, "Thread changes", "List this workspace's threads with activity since a time, one line each with a delta (messages, files, commits, checks, last reply). Threads waiting on approval or a question sort first and are flagged. Excludes the calling thread. Returns Now to pass as since next time. Does not hydrate transcripts.", json!({
+            "since": {"type":"string", "minLength":1, "description":"RFC 3339 timestamp or relative window: 90s, 15m, 2h, 1d."},
+            "limit": {"type":"integer", "minimum":1, "maximum":100, "default":30},
+            "include_archived": {"type":"boolean", "default":false},
+            "max_chars": {"type":"integer", "minimum":512, "maximum":24000, "default":6000}
+        }), vec!["since"]),
         (MESSAGE, "Message thread", "Send a message to an existing thread in this workspace, labelled with the sending thread. Defaults to steering its active turn, falling back to the queue when steering is unavailable; idle threads start a new turn. Use delivery=queue to wait for the active turn. Returns after admission, without waiting for a reply. Self-messaging is rejected; approvals remain in FalconDeck UI.", json!({
             "thread_id": {"type":"string", "minLength":1},
             "message": {"type":"string", "minLength":1, "maxLength":24000},
@@ -173,6 +190,12 @@ impl AppState {
                     .ok_or_else(|| DaemonError::BadRequest("thread_id is required".into()))?;
                 Ok(response(read::view(self, &workspace, target, &a).await?))
             }
+            SUMMARY => Ok(response(
+                digest::summary(self, &workspace, &args(arguments)?).await?,
+            )),
+            CHANGES => Ok(response(
+                digest::changes(self, &workspace, parent, &args(arguments)?).await?,
+            )),
             MESSAGE => {
                 let a: MessageArgs = args(arguments)?;
                 if a.thread_id.trim().is_empty()
@@ -398,6 +421,7 @@ mod tests {
     use super::*;
     use falcondeck_core::{ThreadAgentParams, ThreadAttention};
     use tempfile::tempdir;
+    mod digest_tests;
     mod model_settings_tests;
     pub(super) async fn fixture() -> (AppState, tempfile::TempDir) {
         let temp_dir = tempdir().unwrap();

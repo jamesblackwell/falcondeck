@@ -21,6 +21,15 @@ pub(super) struct ViewArgs {
     pub query: Option<String>,
     pub item_id: Option<String>,
     pub offset: Option<usize>,
+    pub role: Option<Role>,
+    pub preview_chars: Option<usize>,
+}
+
+#[derive(Deserialize, Clone, Copy, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub(super) enum Role {
+    User,
+    Assistant,
 }
 
 pub(super) async fn view(
@@ -45,6 +54,8 @@ pub(super) async fn view(
     if args.offset.is_some() {
         return Err(DaemonError::BadRequest("offset requires item_id".into()));
     }
+    let preview = args.preview_chars.unwrap_or(1200).clamp(200, MAX_CHARS);
+    let status = app.thread_status_lines(workspace, thread).await?;
     let query = args
         .query
         .as_deref()
@@ -61,7 +72,7 @@ pub(super) async fn view(
         })
         .transpose()?;
     let limit = args.limit.unwrap_or(DEFAULT_ITEMS).clamp(1, MAX_ITEMS);
-    let budget = cap.saturating_sub(400);
+    let budget = cap.saturating_sub(400 + status.chars().count());
     let mut sections = Vec::new();
     let mut used = 0;
     let mut scanned = 0;
@@ -123,24 +134,18 @@ pub(super) async fn view(
                 } else {
                     0
                 };
-                let section = excerpt(
-                    &heading,
-                    id,
-                    &body,
-                    offset,
-                    if query.is_some() { 600 } else { 1200 },
-                );
+                let at = Some(super::digest::item_created_at(item));
+                let length = if query.is_some() { 600 } else { preview };
+                let section = excerpt(&heading, id, at, &body, offset, length);
                 let size = section.chars().count() + 2;
                 if used + size > budget && !sections.is_empty() {
                     has_older = true;
                     break 'pages;
                 }
                 // Keep IDs and continuation offsets intact even when the first body fills the budget.
-                let overhead = excerpt(&heading, id, &body, offset, 0).chars().count() + 20;
-                let length = budget
-                    .saturating_sub(used + overhead + 2)
-                    .min(if query.is_some() { 600 } else { 1200 });
-                sections.push(excerpt(&heading, id, &body, offset, length));
+                let overhead = excerpt(&heading, id, at, &body, offset, 0).chars().count() + 20;
+                let length = budget.saturating_sub(used + overhead + 2).min(length);
+                sections.push(excerpt(&heading, id, at, &body, offset, length));
                 used += sections.last().map_or(0, |s| s.chars().count() + 2);
             }
             scanned += 1;
@@ -166,15 +171,19 @@ pub(super) async fn view(
     } else {
         "No older items.".into()
     };
-    let scope = format!(
-        "user/assistant{}{}",
-        if args.include_tools { ", activity" } else { "" },
-        if args.include_reasoning {
-            ", reasoning"
-        } else {
-            ""
-        }
-    );
+    let scope = match args.role {
+        Some(Role::User) => "user".into(),
+        Some(Role::Assistant) => "assistant".into(),
+        None => format!(
+            "user/assistant{}{}",
+            if args.include_tools { ", activity" } else { "" },
+            if args.include_reasoning {
+                ", reasoning"
+            } else {
+                ""
+            }
+        ),
+    };
     let empty = if sections.is_empty() {
         "No matching messages in scanned history.\n"
     } else {
@@ -182,7 +191,7 @@ pub(super) async fn view(
     };
     Ok(capped(
         &format!(
-            "# Thread {}\n\n{navigation}\nScope: {scope}. Shown {}; scanned {scanned} items.\nExpand with item_id; use offset for more body text.\n\n{empty}{}",
+            "# Thread {}\n\n{status}{navigation}\nScope: {scope}. Shown {}; scanned {scanned} items.\nExpand with item_id; use offset for more body text.\n\n{empty}{}",
             line(thread, 128),
             sections.len(),
             sections.join("\n\n")
@@ -192,6 +201,13 @@ pub(super) async fn view(
 }
 
 fn selected(item: &ConversationItem, args: &ViewArgs) -> bool {
+    if let Some(role) = args.role {
+        return match item {
+            ConversationItem::UserMessage { .. } => role == Role::User,
+            ConversationItem::AssistantMessage { .. } => role == Role::Assistant,
+            _ => false,
+        };
+    }
     match item {
         ConversationItem::UserMessage { .. } | ConversationItem::AssistantMessage { .. } => true,
         ConversationItem::Reasoning { .. } => args.include_reasoning,
@@ -489,13 +505,22 @@ fn web_search_body(search: &falcondeck_core::ConversationWebSearch) -> Cow<'_, s
     Cow::Owned(text)
 }
 
-fn excerpt(heading: &str, id: &str, body: &str, offset: usize, length: usize) -> String {
+fn excerpt(
+    heading: &str,
+    id: &str,
+    at: Option<chrono::DateTime<Utc>>,
+    body: &str,
+    offset: usize,
+    length: usize,
+) -> String {
     let text: String = body.chars().skip(offset).take(length).collect();
     let end = offset + text.chars().count();
     let more = body.chars().nth(end).is_some();
     format!(
-        "## {heading}\n\nId: {} | offset={offset}{}\n\n{}{text}{}",
+        "## {heading}\n\nId: {}{} | offset={offset}{}\n\n{}{text}{}",
         line(id, 128),
+        at.map(|at| format!(" | {}", super::digest::stamp(at)))
+            .unwrap_or_default(),
         if more {
             format!(" | next_offset={end}")
         } else {
@@ -521,6 +546,7 @@ fn expand(
     let section = excerpt(
         &heading,
         workspace_ops::conversation_item_id(item),
+        Some(super::digest::item_created_at(item)),
         &body,
         offset,
         cap.saturating_sub(400),

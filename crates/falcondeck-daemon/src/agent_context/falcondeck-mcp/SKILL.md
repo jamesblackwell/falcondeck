@@ -78,6 +78,21 @@ specific result, pass its `item_id` without query/before. Follow `next_offset`
 with `offset` (characters in the item body) to read more. This explicit selection
 includes the item's kind regardless of filters. Images and diff bodies are omitted.
 
+Items carry their timestamp beside the id, and each read starts with the
+thread's status and an `ATTENTION:` line when it waits on an approval, a user
+question, or has errored. `role: "assistant"` with `limit: 1` returns just the
+final assistant message; raise `preview_chars` (200–24000, default 1200) to read
+it whole.
+
+To oversee several threads, prefer `falcondeck_thread_summary` (`thread_id` or
+up to 20 `thread_ids`): status, attention, last activity, last request, last
+outcome, files changed, commits, test/typecheck/autoreview runs, and errors.
+It reads only loaded items; `hydrate: true` loads a bounded tail for up to 5
+unloaded threads. `falcondeck_thread_changes` with `since` (RFC 3339 or `15m`,
+`2h`, `1d`) lists threads active since then with a one-line delta, blocked
+threads first; pass its `Now:` value as the next `since`. Approvals and
+questions are answered only in the FalconDeck UI.
+
 Use `falcondeck_create_thread` for independent sibling work. The workspace is
 inherited. Optional arguments: `provider`, `isolation` (`project_folder`, the
 default, or `isolated`), `model`, and `prompt` (up to 24000 characters). Without
