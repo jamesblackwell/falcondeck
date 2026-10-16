@@ -14,6 +14,7 @@ import {
   SymbolIcon,
   Text,
 } from '@/components/ui'
+import { CHROME_MAX_FONT_SCALE } from '@/lib/glass'
 
 import { connectionState } from './ConnectionHeader'
 import { FloatingHeader } from './FloatingHeader'
@@ -77,11 +78,11 @@ export const ThreadHeader = memo(function ThreadHeader({
 
   const titleBody = (
     <View style={styles.titleText}>
-      <Text variant="label" size="sm" weight="semibold" color="primary" numberOfLines={1}>
+      <Text variant="label" size="sm" weight="semibold" color="primary" numberOfLines={1} maxFontSizeMultiplier={CHROME_MAX_FONT_SCALE}>
         {title}
       </Text>
       {subtitle ? (
-        <Text variant="caption" size="xs" color="muted" numberOfLines={1} style={styles.subtitle}>
+        <Text variant="caption" size="xs" color="muted" numberOfLines={1} maxFontSizeMultiplier={CHROME_MAX_FONT_SCALE} style={styles.subtitle}>
           {subtitle}
         </Text>
       ) : null}

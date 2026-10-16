@@ -12,6 +12,13 @@ import { requireOptionalNativeModule } from 'expo-modules-core'
  */
 export type GlassMode = 'liquid' | 'blur' | 'solid'
 
+/**
+ * How far Dynamic Type may grow a label inside fixed-height glass chrome
+ * (header capsules, toolbar chips, the dock). System bars cap their text the
+ * same way; past this the glyphs clip against the capsule.
+ */
+export const CHROME_MAX_FONT_SCALE = 1.2
+
 export type NativeGlassViewProps = ViewProps & {
   glassEffectStyle?: 'regular' | 'clear' | 'none'
   tintColor?: string

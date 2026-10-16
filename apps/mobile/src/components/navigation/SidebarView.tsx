@@ -70,6 +70,7 @@ import {
   SymbolIcon,
   SyncBanner,
 } from "@/components/ui";
+import { CHROME_MAX_FONT_SCALE } from "@/lib/glass";
 import {
   readStoredChatsCollapsed,
   writeStoredChatsCollapsed,
@@ -1013,7 +1014,7 @@ export const SidebarView = memo(function SidebarView({
       {/* The title stays even when there is nothing to close: it keeps the
           panel's top edge on the same line as the conversation header. */}
       <View style={styles.header}>
-        <Text variant="heading" size="2xl" weight="bold" color="primary" style={styles.headerTitle}>
+        <Text variant="heading" size="2xl" weight="bold" color="primary" maxFontSizeMultiplier={CHROME_MAX_FONT_SCALE} style={styles.headerTitle}>
           Tasks
         </Text>
         {onClose ? (
@@ -1160,6 +1161,7 @@ export const SidebarView = memo(function SidebarView({
                   size="md"
                   weight="semibold"
                   style={styles.floatingNewLabel}
+                  maxFontSizeMultiplier={CHROME_MAX_FONT_SCALE}
                 >
                   New
                 </Text>

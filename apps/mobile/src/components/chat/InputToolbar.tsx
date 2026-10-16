@@ -26,6 +26,7 @@ import {
   Text,
   type OptionSheetItem,
 } from '@/components/ui'
+import { CHROME_MAX_FONT_SCALE } from '@/lib/glass'
 import { triggerComposerSelectionHaptic } from '@/lib/haptics'
 
 import {
@@ -388,7 +389,7 @@ const Chip = memo(function Chip({
           color={theme.colors.fg.secondary}
         />
       ) : null}
-      <Text variant="caption" color="secondary" size="xs" weight="medium" numberOfLines={1} style={styles.chipLabel}>
+      <Text variant="caption" color="secondary" size="xs" weight="medium" numberOfLines={1} maxFontSizeMultiplier={CHROME_MAX_FONT_SCALE} style={styles.chipLabel}>
         {label}
       </Text>
       <SymbolIcon
@@ -444,6 +445,7 @@ const FastChip = memo(function FastChip({
       />
       {active ? (
         <Text
+          maxFontSizeMultiplier={CHROME_MAX_FONT_SCALE}
           variant="caption"
           color="primary"
           size="xs"

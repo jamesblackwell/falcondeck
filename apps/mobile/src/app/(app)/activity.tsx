@@ -13,6 +13,7 @@ import {
   type RecentEntry,
 } from '@falcondeck/client-core'
 import { ActivityDiamond, Button, EmptyState, GlassButton, SymbolIcon, SyncBanner, Text } from '@/components/ui'
+import { CHROME_MAX_FONT_SCALE } from '@/lib/glass'
 import { FloatingHeader } from '@/components/navigation/FloatingHeader'
 import { useSessionStore, useThrottledSnapshot } from '@/store'
 import { useSessionSyncStatus } from '@/hooks/useSessionSyncStatus'
@@ -131,8 +132,8 @@ export default function ActivityScreen() {
         }
         center={
           <View style={styles.headerTitle}>
-            <Text variant="heading" size="lg" weight="bold" numberOfLines={1}>Activity</Text>
-            <Text variant="meta" numberOfLines={1}>{remainingWorkspaces.length ? 'Activity from loaded tasks' : 'Across visible projects and chats'}</Text>
+            <Text variant="heading" size="lg" weight="bold" numberOfLines={1} maxFontSizeMultiplier={CHROME_MAX_FONT_SCALE}>Activity</Text>
+            <Text variant="meta" numberOfLines={1} maxFontSizeMultiplier={CHROME_MAX_FONT_SCALE}>{remainingWorkspaces.length ? 'Activity from loaded tasks' : 'Across visible projects and chats'}</Text>
           </View>
         }
       >

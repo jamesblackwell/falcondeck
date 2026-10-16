@@ -20,6 +20,7 @@ import {
   type AutomationEditorSubmit,
 } from '@/components/automations'
 import { Button, EmptyState, ErrorBanner, GlassButton, LoadingState, OptionSheet, SymbolIcon, Text } from '@/components/ui'
+import { CHROME_MAX_FONT_SCALE } from '@/lib/glass'
 import { FloatingHeader } from '@/components/navigation/FloatingHeader'
 import { subscribeToControlStateChanges } from '@/features/automations/control-events'
 import { useRelativeTimeTick } from '@/hooks/useRelativeTimeTick'
@@ -245,8 +246,8 @@ export default function AutomationsScreen() {
         }
         center={
           <View style={styles.headerCopy}>
-            <Text variant="heading" size="lg" weight="bold" numberOfLines={1}>Automations</Text>
-            <Text variant="meta" color="muted" numberOfLines={1}>{cachedStatus}</Text>
+            <Text variant="heading" size="lg" weight="bold" numberOfLines={1} maxFontSizeMultiplier={CHROME_MAX_FONT_SCALE}>Automations</Text>
+            <Text variant="meta" color="muted" numberOfLines={1} maxFontSizeMultiplier={CHROME_MAX_FONT_SCALE}>{cachedStatus}</Text>
           </View>
         }
         right={
