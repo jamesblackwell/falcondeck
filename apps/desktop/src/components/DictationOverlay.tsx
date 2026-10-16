@@ -246,12 +246,12 @@ export function DictationOverlay({
   };
   const postTranscriptActions = event.text && event.mode !== "rewrite" ? (
     <>
-      <Button type="button" size="sm" variant="secondary" disabled={actionPending} onClick={() => void runAction("open_dictation_dictionary")}>
-        <BookOpen aria-hidden="true" className="h-3.5 w-3.5" />
+      <Button type="button" size={expanded ? "default" : "sm"} variant="secondary" disabled={actionPending} onClick={() => void runAction("open_dictation_dictionary")}>
+        <BookOpen aria-hidden="true" className={expanded ? "h-4 w-4" : "h-3.5 w-3.5"} />
         Update dictionary
       </Button>
-      <Button type="button" size="sm" variant="secondary" disabled={actionPending} onClick={() => void runAction("fix_dictation_transcript", { original: event.text })}>
-        <WandSparkles aria-hidden="true" className="h-3.5 w-3.5" />
+      <Button type="button" size={expanded ? "default" : "sm"} variant="secondary" disabled={actionPending} onClick={() => void runAction("fix_dictation_transcript", { original: event.text })}>
+        <WandSparkles aria-hidden="true" className={expanded ? "h-4 w-4" : "h-3.5 w-3.5"} />
         {actionPending ? "Working…" : "Fix"}
       </Button>
     </>
