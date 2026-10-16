@@ -184,6 +184,10 @@ pub fn router(state: AppState) -> Router {
             get(list_workspace_skills),
         )
         .route(
+            "/api/workspaces/{workspace_id}/prompts",
+            get(list_workspace_prompts),
+        )
+        .route(
             "/api/workspaces/{workspace_id}/providers/{provider}/hydrate",
             post(hydrate_provider),
         )
@@ -712,6 +716,15 @@ async fn list_workspace_skills(
         skills: state
             .list_workspace_skills(&workspace_id, provider.as_ref())
             .await?,
+    }))
+}
+
+async fn list_workspace_prompts(
+    State(state): State<AppState>,
+    Path(workspace_id): Path<String>,
+) -> Result<Json<falcondeck_core::WorkspacePromptsResponse>, DaemonError> {
+    Ok(Json(falcondeck_core::WorkspacePromptsResponse {
+        prompts: state.list_workspace_prompts(&workspace_id).await?,
     }))
 }
 

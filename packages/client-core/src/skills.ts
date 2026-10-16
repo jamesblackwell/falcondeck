@@ -1,5 +1,6 @@
 import type {
   AgentProvider,
+  SavedPrompt,
   SelectedSkillReference,
   SkillSourceKind,
   SkillSummary,
@@ -109,7 +110,16 @@ export type RankedSkillSlashItem = RankedSlashBase & {
   skill: SkillSummary
 }
 
-export type RankedSlashItem = RankedNativeSlashItem | RankedSkillSlashItem
+export type RankedPromptSlashItem = RankedSlashBase & {
+  kind: 'prompt'
+  id: string
+  prompt: SavedPrompt
+}
+
+export type RankedSlashItem =
+  | RankedNativeSlashItem
+  | RankedPromptSlashItem
+  | RankedSkillSlashItem
 
 /** Short source labels for slash-menu badges. */
 export function slashSkillSourceLabel(kind: SkillSourceKind): string {
@@ -278,8 +288,24 @@ function rankedSkillItem(
   }
 }
 
+function rankedPromptItem(
+  prompt: SavedPrompt,
+  score: number,
+  match: SlashMatchSpan | null,
+): RankedPromptSlashItem {
+  return {
+    kind: 'prompt',
+    id: prompt.id,
+    prompt,
+    score,
+    match: mapAliasHighlight(prompt.alias, match),
+  }
+}
+
 function slashItemSortKey(item: RankedSlashItem): string {
-  return item.kind === 'skill' ? item.skill.alias : item.command.alias
+  if (item.kind === 'skill') return item.skill.alias
+  if (item.kind === 'prompt') return item.prompt.alias
+  return item.command.alias
 }
 
 /**
@@ -289,11 +315,13 @@ function slashItemSortKey(item: RankedSlashItem): string {
  */
 export function rankSlashSuggestions({
   skills,
+  prompts = [],
   provider,
   query,
   native = {},
 }: {
   skills: readonly SkillSummary[]
+  prompts?: readonly SavedPrompt[]
   provider: AgentProvider
   query: string
   native?: NativeSlashAvailability
@@ -303,10 +331,14 @@ export function rankSlashSuggestions({
     providerSupportsSkill(skill, provider),
   )
   const nativeIds = nativeSlashIds(native)
+  const savedPrompts = [...prompts].sort((left, right) =>
+    left.alias.localeCompare(right.alias),
+  )
 
   if (!needle) {
     return [
       ...nativeIds.map((id) => rankedNativeItem(id, 0, null)),
+      ...savedPrompts.map((prompt) => rankedPromptItem(prompt, 0, null)),
       ...[...supported]
         .sort((left, right) => left.alias.localeCompare(right.alias))
         .map((skill) => rankedSkillItem(skill, 0, null)),
@@ -318,6 +350,14 @@ export function rankSlashSuggestions({
     const command = NATIVE_SLASH_COMMAND_BY_ID[id]
     const scored = scoreSlashFields(needle, command)
     if (scored) ranked.push(rankedNativeItem(id, scored.score, scored.match))
+  }
+  for (const prompt of savedPrompts) {
+    const scored = scoreSlashFields(needle, {
+      alias: prompt.alias,
+      label: prompt.label,
+      description: prompt.description,
+    })
+    if (scored) ranked.push(rankedPromptItem(prompt, scored.score, scored.match))
   }
   for (const skill of supported) {
     const scored = scoreSlashFields(needle, {
@@ -413,9 +453,23 @@ export type ActiveSlashQuery = {
   rangeEnd: number
 }
 
-export function activeSlashQuery(value: string, caretIndex: number): ActiveSlashQuery | null {
+export function activeSlashQuery(
+  value: string,
+  caretIndex: number,
+  promptAliases?: readonly string[],
+): ActiveSlashQuery | null {
   if (caretIndex < 0 || caretIndex > value.length) return null
 
+  const direct = slashQueryAtCaret(value, caretIndex)
+  if (direct) return direct
+  // A saved prompt can take words after its name (`/save-prompt the login`).
+  // Skill mentions still close once the caret leaves the token, so Enter
+  // keeps sending that draft.
+  if (!promptAliases || promptAliases.length === 0) return null
+  return promptArgumentQuery(value, caretIndex, promptAliases)
+}
+
+function slashQueryAtCaret(value: string, caretIndex: number): ActiveSlashQuery | null {
   let start = caretIndex
   while (start > 0 && !/\s/.test(value[start - 1] ?? '')) {
     start -= 1
@@ -440,5 +494,66 @@ export function activeSlashQuery(value: string, caretIndex: number): ActiveSlash
     query: rest.length === 0 ? '' : canonicalSkillAlias(token).slice(1),
     rangeStart: start,
     rangeEnd,
+  }
+}
+
+/** Slash name on this line whose alias is a saved prompt, with the caret in its arguments. */
+function promptArgumentQuery(
+  value: string,
+  caretIndex: number,
+  promptAliases: readonly string[],
+): ActiveSlashQuery | null {
+  const aliases = new Set(promptAliases.map((alias) => canonicalSkillAlias(alias)))
+  const lineStart = value.lastIndexOf('\n', caretIndex - 1) + 1
+  let matchStart = -1
+  let matchEnd = -1
+  for (let index = lineStart; index < caretIndex; index += 1) {
+    if (value[index] !== '/') continue
+    if (index > lineStart && !/\s/.test(value[index - 1] ?? '')) continue
+    let end = index + 1
+    while (end < value.length && /[A-Za-z0-9_-]/.test(value[end] ?? '')) end += 1
+    if (value[end] === '/' || end === index + 1 || end > caretIndex) continue
+    const alias = canonicalSkillAlias(value.slice(index, end))
+    if (!aliases.has(alias)) continue
+    matchStart = index
+    matchEnd = end
+    index = end - 1
+  }
+  if (matchStart < 0) return null
+  return {
+    query: canonicalSkillAlias(value.slice(matchStart, matchEnd)).slice(1),
+    rangeStart: matchStart,
+    rangeEnd: matchEnd,
+  }
+}
+
+/**
+ * Fills `$ARGUMENTS` in a saved prompt. Text the user already typed after
+ * the slash name is the argument string. With no placeholder, that text is
+ * appended so it is not dropped on the floor.
+ */
+export function expandSavedPrompt(body: string, args: string): string {
+  const trimmedArgs = args.trim()
+  if (!body.includes('$ARGUMENTS')) {
+    if (!trimmedArgs) return body
+    const base = body.replace(/\s+$/, '')
+    return base.length > 0 ? `${base}\n\n${trimmedArgs}` : trimmedArgs
+  }
+  const expanded = body.replaceAll('$ARGUMENTS', trimmedArgs)
+  return trimmedArgs ? expanded : expanded.replace(/\s+$/g, '')
+}
+
+/** Replaces the slash token, and any arguments on its line, with the prompt body. */
+export function savedPromptInsertion(
+  value: string,
+  query: ActiveSlashQuery,
+  body: string,
+): { value: string; caret: number } {
+  let argEnd = query.rangeEnd
+  while (argEnd < value.length && value[argEnd] !== '\n') argEnd += 1
+  const expanded = expandSavedPrompt(body, value.slice(query.rangeEnd, argEnd))
+  return {
+    value: `${value.slice(0, query.rangeStart)}${expanded}${value.slice(argEnd)}`,
+    caret: query.rangeStart + expanded.length,
   }
 }

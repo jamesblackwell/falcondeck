@@ -32,6 +32,7 @@ pub(crate) mod opencode;
 pub mod opencode_conformance;
 #[cfg(unix)]
 mod process_limits;
+mod prompts;
 mod ship;
 mod skill_library;
 mod skills;

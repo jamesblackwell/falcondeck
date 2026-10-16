@@ -141,6 +141,42 @@ describe("createDaemonApiClient sendTurn", () => {
     );
   });
 
+  it("lists saved prompts without treating them as skills", async () => {
+    const fetchMock = vi.fn<typeof fetch>(
+      async () =>
+        new Response(
+          JSON.stringify({
+            prompts: [
+              {
+                id: "prompt:project:save-prompt",
+                label: "Save prompt",
+                alias: "/save-prompt",
+                description: "Review a diff",
+                body: "Review this diff.",
+                source_kind: "project_file",
+              },
+            ],
+          }),
+          { headers: { "content-type": "application/json" } },
+        ),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    const result = await createDaemonApiClient(
+      "http://daemon.test",
+    ).listWorkspacePrompts("ws-1");
+
+    expect(result).toEqual([
+      expect.objectContaining({
+        alias: "/save-prompt",
+        body: "Review this diff.",
+      }),
+    ]);
+    expect(fetchMock.mock.calls[0]?.[0]).toBe(
+      "http://daemon.test/api/workspaces/ws-1/prompts",
+    );
+  });
+
   it("creates a daemon-managed casual chat", async () => {
     const fetchMock = vi.fn<typeof fetch>(
       async () =>

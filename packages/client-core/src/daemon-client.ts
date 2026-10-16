@@ -36,6 +36,7 @@ import type {
   ConsumeProviderResetCreditRequest,
   ConsumeProviderResetCreditResponse,
   ProviderUsageOverview,
+  SavedPrompt,
   SelectedSkillReference,
   SkillSummary,
   TerminalListResponse,
@@ -77,6 +78,7 @@ import {
   normalizeHarnessesOverview,
   normalizeHarnessUpgradeJob,
   normalizePreferences,
+  normalizeSavedPrompts,
   normalizeSkillSummaries,
   normalizeThreadDetail,
   normalizeThreadHandle,
@@ -674,6 +676,19 @@ export function createDaemonApiClient(baseUrl: string) {
         ),
       );
       return normalizeSkillSummaries(payload.skills);
+    },
+    /**
+     * Live disk scan of saved prompts for the slash menu. The bodies stay
+     * out of the skill catalog, so a harness never receives them until the
+     * user inserts one into a turn.
+     */
+    async listWorkspacePrompts(workspaceId: string) {
+      const payload = await parseJson<{ prompts?: SavedPrompt[] }>(
+        await fetch(
+          `${baseUrl}/api/workspaces/${encodeURIComponent(workspaceId)}/prompts`,
+        ),
+      );
+      return normalizeSavedPrompts(payload.prompts);
     },
     /**
      * Warms a lazily-started provider's model catalog because the user

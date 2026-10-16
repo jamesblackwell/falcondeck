@@ -249,6 +249,7 @@ fn remote_rpc_is_read_only(method: &str) -> bool {
             | "workspace.file.read"
             | "workspace.icon"
             | "workspace.skills"
+            | "workspace.prompts"
             | "git.status"
             | "git.diff"
             | "connectors.read"
@@ -320,6 +321,7 @@ pub(super) const REMOTE_RPC_METHODS: &[&str] = &[
     "workspace.close",
     "provider.hydrate",
     "workspace.skills",
+    "workspace.prompts",
     "workspace.files",
     "workspace.file.read",
     "workspace.file.write",
@@ -1753,6 +1755,18 @@ impl AppState {
                         .and_then(|skills| {
                             serde_json::to_value(falcondeck_core::WorkspaceSkillsResponse {
                                 skills,
+                            })
+                            .map_err(DaemonError::from)
+                        })
+                        .map_err(|error| error.to_string())
+                }
+                "workspace.prompts" => {
+                    let workspace_id = required(&["workspaceId", "workspace_id"])?;
+                    self.list_workspace_prompts(&workspace_id)
+                        .await
+                        .and_then(|prompts| {
+                            serde_json::to_value(falcondeck_core::WorkspacePromptsResponse {
+                                prompts,
                             })
                             .map_err(DaemonError::from)
                         })

@@ -15,12 +15,12 @@ use falcondeck_core::{
     EventEnvelope, ExtensionActionResponse, ExtensionSnapshot, ExtensionSummary,
     FalconDeckPreferences, ForkThreadRequest, HealthResponse, InteractiveRequest,
     InteractiveRequestKind, InteractiveResponsePayload, InvokeExtensionActionRequest,
-    OperationalCondition, PairingPublicKeyBundle, RemoteConnectionStatus, SendTurnRequest,
-    ServiceLevel, ServiceNotice, SkillSummary, SnapshotRequest, StartReviewRequest,
-    StartThreadRequest, TextDeltaTarget, ThreadAgentParams, ThreadAttention, ThreadDetail,
-    ThreadDetailRequest, ThreadHandle, ThreadPlan, ThreadStatus, ThreadSummary, ThreadTokenUsage,
-    UnifiedEvent, UpdatePreferencesRequest, UpdateScheduledTaskRequest, UpdateThreadRequest,
-    WorkspaceAgentSummary, WorkspaceStatus, WorkspaceSummary,
+    OperationalCondition, PairingPublicKeyBundle, RemoteConnectionStatus, SavedPrompt,
+    SendTurnRequest, ServiceLevel, ServiceNotice, SkillSummary, SnapshotRequest,
+    StartReviewRequest, StartThreadRequest, TextDeltaTarget, ThreadAgentParams, ThreadAttention,
+    ThreadDetail, ThreadDetailRequest, ThreadHandle, ThreadPlan, ThreadStatus, ThreadSummary,
+    ThreadTokenUsage, UnifiedEvent, UpdatePreferencesRequest, UpdateScheduledTaskRequest,
+    UpdateThreadRequest, WorkspaceAgentSummary, WorkspaceStatus, WorkspaceSummary,
     control::{AgentControlSettings, ControlGetRequest, ControlSearchRequest, ControlStateChanged},
     crypto::LocalBoxKeyPair,
 };
@@ -95,9 +95,9 @@ mod harness_user_text;
 pub(crate) mod host_provisioning;
 mod notifications;
 mod opencode_threads;
+mod project_folders;
 mod provider_runtime;
 mod provider_usage;
-mod project_folders;
 mod remote_bridge;
 mod remote_lifecycle;
 mod rewrite_models;
@@ -3246,7 +3246,9 @@ impl AppState {
     ) -> Result<FalconDeckPreferences, DaemonError> {
         let moved_thread = if let Some(mutation) = &request.project_folder {
             self.validate_project_folder_mutation(mutation).await?;
-            if let falcondeck_core::ProjectFolderAction::MoveThread { thread_id, .. } = &mutation.action {
+            if let falcondeck_core::ProjectFolderAction::MoveThread { thread_id, .. } =
+                &mutation.action
+            {
                 Some((mutation.workspace_id.clone(), thread_id.clone()))
             } else {
                 None
@@ -3848,6 +3850,13 @@ impl AppState {
         provider: Option<&AgentProvider>,
     ) -> Result<Vec<SkillSummary>, DaemonError> {
         workspace_ops::list_workspace_skills(self, workspace_id, provider).await
+    }
+
+    pub async fn list_workspace_prompts(
+        &self,
+        workspace_id: &str,
+    ) -> Result<Vec<SavedPrompt>, DaemonError> {
+        workspace_ops::list_workspace_prompts(self, workspace_id).await
     }
 
     pub async fn thread_detail(

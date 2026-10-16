@@ -269,6 +269,7 @@ export default function HomeScreen() {
     loadThreadDetail,
     retryResponse,
     loadWorkspaceSkills,
+    loadWorkspacePrompts,
     handoffToProvider,
     handoffPending,
   } = useSessionActions();
@@ -1589,6 +1590,7 @@ export default function HomeScreen() {
             attachments={attachments}
             skills={workspace?.skills ?? []}
             loadSkills={loadWorkspaceSkills}
+            loadPrompts={loadWorkspacePrompts}
             // An empty catalog after sync is an empty state, not an active load.
             modelsLoading={isSyncing && effectiveModels.length === 0}
             models={effectiveModels}

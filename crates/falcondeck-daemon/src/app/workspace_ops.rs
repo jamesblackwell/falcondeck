@@ -4723,6 +4723,25 @@ pub(super) async fn list_workspace_skills(
     })
 }
 
+/// Disk scan of saved prompts. The result stays off the workspace snapshot
+/// and off every agent skill list, so opening the slash menu cannot push
+/// prompt text into a harness context.
+pub(super) async fn list_workspace_prompts(
+    app: &AppState,
+    workspace_id: &str,
+) -> Result<Vec<SavedPrompt>, DaemonError> {
+    let path = {
+        let workspaces = app.inner.workspaces.lock().await;
+        workspaces
+            .get(workspace_id)
+            .ok_or_else(|| DaemonError::NotFound("workspace not found".to_string()))?
+            .summary
+            .path
+            .clone()
+    };
+    Ok(crate::prompts::discover_saved_prompts(&path))
+}
+
 pub(super) async fn collaboration_modes(
     app: &AppState,
     workspace_id: &str,

@@ -90,7 +90,7 @@ describe("SlashCommandMenu", () => {
       />,
     );
     expect(
-      screen.getByText(/No commands or skills match/),
+      screen.getByText(/No commands, prompts, or skills match/),
     ).toBeInTheDocument();
     expect(screen.getByText("/zzzz", { exact: false })).toBeInTheDocument();
   });

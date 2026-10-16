@@ -790,8 +790,40 @@ describe("PromptInput", () => {
     textarea.setSelectionRange(1, 1);
     fireEvent.click(textarea);
 
-    const emptyState = screen.getByText(/No commands or skills yet/);
+    const emptyState = screen.getByText(/No commands, prompts, or skills yet/);
     expect(emptyState.parentElement).toHaveClass("absolute", "bottom-full");
+  });
+
+  it("inserts a saved prompt body instead of a skill alias", () => {
+    const onValueChange = vi.fn();
+    render(
+      <PromptInput
+        {...promptInputProps}
+        value="/save-prompt the login"
+        onValueChange={onValueChange}
+        prompts={[
+          {
+            id: "prompt:save-prompt",
+            label: "Save prompt",
+            alias: "/save-prompt",
+            description: "Review a diff",
+            body: "Review this diff.\n\n$ARGUMENTS",
+            source_kind: "project_file",
+          },
+        ]}
+      />,
+    );
+    const textarea = screen.getByPlaceholderText(
+      "Ask anything",
+    ) as HTMLTextAreaElement;
+    const typed = "/save-prompt the login";
+    textarea.setSelectionRange(typed.length, typed.length);
+    fireEvent.click(textarea);
+
+    const command = screen.getByRole("option", { name: /save-prompt/i });
+    expect(command).toHaveTextContent(/prompt/i);
+    fireEvent.mouseDown(command);
+    expect(onValueChange).toHaveBeenCalledWith("Review this diff.\n\nthe login");
   });
 
   it("offers the native compact command and completes its alias", () => {

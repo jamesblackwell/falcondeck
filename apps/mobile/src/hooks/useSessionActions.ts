@@ -14,6 +14,7 @@ import {
   draftKeyFor,
   imageAttachmentSendBlockReason,
   composerSkillCatalog,
+  normalizeSavedPrompts,
   normalizeSkillSummaries,
   selectedSkillsFromText,
   serviceTierForTurn,
@@ -27,6 +28,7 @@ import type {
   ConversationItem,
   InteractiveResponsePayload,
   LiveSkillCatalog,
+  SavedPrompt,
   SkillSummary,
   ThreadDetail,
   ThreadHandle,
@@ -1025,10 +1027,30 @@ export function useSessionActions() {
     }
   }, []);
 
+  const loadWorkspacePrompts = useCallback(async () => {
+    const relay = useRelayStore.getState();
+    const session = useSessionStore.getState();
+    const workspace = session.snapshot?.workspaces.find(
+      (entry) => entry.id === session.selectedWorkspaceId,
+    );
+    if (!workspace) return [];
+    try {
+      const payload = await relay._callRpc<{ prompts?: SavedPrompt[] }>(
+        "workspace.prompts",
+        { workspace_id: workspace.id },
+        { requestIdPrefix: "mobile-prompts" },
+      );
+      return normalizeSavedPrompts(payload.prompts);
+    } catch {
+      return [];
+    }
+  }, []);
+
   return {
     startThread,
     submitTurn,
     loadWorkspaceSkills,
+    loadWorkspacePrompts,
     respondApproval,
     respondInteractive,
     loadThreadDetail,

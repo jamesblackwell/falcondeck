@@ -205,6 +205,9 @@ export async function handleDemoRpc<T>(
     case 'workspace.skills':
       return { skills: [] } as T
 
+    case 'workspace.prompts':
+      return { prompts: [] } as T
+
     case 'workspace.icon':
       return { kind: 'folder' } as T
 

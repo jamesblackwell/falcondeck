@@ -27,7 +27,7 @@ import Animated, {
   withTiming,
 } from 'react-native-reanimated'
 import { StyleSheet, useUnistyles } from 'react-native-unistyles'
-import { BookOpen, ChevronUp, Mic, Plus, Send, Square, Target } from 'lucide-react-native'
+import { ArrowUp, BookOpen, ChevronUp, Mic, Plus, Square, Target } from 'lucide-react-native'
 import { useSafeAreaInsets } from 'react-native-safe-area-context'
 import * as Haptics from 'expo-haptics'
 
@@ -36,6 +36,7 @@ import {
   insertTranscript,
   NO_AGENT_CAPABILITIES,
   rankSlashSuggestions,
+  savedPromptInsertion,
   slashSkillSourceLabel,
   type ActiveSlashQuery,
   type AgentCapabilitySummary,
@@ -46,14 +47,17 @@ import {
   type ModelSummary,
   type ProviderOption,
   type RankedSlashItem,
+  type SavedPrompt,
   type SkillSummary,
 } from '@falcondeck/client-core'
 
 import {
+  GlassButton,
   GlassSurface,
-  glassEdge,
   glassFill,
+  glassFillStrong,
   OptionSheet,
+  SymbolIcon,
   Text,
   type OptionSheetItem,
 } from '@/components/ui'
@@ -101,6 +105,8 @@ interface ChatInputProps {
   attachments: ImageInput[]
   skills: SkillSummary[]
   loadSkills?: (provider: AgentProvider) => Promise<SkillSummary[]>
+  prompts?: SavedPrompt[]
+  loadPrompts?: () => Promise<SavedPrompt[]>
   models: ModelSummary[]
   selectedModel: string | null
   selectedEffort: string | null
@@ -142,7 +148,7 @@ interface ChatInputProps {
   textInputRef?: RefObject<TextInput | null>
 }
 
-const MIN_INPUT_HEIGHT = 48
+const MIN_INPUT_HEIGHT = 44
 const MAX_INPUT_HEIGHT = 320
 // A tall draft (plus attachment previews and the footer) can grow the card
 // past the space left above the keyboard; once the message list has shrunk
@@ -227,7 +233,9 @@ function useEmptyComposerCollapse(isEmpty: boolean) {
 /* eslint-enable react-hooks/immutability */
 
 // Painted size of the attach/send buttons; hitSlop lifts them to 44pt.
-const CONTROL_SIZE = 40
+const CONTROL_SIZE = 36
+/** The composer card's corner: a capsule at one line, a soft card when tall. */
+const COMPOSER_RADIUS = 26
 const DEFAULT_PROVIDER_OPTIONS: ProviderOption[] = [
   { provider: 'codex', label: 'Codex' },
   { provider: 'claude', label: 'Claude' },
@@ -250,6 +258,8 @@ export const ChatInput = memo(function ChatInput({
   attachments,
   skills,
   loadSkills,
+  prompts = [],
+  loadPrompts,
   models,
   selectedModel,
   selectedEffort,
@@ -318,10 +328,15 @@ export const ChatInput = memo(function ChatInput({
   } | null>(null)
   const [slashQuery, setSlashQuery] = useState<ActiveSlashQuery | null>(null)
   const [liveSkills, setLiveSkills] = useState<SkillSummary[] | null>(null)
+  const [livePrompts, setLivePrompts] = useState<SavedPrompt[] | null>(null)
   const loadSkillsRef = useRef(loadSkills)
+  const loadPromptsRef = useRef(loadPrompts)
   useEffect(() => {
     loadSkillsRef.current = loadSkills
   }, [loadSkills])
+  useEffect(() => {
+    loadPromptsRef.current = loadPrompts
+  }, [loadPrompts])
   const [voiceProvider, setVoiceProvider] = useState<SpeechProvider | null>(
     null,
   )
@@ -370,10 +385,36 @@ export const ChatInput = memo(function ChatInput({
     }
   }, [selectedProvider, slashOpen])
 
+  useEffect(() => {
+    if (!slashOpen) return
+    const load = loadPromptsRef.current
+    if (!load) {
+      setLivePrompts(null)
+      return
+    }
+    let cancelled = false
+    void load().then(
+      (next) => {
+        if (!cancelled) setLivePrompts(next)
+      },
+      () => {
+        if (!cancelled) setLivePrompts(null)
+      },
+    )
+    return () => {
+      cancelled = true
+    }
+  }, [slashOpen])
+
+  const promptAliases = useMemo(
+    () => (livePrompts ?? prompts).map((prompt) => prompt.alias),
+    [livePrompts, prompts],
+  )
   const slashItems = useMemo(
     () =>
       rankSlashSuggestions({
         skills: liveSkills ?? skills,
+        prompts: livePrompts ?? prompts,
         provider: selectedProvider,
         query: slashQuery?.query ?? '',
         native: {
@@ -384,7 +425,9 @@ export const ChatInput = memo(function ChatInput({
     [
       capabilities.supports_goals,
       compactCommandAvailable,
+      livePrompts,
       liveSkills,
+      prompts,
       onGoalCommand,
       selectedProvider,
       skills,
@@ -399,9 +442,9 @@ export const ChatInput = memo(function ChatInput({
         return
       }
 
-      setSlashQuery(activeSlashQuery(nextValue, caretIndex))
+      setSlashQuery(activeSlashQuery(nextValue, caretIndex, promptAliases))
     },
-    [disabled],
+    [disabled, promptAliases],
   )
 
   useEffect(() => {
@@ -526,13 +569,34 @@ export const ChatInput = memo(function ChatInput({
     [onChangeText, value],
   )
 
+  const handleInsertPrompt = useCallback(
+    (body: string) => {
+      if (!slashQuery) return
+      triggerComposerSelectionHaptic()
+      const next = savedPromptInsertion(value, slashQuery, body)
+      pendingEditRef.current = {
+        from: value,
+        value: next.value,
+        start: next.caret,
+        end: next.caret,
+        submit: false,
+      }
+      onChangeText(next.value)
+      setSlashQuery(null)
+    },
+    [onChangeText, slashQuery, value],
+  )
+
   const handleInsertSkill = useCallback(
     (alias: string) => {
       if (!slashQuery) return
       triggerComposerSelectionHaptic()
 
-      const nextValue = `${value.slice(0, slashQuery.rangeStart)}${alias} ${value.slice(slashQuery.rangeEnd)}`
-      const nextCaret = slashQuery.rangeStart + alias.length + 1
+      const rest = value.slice(slashQuery.rangeEnd)
+      const insertion = /^\s/.test(rest) ? alias : `${alias} `
+      const nextValue = `${value.slice(0, slashQuery.rangeStart)}${insertion}${rest}`
+      const nextCaret =
+        slashQuery.rangeStart + insertion.length + (rest.startsWith(' ') ? 1 : 0)
 
       pendingEditRef.current = {
         from: value,
@@ -566,6 +630,10 @@ export const ChatInput = memo(function ChatInput({
 
   const handleSlashItem = useCallback(
     (item: RankedSlashItem) => {
+      if (item.kind === 'prompt') {
+        handleInsertPrompt(item.prompt.body)
+        return
+      }
       if (item.kind === 'skill') {
         handleInsertSkill(item.skill.alias)
         return
@@ -578,7 +646,7 @@ export const ChatInput = memo(function ChatInput({
         handleInsertSkill(item.command.alias)
       }
     },
-    [handleGoalCommand, handleInsertSkill],
+    [handleGoalCommand, handleInsertPrompt, handleInsertSkill],
   )
 
   const canSend = hasContent && !disabled && !sendDisabled
@@ -673,10 +741,11 @@ export const ChatInput = memo(function ChatInput({
   return (
     <View style={styles.container}>
       <GlassSurface
-        radius={theme.radius['2xl']}
+        radius={COMPOSER_RADIUS}
         intensity={70}
         highlight={false}
         contentStyle={styles.composer}
+        testID="composer-card"
       >
         {attachments.length > 0 ? (
           <View style={styles.attachmentSection}>
@@ -730,6 +799,7 @@ export const ChatInput = memo(function ChatInput({
             placeholder={placeholder}
             placeholderTextColor={theme.colors.fg.muted}
             selectionColor={theme.colors.accent.default}
+            keyboardAppearance={theme.isDark ? 'dark' : 'light'}
             multiline
             maxLength={100_000}
             editable={!disabled}
@@ -751,7 +821,13 @@ export const ChatInput = memo(function ChatInput({
               <Text variant="caption" size="xs" color="secondary" weight="medium">
                 Expand
               </Text>
-              <ChevronUp size={theme.iconSize.xs} color={theme.colors.fg.secondary} />
+              <SymbolIcon
+                name="arrow.up.left.and.arrow.down.right"
+                fallback={ChevronUp}
+                size={theme.iconSize.xs - 2}
+                weight="semibold"
+                color={theme.colors.fg.secondary}
+              />
             </Pressable>
           </View>
         ) : null}
@@ -764,18 +840,24 @@ export const ChatInput = memo(function ChatInput({
                   return (
                     <Pressable
                       key={item.id}
-                      style={[
+                      style={({ pressed }) => [
                         styles.skillItem,
+                        styles.skillItemRow,
                         lastItem && styles.skillItemLast,
+                        pressed && styles.skillItemPressed,
                       ]}
                       onPress={() => handleSlashItem(item)}
                       accessibilityRole="button"
                       accessibilityLabel="Set a goal"
                     >
-                      <Target
-                        size={theme.iconSize.sm}
-                        color={theme.colors.fg.muted}
-                      />
+                      <View style={styles.skillGlyph}>
+                        <SymbolIcon
+                          name="target"
+                          fallback={Target}
+                          size={theme.iconSize.sm}
+                          color={theme.colors.accent.default}
+                        />
+                      </View>
                       <View style={styles.skillItemBody}>
                         <Text color="primary" size="sm" weight="medium">
                           Goal
@@ -791,20 +873,29 @@ export const ChatInput = memo(function ChatInput({
                   return (
                     <Pressable
                       key={item.id}
-                      style={[
+                      style={({ pressed }) => [
                         styles.skillItem,
+                        styles.skillItemRow,
                         lastItem && styles.skillItemLast,
+                        pressed && styles.skillItemPressed,
                       ]}
                       onPress={() => handleSlashItem(item)}
                       accessibilityRole="button"
                       accessibilityLabel="Compact conversation context"
                     >
-                      <BookOpen
-                        size={theme.iconSize.sm}
-                        color={theme.colors.fg.muted}
-                      />
+                      <View style={styles.skillGlyph}>
+                        <SymbolIcon
+                          name="rectangle.compress.vertical"
+                          fallback={BookOpen}
+                          size={theme.iconSize.sm}
+                          color={theme.colors.fg.secondary}
+                        />
+                      </View>
                       <View style={styles.skillItemBody}>
                         <View style={styles.skillHeading}>
+                          <Text color="primary" size="sm" weight="medium">
+                            Compact context
+                          </Text>
                           <View style={styles.skillAliasPill}>
                             <Text
                               variant="caption"
@@ -815,32 +906,43 @@ export const ChatInput = memo(function ChatInput({
                               {item.command.alias}
                             </Text>
                           </View>
-                          <Text variant="caption" size="2xs" color="muted">
-                            Harness
-                          </Text>
                         </View>
-                        <Text color="primary" size="sm" weight="medium">
-                          Compact context
-                        </Text>
                         <Text variant="caption" color="secondary" size="xs">
                           {item.command.description}
+                        </Text>
+                        <Text variant="caption" size="2xs" color="muted">
+                          Harness
                         </Text>
                       </View>
                     </Pressable>
                   )
                 }
-                if (item.kind !== 'skill') return null
+                if (item.kind !== 'skill' && item.kind !== 'prompt') return null
+                const label = item.kind === 'prompt' ? item.prompt.label : item.skill.label
+                const alias = item.kind === 'prompt' ? item.prompt.alias : item.skill.alias
+                const description =
+                  item.kind === 'prompt'
+                    ? (item.prompt.description ?? item.prompt.argument_hint)
+                    : item.skill.description
+                const source =
+                  item.kind === 'prompt'
+                    ? 'Prompt'
+                    : slashSkillSourceLabel(item.skill.source_kind)
                 return (
                   <Pressable
                     key={item.id}
-                    style={[
+                    style={({ pressed }) => [
                       styles.skillItem,
                       lastItem && styles.skillItemLast,
+                      pressed && styles.skillItemPressed,
                     ]}
                     onPress={() => handleSlashItem(item)}
                   >
                     <View style={styles.skillItemBody}>
                       <View style={styles.skillHeading}>
+                        <Text color="primary" size="sm" weight="medium" style={styles.skillLabel} numberOfLines={1}>
+                          {label}
+                        </Text>
                         <View style={styles.skillAliasPill}>
                           <Text
                             variant="caption"
@@ -848,21 +950,18 @@ export const ChatInput = memo(function ChatInput({
                             color="secondary"
                             weight="semibold"
                           >
-                            {item.skill.alias}
+                            {alias}
                           </Text>
                         </View>
-                        <Text variant="caption" size="2xs" color="muted">
-                          {slashSkillSourceLabel(item.skill.source_kind)}
-                        </Text>
                       </View>
-                      <Text color="primary" size="sm" weight="medium">
-                        {item.skill.label}
-                      </Text>
-                      {item.skill.description ? (
-                        <Text variant="caption" color="secondary" size="xs">
-                          {item.skill.description}
+                      {description ? (
+                        <Text variant="caption" color="secondary" size="xs" numberOfLines={2}>
+                          {description}
                         </Text>
                       ) : null}
+                      <Text variant="caption" size="2xs" color="muted">
+                        {source}
+                      </Text>
                     </View>
                   </Pressable>
                 )
@@ -871,8 +970,8 @@ export const ChatInput = memo(function ChatInput({
               <View style={styles.skillEmpty}>
                 <Text variant="caption" color="muted">
                   {slashQuery.query
-                    ? `No commands or skills match /${slashQuery.query}`
-                    : 'No commands or skills yet'}
+                    ? `No commands, prompts, or skills match /${slashQuery.query}`
+                    : 'No commands, prompts, or skills yet'}
                 </Text>
               </View>
             )}
@@ -905,8 +1004,9 @@ export const ChatInput = memo(function ChatInput({
           <View style={styles.footerControls}>
             {moreItems.length > 0 ? (
               <Pressable
-                style={[
+                style={({ pressed }) => [
                   styles.attachButton,
+                  pressed && !disabled ? styles.controlPressed : null,
                   disabled ? styles.attachButtonDisabled : null,
                 ]}
                 onPress={() => {
@@ -919,11 +1019,12 @@ export const ChatInput = memo(function ChatInput({
                 accessibilityState={{ disabled: Boolean(disabled) }}
                 hitSlop={(theme.minTouchTarget - CONTROL_SIZE) / 2}
               >
-                <Plus
-                  size={theme.iconSize.md}
-                  color={
-                    disabled ? theme.colors.fg.faint : theme.colors.fg.muted
-                  }
+                <SymbolIcon
+                  name="plus"
+                  fallback={Plus}
+                  size={18}
+                  weight="medium"
+                  color={disabled ? theme.colors.fg.faint : theme.colors.fg.secondary}
                 />
               </Pressable>
             ) : null}
@@ -957,8 +1058,9 @@ export const ChatInput = memo(function ChatInput({
           </View>
           <View style={styles.footerActions}>
             <Pressable
-              style={[
-                styles.sendButton,
+              style={({ pressed }) => [
+                styles.micButton,
+                pressed && !disabled ? styles.controlPressed : null,
                 disabled ? styles.micButtonDisabled : null,
               ]}
               onPressIn={handleMicPressIn}
@@ -970,21 +1072,17 @@ export const ChatInput = memo(function ChatInput({
               accessibilityState={{ disabled: Boolean(disabled) }}
               hitSlop={(theme.minTouchTarget - CONTROL_SIZE) / 2}
             >
-              <Mic
-                size={theme.iconSize.md}
-                color={
-                  disabled ? theme.colors.fg.faint : theme.colors.fg.secondary
-                }
+              <SymbolIcon
+                name="mic"
+                fallback={Mic}
+                size={19}
+                color={disabled ? theme.colors.fg.faint : theme.colors.fg.secondary}
               />
             </Pressable>
-            <Pressable
-              style={[
-                styles.sendButton,
-                canUsePrimary ? styles.sendActive : styles.sendInactive,
-              ]}
-              onPress={showStop ? handleStop : handleSubmit}
+            <ComposerPrimaryButton
+              mode={showStop ? 'stop' : 'send'}
               disabled={!canUsePrimary}
-              accessibilityRole="button"
+              onPress={showStop ? handleStop : handleSubmit}
               accessibilityLabel={
                 showStop
                   ? isStopping
@@ -993,28 +1091,7 @@ export const ChatInput = memo(function ChatInput({
                   : 'Send message'
               }
               accessibilityHint={sendDisabled ? sendDisabledReason : undefined}
-              accessibilityState={{ disabled: !canUsePrimary }}
-              hitSlop={(theme.minTouchTarget - CONTROL_SIZE) / 2}
-            >
-              {showStop ? (
-                <Square
-                  size={theme.iconSize.md - 4}
-                  color={
-                    canStop ? theme.colors.surface[0] : theme.colors.fg.faint
-                  }
-                  fill={
-                    canStop ? theme.colors.surface[0] : theme.colors.fg.faint
-                  }
-                />
-              ) : (
-                <Send
-                  size={theme.iconSize.md}
-                  color={
-                    canSend ? theme.colors.surface[0] : theme.colors.fg.faint
-                  }
-                />
-              )}
-            </Pressable>
+            />
           </View>
         </View>
         )}
@@ -1106,18 +1183,17 @@ export const ChatInput = memo(function ChatInput({
             accessibilityViewIsModal
           >
             <View style={styles.editorHeader}>
-              <View>
-                <Text variant="heading" size="md" weight="semibold">Edit prompt</Text>
+              <View style={styles.editorTitle}>
+                <Text variant="label" size="md" weight="semibold">Edit prompt</Text>
                 <Text variant="caption" size="xs" color="muted">Draft saved automatically</Text>
               </View>
-              <Pressable
-                style={styles.editorDone}
+              <GlassButton
+                shape="pill"
                 onPress={() => setIsExpanded(false)}
-                accessibilityRole="button"
                 accessibilityLabel="Done editing prompt"
               >
-                <Text variant="label" size="sm" color="accent">Done</Text>
-              </Pressable>
+                <Text variant="label" size="sm" weight="semibold" color="primary">Done</Text>
+              </GlassButton>
             </View>
             <TextInput
               ref={expandedInputRef}
@@ -1131,6 +1207,7 @@ export const ChatInput = memo(function ChatInput({
               }}
               accessibilityLabel="Expanded prompt"
               selectionColor={theme.colors.accent.default}
+              keyboardAppearance={theme.isDark ? 'dark' : 'light'}
               placeholder={placeholder}
               placeholderTextColor={theme.colors.fg.muted}
               multiline
@@ -1143,7 +1220,11 @@ export const ChatInput = memo(function ChatInput({
                 {sendDisabled && sendDisabledReason ? sendDisabledReason : 'Your draft stays in this conversation'}
               </Text>
               <Pressable
-                style={[styles.editorSend, canSend ? styles.sendActive : styles.sendInactive]}
+                style={({ pressed }) => [
+                  styles.editorSend,
+                  canSend ? styles.sendActive : styles.editorSendInactive,
+                  pressed && canSend ? styles.sendPressed : null,
+                ]}
                 onPress={() => {
                   setIsExpanded(false)
                   handleSubmit()
@@ -1153,7 +1234,13 @@ export const ChatInput = memo(function ChatInput({
                 accessibilityLabel="Send prompt"
                 accessibilityState={{ disabled: !canSend }}
               >
-                <Send size={theme.iconSize.sm} color={canSend ? theme.colors.surface[0] : theme.colors.fg.faint} />
+                <SymbolIcon
+                  name="arrow.up"
+                  fallback={ArrowUp}
+                  size={15}
+                  weight="bold"
+                  color={canSend ? theme.colors.surface[0] : theme.colors.fg.faint}
+                />
                 <Text variant="label" size="sm" weight="semibold" style={{ color: canSend ? theme.colors.surface[0] : theme.colors.fg.faint }}>
                   Send
                 </Text>
@@ -1166,23 +1253,85 @@ export const ChatInput = memo(function ChatInput({
   )
 })
 
+interface ComposerPrimaryButtonProps {
+  mode: 'send' | 'stop'
+  disabled: boolean
+  onPress: () => void
+  accessibilityLabel: string
+  accessibilityHint?: string
+}
+
+/**
+ * Send, or Stop while a turn runs with nothing drafted. The filled disc
+ * grows in as soon as there is something to send, so the button's state
+ * reads at a glance without hunting for a greyed-out icon.
+ */
+const ComposerPrimaryButton = memo(function ComposerPrimaryButton({
+  mode,
+  disabled,
+  onPress,
+  accessibilityLabel,
+  accessibilityHint,
+}: ComposerPrimaryButtonProps) {
+  const { theme } = useUnistyles()
+  const reducedMotion = useReducedMotion()
+  const enabled = !disabled
+  const progress = useSharedValue(enabled ? 1 : 0)
+
+  useEffect(() => {
+    const target = enabled ? 1 : 0
+    progress.value = reducedMotion
+      ? target
+      : withTiming(target, { duration: 170, easing: Easing.out(Easing.cubic) })
+  }, [enabled, progress, reducedMotion])
+
+  const discStyle = useAnimatedStyle(() => ({
+    opacity: progress.value,
+    transform: [{ scale: 0.82 + 0.18 * progress.value }],
+  }))
+
+  const discColor = mode === 'stop' ? theme.colors.fg.primary : theme.colors.accent.default
+  const iconColor = enabled ? theme.colors.surface[0] : theme.colors.fg.faint
+
+  return (
+    <Pressable
+      onPress={onPress}
+      disabled={!enabled}
+      accessibilityRole="button"
+      accessibilityLabel={accessibilityLabel}
+      accessibilityHint={accessibilityHint}
+      accessibilityState={{ disabled: !enabled }}
+      hitSlop={(theme.minTouchTarget - CONTROL_SIZE) / 2}
+      style={({ pressed }) => [styles.sendButton, pressed && enabled ? styles.sendPressed : null]}
+      testID="composer-primary"
+    >
+      <View style={[StyleSheet.absoluteFill, styles.sendInactive]} />
+      <Animated.View style={[StyleSheet.absoluteFill, styles.sendDisc, { backgroundColor: discColor }, discStyle]} />
+      {mode === 'stop' ? (
+        <SymbolIcon name="stop.fill" fallback={Square} size={13} color={iconColor} filled />
+      ) : (
+        <SymbolIcon name="arrow.up" fallback={ArrowUp} size={17} weight="bold" color={iconColor} />
+      )}
+    </Pressable>
+  )
+})
+
 const styles = StyleSheet.create((theme) => ({
-  // No plate behind the composer: it floats on the screen background so the
-  // glass panel is the only chrome at the bottom of the thread.
+  // No plate behind the composer: the glass card floats over the transcript,
+  // which keeps scrolling underneath it.
   container: {
-    paddingHorizontal: theme.spacing[3],
-    paddingTop: theme.spacing[2],
-    paddingBottom: theme.spacing[2],
+    paddingHorizontal: 10,
+    paddingTop: theme.spacing[1],
   },
   composer: {
-    gap: theme.spacing[2],
-    paddingTop: theme.spacing[3],
+    paddingTop: theme.spacing[1.5],
   },
   scrollHint: {
     marginHorizontal: theme.spacing[4],
+    marginTop: theme.spacing[1],
     paddingTop: theme.spacing[1],
     borderTopWidth: StyleSheet.hairlineWidth,
-    borderTopColor: theme.colors.border.subtle,
+    borderTopColor: glassFillStrong(theme.isDark),
     flexDirection: 'row',
     justifyContent: 'space-between',
     alignItems: 'center',
@@ -1191,7 +1340,7 @@ const styles = StyleSheet.create((theme) => ({
   expandButton: {
     flexDirection: 'row',
     alignItems: 'center',
-    gap: theme.spacing[1],
+    gap: theme.spacing[1.5],
     minHeight: 32,
     paddingLeft: theme.spacing[2],
   },
@@ -1209,8 +1358,9 @@ const styles = StyleSheet.create((theme) => ({
     // the box stuck at one line with scrolling disabled.
     minHeight: MIN_INPUT_HEIGHT,
     maxHeight: MAX_INPUT_HEIGHT,
-    paddingHorizontal: theme.spacing[4],
-    paddingVertical: 0,
+    paddingHorizontal: theme.spacing[4] + 2,
+    paddingTop: 10,
+    paddingBottom: theme.spacing[1],
     textAlignVertical: 'top',
     flexGrow: 0,
   },
@@ -1221,28 +1371,45 @@ const styles = StyleSheet.create((theme) => ({
     display: 'none',
   },
   attachmentSection: {
-    paddingHorizontal: theme.spacing[4],
+    paddingHorizontal: theme.spacing[3],
+    paddingTop: theme.spacing[1.5],
   },
   skillMenu: {
-    marginHorizontal: theme.spacing[3],
-    borderRadius: theme.radius.lg,
+    marginHorizontal: theme.spacing[2],
+    marginBottom: theme.spacing[1],
+    borderRadius: theme.radius.xl,
     borderCurve: 'continuous',
-    borderWidth: StyleSheet.hairlineWidth,
-    borderColor: glassEdge(theme.isDark),
     backgroundColor: glassFill(theme.isDark),
     overflow: 'hidden',
   },
   skillItem: {
     paddingHorizontal: theme.spacing[3],
-    paddingVertical: theme.spacing[3],
+    paddingVertical: 10,
     borderBottomWidth: StyleSheet.hairlineWidth,
-    borderBottomColor: glassEdge(theme.isDark),
+    borderBottomColor: glassFillStrong(theme.isDark),
+  },
+  skillItemRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: theme.spacing[3],
   },
   skillItemLast: {
     borderBottomWidth: 0,
   },
+  skillItemPressed: {
+    backgroundColor: glassFill(theme.isDark),
+  },
+  skillGlyph: {
+    width: 30,
+    height: 30,
+    borderRadius: theme.radius.full,
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: glassFill(theme.isDark),
+  },
   skillItemBody: {
-    gap: theme.spacing[1],
+    flex: 1,
+    gap: 2,
   },
   skillHeading: {
     flexDirection: 'row',
@@ -1250,18 +1417,22 @@ const styles = StyleSheet.create((theme) => ({
     justifyContent: 'space-between',
     gap: theme.spacing[2],
   },
+  skillLabel: {
+    flexShrink: 1,
+  },
   skillAliasPill: {
     borderRadius: theme.radius.full,
     backgroundColor: glassFill(theme.isDark),
     paddingHorizontal: theme.spacing[2],
-    paddingVertical: theme.spacing[1],
+    paddingVertical: 2,
   },
   skillEmpty: {
     paddingHorizontal: theme.spacing[3],
     paddingVertical: theme.spacing[3],
   },
   sendDisabledReason: {
-    paddingHorizontal: theme.spacing[4],
+    paddingHorizontal: theme.spacing[4] + 2,
+    paddingBottom: theme.spacing[1],
   },
   footer: {
     flexDirection: 'row',
@@ -1270,24 +1441,22 @@ const styles = StyleSheet.create((theme) => ({
     // A chip row longer than the space scrolls, and its clipped edge landed
     // flush against the send button — which read as a chip jammed underneath
     // rather than as more chips to scroll to.
-    gap: theme.spacing[2],
-    paddingHorizontal: theme.spacing[2],
-    paddingBottom: theme.spacing[2],
+    gap: theme.spacing[1.5],
+    paddingHorizontal: 6,
+    paddingTop: theme.spacing[1],
+    paddingBottom: theme.spacing[1.5],
   },
   footerActions: {
     flexDirection: 'row',
     alignItems: 'center',
-    gap: theme.spacing[1],
-  },
-  micButtonDisabled: {
-    opacity: 0.6,
+    gap: 2,
   },
   footerControls: {
     flexDirection: 'row',
     alignItems: 'center',
     flex: 1,
     flexShrink: 1,
-    gap: theme.spacing[2],
+    gap: theme.spacing[1.5],
   },
   attachButton: {
     width: CONTROL_SIZE,
@@ -1296,11 +1465,22 @@ const styles = StyleSheet.create((theme) => ({
     alignItems: 'center',
     justifyContent: 'center',
     backgroundColor: glassFill(theme.isDark),
-    borderWidth: StyleSheet.hairlineWidth,
-    borderColor: glassEdge(theme.isDark),
   },
   attachButtonDisabled: {
     opacity: 0.6,
+  },
+  micButton: {
+    width: CONTROL_SIZE,
+    height: CONTROL_SIZE,
+    borderRadius: theme.radius.full,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  micButtonDisabled: {
+    opacity: 0.6,
+  },
+  controlPressed: {
+    backgroundColor: glassFillStrong(theme.isDark),
   },
   sendButton: {
     width: CONTROL_SIZE,
@@ -1309,13 +1489,18 @@ const styles = StyleSheet.create((theme) => ({
     alignItems: 'center',
     justifyContent: 'center',
   },
+  sendPressed: {
+    transform: [{ scale: 0.92 }],
+  },
+  sendDisc: {
+    borderRadius: theme.radius.full,
+  },
   sendActive: {
     backgroundColor: theme.colors.accent.default,
   },
   sendInactive: {
+    borderRadius: theme.radius.full,
     backgroundColor: glassFill(theme.isDark),
-    borderWidth: StyleSheet.hairlineWidth,
-    borderColor: glassEdge(theme.isDark),
   },
   editorScreen: {
     flex: 1,
@@ -1325,26 +1510,26 @@ const styles = StyleSheet.create((theme) => ({
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'space-between',
-    paddingHorizontal: theme.spacing[5],
-    paddingVertical: theme.spacing[4],
+    paddingHorizontal: theme.spacing[4],
+    paddingVertical: theme.spacing[3],
     gap: theme.spacing[3],
   },
-  editorDone: {
-    minWidth: theme.minTouchTarget,
-    minHeight: theme.minTouchTarget,
-    alignItems: 'center',
-    justifyContent: 'center',
+  editorTitle: {
+    flex: 1,
+    paddingLeft: theme.spacing[1],
   },
   editorInput: {
     flex: 1,
     minHeight: 0,
     marginHorizontal: theme.spacing[3],
-    borderRadius: theme.radius.xl,
+    borderRadius: COMPOSER_RADIUS,
     borderCurve: 'continuous',
+    backgroundColor: theme.colors.surface[1],
     borderWidth: StyleSheet.hairlineWidth,
     borderColor: theme.colors.border.default,
-    backgroundColor: theme.colors.surface[1],
-    padding: theme.spacing[4],
+    paddingHorizontal: theme.spacing[5],
+    paddingTop: theme.spacing[4],
+    paddingBottom: theme.spacing[4],
     fontSize: theme.fontSize.base,
     lineHeight: theme.fontSize.base * theme.lineHeight.normal,
     fontFamily: theme.fontFamily.sans,
@@ -1366,6 +1551,9 @@ const styles = StyleSheet.create((theme) => ({
     flexDirection: 'row',
     alignItems: 'center',
     gap: theme.spacing[2],
-    paddingHorizontal: theme.spacing[4],
+    paddingHorizontal: theme.spacing[5],
+  },
+  editorSendInactive: {
+    backgroundColor: theme.colors.surface[2],
   },
 }))

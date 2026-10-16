@@ -2513,6 +2513,16 @@ function AppInner() {
     },
     [apiFor, selectedWorkspace?.id],
   );
+  const loadPrompts = useCallback(async () => {
+    const workspaceId = selectedWorkspace?.id;
+    const client = workspaceId ? apiFor(workspaceId) : null;
+    if (!workspaceId || !client) return [];
+    try {
+      return await client.listWorkspacePrompts(workspaceId);
+    } catch {
+      return [];
+    }
+  }, [apiFor, selectedWorkspace?.id]);
 
   /**
    * Switches the UI onto a thread that continues another one (a fork or a
@@ -6485,6 +6495,7 @@ function AppInner() {
                 preparingAttachmentCount,
                 skills: selectedWorkspace?.skills ?? [],
                 loadSkills,
+                loadPrompts,
                 selectedProvider,
                 onProviderChange: handleProviderChange,
                 providers: providerOptions,

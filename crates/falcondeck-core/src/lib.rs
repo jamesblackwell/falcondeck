@@ -3442,6 +3442,47 @@ pub struct WorkspaceSkillsResponse {
     pub skills: Vec<SkillSummary>,
 }
 
+/// Where a saved prompt file was found. Prompts are not skills: nothing in
+/// this catalog is attached to an agent or injected into a later turn.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum SavedPromptSourceKind {
+    /// Project-local prompt file.
+    ProjectFile,
+    /// Home-directory prompt file.
+    HomeFile,
+}
+
+/// A user-invoked prompt. The body is inserted into the composer when the
+/// user picks it. `$ARGUMENTS` is the placeholder for text typed after the
+/// slash name.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SavedPrompt {
+    /// Stable identifier for this file and scope.
+    pub id: String,
+    /// Human-readable name for the slash row.
+    pub label: String,
+    /// Canonical slash alias, including the leading slash.
+    pub alias: String,
+    /// Short line shown in the picker. Not sent to the agent on its own.
+    pub description: Option<String>,
+    /// Hint for the text the user can type after the slash name.
+    pub argument_hint: Option<String>,
+    /// Prompt text inserted into the composer.
+    pub body: String,
+    /// Whether the file is project-local or from the home directory.
+    pub source_kind: SavedPromptSourceKind,
+    /// Source file path when the entry is file-backed.
+    pub source_path: Option<String>,
+}
+
+/// Live saved-prompt catalog for one workspace, rescanned from disk on demand.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct WorkspacePromptsResponse {
+    /// Prompts the composer may insert. This list is not a skill catalog.
+    pub prompts: Vec<SavedPrompt>,
+}
+
 /// Provider capability flags exposed in workspace summaries.
 ///
 /// Every field defaults so old clients and old daemons interoperate with the

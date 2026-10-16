@@ -90,6 +90,7 @@ import {
   shouldYieldRelayDisplayFrame,
   yieldRelayDisplayFrame,
   composerSkillCatalog,
+  normalizeSavedPrompts,
   normalizeSkillSummaries,
   selectedSkillsFromText,
   serviceTierForTurn,
@@ -118,6 +119,7 @@ import {
   threadForSelection,
   type AgentProvider,
   type LiveSkillCatalog,
+  type SavedPrompt,
   type SkillSummary,
   type AttachmentPreparationCounts,
   type ClaimPairingRequest,
@@ -2965,6 +2967,19 @@ function RemoteApp() {
     },
     [callRpc, selectedWorkspace?.id],
   );
+  const loadPrompts = useCallback(async () => {
+    const workspaceId = selectedWorkspace?.id;
+    if (!workspaceId) return [];
+    try {
+      const payload = await callRpc<{ prompts?: SavedPrompt[] }>(
+        "workspace.prompts",
+        { workspace_id: workspaceId },
+      );
+      return normalizeSavedPrompts(payload.prompts);
+    } catch {
+      return [];
+    }
+  }, [callRpc, selectedWorkspace?.id]);
 
   async function handleStop() {
     if (!selectedWorkspace || !selectedThreadId) return;
@@ -5511,6 +5526,7 @@ function RemoteApp() {
                   preparingAttachmentCount={preparingAttachmentCount}
                   skills={selectedWorkspace?.skills ?? []}
                   loadSkills={loadSkills}
+                  loadPrompts={loadPrompts}
                   selectedProvider={activeProvider}
                   onProviderChange={handleProviderChange}
                   providers={providerOptions}

@@ -241,7 +241,8 @@ no longer exists.
 ### Sync latency diagnostics
 
 Mobile requests snapshots without thread plans/diffs or skill catalogs. Skills
-are loaded through `workspace.skills`; model catalogs remain in snapshots.
+are loaded through `workspace.skills` and saved prompts through
+`workspace.prompts`; model catalogs remain in snapshots.
 The relay retains encrypted updates for client replay but does not echo them
 back to daemon peers, which already own and ignore those updates.
 

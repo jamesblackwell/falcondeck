@@ -13,6 +13,7 @@ import type {
   ConversationCitationLocator,
   ContentLifecycle,
   ConversationPreferences,
+  SavedPrompt,
   SkillSummary,
   DaemonSnapshot,
   LibraryWorkspace,
@@ -553,6 +554,41 @@ function normalizeSkill(value: unknown): SkillSummary {
       ...DEFAULT_SKILL_TRANSLATIONS,
       ...(skill.provider_translations ?? {}),
     },
+  };
+}
+
+export function normalizeSavedPrompts(value: unknown): SavedPrompt[] {
+  return Array.isArray(value)
+    ? value.flatMap((entry) => {
+        const prompt = normalizeSavedPrompt(entry);
+        return prompt ? [prompt] : [];
+      })
+    : [];
+}
+
+function normalizeSavedPrompt(value: unknown): SavedPrompt | null {
+  const prompt = (value ?? {}) as Partial<SavedPrompt>;
+  const body = typeof prompt.body === "string" ? prompt.body : "";
+  if (!body.trim()) return null;
+  const alias =
+    typeof prompt.alias === "string" && prompt.alias.trim().length > 0
+      ? prompt.alias.startsWith("/")
+        ? prompt.alias
+        : `/${prompt.alias}`
+      : "/";
+  return {
+    id: prompt.id ?? alias,
+    label:
+      typeof prompt.label === "string" && prompt.label.trim().length > 0
+        ? prompt.label
+        : alias.slice(1) || "Prompt",
+    alias,
+    description: prompt.description ?? null,
+    argument_hint: prompt.argument_hint ?? null,
+    body,
+    source_kind:
+      prompt.source_kind === "home_file" ? "home_file" : "project_file",
+    source_path: prompt.source_path ?? null,
   };
 }
 

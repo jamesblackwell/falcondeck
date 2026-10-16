@@ -218,7 +218,18 @@ registry. The daemon side is
 `DELETE /api/skills/{name}`, mirrored as `skills.*` relay RPCs. The composer
 slash menu does not use that library snapshot: `GET /api/workspaces/{id}/skills`
 (relay `workspace.skills`) rescans disk for the selected provider when `/`
-opens, then filters locally while typing. Installs
+opens, then filters locally while typing. Saved prompts are a separate list.
+`GET /api/workspaces/{id}/prompts` (relay `workspace.prompts`) rescans when `/`
+opens and is not part of the workspace snapshot or any agent skill catalog.
+FalconDeck reads `~/.falcondeck/prompts/*.md` and
+`<workspace>/.falcondeck/prompts/*.md`, and imports Codex
+`~/.codex/prompts` plus `<workspace>/.codex/prompts` and Copilot
+`<workspace>/.github/prompts/*.prompt.md`. A project file overrides a home
+file of the same name. Inside one scope, a FalconDeck file overrides a Codex
+or Copilot import. Picking a
+row replaces `/name` and the rest of that line with the markdown body;
+`$ARGUMENTS` is the text typed after the name. The description is picker-only.
+`.claude/commands` stays a skill root and is not listed as prompts. Installs
 download one bounded skill tree from the source GitHub repo (no `npx`, no
 symlinks, ≤64 files / 5 MB) into `~/.agents/skills/<id>` — already a scan root
 for every provider — and write a `.falcondeck-skill.json` provenance marker;

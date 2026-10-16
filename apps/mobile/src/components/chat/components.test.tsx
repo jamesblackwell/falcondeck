@@ -770,7 +770,7 @@ describe('ChatInput component', () => {
     const style = flattenStyle(input.props.style)
 
     expect(style.height).toBeUndefined()
-    expect(style.minHeight).toBe(48)
+    expect(style.minHeight).toBe(44)
     // The normal cap leaves room for the transcript and composer controls.
     expect(style.maxHeight).toBe(320)
     expect(input.props.multiline).toBe(true)
@@ -851,14 +851,14 @@ describe('ChatInput component', () => {
         nativeEvent: { selection: { start: 1, end: 1 } },
       })
     })
-    expect(textOf(r)).toContain('No commands or skills yet')
+    expect(textOf(r)).toContain('No commands, prompts, or skills yet')
 
     act(() => {
       r.root.findByProps({ testID: 'message-composer' }).props.onSelectionChange({
         nativeEvent: { selection: { start: draft.length, end: draft.length } },
       })
     })
-    expect(textOf(r)).toContain('No commands or skills yet')
+    expect(textOf(r)).toContain('No commands, prompts, or skills yet')
   })
 
   it('pins an empty draft so clearing the composer cannot balloon the input', () => {
@@ -890,11 +890,11 @@ describe('ChatInput component', () => {
 
     const emptyInput = r.root.findByType('TextInput' as any)
     const style = flattenStyle(emptyInput.props.style)
-    expect(style.height).toBe(48)
-    expect(style.minHeight).toBe(48)
+    expect(style.height).toBe(44)
+    expect(style.minHeight).toBe(44)
     act(() => {
       emptyInput.props.onLayout({
-        nativeEvent: { layout: { x: 0, y: 0, width: 320, height: 48 } },
+        nativeEvent: { layout: { x: 0, y: 0, width: 320, height: 44 } },
       })
     })
 
@@ -918,7 +918,7 @@ describe('ChatInput component', () => {
     })
     expect(
       flattenStyle(r.root.findByType('TextInput' as any).props.style).height,
-    ).toBe(48)
+    ).toBe(44)
   })
 
   it('explicitly releases the animated slot height when drafting resumes', () => {
@@ -975,7 +975,7 @@ describe('ChatInput component', () => {
       })
       expect(
         flattenStyle(r.root.findByType('TextInput' as any).props.style).height,
-      ).toBe(48)
+      ).toBe(44)
     } finally {
       setReducedMotion(false)
     }

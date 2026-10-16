@@ -220,6 +220,21 @@ export type SkillSummary = {
   provider_translations?: SkillProviderTranslations | null;
 };
 
+export type SavedPromptSourceKind = "project_file" | "home_file";
+
+/** Composer text the user inserts by slash name. Not a skill. */
+export type SavedPrompt = {
+  id: string;
+  label: string;
+  alias: string;
+  description?: string | null;
+  argument_hint?: string | null;
+  /** Body inserted into the composer. `$ARGUMENTS` is the typed suffix. */
+  body: string;
+  source_kind: SavedPromptSourceKind;
+  source_path?: string | null;
+};
+
 export type WorkspaceAgentSummary = {
   provider: AgentProvider;
   /** Human-readable provider name for pickers. */

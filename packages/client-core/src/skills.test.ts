@@ -3,13 +3,15 @@ import { describe, expect, it } from 'vitest'
 import {
   activeSlashQuery,
   composerSkillCatalog,
+  expandSavedPrompt,
   filterSlashSkills,
   rankSlashSuggestions,
+  savedPromptInsertion,
   scoreSlashFields,
   slashSkillSourceLabel,
   splitSlashCommandSegments,
 } from './skills'
-import type { SkillSummary } from './types'
+import type { SavedPrompt, SkillSummary } from './types'
 
 const lintSkill: SkillSummary = {
   id: 'skill:lint',
@@ -113,6 +115,16 @@ const copyEditingSkill: SkillSummary = {
   source_kind: 'project_file',
   description:
     'Edit, review, proofread, polish, tighten, or refresh existing marketing copy while preserving the core message.',
+}
+
+const savePrompt: SavedPrompt = {
+  id: 'prompt:save-prompt',
+  label: 'Save prompt',
+  alias: '/save-prompt',
+  description: 'Review a diff',
+  argument_hint: '[path]',
+  body: 'Review this diff.\n\n$ARGUMENTS',
+  source_kind: 'project_file',
 }
 
 const freshEyesSkill: SkillSummary = {
@@ -227,9 +239,10 @@ describe('scoreSlashFields', () => {
 })
 
 describe('rankSlashSuggestions', () => {
-  it('keeps native commands first on an empty query, then skills alphabetically', () => {
+  it('keeps native commands first on an empty query, then prompts, then skills', () => {
     const ranked = rankSlashSuggestions({
       skills: [freshEyesSkill, copyEditingSkill],
+      prompts: [savePrompt],
       provider: 'codex',
       query: '',
       native: { goal: true, compact: true },
@@ -237,6 +250,7 @@ describe('rankSlashSuggestions', () => {
     expect(ranked.map((item) => item.id)).toEqual([
       'native:goal',
       'native:compact',
+      'prompt:save-prompt',
       'skill:copy-editing',
       'skill:fresh-eyes-review',
     ])
@@ -299,6 +313,49 @@ describe('rankSlashSuggestions', () => {
       start: 1,
       length: 5,
     })
+  })
+})
+
+describe('saved prompts', () => {
+  it('replaces the slash token with the body and fills arguments', () => {
+    const typed = '/save-prompt the login\nthanks'
+    const query = activeSlashQuery(typed, typed.indexOf('\n'), ['/save-prompt'])
+    expect(query).toEqual({
+      query: 'save-prompt',
+      rangeStart: 0,
+      rangeEnd: '/save-prompt'.length,
+    })
+    expect(
+      savedPromptInsertion(typed, query!, savePrompt.body),
+    ).toEqual({
+      value: 'Review this diff.\n\nthe login\nthanks',
+      caret: 'Review this diff.\n\nthe login'.length,
+    })
+  })
+
+  it('keeps a saved prompt open while arguments are typed, and leaves other slash text alone', () => {
+    const typed = '/save-prompt the login'
+    expect(activeSlashQuery(typed, typed.length)).toBeNull()
+    expect(activeSlashQuery(typed, typed.length, ['/save-prompt'])).toEqual({
+      query: 'save-prompt',
+      rangeStart: 0,
+      rangeEnd: '/save-prompt'.length,
+    })
+    expect(
+      activeSlashQuery('/copy-editing please fix', '/copy-editing please fix'.length, [
+        '/save-prompt',
+      ]),
+    ).toBeNull()
+    expect(activeSlashQuery('/ the login', '/ the login'.length, ['/save-prompt'])).toBeNull()
+  })
+
+  it('drops an empty argument placeholder', () => {
+    expect(expandSavedPrompt('Review this.\n\n$ARGUMENTS', '')).toBe(
+      'Review this.',
+    )
+    expect(expandSavedPrompt('Review this.', 'the login')).toBe(
+      'Review this.\n\nthe login',
+    )
   })
 })
 

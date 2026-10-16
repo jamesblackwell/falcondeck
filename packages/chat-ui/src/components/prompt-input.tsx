@@ -33,6 +33,7 @@ import type {
   ModelSummary,
   ProviderOption,
   RankedSlashItem,
+  SavedPrompt,
   SkillSummary,
 } from "@falcondeck/client-core";
 import {
@@ -44,6 +45,7 @@ import {
   NO_AGENT_CAPABILITIES,
   rankSlashSuggestions,
   resolveServiceTier,
+  savedPromptInsertion,
 } from "@falcondeck/client-core";
 import {
   ActivityDiamond,
@@ -138,6 +140,13 @@ export type PromptInputProps = {
    * provider changes while it is open. Typing filters the last result locally.
    */
   loadSkills?: (provider: AgentProvider) => Promise<SkillSummary[]>;
+  /**
+   * Saved prompts for the slash menu. Picking one inserts its body. They are
+   * not skills and are not sent to the agent until the user submits that text.
+   */
+  prompts?: SavedPrompt[];
+  /** Live prompt scan. Called when the slash menu opens. */
+  loadPrompts?: () => Promise<SavedPrompt[]>;
   selectedProvider: AgentProvider;
   onProviderChange: (value: AgentProvider) => void;
   /** Providers the active workspace offers; defaults to the built-in pair. */
@@ -286,6 +295,8 @@ export const PromptInput = memo(function PromptInput({
   preparingAttachmentCount = 0,
   skills = [],
   loadSkills,
+  prompts = [],
+  loadPrompts,
   selectedProvider,
   onProviderChange,
   providers = DEFAULT_PROVIDER_OPTIONS,
@@ -351,8 +362,11 @@ export const PromptInput = memo(function PromptInput({
   const handledMenuRequestKeyRef = useRef(menuRequest?.key ?? 0);
   const [slashQuery, setSlashQuery] = useState<ActiveSlashQuery | null>(null);
   const [liveSkills, setLiveSkills] = useState<SkillSummary[] | null>(null);
+  const [livePrompts, setLivePrompts] = useState<SavedPrompt[] | null>(null);
   const loadSkillsRef = useRef(loadSkills);
   loadSkillsRef.current = loadSkills;
+  const loadPromptsRef = useRef(loadPrompts);
+  loadPromptsRef.current = loadPrompts;
   const [activeSkillIndex, setActiveSkillIndex] = useState(0);
   const [domFileDragActive, setDomFileDragActive] = useState(false);
   const [attachmentInputNotice, setAttachmentInputNotice] = useState<
@@ -406,10 +420,36 @@ export const PromptInput = memo(function PromptInput({
     };
   }, [selectedProvider, slashOpen]);
 
+  useEffect(() => {
+    if (!slashOpen) return;
+    const load = loadPromptsRef.current;
+    if (!load) {
+      setLivePrompts(null);
+      return;
+    }
+    let cancelled = false;
+    void load().then(
+      (next) => {
+        if (!cancelled) setLivePrompts(next);
+      },
+      () => {
+        if (!cancelled) setLivePrompts(null);
+      },
+    );
+    return () => {
+      cancelled = true;
+    };
+  }, [slashOpen]);
+
+  const promptAliases = useMemo(
+    () => (livePrompts ?? prompts ?? []).map((prompt) => prompt.alias),
+    [livePrompts, prompts],
+  );
   const slashItems = useMemo(
     () =>
       rankSlashSuggestions({
         skills: liveSkills ?? skills,
+        prompts: livePrompts ?? prompts,
         provider: selectedProvider,
         query: slashQuery?.query ?? "",
         native: {
@@ -420,7 +460,9 @@ export const PromptInput = memo(function PromptInput({
     [
       compactCommandAvailable,
       goal,
+      livePrompts,
       liveSkills,
+      prompts,
       selectedProvider,
       skills,
       slashQuery?.query,
@@ -568,10 +610,15 @@ export const PromptInput = memo(function PromptInput({
         typeof caretIndex === "number"
           ? caretIndex
           : (textareaRef.current?.selectionStart ?? nextValue.length);
-      setSlashQuery(activeSlashQuery(nextValue, index));
+      setSlashQuery(activeSlashQuery(nextValue, index, promptAliases));
     },
-    [disabled],
+    [disabled, promptAliases],
   );
+
+  // Prompt files can arrive after the name and its arguments are already typed.
+  useEffect(() => {
+    updateSlashQuery(value);
+  }, [promptAliases, updateSlashQuery, value]);
 
   function handleFileChange(event: ChangeEvent<HTMLInputElement>) {
     setAttachmentInputNotice(null);
@@ -755,13 +802,33 @@ export const PromptInput = memo(function PromptInput({
     reportCaret(textareaRef.current);
   }, [reportCaret, updateSlashQuery, value]);
 
+  const insertSavedPrompt = useCallback(
+    (body: string) => {
+      const query = slashQuery;
+      const textarea = textareaRef.current;
+      if (!query || !textarea) return;
+      const next = savedPromptInsertion(value, query, body);
+      onValueChange(next.value);
+      setSlashQuery(null);
+      requestAnimationFrame(() => {
+        textarea.focus();
+        textarea.setSelectionRange(next.caret, next.caret);
+        updateSlashQuery(next.value, next.caret);
+      });
+    },
+    [onValueChange, slashQuery, updateSlashQuery, value],
+  );
+
   const insertSkillAlias = useCallback(
     (alias: string) => {
       const query = slashQuery;
       const textarea = textareaRef.current;
       if (!query || !textarea) return;
-      const nextValue = `${value.slice(0, query.rangeStart)}${alias} ${value.slice(query.rangeEnd)}`;
-      const nextCaret = query.rangeStart + alias.length + 1;
+      const rest = value.slice(query.rangeEnd);
+      const insertion = /^\s/.test(rest) ? alias : `${alias} `;
+      const nextValue = `${value.slice(0, query.rangeStart)}${insertion}${rest}`;
+      const nextCaret =
+        query.rangeStart + insertion.length + (rest.startsWith(" ") ? 1 : 0);
       onValueChange(nextValue);
       setSlashQuery(null);
       requestAnimationFrame(() => {
@@ -786,6 +853,10 @@ export const PromptInput = memo(function PromptInput({
 
   const activateSlashItem = useCallback(
     (item: RankedSlashItem) => {
+      if (item.kind === "prompt") {
+        insertSavedPrompt(item.prompt.body);
+        return;
+      }
       if (item.kind === "skill") {
         insertSkillAlias(item.skill.alias);
         return;
@@ -799,7 +870,7 @@ export const PromptInput = memo(function PromptInput({
           return;
       }
     },
-    [insertSkillAlias, openGoalCommand],
+    [insertSavedPrompt, insertSkillAlias, openGoalCommand],
   );
 
   return (

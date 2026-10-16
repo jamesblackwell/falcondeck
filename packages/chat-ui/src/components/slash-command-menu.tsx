@@ -75,11 +75,11 @@ export function SlashCommandMenu({
         <p className="px-3 py-3 text-[length:var(--fd-text-sm)] text-fg-muted">
           {query ? (
             <>
-              No commands or skills match{" "}
+              No commands, prompts, or skills match{" "}
               <span className="font-medium text-fg-secondary">/{query}</span>
             </>
           ) : (
-            "No commands or skills yet"
+            "No commands, prompts, or skills yet"
           )}
         </p>
       ) : (
@@ -92,7 +92,7 @@ export function SlashCommandMenu({
           <div
             id={listId}
             role="listbox"
-            aria-label="Commands and skills"
+            aria-label="Commands, prompts, and skills"
             onPointerMove={() => {
               pointerArmedRef.current = true;
             }}
@@ -103,8 +103,9 @@ export function SlashCommandMenu({
               const previous = items[index - 1];
               const showGroupRule =
                 !query &&
-                previous?.kind === "native" &&
-                item.kind === "skill";
+                previous != null &&
+                previous.kind !== item.kind &&
+                item.kind !== "native";
               return (
                 <Fragment key={item.id}>
                   {showGroupRule ? (
@@ -299,19 +300,26 @@ function slashItemTitle(item: RankedSlashItem): string {
   if (item.kind === "native") {
     return item.command.id === "goal" ? item.command.label : item.command.alias;
   }
+  if (item.kind === "prompt") return item.prompt.alias;
   return item.skill.alias;
 }
 
 function slashItemLabel(item: RankedSlashItem): string {
-  return item.kind === "native" ? item.command.label : item.skill.label;
+  if (item.kind === "native") return item.command.label;
+  if (item.kind === "prompt") return item.prompt.label;
+  return item.skill.label;
 }
 
 function slashItemDescription(item: RankedSlashItem): string | null {
   if (item.kind === "native") return item.command.description;
+  if (item.kind === "prompt") {
+    return item.prompt.description ?? item.prompt.argument_hint ?? null;
+  }
   return item.skill.description ?? item.skill.label;
 }
 
 function slashItemBadge(item: RankedSlashItem): string | null {
   if (item.kind === "native") return NATIVE_BADGE[item.command.id] ?? null;
+  if (item.kind === "prompt") return "Prompt";
   return slashSkillSourceLabel(item.skill.source_kind);
 }
