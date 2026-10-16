@@ -321,8 +321,12 @@ export default function HomeScreen() {
     },
     [dockHeight],
   );
-  // A pending question or plan never pushes the composer off the screen.
-  const requestMaxHeight = Math.round(windowHeight * 0.42);
+  // A pending question or plan never pushes the composer off the screen,
+  // including while its own answer field has the keyboard up.
+  const requestMaxHeight = Math.max(
+    160,
+    Math.round((windowHeight - keyboardInset) * 0.42),
+  );
   const [appState, setAppState] = useState(AppState.currentState);
   const [detailLoadingThreadId, setDetailLoadingThreadId] = useState<
     string | null
