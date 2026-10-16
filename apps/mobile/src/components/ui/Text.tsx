@@ -3,6 +3,8 @@ import { type TextProps as RNTextProps } from 'react-native'
 import { UITextView } from '@bsky.app/react-native-uitextview'
 import { StyleSheet } from 'react-native-unistyles'
 
+import { useThemeVersion } from '@/theme/themeVersion'
+
 // The library types against a hoisted React Native copy whose TextStyle
 // disagrees with the app's 0.81.5 types. Keep the runtime component and type
 // it against this package's Text props.
@@ -35,6 +37,9 @@ export const Text = memo(function Text({
   selectable,
   ...props
 }: TextProps) {
+  // The styles below resolve against the current theme when read, so a theme
+  // change has to re-render this component to reach the native text view.
+  useThemeVersion()
   // RN <Text selectable> uses UILabel on iOS, which can only copy the whole
   // block. UITextView is required for drag-handle range selection. Every Text
   // still goes through this wrapper so nested styled spans flatten into the

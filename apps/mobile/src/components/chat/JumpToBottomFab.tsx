@@ -10,8 +10,11 @@ import { ArrowDown } from 'lucide-react-native'
 import * as Haptics from 'expo-haptics'
 
 import { GlassButton, SymbolIcon } from '@/components/ui'
+import { withAlpha } from '@/theme/color'
 
 const FAB_SIZE = 40
+/** Effectively gone, without the singular matrix a zero scale produces. */
+const HIDDEN_SCALE = 0.01
 
 interface JumpToBottomFabProps {
   visible: boolean
@@ -25,19 +28,18 @@ export const JumpToBottomFab = memo(function JumpToBottomFab({
   onPress,
 }: JumpToBottomFabProps) {
   const { theme } = useUnistyles()
-  const opacity = useSharedValue(0)
-  const translateY = useSharedValue(12)
-  const scale = useSharedValue(0.9)
+  // Scale, never opacity: UIKit's glass stops rendering once an ancestor's
+  // alpha has been animated, leaving a bare arrow over the transcript.
+  const scale = useSharedValue(visible ? 1 : HIDDEN_SCALE)
+  const translateY = useSharedValue(visible ? 0 : 10)
 
   useEffect(() => {
-    const config = { duration: 200, easing: Easing.out(Easing.cubic) }
-    opacity.value = withTiming(visible ? 1 : 0, config)
-    translateY.value = withTiming(visible ? 0 : 12, config)
-    scale.value = withTiming(visible ? 1 : 0.9, config)
-  }, [visible, opacity, translateY, scale])
+    const config = { duration: 220, easing: Easing.out(Easing.cubic) }
+    scale.value = withTiming(visible ? 1 : HIDDEN_SCALE, config)
+    translateY.value = withTiming(visible ? 0 : 10, config)
+  }, [visible, scale, translateY])
 
   const animatedStyle = useAnimatedStyle(() => ({
-    opacity: opacity.value,
     transform: [{ translateY: translateY.value }, { scale: scale.value }],
   }))
 
@@ -47,9 +49,17 @@ export const JumpToBottomFab = memo(function JumpToBottomFab({
   }, [onPress])
 
   return (
-    <Animated.View style={[styles.wrapper, animatedStyle]} pointerEvents={visible ? 'auto' : 'none'}>
+    <Animated.View
+      style={[styles.wrapper, animatedStyle]}
+      pointerEvents={visible ? 'auto' : 'none'}
+      accessibilityElementsHidden={!visible}
+      importantForAccessibility={visible ? 'auto' : 'no-hide-descendants'}
+    >
       <GlassButton
         size={FAB_SIZE}
+        // It always sits over transcript text, where clear glass leaves the
+        // arrow floating among the words; a palette tint gives it a body.
+        tint={withAlpha(theme.colors.surface[2], theme.isDark ? 0.72 : 0.8)}
         onPress={handlePress}
         accessibilityLabel="Jump to latest message"
         hitSlop={(theme.minTouchTarget - FAB_SIZE) / 2}

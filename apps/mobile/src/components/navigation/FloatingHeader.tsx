@@ -26,6 +26,11 @@ interface FloatingHeaderProps {
   children?: ReactNode
   /** Background content fades into under the status bar. */
   edgeColor?: string
+  /**
+   * `inline` keeps the same glass controls in normal flow above the content,
+   * for list screens whose pull-to-refresh must not hide behind the bar.
+   */
+  placement?: 'floating' | 'inline'
   onLayout?: (event: LayoutChangeEvent) => void
   style?: StyleProp<ViewStyle>
 }
@@ -42,30 +47,38 @@ export const FloatingHeader = memo(function FloatingHeader({
   right,
   children,
   edgeColor,
+  placement = 'floating',
   onLayout,
   style,
 }: FloatingHeaderProps) {
+  const floating = placement === 'floating'
   const insets = useSafeAreaInsets()
   const rowBottom = insets.top + FLOATING_HEADER_ROW_HEIGHT
   const edgeHeight = rowBottom + EDGE_OVERHANG
 
   return (
-    <View pointerEvents="box-none" style={[styles.root, style]} onLayout={onLayout}>
+    <View
+      pointerEvents="box-none"
+      style={[floating ? styles.root : styles.inline, style]}
+      onLayout={onLayout}
+    >
       {/* Opaque under the clock, still mostly opaque behind the controls so
           text between the capsules cannot compete with the title, then gone
           a little below the row. */}
-      <ScrollEdge
-        edge="top"
-        height={edgeHeight}
-        color={edgeColor}
-        stops={[
-          [0, 1],
-          [insets.top, 1],
-          [insets.top + FLOATING_HEADER_ROW_HEIGHT * 0.5, 0.9],
-          [rowBottom, 0.55],
-          [edgeHeight, 0],
-        ]}
-      />
+      {floating ? (
+        <ScrollEdge
+          edge="top"
+          height={edgeHeight}
+          color={edgeColor}
+          stops={[
+            [0, 1],
+            [insets.top, 1],
+            [insets.top + FLOATING_HEADER_ROW_HEIGHT * 0.5, 0.9],
+            [rowBottom, 0.55],
+            [edgeHeight, 0],
+          ]}
+        />
+      ) : null}
       <View
         pointerEvents="box-none"
         style={[
@@ -99,6 +112,10 @@ const styles = StyleSheet.create((theme) => ({
     left: 0,
     right: 0,
     zIndex: 10,
+  },
+  inline: {
+    zIndex: 10,
+    paddingBottom: theme.spacing[1],
   },
   row: {
     height: FLOATING_HEADER_ROW_HEIGHT,

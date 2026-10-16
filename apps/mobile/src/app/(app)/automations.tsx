@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
-import { Alert, Pressable, View } from 'react-native'
+import { Alert, View } from 'react-native'
 import { FlashList } from '@shopify/flash-list'
 import { useFocusEffect, useRouter } from 'expo-router'
 import { CalendarClock, ChevronLeft, Plus } from 'lucide-react-native'
@@ -19,7 +19,8 @@ import {
   AutomationRow,
   type AutomationEditorSubmit,
 } from '@/components/automations'
-import { Button, EmptyState, ErrorBanner, LoadingState, OptionSheet, Text } from '@/components/ui'
+import { Button, EmptyState, ErrorBanner, GlassButton, LoadingState, OptionSheet, SymbolIcon, Text } from '@/components/ui'
+import { FloatingHeader } from '@/components/navigation/FloatingHeader'
 import { subscribeToControlStateChanges } from '@/features/automations/control-events'
 import { useRelativeTimeTick } from '@/hooks/useRelativeTimeTick'
 import { AutomationControlError, useAutomationStore, useRelayStore, useSessionStore } from '@/store'
@@ -234,30 +235,30 @@ export default function AutomationsScreen() {
     : daemonReady ? 'Connecting to automations…' : 'Desktop offline'
 
   return (
-    <View style={[styles.container, { paddingTop: insets.top }]}>
-      <View style={styles.header}>
-        <Pressable
-          style={({ pressed }) => [styles.headerButton, pressed ? styles.headerButtonPressed : null]}
-          onPress={() => router.navigate('/(app)')}
-          accessibilityRole="button"
-          accessibilityLabel="Close automations"
-        >
-          <ChevronLeft size={theme.iconSize.lg} color={theme.colors.fg.primary} />
-        </Pressable>
-        <View style={styles.headerCopy}>
-          <Text variant="heading" size="lg">Automations</Text>
-          <Text variant="meta" color="muted" numberOfLines={1}>{cachedStatus}</Text>
-        </View>
-        <Button
-          size="icon"
-          variant="ghost"
-          onPress={() => setEditorTarget({ kind: 'create', workspacePath: selectedWorkspacePath })}
-          disabled={!daemonReady}
-          accessibilityLabel="New automation"
-        >
-          <Plus size={theme.iconSize.md} color={theme.colors.fg.primary} />
-        </Button>
-      </View>
+    <View style={styles.container}>
+      <FloatingHeader
+        placement="inline"
+        left={
+          <GlassButton accessibilityLabel="Close automations" onPress={() => router.navigate('/(app)')}>
+            <SymbolIcon name="chevron.left" fallback={ChevronLeft} size={18} weight="semibold" color={theme.colors.fg.primary} />
+          </GlassButton>
+        }
+        center={
+          <View style={styles.headerCopy}>
+            <Text variant="heading" size="lg" weight="bold" numberOfLines={1}>Automations</Text>
+            <Text variant="meta" color="muted" numberOfLines={1}>{cachedStatus}</Text>
+          </View>
+        }
+        right={
+          <GlassButton
+            onPress={() => setEditorTarget({ kind: 'create', workspacePath: selectedWorkspacePath })}
+            disabled={!daemonReady}
+            accessibilityLabel="New automation"
+          >
+            <SymbolIcon name="plus" fallback={Plus} size={19} weight="medium" color={theme.colors.fg.primary} />
+          </GlassButton>
+        }
+      />
 
       <ErrorBanner message={actionError ?? error} onDismiss={() => {
         setActionError(null)
@@ -337,10 +338,7 @@ export default function AutomationsScreen() {
 
 const styles = StyleSheet.create((theme) => ({
   container: { flex: 1, backgroundColor: theme.colors.surface[0] },
-  header: { minHeight: 60, flexDirection: 'row', alignItems: 'center', gap: theme.spacing[2], paddingHorizontal: theme.spacing[2], borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: theme.colors.border.default },
-  headerButton: { width: theme.minTouchTarget, height: theme.minTouchTarget, alignItems: 'center', justifyContent: 'center', borderRadius: theme.radius.full },
-  headerButtonPressed: { backgroundColor: theme.colors.surface[2] },
-  headerCopy: { flex: 1 },
+  headerCopy: { flex: 1, paddingLeft: theme.spacing[1] },
   cacheBanner: { paddingHorizontal: theme.spacing[4], paddingVertical: theme.spacing[2], backgroundColor: theme.colors.warning.muted },
   center: { flex: 1, alignItems: 'center', justifyContent: 'center', gap: theme.spacing[3], padding: theme.spacing[6] },
 }))

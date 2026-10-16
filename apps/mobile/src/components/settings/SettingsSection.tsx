@@ -68,7 +68,12 @@ export const settingsPageStyles = StyleSheet.create((theme) => ({
 const styles = StyleSheet.create((theme) => ({
   section: { gap: theme.spacing[2] },
   title: { paddingHorizontal: theme.spacing[2], letterSpacing: 0.8 },
-  card: { gap: 0 },
+  // iOS 26 inset grouped: a softer, larger corner and a hairline edge.
+  card: {
+    gap: 0,
+    borderRadius: 22,
+    borderWidth: StyleSheet.hairlineWidth,
+  },
   divider: {
     borderTopWidth: StyleSheet.hairlineWidth,
     borderTopColor: theme.colors.border.default,

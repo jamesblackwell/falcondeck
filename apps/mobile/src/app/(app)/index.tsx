@@ -313,13 +313,13 @@ export default function HomeScreen() {
   const dockHeight = useSharedValue(ESTIMATED_DOCK_HEIGHT + insets.bottom);
   const handleHeaderLayout = useCallback(
     (event: LayoutChangeEvent) => {
-      headerHeight.value = event.nativeEvent.layout.height;
+      headerHeight.set(event.nativeEvent.layout.height);
     },
     [headerHeight],
   );
   const handleDockLayout = useCallback(
     (event: LayoutChangeEvent) => {
-      dockHeight.value = event.nativeEvent.layout.height;
+      dockHeight.set(event.nativeEvent.layout.height);
     },
     [dockHeight],
   );

@@ -3,9 +3,16 @@ import { Stack, useRouter } from 'expo-router'
 import { X } from 'lucide-react-native'
 import { StyleSheet, useUnistyles } from 'react-native-unistyles'
 
+import { SymbolIcon } from '@/components/ui'
+import { useGlassMode } from '@/lib/glass'
+
 export default function SettingsLayout() {
   const { theme } = useUnistyles()
   const router = useRouter()
+  // On iOS 26 the system bar is Liquid Glass: let pages scroll under it and
+  // UIKit draws its own scroll-edge effect. Older systems keep a solid bar,
+  // since a transparent one there would just show text colliding with it.
+  const liquidBar = useGlassMode() === 'liquid'
 
   // Settings is a drawer sibling, not a pushed screen, so the root has no back
   // button of its own — without this there is no way out but the swipe gesture.
@@ -15,9 +22,13 @@ export default function SettingsLayout() {
       accessibilityRole="button"
       accessibilityLabel="Close settings"
       hitSlop={6}
-      style={({ pressed }) => [styles.closeButton, pressed && styles.closeButtonPressed]}
+      style={({ pressed }) => [
+        styles.closeButton,
+        // The system wraps bar items in its own glass, which answers the press.
+        pressed && !liquidBar && styles.closeButtonPressed,
+      ]}
     >
-      <X size={theme.iconSize.lg} color={theme.colors.fg.primary} />
+      <SymbolIcon name="xmark" fallback={X} size={17} weight="semibold" color={theme.colors.fg.primary} />
     </Pressable>
   )
 
@@ -27,7 +38,8 @@ export default function SettingsLayout() {
         headerShown: true,
         headerBackTitle: 'Back',
         headerShadowVisible: false,
-        headerStyle: { backgroundColor: theme.colors.surface[0] },
+        headerTransparent: liquidBar,
+        headerStyle: liquidBar ? undefined : { backgroundColor: theme.colors.surface[0] },
         headerTintColor: theme.colors.fg.primary,
         headerTitleStyle: { color: theme.colors.fg.primary },
         contentStyle: { backgroundColor: theme.colors.surface[0] },

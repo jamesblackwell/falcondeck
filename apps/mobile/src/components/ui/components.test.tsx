@@ -18,24 +18,24 @@ import { ProviderIcon } from './ProviderIcon'
 afterEach(cleanup)
 
 describe('Text', () => {
-  it('renders body variant', () => { expect(renderPure(Text, { children: 'Hello' })).toBeTruthy() })
+  it('renders body variant', () => { expect(renderComponent(<Text {...{ children: 'Hello' }} />).toJSON()).toBeTruthy() })
   it('renders all variants', () => {
     for (const v of ['body', 'supporting', 'label', 'meta', 'microlabel', 'caption', 'heading', 'mono'] as const)
-      expect(renderPure(Text, { variant: v, children: v })).toBeTruthy()
+      expect(renderComponent(<Text {...{ variant: v, children: v }} />).toJSON()).toBeTruthy()
   })
   it('renders all colors', () => {
     for (const c of ['primary', 'secondary', 'tertiary', 'muted', 'faint', 'accent', 'danger', 'warning', 'success', 'info'] as const)
-      expect(renderPure(Text, { color: c, children: c })).toBeTruthy()
+      expect(renderComponent(<Text {...{ color: c, children: c }} />).toJSON()).toBeTruthy()
   })
   it('renders all sizes', () => {
     for (const s of ['2xs', 'xs', 'sm', 'base', 'md', 'lg', 'xl', '2xl', '3xl'] as const)
-      expect(renderPure(Text, { size: s, children: s })).toBeTruthy()
+      expect(renderComponent(<Text {...{ size: s, children: s }} />).toJSON()).toBeTruthy()
   })
   it('renders all weights', () => {
     for (const w of ['normal', 'medium', 'semibold', 'bold'] as const)
-      expect(renderPure(Text, { weight: w, children: w })).toBeTruthy()
+      expect(renderComponent(<Text {...{ weight: w, children: w }} />).toJSON()).toBeTruthy()
   })
-  it('renders minimal', () => { expect(renderPure(Text, { children: 'Min' })).toBeTruthy() })
+  it('renders minimal', () => { expect(renderComponent(<Text {...{ children: 'Min' }} />).toJSON()).toBeTruthy() })
   it('derives line height from the requested text size', () => {
     const caption = renderComponent(<Text variant="caption">Caption</Text>)
     const captionNode = caption.root.findByType('Text' as never)

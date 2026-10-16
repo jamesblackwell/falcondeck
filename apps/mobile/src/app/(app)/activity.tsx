@@ -12,7 +12,8 @@ import {
   type ActivitySection,
   type RecentEntry,
 } from '@falcondeck/client-core'
-import { ActivityDiamond, Button, EmptyState, SyncBanner, Text } from '@/components/ui'
+import { ActivityDiamond, Button, EmptyState, GlassButton, SymbolIcon, SyncBanner, Text } from '@/components/ui'
+import { FloatingHeader } from '@/components/navigation/FloatingHeader'
 import { useSessionStore, useThrottledSnapshot } from '@/store'
 import { useSessionSyncStatus } from '@/hooks/useSessionSyncStatus'
 import { useRelativeTimeTick } from '@/hooks/useRelativeTimeTick'
@@ -120,17 +121,23 @@ export default function ActivityScreen() {
     )
   }, [openTask, theme.colors.accent.default])
   return (
-    <View style={[styles.container, { paddingTop: insets.top }]}>
-      <View style={styles.header}>
-        <Button variant="ghost" size="icon" accessibilityLabel="Close activity" onPress={() => router.navigate('/(app)')}>
-          <ChevronLeft size={theme.iconSize.lg} color={theme.colors.fg.primary} />
-        </Button>
-        <View style={styles.title}>
-          <Text variant="heading" size="lg">Activity</Text>
-          <Text variant="meta">{remainingWorkspaces.length ? 'Activity from loaded tasks' : 'Across visible projects and chats'}</Text>
-        </View>
-      </View>
-      <SyncBanner status={syncStatus} />
+    <View style={styles.container}>
+      <FloatingHeader
+        placement="inline"
+        left={
+          <GlassButton accessibilityLabel="Close activity" onPress={() => router.navigate('/(app)')}>
+            <SymbolIcon name="chevron.left" fallback={ChevronLeft} size={18} weight="semibold" color={theme.colors.fg.primary} />
+          </GlassButton>
+        }
+        center={
+          <View style={styles.headerTitle}>
+            <Text variant="heading" size="lg" weight="bold" numberOfLines={1}>Activity</Text>
+            <Text variant="meta" numberOfLines={1}>{remainingWorkspaces.length ? 'Activity from loaded tasks' : 'Across visible projects and chats'}</Text>
+          </View>
+        }
+      >
+        <SyncBanner status={syncStatus} floating />
+      </FloatingHeader>
       <FlashList data={rows} renderItem={renderItem} keyExtractor={keyExtractor} getItemType={getItemType}
         extraData={nowTick} maintainVisibleContentPosition={{ disabled: true }}
         contentContainerStyle={{ paddingHorizontal: theme.spacing[4], paddingBottom: insets.bottom + theme.spacing[6] }}
@@ -147,10 +154,10 @@ export default function ActivityScreen() {
 }
 const styles = StyleSheet.create(theme => ({
   container: { flex: 1, backgroundColor: theme.colors.surface[1] },
-  header: { flexDirection: 'row', alignItems: 'center', gap: theme.spacing[2], padding: theme.spacing[2], borderBottomWidth: 1, borderBottomColor: theme.colors.border.subtle },
   title: { flex: 1 },
+  headerTitle: { flex: 1, paddingLeft: theme.spacing[1] },
   section: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', paddingTop: theme.spacing[6], paddingBottom: theme.spacing[2] },
-  task: { minHeight: theme.minTouchTarget, padding: theme.spacing[3], gap: theme.spacing[2], marginBottom: theme.spacing[2], backgroundColor: theme.colors.surface[2], borderRadius: theme.radius.lg, borderWidth: 1, borderColor: theme.colors.border.subtle },
+  task: { minHeight: theme.minTouchTarget, padding: theme.spacing[4], gap: theme.spacing[2], marginBottom: theme.spacing[2], backgroundColor: theme.colors.surface[1], borderRadius: 20, borderCurve: 'continuous', borderWidth: StyleSheet.hairlineWidth, borderColor: theme.colors.border.emphasis },
   pressed: { backgroundColor: theme.colors.surface[3] },
   taskHeader: { flexDirection: 'row', alignItems: 'center', gap: theme.spacing[2] },
 }))

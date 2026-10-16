@@ -1106,6 +1106,8 @@ export const SidebarView = memo(function SidebarView({
             maintainVisibleContentPosition={{ disabled: true }}
           />
         )}
+        {/* Rows soften as they scroll up under the Activity row. */}
+        <ScrollEdge edge="top" height={theme.spacing[4]} color={theme.colors.surface[1]} />
         <LoadingPill
           visible={!syncStatus.isBusy && (isPaging || isFolderPaging)}
           label="Loading tasks…"
