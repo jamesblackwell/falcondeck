@@ -78,7 +78,8 @@ export async function preparePatchedBinary({ repoRoot, target, destination, forc
     })
     const built = path.join(buildCache, target, 'release/cua-driver')
     const arch = target.startsWith('aarch64') ? 'arm64' : 'x86_64'
-    execFileSync('lipo', ['-verify_arch', arch, built])
+    // Xcode 26 lipo treats arguments after -verify_arch as architecture names.
+    execFileSync('lipo', [built, '-verify_arch', arch])
     const host = execFileSync('rustc', ['-vV'], { cwd: repoRoot, encoding: 'utf8' }).match(/^host: (.+)$/m)?.[1]
     if (host === target) {
       const version = execFileSync(built, ['--version'], { encoding: 'utf8', timeout: 5000 }).trim()
