@@ -75,6 +75,10 @@ import {
   resolvePermissionMode,
   resolveRelayTruncationCursor,
   resolveServiceTier,
+  resolveModelOption,
+  resolveThreadModelId,
+  resolveReasoningEffort,
+  threadComposerSelectionKey,
   restoreBoxKeyPair,
   tryNormalizeRelayUrl,
   RELAY_DISPLAY_FRAME_MAX_ENCRYPTED,
@@ -3308,7 +3312,7 @@ function RemoteApp() {
       selectionSeedRef.current = null;
       return;
     }
-    const seedKey = `${selectedWorkspace.id}:${selectedThread?.id ?? "workspace"}`;
+    const seedKey = threadComposerSelectionKey(selectedWorkspace.id, selectedThread);
     if (selectionSeedRef.current === seedKey) return;
     selectionSeedRef.current = seedKey;
 
@@ -3365,50 +3369,20 @@ function RemoteApp() {
           ),
     );
     const providerModels = workspaceModels(selectedWorkspace, nextProvider);
-    const preferredModelId =
-      preferredSelection?.modelId &&
-      providerModels.some((model) => model.id === preferredSelection.modelId)
-        ? preferredSelection.modelId
-        : null;
-    const fallbackModelId =
-      preferredModelId ??
-      providerModels.find((m) => m.is_default)?.id ??
-      providerModels[0]?.id ??
-      null;
+    const fallbackModelId = resolveThreadModelId(
+      selectedThread, selectedWorkspace, preferredSelection?.modelId, nextProvider,
+    );
+    setSelectedModel(fallbackModelId);
+    setSelectedEffort(resolveReasoningEffort(
+      selectedThread, selectedWorkspace, fallbackModelId, preferredSelection?.effort, nextProvider,
+    ));
     if (selectedThread) {
-      const nextModelId = selectedThread.agent.model_id ?? fallbackModelId;
-      setSelectedModel(nextModelId);
-      setSelectedEffort(
-        selectedThread.agent.reasoning_effort ??
-          reasoningOptions(
-            snapshot,
-            selectedWorkspace.id,
-            nextProvider,
-            nextModelId,
-          )[0] ??
-          "medium",
-      );
-      setSelectedServiceTier(
-        resolveServiceTier(
-          selectedThread.agent.service_tier,
-          providerModels.find((model) => model.id === nextModelId) ?? null,
-        ),
-      );
+      setSelectedServiceTier(resolveServiceTier(
+        selectedThread.agent.service_tier,
+        resolveModelOption(providerModels, fallbackModelId, nextProvider),
+      ));
       return;
     }
-    setSelectedModel(fallbackModelId);
-    const effortOptions = reasoningOptions(
-      snapshot,
-      selectedWorkspace.id,
-      nextProvider,
-      fallbackModelId,
-    );
-    setSelectedEffort(
-      preferredSelection?.effort &&
-        effortOptions.includes(preferredSelection.effort)
-        ? preferredSelection.effort
-        : (effortOptions[0] ?? "medium"),
-    );
     // Threads keep the tier they last ran with; new conversations take the
     // remembered choice, falling back to the model catalog's default tier.
     const fallbackModel =
@@ -3434,7 +3408,7 @@ function RemoteApp() {
       selectedProvider,
       selectedModel,
     );
-    if (options.length === 0) return;
+    if (selectedThread || options.length === 0) return;
     if (!selectedEffort || !options.includes(selectedEffort)) {
       setSelectedEffort(options[0] ?? "medium");
     }
@@ -3442,6 +3416,7 @@ function RemoteApp() {
     selectedEffort,
     selectedModel,
     selectedProvider,
+    selectedThread,
     selectedWorkspace,
     snapshot,
   ]);
@@ -3719,9 +3694,9 @@ function RemoteApp() {
         modelId,
       );
       const nextEffort =
-        selectedEffort && nextOptions.includes(selectedEffort)
+        selectedEffort === null || nextOptions.includes(selectedEffort)
           ? selectedEffort
-          : (nextOptions[0] ?? "medium");
+          : resolveReasoningEffort(null, selectedWorkspace, modelId, null, selectedProvider);
       setSelectedEffort(nextEffort);
       rememberComposerSelection(selectedThread?.provider ?? selectedProvider, {
         modelId,

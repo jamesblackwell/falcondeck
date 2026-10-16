@@ -2,7 +2,7 @@ import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { useState, type ComponentProps } from "react";
 import { beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 
-import type { ModelSummary } from "@falcondeck/client-core";
+import { resolveModelOption, type ModelSummary } from "@falcondeck/client-core";
 
 import { STARRED_MODELS_STORAGE_KEY } from "../lib/starred-models";
 import {
@@ -73,6 +73,17 @@ beforeEach(() => {
 });
 
 describe("ModelMenu", () => {
+  it("displays a full-ID Claude thread with unset effort as Opus 5.5 Default", () => {
+    const models = [model("sonnet", "Sonnet 5.5"), model("opus", "Opus 5.5")];
+    render(<ModelMenu models={models}
+      selectedModel={resolveModelOption(models, "claude-opus-5-5", "claude")}
+      onModelChange={() => {}} reasoningOptions={["low", "medium", "high"]}
+      selectedEffort={null} onEffortChange={() => {}} />);
+    expect(screen.getByRole("button", { name: "Model" })).toHaveTextContent(/opus 5.5/i);
+    expect(screen.getByRole("button", { name: "Model" })).toHaveTextContent("Default");
+    expect(screen.queryByText("Low")).not.toBeInTheDocument();
+  });
+
   it("shows the opening shortcut as keycaps beside the Model title", async () => {
     render(
       <ModelMenu

@@ -55,6 +55,8 @@ import {
   resolvePersistedMode,
   resolvePermissionMode,
   resolveServiceTier,
+  resolveModelOption,
+  threadComposerSelectionKey,
   composerSkillCatalog,
   selectedSkillsFromText,
   serviceTierForTurn,
@@ -1515,7 +1517,7 @@ function AppInner() {
       selectionSeedRef.current = null;
       return;
     }
-    const seedKey = `${selectedWorkspace.id}:${selectedThread?.id ?? "workspace"}`;
+    const seedKey = threadComposerSelectionKey(selectedWorkspace.id, selectedThread);
     if (selectionSeedRef.current === seedKey) return;
     selectionSeedRef.current = seedKey;
 
@@ -1563,15 +1565,13 @@ function AppInner() {
         nextModelId,
         preferredSelection?.effort,
         nextProvider,
-      ) ?? "medium",
+      ),
     );
     // Threads keep the tier they last ran with; new conversations take the
     // remembered choice, falling back to the model catalog's default tier for
     // accounts where the provider turns fast on by default.
     const nextModel =
-      workspaceModels(selectedWorkspace, nextProvider).find(
-        (model) => model.id === nextModelId,
-      ) ?? null;
+      resolveModelOption(workspaceModels(selectedWorkspace, nextProvider), nextModelId, nextProvider);
     setSelectedServiceTier(
       selectedThread
         ? resolveServiceTier(selectedThread.agent.service_tier, nextModel)
@@ -1608,6 +1608,7 @@ function AppInner() {
     if (!selectedWorkspace) return;
     const provider = selectedThread?.provider ?? selectedProvider;
     const models = workspaceModels(selectedWorkspace, provider);
+    if (selectedThread) return;
     if (models.length === 0) {
       if (selectedModel !== null) {
         setSelectedModel(null);
@@ -1646,7 +1647,7 @@ function AppInner() {
       selectedModel,
       provider,
     );
-    if (options.length === 0) return;
+    if (selectedThread || options.length === 0) return;
     if (!selectedEffort || !options.includes(selectedEffort)) {
       const preferredSelection = composerSelectionFor(
         persistedComposerSelections,
@@ -2081,10 +2082,10 @@ function AppInner() {
         provider,
       );
       const nextEffort =
-        selectedEffort && nextOptions.includes(selectedEffort)
+        selectedEffort === null || nextOptions.includes(selectedEffort)
           ? selectedEffort
           : defaultReasoningEffort(
-              selectedThread,
+              null,
               selectedWorkspace,
               modelId,
               provider,

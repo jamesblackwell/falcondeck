@@ -326,6 +326,17 @@ describe('desktop selection utils', () => {
     expect(resolveThreadModelId(null, selectedWorkspace, 'gpt-5.1-codex-max')).toBe('gpt-5.4')
   })
 
+  it('preserves an MCP thread full model ID and unset effort over composer defaults', () => {
+    const selectedWorkspace = workspace()
+    const selectedThread = thread({
+      provider: 'claude',
+      agent: { model_id: 'claude-opus-5-5', reasoning_effort: null,
+        collaboration_mode_id: null, approval_policy: null, service_tier: null },
+    })
+    expect(resolveThreadModelId(selectedThread, selectedWorkspace, 'sonnet')).toBe('claude-opus-5-5')
+    expect(resolveReasoningEffort(selectedThread, selectedWorkspace, 'sonnet', 'low')).toBeNull()
+  })
+
   it('prefers an existing thread effort over a valid remembered effort', () => {
     const selectedWorkspace = workspace({
       models: [

@@ -6324,6 +6324,26 @@ mod tests {
     }
 
     #[test]
+    fn claude_full_model_and_default_effort_survive_native_rehydration() {
+        let mut state = persisted_thread("claude-thread-mcp", Some("session-mcp"));
+        state.agent.model_id = Some("claude-opus-5-5".into());
+        let states = HashMap::from([("claude-thread-mcp".into(), state)]);
+        let merged = merge_hydrated_threads_with_persisted_state(
+            vec![hydrated_thread("session-mcp", "resumed answer")],
+            &states,
+            "workspace-1",
+            None,
+            Utc::now(),
+        );
+        assert_eq!(merged.len(), 1);
+        assert_eq!(
+            merged[0].summary.agent.model_id.as_deref(),
+            Some("claude-opus-5-5")
+        );
+        assert_eq!(merged[0].summary.agent.reasoning_effort, None);
+    }
+
+    #[test]
     fn restored_thread_adopts_the_transcript_hydrated_under_its_session_id() {
         let mut state = persisted_thread("claude-thread-x", Some("session-1"));
         state.status = Some(ThreadStatus::Running);

@@ -1,4 +1,4 @@
-import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import {
@@ -87,6 +87,8 @@ function sendOnlineSync(socket: TestWebSocket, updates: unknown[] = []) {
 }
 
 afterEach(() => {
+  // Unmount flushes the cached snapshot; clear storage after that flush.
+  cleanup();
   window.localStorage.clear();
   window.sessionStorage.clear();
   vi.restoreAllMocks();
@@ -96,6 +98,49 @@ afterEach(() => {
 });
 
 describe("App", () => {
+  it("shows MCP model/default effort through encrypted relay snapshots and settings updates", async () => {
+    const socket = await renderConnectedSession();
+    const dataKey = new Uint8Array(32).fill(7);
+    const calls = (method: string) => sentRelayMessages(socket).filter(m => m.type === 'rpc-call' && m.method === method);
+    const reply = async (method: string, result: unknown) => {
+      await waitFor(() => expect(calls(method).length).toBeGreaterThan(0));
+      const payload = await encryptJson(dataKey, result);
+      act(() => socket.onmessage?.({ data: JSON.stringify({ type: 'rpc-result', request_id: calls(method).at(-1).request_id, ok: true, result: payload }) }));
+    };
+    const base = normalizeDaemonSnapshot({
+      workspaces: [{ id: 'w', path: '/repo', default_provider: 'claude', current_thread_id: 't',
+        agents: [{ provider: 'claude', models: ['sonnet', 'opus'].map(id => ({
+          id, label: id === 'opus' ? 'Opus 5.5' : 'Sonnet 5.5', is_default: id === 'sonnet',
+          default_reasoning_effort: 'high', supported_reasoning_efforts: [
+            { reasoning_effort: 'low', description: 'Low' }, { reasoning_effort: 'high', description: 'High' },
+          ],
+        })) }] }],
+      threads: [{ id: 't', workspace_id: 'w', title: 'MCP Opus fixture', provider: 'claude',
+        updated_at: '2026-10-16T00:00:00Z', agent: { model_id: 'claude-opus-5-5', reasoning_effort: null } }],
+    });
+    sendOnlineSync(socket);
+    await reply('snapshot.current', base);
+    fireEvent.click(await screen.findByRole('button', { name: 'MCP Opus fixture' }));
+    await reply('thread.detail', { workspace_id: 'w', thread: base.threads[0], items: [] });
+    const check = async (model: RegExp) => {
+      await waitFor(() => expect(screen.getByRole('button', { name: 'Model' })).toHaveTextContent(model));
+      expect(screen.getByRole('button', { name: 'Model' })).toHaveTextContent('Default');
+      expect(screen.getByRole('button', { name: 'Model' })).not.toHaveTextContent('Low');
+    };
+    await check(/opus 5.5/i);
+    for (const [index, model_id] of ['claude-sonnet-5-5', 'claude-opus-5-5'].entries()) {
+      const envelope = await encryptJson(dataKey, { kind: 'daemon-event', event: {
+        seq: index + 10, emitted_at: '2026-10-16T00:00:01Z', workspace_id: 'w', thread_id: 't',
+        event: { type: 'thread-updated', thread: { ...base.threads[0],
+          status: 'running', updated_at: '2026-10-16T00:00:01Z',
+          agent: { ...base.threads[0].agent, model_id } } },
+      } });
+      sendOnlineSync(socket, [{ id: `u${index}`, seq: index + 10,
+        created_at: '2026-10-16T00:00:01Z', body: { t: 'encrypted', envelope } }]);
+      await check(index === 0 ? /sonnet 5.5/i : /opus 5.5/i);
+    }
+  });
+
   it("recovers a pending Hermes approval after replay pruning and sends its exact choice", async () => {
     const socket = await renderConnectedSession();
     const dataKey = new Uint8Array(32).fill(7);

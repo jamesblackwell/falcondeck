@@ -44,6 +44,28 @@ const promptInputProps = {
 };
 
 describe("PromptInput", () => {
+  it("shows a full Claude model ID with Default effort after remounting", () => {
+    const props = { ...promptInputProps,
+      selectedProvider: "claude" as const, selectedModelId: "claude-opus-5-5", selectedEffort: null,
+      models: [
+        { id: "sonnet", label: "Sonnet 5.5", is_default: true,
+          default_reasoning_effort: "medium", supported_reasoning_efforts: [] },
+        { id: "opus", label: "Opus 5.5", is_default: false,
+          default_reasoning_effort: "high", supported_reasoning_efforts: [] },
+      ],
+    };
+    const check = () => {
+      expect(screen.getByRole("button", { name: "Model" })).toHaveTextContent(/opus 5.5/i);
+      expect(screen.getByRole("button", { name: "Model" })).toHaveTextContent("Default");
+      expect(screen.getByRole("button", { name: "Model" })).not.toHaveTextContent(/sonnet|low/i);
+    };
+    const first = render(<PromptInput {...props} />);
+    check();
+    first.unmount();
+    render(<PromptInput {...props} />);
+    check();
+  });
+
   const originalScrollHeight = Object.getOwnPropertyDescriptor(
     HTMLTextAreaElement.prototype,
     "scrollHeight",

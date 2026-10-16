@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import {
   generateBoxKeyPair,
+  normalizeDaemonSnapshot,
   REMOTE_SESSION_STORAGE_VERSION,
   secretKeyToBase64,
   type ConversationItem,
@@ -37,6 +38,7 @@ import {
   persistSelection,
   postThreadNotification,
   resumePendingActions,
+  reasoningOptions,
   resolveRestoredSelection,
   scheduleVisibilityAwareFlush,
   shouldApplyReplayPresence,
@@ -47,6 +49,17 @@ import {
 afterEach(() => {
   window.localStorage.clear()
   window.sessionStorage.clear()
+})
+
+it('resolves effort options for full Claude model IDs received across the relay', () => {
+  const snapshot = normalizeDaemonSnapshot({ workspaces: [{
+    id: 'w', default_provider: 'claude', agents: [{ provider: 'claude', models: [{
+      id: 'opus', label: 'Opus 5.5', is_default: false, default_reasoning_effort: 'high',
+      supported_reasoning_efforts: [{ reasoning_effort: 'high', description: 'High' }],
+    }] }],
+  }] })
+  expect(reasoningOptions(snapshot, 'w', 'claude', 'claude-opus-5-5')).toEqual(['high'])
+  expect(reasoningOptions(snapshot, 'w', 'claude', 'unlisted-model')).toEqual([])
 })
 
 describe('remote session secret persistence', () => {

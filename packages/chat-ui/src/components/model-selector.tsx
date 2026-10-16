@@ -264,8 +264,8 @@ export function ModelMenu({
           .endsWith(`(${selectedEffort.toLowerCase()})`)),
   );
   const effortLabel =
-    selectedEffort && reasoningOptions.length > 0 && !modelEncodesEffort
-      ? capitalize(selectedEffort)
+    reasoningOptions.length > 0 && !modelEncodesEffort
+      ? capitalize(selectedEffort ?? "default")
       : null;
 
   const handleOpenChange = (nextOpen: boolean) => {

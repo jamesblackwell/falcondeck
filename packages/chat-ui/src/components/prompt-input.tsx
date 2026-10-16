@@ -37,6 +37,7 @@ import type {
 } from "@falcondeck/client-core";
 import {
   activeSlashQuery,
+  resolveModelOption,
   anyModelHasFastTier,
   fileAttachmentKind,
   modelFastTier,
@@ -381,9 +382,7 @@ export const PromptInput = memo(function PromptInput({
   // Fast mode reads the tier off whichever model a send would actually use —
   // the explicit pick, or the provider default while nothing is picked yet.
   const selectedModel =
-    models.find((model) => model.id === selectedModelId) ??
-    models.find((model) => model.is_default) ??
-    null;
+    resolveModelOption(models, selectedModelId, selectedProvider);
 
   const slashOpen = slashQuery !== null;
   useEffect(() => {

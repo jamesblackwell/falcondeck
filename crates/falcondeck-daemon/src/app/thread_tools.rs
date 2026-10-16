@@ -386,6 +386,7 @@ mod tests {
     use super::*;
     use falcondeck_core::{ThreadAgentParams, ThreadAttention};
     use tempfile::tempdir;
+    mod model_settings_tests;
     async fn fixture() -> (AppState, tempfile::TempDir) {
         let temp_dir = tempdir().unwrap();
         let workspace_path = temp_dir.path().join("project-a");

@@ -30,6 +30,10 @@ import {
   resolvePersistedMode,
   resolvePermissionMode,
   resolveServiceTier,
+  resolveModelOption,
+  resolveThreadModelId,
+  resolveReasoningEffort,
+  threadComposerSelectionKey,
   STANDARD_SERVICE_TIER,
   validateImageAttachmentBudget,
   workspaceAgentCapabilities,
@@ -497,13 +501,10 @@ export default function HomeScreen() {
   }, [activeProvider, models, workspace]);
 
   // Compute effort options from the selected model's supported_reasoning_efforts
-  const resolvedModel = useMemo(() => {
-    if (selectedModel)
-      return effectiveModels.find((m) => m.id === selectedModel) ?? null;
-    return (
-      effectiveModels.find((m) => m.is_default) ?? effectiveModels[0] ?? null
-    );
-  }, [effectiveModels, selectedModel]);
+  const resolvedModel = useMemo(
+    () => resolveModelOption(effectiveModels, selectedModel, activeProvider),
+    [effectiveModels, selectedModel, activeProvider],
+  );
 
   const effortOptions = useMemo(() => {
     const supported =
@@ -513,10 +514,8 @@ export default function HomeScreen() {
     if (supported.length > 0) return supported;
     if (resolvedModel?.default_reasoning_effort)
       return [resolvedModel.default_reasoning_effort];
-    // A resolved model that advertises no efforts has none (several OpenCode
-    // models cannot reason at all); only an unresolved model keeps the
-    // historic fallback.
-    return resolvedModel ? [] : ["medium"];
+    // Models without advertised reasoning support have no effort picker.
+    return [];
   }, [resolvedModel]);
   const isThreadRunning = selectedThread?.status === "running";
   const showThinking = shouldShowThinkingIndicator(
@@ -587,7 +586,7 @@ export default function HomeScreen() {
       return;
     }
 
-    const seedKey = `${workspace.id}:${selectedThread?.id ?? "workspace"}`;
+    const seedKey = threadComposerSelectionKey(workspace.id, selectedThread);
     if (selectionSeedRef.current === seedKey) return;
     selectionSeedRef.current = seedKey;
 
@@ -636,56 +635,20 @@ export default function HomeScreen() {
 
     setSelectedProvider(nextProvider);
     const providerModels = workspaceModels(workspace, nextProvider);
-    const preferredModel =
-      preferredSelection?.modelId &&
-      providerModels.some((model) => model.id === preferredSelection.modelId)
-        ? preferredSelection.modelId
-        : null;
-    const fallbackModel =
-      preferredModel ??
-      providerModels.find((model) => model.is_default)?.id ??
-      providerModels[0]?.id ??
-      null;
-
+    const fallbackModel = resolveThreadModelId(
+      selectedThread, workspace, preferredSelection?.modelId, nextProvider,
+    );
+    const fallbackModelSummary = resolveModelOption(providerModels, fallbackModel, nextProvider);
+    setSelectedModel(fallbackModel);
+    setSelectedEffort(resolveReasoningEffort(
+      selectedThread, workspace, fallbackModel, preferredSelection?.effort, nextProvider,
+    ));
     if (selectedThread) {
-      const nextModel = selectedThread.agent.model_id ?? fallbackModel;
-      const nextModelSummary = nextModel
-        ? (providerModels.find((model) => model.id === nextModel) ?? null)
-        : null;
-      const supportedEfforts =
-        nextModelSummary?.supported_reasoning_efforts.map(
-          (entry) => entry.reasoning_effort,
-        ) ?? [];
-      setSelectedModel(nextModel);
-      setSelectedEffort(
-        selectedThread.agent.reasoning_effort ??
-          nextModelSummary?.default_reasoning_effort ??
-          supportedEfforts[0] ??
-          "medium",
-      );
-      setSelectedServiceTier(
-        resolveServiceTier(selectedThread.agent.service_tier, nextModelSummary),
-      );
+      setSelectedServiceTier(resolveServiceTier(
+        selectedThread.agent.service_tier, fallbackModelSummary,
+      ));
       return;
     }
-
-    const fallbackModelSummary = fallbackModel
-      ? (providerModels.find((model) => model.id === fallbackModel) ?? null)
-      : null;
-    const supportedEfforts =
-      fallbackModelSummary?.supported_reasoning_efforts.map(
-        (entry) => entry.reasoning_effort,
-      ) ?? [];
-    setSelectedModel(fallbackModel);
-    setSelectedEffort(
-      (preferredSelection?.effort &&
-      supportedEfforts.includes(preferredSelection.effort)
-        ? preferredSelection.effort
-        : null) ??
-        fallbackModelSummary?.default_reasoning_effort ??
-        supportedEfforts[0] ??
-        "medium",
-    );
     // Threads keep the tier they last ran with; new conversations take the
     // remembered choice, falling back to the model catalog's default tier.
     setSelectedServiceTier(
@@ -709,13 +672,15 @@ export default function HomeScreen() {
 
   // Reset effort when it's no longer valid for the current model
   useEffect(() => {
-    if (effortOptions.length === 0) return;
+    if (effortOptions.length === 0 || selectedEffort === null ||
+      (selectedThread && selectedModel === selectedThread.agent.model_id &&
+        selectedEffort === selectedThread.agent.reasoning_effort)) return;
     if (!selectedEffort || !effortOptions.includes(selectedEffort)) {
       const fallback =
         resolvedModel?.default_reasoning_effort ?? effortOptions[0] ?? "medium";
       setSelectedEffort(fallback);
     }
-  }, [effortOptions, resolvedModel, selectedEffort, setSelectedEffort]);
+  }, [effortOptions, resolvedModel, selectedEffort, selectedModel, selectedThread, setSelectedEffort]);
 
   // Optional providers start lazily in the daemon; a composer aimed at one
   // is the signal to warm its runtime so the model list fills in. A

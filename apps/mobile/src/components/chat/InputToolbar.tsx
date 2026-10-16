@@ -9,6 +9,7 @@ import {
   modelFastTier,
   NO_AGENT_CAPABILITIES,
   resolveServiceTier,
+  resolveModelOption,
   type AgentCapabilitySummary,
   type ThreadIsolation,
   type AgentProvider,
@@ -123,7 +124,7 @@ export const InputToolbar = memo(function InputToolbar({
     }
   }, [disabled])
 
-  const currentModel = selectedModel ? models.find((m) => m.id === selectedModel) : null
+  const currentModel = resolveModelOption(models, selectedModel, selectedProvider)
   const providerLabel =
     providers.find((option) => option.provider === selectedProvider)?.label ??
     selectedProvider
@@ -207,7 +208,7 @@ export const InputToolbar = memo(function InputToolbar({
     })
   }, [disabled, onSelectSandboxMode, sandboxModes, selectedSandboxMode])
 
-  const currentEffortLabel = capitalize(selectedEffort ?? 'medium')
+  const currentEffortLabel = capitalize(selectedEffort ?? 'default')
 
   // Fast mode reads the tier off whichever model a send would actually use —
   // the explicit pick, or the provider default while the chip says "Default".
@@ -322,7 +323,7 @@ export const InputToolbar = memo(function InputToolbar({
       {modelSheetOpen ? (
         <ComposerModelSheet
           models={models}
-          selectedModel={selectedModel}
+          selectedModel={currentModel?.id ?? selectedModel}
           onSelectModel={onSelectModel}
           selectedProvider={selectedProvider}
           providers={providers}

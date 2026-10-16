@@ -14,6 +14,7 @@ import {
   restoreBoxKeyPair,
   secretKeyToBase64,
   workspaceModels,
+  resolveModelOption,
   type AgentProvider,
   type ConversationItem,
   type DaemonSnapshot,
@@ -185,10 +186,10 @@ export function reasoningOptions(
   modelId: string | null,
 ) {
   const workspace = snapshot?.workspaces.find((entry) => entry.id === workspaceId)
-  const model = workspaceModels(workspace, provider).find((entry) => entry.id === modelId)
+  const model = resolveModelOption(workspaceModels(workspace, provider), modelId, provider)
   const supported = model?.supported_reasoning_efforts.map((entry) => entry.reasoning_effort) ?? []
   if (supported.length > 0) return supported
-  return model?.default_reasoning_effort ? [model.default_reasoning_effort] : ['medium']
+  return model?.default_reasoning_effort ? [model.default_reasoning_effort] : []
 }
 
 export function sendRelayMessage(socket: WebSocket, message: RelayClientMessage) {

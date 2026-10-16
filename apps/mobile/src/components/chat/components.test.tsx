@@ -202,6 +202,19 @@ describe('ChatInput component', () => {
     expect(r.root.findByProps({ accessibilityLabel: 'Record voice message' })).toBeDefined()
   })
 
+  it('shows a full-ID Claude thread with unset effort as Opus 5.5 and Default', () => {
+    const r = renderComponent(<ChatInput value="" {...chatInputDefaults}
+      selectedProvider="claude" selectedModel="claude-opus-5-5" selectedEffort={null}
+      models={['sonnet', 'opus'].map((id) => ({
+        id, label: id === 'opus' ? 'Opus 5.5' : 'Sonnet 5.5', is_default: id === 'sonnet',
+        default_reasoning_effort: 'high', supported_reasoning_efforts: [],
+      }))} />)
+    expect(textOf(r)).toMatch(/opus 5.5/i)
+    expect(textOf(r)).toContain('Default')
+    expect(textOf(r)).not.toContain('Sonnet 5.5')
+    expect(textOf(r)).not.toContain('Low')
+  })
+
   it('renders with text', () => {
     const r = renderComponent(
       <ChatInput value="Hello" {...chatInputDefaults} />,
