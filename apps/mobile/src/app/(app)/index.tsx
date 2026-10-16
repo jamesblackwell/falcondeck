@@ -1,4 +1,5 @@
 import type React from "react";
+import type { ComponentProps } from "react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   AppState,
@@ -220,7 +221,6 @@ export default function HomeScreen() {
   const daemonRpcReady = isDaemonRpcReady(machinePresence);
   const {
     attachments,
-    draft,
     isSubmitting,
     persistedComposerSelections,
     selectedEffort,
@@ -234,7 +234,6 @@ export default function HomeScreen() {
   } = useUIStore(
     useShallow((s) => ({
       attachments: s.attachments,
-      draft: s.draft,
       isSubmitting: s.isSubmitting,
       persistedComposerSelections: s.persistedComposerSelections,
       selectedEffort: s.selectedEffort,
@@ -250,7 +249,6 @@ export default function HomeScreen() {
   const {
     rememberComposerSelection,
     rememberWorkspaceProvider,
-    setDraft,
     setSelectedModel,
     setSelectedEffort,
     setSelectedPermissionMode,
@@ -1547,10 +1545,8 @@ export default function HomeScreen() {
             getAttachmentPreview={handleQueuedTurnAttachmentPreview}
           />
 
-          <ChatInput
+          <DraftChatInput
             textInputRef={composerInputRef}
-            value={draft}
-            onChangeText={setDraft}
             onSubmit={() => {
               // Sending from just above the tail means the reader wants to see
               // their message land; only a reader far enough up for the jump
@@ -1663,6 +1659,16 @@ export default function HomeScreen() {
     </View>
     </AnimationVisibility>
   );
+}
+
+/** Subscribes to the draft on its own, so a keystroke re-renders the
+    composer rather than the whole thread screen around it. */
+function DraftChatInput(
+  props: Omit<ComponentProps<typeof ChatInput>, "value" | "onChangeText">,
+) {
+  const draft = useUIStore((s) => s.draft);
+  const setDraft = useUIStore((s) => s.setDraft);
+  return <ChatInput {...props} value={draft} onChangeText={setDraft} />;
 }
 
 /** Holds space for floating chrome inside the transcript's scroll content.

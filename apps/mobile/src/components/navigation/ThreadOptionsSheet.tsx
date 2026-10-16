@@ -6,7 +6,7 @@ import { StyleSheet, useUnistyles } from 'react-native-unistyles'
 
 import type { ThreadSummary } from '@falcondeck/client-core'
 
-import { Button, Input, NativeSheet, SheetGroup, SheetRow, Text } from '@/components/ui'
+import { Button, Input, NativeSheet, SheetGroup, SheetRow, SymbolIcon, Text } from '@/components/ui'
 import { useThreadActions } from '@/hooks/useThreadActions'
 import { triggerThreadArchiveHaptic } from '@/lib/haptics'
 import { useSessionStore } from '@/store/session-store'
@@ -245,14 +245,14 @@ export const ThreadOptionsSheet = memo(function ThreadOptionsSheet({
             <SheetRow
               label={thread.is_pinned ? 'Unpin' : 'Pin'}
               accessibilityLabel={thread.is_pinned ? 'Unpin thread' : 'Pin thread'}
-              icon={(color) => <Pin size={theme.iconSize.sm} color={color} />}
+              icon={(color) => <SymbolIcon name="pin" fallback={Pin} size={17} color={color} />}
               onPress={() => void handleTogglePin()}
               disabled={pendingAction !== null}
             />
             {canPinInProject ? (
               <SheetRow
                 label={thread.is_pinned_in_project ? 'Unpin from project' : 'Pin in project'}
-                icon={(color) => <Pin size={theme.iconSize.sm} color={color} />}
+                icon={(color) => <SymbolIcon name="pin" fallback={Pin} size={17} color={color} />}
                 onPress={() => void handleTogglePinInProject()}
                 disabled={pendingAction !== null}
               />
@@ -262,7 +262,7 @@ export const ThreadOptionsSheet = memo(function ThreadOptionsSheet({
             <SheetRow
               label="Rename"
               accessibilityLabel="Rename thread"
-              icon={(color) => <Pencil size={theme.iconSize.sm} color={color} />}
+              icon={(color) => <SymbolIcon name="pencil" fallback={Pencil} size={17} color={color} />}
               navigates
               onPress={startRename}
             />
@@ -279,7 +279,7 @@ export const ThreadOptionsSheet = memo(function ThreadOptionsSheet({
               <SheetRow
                 label="Move to folder…"
                 accessibilityLabel="Move to folder"
-                icon={(color) => <FolderInput size={theme.iconSize.sm} color={color} />}
+                icon={(color) => <SymbolIcon name="folder" fallback={FolderInput} size={17} color={color} />}
                 onPress={onMoveToFolder}
                 disabled={pendingAction !== null}
               />
@@ -292,9 +292,9 @@ export const ThreadOptionsSheet = memo(function ThreadOptionsSheet({
               tone="info"
               icon={(color) =>
                 thread.is_archived ? (
-                  <ArchiveRestore size={theme.iconSize.sm} color={color} />
+                  <SymbolIcon name="tray.and.arrow.up" fallback={ArchiveRestore} size={17} color={color} />
                 ) : (
-                  <Archive size={theme.iconSize.sm} color={color} />
+                  <SymbolIcon name="archivebox" fallback={Archive} size={17} color={color} />
                 )
               }
               onPress={thread.is_archived ? handleUnarchive : handleArchive}

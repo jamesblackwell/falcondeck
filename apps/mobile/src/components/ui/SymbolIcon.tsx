@@ -38,6 +38,12 @@ const LUCIDE_STROKE: Record<SymbolWeight, number> = {
   bold: 2.5,
 }
 
+/** An SF Symbol paired with the lucide icon that stands in for it. */
+export interface SymbolGlyph {
+  name: SymbolViewProps['name']
+  fallback: LucideLikeIcon
+}
+
 interface SymbolIconProps {
   /** SF Symbol name, e.g. `square.and.pencil`. */
   name: SymbolViewProps['name']

@@ -87,7 +87,9 @@ export const SheetRow = memo(function SheetRow({
       ]}
     >
       {icon ? <View style={styles.icon}>{icon(color)}</View> : null}
-      <Text variant="label" color={textColor} style={styles.label} numberOfLines={1}>
+      {/* Regular weight, as iOS menus set: Geist ships only Regular and Bold,
+          so the label variant's 500 would round up to Bold. */}
+      <Text size="base" color={textColor} style={styles.label} numberOfLines={1}>
         {label}
       </Text>
       {navigates ? (

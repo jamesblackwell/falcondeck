@@ -11,7 +11,7 @@ import {
 
 import { NativeSheet } from './NativeSheet'
 import { PaletteSwatch, type PaletteSwatchColors } from './PaletteSwatch'
-import { SymbolIcon } from './SymbolIcon'
+import { SymbolIcon, type SymbolGlyph } from './SymbolIcon'
 import { Text } from './Text'
 
 /** Leaves a row of context above the revealed selection. */
@@ -28,6 +28,8 @@ export type OptionSheetItem = {
   destructive?: boolean
   /** Colour chip shown before the label — used by the theme picker. */
   swatch?: PaletteSwatchColors
+  /** Leading glyph for action menus, so each row is recognisable at a glance. */
+  icon?: SymbolGlyph
 }
 
 interface OptionSheetProps {
@@ -144,6 +146,22 @@ export const OptionSheet = memo(function OptionSheet({
               }}
             >
               {item.swatch ? <PaletteSwatch colors={item.swatch} /> : null}
+              {item.icon ? (
+                <View style={styles.itemIcon}>
+                  <SymbolIcon
+                    name={item.icon.name}
+                    fallback={item.icon.fallback}
+                    size={18}
+                    color={
+                      item.disabled
+                        ? theme.colors.fg.faint
+                        : item.destructive
+                          ? theme.colors.danger.default
+                          : theme.colors.fg.secondary
+                    }
+                  />
+                </View>
+              ) : null}
               <View style={styles.itemBody}>
                 <Text
                   size="base"
@@ -238,5 +256,9 @@ const styles = StyleSheet.create((theme) => ({
   itemBody: {
     flex: 1,
     gap: theme.spacing[0.5],
+  },
+  itemIcon: {
+    width: 24,
+    alignItems: 'center',
   },
 }))

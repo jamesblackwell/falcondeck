@@ -31,6 +31,6 @@ export {
   GlassGroupItem,
   GLASS_CONTROL_SIZE,
 } from './GlassButton'
-export { SymbolIcon, hasNativeSymbols } from './SymbolIcon'
+export { SymbolIcon, hasNativeSymbols, type SymbolGlyph } from './SymbolIcon'
 export { ScrollEdge } from './ScrollEdge'
 export { SheetGroup, SheetRow, type SheetRowTone } from './SheetMenu'

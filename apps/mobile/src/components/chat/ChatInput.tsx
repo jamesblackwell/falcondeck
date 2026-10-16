@@ -27,7 +27,21 @@ import Animated, {
   withTiming,
 } from 'react-native-reanimated'
 import { StyleSheet, useUnistyles } from 'react-native-unistyles'
-import { ArrowUp, BookOpen, ChevronUp, Mic, Plus, Square, Target } from 'lucide-react-native'
+import {
+  ArrowUp,
+  BookOpen,
+  Box,
+  Camera,
+  ChevronUp,
+  ClipboardPaste,
+  Images,
+  Mic,
+  Plus,
+  ShieldCheck,
+  SlidersHorizontal,
+  Square,
+  Target,
+} from 'lucide-react-native'
 import { useSafeAreaInsets } from 'react-native-safe-area-context'
 import * as Haptics from 'expo-haptics'
 
@@ -240,6 +254,7 @@ const DEFAULT_PROVIDER_OPTIONS: ProviderOption[] = [
   { provider: 'codex', label: 'Codex' },
   { provider: 'claude', label: 'Claude' },
 ]
+const NO_PROMPTS: SavedPrompt[] = []
 
 export const ChatInput = memo(function ChatInput({
   value,
@@ -258,7 +273,7 @@ export const ChatInput = memo(function ChatInput({
   attachments,
   skills,
   loadSkills,
-  prompts = [],
+  prompts = NO_PROMPTS,
   loadPrompts,
   models,
   selectedModel,
@@ -659,6 +674,7 @@ export const ChatInput = memo(function ChatInput({
       items.push({
         value: 'mode',
         label: 'Mode',
+        icon: { name: 'slider.horizontal.3', fallback: SlidersHorizontal },
         description: collaborationModeLabel(selectedCollaborationMode, collaborationModes),
       })
     }
@@ -667,18 +683,21 @@ export const ChatInput = memo(function ChatInput({
         items.push({
           value: 'paste-image',
           label: 'Paste image',
+          icon: { name: 'doc.on.clipboard', fallback: ClipboardPaste },
           description: 'Attach an image copied to your clipboard',
         })
       }
       items.push({
         value: 'photos',
         label: 'Photos',
+        icon: { name: 'photo.on.rectangle', fallback: Images },
         description: 'Choose images from your photo library',
       })
       if (onTakePhoto) {
         items.push({
           value: 'camera',
           label: 'Camera',
+          icon: { name: 'camera', fallback: Camera },
           description: 'Take a new photo',
         })
       }
@@ -687,6 +706,7 @@ export const ChatInput = memo(function ChatInput({
       items.push({
         value: 'permission',
         label: 'Permissions',
+        icon: { name: 'checkmark.shield', fallback: ShieldCheck },
         description: permissionChipLabel(
           selectedPermissionMode,
           capabilities.permission_modes,
@@ -697,6 +717,7 @@ export const ChatInput = memo(function ChatInput({
       items.push({
         value: 'sandbox',
         label: 'Sandbox',
+        icon: { name: 'shippingbox', fallback: Box },
         description: sandboxChipLabel(selectedSandboxMode),
       })
     }

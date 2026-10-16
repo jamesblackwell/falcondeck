@@ -13,7 +13,7 @@ import {
   type ProviderOption,
 } from '@falcondeck/client-core'
 
-import { LoadingState, NativeSheet, ProviderIcon, Text } from '@/components/ui'
+import { glassFill, LoadingState, NativeSheet, ProviderIcon, SymbolIcon, Text } from '@/components/ui'
 
 /** Leaves a row of context above the revealed selection. */
 const SELECTED_REVEAL_INSET = 64
@@ -167,11 +167,14 @@ export const ComposerModelSheet = memo(function ComposerModelSheet({
               panel === 'handoff' ? 'Back to models' : 'Back to agents'
             }
             hitSlop={8}
-            style={styles.backButton}
+            style={({ pressed }) => [styles.backButton, pressed ? styles.backButtonPressed : null]}
           >
-            <ChevronLeft
-              size={theme.iconSize.md}
-              color={theme.colors.fg.primary}
+            <SymbolIcon
+              name="chevron.left"
+              fallback={ChevronLeft}
+              size={14}
+              weight="bold"
+              color={theme.colors.fg.secondary}
             />
           </Pressable>
         ) : null}
@@ -208,6 +211,8 @@ export const ComposerModelSheet = memo(function ComposerModelSheet({
         keyboardShouldPersistTaps="handled"
         onContentSizeChange={panel === 'model' ? revealSelected : undefined}
       >
+        <View style={styles.group}>
+        <View style={styles.groupInner}>
         {panel === 'agent'
           ? providers.map((option) => {
               const selected = option.provider === selectedProvider
@@ -283,9 +288,12 @@ export const ComposerModelSheet = memo(function ComposerModelSheet({
             )}
           </>
         ) : null}
+        </View>
+        </View>
       </ScrollView>
       {panel === 'model' && canHandoff && !searching ? (
-        <View style={styles.footer}>
+        <View style={[styles.group, styles.footer]}>
+          <View style={styles.groupInner}>
           <SheetRow
             label="Continue in another harness…"
             description={
@@ -300,6 +308,7 @@ export const ComposerModelSheet = memo(function ComposerModelSheet({
               setPanel('handoff')
             }}
           />
+          </View>
         </View>
       ) : null}
     </NativeSheet>
@@ -334,7 +343,7 @@ const SheetRow = memo(function SheetRow({
 
   return (
     <Pressable
-      style={[styles.item, selected ? styles.itemSelected : null]}
+      style={({ pressed }) => [styles.item, pressed && !disabled ? styles.itemPressed : null]}
       onLayout={
         onLayout
           ? (event) => {
@@ -356,7 +365,7 @@ const SheetRow = memo(function SheetRow({
         <ProviderIcon provider={provider} size={theme.iconSize.sm} color={iconColor} />
       ) : null}
       <View style={styles.itemBody}>
-        <Text size="sm" color={disabled ? 'faint' : 'primary'}>
+        <Text size="base" color={disabled ? 'faint' : 'primary'}>
           {label}
         </Text>
         {description ? (
@@ -366,10 +375,22 @@ const SheetRow = memo(function SheetRow({
         ) : null}
       </View>
       {selected ? (
-        <Check size={theme.iconSize.sm} color={theme.colors.accent.default} />
+        <SymbolIcon
+          name="checkmark"
+          fallback={Check}
+          size={15}
+          weight="semibold"
+          color={theme.colors.accent.default}
+        />
       ) : null}
       {trailing === 'arrow' ? (
-        <ArrowRight size={theme.iconSize.sm} color={theme.colors.fg.muted} />
+        <SymbolIcon
+          name="chevron.right"
+          fallback={ArrowRight}
+          size={12}
+          weight="semibold"
+          color={theme.colors.fg.faint}
+        />
       ) : null}
     </Pressable>
   )
@@ -384,13 +405,18 @@ const styles = StyleSheet.create((theme) => ({
     alignItems: 'center',
     gap: theme.spacing[1],
     paddingRight: theme.spacing[10],
-    paddingBottom: theme.spacing[2],
+    paddingBottom: theme.spacing[3],
   },
   backButton: {
-    width: theme.spacing[8],
-    height: theme.spacing[8],
+    width: 30,
+    height: 30,
     alignItems: 'center',
     justifyContent: 'center',
+    borderRadius: theme.radius.full,
+    backgroundColor: glassFill(theme.isDark),
+  },
+  backButtonPressed: {
+    backgroundColor: theme.isDark ? 'rgba(255, 255, 255, 0.18)' : 'rgba(9, 9, 11, 0.1)',
   },
   title: {
     flex: 1,
@@ -402,20 +428,26 @@ const styles = StyleSheet.create((theme) => ({
   /** Pinned below the scrollable model list so the handoff entry stays
       reachable no matter how many models the agent advertises. */
   footer: {
-    marginTop: theme.spacing[2],
-    paddingTop: theme.spacing[2],
-    borderTopWidth: StyleSheet.hairlineWidth,
-    borderTopColor: theme.colors.border.default,
+    marginTop: theme.spacing[3],
+  },
+  // Inset grouped, matching OptionSheet. Each row draws its own bottom
+  // hairline; the inner view tucks the last one under the clipped edge.
+  group: {
+    borderRadius: 20,
+    borderCurve: 'continuous',
+    overflow: 'hidden',
+    backgroundColor: theme.isDark ? 'rgba(255, 255, 255, 0.07)' : 'rgba(255, 255, 255, 0.78)',
+  },
+  groupInner: {
+    marginBottom: -StyleSheet.hairlineWidth,
   },
   searchInput: {
-    minHeight: theme.minTouchTarget,
-    marginHorizontal: theme.spacing[2],
+    minHeight: 40,
     marginBottom: theme.spacing[2],
-    borderWidth: 1,
-    borderColor: theme.colors.border.default,
-    borderRadius: theme.radius.lg,
-    backgroundColor: theme.colors.surface[2],
-    paddingHorizontal: theme.spacing[3],
+    borderRadius: theme.radius.full,
+    borderCurve: 'continuous',
+    backgroundColor: theme.isDark ? 'rgba(255, 255, 255, 0.08)' : 'rgba(9, 9, 11, 0.06)',
+    paddingHorizontal: theme.spacing[4],
     color: theme.colors.fg.primary,
     fontSize: theme.fontSize.sm,
   },
@@ -429,13 +461,14 @@ const styles = StyleSheet.create((theme) => ({
     alignItems: 'center',
     justifyContent: 'space-between',
     gap: theme.spacing[3],
-    minHeight: theme.minTouchTarget,
+    minHeight: 50,
     paddingVertical: theme.spacing[2],
-    paddingHorizontal: theme.spacing[2],
-    borderRadius: theme.radius.lg,
+    paddingHorizontal: theme.spacing[4],
+    borderBottomWidth: StyleSheet.hairlineWidth,
+    borderBottomColor: theme.isDark ? 'rgba(255, 255, 255, 0.1)' : 'rgba(9, 9, 11, 0.09)',
   },
-  itemSelected: {
-    backgroundColor: theme.colors.surface[2],
+  itemPressed: {
+    backgroundColor: theme.isDark ? 'rgba(255, 255, 255, 0.08)' : 'rgba(9, 9, 11, 0.05)',
   },
   itemBody: {
     flex: 1,
