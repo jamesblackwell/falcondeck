@@ -101,9 +101,15 @@ struct OrganizeArgs {
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
-struct TargetArgs {
+struct WaitArgs {
     thread_id: String,
     wait_seconds: Option<u64>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct InterruptArgs {
+    thread_id: String,
 }
 
 #[derive(Deserialize)]
@@ -143,8 +149,13 @@ fn status_name(status: &ThreadStatus) -> &'static str {
     }
 }
 
+/// A question blocks the queue, so waiting for input outranks queued messages.
 fn is_busy(thread: &ThreadSummary) -> bool {
-    thread.status == ThreadStatus::Running || !thread.queued_turns.is_empty()
+    match thread.status {
+        ThreadStatus::Running => true,
+        ThreadStatus::WaitingForInput => false,
+        _ => !thread.queued_turns.is_empty(),
+    }
 }
 
 fn is_child_of(thread: &ThreadSummary, parent: &str) -> bool {
@@ -218,7 +229,7 @@ impl AppState {
     ) -> Result<ExtensionToolResponse, DaemonError> {
         match name {
             WAIT => {
-                let a: TargetArgs = args(arguments)?;
+                let a: WaitArgs = args(arguments)?;
                 let wait = a.wait_seconds.unwrap_or(20).min(MAX_WAIT_SECS);
                 let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(wait);
                 let (thread, waited) = loop {
@@ -321,7 +332,7 @@ impl AppState {
                 )))
             }
             INTERRUPT => {
-                let a: TargetArgs = args(arguments)?;
+                let a: InterruptArgs = args(arguments)?;
                 if a.thread_id == parent {
                     return Err(DaemonError::BadRequest(
                         "cannot interrupt the calling thread".into(),
@@ -915,6 +926,20 @@ mod tests {
             "{idle}"
         );
         assert!(started.elapsed() < std::time::Duration::from_secs(4));
+    }
+
+    #[tokio::test]
+    async fn waiting_for_input_outranks_queued_messages() {
+        let (app, _temp) = fixture().await;
+        let mut thread = app.thread_summary("workspace-1", "thread-1").await.unwrap();
+        thread.queued_turns.push(
+            serde_json::from_value(json!({"id":"q","preview":"later","queued_at":Utc::now()}))
+                .unwrap(),
+        );
+        thread.status = ThreadStatus::WaitingForInput;
+        assert!(!is_busy(&thread));
+        thread.status = ThreadStatus::Idle;
+        assert!(is_busy(&thread));
     }
 
     #[tokio::test]
