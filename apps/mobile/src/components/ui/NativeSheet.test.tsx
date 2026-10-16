@@ -1,6 +1,8 @@
 import React from 'react'
 import { act } from 'react-test-renderer'
 import { afterEach, describe, expect, it, vi } from 'vitest'
+// @ts-expect-error test-only helpers exported by the reanimated mock
+import { __holdAnimationCallbacksForTests, __releaseAnimationCallbacksForTests } from 'react-native-reanimated'
 
 import { cleanup, renderComponent } from '@/test/render'
 
@@ -106,5 +108,28 @@ describe('NativeSheet', () => {
     act(() => {
       frame!.props.onLayout({ nativeEvent: { layout: { height: 320 } } })
     })
+  })
+
+  it('still closes when a grabber drag interrupts the slide away', () => {
+    const { renderer, onClose } = renderSheet()
+    const grabberZone = renderer.root
+      .findAllByType('View' as never)
+      .find((node) => typeof node.props.onPanResponderRelease === 'function')!
+    const backdrop = renderer.root
+      .findAllByType('Pressable' as never)
+      .find((node) => node.props.accessibilityLabel === 'Close options')!
+
+    __holdAnimationCallbacksForTests()
+    act(() => {
+      backdrop.props.onPress()
+    })
+    // The grabber stops taking gestures once the sheet is on its way out.
+    expect(grabberZone.props.onStartShouldSetPanResponder()).toBe(false)
+    // Reanimated reports finished = false when a new value cancels the slide;
+    // the close must happen anyway, or every later dismissal is ignored.
+    act(() => {
+      __releaseAnimationCallbacksForTests(false)
+    })
+    expect(onClose).toHaveBeenCalledOnce()
   })
 })

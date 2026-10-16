@@ -99,8 +99,11 @@ export const NativeSheet = memo(function NativeSheet({
       return
     }
     const distance = Math.max(sheetHeight.current, 240) + SHEET_INSET + insets.bottom
-    offset.value = withTiming(distance, CLOSE_TIMING, (finished) => {
-      if (finished) runOnJS(finishClose)()
+    // Close even when something interrupts the slide (finished is false
+    // then): closingRef already turns every later dismissal away, so a close
+    // that never completed would leave the sheet impossible to leave.
+    offset.value = withTiming(distance, CLOSE_TIMING, () => {
+      runOnJS(finishClose)()
     })
   }, [finishClose, insets.bottom, offset, reducedMotion])
   const requestCloseRef = useRef(requestClose)
@@ -109,7 +112,7 @@ export const NativeSheet = memo(function NativeSheet({
   const handleLayout = useCallback(
     (event: LayoutChangeEvent) => {
       sheetHeight.current = event.nativeEvent.layout.height
-      if (hasOpened.current) return
+      if (hasOpened.current || closingRef.current) return
       hasOpened.current = true
       offset.value = reducedMotion ? 0 : withSpring(0, OPEN_SPRING)
     },
@@ -120,13 +123,17 @@ export const NativeSheet = memo(function NativeSheet({
   // sheet would steal vertical drags from scrollable content inside.
   const panResponder = useRef(
     PanResponder.create({
-      onStartShouldSetPanResponder: () => true,
-      onMoveShouldSetPanResponder: (_event, gesture) => gesture.dy > 4,
+      // Once closing, the grabber lets go: a drag would take over the slide
+      // away and fight the dismissal.
+      onStartShouldSetPanResponder: () => !closingRef.current,
+      onMoveShouldSetPanResponder: (_event, gesture) => !closingRef.current && gesture.dy > 4,
       onPanResponderMove: (_event, gesture) => {
+        if (closingRef.current) return
         // Upward drags meet resistance instead of detaching the sheet.
         offset.value = gesture.dy > 0 ? gesture.dy : gesture.dy / 6
       },
       onPanResponderRelease: (_event, gesture) => {
+        if (closingRef.current) return
         if (gesture.dy > DISMISS_DRAG_DISTANCE || gesture.vy > DISMISS_FLING_VELOCITY) {
           requestCloseRef.current()
           return
@@ -134,6 +141,7 @@ export const NativeSheet = memo(function NativeSheet({
         offset.value = withSpring(0, OPEN_SPRING)
       },
       onPanResponderTerminate: () => {
+        if (closingRef.current) return
         offset.value = withSpring(0, OPEN_SPRING)
       },
     }),

@@ -37,13 +37,26 @@ let reducedMotion = false
 export function useReducedMotion() { return reducedMotion }
 export function __setReducedMotionForTests(value: boolean) { reducedMotion = value }
 // Animations settle immediately in tests, so completion callbacks run at once —
-// a sheet that slides away before closing still reports its close.
+// a sheet that slides away before closing still reports its close. Tests that
+// need an animation to be interrupted hold the callbacks and replay them.
+let heldCallbacks: Array<(finished: boolean) => void> | null = null
+function settle(callback?: (finished: boolean) => void) {
+  if (!callback) return
+  if (heldCallbacks) heldCallbacks.push(callback)
+  else callback(true)
+}
+export function __holdAnimationCallbacksForTests() { heldCallbacks = [] }
+export function __releaseAnimationCallbacksForTests(finished: boolean) {
+  const held = heldCallbacks ?? []
+  heldCallbacks = null
+  held.forEach((callback) => callback(finished))
+}
 export function withTiming(val: any, _config?: any, callback?: (finished: boolean) => void) {
-  callback?.(true)
+  settle(callback)
   return val
 }
 export function withSpring(val: any, _config?: any, callback?: (finished: boolean) => void) {
-  callback?.(true)
+  settle(callback)
   return val
 }
 export function runOnJS(fn: any) { return fn }
