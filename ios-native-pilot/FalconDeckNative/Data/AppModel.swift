@@ -17,13 +17,14 @@ final class AppModel {
     let notifications: LocalNotifications
     let push: NativePushNotifications
     @ObservationIgnored let sessionLoader: @Sendable () throws -> SavedSession?
+    @ObservationIgnored let sessionCacheRoot: URL?
     var pendingNotification: NotificationDestination?
     private(set) var connectionID = UUID()
 
-    init(relay: any RelayServing = RelayClient(), voice: VoiceRecorder = VoiceRecorder(), push: NativePushNotifications = .shared, notifications: LocalNotifications = LocalNotifications(), sessionLoader: @escaping @Sendable () throws -> SavedSession? = { try SessionVault.load() }) {
+    init(relay: any RelayServing = RelayClient(), voice: VoiceRecorder = VoiceRecorder(), push: NativePushNotifications = .shared, notifications: LocalNotifications = LocalNotifications(), sessionLoader: @escaping @Sendable () throws -> SavedSession? = { try SessionVault.load() }, sessionCacheRoot: URL? = nil) {
         self.voice = voice
         self.relay = relay
-        self.push = push; self.notifications = notifications; self.sessionLoader = sessionLoader
+        self.push = push; self.notifications = notifications; self.sessionLoader = sessionLoader; self.sessionCacheRoot = sessionCacheRoot
         NativeSpeechBridge.handler = { [weak self] action in await self?.speechAction(action) }
         notifications.openTask = { [weak self] id in Task { await self?.openTask(id) } }
         notifications.openDestination = { [weak self] destination in
@@ -60,6 +61,11 @@ final class AppModel {
     var hasSession = false
     var busy = false { didSet { if !busy { consumeQueuedPairingPayload() } } }
     var refreshedAt: Date?
+    var hasLiveSnapshot = false
+    var cachedAt: Date?
+    @ObservationIgnored var previewTaskIDs: Set<String> = []
+    @ObservationIgnored var sessionCache: SessionCacheStore?
+    @ObservationIgnored var previewSave: Task<Void, Never>?
     var showConnection = false
     var pairingText = ""
     var restoringSession = true
@@ -71,6 +77,7 @@ final class AppModel {
         didSet {
             let selected: String? = { if case .task(let id) = selection { return id }; return nil }()
             Task { await relay.selectThread(selected) }
+            schedulePreviewSave()
             guard !demo, let store = draftStore else { return }
             switch selection { case .task, .draft, .projects: break; default: return }
             let value = selection
@@ -81,7 +88,7 @@ final class AppModel {
     @ObservationIgnored var savedDrafts: [String: SavedDraft] = [:]
     @ObservationIgnored var draftSaves: [String: Task<Void, Never>] = [:]
     @ObservationIgnored var pendingSelection: Destination?
-    var preferences = JSON.object([:]) { didSet { synchronizePush() } }
+    var preferences = JSON.object([:]) { didSet { synchronizePush(); schedulePreviewSave() } }
     var requests: [JSON] = []
     var serviceNotices: [JSON] = []
     var operationalConditions: [JSON] = []
@@ -129,6 +136,10 @@ final class AppModel {
         let current = connectionID
         hasSession = (try? sessionLoader()) != nil
         await restoreInputs()
+        await restorePreview()
+        guard current == connectionID else { return }
+        // Reveal local content before waiting on the relay handshake.
+        restoringSession = false
         do {
             let restored = try await relay.restore(connectionID: current)
             guard current == connectionID else { return }
@@ -144,6 +155,7 @@ final class AppModel {
     // already-queued stream events after demo/forget/re-pair transitions.
     @discardableResult private func beginConnection(clearData: Bool) -> UUID {
         reconnectTask?.cancel(); reconnectTask = nil
+        previewSave?.cancel(); previewSave = nil; hasLiveSnapshot = false
         if voice.recording { voice.finishRecording() }
         voice.cancelTranscription()
         readAloud.stop(); realtimeAudio.reset(); automations.reset(); extensions.reset(); composerCatalogs = [:]
@@ -151,12 +163,12 @@ final class AppModel {
         itemCache = [:]; itemCacheOrder = []; itemLoads = [:]; mediaGate = MediaTransferGate()
         summaryFlush?.cancel(); summaryFlush = nil; pendingSummaries = [:]
         for chat in chats.values {
-            chat.loadID = UUID(); chat.loading = false; chat.bufferedEvents = []
+            chat.loadID = UUID(); chat.loading = false; chat.bufferedEvents = []; chat.needsRefresh = true
         }
         if clearData {
             projects = []; tasks = []; chats = [:]; requests = []; preferences = .object([:])
             archivedTasks = []; readSuppression = [:]; taskOptionsID = nil; serviceNotices = []; operationalConditions = []; tokenUsage = .object([:])
-            selection = .projects; refreshedAt = nil
+            selection = .projects; refreshedAt = nil; cachedAt = nil; previewTaskIDs = []
         }
         return connectionID
     }
@@ -174,7 +186,7 @@ final class AppModel {
                 return
             }
             pairingRelayReview = nil
-            await saveAllInputs(); draftStore = nil; savedDrafts = [:]; pendingSelection = nil
+            await saveAllInputs(); await savePreview(); sessionCache = nil; draftStore = nil; savedDrafts = [:]; pendingSelection = nil
             let attempt = beginConnection(clearData: true); current = attempt; demo = false
             pairingPending = true; showConnection = true; status = "Connecting…"
             try await relay.pair(input, connectionID: attempt)
@@ -183,7 +195,7 @@ final class AppModel {
             guard attempt == connectionID else { return }
             hasSession = true; pairingText = ""
             synchronizePush()
-            await restoreInputs()
+            await restoreInputs(); await restorePreview()
         } catch {
             guard current == nil || current == connectionID else { return }
             self.error = error.localizedDescription
@@ -204,9 +216,11 @@ final class AppModel {
     func reconnect() async {
         guard hasSession, !busy else { return }
         busy = true; error = nil
+        await savePreview()
         let current = beginConnection(clearData: demo); demo = false
         defer { busy = false }
         if draftStore == nil { await restoreInputs() }
+        if sessionCache == nil { await restorePreview() }
         do { let restored = try await relay.restore(connectionID: current); if current == connectionID { hasSession = restored; synchronizePush() } }
         catch { if current == connectionID { self.error = error.localizedDescription; scheduleReconnect() } }
     }
@@ -222,9 +236,11 @@ final class AppModel {
         await saveAllInputs()
         pendingNotification = nil
         let oldStore = draftStore
+        let oldCache = sessionCache; sessionCache = nil
         draftStore = nil; savedDrafts = [:]; pendingSelection = nil
         hasSession = false; pairingPending = false; pairingRelayReview = nil
         beginConnection(clearData: true); demo = false
+        try? await oldCache?.clear()
         await push.forget(session: try? sessionLoader())
         do {
             try await relay.disconnect(forget: true)
@@ -235,7 +251,7 @@ final class AppModel {
     func useDemo() async {
         guard !busy else { return }
         busy = true; defer { busy = false }
-        await saveAllInputs(); draftStore = nil; savedDrafts = [:]; pendingSelection = nil
+        await saveAllInputs(); await savePreview(); sessionCache = nil; draftStore = nil; savedDrafts = [:]; pendingSelection = nil
         beginConnection(clearData: true); demo = true; pairingPending = false; pairingRelayReview = nil; showConnection = false
         try? await relay.disconnect(forget: false)
         error = nil; status = "Demo workspace"
@@ -244,7 +260,17 @@ final class AppModel {
         if ProcessInfo.processInfo.arguments.contains(where: { $0.hasPrefix("--loading-preview=") }) {
             projects = LoadingPreviewRelay.projects; tasks = [LoadingPreviewRelay.task]; requests = []
             syncIndex = CompactSync(token: LoadingPreviewRelay.token, counts: LoadingPreviewRelay.counts)
-            demo = false; hasSession = true; connected = true; status = "Preview computer"
+            demo = false; hasSession = true; connected = true; hasLiveSnapshot = true; status = "Preview computer"
+            if ProcessInfo.processInfo.arguments.contains("--loading-preview=cached") {
+                let chat = chat(for: LoadingPreviewRelay.task)
+                chat.transcript.items = Demo.messages; chat.loaded = true; chat.needsRefresh = true
+                cachedAt = .now
+            }
+            if ProcessInfo.processInfo.arguments.contains("--loading-preview=connecting") || ProcessInfo.processInfo.arguments.contains("--loading-preview=empty") {
+                connected = false; hasLiveSnapshot = false; syncIndex = nil; status = "Connecting…"
+                if ProcessInfo.processInfo.arguments.contains("--loading-preview=empty") { projects = []; tasks = [] }
+                else { cachedAt = .now }
+            }
         }
         if let argument = ProcessInfo.processInfo.arguments.first(where: { $0.hasPrefix("--review-preview=") }), let task = tasks.first {
             let mode = argument.split(separator: "=").last.map(String.init)
@@ -257,7 +283,7 @@ final class AppModel {
                 if mode != "dispatched" {
                     tasks[0] = AgentTask(task.raw.setting("queued_turns", .array([.object(["id": .string("review-queue"), "text": .string(text), "preview": .string("Keep the full queued message."), "attachment_count": .number(0)])])))
                 } else { chat.queuedEdit = QueuedMessageEdit(id: "review-queue", text: text) }
-                if mode == "queue-error" { demo = false; hasSession = true; connected = true; status = "Preview computer" }
+                if mode == "queue-error" { demo = false; hasSession = true; connected = true; hasLiveSnapshot = true; status = "Preview computer" }
             } else if mode == "output" {
                 let full = JSON.object(["id": .string("review-output"), "kind": .string("tool_call"), "title": .string("Review output"), "status": .string("completed"), "output": .string("Native output search\nAll focused checks passed.\nSearch keeps the full output selectable.")])
                 chat.transcript.items = [Message(full.setting("display", .object(["output_total_bytes": .number(200)])))]
@@ -332,9 +358,10 @@ final class AppModel {
             chat.bufferedEvents = []
             chat.hasOlder = page["has_older"].bool
             chat.oldestID = page["oldest_item_id"].string.nonempty ?? chat.transcript.items.first?.id
-            chat.loaded = true
+            chat.loaded = true; if !older { chat.needsRefresh = false }
             chat.settleSubmission(queued: page["thread"]["queued_turns"].array)
             upsertTask(page["thread"])
+            schedulePreviewSave()
         } catch {
             if current == connectionID, chats[task.id] === chat, chat.loadID == loadID {
                 if older { chat.olderHistoryError = error.localizedDescription }
@@ -497,6 +524,7 @@ final class AppModel {
             pendingSummaries.removeValue(forKey: task.id)
             archivedTasks.removeAll { $0.id == task.id }; archivedTasks.append(AgentTask(task.raw.setting("is_archived", .bool(true))))
             tasks.removeAll { $0.id == task.id }; chats.removeValue(forKey: task.id)
+            schedulePreviewSave()
             if selection == .task(task.id) { selection = .projects }
         } catch { if current == connectionID { self.error = error.localizedDescription } }
     }

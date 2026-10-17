@@ -17,9 +17,14 @@ import Foundation
             let selected: String? = { if case .task(let id) = selection { return id }; return nil }()
             if !value["native_sync"]["token"].string.isEmpty {
                 var index = CompactSync(token: value["native_sync"]["token"].string, counts: value["native_sync"]["counts"])
-                tasks = index.retain(incoming, previous: tasks, projectIDs: Set(projects.map(\.id)), hidden: Set(value["preferences"]["hidden_workspace_ids"].array.map(\.string)), selected: selected)
+                // A disk preview cannot overrule authoritative incoming rows,
+                // even if its cached sequence belongs to an older daemon run.
+                let liveIDs = Set(incoming.map(\.id))
+                let previous = !hasLiveSnapshot && cachedAt != nil ? tasks.filter { !liveIDs.contains($0.id) } : tasks
+                tasks = index.retain(incoming, previous: previous, projectIDs: Set(projects.map(\.id)), hidden: Set(value["preferences"]["hidden_workspace_ids"].array.map(\.string)), selected: selected)
                 syncIndex = index; taskPageLoads = []
             } else { tasks = incoming; syncIndex = nil; taskPageLoads = [] }
+            previewTaskIDs.formIntersection(tasks.map(\.id)); previewTaskIDs.subtract(incoming.map(\.id))
             extensions.setBase(value["extensions"], token: syncIndex?.token)
             if connected { Task { await self.extensions.load(model: self) } }
             preferences = value["preferences"]
@@ -27,6 +32,8 @@ import Foundation
             serviceNotices = value["service_notices"].array
             operationalConditions = value["operational_conditions"].array
             tokenUsage = value["thread_token_usage"] == .null ? .object([:]) : value["thread_token_usage"]
+            hasLiveSnapshot = true
+            schedulePreviewSave()
             refreshedAt = .now; error = nil; demo = false
             Task { await self.openPendingNotification() }
             if let pendingSelection {
@@ -60,7 +67,8 @@ import Foundation
             guard !raw["id"].string.isEmpty else { continue }
             let task = AgentTask(raw)
             let current = pendingSummaries[task.id] ?? active.first(where: { $0.id == task.id })?.raw ?? archived.first(where: { $0.id == task.id })?.raw
-            if let current, TaskSummaryOrder.isStale(raw, comparedTo: current) { continue }
+            if let current, !previewTaskIDs.contains(task.id), TaskSummaryOrder.isStale(raw, comparedTo: current) { continue }
+            previewTaskIDs.remove(task.id)
             if task.archived {
                 active.removeAll { $0.id == task.id }
                 if let index = archived.firstIndex(where: { $0.id == task.id }) { archived[index] = task } else { archived.append(task) }
@@ -71,6 +79,7 @@ import Foundation
         }
         if active != tasks { tasks = active }
         if archived != archivedTasks { archivedTasks = archived }
+        schedulePreviewSave()
     }
 
     func applyEnvelope(_ envelope: JSON, rebase: Bool = false) {
@@ -103,6 +112,7 @@ import Foundation
             let project = Project(event["workspace"])
             if let index = projects.firstIndex(where: { $0.id == project.id }) { projects[index] = project }
             else { projects.append(project) }
+            schedulePreviewSave()
         case "preferences-updated": preferences = event["preferences"]
         case "interactive-request":
             let request = event["request"]
@@ -111,6 +121,7 @@ import Foundation
             }
             requests.removeAll { $0["request_id"] == request["request_id"] }; requests.append(request)
         case "turn-end":
+            schedulePreviewSave()
             // ThreadUpdated carries the authoritative status, including errors
             // and transient retries that remain running after a turn-end.
             if event["status"].string != "running" { requests.removeAll { $0["thread_id"].string == id } }
@@ -143,7 +154,7 @@ import Foundation
         let id = raw["id"].string
         guard !id.isEmpty else { return }
         let current = pendingSummaries[id] ?? tasks.first(where: { $0.id == id })?.raw ?? archivedTasks.first(where: { $0.id == id })?.raw
-        if let current, TaskSummaryOrder.isStale(raw, comparedTo: current) { return }
+        if let current, (pendingSummaries[id] != nil || !previewTaskIDs.contains(id)), TaskSummaryOrder.isStale(raw, comparedTo: current) { return }
         syncIndex?.touched.insert(id)
         pendingSummaries[id] = raw
         guard summaryFlush == nil else { return }

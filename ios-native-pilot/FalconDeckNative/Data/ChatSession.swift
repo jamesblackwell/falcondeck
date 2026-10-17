@@ -21,6 +21,7 @@ final class ChatSession {
     var voiceInsertion: VoiceDraftInsertion?
     var loading = false
     var loaded = false
+    var needsRefresh = false
     var sending = false
     var stopping = false
     var hasOlder = false

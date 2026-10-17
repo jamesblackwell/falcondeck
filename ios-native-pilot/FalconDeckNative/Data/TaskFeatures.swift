@@ -68,6 +68,7 @@ extension Project {
     func markRead(_ task: AgentTask, unread: Bool = false, automatic: Bool = false) async {
         guard !task.isDraft, task.activitySeq > 0, demo || connected else { return }
         if automatic {
+            guard chats[task.id]?.needsRefresh != true else { return }
             guard task.unread, readSuppression[task.id] != task.activitySeq else { return }
         }
         if unread { readSuppression[task.id] = task.activitySeq }

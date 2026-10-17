@@ -41,11 +41,12 @@ struct RootView: View {
     @Environment(\.dynamicTypeSize) private var textSize
     @AppStorage("native.debug.overlay") private var showPerformance = false
     @State private var compactColumn: NavigationSplitViewColumn = .sidebar
+    @State private var columnVisibility: NavigationSplitViewVisibility = .all
     var body: some View {
         @Bindable var model = model
         Group {
             if model.restoringSession {
-                ProgressView("Connecting…").frame(maxWidth: .infinity, maxHeight: .infinity).background(FD.background)
+                NativeLoadingState(label: "Connecting…").frame(maxWidth: .infinity, maxHeight: .infinity).background(FD.background)
             } else if !model.demo && (!model.hasSession || model.pairingPending) {
                 ConnectionView(onboarding: true)
             } else {
@@ -63,33 +64,43 @@ struct RootView: View {
     }
 
     private var workspace: some View {
-        NavigationSplitView(preferredCompactColumn: $compactColumn) {
+        NavigationSplitView(columnVisibility: $columnVisibility, preferredCompactColumn: $compactColumn) {
             SidebarView {
                 if sizeClass == .compact { compactColumn = .detail }
             }
                 .navigationSplitViewColumnWidth(min: 280, ideal: 320, max: 380)
         } detail: {
             NavigationStack {
-                switch model.selection {
-                case .task(let id):
-                    if let task = model.task(id) {
-                        ConversationView(task: task).id(id)
-                    } else { StartView() }
-                case .draft(let projectID, let folderID): DraftConversationView(projectID: projectID, folderID: folderID)
-                case .activity: ActivityView()
-                case .archived: ArchivedTasksView()
-                case .settings: SettingsView()
-                case .automations: AutomationsView()
-                default: StartView()
+                destination.safeAreaInset(edge: .top, spacing: 0) {
+                    if sizeClass == .compact || columnVisibility == .detailOnly { NativeSyncBanner() }
                 }
             }.id(model.selection).navigationBarTitleDisplayMode(.inline)
         }
         .navigationSplitViewStyle(.balanced)
+        .onAppear {
+            if sizeClass == .compact {
+                switch model.selection { case .task, .draft: compactColumn = .detail; default: break }
+            }
+        }
         .sensoryFeedback(.selection, trigger: model.selection)
         // Sidebar taps also reveal an unchanged selection. This observer handles
         // destinations opened elsewhere, including incoming notifications.
         .onChange(of: model.selection) { _, selection in
             if selection != nil && sizeClass == .compact { compactColumn = .detail }
+        }
+    }
+    @ViewBuilder private var destination: some View {
+        switch model.selection {
+        case .task(let id):
+            if let task = model.task(id) {
+                ConversationView(task: task).id(id)
+            } else { StartView() }
+        case .draft(let projectID, let folderID): DraftConversationView(projectID: projectID, folderID: folderID)
+        case .activity: ActivityView()
+        case .archived: ArchivedTasksView()
+        case .settings: SettingsView()
+        case .automations: AutomationsView()
+        default: StartView()
         }
     }
 }

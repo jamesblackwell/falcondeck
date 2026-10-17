@@ -106,6 +106,13 @@ struct SidebarView: View {
         .contentMargins(.top, 0, for: .scrollContent).contentMargins(.bottom, 16, for: .scrollContent)
         .background(FD.background).navigationTitle("Tasks").navigationBarTitleDisplayMode(.inline)
         .searchable(text: $search, placement: .navigationBarDrawer(displayMode: .always), prompt: "Search tasks")
+        .safeAreaInset(edge: .top, spacing: 0) { NativeSyncBanner() }
+        .overlay {
+            if model.projects.isEmpty && model.tasks.isEmpty && model.hasSession && !model.hasLiveSnapshot {
+                NativeLoadingState(label: model.networkAvailable ? "Loading tasks…" : "Waiting for a connection")
+                    .accessibilityIdentifier("sidebar-loading").allowsHitTesting(false)
+            }
+        }
         .refreshable { await model.refresh() }
         .task(id: plan) { await model.loadInitialTaskPages(plan) }
         .onChange(of: model.connectionID) { _, _ in disclosures.reset() }

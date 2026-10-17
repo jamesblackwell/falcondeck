@@ -94,9 +94,14 @@ refresh the checked-in native palette catalog.
 
 Keychain holds this client's identity and relay credentials. Unsent text, image
 attachments, composer choices and the last conversation selection are encrypted
-per pairing in protected device files. Conversations remain in memory; the
-daemon and native agent storage are authoritative. Forget removes this pairing's
-input files and credentials. Revoke the trusted device from desktop settings if
+per pairing in protected device files. A separate encrypted, disposable cache
+restores projects, up to 200 task summaries and five recent conversation tails
+on relaunch. Each tail holds at most 150 items / 64 KiB; catalogs, plans, diffs,
+pending sends and active approvals are excluded. Cached history remains visible
+while fresh history loads, and cannot automatically mark a task read until that
+refresh succeeds. No replay cursor or sync token is restored from this cache.
+The daemon and native agent storage remain authoritative. Forget removes this
+pairing's cache, input files and credentials. Revoke the trusted device from desktop settings if
 it should no longer connect.
 
 Connections bootstrap through `sync.index`, expand shared catalogs once, and
@@ -135,7 +140,7 @@ xcodebuild -project FalconDeckNative.xcodeproj -scheme FalconDeckNativeUI \
   -derivedDataPath build-ui test
 ```
 
-The latest run has 130 passing unit tests and passing pairing/chat/automation UI checks on
+The latest run has 141 passing unit tests and passing pairing/chat/automation UI checks on
 both phone and tablet simulators. See [VERIFICATION.md](VERIFICATION.md) for the
 review and device handoff, and [PARITY.md](PARITY.md) for the feature ledger. Tests cover
 crypto interoperability, pairing authority, chunks/ACKs, UTF-16 streaming,

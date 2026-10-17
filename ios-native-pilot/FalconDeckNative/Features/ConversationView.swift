@@ -14,7 +14,7 @@ struct ConversationView: View {
         .task(id: task.id) {
             let session = model.chat(for: task); chat = session
             if task.isDraft { session.loaded = true }
-            else if !session.loaded { await model.loadChat(task) }
+            else if (!session.loaded || session.needsRefresh) && (model.connected || model.demo) { await model.loadChat(task) }
         }
         .onChange(of: model.connected) { _, connected in if connected && !task.isDraft { Task { await model.loadChat(current) } } }
     }
@@ -61,7 +61,7 @@ private struct ChatContent: View {
                         }.frame(maxWidth: 820).frame(maxWidth: .infinity)
                             .listRowBackground(NativeListScrollProbe(scrolling: listScrolling, rowID: block.id))
                     }
-                    if task.running && !chat.transcript.items.isEmpty {
+                    if task.running && !chat.transcript.items.isEmpty && (model.connected || model.demo) {
                         HStack(spacing: 8) { ActivityDiamond(); Text("\(task.provider.capitalized) is working…").font(.footnote).foregroundStyle(FD.secondary) }.padding(.vertical, 8).frame(maxWidth: 820, alignment: .leading).frame(maxWidth: .infinity)
                             .listRowBackground(NativeListScrollProbe(scrolling: listScrolling))
                     }
@@ -136,6 +136,9 @@ private struct ChatContent: View {
                     .accessibilityIdentifier(chat.loading ? "conversation-loading" : "conversation-empty")
                 }
             }
+            .overlay(alignment: .top) {
+                NativeLoadingPill(loading: chat.loading && !blocks.isEmpty, label: "Updating conversation…")
+            }
             .overlay(alignment: .bottomTrailing) {
                 LatestMessageShortcut(state: scroll, hasMessages: !chat.transcript.items.isEmpty) {
                     scroll.followLatest = true; scrollToLatest(animated: true)
@@ -159,8 +162,8 @@ private struct ChatContent: View {
         .sheet(item: $chat.queuedEdit) { QueuedMessageEditor(task: task, edit: $0) }
         .onAppear { visible = true; listScrolling.setActive(true); if chat.loaded { scrollToLatest(animated: false) } }
         .onDisappear { visible = false; listScrolling.setActive(false) }
-        .task(id: ConversationReadState(taskID: task.id, activitySeq: task.activitySeq, historyReady: chat.loaded && !chat.loading && chat.historyError == nil, foreground: model.foreground, visible: visible)) {
-            guard visible, chat.loaded, !chat.loading, chat.historyError == nil, model.foreground else { return }
+        .task(id: ConversationReadState(taskID: task.id, activitySeq: task.activitySeq, historyReady: chat.loaded && !chat.needsRefresh && !chat.loading && chat.historyError == nil, foreground: model.foreground, visible: visible)) {
+            guard visible, chat.loaded, !chat.needsRefresh, !chat.loading, chat.historyError == nil, model.foreground else { return }
             do { try await Task.sleep(for: .milliseconds(600)) } catch { return }
             await model.markRead(task, automatic: true)
         }

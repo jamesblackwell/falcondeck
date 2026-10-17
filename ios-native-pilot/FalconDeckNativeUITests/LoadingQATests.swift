@@ -13,6 +13,37 @@ import XCTest
         let shot = XCTAttachment(screenshot: XCUIScreen.main.screenshot())
         shot.name = name; shot.lifetime = .keepAlways; add(shot)
     }
+    func testConnectingShowsCachedProjectsWithAnExplicitSyncBanner() {
+        let app = launch("connecting")
+        let banner = app.descendants(matching: .any).matching(identifier: "session-sync-banner").firstMatch
+        XCTAssertTrue(banner.waitForExistence(timeout: 3))
+        XCTAssertTrue(banner.label.contains("Reconnecting"))
+        XCTAssertTrue(banner.label.contains("saved projects"))
+        XCTAssertEqual(app.descendants(matching: .any).matching(identifier: "session-sync-banner").count, 1, "A visible sidebar already provides the iPad connection banner")
+        XCTAssertTrue(app.buttons["project-falcondeck"].isHittable)
+        XCTAssertFalse(app.buttons["sidebar-new-chat"].isEnabled)
+        capture("Cached sidebar stays readable while reconnecting")
+    }
+    func testColdSidebarHasVisibleLoadingFeedback() {
+        let app = launch("empty")
+        XCTAssertTrue(app.descendants(matching: .any).matching(identifier: "session-sync-banner").firstMatch.waitForExistence(timeout: 3))
+        let loading = app.descendants(matching: .any).matching(identifier: "sidebar-loading").firstMatch
+        XCTAssertTrue(loading.waitForExistence(timeout: 3))
+        XCTAssertTrue(loading.isHittable)
+        capture("Cold sidebar has centered task loading state")
+    }
+    func testCachedConversationRemainsReadableDuringRefresh() {
+        let app = launch("cached")
+        app.buttons["sidebar-task-native"].tap()
+        let answer = app.staticTexts.matching(NSPredicate(format: "label CONTAINS 'Use the composer to continue the conversation'")).firstMatch
+        XCTAssertTrue(answer.waitForExistence(timeout: 2))
+        let pill = app.descendants(matching: .any).matching(identifier: "loading-pill").firstMatch
+        XCTAssertTrue(pill.waitForExistence(timeout: 2))
+        XCTAssertFalse(app.otherElements["conversation-loading"].exists)
+        capture("Cached conversation refreshes behind a floating loading pill")
+        XCTAssertTrue(pill.waitForNonExistence(timeout: 10))
+        XCTAssertTrue(answer.exists)
+    }
     func testUnloadedChatsAutomaticallyLoadAsOneFlatSection() {
         let app = launch()
         app.buttons["sidebar-section-projects"].tap()

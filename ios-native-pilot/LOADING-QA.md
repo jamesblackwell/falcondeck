@@ -93,3 +93,42 @@ long-message reading-position preservation, and repeated sidebar navigation.
 The corresponding iPad checks also passed. No new iPhone crash reports appeared
 during those final checks. The updated development app was then launched with
 its real pairing again.
+
+## Persistent cache and reconnect feedback
+
+The native client now hydrates an encrypted per-pairing rendering cache before
+connecting. It retains projects, up to 200 task summaries and five recent history
+tails, prioritizing the selected task. Tails are contiguous, bounded to 150 items
+and 64 KiB each, and mark omitted history as older. Cache serialization, trimming,
+AES-GCM encryption and atomic writes run on a separate actor. Saves are throttled,
+flushed on backgrounding, and skip identical content. Streaming tails and optimistic
+sends are excluded; the last settled history remains available during a running
+turn. Forget invalidates the cache actor and removes its files.
+
+This is disposable presentation state. It restores no replay cursor, sync token,
+or active approval. Authoritative snapshots and pages replace cached summaries,
+including when a cached timestamp is ahead of the current daemon. A cached
+conversation refreshes when opened online and cannot automatically acknowledge
+unread activity until fresh history succeeds. Refresh failures leave cached content
+readable. Unsent drafts continue to use their separate protected recovery store.
+
+Connection, securing, computer-offline and network-offline states have an explicit
+banner. A cold empty sidebar has a centered diamond and caption. A conversation
+with cached content keeps its position and shows a floating glass refresh pill
+after 350 ms. iPad displays one connection banner while the sidebar is visible;
+the detail takes over when that sidebar is hidden. Inline paging retains its own
+indicator, avoiding a redundant global paging pill.
+
+Validation: 141 unit tests passed, including cache encryption, identity isolation,
+relaunch hydration, size limits, optimistic/streaming exclusion, archive eviction,
+clear-versus-save lifetime, and authoritative replacement. All eight loading UI
+checks passed on both phone and iPad simulators. The final two cache/banner cases
+were rerun on each size after eliminating the duplicate iPad banner. Screenshots
+were visually checked; the ignored gallery is `artifacts/cache-2026-10-17/index.html`.
+
+Repo Autoreview (`--mode local --max-priority P2`) passed with no actionable
+findings for the feature and the subsequent scoped navigation/cache-clear delta,
+using isolated native-only review worktrees so unrelated daemon edits were not
+included. The signed Debug app was installed over Wi-Fi on the paired iPhone.
+Its first live launch created an encrypted 507 KB cache in the app's own container.
+The first use of the new build must populate this cache; later launches can reuse it.

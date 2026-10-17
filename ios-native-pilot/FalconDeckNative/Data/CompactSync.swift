@@ -96,6 +96,7 @@ struct CompactSync {
                 tasks.removeAll { remove.contains($0.id) }; index.carried.subtract(remove)
             }
             index.cursors[key] = page["next_cursor"]; syncIndex = index
+            schedulePreviewSave()
         } catch {
             guard current == connectionID, syncIndex?.token == token else { return }
             if error.localizedDescription.contains("sync_index_expired") { await relay.refresh() }
