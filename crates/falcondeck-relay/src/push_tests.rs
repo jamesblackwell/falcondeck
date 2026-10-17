@@ -412,3 +412,93 @@ async fn native_and_legacy_registrations_round_trip_in_postgres_with_generation_
         .await
         .unwrap();
 }
+
+#[tokio::test]
+#[ignore = "requires an isolated FALCONDECK_RELAY_TEST_DATABASE_URL with schema creation privileges"]
+async fn postgres_upgrade_preserves_existing_client_tokens_push_and_replay_sequence() {
+    let url = std::env::var("FALCONDECK_RELAY_TEST_DATABASE_URL").unwrap();
+    let (client, connection) = tokio_postgres::connect(&url, tokio_postgres::NoTls)
+        .await
+        .unwrap();
+    let connection = tokio::spawn(async move {
+        connection.await.unwrap();
+    });
+    let schema = format!("native_upgrade_{}", Uuid::new_v4().simple());
+    client
+        .batch_execute(&format!(
+            "CREATE SCHEMA {schema}; SET search_path TO {schema};"
+        ))
+        .await
+        .unwrap();
+    client
+        .batch_execute(include_str!("../tests/fixtures/pre-native-push.sql"))
+        .await
+        .unwrap();
+    let daemon = secret_verifier("legacy-daemon");
+    let bearer = secret_verifier("legacy-client");
+    client.execute("INSERT INTO relay_sessions (session_id,pairing_id,daemon_token,created_at,updated_at,next_seq,oldest_lost_seq) VALUES ('legacy-session','pairing',$1,NOW(),NOW(),71,70)",&[&daemon]).await.unwrap();
+    client.execute("INSERT INTO relay_devices (session_id,device_id,client_token,created_at,push_token) VALUES ('legacy-session','legacy-device',$1,NOW(),'ExponentPushToken[existing]')",&[&bearer]).await.unwrap();
+    let mut scoped = reqwest::Url::parse(&url).unwrap();
+    scoped
+        .query_pairs_mut()
+        .append_pair("options", &format!("-csearch_path={schema}"));
+    let state = AppState::load_postgres_with_retention(
+        "upgrade-test".to_owned(),
+        scoped.to_string(),
+        Duration::minutes(10),
+        RetentionConfig::default(),
+    )
+    .await
+    .unwrap();
+    state
+        .authenticate_session("legacy-session", "legacy-client")
+        .await
+        .unwrap();
+    state
+        .register_push_token(
+            "legacy-session",
+            "legacy-client",
+            "legacy-device",
+            Some("ExponentPushToken[rotated]".to_owned()),
+        )
+        .await
+        .unwrap();
+    let device=client.query_one("SELECT client_token,push_token,persist_generation,push_registration FROM relay_devices WHERE device_id='legacy-device'",&[]).await.unwrap();
+    assert_eq!(device.get::<_, String>("client_token"), bearer);
+    assert_eq!(
+        device.get::<_, String>("push_token"),
+        "ExponentPushToken[rotated]"
+    );
+    assert_eq!(device.get::<_, i64>("persist_generation"), 1);
+    assert!(
+        device
+            .get::<_, Option<serde_json::Value>>("push_registration")
+            .is_none()
+    );
+    let session=client.query_one("SELECT next_seq,oldest_lost_seq,daemon_token FROM relay_sessions WHERE session_id='legacy-session'",&[]).await.unwrap();
+    assert_eq!(session.get::<_, i64>("next_seq"), 71);
+    assert_eq!(session.get::<_, i64>("oldest_lost_seq"), 70);
+    assert_eq!(session.get::<_, String>("daemon_token"), daemon);
+    drop(state);
+    let restarted = AppState::load_postgres_with_retention(
+        "upgrade-test".to_owned(),
+        scoped.to_string(),
+        Duration::minutes(10),
+        RetentionConfig::default(),
+    )
+    .await
+    .unwrap();
+    restarted
+        .authenticate_session("legacy-session", "legacy-client")
+        .await
+        .unwrap();
+    drop(restarted);
+    client
+        .batch_execute(&format!(
+            "SET search_path TO public; DROP SCHEMA {schema} CASCADE;"
+        ))
+        .await
+        .unwrap();
+    drop(client);
+    connection.await.unwrap();
+}
