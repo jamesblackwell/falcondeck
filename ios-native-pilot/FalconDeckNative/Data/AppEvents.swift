@@ -10,6 +10,7 @@ import Foundation
             if online { reconnectAttempt = 0; reconnectTask?.cancel(); reconnectTask = nil; automations.scheduleRefresh(model: self); synchronizePush(); Task { await self.extensions.load(model: self); await self.openPendingNotification() } }
             if text == "Connecting…" { lastEventSeq = 0 }
         case .snapshot(let value):
+            if pairingPending { pairingPending = false; hasSession = true; showConnection = false }
             summaryFlush?.cancel(); summaryFlush = nil; pendingSummaries = [:]
             projects = value["workspaces"].array.filter { $0["kind"].string != "scratch" }.map(Project.init)
             let incoming = value["threads"].array.filter { !$0["is_archived"].bool }.map(AgentTask.init)

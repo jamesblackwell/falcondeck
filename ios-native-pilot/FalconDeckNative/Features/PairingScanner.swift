@@ -8,12 +8,14 @@ struct PairingScanner: View {
     var scanned: (String) -> Void
     @State private var allowed = false
     @State private var error: String?
+    @State private var handled = false
     var body: some View {
         NavigationStack {
             Group {
                 if allowed, DataScannerViewController.isSupported {
                     QRScannerController { payload in
-                        do { _ = try PairingInput(text: payload, relay: relay); scanned(payload); dismiss() }
+                        guard !handled else { return }
+                        do { _ = try PairingInput(text: payload, relay: relay); handled = true; dismiss(); scanned(payload) }
                         catch { self.error = "This isn't a valid signed FalconDeck pairing code." }
                     } failed: { error = $0 }
                     .overlay(alignment: .bottom) {

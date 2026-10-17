@@ -62,6 +62,10 @@ final class AppModel {
     var refreshedAt: Date?
     var showConnection = false
     var pairingText = ""
+    var restoringSession = true
+    var pairingPending = false
+    var pairingRelayReview: PairingRelayReview?
+    @ObservationIgnored var queuedPairingPayload: String?
     var selection: Destination? = .projects {
         didSet {
             let selected: String? = { if case .task(let id) = selection { return id }; return nil }()
@@ -101,6 +105,13 @@ final class AppModel {
 
     func start() async {
         guard observation == nil else { return }
+        defer {
+            restoringSession = false
+            if let payload = queuedPairingPayload {
+                queuedPairingPayload = nil
+                Task { await self.receivePairingPayload(payload) }
+            }
+        }
         SpeechLiveActivity.shared.voice(nil); SpeechLiveActivity.shared.readAloud(nil)
         let events = await relay.events()
         observation = Task { [weak self] in
@@ -152,22 +163,31 @@ final class AppModel {
         return connectionID
     }
 
-    func pair(relayURL: String) async {
-        guard !busy else { return }
+    func pair(relayURL: String, approvedRelay: Bool = false) async {
+        guard !busy, !pairingPending else { return }
         busy = true; error = nil
         defer { busy = false }
         let previousSession = try? sessionLoader()
+        var current: UUID?
         do {
             let input = try PairingInput(text: pairingText, relay: relayURL)
+            if !approvedRelay, input.relay.absoluteString != PairingInput.defaultRelay {
+                pairingRelayReview = PairingRelayReview(text: pairingText, relay: input.relay)
+                return
+            }
+            pairingRelayReview = nil
             await saveAllInputs(); draftStore = nil; savedDrafts = [:]; pendingSelection = nil
-            let current = beginConnection(clearData: true); demo = false
-            try await relay.pair(input, connectionID: current)
-            guard current == connectionID else { return }
+            let attempt = beginConnection(clearData: true); current = attempt; demo = false
+            pairingPending = true; showConnection = true; status = "Connecting…"
+            try await relay.pair(input, connectionID: attempt)
+            guard attempt == connectionID else { return }
             await push.forget(session: previousSession)
-            hasSession = true; pairingText = ""; showConnection = false
+            guard attempt == connectionID else { return }
+            hasSession = true; pairingText = ""
             synchronizePush()
             await restoreInputs()
         } catch {
+            guard current == nil || current == connectionID else { return }
             self.error = error.localizedDescription
             let saved = try? sessionLoader()
             if let previousSession, let saved,
@@ -177,6 +197,9 @@ final class AppModel {
                 await push.forget(session: previousSession)
             }
             hasSession = saved != nil
+            // Once a claim has saved credentials, retry that connection instead
+            // of submitting the single-use pairing code a second time.
+            pairingPending = current != nil && saved != nil && (previousSession == nil || saved?.deviceID != previousSession?.deviceID || saved?.sessionID != previousSession?.sessionID || saved?.relay != previousSession?.relay)
         }
     }
 
@@ -202,7 +225,7 @@ final class AppModel {
         pendingNotification = nil
         let oldStore = draftStore
         draftStore = nil; savedDrafts = [:]; pendingSelection = nil
-        hasSession = false
+        hasSession = false; pairingPending = false; pairingRelayReview = nil
         beginConnection(clearData: true); demo = false
         await push.forget(session: try? sessionLoader())
         do {
@@ -215,7 +238,7 @@ final class AppModel {
         guard !busy else { return }
         busy = true; defer { busy = false }
         await saveAllInputs(); draftStore = nil; savedDrafts = [:]; pendingSelection = nil
-        beginConnection(clearData: true); demo = true
+        beginConnection(clearData: true); demo = true; pairingPending = false; pairingRelayReview = nil; showConnection = false
         try? await relay.disconnect(forget: false)
         error = nil; status = "Demo workspace"
         projects = Demo.projects; tasks = Demo.tasks; preferences = Demo.preferences

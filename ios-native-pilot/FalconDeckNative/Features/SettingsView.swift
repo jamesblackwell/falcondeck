@@ -46,6 +46,7 @@ struct AppearanceSettingsView: View {
 struct ConnectionSettingsView: View {
     @Environment(AppModel.self) private var model
     @State private var session: SavedSession?
+    @State private var confirmForget = false
     var body: some View {
         Form {
             Section("Active connection") {
@@ -61,9 +62,15 @@ struct ConnectionSettingsView: View {
             Section {
                 Button("Pair a computer") { model.showConnection = true }
                 NavigationLink("Connection log") { ConnectionLogView() }
+                if model.hasSession {
+                    Button("Forget this connection", role: .destructive) { confirmForget = true }.disabled(model.busy)
+                }
             } footer: { Text("Messages are encrypted between this device and your computer.") }.listRowBackground(FD.surface)
         }.scrollContentBackground(.hidden).background(FD.background).navigationTitle("Connections")
-            .task { session = try? SessionVault.load() }
+            .task { session = try? model.sessionLoader() }
+            .confirmationDialog("Forget this computer?", isPresented: $confirmForget, titleVisibility: .visible) {
+                Button("Forget connection", role: .destructive) { Task { await model.forget() } }
+            } message: { Text("You’ll need a new pairing link to connect again.") }
     }
 }
 

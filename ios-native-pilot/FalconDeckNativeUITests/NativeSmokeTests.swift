@@ -51,4 +51,26 @@ import XCTest
         XCTAssertEqual(app.state, .runningForeground)
         capture("Native first reply")
     }
+
+    func testPairingMatchesScanOrEnterFlowAndShowsInlineErrors() {
+        XCUIDevice.shared.orientation = .portrait
+        let app = launchDemo()
+        sidebar(app)
+        app.buttons["Connection settings"].tap()
+        app.buttons["Connections"].tap()
+        app.buttons["Pair a computer"].tap()
+        XCTAssertTrue(app.buttons["pair-scan"].waitForExistence(timeout: 5))
+        XCTAssertTrue(app.staticTexts["Connect to your desktop agent"].exists)
+        XCTAssertFalse(app.staticTexts["This pilot"].exists)
+        XCTAssertFalse(app.buttons["pair-connect"].isEnabled)
+        let input = app.textFields["pairing-input"]
+        input.tap(); input.typeText("incomplete")
+        app.buttons["pair-connect"].tap()
+        XCTAssertTrue(app.staticTexts["pairing-error"].waitForExistence(timeout: 5))
+        XCTAssertTrue(app.buttons["pair-scan"].exists)
+        XCTAssertFalse(app.otherElements["pairing-progress"].exists)
+        capture("Native scan or enter pairing")
+        app.buttons["Cancel"].tap()
+        XCTAssertTrue(app.buttons["Pair a computer"].waitForExistence(timeout: 5))
+    }
 }

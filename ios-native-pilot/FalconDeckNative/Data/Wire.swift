@@ -125,6 +125,7 @@ struct Message: Identifiable, Sendable, Equatable {
 }
 
 struct PairingInput: Sendable {
+    static let defaultRelay = "https://connect.falcondeck.com"
     let relay: URL
     let code: String
     let authoritySeed: Data

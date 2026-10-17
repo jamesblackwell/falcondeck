@@ -13,7 +13,7 @@ struct FalconDeckNativeApp: App {
                 .task { await model.start() }
                 .onOpenURL { url in
                     if url.host == "speech" { if model.voice.pendingURL != nil { model.showSpeechSettings = true } }
-                    else { model.pairingText = url.absoluteString; model.showConnection = true }
+                    else { Task { await model.receivePairingPayload(url.absoluteString) } }
                 }
         }
     }
@@ -28,6 +28,23 @@ struct RootView: View {
     @State private var compactColumn: NavigationSplitViewColumn = .sidebar
     var body: some View {
         @Bindable var model = model
+        Group {
+            if model.restoringSession {
+                ProgressView("Connecting…").frame(maxWidth: .infinity, maxHeight: .infinity).background(FD.background)
+            } else if !model.demo && (!model.hasSession || model.pairingPending) {
+                ConnectionView(onboarding: true)
+            } else {
+                workspace
+            }
+        }
+        .sheet(isPresented: Binding(get: { model.showConnection && !model.pairingPending && (model.hasSession || model.demo) }, set: { model.showConnection = $0 })) { ConnectionView() }
+        .sheet(isPresented: $model.showSpeechSettings) { NavigationStack { SpeechSettingsView(modal: true) } }
+        .overlay(alignment: .topTrailing) { if showPerformance { PerformanceOverlay() } }
+        .sheet(item: Binding(get: { model.taskOptionsID.map { TaskOptionsTarget(id: $0) } }, set: { model.taskOptionsID = $0?.id })) { target in TaskOptionsView(taskID: target.id) }
+        .onChange(of: scenePhase) { _, phase in model.setForeground(phase == .active) }
+    }
+
+    private var workspace: some View {
         NavigationSplitView(preferredCompactColumn: $compactColumn) {
             SidebarView()
                 .navigationSplitViewColumnWidth(min: 280, ideal: 320, max: 380)
@@ -52,13 +69,6 @@ struct RootView: View {
         .sensoryFeedback(.selection, trigger: model.selection)
         .onChange(of: model.selection) { _, selection in
             if selection != nil && sizeClass == .compact { compactColumn = .detail }
-        }
-        .sheet(isPresented: $model.showConnection) { ConnectionView() }
-        .sheet(isPresented: $model.showSpeechSettings) { NavigationStack { SpeechSettingsView(modal: true) } }
-        .overlay(alignment: .topTrailing) { if showPerformance { PerformanceOverlay() } }
-        .sheet(item: Binding(get: { model.taskOptionsID.map { TaskOptionsTarget(id: $0) } }, set: { model.taskOptionsID = $0?.id })) { target in TaskOptionsView(taskID: target.id) }
-        .onChange(of: scenePhase) { _, phase in
-            model.setForeground(phase == .active)
         }
     }
 }
