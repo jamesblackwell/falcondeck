@@ -37,12 +37,14 @@ struct RootView: View {
                 workspace
             }
         }
-        .menuOrder(.fixed)
         .sheet(isPresented: Binding(get: { model.showConnection && !model.pairingPending && (model.hasSession || model.demo) }, set: { model.showConnection = $0 })) { ConnectionView() }
         .sheet(isPresented: $model.showSpeechSettings) { NavigationStack { SpeechSettingsView(modal: true) } }
         .overlay(alignment: .topTrailing) { if showPerformance { PerformanceOverlay() } }
         .sheet(item: Binding(get: { model.taskOptionsID.map { TaskOptionsTarget(id: $0) } }, set: { model.taskOptionsID = $0?.id })) { target in TaskOptionsView(taskID: target.id) }
         .onChange(of: scenePhase) { _, phase in model.setForeground(phase == .active) }
+        // Keep presented sheets on the same appearance and menu policy.
+        .menuOrder(.fixed)
+        .dynamicTypeSize(NativeAppearance.shared.textSize(relativeTo: textSize))
     }
 
     private var workspace: some View {
@@ -66,7 +68,6 @@ struct RootView: View {
             }.id(model.selection).navigationBarTitleDisplayMode(.inline)
         }
         .navigationSplitViewStyle(.balanced)
-        .dynamicTypeSize(NativeAppearance.shared.textSize(relativeTo: textSize))
         .sensoryFeedback(.selection, trigger: model.selection)
         // Sidebar rows are plain buttons so UIKit does not add disclosure
         // chevrons. This binding owns their compact push into the detail pane.
