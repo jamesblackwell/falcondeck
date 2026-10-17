@@ -1,9 +1,12 @@
 # Native client verification — 17 October 2026
 
+Visual polish follow-up: see [VISUAL-QA.md](VISUAL-QA.md) for the expanded
+screen/state checks, screenshot gallery and current device status.
+
 Falcon Native uses the separate `com.falcondeck.pilot.native` application ID and
 Apple Development signing. The latest Debug app and speech widget are installed
-and launched over Wi-Fi on the paired iPhone. Open **Falcon Native** to test
-the updated pairing flow. The physical iPad needs unlocking before its
+over Wi-Fi on the paired iPhone. Unlock it and open **Falcon Native** to test
+the current build. The physical iPad needs unlocking before its
 development image can mount and installation can proceed. No device inventory or credentials are
 checked in.
 
@@ -15,13 +18,13 @@ metadata, reconnect and forgetting a computer live in **Settings → Connections
 
 ## Client validation
 
-- 102 native unit tests pass, including crypto/wire compatibility, pairing
+- 104 native unit tests pass, including crypto/wire compatibility, pairing
   authority, connection epochs, drafts/queues, media, controls/extensions,
   push registration/cleanup and seven new pairing-flow regressions.
-- Three iPhone UI tests pass: first-send/Markdown, landscape automation saving,
-  and the scan-or-enter pairing layout with inline validation and cancellation.
-- The same three UI tests pass on iPad, including the explicit landscape
-  dimension assertion before opening and saving an automation.
+- Eleven UI flows pass on both iPhone and iPad: navigation/density, conversation,
+  requests, goals, search, settings, first send, pairing and landscape automation.
+- Additional compact-width, accessibility-text and landscape conversation checks
+  pass. See [VISUAL-QA.md](VISUAL-QA.md) for the current screen/state inventory.
 - Real relay pairing, encryption, compact project sync and a native conversation
   were exercised. The upgraded relay reconnects successfully with end-to-end
   encryption. Demo UI tests send only in-memory messages/automations.

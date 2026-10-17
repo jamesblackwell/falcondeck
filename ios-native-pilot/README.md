@@ -131,7 +131,7 @@ xcodebuild -project FalconDeckNative.xcodeproj -scheme FalconDeckNativeUI \
   -derivedDataPath build-ui test
 ```
 
-The latest run has 102 passing unit tests and passing pairing/chat/automation UI checks on
+The latest run has 104 passing unit tests and passing pairing/chat/automation UI checks on
 both phone and tablet simulators. See [VERIFICATION.md](VERIFICATION.md) for the
 review and device handoff, and [PARITY.md](PARITY.md) for the feature ledger. Tests cover
 crypto interoperability, pairing authority, chunks/ACKs, UTF-16 streaming,
@@ -139,3 +139,7 @@ connection races, history recovery, drafts, queues, control revisions,
 attachments, PCM, handoff, extension replacement/tombstones, theme callbacks and
 native flowchart parsing. Simulator screenshots and build products stay in
 ignored local `artifacts/` and `build*/` directories.
+
+The visual polish pass follows the Mac/Expo hierarchy and includes phone, iPad,
+compact-width and accessibility-text captures. See [VISUAL-QA.md](VISUAL-QA.md)
+for the screen inventory, findings and device status.
