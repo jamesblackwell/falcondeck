@@ -75,7 +75,7 @@ struct TranscriptRow: View {
                 Text(message.text).font(.body).lineSpacing(4).lineLimit(long && !longMessageExpanded ? 12 : nil).textSelection(.enabled)
                 if long { Button(longMessageExpanded ? "Show less" : "Show more") { longMessageExpanded.toggle() }.font(.caption).foregroundStyle(FD.accent) }
             }
-            else { NativeMarkdown(text: message.text) }
+            else { NativeMarkdown(text: message.text); AssistantSources(message: message) }
             if message.kind != "user_message", !message.text.isEmpty {
                 HStack(spacing: 18) {
                     Button { UIPasteboard.general.string = message.text } label: { Image(systemName: "doc.on.doc") }.accessibilityLabel("Copy response")

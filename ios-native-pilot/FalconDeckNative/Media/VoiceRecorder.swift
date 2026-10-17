@@ -55,6 +55,7 @@ final class VoiceRecorder: NSObject, AVAudioRecorderDelegate {
             UserDefaults.standard.set(provider, forKey: "native.voice.provider")
             try? FileManager.default.setAttributes([.protectionKey: FileProtectionType.completeUnlessOpen], ofItemAtPath: url.path)
             recording = true; elapsed = 0
+            SpeechLiveActivity.shared.voice("listening")
             meter = Task {
                 while !Task.isCancelled, self.recording {
                     if self.recorder?.isRecording != true { self.interrupted(); return }
@@ -70,6 +71,7 @@ final class VoiceRecorder: NSObject, AVAudioRecorderDelegate {
 
     func finishRecording() {
         recorder?.stop(); recorder = nil; meter?.cancel(); meter = nil; recording = false; level = 0
+        SpeechLiveActivity.shared.voice(nil)
         try? AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
     }
 
@@ -91,7 +93,8 @@ final class VoiceRecorder: NSObject, AVAudioRecorderDelegate {
         guard !transcribing, let url = pendingURL else { throw PilotError("Record a message first.") }
         if let providerOverride { provider = providerOverride; UserDefaults.standard.set(providerOverride, forKey: "native.voice.provider") }
         finishRecording(); transcribing = true; error = nil
-        defer { transcribing = false }
+        SpeechLiveActivity.shared.voice("transcribing")
+        defer { transcribing = false; SpeechLiveActivity.shared.voice(nil) }
         let current = model.connectionID
         let text: String
         do {

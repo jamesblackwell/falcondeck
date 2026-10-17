@@ -101,6 +101,7 @@ private struct ChatContent: View {
         }
         .safeAreaInset(edge: .bottom, spacing: 0) {
             VStack(spacing: 10) {
+                ConversationStatus(task: task)
                 ComposerSuggestionsView(task: task)
                 if task.interrupted {
                     HStack {

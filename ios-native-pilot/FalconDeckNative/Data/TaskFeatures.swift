@@ -73,7 +73,11 @@ extension Project {
         if unread { readSuppression[task.id] = task.activitySeq }
         else { readSuppression.removeValue(forKey: task.id) }
         do {
-            if demo { upsertTask(task.raw.setting("attention", task.raw["attention"].setting("unread", .bool(unread)))); return }
+            if demo {
+                var attention = task.raw["attention"].setting("unread", .bool(unread))
+                if !unread { attention = attention.setting("last_read_seq", .number(Double(task.activitySeq))) }
+                upsertTask(task.raw.setting("attention", attention)); return
+            }
             _ = try await taskRequest(task, method: unread ? "thread.mark_unread" : "thread.mark_read", fields: unread ? [:] : ["read_seq": .number(Double(task.activitySeq))])
         } catch {
             if !automatic { self.error = error.localizedDescription }

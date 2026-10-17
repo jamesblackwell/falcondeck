@@ -36,6 +36,28 @@ private actor ExtensionRelay: RelayServing {
             if deleting { XCTAssertNil(store.stage(task)) } else { XCTAssertEqual(store.stage(task)?["id"].string, "done") }
         }
     }
+    func testAReplacementSnapshotRemovesOldUntouchedViews() async {
+        let relay = ExtensionRelay(), model = AppModel(relay: relay)
+        model.connected = true
+        let store = model.extensions
+        store.catalog = [catalog()]; store.views = [view("done")]
+        store.setBase(.null, token: "replacement")
+        let pending = Task { await store.load(model: model) }
+        await relay.wait()
+        await relay.finish(.object(["catalog": .array([catalog()]), "views": .array([])]))
+        await pending.value
+        XCTAssertTrue(store.views.isEmpty)
+        XCTAssertNil(store.stage(task))
+    }
+    func testDemoMarkReadAdvancesReadSequence() async {
+        let model = AppModel(relay: ExtensionRelay())
+        model.demo = true
+        let unread = AgentTask(task.raw.setting("attention", .object(["unread": .bool(true), "last_agent_activity_seq": .number(5), "last_read_seq": .number(2)])))
+        model.tasks = [unread]
+        await model.markRead(unread)
+        XCTAssertFalse(model.tasks[0].unread)
+        XCTAssertEqual(model.tasks[0].raw["attention"]["last_read_seq"].int, 5)
+    }
     func testOrdinaryTagIndexValuesDoNotOverrideDeclarativeFilterDefinitions() {
         let store = NativeExtensions()
         let document = JSON.object(["version": .number(1), "root": .object(["type": .string("select"), "label": .string("Stages"), "options": .array([.object(["value": .string("done"), "label": .string("Done")])]), "binding": .object(["view": .string("thread-tags"), "path": .array([.string("tagIds")]), "operator": .string("includes_any")])])])

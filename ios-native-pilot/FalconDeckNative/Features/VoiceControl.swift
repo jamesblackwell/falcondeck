@@ -10,7 +10,7 @@ struct VoiceControl: View {
         Button {
             if recorder.pendingURL != nil { model.showSpeechSettings = true }
             else {
-                model.readAloud.stop()
+                model.readAloud.stop(); model.realtimeAudio.stop()
                 let current = model.connectionID
                 Task { await recorder.start(ownerID: task.id, provider: provider, isCurrent: { current == model.connectionID }) }
             }

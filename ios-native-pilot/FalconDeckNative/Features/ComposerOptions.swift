@@ -41,11 +41,11 @@ struct ComposerOptions: View {
             }
     }
     private func modePicker(_ label: String, key: String, options: [(String, String)]) -> some View {
-        Picker(label, selection: Binding(get: { (chat.overrides[key] ?? task.raw["agent"][key]).string.nonempty ?? (key == "service_tier" ? "standard" : "") }, set: { value in
+        Picker(label, selection: Binding(get: { (chat.overrides[key] ?? task.raw["agent"][key]).string.nonempty ?? (key == "service_tier" ? "default" : "") }, set: { value in
             chat.overrides[key] = value.isEmpty ? .null : .string(value)
             if key == "permission_mode", task.provider == "codex" { chat.overrides["approval_policy"] = value.isEmpty ? .null : .string(value == "default" ? "on-request" : value) }
         })) {
-            if key == "service_tier" { Text("Standard").tag("standard") }
+            if key == "service_tier" { Text("Standard").tag("default") }
             else { Text("Default").tag("") }
             ForEach(options, id: \.0) { option in Text(option.1.nonempty ?? modeLabel(option.0)).tag(option.0) }
         }

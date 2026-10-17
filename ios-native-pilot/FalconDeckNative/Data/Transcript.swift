@@ -16,6 +16,8 @@ struct Transcript: Sendable {
 
     mutating func apply(_ event: JSON) {
         switch event["type"].string {
+        case "realtime-item-added":
+            upsert(Message(event["item"].setting("kind", .string("realtime"))))
         case "conversation-item-added", "conversation-item-updated": upsert(Message(event["item"]))
         case "text":
             let id = event["item_id"].string, target = event["target"].string
@@ -78,6 +80,16 @@ struct Transcript: Sendable {
 }
 
 enum NativeRequest {
+    static func turnSettings(_ overrides: [String: JSON], task: AgentTask, model: AgentModel?) -> [String: JSON] {
+        var result = overrides
+        let tiers = model?.raw["service_tiers"].array ?? []
+        if tiers.isEmpty { result.removeValue(forKey: "service_tier") }
+        else {
+            let selected = (overrides["service_tier"] ?? task.raw["agent"]["service_tier"]).string
+            result["service_tier"] = .string(tiers.contains(where: { $0["id"].string == selected }) ? selected : "default")
+        }
+        return result
+    }
     static func turn(task: AgentTask, text: String, itemID: String, modelID: String, effort: String, overrides: [String: JSON] = [:], attachments: [NativeAttachment] = []) -> JSON {
         var result = JSON.object([
             "workspace_id": .string(task.projectID), "thread_id": .string(task.id), "provider": .string(task.provider),

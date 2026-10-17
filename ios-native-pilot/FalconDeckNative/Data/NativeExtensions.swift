@@ -64,8 +64,10 @@ struct NativeSuggestionOffer {
             let value = try await model.relay.call(currentToken == nil ? "extensions.read" : "sync.extensions", params: currentToken.map { .object(["token": .string($0)]) } ?? .object([:]))
             guard current == model.connectionID, loadingID == load, currentToken == token else { return }
             if !catalogTouched { catalog = value["catalog"].array }
-            var merged = Dictionary(views.map { (Self.key($0), $0) }, uniquingKeysWith: { _, new in new })
-            for view in value["views"].array where !touched.contains(Self.key(view)) { merged[Self.key(view)] = view }
+            var merged = Dictionary(value["views"].array.map { (Self.key($0), $0) }, uniquingKeysWith: { _, new in new })
+            // A complete replacement proves absent views were removed. Only
+            // events newer than the frozen index may override that snapshot.
+            for key in touched { merged[key] = viewIndex[key] }
             views = Array(merged.values); loaded = true
         } catch { if current == model.connectionID, loadingID == load { self.error = error.localizedDescription } }
     }

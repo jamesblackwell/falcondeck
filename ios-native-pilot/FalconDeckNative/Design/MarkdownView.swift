@@ -25,7 +25,7 @@ extension MarkdownUI.Theme {
         .heading1 { c in c.label.markdownTextStyle { FontSize(.em(1.4)); FontWeight(.semibold) }.markdownMargin(top: 18, bottom: 12) }
         .heading2 { c in c.label.markdownTextStyle { FontSize(.em(1.25)); FontWeight(.semibold) }.markdownMargin(top: 16, bottom: 10) }
         .heading3 { c in c.label.markdownTextStyle { FontSize(.em(1.1)); FontWeight(.semibold) }.markdownMargin(top: 14, bottom: 8) }
-        .codeBlock { c in NativeCodeBlock(content: c.content, language: c.language) }
+        .codeBlock { c in NativeFencedBlock(content: c.content, language: c.language) }
         .blockquote { c in
             HStack(spacing: 12) {
                 Rectangle().fill(FD.accent).frame(width: 2)

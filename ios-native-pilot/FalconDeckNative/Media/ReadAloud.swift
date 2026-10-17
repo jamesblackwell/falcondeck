@@ -28,7 +28,7 @@ final class ReadAloud: NSObject, AVSpeechSynthesizerDelegate, AVAudioPlayerDeleg
 
     func play(_ text: String, id: String, model: AppModel) async {
         if messageID == id { stop(); return }
-        stop(); messageID = id; loading = true; error = nil; errorMessageID = nil
+        stop(); model.realtimeAudio.stop(); messageID = id; loading = true; error = nil; errorMessageID = nil
         remoteControls = RemotePlaybackControls { [weak self] action in
             guard let self, self.messageID != nil else { return }
             switch action {
@@ -38,6 +38,7 @@ final class ReadAloud: NSObject, AVSpeechSynthesizerDelegate, AVAudioPlayerDeleg
             case .stop: self.stop()
             }
         }
+        SpeechLiveActivity.shared.readAloud("preparing")
         let current = generation, connection = model.connectionID
         do {
             try AVAudioSession.sharedInstance().setCategory(.playback, mode: .spokenAudio)
@@ -56,6 +57,7 @@ final class ReadAloud: NSObject, AVSpeechSynthesizerDelegate, AVAudioPlayerDeleg
             }
             guard current == generation, connection == model.connectionID else { return }
             loading = false
+            SpeechLiveActivity.shared.readAloud(paused ? "paused" : "playing")
             MPNowPlayingInfoCenter.default().nowPlayingInfo = [MPMediaItemPropertyTitle: "FalconDeck · Read aloud", MPNowPlayingInfoPropertyPlaybackRate: 1]
         } catch { if current == generation { stop(); self.error = error.localizedDescription; errorMessageID = id } }
     }
@@ -64,6 +66,7 @@ final class ReadAloud: NSObject, AVSpeechSynthesizerDelegate, AVAudioPlayerDeleg
         if paused { try? AVAudioSession.sharedInstance().setActive(true); if let player { player.play() } else { synthesizer.continueSpeaking() } }
         else { if let player { player.pause() } else { synthesizer.pauseSpeaking(at: .word) } }
         paused.toggle()
+        SpeechLiveActivity.shared.readAloud(paused ? "paused" : "playing")
         MPNowPlayingInfoCenter.default().nowPlayingInfo?[MPNowPlayingInfoPropertyPlaybackRate] = paused ? 0 : 1
     }
     func stop() {
@@ -71,6 +74,7 @@ final class ReadAloud: NSObject, AVSpeechSynthesizerDelegate, AVAudioPlayerDeleg
         utteranceID = nil; messageID = nil; paused = false; loading = false
         playbackModel = nil; pendingChunks = []
         remoteControls?.remove(); remoteControls = nil
+        SpeechLiveActivity.shared.readAloud(nil)
         MPNowPlayingInfoCenter.default().nowPlayingInfo = nil
         try? AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
     }

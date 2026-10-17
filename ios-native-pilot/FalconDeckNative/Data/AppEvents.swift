@@ -23,6 +23,9 @@ import Foundation
             if connected { Task { await self.extensions.load(model: self) } }
             preferences = value["preferences"]
             requests = value["interactive_requests"].array
+            serviceNotices = value["service_notices"].array
+            operationalConditions = value["operational_conditions"].array
+            tokenUsage = value["thread_token_usage"] == .null ? .object([:]) : value["thread_token_usage"]
             refreshedAt = .now; error = nil; demo = false
             if let pendingSelection {
                 switch pendingSelection {
@@ -61,6 +64,7 @@ import Foundation
         guard !demo, let seq = envelope["seq"].optionalInt, rebase || seq > lastEventSeq else { return }
         if !rebase { lastEventSeq = seq }
         let event = envelope["event"], id = envelope["thread_id"].string
+        if !rebase, !voice.recording, !voice.transcribing, readAloud.messageID == nil { realtimeAudio.handle(event, taskID: id) }
         switch event["type"].string {
         case "thread-started", "thread-updated":
             let raw = event["thread"]
@@ -72,6 +76,14 @@ import Foundation
                 }
             }
             stageSummary(raw)
+        case "service":
+            let notice = event["notice"]
+            if notice != .null { serviceNotices.removeAll { $0["id"] == notice["id"] }; serviceNotices.append(notice); if serviceNotices.count > 100 { serviceNotices.removeFirst(serviceNotices.count - 100) } }
+        case "operational-condition-upserted":
+            let condition = event["condition"]
+            operationalConditions.removeAll { $0["key"] == condition["key"] }; operationalConditions.append(condition)
+        case "operational-condition-cleared": operationalConditions.removeAll { $0["key"] == event["key"] && $0["id"] == event["condition_id"] }
+        case "thread-token-usage-updated": if !id.isEmpty { tokenUsage = tokenUsage.setting(id, event["usage"]) }
         case "extension-catalog-updated", "extension-view-updated": extensions.apply(event)
         case "control-state-changed": automations.scheduleRefresh(model: self)
         case "workspace-updated":

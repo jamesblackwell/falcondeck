@@ -10,6 +10,7 @@ final class AppModel {
     let relay: any RelayServing
     let voice = VoiceRecorder()
     let readAloud = ReadAloud()
+    let realtimeAudio = RealtimeAudio()
     var composerCatalogs: [String: ComposerCatalog] = [:]
     let extensions = NativeExtensions()
     let automations = AutomationStore()
@@ -18,6 +19,7 @@ final class AppModel {
 
     init(relay: any RelayServing = RelayClient()) {
         self.relay = relay
+        NativeSpeechBridge.handler = { [weak self] action in await self?.speechAction(action) }
         notifications.openTask = { [weak self] id in Task { await self?.openTask(id) } }
     }
     var syncIndex: CompactSync?
@@ -63,6 +65,9 @@ final class AppModel {
     @ObservationIgnored var pendingSelection: Destination?
     var preferences = JSON.object([:])
     var requests: [JSON] = []
+    var serviceNotices: [JSON] = []
+    var operationalConditions: [JSON] = []
+    var tokenUsage = JSON.object([:])
     var archivedTasks: [AgentTask] = []
     var readSuppression: [String: Int] = [:]
     var taskOptionsID: String?
@@ -83,6 +88,7 @@ final class AppModel {
 
     func start() async {
         guard observation == nil else { return }
+        SpeechLiveActivity.shared.voice(nil); SpeechLiveActivity.shared.readAloud(nil)
         let events = await relay.events()
         observation = Task { [weak self] in
             for await event in events {
@@ -116,7 +122,7 @@ final class AppModel {
     @discardableResult private func beginConnection(clearData: Bool) -> UUID {
         reconnectTask?.cancel(); reconnectTask = nil
         if voice.recording { voice.finishRecording() }
-        readAloud.stop(); automations.reset(); extensions.reset(); composerCatalogs = [:]
+        readAloud.stop(); realtimeAudio.stop(); automations.reset(); extensions.reset(); composerCatalogs = [:]
         connectionID = UUID(); lastEventSeq = 0; connected = false; syncIndex = nil; taskPageLoads = []
         itemCache = [:]; itemCacheOrder = []; itemLoads = [:]; mediaGate = MediaTransferGate()
         summaryFlush?.cancel(); summaryFlush = nil; pendingSummaries = [:]
@@ -125,7 +131,7 @@ final class AppModel {
         }
         if clearData {
             projects = []; tasks = []; chats = [:]; requests = []; preferences = .object([:])
-            archivedTasks = []; readSuppression = [:]; taskOptionsID = nil
+            archivedTasks = []; readSuppression = [:]; taskOptionsID = nil; serviceNotices = []; operationalConditions = []; tokenUsage = .object([:])
             selection = .projects; refreshedAt = nil
         }
         return connectionID
@@ -253,7 +259,12 @@ final class AppModel {
         let chat = chat(for: task)
         let consumesComposer = textOverride == nil
         let text = (textOverride ?? chat.draft).trimmingCharacters(in: .whitespacesAndNewlines)
-        let selectedModel = chat.modelID, selectedEffort = chat.effort, selectedOverrides = chat.overrides
+        let selectedModel = chat.modelID, selectedEffort = chat.effort
+        let models = projects.first(where: { $0.id == task.projectID })?.models(for: task.provider) ?? []
+        let activeModel = models.first { $0.id == selectedModel } ?? models.first { $0.raw["is_default"].bool }
+        let turnSettings = NativeRequest.turnSettings(chat.overrides, task: task, model: activeModel)
+        var selectedOverrides = chat.overrides
+        if selectedOverrides["service_tier"] != nil { selectedOverrides["service_tier"] = turnSettings["service_tier"] }
         let attachments = consumesComposer ? chat.attachments : []
         let recoveryText = consumesComposer ? text : ""
         guard !task.isDraft || consumesComposer else { return }
@@ -312,7 +323,7 @@ final class AppModel {
             }
             if text.contains("/") { await loadCatalog(task) }
             guard current == connectionID else { restoreSubmission(task, chat: chat, id: id, text: recoveryText, attachments: attachments); return }
-            let params = NativeRequest.turn(task: task, text: text, itemID: id, modelID: selectedModel, effort: selectedEffort, overrides: selectedOverrides, attachments: attachments).setting("selected_skills", .array(ComposerCatalog.selected(text, skills: catalog(task).skills)))
+            let params = NativeRequest.turn(task: task, text: text, itemID: id, modelID: selectedModel, effort: selectedEffort, overrides: turnSettings, attachments: attachments).setting("selected_skills", .array(ComposerCatalog.selected(text, skills: catalog(task).skills)))
             let response = try await relay.call("turn.start", params: params)
             guard current == connectionID else { restoreSubmission(task, chat: chat, id: id, text: recoveryText, attachments: attachments); return }
             if response["message"].string == "queued" {

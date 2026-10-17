@@ -15,6 +15,7 @@ struct TaskOptionsView: View {
         NavigationStack {
             Form {
                 if let task {
+                    TaskUsageView(usage: model.tokenUsage[task.id])
                     Section("Task title") {
                         TextField("Task title", text: $title).accessibilityIdentifier("task-title")
                         Button("Save title") { run { _ = try await model.taskRequest(task, method: "thread.update", fields: ["title": .string(title.trimmingCharacters(in: .whitespacesAndNewlines))]) } }

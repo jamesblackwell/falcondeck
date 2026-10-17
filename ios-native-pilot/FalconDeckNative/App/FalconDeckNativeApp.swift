@@ -11,8 +11,8 @@ struct FalconDeckNativeApp: App {
                 .tint(FD.accent)
                 .task { await model.start() }
                 .onOpenURL { url in
-                    model.pairingText = url.absoluteString
-                    model.showConnection = true
+                    if url.host == "speech" { if model.voice.pendingURL != nil { model.showSpeechSettings = true } }
+                    else { model.pairingText = url.absoluteString; model.showConnection = true }
                 }
         }
     }

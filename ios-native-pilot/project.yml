@@ -19,8 +19,9 @@ targets:
   FalconDeckNative:
     type: application
     platform: iOS
-    sources: [FalconDeckNative]
+    sources: [FalconDeckNative, Shared]
     dependencies:
+      - target: FalconSpeechActivity
       - package: Sodium
       - package: MarkdownUI
     preBuildScripts:
@@ -44,6 +45,9 @@ targets:
       path: FalconDeckNative/Info.plist
       properties:
         CFBundleDisplayName: Falcon Native
+        CFBundleShortVersionString: $(MARKETING_VERSION)
+        CFBundleVersion: $(CURRENT_PROJECT_VERSION)
+        NSSupportsLiveActivities: true
         CFBundleURLTypes:
           - CFBundleURLSchemes: [falcondeck-native]
         NSCameraUsageDescription: Scan a pairing code or take photos to attach to your agent messages.
@@ -53,6 +57,26 @@ targets:
         UIBackgroundModes: [audio]
         NSAppTransportSecurity:
           NSAllowsLocalNetworking: true
+  FalconSpeechActivity:
+    type: app-extension
+    platform: iOS
+    sources: [SpeechWidget, Shared]
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.falcondeck.pilot.native.speech-activity
+        TARGETED_DEVICE_FAMILY: "1,2"
+        MARKETING_VERSION: "0.1.0"
+        CURRENT_PROJECT_VERSION: "1"
+        APPLICATION_EXTENSION_API_ONLY: YES
+        SKIP_INSTALL: YES
+    info:
+      path: SpeechWidget/Info.plist
+      properties:
+        CFBundleDisplayName: Falcon Speech
+        CFBundleShortVersionString: $(MARKETING_VERSION)
+        CFBundleVersion: $(CURRENT_PROJECT_VERSION)
+        NSExtension:
+          NSExtensionPointIdentifier: com.apple.widgetkit-extension
   FalconDeckNativeTests:
     type: bundle.unit-test
     platform: iOS
