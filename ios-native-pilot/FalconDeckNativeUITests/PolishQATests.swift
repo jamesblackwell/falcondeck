@@ -156,6 +156,20 @@ import XCTest
         search.typeText(String(repeating: XCUIKeyboardKey.delete.rawValue, count: 5))
         XCTAssertTrue(app.buttons["sidebar-task-native"].waitForExistence(timeout: 5))
     }
+    func testExpandingLongMessagePreservesReadingPosition() {
+        let app = launch()
+        app.buttons["sidebar-task-native"].tap()
+        let more = app.buttons["Show more"]
+        let visible = XCTNSPredicateExpectation(predicate: NSPredicate(format: "hittable == true"), object: more)
+        XCTAssertEqual(XCTWaiter.wait(for: [visible], timeout: 5), .completed)
+        let message = app.staticTexts.matching(NSPredicate(format: "label CONTAINS %@", "Please keep the following priorities")).firstMatch
+        let originalTop = message.frame.minY
+        more.tap()
+        XCTAssertEqual(message.frame.minY, originalTop, accuracy: 24, "Expanding text must keep the reader in place instead of following the bottom")
+        let latest = app.staticTexts.matching(NSPredicate(format: "label CONTAINS %@", "Use the composer to continue the conversation")).firstMatch
+        XCTAssertFalse(latest.exists && latest.isHittable, "Expanded text should stay in view instead of snapping to the final reply")
+        capture("Long message reading position")
+    }
     func testEverySettingsScreenAndConnectionDiagnostics() {
         let app = launch()
         app.buttons["sidebar-settings"].tap()

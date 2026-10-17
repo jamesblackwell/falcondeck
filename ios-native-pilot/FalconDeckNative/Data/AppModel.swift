@@ -569,6 +569,24 @@ enum Demo {
         task("polish", "falcondeck", "Polish the mobile experience", "codex", "idle", "A consistent hierarchy across phone, tablet and desktop.", pinned: true),
         task("chat", "casual", "Plan the next release", "claude", "idle", "A quick conversation, outside a project.")
     ]
+    static let longRequest = """
+    Please keep the following priorities in mind as you review the native client.
+
+    - Follow the existing desktop and mobile hierarchy so moving between devices feels familiar.
+    - Show globally pinned tasks first, then projects with their folders, followed by casual chats.
+    - Keep task names on a single line while preserving comfortable touch targets.
+    - Use the same light and dark palettes throughout navigation, conversations and settings.
+    - Make secondary actions easy to find without filling every row with buttons.
+    - Keep model selection and reasoning choices readable on a smaller phone.
+    - Present activity details compactly, with complete output available when I open them.
+    - Preserve my reading position when I expand a tool result or a longer message.
+    - Keep the latest reply in view when a conversation first opens or new content arrives.
+    - Let me scroll back through the history without being pulled away by a live reply.
+    - Make keyboard transitions, sheet presentation and project expansion feel natural.
+    - Check the layout on a phone and tablet, including landscape and larger text.
+    - Keep unsent messages safe while switching tasks or reconnecting to the computer.
+    - Leave the released app alone while the native development build is being tested.
+    """
     static let messages: [Message] = [
         message("1", "user_message", "Let’s explore a truly native FalconDeck. Keep the core experience simple, but make it feel great on iPhone."),
         message("2", "assistant_message", "I’ve narrowed the pilot down to three things: your projects, the tasks inside them, and the conversations that matter.\n\nThe interface uses **native SwiftUI navigation**, SF Symbols, and glass controls. Projects stay in the sidebar, and the conversation layout adapts to your text size."),
@@ -577,6 +595,7 @@ enum Demo {
         Message(.object(["id": .string("tool-read"), "kind": .string("tool_call"), "title": .string("Read sidebar views"), "status": .string("completed"), "tool_kind": .string("read"), "output": .string("Reviewed navigation, project folders and pinned tasks.")])),
         message("5", "assistant_message", "I’m checking the layout at phone and tablet sizes, including menus and keyboard states."),
         Message(.object(["id": .string("tool-tests"), "kind": .string("tool_call"), "title": .string("Run UI checks"), "status": .string("completed"), "tool_kind": .string("command"), "output": .string("All focused checks passed.")])),
+        message("long-request", "user_message", longRequest),
         message("6", "assistant_message", "The core layout is ready to test. Projects stay above chats, pins fit on one line, and model settings have a stable sheet.\n\n- Open a project to see its folders.\n- Long-press a task for secondary actions.\n- Use the composer to continue the conversation.")
     ]
     private static func project(_ id: String, _ path: String, kind: String = "project") -> Project {

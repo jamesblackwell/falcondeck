@@ -15,7 +15,7 @@ struct TranscriptRow: View {
     @State private var loadingOutput = false
     @State private var showOutput = false
     private var preferences: ConversationPreferences { ConversationPreferences(raw: model.preferences["conversation"]) }
-    private var open: Binding<Bool> { Binding(get: { userToggled ? expanded : preferences.opens(message, firstDiff: firstDiff) }, set: { userToggled = true; expanded = $0 }) }
+    private var open: Binding<Bool> { Binding(get: { userToggled ? expanded : preferences.opens(message, firstDiff: firstDiff) }, set: { onInteraction(); userToggled = true; expanded = $0 }) }
     var body: some View {
         Group {
             switch message.kind {
@@ -60,9 +60,7 @@ struct TranscriptRow: View {
             default: unsupported
             }
         }.frame(maxWidth: .infinity, alignment: .leading)
-        .simultaneousGesture(TapGesture().onEnded {
-            if !["user_message", "assistant_message", "code_review", "image", "artifact", "service"].contains(message.kind) { onInteraction() }
-        })
+        .simultaneousGesture(TapGesture().onEnded { onInteraction() })
         .onChange(of: expansion) { _, directive in if let directive { userToggled = true; expanded = directive.expanded } }
         .sheet(isPresented: $showOutput) { if let fullOutput { TextDocumentView(title: message.raw["title"].string.nonempty ?? "Tool output", text: fullOutput) } }
     }
@@ -79,7 +77,7 @@ struct TranscriptRow: View {
             if message.kind == "user_message" {
                 let long = preferences.flag("collapse_long_user_messages") && (message.text.count > 900 || message.text.filter { $0 == "\n" }.count > 12)
                 Text(message.text).font(.body).lineSpacing(4).lineLimit(long && !longMessageExpanded ? 12 : nil).textSelection(.enabled)
-                if long { Button(longMessageExpanded ? "Show less" : "Show more") { longMessageExpanded.toggle() }.font(.caption).foregroundStyle(FD.accent) }
+                if long { Button(longMessageExpanded ? "Show less" : "Show more") { onInteraction(); longMessageExpanded.toggle() }.font(.caption).foregroundStyle(FD.accent) }
             }
             else { NativeMarkdown(text: message.text); AssistantSources(message: message) }
             if showsActions, message.kind != "user_message", !message.streaming, !message.text.isEmpty {

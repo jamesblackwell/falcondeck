@@ -7,7 +7,7 @@ struct TranscriptGroup: View {
     var onInteraction: () -> Void = {}
     @State private var expanded = false
     var body: some View {
-        DisclosureGroup(isExpanded: $expanded) {
+        DisclosureGroup(isExpanded: Binding(get: { expanded }, set: { onInteraction(); expanded = $0 })) {
             VStack(alignment: .leading, spacing: 14) {
                 ForEach(block.items) { TranscriptRow(message: $0, task: task, expansion: expansion, onInteraction: onInteraction) }
             }.padding(.top, 10)
@@ -19,7 +19,6 @@ struct TranscriptGroup: View {
                     .font(.caption).foregroundStyle(FD.secondary)
             }.frame(minHeight: 36, alignment: .leading)
         }.tint(FD.secondary)
-            .simultaneousGesture(TapGesture().onEnded(onInteraction))
             .onChange(of: expansion) { _, value in if let value { expanded = value.expanded } }
     }
 }
