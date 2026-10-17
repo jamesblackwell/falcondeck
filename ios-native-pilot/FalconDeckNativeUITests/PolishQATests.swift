@@ -55,7 +55,17 @@ import XCTest
         XCTAssertGreaterThanOrEqual(send.frame.width, 44)
         XCTAssertLessThanOrEqual(send.frame.maxX, app.frame.maxX)
         XCTAssertGreaterThanOrEqual(model.frame.minX, app.frame.minX)
+        let latest = app.staticTexts.matching(NSPredicate(format: "label CONTAINS %@", "Use the composer to continue the conversation")).firstMatch
+        let atLatest = XCTNSPredicateExpectation(predicate: NSPredicate(format: "hittable == true"), object: latest)
+        XCTAssertEqual(XCTWaiter.wait(for: [atLatest], timeout: 5), .completed, "Opening history must reveal the latest response after Markdown reflow")
         capture("06 Running conversation and compact composer")
+        app.swipeDown()
+        let jump = app.buttons["Jump to latest message"]
+        XCTAssertTrue(jump.waitForExistence(timeout: 5))
+        capture("Conversation reading position")
+        jump.tap()
+        let returned = XCTNSPredicateExpectation(predicate: NSPredicate(format: "hittable == true"), object: latest)
+        XCTAssertEqual(XCTWaiter.wait(for: [returned], timeout: 5), .completed)
         model.tap()
         XCTAssertTrue(app.navigationBars["Model & reasoning"].waitForExistence(timeout: 5))
         capture("07 Model and reasoning sheet")
@@ -134,6 +144,17 @@ import XCTest
         capture("Paused goal controls")
         app.buttons["Stop goal"].tap()
         XCTAssertTrue(app.buttons["Set a goal"].waitForExistence(timeout: 5))
+    }
+    func testSidebarSearchFiltersAndRestoresTheProjectTree() {
+        let app = launch()
+        let search = app.searchFields.firstMatch
+        XCTAssertTrue(search.waitForExistence(timeout: 5))
+        search.tap(); search.typeText("voice")
+        XCTAssertTrue(app.buttons["sidebar-task-voice"].waitForExistence(timeout: 5))
+        XCTAssertFalse(app.buttons["sidebar-task-native"].exists)
+        capture("Sidebar search results")
+        search.typeText(String(repeating: XCUIKeyboardKey.delete.rawValue, count: 5))
+        XCTAssertTrue(app.buttons["sidebar-task-native"].waitForExistence(timeout: 5))
     }
     func testEverySettingsScreenAndConnectionDiagnostics() {
         let app = launch()

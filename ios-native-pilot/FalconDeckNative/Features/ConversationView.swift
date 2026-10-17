@@ -26,6 +26,7 @@ private struct ChatContent: View {
     let task: AgentTask
     @Bindable var chat: ChatSession
     @State private var followLatest = true
+    @State private var nearLatest = true
     @State private var userScrolling = false
     @State private var showGoal = false
     private var expansion: TranscriptExpansion? { chat.transcriptExpansion }
@@ -57,8 +58,8 @@ private struct ChatContent: View {
                         }.frame(maxWidth: .infinity).padding(.vertical, 48)
                     }
                     ForEach(blocks) { block in
-                        if block.grouped { TranscriptGroup(block: block, task: task, expansion: expansion).id(block.id) }
-                        else if let item = block.items.first { TranscriptRow(message: item, task: task, firstDiff: block.firstDiff, showsActions: actions.contains(item.id), expansion: expansion).id(item.id) }
+                        if block.grouped { TranscriptGroup(block: block, task: task, expansion: expansion, onInteraction: { followLatest = false }).id(block.id) }
+                        else if let item = block.items.first { TranscriptRow(message: item, task: task, firstDiff: block.firstDiff, showsActions: actions.contains(item.id), expansion: expansion, onInteraction: { followLatest = false }).id(item.id) }
                     }
                     if task.running {
                         HStack(spacing: 8) { ActivityDiamond(); Text("\(task.provider.capitalized) is working…").font(.footnote).foregroundStyle(FD.secondary) }.padding(.vertical, 8)
@@ -68,9 +69,13 @@ private struct ChatContent: View {
                 .padding(.horizontal, FD.inset).padding(.vertical, 16).frame(maxWidth: 820).frame(maxWidth: .infinity)
             }
             .defaultScrollAnchor(.bottom, for: .initialOffset)
+            // Markdown, images and diagrams can settle after the first layout.
+            // Keep their reflow anchored until the user starts reading activity.
+            .defaultScrollAnchor(followLatest ? .bottom : nil, for: .sizeChanges)
             .onScrollGeometryChange(for: Bool.self) { g in g.contentOffset.y + g.containerSize.height >= g.contentSize.height - 120 } action: { _, value in
                 // Content growth and keyboard dismissal also change geometry.
                 // Only an actual reading gesture should turn following off.
+                nearLatest = value
                 if userScrolling { followLatest = value }
             }
             .onScrollPhaseChange { _, phase in userScrolling = phase == .tracking || phase == .interacting || phase == .decelerating }
@@ -82,7 +87,7 @@ private struct ChatContent: View {
             .onChange(of: chat.loaded) { _, loaded in if loaded { scrollToLatest(proxy, animated: false) } }
             .onChange(of: chat.sending) { _, sending in if sending { followLatest = true; scrollToLatest(proxy, animated: true) } }
             .overlay(alignment: .bottomTrailing) {
-                if !followLatest && !chat.transcript.items.isEmpty {
+                if !nearLatest && !chat.transcript.items.isEmpty {
                     Button { followLatest = true; scrollToLatest(proxy, animated: true) } label: { Image(systemName: "arrow.down").padding(12) }
                         .glassEffect().padding(16).accessibilityLabel("Jump to latest message")
                 }
@@ -99,6 +104,7 @@ private struct ChatContent: View {
                 }
             }
         }
+        .onChange(of: chat.transcriptExpansion) { _, _ in followLatest = false }
         .sheet(isPresented: $showGoal) { GoalView(taskID: task.id) }
         .task(id: task.activitySeq) {
             do { try await Task.sleep(for: .milliseconds(600)) } catch { return }

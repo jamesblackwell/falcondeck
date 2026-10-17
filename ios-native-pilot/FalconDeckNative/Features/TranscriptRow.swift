@@ -7,6 +7,7 @@ struct TranscriptRow: View {
     var firstDiff = false
     var showsActions = true
     var expansion: TranscriptExpansion? = nil
+    var onInteraction: () -> Void = {}
     @State private var expanded = false
     @State private var longMessageExpanded = false
     @State private var userToggled = false
@@ -59,6 +60,9 @@ struct TranscriptRow: View {
             default: unsupported
             }
         }.frame(maxWidth: .infinity, alignment: .leading)
+        .simultaneousGesture(TapGesture().onEnded {
+            if !["user_message", "assistant_message", "code_review", "image", "artifact", "service"].contains(message.kind) { onInteraction() }
+        })
         .onChange(of: expansion) { _, directive in if let directive { userToggled = true; expanded = directive.expanded } }
         .sheet(isPresented: $showOutput) { if let fullOutput { TextDocumentView(title: message.raw["title"].string.nonempty ?? "Tool output", text: fullOutput) } }
     }
