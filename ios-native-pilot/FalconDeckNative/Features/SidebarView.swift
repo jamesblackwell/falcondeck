@@ -34,6 +34,8 @@ struct SidebarView: View {
     private var pins: [AgentTask] { model.tasks.filter { $0.pinned && matches($0) }.sorted { $0.updatedAt > $1.updatedAt } }
     var body: some View {
         @Bindable var model = model
+        let projectGroups = projects.filter { $0.raw["kind"].string != "casual" }
+        let projectsOpen = projectGroups.contains { expanded.contains($0.id) }
         ScrollView {
             LazyVStack(alignment: .leading, spacing: 0) {
                 sidebarAction("New chat", symbol: "square.and.pencil") { Task { await model.newChat() } }
@@ -43,10 +45,10 @@ struct SidebarView: View {
                     sectionHeading("Pinned", expanded: pinsExpanded) { animate { pinsExpanded.toggle() } }
                     if pinsExpanded { ForEach(pins) { taskLink($0) } }
                 }
-                sectionHeading("Projects", expanded: !expanded.isEmpty) {
-                    animate { expanded = expanded.isEmpty ? Set(projects.map(\.id)) : [] }
+                sectionHeading("Projects", expanded: projectsOpen) {
+                    animate { if projectsOpen { expanded.subtract(projectGroups.map(\.id)) } else { expanded.formUnion(projectGroups.map(\.id)) } }
                 }
-                ForEach(projects.filter { $0.raw["kind"].string != "casual" }) { project in
+                ForEach(projectGroups) { project in
                     let isOpen = expanded.contains(project.id) || !search.isEmpty
                     HStack(spacing: 0) {
                     Button {
@@ -143,6 +145,11 @@ struct SidebarView: View {
             if case .task(let id) = model.selection, let task = model.tasks.first(where: { $0.id == id }) { expanded.insert(task.projectID) }
             else if expanded.isEmpty, let project = projects.first(where: { $0.raw["kind"].string != "casual" }) { expanded.insert(project.id) }
         }
+        .onChange(of: model.selection) { _, destination in
+            guard case .task(let id) = destination, let task = model.task(id), !task.pinned else { return }
+            expanded.insert(task.projectID)
+            if let folder = model.folders.first(where: { $0.taskIDs.contains(id) }) { openFolders[folder.id] = true }
+        }
         .onChange(of: model.projects.isEmpty) { _, empty in
             if !empty && expanded.isEmpty, let project = projects.first(where: { $0.raw["kind"].string != "casual" }) { expanded.insert(project.id) }
         }
@@ -202,7 +209,11 @@ struct SidebarView: View {
     }
     @ViewBuilder private func taskPage(_ tasks: [AgentTask], key: String, indent: CGFloat) -> some View {
         let limit = search.isEmpty ? limits[key, default: 5] : tasks.count
-        ForEach(sorted(tasks).prefix(limit)) { taskLink($0, indent: indent) }
+        let ordered = sorted(tasks)
+        ForEach(ordered.prefix(limit)) { taskLink($0, indent: indent) }
+        if case .task(let selectedID) = model.selection, let selected = ordered.dropFirst(limit).first(where: { $0.id == selectedID }) {
+            taskLink(selected, indent: indent)
+        }
         let folder = model.folders.first { $0.id == key }
         let projectID = folder?.projectID ?? key
         if tasks.count > limit || model.hasMoreTasks(projectID, folderID: folder?.id, sort: sort) {
@@ -231,6 +242,7 @@ struct SidebarView: View {
             .background(model.selection == .task(task.id) ? FD.raised : .clear, in: .rect(cornerRadius: 8))
             .contentShape(.rect)
         }.buttonStyle(.plain).accessibilityIdentifier("sidebar-task-\(task.id)")
+            .accessibilityValue("\(task.provider.capitalized), \(task.awaitingInput ? "Needs input" : task.working ? "Running" : task.unread ? "Unread" : "Ready")")
             .accessibilityAddTraits(model.selection == .task(task.id) ? .isSelected : [])
             .contextMenu { TaskStageMenu(task: task); TaskActions(task: task) }
     }

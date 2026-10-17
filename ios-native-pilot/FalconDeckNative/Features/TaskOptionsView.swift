@@ -16,62 +16,63 @@ struct TaskOptionsView: View {
             Form {
                 if let task {
                     Group {
-                    Section {
-                        DisclosureGroup("Rename task") {
-                        TextField("Task title", text: $title).accessibilityIdentifier("task-title")
-                        Button("Save title") { run { _ = try await model.taskRequest(task, method: "thread.update", fields: ["title": .string(title.trimmingCharacters(in: .whitespacesAndNewlines))]) } }
-                            .disabled(title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
-                        Button("Suggest a title", systemImage: "sparkles") {
-                            run(close: false) {
-                                if model.demo { title = "A fresh native experience" }
-                                else {
-                                    let result = try await model.taskRequest(task, method: "thread.suggestTitle")
-                                    guard !result["title"].string.isEmpty else { throw PilotError("Couldn't generate a title.") }
-                                    title = result["title"].string
+                        Section {
+                            DisclosureGroup("Rename task") {
+                            TextField("Task title", text: $title).accessibilityIdentifier("task-title")
+                            Button("Save title") { run { _ = try await model.taskRequest(task, method: "thread.update", fields: ["title": .string(title.trimmingCharacters(in: .whitespacesAndNewlines))]) } }
+                                .disabled(title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                            Button("Suggest a title", systemImage: "sparkles") {
+                                run(close: false) {
+                                    if model.demo { title = "A fresh native experience" }
+                                    else {
+                                        let result = try await model.taskRequest(task, method: "thread.suggestTitle")
+                                        guard !result["title"].string.isEmpty else { throw PilotError("Couldn't generate a title.") }
+                                        title = result["title"].string
+                                    }
                                 }
                             }
-                        }
-                        }
-                    }.listRowBackground(FD.surface)
-                    Section {
-                        TaskStageMenu(task: task)
-                        Button(task.pinned ? "Unpin" : "Pin", systemImage: "pin") { run { _ = try await model.taskRequest(task, method: "thread.update", fields: ["pinned": .bool(!task.pinned)]) } }
-                        Button(task.pinnedInProject ? "Unpin in project" : "Pin in project", systemImage: "pin.circle") { run { _ = try await model.taskRequest(task, method: "thread.update", fields: ["pinned_in_project": .bool(!task.pinnedInProject)]) } }
-                        Menu("Move to folder", systemImage: "folder") {
-                            Button("Project root") { move(task, folder: nil) }
-                            ForEach(model.folders.filter { $0.projectID == task.projectID }) { folder in Button(folder.name) { move(task, folder: folder.id) } }
-                        }
-                        if task.activitySeq > 0 { Button(task.unread ? "Mark read" : "Mark unread", systemImage: "circle") { run { await model.markRead(task, unread: !task.unread) } } }
-                    }.listRowBackground(FD.surface)
-                    Section {
-                        if task.goal != .null || model.projects.first(where: { $0.id == task.projectID })?.capabilities(task.provider)["supports_goals"].bool == true || model.demo {
-                            Button(task.goal == .null ? "Set a goal" : "View goal", systemImage: "target") { goal = true }
-                        }
-                        if model.projects.first(where: { $0.id == task.projectID })?.capabilities(task.provider)["supports_compaction"].bool == true || model.demo {
-                            Button("Compact context", systemImage: "arrow.down.right.and.arrow.up.left") { compact = true }.disabled(task.running || task.status == "waiting_for_input")
-                        }
-                        let chat = model.chat(for: task)
-                        ShareLink(item: ExportedText(text: TranscriptExport.markdown(chat.transcript.items, title: task.title, partial: chat.hasOlder), title: task.title), preview: SharePreview(task.title)) {
-                            Label(chat.loading ? "Loading conversation…" : chat.hasOlder ? "Share loaded conversation" : "Share conversation", systemImage: "square.and.arrow.up")
-                        }.disabled(!chat.loaded || chat.loading || chat.transcript.items.isEmpty)
-                        if let error = chat.error, !chat.loaded {
-                            Text(error).font(.footnote).foregroundStyle(.orange)
-                            Button("Retry loading conversation") { Task { await model.loadChat(task) } }
-                        }
+                            }
+                        }.listRowBackground(FD.surface)
+                        Section {
+                            TaskStageMenu(task: task)
+                            Button(task.pinned ? "Unpin" : "Pin", systemImage: "pin") { run { _ = try await model.taskRequest(task, method: "thread.update", fields: ["pinned": .bool(!task.pinned)]) } }
+                            Button(task.pinnedInProject ? "Unpin in project" : "Pin in project", systemImage: "pin.circle") { run { _ = try await model.taskRequest(task, method: "thread.update", fields: ["pinned_in_project": .bool(!task.pinnedInProject)]) } }
+                            Menu("Move to folder", systemImage: "folder") {
+                                Button("Project root") { move(task, folder: nil) }
+                                ForEach(model.folders.filter { $0.projectID == task.projectID }) { folder in Button(folder.name) { move(task, folder: folder.id) } }
+                            }
+                            if task.activitySeq > 0 { Button(task.unread ? "Mark read" : "Mark unread", systemImage: "circle") { run { await model.markRead(task, unread: !task.unread) } } }
+                        }.listRowBackground(FD.surface)
+                        Section {
+                            if task.goal != .null || model.projects.first(where: { $0.id == task.projectID })?.capabilities(task.provider)["supports_goals"].bool == true || model.demo {
+                                Button(task.goal == .null ? "Set a goal" : "View goal", systemImage: "target") { goal = true }
+                            }
+                            if model.projects.first(where: { $0.id == task.projectID })?.capabilities(task.provider)["supports_compaction"].bool == true || model.demo {
+                                Button("Compact context", systemImage: "arrow.down.right.and.arrow.up.left") { compact = true }.disabled(task.running || task.status == "waiting_for_input")
+                            }
+                            let chat = model.chat(for: task)
+                            ShareLink(item: ExportedText(text: TranscriptExport.markdown(chat.transcript.items, title: task.title, partial: chat.hasOlder), title: task.title), preview: SharePreview(task.title)) {
+                                Label(chat.loading ? "Loading conversation…" : chat.hasOlder ? "Share loaded conversation" : "Share conversation", systemImage: "square.and.arrow.up")
+                            }.disabled(!chat.loaded || chat.loading || chat.transcript.items.isEmpty)
+                            if let error = chat.error, !chat.loaded {
+                                Text(error).font(.footnote).foregroundStyle(.orange)
+                                Button("Retry loading conversation") { Task { await model.loadChat(task) } }
+                            }
 
-                        if let project = model.projects.first(where: { $0.id == task.projectID }) {
-                            Menu("Continue with another agent", systemImage: "arrow.triangle.branch") {
-                                ForEach(project.providers.filter { $0 != task.provider }, id: \.self) { provider in
-                                    Button(provider.capitalized) { run { try await model.handoff(task, provider: provider) } }
+                            if let project = model.projects.first(where: { $0.id == task.projectID }) {
+                                Menu("Continue with another agent", systemImage: "arrow.triangle.branch") {
+                                    ForEach(project.providers.filter { $0 != task.provider }, id: \.self) { provider in
+                                        Button(provider.capitalized) { run { try await model.handoff(task, provider: provider) } }
+                                    }
                                 }
                             }
-                        }
-                        if task.archived { Button("Restore task", systemImage: "arrow.uturn.backward") { run { try await model.unarchive(task) } } }
-                        else { Button("Archive task", systemImage: "archivebox", role: .destructive) { run { await model.archive(task) } } }
-                    }.listRowBackground(FD.surface)
+                            if task.archived { Button("Restore task", systemImage: "arrow.uturn.backward") { run { try await model.unarchive(task) } } }
+                            else { Button("Archive task", systemImage: "archivebox", role: .destructive) { run { await model.archive(task) } } }
+                        }.listRowBackground(FD.surface)
                     }.disabled(!model.demo && !model.connected)
                 }
                 if let task {
+                    // These presentation controls stay available offline.
                     if ConversationPreferences(raw: model.preferences["conversation"]).flag("show_expand_all_controls") {
                         Section("Transcript") {
                             Button("Expand all activity") { model.chat(for: task).transcriptExpansion = TranscriptExpansion(expanded: true) }
