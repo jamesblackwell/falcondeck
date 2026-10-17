@@ -61,8 +61,9 @@ import XCTest
         }
         let atLatest = XCTNSPredicateExpectation(predicate: visibleAboveComposer, object: nil)
         XCTAssertEqual(XCTWaiter.wait(for: [atLatest], timeout: 5), .completed, "Opening history must reveal the latest response after Markdown reflow")
-        capture("06 Running conversation and compact composer")
         let jump = app.buttons["Jump to latest message"]
+        XCTAssertFalse(jump.exists, "Following the latest response should not add a redundant jump control")
+        capture("06 Running conversation and compact composer")
         for _ in 0..<3 { app.scrollViews["conversation-transcript"].swipeDown() }
         XCTAssertTrue(jump.waitForExistence(timeout: 5))
         capture("Conversation reading position")

@@ -95,7 +95,7 @@ private struct ChatContent: View {
             .onChange(of: chat.loaded, initial: true) { _, loaded in if loaded { scrollToLatest(proxy, animated: false) } }
             .onChange(of: chat.sending) { _, sending in if sending { followLatest = true; scrollToLatest(proxy, animated: true) } }
             .overlay(alignment: .bottomTrailing) {
-                if !nearLatest && !chat.transcript.items.isEmpty {
+                if !followLatest && !nearLatest && !chat.transcript.items.isEmpty {
                     Button { followLatest = true; scrollToLatest(proxy, animated: true) } label: { Image(systemName: "arrow.down").padding(12) }
                         .glassEffect().padding(16).accessibilityLabel("Jump to latest message")
                 }
