@@ -5,7 +5,7 @@ import Network
     private let monitor = NWPathMonitor()
     private let queue = DispatchQueue(label: "com.falcondeck.native.network")
     init(changed: @escaping @MainActor @Sendable (Bool) -> Void) {
-        monitor.pathUpdateHandler = { path in
+        monitor.pathUpdateHandler = { @Sendable path in
             let available = path.status == .satisfied
             Task { @MainActor in changed(available) }
         }

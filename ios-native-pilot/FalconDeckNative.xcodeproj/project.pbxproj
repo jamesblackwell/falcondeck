@@ -75,6 +75,7 @@
 		BDA1AA96709537008B464C95 /* ConnectionView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 16F5CDC46298C62F85B619EB /* ConnectionView.swift */; };
 		BE69421FF072D5D3F5D4BBAA /* MarkdownView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 42B8AF3942CD1C580C831846 /* MarkdownView.swift */; };
 		BEF9E38826E07C3404022A5C /* MediaTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = CBF5784E24A143B520CB7169 /* MediaTests.swift */; };
+		C1E7CC737AA28E0377AD611F /* AppearanceTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 21B202DDFF99D1AB36835AB9 /* AppearanceTests.swift */; };
 		C3B640EA9434F8B6D1C2A226 /* MediaFeatures.swift in Sources */ = {isa = PBXBuildFile; fileRef = E3ABE090B975D347B9F544D2 /* MediaFeatures.swift */; };
 		C53156AA4F71BA8293E1D17A /* MediaImageView.swift in Sources */ = {isa = PBXBuildFile; fileRef = E49D235FF66BCB75D605CAF6 /* MediaImageView.swift */; };
 		C57CBBAAE6B35D89B1ACDFB5 /* ConversationView.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA6CF1D3BE369372AD902660 /* ConversationView.swift */; };
@@ -146,6 +147,7 @@
 		1CC657891F6A863270DA8D83 /* ProtocolTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ProtocolTests.swift; sourceTree = "<group>"; };
 		1CD42E8DC267FF3D7FFED9B3 /* AutomationDraft.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AutomationDraft.swift; sourceTree = "<group>"; };
 		1D59FE5987F6028D64C28AB4 /* TaskBranching.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TaskBranching.swift; sourceTree = "<group>"; };
+		21B202DDFF99D1AB36835AB9 /* AppearanceTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppearanceTests.swift; sourceTree = "<group>"; };
 		23EC2AFEB560421194E6B8C7 /* Transcript.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Transcript.swift; sourceTree = "<group>"; };
 		28FB3C1FBFAD033DA4A58C41 /* RemotePlaybackControls.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RemotePlaybackControls.swift; sourceTree = "<group>"; };
 		2B7DF150BEC721BDF01F2F59 /* InputRecovery.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = InputRecovery.swift; sourceTree = "<group>"; };
@@ -341,6 +343,7 @@
 		7D3DFEABD6464A22910B2B98 /* FalconDeckNativeTests */ = {
 			isa = PBXGroup;
 			children = (
+				21B202DDFF99D1AB36835AB9 /* AppearanceTests.swift */,
 				1296682B4C2710C830607D72 /* AutomationTests.swift */,
 				FDB95178D19ED70FD635FC5F /* ChatTests.swift */,
 				6263F2FACA8AC6703722FE37 /* CompactSyncTests.swift */,
@@ -582,6 +585,7 @@
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				C1E7CC737AA28E0377AD611F /* AppearanceTests.swift in Sources */,
 				820BBAB2B97305F90FAE31FD /* AutomationTests.swift in Sources */,
 				704577339832005A782E0AEF /* ChatTests.swift in Sources */,
 				D7EC584FA8C33DB80F6AEC5E /* CompactSyncTests.swift in Sources */,

@@ -33,6 +33,18 @@ import XCTest
         XCTAssertEqual(transcript.items.first?.kind, "realtime")
         XCTAssertEqual(transcript.items.first?.raw["payload"]["text"].string, "Hello")
     }
+    func testStoppingAudioSuppressesDeltasUntilANewStreamStarts() {
+        let audio = RealtimeAudio()
+        audio.handle(.object(["type": .string("realtime-audio-started")]), taskID: "task")
+        audio.stop("task")
+        audio.handle(.object(["type": .string("realtime-audio-delta"), "audio": .null]), taskID: "task")
+        XCTAssertTrue(audio.active.isEmpty)
+        XCTAssertNil(audio.error, "Stopped streams must not even decode later chunks")
+        audio.handle(.object(["type": .string("realtime-audio-started")]), taskID: "task")
+        audio.handle(.object(["type": .string("realtime-audio-delta"), "audio": .null]), taskID: "task")
+        XCTAssertNotNil(audio.error, "A new explicit stream may decode again")
+        audio.reset()
+    }
     func testFastOffUsesTheSharedDefaultTierAndUnsupportedModelsOmitIt() {
         let task = AgentTask(.object(["id": .string("task"), "agent": .object(["service_tier": .string("priority")])]))
         let model = AgentModel(raw: .object(["id": .string("model"), "service_tiers": .array([.object(["id": .string("priority"), "label": .string("Fast")])])]))

@@ -7,7 +7,7 @@ import MediaPlayer
         let center = MPRemoteCommandCenter.shared()
         for (command, action) in [(center.playCommand, Action.play), (center.pauseCommand, .pause), (center.togglePlayPauseCommand, .toggle), (center.stopCommand, .stop)] {
             command.isEnabled = true
-            let target = command.addTarget { _ in Task { @MainActor in perform(action) }; return .success }
+            let target = command.addTarget { @Sendable _ in Task { @MainActor in perform(action) }; return .success }
             handlers.append((command, target))
         }
         center.nextTrackCommand.isEnabled = false; center.previousTrackCommand.isEnabled = false

@@ -122,7 +122,7 @@ final class AppModel {
     @discardableResult private func beginConnection(clearData: Bool) -> UUID {
         reconnectTask?.cancel(); reconnectTask = nil
         if voice.recording { voice.finishRecording() }
-        readAloud.stop(); realtimeAudio.stop(); automations.reset(); extensions.reset(); composerCatalogs = [:]
+        readAloud.stop(); realtimeAudio.reset(); automations.reset(); extensions.reset(); composerCatalogs = [:]
         connectionID = UUID(); lastEventSeq = 0; connected = false; syncIndex = nil; taskPageLoads = []
         itemCache = [:]; itemCacheOrder = []; itemLoads = [:]; mediaGate = MediaTransferGate()
         summaryFlush?.cancel(); summaryFlush = nil; pendingSummaries = [:]

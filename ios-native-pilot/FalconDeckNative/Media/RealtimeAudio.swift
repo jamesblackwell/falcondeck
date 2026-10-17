@@ -25,6 +25,7 @@ enum RealtimePCM {
     var error: String?
     @ObservationIgnored private var engine: AVAudioEngine?
     @ObservationIgnored private var playback: [String: Playback] = [:]
+    @ObservationIgnored private var silenced: Set<String> = []
     @ObservationIgnored private var cleanup: Task<Void, Never>?
     @ObservationIgnored private var interruptions: AudioInterruptionObserver?
     private final class Playback {
@@ -39,13 +40,13 @@ enum RealtimePCM {
     func handle(_ event: JSON, taskID: String) {
         guard !taskID.isEmpty else { return }
         let type = event["type"].string
-        if type == "realtime-audio-started" { stop(taskID); install(taskID); return }
+        if type == "realtime-audio-started" { stop(taskID); silenced.remove(taskID); install(taskID); return }
         if type == "realtime-audio-ended" {
             if event["interrupted"].bool { stop(taskID) }
             else if let state = playback[taskID] { state.ending = true; state.lastActivity = .now; if state.bytes == 0 { stop(taskID) } }
-            return
+            silenced.remove(taskID); return
         }
-        guard type == "realtime-audio-delta" else { return }
+        guard type == "realtime-audio-delta", !silenced.contains(taskID) else { return }
         do {
             let buffer = try RealtimePCM.decode(event["audio"])
             if playback[taskID] == nil { install(taskID) }
@@ -66,7 +67,7 @@ enum RealtimePCM {
             if !engine.isRunning { engine.prepare(); try engine.start() }
             state.bytes += bytes
             let id = state.id
-            node.scheduleBuffer(buffer, completionCallbackType: .dataPlayedBack) { [weak self] _ in
+            node.scheduleBuffer(buffer, completionCallbackType: .dataPlayedBack) { @Sendable [weak self] _ in
                 Task { @MainActor in
                     guard let self, let current = self.playback[taskID], current.id == id else { return }
                     current.bytes = max(0, current.bytes - bytes)
@@ -78,6 +79,7 @@ enum RealtimePCM {
     }
     func stop(_ taskID: String? = nil) {
         for id in taskID.map({ [$0] }) ?? Array(playback.keys) {
+            silenced.insert(id)
             if let state = playback.removeValue(forKey: id), let node = state.node { node.stop(); engine?.detach(node) }
             active.remove(id)
         }
@@ -87,6 +89,7 @@ enum RealtimePCM {
             if ownedAudio { try? AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation) }
         }
     }
+    func reset() { stop(); silenced = []; error = nil }
     private func install(_ id: String) {
         if playback.count >= 8, let oldest = playback.min(by: { $0.value.lastActivity < $1.value.lastActivity })?.key { stop(oldest) }
         playback[id] = Playback(); active.insert(id)

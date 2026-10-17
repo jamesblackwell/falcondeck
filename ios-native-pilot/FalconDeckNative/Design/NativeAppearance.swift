@@ -33,7 +33,11 @@ final class NativeAppearance {
         let dark = Self.palettes.first { $0.id == darkID } ?? Self.palettes.first { $0.dark }
         let lightValue = light?.raw["colors"][group][key].string ?? "#17171c"
         let darkValue = dark?.raw["colors"][group][key].string ?? "#f4f4f6"
-        return Color(UIColor { traits in Self.uiColor(traits.userInterfaceStyle == .dark ? darkValue : lightValue) })
+        return Color(Self.dynamicColor(light: lightValue, dark: darkValue))
+    }
+    nonisolated static func dynamicColor(light: String, dark: String) -> UIColor {
+        // UIKit resolves traits on background render queues as well as main.
+        UIColor { @Sendable traits in Self.uiColor(traits.userInterfaceStyle == .dark ? dark : light) }
     }
     func textSize(relativeTo system: DynamicTypeSize) -> DynamicTypeSize {
         let sizes: [DynamicTypeSize] = [.xSmall, .small, .medium, .large, .xLarge, .xxLarge, .xxxLarge, .accessibility1, .accessibility2, .accessibility3, .accessibility4, .accessibility5]
