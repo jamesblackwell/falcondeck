@@ -9,6 +9,7 @@ final class ReadAloud: NSObject, AVSpeechSynthesizerDelegate, AVAudioPlayerDeleg
     var paused = false
     var loading = false
     var error: String?
+    var errorMessageID: String?
     @ObservationIgnored private var synthesizer = AVSpeechSynthesizer()
     @ObservationIgnored private var player: AVAudioPlayer?
     @ObservationIgnored private var utteranceID: ObjectIdentifier?
@@ -16,6 +17,7 @@ final class ReadAloud: NSObject, AVSpeechSynthesizerDelegate, AVAudioPlayerDeleg
     @ObservationIgnored private weak var playbackModel: AppModel?
     @ObservationIgnored private var pendingChunks: [String] = []
     @ObservationIgnored private var interruptions: AudioInterruptionObserver?
+    @ObservationIgnored private var remoteControls: RemotePlaybackControls?
     override init() {
         super.init(); synthesizer.delegate = self
         interruptions = AudioInterruptionObserver { [weak self] in
@@ -26,12 +28,22 @@ final class ReadAloud: NSObject, AVSpeechSynthesizerDelegate, AVAudioPlayerDeleg
 
     func play(_ text: String, id: String, model: AppModel) async {
         if messageID == id { stop(); return }
-        stop(); messageID = id; loading = true; error = nil
+        stop(); messageID = id; loading = true; error = nil; errorMessageID = nil
+        remoteControls = RemotePlaybackControls { [weak self] action in
+            guard let self, self.messageID != nil else { return }
+            switch action {
+            case .play: if self.paused { self.togglePause() }
+            case .pause: if !self.paused { self.togglePause() }
+            case .toggle: self.togglePause()
+            case .stop: self.stop()
+            }
+        }
         let current = generation, connection = model.connectionID
         do {
             try AVAudioSession.sharedInstance().setCategory(.playback, mode: .spokenAudio)
             try AVAudioSession.sharedInstance().setActive(true)
             let spoken = Self.spokenText(text)
+            guard !spoken.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { throw PilotError("There is no text to read aloud.") }
             if !model.demo, UserDefaults.standard.string(forKey: "native.readAloud.provider") == "desktop" {
                 let pieces = Self.chunks(spoken)
                 guard let first = pieces.first else { throw PilotError("There is no text to read aloud.") }
@@ -42,9 +54,10 @@ final class ReadAloud: NSObject, AVSpeechSynthesizerDelegate, AVAudioPlayerDeleg
                 utterance.voice = AVSpeechSynthesisVoice(language: UserDefaults.standard.string(forKey: "native.speech.language")?.nonempty ?? Locale.current.identifier)
                 utteranceID = ObjectIdentifier(utterance); synthesizer.speak(utterance)
             }
+            guard current == generation, connection == model.connectionID else { return }
             loading = false
             MPNowPlayingInfoCenter.default().nowPlayingInfo = [MPMediaItemPropertyTitle: "FalconDeck · Read aloud", MPNowPlayingInfoPropertyPlaybackRate: 1]
-        } catch { if current == generation { stop(); self.error = error.localizedDescription } }
+        } catch { if current == generation { stop(); self.error = error.localizedDescription; errorMessageID = id } }
     }
     func togglePause() {
         guard messageID != nil else { return }
@@ -57,6 +70,7 @@ final class ReadAloud: NSObject, AVSpeechSynthesizerDelegate, AVAudioPlayerDeleg
         generation = UUID(); player?.stop(); player = nil; synthesizer.stopSpeaking(at: .immediate)
         utteranceID = nil; messageID = nil; paused = false; loading = false
         playbackModel = nil; pendingChunks = []
+        remoteControls?.remove(); remoteControls = nil
         MPNowPlayingInfoCenter.default().nowPlayingInfo = nil
         try? AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
     }

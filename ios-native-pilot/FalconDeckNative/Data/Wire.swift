@@ -93,14 +93,15 @@ struct AgentTask: Identifiable, Hashable, Sendable {
     var effort: String { raw["agent"]["reasoning_effort"].string }
     var latestTurnID: String { raw["latest_turn_id"].string }
     var running: Bool { status == "running" }
-    var needsAttention: Bool { ["waiting_for_input", "awaiting_approval", "error"].contains(status) }
+    var awaitingInput: Bool { ["waiting_for_input", "awaiting_approval"].contains(status) || raw["attention"]["pending_approval_count"].int + raw["attention"]["pending_question_count"].int > 0 }
+    var needsAttention: Bool { awaitingInput || status == "error" }
     init(_ v: JSON) {
         raw = v
         id = v["id"].string; projectID = v["workspace_id"].string
         title = v["title"].string == "Untitled thread" ? "New task" : v["title"].string; provider = v["provider"].string
         status = v["status"].string; preview = v["last_message_preview"].string
         updatedAt = v["updated_at"].string; pinned = v["is_pinned"].bool
-        unread = v["attention"]["unread"].bool
+        unread = v["attention"]["unread"].bool || v["attention"]["last_agent_activity_seq"].int > v["attention"]["last_read_seq"].int
     }
 }
 

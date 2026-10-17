@@ -7,7 +7,7 @@ import Foundation
         case .status(let text, let online):
             status = text; connected = online
             if connectionLog.last?.message != text { connectionLog.append(ConnectionLogEntry(message: text)); if connectionLog.count > 100 { connectionLog.removeFirst(connectionLog.count - 100) } }
-            if online { reconnectAttempt = 0; reconnectTask?.cancel(); reconnectTask = nil; automations.scheduleRefresh(model: self) }
+            if online { reconnectAttempt = 0; reconnectTask?.cancel(); reconnectTask = nil; automations.scheduleRefresh(model: self); Task { await self.extensions.load(model: self) } }
             if text == "Connecting…" { lastEventSeq = 0 }
         case .snapshot(let value):
             summaryFlush?.cancel(); summaryFlush = nil; pendingSummaries = [:]
@@ -19,6 +19,8 @@ import Foundation
                 tasks = index.retain(incoming, previous: tasks, projectIDs: Set(projects.map(\.id)), hidden: Set(value["preferences"]["hidden_workspace_ids"].array.map(\.string)), selected: selected)
                 syncIndex = index; taskPageLoads = []
             } else { tasks = incoming; syncIndex = nil; taskPageLoads = [] }
+            extensions.setBase(value["extensions"], token: syncIndex?.token)
+            if connected { Task { await self.extensions.load(model: self) } }
             preferences = value["preferences"]
             requests = value["interactive_requests"].array
             refreshedAt = .now; error = nil; demo = false
@@ -70,6 +72,7 @@ import Foundation
                 }
             }
             stageSummary(raw)
+        case "extension-catalog-updated", "extension-view-updated": extensions.apply(event)
         case "control-state-changed": automations.scheduleRefresh(model: self)
         case "workspace-updated":
             let project = Project(event["workspace"])

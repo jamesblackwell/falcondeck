@@ -3,6 +3,10 @@ import SwiftUI
 struct SidebarView: View {
     @Environment(AppModel.self) private var model
     @State private var search = ""
+    @State private var optionsProject: Project?
+    @State private var reorder = false
+    @State private var filters = false
+    @AppStorage("native.sidebar.sort") private var sort = "last_updated"
     @State private var expanded: Set<String> = []
     @State private var limits: [String: Int] = [:]
     @State private var showHidden = false
@@ -30,7 +34,7 @@ struct SidebarView: View {
                     .disabled(!model.demo && !model.connected)
                 NavigationLink(value: Destination.archived) { Label("Archived tasks", systemImage: "archivebox") }
                 NavigationLink(value: Destination.activity) {
-                    HStack { Label("Activity", systemImage: "waveform.path"); Spacer(); Text("\(model.tasks.filter(\.running).count)").foregroundStyle(FD.secondary) }
+                    HStack { Label("Activity", systemImage: "waveform.path"); Spacer(); Text("\(model.tasks.filter(\.working).count)").foregroundStyle(FD.secondary) }
                 }
             }
             if !pins.isEmpty {
@@ -50,10 +54,10 @@ struct SidebarView: View {
                         if expanded.contains(project.id) { expanded.remove(project.id) } else { expanded.insert(project.id) }
                     } label: {
                         HStack(spacing: 10) {
-                            ProjectIcon(name: project.name).font(.subheadline).frame(width: 20, height: 24).foregroundStyle(FD.accent)
+                            WorkspaceGlyph(project: project).font(.subheadline).frame(width: 20, height: 24).foregroundStyle(FD.accent)
                             Text(project.name).font(.subheadline.weight(.semibold)).lineLimit(1)
                             Spacer(minLength: 2)
-                            if model.tasks(in: project).contains(where: \.running) { ActivityDiamond() }
+                            if model.tasks(in: project).contains(where: \.working) { ActivityDiamond() }
                             Image(systemName: isOpen ? "chevron.down" : "chevron.right").font(.caption2.weight(.semibold)).foregroundStyle(FD.secondary)
                         }.padding(.vertical, 3)
                     }
@@ -61,9 +65,16 @@ struct SidebarView: View {
                     .contextMenu {
                         Button { newTask(project) } label: { Label("New task", systemImage: "square.and.pencil") }
                         Button { editFolder(projectID: project.id) } label: { Label("New folder", systemImage: "folder.badge.plus") }
+                        Button("Project options", systemImage: "slider.horizontal.3") { optionsProject = project }
                         ShareLink(item: project.path) { Label("Share project path", systemImage: "square.and.arrow.up") }
                     }
-                    if isOpen { projectContents(project).task(id: project.id) { await model.loadTaskPage(project.id) } }
+                    if isOpen { projectContents(project).task(id: project.id + ":" + sort) { await model.loadTaskPage(project.id, sort: sort) } }
+                }
+            }
+            if !search.isEmpty, model.syncIndex != nil, model.sortedProjects.contains(where: { model.hasMoreTasks($0.id, sort: sort) }) {
+                Section {
+                    Text("Searching loaded tasks").font(.caption).foregroundStyle(FD.secondary)
+                    Button("Search more tasks") { Task { for project in model.sortedProjects.filter({ model.hasMoreTasks($0.id, sort: sort) }).prefix(4) { await model.loadTaskPage(project.id, sort: sort, limit: 50) } } }
                 }
             }
             if model.projects.isEmpty {
@@ -103,12 +114,18 @@ struct SidebarView: View {
             ToolbarItem(placement: .bottomBar) { Spacer() }
             ToolbarItem(placement: .bottomBar) {
                 Menu {
+                    Picker("Sort tasks", selection: $sort) { Text("Last updated").tag("last_updated"); Text("Priority").tag("priority"); Text("Name").tag("alphabetical") }
+                    if !model.extensions.filters.isEmpty { Button("Filter tasks", systemImage: "line.3.horizontal.decrease") { filters = true } }
                     Button("Automations", systemImage: "calendar.badge.clock") { model.selection = .automations }
                     Toggle("Show hidden projects", isOn: $showHidden)
+                    Button("Reorder projects", systemImage: "arrow.up.arrow.down") { reorder = true }
                     Button("Collapse all projects") { expanded = [] }
                 } label: { Image(systemName: "line.3.horizontal.decrease") }.accessibilityLabel("Sidebar options")
             }
         }
+        .sheet(item: $optionsProject) { ProjectOptionsView(project: $0) }
+        .sheet(isPresented: $reorder) { ProjectOrderView() }
+        .sheet(isPresented: $filters) { ExtensionFiltersView() }
         .onAppear {
             if case .task(let id) = model.selection, let task = model.tasks.first(where: { $0.id == id }) { expanded.insert(task.projectID) }
             else if expanded.isEmpty, let project = projects.first { expanded.insert(project.id) }
@@ -166,32 +183,33 @@ struct SidebarView: View {
                 Button { editFolder(projectID: project.id, folder: folder) } label: { Label("Rename folder", systemImage: "pencil") }
                 Button("Delete folder", systemImage: "trash", role: .destructive) { deleteFolder = folder }
             }
-            if isOpen { taskPage(children, key: folder.id, indent: 40).task(id: folder.id) { await model.loadTaskPage(project.id, folderID: folder.id) } }
+            if isOpen { taskPage(children, key: folder.id, indent: 40).task(id: folder.id + ":" + sort) { await model.loadTaskPage(project.id, folderID: folder.id, sort: sort) } }
         }
         taskPage(tasks.filter { !$0.pinnedInProject && !filed.contains($0.id) }, key: project.id, indent: 20)
         Button { newTask(project) } label: { Label("New task", systemImage: "plus").font(.subheadline).foregroundStyle(FD.secondary).padding(.leading, 20) }
     }
     @ViewBuilder private func taskPage(_ tasks: [AgentTask], key: String, indent: CGFloat) -> some View {
         let limit = search.isEmpty ? limits[key, default: 5] : tasks.count
-        ForEach(tasks.prefix(limit)) { taskLink($0, indent: indent) }
+        ForEach(sorted(tasks).prefix(limit)) { taskLink($0, indent: indent) }
         let folder = model.folders.first { $0.id == key }
         let projectID = folder?.projectID ?? key
-        if tasks.count > limit || model.hasMoreTasks(projectID, folderID: folder?.id) {
+        if tasks.count > limit || model.hasMoreTasks(projectID, folderID: folder?.id, sort: sort) {
             Button("Show more") {
                 limits[key] = limit + 10
-                Task { await model.loadTaskPage(projectID, folderID: folder?.id) }
+                Task { await model.loadTaskPage(projectID, folderID: folder?.id, sort: sort) }
             }.font(.caption).foregroundStyle(FD.secondary).padding(.leading, indent)
-                .disabled(model.taskPageLoads.contains(CompactSync.key(project: projectID, folder: folder?.id)))
+                .disabled(model.taskPageLoads.contains(CompactSync.key(project: projectID, folder: folder?.id, sort: sort)))
         }
     }
     private func taskLink(_ task: AgentTask, indent: CGFloat = 0) -> some View {
         NavigationLink(value: Destination.task(task.id)) {
             HStack(alignment: .top, spacing: 9) {
                 Group {
-                    if task.running { ActivityDiamond() }
+                    if task.working { ActivityDiamond() }
                     else if task.needsAttention { Image(systemName: "exclamationmark.circle").foregroundStyle(.orange) }
                     else { Image(systemName: "bubble.left").foregroundStyle(FD.muted) }
                 }.font(.caption).frame(width: 14).padding(.top, 3)
+                TaskStageMark(task: task)
                 VStack(alignment: .leading, spacing: 3) {
                     Text(task.title.nonempty ?? "New task").font(.subheadline).lineLimit(2)
                     Text(task.provider.capitalized).font(.caption2).foregroundStyle(FD.muted)
@@ -200,10 +218,21 @@ struct SidebarView: View {
                 if task.unread { Circle().fill(.blue).frame(width: 5, height: 5).padding(.top, 7) }
             }.padding(.vertical, 3).padding(.leading, indent)
         }
-        .contextMenu { TaskActions(task: task) }
+        .contextMenu { TaskStageMenu(task: task); TaskActions(task: task) }
     }
     private func matches(_ task: AgentTask, project: Project? = nil) -> Bool {
-        search.isEmpty || task.title.localizedCaseInsensitiveContains(search) || project?.name.localizedCaseInsensitiveContains(search) == true
+        model.extensions.matches(task) && (search.isEmpty || task.title.localizedCaseInsensitiveContains(search) || project?.name.localizedCaseInsensitiveContains(search) == true)
+    }
+    private func sorted(_ tasks: [AgentTask]) -> [AgentTask] {
+        tasks.sorted { left, right in
+            if sort == "alphabetical" { return left.title.localizedStandardCompare(right.title) == .orderedAscending }
+            if sort == "priority" {
+                let lhs = left.awaitingInput ? 0 : left.unread ? 1 : left.working ? 2 : 3
+                let rhs = right.awaitingInput ? 0 : right.unread ? 1 : right.working ? 2 : 3
+                if lhs != rhs { return lhs < rhs }
+            }
+            return left.updatedAt > right.updatedAt
+        }
     }
     private func newTask(_ project: Project, folderID: String? = nil) {
         model.selection = .draft(project.id, folderID)

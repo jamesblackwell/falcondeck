@@ -12,7 +12,7 @@ struct StartView: View {
                     .toolbar {
                         ToolbarItem(placement: .principal) {
                             Menu {
-                                ForEach(model.sortedProjects) { project in Button(project.name) { projectID = project.id } }
+                                ForEach(model.sortedProjects) { project in Button(project.name) { projectID = project.id; model.selection = .draft(project.id, nil) } }
                                 Button("New chat", systemImage: "square.and.pencil") { Task { await model.newChat() } }
                             } label: { HStack(spacing: 6) { Text(project.raw["kind"].string == "casual" ? "New chat" : project.name).lineLimit(1); Image(systemName: "chevron.down").font(.caption2) }.font(.subheadline.weight(.semibold)) }
                         }

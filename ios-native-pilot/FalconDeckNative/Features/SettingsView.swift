@@ -6,6 +6,7 @@ struct SettingsView: View {
         List {
             Section {
                 NavigationLink { ConnectionSettingsView() } label: { Label("Connections", systemImage: "laptopcomputer.and.iphone") }
+                NavigationLink { ExtensionPanelsView() } label: { Label("Extensions", systemImage: "puzzlepiece.extension") }
                 NavigationLink { AutomationsView() } label: { Label("Automations", systemImage: "calendar.badge.clock") }
             }.listRowBackground(FD.surface)
             Section("Preferences") {

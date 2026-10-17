@@ -1,6 +1,6 @@
 import SwiftUI
 
-/// Falcon dark tokens from DESIGN.md, centralized for this independent client.
+/// Shared design tokens adapted to the native appearance catalog.
 @MainActor enum FD {
     static var background: Color { NativeAppearance.shared.color("surface", "0") }
     static var surface: Color { NativeAppearance.shared.color("surface", "1") }
@@ -48,7 +48,7 @@ struct StatusBadge: View {
     let task: AgentTask
     var body: some View {
         HStack(spacing: 5) {
-            if task.running { ActivityDiamond() }
+            if task.working { ActivityDiamond() }
             else { Circle().fill(color).frame(width: 5, height: 5) }
             Text(label).font(.caption.weight(.medium))
         }
@@ -57,9 +57,9 @@ struct StatusBadge: View {
         .background(color.opacity(0.10), in: Capsule())
         .accessibilityElement(children: .combine)
     }
-    private var color: Color { task.running ? FD.accent : task.needsAttention ? .orange : FD.secondary }
+    private var color: Color { task.working ? FD.accent : task.needsAttention ? .orange : FD.secondary }
     private var label: String {
-        if task.running { return "Working" }
+        if task.working { return "Working" }
         if task.status == "error" { return "Error" }
         if task.needsAttention { return "Needs you" }
         return "Ready"

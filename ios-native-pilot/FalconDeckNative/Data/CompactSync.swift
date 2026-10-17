@@ -39,22 +39,22 @@ struct CompactSync {
         }
         return AgentTask(raw)
     }
-    static func key(project: String, folder: String?) -> String { project + ":" + (folder.map { "folder:\($0):" } ?? "") + "last_updated" }
+    static func key(project: String, folder: String?, sort: String = "last_updated") -> String { project + ":" + (folder.map { "folder:\($0):" } ?? "") + sort }
 }
 
 @MainActor extension AppModel {
-    func loadTaskPage(_ projectID: String, folderID: String? = nil) async {
+    func loadTaskPage(_ projectID: String, folderID: String? = nil, sort: String = "last_updated", limit: Int = 10) async {
         guard let state = syncIndex, !demo, connected else { return }
-        let key = CompactSync.key(project: projectID, folder: folderID)
+        let key = CompactSync.key(project: projectID, folder: folderID, sort: sort)
         guard state.cursors[key] != .null, !taskPageLoads.contains(key) else { return }
         taskPageLoads.insert(key)
         let current = connectionID, token = state.token
         defer { if current == connectionID, syncIndex?.token == token { taskPageLoads.remove(key) } }
         do {
-            var params = JSON.object(["token": .string(token), "workspace_id": .string(projectID), "cursor": state.cursors[key] ?? .number(0), "sort": .string("last_updated"), "limit": .number(folderID == nil ? 10 : 50)])
+            var params = JSON.object(["token": .string(token), "workspace_id": .string(projectID), "cursor": state.cursors[key] ?? .number(0), "sort": .string(sort), "limit": .number(Double(folderID == nil ? max(1, min(50, limit)) : 50))])
             if let folderID { params = params.setting("folder_id", .string(folderID)) }
             let page = try await relay.call("sync.threads", params: params)
-            guard current == connectionID, var index = syncIndex, index.token == token, page["token"].string == token else { return }
+            guard current == connectionID, !Task.isCancelled, var index = syncIndex, index.token == token, page["token"].string == token else { return }
             let rows = page["threads"].array.map(AgentTask.init)
             guard page["workspace_id"].string == projectID, rows.allSatisfy({ $0.projectID == projectID }) else { throw PilotError("Project page scope did not match.") }
             for row in rows {
@@ -72,8 +72,8 @@ struct CompactSync {
             else { self.error = error.localizedDescription }
         }
     }
-    func hasMoreTasks(_ projectID: String, folderID: String? = nil) -> Bool {
+    func hasMoreTasks(_ projectID: String, folderID: String? = nil, sort: String = "last_updated") -> Bool {
         guard let index = syncIndex, index.counts[projectID]["total"].int > 0 else { return false }
-        return index.cursors[CompactSync.key(project: projectID, folder: folderID)] != .null
+        return index.cursors[CompactSync.key(project: projectID, folder: folderID, sort: sort)] != .null
     }
 }

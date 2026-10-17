@@ -31,6 +31,7 @@ struct TaskOptionsView: View {
                         }
                     }.listRowBackground(FD.surface)
                     Section {
+                        TaskStageMenu(task: task)
                         Button(task.pinned ? "Unpin" : "Pin", systemImage: "pin") { run { _ = try await model.taskRequest(task, method: "thread.update", fields: ["pinned": .bool(!task.pinned)]) } }
                         Button(task.pinnedInProject ? "Unpin in project" : "Pin in project", systemImage: "pin.circle") { run { _ = try await model.taskRequest(task, method: "thread.update", fields: ["pinned_in_project": .bool(!task.pinnedInProject)]) } }
                         Menu("Move to folder", systemImage: "folder") {
@@ -62,7 +63,8 @@ struct TaskOptionsView: View {
                                 }
                             }
                         }
-                        Button("Archive task", systemImage: "archivebox", role: .destructive) { run { await model.archive(task) } }
+                        if task.archived { Button("Restore task", systemImage: "arrow.uturn.backward") { run { try await model.unarchive(task) } } }
+                        else { Button("Archive task", systemImage: "archivebox", role: .destructive) { run { await model.archive(task) } } }
                     }.listRowBackground(FD.surface)
                 }
                 if let error { Text(error).foregroundStyle(.orange).listRowBackground(FD.surface) }

@@ -61,6 +61,7 @@ struct NotificationSettingsView: View {
                 }))
             } footer: { Text("Background remote notifications require a native relay push update and are unavailable in this development build.") }.listRowBackground(FD.surface)
             Section {
+                Toggle("Event notifications", isOn: preference("enabled"))
                 Toggle("Completed turns", isOn: preference("notify_on_turn_complete"))
                 Toggle("Approvals and questions", isOn: preference("notify_on_input_required"))
                 Toggle("Failed turns", isOn: preference("notify_on_error"))

@@ -101,6 +101,7 @@ private struct ChatContent: View {
         }
         .safeAreaInset(edge: .bottom, spacing: 0) {
             VStack(spacing: 10) {
+                ComposerSuggestionsView(task: task)
                 if task.interrupted {
                     HStack {
                         Text("FalconDeck closed during this turn.").font(.footnote)

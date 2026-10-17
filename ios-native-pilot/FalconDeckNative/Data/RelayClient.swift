@@ -339,7 +339,7 @@ actor RelayClient: RelayServing {
     }
 
     func call(_ method: String, params: JSON) async throws -> JSON {
-        let allowed = ["sync.index", "sync.threads", "sync.extensions", "snapshot.current", "thread.detail", "thread.start", "thread.update", "thread.archive", "thread.mark_read", "thread.mark_unread", "thread.unarchive", "thread.fork", "thread.suggestTitle", "thread.goal.set", "thread.goal.clear", "thread.compact", "thread.queue.remove", "thread.queue.edit", "thread.queue.steer", "thread.queue.attachment_preview", "chat.create", "provider.hydrate", "workspace.skills", "workspace.prompts", "thread.item", "control.get", "control.execute", "speech.status", "speech.models", "speech.transcribe", "speech.synthesize", "turn.start", "turn.interrupt", "preferences.update", "interactive.respond"]
+        let allowed = ["sync.index", "sync.threads", "sync.extensions", "snapshot.current", "thread.detail", "thread.start", "thread.update", "thread.archive", "thread.mark_read", "thread.mark_unread", "thread.unarchive", "thread.fork", "thread.suggestTitle", "thread.goal.set", "thread.goal.clear", "thread.compact", "thread.queue.remove", "thread.queue.edit", "thread.queue.steer", "thread.queue.attachment_preview", "chat.create", "provider.hydrate", "workspace.skills", "workspace.prompts", "workspace.icon", "extensions.read", "extensions.action.invoke", "thread.item", "control.get", "control.execute", "speech.status", "speech.models", "speech.transcribe", "speech.synthesize", "turn.start", "turn.interrupt", "preferences.update", "interactive.respond"]
         guard allowed.contains(method), let key = session?.dataKey, socket != nil else {
             throw PilotError("Connect to your computer first.")
         }

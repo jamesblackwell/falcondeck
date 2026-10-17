@@ -7,7 +7,7 @@ outside this work. The daemon and agent storage remain authoritative.
 | Area | Existing mobile behavior to mirror | Native status |
 | --- | --- | --- |
 | Connection | Secure link/QR pairing, saved Keychain identity, presence, reconnect, diagnostics | Link pairing, saved identity, automatic reconnect/backoff, compact sync and diagnostics and native QR scanner present; physical QR QA awaits device |
-| Navigation | Sidebar, chats, projects, global/project pins, folders, search/sort/hidden/archive | Sidebar, pins, folders and lazy pages present; project customization/search/sort pending |
+| Navigation | Sidebar, chats, projects, global/project pins, folders, search/sort/hidden/archive | Sidebar, pins, folders, lazy pages, per-device sort, hidden projects, project order and icon choices implemented; search states its loaded scope and can fetch more |
 | New task | Draft composer, provider/model selection, first-send creation, folder filing | Implemented; first-send and failed-send regression tests pass |
 | Composer | Model, effort, permissions, sandbox, collaboration, speed, skills/prompts | Capability-based models/modes/permissions/sandbox/speed plus provider-scoped skills and saved prompt shortcuts |
 | Turns | Live replies, queue/edit/remove/steer, interrupt, resume interrupted, compact | Send/interrupt, queues, shutdown-resume, edit/retry branching and cross-agent handoff implemented |
@@ -15,10 +15,10 @@ outside this work. The daemon and agent storage remain authoritative.
 | Goals | Set objective/budget, status/usage, pause/resume/stop | Implemented; local lifecycle/budget test passes |
 | Transcript | Markdown/code/tables, reasoning/tools/groups, plans/diffs/files, images, search/artifacts/reviews/unknown fallback | All wire item kinds have a native renderer or inspectable fallback; grouping, shared conversation preferences and harness projection implemented; Mermaid remains |
 | Media | Library/camera/clipboard attachments, image preview/save/share, read aloud, recording/transcription | Implemented; attachment/queue/export/Unicode tests pass; physical microphone testing awaits device |
-| Activity | Running/attention/all tasks, navigation | Present; align filters and archive visibility |
+| Activity | Running/attention/all tasks, navigation | Matches Needs input / Failed / Ready to review / Running / Recent sections; archived tasks remain separate |
 | Automations | List/create/edit/enable/delete/run/history/settings via control RPC | Implemented and tested (control revision/idempotency/validation); UI QA continuing |
 | Settings | Appearance palettes/text, conversation preferences, notifications, speech, connection, about/developer | Implemented: all 19 palettes, text size, conversation, connected alerts, speech, connections and diagnostics |
-| Extensions | Tags/stage markers, sidebar filters/panel fallbacks, composer suggestions | Pending; match mobile contract, no arbitrary frontend execution |
+| Extensions | Tags/stage markers, sidebar filters/panel fallbacks, composer suggestions | Stages, filters, suggestions and declarative native panels implemented; unavailable panels use the mobile desktop fallback |
 | Device support | iPhone/iPad, portrait/landscape/multitasking, keyboard, Dynamic Type, Reduce Motion | Phone baseline checked; iPad QA pending |
 | Installation | Separate app ID, development-signed device build, Wi-Fi install command | Device build succeeds with existing Apple Development identity; phone currently offline |
 
@@ -42,3 +42,5 @@ partial exports are explicitly labelled and include tool/file/plan output.
 Recovery milestone: 57 simulator tests pass. Encrypted device input drafts and uncertain-send recovery survive restarts; compact sync carries visible rows and rejects pages raced by live archive events. Notification review findings are fixed: completion alerts require terminal states and unsupported desktop-activity suppression is not offered for connected native alerts. Phone appearance changes verified visually.
 
 Task-action milestone: 63 tests pass. Fake-relay checks verify edit/retry fork boundaries, permission preservation, interrupted resume inputs, skill matching, Unicode context limits, and handoff that never starts a turn or mutates the source. QR scanning uses VisionKit and preserves the signed-pairing validation path; simulator fallback is explicit.
+
+Navigation/extensions milestone: 70 tests pass. Live extension updates and tombstones win over delayed snapshot loads, filter definitions survive ordinary data projections, suggestions preserve draft text/images, and background commands remain in Running. Project icons use the encrypted daemon RPC with bounded native thumbnails. Read-aloud now registers native Lock Screen/headset play/pause/stop controls only while active. Core compact-sync and task-action review passes are clean through P2.

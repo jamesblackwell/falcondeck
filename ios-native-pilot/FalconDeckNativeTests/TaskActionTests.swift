@@ -75,6 +75,18 @@ private actor ActionRelay: RelayServing {
         XCTAssertTrue(calls[0].1["inputs"].array.isEmpty)
         XCTAssertEqual(model.chat(for: interrupted).draft, "Keep my follow-up")
     }
+    func testSuggestedActionsDoNotConsumeTheUsersDraftOrAttachments() async {
+        let (model, relay) = setup()
+        let chat = model.chat(for: source)
+        chat.draft = "My unfinished thought"
+        chat.attachments = [NativeAttachment(id: "image", name: "Image.jpg", mimeType: "image/jpeg", data: Data([1]))]
+        await model.send(source, textOverride: "Run the tests")
+        let calls = await relay.requests()
+        XCTAssertEqual(chat.draft, "My unfinished thought")
+        XCTAssertEqual(chat.attachments.count, 1)
+        XCTAssertEqual(calls.last?.1["inputs"].array.count, 1)
+        XCTAssertEqual(calls.last?.1["inputs"].array.first?["text"].string, "Run the tests")
+    }
     func testSkillMentionsAreDeduplicatedAndDoNotMatchFilePaths() {
         let skill = JSON.object(["id": .string("review"), "alias": .string("/review")])
         let selected = ComposerCatalog.selected("/review then /review and /review/file.md with x/review", skills: [skill])
