@@ -4,9 +4,18 @@ import XCTest
 private actor PairingRelay: RelayServing {
     private(set) var inputs: [PairingInput] = []
     private(set) var restores = 0
+    private var holdRestore = false
+    private var restoreGate: CheckedContinuation<Void, Never>?
     func events() -> AsyncStream<RelayUpdate> { AsyncStream { $0.finish() } }
     func pair(_ input: PairingInput, connectionID: UUID) { inputs.append(input) }
-    func restore(connectionID: UUID) -> Bool { restores += 1; return !inputs.isEmpty }
+    func restore(connectionID: UUID) async -> Bool {
+        restores += 1
+        if holdRestore { await withCheckedContinuation { restoreGate = $0 } }
+        return !inputs.isEmpty
+    }
+    func pauseRestore() { holdRestore = true }
+    func isRestoring() -> Bool { restoreGate != nil }
+    func releaseRestore() { holdRestore = false; restoreGate?.resume(); restoreGate = nil }
     func disconnect(forget: Bool) { }
     func refresh() { }
     func detail(task: AgentTask, before: String?) -> JSON { .null }
@@ -114,5 +123,30 @@ private actor PairingRelay: RelayServing {
         XCTAssertEqual(model.tasks.map(\.id), tasks)
         XCTAssertTrue(model.demo)
         XCTAssertFalse(model.pairingPending)
+    }
+
+    func testIncomingLinkDuringReconnectIsConsumedAfterRecoveryFinishes() async {
+        let relay = PairingRelay()
+        let model = AppModel.testing(relay: relay)
+        model.restoringSession = false; model.hasSession = true
+        await relay.pauseRestore()
+        let recovery = Task { await model.reconnect() }
+        for _ in 0..<50 {
+            if await relay.isRestoring() { break }
+            try? await Task.sleep(for: .milliseconds(10))
+        }
+        XCTAssertTrue(model.busy)
+        await model.receivePairingPayload("falcondeck-native://pair?code=\(code)")
+        let before = await relay.inputs
+        XCTAssertTrue(before.isEmpty)
+        await relay.releaseRestore()
+        await recovery.value
+        for _ in 0..<50 {
+            if await relay.inputs.count == 1 { break }
+            try? await Task.sleep(for: .milliseconds(10))
+        }
+        let inputs = await relay.inputs
+        XCTAssertEqual(inputs.count, 1)
+        XCTAssertTrue(model.pairingPending)
     }
 }

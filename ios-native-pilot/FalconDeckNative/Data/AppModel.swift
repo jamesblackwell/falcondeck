@@ -58,14 +58,15 @@ final class AppModel {
     var error: String?
     var demo = false
     var hasSession = false
-    var busy = false
+    var busy = false { didSet { if !busy { consumeQueuedPairingPayload() } } }
     var refreshedAt: Date?
     var showConnection = false
     var pairingText = ""
     var restoringSession = true
     var pairingPending = false
     var pairingRelayReview: PairingRelayReview?
-    @ObservationIgnored var queuedPairingPayload: String?
+    @ObservationIgnored var claimingPairing = false
+    @ObservationIgnored var queuedPairingPayload: (text: String, relayURL: String)?
     var selection: Destination? = .projects {
         didSet {
             let selected: String? = { if case .task(let id) = selection { return id }; return nil }()
@@ -107,10 +108,7 @@ final class AppModel {
         guard observation == nil else { return }
         defer {
             restoringSession = false
-            if let payload = queuedPairingPayload {
-                queuedPairingPayload = nil
-                Task { await self.receivePairingPayload(payload) }
-            }
+            consumeQueuedPairingPayload()
         }
         SpeechLiveActivity.shared.voice(nil); SpeechLiveActivity.shared.readAloud(nil)
         let events = await relay.events()
@@ -165,8 +163,8 @@ final class AppModel {
 
     func pair(relayURL: String, approvedRelay: Bool = false) async {
         guard !busy, !pairingPending else { return }
-        busy = true; error = nil
-        defer { busy = false }
+        claimingPairing = true; busy = true; error = nil; queuedPairingPayload = nil
+        defer { claimingPairing = false; busy = false }
         let previousSession = try? sessionLoader()
         var current: UUID?
         do {
