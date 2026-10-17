@@ -73,3 +73,60 @@ Screenshots were inspected and saved in ignored
 `.agents/skills/autoreview/scripts/autoreview --mode local --max-priority P2`
 with composer, voice-control, transcription and chat-session datasets and the
 crash stack supplied as context: no actionable P0–P2 findings.
+
+## Reconnect, OpenRouter and read-aloud follow-up
+
+The screenshot's OpenRouter failure was a native-only preflight: the app checked
+connection/key readiness before opening the microphone. Expo captures locally
+first. Native now does the same, preserving audio when upload is unavailable.
+Transcription shows “Waiting for connection…” during a bounded reconnect wait.
+A session-scoped audio lifetime survives socket replacement; forgetting, demo
+switches and re-pairing still invalidate in-flight work, preventing a late upload
+or response from crossing pairing boundaries. Recordings remain retryable.
+
+Read aloud no longer gets stopped by an ordinary relay reconnect. Later-chunk
+and decode failures retain the response ID so their error is visible in the
+transcript. Pausing/resuming between fetched chunks cannot restart the previous
+player, and a chunk arriving while paused stays silent until resumed. Read aloud
+rejects attempts to take over an active recording, including the context-menu
+path. Audio owners release the shared audio session only when they acquired it.
+
+Composer completion and Lock Screen Finish now share the same insertion owner:
+a saved recording is consumed only after its transcript enters the registered
+chat. Archiving or replacing that chat while transcription is pending retains
+the audio for recovery. Speech settings refresh readiness when reconnection
+finishes. Existing explicit voice/transcription provider choices are preserved.
+
+Validation: the original offline microphone, reconnect interruption, hidden
+later-chunk error and audio-ownership failures were reproduced with regression
+checks. The final suite has 151 passing unit tests. Six focused UI cases passed
+on both iPhone and iPad simulators: mic after sending/clearing a Unicode draft,
+control order, recorder states, actual local capture while offline, successful
+fixture transcription back into the existing draft, and a response-specific TTS
+error. Isolated preview storage protects real saved recordings during UI tests.
+Screenshots were visually inspected and live under ignored
+`artifacts/audio-2026-10-17/index.html`.
+
+A separate temporary probe used the simulator's existing pairing and a generated
+20 KB synthetic recording. The real relay/daemon OpenRouter transcription and
+TTS requests passed; returned audio decoded and played with AVAudioPlayer, with
+pause/resume checks. That complete probe took about nine seconds. The probe and
+its audio were removed from the default test target before the final build and
+kept only in ignored artifacts. No personal recording or conversation turn was
+submitted, and no credentials were copied or logged.
+
+Repo Autoreview (`--mode local --max-priority P2`) found no actionable issues in
+the native speech patch or the subsequent insertion-ownership delta. Reviews
+used isolated native-only worktrees. The TTS error accessibility identifier and
+its assertion are mechanical QA instrumentation. The signed Apple Development
+Debug build remains standalone; Expo, daemon, relay, OTA and TestFlight builds
+were not changed or deployed.
+
+The final typing-after-dictation check exposed a cursor restoration bug: UIKit
+restored the field's previous selection when focus returned, so the next typed
+text could land after the first letter. Caret restoration now follows the new
+field's focus update, and rebuilds the position only while the draft's exact
+UTF-16 contents still match. The iPhone and iPad tests both transcribe into a
+nonempty draft and then type more text, verifying it appends at the intended
+position. A focused Autoreview of this correction also reported no actionable
+P0–P2 findings.

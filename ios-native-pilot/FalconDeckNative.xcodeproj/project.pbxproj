@@ -72,6 +72,7 @@
 		91818CCD29CA183EF9E9953F /* DiagramTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7D8EF4E8783EB87AFC36CE77 /* DiagramTests.swift */; };
 		91F36F5A33C47B0442AB366F /* AutomationsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9D92766259A36EC801DDB6D4 /* AutomationsView.swift */; };
 		9240F7BE07C75573E91CAB91 /* TranscriptRow.swift in Sources */ = {isa = PBXBuildFile; fileRef = 18AAC746A0B6B857B356101F /* TranscriptRow.swift */; };
+		948A27BED1FC774E40D5EE7A /* SpeechConnection.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1D71AA432D1BFB16A494407 /* SpeechConnection.swift */; };
 		95DA7565B09C79BB3094B098 /* Transcript.swift in Sources */ = {isa = PBXBuildFile; fileRef = 23EC2AFEB560421194E6B8C7 /* Transcript.swift */; };
 		9862B6393D7E2502789FB21F /* SpeechLiveActivity.swift in Sources */ = {isa = PBXBuildFile; fileRef = B243780CE7FC8C72EF838BE4 /* SpeechLiveActivity.swift */; };
 		99F19EBC1720806CE7CE359E /* GoalView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 44020FC42CAAC84CB02D0394 /* GoalView.swift */; };
@@ -103,6 +104,7 @@
 		CA72C0F821A3CD85718FD19C /* DraftStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 847452B8C0CFBC94AE2F1767 /* DraftStore.swift */; };
 		CD14BA41E43099A4423D75D5 /* PaletteCatalog.json in Resources */ = {isa = PBXBuildFile; fileRef = 3663202D60E040127E6F281B /* PaletteCatalog.json */; };
 		CD52507881EFFA6E375BA102 /* ExtensionViews.swift in Sources */ = {isa = PBXBuildFile; fileRef = EA05554A84D6E67931E193B3 /* ExtensionViews.swift */; };
+		CDC17D0479825F0703828ADC /* ReadAloudTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1B4280F0490DC527F7233C3 /* ReadAloudTests.swift */; };
 		D06308490D0E61D54B7FE796 /* ExtensionTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7B6528AA74EFE828E6D0FDFE /* ExtensionTests.swift */; };
 		D27F6D3B44EF9DE93338C14F /* UnavailablePreviewRelay.swift in Sources */ = {isa = PBXBuildFile; fileRef = 27AC921ACCA12C9C2FC6A6DB /* UnavailablePreviewRelay.swift */; };
 		D2B18AAB4E7C8F1A1509DFA7 /* ConversationSettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 13C423D98FDB81AF0455EC45 /* ConversationSettingsView.swift */; };
@@ -237,6 +239,7 @@
 		98BB15B7D21D7D0701ECF057 /* ProjectOptionsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ProjectOptionsView.swift; sourceTree = "<group>"; };
 		9D13375AE11050AC26013A92 /* UserTextProjection.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = UserTextProjection.swift; sourceTree = "<group>"; };
 		9D92766259A36EC801DDB6D4 /* AutomationsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AutomationsView.swift; sourceTree = "<group>"; };
+		A1B4280F0490DC527F7233C3 /* ReadAloudTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ReadAloudTests.swift; sourceTree = "<group>"; };
 		A320A411D5E4F108995089DA /* InteractiveCard.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = InteractiveCard.swift; sourceTree = "<group>"; };
 		A4199B1817657D57DDFE2060 /* FalconDeckNativeApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FalconDeckNativeApp.swift; sourceTree = "<group>"; };
 		A54D033C04ACF7CDEB83634B /* AudioInterruptionObserver.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AudioInterruptionObserver.swift; sourceTree = "<group>"; };
@@ -245,6 +248,7 @@
 		AC29ECED10ED5C3483365E02 /* QueuedMessagesView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = QueuedMessagesView.swift; sourceTree = "<group>"; };
 		AD2AC5615C2A38A0579CCC41 /* SessionTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SessionTests.swift; sourceTree = "<group>"; };
 		AF97A546F3345BF90FCA8D86 /* PairingFlowTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PairingFlowTests.swift; sourceTree = "<group>"; };
+		B1D71AA432D1BFB16A494407 /* SpeechConnection.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SpeechConnection.swift; sourceTree = "<group>"; };
 		B243780CE7FC8C72EF838BE4 /* SpeechLiveActivity.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SpeechLiveActivity.swift; sourceTree = "<group>"; };
 		B3F944F8E8DE8B9DB93852E5 /* Theme.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Theme.swift; sourceTree = "<group>"; };
 		B4DE01C9A23E93D617C80776 /* NetworkMonitor.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NetworkMonitor.swift; sourceTree = "<group>"; };
@@ -327,6 +331,7 @@
 				EB838F6503B107FFC5005735 /* ReadAloud.swift */,
 				438CEE7A9CB38CCBD8415E41 /* RealtimeAudio.swift */,
 				28FB3C1FBFAD033DA4A58C41 /* RemotePlaybackControls.swift */,
+				B1D71AA432D1BFB16A494407 /* SpeechConnection.swift */,
 				B243780CE7FC8C72EF838BE4 /* SpeechLiveActivity.swift */,
 				F270E9F430EC29374CFDF7AA /* SpeechTranscription.swift */,
 				CCC6B2903671BC7B6C4D7ABC /* VoiceRecorder.swift */,
@@ -423,6 +428,7 @@
 				8C6110D3C8DB511722AD3427 /* PresentationTests.swift */,
 				1CC657891F6A863270DA8D83 /* ProtocolTests.swift */,
 				D324F4CF836F751A0E3E791B /* PushTests.swift */,
+				A1B4280F0490DC527F7233C3 /* ReadAloudTests.swift */,
 				775BFEB02DD2DB1A17067ABC /* RealtimeTests.swift */,
 				C94C7419EF35F3D70C1A0E8C /* SessionCacheTests.swift */,
 				AD2AC5615C2A38A0579CCC41 /* SessionTests.swift */,
@@ -707,6 +713,7 @@
 				099BEE65AD2F664A2E6F54F6 /* PresentationTests.swift in Sources */,
 				008E225D903390BE52A80725 /* ProtocolTests.swift in Sources */,
 				3BC6C26FD0E905E945F6FB0D /* PushTests.swift in Sources */,
+				CDC17D0479825F0703828ADC /* ReadAloudTests.swift in Sources */,
 				3A339CE8F98DA9123414C14D /* RealtimeTests.swift in Sources */,
 				2465BC31839F31F39BE69A64 /* SessionCacheTests.swift in Sources */,
 				F5649421BB78F56628125818 /* SessionTests.swift in Sources */,
@@ -784,6 +791,7 @@
 				A1D6F4032266620F590753D5 /* SidebarView.swift in Sources */,
 				ABF1EAD1E977BD01E4BD1169 /* SlashCommandsView.swift in Sources */,
 				E091C85B17F893482D3473AC /* SpeechActivity.swift in Sources */,
+				948A27BED1FC774E40D5EE7A /* SpeechConnection.swift in Sources */,
 				9862B6393D7E2502789FB21F /* SpeechLiveActivity.swift in Sources */,
 				AE041B8DB912027EB22CEA19 /* SpeechSettingsView.swift in Sources */,
 				5ECD4DE03F2467B76ADEA115 /* SpeechTranscription.swift in Sources */,

@@ -9,12 +9,17 @@ struct FalconDeckNativeApp: App {
         if ProcessInfo.processInfo.arguments.contains(where: { $0.hasPrefix("--loading-preview=") }) {
             let defaults = UserDefaults(suiteName: "NativeLoadingPreview")!
             defaults.removePersistentDomain(forName: "NativeLoadingPreview")
-            return AppModel(relay: LoadingPreviewRelay(failFirst: ProcessInfo.processInfo.arguments.contains("--loading-preview=retry")), push: NativePushNotifications(defaults: defaults), notifications: LocalNotifications(defaults: defaults), sessionLoader: { nil })
+            return AppModel(relay: LoadingPreviewRelay(failFirst: ProcessInfo.processInfo.arguments.contains("--loading-preview=retry")), voice: VoiceRecorder(defaults: defaults), push: NativePushNotifications(defaults: defaults), notifications: LocalNotifications(defaults: defaults), sessionLoader: { nil })
         }
         if ProcessInfo.processInfo.arguments.contains("--review-preview=offline") || ProcessInfo.processInfo.arguments.contains("--review-preview=queue-error") {
             let suite = "NativeReviewPreview", defaults = UserDefaults(suiteName: "NativeReviewPreview")!
             defaults.removePersistentDomain(forName: suite)
-            return AppModel(relay: UnavailablePreviewRelay(), push: NativePushNotifications(defaults: defaults), notifications: LocalNotifications(defaults: defaults), sessionLoader: { nil })
+            return AppModel(relay: UnavailablePreviewRelay(), voice: VoiceRecorder(defaults: defaults), push: NativePushNotifications(defaults: defaults), notifications: LocalNotifications(defaults: defaults), sessionLoader: { nil })
+        }
+        if ProcessInfo.processInfo.arguments.contains("--demo") {
+            let suite = "NativeDemoPreview", defaults = UserDefaults(suiteName: suite)!
+            defaults.removePersistentDomain(forName: suite)
+            return AppModel(voice: VoiceRecorder(defaults: defaults), push: NativePushNotifications(defaults: defaults), notifications: LocalNotifications(defaults: defaults), sessionLoader: { nil })
         }
         #endif
         return AppModel()

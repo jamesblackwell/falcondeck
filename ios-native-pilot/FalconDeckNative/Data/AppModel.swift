@@ -20,6 +20,8 @@ final class AppModel {
     @ObservationIgnored let sessionCacheRoot: URL?
     var pendingNotification: NotificationDestination?
     private(set) var connectionID = UUID()
+    // Local audio survives socket replacement, but never a pairing switch.
+    private(set) var sessionScope = UUID()
 
     init(relay: any RelayServing = RelayClient(), voice: VoiceRecorder = VoiceRecorder(), push: NativePushNotifications = .shared, notifications: LocalNotifications = LocalNotifications(), sessionLoader: @escaping @Sendable () throws -> SavedSession? = { try SessionVault.load() }, sessionCacheRoot: URL? = nil) {
         self.voice = voice
@@ -156,9 +158,12 @@ final class AppModel {
     @discardableResult private func beginConnection(clearData: Bool) -> UUID {
         reconnectTask?.cancel(); reconnectTask = nil
         previewSave?.cancel(); previewSave = nil; hasLiveSnapshot = false
-        if voice.recording { voice.finishRecording() }
-        voice.cancelTranscription()
-        readAloud.stop(); realtimeAudio.reset(); automations.reset(); extensions.reset(); composerCatalogs = [:]
+        if clearData {
+            sessionScope = UUID()
+            if voice.recording { voice.finishRecording() }
+            voice.cancelTranscription(); readAloud.stop()
+        }
+        realtimeAudio.reset(); automations.reset(); extensions.reset(); composerCatalogs = [:]
         connectionID = UUID(); lastEventSeq = 0; connected = false; syncIndex = nil; taskPageLoads = []
         itemCache = [:]; itemCacheOrder = []; itemLoads = [:]; mediaGate = MediaTransferGate()
         summaryFlush?.cancel(); summaryFlush = nil; pendingSummaries = [:]

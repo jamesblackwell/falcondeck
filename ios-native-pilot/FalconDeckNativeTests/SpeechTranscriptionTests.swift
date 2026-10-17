@@ -76,16 +76,100 @@ import XCTest
         XCTAssertNil(voice.error)
         XCTAssertEqual(voice.pendingURL, url)
     }
-    func testUnconfiguredComputerFailsBeforeOpeningTheMicrophone() async {
+    func testCloudRecordingDoesNotWaitForConnectionOrAnOpenRouterKey() async {
+        for online in [false, true] {
+            let (defaults, suite) = defaults(); defer { defaults.removePersistentDomain(forName: suite) }
+            let relay = SpeechFixtureRelay(configured: false)
+            var permissionRequested = false
+            let voice = VoiceRecorder(defaults: defaults, requestPermission: { permissionRequested = true; return false })
+            let model = AppModel.testing(relay: relay, voice: voice); model.connected = online
+            await voice.start(ownerID: "owner", provider: "openrouter")
+            XCTAssertTrue(permissionRequested, "Local recording must reach microphone permission even while reconnecting")
+            XCTAssertTrue(voice.error?.contains("microphone") == true)
+            let calls = await relay.calls; XCTAssertTrue(calls.isEmpty, "Opening the microphone must not perform a network preflight")
+        }
+    }
+    func testReconnectDoesNotInterruptLocalRecording() async throws {
         let (defaults, suite) = defaults(); defer { defaults.removePersistentDomain(forName: suite) }
-        let relay = SpeechFixtureRelay(configured: false)
-        let voice = VoiceRecorder(defaults: defaults), model = AppModel.testing(relay: relay)
+        let voice = VoiceRecorder(defaults: defaults), model = AppModel.testing(relay: SpeechFixtureRelay(), voice: voice)
+        model.hasSession = true; model.connected = true
+        voice.recording = true
+        await model.reconnect()
+        XCTAssertTrue(voice.recording, "A relay reconnect must not stop local audio capture")
+        voice.finishRecording()
+    }
+    func testConnectionWaitIsBoundedAndCancelledBeforeSendingToANewSession() async throws {
+        var waits = 0
+        do {
+            try await SpeechConnection.waitUntilReady(isReady: { false }, isCurrent: { true }, wait: { _ in waits += 1 })
+            XCTFail("Expected reconnect timeout")
+        } catch { XCTAssertTrue(error.localizedDescription.contains("reconnecting")) }
+        XCTAssertEqual(waits, 120)
+        var current = true
+        do {
+            try await SpeechConnection.waitUntilReady(isReady: { false }, isCurrent: { current }, wait: { _ in current = false })
+            XCTFail("Expected cancellation after a pairing switch")
+        } catch { XCTAssertTrue(error is CancellationError) }
+    }
+    func testCloudTranscriptionCanWaitAcrossReconnectAndRetainsItsRecording() async throws {
+        let (defaults, suite) = defaults(), relay = SpeechFixtureRelay()
+        let url = FileManager.default.temporaryDirectory.appending(path: UUID().uuidString + ".m4a")
+        try Data([1, 2, 3]).write(to: url)
+        defer { try? FileManager.default.removeItem(at: url); defaults.removePersistentDomain(forName: suite) }
+        defaults.set(url.path, forKey: "native.voice.pending"); defaults.set("owner", forKey: "native.voice.owner"); defaults.set("openrouter", forKey: "native.voice.provider")
+        let voice = VoiceRecorder(defaults: defaults), model = AppModel.testing(relay: relay, voice: voice)
+        model.hasSession = true
+        let scope = model.sessionScope
+        let work = Task { try await voice.transcribe(model: model) }
+        for _ in 0..<200 where !voice.waitingForConnection { try await Task.sleep(for: .milliseconds(5)) }
+        XCTAssertTrue(voice.waitingForConnection)
+        let before = await relay.calls; XCTAssertTrue(before.isEmpty)
+        await model.reconnect()
+        XCTAssertEqual(model.sessionScope, scope)
+        XCTAssertTrue(voice.transcribing)
         model.connected = true
-        await voice.start(ownerID: "owner", provider: "openrouter", model: model)
-        XCTAssertFalse(voice.recording); XCTAssertFalse(voice.starting); XCTAssertNil(voice.pendingURL)
-        XCTAssertTrue(voice.error?.contains("Add an OpenRouter key") == true)
-        let calls = await relay.calls
-        XCTAssertEqual(calls.map(\.0), ["speech.status"])
+        let result = try await work.value; XCTAssertEqual(result, "A clear transcript.")
+        XCTAssertFalse(voice.waitingForConnection)
+        XCTAssertEqual(voice.pendingURL, url)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: url.path))
+    }
+    func testForgettingWhileWaitingCannotUploadAudioToAnotherPairing() async throws {
+        let (defaults, suite) = defaults(), relay = SpeechFixtureRelay()
+        let url = FileManager.default.temporaryDirectory.appending(path: UUID().uuidString + ".m4a")
+        try Data([1]).write(to: url)
+        defer { try? FileManager.default.removeItem(at: url); defaults.removePersistentDomain(forName: suite) }
+        defaults.set(url.path, forKey: "native.voice.pending"); defaults.set("openrouter", forKey: "native.voice.provider")
+        let voice = VoiceRecorder(defaults: defaults), model = AppModel.testing(relay: relay, voice: voice)
+        let scope = model.sessionScope
+        let work = Task { try await voice.transcribe(model: model) }
+        for _ in 0..<200 where !voice.waitingForConnection { try await Task.sleep(for: .milliseconds(5)) }
+        await model.forget(); model.connected = true
+        XCTAssertNotEqual(model.sessionScope, scope)
+        do { _ = try await work.value; XCTFail("Expected cancellation") }
+        catch { XCTAssertTrue(error is CancellationError) }
+        let calls = await relay.calls; XCTAssertTrue(calls.isEmpty)
+        XCTAssertEqual(voice.pendingURL, url)
+    }
+    func testAnArchivedOrReplacedChatCannotConsumeItsSavedRecording() throws {
+        let (defaults, suite) = defaults()
+        let url = FileManager.default.temporaryDirectory.appending(path: UUID().uuidString + ".m4a")
+        try Data([1]).write(to: url)
+        defer { try? FileManager.default.removeItem(at: url); defaults.removePersistentDomain(forName: suite) }
+        defaults.set(url.path, forKey: "native.voice.pending"); defaults.set("owner", forKey: "native.voice.owner")
+        let voice = VoiceRecorder(defaults: defaults), model = AppModel.testing(relay: SpeechFixtureRelay(), voice: voice)
+        let chat = model.chat(for: AgentTask(.object(["id": .string("owner")])))
+        chat.draft = "Keep draft"; chat.voiceInputOpen = true
+        model.chats.removeValue(forKey: "owner")
+        XCTAssertNil(model.finishVoiceInput("Transcript", ownerID: "owner", chat: chat))
+        XCTAssertEqual(voice.pendingURL, url); XCTAssertEqual(chat.draft, "Keep draft")
+        model.chats["owner"] = ChatSession()
+        XCTAssertNil(model.finishVoiceInput("Transcript", ownerID: "owner", chat: chat))
+        XCTAssertTrue(FileManager.default.fileExists(atPath: url.path))
+        // The rightful current draft consumes the recording only after insertion.
+        let current = model.chats["owner"]!
+        XCTAssertNotNil(model.finishVoiceInput("Transcript", ownerID: "owner", chat: current))
+        XCTAssertEqual(current.draft, "Transcript"); XCTAssertNil(voice.pendingURL)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: url.path))
     }
     func testLockScreenFinishUsesTheSameCapturedDraftSelection() async throws {
         let (defaults, suite) = defaults()

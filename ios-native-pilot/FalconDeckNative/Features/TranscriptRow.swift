@@ -96,7 +96,7 @@ struct TranscriptRow: View {
                         Button { model.readAloud.togglePause() } label: { Image(systemName: model.readAloud.paused ? "play.fill" : "pause.fill").frame(width: 44, height: 44).contentShape(.rect) }.accessibilityLabel(model.readAloud.paused ? "Resume read aloud" : "Pause read aloud")
                     }
                 }.font(.caption).foregroundStyle(FD.secondary).buttonStyle(.plain).padding(.leading, -12)
-                if model.readAloud.errorMessageID == message.id, let error = model.readAloud.error { Text(error).font(.caption).foregroundStyle(.orange) }
+                if model.readAloud.errorMessageID == message.id, let error = model.readAloud.error { Text(error).font(.caption).foregroundStyle(.orange).accessibilityIdentifier("read-aloud-error-\(message.id)") }
             }
         }
         .padding(message.kind == "user_message" ? 16 : 2)

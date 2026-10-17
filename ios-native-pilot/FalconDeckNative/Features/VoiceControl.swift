@@ -14,9 +14,9 @@ struct VoiceControl: View {
             chat.voiceInputOpen = true
             if recorder.pendingURL == nil {
                 model.readAloud.stop(); model.realtimeAudio.stop()
-                let current = model.connectionID
+                let current = model.sessionScope
                 let selectedProvider = provider == "on-device" ? "on-device" : NativeSpeechSettings.defaultProvider
-                Task { await recorder.start(ownerID: task.id, provider: selectedProvider, model: model, isCurrent: { current == model.connectionID }) }
+                Task { await recorder.start(ownerID: task.id, provider: selectedProvider, isCurrent: { current == model.sessionScope }) }
             }
         } label: { Image(systemName: "mic").frame(width: 44, height: 44).contentShape(.rect) }
             .accessibilityLabel(recorder.pendingURL == nil ? "Record voice message" : "Recover saved recording")
@@ -85,7 +85,7 @@ struct RecordingPanel: View {
         }
     }
     private var status: String {
-        recorder.transcribing ? (recorder.transcriptionAttempt > 1 ? "Retrying (\(recorder.transcriptionAttempt))" : "Transcribing…") : recorder.starting ? "Starting microphone…" : recorder.recording ? "Recording" : "Recording ready"
+        recorder.waitingForConnection ? "Waiting for connection…" : recorder.transcribing ? (recorder.transcriptionAttempt > 1 ? "Retrying (\(recorder.transcriptionAttempt))" : "Transcribing…") : recorder.starting ? "Starting microphone…" : recorder.recording ? "Recording" : "Recording ready"
     }
     private var duration: String { let seconds = max(0, Int(recorder.elapsed)); return String(format: "%d:%02d", seconds / 60, seconds % 60) }
     private func control(_ label: String, symbol: String, prominent: Bool = false, action: @escaping () -> Void) -> some View {
@@ -101,16 +101,15 @@ struct RecordingPanel: View {
     }
     private func recordAgain() {
         model.readAloud.stop(); model.realtimeAudio.stop()
-        let current = model.connectionID, provider = NativeSpeechSettings.provider(in: .standard)
-        Task { await recorder.start(ownerID: task.id, provider: provider, model: model, isCurrent: { current == model.connectionID }) }
+        let current = model.sessionScope, provider = NativeSpeechSettings.provider(in: .standard)
+        Task { await recorder.start(ownerID: task.id, provider: provider, isCurrent: { current == model.sessionScope }) }
     }
     private func transcribe(submit: Bool) {
-        let current = model.connectionID
+        let current = model.sessionScope
         Task {
             do {
                 let text = try await recorder.transcribe(model: model)
-                guard current == model.connectionID, recorder.ownerID == task.id, chat.voiceInputOpen else { return }
-                recorder.discard(); chat.voiceInputOpen = false
+                guard current == model.sessionScope, recorder.ownerID == task.id, chat.voiceInputOpen else { return }
                 onTranscript(text, submit)
             } catch { /* Failed audio remains available to retry, recover or discard. */ }
         }

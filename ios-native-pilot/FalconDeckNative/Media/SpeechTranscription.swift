@@ -24,10 +24,12 @@ enum NativeSpeechSettings {
     static func retryable(_ error: Error) -> Bool {
         !(error is CancellationError) && error.localizedDescription.range(of: "too large to send securely|shorter clip|shorter message|not configured|API key was rejected|needs credit|unsupported audio format|not valid base64|must be between 1 byte|invalid OpenRouter", options: [.regularExpression, .caseInsensitive]) == nil
     }
-    static func transcribe(params: JSON, relay: any RelayServing, isCurrent: () -> Bool, onAttempt: (Int) -> Void, wait: (Duration) async throws -> Void = { try await Task.sleep(for: $0) }) async throws -> String {
+    static func transcribe(params: JSON, relay: any RelayServing, isCurrent: () -> Bool, onAttempt: (Int) -> Void, beforeAttempt: () async throws -> Void = {}, wait: (Duration) async throws -> Void = { try await Task.sleep(for: $0) }) async throws -> String {
         for attempt in 1...maxAttempts {
             try Task.checkCancellation()
             guard isCurrent() else { throw CancellationError() }
+            try await beforeAttempt()
+            guard isCurrent(), !Task.isCancelled else { throw CancellationError() }
             onAttempt(attempt)
             do {
                 let response = try await relay.call("speech.transcribe", params: params)

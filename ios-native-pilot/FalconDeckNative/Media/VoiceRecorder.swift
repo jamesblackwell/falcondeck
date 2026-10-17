@@ -8,6 +8,7 @@ final class VoiceRecorder: NSObject, AVAudioRecorderDelegate {
     var recording = false
     var starting = false
     var transcribing = false
+    var waitingForConnection = false
     var elapsed: TimeInterval = 0
     var level: Float = 0
     var levels: [Float] = []
@@ -18,6 +19,7 @@ final class VoiceRecorder: NSObject, AVAudioRecorderDelegate {
     // Legacy saved audio with no provenance stays local. New recordings use the
     // selected provider, whose default is the paired computer.
     private(set) var provider = "on-device"
+    @ObservationIgnored private var ownsAudioSession = false
     @ObservationIgnored private var recorder: AVAudioRecorder?
     @ObservationIgnored private var meter: Task<Void, Never>?
     @ObservationIgnored private var recognition: SFSpeechRecognitionTask?
@@ -28,10 +30,11 @@ final class VoiceRecorder: NSObject, AVAudioRecorderDelegate {
     @ObservationIgnored private var operationID = UUID()
 
     @ObservationIgnored private let defaults: UserDefaults
+    @ObservationIgnored private let requestPermission: @MainActor () async -> Bool
 
     override convenience init() { self.init(defaults: .standard) }
-    init(defaults: UserDefaults) {
-        self.defaults = defaults
+    init(defaults: UserDefaults, requestPermission: @escaping @MainActor () async -> Bool = { await AVAudioApplication.requestRecordPermission() }) {
+        self.defaults = defaults; self.requestPermission = requestPermission
         super.init()
         interruptions = AudioInterruptionObserver { [weak self] in self?.interrupted() }
         if let path = defaults.string(forKey: "native.voice.pending"), FileManager.default.fileExists(atPath: path) {
@@ -41,31 +44,23 @@ final class VoiceRecorder: NSObject, AVAudioRecorderDelegate {
         }
     }
 
-    func start(ownerID: String, provider: String, model: AppModel, isCurrent: () -> Bool = { true }) async {
+    func start(ownerID: String, provider: String, isCurrent: () -> Bool = { true }) async {
         guard !starting, !recording, !transcribing, pendingURL == nil else { return }
         let operation = UUID(); operationID = operation
         self.ownerID = ownerID; self.provider = provider
         starting = true; elapsed = 0; levels = []
         defer { if operationID == operation { starting = false } }
         error = nil
-        if provider == "openrouter" {
-            do {
-                guard model.connected else { throw PilotError("Connect to your computer to use OpenRouter voice input.") }
-                let status = try await model.relay.call("speech.status", params: .object([:]))
-                guard isCurrent(), operationID == operation, !Task.isCancelled else { return }
-                guard status["configured"].bool else { throw PilotError("Add an OpenRouter key in desktop Settings → Models & keys, or choose On-device in Speech settings.") }
-            } catch {
-                if isCurrent(), operationID == operation { self.error = error.localizedDescription }
-                return
-            }
-        }
-        let permitted = await AVAudioApplication.requestRecordPermission()
+        // Capture is local. Connection and API-key failures belong to the
+        // upload step; neither should prevent the user recording their words.
+        let permitted = await requestPermission()
         guard isCurrent(), operationID == operation, !Task.isCancelled else { return }
         guard permitted else { error = "Allow microphone access in Settings to record a message."; return }
         do {
             let session = AVAudioSession.sharedInstance()
             try session.setCategory(.playAndRecord, mode: .default, options: [.defaultToSpeaker, .allowBluetoothHFP])
             try session.setActive(true)
+            ownsAudioSession = true
             let directory = try FileManager.default.url(for: .applicationSupportDirectory, in: .userDomainMask, appropriateFor: nil, create: true).appending(path: "Voice", directoryHint: .isDirectory)
             // Lock Screen Finish reopens finalized recordings for transcription.
             let protection: [FileAttributeKey: Any] = [.protectionKey: FileProtectionType.completeUntilFirstUserAuthentication]
@@ -95,12 +90,17 @@ final class VoiceRecorder: NSObject, AVAudioRecorderDelegate {
                     do { try await Task.sleep(for: .milliseconds(100)) } catch { return }
                 }
             }
-        } catch { self.error = error.localizedDescription; try? AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation) }
+        } catch { self.error = error.localizedDescription; releaseAudioSession() }
     }
 
     func finishRecording() {
         recorder?.stop(); recorder = nil; meter?.cancel(); meter = nil; recording = false; level = 0
         SpeechLiveActivity.shared.voice(nil)
+        releaseAudioSession()
+    }
+    private func releaseAudioSession() {
+        guard ownsAudioSession else { return }
+        ownsAudioSession = false
         try? AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
     }
 
@@ -113,7 +113,7 @@ final class VoiceRecorder: NSObject, AVAudioRecorderDelegate {
     }
 
     func cancelTranscription() {
-        operationID = UUID(); starting = false; transcribing = false
+        operationID = UUID(); starting = false; transcribing = false; waitingForConnection = false
         recognition?.cancel(); resolveRecognition(.failure(CancellationError()))
         SpeechLiveActivity.shared.voice(nil)
     }
@@ -130,23 +130,25 @@ final class VoiceRecorder: NSObject, AVAudioRecorderDelegate {
         if let providerOverride { provider = providerOverride; defaults.set(providerOverride, forKey: "native.voice.provider") }
         finishRecording(); transcribing = true; transcriptionAttempt = 1; error = nil
         SpeechLiveActivity.shared.voice("transcribing")
-        defer { if operationID == operation { transcribing = false; SpeechLiveActivity.shared.voice(nil) } }
-        let current = model.connectionID
+        defer { if operationID == operation { transcribing = false; waitingForConnection = false; SpeechLiveActivity.shared.voice(nil) } }
+        let current = model.sessionScope
         let text: String
         do {
             if provider == "openrouter" {
-                guard model.connected else { throw PilotError("Connect to your computer to transcribe. The recording stays on this device.") }
                 let audio = try await Task.detached {
                     let data = try Data(contentsOf: url)
                     guard !data.isEmpty, data.count <= 8 * 1024 * 1024 else { throw PilotError("Record a shorter message (up to 8 MB).") }
                     return data
                 }.value
-                guard current == model.connectionID, operationID == operation else { throw CancellationError() }
+                guard current == model.sessionScope, operationID == operation else { throw CancellationError() }
                 let params = try NativeSpeechSettings.parameters(audio: audio, defaults: defaults)
-                text = try await SpeechTranscription.transcribe(params: params, relay: model.relay, isCurrent: { current == model.connectionID && self.operationID == operation }, onAttempt: { self.transcriptionAttempt = $0 })
+                text = try await SpeechTranscription.transcribe(params: params, relay: model.relay, isCurrent: { current == model.sessionScope && self.operationID == operation }, onAttempt: { self.transcriptionAttempt = $0 }, beforeAttempt: {
+                    defer { if self.operationID == operation { self.waitingForConnection = false } }
+                    try await SpeechConnection.waitUntilReady(isReady: { model.connected }, isCurrent: { current == model.sessionScope && self.operationID == operation }, onWait: { self.waitingForConnection = true })
+                })
             } else {
                 let authorization = await withCheckedContinuation { continuation in SFSpeechRecognizer.requestAuthorization { @Sendable status in continuation.resume(returning: status) } }
-                guard current == model.connectionID, operationID == operation, !Task.isCancelled else { throw CancellationError() }
+                guard current == model.sessionScope, operationID == operation, !Task.isCancelled else { throw CancellationError() }
                 guard authorization == .authorized else { throw PilotError("Allow Speech Recognition in Settings to transcribe on this device.") }
                 let locale = Locale(identifier: defaults.string(forKey: "native.speech.language")?.nonempty ?? Locale.current.identifier)
                 guard let recognizer = SFSpeechRecognizer(locale: locale), recognizer.isAvailable, recognizer.supportsOnDeviceRecognition else {
@@ -172,11 +174,11 @@ final class VoiceRecorder: NSObject, AVAudioRecorderDelegate {
                     }
                 }
             }
-            guard current == model.connectionID, operationID == operation, !Task.isCancelled else { throw CancellationError() }
+            guard current == model.sessionScope, operationID == operation, !Task.isCancelled else { throw CancellationError() }
             guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { throw PilotError("No speech was detected. You can retry or discard the recording.") }
             return text.trimmingCharacters(in: .whitespacesAndNewlines)
         } catch {
-            guard current == model.connectionID, operationID == operation else { throw CancellationError() }
+            guard current == model.sessionScope, operationID == operation else { throw CancellationError() }
             if !(error is CancellationError) { self.error = error.localizedDescription }
             throw error
         }

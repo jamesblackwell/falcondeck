@@ -104,9 +104,21 @@ struct ComposerView: View {
         focused = false
     }
     private func receiveTranscript(_ text: String, submit: Bool) {
-        selectionBinding.wrappedValue = TextSelection(insertionPoint: chat.insertVoiceTranscript(text))
+        guard let caret = model.finishVoiceInput(text, ownerID: task.id, chat: chat) else { return }
         if submit { submitDraft() }
-        else { Task { @MainActor in await Task.yield(); focused = true } }
+        else {
+            let draft = chat.draft, offset = caret.utf16Offset(in: chat.draft)
+            Task { @MainActor in
+                // The text field is recreated when the recording panel closes.
+                // Apply its caret after focus, so UIKit cannot restore the old
+                // selection over the freshly inserted transcript.
+                await Task.yield()
+                focused = true
+                await Task.yield()
+                guard !chat.voiceInputOpen, chat.draft.utf16.elementsEqual(draft.utf16) else { return }
+                selectionBinding.wrappedValue = TextSelection(insertionPoint: String.Index(utf16Offset: offset, in: chat.draft))
+            }
+        }
     }
     private func submitDraft() {
         focused = false

@@ -22,7 +22,7 @@ struct SpeechSettingsView: View {
             } footer: { Text("On-device recognition keeps audio on this device. OpenRouter sends it encrypted to your paired computer, which holds the API key.") }.listRowBackground(FD.surface)
             if provider == "openrouter" {
                 Section("OpenRouter") {
-                    LabeledContent("Computer", value: desktopStatus)
+                    LabeledContent("Computer", value: model.connected ? desktopStatus : "Waiting for connection")
                     if models.isEmpty { TextField("Transcription model", text: $transcriptionModel).textInputAutocapitalization(.never).autocorrectionDisabled() }
                     else {
                         Picker("Model", selection: $transcriptionModel) {
@@ -63,8 +63,8 @@ struct SpeechSettingsView: View {
             }
             if let error = error ?? model.voice.error { Text(error).font(.footnote).foregroundStyle(.orange) }
         }.scrollContentBackground(.hidden).background(FD.background).navigationTitle("Speech")
-            .task { if provider == "openrouter" { await refresh() } }
-            .onChange(of: provider) { _, value in error = nil; if value == "openrouter" { Task { await refresh() } } }
+            .task(id: model.connected) { if provider == "openrouter", model.connected { await refresh() } }
+            .onChange(of: provider) { _, value in error = nil; if value == "openrouter", model.connected { Task { await refresh() } } }
             .toolbar { if modal { ToolbarItem(placement: .confirmationAction) { Button("Done") { dismiss() }.disabled(inserting) } } }
             .interactiveDismissDisabled(inserting)
     }

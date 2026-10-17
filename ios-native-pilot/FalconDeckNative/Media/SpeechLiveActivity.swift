@@ -45,6 +45,15 @@ import Foundation
 }
 
 @MainActor extension AppModel {
+    /// Only a registered draft may consume a saved recording. A transcription
+    /// can finish after its task was archived or its chat instance replaced.
+    @discardableResult func finishVoiceInput(_ text: String, ownerID: String, chat: ChatSession) -> String.Index? {
+        guard chats[ownerID] === chat, voice.ownerID == ownerID else { return nil }
+        let caret = chat.insertVoiceTranscript(text)
+        voice.discard()
+        return caret
+    }
+
     func speechAction(_ action: NativeSpeechCommand) async {
         switch action {
         case .cancel: voice.discard()
@@ -53,12 +62,11 @@ import Foundation
         case .finish:
             guard voice.recording else { SpeechLiveActivity.shared.voice(nil); return }
             voice.finishRecording()
-            let current = connectionID, owner = voice.ownerID
+            let current = sessionScope, owner = voice.ownerID
             do {
                 let text = try await voice.transcribe(model: self)
-                guard current == connectionID, owner == voice.ownerID, let owner, let chat = chats[owner] else { return }
-                chat.insertVoiceTranscript(text)
-                voice.discard()
+                guard current == sessionScope, owner == voice.ownerID, let owner, let chat = chats[owner] else { return }
+                _ = finishVoiceInput(text, ownerID: owner, chat: chat)
             } catch { /* The recording remains available in Speech settings. */ }
         }
     }

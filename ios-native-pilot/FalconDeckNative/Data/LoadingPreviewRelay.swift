@@ -47,6 +47,7 @@ actor LoadingPreviewRelay: RelayServing {
             preferences = preferences.setting("project_folders", .array(folders))
             return preferences
         }
+        if method == "speech.transcribe" { return .object(["text": .string("A clear native transcript.")]) }
         if method == "thread.mark_read" {
             return .object(["thread": Self.task.raw.setting("attention", .object(["unread": .bool(false), "last_agent_activity_seq": .number(1), "last_read_seq": .number(1)]))])
         }
