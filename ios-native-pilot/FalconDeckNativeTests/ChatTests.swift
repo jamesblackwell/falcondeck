@@ -86,6 +86,15 @@ final class ChatTests: XCTestCase {
         XCTAssertEqual(transcript.items[0].text, "preview")
     }
 
+    func testInvalidOffsetNumbersNeverReachUTF16Indexing() {
+        for (start, end) in [(-1.0, 0.0), (0.5, 1.5), (0.0, -1.0), (1e100, 1e100)] {
+            var transcript = Transcript(items: [Message(.object(["id": .string("a"), "kind": .string("assistant_message"), "text": .string("Hi")]))])
+            transcript.apply(.object(["type": .string("text"), "item_id": .string("a"), "delta": .string("!"), "start_offset": .number(start), "end_offset": .number(end)]))
+            XCTAssertTrue(transcript.needsRecovery)
+            XCTAssertEqual(transcript.items[0].text, "Hi")
+        }
+    }
+
     func testChatRequestPreservesTaskPermissions() {
         let task = AgentTask(.object(["id": .string("task"), "workspace_id": .string("project"), "provider": .string("codex")]))
         let params = NativeRequest.turn(task: task, text: "Hello", itemID: "user-local", modelID: "model", effort: "high")

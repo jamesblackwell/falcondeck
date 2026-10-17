@@ -102,7 +102,7 @@ xcodebuild -project FalconDeckNative.xcodeproj -scheme FalconDeckNative \
   -derivedDataPath build test
 ```
 
-Twenty-two focused tests cover TypeScript AES interoperability and tamper rejection,
+Twenty-three focused tests cover TypeScript AES interoperability and tamper rejection,
 secure pairing parsing/URL policy, signed authority verification, pinned signed
 NaCl bootstrap verification, ordered transport reassembly/type-first ACKs,
 UTF-16 streaming/overlap/gap handling, optimistic echo reconciliation, paged

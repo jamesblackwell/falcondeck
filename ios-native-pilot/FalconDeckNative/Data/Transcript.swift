@@ -31,6 +31,7 @@ struct Transcript: Sendable {
             let index = items.firstIndex { $0.id == id }
             var raw = index.map { items[$0].raw } ?? .object(["id": .string(id), "kind": .string(kind)])
             let current = raw[field].string, delta = event["delta"].string
+            // optionalInt rejects negative/fractional values before slicing.
             if let start = event["start_offset"].optionalInt, let end = event["end_offset"].optionalInt {
                 guard end >= start, delta.utf16.count == end - start else { needsRecovery = true; return }
                 let currentUnits = Array(current.utf16), deltaUnits = Array(delta.utf16)
