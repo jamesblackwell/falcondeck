@@ -13,14 +13,16 @@ import {
 import {
   formatModelLabel,
   filterOptionsByQuery,
+  modelServiceTiers,
+  resolveServiceTier,
   SEARCHABLE_OPTION_THRESHOLD,
+  STANDARD_SERVICE_TIER,
   sortModelsByStarred,
   toggleStarredModelId,
   type AgentProvider,
   type CollaborationModeSummary,
   type ModelSummary,
   type ProviderOption,
-  type ServiceTierOption,
 } from "@falcondeck/client-core";
 
 import {
@@ -29,7 +31,6 @@ import {
 } from "../lib/starred-models";
 
 import {
-  Kbd,
   MenuHeader,
   Select,
   SelectContent,
@@ -166,10 +167,8 @@ function capitalize(value: string) {
 const EMPTY_PROVIDER_OPTIONS: ProviderOption[] = [];
 
 /**
- * The single model chip on the composer: model, reasoning effort, and the fast
- * service tier live in one popover so the toggle row stays short. The trigger
- * reads like ChatGPT's — "GPT-5.6-Sol · Medium" with a filled bolt while the
- * fast tier is on.
+ * Model, reasoning effort, and speed share one popover. The trigger names the
+ * selected extra service tier alongside its filled bolt.
  */
 export function ModelMenu({
   models,
@@ -178,10 +177,9 @@ export function ModelMenu({
   reasoningOptions,
   selectedEffort,
   onEffortChange,
-  fastTier = null,
-  fastActive = false,
-  onFastActiveChange,
-  showFastRow = false,
+  selectedServiceTier = null,
+  onServiceTierChange,
+  showSpeedRow = false,
   handoffProviders = EMPTY_PROVIDER_OPTIONS,
   onHandoffProviderSelect,
   handoffDisabledReason = null,
@@ -199,12 +197,10 @@ export function ModelMenu({
   reasoningOptions: string[];
   selectedEffort: string | null;
   onEffortChange: (value: string) => void;
-  /** Fast tier of the selected model; null greys the row out. */
-  fastTier?: ServiceTierOption | null;
-  fastActive?: boolean;
-  onFastActiveChange?: (active: boolean) => void;
+  selectedServiceTier?: string | null;
+  onServiceTierChange?: (tier: string | null) => void;
   /** True when any model of the provider advertises a tier, so the row does not flicker per model. */
-  showFastRow?: boolean;
+  showSpeedRow?: boolean;
   /** Other providers offered behind the second-step handoff surface. */
   handoffProviders?: ProviderOption[];
   onHandoffProviderSelect?: (provider: AgentProvider) => void;
@@ -248,7 +244,15 @@ export function ModelMenu({
   for (let index = 0; index < visibleModels.length; index += 1) {
     if (starredIdSet.has(visibleModels[index].id)) lastStarredIndex = index;
   }
-  const isFastOn = fastActive && fastTier !== null;
+  const speedOptions = useMemo(
+    () => modelServiceTiers(selectedModel),
+    [selectedModel],
+  );
+  const speedAvailable = speedOptions.length > 1;
+  const selectedTier =
+    resolveServiceTier(selectedServiceTier, selectedModel) ?? STANDARD_SERVICE_TIER;
+  const selectedSpeed = speedOptions.find((tier) => tier.id === selectedTier)!;
+  const extraSpeedActive = selectedTier !== STANDARD_SERVICE_TIER;
   const triggerLabel = selectedModel
     ? formatModelLabel(selectedModel.label)
     : "Model";
@@ -278,15 +282,15 @@ export function ModelMenu({
   };
 
   /**
-   * Navigable rows: every model, then the effort row and the fast toggle as
-   * single stops. Keyboard state is explicit rather than DOM focus — the
+   * Navigable rows: every model, then effort and each speed option.
+   * Keyboard state is explicit rather than DOM focus — the
    * popover can open without focus landing inside it (a shortcut fires while
    * the composer keeps the caret), and roving focus alone leaves no visible
    * highlight to navigate by.
    */
   const rows = useMemo(() => {
     const list: {
-      kind: "model" | "effort" | "fast" | "handoff" | "provider";
+      kind: "model" | "effort" | "speed" | "handoff" | "provider";
       id: string;
     }[] = [];
     if (panel === "handoff") {
@@ -303,18 +307,24 @@ export function ModelMenu({
     );
     if (reasoningOptions.length > 0)
       list.push({ kind: "effort", id: "effort" });
-    if (showFastRow && onFastActiveChange && fastTier !== null)
-      list.push({ kind: "fast", id: "fast" });
+    if (showSpeedRow && onServiceTierChange && speedAvailable)
+      list.push(
+        ...speedOptions.map((tier) => ({
+          kind: "speed" as const,
+          id: `speed:${tier.id}`,
+        })),
+      );
     if (canHandoff) list.push({ kind: "handoff", id: "handoff" });
     return list;
   }, [
     canHandoff,
-    fastTier,
     handoffProviders,
-    onFastActiveChange,
+    onServiceTierChange,
     panel,
     reasoningOptions.length,
-    showFastRow,
+    showSpeedRow,
+    speedAvailable,
+    speedOptions,
     visibleModels,
   ]);
 
@@ -376,13 +386,17 @@ export function ModelMenu({
       if (
         pickerShortcut &&
         event.key.toLowerCase() === "f" &&
-        showFastRow &&
-        fastTier !== null &&
-        onFastActiveChange
+        showSpeedRow &&
+        speedAvailable &&
+        onServiceTierChange
       ) {
         event.preventDefault();
         event.stopPropagation();
-        if (!event.repeat) onFastActiveChange(!isFastOn);
+        if (!event.repeat) {
+          const current = speedOptions.findIndex((tier) => tier.id === selectedTier);
+          const next = speedOptions[(current + 1) % speedOptions.length];
+          onServiceTierChange(next.id === STANDARD_SERVICE_TIER ? null : next.id);
+        }
         return;
       }
       const moveActive = (offset: 1 | -1) => {
@@ -421,8 +435,9 @@ export function ModelMenu({
         if (activeRow.kind === "model") {
           onModelChange(activeRow.id);
           handleOpenChange(false);
-        } else if (activeRow.kind === "fast") {
-          onFastActiveChange?.(!isFastOn);
+        } else if (activeRow.kind === "speed") {
+          const tier = activeRow.id.slice("speed:".length);
+          onServiceTierChange?.(tier === STANDARD_SERVICE_TIER ? null : tier);
         } else if (activeRow.kind === "handoff") {
           if (!handoffDisabledReason) setPanel("handoff");
         } else if (activeRow.kind === "provider") {
@@ -467,7 +482,7 @@ export function ModelMenu({
                 aria-hidden="true"
                 className="h-3 w-3 shrink-0 animate-spin"
               />
-            ) : isFastOn ? (
+            ) : extraSpeedActive ? (
               <Zap
                 aria-hidden="true"
                 className="h-3 w-3 shrink-0 text-accent"
@@ -477,6 +492,9 @@ export function ModelMenu({
             <span className="truncate">{triggerLabel}</span>
             {effortLabel ? (
               <span className="shrink-0 text-fg-muted">{effortLabel}</span>
+            ) : null}
+            {extraSpeedActive ? (
+              <span className="shrink-0 text-accent">{selectedSpeed.name}</span>
             ) : null}
             <ChevronDown
               aria-hidden="true"
@@ -657,62 +675,58 @@ export function ModelMenu({
                 </>
               ) : null}
 
-              {showFastRow && onFastActiveChange ? (
-                <div className="border-t border-border-subtle pt-1">
-                  <Tooltip
-                    label={
-                      fastTier === null
-                        ? "This model has one speed"
-                        : fastTier.description ||
-                          `Run on the ${fastTier.name} tier`
-                    }
-                    shortcut={fastTier === null ? undefined : ["F"]}
-                  >
-                    <button
-                      id={`${menuId}-fast`}
-                      data-row-id="fast"
-                      type="button"
-                      role="menuitemcheckbox"
-                      aria-checked={isFastOn}
-                      aria-label="Fast mode"
-                      aria-keyshortcuts={fastTier === null ? undefined : "f"}
-                      disabled={fastTier === null}
-                      onMouseEnter={() => activateRow("fast")}
-                      onClick={() => onFastActiveChange(!isFastOn)}
-                      className={cn(
-                        "flex w-full items-center gap-2 rounded-[var(--fd-radius-md)] px-2.5 py-1.5 text-left text-[length:var(--fd-text-sm)] text-fg-primary transition-colors hover:bg-interactive-hover focus-visible:bg-interactive-hover focus-visible:outline-none active:bg-interactive-active disabled:cursor-not-allowed disabled:opacity-50 disabled:hover:bg-transparent",
-                        activeRow?.kind === "fast" && "bg-interactive-hover",
-                      )}
-                    >
-                      {/* The bolt fills in when the tier is on, so state survives without color. */}
-                      <Zap
-                        aria-hidden="true"
-                        className={cn(
-                          "h-3.5 w-3.5 shrink-0",
-                          isFastOn ? "text-accent" : "text-fg-muted",
-                        )}
-                        fill={isFastOn ? "currentColor" : "none"}
-                      />
-                      <span className="min-w-0 flex-1">
-                        <span className="block truncate">
-                          {fastTier?.name ?? "Fast"} mode
-                        </span>
-                        {fastTier?.description ? (
-                          <span className="block truncate text-[length:var(--fd-text-xs)] text-fg-muted">
-                            {fastTier.description}
+              {showSpeedRow && onServiceTierChange ? (
+                <>
+                  <MenuHeader
+                    label="Speed"
+                    shortcut={speedAvailable ? ["F"] : undefined}
+                    className="mt-1 border-t border-border-subtle px-2.5 pb-1 pt-2"
+                  />
+                  <div role="radiogroup" aria-label="Speed">
+                    {speedOptions.map((tier) => {
+                      const isSelected = tier.id === selectedTier;
+                      const rowId = `speed:${tier.id}`;
+                      return (
+                        <button
+                          key={tier.id}
+                          id={`${menuId}-${rowId}`}
+                          data-row-id={rowId}
+                          type="button"
+                          role="radio"
+                          aria-checked={isSelected}
+                          aria-label={tier.name}
+                          aria-describedby={`${menuId}-${rowId}-description`}
+                          disabled={!speedAvailable}
+                          onMouseEnter={() => activateRow(rowId)}
+                          onClick={() =>
+                            onServiceTierChange(
+                              tier.id === STANDARD_SERVICE_TIER ? null : tier.id,
+                            )
+                          }
+                          className={cn(
+                            "fd-focus-inset flex w-full items-center gap-2 rounded-[var(--fd-radius-md)] px-2.5 py-1.5 text-left text-[length:var(--fd-text-sm)] text-fg-primary transition-colors hover:bg-interactive-hover active:bg-interactive-active disabled:cursor-not-allowed disabled:opacity-50 disabled:hover:bg-transparent",
+                            activeRow?.id === rowId && "bg-interactive-hover",
+                          )}
+                        >
+                          <span className="min-w-0 flex-1">
+                            <span className="block">{tier.name}</span>
+                            <span
+                              id={`${menuId}-${rowId}-description`}
+                              className="block text-[length:var(--fd-text-xs)] text-fg-muted"
+                            >
+                              {speedAvailable
+                                ? tier.description
+                                : "This model has one speed"}
+                            </span>
                           </span>
-                        ) : null}
-                      </span>
-                      {isFastOn ? (
-                        <Check
-                          aria-hidden="true"
-                          className="h-3.5 w-3.5 shrink-0"
-                        />
-                      ) : null}
-                      <Kbd aria-hidden="true">F</Kbd>
-                    </button>
-                  </Tooltip>
-                </div>
+                          {isSelected ? (
+                            <Check aria-hidden="true" className="h-3.5 w-3.5 shrink-0" />
+                          ) : null}
+                        </button>
+                      );
+                    })}
+                  </div>
+                </>
               ) : null}
               {canHandoff ? (
                 <div className="mt-1 border-t border-border-subtle pt-1">

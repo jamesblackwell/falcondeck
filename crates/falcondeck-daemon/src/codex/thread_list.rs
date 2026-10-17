@@ -75,8 +75,8 @@ pub(super) fn parse_collaboration_modes(value: &Value) -> Vec<CollaborationModeS
 }
 
 /// Service tiers a model can run on beyond the standard tier. The app-server
-/// names each tier for display ("Fast") and keys it by the id the turn request
-/// takes back ("priority"); `additionalSpeedTiers` is its deprecated
+/// names each tier for display ("Fast", "Ultrafast") and keys it by the id the
+/// turn request takes back; `additionalSpeedTiers` is its deprecated
 /// predecessor and carries no display data, so it is ignored.
 fn parse_service_tiers(value: &Value) -> Vec<ServiceTierSummary> {
     value

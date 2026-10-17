@@ -2,15 +2,15 @@ import { memo, useCallback, useEffect, useMemo, useState } from 'react'
 import { Pressable, ScrollView } from 'react-native'
 import { StyleSheet, useUnistyles } from 'react-native-unistyles'
 import { ChevronDown, Zap } from 'lucide-react-native'
-import * as Haptics from 'expo-haptics'
 
 import {
   formatModelLabel,
-  modelFastTier,
+  modelServiceTiers,
   providerMark,
   NO_AGENT_CAPABILITIES,
   resolveServiceTier,
   resolveModelOption,
+  STANDARD_SERVICE_TIER,
   type AgentCapabilitySummary,
   type ThreadIsolation,
   type AgentProvider,
@@ -57,7 +57,7 @@ interface InputToolbarProps {
   handoffProviders?: ProviderOption[]
   onHandoffProviderSelect?: (provider: AgentProvider) => void
   handoffDisabledReason?: string | null
-  /** Tier id while fast mode is on; null is the provider's standard tier. */
+  /** Selected tier id; null is the provider's standard tier. */
   selectedServiceTier?: string | null
   onSelectServiceTier?: (tier: string | null) => void
   /** Drives which mode pickers appear; an agent with no modes shows none. */
@@ -139,7 +139,7 @@ export const InputToolbar = memo(function InputToolbar({
       : null
   const agentModelLabel = agentModelChipLabel(providerLabel, modelDisplayLabel)
   // The chip already carries the agent's own mark, so a known agent shows just
-  // the model and the row keeps room for effort and fast mode. Agents without
+  // the model and the row keeps room for effort and speed. Agents without
   // a mark keep their name in words. Screen readers always hear both.
   const agentModelChipText =
     modelDisplayLabel && providerMark(selectedProvider)
@@ -219,17 +219,31 @@ export const InputToolbar = memo(function InputToolbar({
 
   const currentEffortLabel = capitalize(selectedEffort ?? 'default')
 
-  // Fast mode reads the tier off whichever model a send would actually use —
+  // Speed options come from whichever model a send would actually use —
   // the explicit pick, or the provider default while the chip says "Default".
   const effectiveModel =
     currentModel ?? models.find((m) => m.is_default) ?? models[0] ?? null
-  const fastTier = modelFastTier(effectiveModel)
-  const fastActive = resolveServiceTier(selectedServiceTier, effectiveModel) !== null
-  const handleFastPress = useCallback(() => {
-    if (!onSelectServiceTier || !fastTier) return
-    void Haptics.selectionAsync()
-    onSelectServiceTier(fastActive ? null : fastTier.id)
-  }, [fastActive, fastTier, onSelectServiceTier])
+  const speedOptions = modelServiceTiers(effectiveModel)
+  const selectedTier =
+    resolveServiceTier(selectedServiceTier, effectiveModel) ?? STANDARD_SERVICE_TIER
+  const selectedSpeed = speedOptions.find((tier) => tier.id === selectedTier)!
+  const openSpeedSheet = () => {
+    if (disabled || modelsLoading || !onSelectServiceTier || speedOptions.length < 2) return
+    triggerComposerSelectionHaptic()
+    setSheet({
+      title: 'Speed',
+      items: speedOptions.map((tier) => ({
+        value: tier.id,
+        label: tier.name,
+        description: tier.description,
+      })),
+      selected: selectedTier,
+      onSelect: (value) => {
+        onSelectServiceTier(value === STANDARD_SERVICE_TIER ? null : value)
+        setSheet(null)
+      },
+    })
+  }
 
   return (
     <>
@@ -307,15 +321,12 @@ export const InputToolbar = memo(function InputToolbar({
           />
         ) : null}
 
-        {/* A press-toggle, not a sheet: fast mode is boolean, and the chip's
-            fill is its state. Hidden (not greyed) when the model has one
-            speed — mobile chips already come and go per provider. */}
-        {onSelectServiceTier && fastTier ? (
-          <FastChip
-            label={fastTier.name}
-            active={fastActive}
-            disabled={disabled}
-            onPress={handleFastPress}
+        {onSelectServiceTier && speedOptions.length > 1 ? (
+          <SpeedChip
+            label={selectedSpeed.name}
+            active={selectedTier !== STANDARD_SERVICE_TIER}
+            disabled={disabled || modelsLoading}
+            onPress={openSpeedSheet}
           />
         ) : null}
       </ScrollView>
@@ -403,7 +414,7 @@ const Chip = memo(function Chip({
   )
 })
 
-const FastChip = memo(function FastChip({
+const SpeedChip = memo(function SpeedChip({
   label,
   active,
   disabled,
@@ -421,20 +432,18 @@ const FastChip = memo(function FastChip({
     <Pressable
       style={({ pressed }) => [
         styles.chip,
-        active ? styles.fastChipActive : styles.fastChipIdle,
+        active ? styles.speedChipActive : null,
         pressed && !disabled ? styles.chipPressed : null,
         disabled && styles.controlDisabled,
       ]}
-      accessibilityRole="switch"
-      accessibilityLabel="Fast mode"
-      accessibilityState={{ disabled, checked: active }}
+      accessibilityRole="button"
+      accessibilityLabel="Speed"
+      accessibilityValue={{ text: label }}
+      accessibilityState={{ disabled }}
       hitSlop={12}
       onPress={onPress}
       disabled={disabled}
     >
-      {/* The bolt fills in when the tier is on, so state survives without
-          colour. Off, it is a bare bolt so the row keeps room for the model
-          and effort; on, it names the tier it switched to. */}
       <SymbolIcon
         name={active ? 'bolt.fill' : 'bolt'}
         fallback={Zap}
@@ -443,19 +452,24 @@ const FastChip = memo(function FastChip({
         color={color}
         filled={active}
       />
-      {active ? (
-        <Text
-          maxFontSizeMultiplier={CHROME_MAX_FONT_SCALE}
-          variant="caption"
-          color="primary"
-          size="xs"
-          weight="medium"
-          numberOfLines={1}
-          style={{ color }}
-        >
-          {label}
-        </Text>
-      ) : null}
+      <Text
+        maxFontSizeMultiplier={CHROME_MAX_FONT_SCALE}
+        variant="caption"
+        color="primary"
+        size="xs"
+        weight="medium"
+        numberOfLines={1}
+        style={{ color }}
+      >
+        {label}
+      </Text>
+      <SymbolIcon
+        name="chevron.down"
+        fallback={ChevronDown}
+        size={9}
+        weight="bold"
+        color={color}
+      />
     </Pressable>
   )
 })
@@ -491,13 +505,8 @@ const styles = StyleSheet.create((theme) => ({
   chipPressed: {
     backgroundColor: theme.isDark ? 'rgba(255, 255, 255, 0.18)' : 'rgba(9, 9, 11, 0.1)',
   },
-  fastChipActive: {
+  speedChipActive: {
     backgroundColor: theme.colors.accent.muted,
-  },
-  fastChipIdle: {
-    width: 36,
-    paddingHorizontal: 0,
-    justifyContent: 'center',
   },
   controlDisabled: {
     opacity: 0.55,

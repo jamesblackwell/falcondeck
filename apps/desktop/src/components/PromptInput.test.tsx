@@ -1290,7 +1290,7 @@ describe("PromptInput", () => {
     ).toBeInTheDocument();
   });
 
-  describe("fast mode toggle", () => {
+  describe("speed menu", () => {
     const fastModel = {
       id: "gpt-5.6-sol",
       label: "GPT-5.6-Sol",
@@ -1303,6 +1303,7 @@ describe("PromptInput", () => {
           name: "Fast",
           description: "1.5x speed, increased usage",
         },
+        { id: "ultrafast", name: "Ultrafast", description: "Fastest responses, increased usage" },
       ],
       default_service_tier: null,
     };
@@ -1329,7 +1330,7 @@ describe("PromptInput", () => {
       );
       openModelMenu();
       expect(
-        screen.queryByRole("menuitemcheckbox", { name: "Fast mode" }),
+        screen.queryByRole("radiogroup", { name: "Speed" }),
       ).not.toBeInTheDocument();
     });
 
@@ -1344,11 +1345,11 @@ describe("PromptInput", () => {
       );
       openModelMenu();
       expect(
-        screen.getByRole("menuitemcheckbox", { name: "Fast mode" }),
+        screen.getByRole("radio", { name: "Standard" }),
       ).toBeDisabled();
     });
 
-    it("reports the advertised tier id on toggle and null on toggle-off", () => {
+    it("selects every advertised tier and resets to Standard", () => {
       const onServiceTierChange = vi.fn();
       const { rerender } = render(
         <PromptInput
@@ -1361,25 +1362,24 @@ describe("PromptInput", () => {
       );
 
       openModelMenu();
-      const toggle = screen.getByRole("menuitemcheckbox", {
-        name: "Fast mode",
-      });
-      expect(toggle).toHaveAttribute("aria-checked", "false");
-      fireEvent.click(toggle);
+      expect(screen.getByRole("radio", { name: "Standard" })).toHaveAttribute("aria-checked", "true");
+      fireEvent.click(screen.getByRole("radio", { name: "Fast" }));
       expect(onServiceTierChange).toHaveBeenLastCalledWith("priority");
+      fireEvent.click(screen.getByRole("radio", { name: "Ultrafast" }));
+      expect(onServiceTierChange).toHaveBeenLastCalledWith("ultrafast");
 
       rerender(
         <PromptInput
           {...promptInputProps}
           models={[fastModel]}
           selectedModelId={fastModel.id}
-          selectedServiceTier="priority"
+          selectedServiceTier="ultrafast"
           onServiceTierChange={onServiceTierChange}
         />,
       );
-      expect(toggle).toHaveAttribute("aria-checked", "true");
-      // The chip advertises the active tier with a filled bolt while the menu is open or closed.
-      fireEvent.click(toggle);
+      expect(screen.getByRole("radio", { name: "Ultrafast" })).toHaveAttribute("aria-checked", "true");
+      expect(screen.getByRole("button", { name: "Model" })).toHaveTextContent("Ultrafast");
+      fireEvent.click(screen.getByRole("radio", { name: "Standard" }));
       expect(onServiceTierChange).toHaveBeenLastCalledWith(null);
     });
   });

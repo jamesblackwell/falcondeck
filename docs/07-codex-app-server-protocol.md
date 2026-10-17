@@ -160,6 +160,14 @@ The local transport stops when its app-server exits or is shut down.
 | ------------ | -------------------- | --------------------- |
 | `model/list` | `{ includeHidden? }` | List available models |
 
+FalconDeck's speed menus use every `serviceTiers` entry advertised by the
+selected model, including Ultrafast when Codex makes it available. Tier ids
+pass unchanged through `service_tier` to `turn/start.serviceTier`; selecting
+Standard sends `default` explicitly so a previously selected tier is cleared.
+Providers whose models advertise no extra tiers have no speed picker. Availability
+comes from Codex's model catalog and the signed-in account, not a hardcoded
+FalconDeck model list.
+
 ### Account/Auth
 
 | Method                    | Params                | Description                       |

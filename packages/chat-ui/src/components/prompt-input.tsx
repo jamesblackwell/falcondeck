@@ -39,12 +39,10 @@ import type {
 import {
   activeSlashQuery,
   resolveModelOption,
-  anyModelHasFastTier,
+  anyModelHasServiceTiers,
   fileAttachmentKind,
-  modelFastTier,
   NO_AGENT_CAPABILITIES,
   rankSlashSuggestions,
-  resolveServiceTier,
   savedPromptInsertion,
 } from "@falcondeck/client-core";
 import {
@@ -170,8 +168,8 @@ export type PromptInputProps = {
   selectedEffort: string | null;
   onEffortChange: (value: string) => void;
   /**
-   * Service tier id when fast mode is on; null runs the standard tier. The
-   * toggle only mounts when a model of the current provider advertises a tier
+   * Selected service tier id; null runs the standard tier. The
+   * picker only mounts when a model of the current provider advertises a tier
    * and a handler is passed, so providers without the concept keep a clean row.
    */
   selectedServiceTier?: string | null;
@@ -393,7 +391,7 @@ export const PromptInput = memo(function PromptInput({
     isRunning &&
     !hasContent &&
     capabilities.supports_interrupt;
-  // Fast mode reads the tier off whichever model a send would actually use —
+  // Speed options come from whichever model a send would actually use —
   // the explicit pick, or the provider default while nothing is picked yet.
   const selectedModel =
     resolveModelOption(models, selectedModelId, selectedProvider);
@@ -1408,24 +1406,11 @@ export const PromptInput = memo(function PromptInput({
                     reasoningOptions={reasoningOptions}
                     selectedEffort={selectedEffort}
                     onEffortChange={onEffortChange}
-                    fastTier={modelFastTier(selectedModel)}
-                    fastActive={
-                      resolveServiceTier(selectedServiceTier, selectedModel) !==
-                      null
-                    }
-                    onFastActiveChange={
-                      onServiceTierChange
-                        ? (active) =>
-                            onServiceTierChange(
-                              active
-                                ? (modelFastTier(selectedModel)?.id ?? null)
-                                : null,
-                            )
-                        : undefined
-                    }
-                    showFastRow={
+                    selectedServiceTier={selectedServiceTier}
+                    onServiceTierChange={onServiceTierChange}
+                    showSpeedRow={
                       Boolean(onServiceTierChange) &&
-                      anyModelHasFastTier(models)
+                      anyModelHasServiceTiers(models)
                     }
                     handoffProviders={handoffProviders}
                     onHandoffProviderSelect={onHandoffProviderSelect}

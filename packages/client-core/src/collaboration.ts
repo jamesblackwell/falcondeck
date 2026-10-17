@@ -192,25 +192,27 @@ export function threadProviderLabel(
  */
 export const STANDARD_SERVICE_TIER = "default";
 
-/**
- * The tier the fast-mode toggle switches a model onto: its first advertised
- * extra service tier (Codex advertises exactly one, `priority`/"Fast").
- */
-export function modelFastTier(
+/** Standard speed followed by every extra tier advertised by the model. */
+export function modelServiceTiers(
   model: ModelSummary | null | undefined,
-): ServiceTierOption | null {
-  return model?.service_tiers?.[0] ?? null;
+): ServiceTierOption[] {
+  return [
+    { id: STANDARD_SERVICE_TIER, name: "Standard", description: "Default speed" },
+    ...(model?.service_tiers ?? []).filter(
+      (tier) => tier.id !== STANDARD_SERVICE_TIER,
+    ),
+  ];
 }
 
 /** Whether any of the models can run on an extra service tier. */
-export function anyModelHasFastTier(models: ModelSummary[]): boolean {
-  return models.some((model) => modelFastTier(model) !== null);
+export function anyModelHasServiceTiers(models: ModelSummary[]): boolean {
+  return models.some((model) => modelServiceTiers(model).length > 1);
 }
 
 /**
  * Validates a remembered/thread tier id against what the model actually
- * advertises, so the toggle never resurrects a tier the catalog dropped.
- * The standard tier normalizes to null (toggle off).
+ * advertises, so the picker never resurrects a tier the catalog dropped.
+ * The standard tier normalizes to null.
  */
 export function resolveServiceTier(
   tier: string | null | undefined,
@@ -231,7 +233,7 @@ export function serviceTierForTurn(
   selectedTier: string | null,
   model: ModelSummary | null | undefined,
 ): string | null {
-  if (modelFastTier(model) === null) return null;
+  if (modelServiceTiers(model).length < 2) return null;
   return resolveServiceTier(selectedTier, model) ?? STANDARD_SERVICE_TIER;
 }
 

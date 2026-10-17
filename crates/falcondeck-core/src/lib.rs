@@ -3951,7 +3951,7 @@ pub struct ModelSummary {
     /// Reasoning efforts supported by the model.
     pub supported_reasoning_efforts: Vec<ReasoningEffortSummary>,
     /// Service tiers the model can run on beyond the provider's standard
-    /// tier (e.g. Codex "Fast"); empty hides the speed picker.
+    /// tier (e.g. Codex "Fast" and "Ultrafast"); empty hides the speed picker.
     #[serde(default)]
     pub service_tiers: Vec<ServiceTierSummary>,
     /// Catalog default service tier id, when the provider configures one.

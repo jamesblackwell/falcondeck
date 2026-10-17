@@ -29,25 +29,30 @@ const MODELS = [
 
 function KeyboardModelMenu(props: Partial<ComponentProps<typeof ModelMenu>>) {
   const [effort, setEffort] = useState("medium");
-  const [fast, setFast] = useState(false);
+  const [serviceTier, setServiceTier] = useState<string | null>(null);
   return (
     <ModelMenu
       models={MODELS}
-      selectedModel={MODELS[0]}
+      selectedModel={{
+        ...MODELS[0],
+        service_tiers: [
+          { id: "fast", name: "Fast", description: "2x speed" },
+          { id: "ultrafast", name: "Ultrafast", description: "Fastest responses, increased usage" },
+        ],
+      }}
       onModelChange={vi.fn()}
       reasoningOptions={["low", "medium", "high"]}
       selectedEffort={effort}
-      fastTier={{ id: "fast", name: "Fast", description: "2x speed" }}
-      fastActive={fast}
-      showFastRow
+      selectedServiceTier={serviceTier}
+      showSpeedRow
       {...props}
       onEffortChange={(next) => {
         setEffort(next);
         props.onEffortChange?.(next);
       }}
-      onFastActiveChange={(next) => {
-        setFast(next);
-        props.onFastActiveChange?.(next);
+      onServiceTierChange={(next) => {
+        setServiceTier(next);
+        props.onServiceTierChange?.(next);
       }}
     />
   );
@@ -224,7 +229,7 @@ describe("ModelMenu", () => {
 });
 
 describe("ModelMenu keyboard shortcuts", () => {
-  it("steps through effort from model and fast rows, clamping at the ends", () => {
+  it("steps through effort from model and speed rows, clamping at the ends", () => {
     const onEffortChange = vi.fn();
     const onModelChange = vi.fn();
     render(
@@ -243,7 +248,7 @@ describe("ModelMenu keyboard shortcuts", () => {
     expect(onEffortChange).toHaveBeenCalledTimes(1);
     expect(menu).toHaveAttribute("aria-activedescendant", initialHighlight);
 
-    fireEvent.mouseEnter(screen.getByRole("menuitemcheckbox", { name: "Fast mode" }));
+    fireEvent.mouseEnter(screen.getByRole("radio", { name: "Fast" }));
     fireEvent.keyDown(document, { key: "ArrowLeft" });
     fireEvent.keyDown(document, { key: "ArrowLeft" });
     fireEvent.keyDown(document, { key: "ArrowLeft" });
@@ -252,13 +257,13 @@ describe("ModelMenu keyboard shortcuts", () => {
     expect(onModelChange).not.toHaveBeenCalled();
   });
 
-  it("toggles fast mode with F without closing or changing the model highlight", () => {
+  it("cycles all speeds with F without closing or changing the model highlight", () => {
     render(<KeyboardModelMenu />);
     fireEvent.click(screen.getByRole("button", { name: "Model" }));
     expect(keycapTexts()).toEqual(["←", "→", "F"]);
     const menu = screen.getByRole("menu");
     const initialHighlight = menu.getAttribute("aria-activedescendant");
-    const fast = screen.getByRole("menuitemcheckbox", { name: "Fast mode" });
+    const fast = screen.getByRole("radio", { name: "Fast" });
 
     fireEvent.keyDown(document, { key: "f" });
     expect(fast).toHaveAttribute("aria-checked", "true");
@@ -266,19 +271,23 @@ describe("ModelMenu keyboard shortcuts", () => {
     expect(fast).toHaveAttribute("aria-checked", "true");
     fireEvent.keyDown(document, { key: "F" });
     expect(fast).toHaveAttribute("aria-checked", "false");
+    expect(screen.getByRole("radio", { name: "Ultrafast" })).toHaveAttribute("aria-checked", "true");
+    expect(screen.getByRole("button", { name: "Model" })).toHaveTextContent("Ultrafast");
+    fireEvent.keyDown(document, { key: "f" });
+    expect(screen.getByRole("radio", { name: "Standard" })).toHaveAttribute("aria-checked", "true");
     expect(menu).toHaveAttribute("aria-activedescendant", initialHighlight);
   });
 
   it("handles shortcuts while focus stays in the composer", () => {
     const onEffortChange = vi.fn();
-    const onFastActiveChange = vi.fn();
+    const onServiceTierChange = vi.fn();
     render(
       <>
         <textarea aria-label="Draft" />
         <KeyboardModelMenu
           open
           onEffortChange={onEffortChange}
-          onFastActiveChange={onFastActiveChange}
+          onServiceTierChange={onServiceTierChange}
         />
       </>,
     );
@@ -286,16 +295,16 @@ describe("ModelMenu keyboard shortcuts", () => {
     expect(fireEvent.keyDown(draft, { key: "ArrowRight" })).toBe(false);
     expect(fireEvent.keyDown(draft, { key: "f" })).toBe(false);
     expect(onEffortChange).toHaveBeenCalledWith("high");
-    expect(onFastActiveChange).toHaveBeenCalledWith(true);
+    expect(onServiceTierChange).toHaveBeenCalledWith("fast");
   });
 
   it("leaves modified keys, composition, and closed pickers alone", () => {
     const onEffortChange = vi.fn();
-    const onFastActiveChange = vi.fn();
+    const onServiceTierChange = vi.fn();
     render(
       <KeyboardModelMenu
         onEffortChange={onEffortChange}
-        onFastActiveChange={onFastActiveChange}
+        onServiceTierChange={onServiceTierChange}
       />,
     );
     fireEvent.keyDown(document, { key: "ArrowRight" });
@@ -309,19 +318,19 @@ describe("ModelMenu keyboard shortcuts", () => {
     fireEvent.keyDown(document, { key: "ArrowRight" });
     fireEvent.keyDown(document, { key: "f" });
     expect(onEffortChange).not.toHaveBeenCalled();
-    expect(onFastActiveChange).not.toHaveBeenCalled();
+    expect(onServiceTierChange).not.toHaveBeenCalled();
   });
 
   it("preserves typing and caret movement in the model search field", () => {
     const onEffortChange = vi.fn();
-    const onFastActiveChange = vi.fn();
+    const onServiceTierChange = vi.fn();
     render(
       <KeyboardModelMenu
         models={Array.from({ length: 8 }, (_, i) =>
           model(`model-${i}`, `Model ${i}`),
         )}
         onEffortChange={onEffortChange}
-        onFastActiveChange={onFastActiveChange}
+        onServiceTierChange={onServiceTierChange}
       />,
     );
     fireEvent.click(screen.getByRole("button", { name: "Model" }));
@@ -330,29 +339,29 @@ describe("ModelMenu keyboard shortcuts", () => {
     expect(fireEvent.keyDown(search, { key: "ArrowLeft" })).toBe(true);
     expect(fireEvent.keyDown(search, { key: "ArrowRight" })).toBe(true);
     expect(onEffortChange).not.toHaveBeenCalled();
-    expect(onFastActiveChange).not.toHaveBeenCalled();
+    expect(onServiceTierChange).not.toHaveBeenCalled();
   });
 
-  it("does not toggle unavailable fast mode or change effort in the handoff panel", () => {
+  it("does not cycle unavailable speeds or change effort in the handoff panel", () => {
     const onEffortChange = vi.fn();
-    const onFastActiveChange = vi.fn();
+    const onServiceTierChange = vi.fn();
     render(
       <KeyboardModelMenu
-        fastTier={null}
+        selectedModel={MODELS[0]}
         handoffProviders={[{ provider: "claude", label: "Claude" }]}
         onHandoffProviderSelect={vi.fn()}
         onEffortChange={onEffortChange}
-        onFastActiveChange={onFastActiveChange}
+        onServiceTierChange={onServiceTierChange}
       />,
     );
     fireEvent.click(screen.getByRole("button", { name: "Model" }));
-    expect(screen.getByRole("menuitemcheckbox", { name: "Fast mode" })).toBeDisabled();
+    expect(screen.getByRole("radio", { name: "Standard" })).toBeDisabled();
     fireEvent.keyDown(document, { key: "f" });
     fireEvent.click(screen.getByRole("menuitem", { name: /Continue in another harness/ }));
     fireEvent.keyDown(document, { key: "ArrowRight" });
     fireEvent.keyDown(document, { key: "f" });
     expect(onEffortChange).not.toHaveBeenCalled();
-    expect(onFastActiveChange).not.toHaveBeenCalled();
+    expect(onServiceTierChange).not.toHaveBeenCalled();
   });
 });
 

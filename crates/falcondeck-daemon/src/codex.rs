@@ -2394,13 +2394,13 @@ mod tests {
             json!({ "mode": "default", "settings": { "model": "gpt-5.4" } }),
             json!({ "type": "workspaceWrite" }),
             Some("never"),
-            Some("priority"),
+            Some("ultrafast"),
         );
         assert_eq!(params["effort"], "high");
         assert!(params.get("config").is_none());
         assert_eq!(params["sandboxPolicy"]["type"], "workspaceWrite");
         assert_eq!(params["approvalPolicy"], "never");
-        assert_eq!(params["serviceTier"], "priority");
+        assert_eq!(params["serviceTier"], "ultrafast");
     }
 
     #[test]
@@ -2870,17 +2870,20 @@ mod tests {
             "supportedReasoningEfforts": [],
             "additionalSpeedTiers": ["fast"],
             "serviceTiers": [
-                {"id": "priority", "name": "Fast", "description": "1.5x speed, increased usage"}
+                {"id": "priority", "name": "Fast", "description": "1.5x speed, increased usage"},
+                {"id": "ultrafast", "name": "Ultrafast", "description": "Fastest available responses"}
             ],
-            "defaultServiceTier": "priority"
+            "defaultServiceTier": "ultrafast"
         }]));
         assert_eq!(models.len(), 1);
         let tiers = &models[0].service_tiers;
-        assert_eq!(tiers.len(), 1);
+        assert_eq!(tiers.len(), 2);
         assert_eq!(tiers[0].id, "priority");
         assert_eq!(tiers[0].name, "Fast");
         assert_eq!(tiers[0].description, "1.5x speed, increased usage");
-        assert_eq!(models[0].default_service_tier.as_deref(), Some("priority"));
+        assert_eq!(tiers[1].id, "ultrafast");
+        assert_eq!(tiers[1].name, "Ultrafast");
+        assert_eq!(models[0].default_service_tier.as_deref(), Some("ultrafast"));
     }
 
     #[test]

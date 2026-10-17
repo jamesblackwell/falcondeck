@@ -38,7 +38,7 @@ export type ModelSummary = {
   is_default: boolean;
   default_reasoning_effort: string | null;
   supported_reasoning_efforts: ReasoningEffortOption[];
-  /** Extra service tiers; absent/empty hides the speed toggle. Optional because older daemons omit it. */
+  /** Extra service tiers; absent/empty hides the speed picker. Optional because older daemons omit it. */
   service_tiers?: ServiceTierOption[];
   default_service_tier?: string | null;
 };

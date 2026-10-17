@@ -419,7 +419,7 @@ describe("submitTurn guards", () => {
     expect(useUIStore.getState().isSubmitting).toBe(false);
   });
 
-  it("states the advertised tier on turns when fast mode is on", async () => {
+  it.each(["priority", "ultrafast", null])("sends the selected speed %s on turns", async (serviceTier) => {
     useSessionStore.getState().applyDaemonEvent(
       snapshotEvent(
         snapshot({
@@ -434,8 +434,8 @@ describe("submitTurn guards", () => {
                   account: { status: "ready", label: "ready" },
                   models: [
                     {
-                      id: "gpt-5.6-sol",
-                      label: "GPT-5.6-Sol",
+                      id: "gpt-6.1-sol",
+                      label: "GPT-6.1 Sol",
                       is_default: true,
                       default_reasoning_effort: "medium",
                       supported_reasoning_efforts: [],
@@ -443,7 +443,12 @@ describe("submitTurn guards", () => {
                         {
                           id: "priority",
                           name: "Fast",
-                          description: "1.5x speed",
+                          description: "2x speed",
+                        },
+                        {
+                          id: "ultrafast",
+                          name: "Ultrafast",
+                          description: "Fastest available responses",
                         },
                       ],
                       default_service_tier: null,
@@ -462,8 +467,8 @@ describe("submitTurn guards", () => {
     useUIStore.setState({
       draft: "Quick one",
       selectedProvider: "codex",
-      selectedModel: "gpt-5.6-sol",
-      selectedServiceTier: "priority",
+      selectedModel: "gpt-6.1-sol",
+      selectedServiceTier: serviceTier,
       isSubmitting: false,
     });
 
@@ -484,7 +489,7 @@ describe("submitTurn guards", () => {
 
     expect(rpc).toHaveBeenCalledWith(
       "turn.start",
-      expect.objectContaining({ service_tier: "priority" }),
+      expect.objectContaining({ service_tier: serviceTier ?? "default" }),
       { requestIdPrefix: "mobile-turn" },
     );
   });

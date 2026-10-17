@@ -30,8 +30,8 @@ import {
   verifyPairingClaimChallenge,
   formatModelLabel,
   filesToImageInputs,
-  modelFastTier,
-  anyModelHasFastTier,
+  modelServiceTiers,
+  anyModelHasServiceTiers,
   resolveServiceTier,
   serviceTierForTurn,
   threadForSelection,
@@ -1086,7 +1086,10 @@ describe('client-core service tier helpers', () => {
     is_default: true,
     default_reasoning_effort: 'medium',
     supported_reasoning_efforts: [],
-    service_tiers: [{ id: 'priority', name: 'Fast', description: '1.5x speed' }],
+    service_tiers: [
+      { id: 'priority', name: 'Fast', description: '1.5x speed' },
+      { id: 'ultrafast', name: 'Ultrafast', description: 'Fastest responses' },
+    ],
     default_service_tier: null,
   }
   const plainModel: ModelSummary = {
@@ -1097,15 +1100,17 @@ describe('client-core service tier helpers', () => {
     supported_reasoning_efforts: [],
   }
 
-  it('finds the fast tier only on models that advertise one', () => {
-    expect(modelFastTier(fastModel)?.id).toBe('priority')
-    expect(modelFastTier(plainModel)).toBeNull()
-    expect(anyModelHasFastTier([plainModel, fastModel])).toBe(true)
-    expect(anyModelHasFastTier([plainModel])).toBe(false)
+  it('offers Standard followed by every advertised service tier', () => {
+    expect(modelServiceTiers(fastModel).map((tier) => tier.id)).toEqual(['default', 'priority', 'ultrafast'])
+    expect(modelServiceTiers(plainModel).map((tier) => tier.id)).toEqual(['default'])
+    expect(anyModelHasServiceTiers([plainModel, fastModel])).toBe(true)
+    expect(anyModelHasServiceTiers([plainModel])).toBe(false)
   })
 
   it('validates tiers against the model catalog and treats the standard tier as off', () => {
     expect(resolveServiceTier('priority', fastModel)).toBe('priority')
+    expect(resolveServiceTier('ultrafast', fastModel)).toBe('ultrafast')
+    expect(resolveServiceTier('ultrafast', plainModel)).toBeNull()
     expect(resolveServiceTier(STANDARD_SERVICE_TIER, fastModel)).toBeNull()
     expect(resolveServiceTier('priority', plainModel)).toBeNull()
     expect(resolveServiceTier('retired-tier', fastModel)).toBeNull()
@@ -1114,6 +1119,7 @@ describe('client-core service tier helpers', () => {
 
   it('states the tier explicitly on turns for tier-capable models and omits it otherwise', () => {
     expect(serviceTierForTurn('priority', fastModel)).toBe('priority')
+    expect(serviceTierForTurn('ultrafast', fastModel)).toBe('ultrafast')
     // Off must reach the provider as an explicit standard-tier request, not
     // an absent field, because absent means "keep the session's tier".
     expect(serviceTierForTurn(null, fastModel)).toBe(STANDARD_SERVICE_TIER)
