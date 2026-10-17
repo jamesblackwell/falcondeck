@@ -85,7 +85,15 @@ private struct ChatContent: View {
             .onChange(of: bottomInsetHeight) { _, _ in
                 if scroll.followLatest && !scroll.userScrolling { scrollToLatest(proxy, animated: false) }
             }
-            .onScrollPhaseChange { _, phase in scroll.userScrolling = phase == .tracking || phase == .interacting || phase == .decelerating }
+            .onScrollPhaseChange { previous, phase in
+                scroll.userScrolling = phase == .tracking || phase == .interacting || phase == .decelerating
+                // A drag expresses reading intent even if the near-end value did
+                // not cross its threshold during that gesture.
+                if phase == .interacting { scroll.followLatest = false }
+                else if phase == .idle && (previous == .interacting || previous == .decelerating) && scroll.nearLatest {
+                    scroll.followLatest = true
+                }
+            }
             .scrollDismissesKeyboard(.interactively)
             .refreshable { if !task.isDraft { await model.loadChat(task) } }
             .onChange(of: chat.transcript.revision) { _, _ in
