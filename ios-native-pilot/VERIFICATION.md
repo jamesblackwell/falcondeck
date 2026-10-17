@@ -18,11 +18,12 @@ metadata, reconnect and forgetting a computer live in **Settings → Connections
 
 ## Client validation
 
-- 104 native unit tests pass, including crypto/wire compatibility, pairing
+- 105 native unit tests pass, including crypto/wire compatibility, pairing
   authority, connection epochs, drafts/queues, media, controls/extensions,
   push registration/cleanup and seven new pairing-flow regressions.
-- Eleven UI flows pass on both iPhone and iPad: navigation/density, conversation,
-  requests, goals, search, settings, first send, pairing and landscape automation.
+- Fourteen UI flows pass on both iPhone and iPad: navigation/density, conversation,
+  requests, goals, search, settings, first send, pairing and landscape automation,
+  plus sidebar reselection, collapsed-section search and retained expansion.
 - Additional compact-width, accessibility-text and landscape conversation checks
   pass. See [VISUAL-QA.md](VISUAL-QA.md) for the current screen/state inventory.
 - Real relay pairing, encryption, compact project sync and a native conversation

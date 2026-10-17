@@ -105,3 +105,48 @@ The iPad build is ready but its locked device prevents development-image mountin
 Physical camera, microphone, speech/Live Activity and background push delivery
 still need device testing. This report does not treat simulator success as proof
 of those hardware behaviors.
+
+## Fresh-eyes code review follow-up
+
+The follow-up review reproduced and fixed four issues:
+
+- Returning to the iPhone sidebar and choosing the same task again did not reopen
+  its detail pane. Explicit sidebar navigation now reveals unchanged selections,
+  including Settings, Activity and draft destinations. Earlier navigation checks
+  covered the first selection, not reselection after Back.
+- Search could hide matching pins or chats inside collapsed sections. Search now
+  reveals matching sections and folders without changing their collapsed state.
+- Expand-all directives were ignored by transcript rows created after the action,
+  including after switching away and reopening a conversation. Both group and row
+  observers now apply retained directives when they first appear.
+- Invisible harness messages split visible assistant turns and left duplicate
+  action bars. Action selection now uses the same user-text projection as rendering.
+
+The three new UI regressions failed before the fixes and passed afterward. The
+new hidden-message unit regression also failed before the fix; all 105 native
+unit tests now pass. Loading read-aloud and automation controls retain their
+44-point frames. The unused prototype project/card navigation and its private
+theme components have been removed, leaving one navigation implementation.
+
+Repo-local Autoreview ran against only the native patch in an isolated review
+checkout, with adjacent owners included:
+
+```sh
+.agents/skills/autoreview/scripts/autoreview --mode local --max-priority P2 \
+  --dataset ios-native-pilot/FalconDeckNative/App/FalconDeckNativeApp.swift \
+  --dataset ios-native-pilot/FalconDeckNative/Features/ConversationView.swift \
+  --dataset ios-native-pilot/FalconDeckNative/Features/SidebarView.swift \
+  --dataset ios-native-pilot/FalconDeckNative/Features/TaskOptionsView.swift \
+  --dataset ios-native-pilot/FalconDeckNative/Data/UserTextProjection.swift \
+  --dataset ios-native-pilot/FalconDeckNative/Data/ConversationPresentation.swift \
+  --dataset ios-native-pilot/FalconDeckNative/Data/TaskFeatures.swift
+```
+
+Result: clean, with no actionable P0–P2 findings. Fixes are committed in `a8b8a61b`.
+All fourteen UI flows pass on both iPhone and iPad, including the three new
+regressions. Results and the review are retained locally under the ignored
+`artifacts/fresh-eyes-2026-10-17/` directory. The signed Apple Development
+Debug app/widget rebuild and deep signature verification pass. The updated app
+is installed over Wi-Fi on the iPhone; automatic launch is still refused while
+the phone is locked. Documentation-only verification updates use `git diff --check`;
+Autoreview is skipped for those mechanical edits.
