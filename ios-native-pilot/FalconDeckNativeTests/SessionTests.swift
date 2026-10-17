@@ -16,6 +16,7 @@ private actor ControlledRelay: RelayServing {
     func call(_ method: String, params: JSON) async throws -> JSON {
         lastParams = params
         if method == "thread.archive" { return .object(["ok": .bool(true)]) }
+        if method == "thread.unarchive" { return .object(["thread": params.setting("id", params["thread_id"]).setting("is_archived", .bool(false))]) }
         return try await withCheckedThrowingContinuation {
             pending = $0; waiter?.resume(); waiter = nil
         }
@@ -34,6 +35,85 @@ private actor ControlledRelay: RelayServing {
 
     private func summary(_ task: AgentTask, seq: Int = 1) -> ClientEvent {
         .events([.object(["seq": .number(Double(seq)), "thread_id": .string(task.id), "event": .object(["type": .string("thread-updated"), "thread": task.raw])])])
+    }
+
+    func testItemUpdatePreventsAnOlderReadFromRepopulatingTheCache() async throws {
+        let relay = ControlledRelay(), model = AppModel.testing(relay: relay)
+        let read = Task { try await model.fullItem(task, itemID: "image") }
+        await relay.waitForRequest()
+        let newer = JSON.object(["id": .string("image"), "kind": .string("image"), "text": .string("New content")])
+        model.receive(.init(connectionID: model.connectionID, event: .events([.object(["seq": .number(1), "thread_id": .string(task.id), "event": .object(["type": .string("conversation-item-updated"), "item": newer])])])))
+        await relay.complete(newer.setting("text", .string("Old content")))
+        _ = try await read.value
+        XCTAssertTrue(model.itemCache.isEmpty, "An update received during a read invalidates its captured result")
+        guard model.itemCache.isEmpty else { return }
+        let fresh = Task { try await model.fullItem(task, itemID: "image") }
+        await relay.waitForRequest()
+        await relay.complete(newer)
+        let result = try await fresh.value
+        XCTAssertEqual(result["text"].string, "New content")
+    }
+
+    func testArchiveAndRestoreKeepUnsentTextAndAttachmentsInTheSameLaunch() async throws {
+        let model = AppModel.testing(relay: ControlledRelay())
+        model.connected = true; model.tasks = [task]
+        let chat = model.chat(for: task)
+        chat.draft = "Keep my unfinished message"
+        chat.attachments = [NativeAttachment(id: "image", name: "Fixture.png", mimeType: "image/png", data: Data([1]))]
+        await model.archive(task)
+        let archived = try XCTUnwrap(model.archivedTasks.first)
+        try await model.unarchive(archived)
+        let restored = model.chat(for: try XCTUnwrap(model.task(task.id)))
+        XCTAssertEqual(restored.draft, "Keep my unfinished message")
+        XCTAssertEqual(restored.attachments.map(\.id), ["image"])
+    }
+
+    func testOlderHistoryDoesNotReplayAlreadyAppliedLiveText() async {
+        let relay = ControlledRelay(), model = AppModel.testing(relay: relay)
+        model.tasks = [task]
+        let chat = model.chat(for: task); chat.loaded = true; chat.hasOlder = true; chat.oldestID = "answer"
+        chat.transcript.items = [Message(.object(["id": .string("answer"), "kind": .string("assistant_message"), "text": .string("Hello")]))]
+        let load = Task { await model.loadChat(task, older: true) }
+        await relay.waitForRequest()
+        model.receive(.init(connectionID: model.connectionID, event: .events([.object(["seq": .number(1), "thread_id": .string(task.id), "event": .object(["type": .string("text"), "item_id": .string("answer"), "delta": .string(" 🦅")])])])))
+        let older = JSON.object(["id": .string("older"), "kind": .string("user_message"), "text": .string("Earlier request")])
+        await relay.complete(.object(["thread": task.raw, "items": .array([older]), "has_older": .bool(false)]))
+        await load.value
+        XCTAssertEqual(chat.transcript.items.map(\.id), ["older", "answer"])
+        XCTAssertEqual(chat.transcript.items.last?.text, "Hello 🦅")
+    }
+
+    func testLateArchiveListKeepsLocalRestoresAndNewArchives() async throws {
+        for restoring in [false, true] {
+            let relay = ControlledRelay(), model = AppModel.testing(relay: relay)
+            let archived = AgentTask(task.raw.setting("id", .string("archived")).setting("is_archived", .bool(true)))
+            model.connected = true; model.tasks = [task]; model.archivedTasks = [archived]
+            let load = Task { try await model.loadArchived() }
+            await relay.waitForRequest()
+            if restoring { try await model.unarchive(archived) } else { await model.archive(task) }
+            await relay.complete(.object(["threads": .array([archived.raw])]))
+            try await load.value
+            if restoring {
+                XCTAssertTrue(model.archivedTasks.isEmpty)
+                XCTAssertTrue(model.tasks.contains { $0.id == archived.id })
+            } else { XCTAssertEqual(Set(model.archivedTasks.map(\.id)), [task.id, archived.id]) }
+        }
+    }
+
+    func testEveryWaiterRejectsAMediaReadFromThePreviousConnection() async {
+        let relay = ControlledRelay(), model = AppModel.testing(relay: relay)
+        let first = Task { try await model.fullItem(task, itemID: "image") }
+        await relay.waitForRequest()
+        var joined = false
+        let second = Task { joined = true; return try await model.fullItem(task, itemID: "image") }
+        while !joined { await Task.yield() }
+        await model.useDemo()
+        await relay.complete(.object(["id": .string("image"), "kind": .string("image")]))
+        for read in [first, second] {
+            do { _ = try await read.value; XCTFail("All shared waiters must reject a previous connection's media") }
+            catch { XCTAssertTrue(error is CancellationError) }
+        }
+        XCTAssertTrue(model.itemCache.isEmpty)
     }
 
     func testDemoCancelsPendingSummariesAndRejectsOldSnapshotsAndErrors() async throws {

@@ -6,9 +6,11 @@ import Foundation
         do {
             let store = try DraftStore(session: session)
             let drafts = try await store.load()
+            let unreadable = await store.unreadableDraftCount
             draftStore = store; savedDrafts = Dictionary(drafts.map { ($0.id, $0) }, uniquingKeysWith: { _, new in new })
             pendingSelection = try await store.loadSelection()
             if case .task(let id) = pendingSelection { await relay.selectThread(id) }
+            if unreadable > 0 { error = "Some saved input couldn't be read. Other drafts have been restored." }
         } catch { self.error = "Input recovery failed: \(error.localizedDescription)" }
     }
     func scheduleInputSave(_ id: String, chat: ChatSession) {

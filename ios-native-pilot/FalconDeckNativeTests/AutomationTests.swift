@@ -16,6 +16,36 @@ private actor AutomationRelay: RelayServing {
 }
 
 @MainActor final class AutomationTests: XCTestCase {
+    func testOlderRunHistoryCannotReplaceANewerRefresh() async throws {
+        let relay = RunHistoryRelay(), model = AppModel.testing(relay: relay)
+        let first = Task { try await model.automations.loadRuns("fixture", model: model) }
+        await relay.waitForFirst()
+        try await model.automations.loadRuns("fixture", model: model)
+        await relay.finishFirst(); try await first.value
+        XCTAssertEqual(model.automations.runs["fixture"]?.first?["id"].string, "new")
+    }
+    func testLateListCannotUndoAPauseOrResurrectADeletedAutomation() async throws {
+        for deleting in [false, true] {
+            let relay = AutomationRaceRelay(deleting: deleting), model = AppModel.testing(relay: relay)
+            let store = model.automations
+            store.visible = 1; store.rows = [NativeAutomation(raw: AutomationRaceRelay.original)]
+            let refresh = Task { await store.refresh(model: model) }
+            await relay.waitForRead()
+            try await store.execute(deleting ? "automation.delete" : "automation.pause", arguments: .object(["automation_id": .string("fixture")]), revision: 1, model: model)
+            await relay.finishRead()
+            await refresh.value
+            if deleting { XCTAssertTrue(store.rows.isEmpty, "A late list must not resurrect a deleted automation") }
+            else { XCTAssertEqual(store.rows.first?.revision, 2); XCTAssertFalse(store.rows.first?.enabled ?? true) }
+            // A control change during an in-flight list must trigger another read.
+            for _ in 0..<100 {
+                if await relay.reads >= 2 { break }
+                try await Task.sleep(for: .milliseconds(10))
+            }
+            let reads = await relay.reads
+            XCTAssertEqual(reads, 2)
+            store.reset()
+        }
+    }
     private func validDraft() -> AutomationDraft {
         var draft = AutomationDraft(workspacePath: "/work/project")
         draft.name = "Daily check"; draft.instruction = "Check the tests"
@@ -81,4 +111,47 @@ private actor AutomationRelay: RelayServing {
         XCTAssertFalse(merged["conversation"]["auto_expand"]["errors"].bool)
         XCTAssertEqual(merged["workspace_order"].array, [.string("b")])
     }
+}
+
+private actor RunHistoryRelay: RelayServing {
+    private var pending: CheckedContinuation<JSON, Never>?
+    private var ready: CheckedContinuation<Void, Never>?
+    private var reads = 0
+    func events() -> AsyncStream<RelayUpdate> { AsyncStream { $0.finish() } }
+    func pair(_ input: PairingInput, connectionID: UUID) { }
+    func restore(connectionID: UUID) -> Bool { false }
+    func disconnect(forget: Bool) { }
+    func refresh() { }
+    func detail(task: AgentTask, before: String?) -> JSON { .null }
+    func call(_ method: String, params: JSON) async -> JSON {
+        reads += 1
+        if reads == 1 { return await withCheckedContinuation { pending = $0; ready?.resume(); ready = nil } }
+        return .object(["data": .array([.object(["id": .string("new")])])])
+    }
+    func waitForFirst() async { if pending == nil { await withCheckedContinuation { ready = $0 } } }
+    func finishFirst() { pending?.resume(returning: .object(["data": .array([.object(["id": .string("old")])])])); pending = nil }
+}
+
+private actor AutomationRaceRelay: RelayServing {
+    static let original = JSON.object(["id": .string("fixture"), "revision": .number(1), "state": .string("enabled"), "target": .object([:])])
+    private let deleting: Bool
+    private var pending: CheckedContinuation<JSON, Never>?
+    private var ready: CheckedContinuation<Void, Never>?
+    private(set) var reads = 0
+    init(deleting: Bool) { self.deleting = deleting }
+    func events() -> AsyncStream<RelayUpdate> { AsyncStream { $0.finish() } }
+    func pair(_ input: PairingInput, connectionID: UUID) { }
+    func restore(connectionID: UUID) -> Bool { false }
+    func disconnect(forget: Bool) { }
+    func refresh() { }
+    func detail(task: AgentTask, before: String?) -> JSON { .null }
+    func call(_ method: String, params: JSON) async -> JSON {
+        if method == "control.execute" { return .object(["ok": .bool(true), "data": deleting ? .null : Self.original.setting("revision", .number(2)).setting("state", .string("paused"))]) }
+        guard params["resource"].string == "automations" else { return .object(["data": .object([:])]) }
+        reads += 1
+        if reads == 1 { return await withCheckedContinuation { pending = $0; ready?.resume(); ready = nil } }
+        return .object(["data": .array(deleting ? [] : [Self.original.setting("revision", .number(2)).setting("state", .string("paused"))])])
+    }
+    func waitForRead() async { if pending == nil { await withCheckedContinuation { ready = $0 } } }
+    func finishRead() { pending?.resume(returning: .object(["data": .array([Self.original])])); pending = nil }
 }

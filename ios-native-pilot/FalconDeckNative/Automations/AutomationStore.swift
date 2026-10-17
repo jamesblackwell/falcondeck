@@ -18,14 +18,25 @@ final class AutomationStore {
     var error: String?
     var visible = 0
     @ObservationIgnored private var refreshTask: Task<Void, Never>?
+    @ObservationIgnored private var mutationRevision = 0
+    @ObservationIgnored private var refreshAgain = false
+    @ObservationIgnored private var runLoads: [String: UUID] = [:]
     func reset() {
         refreshTask?.cancel(); refreshTask = nil
         rows = []; settings = .null; runs = [:]; loading = false; error = nil
+        mutationRevision += 1; refreshAgain = false
+        runLoads = [:]
     }
     func refresh(model: AppModel) async {
-        guard !loading else { return }; loading = true; error = nil
-        let current = model.connectionID
-        defer { if current == model.connectionID { loading = false } }
+        guard !loading else { refreshAgain = true; return }; loading = true; error = nil
+        refreshAgain = false
+        let current = model.connectionID, startedRevision = mutationRevision
+        defer {
+            if current == model.connectionID {
+                loading = false
+                if refreshAgain { refreshAgain = false; scheduleRefresh(model: model) }
+            }
+        }
         if model.demo {
             if settings == .null { settings = .object(["enabled": .bool(true), "default_timezone": .string(TimeZone.current.identifier), "allow_elevated_automations": .bool(false)]) }
             return
@@ -35,6 +46,8 @@ final class AutomationStore {
             async let controls: JSON? = try? await model.relay.call("control.get", params: .object(["resource": .string("agent_control.settings")]))
             let (response, control) = try await (definitions, controls)
             guard current == model.connectionID else { return }
+            // A list captured before a completed mutation cannot undo that mutation.
+            guard startedRevision == mutationRevision else { refreshAgain = true; return }
             rows = response["data"].array.map { NativeAutomation(raw: $0) }; settings = control?["data"] ?? settings
         } catch { if current == model.connectionID { self.error = error.localizedDescription } }
     }
@@ -57,10 +70,19 @@ final class AutomationStore {
     }
     func loadRuns(_ id: String, model: AppModel) async throws {
         if model.demo { return }
-        let current = model.connectionID
-        let result = try await model.relay.call("control.get", params: .object(["resource": .string("automation.runs"), "id": .string(id), "limit": .number(50)]))
-        guard current == model.connectionID else { throw CancellationError() }
-        runs[id] = result["data"].array
+        let current = model.connectionID, load = UUID()
+        runLoads[id] = load
+        defer { if runLoads[id] == load { runLoads.removeValue(forKey: id) } }
+        do {
+            let result = try await model.relay.call("control.get", params: .object(["resource": .string("automation.runs"), "id": .string(id), "limit": .number(50)]))
+            guard current == model.connectionID else { throw CancellationError() }
+            guard runLoads[id] == load else { return }
+            runs[id] = result["data"].array
+        } catch {
+            guard current == model.connectionID else { throw CancellationError() }
+            guard runLoads[id] == load else { return }
+            throw error
+        }
     }
     @discardableResult func execute(_ operation: String, arguments: JSON, revision: Int? = nil, model: AppModel) async throws -> JSON {
         let current = model.connectionID
@@ -73,6 +95,7 @@ final class AutomationStore {
             if result["error"]["code"].string == "revision_conflict" { await refresh(model: model) }
             throw PilotError(result["error"]["suggested_action"].string.nonempty ?? result["error"]["message"].string.nonempty ?? "The automation could not be updated.")
         }
+        mutationRevision += 1
         let data = result["data"]
         if operation == "automation.delete" { rows.removeAll { $0.id == arguments["automation_id"].string } }
         else if data["target"] != .null, !data["id"].string.isEmpty {

@@ -21,6 +21,30 @@ private actor FolderRelay: RelayServing {
 @MainActor final class FolderDisclosureTests: XCTestCase {
     private let folder = ProjectFolder(raw: .object(["id": .string("f"), "workspace_id": .string("p"), "collapsed": .bool(true)]))
     private func preferences(collapsed: Bool) -> JSON { .object(["project_folders": .array([folder.raw.setting("collapsed", .bool(collapsed))])]) }
+    func testPreferenceAndFolderWritesSerializeTheirFullSnapshotResponses() async throws {
+        let relay = PreferenceRaceRelay(), model = AppModel.testing(relay: relay)
+        let first = Task { try await model.updatePreferences(.object(["workspace_order": .array([.string("p")])])) }
+        await relay.waitForFirst()
+        var joined = false
+        let second = Task { joined = true; try await model.folderMutation(projectID: "p", action: "set_collapsed", folderID: "f", collapsed: false) }
+        while !joined { await Task.yield() }
+        for _ in 0..<5 { await Task.yield() }
+        let before = await relay.calls
+        XCTAssertEqual(before, 1, "Folder mutations and other preference writes must share one writer")
+        await relay.finishFirst()
+        try await first.value; try await second.value
+        XCTAssertEqual(model.preferences["project_folders"].array.first?["collapsed"], .bool(false))
+        XCTAssertEqual(model.preferences["workspace_order"].array, [.string("p")])
+    }
+    func testLivePreferencesWinOverAnOlderWriteResponse() async throws {
+        let relay = PreferenceRaceRelay(), model = AppModel.testing(relay: relay)
+        let save = Task { try await model.updatePreferences(.object(["workspace_order": .array([.string("p")])])) }
+        await relay.waitForFirst()
+        let latest = JSON.object(["workspace_order": .array([.string("p")]), "updated_on_desktop": .bool(true)])
+        model.receive(.init(connectionID: model.connectionID, event: .events([.object(["seq": .number(1), "event": .object(["type": .string("preferences-updated"), "preferences": latest])])])))
+        await relay.finishFirst(); try await save.value
+        XCTAssertEqual(model.preferences, latest)
+    }
     private func request(_ relay: FolderRelay) async -> JSON {
         for _ in 0..<1_000 {
             if let params = await relay.requested() { return params }
@@ -76,4 +100,24 @@ private actor FolderRelay: RelayServing {
         XCTAssertNil(model.error)
         XCTAssertTrue(state.overrides.isEmpty)
     }
+}
+
+private actor PreferenceRaceRelay: RelayServing {
+    private var pending: CheckedContinuation<JSON, Never>?
+    private var ready: CheckedContinuation<Void, Never>?
+    private(set) var calls = 0
+    func events() -> AsyncStream<RelayUpdate> { AsyncStream { $0.finish() } }
+    func pair(_ input: PairingInput, connectionID: UUID) { }
+    func restore(connectionID: UUID) -> Bool { false }
+    func disconnect(forget: Bool) { }
+    func refresh() { }
+    func detail(task: AgentTask, before: String?) -> JSON { .null }
+    func call(_ method: String, params: JSON) async -> JSON {
+        calls += 1
+        if calls == 1 { return await withCheckedContinuation { pending = $0; ready?.resume(); ready = nil } }
+        return Self.first.setting("project_folders", .array([.object(["id": .string("f"), "collapsed": .bool(false)])]))
+    }
+    private static let first = JSON.object(["workspace_order": .array([.string("p")])])
+    func waitForFirst() async { if pending == nil { await withCheckedContinuation { ready = $0 } } }
+    func finishFirst() { pending?.resume(returning: Self.first); pending = nil }
 }

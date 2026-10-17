@@ -94,7 +94,7 @@ import XCTest
         let session = session(), root = try root(), store = try SessionCacheStore(session: session, root: root)
         try await store.save(input())
         let defaults = UserDefaults(suiteName: "NativeCacheHydrationTests")!
-        let model = AppModel(relay: CacheHistoryRelay(), push: NativePushNotifications(defaults: defaults), notifications: LocalNotifications(defaults: defaults), sessionLoader: { session }, sessionCacheRoot: root)
+        let model = AppModel(relay: CacheHistoryRelay(), voice: VoiceRecorder(defaults: defaults), push: NativePushNotifications(defaults: defaults), notifications: LocalNotifications(defaults: defaults), sessionLoader: { session }, sessionCacheRoot: root)
         model.pendingSelection = .task("t")
         await model.restorePreview()
         XCTAssertEqual(model.projects.first?.id, "p")

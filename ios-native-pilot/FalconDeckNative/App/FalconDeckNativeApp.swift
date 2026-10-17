@@ -4,8 +4,22 @@ import SwiftUI
 struct FalconDeckNativeApp: App {
     @UIApplicationDelegateAdaptor(NativeAppDelegate.self) private var appDelegate
     @State private var model = makeModel()
-    private static func makeModel() -> AppModel {
+    static var isUnitTestHost: Bool {
         #if DEBUG
+        ProcessInfo.processInfo.environment["XCTestBundlePath"]?.hasSuffix("/FalconDeckNativeTests.xctest") == true
+        #else
+        false
+        #endif
+    }
+    static func makeModel() -> AppModel {
+        #if DEBUG
+        if isUnitTestHost {
+            let suite = "NativeUnitTestHost", defaults = UserDefaults(suiteName: suite)!
+            defaults.removePersistentDomain(forName: suite)
+            let model = AppModel(relay: UnavailablePreviewRelay(), voice: VoiceRecorder(defaults: defaults), push: NativePushNotifications(defaults: defaults), notifications: LocalNotifications(defaults: defaults), sessionLoader: { nil })
+            model.restoringSession = false
+            return model
+        }
         if ProcessInfo.processInfo.arguments.contains(where: { $0.hasPrefix("--loading-preview=") }) {
             let defaults = UserDefaults(suiteName: "NativeLoadingPreview")!
             defaults.removePersistentDomain(forName: "NativeLoadingPreview")
@@ -30,7 +44,7 @@ struct FalconDeckNativeApp: App {
                 .environment(model)
                 .preferredColorScheme(NativeAppearance.shared.colorScheme)
                 .tint(FD.accent)
-                .task { await model.start() }
+                .task { if !Self.isUnitTestHost { await model.start() } }
                 .onOpenURL { url in
                     if url.host == "speech" { if model.voice.pendingURL != nil { model.showSpeechSettings = true } }
                     else { Task { await model.receivePairingPayload(url.absoluteString) } }

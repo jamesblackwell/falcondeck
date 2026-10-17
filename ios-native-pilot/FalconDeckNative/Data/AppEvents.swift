@@ -33,6 +33,7 @@ import Foundation
             operationalConditions = value["operational_conditions"].array
             tokenUsage = value["thread_token_usage"] == .null ? .object([:]) : value["thread_token_usage"]
             hasLiveSnapshot = true
+            synchronizePush()
             schedulePreviewSave()
             refreshedAt = .now; error = nil; demo = false
             Task { await self.openPendingNotification() }
@@ -48,6 +49,7 @@ import Foundation
         case .rebase(let events):
             for event in events { applyEnvelope(event, rebase: true) }
         case .error(let message):
+            if claimingPairing { pairingNeedsReconnect = true }
             error = message; connected = false; scheduleReconnect()
             connectionLog.append(ConnectionLogEntry(message: "Connection request failed"))
             if connectionLog.count > 100 { connectionLog.removeFirst(connectionLog.count - 100) }
@@ -68,6 +70,7 @@ import Foundation
             let task = AgentTask(raw)
             let current = pendingSummaries[task.id] ?? active.first(where: { $0.id == task.id })?.raw ?? archived.first(where: { $0.id == task.id })?.raw
             if let current, !previewTaskIDs.contains(task.id), TaskSummaryOrder.isStale(raw, comparedTo: current) { continue }
+            if archivedLoadID != nil { archivedTouched.insert(task.id) }
             previewTaskIDs.remove(task.id)
             if task.archived {
                 active.removeAll { $0.id == task.id }
@@ -94,7 +97,7 @@ import Foundation
             if !rebase, old["status"].string == "running", ["idle", "error"].contains(raw["status"].string), (!foreground ? !push.registered : selection != .task(id)), preferences["notifications"]["enabled"] != .bool(false) {
                 let failed = raw["status"].string == "error"
                 if preferences["notifications"][failed ? "notify_on_error" : "notify_on_turn_complete"] != .bool(false) {
-                    notifications.announce(title: raw["title"].string.nonempty ?? "FalconDeck", body: failed ? raw["last_error"].string : raw["last_message_preview"].string.nonempty ?? "Task completed", taskID: id)
+                    announceTask(title: raw["title"].string.nonempty ?? "FalconDeck", body: failed ? raw["last_error"].string : raw["last_message_preview"].string.nonempty ?? "Task completed", taskID: id, workspaceID: raw["workspace_id"].string)
                 }
             }
             stageSummary(raw)
@@ -117,7 +120,7 @@ import Foundation
         case "interactive-request":
             let request = event["request"]
             if !rebase, !requests.contains(where: { $0["request_id"] == request["request_id"] }), (!foreground ? !push.registered : selection != .task(id)), preferences["notifications"]["enabled"] != .bool(false), preferences["notifications"]["notify_on_input_required"] != .bool(false) {
-                notifications.announce(title: "Input needed", body: request["title"].string, taskID: id)
+                announceTask(title: "Input needed", body: request["title"].string, taskID: id, workspaceID: request["workspace_id"].string)
             }
             requests.removeAll { $0["request_id"] == request["request_id"] }; requests.append(request)
         case "turn-end":
@@ -129,6 +132,7 @@ import Foundation
             let item = event["item"]
             let cacheKey = "\(connectionID):\(id):\(item["id"].string)"
             itemCache.removeValue(forKey: cacheKey); itemCacheOrder.removeAll { $0 == cacheKey }
+            itemLoads.removeValue(forKey: cacheKey)
             if item["kind"].string == "interactive_request", item["resolved"].bool {
                 requests.removeAll { $0["request_id"] == item["request"]["request_id"] }
             }

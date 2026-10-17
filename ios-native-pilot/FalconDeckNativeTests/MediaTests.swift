@@ -6,6 +6,18 @@ import XCTest
 @testable import FalconDeckNative
 
 @MainActor final class MediaTests: XCTestCase {
+    func testInProgressToolOutputIsFetchedAgainUntilItIsFinal() async throws {
+        let relay = ItemSnapshotRelay(), model = AppModel.testing(relay: relay)
+        let task = AgentTask(.object(["id": .string("task"), "workspace_id": .string("project")]))
+        let partial = try await model.fullItem(task, itemID: "tool")
+        XCTAssertEqual(partial["output"].string, "Partial output")
+        let final = try await model.fullItem(task, itemID: "tool")
+        XCTAssertEqual(final["output"].string, "Complete output")
+        let cached = try await model.fullItem(task, itemID: "tool")
+        XCTAssertEqual(cached, final)
+        let count = await relay.requests
+        XCTAssertEqual(count, 2)
+    }
     func testImageSharingNegotiatesTheConcreteFormatWithoutReencoding() async throws {
         let image = UIGraphicsImageRenderer(size: CGSize(width: 8, height: 8)).image { context in
             UIColor.systemGreen.setFill(); context.fill(CGRect(x: 0, y: 0, width: 8, height: 8))
@@ -108,7 +120,9 @@ import XCTest
     }
 
     func testRecordingInterruptionFinalizesListeningAndRetainsRecovery() {
-        let recorder = VoiceRecorder()
+        let suite = "NativeRecordingInterruptionTests-\(UUID())", defaults = UserDefaults(suiteName: suite)!
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let recorder = VoiceRecorder(defaults: defaults)
         let pending = recorder.pendingURL
         recorder.recording = true
         recorder.interrupted()
@@ -130,6 +144,20 @@ import XCTest
         XCTAssertTrue(spoken.contains("Hello James"))
         XCTAssertFalse(spoken.contains("https://"))
         XCTAssertFalse(spoken.contains("let x"))
+    }
+}
+
+private actor ItemSnapshotRelay: RelayServing {
+    private(set) var requests = 0
+    func events() -> AsyncStream<RelayUpdate> { AsyncStream { $0.finish() } }
+    func pair(_ input: PairingInput, connectionID: UUID) { }
+    func restore(connectionID: UUID) -> Bool { false }
+    func disconnect(forget: Bool) { }
+    func refresh() { }
+    func detail(task: AgentTask, before: String?) -> JSON { .null }
+    func call(_ method: String, params: JSON) -> JSON {
+        requests += 1
+        return .object(["id": params["item_id"], "kind": .string("tool_call"), "status": .string(requests == 1 ? "in_progress" : "completed"), "output": .string(requests == 1 ? "Partial output" : "Complete output")])
     }
 }
 

@@ -87,13 +87,18 @@ extension Project {
 
     func loadArchived() async throws {
         if demo { return }
-        let current = connectionID
+        let current = connectionID, load = UUID()
+        archivedLoadID = load; archivedTouched = []
+        defer { if archivedLoadID == load { archivedLoadID = nil; archivedTouched = [] } }
         let snapshot = try await relay.call("snapshot.current", params: .object([
             "include_archived_threads": .bool(true), "include_thread_plans": .bool(false), "include_thread_diffs": .bool(false),
             "include_agent_skills": .bool(false), "include_workspace_skills": .bool(false)
         ]))
-        guard current == connectionID else { return }
-        archivedTasks = snapshot["threads"].array.filter { $0["is_archived"].bool }.map(AgentTask.init)
+        guard current == connectionID, archivedLoadID == load else { return }
+        let incoming = snapshot["threads"].array.filter { $0["is_archived"].bool && !$0["id"].string.isEmpty }.map(AgentTask.init)
+        var rows = Dictionary(incoming.map { ($0.id, $0) }, uniquingKeysWith: { _, new in new })
+        for id in archivedTouched { rows[id] = archivedTasks.first { $0.id == id } }
+        archivedTasks = rows.values.sorted { $0.updatedAt > $1.updatedAt }
     }
 
     func unarchive(_ task: AgentTask) async throws {

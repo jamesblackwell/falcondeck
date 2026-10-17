@@ -5,7 +5,11 @@ import Foundation
         let current = connectionID
         let key = "\(current):\(task.id):\(itemID)"
         if let cached = itemCache[key] { return cached }
-        if let load = itemLoads[key] { return try await load.value }
+        if let load = itemLoads[key] {
+            let result = try await load.task.value
+            guard current == connectionID else { throw CancellationError() }
+            return result
+        }
         let relay = relay, gate = mediaGate
         let load = Task {
             await gate.acquire()
@@ -15,13 +19,18 @@ import Foundation
                 await gate.release(); return value
             } catch { await gate.release(); throw error }
         }
-        itemLoads[key] = load
-        defer { itemLoads.removeValue(forKey: key) }
+        let loadID = UUID()
+        itemLoads[key] = (loadID, load)
+        defer { if itemLoads[key]?.id == loadID { itemLoads.removeValue(forKey: key) } }
         let result = try await load.value
         guard current == connectionID else { throw CancellationError() }
+        // A live update invalidates even a read that is still in flight. Its
+        // old result must neither repopulate the cache nor remove a newer load.
+        guard itemLoads[key]?.id == loadID else { return result }
         // Running tools are not immutable; a later tap must fetch their final
         // output rather than retaining the first partial response.
-        if result["kind"].string == "tool_call", ["running", "pending"].contains(result["status"].string) { return result }
+        let item = Message(result)
+        if item.streaming || item.kind == "tool_call" && (item.running || result["status"].string == "pending") { return result }
         // Full media is an in-memory display cache, never a conversation store.
         if itemCache.count >= 4, let oldest = itemCacheOrder.first {
             itemCache.removeValue(forKey: oldest); itemCacheOrder.removeFirst()

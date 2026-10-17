@@ -63,6 +63,7 @@ extension RelayServing {
 actor RelayClient: RelayServing {
     private let log = Logger(subsystem: "com.falcondeck.pilot.native", category: "relay")
     private let http = URLSession(configuration: .ephemeral)
+    private let writer = RelayWriter()
     private var socket: URLSessionWebSocketTask?
     private var reader: Task<Void, Never>?
     private var heartbeat: Task<Void, Never>?
@@ -361,13 +362,15 @@ actor RelayClient: RelayServing {
                 do {
                     guard current == self.generation else { throw CancellationError() }
                     try await self.send(frame, requestID: id)
+                    guard current == self.generation, self.pending[id] != nil else { return }
+                    // The daemon cannot act until the acknowledged upload is
+                    // complete. Give its response a separate deadline, as well
+                    // as the bounded transport deadline below.
+                    let seconds = ["speech.transcribe", "speech.synthesize", "turn.start", "thread.item"].contains(method) ? 120 : 35
+                    try await Task.sleep(for: .seconds(seconds))
+                    self.finish(id, error: PilotError("The computer took too long to respond. Pull to refresh or reconnect."))
                 }
                 catch { self.finish(id, error: error) }
-            }
-            Task {
-                let seconds = ["speech.transcribe", "speech.synthesize", "turn.start", "thread.item"].contains(method) ? 120 : 30
-                try? await Task.sleep(for: .seconds(seconds))
-                self.finish(id, error: PilotError("The computer took too long to respond. Pull to refresh or reconnect."))
             }
         }
     }
@@ -391,16 +394,19 @@ actor RelayClient: RelayServing {
         let text = try value.wireText()
         let bytes = Data(text.utf8)
         guard bytes.count <= 40 * 1024 * 1024 else { throw PilotError("Message exceeds the relay’s transport limit.") }
-        if bytes.count <= 11 * 1024 { try await socket.send(.string(text)); return }
+        if bytes.count <= 11 * 1024 { try await writer.send(text, to: socket); return }
         guard !bulkSending else { throw PilotError("Another large message is still sending. Wait a moment before sending again.") }
         bulkSending = true
         let current = generation
+        let deadline = ContinuousClock.now.advanced(by: .seconds(900))
         transferID += 1
         let id = transferID
         defer { if current == generation { bulkSending = false } }
         do {
             for (index, offset) in stride(from: 0, to: bytes.count, by: 11 * 1024).enumerated() {
                 guard current == generation else { throw CancellationError() }
+                guard ContinuousClock.now < deadline else { throw PilotError("The upload took too long. Try a smaller attachment.") }
+                let timeout = min(Duration.seconds(25), ContinuousClock.now.duration(to: deadline))
                 if let requestID, pending[requestID] == nil { throw CancellationError() }
                 let part = bytes.subdata(in: offset..<min(offset + 11 * 1024, bytes.count))
                 let frame = JSON.object(["type": .string("transport-chunk"), "id": .number(Double(id)), "index": .number(Double(index)), "total": .number(Double(bytes.count)), "data": .string(part.base64EncodedString())])
@@ -408,18 +414,18 @@ actor RelayClient: RelayServing {
                 try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
                     acknowledgements[ackKey] = continuation
                     Task {
-                        do { try await socket.send(.string(frame.wireText())) }
+                        do { try await self.writer.send(frame.wireText(), to: socket, timeout: timeout) }
                         catch { self.acknowledgements.removeValue(forKey: ackKey)?.resume(throwing: error) }
                     }
                     Task {
-                        try? await Task.sleep(for: .seconds(25))
+                        try? await Task.sleep(for: timeout)
                         self.acknowledgements.removeValue(forKey: ackKey)?.resume(throwing: PilotError("The relay did not acknowledge this message."))
                     }
                 }
             }
         } catch {
             if current == generation {
-                try? await socket.send(.string(JSON.object(["type": .string("transport-cancel"), "id": .number(Double(id))]).wireText()))
+                try? await writer.send(JSON.object(["type": .string("transport-cancel"), "id": .number(Double(id))]).wireText(), to: socket, timeout: .seconds(2))
             }
             throw error
         }
@@ -436,6 +442,40 @@ actor RelayClient: RelayServing {
             throw PilotError(value?["error"].string.nonempty ?? "The relay could not complete the connection. Check the address and pairing link.")
         }
         return value
+    }
+}
+
+/// Foundation can queue a write indefinitely before a WebSocket handshake.
+/// Use its callback API so the timeout can resume the caller and close that
+/// socket without waiting for a suspended send task to honor cancellation.
+actor RelayWriter {
+    private var pending: [UUID: (continuation: CheckedContinuation<Void, Error>, timer: Task<Void, Never>)] = [:]
+
+    func send(_ text: String, to socket: URLSessionWebSocketTask, timeout: Duration = .seconds(25)) async throws {
+        try await perform(timeout: timeout, start: { completion in
+            socket.send(.string(text), completionHandler: completion)
+        }, cancel: { socket.cancel(with: .goingAway, reason: nil) })
+    }
+
+    func perform(timeout: Duration, start: @Sendable (@escaping @Sendable (Error?) -> Void) -> Void, cancel: @escaping @Sendable () -> Void) async throws {
+        let id = UUID()
+        try await withCheckedThrowingContinuation { continuation in
+            let timer = Task {
+                do { try await Task.sleep(for: timeout) } catch { return }
+                guard self.pending[id] != nil else { return }
+                cancel()
+                self.finish(id, error: PilotError("The relay took too long to accept this message. Reconnect to try again."))
+            }
+            pending[id] = (continuation, timer)
+            start { error in Task { await self.finish(id, error: error) } }
+        }
+    }
+
+    private func finish(_ id: UUID, error: Error?) {
+        guard let write = pending.removeValue(forKey: id) else { return }
+        write.timer.cancel()
+        if let error { write.continuation.resume(throwing: error) }
+        else { write.continuation.resume() }
     }
 }
 

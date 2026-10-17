@@ -100,6 +100,21 @@ final class PresentationTests: XCTestCase {
 }
 
 @MainActor final class DraftRecoveryTests: XCTestCase {
+    func testOneDamagedDraftDoesNotHideOtherRecoverableInput() async throws {
+        let root = FileManager.default.temporaryDirectory.appending(path: UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let session = SavedSession(relay: URL(string: "https://relay.example")!, sessionID: "fixture", deviceID: "device", token: "unused", secret: Data(repeating: 7, count: 32), daemonKey: "unused", daemonIdentity: "unused")
+        let store = try DraftStore(session: session, root: root)
+        try await store.save(SavedDraft(id: "damaged", text: "Older input", attachments: [], modelID: "", effort: "", provider: "codex", overrides: [:]))
+        let files = FileManager.default.enumerator(at: root, includingPropertiesForKeys: nil)!.allObjects.compactMap { $0 as? URL }
+        let damaged = try XCTUnwrap(files.first { $0.pathExtension == "draft" })
+        try await store.save(SavedDraft(id: "healthy", text: "Keep this input", attachments: [], modelID: "", effort: "", provider: "codex", overrides: [:]))
+        try Data("Damaged encrypted file".utf8).write(to: damaged)
+        let loaded = try await store.load()
+        XCTAssertEqual(loaded.map(\.id), ["healthy"])
+        XCTAssertEqual(loaded.first?.text, "Keep this input")
+        XCTAssertTrue(FileManager.default.fileExists(atPath: damaged.path), "Unreadable input must remain available for recovery")
+    }
     func testDraftStorageIsEncryptedAndIsolatedByPairing() async throws {
         let root = FileManager.default.temporaryDirectory.appending(path: UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: root) }

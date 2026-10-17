@@ -50,8 +50,11 @@ extension AgentTask {
         guard provider != source.provider, let project = projects.first(where: { $0.id == source.projectID }) else { return }
         let current = connectionID, sourceSelection = selection, chat = chat(for: source)
         guard !chat.sending else { return }; chat.sending = true; defer { chat.sending = false }
-        if !chat.loaded { await loadChat(source) }
-        guard chat.loaded else { throw PilotError(chat.error ?? "Couldn't load the source conversation.") }
+        if !chat.loaded || chat.needsRefresh || chat.transcript.needsRecovery { await loadChat(source) }
+        guard current == connectionID, chats[source.id] === chat else { throw CancellationError() }
+        guard chat.loaded, !chat.needsRefresh, !chat.transcript.needsRecovery, !chat.loading, chat.historyError == nil else {
+            throw PilotError(chat.historyError ?? "Wait for this conversation to finish loading before handing it off.")
+        }
         var items = chat.transcript.items, oldest = chat.oldestID, partial = chat.hasOlder
         var bytes = items.reduce(0) { $0 + $1.text.utf8.count }
         if !demo {

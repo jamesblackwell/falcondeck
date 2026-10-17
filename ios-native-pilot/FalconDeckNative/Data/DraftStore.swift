@@ -23,6 +23,7 @@ struct SavedDraft: Codable, Sendable {
 actor DraftStore {
     private let directory: URL
     private let key: SymmetricKey
+    private(set) var unreadableDraftCount = 0
     init(session: SavedSession, root: URL? = nil) throws {
         let root = try root ?? FileManager.default.url(for: .applicationSupportDirectory, in: .userDomainMask, appropriateFor: nil, create: true).appending(path: "InputDrafts", directoryHint: .isDirectory)
         let namespace = Self.hash(session.relay.absoluteString + ":" + session.sessionID + ":" + session.deviceID)
@@ -34,8 +35,14 @@ actor DraftStore {
         try location.setResourceValues(values)
     }
     func load() throws -> [SavedDraft] {
-        try FileManager.default.contentsOfDirectory(at: directory, includingPropertiesForKeys: nil).filter { $0.pathExtension == "draft" }.map { url in
-            try JSONDecoder().decode(SavedDraft.self, from: decrypt(Data(contentsOf: url)))
+        unreadableDraftCount = 0
+        return try FileManager.default.contentsOfDirectory(at: directory, includingPropertiesForKeys: nil).filter { $0.pathExtension == "draft" }.compactMap { url in
+            do { return try JSONDecoder().decode(SavedDraft.self, from: decrypt(Data(contentsOf: url))) }
+            catch {
+                // Keep damaged input on disk, but recover the independent healthy drafts.
+                unreadableDraftCount += 1
+                return nil
+            }
         }
     }
     func save(_ draft: SavedDraft) throws {

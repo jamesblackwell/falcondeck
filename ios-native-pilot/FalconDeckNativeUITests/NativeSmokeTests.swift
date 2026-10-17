@@ -51,7 +51,7 @@ import XCTest
     }
     func testLoadedConversationCanBeSharedOffline() {
         let app = launch("offline")
-        XCTAssertFalse(app.buttons["send-message"].isEnabled)
+        XCTAssertFalse(app.buttons["stop-task"].isEnabled)
         app.buttons["task-menu"].tap()
         let share = app.buttons["share-conversation"]
         for _ in 0..<3 where !share.isHittable { app.swipeUp() }

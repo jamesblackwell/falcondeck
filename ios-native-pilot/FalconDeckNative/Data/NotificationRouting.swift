@@ -1,13 +1,20 @@
 import Foundation
 
 @MainActor extension AppModel {
+    func announceTask(title: String, body: String, taskID: String, workspaceID: String) {
+        guard !demo, let session = try? sessionLoader(),
+              let destination = NotificationDestination(userInfo: ["sessionId": session.sessionID, "workspaceId": workspaceID, "threadId": taskID]) else { return }
+        notifications.announce(title: title, body: body, destination: destination)
+    }
     func synchronizePush() {
-        guard !demo, hasSession else { return }
+        // Cached preferences are rendering hints, not permission to change a
+        // remote registration. Wait for this connection's authoritative state.
+        guard !demo, hasSession, hasLiveSnapshot else { return }
         let session = try? sessionLoader()
         let eventNotifications = preferences["notifications"]["enabled"] != .bool(false)
         let current = connectionID
         Task {
-            guard current == connectionID, hasSession, !demo else { return }
+            guard current == connectionID, hasSession, hasLiveSnapshot, !demo else { return }
             await push.configure(session: session, eventNotifications: eventNotifications)
         }
     }

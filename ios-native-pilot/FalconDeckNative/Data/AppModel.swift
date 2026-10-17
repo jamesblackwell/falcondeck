@@ -28,7 +28,6 @@ final class AppModel {
         self.relay = relay
         self.push = push; self.notifications = notifications; self.sessionLoader = sessionLoader; self.sessionCacheRoot = sessionCacheRoot
         NativeSpeechBridge.handler = { [weak self] action in await self?.speechAction(action) }
-        notifications.openTask = { [weak self] id in Task { await self?.openTask(id) } }
         notifications.openDestination = { [weak self] destination in
             self?.pendingNotification = destination
             Task { await self?.openPendingNotification() }
@@ -74,6 +73,7 @@ final class AppModel {
     var pairingPending = false
     var pairingRelayReview: PairingRelayReview?
     @ObservationIgnored var claimingPairing = false
+    @ObservationIgnored var pairingNeedsReconnect = false
     @ObservationIgnored var queuedPairingPayload: (text: String, relayURL: String)?
     var selection: Destination? = .projects {
         didSet {
@@ -90,18 +90,22 @@ final class AppModel {
     @ObservationIgnored var savedDrafts: [String: SavedDraft] = [:]
     @ObservationIgnored var draftSaves: [String: Task<Void, Never>] = [:]
     @ObservationIgnored var pendingSelection: Destination?
-    var preferences = JSON.object([:]) { didSet { synchronizePush(); schedulePreviewSave() } }
+    var preferences = JSON.object([:]) { didSet { preferencesRevision += 1; synchronizePush(); schedulePreviewSave() } }
+    @ObservationIgnored var preferencesRevision = 0
+    @ObservationIgnored var preferenceWrite: (id: UUID, task: Task<Void, Error>)?
     var requests: [JSON] = []
     var serviceNotices: [JSON] = []
     var operationalConditions: [JSON] = []
     var tokenUsage = JSON.object([:])
     var archivedTasks: [AgentTask] = []
+    @ObservationIgnored var archivedLoadID: UUID?
+    @ObservationIgnored var archivedTouched: Set<String> = []
     var readSuppression: [String: Int] = [:]
     var taskOptionsID: String?
     var showSpeechSettings = false
     var connectionLog: [ConnectionLogEntry] = []
     @ObservationIgnored var mediaGate = MediaTransferGate()
-    @ObservationIgnored var itemLoads: [String: Task<JSON, Error>] = [:]
+    @ObservationIgnored var itemLoads: [String: (id: UUID, task: Task<JSON, Error>)] = [:]
     @ObservationIgnored var itemCache: [String: JSON] = [:]
     @ObservationIgnored var itemCacheOrder: [String] = []
     var chats: [String: ChatSession] = [:]
@@ -164,7 +168,8 @@ final class AppModel {
             voice.cancelTranscription(); readAloud.stop()
         }
         realtimeAudio.reset(); automations.reset(); extensions.reset(); composerCatalogs = [:]
-        connectionID = UUID(); lastEventSeq = 0; connected = false; syncIndex = nil; taskPageLoads = []
+        connectionID = UUID(); lastEventSeq = 0; connected = false; syncIndex = nil; taskPageLoads = []; pairingNeedsReconnect = false
+        preferenceWrite = nil; archivedLoadID = nil; archivedTouched = []
         itemCache = [:]; itemCacheOrder = []; itemLoads = [:]; mediaGate = MediaTransferGate()
         summaryFlush?.cancel(); summaryFlush = nil; pendingSummaries = [:]
         for chat in chats.values {
@@ -180,8 +185,11 @@ final class AppModel {
 
     func pair(relayURL: String, approvedRelay: Bool = false) async {
         guard !busy, !pairingPending else { return }
-        claimingPairing = true; busy = true; error = nil; queuedPairingPayload = nil
-        defer { claimingPairing = false; busy = false }
+        claimingPairing = true; pairingNeedsReconnect = false; busy = true; error = nil; queuedPairingPayload = nil
+        defer {
+            claimingPairing = false; busy = false
+            if pairingNeedsReconnect { pairingNeedsReconnect = false; scheduleReconnect() }
+        }
         let previousSession = try? sessionLoader()
         var current: UUID?
         do {
@@ -215,6 +223,7 @@ final class AppModel {
             // Once a claim has saved credentials, retry that connection instead
             // of submitting the single-use pairing code a second time.
             pairingPending = current != nil && saved != nil && (previousSession == nil || saved?.deviceID != previousSession?.deviceID || saved?.sessionID != previousSession?.sessionID || saved?.relay != previousSession?.relay)
+            if pairingPending { scheduleReconnect() }
         }
     }
 
@@ -352,7 +361,7 @@ final class AppModel {
             // request. Reopening then shares the result instead of waiting on
             // an in-flight load whose response would otherwise be discarded.
             guard current == connectionID, chats[task.id] === chat, chat.loadID == loadID else { return }
-            guard !chat.bufferOverflowed else { throw PilotError("Too many live updates arrived while loading history. Refresh this task to recover.") }
+            guard older || !chat.bufferOverflowed else { throw PilotError("Too many live updates arrived while loading history. Refresh this task to recover.") }
             let items = page["items"].array.map(Message.init)
             if older { chat.transcript.prepend(items) }
             else {
@@ -363,7 +372,9 @@ final class AppModel {
                 chat.transcript = Transcript(items: items + pending, revision: revision + 1)
             }
             if !older { chat.transcript.needsRecovery = false }
-            for event in chat.bufferedEvents { chat.transcript.apply(event) }
+            // Prepending preserves the live transcript, where these events have
+            // already been applied. Only replacement history needs a replay.
+            if !older { for event in chat.bufferedEvents { chat.transcript.apply(event) } }
             chat.bufferedEvents = []
             chat.hasOlder = page["has_older"].bool
             chat.oldestID = page["oldest_item_id"].string.nonempty ?? chat.transcript.items.first?.id
@@ -379,19 +390,30 @@ final class AppModel {
         }
     }
 
-    func send(_ task: AgentTask, textOverride: String? = nil) async {
+    func send(_ task: AgentTask, textOverride: String? = nil, initialInput: SavedDraft? = nil) async {
         let current = connectionID
         let chat = chat(for: task)
-        let consumesComposer = textOverride == nil
-        let text = (textOverride ?? chat.draft).trimmingCharacters(in: .whitespacesAndNewlines)
-        let selectedModel = chat.modelID, selectedEffort = chat.effort
+        let id = "user-\(UUID().uuidString)"
+        var initialInputHandled = false
+        defer {
+            if let initialInput, !initialInputHandled {
+                // A first send can be rejected before creating an optimistic
+                // row (for example, if the connection dropped during creation).
+                // Its source draft has already been consumed by the caller.
+                restoreSubmission(task, chat: chat, id: id, text: initialInput.text, attachments: initialInput.attachments)
+            }
+        }
+        let consumesComposer = textOverride == nil && initialInput == nil
+        let recoversInput = consumesComposer || initialInput != nil
+        let text = (initialInput?.text ?? textOverride ?? chat.draft).trimmingCharacters(in: .whitespacesAndNewlines)
+        let selectedModel = initialInput?.modelID ?? chat.modelID, selectedEffort = initialInput?.effort ?? chat.effort
         let models = projects.first(where: { $0.id == task.projectID })?.models(for: task.provider) ?? []
         let activeModel = models.first { $0.id == selectedModel } ?? models.first { $0.raw["is_default"].bool }
-        let turnSettings = NativeRequest.turnSettings(chat.overrides, task: task, model: activeModel)
-        var selectedOverrides = chat.overrides
+        let turnSettings = NativeRequest.turnSettings(initialInput?.overrides ?? chat.overrides, task: task, model: activeModel)
+        var selectedOverrides = initialInput?.overrides ?? chat.overrides
         if selectedOverrides["service_tier"] != nil { selectedOverrides["service_tier"] = turnSettings["service_tier"] }
-        let attachments = consumesComposer ? chat.attachments : []
-        let recoveryText = consumesComposer ? text : ""
+        let attachments = initialInput?.attachments ?? (consumesComposer ? chat.attachments : [])
+        let recoveryText = recoversInput ? text : ""
         guard !task.isDraft || consumesComposer else { return }
         guard !text.isEmpty || !attachments.isEmpty, !chat.sending, !chat.preparingAttachments, demo || connected else { return }
         do {
@@ -403,31 +425,34 @@ final class AppModel {
             defer { chat.sending = false }
             do {
                 guard let project = projects.first(where: { $0.id == task.projectID }) else { throw PilotError("Select a project first.") }
-                let created = try await createTask(project: project, provider: chat.provider, modelID: selectedModel, folderID: task.raw["folder_id"].string.nonempty, overrides: selectedOverrides)
+                let input = SavedDraft(id: task.id, text: text, attachments: attachments, modelID: selectedModel, effort: selectedEffort, provider: chat.provider, overrides: selectedOverrides)
+                let created = try await createTask(project: project, provider: chat.provider, modelID: selectedModel, folderID: task.raw["folder_id"].string.nonempty, overrides: selectedOverrides, initialInput: input)
                 guard current == connectionID else { return }
-                let destination = self.chat(for: created)
-                destination.draft = text; destination.attachments = attachments; destination.modelID = selectedModel; destination.effort = selectedEffort; destination.overrides = selectedOverrides
                 if chat.draft.trimmingCharacters(in: .whitespacesAndNewlines) == text { chat.draft = "" }
                 chat.attachments.removeAll { attachment in attachments.contains { $0.id == attachment.id } }
-                await send(created)
+                // Submit the captured first input without consuming any newer
+                // edits made through the new task's sidebar entry.
+                await send(created, initialInput: input)
             } catch { if current == connectionID { chat.error = error.localizedDescription } }
             return
         }
-        if consumesComposer && (text == "/compact" || text.hasPrefix("/compact ")) {
+        if recoversInput && (text == "/compact" || text.hasPrefix("/compact ")) {
             defer { chat.sending = false }
             do {
                 guard attachments.isEmpty else { throw PilotError("Remove attachments before compacting.") }
-                try await compact(task, instructions: String(text.dropFirst(8)).trimmingCharacters(in: .whitespacesAndNewlines)); if chat.draft.trimmingCharacters(in: .whitespacesAndNewlines) == text { chat.draft = "" } }
+                try await compact(task, instructions: String(text.dropFirst(8)).trimmingCharacters(in: .whitespacesAndNewlines)); initialInputHandled = true
+                if consumesComposer && chat.draft.trimmingCharacters(in: .whitespacesAndNewlines) == text { chat.draft = "" } }
             catch { chat.error = error.localizedDescription }
             return
         }
-        let id = "user-\(UUID().uuidString)"
+        initialInputHandled = true
         let optimistic = Message(.object(["id": .string(id), "kind": .string("user_message"), "text": .string(text), "pending": .bool(true), "attachments": .array(attachments.map(\.input))]))
         let expectQueued = task.running || task.status == "waiting_for_input"
         let queued = QueuedDraft(id: id, text: text, attachmentCount: attachments.count, knownIDs: Set(task.queued.map { $0["id"].string }))
         if expectQueued { chat.pendingQueue.append(queued) }
         else { chat.transcript.upsert(optimistic) }
-        if consumesComposer { chat.submission = SavedSubmission(id: id, text: text, attachments: attachments); chat.draft = ""; chat.attachments = [] }
+        if recoversInput { chat.submission = SavedSubmission(id: id, text: text, attachments: attachments) }
+        if consumesComposer { chat.draft = ""; chat.attachments = [] }
         if let store = draftStore {
             do { try await store.save(chat.saved(id: task.id)) }
             catch { restoreSubmission(task, chat: chat, id: id, text: recoveryText, attachments: attachments); chat.error = "Couldn't save a recovery copy: \(error.localizedDescription)"; chat.sending = false; return }
@@ -497,8 +522,8 @@ final class AppModel {
         } catch { if current == connectionID { chat.error = error.localizedDescription } }
     }
 
-    @discardableResult func createTask(project: Project, provider: String, modelID: String, folderID: String?, overrides: [String: JSON] = [:]) async throws -> AgentTask {
-        let current = connectionID
+    @discardableResult func createTask(project: Project, provider: String, modelID: String, folderID: String?, overrides: [String: JSON] = [:], initialInput: SavedDraft? = nil) async throws -> AgentTask {
+        let current = connectionID, sourceSelection = selection
         let raw: JSON
         if demo {
             raw = .object(["id": .string("demo-\(UUID())"), "workspace_id": .string(project.id), "title": .string("New task"), "provider": .string(provider), "status": .string("idle")])
@@ -508,14 +533,21 @@ final class AppModel {
             raw = try await relay.call("thread.start", params: params)["thread"]
         }
         guard current == connectionID else { throw CancellationError() }
-        upsertTask(raw)
         let task = AgentTask(raw)
         let chat = chat(for: task); chat.loaded = true
-        selection = .task(task.id)
+        if let initialInput {
+            chat.modelID = initialInput.modelID; chat.effort = initialInput.effort; chat.overrides = initialInput.overrides
+            chat.sending = true
+        }
+        defer { if initialInput != nil { chat.sending = false } }
+        upsertTask(raw)
         if let folderID {
             do { try await folderMutation(projectID: project.id, action: "move_thread", folderID: folderID, taskID: task.id) }
-            catch { self.error = "Task created, but it could not be moved to the folder: \(error.localizedDescription)" }
+            catch { if current == connectionID { self.error = "Task created, but it could not be moved to the folder: \(error.localizedDescription)" } }
         }
+        guard current == connectionID else { throw CancellationError() }
+        guard chats[task.id] === chat, tasks.contains(where: { $0.id == task.id }) else { throw PilotError("The new task is no longer available.") }
+        if selection == sourceSelection { selection = .task(task.id) }
         return task
     }
 
@@ -531,10 +563,18 @@ final class AppModel {
             if !demo { _ = try await relay.call("thread.archive", params: .object(["workspace_id": .string(task.projectID), "thread_id": .string(task.id)])) }
             guard current == connectionID else { return }
             pendingSummaries.removeValue(forKey: task.id)
+            if archivedLoadID != nil { archivedTouched.insert(task.id) }
+            let input = chats[task.id]?.saved(id: task.id)
+            if let input { savedDrafts[task.id] = input }
+            draftSaves.removeValue(forKey: task.id)?.cancel()
             archivedTasks.removeAll { $0.id == task.id }; archivedTasks.append(AgentTask(task.raw.setting("is_archived", .bool(true))))
             tasks.removeAll { $0.id == task.id }; chats.removeValue(forKey: task.id)
             schedulePreviewSave()
             if selection == .task(task.id) { selection = .projects }
+            if let input, let store = draftStore {
+                do { try await store.save(input) }
+                catch { if current == connectionID { self.error = "Task archived, but its unsent input couldn't be saved: \(error.localizedDescription)" } }
+            }
         } catch { if current == connectionID { self.error = error.localizedDescription } }
     }
 
@@ -546,10 +586,7 @@ final class AppModel {
         if let taskID { mutation = mutation.setting("thread_id", .string(taskID)) }
         if let collapsed { mutation = mutation.setting("collapsed", .bool(collapsed)) }
         if demo { applyDemoFolder(mutation); return }
-        let current = connectionID
-        let result = try await relay.call("preferences.update", params: .object(["project_folder": mutation]))
-        guard current == connectionID else { throw CancellationError() }
-        preferences = result
+        try await updatePreferences(.object(["project_folder": mutation]))
     }
 
     private func applyDemoFolder(_ mutation: JSON) {

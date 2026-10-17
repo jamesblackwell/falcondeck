@@ -6,6 +6,7 @@ struct NotificationDestination: Equatable, Sendable {
     let sessionID: String
     let workspaceID: String
     let threadID: String
+    var userInfo: [String: String] { ["sessionId": sessionID, "workspaceId": workspaceID, "threadId": threadID] }
     init?(userInfo: [AnyHashable: Any]) {
         guard let session = userInfo["sessionId"] as? String, let workspace = userInfo["workspaceId"] as? String, let thread = userInfo["threadId"] as? String,
               [session, workspace, thread].allSatisfy({ !$0.isEmpty && $0.utf8.count <= 1024 && !$0.unicodeScalars.contains(where: CharacterSet.controlCharacters.contains) }) else { return nil }

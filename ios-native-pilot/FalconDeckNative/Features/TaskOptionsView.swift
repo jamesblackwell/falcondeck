@@ -55,7 +55,7 @@ struct TaskOptionsView: View {
                             ShareLink(item: ExportedText(text: TranscriptExport.markdown(chat.transcript.items, title: task.title, partial: chat.hasOlder), title: task.title), preview: SharePreview(task.title)) {
                                 Label(chat.loading ? "Loading conversation…" : chat.hasOlder ? "Share loaded conversation" : "Share conversation", systemImage: "square.and.arrow.up")
                             }.disabled(!chat.loaded || chat.loading || chat.transcript.items.isEmpty).accessibilityIdentifier("share-conversation")
-                            if let error = chat.error, !chat.loaded {
+                            if let error = chat.historyError {
                                 Text(error).font(.footnote).foregroundStyle(.orange)
                                 Button("Retry loading conversation") { Task { await model.loadChat(task) } }.disabled(!canMutate)
                             }
@@ -88,7 +88,7 @@ struct TaskOptionsView: View {
             .scrollContentBackground(.hidden).background(FD.background).navigationTitle("Task options").navigationBarTitleDisplayMode(.inline)
             .toolbar { ToolbarItem(placement: .confirmationAction) { Button("Done") { dismiss() }.disabled(pending) } }
             .onAppear { title = task?.title ?? "" }
-            .task(id: taskID) { if canMutate, let task, !model.chat(for: task).loaded { await model.loadChat(task) } }
+            .task(id: "\(taskID):\(canMutate)") { if canMutate, let task, !model.chat(for: task).loaded || model.chat(for: task).needsRefresh { await model.loadChat(task) } }
             .sheet(isPresented: $goal) { GoalView(taskID: taskID) }
             .alert("Compact context", isPresented: $compact) {
                 TextField("Guidance (optional)", text: $instructions)

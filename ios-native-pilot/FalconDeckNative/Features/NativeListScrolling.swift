@@ -6,6 +6,7 @@ import SwiftUI
 @MainActor final class NativeListScrolling {
     struct ReadingAnchor {
         fileprivate let view: ObjectIdentifier
+        fileprivate let revision: Int
         fileprivate let rows: [(id: String, relativeY: CGFloat)]
     }
     private struct WeakRow { weak var view: UIView? }
@@ -14,6 +15,7 @@ import SwiftUI
     private var scheduled: Task<Void, Never>?
     private var wantsBottom = false
     private var active = false
+    private var positionRevision = 0
 
     func setActive(_ value: Bool) {
         active = value
@@ -60,6 +62,7 @@ import SwiftUI
     }
     func cancel() {
         scheduled?.cancel(); scheduled = nil; wantsBottom = false
+        positionRevision += 1
     }
     func readingAnchor() -> ReadingAnchor? {
         cancel()
@@ -73,13 +76,17 @@ import SwiftUI
             return (id, frame.minY - view.contentOffset.y)
         }.sorted { $0.relativeY < $1.relativeY }
         guard !visible.isEmpty else { return nil }
-        return ReadingAnchor(view: ObjectIdentifier(view), rows: visible)
+        return ReadingAnchor(view: ObjectIdentifier(view), revision: positionRevision, rows: visible)
     }
     func restore(_ anchor: ReadingAnchor) {
+        guard anchor.revision == positionRevision else { return }
         cancel()
+        let revision = positionRevision
         scheduled = Task { @MainActor [weak self] in
             await Task.yield()
-            guard !Task.isCancelled, let self, self.active, let view = self.view, view.window != nil, ObjectIdentifier(view) == anchor.view else { return }
+            guard !Task.isCancelled, let self, self.active, self.positionRevision == revision,
+                  let view = self.view, view.window != nil, ObjectIdentifier(view) == anchor.view,
+                  !view.isTracking, !view.isDragging, !view.isDecelerating else { return }
             view.layoutIfNeeded()
             // Anchor to an actual surviving row. A live response may grow
             // below it while older history is fetched; total height is not an

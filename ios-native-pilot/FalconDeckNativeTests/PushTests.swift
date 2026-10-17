@@ -38,6 +38,40 @@ private actor PushRelay: RelayServing {
 }
 
 @MainActor final class PushTests: XCTestCase {
+    func testCachedPreferencesCannotChangeRemotePushRegistration() async throws {
+        let suite = "CachedPushTests-\(UUID())", defaults = UserDefaults(suiteName: suite)!
+        defer { defaults.removePersistentDomain(forName: suite) }
+        defaults.set(true, forKey: "native.notifications.push")
+        let http = PushHTTPMock(), sync = PushRegistrationSync(http: http), saved = target().session
+        let model = AppModel(relay: PushRelay(), voice: VoiceRecorder(defaults: defaults), push: NativePushNotifications(defaults: defaults, sync: sync), notifications: LocalNotifications(defaults: defaults), sessionLoader: { saved })
+        model.hasSession = true
+        model.preferences = .object(["notifications": .object(["enabled": .bool(false)])])
+        try await Task.sleep(for: .milliseconds(100))
+        let cachedRequests = await http.requests
+        XCTAssertTrue(cachedRequests.isEmpty, "A disk preview is not authoritative notification policy")
+        model.receive(.init(connectionID: model.connectionID, event: .snapshot(.object(["preferences": .object(["notifications": .object(["enabled": .bool(false)])])]))))
+        for _ in 0..<100 {
+            if await !http.requests.isEmpty { break }
+            try await Task.sleep(for: .milliseconds(5))
+        }
+        let liveRequests = await http.requests
+        XCTAssertFalse(liveRequests.isEmpty, "The live snapshot must apply the actual notification policy")
+    }
+    func testLocalAlertsUseTheSameSessionScopedRoutingAsPush() throws {
+        let destination = try XCTUnwrap(NotificationDestination(userInfo: ["sessionId": "origin", "workspaceId": "project", "threadId": "task"]))
+        let content = LocalNotifications.content(title: "Completed", body: "A local response", destination: destination)
+        XCTAssertEqual(NotificationDestination(userInfo: content.userInfo), destination)
+        XCTAssertNil(NotificationDestination(userInfo: ["thread_id": "legacy-unscoped-task"]))
+        let suite = "LocalAlertRoutingTests-\(UUID())", defaults = UserDefaults(suiteName: suite)!
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let saved = target().session
+        let model = AppModel(relay: PushRelay(), voice: VoiceRecorder(defaults: defaults), push: NativePushNotifications(defaults: defaults), notifications: LocalNotifications(defaults: defaults), sessionLoader: { saved })
+        XCTAssertFalse(model.notifications.shouldPresent?(destination) ?? true)
+        let current = try XCTUnwrap(NotificationDestination(userInfo: ["sessionId": saved.sessionID, "workspaceId": "project", "threadId": "task"]))
+        XCTAssertTrue(model.notifications.shouldPresent?(current) ?? false)
+        model.selection = .task("task")
+        XCTAssertFalse(model.notifications.shouldPresent?(current) ?? true)
+    }
     private func target(_ token: String? = "aabb", enabled: Bool = true, device: String = "device", relay: String = "https://relay.example") -> PushTarget {
         let session = SavedSession(relay: URL(string: relay)!, sessionID: "session", deviceID: device, token: "client-secret", secret: Data(repeating: 0, count: 32), daemonKey: "daemon", daemonIdentity: "identity")
         return PushTarget(session: session, token: token, topic: "org.example.native", environment: "sandbox", enabled: enabled)
@@ -131,7 +165,7 @@ private actor PushRelay: RelayServing {
         let defaults = UserDefaults(suiteName: suite)!
         defer { defaults.removePersistentDomain(forName: suite) }
         let push = NativePushNotifications(defaults: defaults, sync: sync)
-        let model = AppModel(relay: PushRelay(), push: push, notifications: LocalNotifications(defaults: defaults), sessionLoader: { saved })
+        let model = AppModel(relay: PushRelay(), voice: VoiceRecorder(defaults: defaults), push: push, notifications: LocalNotifications(defaults: defaults), sessionLoader: { saved })
         model.hasSession = true
         await model.forget()
         let requests = await http.requests

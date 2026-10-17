@@ -1,13 +1,22 @@
 import XCTest
+import os
 @testable import FalconDeckNative
 
 private actor PairingRelay: RelayServing {
+    let onClaim: (@Sendable () -> Void)?
+    init(onClaim: (@Sendable () -> Void)? = nil) { self.onClaim = onClaim }
     private(set) var inputs: [PairingInput] = []
     private(set) var restores = 0
     private var holdRestore = false
     private var restoreGate: CheckedContinuation<Void, Never>?
+    private var onConnect: (@MainActor @Sendable (UUID) -> Void)?
+    func setConnectionCallback(_ callback: @escaping @MainActor @Sendable (UUID) -> Void) { onConnect = callback }
     func events() -> AsyncStream<RelayUpdate> { AsyncStream { $0.finish() } }
-    func pair(_ input: PairingInput, connectionID: UUID) { inputs.append(input) }
+    func pair(_ input: PairingInput, connectionID: UUID) async throws {
+        inputs.append(input)
+        if let onClaim { onClaim(); throw PilotError("Ticket request failed") }
+        await onConnect?(connectionID)
+    }
     func restore(connectionID: UUID) async -> Bool {
         restores += 1
         if holdRestore { await withCheckedContinuation { restoreGate = $0 } }
@@ -23,8 +32,41 @@ private actor PairingRelay: RelayServing {
 }
 
 @MainActor final class PairingFlowTests: XCTestCase {
+    func testUnitTestHostDoesNotUseASavedPairingOrRecording() throws {
+        XCTAssertTrue(FalconDeckNativeApp.isUnitTestHost, "Xcode must expose the unit-test bundle before app startup")
+        let host = FalconDeckNativeApp.makeModel()
+        XCTAssertTrue(host.relay is UnavailablePreviewRelay)
+        XCTAssertNil(try host.sessionLoader())
+        XCTAssertNil(host.voice.pendingURL)
+        XCTAssertFalse(host.restoringSession)
+    }
     // Public synthetic authority seed; no real pairing/session credentials.
     private let code = "ABC123.\(Data(repeating: 7, count: 32).base64EncodedString().replacingOccurrences(of: "=", with: ""))"
+
+    func testClaimedIdentitySchedulesRecoveryWhenTheTicketRequestFails() async {
+        let saved = SavedSession(relay: URL(string: "https://example.test")!, sessionID: "fixture", deviceID: "fixture", token: "fixture", secret: Data(repeating: 7, count: 32), daemonKey: "fixture", daemonIdentity: "fixture")
+        let store = OSAllocatedUnfairLock<SavedSession?>(initialState: nil)
+        let relay = PairingRelay(onClaim: { store.withLock { $0 = saved } })
+        let model = AppModel.testing(relay: relay, sessionLoader: { store.withLock { $0 } })
+        model.restoringSession = false; model.pairingText = code
+        await model.pair(relayURL: PairingInput.defaultRelay)
+        XCTAssertTrue(model.hasSession)
+        XCTAssertTrue(model.pairingPending)
+        XCTAssertNotNil(model.reconnectTask, "The first HTTP failure has no socket reader to schedule recovery")
+        model.reconnectTask?.cancel(); model.reconnectTask = nil
+    }
+    func testAnEarlySocketFailureIsRetriedAfterPairingFinishes() async {
+        let relay = PairingRelay()
+        // Use the relay callback to reproduce an error before pair() returns,
+        // when the model has not yet exposed its newly saved session.
+        let connected = AppModel.testing(relay: relay)
+        await relay.setConnectionCallback { [weak connected] id in connected?.receive(.init(connectionID: id, event: .error("Handshake failed"))) }
+        connected.pairingText = code; connected.restoringSession = false
+        await connected.pair(relayURL: PairingInput.defaultRelay)
+        XCTAssertTrue(connected.hasSession)
+        XCTAssertNotNil(connected.reconnectTask)
+        connected.reconnectTask?.cancel(); connected.reconnectTask = nil
+    }
 
     func testScanConnectsOnceAndWaitsForSnapshotBeforeOpeningWorkspace() async {
         let relay = PairingRelay()

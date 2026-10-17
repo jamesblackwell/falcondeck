@@ -66,6 +66,19 @@ import UIKit
         await settle()
         XCTAssertEqual(view.contentOffset.y, 0)
     }
+    func testHistoryAnchorDoesNotUndoANewerReadingGesture() async throws {
+        let window = UIWindow(), scrolling = NativeListScrolling()
+        let view = viewport(in: window)
+        scrolling.attach(view); scrolling.setActive(true); view.contentOffset.y = 200
+        let row = UIView(frame: CGRect(x: 0, y: 200, width: 320, height: 100))
+        view.addSubview(row); scrolling.register(row, id: "reading")
+        let anchor = try XCTUnwrap(scrolling.readingAnchor())
+        scrolling.cancel() // The reader drags elsewhere while history is loading.
+        view.contentOffset.y = 400; row.frame.origin.y += 300; view.contentSize.height += 300
+        scrolling.restore(anchor)
+        await settle()
+        XCTAssertEqual(view.contentOffset.y, 400)
+    }
     func testAReadingGestureWinsOverAnAlreadyQueuedBottomRequest() async {
         let window = UIWindow(), scrolling = NativeListScrolling()
         let view = GestureScrollView(frame: CGRect(x: 0, y: 0, width: 320, height: 480))

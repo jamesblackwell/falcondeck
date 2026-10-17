@@ -2,9 +2,26 @@ import CryptoKit
 import Foundation
 import Sodium
 import XCTest
+import os
 @testable import FalconDeckNative
 
 final class ProtocolTests: XCTestCase {
+    func testStalledWriteTimesOutAndIgnoresALateCompletion() async throws {
+        let writer = RelayWriter()
+        let callback = OSAllocatedUnfairLock<(@Sendable (Error?) -> Void)?>(initialState: nil)
+        let cancellations = OSAllocatedUnfairLock(initialState: 0)
+        let began = ContinuousClock.now
+        do {
+            try await writer.perform(timeout: .milliseconds(30), start: { completion in callback.withLock { $0 = completion } }, cancel: { cancellations.withLock { $0 += 1 } })
+            XCTFail("A socket that never completes must release the sender")
+        } catch { XCTAssertTrue(error.localizedDescription.contains("too long to accept")) }
+        XCTAssertLessThan(began.duration(to: .now), .seconds(2))
+        XCTAssertEqual(cancellations.withLock { $0 }, 1)
+        callback.withLock { $0 }?(nil)
+        try await writer.perform(timeout: .milliseconds(30), start: { $0(nil) }, cancel: { cancellations.withLock { $0 += 1 } })
+        try await Task.sleep(for: .milliseconds(60))
+        XCTAssertEqual(cancellations.withLock { $0 }, 1, "A successful write must cancel its timer")
+    }
     func testTypeScriptAESWireCompatibilityAndTamperRejection() throws {
         // Public synthetic fixture: @noble/ciphers AES-GCM, key=42, nonce=7.
         let ciphertext = "AAcHBwcHBwcHBwcHB0TdjMog5kZU23BS1POM0khZ9AQD6h9MF9pI7f05X3Zh3JbAZnCRlHjrxIqX3ZJHAwFbqqM="

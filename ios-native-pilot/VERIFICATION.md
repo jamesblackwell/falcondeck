@@ -4,12 +4,10 @@ Visual polish follow-up: see [VISUAL-QA.md](VISUAL-QA.md) for the expanded
 screen/state checks, screenshot gallery and current device status.
 
 Falcon Native uses the separate `com.falcondeck.pilot.native` application ID and
-Apple Development signing. The preceding Debug app and speech widget are installed
-over Wi-Fi on the paired iPhone. The newer voice/composer build is ready locally;
-the phone currently cannot provide the trusted connectivity and device services
-required for installation. Reconnect/unlock it to install that build. The physical iPad needs unlocking before its
-development image can mount and installation can proceed. No device inventory or credentials are
-checked in.
+Apple Development signing. The preceding streaming/prompt Debug app and speech
+widget were installed over Wi-Fi on the paired iPhone. The build from the whole
+Swift source review is signed and retained locally; this review did not install
+it on a physical device. No device inventory or credentials are checked in.
 
 The opening screen now follows Expo: **Scan QR code**, or enter the full secure
 code/link and **Connect**. Scanning or opening a native pairing link connects
@@ -19,12 +17,15 @@ metadata, reconnect and forgetting a computer live in **Settings → Connections
 
 ## Client validation
 
-- 113 native unit tests pass, including crypto/wire compatibility, pairing
+- 188 native unit tests pass, including crypto/wire compatibility, pairing
   authority, connection epochs, drafts/queues, media, controls/extensions,
-  push registration/cleanup and seven new pairing-flow regressions.
-- Fourteen UI flows pass on both iPhone and iPad: navigation/density, conversation,
-  requests, goals, search, settings, first send, pairing and landscape automation,
-  plus sidebar reselection, collapsed-section search and retained expansion.
+  push registration/cleanup and the whole-source review regressions.
+- All 39 UI checks pass on iPad. On iPhone, 38 passed in the complete run;
+  one goal check was interrupted by an accidental overlapping unit run and
+  passed when rerun alone. The final changed build also passes first send and
+  both streaming/reading-position checks on both sizes. Coverage includes
+  navigation/density, requests, goals, settings, voice states, search, pairing,
+  keyboard behavior, archive recovery and landscape automation.
 - Additional compact-width, accessibility-text and landscape conversation checks
   pass. See [VISUAL-QA.md](VISUAL-QA.md) for the current screen/state inventory.
 - The new voice flow passes focused phone/iPad composer, first-send and keyboard
@@ -36,6 +37,67 @@ metadata, reconnect and forgetting a computer live in **Settings → Connections
   encryption. Demo UI tests send only in-memory messages/automations.
 - Apple Development arm64 app/widget builds succeed. Build products, Xcode
   results and screenshots remain local and ignored.
+
+## Whole Swift source review
+
+All 116 Swift files were read: 88 app, widget and utility files, 23 unit-test
+files and five UI-test files. This covered every native screen and the state,
+transport, persistence, media and speech code behind those screens.
+
+The review fixed independently reproducible bugs in:
+
+- Input recovery: one corrupt encrypted draft no longer hides healthy drafts;
+  archiving and restoring a task retains unsent text and attachments.
+- History: loading older messages does not apply live deltas twice; handoffs
+  refresh stale history and stop safely when that refresh fails; Task options
+  exposes history errors and allows retry before sharing.
+- State races: late archive lists and automation refreshes retain newer
+  changes; all preference controls, including folders, share one serialized
+  writer, newer preference events win over old responses, and superseded
+  automation run-history responses are ignored.
+- Media: shared reads reject results from previous connections, active tool
+  output is fetched again, and updates invalidate in-flight cache writes.
+- Notifications: local alerts carry the same computer/workspace routing as
+  remote notifications and cannot open a task belonging to a prior pairing.
+  Cached preferences cannot change remote push registration before live state
+  arrives.
+- Connections and first send: a saved claim retries after a ticket failure;
+  asynchronous handshake errors also retry after pairing finishes. First-send
+  input is captured independently of newer composer edits, recovered when
+  offline guards reject it, and folder placement preserves newer navigation.
+- Scrolling: history anchors become invalid after a newer reading gesture,
+  so a late history response cannot pull the reader back.
+- Transport: acknowledged upload time is separate from the RPC response
+  deadline. Individual writes, chunk acknowledgements and cancellation writes
+  have deadlines, including a WebSocket stalled before its handshake.
+
+Unit-test hosts and fake-relay fixtures now use isolated recording/preferences
+state and never restore the development app's saved relay credentials. Three
+new state regressions were confirmed failing before their fixes; the earlier
+review batches likewise reproduced the draft/history/media/state failures.
+
+The final 188-test unit suite and signed arm64 app/widget build pass. All 39
+UI checks are green across the complete runs and the isolated iPhone rerun.
+UI fixtures use local content; no real agent turns or automations were
+started by them. Screenshots and Xcode result bundles remain ignored/local.
+
+Repo-local Autoreview was run in a native-only review worktree with the command
+below. The complete runtime sources were supplied in two bounded datasets
+(state/media and views/design/widget), with adjacent contracts included.
+Unchanged files remained in the requested review scope. Findings were checked
+against their actual call paths and received focused regressions. Reruns used
+the complete changed ownership boundaries and the native-only patch. The final
+pass completed clean with no actionable P0–P2 findings.
+
+```sh
+.agents/skills/autoreview/scripts/autoreview \
+  --mode local --max-priority P2 \
+  --dataset <each-complete-source-file-in-the-batch> \
+  --prompt <whole-source-review-scope>
+```
+
+This pass changes only the standalone native client and its tests/documentation.
+It makes no relay, daemon, Expo, OTA, TestFlight or production changes.
 
 ## Relay and native push
 

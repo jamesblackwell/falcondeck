@@ -28,6 +28,29 @@ import XCTest
         }
         XCTAssertTrue(app.buttons["sidebar-settings"].isHittable)
     }
+    func testArchiveAndRestorePreserveTheComposerDraft() {
+        let app = launch()
+        app.buttons["sidebar-task-native"].tap()
+        let draft = "Keep this unfinished message after archiving."
+        let input = app.textFields["chat-input"]
+        input.tap(); input.typeText(draft)
+        app.buttons["task-menu"].tap()
+        let archive = app.buttons["Archive task"]
+        for _ in 0..<4 where !archive.isHittable { app.swipeUp() }
+        archive.tap()
+        showSidebar(app)
+        app.buttons["Sidebar options"].tap()
+        let archivedTasks = app.buttons["Archived tasks"]
+        if !archivedTasks.isHittable { app.swipeUp() }
+        archivedTasks.tap()
+        let archived = app.buttons.containing(.staticText, identifier: "A more native way to work").firstMatch
+        XCTAssertTrue(archived.waitForExistence(timeout: 5)); archived.tap()
+        let restore = app.buttons["Restore task to continue"]
+        XCTAssertTrue(restore.waitForExistence(timeout: 5)); restore.tap()
+        XCTAssertTrue(input.waitForExistence(timeout: 5))
+        XCTAssertEqual(input.value as? String, draft)
+        capture("Archived task restores its unsent composer input")
+    }
     func testReselectingTheSameSidebarDestinationReopensDetail() {
         let app = launch()
         for _ in 0..<2 {

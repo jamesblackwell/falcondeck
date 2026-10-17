@@ -13,6 +13,23 @@ import XCTest
         let shot = XCTAttachment(screenshot: XCUIScreen.main.screenshot())
         shot.name = name; shot.lifetime = .keepAlways; add(shot)
     }
+    func testTaskOptionsExposeHistoryFailureAndRetry() {
+        let app = launch("retry")
+        app.buttons["sidebar-task-native"].press(forDuration: 1)
+        app.buttons["Task options"].tap()
+        XCTAssertTrue(app.navigationBars["Task options"].waitForExistence(timeout: 5))
+        app.swipeUp()
+        let retry = app.buttons["Retry loading conversation"]
+        XCTAssertTrue(retry.waitForExistence(timeout: 10))
+        XCTAssertTrue(app.staticTexts["The preview computer took too long to respond."].exists)
+        capture("Task options show failed history and retry")
+        retry.tap()
+        let share = app.buttons["share-conversation"]
+        let enabled = XCTNSPredicateExpectation(predicate: NSPredicate(format: "enabled == true"), object: share)
+        XCTAssertEqual(XCTWaiter.wait(for: [enabled], timeout: 10), .completed)
+        XCTAssertFalse(retry.exists)
+        capture("Task options can share after retry succeeds")
+    }
     func testConnectingShowsCachedProjectsWithAnExplicitSyncBanner() {
         let app = launch("connecting")
         let banner = app.descendants(matching: .any).matching(identifier: "session-sync-banner").firstMatch
