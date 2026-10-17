@@ -7,6 +7,7 @@ struct ComposerView: View {
     @Bindable var chat: ChatSession
     @FocusState private var focused: Bool
     private var models: [AgentModel] { project?.models(for: task.provider) ?? [] }
+    private var activeModel: AgentModel? { models.first { $0.id == chat.modelID } ?? models.first { $0.raw["is_default"].bool } ?? models.first }
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
             if !model.connected && !model.demo {
@@ -27,10 +28,11 @@ struct ComposerView: View {
                 Menu {
                     Picker("Reasoning", selection: $chat.effort) {
                         Text("Default effort").tag("")
-                        ForEach(models.first { $0.id == chat.modelID }?.efforts ?? [], id: \.self) { Text($0.capitalized).tag($0) }
+                        ForEach(activeModel?.efforts ?? [], id: \.self) { Text($0.capitalized).tag($0) }
                     }
                 } label: { HStack(spacing: 4) { Text(chat.effort.nonempty?.capitalized ?? "Effort"); Image(systemName: "chevron.down").font(.caption2) } }
-                    .disabled(models.first { $0.id == chat.modelID }?.efforts.isEmpty != false)
+                    .disabled(activeModel?.efforts.isEmpty != false)
+                ComposerOptions(task: task, project: project, chat: chat)
                 Spacer(minLength: 0)
                 if task.running {
                     Button { Task { await model.stop(task) } } label: { Image(systemName: "stop.fill").font(.subheadline).frame(width: 32, height: 32) }
@@ -49,6 +51,11 @@ struct ComposerView: View {
             if model.demo { Text("Demo · Messages stay on this device").font(.caption2).foregroundStyle(FD.muted) }
         }
         .padding(14).glassEffect(in: .rect(cornerRadius: 24))
-        .onChange(of: chat.modelID) { _, _ in chat.effort = "" }
+        .onChange(of: chat.modelID) { _, value in
+            chat.effort = ""; chat.overrides["model_id"] = value.isEmpty ? .null : .string(value)
+            chat.overrides["reasoning_effort"] = .null
+            chat.overrides.removeValue(forKey: "service_tier")
+        }
+        .onChange(of: chat.effort) { _, value in chat.overrides["reasoning_effort"] = value.isEmpty ? .null : .string(value) }
     }
 }

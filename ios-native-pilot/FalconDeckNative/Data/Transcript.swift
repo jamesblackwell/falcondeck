@@ -78,7 +78,7 @@ struct Transcript: Sendable {
 }
 
 enum NativeRequest {
-    static func turn(task: AgentTask, text: String, itemID: String, modelID: String, effort: String) -> JSON {
+    static func turn(task: AgentTask, text: String, itemID: String, modelID: String, effort: String, overrides: [String: JSON] = [:]) -> JSON {
         var result = JSON.object([
             "workspace_id": .string(task.projectID), "thread_id": .string(task.id), "provider": .string(task.provider),
             "inputs": .array([.object(["type": .string("text"), "text": .string(text)])]),
@@ -88,6 +88,9 @@ enum NativeRequest {
         // the model or effort never silently broadens access to the computer.
         if !modelID.isEmpty { result = result.setting("model_id", .string(modelID)) }
         if !effort.isEmpty { result = result.setting("reasoning_effort", .string(effort)) }
+        for key in ["permission_mode", "sandbox_mode", "service_tier", "approval_policy"] {
+            if let value = overrides[key] { result = result.setting(key, value) }
+        }
         return result
     }
     static func events(_ payload: JSON) -> [JSON] {

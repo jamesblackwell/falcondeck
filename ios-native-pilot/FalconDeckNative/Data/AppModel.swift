@@ -2,7 +2,7 @@ import Foundation
 import Observation
 
 enum Destination: Hashable {
-    case projects, activity, task(String)
+    case projects, activity, settings, automations, archived, task(String), draft(String, String?)
 }
 
 @MainActor @Observable
@@ -11,6 +11,8 @@ final class ChatSession {
     var draft = ""
     var modelID = ""
     var effort = ""
+    var provider = ""
+    var overrides: [String: JSON] = [:]
     var loading = false
     var loaded = false
     var sending = false
@@ -51,11 +53,11 @@ final class AppModel {
     var showConnection = false
     var pairingText = ""
     var selection: Destination? = .projects
-    var showNewTask = false
-    var newTaskProjectID: String?
-    var newTaskFolderID: String?
     var preferences = JSON.object([:])
     var requests: [JSON] = []
+    var archivedTasks: [AgentTask] = []
+    var readSuppression: [String: Int] = [:]
+    var taskOptionsID: String?
     var chats: [String: ChatSession] = [:]
     private var lastEventSeq = 0
     private var observation: Task<Void, Never>?
@@ -112,6 +114,7 @@ final class AppModel {
         }
         if clearData {
             projects = []; tasks = []; chats = [:]; requests = []; preferences = .object([:])
+            archivedTasks = []; readSuppression = [:]; taskOptionsID = nil
             selection = .projects; refreshedAt = nil
         }
         return connectionID
@@ -184,7 +187,7 @@ final class AppModel {
     var folders: [ProjectFolder] { preferences["project_folders"].array.map { ProjectFolder(raw: $0) } }
     func chat(for task: AgentTask) -> ChatSession {
         if let value = chats[task.id] { return value }
-        let value = ChatSession(); value.modelID = task.modelID; value.effort = task.effort
+        let value = ChatSession(); value.modelID = task.modelID; value.effort = task.effort; value.provider = task.provider
         chats[task.id] = value
         return value
     }
@@ -223,7 +226,7 @@ final class AppModel {
         } catch { if current == connectionID, chat.loadID == loadID { chat.error = error.localizedDescription } }
     }
 
-    private func upsertTask(_ raw: JSON) {
+    func upsertTask(_ raw: JSON) {
         guard !raw["id"].string.isEmpty else { return }
         let task = AgentTask(raw)
         if task.raw["is_archived"].bool { tasks.removeAll { $0.id == task.id }; return }
@@ -293,8 +296,28 @@ final class AppModel {
         let current = connectionID
         let chat = chat(for: task)
         let text = chat.draft.trimmingCharacters(in: .whitespacesAndNewlines)
+        let selectedModel = chat.modelID, selectedEffort = chat.effort, selectedOverrides = chat.overrides
         guard !text.isEmpty, !chat.sending, demo || connected else { return }
         chat.sending = true; chat.error = nil; chat.notice = nil
+        if task.isDraft {
+            defer { chat.sending = false }
+            do {
+                guard let project = projects.first(where: { $0.id == task.projectID }) else { throw PilotError("Select a project first.") }
+                let created = try await createTask(project: project, provider: chat.provider, modelID: selectedModel, folderID: task.raw["folder_id"].string.nonempty, overrides: selectedOverrides)
+                guard current == connectionID else { return }
+                let destination = self.chat(for: created)
+                destination.draft = text; destination.modelID = selectedModel; destination.effort = selectedEffort; destination.overrides = selectedOverrides
+                if chat.draft.trimmingCharacters(in: .whitespacesAndNewlines) == text { chat.draft = "" }
+                await send(created)
+            } catch { if current == connectionID { chat.error = error.localizedDescription } }
+            return
+        }
+        if text == "/compact" || text.hasPrefix("/compact ") {
+            defer { chat.sending = false }
+            do { try await compact(task, instructions: String(text.dropFirst(8)).trimmingCharacters(in: .whitespacesAndNewlines)); chat.draft = "" }
+            catch { chat.error = error.localizedDescription }
+            return
+        }
         let id = "user-\(UUID().uuidString)"
         let optimistic = Message(.object(["id": .string(id), "kind": .string("user_message"), "text": .string(text), "pending": .bool(true)]))
         if !task.running { chat.transcript.upsert(optimistic) }
@@ -305,7 +328,11 @@ final class AppModel {
             return
         }
         do {
-            let response = try await relay.call("turn.start", params: NativeRequest.turn(task: task, text: text, itemID: id, modelID: chat.modelID, effort: chat.effort))
+            if !selectedOverrides.isEmpty {
+                _ = try await taskRequest(task, method: "thread.update", fields: selectedOverrides)
+                guard current == connectionID else { return }
+            }
+            let response = try await relay.call("turn.start", params: NativeRequest.turn(task: task, text: text, itemID: id, modelID: selectedModel, effort: selectedEffort, overrides: selectedOverrides))
             guard current == connectionID else { return }
             if response["message"].string == "queued" {
                 chat.transcript.items.removeAll { $0.id == id }; chat.notice = "Message queued for the next turn."
@@ -333,13 +360,13 @@ final class AppModel {
         } catch { if current == connectionID { chat.error = error.localizedDescription } }
     }
 
-    func createTask(project: Project, provider: String, modelID: String, folderID: String?) async throws {
+    @discardableResult func createTask(project: Project, provider: String, modelID: String, folderID: String?, overrides: [String: JSON] = [:]) async throws -> AgentTask {
         let current = connectionID
         let raw: JSON
         if demo {
             raw = .object(["id": .string("demo-\(UUID())"), "workspace_id": .string(project.id), "title": .string("New task"), "provider": .string(provider), "status": .string("idle")])
         } else {
-            var params = JSON.object(["workspace_id": .string(project.id), "provider": .string(provider)])
+            var params = JSON.object(overrides).setting("workspace_id", .string(project.id)).setting("provider", .string(provider))
             if !modelID.isEmpty { params = params.setting("model_id", .string(modelID)) }
             raw = try await relay.call("thread.start", params: params)["thread"]
         }
@@ -352,22 +379,13 @@ final class AppModel {
             do { try await folderMutation(projectID: project.id, action: "move_thread", folderID: folderID, taskID: task.id) }
             catch { self.error = "Task created, but it could not be moved to the folder: \(error.localizedDescription)" }
         }
+        return task
     }
 
     func updateTask(_ task: AgentTask, fields: [String: JSON]) async {
         let current = connectionID
-        do {
-            var params = JSON.object(fields).setting("workspace_id", .string(task.projectID)).setting("thread_id", .string(task.id))
-            if demo {
-                params = task.raw
-                for (key, value) in fields { params = params.setting(key == "pinned" ? "is_pinned" : key == "pinned_in_project" ? "is_pinned_in_project" : key, value) }
-                upsertTask(params)
-            } else {
-                let result = try await relay.call("thread.update", params: params)
-                guard current == connectionID else { return }
-                upsertTask(result["thread"] == .null ? result : result["thread"])
-            }
-        } catch { if current == connectionID { self.error = error.localizedDescription } }
+        do { _ = try await taskRequest(task, method: "thread.update", fields: fields) }
+        catch { if current == connectionID { self.error = error.localizedDescription } }
     }
 
     func archive(_ task: AgentTask) async {
@@ -376,6 +394,7 @@ final class AppModel {
             if !demo { _ = try await relay.call("thread.archive", params: .object(["workspace_id": .string(task.projectID), "thread_id": .string(task.id)])) }
             guard current == connectionID else { return }
             pendingSummaries.removeValue(forKey: task.id)
+            archivedTasks.removeAll { $0.id == task.id }; archivedTasks.append(AgentTask(task.raw.setting("is_archived", .bool(true))))
             tasks.removeAll { $0.id == task.id }; chats.removeValue(forKey: task.id)
             if selection == .task(task.id) { selection = .projects }
         } catch { if current == connectionID { self.error = error.localizedDescription } }

@@ -26,7 +26,9 @@ struct SidebarView: View {
         @Bindable var model = model
         List(selection: $model.selection) {
             Section {
-                NavigationLink(value: Destination.projects) { Label("Projects", systemImage: "square.grid.2x2") }
+                Button { Task { await model.newChat() } } label: { Label("New chat", systemImage: "square.and.pencil") }
+                    .disabled(!model.demo && !model.connected)
+                NavigationLink(value: Destination.archived) { Label("Archived tasks", systemImage: "archivebox") }
                 NavigationLink(value: Destination.activity) {
                     HStack { Label("Activity", systemImage: "waveform.path"); Spacer(); Text("\(model.tasks.filter(\.running).count)").foregroundStyle(FD.secondary) }
                 }
@@ -34,8 +36,15 @@ struct SidebarView: View {
             if !pins.isEmpty {
                 Section("Pinned", isExpanded: $pinsExpanded) { ForEach(pins) { taskLink($0) } }
             }
+            if projects.contains(where: { $0.raw["kind"].string == "casual" }) {
+                Section("Chats") {
+                    ForEach(projects.filter { $0.raw["kind"].string == "casual" }) { project in
+                        ForEach(model.tasks(in: project).filter { !$0.pinned && matches($0) }) { taskLink($0) }
+                    }
+                }
+            }
             Section("Projects") {
-                ForEach(projects) { project in
+                ForEach(projects.filter { $0.raw["kind"].string != "casual" }) { project in
                     let isOpen = expanded.contains(project.id) || !search.isEmpty
                     Button {
                         if expanded.contains(project.id) { expanded.remove(project.id) } else { expanded.insert(project.id) }
@@ -84,7 +93,7 @@ struct SidebarView: View {
         .refreshable { await model.refresh() }
         .toolbar {
             ToolbarItem(placement: .topBarTrailing) {
-                Button { model.newTaskProjectID = projects.first?.id; model.newTaskFolderID = nil; model.showNewTask = true } label: {
+                Button { if let project = projects.first { newTask(project) } } label: {
                     Image(systemName: "square.and.pencil")
                 }.disabled(!model.demo && !model.connected).accessibilityLabel("New task").accessibilityIdentifier("new-task")
             }
@@ -190,7 +199,7 @@ struct SidebarView: View {
         search.isEmpty || task.title.localizedCaseInsensitiveContains(search) || project?.name.localizedCaseInsensitiveContains(search) == true
     }
     private func newTask(_ project: Project, folderID: String? = nil) {
-        model.newTaskProjectID = project.id; model.newTaskFolderID = folderID; model.showNewTask = true
+        model.selection = .draft(project.id, folderID)
     }
     private func editFolder(projectID: String, folder: ProjectFolder? = nil) {
         folderProject = projectID; editingFolder = folder; folderName = folder?.name ?? ""; showFolderEditor = true
@@ -201,6 +210,7 @@ struct TaskActions: View {
     @Environment(AppModel.self) private var model
     let task: AgentTask
     var body: some View {
+        Button { model.taskOptionsID = task.id } label: { Label("Task options", systemImage: "ellipsis") }
         Button { Task { await model.updateTask(task, fields: ["pinned": .bool(!task.pinned)]) } } label: { Label(task.pinned ? "Unpin" : "Pin", systemImage: "pin") }
         Button { Task { await model.updateTask(task, fields: ["pinned_in_project": .bool(!task.pinnedInProject)]) } } label: { Label(task.pinnedInProject ? "Unpin in project" : "Pin in project", systemImage: "pin.circle") }
         Menu("Move to folder", systemImage: "folder") {

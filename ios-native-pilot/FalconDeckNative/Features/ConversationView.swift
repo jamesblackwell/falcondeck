@@ -12,9 +12,11 @@ struct ConversationView: View {
         }
         .task(id: task.id) {
             let session = model.chat(for: task); chat = session
-            if !session.loaded { await model.loadChat(task) }
+            if task.isDraft { session.loaded = true }
+            else if !session.loaded { await model.loadChat(task) }
+            await model.markRead(current, automatic: true)
         }
-        .onChange(of: model.connected) { _, connected in if connected { Task { await model.loadChat(current) } } }
+        .onChange(of: model.connected) { _, connected in if connected && !task.isDraft { Task { await model.loadChat(current) } } }
     }
 }
 
@@ -25,8 +27,7 @@ private struct ChatContent: View {
     @Bindable var chat: ChatSession
     @State private var followLatest = true
     @State private var userScrolling = false
-    @State private var rename = false
-    @State private var title = ""
+    @State private var showGoal = false
     private var project: Project? { model.projects.first { $0.id == task.projectID } }
     private var requests: [JSON] { model.requests.filter { $0["thread_id"].string == task.id } }
 
@@ -61,7 +62,7 @@ private struct ChatContent: View {
             }
             .onScrollPhaseChange { _, phase in userScrolling = phase == .tracking || phase == .interacting || phase == .decelerating }
             .scrollDismissesKeyboard(.interactively)
-            .refreshable { await model.loadChat(task) }
+            .refreshable { if !task.isDraft { await model.loadChat(task) } }
             .onChange(of: chat.transcript.revision) { _, _ in
                 if followLatest || chat.sending { scrollToLatest(proxy, animated: true) }
             }
@@ -77,21 +78,22 @@ private struct ChatContent: View {
         .background(FD.background).navigationTitle(task.title.nonempty ?? "New task").navigationBarTitleDisplayMode(.inline)
         .toolbar {
             ToolbarItem(placement: .topBarTrailing) {
-                Menu {
-                    Button("Rename task", systemImage: "pencil") { title = task.title; rename = true }
-                    TaskActions(task: task)
-                    Divider()
-                    Button("Connection", systemImage: "lock.shield") { model.showConnection = true }
-                } label: { Image(systemName: "ellipsis") }.accessibilityLabel("Task options")
+                if !task.isDraft {
+                    Button { model.taskOptionsID = task.id } label: { Image(systemName: "ellipsis") }.accessibilityLabel("Task options")
+                }
             }
         }
-        .alert("Rename task", isPresented: $rename) {
-            TextField("Task title", text: $title)
-            Button("Cancel", role: .cancel) { }
-            Button("Save") { Task { await model.updateTask(task, fields: ["title": .string(title)]) } }.disabled(title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+        .sheet(isPresented: $showGoal) { GoalView(taskID: task.id) }
+        .task(id: task.activitySeq) {
+            do { try await Task.sleep(for: .milliseconds(600)) } catch { return }
+            await model.markRead(task, automatic: true)
         }
         .safeAreaInset(edge: .bottom, spacing: 0) {
             VStack(spacing: 10) {
+                if task.goal != .null {
+                    Button { showGoal = true } label: { Label("Goal · \(task.goal["status"].string.capitalized)", systemImage: "target").font(.caption) }.buttonStyle(.glass)
+                }
+                if !task.queued.isEmpty { QueuedMessagesView(task: task) }
                 ForEach(requests, id: \.self) { request in InteractiveCard(request: request) }
                 if let error = chat.error ?? model.error {
                     HStack(alignment: .top) {
@@ -111,5 +113,17 @@ private struct ChatContent: View {
             await Task.yield()
             withAnimation(animated && !reduceMotion ? .easeOut(duration: 0.15) : nil) { proxy.scrollTo("latest", anchor: .bottom) }
         }
+    }
+}
+
+struct DraftConversationView: View {
+    @Environment(AppModel.self) private var model
+    let projectID: String
+    let folderID: String?
+    var body: some View {
+        if let project = model.projects.first(where: { $0.id == projectID }) {
+            ConversationView(task: model.draftTask(project: project, folderID: folderID))
+                .navigationTitle(project.raw["kind"].string == "casual" ? "New chat" : project.name)
+        } else { ContentUnavailableView("Select a project", systemImage: "folder") }
     }
 }

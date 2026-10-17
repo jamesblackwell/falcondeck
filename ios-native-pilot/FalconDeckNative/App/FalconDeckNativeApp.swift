@@ -35,7 +35,9 @@ struct RootView: View {
                     if let task = model.tasks.first(where: { $0.id == id }) {
                         ConversationView(task: task).id(id)
                     } else { ProjectsView() }
+                case .draft(let projectID, let folderID): DraftConversationView(projectID: projectID, folderID: folderID)
                 case .activity: ActivityView()
+                case .archived: ArchivedTasksView()
                 default: ProjectsView()
                 }
             }.id(model.selection)
@@ -46,9 +48,11 @@ struct RootView: View {
             if selection != nil && sizeClass == .compact { compactColumn = .detail }
         }
         .sheet(isPresented: $model.showConnection) { ConnectionView() }
-        .sheet(isPresented: $model.showNewTask) { NewTaskView() }
+        .sheet(item: Binding(get: { model.taskOptionsID.map { TaskOptionsTarget(id: $0) } }, set: { model.taskOptionsID = $0?.id })) { target in TaskOptionsView(taskID: target.id) }
         .onChange(of: scenePhase) { _, phase in
             if phase == .active && model.hasSession && !model.demo { Task { await model.reconnect() } }
         }
     }
 }
+
+private struct TaskOptionsTarget: Identifiable { let id: String }
