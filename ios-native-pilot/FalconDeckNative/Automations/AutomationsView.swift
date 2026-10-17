@@ -21,7 +21,7 @@ struct AutomationsView: View {
                 VStack(alignment: .leading, spacing: 8) {
                     HStack {
                         Image(systemName: row.enabled ? "calendar.badge.clock" : "pause.circle").foregroundStyle(row.enabled ? FD.accent : FD.secondary)
-                        Text(row.name).font(.headline)
+                        Text(row.name).font(.subheadline.weight(.semibold)).lineLimit(1)
                         Spacer()
                         Menu {
                             Button(row.enabled ? "Pause" : "Resume", systemImage: row.enabled ? "pause" : "play") { run(row, operation: row.enabled ? "automation.pause" : "automation.resume", revision: row.revision) }
@@ -29,8 +29,8 @@ struct AutomationsView: View {
                             Button("Edit", systemImage: "pencil") { edit(row) }
                             Button("Run history", systemImage: "clock") { history = row }
                             Button("Delete", systemImage: "trash", role: .destructive) { deleting = row }
-                        } label: { if pending == row.id { ActivityDiamond() } else { Image(systemName: "ellipsis").padding(8) } }
-                            .disabled(pending != nil || (!model.connected && !model.demo))
+                        } label: { if pending == row.id { ActivityDiamond() } else { Image(systemName: "ellipsis").frame(width: 44, height: 44).contentShape(.rect) } }
+                            .accessibilityLabel("Automation options").disabled(pending != nil || (!model.connected && !model.demo))
                     }
                     if !row.raw["description"].string.isEmpty { Text(row.raw["description"].string).font(.subheadline).foregroundStyle(FD.secondary) }
                     Text(schedule(row.raw)).font(.footnote).foregroundStyle(FD.secondary)
@@ -40,11 +40,11 @@ struct AutomationsView: View {
                         if let next = AutomationDraft.parseDate(row.raw["next_run_at"].string) { Text("Next: \(next.formatted(date: .abbreviated, time: .shortened))") }
                     }.font(.caption).foregroundStyle(FD.muted)
                     if !row.raw["latest_outcome"]["preview"].string.isEmpty { Text(row.raw["latest_outcome"]["preview"].string).font(.footnote).lineLimit(3) }
-                }.padding(.vertical, 8).listRowBackground(FD.surface)
+                }.padding(.vertical, 4).listRowBackground(Color.clear)
                     .contextMenu { Button("Run history") { history = row }; Button("Edit") { edit(row) } }
             }
             if store.rows.isEmpty && !store.loading { ContentUnavailableView("No automations yet", systemImage: "calendar.badge.clock", description: Text("Schedule an agent task to run on your computer.")) }
-        }.scrollContentBackground(.hidden).background(FD.background).navigationTitle("Automations")
+        }.listStyle(.plain).scrollContentBackground(.hidden).background(FD.background).navigationTitle("Automations")
             .toolbar { Button { editor = AutomationEditorTarget(definition: nil) } label: { Image(systemName: "plus") }.accessibilityLabel("New automation").disabled(!model.connected && !model.demo) }
             .task { await store.refresh(model: model) }.refreshable { await store.refresh(model: model) }
             .onAppear { store.visible += 1 }.onDisappear { store.visible = max(0, store.visible - 1) }

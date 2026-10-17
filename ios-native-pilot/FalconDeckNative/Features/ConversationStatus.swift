@@ -54,7 +54,7 @@ struct TaskUsageView: View {
     let usage: JSON
     var body: some View {
         if usage != .null {
-            Section("Token usage") {
+            DisclosureGroup("Token usage") {
                 LabeledContent("Total", value: usage["total"]["total_tokens"].int.formatted())
                 LabeledContent("Input", value: usage["total"]["input_tokens"].int.formatted())
                 LabeledContent("Cached input", value: usage["total"]["cached_input_tokens"].int.formatted())

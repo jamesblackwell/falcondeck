@@ -14,7 +14,7 @@ struct VoiceControl: View {
                 let current = model.connectionID
                 Task { await recorder.start(ownerID: task.id, provider: provider, isCurrent: { current == model.connectionID }) }
             }
-        } label: { Image(systemName: "mic").frame(width: 28, height: 28) }
+        } label: { Image(systemName: "mic").frame(width: 44, height: 44).contentShape(.rect) }
             .accessibilityLabel(recorder.pendingURL == nil ? "Record voice message" : "Recover saved recording")
             .disabled(chat.sending || recorder.starting || recorder.recording || recorder.transcribing)
 

@@ -7,12 +7,13 @@ struct ComposerView: View {
     @Bindable var chat: ChatSession
     @FocusState private var focused: Bool
     @State private var showGoal = false
+    @State private var showModels = false
     @State private var goalSeed = ""
     @State private var goalCommand = ""
     private var models: [AgentModel] { project?.models(for: task.provider) ?? [] }
     private var activeModel: AgentModel? { models.first { $0.id == chat.modelID } ?? models.first { $0.raw["is_default"].bool } ?? models.first }
     var body: some View {
-        VStack(alignment: .leading, spacing: 10) {
+        VStack(alignment: .leading, spacing: 6) {
             if !model.connected && !model.demo {
                 Button { Task { await model.reconnect() } } label: { Label("\(model.status) · Reconnect", systemImage: "wifi.exclamationmark").font(.footnote) }
             }
@@ -20,49 +21,61 @@ struct ComposerView: View {
             RecordingPanel(task: task, chat: chat)
             if !chat.attachments.isEmpty { AttachmentStrip(chat: chat) }
             TextField(task.running ? "Queue a follow-up…" : "Message \(task.provider.capitalized)…", text: $chat.draft, axis: .vertical)
-                .lineLimit(1...7).font(.body).focused($focused).padding(.horizontal, 4).accessibilityIdentifier("chat-input").submitLabel(.return)
+                .lineLimit(1...6).font(.body).focused($focused).padding(.horizontal, 4).accessibilityIdentifier("chat-input").submitLabel(.return)
                 .frame(minHeight: 44, alignment: .topLeading)
                 .contentShape(Rectangle())
                 .simultaneousGesture(TapGesture().onEnded { focused = true })
-            HStack(spacing: 12) {
+            HStack(spacing: 0) {
                 if project?.capabilities(task.provider)["supports_images"] != .bool(false) { AttachmentPicker(chat: chat) }
                 VoiceControl(task: task, chat: chat)
-                Menu {
-                    Picker("Model", selection: $chat.modelID) {
-                        Text("Task default").tag("")
-                        if !chat.modelID.isEmpty && !models.contains(where: { $0.id == chat.modelID }) { Text(chat.modelID).tag(chat.modelID) }
-                        ForEach(models) { Text($0.label).tag($0.id) }
-                    }
-                } label: {
-                    HStack(spacing: 4) { Text(models.first { $0.id == chat.modelID }?.label ?? chat.modelID.nonempty ?? task.provider.capitalized).lineLimit(1); Image(systemName: "chevron.down").font(.caption2) }
-                }.accessibilityLabel("Choose model")
-                Menu {
-                    Picker("Reasoning", selection: $chat.effort) {
-                        Text("Default effort").tag("")
-                        ForEach(activeModel?.efforts ?? [], id: \.self) { Text($0.capitalized).tag($0) }
-                    }
-                } label: { HStack(spacing: 4) { Text(chat.effort.nonempty?.capitalized ?? "Effort"); Image(systemName: "chevron.down").font(.caption2) } }
-                    .disabled(activeModel?.efforts.isEmpty != false)
+                Button { focused = false; showModels = true } label: {
+                    HStack(spacing: 5) {
+                        Text(models.first { $0.id == chat.modelID }?.label ?? chat.modelID.nonempty ?? task.provider.capitalized)
+                            .lineLimit(1).truncationMode(.tail)
+                        Image(systemName: "chevron.down").font(.system(size: 9, weight: .semibold))
+                    }.padding(.horizontal, 6).frame(maxWidth: .infinity, minHeight: 44, alignment: .leading).contentShape(.rect)
+                }.buttonStyle(.plain).accessibilityLabel("Choose model").accessibilityIdentifier("composer-model")
                 ComposerOptions(task: task, project: project, chat: chat)
-                Spacer(minLength: 0)
                 if task.running || task.status == "waiting_for_input" {
-                    Button { Task { await model.stop(task) } } label: { Image(systemName: "stop.fill").font(.subheadline).frame(width: 32, height: 32) }
-                        .buttonStyle(.glass).disabled(chat.stopping || (!model.connected && !model.demo)).accessibilityLabel("Stop task").accessibilityIdentifier("stop-task")
+                    Button { Task { await model.stop(task) } } label: { Image(systemName: "stop.fill").font(.subheadline).frame(width: 44, height: 44).contentShape(.rect) }
+                        .buttonStyle(.plain).disabled(chat.stopping || (!model.connected && !model.demo)).accessibilityLabel("Stop task").accessibilityIdentifier("stop-task")
                 }
                 Button {
                     focused = false
                     if !task.isDraft, chat.draft.trimmingCharacters(in: .whitespacesAndNewlines) == "/goal" || chat.draft.hasPrefix("/goal ") { openGoal() }
                     else { Task { await model.send(task) } }
                 } label: {
-                    Group { if chat.sending { ActivityDiamond() } else { Image(systemName: task.running ? "arrow.up.to.line" : "arrow.up").fontWeight(.semibold) } }.frame(width: 32, height: 32)
+                    Group { if chat.sending { ActivityDiamond() } else { Image(systemName: task.running ? "arrow.up.to.line" : "arrow.up").fontWeight(.semibold) } }.frame(width: 44, height: 44).contentShape(.rect)
                 }
-                .buttonStyle(.glassProminent).tint(FD.accent).foregroundStyle(FD.background)
+                .background(FD.accent.opacity(chat.draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && chat.attachments.isEmpty ? 0.15 : 1), in: Circle()).buttonStyle(.plain).foregroundStyle(chat.draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && chat.attachments.isEmpty ? FD.secondary : FD.background)
                 .disabled(chat.sending || chat.preparingAttachments || (chat.draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && chat.attachments.isEmpty) || (!model.connected && !model.demo))
                 .accessibilityLabel(task.running ? "Queue message" : "Send message").accessibilityIdentifier("send-message")
             }.font(.caption).foregroundStyle(FD.secondary)
-            if model.demo { Text("Demo · Messages stay on this device").font(.caption2).foregroundStyle(FD.muted) }
         }
-        .padding(14).glassEffect(in: .rect(cornerRadius: 24))
+        .padding(.horizontal, 10).padding(.top, 10).padding(.bottom, 6).glassEffect(in: .rect(cornerRadius: 20))
+        .sheet(isPresented: $showModels) {
+            NavigationStack {
+                Form {
+                    Section("Model") {
+                        Picker("Model", selection: $chat.modelID) {
+                            Text("Task default").tag("")
+                            if !chat.modelID.isEmpty && !models.contains(where: { $0.id == chat.modelID }) { Text(chat.modelID).tag(chat.modelID) }
+                            ForEach(models) { Text($0.label).tag($0.id) }
+                        }.pickerStyle(.inline)
+                    }.listRowBackground(FD.surface)
+                    if let activeModel, !activeModel.efforts.isEmpty {
+                        Section("Reasoning") {
+                            Picker("Reasoning effort", selection: $chat.effort) {
+                                Text("Default").tag("")
+                                ForEach(activeModel.efforts, id: \.self) { Text($0.capitalized).tag($0) }
+                            }.pickerStyle(.inline)
+                        }.listRowBackground(FD.surface)
+                    }
+                }.scrollContentBackground(.hidden).background(FD.background)
+                    .navigationTitle("Model & reasoning").navigationBarTitleDisplayMode(.inline)
+                    .toolbar { ToolbarItem(placement: .confirmationAction) { Button("Done") { showModels = false } } }
+            }.presentationDetents([.medium, .large]).presentationDragIndicator(.visible)
+        }
         .task(id: task.projectID + ":" + task.provider + ":" + String(model.connected)) { await model.loadCatalog(task) }
         .sheet(isPresented: $showGoal) { GoalView(taskID: task.id, initialObjective: goalSeed) { if chat.draft == goalCommand { chat.draft = "" } } }
         .onChange(of: chat.modelID) { _, value in

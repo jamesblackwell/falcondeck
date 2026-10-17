@@ -239,7 +239,7 @@ final class AppModel {
         beginConnection(clearData: true); demo = true; pairingPending = false; pairingRelayReview = nil; showConnection = false
         try? await relay.disconnect(forget: false)
         error = nil; status = "Demo workspace"
-        projects = Demo.projects; tasks = Demo.tasks; preferences = Demo.preferences
+        projects = Demo.projects; tasks = Demo.tasks; preferences = Demo.preferences; requests = Demo.requests
     }
     func tasks(in project: Project) -> [AgentTask] {
         taskGroups[project.id] ?? []
@@ -545,27 +545,51 @@ enum Demo {
 
     [FalconDeck](https://falcondeck.com)
     """
+    static let requests: [JSON] = [
+        .object(["request_id": .string("demo-approval"), "workspace_id": .string("falcondeck"), "thread_id": .string("review"), "kind": .string("approval"), "title": .string("Run the focused UI checks?"), "command": .string("swift test --filter SidebarTests")]),
+        .object(["request_id": .string("demo-question"), "workspace_id": .string("falcondeck"), "thread_id": .string("review"), "kind": .string("question"), "title": .string("Choose a sidebar layout"), "questions": .array([
+            .object(["id": .string("layout"), "header": .string("Sidebar"), "question": .string("Which layout should we keep?"), "options": .array([
+                .object(["label": .string("Compact"), "description": .string("Single-line tasks, with projects before chats.")]),
+                .object(["label": .string("Comfortable"), "description": .string("More room between task rows.")])
+            ])])
+        ])])
+    ]
     static let projects: [Project] = [
         project("falcondeck", "/Projects/falcondeck"), project("quizgecko", "/Projects/quizgecko"),
-        project("lookset", "/Projects/lookset"), project("lucidpic", "/Projects/lucidpic")
+        project("lookset", "/Projects/lookset"), project("lucidpic", "/Projects/lucidpic"), project("casual", "/Chats", kind: "casual")
     ]
     static let tasks: [AgentTask] = [
         task("native", "falcondeck", "A more native way to work", "codex", "running", "Exploring the little details that make an app feel right at home on iPhone.", pinned: true),
         task("relay", "falcondeck", "Make reconnects feel instant", "claude", "idle", "The relay recovery path now restores a fresh snapshot when history has been pruned."),
         task("review", "falcondeck", "Review the new project sidebar", "codex", "waiting_for_input", "The implementation is ready. There’s one decision to make about the compact layout."),
         task("quiz", "quizgecko", "Bring the study flow to SwiftUI", "claude", "running", "The flashcard transition now follows your gesture with a spring animation."),
-        task("voice", "quizgecko", "Polish the voice tutor", "codex", "idle", "The tutor keeps listening while you move between study materials."),
-        task("samples", "lookset", "A fresh set of product scenes", "claude", "idle", "Four directions, with consistent lighting and a quieter background."),
-        task("images", "lucidpic", "Simplify the image library", "codex", "idle", "The library now groups recent generations into a single collection.")
+        task("voice", "quizgecko", "Polish the voice tutor", "codex", "idle", "The tutor keeps listening while you move between study materials.", pinned: true),
+        task("samples", "lookset", "A fresh set of product scenes", "claude", "idle", "Four directions, with consistent lighting and a quieter background.", pinned: true),
+        task("images", "lucidpic", "Simplify the image library", "codex", "idle", "The library now groups recent generations into a single collection.", pinned: true),
+        task("polish", "falcondeck", "Polish the mobile experience", "codex", "idle", "A consistent hierarchy across phone, tablet and desktop.", pinned: true),
+        task("chat", "casual", "Plan the next release", "claude", "idle", "A quick conversation, outside a project.")
     ]
     static let messages: [Message] = [
         message("1", "user_message", "Let’s explore a truly native FalconDeck. Keep the core experience simple, but make it feel great on iPhone."),
         message("2", "assistant_message", "I’ve narrowed the pilot down to three things: your projects, the tasks inside them, and the conversations that matter.\n\nThe interface uses **native SwiftUI navigation**, SF Symbols, and glass controls. Projects stay in the sidebar, and the conversation layout adapts to your text size."),
         message("3", "user_message", "Can it talk to the real relay too?"),
-        message("4", "assistant_message", markdownReply)
+        message("4", "assistant_message", markdownReply),
+        Message(.object(["id": .string("tool-read"), "kind": .string("tool_call"), "title": .string("Read sidebar views"), "status": .string("completed"), "tool_kind": .string("read"), "output": .string("Reviewed navigation, project folders and pinned tasks.")])),
+        message("5", "assistant_message", "I’m checking the layout at phone and tablet sizes, including menus and keyboard states."),
+        Message(.object(["id": .string("tool-tests"), "kind": .string("tool_call"), "title": .string("Run UI checks"), "status": .string("completed"), "tool_kind": .string("command"), "output": .string("All focused checks passed.")])),
+        message("6", "assistant_message", "The core layout is ready to test. Projects stay above chats, pins fit on one line, and model settings have a stable sheet.\n\n- Open a project to see its folders.\n- Long-press a task for secondary actions.\n- Use the composer to continue the conversation.")
     ]
-    private static func project(_ id: String, _ path: String) -> Project {
-        Project(.object(["id": .string(id), "path": .string(path), "status": .string("connected")]))
+    private static func project(_ id: String, _ path: String, kind: String = "project") -> Project {
+        let efforts = ["low", "medium", "high"].map { JSON.object(["reasoning_effort": .string($0)]) }
+        let agents = [("codex", "GPT-5.4"), ("claude", "Opus 4.5")].map { provider, name in
+            JSON.object(["provider": .string(provider), "models": .array([
+                .object(["id": .string("demo-model"), "label": .string(name), "is_default": .bool(true), "supported_reasoning_efforts": .array(efforts)])
+            ]), "capabilities": .object([
+                "permission_modes": .array([.string("default"), .string("never")]),
+                "sandbox_modes": .array([.string("workspace-write"), .string("read-only")])
+            ])])
+        }
+        return Project(.object(["id": .string(id), "path": .string(path), "kind": .string(kind), "agents": .array(agents), "status": .string("connected")]))
     }
     private static func task(_ id: String, _ project: String, _ title: String, _ provider: String, _ status: String, _ preview: String, pinned: Bool = false) -> AgentTask {
         AgentTask(.object(["id": .string(id), "workspace_id": .string(project), "title": .string(title), "provider": .string(provider),

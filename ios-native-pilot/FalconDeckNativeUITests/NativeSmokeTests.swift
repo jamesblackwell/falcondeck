@@ -12,8 +12,8 @@ import XCTest
         app.launch(); return app
     }
     private func sidebar(_ app: XCUIApplication) {
-        if !app.buttons["Connection settings"].exists, app.buttons["BackButton"].exists { app.buttons["BackButton"].tap() }
-        XCTAssertTrue(app.buttons["Connection settings"].waitForExistence(timeout: 5))
+        if !app.buttons["sidebar-settings"].exists, app.buttons["BackButton"].exists { app.buttons["BackButton"].tap() }
+        XCTAssertTrue(app.buttons["sidebar-settings"].waitForExistence(timeout: 5))
     }
     func testAutomationCanSaveAndDismissInLandscape() {
         let app = launchDemo()
@@ -22,7 +22,7 @@ import XCTest
         let landscape = XCTNSPredicateExpectation(predicate: NSPredicate { _, _ in app.frame.width > app.frame.height }, object: nil)
         XCTAssertEqual(XCTWaiter.wait(for: [landscape], timeout: 5), .completed)
         sidebar(app)
-        app.buttons["Connection settings"].tap()
+        app.buttons["sidebar-settings"].tap()
         app.buttons["Automations"].tap()
         app.buttons["New automation"].tap()
         let name = app.textFields["automation-name"]
@@ -45,7 +45,7 @@ import XCTest
         XCTAssertTrue(app.keyboards.firstMatch.waitForExistence(timeout: 5))
         input.typeText("Native UI smoke")
         app.buttons["send-message"].tap()
-        XCTAssertTrue(app.buttons["Task options"].waitForExistence(timeout: 5))
+        XCTAssertTrue(app.buttons["task-menu"].waitForExistence(timeout: 5))
         let reply = app.staticTexts.matching(NSPredicate(format: "label CONTAINS %@", "A native place for your work")).firstMatch
         XCTAssertTrue(reply.waitForExistence(timeout: 5))
         XCTAssertEqual(app.state, .runningForeground)
@@ -56,7 +56,7 @@ import XCTest
         XCUIDevice.shared.orientation = .portrait
         let app = launchDemo()
         sidebar(app)
-        app.buttons["Connection settings"].tap()
+        app.buttons["sidebar-settings"].tap()
         app.buttons["Connections"].tap()
         app.buttons["Pair a computer"].tap()
         XCTAssertTrue(app.buttons["pair-scan"].waitForExistence(timeout: 5))

@@ -1,8 +1,14 @@
 import SwiftUI
 
+private enum SidebarOptionsAction { case reorder, filters }
+
 struct SidebarView: View {
     @Environment(AppModel.self) private var model
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var search = ""
+    @State private var showOptions = false
+    @State private var deferredOptionsAction: SidebarOptionsAction?
+    @State private var chatsExpanded = true
     @State private var optionsProject: Project?
     @State private var reorder = false
     @State private var filters = false
@@ -28,40 +34,41 @@ struct SidebarView: View {
     private var pins: [AgentTask] { model.tasks.filter { $0.pinned && matches($0) }.sorted { $0.updatedAt > $1.updatedAt } }
     var body: some View {
         @Bindable var model = model
-        List(selection: $model.selection) {
-            Section {
-                Button { Task { await model.newChat() } } label: { Label("New chat", systemImage: "square.and.pencil") }
+        ScrollView {
+            LazyVStack(alignment: .leading, spacing: 0) {
+                sidebarAction("New chat", symbol: "square.and.pencil") { Task { await model.newChat() } }
                     .disabled(!model.demo && !model.connected)
-                NavigationLink(value: Destination.archived) { Label("Archived tasks", systemImage: "archivebox") }
-                NavigationLink(value: Destination.activity) {
-                    HStack { Label("Activity", systemImage: "waveform.path"); Spacer(); Text("\(model.tasks.filter(\.working).count)").foregroundStyle(FD.secondary) }
+                sidebarAction("Activity", symbol: "tray.full", selected: model.selection == .activity) { model.selection = .activity }
+                if !pins.isEmpty {
+                    sectionHeading("Pinned", expanded: pinsExpanded) { animate { pinsExpanded.toggle() } }
+                    if pinsExpanded { ForEach(pins) { taskLink($0) } }
                 }
-            }
-            if !pins.isEmpty {
-                Section("Pinned", isExpanded: $pinsExpanded) { ForEach(pins) { taskLink($0) } }
-            }
-            if projects.contains(where: { $0.raw["kind"].string == "casual" }) {
-                Section("Chats") {
-                    ForEach(projects.filter { $0.raw["kind"].string == "casual" }) { project in
-                        ForEach(model.tasks(in: project).filter { !$0.pinned && matches($0) }) { taskLink($0) }
-                    }
+                sectionHeading("Projects", expanded: !expanded.isEmpty) {
+                    animate { expanded = expanded.isEmpty ? Set(projects.map(\.id)) : [] }
                 }
-            }
-            Section("Projects") {
                 ForEach(projects.filter { $0.raw["kind"].string != "casual" }) { project in
                     let isOpen = expanded.contains(project.id) || !search.isEmpty
+                    HStack(spacing: 0) {
                     Button {
-                        if expanded.contains(project.id) { expanded.remove(project.id) } else { expanded.insert(project.id) }
+                        animate { if expanded.contains(project.id) { expanded.remove(project.id) } else { expanded.insert(project.id) } }
                     } label: {
-                        HStack(spacing: 10) {
-                            WorkspaceGlyph(project: project).font(.subheadline).frame(width: 20, height: 24).foregroundStyle(FD.accent)
-                            Text(project.name).font(.subheadline.weight(.semibold)).lineLimit(1)
+                        HStack(spacing: 8) {
+                            Image(systemName: isOpen ? "chevron.down" : "chevron.right")
+                                .font(.system(size: 10, weight: .semibold)).foregroundStyle(FD.muted).frame(width: 12)
+                            WorkspaceGlyph(project: project).font(.subheadline).frame(width: 18, height: 20)
+                            Text(project.name).font(.subheadline.weight(.medium)).lineLimit(1)
                             Spacer(minLength: 2)
                             if model.tasks(in: project).contains(where: \.working) { ActivityDiamond() }
-                            Image(systemName: isOpen ? "chevron.down" : "chevron.right").font(.caption2.weight(.semibold)).foregroundStyle(FD.secondary)
-                        }.padding(.vertical, 3)
+                        }.padding(.horizontal, 10).frame(minHeight: 44).contentShape(.rect)
                     }
-                    .foregroundStyle(FD.foreground).accessibilityIdentifier("project-\(project.name)").accessibilityValue(isOpen ? "Expanded" : "Collapsed")
+                    .buttonStyle(.plain).foregroundStyle(FD.foreground)
+                    .accessibilityIdentifier("project-\(project.name)").accessibilityValue(isOpen ? "Expanded" : "Collapsed")
+                    Button { newTask(project) } label: {
+                        Image(systemName: "square.and.pencil").font(.caption).foregroundStyle(FD.muted)
+                            .frame(width: 44, height: 44).contentShape(.rect)
+                    }.buttonStyle(.plain).accessibilityLabel("New task in \(project.name)")
+                        .disabled(!model.demo && !model.connected)
+                    }
                     .contextMenu {
                         Button { newTask(project) } label: { Label("New task", systemImage: "square.and.pencil") }
                         Button { editFolder(projectID: project.id) } label: { Label("New folder", systemImage: "folder.badge.plus") }
@@ -70,68 +77,74 @@ struct SidebarView: View {
                     }
                     if isOpen { projectContents(project).task(id: project.id + ":" + sort) { await model.loadTaskPage(project.id, sort: sort) } }
                 }
-            }
-            if !search.isEmpty, model.syncIndex != nil, model.sortedProjects.contains(where: { model.hasMoreTasks($0.id, sort: sort) }) {
-                Section {
-                    Text("Searching loaded tasks").font(.caption).foregroundStyle(FD.secondary)
-                    Button("Search more tasks") { Task { for project in model.sortedProjects.filter({ model.hasMoreTasks($0.id, sort: sort) }).prefix(4) { await model.loadTaskPage(project.id, sort: sort, limit: 50) } } }
+                let casual = projects.filter { $0.raw["kind"].string == "casual" }
+                if !casual.isEmpty {
+                    sectionHeading("Chats", expanded: chatsExpanded) { animate { chatsExpanded.toggle() } }
+                    if chatsExpanded {
+                        ForEach(casual) { project in taskPage(model.tasks(in: project).filter { !$0.pinned && matches($0) }, key: project.id, indent: 0) }
+                    }
                 }
-            }
-            if model.projects.isEmpty {
-                Section {
-                    Button("Connect your computer") { model.showConnection = true }
-                    Button("Explore demo workspace") { Task { await model.useDemo() } }
+                if !search.isEmpty, model.syncIndex != nil, model.sortedProjects.contains(where: { model.hasMoreTasks($0.id, sort: sort) }) {
+                    VStack(alignment: .leading, spacing: 8) {
+                        Text("Searching loaded tasks").font(.caption).foregroundStyle(FD.secondary)
+                        Button("Search more tasks") { Task { for project in model.sortedProjects.filter({ model.hasMoreTasks($0.id, sort: sort) }).prefix(4) { await model.loadTaskPage(project.id, sort: sort, limit: 50) } } }
+                    }.padding(12)
                 }
-            }
-            Section {
                 if let error = model.error {
-                    Text(error).font(.footnote).foregroundStyle(.orange)
-                    Button("Dismiss error") { model.error = nil }
+                    Label(error, systemImage: "exclamationmark.circle").font(.caption).foregroundStyle(.orange).padding(12)
+                    Button("Dismiss error") { model.error = nil }.font(.caption).padding(.horizontal, 12)
                 }
-                Button { model.showConnection = true } label: {
-                    HStack(spacing: 10) {
-                        Image(systemName: model.demo ? "sparkle" : "lock.shield")
-                        Text(model.demo ? "Demo workspace" : model.status)
-                        Spacer()
-                        Circle().fill(model.connected ? FD.accent : FD.secondary).frame(width: 6, height: 6)
-                    }.font(.footnote).foregroundStyle(FD.secondary)
-                }
-            }
+            }.padding(.horizontal, 10).padding(.bottom, 16)
         }
-        .listStyle(.sidebar).scrollContentBackground(.hidden).background(FD.background)
-        .navigationTitle("FalconDeck")
-        .searchable(text: $search, prompt: "Search projects and tasks")
+        .background(FD.background).navigationTitle("Tasks").navigationBarTitleDisplayMode(.inline)
+        .searchable(text: $search, placement: .navigationBarDrawer(displayMode: .always), prompt: "Search tasks")
         .refreshable { await model.refresh() }
         .toolbar {
-            ToolbarItem(placement: .topBarTrailing) {
-                Button { if let project = projects.first { newTask(project) } } label: {
-                    Image(systemName: "square.and.pencil")
-                }.disabled(!model.demo && !model.connected).accessibilityLabel("New task").accessibilityIdentifier("new-task")
-            }
             ToolbarItem(placement: .bottomBar) {
-                Button { model.selection = .settings } label: { Image(systemName: "gearshape") }.accessibilityLabel("Connection settings")
+                Button { model.selection = .settings } label: { Image(systemName: "gearshape") }
+                    .accessibilityLabel("Settings").accessibilityIdentifier("sidebar-settings")
             }
             ToolbarItem(placement: .bottomBar) { Spacer() }
             ToolbarItem(placement: .bottomBar) {
-                Menu {
-                    Picker("Sort tasks", selection: $sort) { Text("Last updated").tag("last_updated"); Text("Priority").tag("priority"); Text("Name").tag("alphabetical") }
-                    if !model.extensions.filters.isEmpty { Button("Filter tasks", systemImage: "line.3.horizontal.decrease") { filters = true } }
-                    Button("Automations", systemImage: "calendar.badge.clock") { model.selection = .automations }
-                    Toggle("Show hidden projects", isOn: $showHidden)
-                    Button("Reorder projects", systemImage: "arrow.up.arrow.down") { reorder = true }
-                    Button("Collapse all projects") { expanded = [] }
-                } label: { Image(systemName: "line.3.horizontal.decrease") }.accessibilityLabel("Sidebar options")
+                Button { showOptions = true } label: { Label("Options", systemImage: "slider.horizontal.3") }
+                    .accessibilityLabel("Sidebar options")
             }
+        }
+        .sheet(isPresented: $showOptions, onDismiss: {
+            switch deferredOptionsAction { case .reorder: reorder = true; case .filters: filters = true; case nil: break }
+            deferredOptionsAction = nil
+        }) {
+            NavigationStack {
+                Form {
+                    Section("Task order") {
+                        Picker("Sort tasks", selection: $sort) {
+                            Text("Last updated").tag("last_updated"); Text("Priority").tag("priority"); Text("Name").tag("alphabetical")
+                        }.pickerStyle(.inline)
+                    }.listRowBackground(FD.surface)
+                    Section("Projects") {
+                        Toggle("Show hidden projects", isOn: $showHidden)
+                        Button("Reorder projects", systemImage: "arrow.up.arrow.down") { deferredOptionsAction = .reorder; showOptions = false }
+                        Button("Collapse all projects", systemImage: "rectangle.compress.vertical") { expanded = []; showOptions = false }
+                    }.listRowBackground(FD.surface)
+                    Section {
+                        if !model.extensions.filters.isEmpty { Button("Filter tasks", systemImage: "line.3.horizontal.decrease") { deferredOptionsAction = .filters; showOptions = false } }
+                        Button("Automations", systemImage: "calendar.badge.clock") { showOptions = false; model.selection = .automations }
+                        Button("Archived tasks", systemImage: "archivebox") { showOptions = false; model.selection = .archived }
+                    }.listRowBackground(FD.surface)
+                }.scrollContentBackground(.hidden).background(FD.background)
+                    .navigationTitle("Sidebar options").navigationBarTitleDisplayMode(.inline)
+                    .toolbar { ToolbarItem(placement: .confirmationAction) { Button("Done") { showOptions = false } } }
+            }.presentationDetents([.medium, .large]).presentationDragIndicator(.visible)
         }
         .sheet(item: $optionsProject) { ProjectOptionsView(project: $0) }
         .sheet(isPresented: $reorder) { ProjectOrderView() }
         .sheet(isPresented: $filters) { ExtensionFiltersView() }
         .onAppear {
             if case .task(let id) = model.selection, let task = model.tasks.first(where: { $0.id == id }) { expanded.insert(task.projectID) }
-            else if expanded.isEmpty, let project = projects.first { expanded.insert(project.id) }
+            else if expanded.isEmpty, let project = projects.first(where: { $0.raw["kind"].string != "casual" }) { expanded.insert(project.id) }
         }
         .onChange(of: model.projects.isEmpty) { _, empty in
-            if !empty && expanded.isEmpty, let project = projects.first { expanded.insert(project.id) }
+            if !empty && expanded.isEmpty, let project = projects.first(where: { $0.raw["kind"].string != "casual" }) { expanded.insert(project.id) }
         }
         .alert(editingFolder == nil ? "New folder" : "Rename folder", isPresented: $showFolderEditor) {
             TextField("Folder name", text: $folderName)
@@ -175,7 +188,7 @@ struct SidebarView: View {
                     Spacer()
                     if savingFolders.contains(folder.id) { ActivityDiamond() }
                     else { Image(systemName: isOpen ? "chevron.down" : "chevron.right").font(.caption2.weight(.semibold)) }
-                }.foregroundStyle(FD.secondary).padding(.leading, 20)
+                }.foregroundStyle(FD.secondary).padding(.leading, 26).padding(.trailing, 10).frame(minHeight: 44).contentShape(.rect)
             }
             .disabled(savingFolders.contains(folder.id)).accessibilityValue(isOpen ? "Expanded" : "Collapsed")
             .contextMenu {
@@ -186,7 +199,6 @@ struct SidebarView: View {
             if isOpen { taskPage(children, key: folder.id, indent: 40).task(id: folder.id + ":" + sort) { await model.loadTaskPage(project.id, folderID: folder.id, sort: sort) } }
         }
         taskPage(tasks.filter { !$0.pinnedInProject && !filed.contains($0.id) }, key: project.id, indent: 20)
-        Button { newTask(project) } label: { Label("New task", systemImage: "plus").font(.subheadline).foregroundStyle(FD.secondary).padding(.leading, 20) }
     }
     @ViewBuilder private func taskPage(_ tasks: [AgentTask], key: String, indent: CGFloat) -> some View {
         let limit = search.isEmpty ? limits[key, default: 5] : tasks.count
@@ -197,29 +209,48 @@ struct SidebarView: View {
             Button("Show more") {
                 limits[key] = limit + 10
                 Task { await model.loadTaskPage(projectID, folderID: folder?.id, sort: sort) }
-            }.font(.caption).foregroundStyle(FD.secondary).padding(.leading, indent)
+            }.font(.caption).foregroundStyle(FD.secondary).padding(.leading, indent + 28).frame(minHeight: 44)
                 .disabled(model.taskPageLoads.contains(CompactSync.key(project: projectID, folder: folder?.id, sort: sort)))
         }
     }
     private func taskLink(_ task: AgentTask, indent: CGFloat = 0) -> some View {
-        NavigationLink(value: Destination.task(task.id)) {
-            HStack(alignment: .top, spacing: 9) {
+        Button { model.selection = .task(task.id) } label: {
+            HStack(spacing: 8) {
                 Group {
                     if task.working { ActivityDiamond() }
-                    else if task.needsAttention { Image(systemName: "exclamationmark.circle").foregroundStyle(.orange) }
-                    else { Image(systemName: "bubble.left").foregroundStyle(FD.muted) }
-                }.font(.caption).frame(width: 14).padding(.top, 3)
-                TaskStageMark(task: task)
-                VStack(alignment: .leading, spacing: 3) {
-                    Text(task.title.nonempty ?? "New task").font(.subheadline).lineLimit(2)
-                    Text(task.provider.capitalized).font(.caption2).foregroundStyle(FD.muted)
-                }
-                Spacer(minLength: 0)
-                if task.unread { Circle().fill(.blue).frame(width: 5, height: 5).padding(.top, 7) }
-            }.padding(.vertical, 3).padding(.leading, indent)
-        }
-        .contextMenu { TaskStageMenu(task: task); TaskActions(task: task) }
+                    else if task.needsAttention { Circle().fill(.orange).frame(width: 6, height: 6) }
+                    else if task.unread { Circle().fill(NativeAppearance.shared.color("unread")).frame(width: 6, height: 6) }
+                    else { Color.clear }
+                }.frame(width: 12, height: 14)
+                Text(task.title.nonempty ?? "New task").font(.subheadline).lineLimit(1)
+                    .foregroundStyle(model.selection == .task(task.id) ? FD.foreground : FD.secondary)
+                Spacer(minLength: 4)
+                TaskStageMark(task: task).font(.caption2)
+            }
+            .padding(.leading, indent + 10).padding(.trailing, 12).frame(minHeight: 44)
+            .background(model.selection == .task(task.id) ? FD.raised : .clear, in: .rect(cornerRadius: 8))
+            .contentShape(.rect)
+        }.buttonStyle(.plain).accessibilityIdentifier("sidebar-task-\(task.id)")
+            .accessibilityAddTraits(model.selection == .task(task.id) ? .isSelected : [])
+            .contextMenu { TaskStageMenu(task: task); TaskActions(task: task) }
     }
+    private func sidebarAction(_ title: String, symbol: String, selected: Bool = false, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Label(title, systemImage: symbol).font(.subheadline).frame(maxWidth: .infinity, minHeight: 44, alignment: .leading)
+                .padding(.horizontal, 12).background(selected ? FD.raised : .clear, in: .rect(cornerRadius: 8)).contentShape(.rect)
+        }.buttonStyle(.plain).foregroundStyle(FD.foreground)
+    }
+    private func sectionHeading(_ title: String, expanded: Bool, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            HStack {
+                Text(title.uppercased()).font(.system(.caption2, design: .monospaced).weight(.medium)).tracking(0.8)
+                Spacer()
+                Image(systemName: expanded ? "chevron.down" : "chevron.right").font(.system(size: 10, weight: .semibold))
+            }.foregroundStyle(FD.muted).padding(.horizontal, 12).frame(minHeight: 40).padding(.top, 8).contentShape(.rect)
+        }.buttonStyle(.plain).accessibilityIdentifier("sidebar-section-\(title.lowercased())")
+            .accessibilityValue(expanded ? "Expanded" : "Collapsed")
+    }
+    private func animate(_ changes: () -> Void) { withAnimation(reduceMotion ? nil : .snappy(duration: 0.22), changes) }
     private func matches(_ task: AgentTask, project: Project? = nil) -> Bool {
         model.extensions.matches(task) && (search.isEmpty || task.title.localizedCaseInsensitiveContains(search) || project?.name.localizedCaseInsensitiveContains(search) == true)
     }

@@ -21,6 +21,21 @@ struct TranscriptBlock: Identifiable {
     let firstDiff: Bool
     var id: String { items.first?.id ?? "" }
     var running: Bool { items.contains { $0.raw["status"].string == "running" || $0.streaming } }
+    /// Keep secondary controls on the final assistant message of each turn.
+    /// Earlier commentary remains available through the message context menu.
+    static func actionMessageIDs(_ input: [Message]) -> Set<String> {
+        var ids: Set<String> = [], pending: String?
+        for message in input {
+            if message.kind == "user_message" {
+                if let pending { ids.insert(pending) }
+                pending = nil
+            } else if message.kind == "assistant_message" || message.kind == "code_review" {
+                pending = message.streaming ? nil : message.id
+            }
+        }
+        if let pending { ids.insert(pending) }
+        return ids
+    }
     static func build(_ input: [Message], preferences: ConversationPreferences, running: Bool) -> [TranscriptBlock] {
         let source = UserTextProjection.messages(input)
         var blocks: [TranscriptBlock] = [], buffer: [Message] = []

@@ -5,6 +5,7 @@ struct TranscriptRow: View {
     let message: Message
     var task: AgentTask? = nil
     var firstDiff = false
+    var showsActions = true
     var expansion: TranscriptExpansion? = nil
     @State private var expanded = false
     @State private var longMessageExpanded = false
@@ -62,13 +63,14 @@ struct TranscriptRow: View {
         .sheet(isPresented: $showOutput) { if let fullOutput { TextDocumentView(title: message.raw["title"].string.nonempty ?? "Tool output", text: fullOutput) } }
     }
     private var messageBody: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            HStack(spacing: 7) {
-                Image(systemName: message.kind == "user_message" ? "person.crop.circle" : "sparkle")
-                Text(message.kind == "user_message" ? (message.raw["automated"].bool ? "Scheduled task" : "You") : "Assistant").fontWeight(.medium)
-                Spacer()
-                if message.raw["pending"].bool { Text("Sending…").foregroundStyle(FD.muted) }
-            }.font(.caption).foregroundStyle(message.kind == "user_message" ? FD.secondary : FD.accent)
+        VStack(alignment: .leading, spacing: 6) {
+            if message.raw["automated"].bool || message.raw["pending"].bool {
+                HStack {
+                    if message.raw["automated"].bool { Label("Scheduled task", systemImage: "calendar").font(.caption) }
+                    Spacer()
+                    if message.raw["pending"].bool { Text("Sending…").font(.caption) }
+                }.foregroundStyle(FD.secondary)
+            }
             ForEach(message.raw["attachments"].array, id: \.self) { reference in MediaImageView(reference: reference, itemID: message.id, task: task) }
             if message.kind == "user_message" {
                 let long = preferences.flag("collapse_long_user_messages") && (message.text.count > 900 || message.text.filter { $0 == "\n" }.count > 12)
@@ -76,19 +78,19 @@ struct TranscriptRow: View {
                 if long { Button(longMessageExpanded ? "Show less" : "Show more") { longMessageExpanded.toggle() }.font(.caption).foregroundStyle(FD.accent) }
             }
             else { NativeMarkdown(text: message.text); AssistantSources(message: message) }
-            if message.kind != "user_message", !message.text.isEmpty {
-                HStack(spacing: 18) {
-                    Button { UIPasteboard.general.string = message.text } label: { Image(systemName: "doc.on.doc") }.accessibilityLabel("Copy response")
+            if showsActions, message.kind != "user_message", !message.streaming, !message.text.isEmpty {
+                HStack(spacing: 0) {
+                    Button { UIPasteboard.general.string = message.text } label: { Image(systemName: "doc.on.doc").frame(width: 44, height: 44).contentShape(.rect) }.accessibilityLabel("Copy response")
                     Button {
                         Task { await model.readAloud.play(message.text, id: message.id, model: model) }
                     } label: {
                         if model.readAloud.messageID == message.id, model.readAloud.loading { ActivityDiamond() }
-                        else { Image(systemName: model.readAloud.messageID == message.id ? "stop.fill" : "speaker.wave.2") }
+                        else { Image(systemName: model.readAloud.messageID == message.id ? "stop.fill" : "speaker.wave.2").frame(width: 44, height: 44).contentShape(.rect) }
                     }.accessibilityLabel(model.readAloud.messageID == message.id ? "Stop read aloud" : "Read aloud").disabled(model.voice.recording || model.voice.transcribing)
                     if model.readAloud.messageID == message.id, !model.readAloud.loading {
                         Button { model.readAloud.togglePause() } label: { Image(systemName: model.readAloud.paused ? "play.fill" : "pause.fill") }.accessibilityLabel(model.readAloud.paused ? "Resume read aloud" : "Pause read aloud")
                     }
-                }.font(.caption).foregroundStyle(FD.secondary).buttonStyle(.plain).padding(.top, 4)
+                }.font(.caption).foregroundStyle(FD.secondary).buttonStyle(.plain).padding(.leading, -12)
                 if model.readAloud.errorMessageID == message.id, let error = model.readAloud.error { Text(error).font(.caption).foregroundStyle(.orange) }
             }
         }
@@ -100,6 +102,10 @@ struct TranscriptRow: View {
                 Button("Retry in a new branch", systemImage: "arrow.clockwise") { branch(task, retry: true) }.disabled(model.chat(for: task).sending || (!model.demo && !model.connected))
             }
             Button { UIPasteboard.general.string = message.text } label: { Label("Copy message", systemImage: "doc.on.doc") }
+            if message.kind != "user_message", !message.text.isEmpty {
+                Button("Read aloud", systemImage: "speaker.wave.2") { Task { await model.readAloud.play(message.text, id: message.id, model: model) } }
+                    .disabled(model.voice.recording || model.voice.transcribing)
+            }
             ShareLink(item: message.text) { Label("Share message", systemImage: "square.and.arrow.up") }
         }
     }

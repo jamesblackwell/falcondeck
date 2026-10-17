@@ -31,8 +31,8 @@ final class NativeAppearance {
     func color(_ group: String, _ key: String = "default") -> Color {
         let light = Self.palettes.first { $0.id == lightID } ?? Self.palettes.first { !$0.dark }
         let dark = Self.palettes.first { $0.id == darkID } ?? Self.palettes.first { $0.dark }
-        let lightValue = light?.raw["colors"][group][key].string ?? "#17171c"
-        let darkValue = dark?.raw["colors"][group][key].string ?? "#f4f4f6"
+        let lightValue = light?.raw["colors"][group][key].string.nonempty ?? light?.raw["colors"][group].string.nonempty ?? "#17171c"
+        let darkValue = dark?.raw["colors"][group][key].string.nonempty ?? dark?.raw["colors"][group].string.nonempty ?? "#f4f4f6"
         return Color(Self.dynamicColor(light: lightValue, dark: darkValue))
     }
     nonisolated static func dynamicColor(light: String, dark: String) -> UIColor {

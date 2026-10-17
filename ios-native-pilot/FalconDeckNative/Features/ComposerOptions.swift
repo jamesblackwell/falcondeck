@@ -5,11 +5,35 @@ struct ComposerOptions: View {
     let task: AgentTask
     let project: Project?
     @Bindable var chat: ChatSession
+    @State private var showSettings = false
     private var capabilities: JSON { project?.capabilities(task.provider) ?? .null }
     private var modes: [JSON] { project?.modes(task.provider) ?? [] }
     private var activeModel: AgentModel? { project?.models(for: task.provider).first { $0.id == chat.modelID } ?? project?.models(for: task.provider).first { $0.raw["is_default"].bool } }
     var body: some View {
-        Menu {
+        Button { showSettings = true } label: {
+            Image(systemName: "slider.horizontal.3").frame(width: 44, height: 44).contentShape(.rect)
+        }.buttonStyle(.plain).accessibilityLabel("Agent and task settings")
+        .sheet(isPresented: $showSettings) {
+            NavigationStack {
+                Form { settings }
+                    .scrollContentBackground(.hidden).background(FD.background)
+                    .navigationTitle("Task settings").navigationBarTitleDisplayMode(.inline)
+                    .toolbar { ToolbarItem(placement: .confirmationAction) { Button("Done") { showSettings = false } } }
+            }.presentationDetents([.medium, .large]).presentationDragIndicator(.visible)
+        }
+        .onChange(of: chat.provider) { _, provider in
+            guard task.isDraft else { return }
+            chat.modelID = ""; chat.effort = ""; chat.overrides = [:]
+            if let project, project.models(for: provider).isEmpty, !model.demo {
+                Task {
+                    do { _ = try await model.relay.call("provider.hydrate", params: .object(["workspace_id": .string(project.id), "provider": .string(provider)])) }
+                    catch { chat.error = error.localizedDescription }
+                }
+            }
+        }
+    }
+    @ViewBuilder private var settings: some View {
+        Section {
             if task.isDraft {
                 Picker("Agent", selection: $chat.provider) {
                     ForEach(project?.providers ?? [task.provider], id: \.self) { Text($0.capitalized).tag($0) }
@@ -27,18 +51,7 @@ struct ComposerOptions: View {
             if let activeModel, !activeModel.raw["service_tiers"].array.isEmpty {
                 modePicker("Speed", key: "service_tier", options: activeModel.raw["service_tiers"].array.map { ($0["id"].string, $0["name"].string) })
             }
-        } label: { Image(systemName: "slider.horizontal.3").padding(.vertical, 4) }
-            .accessibilityLabel("Agent and task settings")
-            .onChange(of: chat.provider) { _, provider in
-                guard task.isDraft else { return }
-                chat.modelID = ""; chat.effort = ""; chat.overrides = [:]
-                if let project, project.models(for: provider).isEmpty, !model.demo {
-                    Task {
-                        do { _ = try await model.relay.call("provider.hydrate", params: .object(["workspace_id": .string(project.id), "provider": .string(provider)])) }
-                        catch { chat.error = error.localizedDescription }
-                    }
-                }
-            }
+        }.listRowBackground(FD.surface)
     }
     private func modePicker(_ label: String, key: String, options: [(String, String)]) -> some View {
         Picker(label, selection: Binding(get: { (chat.overrides[key] ?? task.raw["agent"][key]).string.nonempty ?? (key == "service_tier" ? "default" : "") }, set: { value in

@@ -24,6 +24,14 @@ final class PresentationTests: XCTestCase {
         XCTAssertEqual(blocks[0].items.map(\.id), ["t1", "r", "t2"])
         XCTAssertFalse(blocks[1].grouped)
     }
+    func testActionsStayOnTheLastAssistantResponseOfEachTurn() {
+        let rows = [message("u1", kind: "user_message"), message("commentary", kind: "assistant_message"), message("tool", kind: "tool_call"), message("final1", kind: "assistant_message"), message("u2", kind: "user_message"), message("final2", kind: "assistant_message")]
+        XCTAssertEqual(TranscriptBlock.actionMessageIDs(rows), ["final1", "final2"])
+    }
+    func testStreamingReplyDoesNotLeaveAnEarlierCommentaryActionBar() {
+        let rows = [message("commentary", kind: "assistant_message"), Message(message("streaming", kind: "assistant_message").raw.setting("lifecycle", .string("streaming")))]
+        XCTAssertTrue(TranscriptBlock.actionMessageIDs(rows).isEmpty)
+    }
     func testOnlyTrailingReasoningRemainsStreaming() {
         let rows = [Message(message("r1", kind: "reasoning").raw.setting("lifecycle", .string("streaming"))), Message(message("r2", kind: "reasoning").raw.setting("lifecycle", .string("streaming")))]
         let blocks = TranscriptBlock.build(rows, preferences: ConversationPreferences(raw: .null), running: true)

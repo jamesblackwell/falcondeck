@@ -33,11 +33,13 @@ private struct ChatContent: View {
     private var requests: [JSON] { model.requests.filter { $0["thread_id"].string == task.id } }
 
     private var preferences: ConversationPreferences { ConversationPreferences(raw: model.preferences["conversation"]) }
+    private var actionIDs: Set<String> { TranscriptBlock.actionMessageIDs(chat.transcript.items) }
     private var blocks: [TranscriptBlock] { TranscriptBlock.build(chat.transcript.items, preferences: preferences, running: task.running) }
     var body: some View {
+        let actions = actionIDs
         ScrollViewReader { proxy in
             ScrollView {
-                LazyVStack(alignment: .leading, spacing: 20) {
+                LazyVStack(alignment: .leading, spacing: 12) {
                     if chat.hasOlder {
                         Button {
                             let anchor = chat.transcript.items.first?.id
@@ -51,14 +53,14 @@ private struct ChatContent: View {
                     }
                     ForEach(blocks) { block in
                         if block.grouped { TranscriptGroup(block: block, task: task, expansion: expansion).id(block.id) }
-                        else if let item = block.items.first { TranscriptRow(message: item, task: task, firstDiff: block.firstDiff, expansion: expansion).id(item.id) }
+                        else if let item = block.items.first { TranscriptRow(message: item, task: task, firstDiff: block.firstDiff, showsActions: actions.contains(item.id), expansion: expansion).id(item.id) }
                     }
                     if task.running {
                         HStack(spacing: 8) { ActivityDiamond(); Text("\(task.provider.capitalized) is working…").font(.footnote).foregroundStyle(FD.secondary) }.padding(.vertical, 8)
                     }
                     Color.clear.frame(height: 1).id("latest")
                 }
-                .padding(.horizontal, FD.inset).padding(.vertical, 20).frame(maxWidth: 820).frame(maxWidth: .infinity)
+                .padding(.horizontal, FD.inset).padding(.vertical, 16).frame(maxWidth: 820).frame(maxWidth: .infinity)
             }
             .defaultScrollAnchor(.bottom, for: .initialOffset)
             .onScrollGeometryChange(for: Bool.self) { g in g.contentOffset.y + g.containerSize.height >= g.contentSize.height - 120 } action: { _, value in
@@ -83,14 +85,17 @@ private struct ChatContent: View {
         }
         .background(FD.background).navigationTitle(task.title.nonempty ?? "New task").navigationBarTitleDisplayMode(.inline)
         .toolbar {
-            if preferences.flag("show_expand_all_controls"), !chat.transcript.items.isEmpty {
-                ToolbarItem(placement: .topBarTrailing) {
-                    Menu { Button("Expand all activity") { expansion = TranscriptExpansion(expanded: true) }; Button("Collapse all activity") { expansion = TranscriptExpansion(expanded: false) } } label: { Image(systemName: "line.3.horizontal.decrease") }.accessibilityLabel("Transcript display")
-                }
-            }
             ToolbarItem(placement: .topBarTrailing) {
                 if !task.isDraft {
-                    Button { model.taskOptionsID = task.id } label: { Image(systemName: "ellipsis") }.accessibilityLabel("Task options")
+                    Menu {
+                        Button("Task options", systemImage: "slider.horizontal.3") { model.taskOptionsID = task.id }
+                        if preferences.flag("show_expand_all_controls"), !chat.transcript.items.isEmpty {
+                            Divider()
+                            Button("Expand all activity") { expansion = TranscriptExpansion(expanded: true) }
+                            Button("Collapse all activity") { expansion = TranscriptExpansion(expanded: false) }
+                        }
+                    } label: { Image(systemName: "ellipsis").frame(width: 28, height: 28) }
+                        .accessibilityLabel("Task menu").accessibilityIdentifier("task-menu")
                 }
             }
         }

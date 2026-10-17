@@ -27,14 +27,14 @@ struct ActivityView: View {
                     Section("\(section.rawValue) · \(rows.count)") {
                         ForEach(Array(rows.prefix(section == .recent ? 50 : rows.count))) { task in
                             Button { model.selection = .task(task.id) } label: {
-                                VStack(alignment: .leading, spacing: 6) {
+                                VStack(alignment: .leading, spacing: 4) {
                                     Text(model.projects.first { $0.id == task.projectID }?.name ?? "Project").font(.caption).foregroundStyle(FD.secondary)
                                     HStack { Text(task.title).font(.subheadline.weight(.medium)); Spacer(); if task.working { ActivityDiamond() } }
-                                    if !task.preview.isEmpty { Text(task.preview).font(.footnote).foregroundStyle(FD.secondary).lineLimit(2) }
-                                }.padding(.vertical, 5)
+                                    if !task.preview.isEmpty { Text(task.preview).font(.footnote).foregroundStyle(FD.secondary).lineLimit(1) }
+                                }.padding(.vertical, 2)
                             }.foregroundStyle(FD.foreground).contextMenu { TaskActions(task: task) }
                         }
-                    }.listRowBackground(FD.surface)
+                    }.listRowBackground(Color.clear)
                 }
             }
             if entries.isEmpty { ContentUnavailableView("All quiet", systemImage: "waveform.path") }
@@ -44,7 +44,7 @@ struct ActivityView: View {
                     Task { defer { loadingMore = false }; for project in model.sortedProjects.filter({ model.hasMoreTasks($0.id) }).prefix(4) { await model.loadTaskPage(project.id) } }
                 }.disabled(loadingMore || !model.connected)
             }
-        }.scrollContentBackground(.hidden).background(FD.background).navigationTitle("Activity")
+        }.listStyle(.plain).scrollContentBackground(.hidden).background(FD.background).navigationTitle("Activity")
             .refreshable { await model.refresh() }
     }
 }

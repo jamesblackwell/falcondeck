@@ -93,6 +93,7 @@
 		CD52507881EFFA6E375BA102 /* ExtensionViews.swift in Sources */ = {isa = PBXBuildFile; fileRef = EA05554A84D6E67931E193B3 /* ExtensionViews.swift */; };
 		D06308490D0E61D54B7FE796 /* ExtensionTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7B6528AA74EFE828E6D0FDFE /* ExtensionTests.swift */; };
 		D2B18AAB4E7C8F1A1509DFA7 /* ConversationSettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 13C423D98FDB81AF0455EC45 /* ConversationSettingsView.swift */; };
+		D33B314FDE8ABD653260900B /* PolishQATests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0FD783724D4610D009EA7313 /* PolishQATests.swift */; };
 		D7EC584FA8C33DB80F6AEC5E /* CompactSyncTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6263F2FACA8AC6703722FE37 /* CompactSyncTests.swift */; };
 		D8E9D4506A116EF7A3F3F807 /* SessionVault.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1518FBBC59AA5C636477C648 /* SessionVault.swift */; };
 		D9722B14F3B27788B3D622C8 /* InteractiveCard.swift in Sources */ = {isa = PBXBuildFile; fileRef = A320A411D5E4F108995089DA /* InteractiveCard.swift */; };
@@ -155,6 +156,7 @@
 		0B2E3E67BD590B9BDB46318D /* NativeSmokeTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NativeSmokeTests.swift; sourceTree = "<group>"; };
 		0B674EB9298FF9EA3AFBC664 /* CompactSync.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CompactSync.swift; sourceTree = "<group>"; };
 		0FB0EF0DB934FDF58A63E71A /* PerformanceSample.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PerformanceSample.swift; sourceTree = "<group>"; };
+		0FD783724D4610D009EA7313 /* PolishQATests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PolishQATests.swift; sourceTree = "<group>"; };
 		1296682B4C2710C830607D72 /* AutomationTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AutomationTests.swift; sourceTree = "<group>"; };
 		13C423D98FDB81AF0455EC45 /* ConversationSettingsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ConversationSettingsView.swift; sourceTree = "<group>"; };
 		1518FBBC59AA5C636477C648 /* SessionVault.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SessionVault.swift; sourceTree = "<group>"; };
@@ -398,6 +400,7 @@
 			isa = PBXGroup;
 			children = (
 				0B2E3E67BD590B9BDB46318D /* NativeSmokeTests.swift */,
+				0FD783724D4610D009EA7313 /* PolishQATests.swift */,
 			);
 			path = FalconDeckNativeUITests;
 			sourceTree = "<group>";
@@ -758,6 +761,7 @@
 			buildActionMask = 2147483647;
 			files = (
 				B303B6D6F20519B66A182BBE /* NativeSmokeTests.swift in Sources */,
+				D33B314FDE8ABD653260900B /* PolishQATests.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};

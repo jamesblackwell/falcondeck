@@ -62,7 +62,7 @@ struct RootView: View {
                 case .automations: AutomationsView()
                 default: StartView()
                 }
-            }.id(model.selection)
+            }.id(model.selection).navigationBarTitleDisplayMode(.inline)
         }
         .navigationSplitViewStyle(.balanced)
         .dynamicTypeSize(NativeAppearance.shared.textSize(relativeTo: textSize))

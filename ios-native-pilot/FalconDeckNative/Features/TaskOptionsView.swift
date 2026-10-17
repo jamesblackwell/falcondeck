@@ -15,8 +15,8 @@ struct TaskOptionsView: View {
         NavigationStack {
             Form {
                 if let task {
-                    TaskUsageView(usage: model.tokenUsage[task.id])
-                    Section("Task title") {
+                    Section {
+                        DisclosureGroup("Rename task") {
                         TextField("Task title", text: $title).accessibilityIdentifier("task-title")
                         Button("Save title") { run { _ = try await model.taskRequest(task, method: "thread.update", fields: ["title": .string(title.trimmingCharacters(in: .whitespacesAndNewlines))]) } }
                             .disabled(title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
@@ -29,6 +29,7 @@ struct TaskOptionsView: View {
                                     title = result["title"].string
                                 }
                             }
+                        }
                         }
                     }.listRowBackground(FD.surface)
                     Section {
@@ -68,6 +69,7 @@ struct TaskOptionsView: View {
                         else { Button("Archive task", systemImage: "archivebox", role: .destructive) { run { await model.archive(task) } } }
                     }.listRowBackground(FD.surface)
                 }
+                if let task { TaskUsageView(usage: model.tokenUsage[task.id]) }
                 if let error { Text(error).foregroundStyle(.orange).listRowBackground(FD.surface) }
             }
             .disabled(pending || (!model.demo && !model.connected))
