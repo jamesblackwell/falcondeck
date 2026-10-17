@@ -68,10 +68,9 @@ private struct ChatContent: View {
                 }
                 .padding(.horizontal, FD.inset).padding(.vertical, 16).frame(maxWidth: 820).frame(maxWidth: .infinity)
             }
+            // Keep this preference fixed: changing the size-change anchor while
+            // reading variable-height lazy rows can trigger a layout feedback loop.
             .defaultScrollAnchor(.bottom, for: .initialOffset)
-            // Markdown, images and diagrams can settle after the first layout.
-            // Keep their reflow anchored until the user starts reading activity.
-            .defaultScrollAnchor(followLatest ? .bottom : nil, for: .sizeChanges)
             .onScrollGeometryChange(for: Bool.self) { g in g.contentOffset.y + g.containerSize.height >= g.contentSize.height - 120 } action: { _, value in
                 // Content growth and keyboard dismissal also change geometry.
                 // Only an actual reading gesture should turn following off.
@@ -84,7 +83,7 @@ private struct ChatContent: View {
             .onChange(of: chat.transcript.revision) { _, _ in
                 if followLatest || chat.sending { scrollToLatest(proxy, animated: true) }
             }
-            .onChange(of: chat.loaded) { _, loaded in if loaded { scrollToLatest(proxy, animated: false) } }
+            .onChange(of: chat.loaded, initial: true) { _, loaded in if loaded { scrollToLatest(proxy, animated: false) } }
             .onChange(of: chat.sending) { _, sending in if sending { followLatest = true; scrollToLatest(proxy, animated: true) } }
             .overlay(alignment: .bottomTrailing) {
                 if !nearLatest && !chat.transcript.items.isEmpty {
