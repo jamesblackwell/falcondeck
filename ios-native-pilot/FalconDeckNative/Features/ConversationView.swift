@@ -41,8 +41,8 @@ private struct ChatContent: View {
     var body: some View {
         let actions = actionIDs
         ScrollViewReader { proxy in
-            ScrollView {
-                LazyVStack(alignment: .leading, spacing: 12) {
+            List {
+                Group {
                     if chat.hasOlder {
                         Button {
                             let anchor = chat.transcript.items.first?.id
@@ -58,16 +58,23 @@ private struct ChatContent: View {
                         }.frame(maxWidth: .infinity).padding(.vertical, 48)
                     }
                     ForEach(blocks) { block in
-                        if block.grouped { TranscriptGroup(block: block, task: task, expansion: expansion, onInteraction: { scroll.followLatest = false }).id(block.id) }
-                        else if let item = block.items.first { TranscriptRow(message: item, task: task, firstDiff: block.firstDiff, showsActions: actions.contains(item.id), expansion: expansion, onInteraction: { scroll.followLatest = false }).id(item.id) }
+                        Group {
+                            if block.grouped { TranscriptGroup(block: block, task: task, expansion: expansion, onInteraction: { scroll.followLatest = false }).id(block.id) }
+                            else if let item = block.items.first { TranscriptRow(message: item, task: task, firstDiff: block.firstDiff, showsActions: actions.contains(item.id), expansion: expansion, onInteraction: { scroll.followLatest = false }).id(item.id) }
+                        }.frame(maxWidth: 820).frame(maxWidth: .infinity)
                     }
                     if task.running {
-                        HStack(spacing: 8) { ActivityDiamond(); Text("\(task.provider.capitalized) is working…").font(.footnote).foregroundStyle(FD.secondary) }.padding(.vertical, 8)
+                        HStack(spacing: 8) { ActivityDiamond(); Text("\(task.provider.capitalized) is working…").font(.footnote).foregroundStyle(FD.secondary) }.padding(.vertical, 8).frame(maxWidth: 820, alignment: .leading).frame(maxWidth: .infinity)
                     }
                     Color.clear.frame(height: 1).id("latest")
                 }
-                .padding(.horizontal, FD.inset).padding(.vertical, 16).frame(maxWidth: 820).frame(maxWidth: .infinity)
+                .listRowInsets(EdgeInsets(top: 6, leading: FD.inset, bottom: 6, trailing: FD.inset))
+                .listRowSeparator(.hidden).listRowBackground(Color.clear)
+                .buttonStyle(.plain)
             }
+            .listStyle(.plain).scrollContentBackground(.hidden)
+            .environment(\.defaultMinListRowHeight, 0)
+            .contentMargins(.vertical, 10, for: .scrollContent)
             .accessibilityIdentifier("conversation-transcript")
             // Keep initial positioning independent from subsequent reading/reflow.
             .defaultScrollAnchor(.bottom, for: .initialOffset)

@@ -18,6 +18,9 @@ import XCTest
         XCTAssertTrue(bar.waitForExistence(timeout: 5))
         bar.buttons.element(boundBy: 0).tap()
     }
+    private func transcript(_ app: XCUIApplication) -> XCUIElement {
+        app.descendants(matching: .any).matching(identifier: "conversation-transcript").firstMatch
+    }
     func testSidebarHierarchyDensityAndSheetTransitions() {
         let app = launch()
         let pin = app.buttons["sidebar-task-native"]
@@ -64,7 +67,7 @@ import XCTest
         let jump = app.buttons["Jump to latest message"]
         XCTAssertFalse(jump.exists, "Following the latest response should not add a redundant jump control")
         capture("06 Running conversation and compact composer")
-        for _ in 0..<3 { app.scrollViews["conversation-transcript"].swipeDown() }
+        for _ in 0..<3 { transcript(app).swipeDown() }
         XCTAssertTrue(jump.waitForExistence(timeout: 5))
         capture("Conversation reading position")
         jump.tap()
@@ -164,7 +167,7 @@ import XCTest
         let app = launch()
         app.buttons["sidebar-task-native"].tap()
         let more = app.buttons["Show more"]
-        for _ in 0..<5 where !more.isHittable { app.scrollViews["conversation-transcript"].swipeDown() }
+        for _ in 0..<5 where !more.isHittable { transcript(app).swipeDown() }
         let visible = XCTNSPredicateExpectation(predicate: NSPredicate(format: "hittable == true"), object: more)
         XCTAssertEqual(XCTWaiter.wait(for: [visible], timeout: 5), .completed)
         let message = app.staticTexts.matching(NSPredicate(format: "label CONTAINS %@", "Please keep the following priorities")).firstMatch
