@@ -33,7 +33,7 @@ state. Focused regressions cover twelve initially unloaded casual workspaces,
 five-second history requests, failed first reads and retry, reopening during a
 request, unread acknowledgement, compact row spacing, and repeated folder taps.
 
-126 unit tests pass. New unit regressions cover cancelled read retention, fresh
+130 unit tests pass. New unit regressions cover cancelled read retention, fresh
 index paging, folder save ordering/failure/connection changes, history
 projection, archive during history loading, and older-page failure isolation.
 Phone and iPad UI checks also cover sidebar hierarchy, search into
@@ -66,3 +66,30 @@ All changes are confined to this standalone native client. No Expo build, OTA,
 TestFlight upload, relay deployment or production build is involved. Slow-link
 and failure checks use deterministic local fixtures; their five-second delay
 is a test condition, not a measurement of the real relay.
+
+## Physical-device scrolling follow-up
+
+The post-install process check caught two iPhone crashes in
+`UICollectionView._validateScrollingTargetIndexPath` during SwiftUI's deferred
+list updates. The transcript scheduled unstructured ScrollViewProxy requests
+for changing item indices; these also survived leaving a conversation.
+
+Transcript scrolling now has one view-scoped owner. It coalesces requests,
+cancels when the view disappears or the user starts reading, and uses the
+current native scroll view's laid-out content bounds instead of a deferred
+collection item index. Initial positioning and older-page preservation use
+that owner too. Row background probes bind to their own live collection view;
+an older-page anchor cannot move a replacement conversation.
+
+New regressions cover row replacement before scrolling, cancellation on view
+departure or row interaction, and prepend anchors across list replacement or
+simultaneous live output below the reader. The original native List renderer
+remains in use for rich Markdown and cell reuse. The separate review of this
+follow-up also finished with no actionable P0–P2 findings after correcting anchor
+restoration and interaction cancellation.
+
+Direct tests on the physical iPhone passed keyboard/latest positioning,
+long-message reading-position preservation, and repeated sidebar navigation.
+The corresponding iPad checks also passed. No new iPhone crash reports appeared
+during those final checks. The updated development app was then launched with
+its real pairing again.

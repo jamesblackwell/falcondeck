@@ -26,6 +26,7 @@ private struct ChatContent: View {
     let task: AgentTask
     @Bindable var chat: ChatSession
     @State private var scroll = TranscriptScrollState()
+    @State private var listScrolling = NativeListScrolling()
     @State private var showGoal = false
     @State private var visible = false
     private var expansion: TranscriptExpansion? { chat.transcriptExpansion }
@@ -41,56 +42,61 @@ private struct ChatContent: View {
     var body: some View {
         let actions = actionIDs
         let blocks = blocks
-        ScrollViewReader { proxy in
+        Group {
             List {
                 Group {
                     if chat.hasOlder {
                         Button {
-                            let anchor = chat.transcript.items.first?.id
-                            Task { await model.loadChat(task, older: true); if let anchor { proxy.scrollTo(anchor, anchor: .top) } }
+                            scroll.followLatest = false
+                            let anchor = listScrolling.readingAnchor()
+                            Task { await model.loadChat(task, older: true); if let anchor { listScrolling.restore(anchor) } }
                         } label: { HStack { if chat.loading { ActivityDiamond() }; Text("Load earlier messages") }.frame(maxWidth: .infinity) }
                             .font(.footnote).foregroundStyle(FD.secondary).disabled(chat.loading)
+                            .listRowBackground(NativeListScrollProbe(scrolling: listScrolling))
                     }
                     ForEach(blocks) { block in
                         Group {
-                            if block.grouped { TranscriptGroup(block: block, task: task, expansion: expansion, onInteraction: { scroll.followLatest = false }).id(block.id) }
-                            else if let item = block.items.first { TranscriptRow(message: item, task: task, firstDiff: block.firstDiff, showsActions: actions.contains(item.id), expansion: expansion, onInteraction: { scroll.followLatest = false }).id(item.id) }
+                            if block.grouped { TranscriptGroup(block: block, task: task, expansion: expansion, onInteraction: stopFollowing).id(block.id) }
+                            else if let item = block.items.first { TranscriptRow(message: item, task: task, firstDiff: block.firstDiff, showsActions: actions.contains(item.id), expansion: expansion, onInteraction: stopFollowing).id(item.id) }
                         }.frame(maxWidth: 820).frame(maxWidth: .infinity)
+                            .listRowBackground(NativeListScrollProbe(scrolling: listScrolling, rowID: block.id))
                     }
                     if task.running && !chat.transcript.items.isEmpty {
                         HStack(spacing: 8) { ActivityDiamond(); Text("\(task.provider.capitalized) is working…").font(.footnote).foregroundStyle(FD.secondary) }.padding(.vertical, 8).frame(maxWidth: 820, alignment: .leading).frame(maxWidth: .infinity)
+                            .listRowBackground(NativeListScrollProbe(scrolling: listScrolling))
                     }
-                    Color.clear.frame(height: 1).id("latest")
+                    Color.clear.frame(height: 1).id("latest").listRowBackground(NativeListScrollProbe(scrolling: listScrolling))
                 }
                 .listRowInsets(EdgeInsets(top: 6, leading: FD.inset, bottom: 6, trailing: FD.inset))
-                .listRowSeparator(.hidden).listRowBackground(Color.clear)
+                .listRowSeparator(.hidden)
                 .buttonStyle(.plain)
             }
             .listStyle(.plain).scrollContentBackground(.hidden)
             .environment(\.defaultMinListRowHeight, 0)
             .contentMargins(.vertical, 10, for: .scrollContent)
             .accessibilityIdentifier("conversation-transcript")
-            // Keep initial positioning independent from subsequent reading/reflow.
-            .defaultScrollAnchor(.bottom, for: .initialOffset)
-            .onScrollGeometryChange(for: Bool.self) { g in g.contentOffset.y + g.containerSize.height >= g.contentSize.height - 120 } action: { _, value in
+            .onScrollGeometryChange(for: TranscriptGeometry.self) { g in
+                TranscriptGeometry(nearLatest: g.contentOffset.y + g.containerSize.height >= g.contentSize.height - 120, contentHeight: g.contentSize.height)
+            } action: { previous, value in
                 // Content growth and keyboard dismissal also change geometry.
                 // Only an actual reading gesture should turn following off.
-                scroll.nearLatest = value
-                if scroll.userScrolling { scroll.followLatest = value }
+                scroll.nearLatest = value.nearLatest
+                if scroll.userScrolling { scroll.followLatest = value.nearLatest }
+                if previous.contentHeight != value.contentHeight, scroll.followLatest, !scroll.userScrolling { scrollToLatest(animated: false) }
             }
             .onChange(of: viewportHeight) { _, _ in
                 // Observe the outer layout, which cannot change as lazy rows are
                 // measured. Keyboard and composer resizing must still follow.
-                if scroll.followLatest && !scroll.userScrolling { scrollToLatest(proxy, animated: false) }
+                if scroll.followLatest && !scroll.userScrolling { scrollToLatest(animated: false) }
             }
             .onChange(of: bottomInsetHeight) { _, _ in
-                if scroll.followLatest && !scroll.userScrolling { scrollToLatest(proxy, animated: false) }
+                if scroll.followLatest && !scroll.userScrolling { scrollToLatest(animated: false) }
             }
             .onScrollPhaseChange { previous, phase in
                 scroll.userScrolling = phase == .tracking || phase == .interacting || phase == .decelerating
                 // A drag expresses reading intent even if the near-end value did
                 // not cross its threshold during that gesture.
-                if phase == .interacting { scroll.followLatest = false }
+                if phase == .interacting { scroll.followLatest = false; listScrolling.cancel() }
                 else if phase == .idle && (previous == .interacting || previous == .decelerating) && scroll.nearLatest {
                     scroll.followLatest = true
                 }
@@ -98,10 +104,10 @@ private struct ChatContent: View {
             .scrollDismissesKeyboard(.interactively)
             .refreshable { if !task.isDraft { await model.loadChat(task) } }
             .onChange(of: chat.transcript.revision) { _, _ in
-                if scroll.followLatest || chat.sending { scrollToLatest(proxy, animated: true) }
+                if scroll.followLatest || chat.sending { scrollToLatest(animated: true) }
             }
-            .onChange(of: chat.loaded, initial: true) { _, loaded in if loaded { scrollToLatest(proxy, animated: false) } }
-            .onChange(of: chat.sending) { _, sending in if sending { scroll.followLatest = true; scrollToLatest(proxy, animated: true) } }
+            .onChange(of: chat.loaded, initial: true) { _, loaded in if loaded { scrollToLatest(animated: false) } }
+            .onChange(of: chat.sending) { _, sending in if sending { scroll.followLatest = true; scrollToLatest(animated: true) } }
             // Pane states stay outside the bottom-anchored list so they cannot
             // scroll off screen, including during keyboard/composer resizing.
             .overlay {
@@ -132,7 +138,7 @@ private struct ChatContent: View {
             }
             .overlay(alignment: .bottomTrailing) {
                 LatestMessageShortcut(state: scroll, hasMessages: !chat.transcript.items.isEmpty) {
-                    scroll.followLatest = true; scrollToLatest(proxy, animated: true)
+                    scroll.followLatest = true; scrollToLatest(animated: true)
                 }
             }
         }
@@ -147,12 +153,12 @@ private struct ChatContent: View {
                 }
             }
         }
-        .onChange(of: chat.transcriptExpansion) { _, _ in scroll.followLatest = false }
+        .onChange(of: chat.transcriptExpansion) { _, _ in scroll.followLatest = false; listScrolling.cancel() }
         .sheet(isPresented: $showGoal) { GoalView(taskID: task.id) }
         // The editor outlives the queue row if that message dispatches meanwhile.
         .sheet(item: $chat.queuedEdit) { QueuedMessageEditor(task: task, edit: $0) }
-        .onAppear { visible = true }
-        .onDisappear { visible = false }
+        .onAppear { visible = true; listScrolling.setActive(true); if chat.loaded { scrollToLatest(animated: false) } }
+        .onDisappear { visible = false; listScrolling.setActive(false) }
         .task(id: ConversationReadState(taskID: task.id, activitySeq: task.activitySeq, historyReady: chat.loaded && !chat.loading && chat.historyError == nil, foreground: model.foreground, visible: visible)) {
             guard visible, chat.loaded, !chat.loading, chat.historyError == nil, model.foreground else { return }
             do { try await Task.sleep(for: .milliseconds(600)) } catch { return }
@@ -204,13 +210,16 @@ private struct ChatContent: View {
         }.defaultScrollAnchor(.bottom)
             .accessibilityIdentifier("conversation-context").frame(height: min(contextHeight, max(0, min(200, min(viewportHeight * 0.28, viewportHeight - 180)))))
     }
-    private func scrollToLatest(_ proxy: ScrollViewProxy, animated: Bool) {
-        Task { @MainActor in
-            await Task.yield()
-            guard scroll.followLatest || chat.sending else { return }
-            withAnimation(animated && !reduceMotion ? .easeOut(duration: 0.15) : nil) { proxy.scrollTo("latest", anchor: .bottom) }
-        }
+    private func scrollToLatest(animated: Bool) {
+        guard visible, scroll.followLatest || chat.sending else { return }
+        listScrolling.bottom(animated: animated && !reduceMotion)
     }
+    private func stopFollowing() { scroll.followLatest = false; listScrolling.cancel() }
+}
+
+private struct TranscriptGeometry: Equatable {
+    let nearLatest: Bool
+    let contentHeight: CGFloat
 }
 
 private struct ConversationReadState: Hashable {
