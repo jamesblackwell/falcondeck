@@ -102,9 +102,10 @@ struct ExtensionPanelsView: View {
                     if extensionItem["contributes"]["panels"].array.isEmpty { Text("Connected extension").font(.footnote).foregroundStyle(FD.secondary) }
                 }.listRowBackground(FD.surface)
             }
-            if model.extensions.enabled.isEmpty { ContentUnavailableView("No active extensions", systemImage: "puzzlepiece.extension") }
             if let error = model.extensions.error { Text(error).foregroundStyle(.orange); Button("Retry") { Task { await model.extensions.load(model: model, force: true) } } }
-        }.scrollContentBackground(.hidden).background(FD.background).navigationTitle("Extensions").task { await model.extensions.load(model: model) }
+        }.scrollContentBackground(.hidden).background(FD.background).navigationTitle("Extensions")
+            .overlay { if model.extensions.enabled.isEmpty && model.extensions.error == nil { ContentUnavailableView("No active extensions", systemImage: "puzzlepiece.extension").allowsHitTesting(false) } }
+            .task { await model.extensions.load(model: model) }
     }
 }
 

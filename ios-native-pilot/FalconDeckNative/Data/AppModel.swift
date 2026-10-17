@@ -546,7 +546,7 @@ enum Demo {
     [FalconDeck](https://falcondeck.com)
     """
     static let requests: [JSON] = [
-        .object(["request_id": .string("demo-approval"), "workspace_id": .string("falcondeck"), "thread_id": .string("review"), "kind": .string("approval"), "title": .string("Run the focused UI checks?"), "command": .string("swift test --filter SidebarTests")]),
+        .object(["request_id": .string("demo-approval"), "workspace_id": .string("falcondeck"), "thread_id": .string("review"), "kind": .string("approval"), "title": .string("Run the focused UI checks?"), "command": .string("swift test --filter SidebarTests\n# Check small-screen layout\n# Check tablet navigation\n# Check text-size changes\n# Check keyboard focus\n# Check menu anchoring\n# Check pin density\n# Check project folders\nswift test --filter ComposerTests")]),
         .object(["request_id": .string("demo-question"), "workspace_id": .string("falcondeck"), "thread_id": .string("review"), "kind": .string("question"), "title": .string("Choose a sidebar layout"), "questions": .array([
             .object(["id": .string("layout"), "header": .string("Sidebar"), "question": .string("Which layout should we keep?"), "options": .array([
                 .object(["label": .string("Compact"), "description": .string("Single-line tasks, with projects before chats.")]),

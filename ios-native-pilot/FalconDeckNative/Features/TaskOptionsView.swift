@@ -15,6 +15,7 @@ struct TaskOptionsView: View {
         NavigationStack {
             Form {
                 if let task {
+                    Group {
                     Section {
                         DisclosureGroup("Rename task") {
                         TextField("Task title", text: $title).accessibilityIdentifier("task-title")
@@ -68,6 +69,7 @@ struct TaskOptionsView: View {
                         if task.archived { Button("Restore task", systemImage: "arrow.uturn.backward") { run { try await model.unarchive(task) } } }
                         else { Button("Archive task", systemImage: "archivebox", role: .destructive) { run { await model.archive(task) } } }
                     }.listRowBackground(FD.surface)
+                    }.disabled(!model.demo && !model.connected)
                 }
                 if let task {
                     if ConversationPreferences(raw: model.preferences["conversation"]).flag("show_expand_all_controls") {
@@ -80,7 +82,7 @@ struct TaskOptionsView: View {
                 }
                 if let error { Text(error).foregroundStyle(.orange).listRowBackground(FD.surface) }
             }
-            .disabled(pending || (!model.demo && !model.connected))
+            .disabled(pending)
             .scrollContentBackground(.hidden).background(FD.background).navigationTitle("Task options").navigationBarTitleDisplayMode(.inline)
             .toolbar { ToolbarItem(placement: .confirmationAction) { Button("Done") { dismiss() }.disabled(pending) } }
             .onAppear { title = task?.title ?? "" }
@@ -124,8 +126,8 @@ struct ArchivedTasksView: View {
                     }.disabled(pending != nil || (!model.demo && !model.connected))
                 }.listRowBackground(FD.surface)
             }
-            if model.archivedTasks.isEmpty { ContentUnavailableView("No archived tasks", systemImage: "archivebox") }
         }.scrollContentBackground(.hidden).background(FD.background).navigationTitle("Archived tasks")
+            .overlay { if model.archivedTasks.isEmpty && error == nil { ContentUnavailableView("No archived tasks", systemImage: "archivebox").allowsHitTesting(false) } }
             .searchable(text: $search).task { await load() }.refreshable { await load() }
     }
     private func load() async { do { try await model.loadArchived() } catch { self.error = error.localizedDescription } }

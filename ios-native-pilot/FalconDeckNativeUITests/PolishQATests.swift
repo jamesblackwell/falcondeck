@@ -98,6 +98,9 @@ import XCTest
         XCTAssertTrue(review.waitForExistence(timeout: 5)); review.tap()
         XCTAssertTrue(app.buttons["Answer questions"].waitForExistence(timeout: 5))
         capture("Approval and question requests")
+        let command = app.scrollViews["approval-command"]
+        XCTAssertLessThanOrEqual(command.frame.height, 90, "Multiline command previews must remain bounded and scrollable")
+        if !app.buttons["Answer questions"].isHittable { app.scrollViews["conversation-context"].swipeUp() }
         app.buttons["Answer questions"].tap()
         XCTAssertTrue(app.navigationBars["Questions"].waitForExistence(timeout: 5))
         capture("Question answer sheet")

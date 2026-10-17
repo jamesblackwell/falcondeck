@@ -28,13 +28,18 @@ struct InteractiveCard: View {
     @State private var sending = false
     @State private var error: String?
     @State private var showQuestions = false
+    @State private var commandHeight: CGFloat = 40
     private var kind: String { request["kind"].string }
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
             Label(request["title"].string, systemImage: "hand.raised").font(.subheadline.weight(.semibold)).foregroundStyle(.orange)
             if !request["command"].string.isEmpty {
-                ScrollView(.horizontal) { Text(request["command"].string).font(.caption.monospaced()).textSelection(.enabled).fixedSize(horizontal: true, vertical: false).padding(8) }
-                    .fixedSize(horizontal: false, vertical: true).frame(maxHeight: 88).background(FD.raised, in: .rect(cornerRadius: 8))
+                ScrollView([.horizontal, .vertical]) {
+                    Text(request["command"].string).font(.caption.monospaced()).textSelection(.enabled)
+                        .fixedSize(horizontal: true, vertical: true).padding(8)
+                        .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { commandHeight = $0 }
+                }.frame(height: min(commandHeight, 88)).background(FD.raised, in: .rect(cornerRadius: 8)).clipped()
+                    .accessibilityIdentifier("approval-command")
             }
             if !request["path"].string.isEmpty { Text(request["path"].string).font(.caption.monospaced()).foregroundStyle(FD.secondary).textSelection(.enabled) }
             if !request["detail"].string.isEmpty {

@@ -43,8 +43,8 @@ struct AutomationsView: View {
                 }.padding(.vertical, 4).listRowBackground(Color.clear)
                     .contextMenu { Button("Run history") { history = row }; Button("Edit") { edit(row) } }
             }
-            if store.rows.isEmpty && !store.loading { ContentUnavailableView("No automations yet", systemImage: "calendar.badge.clock", description: Text("Schedule an agent task to run on your computer.")) }
         }.listStyle(.plain).scrollContentBackground(.hidden).background(FD.background).navigationTitle("Automations")
+            .overlay { if store.rows.isEmpty && !store.loading && error == nil && store.error == nil { ContentUnavailableView("No automations yet", systemImage: "calendar.badge.clock", description: Text("Schedule an agent task to run on your computer.")).allowsHitTesting(false) } }
             .toolbar { Button { editor = AutomationEditorTarget(definition: nil) } label: { Image(systemName: "plus") }.accessibilityLabel("New automation").disabled(!model.connected && !model.demo) }
             .task { await store.refresh(model: model) }.refreshable { await store.refresh(model: model) }
             .onAppear { store.visible += 1 }.onDisappear { store.visible = max(0, store.visible - 1) }
