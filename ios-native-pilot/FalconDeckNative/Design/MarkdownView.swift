@@ -34,8 +34,9 @@ extension MarkdownUI.Theme {
         }
         .table { c in
             ScrollView(.horizontal) {
+                // Keep the table's intrinsic height during lazy history layout.
                 c.label.markdownTableBorderStyle(.init(color: FD.line))
-                    .markdownTableBackgroundStyle(.alternatingRows(FD.surface, FD.raised)).fixedSize(horizontal: true, vertical: false)
+                    .markdownTableBackgroundStyle(.alternatingRows(FD.surface, FD.raised)).fixedSize(horizontal: true, vertical: true)
             }.markdownMargin(top: 8, bottom: 16)
         }
     }

@@ -32,6 +32,7 @@ private struct ChatContent: View {
     private var expansion: TranscriptExpansion? { chat.transcriptExpansion }
     @State private var contextHeight: CGFloat = 0
     @State private var viewportHeight: CGFloat = 600
+    @State private var bottomInsetHeight: CGFloat = 0
     private var project: Project? { model.projects.first { $0.id == task.projectID } }
     private var requests: [JSON] { model.requests.filter { $0["thread_id"].string == task.id } }
 
@@ -68,14 +69,22 @@ private struct ChatContent: View {
                 }
                 .padding(.horizontal, FD.inset).padding(.vertical, 16).frame(maxWidth: 820).frame(maxWidth: .infinity)
             }
-            // Keep this preference fixed: changing the size-change anchor while
-            // reading variable-height lazy rows can trigger a layout feedback loop.
+            .accessibilityIdentifier("conversation-transcript")
+            // Keep initial positioning independent from subsequent reading/reflow.
             .defaultScrollAnchor(.bottom, for: .initialOffset)
             .onScrollGeometryChange(for: Bool.self) { g in g.contentOffset.y + g.containerSize.height >= g.contentSize.height - 120 } action: { _, value in
                 // Content growth and keyboard dismissal also change geometry.
                 // Only an actual reading gesture should turn following off.
                 nearLatest = value
                 if userScrolling { followLatest = value }
+            }
+            .onChange(of: viewportHeight) { _, _ in
+                // Observe the outer layout, which cannot change as lazy rows are
+                // measured. Keyboard and composer resizing must still follow.
+                if followLatest && !userScrolling { scrollToLatest(proxy, animated: false) }
+            }
+            .onChange(of: bottomInsetHeight) { _, _ in
+                if followLatest && !userScrolling { scrollToLatest(proxy, animated: false) }
             }
             .onScrollPhaseChange { _, phase in userScrolling = phase == .tracking || phase == .interacting || phase == .decelerating }
             .scrollDismissesKeyboard(.interactively)
@@ -119,6 +128,7 @@ private struct ChatContent: View {
                 } else { ComposerView(task: task, project: project, chat: chat) }
             }
             .padding(.horizontal, 12).padding(.top, 8).padding(.bottom, 8).frame(maxWidth: 844).frame(maxWidth: .infinity)
+            .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { bottomInsetHeight = $0 }
         }
         .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { viewportHeight = $0 }
     }

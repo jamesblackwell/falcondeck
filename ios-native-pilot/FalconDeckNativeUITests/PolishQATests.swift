@@ -56,15 +56,18 @@ import XCTest
         XCTAssertLessThanOrEqual(send.frame.maxX, app.frame.maxX)
         XCTAssertGreaterThanOrEqual(model.frame.minX, app.frame.minX)
         let latest = app.staticTexts.matching(NSPredicate(format: "label CONTAINS %@", "Use the composer to continue the conversation")).firstMatch
-        let atLatest = XCTNSPredicateExpectation(predicate: NSPredicate(format: "hittable == true"), object: latest)
+        let visibleAboveComposer = NSPredicate { _, _ in
+            latest.exists && latest.isHittable && latest.frame.maxY <= app.textFields["chat-input"].frame.minY - 8
+        }
+        let atLatest = XCTNSPredicateExpectation(predicate: visibleAboveComposer, object: nil)
         XCTAssertEqual(XCTWaiter.wait(for: [atLatest], timeout: 5), .completed, "Opening history must reveal the latest response after Markdown reflow")
         capture("06 Running conversation and compact composer")
-        app.swipeDown()
         let jump = app.buttons["Jump to latest message"]
+        for _ in 0..<3 { app.scrollViews["conversation-transcript"].swipeDown() }
         XCTAssertTrue(jump.waitForExistence(timeout: 5))
         capture("Conversation reading position")
         jump.tap()
-        let returned = XCTNSPredicateExpectation(predicate: NSPredicate(format: "hittable == true"), object: latest)
+        let returned = XCTNSPredicateExpectation(predicate: visibleAboveComposer, object: nil)
         XCTAssertEqual(XCTWaiter.wait(for: [returned], timeout: 5), .completed)
         model.tap()
         XCTAssertTrue(app.navigationBars["Model & reasoning"].waitForExistence(timeout: 5))
@@ -160,6 +163,7 @@ import XCTest
         let app = launch()
         app.buttons["sidebar-task-native"].tap()
         let more = app.buttons["Show more"]
+        for _ in 0..<5 where !more.isHittable { app.scrollViews["conversation-transcript"].swipeDown() }
         let visible = XCTNSPredicateExpectation(predicate: NSPredicate(format: "hittable == true"), object: more)
         XCTAssertEqual(XCTWaiter.wait(for: [visible], timeout: 5), .completed)
         let message = app.staticTexts.matching(NSPredicate(format: "label CONTAINS %@", "Please keep the following priorities")).firstMatch
@@ -169,6 +173,21 @@ import XCTest
         let latest = app.staticTexts.matching(NSPredicate(format: "label CONTAINS %@", "Use the composer to continue the conversation")).firstMatch
         XCTAssertFalse(latest.exists && latest.isHittable, "Expanded text should stay in view instead of snapping to the final reply")
         capture("Long message reading position")
+    }
+    func testKeyboardKeepsLatestReplyVisible() {
+        let app = launch()
+        app.buttons["sidebar-task-native"].tap()
+        let latest = app.staticTexts.matching(NSPredicate(format: "label CONTAINS %@", "Use the composer to continue the conversation")).firstMatch
+        let opened = XCTNSPredicateExpectation(predicate: NSPredicate(format: "hittable == true"), object: latest)
+        XCTAssertEqual(XCTWaiter.wait(for: [opened], timeout: 5), .completed)
+        let input = app.textFields["chat-input"]
+        input.tap()
+        XCTAssertTrue(app.keyboards.firstMatch.waitForExistence(timeout: 5))
+        let visible = XCTNSPredicateExpectation(predicate: NSPredicate { _, _ in
+            latest.exists && latest.isHittable && latest.frame.maxY <= input.frame.minY - 8
+        }, object: nil)
+        XCTAssertEqual(XCTWaiter.wait(for: [visible], timeout: 5), .completed, "Opening the keyboard while following must keep the latest reply visible")
+        capture("Latest reply with keyboard")
     }
     func testEverySettingsScreenAndConnectionDiagnostics() {
         let app = launch()
