@@ -14,7 +14,7 @@ From this directory:
 ./scripts/run.sh --demo    # clearly labelled sample data
 ```
 
-Select **FalconDeck Native Pilot** in Simulator. The script creates/reuses a
+Select **FalconDeck Native Pilot** in Device Hub (Simulator on older Xcode). The script creates/reuses a
 dedicated simulator and leaves other simulators alone. Set `SIMULATOR_UDID` to
 use another device. Alternatively, open `FalconDeckNative.xcodeproj` and run the
 `FalconDeckNative` scheme. Regenerate the project with `xcodegen generate` after

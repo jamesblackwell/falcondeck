@@ -24,4 +24,4 @@ xcodebuild -project FalconDeckNative.xcodeproj -scheme FalconDeckNative \
 xcrun simctl terminate "$pilot_udid" com.falcondeck.pilot.native >/dev/null 2>&1 || true
 xcrun simctl install "$pilot_udid" build/Build/Products/Debug-iphonesimulator/FalconDeckNative.app
 xcrun simctl launch "$pilot_udid" com.falcondeck.pilot.native "$@"
-echo "Running on FalconDeck Native Pilot ($pilot_udid). Select it in Simulator to try the app."
+echo "Running on FalconDeck Native Pilot ($pilot_udid). Select it in Device Hub / Simulator to try the app."

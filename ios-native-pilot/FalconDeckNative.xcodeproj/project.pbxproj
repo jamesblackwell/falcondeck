@@ -255,7 +255,7 @@
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 			shellPath = /bin/sh;
-			shellScript = "swift \"$SRCROOT/scripts/generate-icon.swift\" \"$SRCROOT/FalconDeckNative/Assets.xcassets/FalconMark.imageset/mark.svg\" \"$SRCROOT/FalconDeckNative/Assets.xcassets/AppIcon.appiconset/icon.png\"";
+			shellScript = "xcrun --sdk macosx swift -sdk \"$(xcrun --sdk macosx --show-sdk-path)\" \"$SRCROOT/scripts/generate-icon.swift\" \"$SRCROOT/FalconDeckNative/Assets.xcassets/FalconMark.imageset/mark.svg\" \"$SRCROOT/FalconDeckNative/Assets.xcassets/AppIcon.appiconset/icon.png\"";
 		};
 /* End PBXShellScriptBuildPhase section */
 

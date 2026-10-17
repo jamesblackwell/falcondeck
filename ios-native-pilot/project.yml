@@ -21,7 +21,7 @@ targets:
       - package: Sodium
     preBuildScripts:
       - name: Generate native pilot icon
-        script: swift "$SRCROOT/scripts/generate-icon.swift" "$SRCROOT/FalconDeckNative/Assets.xcassets/FalconMark.imageset/mark.svg" "$SRCROOT/FalconDeckNative/Assets.xcassets/AppIcon.appiconset/icon.png"
+        script: xcrun --sdk macosx swift -sdk "$(xcrun --sdk macosx --show-sdk-path)" "$SRCROOT/scripts/generate-icon.swift" "$SRCROOT/FalconDeckNative/Assets.xcassets/FalconMark.imageset/mark.svg" "$SRCROOT/FalconDeckNative/Assets.xcassets/AppIcon.appiconset/icon.png"
         inputFiles:
           - $(SRCROOT)/scripts/generate-icon.swift
           - $(SRCROOT)/FalconDeckNative/Assets.xcassets/FalconMark.imageset/mark.svg
