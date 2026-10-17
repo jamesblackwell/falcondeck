@@ -13,6 +13,8 @@ final class ChatSession {
     var effort = ""
     var provider = ""
     var overrides: [String: JSON] = [:]
+    var attachments: [NativeAttachment] = []
+    var pendingQueue: [QueuedDraft] = []
     var loading = false
     var loaded = false
     var sending = false
@@ -29,6 +31,8 @@ final class ChatSession {
 @MainActor @Observable
 final class AppModel {
     let relay: any RelayServing
+    let voice = VoiceRecorder()
+    let readAloud = ReadAloud()
     private(set) var connectionID = UUID()
 
     init(relay: any RelayServing = RelayClient()) { self.relay = relay }
@@ -37,6 +41,11 @@ final class AppModel {
         didSet {
             taskGroups = Dictionary(grouping: tasks, by: \.projectID).mapValues { values in
                 values.sorted { $0.pinned != $1.pinned ? $0.pinned : $0.updatedAt > $1.updatedAt }
+            }
+            for task in tasks {
+                if let chat = chats[task.id], !chat.pendingQueue.isEmpty {
+                    chat.pendingQueue = QueuedDraft.reconcile(chat.pendingQueue, queued: task.queued, items: chat.transcript.items)
+                }
             }
         }
     }
@@ -58,6 +67,10 @@ final class AppModel {
     var archivedTasks: [AgentTask] = []
     var readSuppression: [String: Int] = [:]
     var taskOptionsID: String?
+    @ObservationIgnored var mediaGate = MediaTransferGate()
+    @ObservationIgnored var itemLoads: [String: Task<JSON, Error>] = [:]
+    @ObservationIgnored var itemCache: [String: JSON] = [:]
+    @ObservationIgnored var itemCacheOrder: [String] = []
     var chats: [String: ChatSession] = [:]
     private var lastEventSeq = 0
     private var observation: Task<Void, Never>?
@@ -107,7 +120,10 @@ final class AppModel {
     }
 
     @discardableResult private func beginConnection(clearData: Bool) -> UUID {
+        if voice.recording { voice.finishRecording() }
+        readAloud.stop()
         connectionID = UUID(); lastEventSeq = 0; connected = false
+        itemCache = [:]; itemCacheOrder = []; itemLoads = [:]; mediaGate = MediaTransferGate()
         summaryFlush?.cancel(); summaryFlush = nil; pendingSummaries = [:]
         for chat in chats.values {
             chat.loadID = UUID(); chat.loading = false; chat.bufferedEvents = []
@@ -254,6 +270,8 @@ final class AppModel {
             if event["status"].string != "running" { requests.removeAll { $0["thread_id"].string == id } }
         case "conversation-item-updated", "conversation-item-added":
             let item = event["item"]
+            let cacheKey = "\(connectionID):\(id):\(item["id"].string)"
+            itemCache.removeValue(forKey: cacheKey); itemCacheOrder.removeAll { $0 == cacheKey }
             if item["kind"].string == "interactive_request", item["resolved"].bool {
                 requests.removeAll { $0["request_id"] == item["request"]["request_id"] }
             }
@@ -265,6 +283,9 @@ final class AppModel {
                 else { chat.bufferOverflowed = true }
             }
             chat.transcript.apply(event)
+            if !chat.pendingQueue.isEmpty {
+                chat.pendingQueue = QueuedDraft.reconcile(chat.pendingQueue, queued: tasks.first(where: { $0.id == id })?.queued ?? [], items: chat.transcript.items)
+            }
             if chat.transcript.needsRecovery, !chat.loading, let task = tasks.first(where: { $0.id == id }) {
                 Task { await self.loadChat(task) }
             }
@@ -297,7 +318,12 @@ final class AppModel {
         let chat = chat(for: task)
         let text = chat.draft.trimmingCharacters(in: .whitespacesAndNewlines)
         let selectedModel = chat.modelID, selectedEffort = chat.effort, selectedOverrides = chat.overrides
-        guard !text.isEmpty, !chat.sending, demo || connected else { return }
+        let attachments = chat.attachments
+        guard !text.isEmpty || !attachments.isEmpty, !chat.sending, demo || connected else { return }
+        do {
+            try NativeAttachment.validate(attachments)
+            if !attachments.isEmpty, projects.first(where: { $0.id == task.projectID })?.capabilities(task.provider)["supports_images"] == .bool(false) { throw PilotError("This agent doesn't support image attachments.") }
+        } catch { chat.error = error.localizedDescription; return }
         chat.sending = true; chat.error = nil; chat.notice = nil
         if task.isDraft {
             defer { chat.sending = false }
@@ -306,24 +332,32 @@ final class AppModel {
                 let created = try await createTask(project: project, provider: chat.provider, modelID: selectedModel, folderID: task.raw["folder_id"].string.nonempty, overrides: selectedOverrides)
                 guard current == connectionID else { return }
                 let destination = self.chat(for: created)
-                destination.draft = text; destination.modelID = selectedModel; destination.effort = selectedEffort; destination.overrides = selectedOverrides
+                destination.draft = text; destination.attachments = attachments; destination.modelID = selectedModel; destination.effort = selectedEffort; destination.overrides = selectedOverrides
                 if chat.draft.trimmingCharacters(in: .whitespacesAndNewlines) == text { chat.draft = "" }
+                chat.attachments.removeAll { attachment in attachments.contains { $0.id == attachment.id } }
                 await send(created)
             } catch { if current == connectionID { chat.error = error.localizedDescription } }
             return
         }
         if text == "/compact" || text.hasPrefix("/compact ") {
             defer { chat.sending = false }
-            do { try await compact(task, instructions: String(text.dropFirst(8)).trimmingCharacters(in: .whitespacesAndNewlines)); chat.draft = "" }
+            do {
+                guard attachments.isEmpty else { throw PilotError("Remove attachments before compacting.") }
+                try await compact(task, instructions: String(text.dropFirst(8)).trimmingCharacters(in: .whitespacesAndNewlines)); chat.draft = "" }
             catch { chat.error = error.localizedDescription }
             return
         }
         let id = "user-\(UUID().uuidString)"
-        let optimistic = Message(.object(["id": .string(id), "kind": .string("user_message"), "text": .string(text), "pending": .bool(true)]))
-        if !task.running { chat.transcript.upsert(optimistic) }
+        let optimistic = Message(.object(["id": .string(id), "kind": .string("user_message"), "text": .string(text), "pending": .bool(true), "attachments": .array(attachments.map(\.input))]))
+        let expectQueued = task.running || task.status == "waiting_for_input"
+        let queued = QueuedDraft(id: id, text: text, attachmentCount: attachments.count, knownIDs: Set(task.queued.map { $0["id"].string }))
+        if expectQueued { chat.pendingQueue.append(queued) }
+        else { chat.transcript.upsert(optimistic) }
+        chat.draft = ""; chat.attachments = []
         defer { chat.sending = false }
         if demo {
-            chat.draft = ""; chat.transcript.upsert(Message(optimistic.raw.setting("pending", .bool(false))))
+            chat.pendingQueue.removeAll { $0.id == id }
+            chat.transcript.upsert(Message(optimistic.raw.setting("pending", .bool(false))))
             chat.transcript.upsert(Message(.object(["id": .string("demo-\(UUID())"), "kind": .string("assistant_message"), "text": .string(Demo.markdownReply)])))
             return
         }
@@ -332,15 +366,22 @@ final class AppModel {
                 _ = try await taskRequest(task, method: "thread.update", fields: selectedOverrides)
                 guard current == connectionID else { return }
             }
-            let response = try await relay.call("turn.start", params: NativeRequest.turn(task: task, text: text, itemID: id, modelID: selectedModel, effort: selectedEffort, overrides: selectedOverrides))
+            let response = try await relay.call("turn.start", params: NativeRequest.turn(task: task, text: text, itemID: id, modelID: selectedModel, effort: selectedEffort, overrides: selectedOverrides, attachments: attachments))
             guard current == connectionID else { return }
             if response["message"].string == "queued" {
-                chat.transcript.items.removeAll { $0.id == id }; chat.notice = "Message queued for the next turn."
+                chat.transcript.items.removeAll { $0.id == id }
+                if !expectQueued { chat.pendingQueue.append(queued) }
+                chat.pendingQueue = QueuedDraft.reconcile(chat.pendingQueue, queued: tasks.first(where: { $0.id == task.id })?.queued ?? [], items: chat.transcript.items)
+            } else if expectQueued {
+                chat.pendingQueue.removeAll { $0.id == id }; chat.transcript.upsert(optimistic)
             }
-            if chat.draft.trimmingCharacters(in: .whitespacesAndNewlines) == text { chat.draft = "" }
         } catch {
             guard current == connectionID else { return }
+            chat.pendingQueue.removeAll { $0.id == id }
             chat.transcript.items.removeAll { $0.id == id && $0.raw["pending"].bool }
+            if chat.draft.isEmpty { chat.draft = text }
+            else if chat.draft != text { chat.draft = text + "\n\n" + chat.draft }
+            chat.attachments = attachments + chat.attachments.filter { newer in !attachments.contains { $0.id == newer.id } }
             chat.error = "\(error.localizedDescription) Refresh this task before resending if delivery is uncertain."
         }
     }

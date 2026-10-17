@@ -319,7 +319,7 @@ actor RelayClient: RelayServing {
     }
 
     func call(_ method: String, params: JSON) async throws -> JSON {
-        let allowed = ["snapshot.current", "thread.detail", "thread.start", "thread.update", "thread.archive", "thread.mark_read", "thread.mark_unread", "thread.unarchive", "thread.fork", "thread.suggestTitle", "thread.goal.set", "thread.goal.clear", "thread.compact", "thread.queue.remove", "thread.queue.edit", "thread.queue.steer", "thread.queue.attachment_preview", "chat.create", "provider.hydrate", "workspace.skills", "workspace.prompts", "thread.item", "turn.start", "turn.interrupt", "preferences.update", "interactive.respond"]
+        let allowed = ["snapshot.current", "thread.detail", "thread.start", "thread.update", "thread.archive", "thread.mark_read", "thread.mark_unread", "thread.unarchive", "thread.fork", "thread.suggestTitle", "thread.goal.set", "thread.goal.clear", "thread.compact", "thread.queue.remove", "thread.queue.edit", "thread.queue.steer", "thread.queue.attachment_preview", "chat.create", "provider.hydrate", "workspace.skills", "workspace.prompts", "thread.item", "speech.status", "speech.models", "speech.transcribe", "speech.synthesize", "turn.start", "turn.interrupt", "preferences.update", "interactive.respond"]
         guard allowed.contains(method), let key = session?.dataKey, socket != nil else {
             throw PilotError("Connect to your computer first.")
         }
@@ -337,7 +337,8 @@ actor RelayClient: RelayServing {
                 catch { self.finish(id, error: error) }
             }
             Task {
-                try? await Task.sleep(for: .seconds(30))
+                let seconds = ["speech.transcribe", "speech.synthesize", "turn.start"].contains(method) ? 120 : 30
+                try? await Task.sleep(for: .seconds(seconds))
                 self.finish(id, error: PilotError("The computer took too long to respond. Pull to refresh or reconnect."))
             }
         }

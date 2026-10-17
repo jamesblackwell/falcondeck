@@ -13,7 +13,7 @@ struct NativeMarkdown: View {
 
 private struct ExplicitImageProvider: ImageProvider {
     func makeImage(url: URL?) -> some View {
-        Text("Image: \(url?.lastPathComponent ?? "attachment")")
+        MediaImageView(reference: .object(["url": .string(url?.absoluteString ?? ""), "name": .string(url?.lastPathComponent ?? "Image")]))
     }
 }
 

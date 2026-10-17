@@ -78,10 +78,10 @@ struct Transcript: Sendable {
 }
 
 enum NativeRequest {
-    static func turn(task: AgentTask, text: String, itemID: String, modelID: String, effort: String, overrides: [String: JSON] = [:]) -> JSON {
+    static func turn(task: AgentTask, text: String, itemID: String, modelID: String, effort: String, overrides: [String: JSON] = [:], attachments: [NativeAttachment] = []) -> JSON {
         var result = JSON.object([
             "workspace_id": .string(task.projectID), "thread_id": .string(task.id), "provider": .string(task.provider),
-            "inputs": .array([.object(["type": .string("text"), "text": .string(text)])]),
+            "inputs": .array((text.isEmpty ? [] : [.object(["type": .string("text"), "text": .string(text)])]) + attachments.map(\.input)),
             "user_item_id": .string(itemID)
         ])
         // Omitted permissions preserve the task's existing settings. Changing

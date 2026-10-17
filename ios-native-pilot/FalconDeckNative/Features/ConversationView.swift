@@ -46,7 +46,7 @@ private struct ChatContent: View {
                     if chat.loaded && chat.transcript.items.isEmpty {
                         ContentUnavailableView("What are we working on?", systemImage: "sparkle", description: Text("Send a message to \(task.provider.capitalized) to get started."))
                     }
-                    ForEach(chat.transcript.items) { item in TranscriptRow(message: item).id(item.id) }
+                    ForEach(chat.transcript.items) { item in TranscriptRow(message: item, task: task).id(item.id) }
                     if task.running {
                         HStack(spacing: 8) { ActivityDiamond(); Text("\(task.provider.capitalized) is working…").font(.footnote).foregroundStyle(FD.secondary) }.padding(.vertical, 8)
                     }
@@ -93,7 +93,7 @@ private struct ChatContent: View {
                 if task.goal != .null {
                     Button { showGoal = true } label: { Label("Goal · \(task.goal["status"].string.capitalized)", systemImage: "target").font(.caption) }.buttonStyle(.glass)
                 }
-                if !task.queued.isEmpty { QueuedMessagesView(task: task) }
+                if !task.queued.isEmpty || !chat.pendingQueue.isEmpty { QueuedMessagesView(task: task) }
                 ForEach(requests, id: \.self) { request in InteractiveCard(request: request) }
                 if let error = chat.error ?? model.error {
                     HStack(alignment: .top) {

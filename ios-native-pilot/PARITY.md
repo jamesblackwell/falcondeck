@@ -13,8 +13,8 @@ outside this work. The daemon and agent storage remain authoritative.
 | Turns | Live replies, queue/edit/remove/steer, interrupt, resume interrupted, compact | Send/interrupt and queue controls implemented; resume/branch/handoff pending |
 | Task actions | Rename/suggest, read/unread, archive/unarchive, branch/retry, handoff | Rename/suggest/read/unread/pin/archive/restore implemented; branch/handoff pending |
 | Goals | Set objective/budget, status/usage, pause/resume/stop | Implemented; local lifecycle/budget test passes |
-| Transcript | Markdown/code/tables, reasoning/tools/groups, plans/diffs/files, images, search/artifacts/reviews/unknown fallback | Text/Markdown/tool baseline present; expand all item kinds |
-| Media | Library/camera/clipboard attachments, image preview/save/share, read aloud, recording/transcription | Pending |
+| Transcript | Markdown/code/tables, reasoning/tools/groups, plans/diffs/files, images, search/artifacts/reviews/unknown fallback | All wire item kinds have a native renderer or inspectable fallback; grouping/preferences and Mermaid remain |
+| Media | Library/camera/clipboard attachments, image preview/save/share, read aloud, recording/transcription | Implemented; attachment/queue/export/Unicode tests pass; physical microphone testing awaits device |
 | Activity | Running/attention/all tasks, navigation | Present; align filters and archive visibility |
 | Automations | List/create/edit/enable/delete/run/history/settings via control RPC | Pending |
 | Settings | Appearance palettes/text, conversation preferences, notifications, speech, connection, about/developer | Connection present; expand |
@@ -27,3 +27,14 @@ entries with concrete implementation and verification as each area lands.
 
 Core parity milestone: 28 iPhone simulator unit tests pass. A development-signed
 arm64 build succeeds for the separate native bundle ID. UI parity QA continues.
+
+Confirmed platform constraint: relay push delivery in `crates/falcondeck-relay/src/app.rs`
+is Expo-only (`EXPO_PUSH_URL`). A Swift-only development client cannot receive
+background remote notifications through that route. Native APNs delivery needs
+a separate relay implementation/deployment; production remains untouched. James
+was notified via NTFY, and all other parity work continues.
+
+Media milestone: 35 tests pass. iPad Pro 11-inch simulator boots with sidebar
+and detail visible. Core review finding (sharing an unopened task exported an
+empty transcript) is fixed by loading history and disabling sharing until ready;
+partial exports are explicitly labelled and include tool/file/plan output.

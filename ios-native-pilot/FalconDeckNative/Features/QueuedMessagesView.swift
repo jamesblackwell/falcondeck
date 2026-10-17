@@ -8,8 +8,10 @@ struct QueuedMessagesView: View {
     @State private var pending = false
     @State private var error: String?
     var body: some View {
+        let queue = task.queued + model.chat(for: task).pendingQueue.map(\.json)
+        ScrollView {
         VStack(alignment: .leading, spacing: 8) {
-            ForEach(task.queued, id: \.self) { queued in
+            ForEach(queue, id: \.self) { queued in
                 HStack(alignment: .top, spacing: 8) {
                     Image(systemName: "text.line.first.and.arrowtriangle.forward").foregroundStyle(FD.secondary)
                     VStack(alignment: .leading, spacing: 4) {
@@ -17,17 +19,19 @@ struct QueuedMessagesView: View {
                         if queued["attachment_count"].int > 0 { Text("\(queued["attachment_count"].int) attachments").font(.caption).foregroundStyle(FD.secondary) }
                     }
                     Spacer(minLength: 0)
-                    Menu {
+                    if queued["pending"].bool { ActivityDiamond() }
+                    else { Menu {
                         Button("Edit message", systemImage: "pencil") { text = queued["text"].string.nonempty ?? queued["preview"].string; editingID = queued["id"].string }
                         if model.projects.first(where: { $0.id == task.projectID })?.capabilities(task.provider)["supports_steering"].bool == true {
                             Button("Send now", systemImage: "arrow.up") { run(queued, action: "steer") }
                         }
                         Button("Remove", systemImage: "trash", role: .destructive) { run(queued, action: "remove") }
-                    } label: { Image(systemName: "ellipsis").padding(6) }
+                    } label: { Image(systemName: "ellipsis").padding(6) } }
                 }.padding(10).background(FD.surface, in: .rect(cornerRadius: 12))
             }
             if let error { Text(error).font(.footnote).foregroundStyle(.orange) }
-        }.disabled(pending || (!model.demo && !model.connected))
+        }
+        }.frame(maxHeight: min(CGFloat(queue.count) * 90, 180)).disabled(pending || (!model.demo && !model.connected))
         .alert("Edit queued message", isPresented: Binding(get: { editingID != nil }, set: { if !$0 { editingID = nil } })) {
             TextField("Message", text: $text, axis: .vertical)
             Button("Cancel", role: .cancel) { editingID = nil }

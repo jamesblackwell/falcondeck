@@ -46,7 +46,15 @@ struct TaskOptionsView: View {
                         if model.projects.first(where: { $0.id == task.projectID })?.capabilities(task.provider)["supports_compaction"].bool == true || model.demo {
                             Button("Compact context", systemImage: "arrow.down.right.and.arrow.up.left") { compact = true }.disabled(task.running || task.status == "waiting_for_input")
                         }
-                        ShareLink(item: model.chat(for: task).transcript.items.filter(\.isMessage).map { "\($0.kind == "user_message" ? "You" : "Assistant")\n\n\($0.text)" }.joined(separator: "\n\n---\n\n")) { Label("Share conversation", systemImage: "square.and.arrow.up") }
+                        let chat = model.chat(for: task)
+                        ShareLink(item: ExportedText(text: TranscriptExport.markdown(chat.transcript.items, title: task.title, partial: chat.hasOlder), title: task.title), preview: SharePreview(task.title)) {
+                            Label(chat.loading ? "Loading conversation…" : chat.hasOlder ? "Share loaded conversation" : "Share conversation", systemImage: "square.and.arrow.up")
+                        }.disabled(!chat.loaded || chat.loading || chat.transcript.items.isEmpty)
+                        if let error = chat.error, !chat.loaded {
+                            Text(error).font(.footnote).foregroundStyle(.orange)
+                            Button("Retry loading conversation") { Task { await model.loadChat(task) } }
+                        }
+
                         Button("Archive task", systemImage: "archivebox", role: .destructive) { run { await model.archive(task) } }
                     }.listRowBackground(FD.surface)
                 }
@@ -56,6 +64,7 @@ struct TaskOptionsView: View {
             .scrollContentBackground(.hidden).background(FD.background).navigationTitle("Task options").navigationBarTitleDisplayMode(.inline)
             .toolbar { ToolbarItem(placement: .confirmationAction) { Button("Done") { dismiss() }.disabled(pending) } }
             .onAppear { title = task?.title ?? "" }
+            .task(id: taskID) { if let task, !model.chat(for: task).loaded { await model.loadChat(task) } }
             .sheet(isPresented: $goal) { GoalView(taskID: taskID) }
             .alert("Compact context", isPresented: $compact) {
                 TextField("Guidance (optional)", text: $instructions)

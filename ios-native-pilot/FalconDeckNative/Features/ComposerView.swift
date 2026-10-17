@@ -13,9 +13,13 @@ struct ComposerView: View {
             if !model.connected && !model.demo {
                 Button { Task { await model.reconnect() } } label: { Label("\(model.status) · Reconnect", systemImage: "wifi.exclamationmark").font(.footnote) }
             }
+            RecordingPanel(task: task, chat: chat)
+            if !chat.attachments.isEmpty { AttachmentStrip(chat: chat) }
             TextField(task.running ? "Queue a follow-up…" : "Message \(task.provider.capitalized)…", text: $chat.draft, axis: .vertical)
                 .lineLimit(1...7).font(.body).focused($focused).padding(.horizontal, 4).accessibilityIdentifier("chat-input").submitLabel(.return)
-            HStack(spacing: 14) {
+            HStack(spacing: 12) {
+                if project?.capabilities(task.provider)["supports_images"] != .bool(false) { AttachmentPicker(chat: chat) }
+                VoiceControl(task: task, chat: chat)
                 Menu {
                     Picker("Model", selection: $chat.modelID) {
                         Text("Task default").tag("")
@@ -34,7 +38,7 @@ struct ComposerView: View {
                     .disabled(activeModel?.efforts.isEmpty != false)
                 ComposerOptions(task: task, project: project, chat: chat)
                 Spacer(minLength: 0)
-                if task.running {
+                if task.running || task.status == "waiting_for_input" {
                     Button { Task { await model.stop(task) } } label: { Image(systemName: "stop.fill").font(.subheadline).frame(width: 32, height: 32) }
                         .buttonStyle(.glass).disabled(chat.stopping || (!model.connected && !model.demo)).accessibilityLabel("Stop task").accessibilityIdentifier("stop-task")
                 }
@@ -45,7 +49,7 @@ struct ComposerView: View {
                     Group { if chat.sending { ActivityDiamond() } else { Image(systemName: task.running ? "arrow.up.to.line" : "arrow.up").fontWeight(.semibold) } }.frame(width: 32, height: 32)
                 }
                 .buttonStyle(.glassProminent).tint(FD.accent).foregroundStyle(FD.background)
-                .disabled(chat.sending || chat.draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || (!model.connected && !model.demo))
+                .disabled(chat.sending || (chat.draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && chat.attachments.isEmpty) || (!model.connected && !model.demo))
                 .accessibilityLabel(task.running ? "Queue message" : "Send message").accessibilityIdentifier("send-message")
             }.font(.caption).foregroundStyle(FD.secondary)
             if model.demo { Text("Demo · Messages stay on this device").font(.caption2).foregroundStyle(FD.muted) }
