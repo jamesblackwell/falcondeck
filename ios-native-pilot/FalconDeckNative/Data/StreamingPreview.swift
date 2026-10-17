@@ -49,10 +49,13 @@ import Foundation
                     try await Task.sleep(for: .milliseconds(20))
                 }
                 try await Task.sleep(for: .seconds(1))
+                // Hardware UI automation needs enough delivery time to inspect a reading anchor.
+                let interval: Duration = ProcessInfo.processInfo.arguments.contains("--streaming-preview-slow")
+                    ? .milliseconds(50) : .milliseconds(20)
                 for chunk in chunks(reply) {
                     guard model.demo, model.sessionScope == scope else { return }
                     chat.transcript.apply(.object(["type": .string("text"), "item_id": .string("preview-answer"), "target": .string("assistant_message"), "delta": .string(chunk)]))
-                    try await Task.sleep(for: .milliseconds(20))
+                    try await Task.sleep(for: interval)
                 }
                 guard model.demo, model.sessionScope == scope else { return }
                 chat.transcript.apply(.object(["type": .string("turn-end")]))

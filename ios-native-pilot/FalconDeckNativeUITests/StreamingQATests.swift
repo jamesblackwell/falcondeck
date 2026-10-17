@@ -2,9 +2,11 @@ import XCTest
 
 @MainActor final class StreamingQATests: XCTestCase {
     override func setUp() { super.setUp(); continueAfterFailure = false }
-    private func launch() -> XCUIApplication {
+    private func launch(slow: Bool = false) -> XCUIApplication {
         XCUIDevice.shared.orientation = .portrait
-        let app = XCUIApplication(); app.launchArguments = ["--demo", "--streaming-preview"]; app.launch()
+        let app = XCUIApplication(); app.launchArguments = ["--demo", "--streaming-preview"]
+        if slow { app.launchArguments.append("--streaming-preview-slow") }
+        app.launch()
         XCTAssertTrue(app.textFields["chat-input"].waitForExistence(timeout: 5))
         return app
     }
@@ -27,7 +29,7 @@ import XCTest
         capture("Completed streamed Markdown stays above the composer")
     }
     func testReadingEarlierMessagesDuringAStreamKeepsItsPosition() {
-        let app = launch()
+        let app = launch(slow: true)
         let heading = app.staticTexts["A steadier conversation"]
         XCTAssertTrue(heading.waitForExistence(timeout: 10))
         let transcript = app.descendants(matching: .any).matching(identifier: "conversation-transcript").firstMatch
@@ -38,6 +40,7 @@ import XCTest
         XCTAssertNotNil(anchor)
         guard let anchor else { return }
         let y = anchor.frame.minY
+        XCTAssertTrue(app.buttons["stop-task"].exists, "The reading anchor must be measured before delivery finishes")
         capture("Reading position while the response continues below")
         XCTAssertTrue(app.buttons["stop-task"].waitForNonExistence(timeout: 20))
         XCTAssertTrue(anchor.exists)

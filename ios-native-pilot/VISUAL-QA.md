@@ -33,6 +33,16 @@ datasets. Verified findings corrected the running-task history error's precedenc
 explicit navigation during deceleration and the `in_progress` activity indicator.
 The final review is clean, with no actionable P0–P2 findings.
 
+The physical iPhone check also passes both focused streaming tests using local
+sample content. The reading test now opts into a longer delivery window and
+asserts the stream is still active before measuring its anchor; the position
+stays within 4 points through completion. Plain “Thinking…” labels, Jump to
+latest and final response bounds pass. Four hardware screenshots were inspected
+and retained in the same gallery. The app was reopened without preview arguments,
+and the device has no new native crash reports. No production turns were sent.
+Autoreview of the fixture/test change (`--mode local --max-priority P2`, in a
+native-only review worktree) reports no actionable findings.
+
 ## Composer control follow-up
 
 The composer follows Expo's action order: attachments, model/options, microphone,
