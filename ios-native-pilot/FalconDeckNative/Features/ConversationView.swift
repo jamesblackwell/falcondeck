@@ -24,6 +24,7 @@ private struct ChatContent: View {
     let task: AgentTask
     @Bindable var chat: ChatSession
     @State private var followLatest = true
+    @State private var userScrolling = false
     @State private var rename = false
     @State private var title = ""
     private var project: Project? { model.projects.first { $0.id == task.projectID } }
@@ -53,16 +54,22 @@ private struct ChatContent: View {
                 .padding(.horizontal, FD.inset).padding(.vertical, 20).frame(maxWidth: 820).frame(maxWidth: .infinity)
             }
             .defaultScrollAnchor(.bottom, for: .initialOffset)
-            .onScrollGeometryChange(for: Bool.self) { g in g.contentOffset.y + g.containerSize.height >= g.contentSize.height - 120 } action: { _, value in followLatest = value }
+            .onScrollGeometryChange(for: Bool.self) { g in g.contentOffset.y + g.containerSize.height >= g.contentSize.height - 120 } action: { _, value in
+                // Content growth and keyboard dismissal also change geometry.
+                // Only an actual reading gesture should turn following off.
+                if userScrolling { followLatest = value }
+            }
+            .onScrollPhaseChange { _, phase in userScrolling = phase == .tracking || phase == .interacting || phase == .decelerating }
             .scrollDismissesKeyboard(.interactively)
             .refreshable { await model.loadChat(task) }
             .onChange(of: chat.transcript.revision) { _, _ in
-                if followLatest || chat.sending { withAnimation(reduceMotion ? nil : .easeOut(duration: 0.15)) { proxy.scrollTo("latest", anchor: .bottom) } }
+                if followLatest || chat.sending { scrollToLatest(proxy, animated: true) }
             }
-            .onChange(of: chat.loaded) { _, loaded in if loaded { proxy.scrollTo("latest", anchor: .bottom) } }
+            .onChange(of: chat.loaded) { _, loaded in if loaded { scrollToLatest(proxy, animated: false) } }
+            .onChange(of: chat.sending) { _, sending in if sending { followLatest = true; scrollToLatest(proxy, animated: true) } }
             .overlay(alignment: .bottomTrailing) {
                 if !followLatest && !chat.transcript.items.isEmpty {
-                    Button { withAnimation(reduceMotion ? nil : .smooth) { proxy.scrollTo("latest", anchor: .bottom) } } label: { Image(systemName: "arrow.down").padding(12) }
+                    Button { followLatest = true; scrollToLatest(proxy, animated: true) } label: { Image(systemName: "arrow.down").padding(12) }
                         .glassEffect().padding(16).accessibilityLabel("Jump to latest message")
                 }
             }
@@ -97,6 +104,12 @@ private struct ChatContent: View {
                 ComposerView(task: task, project: project, chat: chat)
             }
             .padding(.horizontal, 12).padding(.top, 8).padding(.bottom, 8).frame(maxWidth: 844).frame(maxWidth: .infinity)
+        }
+    }
+    private func scrollToLatest(_ proxy: ScrollViewProxy, animated: Bool) {
+        Task { @MainActor in
+            await Task.yield()
+            withAnimation(animated && !reduceMotion ? .easeOut(duration: 0.15) : nil) { proxy.scrollTo("latest", anchor: .bottom) }
         }
     }
 }
