@@ -1,4 +1,5 @@
 import SwiftUI
+import Observation
 
 struct ConversationView: View {
     @Environment(AppModel.self) private var model
@@ -25,9 +26,7 @@ private struct ChatContent: View {
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     let task: AgentTask
     @Bindable var chat: ChatSession
-    @State private var followLatest = true
-    @State private var nearLatest = true
-    @State private var userScrolling = false
+    @State private var scroll = TranscriptScrollState()
     @State private var showGoal = false
     private var expansion: TranscriptExpansion? { chat.transcriptExpansion }
     @State private var contextHeight: CGFloat = 0
@@ -59,8 +58,8 @@ private struct ChatContent: View {
                         }.frame(maxWidth: .infinity).padding(.vertical, 48)
                     }
                     ForEach(blocks) { block in
-                        if block.grouped { TranscriptGroup(block: block, task: task, expansion: expansion, onInteraction: { followLatest = false }).id(block.id) }
-                        else if let item = block.items.first { TranscriptRow(message: item, task: task, firstDiff: block.firstDiff, showsActions: actions.contains(item.id), expansion: expansion, onInteraction: { followLatest = false }).id(item.id) }
+                        if block.grouped { TranscriptGroup(block: block, task: task, expansion: expansion, onInteraction: { scroll.followLatest = false }).id(block.id) }
+                        else if let item = block.items.first { TranscriptRow(message: item, task: task, firstDiff: block.firstDiff, showsActions: actions.contains(item.id), expansion: expansion, onInteraction: { scroll.followLatest = false }).id(item.id) }
                     }
                     if task.running {
                         HStack(spacing: 8) { ActivityDiamond(); Text("\(task.provider.capitalized) is working…").font(.footnote).foregroundStyle(FD.secondary) }.padding(.vertical, 8)
@@ -75,29 +74,28 @@ private struct ChatContent: View {
             .onScrollGeometryChange(for: Bool.self) { g in g.contentOffset.y + g.containerSize.height >= g.contentSize.height - 120 } action: { _, value in
                 // Content growth and keyboard dismissal also change geometry.
                 // Only an actual reading gesture should turn following off.
-                nearLatest = value
-                if userScrolling { followLatest = value }
+                scroll.nearLatest = value
+                if scroll.userScrolling { scroll.followLatest = value }
             }
             .onChange(of: viewportHeight) { _, _ in
                 // Observe the outer layout, which cannot change as lazy rows are
                 // measured. Keyboard and composer resizing must still follow.
-                if followLatest && !userScrolling { scrollToLatest(proxy, animated: false) }
+                if scroll.followLatest && !scroll.userScrolling { scrollToLatest(proxy, animated: false) }
             }
             .onChange(of: bottomInsetHeight) { _, _ in
-                if followLatest && !userScrolling { scrollToLatest(proxy, animated: false) }
+                if scroll.followLatest && !scroll.userScrolling { scrollToLatest(proxy, animated: false) }
             }
-            .onScrollPhaseChange { _, phase in userScrolling = phase == .tracking || phase == .interacting || phase == .decelerating }
+            .onScrollPhaseChange { _, phase in scroll.userScrolling = phase == .tracking || phase == .interacting || phase == .decelerating }
             .scrollDismissesKeyboard(.interactively)
             .refreshable { if !task.isDraft { await model.loadChat(task) } }
             .onChange(of: chat.transcript.revision) { _, _ in
-                if followLatest || chat.sending { scrollToLatest(proxy, animated: true) }
+                if scroll.followLatest || chat.sending { scrollToLatest(proxy, animated: true) }
             }
             .onChange(of: chat.loaded, initial: true) { _, loaded in if loaded { scrollToLatest(proxy, animated: false) } }
-            .onChange(of: chat.sending) { _, sending in if sending { followLatest = true; scrollToLatest(proxy, animated: true) } }
+            .onChange(of: chat.sending) { _, sending in if sending { scroll.followLatest = true; scrollToLatest(proxy, animated: true) } }
             .overlay(alignment: .bottomTrailing) {
-                if !followLatest && !nearLatest && !chat.transcript.items.isEmpty {
-                    Button { followLatest = true; scrollToLatest(proxy, animated: true) } label: { Image(systemName: "arrow.down").padding(12) }
-                        .glassEffect().padding(16).accessibilityLabel("Jump to latest message")
+                LatestMessageShortcut(state: scroll, hasMessages: !chat.transcript.items.isEmpty) {
+                    scroll.followLatest = true; scrollToLatest(proxy, animated: true)
                 }
             }
         }
@@ -112,7 +110,7 @@ private struct ChatContent: View {
                 }
             }
         }
-        .onChange(of: chat.transcriptExpansion) { _, _ in followLatest = false }
+        .onChange(of: chat.transcriptExpansion) { _, _ in scroll.followLatest = false }
         .sheet(isPresented: $showGoal) { GoalView(taskID: task.id) }
         .task(id: task.activitySeq) {
             do { try await Task.sleep(for: .milliseconds(600)) } catch { return }
@@ -167,6 +165,7 @@ private struct ChatContent: View {
     private func scrollToLatest(_ proxy: ScrollViewProxy, animated: Bool) {
         Task { @MainActor in
             await Task.yield()
+            guard scroll.followLatest || chat.sending else { return }
             withAnimation(animated && !reduceMotion ? .easeOut(duration: 0.15) : nil) { proxy.scrollTo("latest", anchor: .bottom) }
         }
     }
@@ -181,5 +180,24 @@ struct DraftConversationView: View {
             ConversationView(task: model.draftTask(project: project, folderID: folderID))
                 .navigationTitle(project.raw["kind"].string == "casual" ? "New chat" : project.name)
         } else { ContentUnavailableView("Select a project", systemImage: "folder") }
+    }
+}
+
+// Geometry updates should invalidate the shortcut, not rebuild rich transcript rows.
+@MainActor @Observable private final class TranscriptScrollState {
+    var followLatest = true
+    var nearLatest = true
+    var userScrolling = false
+}
+
+private struct LatestMessageShortcut: View {
+    let state: TranscriptScrollState
+    let hasMessages: Bool
+    let jump: () -> Void
+    var body: some View {
+        if !state.followLatest && !state.nearLatest && hasMessages {
+            Button(action: jump) { Image(systemName: "arrow.down").padding(12) }
+                .glassEffect().padding(16).accessibilityLabel("Jump to latest message")
+        }
     }
 }

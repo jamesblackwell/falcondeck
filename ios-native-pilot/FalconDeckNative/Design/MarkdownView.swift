@@ -5,6 +5,7 @@ struct NativeMarkdown: View {
     let text: String
     var body: some View {
         Markdown(text).markdownTheme(.falcon).markdownImageProvider(ExplicitImageProvider()).textSelection(.enabled)
+            .fixedSize(horizontal: false, vertical: true)
             .environment(\.openURL, OpenURLAction { url in
                 ["https", "http", "mailto"].contains(url.scheme?.lowercased() ?? "") ? .systemAction : .discarded
             })
