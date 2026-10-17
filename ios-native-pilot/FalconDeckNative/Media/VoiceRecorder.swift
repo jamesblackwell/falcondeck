@@ -33,11 +33,12 @@ final class VoiceRecorder: NSObject, AVAudioRecorderDelegate {
         }
     }
 
-    func start(ownerID: String, provider: String) async {
+    func start(ownerID: String, provider: String, isCurrent: () -> Bool = { true }) async {
         guard !starting, !recording, !transcribing, pendingURL == nil else { return }
         starting = true; defer { starting = false }
         error = nil
         guard await AVAudioApplication.requestRecordPermission() else { error = "Allow microphone access in Settings to record a message."; return }
+        guard isCurrent(), !Task.isCancelled else { return }
         do {
             let session = AVAudioSession.sharedInstance()
             try session.setCategory(.playAndRecord, mode: .default, options: [.defaultToSpeaker, .allowBluetoothHFP])

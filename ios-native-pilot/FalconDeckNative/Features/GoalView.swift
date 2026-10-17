@@ -4,6 +4,8 @@ struct GoalView: View {
     @Environment(AppModel.self) private var model
     @Environment(\.dismiss) private var dismiss
     let taskID: String
+    var initialObjective = ""
+    var onSaved: (() -> Void)? = nil
     @State private var objective = ""
     @State private var budget = ""
     @State private var pending = false
@@ -36,7 +38,7 @@ struct GoalView: View {
                         }.listRowBackground(FD.surface)
                         Section {
                             Button("Start goal") {
-                                run { try await model.setGoal(task, objective: objective.trimmingCharacters(in: .whitespacesAndNewlines), budget: Int(budget).flatMap { $0 > 0 ? $0 : nil }) }
+                                run { try await model.setGoal(task, objective: objective.trimmingCharacters(in: .whitespacesAndNewlines), budget: Int(budget).flatMap { $0 > 0 ? $0 : nil }); onSaved?() }
                             }.disabled(objective.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty).accessibilityIdentifier("start-goal")
                         }.listRowBackground(FD.surface)
                     }
@@ -47,7 +49,7 @@ struct GoalView: View {
             .scrollContentBackground(.hidden).background(FD.background)
             .navigationTitle("Goal").navigationBarTitleDisplayMode(.inline)
             .toolbar { ToolbarItem(placement: .confirmationAction) { Button("Done") { dismiss() }.disabled(pending) } }
-        }.presentationDetents([.medium, .large]).interactiveDismissDisabled(pending)
+        }.onAppear { if objective.isEmpty { objective = initialObjective } }.presentationDetents([.medium, .large]).interactiveDismissDisabled(pending)
     }
     private func run(_ action: @escaping @MainActor () async throws -> Void) {
         guard !pending else { return }

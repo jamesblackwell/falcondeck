@@ -55,6 +55,13 @@ struct TaskOptionsView: View {
                             Button("Retry loading conversation") { Task { await model.loadChat(task) } }
                         }
 
+                        if let project = model.projects.first(where: { $0.id == task.projectID }) {
+                            Menu("Continue with another agent", systemImage: "arrow.triangle.branch") {
+                                ForEach(project.providers.filter { $0 != task.provider }, id: \.self) { provider in
+                                    Button(provider.capitalized) { run { try await model.handoff(task, provider: provider) } }
+                                }
+                            }
+                        }
                         Button("Archive task", systemImage: "archivebox", role: .destructive) { run { await model.archive(task) } }
                     }.listRowBackground(FD.surface)
                 }

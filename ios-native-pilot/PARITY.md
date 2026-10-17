@@ -6,12 +6,12 @@ outside this work. The daemon and agent storage remain authoritative.
 
 | Area | Existing mobile behavior to mirror | Native status |
 | --- | --- | --- |
-| Connection | Secure link/QR pairing, saved Keychain identity, presence, reconnect, diagnostics | Link pairing, saved identity, automatic reconnect/backoff, compact sync and diagnostics present; QR pending |
+| Connection | Secure link/QR pairing, saved Keychain identity, presence, reconnect, diagnostics | Link pairing, saved identity, automatic reconnect/backoff, compact sync and diagnostics and native QR scanner present; physical QR QA awaits device |
 | Navigation | Sidebar, chats, projects, global/project pins, folders, search/sort/hidden/archive | Sidebar, pins, folders and lazy pages present; project customization/search/sort pending |
 | New task | Draft composer, provider/model selection, first-send creation, folder filing | Implemented; first-send and failed-send regression tests pass |
-| Composer | Model, effort, permissions, sandbox, collaboration, speed, skills/prompts | Model/effort plus capability-based modes, permissions, sandbox and speed; skills/prompts pending |
-| Turns | Live replies, queue/edit/remove/steer, interrupt, resume interrupted, compact | Send/interrupt and queue controls implemented; resume/branch/handoff pending |
-| Task actions | Rename/suggest, read/unread, archive/unarchive, branch/retry, handoff | Rename/suggest/read/unread/pin/archive/restore implemented; branch/handoff pending |
+| Composer | Model, effort, permissions, sandbox, collaboration, speed, skills/prompts | Capability-based models/modes/permissions/sandbox/speed plus provider-scoped skills and saved prompt shortcuts |
+| Turns | Live replies, queue/edit/remove/steer, interrupt, resume interrupted, compact | Send/interrupt, queues, shutdown-resume, edit/retry branching and cross-agent handoff implemented |
+| Task actions | Rename/suggest, read/unread, archive/unarchive, branch/retry, handoff | Rename/suggest/read/unread/pin/archive/read-archived/restore, branch/retry and cross-agent handoff implemented |
 | Goals | Set objective/budget, status/usage, pause/resume/stop | Implemented; local lifecycle/budget test passes |
 | Transcript | Markdown/code/tables, reasoning/tools/groups, plans/diffs/files, images, search/artifacts/reviews/unknown fallback | All wire item kinds have a native renderer or inspectable fallback; grouping, shared conversation preferences and harness projection implemented; Mermaid remains |
 | Media | Library/camera/clipboard attachments, image preview/save/share, read aloud, recording/transcription | Implemented; attachment/queue/export/Unicode tests pass; physical microphone testing awaits device |
@@ -40,3 +40,5 @@ empty transcript) is fixed by loading history and disabling sharing until ready;
 partial exports are explicitly labelled and include tool/file/plan output.
 
 Recovery milestone: 57 simulator tests pass. Encrypted device input drafts and uncertain-send recovery survive restarts; compact sync carries visible rows and rejects pages raced by live archive events. Notification review findings are fixed: completion alerts require terminal states and unsupported desktop-activity suppression is not offered for connected native alerts. Phone appearance changes verified visually.
+
+Task-action milestone: 63 tests pass. Fake-relay checks verify edit/retry fork boundaries, permission preservation, interrupted resume inputs, skill matching, Unicode context limits, and handoff that never starts a turn or mutates the source. QR scanning uses VisionKit and preserves the signed-pairing validation path; simulator fallback is explicit.

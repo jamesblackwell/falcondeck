@@ -95,9 +95,16 @@ struct TranscriptRow: View {
         .padding(message.kind == "user_message" ? 16 : 2)
         .background(message.kind == "user_message" ? FD.raised : .clear, in: .rect(cornerRadius: 16))
         .contextMenu {
+            if message.kind == "user_message", !message.raw["pending"].bool, let task, !task.archived {
+                Button("Edit in a new branch", systemImage: "pencil") { branch(task, retry: false) }.disabled(model.chat(for: task).sending || (!model.demo && !model.connected))
+                Button("Retry in a new branch", systemImage: "arrow.clockwise") { branch(task, retry: true) }.disabled(model.chat(for: task).sending || (!model.demo && !model.connected))
+            }
             Button { UIPasteboard.general.string = message.text } label: { Label("Copy message", systemImage: "doc.on.doc") }
             ShareLink(item: message.text) { Label("Share message", systemImage: "square.and.arrow.up") }
         }
+    }
+    private func branch(_ task: AgentTask, retry: Bool) {
+        Task { do { try await model.branch(task, message: message, retry: retry) } catch { model.chat(for: task).error = error.localizedDescription } }
     }
     private var tool: some View {
         let bordered = ["execute", "edit", "terminal", "command"].contains(message.raw["tool_kind"].string)

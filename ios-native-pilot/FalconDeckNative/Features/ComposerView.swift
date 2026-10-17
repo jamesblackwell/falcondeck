@@ -6,6 +6,9 @@ struct ComposerView: View {
     let project: Project?
     @Bindable var chat: ChatSession
     @FocusState private var focused: Bool
+    @State private var showGoal = false
+    @State private var goalSeed = ""
+    @State private var goalCommand = ""
     private var models: [AgentModel] { project?.models(for: task.provider) ?? [] }
     private var activeModel: AgentModel? { models.first { $0.id == chat.modelID } ?? models.first { $0.raw["is_default"].bool } ?? models.first }
     var body: some View {
@@ -13,6 +16,7 @@ struct ComposerView: View {
             if !model.connected && !model.demo {
                 Button { Task { await model.reconnect() } } label: { Label("\(model.status) · Reconnect", systemImage: "wifi.exclamationmark").font(.footnote) }
             }
+            SlashCommandsView(task: task, chat: chat) { openGoal() }
             RecordingPanel(task: task, chat: chat)
             if !chat.attachments.isEmpty { AttachmentStrip(chat: chat) }
             TextField(task.running ? "Queue a follow-up…" : "Message \(task.provider.capitalized)…", text: $chat.draft, axis: .vertical)
@@ -44,7 +48,8 @@ struct ComposerView: View {
                 }
                 Button {
                     focused = false
-                    Task { await model.send(task) }
+                    if !task.isDraft, chat.draft.trimmingCharacters(in: .whitespacesAndNewlines) == "/goal" || chat.draft.hasPrefix("/goal ") { openGoal() }
+                    else { Task { await model.send(task) } }
                 } label: {
                     Group { if chat.sending { ActivityDiamond() } else { Image(systemName: task.running ? "arrow.up.to.line" : "arrow.up").fontWeight(.semibold) } }.frame(width: 32, height: 32)
                 }
@@ -55,11 +60,19 @@ struct ComposerView: View {
             if model.demo { Text("Demo · Messages stay on this device").font(.caption2).foregroundStyle(FD.muted) }
         }
         .padding(14).glassEffect(in: .rect(cornerRadius: 24))
+        .task(id: task.projectID + ":" + task.provider + ":" + String(model.connected)) { await model.loadCatalog(task) }
+        .sheet(isPresented: $showGoal) { GoalView(taskID: task.id, initialObjective: goalSeed) { if chat.draft == goalCommand { chat.draft = "" } } }
         .onChange(of: chat.modelID) { _, value in
             chat.effort = ""; chat.overrides["model_id"] = value.isEmpty ? .null : .string(value)
             chat.overrides["reasoning_effort"] = .null
             chat.overrides.removeValue(forKey: "service_tier")
         }
         .onChange(of: chat.effort) { _, value in chat.overrides["reasoning_effort"] = value.isEmpty ? .null : .string(value) }
+    }
+    private func openGoal() {
+        goalCommand = chat.draft
+        let text = chat.draft.trimmingCharacters(in: .whitespacesAndNewlines)
+        goalSeed = text.hasPrefix("/goal") ? String(text.dropFirst(5)).trimmingCharacters(in: .whitespacesAndNewlines) : ""
+        showGoal = true
     }
 }

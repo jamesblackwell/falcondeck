@@ -101,6 +101,15 @@ private struct ChatContent: View {
         }
         .safeAreaInset(edge: .bottom, spacing: 0) {
             VStack(spacing: 10) {
+                if task.interrupted {
+                    HStack {
+                        Text("FalconDeck closed during this turn.").font(.footnote)
+                        Spacer()
+                        Button("Continue") { Task { await model.resumeInterrupted(task) } }.disabled(chat.sending || (!model.demo && !model.connected))
+                        Button { Task { await model.updateTask(task, fields: ["acknowledge_interruption": .bool(true)]) } } label: { Image(systemName: "xmark") }.accessibilityLabel("Dismiss interrupted turn")
+                    }.padding(12).background(FD.surface, in: .rect(cornerRadius: 12))
+                }
+                if task.raw["handoff_from"]["context_pending"].bool { Text("The previous conversation is sent with your first message.").font(.footnote).foregroundStyle(FD.secondary) }
                 if task.goal != .null {
                     Button { showGoal = true } label: { Label("Goal · \(task.goal["status"].string.capitalized)", systemImage: "target").font(.caption) }.buttonStyle(.glass)
                 }

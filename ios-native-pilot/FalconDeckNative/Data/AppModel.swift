@@ -10,6 +10,7 @@ final class AppModel {
     let relay: any RelayServing
     let voice = VoiceRecorder()
     let readAloud = ReadAloud()
+    var composerCatalogs: [String: ComposerCatalog] = [:]
     let automations = AutomationStore()
     let notifications = LocalNotifications()
     private(set) var connectionID = UUID()
@@ -113,7 +114,7 @@ final class AppModel {
     @discardableResult private func beginConnection(clearData: Bool) -> UUID {
         reconnectTask?.cancel(); reconnectTask = nil
         if voice.recording { voice.finishRecording() }
-        readAloud.stop(); automations.reset()
+        readAloud.stop(); automations.reset(); composerCatalogs = [:]
         connectionID = UUID(); lastEventSeq = 0; connected = false; syncIndex = nil; taskPageLoads = []
         itemCache = [:]; itemCacheOrder = []; itemLoads = [:]; mediaGate = MediaTransferGate()
         summaryFlush?.cancel(); summaryFlush = nil; pendingSummaries = [:]
@@ -305,7 +306,10 @@ final class AppModel {
                 _ = try await taskRequest(task, method: "thread.update", fields: selectedOverrides)
                 guard current == connectionID else { restoreSubmission(task, chat: chat, id: id, text: text, attachments: attachments); return }
             }
-            let response = try await relay.call("turn.start", params: NativeRequest.turn(task: task, text: text, itemID: id, modelID: selectedModel, effort: selectedEffort, overrides: selectedOverrides, attachments: attachments))
+            if text.contains("/") { await loadCatalog(task) }
+            guard current == connectionID else { restoreSubmission(task, chat: chat, id: id, text: text, attachments: attachments); return }
+            let params = NativeRequest.turn(task: task, text: text, itemID: id, modelID: selectedModel, effort: selectedEffort, overrides: selectedOverrides, attachments: attachments).setting("selected_skills", .array(ComposerCatalog.selected(text, skills: catalog(task).skills)))
+            let response = try await relay.call("turn.start", params: params)
             guard current == connectionID else { restoreSubmission(task, chat: chat, id: id, text: text, attachments: attachments); return }
             if response["message"].string == "queued" {
                 chat.submission = nil

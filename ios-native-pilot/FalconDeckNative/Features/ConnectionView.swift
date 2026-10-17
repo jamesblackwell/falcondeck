@@ -5,6 +5,7 @@ struct ConnectionView: View {
     @Environment(\.dismiss) private var dismiss
     @State private var relayURL = "https://connect.falcondeck.com"
     @State private var confirmForget = false
+    @State private var showScanner = false
     var body: some View {
         @Bindable var model = model
         NavigationStack {
@@ -18,6 +19,7 @@ struct ConnectionView: View {
                     }.padding(.vertical, 12)
                 }.listRowBackground(FD.surface)
                 Section("Pair a computer") {
+                    Button("Scan pairing code", systemImage: "qrcode.viewfinder") { showScanner = true }.disabled(model.busy)
                     SecureField("Secure pairing link or code", text: $model.pairingText)
                         .textContentType(.none).textInputAutocapitalization(.never).autocorrectionDisabled()
                         .accessibilityIdentifier("pairing-input")
@@ -72,5 +74,6 @@ struct ConnectionView: View {
         }
         .presentationDragIndicator(.visible)
         .interactiveDismissDisabled(model.busy)
+        .sheet(isPresented: $showScanner) { PairingScanner(relay: relayURL) { model.pairingText = $0 } }
     }
 }

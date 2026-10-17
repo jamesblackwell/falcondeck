@@ -11,7 +11,8 @@ struct VoiceControl: View {
             if recorder.pendingURL != nil { model.showSpeechSettings = true }
             else {
                 model.readAloud.stop()
-                Task { await recorder.start(ownerID: task.id, provider: provider) }
+                let current = model.connectionID
+                Task { await recorder.start(ownerID: task.id, provider: provider, isCurrent: { current == model.connectionID }) }
             }
         } label: { Image(systemName: "mic").frame(width: 28, height: 28) }
             .accessibilityLabel(recorder.pendingURL == nil ? "Record voice message" : "Recover saved recording")
