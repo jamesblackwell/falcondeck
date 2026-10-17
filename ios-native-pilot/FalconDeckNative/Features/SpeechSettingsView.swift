@@ -4,8 +4,8 @@ struct SpeechSettingsView: View {
     @Environment(AppModel.self) private var model
     @Environment(\.dismiss) private var dismiss
     var modal = false
-    @AppStorage("native.speech.provider") private var provider = "on-device"
-    @AppStorage("native.speech.model") private var transcriptionModel = "openai/gpt-4o-mini-transcribe"
+    @AppStorage("native.speech.provider") private var provider = NativeSpeechSettings.defaultProvider
+    @AppStorage("native.speech.model") private var transcriptionModel = NativeSpeechSettings.defaultModel
     @AppStorage("native.speech.language") private var language = ""
     @AppStorage("native.readAloud.provider") private var readAloud = "on-device"
     @State private var desktopStatus = "Not checked"

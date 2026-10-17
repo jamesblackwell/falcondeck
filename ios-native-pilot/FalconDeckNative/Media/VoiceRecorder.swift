@@ -10,9 +10,13 @@ final class VoiceRecorder: NSObject, AVAudioRecorderDelegate {
     var transcribing = false
     var elapsed: TimeInterval = 0
     var level: Float = 0
+    var levels: [Float] = []
+    var transcriptionAttempt = 1
     var error: String?
     private(set) var ownerID: String?
     private(set) var pendingURL: URL?
+    // Legacy saved audio with no provenance stays local. New recordings use the
+    // selected provider, whose default is the paired computer.
     private(set) var provider = "on-device"
     @ObservationIgnored private var recorder: AVAudioRecorder?
     @ObservationIgnored private var meter: Task<Void, Never>?
@@ -21,6 +25,7 @@ final class VoiceRecorder: NSObject, AVAudioRecorderDelegate {
     @ObservationIgnored private var recognitionTimeout: Task<Void, Never>?
     @ObservationIgnored private var recognitionID = UUID()
     @ObservationIgnored private var interruptions: AudioInterruptionObserver?
+    @ObservationIgnored private var operationID = UUID()
 
     @ObservationIgnored private let defaults: UserDefaults
 
@@ -36,12 +41,27 @@ final class VoiceRecorder: NSObject, AVAudioRecorderDelegate {
         }
     }
 
-    func start(ownerID: String, provider: String, isCurrent: () -> Bool = { true }) async {
+    func start(ownerID: String, provider: String, model: AppModel, isCurrent: () -> Bool = { true }) async {
         guard !starting, !recording, !transcribing, pendingURL == nil else { return }
-        starting = true; defer { starting = false }
+        let operation = UUID(); operationID = operation
+        self.ownerID = ownerID; self.provider = provider
+        starting = true; elapsed = 0; levels = []
+        defer { if operationID == operation { starting = false } }
         error = nil
-        guard await AVAudioApplication.requestRecordPermission() else { error = "Allow microphone access in Settings to record a message."; return }
-        guard isCurrent(), !Task.isCancelled else { return }
+        if provider == "openrouter" {
+            do {
+                guard model.connected else { throw PilotError("Connect to your computer to use OpenRouter voice input.") }
+                let status = try await model.relay.call("speech.status", params: .object([:]))
+                guard isCurrent(), operationID == operation, !Task.isCancelled else { return }
+                guard status["configured"].bool else { throw PilotError("Add an OpenRouter key in desktop Settings → Models & keys, or choose On-device in Speech settings.") }
+            } catch {
+                if isCurrent(), operationID == operation { self.error = error.localizedDescription }
+                return
+            }
+        }
+        let permitted = await AVAudioApplication.requestRecordPermission()
+        guard isCurrent(), operationID == operation, !Task.isCancelled else { return }
+        guard permitted else { error = "Allow microphone access in Settings to record a message."; return }
         do {
             let session = AVAudioSession.sharedInstance()
             try session.setCategory(.playAndRecord, mode: .default, options: [.defaultToSpeaker, .allowBluetoothHFP])
@@ -55,7 +75,7 @@ final class VoiceRecorder: NSObject, AVAudioRecorderDelegate {
             var resourceValues = URLResourceValues(); resourceValues.isExcludedFromBackup = true
             try protectedDirectory.setResourceValues(resourceValues)
             let url = directory.appending(path: "\(UUID()).m4a")
-            let recorder = try AVAudioRecorder(url: url, settings: [AVFormatIDKey: kAudioFormatMPEG4AAC, AVSampleRateKey: 44_100, AVNumberOfChannelsKey: 1, AVEncoderBitRateKey: 64_000])
+            let recorder = try AVAudioRecorder(url: url, settings: [AVFormatIDKey: kAudioFormatMPEG4AAC, AVSampleRateKey: 16_000, AVNumberOfChannelsKey: 1, AVEncoderBitRateKey: 32_000])
             recorder.delegate = self; recorder.isMeteringEnabled = true
             guard recorder.record() else { throw PilotError("Couldn't start the microphone.") }
             self.recorder = recorder; pendingURL = url; self.ownerID = ownerID; self.provider = provider
@@ -69,7 +89,8 @@ final class VoiceRecorder: NSObject, AVAudioRecorderDelegate {
                     if self.recorder?.isRecording != true { self.interrupted(); return }
                     self.recorder?.updateMeters()
                     self.elapsed = self.recorder?.currentTime ?? self.elapsed
-                    self.level = pow(10, (self.recorder?.averagePower(forChannel: 0) ?? -60) / 20)
+                    self.level = min(1, max(0, 1 + (self.recorder?.averagePower(forChannel: 0) ?? -60) / 50))
+                    self.levels = Array(self.levels.suffix(119)) + [self.level]
                     if self.elapsed >= 180 { self.finishRecording(); return }
                     do { try await Task.sleep(for: .milliseconds(100)) } catch { return }
                 }
@@ -84,15 +105,17 @@ final class VoiceRecorder: NSObject, AVAudioRecorderDelegate {
     }
 
     func discard() {
-        finishRecording(); recognition?.cancel(); resolveRecognition(.failure(CancellationError()))
+        finishRecording(); cancelTranscription()
         if let pendingURL { try? FileManager.default.removeItem(at: pendingURL) }
-        pendingURL = nil; ownerID = nil; error = nil
+        pendingURL = nil; ownerID = nil; error = nil; levels = []
         defaults.removeObject(forKey: "native.voice.pending")
         defaults.removeObject(forKey: "native.voice.owner")
     }
 
     func cancelTranscription() {
+        operationID = UUID(); starting = false; transcribing = false
         recognition?.cancel(); resolveRecognition(.failure(CancellationError()))
+        SpeechLiveActivity.shared.voice(nil)
     }
 
     func interrupted() {
@@ -103,10 +126,11 @@ final class VoiceRecorder: NSObject, AVAudioRecorderDelegate {
 
     func transcribe(model: AppModel, using providerOverride: String? = nil) async throws -> String {
         guard !transcribing, let url = pendingURL else { throw PilotError("Record a message first.") }
+        let operation = UUID(); operationID = operation
         if let providerOverride { provider = providerOverride; defaults.set(providerOverride, forKey: "native.voice.provider") }
-        finishRecording(); transcribing = true; error = nil
+        finishRecording(); transcribing = true; transcriptionAttempt = 1; error = nil
         SpeechLiveActivity.shared.voice("transcribing")
-        defer { transcribing = false; SpeechLiveActivity.shared.voice(nil) }
+        defer { if operationID == operation { transcribing = false; SpeechLiveActivity.shared.voice(nil) } }
         let current = model.connectionID
         let text: String
         do {
@@ -115,15 +139,14 @@ final class VoiceRecorder: NSObject, AVAudioRecorderDelegate {
                 let audio = try await Task.detached {
                     let data = try Data(contentsOf: url)
                     guard !data.isEmpty, data.count <= 8 * 1024 * 1024 else { throw PilotError("Record a shorter message (up to 8 MB).") }
-                    return data.base64EncodedString()
+                    return data
                 }.value
-                guard current == model.connectionID else { throw CancellationError() }
-                var params = JSON.object(["audio_base64": .string(audio), "format": .string("m4a"), "model": .string(defaults.string(forKey: "native.speech.model") ?? "openai/gpt-4o-mini-transcribe")])
-                if let language = defaults.string(forKey: "native.speech.language")?.nonempty { params = params.setting("language", .string(language)) }
-                text = try await model.relay.call("speech.transcribe", params: params)["text"].string
+                guard current == model.connectionID, operationID == operation else { throw CancellationError() }
+                let params = try NativeSpeechSettings.parameters(audio: audio, defaults: defaults)
+                text = try await SpeechTranscription.transcribe(params: params, relay: model.relay, isCurrent: { current == model.connectionID && self.operationID == operation }, onAttempt: { self.transcriptionAttempt = $0 })
             } else {
                 let authorization = await withCheckedContinuation { continuation in SFSpeechRecognizer.requestAuthorization { @Sendable status in continuation.resume(returning: status) } }
-                guard current == model.connectionID, !Task.isCancelled else { throw CancellationError() }
+                guard current == model.connectionID, operationID == operation, !Task.isCancelled else { throw CancellationError() }
                 guard authorization == .authorized else { throw PilotError("Allow Speech Recognition in Settings to transcribe on this device.") }
                 let locale = Locale(identifier: defaults.string(forKey: "native.speech.language")?.nonempty ?? Locale.current.identifier)
                 guard let recognizer = SFSpeechRecognizer(locale: locale), recognizer.isAvailable, recognizer.supportsOnDeviceRecognition else {
@@ -149,10 +172,14 @@ final class VoiceRecorder: NSObject, AVAudioRecorderDelegate {
                     }
                 }
             }
-            guard current == model.connectionID else { throw CancellationError() }
+            guard current == model.connectionID, operationID == operation, !Task.isCancelled else { throw CancellationError() }
             guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { throw PilotError("No speech was detected. You can retry or discard the recording.") }
-            return text
-        } catch { self.error = error.localizedDescription; throw error }
+            return text.trimmingCharacters(in: .whitespacesAndNewlines)
+        } catch {
+            guard current == model.connectionID, operationID == operation else { throw CancellationError() }
+            if !(error is CancellationError) { self.error = error.localizedDescription }
+            throw error
+        }
     }
 
     private func resolveRecognition(_ result: Result<String, Error>) {
@@ -160,6 +187,16 @@ final class VoiceRecorder: NSObject, AVAudioRecorderDelegate {
         let waiter = recognitionWaiter; recognitionWaiter = nil
         waiter?.resume(with: result)
     }
+    #if DEBUG
+    /// Local screenshot fixtures never open a microphone, file or relay request.
+    func preview(_ phase: String, ownerID: String) {
+        self.ownerID = ownerID; provider = "openrouter"; elapsed = 42
+        pendingURL = FileManager.default.temporaryDirectory.appending(path: "voice-ui-preview.m4a")
+        starting = phase == "starting"; recording = phase == "recording"; transcribing = phase == "transcribing"
+        levels = (0..<100).map { Float(abs(sin(Double($0) * 0.43))) * 0.8 }
+        error = phase == "failed" ? "Could not reach your computer. Your recording is safe, so you can retry." : nil
+    }
+    #endif
     nonisolated func audioRecorderDidFinishRecording(_ recorder: AVAudioRecorder, successfully flag: Bool) {
         let id = ObjectIdentifier(recorder)
         Task { @MainActor in if self.recording, self.recorder.map(ObjectIdentifier.init) == id { self.interrupted() } }

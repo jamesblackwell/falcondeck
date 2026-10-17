@@ -16,6 +16,8 @@ final class ChatSession {
     @ObservationIgnored var changed: (() -> Void)?
     var pendingQueue: [QueuedDraft] = []
     var preparingAttachments = false
+    var voiceInputOpen = false
+    var voiceInsertion: VoiceDraftInsertion?
     var loading = false
     var loaded = false
     var sending = false
@@ -27,5 +29,12 @@ final class ChatSession {
     var bufferedEvents: [JSON] = []
     var loadID = UUID()
     var bufferOverflowed = false
+
+    @discardableResult func insertVoiceTranscript(_ text: String) -> String.Index {
+        let insertion = (voiceInsertion ?? VoiceDraftInsertion(original: draft, selection: nil)).inserting(text, into: draft)
+        draft = insertion.text
+        voiceInsertion = nil; voiceInputOpen = false
+        return insertion.caret
+    }
 }
 

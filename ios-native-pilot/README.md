@@ -69,7 +69,11 @@ keys, tokens, real device inventory or private screenshots in git.
   operational notices, token usage and inspectable unknown items.
 - Photos/camera/files/clipboard image attachments; native image preview,
   zoom/save/share; full tool-output sheets and explicit partial transcript export.
-- Retained voice recordings, on-device recognition, computer transcription,
+- Inline voice recording/transcribing with waveform, timer, stop-to-edit,
+  transcribe-and-send and retained audio for retry. New recordings default to the
+  same OpenRouter transcription service/model as Expo, through the paired computer;
+  explicit on-device choices and older recordings retain their selected engine.
+  Also includes on-device recognition, computer transcription,
   system/computer read aloud, speech Live Activities and Lock Screen/headset
   playback controls; bounded native realtime PCM audio.
 - Automations: list/create/edit/pause/resume/delete/run/history using control RPC,
@@ -131,7 +135,7 @@ xcodebuild -project FalconDeckNative.xcodeproj -scheme FalconDeckNativeUI \
   -derivedDataPath build-ui test
 ```
 
-The latest run has 105 passing unit tests and passing pairing/chat/automation UI checks on
+The latest run has 113 passing unit tests and passing pairing/chat/automation UI checks on
 both phone and tablet simulators. See [VERIFICATION.md](VERIFICATION.md) for the
 review and device handoff, and [PARITY.md](PARITY.md) for the feature ledger. Tests cover
 crypto interoperability, pairing authority, chunks/ACKs, UTF-16 streaming,

@@ -91,7 +91,7 @@ struct TranscriptRow: View {
                             if model.readAloud.messageID == message.id, model.readAloud.loading { ActivityDiamond() }
                             else { Image(systemName: model.readAloud.messageID == message.id ? "stop.fill" : "speaker.wave.2") }
                         }.frame(width: 44, height: 44).contentShape(.rect)
-                    }.accessibilityLabel(model.readAloud.messageID == message.id ? "Stop read aloud" : "Read aloud").disabled(model.voice.recording || model.voice.transcribing)
+                    }.accessibilityLabel(model.readAloud.messageID == message.id ? "Stop read aloud" : "Read aloud").disabled(model.voice.starting || model.voice.recording || model.voice.transcribing)
                     if model.readAloud.messageID == message.id, !model.readAloud.loading {
                         Button { model.readAloud.togglePause() } label: { Image(systemName: model.readAloud.paused ? "play.fill" : "pause.fill").frame(width: 44, height: 44).contentShape(.rect) }.accessibilityLabel(model.readAloud.paused ? "Resume read aloud" : "Pause read aloud")
                     }
@@ -109,7 +109,7 @@ struct TranscriptRow: View {
             Button { UIPasteboard.general.string = message.text } label: { Label("Copy message", systemImage: "doc.on.doc") }
             if message.kind != "user_message", !message.text.isEmpty {
                 Button("Read aloud", systemImage: "speaker.wave.2") { Task { await model.readAloud.play(message.text, id: message.id, model: model) } }
-                    .disabled(model.voice.recording || model.voice.transcribing)
+                    .disabled(model.voice.starting || model.voice.recording || model.voice.transcribing)
             }
             ShareLink(item: message.text) { Label("Share message", systemImage: "square.and.arrow.up") }
         }

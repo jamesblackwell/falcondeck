@@ -57,7 +57,7 @@ import Foundation
             do {
                 let text = try await voice.transcribe(model: self)
                 guard current == connectionID, owner == voice.ownerID, let owner, let chat = chats[owner] else { return }
-                chat.draft = chat.draft.isEmpty ? text : chat.draft + "\n" + text
+                chat.insertVoiceTranscript(text)
                 voice.discard()
             } catch { /* The recording remains available in Speech settings. */ }
         }

@@ -66,7 +66,7 @@ import Foundation
         guard !demo, let seq = envelope["seq"].optionalInt, rebase || seq > lastEventSeq else { return }
         if !rebase { lastEventSeq = seq }
         let event = envelope["event"], id = envelope["thread_id"].string
-        if !rebase, !voice.recording, !voice.transcribing, readAloud.messageID == nil { realtimeAudio.handle(event, taskID: id) }
+        if !rebase, !voice.starting, !voice.recording, !voice.transcribing, readAloud.messageID == nil { realtimeAudio.handle(event, taskID: id) }
         switch event["type"].string {
         case "thread-started", "thread-updated":
             let raw = event["thread"]

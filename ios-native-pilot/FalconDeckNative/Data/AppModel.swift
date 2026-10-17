@@ -240,6 +240,13 @@ final class AppModel {
         try? await relay.disconnect(forget: false)
         error = nil; status = "Demo workspace"
         projects = Demo.projects; tasks = Demo.tasks; preferences = Demo.preferences; requests = Demo.requests
+        #if DEBUG
+        if let argument = ProcessInfo.processInfo.arguments.first(where: { $0.hasPrefix("--voice-preview=") }),
+           let phase = argument.split(separator: "=").last.map(String.init), ["starting", "recording", "transcribing", "failed"].contains(phase), let task = tasks.first {
+            voice.preview(phase, ownerID: task.id)
+            let chat = chat(for: task); chat.voiceInputOpen = true; chat.draft = "Keep my existing draft."
+        }
+        #endif
     }
     func tasks(in project: Project) -> [AgentTask] {
         taskGroups[project.id] ?? []

@@ -4,9 +4,10 @@ Visual polish follow-up: see [VISUAL-QA.md](VISUAL-QA.md) for the expanded
 screen/state checks, screenshot gallery and current device status.
 
 Falcon Native uses the separate `com.falcondeck.pilot.native` application ID and
-Apple Development signing. The latest Debug app and speech widget are installed
-over Wi-Fi on the paired iPhone. Unlock it and open **Falcon Native** to test
-the current build. The physical iPad needs unlocking before its
+Apple Development signing. The preceding Debug app and speech widget are installed
+over Wi-Fi on the paired iPhone. The newer voice/composer build is ready locally;
+the phone currently cannot provide the trusted connectivity and device services
+required for installation. Reconnect/unlock it to install that build. The physical iPad needs unlocking before its
 development image can mount and installation can proceed. No device inventory or credentials are
 checked in.
 
@@ -18,7 +19,7 @@ metadata, reconnect and forgetting a computer live in **Settings → Connections
 
 ## Client validation
 
-- 105 native unit tests pass, including crypto/wire compatibility, pairing
+- 113 native unit tests pass, including crypto/wire compatibility, pairing
   authority, connection epochs, drafts/queues, media, controls/extensions,
   push registration/cleanup and seven new pairing-flow regressions.
 - Fourteen UI flows pass on both iPhone and iPad: navigation/density, conversation,
@@ -26,6 +27,10 @@ metadata, reconnect and forgetting a computer live in **Settings → Connections
   plus sidebar reselection, collapsed-section search and retained expansion.
 - Additional compact-width, accessibility-text and landscape conversation checks
   pass. See [VISUAL-QA.md](VISUAL-QA.md) for the current screen/state inventory.
+- The new voice flow passes focused phone/iPad composer, first-send and keyboard
+  checks, plus all four voice states at accessibility text sizes. Transcription
+  request/model parity, retries, cancellation, Unicode insertion and Lock Screen
+  Finish selection are covered by isolated tests. See [VOICE-QA.md](VOICE-QA.md).
 - Real relay pairing, encryption, compact project sync and a native conversation
   were exercised. The upgraded relay reconnects successfully with end-to-end
   encryption. Demo UI tests send only in-memory messages/automations.
