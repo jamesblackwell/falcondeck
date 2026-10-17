@@ -11,7 +11,8 @@ struct ComposerOptions: View {
     private var activeModel: AgentModel? { project?.models(for: task.provider).first { $0.id == chat.modelID } ?? project?.models(for: task.provider).first { $0.raw["is_default"].bool } }
     var body: some View {
         Button { showSettings = true } label: {
-            Image(systemName: "slider.horizontal.3").frame(width: 44, height: 44).contentShape(.rect)
+            Image(systemName: "slider.horizontal.3").font(.system(size: ComposerMetrics.iconSize))
+                .frame(width: ComposerMetrics.controlSize, height: ComposerMetrics.controlSize).contentShape(.rect)
         }.buttonStyle(.plain).accessibilityLabel("Agent and task settings")
         .sheet(isPresented: $showSettings) {
             NavigationStack {

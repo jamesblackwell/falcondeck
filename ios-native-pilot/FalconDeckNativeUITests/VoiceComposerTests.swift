@@ -21,13 +21,62 @@ import XCTest
     func testMicrophoneStaysOnTheRightBesideThePrimaryAction() {
         let app = XCUIApplication(); app.launchArguments = ["--demo"]; app.launch()
         app.buttons["sidebar-task-native"].tap()
-        let model = app.buttons["composer-model"], options = app.buttons["Agent and task settings"], mic = app.buttons["record-voice"], stop = app.buttons["stop-task"], send = app.buttons["send-message"]
+        let model = app.buttons["composer-model"], options = app.buttons["Agent and task settings"], mic = app.buttons["record-voice"], stop = app.buttons["stop-task"]
         XCTAssertTrue(mic.waitForExistence(timeout: 5))
+        let controls = [app.buttons["Add attachment"], model, options, mic, stop]
+        for control in controls {
+            XCTAssertGreaterThanOrEqual(control.frame.width, 48)
+            XCTAssertGreaterThanOrEqual(control.frame.height, 48)
+            XCTAssertLessThanOrEqual(control.frame.maxX, app.frame.maxX)
+            XCTAssertTrue(control.isHittable)
+        }
         XCTAssertLessThan(model.frame.maxX, options.frame.maxX)
         XCTAssertLessThanOrEqual(options.frame.maxX, mic.frame.minX)
         XCTAssertLessThanOrEqual(mic.frame.maxX, stop.frame.minX)
-        XCTAssertLessThanOrEqual(stop.frame.maxX, send.frame.minX)
+        XCTAssertFalse(app.buttons["send-message"].exists, "An empty running composer uses one Stop action, as Expo does")
         let shot = XCTAttachment(screenshot: XCUIScreen.main.screenshot()); shot.name = "Composer matches Expo control order"; shot.lifetime = .keepAlways; add(shot)
+    }
+    func testPrimaryActionSwitchesBetweenStopQueueAndIdleSend() {
+        let app = XCUIApplication(); app.launchArguments = ["--demo"]; app.launch()
+        app.buttons["sidebar-task-native"].tap()
+        let stop = app.buttons["stop-task"], send = app.buttons["send-message"], input = app.textFields["chat-input"]
+        XCTAssertTrue(stop.waitForExistence(timeout: 5))
+        let primaryFrame = stop.frame
+        input.tap(); input.typeText("Follow up")
+        XCTAssertTrue(send.isEnabled)
+        XCTAssertEqual(send.label, "Queue message")
+        XCTAssertFalse(stop.exists)
+        XCTAssertEqual(send.frame.minX, primaryFrame.minX, accuracy: 1)
+        capture("Draft uses the same primary position for queueing")
+        input.typeText(String(repeating: XCUIKeyboardKey.delete.rawValue, count: 9))
+        XCTAssertTrue(stop.isEnabled)
+        XCTAssertFalse(send.exists)
+        stop.tap()
+        XCTAssertTrue(send.waitForExistence(timeout: 5))
+        XCTAssertEqual(send.label, "Send message")
+        XCTAssertFalse(send.isEnabled)
+        input.tap(); input.typeText("Continue after stopping")
+        XCTAssertTrue(send.isEnabled)
+        send.tap()
+        let cleared = XCTNSPredicateExpectation(predicate: NSPredicate { _, _ in
+            input.exists && (input.value as? String) == "Message Codex…"
+        }, object: nil)
+        XCTAssertEqual(XCTWaiter.wait(for: [cleared], timeout: 5), .completed)
+        XCTAssertFalse(send.isEnabled)
+    }
+    func testOfflineComposerKeepsTheDraftWithoutReconnectNotices() {
+        let app = XCUIApplication(); app.launchArguments = ["--demo", "--review-preview=offline"]; app.launch()
+        app.buttons["sidebar-task-native"].tap()
+        let input = app.textFields["chat-input"]
+        XCTAssertTrue(input.waitForExistence(timeout: 5))
+        input.tap(); input.typeText("Save this draft while offline.")
+        XCTAssertFalse(app.buttons["send-message"].isEnabled)
+        XCTAssertTrue(app.buttons["record-voice"].isEnabled)
+        XCTAssertFalse(app.buttons.matching(NSPredicate(format: "label CONTAINS[c] 'Reconnect'")).firstMatch.exists)
+        if app.frame.width < 600 {
+            XCTAssertFalse(app.descendants(matching: .any).matching(identifier: "session-sync-banner").firstMatch.exists)
+        }
+        capture("Offline composer keeps the draft without connection chatter")
     }
     func testFinishedTranscriptionReturnsToTheExistingDraft() {
         let app = XCUIApplication()
@@ -58,7 +107,8 @@ import XCTest
         XCTAssertTrue(recording.waitForExistence(timeout: 5))
         capture("OpenRouter microphone records while reconnecting")
         app.buttons["Stop and transcribe"].tap()
-        XCTAssertTrue(app.staticTexts["Waiting for connection…"].waitForExistence(timeout: 3))
+        XCTAssertTrue(app.staticTexts["Transcribing…"].waitForExistence(timeout: 3))
+        XCTAssertFalse(app.staticTexts["Waiting for connection…"].exists)
         capture("Saved audio waits for connection before uploading")
         app.buttons["Cancel voice input"].tap()
         discardSavedRecording(app)
@@ -97,8 +147,8 @@ import XCTest
             XCTAssertTrue(cancel.waitForExistence(timeout: 5))
             XCTAssertFalse(app.textFields["chat-input"].exists)
             XCTAssertFalse(app.buttons["composer-model"].exists)
-            XCTAssertGreaterThanOrEqual(cancel.frame.width, 44)
-            XCTAssertLessThanOrEqual(cancel.frame.height, 48)
+            XCTAssertGreaterThanOrEqual(cancel.frame.width, 48)
+            XCTAssertEqual(cancel.frame.height, 48, accuracy: 1)
             if phase == "transcribing" {
                 XCTAssertTrue(app.staticTexts["Transcribing…"].exists)
                 XCTAssertFalse(app.buttons["Transcribe and send"].exists)

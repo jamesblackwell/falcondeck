@@ -111,10 +111,10 @@ import XCTest
         let model = app.buttons["composer-model"]
         XCTAssertTrue(model.waitForExistence(timeout: 5))
         XCTAssertTrue(model.isHittable, "Selecting a sidebar task must reveal the detail column on iPhone")
-        let send = app.buttons["send-message"]
+        let primary = app.buttons["stop-task"]
         XCTAssertLessThanOrEqual(model.frame.height, 48, "Model names must not wrap vertically")
-        XCTAssertGreaterThanOrEqual(send.frame.width, 44)
-        XCTAssertLessThanOrEqual(send.frame.maxX, app.frame.maxX)
+        XCTAssertGreaterThanOrEqual(primary.frame.width, 48)
+        XCTAssertLessThanOrEqual(primary.frame.maxX, app.frame.maxX)
         XCTAssertGreaterThanOrEqual(model.frame.minX, app.frame.minX)
         let latest = app.staticTexts.matching(NSPredicate(format: "label CONTAINS %@", "Use the composer to continue the conversation")).firstMatch
         let visibleAboveComposer = NSPredicate { _, _ in

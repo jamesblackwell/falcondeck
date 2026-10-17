@@ -4,6 +4,28 @@ The reference is the running Mac app, `DESIGN.md`, and the Expo sidebar,
 conversation, composer and pairing implementations. This pass changes only the
 standalone native client. It does not deploy the daemon, relay or released apps.
 
+## Composer control follow-up
+
+The composer follows Expo's action order: attachments, model/options, microphone,
+then one primary action. An empty running task shows Stop; a draft switches that
+same button to Send/Queue. This leaves room for a readable, single-line model name.
+Toolbar and recording controls have 48-point targets and 21-point symbols, rather
+than inheriting the caption font. The prompt uses Expo's 26-point corner radius.
+
+Connection banners and the inline Reconnect action are removed from the conversation
+and composer. The sidebar retains connection feedback, and recording/transcribing
+states still show their relevant progress. Background reconnection and saved-audio
+recovery are unchanged.
+
+Nine focused composer/conversation UI flows pass on both iPhone and iPad
+simulators. Three additional checks pass with accessibility text enabled, covering
+control order, Stop/Queue/Send transitions, and recording/transcription/error
+layouts. Screenshots were visually inspected and retained in the ignored
+`artifacts/composer-2026-10-17/index.html` gallery. Native-only repo Autoreview
+(`--mode local --max-priority P2`, with composer and root view datasets) reported
+no actionable findings. The signed Debug app was installed and launched on the
+iPhone over Wi-Fi, and the crash-log inventory has no new native crashes.
+
 ## Layout changes
 
 - Plain, single-line task rows replace grouped sidebar cards and provider subtitles.

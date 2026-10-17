@@ -19,7 +19,8 @@ struct AttachmentPicker: View {
                 add(data, name: "Clipboard.png")
             }
         } label: {
-            Group { if loading { ActivityDiamond() } else { Image(systemName: "plus") } }.frame(width: 44, height: 44).contentShape(.rect)
+            Group { if loading { ActivityDiamond() } else { Image(systemName: "plus").font(.system(size: ComposerMetrics.iconSize)) } }
+                .frame(width: ComposerMetrics.controlSize, height: ComposerMetrics.controlSize).contentShape(.rect)
         }
         .accessibilityLabel("Add attachment").disabled(loading || chat.preparingAttachments || chat.sending)
         .photosPicker(isPresented: $showPhotos, selection: $photos, maxSelectionCount: 10, matching: .images)

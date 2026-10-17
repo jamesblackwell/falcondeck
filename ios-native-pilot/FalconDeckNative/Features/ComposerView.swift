@@ -15,6 +15,12 @@ struct ComposerView: View {
     private var models: [AgentModel] { project?.models(for: task.provider) ?? [] }
     private var activeModel: AgentModel? { models.first { $0.id == chat.modelID } ?? models.first { $0.raw["is_default"].bool } ?? models.first }
     private var voiceActive: Bool { chat.voiceInputOpen && model.voice.ownerID == task.id }
+    private var hasContent: Bool { !chat.draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !chat.attachments.isEmpty }
+    private var showsStop: Bool { !hasContent && (task.running || task.status == "waiting_for_input") }
+    private var primaryDisabled: Bool {
+        if !model.connected && !model.demo { return true }
+        return showsStop ? chat.stopping : chat.sending || chat.preparingAttachments || !hasContent
+    }
     private var selectionBinding: Binding<TextSelection?> {
         Binding(get: { selection }, set: { value in
             selection = value
@@ -25,16 +31,13 @@ struct ComposerView: View {
     }
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
-            if !model.connected && !model.demo {
-                Button { Task { await model.reconnect() } } label: { Label("\(model.status) · Reconnect", systemImage: "wifi.exclamationmark").font(.footnote) }
-            }
             if !chat.attachments.isEmpty { AttachmentStrip(chat: chat) }
             if voiceActive {
                 RecordingPanel(task: task, chat: chat, onTranscript: receiveTranscript)
             } else {
                 SlashCommandsView(task: task, chat: chat) { openGoal() }
                 TextField(task.running ? "Queue a follow-up…" : "Message \(task.provider.capitalized)…", text: $chat.draft, selection: selectionBinding, axis: .vertical)
-                    .lineLimit(1...6).font(.body).focused($focused).padding(.horizontal, 4).accessibilityIdentifier("chat-input").submitLabel(.return)
+                    .lineLimit(1...6).font(.body).focused($focused).padding(.horizontal, 8).accessibilityIdentifier("chat-input").submitLabel(.return)
                     .frame(minHeight: 44, alignment: .topLeading)
                     .contentShape(Rectangle())
                     .simultaneousGesture(TapGesture().onEnded { focused = true })
@@ -44,27 +47,29 @@ struct ComposerView: View {
                         HStack(spacing: 5) {
                             Text(activeModel?.label ?? chat.modelID.nonempty ?? task.provider.capitalized)
                                 .lineLimit(1).truncationMode(.tail)
-                            Image(systemName: "chevron.down").font(.system(size: 9, weight: .semibold))
-                        }.padding(.horizontal, 6).frame(maxWidth: .infinity, minHeight: 44, alignment: .leading).contentShape(.rect)
+                            Image(systemName: "chevron.down").font(.system(size: 11, weight: .semibold))
+                        }.font(.subheadline).padding(.horizontal, 6).frame(maxWidth: .infinity, minHeight: ComposerMetrics.controlSize, alignment: .leading).contentShape(.rect)
                     }.buttonStyle(.plain).accessibilityLabel("Choose model").accessibilityIdentifier("composer-model")
                     ComposerOptions(task: task, project: project, chat: chat)
                     VoiceControl(task: task, chat: chat, onBegin: beginVoiceInput)
-                    if task.running || task.status == "waiting_for_input" {
-                        Button { Task { await model.stop(task) } } label: { Image(systemName: "stop.fill").font(.subheadline).frame(width: 44, height: 44).contentShape(.rect) }
-                            .buttonStyle(.plain).disabled(chat.stopping || (!model.connected && !model.demo)).accessibilityLabel("Stop task").accessibilityIdentifier("stop-task")
-                    }
                     Button {
-                        submitDraft()
+                        if showsStop { Task { await model.stop(task) } }
+                        else { submitDraft() }
                     } label: {
-                        Group { if chat.sending { ActivityDiamond() } else { Image(systemName: task.running ? "arrow.up.to.line" : "arrow.up").fontWeight(.semibold) } }.frame(width: 44, height: 44).contentShape(.rect)
+                        Group {
+                            if chat.sending || chat.stopping { ActivityDiamond() }
+                            else { Image(systemName: showsStop ? "stop.fill" : "arrow.up").font(.system(size: showsStop ? 14 : ComposerMetrics.iconSize, weight: .semibold)) }
+                        }.frame(width: ComposerMetrics.controlSize, height: ComposerMetrics.controlSize).contentShape(.rect)
                     }
-                    .background(FD.accent.opacity(chat.draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && chat.attachments.isEmpty ? 0.15 : 1), in: Circle()).buttonStyle(.plain).foregroundStyle(chat.draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && chat.attachments.isEmpty ? FD.secondary : FD.background)
-                    .disabled(chat.sending || chat.preparingAttachments || (chat.draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && chat.attachments.isEmpty) || (!model.connected && !model.demo))
-                    .accessibilityLabel(task.running ? "Queue message" : "Send message").accessibilityIdentifier("send-message")
-                }.font(.caption).foregroundStyle(FD.secondary)
+                    .background(showsStop ? FD.foreground : FD.accent.opacity(hasContent ? 1 : 0.15), in: Circle())
+                    .buttonStyle(.plain).foregroundStyle(showsStop || hasContent ? FD.background : FD.secondary)
+                    .disabled(primaryDisabled)
+                    .accessibilityLabel(showsStop ? "Stop task" : task.running ? "Queue message" : "Send message")
+                    .accessibilityIdentifier(showsStop ? "stop-task" : "send-message")
+                }.foregroundStyle(FD.secondary)
             }
         }
-        .padding(.horizontal, 10).padding(.top, 10).padding(.bottom, 6).glassEffect(.regular.tint(FD.surface), in: .rect(cornerRadius: 20))
+        .padding(.horizontal, 8).padding(.top, 12).padding(.bottom, 8).glassEffect(.regular.tint(FD.surface), in: .rect(cornerRadius: 26))
         .sheet(isPresented: $showModels) {
             NavigationStack {
                 Form {
@@ -132,4 +137,9 @@ struct ComposerView: View {
         goalSeed = text.hasPrefix("/goal") ? String(text.dropFirst(5)).trimmingCharacters(in: .whitespacesAndNewlines) : ""
         showGoal = true
     }
+}
+
+enum ComposerMetrics {
+    static let controlSize: CGFloat = 48
+    static let iconSize: CGFloat = 21
 }

@@ -76,9 +76,7 @@ struct RootView: View {
                 .navigationSplitViewColumnWidth(min: 280, ideal: 320, max: 380)
         } detail: {
             NavigationStack {
-                destination.safeAreaInset(edge: .top, spacing: 0) {
-                    if sizeClass == .compact || columnVisibility == .detailOnly { NativeSyncBanner() }
-                }
+                destination
             }.id(model.selection).navigationBarTitleDisplayMode(.inline)
         }
         .navigationSplitViewStyle(.balanced)

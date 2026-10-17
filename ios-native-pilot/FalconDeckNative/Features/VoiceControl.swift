@@ -18,7 +18,10 @@ struct VoiceControl: View {
                 let selectedProvider = provider == "on-device" ? "on-device" : NativeSpeechSettings.defaultProvider
                 Task { await recorder.start(ownerID: task.id, provider: selectedProvider, isCurrent: { current == model.sessionScope }) }
             }
-        } label: { Image(systemName: "mic").frame(width: 44, height: 44).contentShape(.rect) }
+        } label: {
+            Image(systemName: "mic").font(.system(size: ComposerMetrics.iconSize))
+                .frame(width: ComposerMetrics.controlSize, height: ComposerMetrics.controlSize).contentShape(.rect)
+        }
             .accessibilityLabel(recorder.pendingURL == nil ? "Record voice message" : "Recover saved recording")
             .accessibilityIdentifier("record-voice")
             .disabled(chat.sending || chat.preparingAttachments || recorder.starting || recorder.recording || recorder.transcribing)
@@ -59,11 +62,11 @@ struct RecordingPanel: View {
                             .accessibilityIdentifier("voice-status")
                         Spacer(minLength: 0)
                         if !recorder.starting { Text(duration).monospacedDigit().foregroundStyle(FD.muted) }
-                    }.font(.caption.weight(.medium))
+                    }.font(.footnote.weight(.medium))
                     if recorder.recording { VoiceWaveform(levels: recorder.levels).frame(height: 32) }
                 }.frame(maxWidth: .infinity, alignment: .leading)
                 if recorder.transcribing {
-                    ActivityDiamond().frame(width: 44, height: 44).accessibilityLabel(status)
+                    ActivityDiamond().frame(width: ComposerMetrics.controlSize, height: ComposerMetrics.controlSize).accessibilityLabel(status)
                 } else {
                     control("Stop and transcribe", symbol: "stop.fill") { transcribe(submit: false) }
                         .accessibilityHint("Puts the transcript in the composer to edit")
@@ -85,15 +88,15 @@ struct RecordingPanel: View {
         }
     }
     private var status: String {
-        recorder.waitingForConnection ? "Waiting for connection…" : recorder.transcribing ? (recorder.transcriptionAttempt > 1 ? "Retrying (\(recorder.transcriptionAttempt))" : "Transcribing…") : recorder.starting ? "Starting microphone…" : recorder.recording ? "Recording" : "Recording ready"
+        recorder.transcribing ? (recorder.transcriptionAttempt > 1 ? "Retrying (\(recorder.transcriptionAttempt))" : "Transcribing…") : recorder.starting ? "Starting microphone…" : recorder.recording ? "Recording" : "Recording ready"
     }
     private var duration: String { let seconds = max(0, Int(recorder.elapsed)); return String(format: "%d:%02d", seconds / 60, seconds % 60) }
     private func control(_ label: String, symbol: String, prominent: Bool = false, action: @escaping () -> Void) -> some View {
         Button(action: action) {
-            Image(systemName: symbol).font(.system(size: symbol == "stop.fill" ? 12 : 17, weight: .medium))
-                .frame(width: 40, height: 40).background(prominent ? FD.accent : FD.raised, in: Circle())
+            Image(systemName: symbol).font(.system(size: symbol == "stop.fill" ? 14 : ComposerMetrics.iconSize, weight: .medium))
+                .frame(width: ComposerMetrics.controlSize, height: ComposerMetrics.controlSize).background(prominent ? FD.accent : FD.raised, in: Circle())
                 .foregroundStyle(prominent ? FD.background : FD.foreground)
-                .frame(width: 44, height: 44).contentShape(.rect)
+                .contentShape(.rect)
         }.buttonStyle(.plain).accessibilityLabel(label)
     }
     private func close() {
