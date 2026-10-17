@@ -21,11 +21,15 @@ final class ChatSession {
     var notice: String?
     var bufferedEvents: [JSON] = []
     var loadID = UUID()
+    var bufferOverflowed = false
 }
 
 @MainActor @Observable
 final class AppModel {
-    let relay = RelayClient()
+    let relay: any RelayServing
+    private(set) var connectionID = UUID()
+
+    init(relay: any RelayServing = RelayClient()) { self.relay = relay }
     var projects: [Project] = []
     var tasks: [AgentTask] = [] {
         didSet {
@@ -62,28 +66,55 @@ final class AppModel {
         observation = Task { [weak self] in
             for await event in events {
                 guard let self else { return }
-                switch event {
-                case .status(let text, let online):
-                    if !self.demo { self.status = text; self.connected = online }
-                    if text == "Connecting…" { self.lastEventSeq = 0 }
-                case .snapshot(let value):
-                    self.summaryFlush?.cancel(); self.summaryFlush = nil; self.pendingSummaries = [:]
-                    self.projects = value["workspaces"].array.filter { $0["kind"].string != "scratch" }.map(Project.init)
-                    self.tasks = value["threads"].array.filter { !$0["is_archived"].bool }.map(AgentTask.init)
-                    self.preferences = value["preferences"]
-                    self.requests = value["interactive_requests"].array
-                    self.refreshedAt = .now; self.error = nil; self.demo = false
-                case .events(let events):
-                    for event in events { self.applyEnvelope(event) }
-                case .rebase(let events):
-                    for event in events { self.applyEnvelope(event, rebase: true) }
-                case .error(let message): self.error = message; self.connected = false
-                }
+                self.receive(event)
             }
         }
         if ProcessInfo.processInfo.arguments.contains("--demo") { await useDemo(); return }
-        do { hasSession = try await relay.restore() }
-        catch { self.error = error.localizedDescription; hasSession = (try? SessionVault.load()) != nil }
+        let current = connectionID
+        do {
+            let restored = try await relay.restore(connectionID: current)
+            guard current == connectionID else { return }
+            hasSession = restored
+        } catch {
+            guard current == connectionID else { return }
+            self.error = error.localizedDescription; hasSession = (try? SessionVault.load()) != nil
+        }
+    }
+
+    // Every asynchronous result belongs to one connection. This also rejects
+    // already-queued stream events after demo/forget/re-pair transitions.
+    func receive(_ update: RelayUpdate) {
+        guard update.connectionID == connectionID, !demo else { return }
+        switch update.event {
+        case .status(let text, let online):
+            status = text; connected = online
+            if text == "Connecting…" { lastEventSeq = 0 }
+        case .snapshot(let value):
+            summaryFlush?.cancel(); summaryFlush = nil; pendingSummaries = [:]
+            projects = value["workspaces"].array.filter { $0["kind"].string != "scratch" }.map(Project.init)
+            tasks = value["threads"].array.filter { !$0["is_archived"].bool }.map(AgentTask.init)
+            preferences = value["preferences"]
+            requests = value["interactive_requests"].array
+            refreshedAt = .now; error = nil; demo = false
+        case .events(let events):
+            for event in events { applyEnvelope(event) }
+        case .rebase(let events):
+            for event in events { applyEnvelope(event, rebase: true) }
+        case .error(let message): error = message; connected = false
+        }
+    }
+
+    @discardableResult private func beginConnection(clearData: Bool) -> UUID {
+        connectionID = UUID(); lastEventSeq = 0; connected = false
+        summaryFlush?.cancel(); summaryFlush = nil; pendingSummaries = [:]
+        for chat in chats.values {
+            chat.loadID = UUID(); chat.loading = false; chat.bufferedEvents = []
+        }
+        if clearData {
+            projects = []; tasks = []; chats = [:]; requests = []; preferences = .object([:])
+            selection = .projects; refreshedAt = nil
+        }
+        return connectionID
     }
 
     func pair(relayURL: String) async {
@@ -92,18 +123,22 @@ final class AppModel {
         defer { busy = false }
         do {
             let input = try PairingInput(text: pairingText, relay: relayURL)
-            try await relay.pair(input)
-            hasSession = true; demo = false; projects = []; tasks = []; pairingText = ""
-            chats = [:]; requests = []; preferences = .object([:]); selection = .projects
-            showConnection = false
-        } catch { self.error = error.localizedDescription }
+            let current = beginConnection(clearData: true); demo = false
+            try await relay.pair(input, connectionID: current)
+            guard current == connectionID else { return }
+            hasSession = true; pairingText = ""; showConnection = false
+        } catch {
+            self.error = error.localizedDescription
+            hasSession = (try? SessionVault.load()) != nil
+        }
     }
 
     func reconnect() async {
-        guard hasSession, !busy, !demo else { return }
+        guard hasSession, !busy else { return }
         busy = true; error = nil
+        let current = beginConnection(clearData: demo); demo = false
         defer { busy = false }
-        do { hasSession = try await relay.restore() }
+        do { hasSession = try await relay.restore(connectionID: current) }
         catch { self.error = error.localizedDescription }
     }
     func refresh() async {
@@ -113,17 +148,21 @@ final class AppModel {
         if case .task(let id) = selection, let task = tasks.first(where: { $0.id == id }) { await loadChat(task) }
     }
     func forget() async {
+        guard !busy else { return }
+        busy = true; defer { busy = false }
+        beginConnection(clearData: true); demo = false
         do {
             try await relay.disconnect(forget: true)
-            projects = []; tasks = []; demo = false; hasSession = false; refreshedAt = nil; error = nil
-            chats = [:]; preferences = .object([:]); requests = []; selection = .projects; lastEventSeq = 0
+            hasSession = false; error = nil; status = "Not connected"
         } catch { self.error = error.localizedDescription }
     }
     func useDemo() async {
-        try? await relay.disconnect()
-        demo = true; connected = false; error = nil; status = "Demo workspace"
-        projects = Demo.projects; tasks = Demo.tasks; refreshedAt = nil
-        chats = [:]; requests = []; preferences = Demo.preferences; selection = .projects
+        guard !busy else { return }
+        busy = true; defer { busy = false }
+        beginConnection(clearData: true); demo = true
+        try? await relay.disconnect(forget: false)
+        error = nil; status = "Demo workspace"
+        projects = Demo.projects; tasks = Demo.tasks; preferences = Demo.preferences
     }
     func tasks(in project: Project) -> [AgentTask] {
         taskGroups[project.id] ?? []
@@ -153,7 +192,8 @@ final class AppModel {
     func loadChat(_ task: AgentTask, older: Bool = false) async {
         let chat = chat(for: task)
         guard !chat.loading else { return }
-        chat.loading = true; chat.error = nil; chat.bufferedEvents = []
+        let current = connectionID
+        chat.loading = true; chat.error = nil; chat.bufferedEvents = []; chat.bufferOverflowed = false
         let loadID = UUID(); chat.loadID = loadID
         defer { if chat.loadID == loadID { chat.loading = false } }
         if demo {
@@ -162,23 +202,25 @@ final class AppModel {
         }
         do {
             let page = try await relay.detail(task: task, before: older ? chat.oldestID : nil)
-            guard chat.loadID == loadID, !Task.isCancelled else { return }
+            guard current == connectionID, chat.loadID == loadID, !Task.isCancelled else { return }
+            guard !chat.bufferOverflowed else { throw PilotError("Too many live updates arrived while loading history. Refresh this task to recover.") }
             let items = page["items"].array.map(Message.init)
             if older { chat.transcript.prepend(items) }
             else {
                 // Preserve unacknowledged local rows, then replay events that
                 // arrived during this authoritative history request.
                 let pending = chat.transcript.items.filter { pending in pending.raw["pending"].bool && !items.contains(where: { $0.id == pending.id }) }
-                chat.transcript = Transcript(items: items + pending)
+                let revision = chat.transcript.revision
+                chat.transcript = Transcript(items: items + pending, revision: revision + 1)
             }
-            chat.transcript.needsRecovery = false
+            if !older { chat.transcript.needsRecovery = false }
             for event in chat.bufferedEvents { chat.transcript.apply(event) }
             chat.bufferedEvents = []
             chat.hasOlder = page["has_older"].bool
             chat.oldestID = page["oldest_item_id"].string.nonempty ?? chat.transcript.items.first?.id
             chat.loaded = true
             upsertTask(page["thread"])
-        } catch { if chat.loadID == loadID { chat.error = error.localizedDescription } }
+        } catch { if current == connectionID, chat.loadID == loadID { chat.error = error.localizedDescription } }
     }
 
     private func upsertTask(_ raw: JSON) {
@@ -203,12 +245,10 @@ final class AppModel {
         case "interactive-request":
             let request = event["request"]
             requests.removeAll { $0["request_id"] == request["request_id"] }; requests.append(request)
-        case "turn-start", "turn-end":
-            if let task = tasks.first(where: { $0.id == id }) {
-                let raw = pendingSummaries[id] ?? task.raw
-                stageSummary(raw.setting("status", .string(event["type"].string == "turn-start" ? "running" : "idle")))
-            }
-            if event["type"].string == "turn-end" { requests.removeAll { $0["thread_id"].string == id } }
+        case "turn-end":
+            // ThreadUpdated carries the authoritative status, including errors
+            // and transient retries that remain running after a turn-end.
+            if event["status"].string != "running" { requests.removeAll { $0["thread_id"].string == id } }
         case "conversation-item-updated", "conversation-item-added":
             let item = event["item"]
             if item["kind"].string == "interactive_request", item["resolved"].bool {
@@ -217,7 +257,10 @@ final class AppModel {
         default: break
         }
         if !rebase, let chat = chats[id] {
-            if chat.loading && chat.bufferedEvents.count < 2048 { chat.bufferedEvents.append(event) }
+            if chat.loading {
+                if chat.bufferedEvents.count < 2048 { chat.bufferedEvents.append(event) }
+                else { chat.bufferOverflowed = true }
+            }
             chat.transcript.apply(event)
             if chat.transcript.needsRecovery, !chat.loading, let task = tasks.first(where: { $0.id == id }) {
                 Task { await self.loadChat(task) }
@@ -247,6 +290,7 @@ final class AppModel {
     }
 
     func send(_ task: AgentTask) async {
+        let current = connectionID
         let chat = chat(for: task)
         let text = chat.draft.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !text.isEmpty, !chat.sending, demo || connected else { return }
@@ -256,33 +300,41 @@ final class AppModel {
         if !task.running { chat.transcript.upsert(optimistic) }
         defer { chat.sending = false }
         if demo {
-            chat.draft = ""; chat.transcript.upsert(optimistic)
+            chat.draft = ""; chat.transcript.upsert(Message(optimistic.raw.setting("pending", .bool(false))))
             chat.transcript.upsert(Message(.object(["id": .string("demo-\(UUID())"), "kind": .string("assistant_message"), "text": .string(Demo.markdownReply)])))
             return
         }
         do {
             let response = try await relay.call("turn.start", params: NativeRequest.turn(task: task, text: text, itemID: id, modelID: chat.modelID, effort: chat.effort))
+            guard current == connectionID else { return }
             if response["message"].string == "queued" {
                 chat.transcript.items.removeAll { $0.id == id }; chat.notice = "Message queued for the next turn."
             }
             if chat.draft.trimmingCharacters(in: .whitespacesAndNewlines) == text { chat.draft = "" }
         } catch {
+            guard current == connectionID else { return }
             chat.transcript.items.removeAll { $0.id == id && $0.raw["pending"].bool }
             chat.error = "\(error.localizedDescription) Refresh this task before resending if delivery is uncertain."
         }
     }
 
     func stop(_ task: AgentTask) async {
+        let current = connectionID
         let chat = chat(for: task)
         guard !chat.stopping else { return }
         chat.stopping = true; defer { chat.stopping = false }
         do {
-            if !demo { _ = try await relay.call("turn.interrupt", params: .object(["workspace_id": .string(task.projectID), "thread_id": .string(task.id)])) }
-            upsertTask(task.raw.setting("status", .string("idle")))
-        } catch { chat.error = error.localizedDescription }
+            if demo { upsertTask(task.raw.setting("status", .string("idle"))) }
+            else {
+                // The RPC acknowledges an interrupt request, not completion.
+                // The daemon's turn/thread events own the resulting state.
+                _ = try await relay.call("turn.interrupt", params: .object(["workspace_id": .string(task.projectID), "thread_id": .string(task.id)]))
+            }
+        } catch { if current == connectionID { chat.error = error.localizedDescription } }
     }
 
     func createTask(project: Project, provider: String, modelID: String, folderID: String?) async throws {
+        let current = connectionID
         let raw: JSON
         if demo {
             raw = .object(["id": .string("demo-\(UUID())"), "workspace_id": .string(project.id), "title": .string("New task"), "provider": .string(provider), "status": .string("idle")])
@@ -291,6 +343,7 @@ final class AppModel {
             if !modelID.isEmpty { params = params.setting("model_id", .string(modelID)) }
             raw = try await relay.call("thread.start", params: params)["thread"]
         }
+        guard current == connectionID else { throw CancellationError() }
         upsertTask(raw)
         let task = AgentTask(raw)
         let chat = chat(for: task); chat.loaded = true
@@ -302,6 +355,7 @@ final class AppModel {
     }
 
     func updateTask(_ task: AgentTask, fields: [String: JSON]) async {
+        let current = connectionID
         do {
             var params = JSON.object(fields).setting("workspace_id", .string(task.projectID)).setting("thread_id", .string(task.id))
             if demo {
@@ -310,17 +364,21 @@ final class AppModel {
                 upsertTask(params)
             } else {
                 let result = try await relay.call("thread.update", params: params)
+                guard current == connectionID else { return }
                 upsertTask(result["thread"] == .null ? result : result["thread"])
             }
-        } catch { self.error = error.localizedDescription }
+        } catch { if current == connectionID { self.error = error.localizedDescription } }
     }
 
     func archive(_ task: AgentTask) async {
+        let current = connectionID
         do {
             if !demo { _ = try await relay.call("thread.archive", params: .object(["workspace_id": .string(task.projectID), "thread_id": .string(task.id)])) }
+            guard current == connectionID else { return }
+            pendingSummaries.removeValue(forKey: task.id)
             tasks.removeAll { $0.id == task.id }; chats.removeValue(forKey: task.id)
             if selection == .task(task.id) { selection = .projects }
-        } catch { self.error = error.localizedDescription }
+        } catch { if current == connectionID { self.error = error.localizedDescription } }
     }
 
     func folderMutation(projectID: String, action: String, folderID: String? = nil, name: String? = nil, taskID: String? = nil, collapsed: Bool? = nil) async throws {
@@ -331,7 +389,10 @@ final class AppModel {
         if let taskID { mutation = mutation.setting("thread_id", .string(taskID)) }
         if let collapsed { mutation = mutation.setting("collapsed", .bool(collapsed)) }
         if demo { applyDemoFolder(mutation); return }
-        preferences = try await relay.call("preferences.update", params: .object(["project_folder": mutation]))
+        let current = connectionID
+        let result = try await relay.call("preferences.update", params: .object(["project_folder": mutation]))
+        guard current == connectionID else { throw CancellationError() }
+        preferences = result
     }
 
     private func applyDemoFolder(_ mutation: JSON) {
@@ -357,9 +418,11 @@ final class AppModel {
     }
 
     func respond(request: JSON, response: JSON) async throws {
+        let current = connectionID
         if !demo {
             _ = try await relay.call("interactive.respond", params: .object(["workspace_id": request["workspace_id"], "request_id": request["request_id"], "response": response]))
         }
+        guard current == connectionID else { throw CancellationError() }
         requests.removeAll { $0["request_id"] == request["request_id"] }
     }
 }

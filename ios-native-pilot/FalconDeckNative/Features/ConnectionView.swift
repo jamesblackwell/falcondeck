@@ -48,17 +48,15 @@ struct ConnectionView: View {
                     if model.hasSession {
                         Button("Reconnect saved computer") {
                             Task {
-                                model.demo = false
-                                model.projects = []; model.tasks = []
                                 await model.reconnect()
                                 if model.error == nil { dismiss() }
                             }
                         }.disabled(model.busy)
-                        Button("Forget this connection", role: .destructive) { confirmForget = true }
+                        Button("Forget this connection", role: .destructive) { confirmForget = true }.disabled(model.busy)
                     }
                     Button("Explore demo workspace") {
                         Task { await model.useDemo(); dismiss() }
-                    }
+                    }.disabled(model.busy)
                 }.listRowBackground(FD.surface)
                 Section {
                     Label("Pairing creates a separate trusted device named Falcon Native Pilot. Forgetting removes credentials on this device; you can revoke it from your computer.", systemImage: "lock.shield")

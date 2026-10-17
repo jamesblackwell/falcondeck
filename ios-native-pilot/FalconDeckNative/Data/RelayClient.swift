@@ -35,10 +35,25 @@ enum ClientEvent: Sendable {
     case error(String)
 }
 
+struct RelayUpdate: Sendable {
+    let connectionID: UUID
+    let event: ClientEvent
+}
+
+protocol RelayServing: Sendable {
+    func events() async -> AsyncStream<RelayUpdate>
+    func pair(_ input: PairingInput, connectionID: UUID) async throws
+    func restore(connectionID: UUID) async throws -> Bool
+    func disconnect(forget: Bool) async throws
+    func refresh() async
+    func detail(task: AgentTask, before: String?) async throws -> JSON
+    func call(_ method: String, params: JSON) async throws -> JSON
+}
+
 /// Owns networking and cryptography off the UI actor. A fresh daemon snapshot
 /// anchors every connection; ordered live events follow it. No history DB or
 /// durable replay cursor is added by this client.
-actor RelayClient {
+actor RelayClient: RelayServing {
     private let log = Logger(subsystem: "com.falcondeck.pilot.native", category: "relay")
     private let http = URLSession(configuration: .ephemeral)
     private var socket: URLSessionWebSocketTask?
@@ -46,7 +61,7 @@ actor RelayClient {
     private var heartbeat: Task<Void, Never>?
     private var session: SavedSession?
     private var generation = UUID()
-    private var sink: AsyncStream<ClientEvent>.Continuation?
+    private var sink: AsyncStream<RelayUpdate>.Continuation?
     private var pending: [String: CheckedContinuation<JSON, Error>] = [:]
     private var refreshInFlight = false
     private var lastReceived = Date.now
@@ -56,16 +71,28 @@ actor RelayClient {
     private var bulkSending = false
     private var acknowledgements: [String: CheckedContinuation<Void, Error>] = [:]
 
-    func events() -> AsyncStream<ClientEvent> {
-        let (stream, continuation) = AsyncStream<ClientEvent>.makeStream()
+    func events() -> AsyncStream<RelayUpdate> {
+        let (stream, continuation) = AsyncStream<RelayUpdate>.makeStream()
         sink = continuation
         return stream
     }
 
-    func pair(_ input: PairingInput) async throws {
+    private func emit(_ event: ClientEvent) {
+        sink?.yield(RelayUpdate(connectionID: generation, event: event))
+    }
+
+    private func beginConnection(_ connectionID: UUID) throws {
+        try disconnect()
+        generation = connectionID
+        lastBootstrapRequest = .distantPast
+    }
+
+    func pair(_ input: PairingInput, connectionID: UUID) async throws {
+        try beginConnection(connectionID)
         let oldIdentity = try SessionVault.load()?.secret
         let identity = try RelayIdentity(secret: oldIdentity)
         let challenge = try await post(input.relay, path: "v1/pairings/challenge", body: .object(["pairing_code": .string(input.code)]))
+        guard generation == connectionID else { throw CancellationError() }
         let nonce = challenge["challenge"].string
         guard !nonce.isEmpty else { throw PilotError("Relay did not provide a pairing challenge.") }
         let bundle = try identity.bundle()
@@ -75,6 +102,7 @@ actor RelayClient {
             "challenge_signature": .string(try identity.sign(["falcondeck-pairing-claim-v1", input.code, nonce])),
             "pairing_authority_signature": .string(try authority.sign(["falcondeck-pairing-authority-client-v1", input.code, nonce, "data_key_v1", "ed25519_v1", try identity.publicKey, try identity.identityKey]))
         ]))
+        guard generation == connectionID else { throw CancellationError() }
         try RelayCrypto.verifyClaim(claim, input: input)
         guard !claim["session_id"].string.isEmpty, !claim["client_token"].string.isEmpty, !claim["device_id"].string.isEmpty else { throw PilotError("Relay returned an incomplete connection.") }
         let saved = SavedSession(relay: input.relay, sessionID: claim["session_id"].string, deviceID: claim["device_id"].string,
@@ -85,7 +113,8 @@ actor RelayClient {
         try await connect(saved)
     }
 
-    func restore() async throws -> Bool {
+    func restore(connectionID: UUID) async throws -> Bool {
+        try beginConnection(connectionID)
         guard let saved = try SessionVault.load() else { return false }
         try await connect(saved)
         return true
@@ -99,14 +128,13 @@ actor RelayClient {
         bufferedEvents = []
         failPending(PilotError("The connection closed."))
         if forget { try SessionVault.clear() }
-        sink?.yield(.status("Disconnected", connected: false))
+        emit(.status("Disconnected", connected: false))
     }
 
     private func connect(_ saved: SavedSession) async throws {
-        try disconnect()
         session = saved
         let current = generation
-        sink?.yield(.status("Connecting…", connected: false))
+        emit(.status("Connecting…", connected: false))
         let relay = try PairingInput.relayURL(saved.relay.absoluteString)
         let ticket = try await post(relay, path: "v1/sessions/\(saved.sessionID)/ws-ticket", token: saved.token)
         guard current == generation else { throw CancellationError() }
@@ -125,6 +153,7 @@ actor RelayClient {
                     guard current == self.generation else { return }
                     if Date.now.timeIntervalSince(self.lastReceived) > 45 { throw PilotError("Relay stopped responding. Reconnect to try again.") }
                     try await self.send(.object(["type": .string("ping")]))
+                    guard current == self.generation else { return }
                     if self.session?.dataKey == nil { try await self.requestBootstrap() }
                     else { await self.refresh() }
                 } catch is CancellationError { return }
@@ -155,33 +184,35 @@ actor RelayClient {
                     let complete = try chunks.receive(frame)
                     try await send(.object(["type": .string("transport-ack"), "id": frame["id"], "index": frame["index"]]))
                     guard current == generation else { return }
-                    if let complete { try await handle(JSON.decode(complete)) }
+                    if let complete { try await handle(JSON.decode(complete), generation: current) }
                 case "transport-cancel": chunks = .init()
                 case "transport-ack":
                     let key = "\(frame["id"].int):\(frame["index"].int)"
                     acknowledgements.removeValue(forKey: key)?.resume()
-                default: try await handle(frame)
+                default: try await handle(frame, generation: current)
                 }
             }
         } catch is CancellationError { }
         catch { connectionFailed(error, generation: current) }
     }
 
-    private func handle(_ frame: JSON) async throws {
+    private func handle(_ frame: JSON, generation current: UUID) async throws {
+        guard current == generation else { return }
         switch frame["type"].string {
         case "ready":
             log.info("Relay ready; saved content key: \(self.session?.dataKey != nil)")
             guard frame["session_id"].string == session?.sessionID, frame["role"].string == "client" else { throw PilotError("Unexpected relay session.") }
-            sink?.yield(.status("Securing connection…", connected: false))
+            emit(.status("Securing connection…", connected: false))
             // Fresh snapshots are our source of truth; skip old ciphertext and
             // request a signed bootstrap addressed to this independent client.
             try await send(.object(["type": .string("sync"), "after_seq": .number(Double(max(0, frame["next_seq"].int - 1)))]))
+            guard current == generation else { return }
             if session?.dataKey == nil { try await requestBootstrap() }
             else { scheduleRefresh() }
         case "sync":
-            for update in frame["updates"].array { try await consume(update) }
+            for update in frame["updates"].array { try consume(update) }
             if frame["presence"] != .null { applyPresence(frame["presence"]) }
-        case "update": try await consume(frame["update"])
+        case "update": try consume(frame["update"])
         case "presence": applyPresence(frame["presence"])
         case "ephemeral":
             if let key = session?.dataKey, frame["body"]["kind"].string == "encrypted-daemon-event" {
@@ -205,7 +236,7 @@ actor RelayClient {
         }
     }
 
-    private func consume(_ update: JSON) async throws {
+    private func consume(_ update: JSON) throws {
         let body = update["body"]
         if body["t"].string == "session-bootstrap", var saved = session,
            body["material"]["client_public_key"].string == (try RelayIdentity(secret: saved.secret).publicKey) {
@@ -227,16 +258,17 @@ actor RelayClient {
                 // A full snapshot will be retried rather than silently dropping
                 // deltas. Closing also releases every pending mutation honestly.
                 connectionFailed(PilotError("Live updates fell behind. Reconnect to recover."), generation: generation)
+                return
             }
         }
         // A sidebar refresh must never pause the selected transcript. Metadata
         // is rebased after the snapshot without replaying text a second time.
-        if !live.isEmpty { sink?.yield(.events(live)) }
+        if !live.isEmpty { emit(.events(live)) }
     }
 
     private func applyPresence(_ presence: JSON) {
         guard presence["daemon_connected"].bool else {
-            sink?.yield(.status("Computer offline", connected: false)); return
+            emit(.status("Computer offline", connected: false)); return
         }
         if session?.dataKey != nil { scheduleRefresh() }
     }
@@ -250,7 +282,10 @@ actor RelayClient {
         ])]))
     }
 
-    private func scheduleRefresh() { Task { await self.refresh() } }
+    private func scheduleRefresh() {
+        let current = generation
+        Task { if current == self.generation { await self.refresh() } }
+    }
     func refresh() async {
         guard session?.dataKey != nil, !refreshInFlight else { return }
         refreshInFlight = true
@@ -263,13 +298,13 @@ actor RelayClient {
                 "include_thread_diffs": .bool(false), "include_agent_skills": .bool(false), "include_workspace_skills": .bool(false)
             ]))
             guard current == generation else { return }
-            sink?.yield(.snapshot(result))
-            sink?.yield(.rebase(bufferedEvents)); bufferedEvents = []
-            sink?.yield(.status("Connected", connected: true))
+            emit(.snapshot(result))
+            emit(.rebase(bufferedEvents)); bufferedEvents = []
+            emit(.status("Connected", connected: true))
         } catch {
             guard current == generation else { return }
             bufferedEvents = []
-            sink?.yield(.error(error.localizedDescription))
+            emit(.error(error.localizedDescription))
         }
     }
 
@@ -316,11 +351,11 @@ actor RelayClient {
     }
     private func connectionFailed(_ error: Error, generation current: UUID) {
         guard current == generation else { return }
+        emit(.status("Disconnected", connected: false)); emit(.error(error.localizedDescription))
         generation = UUID(); refreshInFlight = false; bufferedEvents = []; bulkSending = false
         log.error("Connection failed: \(error.localizedDescription, privacy: .private)")
         socket?.cancel(with: .goingAway, reason: nil); socket = nil; heartbeat?.cancel()
         failPending(error)
-        sink?.yield(.status("Disconnected", connected: false)); sink?.yield(.error(error.localizedDescription))
     }
     private func send(_ value: JSON, requestID: String? = nil) async throws {
         guard let socket else { throw PilotError("Relay is disconnected.") }

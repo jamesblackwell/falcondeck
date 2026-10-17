@@ -42,6 +42,50 @@ final class ChatTests: XCTestCase {
         XCTAssertFalse(transcript.items.contains(where: \.streaming))
     }
 
+    func testReplayedToolStartPreservesAuthoritativeOutputAndCompletion() {
+        var transcript = Transcript(items: [Message(.object([
+            "id": .string("tool"), "kind": .string("tool_call"), "title": .string("Run tests"),
+            "status": .string("succeeded"), "output": .string("All tests passed"), "exit_code": .number(0)
+        ]))])
+        transcript.apply(.object(["type": .string("tool-call-start"), "item_id": .string("tool"), "title": .string("Run tests"), "kind": .string("execute")]))
+        XCTAssertEqual(transcript.items[0].text, "All tests passed")
+        XCTAssertEqual(transcript.items[0].raw["status"].string, "succeeded")
+        XCTAssertEqual(transcript.items[0].raw["exit_code"], .number(0))
+    }
+
+    func testConflictingReplayRequiresRecoveryInsteadOfDiscardingText() {
+        var transcript = Transcript(items: [Message(.object(["id": .string("a"), "kind": .string("assistant_message"), "text": .string("Hello")]))])
+        transcript.apply(.object(["type": .string("text"), "item_id": .string("a"), "delta": .string("World"), "start_offset": .number(0), "end_offset": .number(5)]))
+        XCTAssertTrue(transcript.needsRecovery)
+        XCTAssertEqual(transcript.items[0].text, "Hello")
+    }
+
+    func testOlderPageRejectsEmptyAndDuplicateIDs() {
+        var transcript = Transcript()
+        let item = Message(.object(["id": .string("a"), "kind": .string("assistant_message"), "text": .string("Hello")]))
+        transcript.prepend([item, item, Message(.object([:]))])
+        XCTAssertEqual(transcript.items.map(\.id), ["a"])
+    }
+
+    func testPartialOffsetsRecoverAndCompletedLifecycleStaysTerminal() {
+        let item = Message(.object(["id": .string("a"), "kind": .string("assistant_message"), "text": .string("Hi"), "lifecycle": .string("complete")]))
+        var transcript = Transcript(items: [item])
+        transcript.apply(.object(["type": .string("text"), "item_id": .string("a"), "delta": .string("!"), "start_offset": .number(2)]))
+        XCTAssertTrue(transcript.needsRecovery)
+        XCTAssertEqual(transcript.items[0].text, "Hi")
+        transcript.apply(.object(["type": .string("text"), "item_id": .string("a"), "delta": .string("!"), "start_offset": .number(2), "end_offset": .number(3)]))
+        XCTAssertEqual(transcript.items[0].text, "Hi!")
+        XCTAssertFalse(transcript.items[0].streaming)
+    }
+
+    func testCappedToolPreviewDoesNotTriggerRepeatedHistoryRecovery() {
+        let item = Message(.object(["id": .string("tool"), "kind": .string("tool_call"), "output": .string("preview"), "display": .object(["output_total_bytes": .number(2000)])]))
+        var transcript = Transcript(items: [item])
+        transcript.apply(.object(["type": .string("text"), "item_id": .string("tool"), "target": .string("tool_output"), "delta": .string("!"), "start_offset": .number(2000), "end_offset": .number(2001)]))
+        XCTAssertFalse(transcript.needsRecovery)
+        XCTAssertEqual(transcript.items[0].text, "preview")
+    }
+
     func testChatRequestPreservesTaskPermissions() {
         let task = AgentTask(.object(["id": .string("task"), "workspace_id": .string("project"), "provider": .string("codex")]))
         let params = NativeRequest.turn(task: task, text: "Hello", itemID: "user-local", modelID: "model", effort: "high")

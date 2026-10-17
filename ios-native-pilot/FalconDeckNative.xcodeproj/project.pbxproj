@@ -30,6 +30,7 @@
 		D8E9D4506A116EF7A3F3F807 /* SessionVault.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1518FBBC59AA5C636477C648 /* SessionVault.swift */; };
 		D9722B14F3B27788B3D622C8 /* InteractiveCard.swift in Sources */ = {isa = PBXBuildFile; fileRef = A320A411D5E4F108995089DA /* InteractiveCard.swift */; };
 		EAC9FA378D0945CAD1FAEE35 /* RelayClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3BEEED757B7332EB7295B178 /* RelayClient.swift */; };
+		F5649421BB78F56628125818 /* SessionTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = AD2AC5615C2A38A0579CCC41 /* SessionTests.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -61,6 +62,7 @@
 		A320A411D5E4F108995089DA /* InteractiveCard.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = InteractiveCard.swift; sourceTree = "<group>"; };
 		A4199B1817657D57DDFE2060 /* FalconDeckNativeApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FalconDeckNativeApp.swift; sourceTree = "<group>"; };
 		AA6CF1D3BE369372AD902660 /* ConversationView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ConversationView.swift; sourceTree = "<group>"; };
+		AD2AC5615C2A38A0579CCC41 /* SessionTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SessionTests.swift; sourceTree = "<group>"; };
 		B3F944F8E8DE8B9DB93852E5 /* Theme.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Theme.swift; sourceTree = "<group>"; };
 		B4F5B200EA896AD3877A6291 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist; path = Info.plist; sourceTree = "<group>"; };
 		CF8AD4FE8CDCE78BDA2E5F54 /* SidebarView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SidebarView.swift; sourceTree = "<group>"; };
@@ -135,6 +137,7 @@
 			children = (
 				FDB95178D19ED70FD635FC5F /* ChatTests.swift */,
 				1CC657891F6A863270DA8D83 /* ProtocolTests.swift */,
+				AD2AC5615C2A38A0579CCC41 /* SessionTests.swift */,
 			);
 			path = FalconDeckNativeTests;
 			sourceTree = "<group>";
@@ -294,6 +297,7 @@
 			files = (
 				704577339832005A782E0AEF /* ChatTests.swift in Sources */,
 				008E225D903390BE52A80725 /* ProtocolTests.swift in Sources */,
+				F5649421BB78F56628125818 /* SessionTests.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};

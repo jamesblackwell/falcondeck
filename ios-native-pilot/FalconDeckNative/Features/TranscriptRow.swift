@@ -55,6 +55,9 @@ struct TranscriptRow: View {
         return DisclosureGroup(isExpanded: $expanded) {
             if !message.text.isEmpty { NativeCodeBlock(content: String(message.text.prefix(16000)), language: "Output") }
             else { Text("No output recorded.").font(.footnote).foregroundStyle(FD.secondary) }
+            if message.raw["display"]["output_total_bytes"] != .null || message.text.count > 16000 {
+                Text("Output preview · Open on your computer for the full output.").font(.caption).foregroundStyle(FD.muted)
+            }
         } label: {
             HStack(spacing: 8) {
                 if message.raw["status"].string == "running" { ActivityDiamond() }

@@ -33,16 +33,30 @@ struct Transcript: Sendable {
             let current = raw[field].string, delta = event["delta"].string
             if let start = event["start_offset"].optionalInt, let end = event["end_offset"].optionalInt {
                 guard end >= start, delta.utf16.count == end - start else { needsRecovery = true; return }
-                if end <= current.utf16.count { return }
-                guard start <= current.utf16.count else { needsRecovery = true; return }
-                let overlap = current.utf16.count - start
-                let suffix = Array(delta.utf16).dropFirst(overlap)
+                let currentUnits = Array(current.utf16), deltaUnits = Array(delta.utf16)
+                guard start <= currentUnits.count else {
+                    // Detail pages deliberately cap tool previews; their byte
+                    // count cannot be used as a UTF-16 streaming cursor.
+                    if kind != "tool_call" || raw["display"]["output_total_bytes"] == .null { needsRecovery = true }
+                    return
+                }
+                let overlap = min(currentUnits.count - start, deltaUnits.count)
+                guard currentUnits[start..<(start + overlap)].elementsEqual(deltaUnits.prefix(overlap)) else { needsRecovery = true; return }
+                if end <= currentUnits.count { return }
+                let suffix = deltaUnits.dropFirst(overlap)
                 raw = raw.setting(field, .string(current + String(decoding: suffix, as: UTF16.self)))
-            } else { raw = raw.setting(field, .string(current + delta)) }
-            raw = raw.setting("lifecycle", .string("streaming"))
+            } else {
+                guard event["start_offset"] == .null, event["end_offset"] == .null else { needsRecovery = true; return }
+                raw = raw.setting(field, .string(current + delta))
+            }
+            if !["complete", "interrupted", "error"].contains(raw["lifecycle"].string) {
+                raw = raw.setting("lifecycle", .string("streaming"))
+            }
             upsert(Message(raw))
         case "tool-call-start":
-            upsert(Message(.object(["id": event["item_id"], "kind": .string("tool_call"), "title": event["title"], "tool_kind": event["kind"], "status": .string("running")])) )
+            // A start can be replayed over a newer authoritative detail page.
+            guard !items.contains(where: { $0.id == event["item_id"].string }) else { return }
+            upsert(Message(.object(["id": event["item_id"], "kind": .string("tool_call"), "title": event["title"], "tool_kind": event["kind"], "status": .string("running")])))
         case "tool-call-end":
             let raw = items.first { $0.id == event["item_id"].string }?.raw ?? .object(["id": event["item_id"], "kind": .string("tool_call"), "title": event["title"]])
             upsert(Message(raw.setting("status", event["status"]).setting("exit_code", event["exit_code"])))
@@ -56,8 +70,8 @@ struct Transcript: Sendable {
     }
 
     mutating func prepend(_ older: [Message]) {
-        let existing = Set(items.map(\.id))
-        items.insert(contentsOf: older.filter { !existing.contains($0.id) }, at: 0)
+        var existing = Set(items.map(\.id))
+        items.insert(contentsOf: older.filter { !$0.id.isEmpty && existing.insert($0.id).inserted }, at: 0)
         revision += 1
     }
 }

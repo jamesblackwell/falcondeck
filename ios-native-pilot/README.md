@@ -79,7 +79,10 @@ It requests an authoritative snapshot on connection, on pull-to-refresh, and
 every 10 seconds while running. Live events update the selected transcript
 immediately and sidebar metadata in bounded batches. UTF-16 offsets suppress
 duplicate text and detect gaps, which trigger authoritative history recovery.
-History requests replay events that arrive while a page loads. No relay cursor
+History requests replay events that arrive while a page loads. A buffer overflow
+keeps the live transcript and reports an explicit recovery error. Connection
+identifiers prevent old events and RPC results from changing a new session or
+demo workspace. Interrupt acknowledgements leave task status to daemon events. No relay cursor
 is persisted; pruned replay is never treated as a local source of truth.
 Background/foreground reconnect and explicit reconnect are included;
 automatic network retry with backoff is a future step.
@@ -99,12 +102,13 @@ xcodebuild -project FalconDeckNative.xcodeproj -scheme FalconDeckNative \
   -derivedDataPath build test
 ```
 
-Eleven focused tests cover TypeScript AES interoperability and tamper rejection,
+Twenty-two focused tests cover TypeScript AES interoperability and tamper rejection,
 secure pairing parsing/URL policy, signed authority verification, pinned signed
 NaCl bootstrap verification, ordered transport reassembly/type-first ACKs,
 UTF-16 streaming/overlap/gap handling, optimistic echo reconciliation, paged
 history merging, content targets, permission-preserving requests, and exact
-approval scopes.
+approval scopes, connection isolation, delayed summaries, interrupt acknowledgements,
+retry/error status preservation, and history-buffer overflow.
 
 Local simulator checks also exercise real hosted-relay pairing, project/task
 reads, task creation, real chat round trips, rendered Markdown, and Keychain
