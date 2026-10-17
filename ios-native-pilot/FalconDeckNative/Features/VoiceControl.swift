@@ -8,11 +8,15 @@ struct VoiceControl: View {
     private var recorder: VoiceRecorder { model.voice }
     var body: some View {
         Button {
-            model.readAloud.stop()
-            Task { await recorder.start(ownerID: task.id, provider: provider) }
+            if recorder.pendingURL != nil { model.showSpeechSettings = true }
+            else {
+                model.readAloud.stop()
+                Task { await recorder.start(ownerID: task.id, provider: provider) }
+            }
         } label: { Image(systemName: "mic").frame(width: 28, height: 28) }
-            .accessibilityLabel("Record voice message")
-            .disabled(chat.sending || recorder.starting || recorder.pendingURL != nil || recorder.transcribing)
+            .accessibilityLabel(recorder.pendingURL == nil ? "Record voice message" : "Recover saved recording")
+            .disabled(chat.sending || recorder.starting || recorder.recording || recorder.transcribing)
+
     }
 }
 

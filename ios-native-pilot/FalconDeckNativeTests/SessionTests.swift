@@ -4,6 +4,7 @@ import XCTest
 private actor ControlledRelay: RelayServing {
     private var pending: CheckedContinuation<JSON, Error>?
     private var waiter: CheckedContinuation<Void, Never>?
+    private var lastParams: JSON = .null
     func events() -> AsyncStream<RelayUpdate> { AsyncStream { $0.finish() } }
     func pair(_ input: PairingInput, connectionID: UUID) { }
     func restore(connectionID: UUID) -> Bool { true }
@@ -13,10 +14,12 @@ private actor ControlledRelay: RelayServing {
     func refresh() { }
     func detail(task: AgentTask, before: String?) async throws -> JSON { try await call("thread.detail", params: .null) }
     func call(_ method: String, params: JSON) async throws -> JSON {
-        try await withCheckedThrowingContinuation {
+        lastParams = params
+        return try await withCheckedThrowingContinuation {
             pending = $0; waiter?.resume(); waiter = nil
         }
     }
+    func params() -> JSON { lastParams }
     func waitForRequest() async {
         if pending != nil { return }
         await withCheckedContinuation { waiter = $0 }
@@ -97,6 +100,45 @@ private actor ControlledRelay: RelayServing {
         XCTAssertEqual(controlled.tasks.first?.title, newer.title)
         XCTAssertEqual(controlled.tasks.first?.status, "running")
         XCTAssertEqual(controlled.tasks.first?.latestTurnID, "next-turn")
+    }
+
+    func testReconnectRestoresAnUnconfirmedSendIntoRetainedChat() async {
+        let relay = ControlledRelay()
+        let controlled = AppModel(relay: relay)
+        controlled.tasks = [task]; controlled.connected = true; controlled.hasSession = true
+        let chat = controlled.chat(for: task)
+        chat.draft = "Keep across reconnect"
+        let attachment = NativeAttachment(id: "image", name: "Fixture.png", mimeType: "image/png", data: Data([0]))
+        chat.attachments = [attachment]
+        let send = Task { await controlled.send(task) }
+        await relay.waitForRequest()
+        XCTAssertTrue(chat.draft.isEmpty)
+        await controlled.reconnect()
+        await relay.complete(.object(["ok": .bool(true)]))
+        await send.value
+        XCTAssertEqual(chat.draft, "Keep across reconnect")
+        XCTAssertEqual(chat.attachments.map(\.id), [attachment.id])
+        XCTAssertNotNil(chat.notice)
+    }
+
+    func testAnEarlyEchoSurvivesBothStartedAndQueuedAcknowledgements() async {
+        for (status, response) in [("running", "started"), ("running", "queued"), ("idle", "queued")] {
+            let relay = ControlledRelay()
+            let model = AppModel(relay: relay)
+            let task = AgentTask(self.task.raw.setting("status", .string(status)))
+            model.tasks = [task]; model.connected = true
+            let chat = model.chat(for: task); chat.draft = "Confirmed message"
+            let send = Task { await model.send(task) }
+            await relay.waitForRequest()
+            let params = await relay.params()
+            let echo = JSON.object(["id": params["user_item_id"], "kind": .string("user_message"), "text": .string("Confirmed message")])
+            model.receive(RelayUpdate(connectionID: model.connectionID, event: .events([.object(["seq": .number(1), "thread_id": .string(task.id), "event": .object(["type": .string("conversation-item-added"), "item": echo])])])))
+            await relay.complete(.object(["ok": .bool(true), "message": .string(response)]))
+            await send.value
+            XCTAssertEqual(chat.transcript.items.count, 1)
+            XCTAssertFalse(chat.transcript.items[0].raw["pending"].bool)
+            XCTAssertTrue(chat.pendingQueue.isEmpty)
+        }
     }
 
     func testHistoryBufferOverflowKeepsLiveTranscriptAndShowsRecoveryError() async {

@@ -18,7 +18,7 @@ private struct ExplicitImageProvider: ImageProvider {
 }
 
 extension MarkdownUI.Theme {
-    @MainActor static let falcon = MarkdownUI.Theme.gitHub
+    @MainActor static var falcon: MarkdownUI.Theme { MarkdownUI.Theme.gitHub
         .text { ForegroundColor(FD.foreground); BackgroundColor(.clear); FontSize(17) }
         .code { FontFamilyVariant(.monospaced); FontSize(.em(0.88)); BackgroundColor(FD.raised) }
         .link { ForegroundColor(FD.accent) }
@@ -38,6 +38,7 @@ extension MarkdownUI.Theme {
                     .markdownTableBackgroundStyle(.alternatingRows(FD.surface, FD.raised)).fixedSize(horizontal: true, vertical: false)
             }.markdownMargin(top: 8, bottom: 16)
         }
+    }
 }
 
 struct NativeCodeBlock: View {

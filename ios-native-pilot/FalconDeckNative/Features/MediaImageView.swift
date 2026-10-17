@@ -16,6 +16,10 @@ struct MediaImageView: View {
     @State private var error: String?
     @State private var loading = false
     @State private var preview = false
+    @State private var loadID = UUID()
+    @State private var activeSource: String?
+    @State private var loadedSource: String?
+    private var sourceKey: String { "\(lifecycle):\(reference["url"].string):\(reference["local_path"].string)" }
     private var label: String { reference["alt_text"].string.nonempty ?? reference["name"].string.nonempty ?? "Image" }
     var body: some View {
         Group {
@@ -32,14 +36,18 @@ struct MediaImageView: View {
                 }.buttonStyle(.plain).disabled(loading)
             }
         }
-        .task(id: "\(lifecycle):\(reference["url"].string)") { await load() }
+        .task(id: sourceKey) { await load() }
         .sheet(isPresented: $preview) { if let bytes, let image { ImageDetailView(data: bytes, image: image, title: label) } }
     }
     private func load() async {
-        guard image == nil, !loading else { return }
-        if ["pending", "streaming"].contains(lifecycle), reference["url"].string.isEmpty { return }
-        loading = true; error = nil
-        defer { loading = false }
+        let sourceIdentity = sourceKey
+        guard loadedSource != sourceIdentity || image == nil else { return }
+        guard activeSource != sourceIdentity || !loading else { return }
+        let id = UUID(); loadID = id; activeSource = sourceIdentity
+        image = nil; bytes = nil; error = nil
+        if ["pending", "streaming"].contains(lifecycle), reference["url"].string.isEmpty { loading = false; activeSource = nil; return }
+        loading = true
+        defer { if loadID == id { loading = false; activeSource = nil } }
         do {
             var source = reference["url"].string
             if MediaURL.data(source) == nil, MediaURL.external(source) == nil, let task, let itemID {
@@ -52,14 +60,12 @@ struct MediaImageView: View {
             let data: Data
             if let decoded = MediaURL.data(source) { data = decoded }
             else if let url = MediaURL.external(source) {
-                let (download, response) = try await URLSession.shared.data(from: url)
-                guard let response = response as? HTTPURLResponse, (200..<300).contains(response.statusCode), download.count <= 25_000_000 else { throw PilotError("Image unavailable.") }
-                data = download
+                data = try await BoundedImageDownload.shared.download(url)
             } else { throw PilotError("This image is unavailable on this device.") }
             let thumbnail = try await Task.detached { try NativeAttachment.prepare(data).data }.value
-            guard !Task.isCancelled, let decoded = UIImage(data: thumbnail) else { return }
-            bytes = data; image = decoded
-        } catch { self.error = error.localizedDescription }
+            guard loadID == id, !Task.isCancelled, let decoded = UIImage(data: thumbnail) else { return }
+            bytes = data; image = decoded; loadedSource = sourceIdentity
+        } catch { if loadID == id, !Task.isCancelled { self.error = error.localizedDescription } }
     }
 }
 

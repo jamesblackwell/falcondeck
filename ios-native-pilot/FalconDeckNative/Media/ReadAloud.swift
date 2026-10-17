@@ -15,7 +15,14 @@ final class ReadAloud: NSObject, AVSpeechSynthesizerDelegate, AVAudioPlayerDeleg
     @ObservationIgnored private var generation = UUID()
     @ObservationIgnored private weak var playbackModel: AppModel?
     @ObservationIgnored private var pendingChunks: [String] = []
-    override init() { super.init(); synthesizer.delegate = self }
+    @ObservationIgnored private var interruptions: AudioInterruptionObserver?
+    override init() {
+        super.init(); synthesizer.delegate = self
+        interruptions = AudioInterruptionObserver { [weak self] in
+            guard let self, self.messageID != nil, !self.paused else { return }
+            self.togglePause()
+        }
+    }
 
     func play(_ text: String, id: String, model: AppModel) async {
         if messageID == id { stop(); return }
@@ -41,7 +48,7 @@ final class ReadAloud: NSObject, AVSpeechSynthesizerDelegate, AVAudioPlayerDeleg
     }
     func togglePause() {
         guard messageID != nil else { return }
-        if paused { if let player { player.play() } else { synthesizer.continueSpeaking() } }
+        if paused { try? AVAudioSession.sharedInstance().setActive(true); if let player { player.play() } else { synthesizer.continueSpeaking() } }
         else { if let player { player.pause() } else { synthesizer.pauseSpeaking(at: .word) } }
         paused.toggle()
         MPNowPlayingInfoCenter.default().nowPlayingInfo?[MPNowPlayingInfoPropertyPlaybackRate] = paused ? 0 : 1

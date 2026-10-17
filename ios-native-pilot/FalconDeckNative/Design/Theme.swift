@@ -1,15 +1,15 @@
 import SwiftUI
 
 /// Falcon dark tokens from DESIGN.md, centralized for this independent client.
-enum FD {
-    static let background = Color(red: 9/255, green: 9/255, blue: 11/255)
-    static let surface = Color(red: 17/255, green: 17/255, blue: 19/255)
-    static let raised = Color(red: 26/255, green: 26/255, blue: 31/255)
-    static let foreground = Color(red: 244/255, green: 244/255, blue: 246/255)
-    static let secondary = Color(red: 157/255, green: 157/255, blue: 168/255)
-    static let muted = Color(red: 132/255, green: 132/255, blue: 143/255)
-    static let accent = Color(red: 52/255, green: 211/255, blue: 153/255)
-    static let line = Color.white.opacity(0.10)
+@MainActor enum FD {
+    static var background: Color { NativeAppearance.shared.color("surface", "0") }
+    static var surface: Color { NativeAppearance.shared.color("surface", "1") }
+    static var raised: Color { NativeAppearance.shared.color("surface", "2") }
+    static var foreground: Color { NativeAppearance.shared.color("fg", "primary") }
+    static var secondary: Color { NativeAppearance.shared.color("fg", "tertiary") }
+    static var muted: Color { NativeAppearance.shared.color("fg", "muted") }
+    static var accent: Color { NativeAppearance.shared.color("accent") }
+    static var line: Color { NativeAppearance.shared.color("border") }
     static let radius: CGFloat = 20
     static let inset: CGFloat = 20
 

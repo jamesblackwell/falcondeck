@@ -1,4 +1,5 @@
 import UIKit
+import AVFoundation
 import XCTest
 @testable import FalconDeckNative
 
@@ -57,6 +58,28 @@ import XCTest
         XCTAssertTrue(markdown.contains("Output preview"))
     }
 
+    func testRemoteImageBudgetRejectsAnUnknownLengthStream() async throws {
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [ImageFixtureProtocol.self]
+        let session = URLSession(configuration: configuration)
+        defer { session.invalidateAndCancel() }
+        let url = URL(string: "https://native-image.test/fixture")!
+        do { _ = try await BoundedImageDownload.shared.download(url, session: session, maxBytes: 8); XCTFail("An oversized image must be rejected during streaming") }
+        catch { XCTAssertTrue(error.localizedDescription.contains("limit")) }
+        let valid = try await BoundedImageDownload.shared.download(url, session: session, maxBytes: 200)
+        XCTAssertEqual(valid.count, 100)
+    }
+
+    func testRecordingInterruptionFinalizesListeningAndRetainsRecovery() {
+        let recorder = VoiceRecorder()
+        let pending = recorder.pendingURL
+        recorder.recording = true
+        recorder.interrupted()
+        XCTAssertFalse(recorder.recording)
+        XCTAssertEqual(recorder.pendingURL, pending)
+        XCTAssertTrue(recorder.error?.contains("interrupted") == true)
+    }
+
     func testReadAloudChunksStayWithinDaemonLimitAndPreserveUnicode() {
         let text = String(repeating: "Hello 🦅 é. ", count: 1000)
         let chunks = ReadAloud.chunks(text)
@@ -71,4 +94,16 @@ import XCTest
         XCTAssertFalse(spoken.contains("https://"))
         XCTAssertFalse(spoken.contains("let x"))
     }
+}
+
+private final class ImageFixtureProtocol: URLProtocol, @unchecked Sendable {
+    override class func canInit(with request: URLRequest) -> Bool { request.url?.host == "native-image.test" }
+    override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
+    override func startLoading() {
+        let response = HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: "HTTP/1.1", headerFields: ["Content-Type": "image/png"])!
+        client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
+        client?.urlProtocol(self, didLoad: Data(repeating: 1, count: 100))
+        client?.urlProtocolDidFinishLoading(self)
+    }
+    override func stopLoading() { }
 }

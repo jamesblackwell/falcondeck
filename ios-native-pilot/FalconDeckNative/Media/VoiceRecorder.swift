@@ -20,9 +20,11 @@ final class VoiceRecorder: NSObject, AVAudioRecorderDelegate {
     @ObservationIgnored private var recognitionWaiter: CheckedContinuation<String, Error>?
     @ObservationIgnored private var recognitionTimeout: Task<Void, Never>?
     @ObservationIgnored private var recognitionID = UUID()
+    @ObservationIgnored private var interruptions: AudioInterruptionObserver?
 
     override init() {
         super.init()
+        interruptions = AudioInterruptionObserver { [weak self] in self?.interrupted() }
         let defaults = UserDefaults.standard
         if let path = defaults.string(forKey: "native.voice.pending"), FileManager.default.fileExists(atPath: path) {
             pendingURL = URL(fileURLWithPath: path)
@@ -54,6 +56,7 @@ final class VoiceRecorder: NSObject, AVAudioRecorderDelegate {
             recording = true; elapsed = 0
             meter = Task {
                 while !Task.isCancelled, self.recording {
+                    if self.recorder?.isRecording != true { self.interrupted(); return }
                     self.recorder?.updateMeters()
                     self.elapsed = self.recorder?.currentTime ?? self.elapsed
                     self.level = pow(10, (self.recorder?.averagePower(forChannel: 0) ?? -60) / 20)
@@ -77,8 +80,15 @@ final class VoiceRecorder: NSObject, AVAudioRecorderDelegate {
         UserDefaults.standard.removeObject(forKey: "native.voice.owner")
     }
 
-    func transcribe(model: AppModel) async throws -> String {
+    func interrupted() {
+        guard recording else { return }
+        finishRecording()
+        error = "Recording was interrupted. Your captured audio is safe; transcribe or discard it when ready."
+    }
+
+    func transcribe(model: AppModel, using providerOverride: String? = nil) async throws -> String {
         guard !transcribing, let url = pendingURL else { throw PilotError("Record a message first.") }
+        if let providerOverride { provider = providerOverride; UserDefaults.standard.set(providerOverride, forKey: "native.voice.provider") }
         finishRecording(); transcribing = true; error = nil
         defer { transcribing = false }
         let current = model.connectionID
@@ -133,8 +143,16 @@ final class VoiceRecorder: NSObject, AVAudioRecorderDelegate {
         let waiter = recognitionWaiter; recognitionWaiter = nil
         waiter?.resume(with: result)
     }
+    nonisolated func audioRecorderDidFinishRecording(_ recorder: AVAudioRecorder, successfully flag: Bool) {
+        let id = ObjectIdentifier(recorder)
+        Task { @MainActor in if self.recording, self.recorder.map(ObjectIdentifier.init) == id { self.interrupted() } }
+    }
     nonisolated func audioRecorderEncodeErrorDidOccur(_ recorder: AVAudioRecorder, error: Error?) {
         let message = error?.localizedDescription ?? "Recording stopped unexpectedly. Your captured audio is retained."
-        Task { @MainActor in self.finishRecording(); self.error = message }
+        let id = ObjectIdentifier(recorder)
+        Task { @MainActor in
+            guard self.recorder.map(ObjectIdentifier.init) == id else { return }
+            self.finishRecording(); self.error = message
+        }
     }
 }

@@ -15,6 +15,7 @@ final class ChatSession {
     var overrides: [String: JSON] = [:]
     var attachments: [NativeAttachment] = []
     var pendingQueue: [QueuedDraft] = []
+    var preparingAttachments = false
     var loading = false
     var loaded = false
     var sending = false
@@ -33,9 +34,14 @@ final class AppModel {
     let relay: any RelayServing
     let voice = VoiceRecorder()
     let readAloud = ReadAloud()
+    let automations = AutomationStore()
+    let notifications = LocalNotifications()
     private(set) var connectionID = UUID()
 
-    init(relay: any RelayServing = RelayClient()) { self.relay = relay }
+    init(relay: any RelayServing = RelayClient()) {
+        self.relay = relay
+        notifications.openTask = { [weak self] id in self?.selection = .task(id) }
+    }
     var projects: [Project] = []
     var tasks: [AgentTask] = [] {
         didSet {
@@ -67,6 +73,8 @@ final class AppModel {
     var archivedTasks: [AgentTask] = []
     var readSuppression: [String: Int] = [:]
     var taskOptionsID: String?
+    var showSpeechSettings = false
+    var connectionLog: [ConnectionLogEntry] = []
     @ObservationIgnored var mediaGate = MediaTransferGate()
     @ObservationIgnored var itemLoads: [String: Task<JSON, Error>] = [:]
     @ObservationIgnored var itemCache: [String: JSON] = [:]
@@ -103,6 +111,8 @@ final class AppModel {
         switch update.event {
         case .status(let text, let online):
             status = text; connected = online
+            if connectionLog.last?.message != text { connectionLog.append(ConnectionLogEntry(message: text)); if connectionLog.count > 100 { connectionLog.removeFirst(connectionLog.count - 100) } }
+            if online { automations.scheduleRefresh(model: self) }
             if text == "Connecting…" { lastEventSeq = 0 }
         case .snapshot(let value):
             summaryFlush?.cancel(); summaryFlush = nil; pendingSummaries = [:]
@@ -115,13 +125,16 @@ final class AppModel {
             for event in events { applyEnvelope(event) }
         case .rebase(let events):
             for event in events { applyEnvelope(event, rebase: true) }
-        case .error(let message): error = message; connected = false
+        case .error(let message):
+            error = message; connected = false
+            connectionLog.append(ConnectionLogEntry(message: "Connection request failed"))
+            if connectionLog.count > 100 { connectionLog.removeFirst(connectionLog.count - 100) }
         }
     }
 
     @discardableResult private func beginConnection(clearData: Bool) -> UUID {
         if voice.recording { voice.finishRecording() }
-        readAloud.stop()
+        readAloud.stop(); automations.reset()
         connectionID = UUID(); lastEventSeq = 0; connected = false
         itemCache = [:]; itemCacheOrder = []; itemLoads = [:]; mediaGate = MediaTransferGate()
         summaryFlush?.cancel(); summaryFlush = nil; pendingSummaries = [:]
@@ -255,7 +268,17 @@ final class AppModel {
         if !rebase { lastEventSeq = seq }
         let event = envelope["event"], id = envelope["thread_id"].string
         switch event["type"].string {
-        case "thread-started", "thread-updated": stageSummary(event["thread"])
+        case "thread-started", "thread-updated":
+            let raw = event["thread"]
+            let old = pendingSummaries[id] ?? tasks.first(where: { $0.id == id })?.raw ?? .null
+            if !rebase, old["status"].string == "running", raw["status"].string != "running", selection != .task(id), preferences["notifications"]["enabled"] != .bool(false) {
+                let failed = raw["status"].string == "error"
+                if preferences["notifications"][failed ? "notify_on_error" : "notify_on_turn_complete"] != .bool(false) {
+                    notifications.announce(title: raw["title"].string.nonempty ?? "FalconDeck", body: failed ? raw["last_error"].string : raw["last_message_preview"].string.nonempty ?? "Task completed", taskID: id)
+                }
+            }
+            stageSummary(raw)
+        case "control-state-changed": automations.scheduleRefresh(model: self)
         case "workspace-updated":
             let project = Project(event["workspace"])
             if let index = projects.firstIndex(where: { $0.id == project.id }) { projects[index] = project }
@@ -263,6 +286,9 @@ final class AppModel {
         case "preferences-updated": preferences = event["preferences"]
         case "interactive-request":
             let request = event["request"]
+            if !rebase, !requests.contains(where: { $0["request_id"] == request["request_id"] }), selection != .task(id), preferences["notifications"]["enabled"] != .bool(false), preferences["notifications"]["notify_on_input_required"] != .bool(false) {
+                notifications.announce(title: "Input needed", body: request["title"].string, taskID: id)
+            }
             requests.removeAll { $0["request_id"] == request["request_id"] }; requests.append(request)
         case "turn-end":
             // ThreadUpdated carries the authoritative status, including errors
@@ -319,7 +345,7 @@ final class AppModel {
         let text = chat.draft.trimmingCharacters(in: .whitespacesAndNewlines)
         let selectedModel = chat.modelID, selectedEffort = chat.effort, selectedOverrides = chat.overrides
         let attachments = chat.attachments
-        guard !text.isEmpty || !attachments.isEmpty, !chat.sending, demo || connected else { return }
+        guard !text.isEmpty || !attachments.isEmpty, !chat.sending, !chat.preparingAttachments, demo || connected else { return }
         do {
             try NativeAttachment.validate(attachments)
             if !attachments.isEmpty, projects.first(where: { $0.id == task.projectID })?.capabilities(task.provider)["supports_images"] == .bool(false) { throw PilotError("This agent doesn't support image attachments.") }
@@ -364,26 +390,35 @@ final class AppModel {
         do {
             if !selectedOverrides.isEmpty {
                 _ = try await taskRequest(task, method: "thread.update", fields: selectedOverrides)
-                guard current == connectionID else { return }
+                guard current == connectionID else { restoreSubmission(task, chat: chat, id: id, text: text, attachments: attachments); return }
             }
             let response = try await relay.call("turn.start", params: NativeRequest.turn(task: task, text: text, itemID: id, modelID: selectedModel, effort: selectedEffort, overrides: selectedOverrides, attachments: attachments))
-            guard current == connectionID else { return }
+            guard current == connectionID else { restoreSubmission(task, chat: chat, id: id, text: text, attachments: attachments); return }
             if response["message"].string == "queued" {
-                chat.transcript.items.removeAll { $0.id == id }
-                if !expectQueued { chat.pendingQueue.append(queued) }
+                chat.transcript.items.removeAll { $0.id == id && $0.raw["pending"].bool }
+                if !expectQueued, !chat.transcript.items.contains(where: { $0.id == id && !$0.raw["pending"].bool }) { chat.pendingQueue.append(queued) }
                 chat.pendingQueue = QueuedDraft.reconcile(chat.pendingQueue, queued: tasks.first(where: { $0.id == task.id })?.queued ?? [], items: chat.transcript.items)
             } else if expectQueued {
-                chat.pendingQueue.removeAll { $0.id == id }; chat.transcript.upsert(optimistic)
+                chat.pendingQueue.removeAll { $0.id == id }
+                if !chat.transcript.items.contains(where: { $0.id == id && !$0.raw["pending"].bool }) { chat.transcript.upsert(optimistic) }
             }
         } catch {
-            guard current == connectionID else { return }
-            chat.pendingQueue.removeAll { $0.id == id }
-            chat.transcript.items.removeAll { $0.id == id && $0.raw["pending"].bool }
-            if chat.draft.isEmpty { chat.draft = text }
-            else if chat.draft != text { chat.draft = text + "\n\n" + chat.draft }
-            chat.attachments = attachments + chat.attachments.filter { newer in !attachments.contains { $0.id == newer.id } }
-            chat.error = "\(error.localizedDescription) Refresh this task before resending if delivery is uncertain."
+            restoreSubmission(task, chat: chat, id: id, text: text, attachments: attachments)
+            if chats[task.id] === chat { chat.error = "\(error.localizedDescription) Refresh this task before resending if delivery is uncertain." }
         }
+    }
+
+    private func restoreSubmission(_ task: AgentTask, chat: ChatSession, id: String, text: String, attachments: [NativeAttachment]) {
+        // Reconnect retains this session; forgetting/re-pairing replaces it.
+        // Recover only into the original instance, never into a new computer.
+        guard chats[task.id] === chat else { return }
+        chat.pendingQueue.removeAll { $0.id == id }
+        guard !chat.transcript.items.contains(where: { $0.id == id && !$0.raw["pending"].bool }) else { return }
+        chat.transcript.items.removeAll { $0.id == id && $0.raw["pending"].bool }
+        if chat.draft.isEmpty { chat.draft = text }
+        else if chat.draft != text { chat.draft = text + "\n\n" + chat.draft }
+        chat.attachments = attachments + chat.attachments.filter { newer in !attachments.contains { $0.id == newer.id } }
+        chat.notice = "Delivery wasn't confirmed. Refresh this task before sending again."
     }
 
     func stop(_ task: AgentTask) async {

@@ -21,12 +21,12 @@ struct AttachmentPicker: View {
         } label: {
             Group { if loading { ActivityDiamond() } else { Image(systemName: "plus") } }.frame(width: 28, height: 28)
         }
-        .accessibilityLabel("Add attachment").disabled(loading || chat.sending)
+        .accessibilityLabel("Add attachment").disabled(loading || chat.preparingAttachments || chat.sending)
         .photosPicker(isPresented: $showPhotos, selection: $photos, maxSelectionCount: 10, matching: .images)
         .onChange(of: photos) { _, items in
-            guard !items.isEmpty else { return }; loading = true
+            guard !items.isEmpty else { return }; loading = true; chat.preparingAttachments = true
             Task {
-                defer { loading = false; photos = [] }
+                defer { loading = false; chat.preparingAttachments = false; photos = [] }
                 for item in items {
                     do {
                         guard let data = try await item.loadTransferable(type: Data.self) else { throw PilotError("Couldn't read this photo.") }
@@ -40,9 +40,9 @@ struct AttachmentPicker: View {
         .fileImporter(isPresented: $showFiles, allowedContentTypes: [.image], allowsMultipleSelection: true) { result in
             switch result {
             case .success(let urls):
-                loading = true
+                loading = true; chat.preparingAttachments = true
                 Task {
-                    defer { loading = false }
+                    defer { loading = false; chat.preparingAttachments = false }
                     for url in urls {
                         do {
                             let attachment = try await Task.detached {
@@ -61,9 +61,9 @@ struct AttachmentPicker: View {
         }
     }
     private func add(_ data: Data, name: String) {
-        guard !loading else { return }; loading = true
+        guard !loading else { return }; loading = true; chat.preparingAttachments = true
         Task {
-            defer { loading = false }
+            defer { loading = false; chat.preparingAttachments = false }
             do {
                 let attachment = try await Task.detached { try NativeAttachment.prepare(data, name: name) }.value
                 try NativeAttachment.validate(chat.attachments + [attachment]); chat.attachments.append(attachment)

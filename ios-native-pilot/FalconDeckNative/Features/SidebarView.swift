@@ -98,11 +98,12 @@ struct SidebarView: View {
                 }.disabled(!model.demo && !model.connected).accessibilityLabel("New task").accessibilityIdentifier("new-task")
             }
             ToolbarItem(placement: .bottomBar) {
-                Button { model.showConnection = true } label: { Image(systemName: "gearshape") }.accessibilityLabel("Connection settings")
+                Button { model.selection = .settings } label: { Image(systemName: "gearshape") }.accessibilityLabel("Connection settings")
             }
             ToolbarItem(placement: .bottomBar) { Spacer() }
             ToolbarItem(placement: .bottomBar) {
                 Menu {
+                    Button("Automations", systemImage: "calendar.badge.clock") { model.selection = .automations }
                     Toggle("Show hidden projects", isOn: $showHidden)
                     Button("Collapse all projects") { expanded = [] }
                 } label: { Image(systemName: "line.3.horizontal.decrease") }.accessibilityLabel("Sidebar options")

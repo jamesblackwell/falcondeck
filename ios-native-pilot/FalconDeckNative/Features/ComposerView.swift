@@ -49,7 +49,7 @@ struct ComposerView: View {
                     Group { if chat.sending { ActivityDiamond() } else { Image(systemName: task.running ? "arrow.up.to.line" : "arrow.up").fontWeight(.semibold) } }.frame(width: 32, height: 32)
                 }
                 .buttonStyle(.glassProminent).tint(FD.accent).foregroundStyle(FD.background)
-                .disabled(chat.sending || (chat.draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && chat.attachments.isEmpty) || (!model.connected && !model.demo))
+                .disabled(chat.sending || chat.preparingAttachments || (chat.draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && chat.attachments.isEmpty) || (!model.connected && !model.demo))
                 .accessibilityLabel(task.running ? "Queue message" : "Send message").accessibilityIdentifier("send-message")
             }.font(.caption).foregroundStyle(FD.secondary)
             if model.demo { Text("Demo · Messages stay on this device").font(.caption2).foregroundStyle(FD.muted) }
