@@ -1,0 +1,63 @@
+name: FalconDeckNative
+options:
+  bundleIdPrefix: com.falcondeck.pilot
+  deploymentTarget:
+    iOS: "26.0"
+  createIntermediateGroups: true
+settings:
+  base:
+    SWIFT_VERSION: "6.0"
+    CODE_SIGN_STYLE: Automatic
+packages:
+  Sodium:
+    url: https://github.com/jedisct1/swift-sodium.git
+    exactVersion: 0.11.0
+targets:
+  FalconDeckNative:
+    type: application
+    platform: iOS
+    sources: [FalconDeckNative]
+    dependencies:
+      - package: Sodium
+    preBuildScripts:
+      - name: Generate native pilot icon
+        script: swift "$SRCROOT/scripts/generate-icon.swift" "$SRCROOT/FalconDeckNative/Assets.xcassets/FalconMark.imageset/mark.svg" "$SRCROOT/FalconDeckNative/Assets.xcassets/AppIcon.appiconset/icon.png"
+        inputFiles:
+          - $(SRCROOT)/scripts/generate-icon.swift
+          - $(SRCROOT)/FalconDeckNative/Assets.xcassets/FalconMark.imageset/mark.svg
+        outputFiles:
+          - $(SRCROOT)/FalconDeckNative/Assets.xcassets/AppIcon.appiconset/icon.png
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.falcondeck.pilot.native
+        TARGETED_DEVICE_FAMILY: "1,2"
+        GENERATE_INFOPLIST_FILE: YES
+        INFOPLIST_KEY_CFBundleDisplayName: Falcon Native
+        INFOPLIST_KEY_UILaunchScreen_Generation: YES
+        MARKETING_VERSION: "0.1.0"
+        CURRENT_PROJECT_VERSION: "1"
+    info:
+      path: FalconDeckNative/Info.plist
+      properties:
+        CFBundleDisplayName: Falcon Native
+        CFBundleURLTypes:
+          - CFBundleURLSchemes: [falcondeck-native]
+        NSAppTransportSecurity:
+          NSAllowsLocalNetworking: true
+  FalconDeckNativeTests:
+    type: bundle.unit-test
+    platform: iOS
+    sources: [FalconDeckNativeTests]
+    dependencies:
+      - target: FalconDeckNative
+    settings:
+      base:
+        GENERATE_INFOPLIST_FILE: YES
+schemes:
+  FalconDeckNative:
+    build:
+      targets:
+        FalconDeckNative: all
+        FalconDeckNativeTests: [test]
+    test:
+      targets: [FalconDeckNativeTests]

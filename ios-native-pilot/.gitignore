@@ -1,0 +1,9 @@
+build/
+.build/
+.swiftpm/
+*.xcuserstate
+xcuserdata/
+artifacts/
+.pairing-link
+build.log
+FalconDeckNative/Assets.xcassets/AppIcon.appiconset/icon.png

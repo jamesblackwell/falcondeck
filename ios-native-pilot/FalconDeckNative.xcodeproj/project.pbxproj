@@ -1,0 +1,549 @@
+// !$*UTF8*$!
+{
+	archiveVersion = 1;
+	classes = {
+	};
+	objectVersion = 77;
+	objects = {
+
+/* Begin PBXBuildFile section */
+		008E225D903390BE52A80725 /* ProtocolTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1CC657891F6A863270DA8D83 /* ProtocolTests.swift */; };
+		0EF12FAE236A1A33C28E0A7A /* Theme.swift in Sources */ = {isa = PBXBuildFile; fileRef = B3F944F8E8DE8B9DB93852E5 /* Theme.swift */; };
+		3F60571032B128CFC6A3E5ED /* AppModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = 40A4F994DF4603858E55E14C /* AppModel.swift */; };
+		5343B3A43B90C2948CCC6506 /* RelayCrypto.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7E9D658D826B39BAF2A75562 /* RelayCrypto.swift */; };
+		539ED4DEA1B58B9A96B8F3B2 /* ProjectsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 714736364009AFB117556B81 /* ProjectsView.swift */; };
+		61A230FF17B918EEF918E43C /* FalconDeckNativeApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = A4199B1817657D57DDFE2060 /* FalconDeckNativeApp.swift */; };
+		70008635861DC82FD2717AA5 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = 06F7E8C4BA907396BEF51195 /* Assets.xcassets */; };
+		785071928DB3C21192843E58 /* Wire.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8B8FBCAF3C84F1B6D0268333 /* Wire.swift */; };
+		9C8F54D285C47D159D1CF07E /* ActivityView.swift in Sources */ = {isa = PBXBuildFile; fileRef = FD587F0C60D26CB61A64907F /* ActivityView.swift */; };
+		BAA8BBF65D0A345B4B484641 /* Sodium in Frameworks */ = {isa = PBXBuildFile; productRef = 33E86D1F2E3B8C0C0ABC20E2 /* Sodium */; };
+		BDA1AA96709537008B464C95 /* ConnectionView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 16F5CDC46298C62F85B619EB /* ConnectionView.swift */; };
+		C57CBBAAE6B35D89B1ACDFB5 /* ConversationView.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA6CF1D3BE369372AD902660 /* ConversationView.swift */; };
+		D8E9D4506A116EF7A3F3F807 /* SessionVault.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1518FBBC59AA5C636477C648 /* SessionVault.swift */; };
+		EAC9FA378D0945CAD1FAEE35 /* RelayClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3BEEED757B7332EB7295B178 /* RelayClient.swift */; };
+/* End PBXBuildFile section */
+
+/* Begin PBXContainerItemProxy section */
+		51D373AB5EAACA94B24656FE /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = 3F8122353E9610995751AF25 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = C5041C9FCBD034C6F003ABE6;
+			remoteInfo = FalconDeckNative;
+		};
+/* End PBXContainerItemProxy section */
+
+/* Begin PBXFileReference section */
+		06F7E8C4BA907396BEF51195 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
+		1518FBBC59AA5C636477C648 /* SessionVault.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SessionVault.swift; sourceTree = "<group>"; };
+		16F5CDC46298C62F85B619EB /* ConnectionView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ConnectionView.swift; sourceTree = "<group>"; };
+		1CC657891F6A863270DA8D83 /* ProtocolTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ProtocolTests.swift; sourceTree = "<group>"; };
+		3BEEED757B7332EB7295B178 /* RelayClient.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RelayClient.swift; sourceTree = "<group>"; };
+		40A4F994DF4603858E55E14C /* AppModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppModel.swift; sourceTree = "<group>"; };
+		6E36500E629EEF10CD1C26D1 /* FalconDeckNativeTests.xctest */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.cfbundle; path = FalconDeckNativeTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
+		714736364009AFB117556B81 /* ProjectsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ProjectsView.swift; sourceTree = "<group>"; };
+		7E9D658D826B39BAF2A75562 /* RelayCrypto.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RelayCrypto.swift; sourceTree = "<group>"; };
+		8B8FBCAF3C84F1B6D0268333 /* Wire.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Wire.swift; sourceTree = "<group>"; };
+		A4199B1817657D57DDFE2060 /* FalconDeckNativeApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FalconDeckNativeApp.swift; sourceTree = "<group>"; };
+		AA6CF1D3BE369372AD902660 /* ConversationView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ConversationView.swift; sourceTree = "<group>"; };
+		B3F944F8E8DE8B9DB93852E5 /* Theme.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Theme.swift; sourceTree = "<group>"; };
+		B4F5B200EA896AD3877A6291 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist; path = Info.plist; sourceTree = "<group>"; };
+		FD587F0C60D26CB61A64907F /* ActivityView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ActivityView.swift; sourceTree = "<group>"; };
+		FFEF03D303D8B76B687E7BE3 /* FalconDeckNative.app */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.application; path = FalconDeckNative.app; sourceTree = BUILT_PRODUCTS_DIR; };
+/* End PBXFileReference section */
+
+/* Begin PBXFrameworksBuildPhase section */
+		F2C870DEEBFFBE6A2A8EE5B2 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				BAA8BBF65D0A345B4B484641 /* Sodium in Frameworks */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXFrameworksBuildPhase section */
+
+/* Begin PBXGroup section */
+		156CF86E4D2E17625E7D99F7 /* Products */ = {
+			isa = PBXGroup;
+			children = (
+				FFEF03D303D8B76B687E7BE3 /* FalconDeckNative.app */,
+				6E36500E629EEF10CD1C26D1 /* FalconDeckNativeTests.xctest */,
+			);
+			name = Products;
+			sourceTree = "<group>";
+		};
+		24807DFF84FB5D2C28A5F438 = {
+			isa = PBXGroup;
+			children = (
+				F26F799D747451A9FFEB9BB1 /* FalconDeckNative */,
+				7D3DFEABD6464A22910B2B98 /* FalconDeckNativeTests */,
+				156CF86E4D2E17625E7D99F7 /* Products */,
+			);
+			sourceTree = "<group>";
+		};
+		2A03809CAB2A01B885B34DED /* Data */ = {
+			isa = PBXGroup;
+			children = (
+				40A4F994DF4603858E55E14C /* AppModel.swift */,
+				3BEEED757B7332EB7295B178 /* RelayClient.swift */,
+				7E9D658D826B39BAF2A75562 /* RelayCrypto.swift */,
+				1518FBBC59AA5C636477C648 /* SessionVault.swift */,
+				8B8FBCAF3C84F1B6D0268333 /* Wire.swift */,
+			);
+			path = Data;
+			sourceTree = "<group>";
+		};
+		33966A101757F0923F8BC814 /* App */ = {
+			isa = PBXGroup;
+			children = (
+				A4199B1817657D57DDFE2060 /* FalconDeckNativeApp.swift */,
+			);
+			path = App;
+			sourceTree = "<group>";
+		};
+		54BDC54D64320C2892144E68 /* Design */ = {
+			isa = PBXGroup;
+			children = (
+				B3F944F8E8DE8B9DB93852E5 /* Theme.swift */,
+			);
+			path = Design;
+			sourceTree = "<group>";
+		};
+		7D3DFEABD6464A22910B2B98 /* FalconDeckNativeTests */ = {
+			isa = PBXGroup;
+			children = (
+				1CC657891F6A863270DA8D83 /* ProtocolTests.swift */,
+			);
+			path = FalconDeckNativeTests;
+			sourceTree = "<group>";
+		};
+		E1031B3F2BB9C37EA151A6A9 /* Features */ = {
+			isa = PBXGroup;
+			children = (
+				FD587F0C60D26CB61A64907F /* ActivityView.swift */,
+				16F5CDC46298C62F85B619EB /* ConnectionView.swift */,
+				AA6CF1D3BE369372AD902660 /* ConversationView.swift */,
+				714736364009AFB117556B81 /* ProjectsView.swift */,
+			);
+			path = Features;
+			sourceTree = "<group>";
+		};
+		F26F799D747451A9FFEB9BB1 /* FalconDeckNative */ = {
+			isa = PBXGroup;
+			children = (
+				06F7E8C4BA907396BEF51195 /* Assets.xcassets */,
+				B4F5B200EA896AD3877A6291 /* Info.plist */,
+				33966A101757F0923F8BC814 /* App */,
+				2A03809CAB2A01B885B34DED /* Data */,
+				54BDC54D64320C2892144E68 /* Design */,
+				E1031B3F2BB9C37EA151A6A9 /* Features */,
+			);
+			path = FalconDeckNative;
+			sourceTree = "<group>";
+		};
+/* End PBXGroup section */
+
+/* Begin PBXNativeTarget section */
+		5A41F6B9040D6096B4602C1D /* FalconDeckNativeTests */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = 0BFD48AD3D2FAE91AB87D4DB /* Build configuration list for PBXNativeTarget "FalconDeckNativeTests" */;
+			buildPhases = (
+				AB2F660B84F3D3DDA27CF7FF /* Sources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+				D3EF602FCA6A03974C4AE4ED /* PBXTargetDependency */,
+			);
+			name = FalconDeckNativeTests;
+			packageProductDependencies = (
+			);
+			productName = FalconDeckNativeTests;
+			productReference = 6E36500E629EEF10CD1C26D1 /* FalconDeckNativeTests.xctest */;
+			productType = "com.apple.product-type.bundle.unit-test";
+		};
+		C5041C9FCBD034C6F003ABE6 /* FalconDeckNative */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = D16DEFDCDC8006F9A923424C /* Build configuration list for PBXNativeTarget "FalconDeckNative" */;
+			buildPhases = (
+				9E3602C2C4F6B925391DD83D /* Generate native pilot icon */,
+				CB0D4A274F691421A64A2F14 /* Sources */,
+				F952E52D2D373350ADDEDF23 /* Resources */,
+				F2C870DEEBFFBE6A2A8EE5B2 /* Frameworks */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			name = FalconDeckNative;
+			packageProductDependencies = (
+				33E86D1F2E3B8C0C0ABC20E2 /* Sodium */,
+			);
+			productName = FalconDeckNative;
+			productReference = FFEF03D303D8B76B687E7BE3 /* FalconDeckNative.app */;
+			productType = "com.apple.product-type.application";
+		};
+/* End PBXNativeTarget section */
+
+/* Begin PBXProject section */
+		3F8122353E9610995751AF25 /* Project object */ = {
+			isa = PBXProject;
+			attributes = {
+				BuildIndependentTargetsInParallel = YES;
+				LastUpgradeCheck = 1430;
+				TargetAttributes = {
+					5A41F6B9040D6096B4602C1D = {
+						ProvisioningStyle = Automatic;
+					};
+					C5041C9FCBD034C6F003ABE6 = {
+						ProvisioningStyle = Automatic;
+					};
+				};
+			};
+			buildConfigurationList = F044BD1FE3125A9C5A173A08 /* Build configuration list for PBXProject "FalconDeckNative" */;
+			developmentRegion = en;
+			hasScannedForEncodings = 0;
+			knownRegions = (
+				Base,
+				en,
+			);
+			mainGroup = 24807DFF84FB5D2C28A5F438;
+			minimizedProjectReferenceProxies = 1;
+			packageReferences = (
+				BA281F30C947146A4653CE7D /* XCRemoteSwiftPackageReference "swift-sodium" */,
+			);
+			preferredProjectObjectVersion = 77;
+			productRefGroup = 156CF86E4D2E17625E7D99F7 /* Products */;
+			projectDirPath = "";
+			projectRoot = "";
+			targets = (
+				C5041C9FCBD034C6F003ABE6 /* FalconDeckNative */,
+				5A41F6B9040D6096B4602C1D /* FalconDeckNativeTests */,
+			);
+		};
+/* End PBXProject section */
+
+/* Begin PBXResourcesBuildPhase section */
+		F952E52D2D373350ADDEDF23 /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				70008635861DC82FD2717AA5 /* Assets.xcassets in Resources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXResourcesBuildPhase section */
+
+/* Begin PBXShellScriptBuildPhase section */
+		9E3602C2C4F6B925391DD83D /* Generate native pilot icon */ = {
+			isa = PBXShellScriptBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			inputFileListPaths = (
+			);
+			inputPaths = (
+				"$(SRCROOT)/scripts/generate-icon.swift",
+				"$(SRCROOT)/FalconDeckNative/Assets.xcassets/FalconMark.imageset/mark.svg",
+			);
+			name = "Generate native pilot icon";
+			outputFileListPaths = (
+			);
+			outputPaths = (
+				"$(SRCROOT)/FalconDeckNative/Assets.xcassets/AppIcon.appiconset/icon.png",
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+			shellPath = /bin/sh;
+			shellScript = "swift \"$SRCROOT/scripts/generate-icon.swift\" \"$SRCROOT/FalconDeckNative/Assets.xcassets/FalconMark.imageset/mark.svg\" \"$SRCROOT/FalconDeckNative/Assets.xcassets/AppIcon.appiconset/icon.png\"";
+		};
+/* End PBXShellScriptBuildPhase section */
+
+/* Begin PBXSourcesBuildPhase section */
+		AB2F660B84F3D3DDA27CF7FF /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				008E225D903390BE52A80725 /* ProtocolTests.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		CB0D4A274F691421A64A2F14 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				9C8F54D285C47D159D1CF07E /* ActivityView.swift in Sources */,
+				3F60571032B128CFC6A3E5ED /* AppModel.swift in Sources */,
+				BDA1AA96709537008B464C95 /* ConnectionView.swift in Sources */,
+				C57CBBAAE6B35D89B1ACDFB5 /* ConversationView.swift in Sources */,
+				61A230FF17B918EEF918E43C /* FalconDeckNativeApp.swift in Sources */,
+				539ED4DEA1B58B9A96B8F3B2 /* ProjectsView.swift in Sources */,
+				EAC9FA378D0945CAD1FAEE35 /* RelayClient.swift in Sources */,
+				5343B3A43B90C2948CCC6506 /* RelayCrypto.swift in Sources */,
+				D8E9D4506A116EF7A3F3F807 /* SessionVault.swift in Sources */,
+				0EF12FAE236A1A33C28E0A7A /* Theme.swift in Sources */,
+				785071928DB3C21192843E58 /* Wire.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXSourcesBuildPhase section */
+
+/* Begin PBXTargetDependency section */
+		D3EF602FCA6A03974C4AE4ED /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = C5041C9FCBD034C6F003ABE6 /* FalconDeckNative */;
+			targetProxy = 51D373AB5EAACA94B24656FE /* PBXContainerItemProxy */;
+		};
+/* End PBXTargetDependency section */
+
+/* Begin XCBuildConfiguration section */
+		152561DA0A77C06827E2C9B0 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				CODE_SIGN_IDENTITY = "iPhone Developer";
+				CURRENT_PROJECT_VERSION = 1;
+				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_FILE = FalconDeckNative/Info.plist;
+				INFOPLIST_KEY_CFBundleDisplayName = "Falcon Native";
+				INFOPLIST_KEY_UILaunchScreen_Generation = YES;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+				);
+				MARKETING_VERSION = 0.1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = com.falcondeck.pilot.native;
+				SDKROOT = iphoneos;
+				TARGETED_DEVICE_FAMILY = "1,2";
+			};
+			name = Debug;
+		};
+		185A2E3FEA7BD6BF1983F401 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				GENERATE_INFOPLIST_FILE = YES;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+					"@loader_path/Frameworks",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = com.falcondeck.pilot.FalconDeckNativeTests;
+				SDKROOT = iphoneos;
+				TARGETED_DEVICE_FAMILY = "1,2";
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/FalconDeckNative.app/FalconDeckNative";
+			};
+			name = Debug;
+		};
+		584547276005083CA0A3D084 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				CLANG_ANALYZER_NONNULL = YES;
+				CLANG_ANALYZER_NUMBER_OBJECT_CONVERSION = YES_AGGRESSIVE;
+				CLANG_CXX_LANGUAGE_STANDARD = "gnu++14";
+				CLANG_CXX_LIBRARY = "libc++";
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				CLANG_ENABLE_OBJC_WEAK = YES;
+				CLANG_WARN_BLOCK_CAPTURE_AUTORELEASING = YES;
+				CLANG_WARN_BOOL_CONVERSION = YES;
+				CLANG_WARN_COMMA = YES;
+				CLANG_WARN_CONSTANT_CONVERSION = YES;
+				CLANG_WARN_DEPRECATED_OBJC_IMPLEMENTATIONS = YES;
+				CLANG_WARN_DIRECT_OBJC_ISA_USAGE = YES_ERROR;
+				CLANG_WARN_DOCUMENTATION_COMMENTS = YES;
+				CLANG_WARN_EMPTY_BODY = YES;
+				CLANG_WARN_ENUM_CONVERSION = YES;
+				CLANG_WARN_INFINITE_RECURSION = YES;
+				CLANG_WARN_INT_CONVERSION = YES;
+				CLANG_WARN_NON_LITERAL_NULL_CONVERSION = YES;
+				CLANG_WARN_OBJC_IMPLICIT_RETAIN_SELF = YES;
+				CLANG_WARN_OBJC_LITERAL_CONVERSION = YES;
+				CLANG_WARN_OBJC_ROOT_CLASS = YES_ERROR;
+				CLANG_WARN_QUOTED_INCLUDE_IN_FRAMEWORK_HEADER = YES;
+				CLANG_WARN_RANGE_LOOP_ANALYSIS = YES;
+				CLANG_WARN_STRICT_PROTOTYPES = YES;
+				CLANG_WARN_SUSPICIOUS_MOVE = YES;
+				CLANG_WARN_UNGUARDED_AVAILABILITY = YES_AGGRESSIVE;
+				CLANG_WARN_UNREACHABLE_CODE = YES;
+				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
+				CODE_SIGN_STYLE = Automatic;
+				COPY_PHASE_STRIP = NO;
+				DEBUG_INFORMATION_FORMAT = dwarf;
+				ENABLE_STRICT_OBJC_MSGSEND = YES;
+				ENABLE_TESTABILITY = YES;
+				GCC_C_LANGUAGE_STANDARD = gnu11;
+				GCC_DYNAMIC_NO_PIC = NO;
+				GCC_NO_COMMON_BLOCKS = YES;
+				GCC_OPTIMIZATION_LEVEL = 0;
+				GCC_PREPROCESSOR_DEFINITIONS = (
+					"$(inherited)",
+					"DEBUG=1",
+				);
+				GCC_WARN_64_TO_32_BIT_CONVERSION = YES;
+				GCC_WARN_ABOUT_RETURN_TYPE = YES_ERROR;
+				GCC_WARN_UNDECLARED_SELECTOR = YES;
+				GCC_WARN_UNINITIALIZED_AUTOS = YES_AGGRESSIVE;
+				GCC_WARN_UNUSED_FUNCTION = YES;
+				GCC_WARN_UNUSED_VARIABLE = YES;
+				IPHONEOS_DEPLOYMENT_TARGET = 26.0;
+				MTL_ENABLE_DEBUG_INFO = INCLUDE_SOURCE;
+				MTL_FAST_MATH = YES;
+				ONLY_ACTIVE_ARCH = YES;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = iphoneos;
+				SWIFT_ACTIVE_COMPILATION_CONDITIONS = DEBUG;
+				SWIFT_OPTIMIZATION_LEVEL = "-Onone";
+				SWIFT_VERSION = 6.0;
+			};
+			name = Debug;
+		};
+		5C5DD60A8BC64EC3B4FE553E /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				CODE_SIGN_IDENTITY = "iPhone Developer";
+				CURRENT_PROJECT_VERSION = 1;
+				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_FILE = FalconDeckNative/Info.plist;
+				INFOPLIST_KEY_CFBundleDisplayName = "Falcon Native";
+				INFOPLIST_KEY_UILaunchScreen_Generation = YES;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+				);
+				MARKETING_VERSION = 0.1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = com.falcondeck.pilot.native;
+				SDKROOT = iphoneos;
+				TARGETED_DEVICE_FAMILY = "1,2";
+			};
+			name = Release;
+		};
+		905BA70581CBB00E2E28A76C /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				CLANG_ANALYZER_NONNULL = YES;
+				CLANG_ANALYZER_NUMBER_OBJECT_CONVERSION = YES_AGGRESSIVE;
+				CLANG_CXX_LANGUAGE_STANDARD = "gnu++14";
+				CLANG_CXX_LIBRARY = "libc++";
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				CLANG_ENABLE_OBJC_WEAK = YES;
+				CLANG_WARN_BLOCK_CAPTURE_AUTORELEASING = YES;
+				CLANG_WARN_BOOL_CONVERSION = YES;
+				CLANG_WARN_COMMA = YES;
+				CLANG_WARN_CONSTANT_CONVERSION = YES;
+				CLANG_WARN_DEPRECATED_OBJC_IMPLEMENTATIONS = YES;
+				CLANG_WARN_DIRECT_OBJC_ISA_USAGE = YES_ERROR;
+				CLANG_WARN_DOCUMENTATION_COMMENTS = YES;
+				CLANG_WARN_EMPTY_BODY = YES;
+				CLANG_WARN_ENUM_CONVERSION = YES;
+				CLANG_WARN_INFINITE_RECURSION = YES;
+				CLANG_WARN_INT_CONVERSION = YES;
+				CLANG_WARN_NON_LITERAL_NULL_CONVERSION = YES;
+				CLANG_WARN_OBJC_IMPLICIT_RETAIN_SELF = YES;
+				CLANG_WARN_OBJC_LITERAL_CONVERSION = YES;
+				CLANG_WARN_OBJC_ROOT_CLASS = YES_ERROR;
+				CLANG_WARN_QUOTED_INCLUDE_IN_FRAMEWORK_HEADER = YES;
+				CLANG_WARN_RANGE_LOOP_ANALYSIS = YES;
+				CLANG_WARN_STRICT_PROTOTYPES = YES;
+				CLANG_WARN_SUSPICIOUS_MOVE = YES;
+				CLANG_WARN_UNGUARDED_AVAILABILITY = YES_AGGRESSIVE;
+				CLANG_WARN_UNREACHABLE_CODE = YES;
+				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
+				CODE_SIGN_STYLE = Automatic;
+				COPY_PHASE_STRIP = NO;
+				DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym";
+				ENABLE_NS_ASSERTIONS = NO;
+				ENABLE_STRICT_OBJC_MSGSEND = YES;
+				GCC_C_LANGUAGE_STANDARD = gnu11;
+				GCC_NO_COMMON_BLOCKS = YES;
+				GCC_WARN_64_TO_32_BIT_CONVERSION = YES;
+				GCC_WARN_ABOUT_RETURN_TYPE = YES_ERROR;
+				GCC_WARN_UNDECLARED_SELECTOR = YES;
+				GCC_WARN_UNINITIALIZED_AUTOS = YES_AGGRESSIVE;
+				GCC_WARN_UNUSED_FUNCTION = YES;
+				GCC_WARN_UNUSED_VARIABLE = YES;
+				IPHONEOS_DEPLOYMENT_TARGET = 26.0;
+				MTL_ENABLE_DEBUG_INFO = NO;
+				MTL_FAST_MATH = YES;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = iphoneos;
+				SWIFT_COMPILATION_MODE = wholemodule;
+				SWIFT_OPTIMIZATION_LEVEL = "-O";
+				SWIFT_VERSION = 6.0;
+			};
+			name = Release;
+		};
+		CDB41EF1BC068EED4AE0C134 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				GENERATE_INFOPLIST_FILE = YES;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+					"@loader_path/Frameworks",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = com.falcondeck.pilot.FalconDeckNativeTests;
+				SDKROOT = iphoneos;
+				TARGETED_DEVICE_FAMILY = "1,2";
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/FalconDeckNative.app/FalconDeckNative";
+			};
+			name = Release;
+		};
+/* End XCBuildConfiguration section */
+
+/* Begin XCConfigurationList section */
+		0BFD48AD3D2FAE91AB87D4DB /* Build configuration list for PBXNativeTarget "FalconDeckNativeTests" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				185A2E3FEA7BD6BF1983F401 /* Debug */,
+				CDB41EF1BC068EED4AE0C134 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Debug;
+		};
+		D16DEFDCDC8006F9A923424C /* Build configuration list for PBXNativeTarget "FalconDeckNative" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				152561DA0A77C06827E2C9B0 /* Debug */,
+				5C5DD60A8BC64EC3B4FE553E /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Debug;
+		};
+		F044BD1FE3125A9C5A173A08 /* Build configuration list for PBXProject "FalconDeckNative" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				584547276005083CA0A3D084 /* Debug */,
+				905BA70581CBB00E2E28A76C /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Debug;
+		};
+/* End XCConfigurationList section */
+
+/* Begin XCRemoteSwiftPackageReference section */
+		BA281F30C947146A4653CE7D /* XCRemoteSwiftPackageReference "swift-sodium" */ = {
+			isa = XCRemoteSwiftPackageReference;
+			repositoryURL = "https://github.com/jedisct1/swift-sodium.git";
+			requirement = {
+				kind = exactVersion;
+				version = 0.11.0;
+			};
+		};
+/* End XCRemoteSwiftPackageReference section */
+
+/* Begin XCSwiftPackageProductDependency section */
+		33E86D1F2E3B8C0C0ABC20E2 /* Sodium */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = BA281F30C947146A4653CE7D /* XCRemoteSwiftPackageReference "swift-sodium" */;
+			productName = Sodium;
+		};
+/* End XCSwiftPackageProductDependency section */
+	};
+	rootObject = 3F8122353E9610995751AF25 /* Project object */;
+}
