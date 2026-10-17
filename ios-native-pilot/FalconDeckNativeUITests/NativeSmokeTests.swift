@@ -34,6 +34,18 @@ import XCTest
         XCTAssertTrue(app.staticTexts["Native UI regression"].waitForExistence(timeout: 5))
         XCTAssertEqual(app.state, .runningForeground)
         capture("Landscape automation saved")
+        app.terminate()
+        let chat = launchDemo()
+        sidebar(chat)
+        chat.buttons["sidebar-task-native"].tap()
+        XCTAssertTrue(chat.buttons["composer-model"].waitForExistence(timeout: 5))
+        XCTAssertTrue(chat.buttons["composer-model"].isHittable)
+        let latest = chat.staticTexts.matching(NSPredicate(format: "label CONTAINS %@", "Use the composer to continue the conversation")).firstMatch
+        let visible = XCTNSPredicateExpectation(predicate: NSPredicate { _, _ in
+            latest.exists && latest.isHittable && latest.frame.maxY <= chat.textFields["chat-input"].frame.minY - 8
+        }, object: nil)
+        XCTAssertEqual(XCTWaiter.wait(for: [visible], timeout: 5), .completed)
+        capture("Landscape conversation")
     }
     func testFirstSendCreatesTaskAndRendersMarkdown() {
         XCUIDevice.shared.orientation = .portrait
