@@ -24,13 +24,11 @@ import SwiftUI
 
 struct ActivityDiamond: View {
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
-    @State private var rotate = false
     var body: some View {
         Image(systemName: "diamond.fill")
             .font(.caption2).foregroundStyle(FD.accent)
-            .rotationEffect(.degrees(rotate && !reduceMotion ? 180 : 0))
-            .animation(reduceMotion ? nil : .easeInOut(duration: 1.5).repeatForever(autoreverses: true), value: rotate)
-            .onAppear { rotate = true }
+            // Animate the symbol, so transcript reflow cannot animate its placement.
+            .symbolEffect(.pulse, options: .repeating, isActive: !reduceMotion)
             .accessibilityLabel("Loading")
     }
 }
