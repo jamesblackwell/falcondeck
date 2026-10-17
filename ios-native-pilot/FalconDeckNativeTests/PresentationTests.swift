@@ -1,0 +1,83 @@
+import XCTest
+@testable import FalconDeckNative
+
+final class PresentationTests: XCTestCase {
+    func testHarnessProjectionHidesScaffoldingAndKeepsTypedQuery() {
+        XCTAssertEqual(UserTextProjection.project("<environment_context>private scaffold</environment_context>\n<user_query>Hello 👋</user_query>"), .prompt("Hello 👋", automated: false))
+        XCTAssertEqual(UserTextProjection.project("# AGENTS.md instructions for /project\n<INSTRUCTIONS>rules</INSTRUCTIONS>"), .hidden)
+        XCTAssertEqual(UserTextProjection.project("<environment_context>half a streamed block"), .hidden)
+        XCTAssertEqual(UserTextProjection.project("<falcondeck_automation>Sent by scheduled task</falcondeck_automation>\nRun tests"), .prompt("Run tests", automated: true))
+        XCTAssertEqual(UserTextProjection.project("<system-reminder>FalconDeck resume: continue</system-reminder>"), .service("Resumed after FalconDeck closed"))
+    }
+    func testSkillEchoDeduplicationDoesNotDropImageOnlyMessages() {
+        let text = "Use the FalconDeck skill defined at /skills/a.md. Follow it as the governing skill for this request.\nHello"
+        let rows = [message("u1", kind: "user_message", text: "Hello"), message("t", kind: "tool_call"), message("u2", kind: "user_message", text: text), Message(.object(["id": .string("image"), "kind": .string("user_message"), "text": .string("<environment_context>hidden</environment_context>"), "attachments": .array([.object(["url": .string("example")])])]))]
+        let projected = UserTextProjection.messages(rows)
+        XCTAssertEqual(projected.map(\.id), ["u1", "t", "image"])
+        XCTAssertEqual(projected.last?.text, "")
+    }
+    func testCollapsedToolRunsKeepFailuresOutsideTheFold() {
+        let rows = [message("t1", kind: "tool_call"), message("r", kind: "reasoning"), message("t2", kind: "tool_call"), Message(message("error", kind: "tool_call").raw.setting("status", .string("failed")))]
+        let blocks = TranscriptBlock.build(rows, preferences: ConversationPreferences(raw: .null), running: false)
+        XCTAssertEqual(blocks.count, 2)
+        XCTAssertTrue(blocks[0].grouped)
+        XCTAssertEqual(blocks[0].items.map(\.id), ["t1", "r", "t2"])
+        XCTAssertFalse(blocks[1].grouped)
+    }
+    func testOnlyTrailingReasoningRemainsStreaming() {
+        let rows = [Message(message("r1", kind: "reasoning").raw.setting("lifecycle", .string("streaming"))), Message(message("r2", kind: "reasoning").raw.setting("lifecycle", .string("streaming")))]
+        let blocks = TranscriptBlock.build(rows, preferences: ConversationPreferences(raw: .null), running: true)
+        XCTAssertFalse(blocks[0].items[0].streaming)
+        XCTAssertTrue(blocks[1].items[0].streaming)
+    }
+    func testSummaryOrderingParsesFractionalSecondsAndProtectsTerminalState() {
+        let current = JSON.object(["updated_at": .string("2026-10-17T10:00:00.12Z"), "status": .string("idle")])
+        let old = current.setting("updated_at", .string("2026-10-17T10:00:00.1Z")).setting("status", .string("running"))
+        XCTAssertTrue(TaskSummaryOrder.isStale(old, comparedTo: current))
+        XCTAssertTrue(TaskSummaryOrder.isStale(current.setting("status", .string("running")), comparedTo: current))
+        XCTAssertFalse(TaskSummaryOrder.isStale(current.setting("updated_at", .string("2026-10-17T10:00:00.13Z")).setting("status", .string("running")), comparedTo: current))
+    }
+    private func message(_ id: String, kind: String, text: String = "") -> Message { Message(.object(["id": .string(id), "kind": .string(kind), "text": .string(text)])) }
+}
+
+@MainActor final class DraftRecoveryTests: XCTestCase {
+    func testDraftStorageIsEncryptedAndIsolatedByPairing() async throws {
+        let root = FileManager.default.temporaryDirectory.appending(path: UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let secret = Data(repeating: 7, count: 32)
+        let session = SavedSession(relay: URL(string: "https://relay.example")!, sessionID: "one", deviceID: "device", token: "unused", secret: secret, daemonKey: "unused", daemonIdentity: "unused")
+        let store = try DraftStore(session: session, root: root)
+        let value = SavedDraft(id: "task", text: "Private recovery text", attachments: [], modelID: "model", effort: "high", provider: "codex", overrides: [:])
+        try await store.save(value); try await store.saveSelection(.task("task"))
+        let loaded = try await store.load()
+        XCTAssertEqual(loaded.first?.text, value.text)
+        let selected = try await store.loadSelection()
+        XCTAssertEqual(selected, .task("task"))
+        let files = FileManager.default.enumerator(at: root, includingPropertiesForKeys: nil)!.allObjects.compactMap { $0 as? URL }.filter { $0.pathExtension == "draft" }
+        XCTAssertFalse(String(decoding: try Data(contentsOf: XCTUnwrap(files.first)), as: UTF8.self).contains(value.text))
+        let other = SavedSession(relay: session.relay, sessionID: "two", deviceID: "device", token: "unused", secret: secret, daemonKey: "unused", daemonIdentity: "unused")
+        let second = try DraftStore(session: other, root: root)
+        let empty = try await second.load()
+        XCTAssertTrue(empty.isEmpty)
+    }
+    func testUnconfirmedRecoveryNeverDuplicatesTextAcrossRelaunches() {
+        let pending = SavedSubmission(id: "submitted", text: "Sent text", attachments: [])
+        let value = SavedDraft(id: "task", text: "New text", attachments: [], modelID: "", effort: "", provider: "codex", overrides: [:], submission: pending)
+        let chat = ChatSession(); chat.restore(value)
+        XCTAssertEqual(chat.draft, "Sent text\n\nNew text")
+        let next = ChatSession(); next.restore(chat.saved(id: "task"))
+        XCTAssertEqual(next.draft, chat.draft)
+        next.transcript.upsert(Message(.object(["id": .string("submitted"), "kind": .string("user_message"), "text": .string("Sent text")])))
+        next.settleSubmission()
+        XCTAssertNil(next.submission)
+        XCTAssertEqual(next.draft, "New text")
+    }
+    func testAnAlreadyDeliveredRecoveredDraftIsClearedAfterHistoryLoads() {
+        let chat = ChatSession()
+        chat.restore(SavedDraft(id: "task", text: "", attachments: [], modelID: "", effort: "", provider: "codex", overrides: [:], submission: SavedSubmission(id: "submitted", text: "Sent text", attachments: [])))
+        chat.transcript.upsert(Message(.object(["id": .string("submitted"), "kind": .string("user_message"), "text": .string("Sent text")])))
+        chat.settleSubmission()
+        XCTAssertEqual(chat.draft, "")
+        XCTAssertNil(chat.submission)
+    }
+}

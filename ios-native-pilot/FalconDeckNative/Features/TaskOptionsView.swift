@@ -10,7 +10,7 @@ struct TaskOptionsView: View {
     @State private var goal = false
     @State private var compact = false
     @State private var instructions = ""
-    private var task: AgentTask? { model.tasks.first { $0.id == taskID } }
+    private var task: AgentTask? { model.task(taskID) }
     var body: some View {
         NavigationStack {
             Form {
@@ -93,7 +93,7 @@ struct ArchivedTasksView: View {
             if let error { Text(error).foregroundStyle(.orange) }
             ForEach(model.archivedTasks.filter { search.isEmpty || $0.title.localizedCaseInsensitiveContains(search) }) { task in
                 HStack {
-                    VStack(alignment: .leading) { Text(task.title); Text(task.provider.capitalized).font(.caption).foregroundStyle(FD.secondary) }
+                    Button { model.selection = .task(task.id) } label: { VStack(alignment: .leading) { Text(task.title); Text(task.provider.capitalized).font(.caption).foregroundStyle(FD.secondary) }.frame(maxWidth: .infinity, alignment: .leading) }.buttonStyle(.plain)
                     Spacer()
                     Button("Restore") {
                         pending = task.id

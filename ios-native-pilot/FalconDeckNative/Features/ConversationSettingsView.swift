@@ -64,8 +64,7 @@ struct NotificationSettingsView: View {
                 Toggle("Completed turns", isOn: preference("notify_on_turn_complete"))
                 Toggle("Approvals and questions", isOn: preference("notify_on_input_required"))
                 Toggle("Failed turns", isOn: preference("notify_on_error"))
-                Toggle("Suppress while computer is active", isOn: preference("suppress_when_desktop_active"))
-            } header: { Text("Notify me about") } footer: { Text("These event preferences are stored on your computer and apply to all paired clients.") }.listRowBackground(FD.surface)
+            } header: { Text("Notify me about") } footer: { Text("These event preferences are stored on your computer and apply to all paired clients. Connected native alerts cannot detect desktop activity.") }.listRowBackground(FD.surface)
                 .disabled(pending || (!model.demo && !model.connected))
             if let error { Text(error).foregroundStyle(.orange) }
         }.scrollContentBackground(.hidden).background(FD.background).navigationTitle("Notifications")

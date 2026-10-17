@@ -34,15 +34,15 @@ struct RootView: View {
             NavigationStack {
                 switch model.selection {
                 case .task(let id):
-                    if let task = model.tasks.first(where: { $0.id == id }) {
+                    if let task = model.task(id) {
                         ConversationView(task: task).id(id)
-                    } else { ProjectsView() }
+                    } else { StartView() }
                 case .draft(let projectID, let folderID): DraftConversationView(projectID: projectID, folderID: folderID)
                 case .activity: ActivityView()
                 case .archived: ArchivedTasksView()
                 case .settings: SettingsView()
                 case .automations: AutomationsView()
-                default: ProjectsView()
+                default: StartView()
                 }
             }.id(model.selection)
         }
@@ -57,7 +57,7 @@ struct RootView: View {
         .overlay(alignment: .topTrailing) { if showPerformance { PerformanceOverlay() } }
         .sheet(item: Binding(get: { model.taskOptionsID.map { TaskOptionsTarget(id: $0) } }, set: { model.taskOptionsID = $0?.id })) { target in TaskOptionsView(taskID: target.id) }
         .onChange(of: scenePhase) { _, phase in
-            if phase == .active && model.hasSession && !model.demo { Task { if model.connected { await model.refresh() } else { await model.reconnect() } } }
+            model.setForeground(phase == .active)
         }
     }
 }

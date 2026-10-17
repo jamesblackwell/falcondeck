@@ -46,9 +46,12 @@ protocol RelayServing: Sendable {
     func restore(connectionID: UUID) async throws -> Bool
     func disconnect(forget: Bool) async throws
     func refresh() async
+    func selectThread(_ id: String?) async
     func detail(task: AgentTask, before: String?) async throws -> JSON
     func call(_ method: String, params: JSON) async throws -> JSON
 }
+
+extension RelayServing { func selectThread(_ id: String?) async { } }
 
 /// Owns networking and cryptography off the UI actor. A fresh daemon snapshot
 /// anchors every connection; ordered live events follow it. No history DB or
@@ -63,6 +66,9 @@ actor RelayClient: RelayServing {
     private var generation = UUID()
     private var sink: AsyncStream<RelayUpdate>.Continuation?
     private var pending: [String: CheckedContinuation<JSON, Error>] = [:]
+    private var rpcReady: Bool?
+    private var selectedThread: String?
+    private var refreshed = Date.distantPast
     private var refreshInFlight = false
     private var lastReceived = Date.now
     private var lastBootstrapRequest = Date.distantPast
@@ -70,6 +76,8 @@ actor RelayClient: RelayServing {
     private var transferID = 0
     private var bulkSending = false
     private var acknowledgements: [String: CheckedContinuation<Void, Error>] = [:]
+
+    func selectThread(_ id: String?) { selectedThread = id }
 
     func events() -> AsyncStream<RelayUpdate> {
         let (stream, continuation) = AsyncStream<RelayUpdate>.makeStream()
@@ -124,7 +132,7 @@ actor RelayClient: RelayServing {
         generation = UUID()
         reader?.cancel(); heartbeat?.cancel()
         socket?.cancel(with: .goingAway, reason: nil)
-        socket = nil; session = nil; refreshInFlight = false; bulkSending = false
+        socket = nil; session = nil; rpcReady = nil; refreshInFlight = false; bulkSending = false
         bufferedEvents = []
         failPending(PilotError("The connection closed."))
         if forget { try SessionVault.clear() }
@@ -155,7 +163,7 @@ actor RelayClient: RelayServing {
                     try await self.send(.object(["type": .string("ping")]))
                     guard current == self.generation else { return }
                     if self.session?.dataKey == nil { try await self.requestBootstrap() }
-                    else { await self.refresh() }
+                    else if Date.now.timeIntervalSince(self.refreshed) > 60 { await self.refresh() }
                 } catch is CancellationError { return }
                 catch { self.connectionFailed(error, generation: current); return }
             }
@@ -267,6 +275,7 @@ actor RelayClient: RelayServing {
     }
 
     private func applyPresence(_ presence: JSON) {
+        rpcReady = presence["daemon_connected"].bool && presence["daemon_rpc_ready"] != .bool(false)
         guard presence["daemon_connected"].bool else {
             emit(.status("Computer offline", connected: false)); return
         }
@@ -288,17 +297,27 @@ actor RelayClient: RelayServing {
         Task { if current == self.generation { await self.refresh() } }
     }
     func refresh() async {
-        guard session?.dataKey != nil, !refreshInFlight else { return }
+        guard session?.dataKey != nil, rpcReady != false, !refreshInFlight else { return }
         refreshInFlight = true
         bufferedEvents = []
         let current = generation
         defer { if current == generation { refreshInFlight = false } }
         do {
-            let result = try await call("snapshot.current", params: .object([
-                "include_archived_threads": .bool(false), "include_thread_plans": .bool(false),
-                "include_thread_diffs": .bool(false), "include_agent_skills": .bool(false), "include_workspace_skills": .bool(false)
-            ]))
+            let result: JSON
+            do {
+                let index = try await call("sync.index", params: .object(["selected_thread_id": selectedThread.map(JSON.string) ?? .null]))
+                result = try CompactSync.expand(index)
+            } catch {
+                // Compatibility only: a timeout must not start a larger fetch.
+                let message = error.localizedDescription.lowercased()
+                guard message.contains("method_unavailable") || message.contains("not registered") || message.contains("unsupported") && message.contains("sync.index") else { throw error }
+                result = try await call("snapshot.current", params: .object([
+                    "include_archived_threads": .bool(false), "include_thread_plans": .bool(false),
+                    "include_thread_diffs": .bool(false), "include_agent_skills": .bool(false), "include_workspace_skills": .bool(false)
+                ]))
+            }
             guard current == generation else { return }
+            refreshed = .now
             emit(.snapshot(result))
             emit(.rebase(bufferedEvents)); bufferedEvents = []
             emit(.status("Connected", connected: true))
@@ -320,7 +339,7 @@ actor RelayClient: RelayServing {
     }
 
     func call(_ method: String, params: JSON) async throws -> JSON {
-        let allowed = ["snapshot.current", "thread.detail", "thread.start", "thread.update", "thread.archive", "thread.mark_read", "thread.mark_unread", "thread.unarchive", "thread.fork", "thread.suggestTitle", "thread.goal.set", "thread.goal.clear", "thread.compact", "thread.queue.remove", "thread.queue.edit", "thread.queue.steer", "thread.queue.attachment_preview", "chat.create", "provider.hydrate", "workspace.skills", "workspace.prompts", "thread.item", "control.get", "control.execute", "speech.status", "speech.models", "speech.transcribe", "speech.synthesize", "turn.start", "turn.interrupt", "preferences.update", "interactive.respond"]
+        let allowed = ["sync.index", "sync.threads", "sync.extensions", "snapshot.current", "thread.detail", "thread.start", "thread.update", "thread.archive", "thread.mark_read", "thread.mark_unread", "thread.unarchive", "thread.fork", "thread.suggestTitle", "thread.goal.set", "thread.goal.clear", "thread.compact", "thread.queue.remove", "thread.queue.edit", "thread.queue.steer", "thread.queue.attachment_preview", "chat.create", "provider.hydrate", "workspace.skills", "workspace.prompts", "thread.item", "control.get", "control.execute", "speech.status", "speech.models", "speech.transcribe", "speech.synthesize", "turn.start", "turn.interrupt", "preferences.update", "interactive.respond"]
         guard allowed.contains(method), let key = session?.dataKey, socket != nil else {
             throw PilotError("Connect to your computer first.")
         }

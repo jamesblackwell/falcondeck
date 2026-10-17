@@ -63,7 +63,7 @@ struct SidebarView: View {
                         Button { editFolder(projectID: project.id) } label: { Label("New folder", systemImage: "folder.badge.plus") }
                         ShareLink(item: project.path) { Label("Share project path", systemImage: "square.and.arrow.up") }
                     }
-                    if isOpen { projectContents(project) }
+                    if isOpen { projectContents(project).task(id: project.id) { await model.loadTaskPage(project.id) } }
                 }
             }
             if model.projects.isEmpty {
@@ -166,7 +166,7 @@ struct SidebarView: View {
                 Button { editFolder(projectID: project.id, folder: folder) } label: { Label("Rename folder", systemImage: "pencil") }
                 Button("Delete folder", systemImage: "trash", role: .destructive) { deleteFolder = folder }
             }
-            if isOpen { taskPage(children, key: folder.id, indent: 40) }
+            if isOpen { taskPage(children, key: folder.id, indent: 40).task(id: folder.id) { await model.loadTaskPage(project.id, folderID: folder.id) } }
         }
         taskPage(tasks.filter { !$0.pinnedInProject && !filed.contains($0.id) }, key: project.id, indent: 20)
         Button { newTask(project) } label: { Label("New task", systemImage: "plus").font(.subheadline).foregroundStyle(FD.secondary).padding(.leading, 20) }
@@ -174,8 +174,14 @@ struct SidebarView: View {
     @ViewBuilder private func taskPage(_ tasks: [AgentTask], key: String, indent: CGFloat) -> some View {
         let limit = search.isEmpty ? limits[key, default: 5] : tasks.count
         ForEach(tasks.prefix(limit)) { taskLink($0, indent: indent) }
-        if tasks.count > limit {
-            Button("Show more (\(tasks.count - limit))") { limits[key] = limit + 10 }.font(.caption).foregroundStyle(FD.secondary).padding(.leading, indent)
+        let folder = model.folders.first { $0.id == key }
+        let projectID = folder?.projectID ?? key
+        if tasks.count > limit || model.hasMoreTasks(projectID, folderID: folder?.id) {
+            Button("Show more") {
+                limits[key] = limit + 10
+                Task { await model.loadTaskPage(projectID, folderID: folder?.id) }
+            }.font(.caption).foregroundStyle(FD.secondary).padding(.leading, indent)
+                .disabled(model.taskPageLoads.contains(CompactSync.key(project: projectID, folder: folder?.id)))
         }
     }
     private func taskLink(_ task: AgentTask, indent: CGFloat = 0) -> some View {

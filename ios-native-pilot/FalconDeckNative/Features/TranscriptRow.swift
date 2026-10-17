@@ -4,11 +4,16 @@ struct TranscriptRow: View {
     @Environment(AppModel.self) private var model
     let message: Message
     var task: AgentTask? = nil
+    var firstDiff = false
+    var expansion: TranscriptExpansion? = nil
     @State private var expanded = false
+    @State private var longMessageExpanded = false
     @State private var userToggled = false
     @State private var fullOutput: String?
     @State private var loadingOutput = false
     @State private var showOutput = false
+    private var preferences: ConversationPreferences { ConversationPreferences(raw: model.preferences["conversation"]) }
+    private var open: Binding<Bool> { Binding(get: { userToggled ? expanded : preferences.opens(message, firstDiff: firstDiff) }, set: { userToggled = true; expanded = $0 }) }
     var body: some View {
         Group {
             switch message.kind {
@@ -21,9 +26,14 @@ struct TranscriptRow: View {
                 DisclosureGroup { NativeCodeBlock(content: (try? message.raw["payload"].wireText()) ?? "", language: "Details") } label: { Label(message.raw["title"].string.nonempty ?? "Realtime activity", systemImage: "waveform").font(.footnote).foregroundStyle(FD.secondary) }
             case "unsupported": unsupported
             case "reasoning":
-                DisclosureGroup(isExpanded: Binding(get: { userToggled ? expanded : message.streaming }, set: { userToggled = true; expanded = $0 })) {
+                DisclosureGroup(isExpanded: open) {
                     NativeMarkdown(text: message.text).padding(.leading, 12).overlay(alignment: .leading) { Rectangle().fill(FD.line).frame(width: 2) }
-                } label: { Label(message.streaming ? "Thinking…" : "Thinking", systemImage: "brain").font(.footnote).foregroundStyle(FD.secondary) }
+                } label: {
+                    VStack(alignment: .leading, spacing: 5) {
+                        Label(message.streaming ? "Thinking…" : "Thinking", systemImage: "brain").font(.footnote)
+                        if preferences.thinking == "preview", !open.wrappedValue { Text(message.text).font(.caption).lineLimit(2) }
+                    }.foregroundStyle(FD.secondary)
+                }
             case "tool_call": tool
             case "plan":
                 DisclosureGroup {
@@ -32,9 +42,9 @@ struct TranscriptRow: View {
                     }
                 } label: { Label("Plan", systemImage: "checklist").font(.footnote).foregroundStyle(FD.secondary) }
             case "diff":
-                DisclosureGroup { NativeCodeBlock(content: message.text, language: "diff") } label: { Label("Changes", systemImage: "plus.forwardslash.minus").font(.footnote).foregroundStyle(FD.secondary) }
+                DisclosureGroup(isExpanded: open) { NativeCodeBlock(content: message.text, language: "diff") } label: { Label("Changes", systemImage: "plus.forwardslash.minus").font(.footnote).foregroundStyle(FD.secondary) }
             case "file_change":
-                DisclosureGroup {
+                DisclosureGroup(isExpanded: open) {
                     ForEach(message.raw["changes"].array, id: \.self) { change in
                         VStack(alignment: .leading, spacing: 8) {
                             Text(change["path"].string).font(.caption.monospaced()).foregroundStyle(FD.secondary)
@@ -48,18 +58,23 @@ struct TranscriptRow: View {
             default: unsupported
             }
         }.frame(maxWidth: .infinity, alignment: .leading)
+        .onChange(of: expansion) { _, directive in if let directive { userToggled = true; expanded = directive.expanded } }
         .sheet(isPresented: $showOutput) { if let fullOutput { TextDocumentView(title: message.raw["title"].string.nonempty ?? "Tool output", text: fullOutput) } }
     }
     private var messageBody: some View {
         VStack(alignment: .leading, spacing: 10) {
             HStack(spacing: 7) {
                 Image(systemName: message.kind == "user_message" ? "person.crop.circle" : "sparkle")
-                Text(message.kind == "user_message" ? "You" : "Assistant").fontWeight(.medium)
+                Text(message.kind == "user_message" ? (message.raw["automated"].bool ? "Scheduled task" : "You") : "Assistant").fontWeight(.medium)
                 Spacer()
                 if message.raw["pending"].bool { Text("Sending…").foregroundStyle(FD.muted) }
             }.font(.caption).foregroundStyle(message.kind == "user_message" ? FD.secondary : FD.accent)
             ForEach(message.raw["attachments"].array, id: \.self) { reference in MediaImageView(reference: reference, itemID: message.id, task: task) }
-            if message.kind == "user_message" { Text(message.text).font(.body).lineSpacing(4).textSelection(.enabled) }
+            if message.kind == "user_message" {
+                let long = preferences.flag("collapse_long_user_messages") && (message.text.count > 900 || message.text.filter { $0 == "\n" }.count > 12)
+                Text(message.text).font(.body).lineSpacing(4).lineLimit(long && !longMessageExpanded ? 12 : nil).textSelection(.enabled)
+                if long { Button(longMessageExpanded ? "Show less" : "Show more") { longMessageExpanded.toggle() }.font(.caption).foregroundStyle(FD.accent) }
+            }
             else { NativeMarkdown(text: message.text) }
             if message.kind != "user_message", !message.text.isEmpty {
                 HStack(spacing: 18) {
@@ -86,7 +101,7 @@ struct TranscriptRow: View {
     }
     private var tool: some View {
         let bordered = ["execute", "edit", "terminal", "command"].contains(message.raw["tool_kind"].string)
-        return DisclosureGroup(isExpanded: $expanded) {
+        return DisclosureGroup(isExpanded: open) {
             if !message.text.isEmpty { NativeCodeBlock(content: String(message.text.prefix(16000)), language: "Output") }
             else { Text("No output recorded.").font(.footnote).foregroundStyle(FD.secondary) }
             if message.raw["display"]["output_total_bytes"] != .null || message.text.count > 16000 {

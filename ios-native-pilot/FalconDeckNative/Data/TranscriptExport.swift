@@ -4,7 +4,7 @@ enum TranscriptExport {
     static func markdown(_ items: [Message], title: String, partial: Bool) -> String {
         var blocks = ["# \(title)"]
         if partial { blocks.append("> Partial export: earlier messages are not loaded.") }
-        for item in items {
+        for item in UserTextProjection.messages(items) {
             switch item.kind {
             case "user_message", "assistant_message", "code_review":
                 let label = item.kind == "user_message" ? "You" : item.kind == "code_review" ? "Code review" : "Assistant"

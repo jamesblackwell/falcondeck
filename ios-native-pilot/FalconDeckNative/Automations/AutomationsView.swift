@@ -98,7 +98,7 @@ struct AutomationHistoryView: View {
                         if let date = AutomationDraft.parseDate(run["started_at"].string.nonempty ?? run["queued_at"].string) { Text(date.formatted(date: .abbreviated, time: .shortened)).font(.caption).foregroundStyle(FD.secondary) }
                         Text(run["outcome_preview"].string.nonempty ?? run["error"]["message"].string).font(.footnote)
                         if let id = run["thread_id"].string.nonempty {
-                            Button("Open task") { model.selection = .task(id); dismiss() }
+                            Button("Open task") { Task { await model.openTask(id) }; dismiss() }
                         }
                     }.listRowBackground(FD.surface)
                 }

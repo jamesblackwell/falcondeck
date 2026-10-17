@@ -4,7 +4,7 @@ struct ConversationView: View {
     @Environment(AppModel.self) private var model
     let task: AgentTask
     @State private var chat: ChatSession?
-    private var current: AgentTask { model.tasks.first { $0.id == task.id } ?? task }
+    private var current: AgentTask { model.task(task.id) ?? task }
     var body: some View {
         Group {
             if let chat { ChatContent(task: current, chat: chat) }
@@ -28,9 +28,12 @@ private struct ChatContent: View {
     @State private var followLatest = true
     @State private var userScrolling = false
     @State private var showGoal = false
+    @State private var expansion: TranscriptExpansion?
     private var project: Project? { model.projects.first { $0.id == task.projectID } }
     private var requests: [JSON] { model.requests.filter { $0["thread_id"].string == task.id } }
 
+    private var preferences: ConversationPreferences { ConversationPreferences(raw: model.preferences["conversation"]) }
+    private var blocks: [TranscriptBlock] { TranscriptBlock.build(chat.transcript.items, preferences: preferences, running: task.running) }
     var body: some View {
         ScrollViewReader { proxy in
             ScrollView {
@@ -46,7 +49,10 @@ private struct ChatContent: View {
                     if chat.loaded && chat.transcript.items.isEmpty {
                         ContentUnavailableView("What are we working on?", systemImage: "sparkle", description: Text("Send a message to \(task.provider.capitalized) to get started."))
                     }
-                    ForEach(chat.transcript.items) { item in TranscriptRow(message: item, task: task).id(item.id) }
+                    ForEach(blocks) { block in
+                        if block.grouped { TranscriptGroup(block: block, task: task, expansion: expansion).id(block.id) }
+                        else if let item = block.items.first { TranscriptRow(message: item, task: task, firstDiff: block.firstDiff, expansion: expansion).id(item.id) }
+                    }
                     if task.running {
                         HStack(spacing: 8) { ActivityDiamond(); Text("\(task.provider.capitalized) is working…").font(.footnote).foregroundStyle(FD.secondary) }.padding(.vertical, 8)
                     }
@@ -77,6 +83,11 @@ private struct ChatContent: View {
         }
         .background(FD.background).navigationTitle(task.title.nonempty ?? "New task").navigationBarTitleDisplayMode(.inline)
         .toolbar {
+            if preferences.flag("show_expand_all_controls"), !chat.transcript.items.isEmpty {
+                ToolbarItem(placement: .topBarTrailing) {
+                    Menu { Button("Expand all activity") { expansion = TranscriptExpansion(expanded: true) }; Button("Collapse all activity") { expansion = TranscriptExpansion(expanded: false) } } label: { Image(systemName: "line.3.horizontal.decrease") }.accessibilityLabel("Transcript display")
+                }
+            }
             ToolbarItem(placement: .topBarTrailing) {
                 if !task.isDraft {
                     Button { model.taskOptionsID = task.id } label: { Image(systemName: "ellipsis") }.accessibilityLabel("Task options")
@@ -103,7 +114,11 @@ private struct ChatContent: View {
                     }.font(.footnote).foregroundStyle(.orange).padding(12).background(FD.surface, in: .rect(cornerRadius: 12))
                 }
                 if let notice = chat.notice { Text(notice).font(.footnote).foregroundStyle(FD.secondary).onTapGesture { chat.notice = nil } }
-                ComposerView(task: task, project: project, chat: chat)
+                if task.archived {
+                    Button("Restore task to continue", systemImage: "arrow.uturn.backward") {
+                        Task { do { try await model.unarchive(task) } catch { chat.error = error.localizedDescription } }
+                    }.buttonStyle(.glassProminent).disabled(!model.demo && !model.connected)
+                } else { ComposerView(task: task, project: project, chat: chat) }
             }
             .padding(.horizontal, 12).padding(.top, 8).padding(.bottom, 8).frame(maxWidth: 844).frame(maxWidth: .infinity)
         }

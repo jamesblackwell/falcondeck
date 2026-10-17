@@ -1,32 +1,8 @@
 import Foundation
 import Observation
 
-enum Destination: Hashable {
+enum Destination: Hashable, Codable {
     case projects, activity, settings, automations, archived, task(String), draft(String, String?)
-}
-
-@MainActor @Observable
-final class ChatSession {
-    var transcript = Transcript()
-    var draft = ""
-    var modelID = ""
-    var effort = ""
-    var provider = ""
-    var overrides: [String: JSON] = [:]
-    var attachments: [NativeAttachment] = []
-    var pendingQueue: [QueuedDraft] = []
-    var preparingAttachments = false
-    var loading = false
-    var loaded = false
-    var sending = false
-    var stopping = false
-    var hasOlder = false
-    var oldestID: String?
-    var error: String?
-    var notice: String?
-    var bufferedEvents: [JSON] = []
-    var loadID = UUID()
-    var bufferOverflowed = false
 }
 
 @MainActor @Observable
@@ -40,8 +16,10 @@ final class AppModel {
 
     init(relay: any RelayServing = RelayClient()) {
         self.relay = relay
-        notifications.openTask = { [weak self] id in self?.selection = .task(id) }
+        notifications.openTask = { [weak self] id in Task { await self?.openTask(id) } }
     }
+    var syncIndex: CompactSync?
+    var taskPageLoads: Set<String> = []
     var projects: [Project] = []
     var tasks: [AgentTask] = [] {
         didSet {
@@ -56,8 +34,8 @@ final class AppModel {
         }
     }
     private var taskGroups: [String: [AgentTask]] = [:]
-    @ObservationIgnored private var pendingSummaries: [String: JSON] = [:]
-    @ObservationIgnored private var summaryFlush: Task<Void, Never>?
+    @ObservationIgnored var pendingSummaries: [String: JSON] = [:]
+    @ObservationIgnored var summaryFlush: Task<Void, Never>?
     var connected = false
     var status = "Not connected"
     var error: String?
@@ -67,7 +45,19 @@ final class AppModel {
     var refreshedAt: Date?
     var showConnection = false
     var pairingText = ""
-    var selection: Destination? = .projects
+    var selection: Destination? = .projects {
+        didSet {
+            let selected: String? = { if case .task(let id) = selection { return id }; return nil }()
+            Task { await relay.selectThread(selected) }
+            guard !demo, let store = draftStore else { return }
+            let value = selection
+            Task { try? await store.saveSelection(value) }
+        }
+    }
+    @ObservationIgnored var draftStore: DraftStore?
+    @ObservationIgnored var savedDrafts: [String: SavedDraft] = [:]
+    @ObservationIgnored var draftSaves: [String: Task<Void, Never>] = [:]
+    @ObservationIgnored var pendingSelection: Destination?
     var preferences = JSON.object([:])
     var requests: [JSON] = []
     var archivedTasks: [AgentTask] = []
@@ -80,8 +70,13 @@ final class AppModel {
     @ObservationIgnored var itemCache: [String: JSON] = [:]
     @ObservationIgnored var itemCacheOrder: [String] = []
     var chats: [String: ChatSession] = [:]
-    private var lastEventSeq = 0
+    var lastEventSeq = 0
     private var observation: Task<Void, Never>?
+    @ObservationIgnored var reconnectTask: Task<Void, Never>?
+    @ObservationIgnored private var networkMonitor: NetworkMonitor?
+    var reconnectAttempt = 0
+    var networkAvailable = true
+    var foreground = true
 
     func start() async {
         guard observation == nil else { return }
@@ -92,50 +87,34 @@ final class AppModel {
                 self.receive(event)
             }
         }
+        networkMonitor = NetworkMonitor { [weak self] available in
+            guard let self else { return }
+            let recovered = available && !self.networkAvailable
+            self.networkAvailable = available
+            if recovered { self.reconnectAttempt = 0; self.scheduleReconnect() }
+            if !available { self.reconnectTask?.cancel(); self.reconnectTask = nil }
+        }
         if ProcessInfo.processInfo.arguments.contains("--demo") { await useDemo(); return }
         let current = connectionID
+        hasSession = (try? SessionVault.load()) != nil
+        await restoreInputs()
         do {
             let restored = try await relay.restore(connectionID: current)
             guard current == connectionID else { return }
             hasSession = restored
         } catch {
             guard current == connectionID else { return }
-            self.error = error.localizedDescription; hasSession = (try? SessionVault.load()) != nil
+            self.error = error.localizedDescription; hasSession = (try? SessionVault.load()) != nil; scheduleReconnect()
         }
     }
 
     // Every asynchronous result belongs to one connection. This also rejects
     // already-queued stream events after demo/forget/re-pair transitions.
-    func receive(_ update: RelayUpdate) {
-        guard update.connectionID == connectionID, !demo else { return }
-        switch update.event {
-        case .status(let text, let online):
-            status = text; connected = online
-            if connectionLog.last?.message != text { connectionLog.append(ConnectionLogEntry(message: text)); if connectionLog.count > 100 { connectionLog.removeFirst(connectionLog.count - 100) } }
-            if online { automations.scheduleRefresh(model: self) }
-            if text == "Connecting…" { lastEventSeq = 0 }
-        case .snapshot(let value):
-            summaryFlush?.cancel(); summaryFlush = nil; pendingSummaries = [:]
-            projects = value["workspaces"].array.filter { $0["kind"].string != "scratch" }.map(Project.init)
-            tasks = value["threads"].array.filter { !$0["is_archived"].bool }.map(AgentTask.init)
-            preferences = value["preferences"]
-            requests = value["interactive_requests"].array
-            refreshedAt = .now; error = nil; demo = false
-        case .events(let events):
-            for event in events { applyEnvelope(event) }
-        case .rebase(let events):
-            for event in events { applyEnvelope(event, rebase: true) }
-        case .error(let message):
-            error = message; connected = false
-            connectionLog.append(ConnectionLogEntry(message: "Connection request failed"))
-            if connectionLog.count > 100 { connectionLog.removeFirst(connectionLog.count - 100) }
-        }
-    }
-
     @discardableResult private func beginConnection(clearData: Bool) -> UUID {
+        reconnectTask?.cancel(); reconnectTask = nil
         if voice.recording { voice.finishRecording() }
         readAloud.stop(); automations.reset()
-        connectionID = UUID(); lastEventSeq = 0; connected = false
+        connectionID = UUID(); lastEventSeq = 0; connected = false; syncIndex = nil; taskPageLoads = []
         itemCache = [:]; itemCacheOrder = []; itemLoads = [:]; mediaGate = MediaTransferGate()
         summaryFlush?.cancel(); summaryFlush = nil; pendingSummaries = [:]
         for chat in chats.values {
@@ -155,10 +134,12 @@ final class AppModel {
         defer { busy = false }
         do {
             let input = try PairingInput(text: pairingText, relay: relayURL)
+            await saveAllInputs(); draftStore = nil; savedDrafts = [:]; pendingSelection = nil
             let current = beginConnection(clearData: true); demo = false
             try await relay.pair(input, connectionID: current)
             guard current == connectionID else { return }
             hasSession = true; pairingText = ""; showConnection = false
+            await restoreInputs()
         } catch {
             self.error = error.localizedDescription
             hasSession = (try? SessionVault.load()) != nil
@@ -170,8 +151,9 @@ final class AppModel {
         busy = true; error = nil
         let current = beginConnection(clearData: demo); demo = false
         defer { busy = false }
-        do { hasSession = try await relay.restore(connectionID: current) }
-        catch { self.error = error.localizedDescription }
+        if draftStore == nil { await restoreInputs() }
+        do { let restored = try await relay.restore(connectionID: current); if current == connectionID { hasSession = restored } }
+        catch { if current == connectionID { self.error = error.localizedDescription; scheduleReconnect() } }
     }
     func refresh() async {
         if demo { return }
@@ -182,15 +164,20 @@ final class AppModel {
     func forget() async {
         guard !busy else { return }
         busy = true; defer { busy = false }
+        await saveAllInputs()
+        let oldStore = draftStore
+        draftStore = nil; savedDrafts = [:]; pendingSelection = nil
         beginConnection(clearData: true); demo = false
         do {
             try await relay.disconnect(forget: true)
+            try await oldStore?.clear()
             hasSession = false; error = nil; status = "Not connected"
         } catch { self.error = error.localizedDescription }
     }
     func useDemo() async {
         guard !busy else { return }
         busy = true; defer { busy = false }
+        await saveAllInputs(); draftStore = nil; savedDrafts = [:]; pendingSelection = nil
         beginConnection(clearData: true); demo = true
         try? await relay.disconnect(forget: false)
         error = nil; status = "Demo workspace"
@@ -217,7 +204,9 @@ final class AppModel {
     func chat(for task: AgentTask) -> ChatSession {
         if let value = chats[task.id] { return value }
         let value = ChatSession(); value.modelID = task.modelID; value.effort = task.effort; value.provider = task.provider
+        if let saved = savedDrafts.removeValue(forKey: task.id) { value.restore(saved) }
         chats[task.id] = value
+        value.changed = { [weak self, weak value] in if let self, let value { self.scheduleInputSave(task.id, chat: value) } }
         return value
     }
 
@@ -251,92 +240,9 @@ final class AppModel {
             chat.hasOlder = page["has_older"].bool
             chat.oldestID = page["oldest_item_id"].string.nonempty ?? chat.transcript.items.first?.id
             chat.loaded = true
+            chat.settleSubmission(queued: page["thread"]["queued_turns"].array)
             upsertTask(page["thread"])
         } catch { if current == connectionID, chat.loadID == loadID { chat.error = error.localizedDescription } }
-    }
-
-    func upsertTask(_ raw: JSON) {
-        guard !raw["id"].string.isEmpty else { return }
-        let task = AgentTask(raw)
-        if task.raw["is_archived"].bool { tasks.removeAll { $0.id == task.id }; return }
-        if let index = tasks.firstIndex(where: { $0.id == task.id }) { tasks[index] = task }
-        else { tasks.append(task) }
-    }
-
-    private func applyEnvelope(_ envelope: JSON, rebase: Bool = false) {
-        guard !demo, let seq = envelope["seq"].optionalInt, rebase || seq > lastEventSeq else { return }
-        if !rebase { lastEventSeq = seq }
-        let event = envelope["event"], id = envelope["thread_id"].string
-        switch event["type"].string {
-        case "thread-started", "thread-updated":
-            let raw = event["thread"]
-            let old = pendingSummaries[id] ?? tasks.first(where: { $0.id == id })?.raw ?? .null
-            if !rebase, old["status"].string == "running", raw["status"].string != "running", selection != .task(id), preferences["notifications"]["enabled"] != .bool(false) {
-                let failed = raw["status"].string == "error"
-                if preferences["notifications"][failed ? "notify_on_error" : "notify_on_turn_complete"] != .bool(false) {
-                    notifications.announce(title: raw["title"].string.nonempty ?? "FalconDeck", body: failed ? raw["last_error"].string : raw["last_message_preview"].string.nonempty ?? "Task completed", taskID: id)
-                }
-            }
-            stageSummary(raw)
-        case "control-state-changed": automations.scheduleRefresh(model: self)
-        case "workspace-updated":
-            let project = Project(event["workspace"])
-            if let index = projects.firstIndex(where: { $0.id == project.id }) { projects[index] = project }
-            else { projects.append(project) }
-        case "preferences-updated": preferences = event["preferences"]
-        case "interactive-request":
-            let request = event["request"]
-            if !rebase, !requests.contains(where: { $0["request_id"] == request["request_id"] }), selection != .task(id), preferences["notifications"]["enabled"] != .bool(false), preferences["notifications"]["notify_on_input_required"] != .bool(false) {
-                notifications.announce(title: "Input needed", body: request["title"].string, taskID: id)
-            }
-            requests.removeAll { $0["request_id"] == request["request_id"] }; requests.append(request)
-        case "turn-end":
-            // ThreadUpdated carries the authoritative status, including errors
-            // and transient retries that remain running after a turn-end.
-            if event["status"].string != "running" { requests.removeAll { $0["thread_id"].string == id } }
-        case "conversation-item-updated", "conversation-item-added":
-            let item = event["item"]
-            let cacheKey = "\(connectionID):\(id):\(item["id"].string)"
-            itemCache.removeValue(forKey: cacheKey); itemCacheOrder.removeAll { $0 == cacheKey }
-            if item["kind"].string == "interactive_request", item["resolved"].bool {
-                requests.removeAll { $0["request_id"] == item["request"]["request_id"] }
-            }
-        default: break
-        }
-        if !rebase, let chat = chats[id] {
-            if chat.loading {
-                if chat.bufferedEvents.count < 2048 { chat.bufferedEvents.append(event) }
-                else { chat.bufferOverflowed = true }
-            }
-            chat.transcript.apply(event)
-            if !chat.pendingQueue.isEmpty {
-                chat.pendingQueue = QueuedDraft.reconcile(chat.pendingQueue, queued: tasks.first(where: { $0.id == id })?.queued ?? [], items: chat.transcript.items)
-            }
-            if chat.transcript.needsRecovery, !chat.loading, let task = tasks.first(where: { $0.id == id }) {
-                Task { await self.loadChat(task) }
-            }
-        }
-    }
-
-    private func stageSummary(_ raw: JSON) {
-        let id = raw["id"].string
-        guard !id.isEmpty else { return }
-        pendingSummaries[id] = raw
-        guard summaryFlush == nil else { return }
-        // Keep transcript tokens immediate; coalesce sidebar metadata so a
-        // busy task doesn't rebuild thousands of sidebar rows per token.
-        summaryFlush = Task {
-            do { try await Task.sleep(for: .milliseconds(200)) } catch { return }
-            let updates = self.pendingSummaries
-            self.pendingSummaries = [:]; self.summaryFlush = nil
-            var next = self.tasks
-            for (id, raw) in updates {
-                if raw["is_archived"].bool { next.removeAll { $0.id == id } }
-                else if let index = next.firstIndex(where: { $0.id == id }) { next[index] = AgentTask(raw) }
-                else { next.append(AgentTask(raw)) }
-            }
-            self.tasks = next
-        }
     }
 
     func send(_ task: AgentTask) async {
@@ -379,11 +285,18 @@ final class AppModel {
         let queued = QueuedDraft(id: id, text: text, attachmentCount: attachments.count, knownIDs: Set(task.queued.map { $0["id"].string }))
         if expectQueued { chat.pendingQueue.append(queued) }
         else { chat.transcript.upsert(optimistic) }
+        chat.submission = SavedSubmission(id: id, text: text, attachments: attachments)
         chat.draft = ""; chat.attachments = []
+        if let store = draftStore {
+            do { try await store.save(chat.saved(id: task.id)) }
+            catch { restoreSubmission(task, chat: chat, id: id, text: text, attachments: attachments); chat.error = "Couldn't save a recovery copy: \(error.localizedDescription)"; chat.sending = false; return }
+        }
+        guard current == connectionID else { restoreSubmission(task, chat: chat, id: id, text: text, attachments: attachments); chat.sending = false; return }
         defer { chat.sending = false }
         if demo {
             chat.pendingQueue.removeAll { $0.id == id }
             chat.transcript.upsert(Message(optimistic.raw.setting("pending", .bool(false))))
+            chat.submission = nil
             chat.transcript.upsert(Message(.object(["id": .string("demo-\(UUID())"), "kind": .string("assistant_message"), "text": .string(Demo.markdownReply)])))
             return
         }
@@ -395,6 +308,7 @@ final class AppModel {
             let response = try await relay.call("turn.start", params: NativeRequest.turn(task: task, text: text, itemID: id, modelID: selectedModel, effort: selectedEffort, overrides: selectedOverrides, attachments: attachments))
             guard current == connectionID else { restoreSubmission(task, chat: chat, id: id, text: text, attachments: attachments); return }
             if response["message"].string == "queued" {
+                chat.submission = nil
                 chat.transcript.items.removeAll { $0.id == id && $0.raw["pending"].bool }
                 if !expectQueued, !chat.transcript.items.contains(where: { $0.id == id && !$0.raw["pending"].bool }) { chat.pendingQueue.append(queued) }
                 chat.pendingQueue = QueuedDraft.reconcile(chat.pendingQueue, queued: tasks.first(where: { $0.id == task.id })?.queued ?? [], items: chat.transcript.items)
@@ -418,6 +332,7 @@ final class AppModel {
         if chat.draft.isEmpty { chat.draft = text }
         else if chat.draft != text { chat.draft = text + "\n\n" + chat.draft }
         chat.attachments = attachments + chat.attachments.filter { newer in !attachments.contains { $0.id == newer.id } }
+        chat.submission = nil
         chat.notice = "Delivery wasn't confirmed. Refresh this task before sending again."
     }
 
