@@ -51,7 +51,7 @@ struct ConnectionSettingsView: View {
         Form {
             Section("Active connection") {
                 LabeledContent("Status", value: model.status)
-                LabeledContent("Encryption", value: model.connected ? "End-to-end encrypted" : "Not established")
+                if !model.demo { LabeledContent("Encryption", value: model.connected ? "End-to-end encrypted" : "Not established") }
                 if let session {
                     LabeledContent("Relay") { Text(session.relay.absoluteString).font(.footnote).textSelection(.enabled) }
                     LabeledContent("Session") { Text(session.sessionID).font(.footnote.monospaced()).textSelection(.enabled) }
@@ -67,7 +67,7 @@ struct ConnectionSettingsView: View {
                 }
             } footer: { Text("Messages are encrypted between this device and your computer.") }.listRowBackground(FD.surface)
         }.scrollContentBackground(.hidden).background(FD.background).navigationTitle("Connections")
-            .task { session = try? model.sessionLoader() }
+            .task { session = model.demo ? nil : try? model.sessionLoader() }
             .confirmationDialog("Forget this computer?", isPresented: $confirmForget, titleVisibility: .visible) {
                 Button("Forget connection", role: .destructive) { Task { await model.forget() } }
             } message: { Text("You’ll need a new pairing link to connect again.") }

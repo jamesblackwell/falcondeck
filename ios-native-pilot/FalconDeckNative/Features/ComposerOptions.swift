@@ -19,7 +19,7 @@ struct ComposerOptions: View {
                     .scrollContentBackground(.hidden).background(FD.background)
                     .navigationTitle("Task settings").navigationBarTitleDisplayMode(.inline)
                     .toolbar { ToolbarItem(placement: .confirmationAction) { Button("Done") { showSettings = false } } }
-            }.presentationDetents([.medium, .large]).presentationDragIndicator(.visible)
+            }.nativeOptionsSheet()
         }
         .onChange(of: chat.provider) { _, provider in
             guard task.isDraft else { return }

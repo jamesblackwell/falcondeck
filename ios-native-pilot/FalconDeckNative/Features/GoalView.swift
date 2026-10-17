@@ -49,7 +49,7 @@ struct GoalView: View {
             .scrollContentBackground(.hidden).background(FD.background)
             .navigationTitle("Goal").navigationBarTitleDisplayMode(.inline)
             .toolbar { ToolbarItem(placement: .confirmationAction) { Button("Done") { dismiss() }.disabled(pending) } }
-        }.onAppear { if objective.isEmpty { objective = initialObjective } }.presentationDetents([.medium, .large]).interactiveDismissDisabled(pending)
+        }.onAppear { if objective.isEmpty { objective = initialObjective } }.nativeOptionsSheet().interactiveDismissDisabled(pending)
     }
     private func run(_ action: @escaping @MainActor () async throws -> Void) {
         guard !pending else { return }

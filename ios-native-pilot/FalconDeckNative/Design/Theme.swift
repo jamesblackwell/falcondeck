@@ -110,3 +110,16 @@ struct ConnectionPill: View {
         .accessibilityIdentifier("connection")
     }
 }
+
+/// Option sheets use the available height when larger text needs more room.
+private struct NativeOptionsSheet: ViewModifier {
+    @Environment(\.dynamicTypeSize) private var textSize
+    func body(content: Content) -> some View {
+        content.presentationDetents(textSize.isAccessibilitySize ? [.large] : [.medium, .large])
+            .presentationDragIndicator(.visible)
+    }
+}
+
+extension View {
+    func nativeOptionsSheet() -> some View { modifier(NativeOptionsSheet()) }
+}

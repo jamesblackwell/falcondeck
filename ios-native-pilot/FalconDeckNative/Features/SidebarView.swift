@@ -121,7 +121,7 @@ struct SidebarView: View {
                     Section("Task order") {
                         Picker("Sort tasks", selection: $sort) {
                             Text("Last updated").tag("last_updated"); Text("Priority").tag("priority"); Text("Name").tag("alphabetical")
-                        }.pickerStyle(.inline)
+                        }.pickerStyle(.inline).labelsHidden()
                     }.listRowBackground(FD.surface)
                     Section("Projects") {
                         Toggle("Show hidden projects", isOn: $showHidden)
@@ -136,7 +136,7 @@ struct SidebarView: View {
                 }.scrollContentBackground(.hidden).background(FD.background)
                     .navigationTitle("Sidebar options").navigationBarTitleDisplayMode(.inline)
                     .toolbar { ToolbarItem(placement: .confirmationAction) { Button("Done") { showOptions = false } } }
-            }.presentationDetents([.medium, .large]).presentationDragIndicator(.visible)
+            }.nativeOptionsSheet()
         }
         .sheet(item: $optionsProject) { ProjectOptionsView(project: $0) }
         .sheet(isPresented: $reorder) { ProjectOrderView() }

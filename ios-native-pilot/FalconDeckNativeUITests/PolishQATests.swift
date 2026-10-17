@@ -80,6 +80,7 @@ import XCTest
         app.navigationBars["Task options"].buttons["Done"].tap()
         app.buttons["Add attachment"].tap()
         XCTAssertTrue(app.buttons["Photo library"].waitForExistence(timeout: 5))
+        XCTAssertLessThan(app.buttons["Photo library"].frame.minY, app.buttons["Paste image"].frame.minY, "Bottom-edge menus must retain the authored action order")
         capture("09 Attachment menu anchor")
     }
     func testProjectFoldersActivityAndInteractiveRequests() {
@@ -110,6 +111,29 @@ import XCTest
         again.buttons["Activity"].tap()
         XCTAssertTrue(again.navigationBars["Activity"].waitForExistence(timeout: 5))
         capture("Activity dense task feed")
+    }
+    func testGoalEditorActiveAndPausedStates() {
+        let app = launch()
+        app.buttons["sidebar-task-native"].tap()
+        app.buttons["task-menu"].tap()
+        let setGoal = app.buttons["Set a goal"]
+        if !setGoal.isHittable { app.swipeUp() }
+        setGoal.tap()
+        let objective = app.textFields["goal-objective"]
+        XCTAssertTrue(objective.waitForExistence(timeout: 5))
+        objective.tap(); objective.typeText("Polish the native app")
+        let start = app.buttons["start-goal"]
+        if !start.isHittable { app.swipeUp() }
+        start.tap()
+        app.buttons["View goal"].tap()
+        XCTAssertTrue(app.buttons["Pause goal"].waitForExistence(timeout: 5))
+        capture("Active goal controls")
+        app.buttons["Pause goal"].tap()
+        app.buttons["View goal"].tap()
+        XCTAssertTrue(app.buttons["Resume goal"].waitForExistence(timeout: 5))
+        capture("Paused goal controls")
+        app.buttons["Stop goal"].tap()
+        XCTAssertTrue(app.buttons["Set a goal"].waitForExistence(timeout: 5))
     }
     func testEverySettingsScreenAndConnectionDiagnostics() {
         let app = launch()

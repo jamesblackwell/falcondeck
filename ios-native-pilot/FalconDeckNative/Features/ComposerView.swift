@@ -52,7 +52,7 @@ struct ComposerView: View {
                 .accessibilityLabel(task.running ? "Queue message" : "Send message").accessibilityIdentifier("send-message")
             }.font(.caption).foregroundStyle(FD.secondary)
         }
-        .padding(.horizontal, 10).padding(.top, 10).padding(.bottom, 6).glassEffect(in: .rect(cornerRadius: 20))
+        .padding(.horizontal, 10).padding(.top, 10).padding(.bottom, 6).glassEffect(.regular.tint(FD.surface), in: .rect(cornerRadius: 20))
         .sheet(isPresented: $showModels) {
             NavigationStack {
                 Form {
@@ -61,20 +61,20 @@ struct ComposerView: View {
                             Text("Task default").tag("")
                             if !chat.modelID.isEmpty && !models.contains(where: { $0.id == chat.modelID }) { Text(chat.modelID).tag(chat.modelID) }
                             ForEach(models) { Text($0.label).tag($0.id) }
-                        }.pickerStyle(.inline)
+                        }.pickerStyle(.inline).labelsHidden()
                     }.listRowBackground(FD.surface)
                     if let activeModel, !activeModel.efforts.isEmpty {
                         Section("Reasoning") {
                             Picker("Reasoning effort", selection: $chat.effort) {
                                 Text("Default").tag("")
                                 ForEach(activeModel.efforts, id: \.self) { Text($0.capitalized).tag($0) }
-                            }.pickerStyle(.inline)
+                            }.pickerStyle(.inline).labelsHidden()
                         }.listRowBackground(FD.surface)
                     }
                 }.scrollContentBackground(.hidden).background(FD.background)
                     .navigationTitle("Model & reasoning").navigationBarTitleDisplayMode(.inline)
                     .toolbar { ToolbarItem(placement: .confirmationAction) { Button("Done") { showModels = false } } }
-            }.presentationDetents([.medium, .large]).presentationDragIndicator(.visible)
+            }.nativeOptionsSheet()
         }
         .task(id: task.projectID + ":" + task.provider + ":" + String(model.connected)) { await model.loadCatalog(task) }
         .sheet(isPresented: $showGoal) { GoalView(taskID: task.id, initialObjective: goalSeed) { if chat.draft == goalCommand { chat.draft = "" } } }

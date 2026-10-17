@@ -37,6 +37,7 @@ struct RootView: View {
                 workspace
             }
         }
+        .menuOrder(.fixed)
         .sheet(isPresented: Binding(get: { model.showConnection && !model.pairingPending && (model.hasSession || model.demo) }, set: { model.showConnection = $0 })) { ConnectionView() }
         .sheet(isPresented: $model.showSpeechSettings) { NavigationStack { SpeechSettingsView(modal: true) } }
         .overlay(alignment: .topTrailing) { if showPerformance { PerformanceOverlay() } }

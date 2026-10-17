@@ -146,7 +146,8 @@ private struct ChatContent: View {
                 if let notice = chat.notice { Text(notice).font(.footnote).foregroundStyle(FD.secondary).onTapGesture { chat.notice = nil } }
             }.frame(maxWidth: .infinity, alignment: .leading)
                 .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { contextHeight = $0 }
-        }.accessibilityIdentifier("conversation-context").frame(height: min(contextHeight, max(0, min(200, min(viewportHeight * 0.28, viewportHeight - 180)))))
+        }.defaultScrollAnchor(.bottom)
+            .accessibilityIdentifier("conversation-context").frame(height: min(contextHeight, max(0, min(200, min(viewportHeight * 0.28, viewportHeight - 180)))))
     }
     private func scrollToLatest(_ proxy: ScrollViewProxy, animated: Bool) {
         Task { @MainActor in
