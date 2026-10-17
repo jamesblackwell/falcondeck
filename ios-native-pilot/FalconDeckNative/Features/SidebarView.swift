@@ -37,7 +37,7 @@ struct SidebarView: View {
         ScrollView {
             LazyVStack(alignment: .leading, spacing: 0) {
                 sidebarAction("New chat", symbol: "square.and.pencil") { Task { await model.newChat() } }
-                    .disabled(!model.demo && !model.connected)
+                    .disabled(!model.demo && !model.connected).accessibilityIdentifier("sidebar-new-chat")
                 sidebarAction("Activity", symbol: "tray.full", selected: model.selection == .activity) { model.selection = .activity }
                 if !pins.isEmpty {
                     sectionHeading("Pinned", expanded: pinsExpanded) { animate { pinsExpanded.toggle() } }

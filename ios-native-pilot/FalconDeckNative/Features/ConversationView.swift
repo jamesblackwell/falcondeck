@@ -28,7 +28,9 @@ private struct ChatContent: View {
     @State private var followLatest = true
     @State private var userScrolling = false
     @State private var showGoal = false
-    @State private var expansion: TranscriptExpansion?
+    private var expansion: TranscriptExpansion? { chat.transcriptExpansion }
+    @State private var contextHeight: CGFloat = 0
+    @State private var viewportHeight: CGFloat = 600
     private var project: Project? { model.projects.first { $0.id == task.projectID } }
     private var requests: [JSON] { model.requests.filter { $0["thread_id"].string == task.id } }
 
@@ -49,7 +51,10 @@ private struct ChatContent: View {
                     }
                     if chat.loading && chat.transcript.items.isEmpty { ActivityDiamond().frame(maxWidth: .infinity).padding(.vertical, 64) }
                     if chat.loaded && chat.transcript.items.isEmpty {
-                        ContentUnavailableView("What are we working on?", systemImage: "sparkle", description: Text("Send a message to \(task.provider.capitalized) to get started."))
+                        VStack(spacing: 8) {
+                            Text("No messages yet").font(.headline)
+                            Text("Send a message to get started").font(.subheadline).foregroundStyle(FD.secondary)
+                        }.frame(maxWidth: .infinity).padding(.vertical, 48)
                     }
                     ForEach(blocks) { block in
                         if block.grouped { TranscriptGroup(block: block, task: task, expansion: expansion).id(block.id) }
@@ -84,18 +89,13 @@ private struct ChatContent: View {
             }
         }
         .background(FD.background).navigationTitle(task.title.nonempty ?? "New task").navigationBarTitleDisplayMode(.inline)
+        .toolbarBackground(FD.background, for: .navigationBar)
+        .toolbarBackground(.visible, for: .navigationBar)
         .toolbar {
             ToolbarItem(placement: .topBarTrailing) {
                 if !task.isDraft {
-                    Menu {
-                        Button("Task options", systemImage: "slider.horizontal.3") { model.taskOptionsID = task.id }
-                        if preferences.flag("show_expand_all_controls"), !chat.transcript.items.isEmpty {
-                            Divider()
-                            Button("Expand all activity") { expansion = TranscriptExpansion(expanded: true) }
-                            Button("Collapse all activity") { expansion = TranscriptExpansion(expanded: false) }
-                        }
-                    } label: { Image(systemName: "ellipsis").frame(width: 28, height: 28) }
-                        .accessibilityLabel("Task menu").accessibilityIdentifier("task-menu")
+                    Button { model.taskOptionsID = task.id } label: { Image(systemName: "ellipsis").frame(width: 28, height: 28) }
+                        .accessibilityLabel("Task options").accessibilityIdentifier("task-menu")
                 }
             }
         }
@@ -105,7 +105,21 @@ private struct ChatContent: View {
             await model.markRead(task, automatic: true)
         }
         .safeAreaInset(edge: .bottom, spacing: 0) {
-            VStack(spacing: 10) {
+            VStack(spacing: 0) {
+                contextTray.padding(.bottom, contextHeight > 0 ? 8 : 0)
+                if task.archived {
+                    Button("Restore task to continue", systemImage: "arrow.uturn.backward") {
+                        Task { do { try await model.unarchive(task) } catch { chat.error = error.localizedDescription } }
+                    }.buttonStyle(.glassProminent).disabled(!model.demo && !model.connected)
+                } else { ComposerView(task: task, project: project, chat: chat) }
+            }
+            .padding(.horizontal, 12).padding(.top, 8).padding(.bottom, 8).frame(maxWidth: 844).frame(maxWidth: .infinity)
+        }
+        .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { viewportHeight = $0 }
+    }
+    private var contextTray: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 8) {
                 ConversationStatus(task: task)
                 ComposerSuggestionsView(task: task)
                 if task.interrupted {
@@ -130,14 +144,9 @@ private struct ChatContent: View {
                     }.font(.footnote).foregroundStyle(.orange).padding(12).background(FD.surface, in: .rect(cornerRadius: 12))
                 }
                 if let notice = chat.notice { Text(notice).font(.footnote).foregroundStyle(FD.secondary).onTapGesture { chat.notice = nil } }
-                if task.archived {
-                    Button("Restore task to continue", systemImage: "arrow.uturn.backward") {
-                        Task { do { try await model.unarchive(task) } catch { chat.error = error.localizedDescription } }
-                    }.buttonStyle(.glassProminent).disabled(!model.demo && !model.connected)
-                } else { ComposerView(task: task, project: project, chat: chat) }
-            }
-            .padding(.horizontal, 12).padding(.top, 8).padding(.bottom, 8).frame(maxWidth: 844).frame(maxWidth: .infinity)
-        }
+            }.frame(maxWidth: .infinity, alignment: .leading)
+                .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { contextHeight = $0 }
+        }.frame(height: min(contextHeight, min(200, max(72, viewportHeight * 0.28))))
     }
     private func scrollToLatest(_ proxy: ScrollViewProxy, animated: Bool) {
         Task { @MainActor in

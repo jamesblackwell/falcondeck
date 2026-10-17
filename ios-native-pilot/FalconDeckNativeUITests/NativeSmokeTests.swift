@@ -16,6 +16,7 @@ import XCTest
         XCTAssertTrue(app.buttons["sidebar-settings"].waitForExistence(timeout: 5))
     }
     func testAutomationCanSaveAndDismissInLandscape() {
+        XCUIDevice.shared.orientation = .portrait
         let app = launchDemo()
         XCUIDevice.shared.orientation = .landscapeLeft
         defer { XCUIDevice.shared.orientation = .portrait }
@@ -38,7 +39,7 @@ import XCTest
         XCUIDevice.shared.orientation = .portrait
         let app = launchDemo()
         sidebar(app)
-        app.buttons["New chat"].tap()
+        app.buttons["sidebar-new-chat"].tap()
         let input = app.textFields["chat-input"]
         XCTAssertTrue(input.waitForExistence(timeout: 5))
         input.tap()

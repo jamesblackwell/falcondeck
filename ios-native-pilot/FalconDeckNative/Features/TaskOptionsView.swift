@@ -69,7 +69,15 @@ struct TaskOptionsView: View {
                         else { Button("Archive task", systemImage: "archivebox", role: .destructive) { run { await model.archive(task) } } }
                     }.listRowBackground(FD.surface)
                 }
-                if let task { TaskUsageView(usage: model.tokenUsage[task.id]) }
+                if let task {
+                    if ConversationPreferences(raw: model.preferences["conversation"]).flag("show_expand_all_controls") {
+                        Section("Transcript") {
+                            Button("Expand all activity") { model.chat(for: task).transcriptExpansion = TranscriptExpansion(expanded: true) }
+                            Button("Collapse all activity") { model.chat(for: task).transcriptExpansion = TranscriptExpansion(expanded: false) }
+                        }.listRowBackground(FD.surface)
+                    }
+                    TaskUsageView(usage: model.tokenUsage[task.id])
+                }
                 if let error { Text(error).foregroundStyle(.orange).listRowBackground(FD.surface) }
             }
             .disabled(pending || (!model.demo && !model.connected))

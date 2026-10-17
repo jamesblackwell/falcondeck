@@ -30,7 +30,7 @@ struct ComposerView: View {
                 VoiceControl(task: task, chat: chat)
                 Button { focused = false; showModels = true } label: {
                     HStack(spacing: 5) {
-                        Text(models.first { $0.id == chat.modelID }?.label ?? chat.modelID.nonempty ?? task.provider.capitalized)
+                        Text(activeModel?.label ?? chat.modelID.nonempty ?? task.provider.capitalized)
                             .lineLimit(1).truncationMode(.tail)
                         Image(systemName: "chevron.down").font(.system(size: 9, weight: .semibold))
                     }.padding(.horizontal, 6).frame(maxWidth: .infinity, minHeight: 44, alignment: .leading).contentShape(.rect)

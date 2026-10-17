@@ -33,8 +33,8 @@ struct InteractiveCard: View {
         VStack(alignment: .leading, spacing: 12) {
             Label(request["title"].string, systemImage: "hand.raised").font(.subheadline.weight(.semibold)).foregroundStyle(.orange)
             if !request["command"].string.isEmpty {
-                ScrollView([.horizontal, .vertical]) { Text(request["command"].string).font(.caption.monospaced()).textSelection(.enabled).padding(8) }
-                    .frame(maxHeight: 100).background(FD.raised, in: .rect(cornerRadius: 8))
+                ScrollView(.horizontal) { Text(request["command"].string).font(.caption.monospaced()).textSelection(.enabled).fixedSize(horizontal: true, vertical: false).padding(8) }
+                    .fixedSize(horizontal: false, vertical: true).frame(maxHeight: 88).background(FD.raised, in: .rect(cornerRadius: 8))
             }
             if !request["path"].string.isEmpty { Text(request["path"].string).font(.caption.monospaced()).foregroundStyle(FD.secondary).textSelection(.enabled) }
             if !request["detail"].string.isEmpty {
@@ -58,7 +58,7 @@ struct InteractiveCard: View {
             }
             if sending { ActivityDiamond() }
         }
-        .padding(14).background(FD.surface, in: .rect(cornerRadius: 16))
+        .frame(maxWidth: .infinity, alignment: .leading).padding(12).background(FD.surface, in: .rect(cornerRadius: 16))
         .overlay { RoundedRectangle(cornerRadius: 16).strokeBorder(FD.line) }
         .disabled(sending || (!model.connected && !model.demo))
         .sheet(isPresented: $showQuestions) { questionSheet }

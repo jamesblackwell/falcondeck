@@ -67,6 +67,8 @@ struct RootView: View {
         .navigationSplitViewStyle(.balanced)
         .dynamicTypeSize(NativeAppearance.shared.textSize(relativeTo: textSize))
         .sensoryFeedback(.selection, trigger: model.selection)
+        // Sidebar rows are plain buttons so UIKit does not add disclosure
+        // chevrons. This binding owns their compact push into the detail pane.
         .onChange(of: model.selection) { _, selection in
             if selection != nil && sizeClass == .compact { compactColumn = .detail }
         }

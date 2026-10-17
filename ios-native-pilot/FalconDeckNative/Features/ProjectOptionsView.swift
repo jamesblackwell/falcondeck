@@ -92,12 +92,13 @@ struct ProjectOrderView: View {
 struct WorkspaceGlyph: View {
     @Environment(AppModel.self) private var model
     let project: Project
+    var size: CGFloat = 18
     @State private var image: UIImage?
     var body: some View {
         Group {
             if model.preferences["workspace_icons"][project.id]["mode"].string == "folder" { Image(systemName: "folder") }
-            else if let image { Image(uiImage: image).resizable().scaledToFit().frame(width: 24, height: 24).clipShape(.rect(cornerRadius: 5)) }
-            else { ProjectIcon(name: project.name) }
+            else if let image { Image(uiImage: image).resizable().scaledToFit().frame(width: size, height: size).clipShape(.rect(cornerRadius: 5)) }
+            else { ProjectIcon(name: project.name, size: size) }
         }.task(id: "\(model.connectionID):\(project.raw["icon"]["etag"].string):\(model.connected)") {
             image = nil
             guard model.connected, project.raw["icon"]["kind"].string == "image" else { return }

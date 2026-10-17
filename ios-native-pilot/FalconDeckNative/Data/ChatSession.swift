@@ -4,6 +4,7 @@ import Observation
 @MainActor @Observable
 final class ChatSession {
     var transcript = Transcript()
+    var transcriptExpansion: TranscriptExpansion?
     var draft = "" { didSet { changed?() } }
     var modelID = "" { didSet { changed?() } }
     var effort = "" { didSet { changed?() } }

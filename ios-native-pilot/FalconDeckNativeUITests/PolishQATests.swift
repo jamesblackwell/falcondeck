@@ -49,6 +49,7 @@ import XCTest
         app.buttons["sidebar-task-native"].tap()
         let model = app.buttons["composer-model"]
         XCTAssertTrue(model.waitForExistence(timeout: 5))
+        XCTAssertTrue(model.isHittable, "Selecting a sidebar task must reveal the detail column on iPhone")
         let send = app.buttons["send-message"]
         XCTAssertLessThanOrEqual(model.frame.height, 48, "Model names must not wrap vertically")
         XCTAssertGreaterThanOrEqual(send.frame.width, 44)
@@ -64,9 +65,6 @@ import XCTest
         capture("08 Task settings sheet")
         app.buttons["Done"].tap()
         app.buttons["task-menu"].tap()
-        XCTAssertTrue(app.buttons["Task options"].waitForExistence(timeout: 5))
-        capture("10 Task menu anchor")
-        app.buttons["Task options"].tap()
         XCTAssertTrue(app.navigationBars["Task options"].waitForExistence(timeout: 5))
         capture("11 Task actions hierarchy")
         app.buttons["Rename task"].tap()
@@ -78,8 +76,8 @@ import XCTest
         goal.tap()
         XCTAssertTrue(app.navigationBars["Goal"].waitForExistence(timeout: 5))
         capture("13 Goal editor")
-        app.buttons["Cancel"].tap()
-        app.buttons["Done"].tap()
+        app.navigationBars["Goal"].buttons["Done"].tap()
+        app.navigationBars["Task options"].buttons["Done"].tap()
         app.buttons["Add attachment"].tap()
         XCTAssertTrue(app.buttons["Photo library"].waitForExistence(timeout: 5))
         capture("09 Attachment menu anchor")
