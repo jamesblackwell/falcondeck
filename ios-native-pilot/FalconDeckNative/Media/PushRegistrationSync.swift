@@ -88,7 +88,9 @@ actor PushRegistrationSync {
                 self.known = nil
             }
             for (identity, old) in Array(pendingClears) {
-                do { try await post(old, registration: nil); pendingClears.removeValue(forKey: identity) } catch { }
+                do { try await post(old, registration: nil); pendingClears.removeValue(forKey: identity) }
+                catch PushEndpointError.unavailable { pendingClears.removeValue(forKey: identity) }
+                catch { }
             }
             let next: PushSyncStatus
             do { next = try await synchronize(target, revision: current) } catch { next = .failed }

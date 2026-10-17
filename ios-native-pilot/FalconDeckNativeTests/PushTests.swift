@@ -4,12 +4,14 @@ import XCTest
 private actor PushHTTPMock: PushHTTP {
     private(set) var requests: [URLRequest] = []
     let available: Bool
+    let unavailableHosts: Set<String>
     var gated: Bool
     var failedClears = 0
     var gate: CheckedContinuation<Void, Never>?
-    init(available: Bool = true, gated: Bool = false) { self.available = available; self.gated = gated }
+    init(available: Bool = true, gated: Bool = false, unavailableHosts: Set<String> = []) { self.available = available; self.gated = gated; self.unavailableHosts = unavailableHosts }
     func send(_ request: URLRequest) async throws -> (Data, Int) {
         requests.append(request)
+        let available = self.available && !unavailableHosts.contains(request.url?.host ?? "")
         if request.httpMethod != "POST" {
             return (Data("{\"apns\":[{\"topic\":\"org.example.native\",\"environment\":\"sandbox\"}]}".utf8), available ? 200 : 404)
         }
@@ -36,8 +38,8 @@ private actor PushRelay: RelayServing {
 }
 
 @MainActor final class PushTests: XCTestCase {
-    private func target(_ token: String? = "aabb", enabled: Bool = true, device: String = "device") -> PushTarget {
-        let session = SavedSession(relay: URL(string: "https://relay.example")!, sessionID: "session", deviceID: device, token: "client-secret", secret: Data(repeating: 0, count: 32), daemonKey: "daemon", daemonIdentity: "identity")
+    private func target(_ token: String? = "aabb", enabled: Bool = true, device: String = "device", relay: String = "https://relay.example") -> PushTarget {
+        let session = SavedSession(relay: URL(string: relay)!, sessionID: "session", deviceID: device, token: "client-secret", secret: Data(repeating: 0, count: 32), daemonKey: "daemon", daemonIdentity: "identity")
         return PushTarget(session: session, token: token, topic: "org.example.native", environment: "sandbox", enabled: enabled)
     }
     func testNativeRegistrationUsesOwnAuthenticatedEndpointAndRotatesToken() async throws {
@@ -138,5 +140,12 @@ private actor PushRelay: RelayServing {
         let body = try JSONDecoder().decode(JSON.self, from: XCTUnwrap(requests[0].httpBody))
         XCTAssertEqual(body["registration"], .null)
         XCTAssertFalse(model.hasSession)
+    }
+    func testSwitchingFromLegacyRelayDoesNotRetainUnavailableCleanup() async {
+        let http = PushHTTPMock(unavailableHosts: ["legacy.example"]), sync = PushRegistrationSync(http: http)
+        let legacy = await sync.update(target(relay: "https://legacy.example")); XCTAssertEqual(legacy, .unavailable)
+        let native = await sync.update(target()); XCTAssertEqual(native, .registered)
+        let disabled = await sync.update(target(enabled: false)); XCTAssertEqual(disabled, .disabled)
+        let forgotten = await sync.update(nil); XCTAssertEqual(forgotten, .disabled)
     }
 }
