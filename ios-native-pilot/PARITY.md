@@ -1,12 +1,13 @@
 # Native mobile parity
 
 Scope: mirror `apps/mobile/src/app` and its composer/sidebar actions in a separate
-SwiftUI client. Production mobile, daemon, relay, Expo, OTA, and TestFlight are
-outside this work. The daemon and agent storage remain authoritative.
+SwiftUI client. Released mobile builds, the daemon, Expo OTA and TestFlight are
+outside this work. Optional APNs support was added and deployed to the relay
+alongside the unchanged Expo route. The daemon and agent storage remain authoritative.
 
 | Area | Existing mobile behavior to mirror | Native status |
 | --- | --- | --- |
-| Connection | Secure link/QR pairing, saved Keychain identity, presence, reconnect, diagnostics | Link pairing, saved identity, automatic reconnect/backoff, compact sync and diagnostics and native QR scanner present; physical QR QA awaits device |
+| Connection | Secure link/QR pairing, saved Keychain identity, presence, reconnect, diagnostics | Expo scan-or-enter layout; scans/links connect automatically and wait for an encrypted snapshot; self-hosted relay review, Keychain, reconnect/backoff and diagnostics; physical QR QA awaits device |
 | Navigation | Sidebar, chats, projects, global/project pins, folders, search/sort/hidden/archive | Sidebar, pins, folders, lazy pages, per-device sort, hidden projects, project order and icon choices implemented; search states its loaded scope and can fetch more |
 | New task | Draft composer, provider/model selection, first-send creation, folder filing | Implemented; first-send and failed-send regression tests pass |
 | Composer | Model, effort, permissions, sandbox, collaboration, speed, skills/prompts | Capability-based models/modes/permissions/sandbox/speed plus provider-scoped skills and saved prompt shortcuts |
@@ -17,18 +18,20 @@ outside this work. The daemon and agent storage remain authoritative.
 | Media | Library/camera/clipboard attachments, image preview/save/share, read aloud, recording/transcription | Native attachments, read aloud, on-device/computer transcription, speech Live Activity/Lock Screen controls and bounded realtime PCM implemented; physical media QA awaits device |
 | Activity | Running/attention/all tasks, navigation | Matches Needs input / Failed / Ready to review / Running / Recent sections; archived tasks remain separate |
 | Automations | List/create/edit/enable/delete/run/history/settings via control RPC | Implemented and tested (control revision/idempotency/validation); iPad landscape create/save UI check passes |
-| Settings | Appearance palettes/text, conversation preferences, notifications, speech, connection, about/developer | Implemented: all 19 palettes, text size, conversation, connected alerts, speech, connections and diagnostics |
+| Settings | Appearance palettes/text, conversation preferences, notifications, speech, connection, about/developer | Implemented: all 19 palettes, text size, conversation, native APNs/connected alerts, speech, connections and diagnostics |
 | Extensions | Tags/stage markers, sidebar filters/panel fallbacks, composer suggestions | Stages, filters, suggestions and declarative native panels implemented; unavailable panels use the mobile desktop fallback |
 | Device support | iPhone/iPad, portrait/landscape/multitasking, keyboard, Dynamic Type, Reduce Motion | Phone navigation/theme changes and iPad split-view/settings/automation creation verified; first-send keyboard and Markdown UI regression passes |
-| Installation | Separate app ID, development-signed device build, Wi-Fi install command | Apple Development app/widget build and signature verification pass; installed over Wi-Fi on iPhone; launch requires unlocking; physical iPad install also requires unlocking |
+| Installation | Separate app ID, development-signed device build, Wi-Fi install command | Apple Development app/widget build and signature verification pass; installed and launched over Wi-Fi on iPhone; physical iPad install requires unlocking |
 
 Implementation is ready for device testing. Hardware behavior and the platform
 constraints below remain explicit gaps; this is not a claim of exhaustive parity.
 
+## Earlier implementation milestones
+
 Core parity milestone: 28 iPhone simulator unit tests pass. A development-signed
 arm64 build succeeds for the separate native bundle ID. UI parity QA continues.
 
-Confirmed platform constraint: relay push delivery in `crates/falcondeck-relay/src/app.rs`
+Earlier platform constraint (resolved by the APNs milestone below): relay push delivery in `crates/falcondeck-relay/src/app.rs`
 is Expo-only (`EXPO_PUSH_URL`). A Swift-only development client cannot receive
 background remote notifications through that route. Native APNs delivery needs
 a separate relay implementation/deployment; production remains untouched. James
@@ -51,4 +54,10 @@ QA fix milestone: 83 tests pass. A failing background color-resolution test repr
 
 Speech recovery milestone: 85 tests pass. Failed new-chat creation preserves the recording and existing draft; successful recovery appends without overwriting input. Pending recovery actions are disabled while creating the chat. Transcription callbacks explicitly cross onto the main actor, and connection changes cancel recognition while retaining audio. Phone/tablet orientations and iPad resizing are declared explicitly. README now documents the actual native feature set and remaining hardware/push limits.
 
-Final UI regression: the original composer failed to focus when its blank input area was tapped. A 44-point content shape now focuses the complete field; the same keyboard/type/first-send/Markdown test passes. The signed Debug app is installed alongside the released app on the iPhone. The device is locked, so launch and physical media testing await unlock. The physical iPad also requires unlock before Xcode can mount its development image and install. No production deployment occurred.
+Earlier UI regression: the original composer failed to focus when its blank input area was tapped. A 44-point content shape now focuses the complete field; the same keyboard/type/first-send/Markdown test passes. The signed Debug app is installed alongside the released app on the iPhone. The device is locked, so launch and physical media testing await unlock. The physical iPad also requires unlock before Xcode can mount its development image and install. No production deployment occurred.
+
+## Current relay and connection milestones
+
+Native push milestone: optional APNs is live alongside Expo, with provider-tagged registration, capability discovery, foreground activity negotiation, generation-safe persistence and token cleanup. Existing active trusted credentials and Expo tokens survived the relay upgrade unchanged. Real Apple sandbox authentication and native simulator registration pass. A physical-device background banner remains unverified. No released app build or OTA was pushed.
+
+Connection UX milestone: 102 unit tests pass, including seven new scan/link, duplicate-consumption, startup, relay-review and retry regressions. Pairing follows Expo’s scan-or-enter layout, automatically claims valid scans/links, and waits for the encrypted workspace before dismissing setup. Diagnostics and Forget live in Settings → Connections.

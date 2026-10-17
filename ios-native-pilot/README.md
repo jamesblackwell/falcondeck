@@ -3,7 +3,9 @@
 Standalone SwiftUI development client for iPhone and iPad (iOS 26+). It uses the
 existing encrypted relay and daemon RPCs. The app and speech widget have separate
 bundle identifiers from the released app; they can be installed alongside it.
-Production clients, daemon, relay, Expo, OTA and TestFlight are unchanged.
+The released clients and daemon are unchanged. The relay now supports optional
+native APNs alongside its existing Expo provider; no Expo build, OTA or
+TestFlight submission is involved.
 
 ## Run locally
 
@@ -40,8 +42,11 @@ is in `build-device/Build/Products/Debug-iphoneos/FalconDeckNative.app`.
 ## Connect
 
 Create a signed pairing link in the desktop app's remote-access settings. In
-Falcon Native, open Connections and scan the QR code or paste the complete link.
-The default relay is `https://connect.falcondeck.com`; a relay in the signed link
+Falcon Native, scan the QR code on the opening screen to connect automatically,
+or paste the complete code/link and tap Connect. Setup remains visible until
+the encrypted workspace is ready. A self-hosted relay gets the same explicit
+server review as the Expo client; diagnostics and forgetting a saved computer
+are in Settings → Connections. The default relay is `https://connect.falcondeck.com`; a relay in the signed link
 is honored. This registers a separate trusted client named **Falcon Native
 Pilot**. It does not reuse the released mobile app's credentials.
 
@@ -100,18 +105,18 @@ Search covers loaded tasks and explicitly offers loading more.
 
 Known limits:
 
-- Background remote push is unavailable: the current relay only delivers Expo
-  push. A native APNs relay path requires separate server work/deployment. James
-  was notified via NTFY; production was left untouched. Opt-in connected local
-  alerts work while the app can maintain its connection. They cannot detect
-  desktop activity.
+- Native background push is opt-in under Settings → Notifications. The real
+  relay advertises this development app’s sandbox APNs topic alongside Expo.
+  Token registration and Apple authentication were verified; a delivered banner
+  on physical hardware still needs testing. Self-hosters must configure their
+  own Apple credentials/topics; see [the public push contract](../docs/push-client-protocol.md).
 - Common Mermaid flowcharts render as native shapes. Other Mermaid syntax shows
   its complete copyable source. Code coloring is lightweight.
 - Extensions must publish supported declarative mobile UI. Desktop frontend
   panels have an explicit desktop fallback.
 - Camera, microphone, speech languages and Live Activity behavior still need
   verification on unlocked physical devices. Wi-Fi installation on the iPhone
-  succeeded; launching it requires unlocking. The physical iPad needs unlocking
+  and launch succeeded. The physical iPad needs unlocking
   before its development image can mount and installation can proceed.
 
 ## Verify
@@ -126,7 +131,7 @@ xcodebuild -project FalconDeckNative.xcodeproj -scheme FalconDeckNativeUI \
   -derivedDataPath build-ui test
 ```
 
-The final run has 85 passing unit tests and passing chat/automation UI checks on
+The latest run has 102 passing unit tests and passing pairing/chat/automation UI checks on
 both phone and tablet simulators. See [VERIFICATION.md](VERIFICATION.md) for the
 review and device handoff, and [PARITY.md](PARITY.md) for the feature ledger. Tests cover
 crypto interoperability, pairing authority, chunks/ACKs, UTF-16 streaming,

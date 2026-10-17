@@ -39,3 +39,13 @@ remain encrypted. Provider failure must stay outside the WebSocket/RPC path.
 
 Apple references: [APNs requests](https://developer.apple.com/documentation/usernotifications/sending-notification-requests-to-apns),
 [token authentication](https://developer.apple.com/documentation/usernotifications/establishing-a-token-based-connection-to-apns).
+
+## Implemented and enabled
+
+The additive provider contract, native registration and relay rollout are
+complete. The existing Expo registration endpoint/payload and prior trusted
+credentials were preserved. Real sandbox APNs authentication and native token
+registration pass; physical background delivery still needs device testing.
+See [native verification](../ios-native-pilot/VERIFICATION.md) for checks,
+review findings/fixes and the development-device handoff. No released mobile
+build, Expo OTA or TestFlight submission was made.
