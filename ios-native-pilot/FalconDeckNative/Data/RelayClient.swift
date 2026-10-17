@@ -47,11 +47,15 @@ protocol RelayServing: Sendable {
     func disconnect(forget: Bool) async throws
     func refresh() async
     func selectThread(_ id: String?) async
+    func setForeground(_ active: Bool) async
     func detail(task: AgentTask, before: String?) async throws -> JSON
     func call(_ method: String, params: JSON) async throws -> JSON
 }
 
-extension RelayServing { func selectThread(_ id: String?) async { } }
+extension RelayServing {
+    func selectThread(_ id: String?) async { }
+    func setForeground(_ active: Bool) async { }
+}
 
 /// Owns networking and cryptography off the UI actor. A fresh daemon snapshot
 /// anchors every connection; ordered live events follow it. No history DB or
@@ -75,9 +79,16 @@ actor RelayClient: RelayServing {
     private var bufferedEvents: [JSON] = []
     private var transferID = 0
     private var bulkSending = false
+    private var foreground = true
+    private var supportsClientActivity = false
     private var acknowledgements: [String: CheckedContinuation<Void, Error>] = [:]
 
     func selectThread(_ id: String?) { selectedThread = id }
+    func setForeground(_ active: Bool) async {
+        foreground = active
+        guard supportsClientActivity, socket != nil else { return }
+        try? await send(.object(["type": .string("client-activity"), "foreground": .bool(active)]))
+    }
 
     func events() -> AsyncStream<RelayUpdate> {
         let (stream, continuation) = AsyncStream<RelayUpdate>.makeStream()
@@ -133,6 +144,7 @@ actor RelayClient: RelayServing {
         reader?.cancel(); heartbeat?.cancel()
         socket?.cancel(with: .goingAway, reason: nil)
         socket = nil; session = nil; rpcReady = nil; refreshInFlight = false; bulkSending = false
+        supportsClientActivity = false
         bufferedEvents = []
         failPending(PilotError("The connection closed."))
         if forget { try SessionVault.clear() }
@@ -210,6 +222,8 @@ actor RelayClient: RelayServing {
         case "ready":
             log.info("Relay ready; saved content key: \(self.session?.dataKey != nil)")
             guard frame["session_id"].string == session?.sessionID, frame["role"].string == "client" else { throw PilotError("Unexpected relay session.") }
+            supportsClientActivity = frame["client_activity_supported"].bool
+            await setForeground(foreground)
             emit(.status("Securing connection…", connected: false))
             // Fresh snapshots are our source of truth; skip old ciphertext and
             // request a signed bootstrap addressed to this independent client.

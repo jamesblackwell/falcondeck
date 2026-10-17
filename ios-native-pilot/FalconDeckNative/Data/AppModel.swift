@@ -15,6 +15,8 @@ final class AppModel {
     let extensions = NativeExtensions()
     let automations = AutomationStore()
     let notifications = LocalNotifications()
+    let push = NativePushNotifications.shared
+    var pendingNotification: NotificationDestination?
     private(set) var connectionID = UUID()
 
     init(relay: any RelayServing = RelayClient(), voice: VoiceRecorder = VoiceRecorder()) {
@@ -22,6 +24,14 @@ final class AppModel {
         self.relay = relay
         NativeSpeechBridge.handler = { [weak self] action in await self?.speechAction(action) }
         notifications.openTask = { [weak self] id in Task { await self?.openTask(id) } }
+        notifications.openDestination = { [weak self] destination in
+            self?.pendingNotification = destination
+            Task { await self?.openPendingNotification() }
+        }
+        notifications.shouldPresent = { [weak self] destination in
+            guard let self, !self.demo, (try? SessionVault.load())?.sessionID == destination.sessionID else { return false }
+            return self.selection != .task(destination.threadID)
+        }
     }
     var syncIndex: CompactSync?
     var taskPageLoads: Set<String> = []
@@ -64,7 +74,7 @@ final class AppModel {
     @ObservationIgnored var savedDrafts: [String: SavedDraft] = [:]
     @ObservationIgnored var draftSaves: [String: Task<Void, Never>] = [:]
     @ObservationIgnored var pendingSelection: Destination?
-    var preferences = JSON.object([:])
+    var preferences = JSON.object([:]) { didSet { synchronizePush() } }
     var requests: [JSON] = []
     var serviceNotices: [JSON] = []
     var operationalConditions: [JSON] = []
@@ -112,6 +122,7 @@ final class AppModel {
             let restored = try await relay.restore(connectionID: current)
             guard current == connectionID else { return }
             hasSession = restored
+            synchronizePush()
         } catch {
             guard current == connectionID else { return }
             self.error = error.localizedDescription; hasSession = (try? SessionVault.load()) != nil; scheduleReconnect()
@@ -150,6 +161,7 @@ final class AppModel {
             try await relay.pair(input, connectionID: current)
             guard current == connectionID else { return }
             hasSession = true; pairingText = ""; showConnection = false
+            synchronizePush()
             await restoreInputs()
         } catch {
             self.error = error.localizedDescription
@@ -163,7 +175,7 @@ final class AppModel {
         let current = beginConnection(clearData: demo); demo = false
         defer { busy = false }
         if draftStore == nil { await restoreInputs() }
-        do { let restored = try await relay.restore(connectionID: current); if current == connectionID { hasSession = restored } }
+        do { let restored = try await relay.restore(connectionID: current); if current == connectionID { hasSession = restored; synchronizePush() } }
         catch { if current == connectionID { self.error = error.localizedDescription; scheduleReconnect() } }
     }
     func refresh() async {
@@ -176,14 +188,17 @@ final class AppModel {
         guard !busy else { return }
         busy = true; defer { busy = false }
         await saveAllInputs()
+        pendingNotification = nil
         let oldStore = draftStore
         draftStore = nil; savedDrafts = [:]; pendingSelection = nil
+        hasSession = false
         beginConnection(clearData: true); demo = false
+        await push.configure(session: nil)
         do {
             try await relay.disconnect(forget: true)
             try await oldStore?.clear()
             hasSession = false; error = nil; status = "Not connected"
-        } catch { self.error = error.localizedDescription }
+        } catch { self.error = error.localizedDescription; hasSession = (try? SessionVault.load()) != nil }
     }
     func useDemo() async {
         guard !busy else { return }

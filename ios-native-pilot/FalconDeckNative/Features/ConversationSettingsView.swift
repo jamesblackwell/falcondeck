@@ -46,20 +46,21 @@ struct ConversationSettingsView: View {
 
 struct NotificationSettingsView: View {
     @Environment(AppModel.self) private var model
-    @AppStorage("native.notifications.connected") private var connectedAlerts = false
+    @State private var authorizing = false
     @State private var pending = false
     @State private var error: String?
     var body: some View {
         Form {
             Section {
-                Toggle("Alerts while connected", isOn: Binding(get: { connectedAlerts }, set: { enabled in
-                    if !enabled { connectedAlerts = false; return }
+                Toggle("Push notifications", isOn: Binding(get: { model.push.enabled }, set: { enabled in
+                    guard !authorizing else { return }; authorizing = true; error = nil
                     Task {
-                        do { connectedAlerts = try await model.notifications.authorize(); if !connectedAlerts { error = "Allow notifications in this device's Settings." } }
+                        defer { authorizing = false }
+                        do { try await model.push.setEnabled(enabled) }
                         catch { self.error = error.localizedDescription }
                     }
-                }))
-            } footer: { Text("Background remote notifications require a native relay push update and are unavailable in this development build.") }.listRowBackground(FD.surface)
+                })).disabled(authorizing || model.demo)
+            } footer: { Text(model.demo ? "Push registration is unavailable in the local demo." : model.push.status) }.listRowBackground(FD.surface)
             Section {
                 Toggle("Event notifications", isOn: preference("enabled"))
                 Toggle("Completed turns", isOn: preference("notify_on_turn_complete"))
@@ -69,6 +70,7 @@ struct NotificationSettingsView: View {
                 .disabled(pending || (!model.demo && !model.connected))
             if let error { Text(error).foregroundStyle(.orange) }
         }.scrollContentBackground(.hidden).background(FD.background).navigationTitle("Notifications")
+            .onAppear { model.synchronizePush() }
     }
     private func preference(_ key: String) -> Binding<Bool> {
         Binding(get: { model.preferences["notifications"][key] == .null ? true : model.preferences["notifications"][key].bool }, set: { value in

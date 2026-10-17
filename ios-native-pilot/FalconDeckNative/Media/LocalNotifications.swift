@@ -3,6 +3,8 @@ import UserNotifications
 
 @MainActor final class LocalNotifications: NSObject, UNUserNotificationCenterDelegate {
     var openTask: ((String) -> Void)?
+    var openDestination: ((NotificationDestination) -> Void)?
+    var shouldPresent: ((NotificationDestination) -> Bool)?
     override init() { super.init(); UNUserNotificationCenter.current().delegate = self }
     func authorize() async throws -> Bool { try await UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .badge, .sound]) }
     func announce(title: String, body: String, taskID: String) {
@@ -13,10 +15,17 @@ import UserNotifications
         let request = UNNotificationRequest(identifier: "native-\(taskID)", content: content, trigger: nil)
         UNUserNotificationCenter.current().add(request)
     }
-    nonisolated func userNotificationCenter(_ center: UNUserNotificationCenter, willPresent notification: UNNotification, withCompletionHandler completionHandler: @escaping (UNNotificationPresentationOptions) -> Void) { completionHandler([.banner, .sound, .list]) }
-    nonisolated func userNotificationCenter(_ center: UNUserNotificationCenter, didReceive response: UNNotificationResponse, withCompletionHandler completionHandler: @escaping () -> Void) {
+    nonisolated func userNotificationCenter(_ center: UNUserNotificationCenter, willPresent notification: UNNotification, withCompletionHandler completionHandler: @escaping @Sendable (UNNotificationPresentationOptions) -> Void) {
+        let destination = NotificationDestination(userInfo: notification.request.content.userInfo)
+        Task { @MainActor in
+            let present = destination.map { self.shouldPresent?($0) ?? false } ?? true
+            completionHandler(present ? [.banner, .sound, .list] : [])
+        }
+    }
+    nonisolated func userNotificationCenter(_ center: UNUserNotificationCenter, didReceive response: UNNotificationResponse, withCompletionHandler completionHandler: @escaping @Sendable () -> Void) {
         let id = response.notification.request.content.userInfo["thread_id"] as? String
-        Task { @MainActor in if let id { self.openTask?(id) } }
+        let destination = NotificationDestination(userInfo: response.notification.request.content.userInfo)
+        Task { @MainActor in if let destination { self.openDestination?(destination) } else if let id { self.openTask?(id) } }
         completionHandler()
     }
 }

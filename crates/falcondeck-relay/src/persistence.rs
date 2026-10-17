@@ -874,6 +874,7 @@ async fn init_postgres_schema(client: &PostgresClient) -> Result<(), RelayError>
                 PRIMARY KEY (session_id, device_id)
             );
             ALTER TABLE relay_devices ADD COLUMN IF NOT EXISTS push_token TEXT NULL;
+            ALTER TABLE relay_devices ADD COLUMN IF NOT EXISTS push_registration JSONB NULL;
             ALTER TABLE relay_devices ADD COLUMN IF NOT EXISTS identity_public_key TEXT NULL;
             ALTER TABLE relay_devices
                 ADD COLUMN IF NOT EXISTS persist_generation BIGINT NOT NULL DEFAULT 0;
@@ -973,7 +974,7 @@ async fn load_postgres_state_from_client(
 
     for row in client
         .query(
-            "SELECT session_id, device_id, client_token, label, public_key, identity_public_key, created_at, last_seen_at, revoked_at, push_token, persist_generation FROM relay_devices ORDER BY created_at ASC",
+            "SELECT session_id, device_id, client_token, label, public_key, identity_public_key, created_at, last_seen_at, revoked_at, push_token, persist_generation, push_registration FROM relay_devices ORDER BY created_at ASC",
             &[],
         )
         .await
@@ -991,6 +992,7 @@ async fn load_postgres_state_from_client(
                 last_seen_at: row.get("last_seen_at"),
                 revoked_at: row.get("revoked_at"),
                 push_token: row.get("push_token"),
+                push_registration: row.get::<_, Option<serde_json::Value>>("push_registration").and_then(|value| serde_json::from_value(value).ok()),
                 persist_generation: row
                     .get::<_, i64>("persist_generation")
                     .try_into()
@@ -1159,8 +1161,8 @@ async fn upsert_pairing(
 }
 
 const UPSERT_DEVICE_SQL: &str = "\
-INSERT INTO relay_devices (session_id, device_id, client_token, label, public_key, identity_public_key, created_at, last_seen_at, revoked_at, push_token, persist_generation)
-VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+INSERT INTO relay_devices (session_id, device_id, client_token, label, public_key, identity_public_key, created_at, last_seen_at, revoked_at, push_token, persist_generation, push_registration)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
 ON CONFLICT (session_id, device_id) DO UPDATE SET
   client_token = EXCLUDED.client_token,
   label = EXCLUDED.label,
@@ -1170,6 +1172,7 @@ ON CONFLICT (session_id, device_id) DO UPDATE SET
   last_seen_at = GREATEST(relay_devices.last_seen_at, EXCLUDED.last_seen_at),
   revoked_at = EXCLUDED.revoked_at,
   push_token = EXCLUDED.push_token,
+  push_registration = EXCLUDED.push_registration,
   persist_generation = EXCLUDED.persist_generation
 WHERE relay_devices.persist_generation < EXCLUDED.persist_generation";
 
@@ -1183,6 +1186,7 @@ UPDATE relay_devices SET
   last_seen_at = GREATEST(relay_devices.last_seen_at, $8),
   revoked_at = $9,
   push_token = $10,
+  push_registration = $12,
   persist_generation = $11
 WHERE session_id = $1
   AND device_id = $2
@@ -1235,6 +1239,12 @@ async fn upsert_device(
                 &device.revoked_at,
                 &device.push_token,
                 &generation,
+                &device
+                    .push_registration
+                    .as_ref()
+                    .map(serde_json::to_value)
+                    .transpose()
+                    .map_err(|error| RelayError::StatePersist(error.to_string()))?,
             ],
         )
         .await
@@ -1263,6 +1273,12 @@ async fn update_device_if_newer(
                 &device.revoked_at,
                 &device.push_token,
                 &generation,
+                &device
+                    .push_registration
+                    .as_ref()
+                    .map(serde_json::to_value)
+                    .transpose()
+                    .map_err(|error| RelayError::StatePersist(error.to_string()))?,
             ],
         )
         .await
@@ -1443,8 +1459,8 @@ async fn flush_postgres_state(
 
         for device in session.devices.values() {
             tx.execute(
-                "INSERT INTO relay_devices (session_id, device_id, client_token, label, public_key, identity_public_key, created_at, last_seen_at, revoked_at, push_token, persist_generation)
-                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)",
+                "INSERT INTO relay_devices (session_id, device_id, client_token, label, public_key, identity_public_key, created_at, last_seen_at, revoked_at, push_token, persist_generation, push_registration)
+                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)",
                 &[
                     &session.session_id,
                     &device.device_id,
@@ -1457,6 +1473,7 @@ async fn flush_postgres_state(
                     &device.revoked_at,
                     &device.push_token,
                     &device_generation_param(device)?,
+                    &device.push_registration.as_ref().map(serde_json::to_value).transpose().map_err(|error| RelayError::StatePersist(error.to_string()))?,
                 ],
             )
             .await
@@ -1484,7 +1501,7 @@ async fn flush_postgres_state(
         for action in session.actions.values() {
             tx.execute(
                 "INSERT INTO relay_actions (action_id, session_id, device_id, action_type, idempotency_key, payload, status, created_at, updated_at, error, result)
-                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)",
+                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)",
                 &[
                     &action.action_id,
                     &session.session_id,

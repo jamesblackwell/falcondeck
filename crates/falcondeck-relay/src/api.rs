@@ -32,6 +32,7 @@ pub fn router(state: AppState) -> Router {
         .route("/", get(landing_page))
         .route("/health", get(health))
         .route("/v1/health", get(health))
+        .route("/v1/push-capabilities", get(push_capabilities))
         .route(
             "/v1/pairings",
             post(start_pairing).layer(DefaultBodyLimit::max(PAIRING_REQUEST_BODY_LIMIT_BYTES)),
@@ -60,6 +61,10 @@ pub fn router(state: AppState) -> Router {
         .route(
             "/v1/sessions/{session_id}/devices/{device_id}/push-token",
             post(register_push_token),
+        )
+        .route(
+            "/v1/sessions/{session_id}/devices/{device_id}/push-registration",
+            post(register_push_registration).layer(DefaultBodyLimit::max(16 * 1024)),
         )
         .route("/v1/updates/ws", get(updates_ws))
         .layer(relay_cors_layer())
@@ -571,6 +576,25 @@ async fn register_push_token(
     let token = auth_token(&headers)?;
     state
         .register_push_token(&session_id, &token, &device_id, request.push_token)
+        .await?;
+    Ok(Json(serde_json::json!({ "ok": true })))
+}
+
+async fn push_capabilities(
+    State(state): State<AppState>,
+) -> Json<falcondeck_core::RelayPushCapabilities> {
+    Json(state.push_capabilities())
+}
+
+async fn register_push_registration(
+    State(state): State<AppState>,
+    Path((session_id, device_id)): Path<(String, String)>,
+    headers: HeaderMap,
+    Json(request): Json<falcondeck_core::RegisterPushRegistrationRequest>,
+) -> Result<Json<serde_json::Value>, RelayError> {
+    let token = auth_token(&headers)?;
+    state
+        .register_push_registration(&session_id, &token, &device_id, request.registration)
         .await?;
     Ok(Json(serde_json::json!({ "ok": true })))
 }

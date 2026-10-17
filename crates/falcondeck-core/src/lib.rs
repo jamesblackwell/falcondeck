@@ -5689,6 +5689,12 @@ pub enum RelayRpcFailureCode {
 pub enum RelayClientMessage {
     /// Keepalive ping.
     Ping,
+    /// Advertise whether this client can present live events. Only send after
+    /// Ready advertises client_activity_supported; legacy peers stay foreground.
+    ClientActivity {
+        /// False permits push delivery while the socket remains connected.
+        foreground: bool,
+    },
     /// Request replay updates after an optional sequence.
     Sync {
         /// Highest acknowledged sequence number to resume after.
@@ -5771,6 +5777,63 @@ pub struct RegisterPushTokenRequest {
     pub push_token: Option<String>,
 }
 
+/// Native and third-party clients use this provider-tagged registration.
+/// Provider credentials belong to the relay operator, never the registering client.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "provider", rename_all = "snake_case", deny_unknown_fields)]
+pub enum PushRegistration {
+    /// Expo Push Service, including the existing released client.
+    Expo {
+        /// Expo-assigned device token.
+        token: String,
+    },
+    /// Direct Apple delivery using an operator-configured application.
+    Apns {
+        /// Hexadecimal bytes returned by APNs registration.
+        token: String,
+        /// App bundle identifier.
+        topic: String,
+        /// Must match the app's signed aps-environment entitlement.
+        environment: ApnsEnvironment,
+    },
+}
+
+/// Apple maintains distinct device-token namespaces for development and distribution.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
+#[serde(rename_all = "snake_case")]
+pub enum ApnsEnvironment {
+    /// Development-signed apps.
+    Sandbox,
+    /// Distribution-signed apps.
+    Production,
+}
+
+/// `registration: null` unregisters this device. The legacy Expo endpoint remains valid.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RegisterPushRegistrationRequest {
+    /// Replacement registration, or `None` to disable push for this device.
+    pub registration: Option<PushRegistration>,
+}
+
+/// Public delivery capabilities; contains no credentials or device tokens.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RelayPushCapabilities {
+    /// Whether Expo delivery is enabled.
+    pub expo: bool,
+    /// Applications supported by the optional native provider.
+    pub apns: Vec<ApnsApplication>,
+}
+
+/// Public application identity, excluding all provider credentials.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
+pub struct ApnsApplication {
+    /// App bundle identifier.
+    pub topic: String,
+    /// APNs environment accepted by the relay for this app.
+    pub environment: ApnsEnvironment,
+}
+
 /// Messages emitted by the relay websocket.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(tag = "type", rename_all = "kebab-case")]
@@ -5789,6 +5852,10 @@ pub enum RelayServerMessage {
         role: RelayPeerRole,
         /// Next replay sequence available on the relay.
         next_seq: u64,
+        /// Allows clients to opt into background push while retaining their socket.
+        /// Older relays omit this flag and must not receive ClientActivity frames.
+        #[serde(default)]
+        client_activity_supported: bool,
     },
     /// Keepalive pong.
     Pong,
@@ -6118,6 +6185,7 @@ mod tests {
             session_id: "session-1".to_string(),
             role: RelayPeerRole::Daemon,
             next_seq: 3,
+            client_activity_supported: true,
         };
 
         let json = serde_json::to_value(message).unwrap();

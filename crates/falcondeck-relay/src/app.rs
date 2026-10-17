@@ -27,7 +27,15 @@ use tokio::sync::{Mutex, OwnedSemaphorePermit, Semaphore, mpsc};
 use tracing::warn;
 use uuid::Uuid;
 
-use crate::error::RelayError;
+#[cfg(test)]
+#[path = "push_tests.rs"]
+mod push_tests;
+
+use crate::{
+    error::RelayError,
+    push::{ApnsProvider, DeliveryOutcome, RegisteredPush, normalize_registration},
+};
+use falcondeck_core::{PushRegistration, RelayPushCapabilities};
 
 const PEER_QUEUE_CAPACITY: usize = 256;
 /// Maximum inbound websocket message size shared with the HTTP upgrade
@@ -399,6 +407,7 @@ struct InnerState {
     /// Receipt endpoint resolved once at startup, with an override retained
     /// for local relay integration tests.
     push_receipts_endpoint: String,
+    apns: Option<Arc<ApnsProvider>>,
 }
 
 struct Store {
@@ -531,6 +540,8 @@ pub(crate) struct TrustedDeviceRecord {
     /// Never exposed through the trusted-devices API responses.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) push_token: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) push_registration: Option<RegisteredPush>,
     /// Bumped under the store lock before a full-row snapshot is taken.
     /// Postgres applies that snapshot only when the generation is newer, so
     /// a slow earlier write cannot restore a revoked row or an old token.
@@ -674,6 +685,7 @@ pub(crate) struct QueuedActionRecord {
 
 #[derive(Clone)]
 struct PeerHandle {
+    foreground: bool,
     role: RelayPeerRole,
     device_id: Option<String>,
     tx: PeerQueue,
@@ -965,6 +977,7 @@ impl AppState {
                 push_endpoint,
                 push_access_token,
                 push_receipts_endpoint,
+                apns: ApnsProvider::from_env(),
             }),
         }
     }
@@ -1489,6 +1502,7 @@ impl AppState {
                             last_seen_at: Some(now),
                             revoked_at: None,
                             push_token: None,
+                            push_registration: None,
                             persist_generation: 1,
                         },
                     );
@@ -1793,6 +1807,7 @@ impl AppState {
         live.peers.insert(
             peer_id.clone(),
             PeerHandle {
+                foreground: true,
                 role: role.clone(),
                 device_id,
                 tx,
@@ -1810,6 +1825,7 @@ impl AppState {
                 session_id: session_id.to_string(),
                 role,
                 next_seq,
+                client_activity_supported: true,
             },
         ))
     }
@@ -2065,6 +2081,21 @@ impl AppState {
             }
         }
         match message {
+            RelayClientMessage::ClientActivity { foreground } => {
+                if !matches!(role, RelayPeerRole::Client) {
+                    return Err(RelayError::Unauthorized(
+                        "only clients may set their activity".to_owned(),
+                    ));
+                }
+                let mut store = self.inner.store.lock().await;
+                if let Some(peer) = store
+                    .live_sessions
+                    .get_mut(session_id)
+                    .and_then(|live| live.peers.get_mut(peer_id))
+                {
+                    peer.foreground = foreground;
+                }
+            }
             RelayClientMessage::Ping => {
                 let current_device_id = {
                     let store = self.inner.store.lock().await;
@@ -3006,8 +3037,7 @@ impl AppState {
         self.trusted_devices_response(session_id).await
     }
 
-    /// Store (or clear) the Expo push token for a trusted device. Clients may
-    /// only register their own device's token; the daemon may manage any.
+    /// Legacy Expo contract, retained for released mobile clients.
     pub async fn register_push_token(
         &self,
         session_id: &str,
@@ -3015,8 +3045,53 @@ impl AppState {
         device_id: &str,
         push_token: Option<String>,
     ) -> Result<(), RelayError> {
-        if let Some(push_token) = push_token.as_deref() {
-            validate_bounded_text("push_token", push_token, MAX_PUSH_TOKEN_LENGTH, true)?;
+        if let Some(value) = push_token.as_deref() {
+            validate_bounded_text("push_token", value, MAX_PUSH_TOKEN_LENGTH, true)?;
+        }
+        let registration = push_token
+            .map(|value| value.trim().to_owned())
+            .filter(|value| !value.is_empty())
+            .map(|token| PushRegistration::Expo { token });
+        self.register_push_registration(session_id, token, device_id, registration)
+            .await
+    }
+
+    pub fn push_capabilities(&self) -> RelayPushCapabilities {
+        RelayPushCapabilities {
+            expo: !self.inner.push_endpoint.trim().is_empty(),
+            apns: self
+                .inner
+                .apns
+                .as_ref()
+                .map(|provider| provider.applications())
+                .unwrap_or_default(),
+        }
+    }
+
+    /// Clients can update only their own device. A daemon can manage its devices.
+    pub async fn register_push_registration(
+        &self,
+        session_id: &str,
+        token: &str,
+        device_id: &str,
+        registration: Option<PushRegistration>,
+    ) -> Result<(), RelayError> {
+        let registration = registration
+            .map(normalize_registration)
+            .transpose()
+            .map_err(|reason| RelayError::BadRequest(reason.to_owned()))?;
+        if let Some(PushRegistration::Apns {
+            topic, environment, ..
+        }) = &registration
+            && !self
+                .inner
+                .apns
+                .as_ref()
+                .is_some_and(|provider| provider.supports(topic, *environment))
+        {
+            return Err(RelayError::BadRequest(
+                "APNs application is not configured on this relay".to_owned(),
+            ));
         }
         let auth = self.authenticate_session(session_id, token).await?;
         if matches!(auth.role, RelayPeerRole::Client)
@@ -3043,9 +3118,20 @@ impl AppState {
                     "trusted device is revoked".to_string(),
                 ));
             }
-            device.push_token = push_token
-                .map(|value| value.trim().to_string())
-                .filter(|value| !value.is_empty());
+            // Keep legacy Expo rows byte-for-byte compatible with old binaries.
+            device.push_token = match &registration {
+                Some(PushRegistration::Expo { token }) => Some(token.clone()),
+                _ => None,
+            };
+            device.push_registration = match &registration {
+                Some(PushRegistration::Apns { .. }) => {
+                    registration.clone().map(|registration| RegisteredPush {
+                        registration,
+                        registered_at: Utc::now(),
+                    })
+                }
+                _ => None,
+            };
             device.bump_persist_generation();
             let device_snapshot = device.clone();
             session.updated_at = Utc::now();
@@ -3074,9 +3160,6 @@ impl AppState {
         message_preview: Option<String>,
     ) {
         let endpoint = self.inner.push_endpoint.clone();
-        if endpoint.trim().is_empty() {
-            return;
-        }
         let recipients = {
             let mut store = self.inner.store.lock().await;
             let now = Utc::now();
@@ -3094,6 +3177,7 @@ impl AppState {
                 .map(|live| {
                     live.peers
                         .values()
+                        .filter(|peer| peer.foreground)
                         .filter_map(|peer| peer.device_id.clone())
                         .collect::<std::collections::HashSet<_>>()
                 })
@@ -3107,7 +3191,40 @@ impl AppState {
                 .values()
                 .filter(|device| device.revoked_at.is_none())
                 .filter(|device| !connected_devices.contains(&device.device_id))
-                .filter_map(|device| device.push_token.clone())
+                .filter_map(|device| {
+                    let registration = if let Some(registration) = &device.push_registration {
+                        let PushRegistration::Apns {
+                            topic, environment, ..
+                        } = &registration.registration
+                        else {
+                            return None;
+                        };
+                        if !self
+                            .inner
+                            .apns
+                            .as_ref()
+                            .is_some_and(|provider| provider.supports(topic, *environment))
+                        {
+                            return None;
+                        }
+                        registration.clone()
+                    } else {
+                        if endpoint.trim().is_empty() {
+                            return None;
+                        }
+                        RegisteredPush {
+                            registration: PushRegistration::Expo {
+                                token: device.push_token.clone()?,
+                            },
+                            registered_at: now,
+                        }
+                    };
+                    Some((
+                        device.device_id.clone(),
+                        device.persist_generation,
+                        registration,
+                    ))
+                })
                 .collect::<Vec<_>>();
             if recipients.is_empty() {
                 return;
@@ -3118,7 +3235,78 @@ impl AppState {
 
         let (title, body) =
             push_notification_content(&kind, thread_title.as_deref(), message_preview.as_deref());
-        for recipient_chunk in recipients.chunks(EXPO_MAX_MESSAGES_PER_REQUEST) {
+        let collapse_id = format!(
+            "{:x}",
+            Sha256::digest(
+                serde_json::to_vec(&push_dedupe_key(session_id, &kind, thread_id.as_deref()))
+                    .unwrap_or_default()
+            )
+        );
+        if let Some(provider) = &self.inner.apns
+            && let Some(payload) = crate::push::apns_payload(
+                title,
+                body,
+                session_id,
+                workspace_id.as_deref(),
+                thread_id.as_deref(),
+                &kind,
+                &collapse_id,
+            )
+        {
+            for (device_id, generation, registered) in &recipients {
+                if !matches!(registered.registration, PushRegistration::Apns { .. }) {
+                    continue;
+                }
+                let Some(permit) = provider.reserve() else {
+                    warn!("APNs delivery capacity exceeded");
+                    continue;
+                };
+                let (
+                    state,
+                    provider,
+                    session_id,
+                    device_id,
+                    generation,
+                    registered,
+                    payload,
+                    collapse_id,
+                ) = (
+                    self.clone(),
+                    provider.clone(),
+                    session_id.to_owned(),
+                    device_id.clone(),
+                    *generation,
+                    registered.clone(),
+                    payload.clone(),
+                    collapse_id.clone(),
+                );
+                tokio::spawn(async move {
+                    let _permit = permit;
+                    if let DeliveryOutcome::Unregistered(timestamp) = provider
+                        .deliver(&registered.registration, &payload, &collapse_id)
+                        .await
+                        && timestamp >= registered.registered_at.timestamp_millis()
+                    {
+                        state
+                            .clear_dead_native_registration(
+                                &session_id,
+                                &device_id,
+                                generation,
+                                &registered,
+                            )
+                            .await;
+                    }
+                });
+            }
+        }
+        let expo_recipients = recipients
+            .into_iter()
+            .filter_map(|(_, _, registered)| match registered.registration {
+                PushRegistration::Expo { token } => Some(token),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        for recipient_chunk in expo_recipients.chunks(EXPO_MAX_MESSAGES_PER_REQUEST) {
             let chunk_recipients = recipient_chunk.to_vec();
             let messages = chunk_recipients
                 .iter()
@@ -3195,6 +3383,46 @@ impl AppState {
                     break;
                 }
             });
+        }
+    }
+
+    async fn clear_dead_native_registration(
+        &self,
+        session_id: &str,
+        device_id: &str,
+        generation: u64,
+        registered: &RegisteredPush,
+    ) {
+        let snapshot = {
+            let mut store = self.inner.store.lock().await;
+            let Some(session) = store.data.sessions.get_mut(session_id) else {
+                return;
+            };
+            let Some(device) = session.devices.get_mut(device_id) else {
+                return;
+            };
+            if device.persist_generation != generation
+                || device.push_registration.as_ref() != Some(registered)
+            {
+                return;
+            }
+            device.push_registration = None;
+            device.bump_persist_generation();
+            let device = device.clone();
+            session.updated_at = Utc::now();
+            (session.meta(), device)
+        };
+        if self
+            .persist_device_state(
+                &snapshot.0,
+                Some(&snapshot.1),
+                false,
+                PersistMode::Immediate,
+            )
+            .await
+            .is_err()
+        {
+            warn!("failed to persist expired APNs registration");
         }
     }
 
@@ -4086,6 +4314,7 @@ impl SessionRecord {
                     last_seen_at: self.client_last_seen_at,
                     revoked_at: self.revoked_at,
                     push_token: None,
+                    push_registration: None,
                     persist_generation: 1,
                 },
             );
@@ -4877,6 +5106,7 @@ mod tests {
                 last_seen_at: None,
                 revoked_at: None,
                 push_token: None,
+                push_registration: None,
                 persist_generation: 0,
             },
         );
@@ -5540,6 +5770,7 @@ mod tests {
         live.peers.insert(
             "daemon-1".to_string(),
             PeerHandle {
+                foreground: true,
                 role: falcondeck_core::RelayPeerRole::Daemon,
                 device_id: None,
                 tx,
@@ -5570,6 +5801,7 @@ mod tests {
             live.peers.insert(
                 peer_id.to_string(),
                 PeerHandle {
+                    foreground: true,
                     role: falcondeck_core::RelayPeerRole::Daemon,
                     device_id: None,
                     tx: tx.clone(),
@@ -5597,6 +5829,7 @@ mod tests {
             live.peers.insert(
                 peer_id.to_string(),
                 PeerHandle {
+                    foreground: true,
                     role: falcondeck_core::RelayPeerRole::Daemon,
                     device_id: None,
                     tx: tx.clone(),

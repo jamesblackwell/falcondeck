@@ -1895,6 +1895,20 @@ export type RemoteConnectionStatus =
 
 export type TrustedDeviceStatus = "active" | "revoked";
 
+/** Provider credentials are configured by the relay operator, never submitted by clients. */
+export type PushRegistration =
+  | { provider: "expo"; token: string }
+  | { provider: "apns"; token: string; topic: string; environment: "sandbox" | "production" };
+
+/** POST /v1/sessions/:sessionId/devices/:deviceId/push-registration. */
+export type RegisterPushRegistrationRequest = { registration: PushRegistration | null };
+
+/** GET /v1/push-capabilities. Older relays may return 404. */
+export type RelayPushCapabilities = {
+  expo: boolean;
+  apns: Array<{ topic: string; environment: "sandbox" | "production" }>;
+};
+
 export type TrustedDevice = {
   device_id: string;
   session_id: string;
@@ -2067,6 +2081,8 @@ export type SubmitQueuedActionRequest = {
 export type RelayServerMessage =
   | {
       type: "ready";
+      /** Gate client-activity frames; absent on old relays. */
+      client_activity_supported?: boolean;
       session_id: string;
       role: "daemon" | "client";
       next_seq: number;
@@ -2110,6 +2126,7 @@ export type RelayServerMessage =
 
 export type RelayClientMessage =
   | { type: "ping" }
+  | { type: "client-activity"; foreground: boolean }
   | { type: "sync"; after_seq?: number | null }
   | { type: "update"; body: RelayUpdateBody }
   | { type: "ephemeral"; body: unknown }

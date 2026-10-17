@@ -35,12 +35,20 @@ targets:
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.falcondeck.pilot.native
+        CODE_SIGN_ENTITLEMENTS: FalconDeckNative/FalconDeckNative.entitlements
         TARGETED_DEVICE_FAMILY: "1,2"
         GENERATE_INFOPLIST_FILE: YES
         INFOPLIST_KEY_CFBundleDisplayName: Falcon Native
         INFOPLIST_KEY_UILaunchScreen_Generation: YES
         MARKETING_VERSION: "0.1.0"
         CURRENT_PROJECT_VERSION: "1"
+      configs:
+        Debug:
+          APS_ENVIRONMENT: development
+          NATIVE_PUSH_ENVIRONMENT: sandbox
+        Release:
+          APS_ENVIRONMENT: production
+          NATIVE_PUSH_ENVIRONMENT: production
     info:
       path: FalconDeckNative/Info.plist
       properties:
@@ -48,6 +56,7 @@ targets:
         CFBundleShortVersionString: $(MARKETING_VERSION)
         CFBundleVersion: $(CURRENT_PROJECT_VERSION)
         NSSupportsLiveActivities: true
+        NativePushEnvironment: $(NATIVE_PUSH_ENVIRONMENT)
         UISupportedInterfaceOrientations: [UIInterfaceOrientationPortrait, UIInterfaceOrientationLandscapeLeft, UIInterfaceOrientationLandscapeRight]
         UISupportedInterfaceOrientations~ipad: [UIInterfaceOrientationPortrait, UIInterfaceOrientationPortraitUpsideDown, UIInterfaceOrientationLandscapeLeft, UIInterfaceOrientationLandscapeRight]
         UIRequiresFullScreen: false

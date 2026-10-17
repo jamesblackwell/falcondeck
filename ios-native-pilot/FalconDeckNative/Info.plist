@@ -44,6 +44,8 @@
 	<string>Transcribe voice messages on this device.</string>
 	<key>NSSupportsLiveActivities</key>
 	<true/>
+	<key>NativePushEnvironment</key>
+	<string>$(NATIVE_PUSH_ENVIRONMENT)</string>
 	<key>UIBackgroundModes</key>
 	<array>
 		<string>audio</string>

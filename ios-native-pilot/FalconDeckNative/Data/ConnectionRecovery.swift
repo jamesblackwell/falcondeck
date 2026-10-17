@@ -3,7 +3,9 @@ import Foundation
 @MainActor extension AppModel {
     func setForeground(_ active: Bool) {
         foreground = active
+        Task { await relay.setForeground(active) }
         if active {
+            synchronizePush()
             if hasSession && !demo { Task { if self.connected { await self.refresh() } else { await self.reconnect() } } }
         } else { reconnectTask?.cancel(); reconnectTask = nil; Task { await self.saveAllInputs() } }
     }

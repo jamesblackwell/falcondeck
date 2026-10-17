@@ -7,7 +7,7 @@ import Foundation
         case .status(let text, let online):
             status = text; connected = online
             if connectionLog.last?.message != text { connectionLog.append(ConnectionLogEntry(message: text)); if connectionLog.count > 100 { connectionLog.removeFirst(connectionLog.count - 100) } }
-            if online { reconnectAttempt = 0; reconnectTask?.cancel(); reconnectTask = nil; automations.scheduleRefresh(model: self); Task { await self.extensions.load(model: self) } }
+            if online { reconnectAttempt = 0; reconnectTask?.cancel(); reconnectTask = nil; automations.scheduleRefresh(model: self); synchronizePush(); Task { await self.extensions.load(model: self); await self.openPendingNotification() } }
             if text == "Connecting…" { lastEventSeq = 0 }
         case .snapshot(let value):
             summaryFlush?.cancel(); summaryFlush = nil; pendingSummaries = [:]
@@ -27,6 +27,7 @@ import Foundation
             operationalConditions = value["operational_conditions"].array
             tokenUsage = value["thread_token_usage"] == .null ? .object([:]) : value["thread_token_usage"]
             refreshedAt = .now; error = nil; demo = false
+            Task { await self.openPendingNotification() }
             if let pendingSelection {
                 switch pendingSelection {
                 case .task(let id): if task(id) != nil { selection = pendingSelection; self.pendingSelection = nil }
@@ -69,7 +70,7 @@ import Foundation
         case "thread-started", "thread-updated":
             let raw = event["thread"]
             let old = pendingSummaries[id] ?? tasks.first(where: { $0.id == id })?.raw ?? .null
-            if !rebase, old["status"].string == "running", ["idle", "error"].contains(raw["status"].string), (!foreground || selection != .task(id)), preferences["notifications"]["enabled"] != .bool(false) {
+            if !rebase, old["status"].string == "running", ["idle", "error"].contains(raw["status"].string), (!foreground ? !push.registered : selection != .task(id)), preferences["notifications"]["enabled"] != .bool(false) {
                 let failed = raw["status"].string == "error"
                 if preferences["notifications"][failed ? "notify_on_error" : "notify_on_turn_complete"] != .bool(false) {
                     notifications.announce(title: raw["title"].string.nonempty ?? "FalconDeck", body: failed ? raw["last_error"].string : raw["last_message_preview"].string.nonempty ?? "Task completed", taskID: id)
@@ -93,7 +94,7 @@ import Foundation
         case "preferences-updated": preferences = event["preferences"]
         case "interactive-request":
             let request = event["request"]
-            if !rebase, !requests.contains(where: { $0["request_id"] == request["request_id"] }), (!foreground || selection != .task(id)), preferences["notifications"]["enabled"] != .bool(false), preferences["notifications"]["notify_on_input_required"] != .bool(false) {
+            if !rebase, !requests.contains(where: { $0["request_id"] == request["request_id"] }), (!foreground ? !push.registered : selection != .task(id)), preferences["notifications"]["enabled"] != .bool(false), preferences["notifications"]["notify_on_input_required"] != .bool(false) {
                 notifications.announce(title: "Input needed", body: request["title"].string, taskID: id)
             }
             requests.removeAll { $0["request_id"] == request["request_id"] }; requests.append(request)

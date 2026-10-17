@@ -9,6 +9,7 @@ pub mod app;
 mod diagnostics;
 pub mod error;
 pub(crate) mod persistence;
+mod push;
 
 pub use api::router;
 pub use app::{AppState, BudgetedRelayMessage, RetentionConfig};
