@@ -47,7 +47,10 @@ final class VoiceRecorder: NSObject, AVAudioRecorderDelegate {
             try session.setCategory(.playAndRecord, mode: .default, options: [.defaultToSpeaker, .allowBluetoothHFP])
             try session.setActive(true)
             let directory = try FileManager.default.url(for: .applicationSupportDirectory, in: .userDomainMask, appropriateFor: nil, create: true).appending(path: "Voice", directoryHint: .isDirectory)
-            try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+            // Lock Screen Finish reopens finalized recordings for transcription.
+            let protection: [FileAttributeKey: Any] = [.protectionKey: FileProtectionType.completeUntilFirstUserAuthentication]
+            try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true, attributes: protection)
+            try FileManager.default.setAttributes(protection, ofItemAtPath: directory.path)
             var protectedDirectory = directory
             var resourceValues = URLResourceValues(); resourceValues.isExcludedFromBackup = true
             try protectedDirectory.setResourceValues(resourceValues)
@@ -59,8 +62,6 @@ final class VoiceRecorder: NSObject, AVAudioRecorderDelegate {
             defaults.set(url.path, forKey: "native.voice.pending")
             defaults.set(ownerID, forKey: "native.voice.owner")
             defaults.set(provider, forKey: "native.voice.provider")
-            // Lock Screen Finish reopens the finalized file for transcription.
-            try FileManager.default.setAttributes([.protectionKey: FileProtectionType.completeUntilFirstUserAuthentication], ofItemAtPath: url.path)
             recording = true; elapsed = 0
             SpeechLiveActivity.shared.voice("listening")
             meter = Task {

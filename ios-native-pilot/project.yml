@@ -89,6 +89,16 @@ targets:
     settings:
       base:
         GENERATE_INFOPLIST_FILE: YES
+  FalconDeckNativeUITests:
+    type: bundle.ui-testing
+    platform: iOS
+    sources: [FalconDeckNativeUITests]
+    dependencies:
+      - target: FalconDeckNative
+    settings:
+      base:
+        GENERATE_INFOPLIST_FILE: YES
+        TEST_TARGET_NAME: FalconDeckNative
 schemes:
   FalconDeckNative:
     build:
@@ -97,3 +107,10 @@ schemes:
         FalconDeckNativeTests: [test]
     test:
       targets: [FalconDeckNativeTests]
+  FalconDeckNativeUI:
+    build:
+      targets:
+        FalconDeckNative: all
+        FalconDeckNativeUITests: [test]
+    test:
+      targets: [FalconDeckNativeUITests]

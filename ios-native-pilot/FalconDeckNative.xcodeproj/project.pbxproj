@@ -71,6 +71,7 @@
 		AE041B8DB912027EB22CEA19 /* SpeechSettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 868A352E3D9F06A83D30D411 /* SpeechSettingsView.swift */; };
 		B00C66C810B7BF4298D753A2 /* VoiceControl.swift in Sources */ = {isa = PBXBuildFile; fileRef = D86E75EE1AC3FB975EE5C217 /* VoiceControl.swift */; };
 		B28081AEF710554BF11F2BF1 /* TranscriptGroup.swift in Sources */ = {isa = PBXBuildFile; fileRef = 344E2A83A1274334E60129B3 /* TranscriptGroup.swift */; };
+		B303B6D6F20519B66A182BBE /* NativeSmokeTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0B2E3E67BD590B9BDB46318D /* NativeSmokeTests.swift */; };
 		BAA8BBF65D0A345B4B484641 /* Sodium in Frameworks */ = {isa = PBXBuildFile; productRef = 33E86D1F2E3B8C0C0ABC20E2 /* Sodium */; };
 		BDA1AA96709537008B464C95 /* ConnectionView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 16F5CDC46298C62F85B619EB /* ConnectionView.swift */; };
 		BE69421FF072D5D3F5D4BBAA /* MarkdownView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 42B8AF3942CD1C580C831846 /* MarkdownView.swift */; };
@@ -102,6 +103,13 @@
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
+		32583033DD74725C23C8E8C1 /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = 3F8122353E9610995751AF25 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = C5041C9FCBD034C6F003ABE6;
+			remoteInfo = FalconDeckNative;
+		};
 		4548E23A75F7D31B04E298EB /* PBXContainerItemProxy */ = {
 			isa = PBXContainerItemProxy;
 			containerPortal = 3F8122353E9610995751AF25 /* Project object */;
@@ -136,6 +144,7 @@
 		0425536D3162A63CF5341E63 /* LocalNotifications.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LocalNotifications.swift; sourceTree = "<group>"; };
 		05853E8F91F07EB6C08036EA /* TaskFeatureTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TaskFeatureTests.swift; sourceTree = "<group>"; };
 		06F7E8C4BA907396BEF51195 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
+		0B2E3E67BD590B9BDB46318D /* NativeSmokeTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NativeSmokeTests.swift; sourceTree = "<group>"; };
 		0B674EB9298FF9EA3AFBC664 /* CompactSync.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CompactSync.swift; sourceTree = "<group>"; };
 		0FB0EF0DB934FDF58A63E71A /* PerformanceSample.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PerformanceSample.swift; sourceTree = "<group>"; };
 		1296682B4C2710C830607D72 /* AutomationTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AutomationTests.swift; sourceTree = "<group>"; };
@@ -200,6 +209,7 @@
 		A4199B1817657D57DDFE2060 /* FalconDeckNativeApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FalconDeckNativeApp.swift; sourceTree = "<group>"; };
 		A54D033C04ACF7CDEB83634B /* AudioInterruptionObserver.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AudioInterruptionObserver.swift; sourceTree = "<group>"; };
 		AA6CF1D3BE369372AD902660 /* ConversationView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ConversationView.swift; sourceTree = "<group>"; };
+		AB800874F81E1B3693B143E0 /* FalconDeckNativeUITests.xctest */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.cfbundle; path = FalconDeckNativeUITests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		AC29ECED10ED5C3483365E02 /* QueuedMessagesView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = QueuedMessagesView.swift; sourceTree = "<group>"; };
 		AD2AC5615C2A38A0579CCC41 /* SessionTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SessionTests.swift; sourceTree = "<group>"; };
 		B243780CE7FC8C72EF838BE4 /* SpeechLiveActivity.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SpeechLiveActivity.swift; sourceTree = "<group>"; };
@@ -246,6 +256,7 @@
 			children = (
 				FFEF03D303D8B76B687E7BE3 /* FalconDeckNative.app */,
 				6E36500E629EEF10CD1C26D1 /* FalconDeckNativeTests.xctest */,
+				AB800874F81E1B3693B143E0 /* FalconDeckNativeUITests.xctest */,
 				6EB16C06AEF431B0E751E05B /* FalconSpeechActivity.appex */,
 			);
 			name = Products;
@@ -256,6 +267,7 @@
 			children = (
 				F26F799D747451A9FFEB9BB1 /* FalconDeckNative */,
 				7D3DFEABD6464A22910B2B98 /* FalconDeckNativeTests */,
+				B3B2BB09C083CAC860457964 /* FalconDeckNativeUITests */,
 				F8248BC9E1C1AA30D2C9D616 /* Shared */,
 				3D39943732A4510E51A7444C /* SpeechWidget */,
 				156CF86E4D2E17625E7D99F7 /* Products */,
@@ -358,6 +370,14 @@
 				05853E8F91F07EB6C08036EA /* TaskFeatureTests.swift */,
 			);
 			path = FalconDeckNativeTests;
+			sourceTree = "<group>";
+		};
+		B3B2BB09C083CAC860457964 /* FalconDeckNativeUITests */ = {
+			isa = PBXGroup;
+			children = (
+				0B2E3E67BD590B9BDB46318D /* NativeSmokeTests.swift */,
+			);
+			path = FalconDeckNativeUITests;
 			sourceTree = "<group>";
 		};
 		E1031B3F2BB9C37EA151A6A9 /* Features */ = {
@@ -466,6 +486,24 @@
 			productReference = 6EB16C06AEF431B0E751E05B /* FalconSpeechActivity.appex */;
 			productType = "com.apple.product-type.app-extension";
 		};
+		9125732F64B5C23DFB2E9E5C /* FalconDeckNativeUITests */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = 06F57CF42C889248FC414477 /* Build configuration list for PBXNativeTarget "FalconDeckNativeUITests" */;
+			buildPhases = (
+				E12DE611A896386FDA686E2D /* Sources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+				5E8411BF760557B1032DB235 /* PBXTargetDependency */,
+			);
+			name = FalconDeckNativeUITests;
+			packageProductDependencies = (
+			);
+			productName = FalconDeckNativeUITests;
+			productReference = AB800874F81E1B3693B143E0 /* FalconDeckNativeUITests.xctest */;
+			productType = "com.apple.product-type.bundle.ui-testing";
+		};
 		C5041C9FCBD034C6F003ABE6 /* FalconDeckNative */ = {
 			isa = PBXNativeTarget;
 			buildConfigurationList = D16DEFDCDC8006F9A923424C /* Build configuration list for PBXNativeTarget "FalconDeckNative" */;
@@ -505,6 +543,10 @@
 					825A86B82549366EF0E965DE = {
 						ProvisioningStyle = Automatic;
 					};
+					9125732F64B5C23DFB2E9E5C = {
+						ProvisioningStyle = Automatic;
+						TestTargetID = C5041C9FCBD034C6F003ABE6;
+					};
 					C5041C9FCBD034C6F003ABE6 = {
 						ProvisioningStyle = Automatic;
 					};
@@ -531,6 +573,7 @@
 				C5041C9FCBD034C6F003ABE6 /* FalconDeckNative */,
 				825A86B82549366EF0E965DE /* FalconSpeechActivity */,
 				5A41F6B9040D6096B4602C1D /* FalconDeckNativeTests */,
+				9125732F64B5C23DFB2E9E5C /* FalconDeckNativeUITests */,
 			);
 		};
 /* End PBXProject section */
@@ -680,6 +723,14 @@
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
+		E12DE611A896386FDA686E2D /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				B303B6D6F20519B66A182BBE /* NativeSmokeTests.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 /* End PBXSourcesBuildPhase section */
 
 /* Begin PBXTargetDependency section */
@@ -687,6 +738,11 @@
 			isa = PBXTargetDependency;
 			target = 825A86B82549366EF0E965DE /* FalconSpeechActivity */;
 			targetProxy = 4548E23A75F7D31B04E298EB /* PBXContainerItemProxy */;
+		};
+		5E8411BF760557B1032DB235 /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = C5041C9FCBD034C6F003ABE6 /* FalconDeckNative */;
+			targetProxy = 32583033DD74725C23C8E8C1 /* PBXContainerItemProxy */;
 		};
 		D3EF602FCA6A03974C4AE4ED /* PBXTargetDependency */ = {
 			isa = PBXTargetDependency;
@@ -731,6 +787,40 @@
 				SDKROOT = iphoneos;
 				TARGETED_DEVICE_FAMILY = "1,2";
 				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/FalconDeckNative.app/FalconDeckNative";
+			};
+			name = Debug;
+		};
+		1E18C95A261B9CAF8C82896E /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				GENERATE_INFOPLIST_FILE = YES;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+					"@loader_path/Frameworks",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = com.falcondeck.pilot.FalconDeckNativeUITests;
+				SDKROOT = iphoneos;
+				TARGETED_DEVICE_FAMILY = "1,2";
+				TEST_TARGET_NAME = FalconDeckNative;
+			};
+			name = Release;
+		};
+		289A265FD07A963C84D0343B /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				GENERATE_INFOPLIST_FILE = YES;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+					"@loader_path/Frameworks",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = com.falcondeck.pilot.FalconDeckNativeUITests;
+				SDKROOT = iphoneos;
+				TARGETED_DEVICE_FAMILY = "1,2";
+				TEST_TARGET_NAME = FalconDeckNative;
 			};
 			name = Debug;
 		};
@@ -934,6 +1024,15 @@
 /* End XCBuildConfiguration section */
 
 /* Begin XCConfigurationList section */
+		06F57CF42C889248FC414477 /* Build configuration list for PBXNativeTarget "FalconDeckNativeUITests" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				289A265FD07A963C84D0343B /* Debug */,
+				1E18C95A261B9CAF8C82896E /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Debug;
+		};
 		0BFD48AD3D2FAE91AB87D4DB /* Build configuration list for PBXNativeTarget "FalconDeckNativeTests" */ = {
 			isa = XCConfigurationList;
 			buildConfigurations = (

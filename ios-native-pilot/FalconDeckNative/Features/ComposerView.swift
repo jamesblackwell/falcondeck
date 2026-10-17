@@ -21,6 +21,9 @@ struct ComposerView: View {
             if !chat.attachments.isEmpty { AttachmentStrip(chat: chat) }
             TextField(task.running ? "Queue a follow-up…" : "Message \(task.provider.capitalized)…", text: $chat.draft, axis: .vertical)
                 .lineLimit(1...7).font(.body).focused($focused).padding(.horizontal, 4).accessibilityIdentifier("chat-input").submitLabel(.return)
+                .frame(minHeight: 44, alignment: .topLeading)
+                .contentShape(Rectangle())
+                .simultaneousGesture(TapGesture().onEnded { focused = true })
             HStack(spacing: 12) {
                 if project?.capabilities(task.provider)["supports_images"] != .bool(false) { AttachmentPicker(chat: chat) }
                 VoiceControl(task: task, chat: chat)
