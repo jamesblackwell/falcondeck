@@ -2,6 +2,32 @@ import XCTest
 
 @MainActor final class VoiceComposerTests: XCTestCase {
     override func setUp() { super.setUp(); continueAfterFailure = false }
+    func testMicrophoneAfterSendingAClearedDraftDoesNotCrash() {
+        XCUIDevice.shared.orientation = .portrait
+        let app = XCUIApplication(); app.launchArguments = ["--demo", "-native.speech.provider", "openrouter"]; app.launch()
+        app.buttons["sidebar-task-native"].tap()
+        let input = app.textFields["chat-input"]
+        input.tap(); input.typeText("A long draft with 🦅 Unicode that will be cleared before recording.")
+        app.buttons["send-message"].tap()
+        let cleared = XCTNSPredicateExpectation(predicate: NSPredicate { _, _ in input.exists && (input.value as? String) != "A long draft with 🦅 Unicode that will be cleared before recording." }, object: nil)
+        XCTAssertEqual(XCTWaiter.wait(for: [cleared], timeout: 5), .completed)
+        app.buttons["record-voice"].tap()
+        XCTAssertTrue(app.buttons["Cancel voice input"].waitForExistence(timeout: 5))
+        XCTAssertTrue(app.staticTexts["Connect to your computer to use OpenRouter voice input."].exists)
+        app.buttons["Cancel voice input"].tap()
+        XCTAssertTrue(input.waitForExistence(timeout: 5))
+    }
+    func testMicrophoneStaysOnTheRightBesideThePrimaryAction() {
+        let app = XCUIApplication(); app.launchArguments = ["--demo"]; app.launch()
+        app.buttons["sidebar-task-native"].tap()
+        let model = app.buttons["composer-model"], options = app.buttons["Agent and task settings"], mic = app.buttons["record-voice"], stop = app.buttons["stop-task"], send = app.buttons["send-message"]
+        XCTAssertTrue(mic.waitForExistence(timeout: 5))
+        XCTAssertLessThan(model.frame.maxX, options.frame.maxX)
+        XCTAssertLessThanOrEqual(options.frame.maxX, mic.frame.minX)
+        XCTAssertLessThanOrEqual(mic.frame.maxX, stop.frame.minX)
+        XCTAssertLessThanOrEqual(stop.frame.maxX, send.frame.minX)
+        let shot = XCTAttachment(screenshot: XCUIScreen.main.screenshot()); shot.name = "Composer matches Expo control order"; shot.lifetime = .keepAlways; add(shot)
+    }
     func testVoiceStatesReplaceTheInputWithoutLosingTheDraft() {
         XCUIDevice.shared.orientation = .portrait
         for phase in ["starting", "recording", "transcribing", "failed"] {

@@ -7,6 +7,7 @@ struct ComposerView: View {
     @Bindable var chat: ChatSession
     @FocusState private var focused: Bool
     @State private var selection: TextSelection?
+    @State private var voiceSelection: (text: String, indices: Range<String.Index>)?
     @State private var showGoal = false
     @State private var showModels = false
     @State private var goalSeed = ""
@@ -14,6 +15,14 @@ struct ComposerView: View {
     private var models: [AgentModel] { project?.models(for: task.provider) ?? [] }
     private var activeModel: AgentModel? { models.first { $0.id == chat.modelID } ?? models.first { $0.raw["is_default"].bool } ?? models.first }
     private var voiceActive: Bool { chat.voiceInputOpen && model.voice.ownerID == task.id }
+    private var selectionBinding: Binding<TextSelection?> {
+        Binding(get: { selection }, set: { value in
+            selection = value
+            if let value, case .selection(let indices) = value.indices {
+                voiceSelection = (chat.draft, indices)
+            } else { voiceSelection = nil }
+        })
+    }
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
             if !model.connected && !model.demo {
@@ -24,14 +33,13 @@ struct ComposerView: View {
                 RecordingPanel(task: task, chat: chat, onTranscript: receiveTranscript)
             } else {
                 SlashCommandsView(task: task, chat: chat) { openGoal() }
-                TextField(task.running ? "Queue a follow-up…" : "Message \(task.provider.capitalized)…", text: $chat.draft, selection: $selection, axis: .vertical)
+                TextField(task.running ? "Queue a follow-up…" : "Message \(task.provider.capitalized)…", text: $chat.draft, selection: selectionBinding, axis: .vertical)
                     .lineLimit(1...6).font(.body).focused($focused).padding(.horizontal, 4).accessibilityIdentifier("chat-input").submitLabel(.return)
                     .frame(minHeight: 44, alignment: .topLeading)
                     .contentShape(Rectangle())
                     .simultaneousGesture(TapGesture().onEnded { focused = true })
                 HStack(spacing: 0) {
                     if project?.capabilities(task.provider)["supports_images"] != .bool(false) { AttachmentPicker(chat: chat) }
-                    VoiceControl(task: task, chat: chat, onBegin: beginVoiceInput)
                     Button { focused = false; showModels = true } label: {
                         HStack(spacing: 5) {
                             Text(activeModel?.label ?? chat.modelID.nonempty ?? task.provider.capitalized)
@@ -40,6 +48,7 @@ struct ComposerView: View {
                         }.padding(.horizontal, 6).frame(maxWidth: .infinity, minHeight: 44, alignment: .leading).contentShape(.rect)
                     }.buttonStyle(.plain).accessibilityLabel("Choose model").accessibilityIdentifier("composer-model")
                     ComposerOptions(task: task, project: project, chat: chat)
+                    VoiceControl(task: task, chat: chat, onBegin: beginVoiceInput)
                     if task.running || task.status == "waiting_for_input" {
                         Button { Task { await model.stop(task) } } label: { Image(systemName: "stop.fill").font(.subheadline).frame(width: 44, height: 44).contentShape(.rect) }
                             .buttonStyle(.plain).disabled(chat.stopping || (!model.connected && !model.demo)).accessibilityLabel("Stop task").accessibilityIdentifier("stop-task")
@@ -89,14 +98,13 @@ struct ComposerView: View {
         .onChange(of: chat.effort) { _, value in chat.overrides["reasoning_effort"] = value.isEmpty ? .null : .string(value) }
     }
     private func beginVoiceInput() {
-        let range: NSRange?
-        if let selection, case .selection(let indices) = selection.indices { range = NSRange(indices, in: chat.draft) }
-        else { range = nil }
-        chat.voiceInsertion = VoiceDraftInsertion(original: chat.draft, selection: range)
+        // TextSelection indices can outlive a send or draft edit. Keep their
+        // owning text, and validate them once when dictation begins.
+        chat.voiceInsertion = voiceSelection.map { VoiceDraftInsertion.capture($0.indices, in: $0.text) } ?? VoiceDraftInsertion(original: chat.draft, selection: nil)
         focused = false
     }
     private func receiveTranscript(_ text: String, submit: Bool) {
-        selection = TextSelection(insertionPoint: chat.insertVoiceTranscript(text))
+        selectionBinding.wrappedValue = TextSelection(insertionPoint: chat.insertVoiceTranscript(text))
         if submit { submitDraft() }
         else { Task { @MainActor in await Task.yield(); focused = true } }
     }

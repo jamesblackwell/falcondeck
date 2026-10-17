@@ -119,6 +119,27 @@ import XCTest
         XCTAssertEqual(middle.text, "Fix the obvious parser")
         XCTAssertEqual(String(middle.text[..<middle.caret]), "Fix the obvious")
     }
+    func testCanonicallyEquivalentDraftChangesCannotReuseOldUTF16Offsets() {
+        let original = "e\u{301}x", changed = "éx"
+        XCTAssertEqual(original, changed)
+        let edit = VoiceDraftInsertion(original: original, selection: NSRange(location: 0, length: 2))
+        XCTAssertEqual(edit.inserting("next", into: changed).text, "éx next")
+    }
+    func testStaleCursorIndicesAfterClearingOrShorteningTheDraftAreSafe() {
+        let old = "A long draft with 🦅 Unicode that will be cleared before recording."
+        let caret = old.endIndex..<old.endIndex
+        for draft in ["", "Short"] {
+            let insertion = VoiceDraftInsertion.capture(caret, in: draft)
+            XCTAssertNil(insertion.selection)
+            XCTAssertEqual(insertion.inserting("dictation", into: draft).text, draft.isEmpty ? "dictation" : draft + " dictation")
+        }
+        let selected = old.range(of: "Unicode")!
+        let captured = VoiceDraftInsertion.capture(selected, in: old)
+        XCTAssertEqual(captured.selection, NSRange(selected, in: old))
+        XCTAssertTrue(captured.inserting("speech", into: old).text.contains("🦅 speech that"))
+        XCTAssertEqual(captured.inserting("speech", into: "A new draft").text, "A new draft speech")
+        XCTAssertEqual(VoiceDraftInsertion.capture("".startIndex..<"".endIndex, in: "").selection, NSRange(location: 0, length: 0))
+    }
 }
 
 private actor SpeechFixtureRelay: RelayServing {

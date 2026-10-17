@@ -50,8 +50,26 @@ enum NativeSpeechSettings {
 struct VoiceDraftInsertion {
     let original: String
     let selection: NSRange?
+    static func capture(_ indices: Range<String.Index>, in draft: String) -> Self {
+        // Only positions obtained from this string may become UTF-16 offsets.
+        // NSRange(staleIndices, in: draft) traps when SwiftUI retains a selection
+        // after the draft is shortened or cleared.
+        let utf16 = draft.utf16
+        var start: Int?, end: Int?, offset = 0
+        for index in utf16.indices {
+            if index == indices.lowerBound { start = offset }
+            if index == indices.upperBound { end = offset }
+            offset += 1
+        }
+        if indices.lowerBound == utf16.endIndex { start = offset }
+        if indices.upperBound == utf16.endIndex { end = offset }
+        let range: NSRange?
+        if let start, let end, start <= end { range = NSRange(location: start, length: end - start) }
+        else { range = nil }
+        return Self(original: draft, selection: range)
+    }
     func inserting(_ transcript: String, into draft: String) -> (text: String, caret: String.Index) {
-        let range = original == draft ? selection.flatMap { Range($0, in: draft) } : nil
+        let range = original.utf16.elementsEqual(draft.utf16) ? selection.flatMap { Range($0, in: draft) } : nil
         let target = range ?? (draft.endIndex..<draft.endIndex)
         let before = String(draft[..<target.lowerBound]), after = String(draft[target.upperBound...])
         let cleaned = transcript.trimmingCharacters(in: .whitespacesAndNewlines)
