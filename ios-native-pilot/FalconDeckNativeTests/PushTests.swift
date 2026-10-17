@@ -5,6 +5,7 @@ private actor PushHTTPMock: PushHTTP {
     private(set) var requests: [URLRequest] = []
     let available: Bool
     var gated: Bool
+    var failedClears = 0
     var gate: CheckedContinuation<Void, Never>?
     init(available: Bool = true, gated: Bool = false) { self.available = available; self.gated = gated }
     func send(_ request: URLRequest) async throws -> (Data, Int) {
@@ -13,10 +14,25 @@ private actor PushHTTPMock: PushHTTP {
             return (Data("{\"apns\":[{\"topic\":\"org.example.native\",\"environment\":\"sandbox\"}]}".utf8), available ? 200 : 404)
         }
         if gated { gated = false; await withCheckedContinuation { gate = $0 } }
+        if let body = request.httpBody.flatMap({ try? JSONDecoder().decode(JSON.self, from: $0) }), body["registration"] == .null, failedClears > 0 {
+            failedClears -= 1
+            throw URLError(.timedOut) // The relay may have applied the clear before losing its response.
+        }
         return (Data("{\"ok\":true}".utf8), available ? 200 : 404)
     }
     func release() { gate?.resume(); gate = nil }
     func hasBlockedPost() -> Bool { gate != nil }
+    func failNextUnregister() { failedClears = 1 }
+}
+
+private actor PushRelay: RelayServing {
+    func events() -> AsyncStream<RelayUpdate> { AsyncStream { $0.finish() } }
+    func pair(_ input: PairingInput, connectionID: UUID) { }
+    func restore(connectionID: UUID) -> Bool { false }
+    func disconnect(forget: Bool) { }
+    func refresh() { }
+    func detail(task: AgentTask, before: String?) -> JSON { .object([:]) }
+    func call(_ method: String, params: JSON) -> JSON { .object([:]) }
 }
 
 @MainActor final class PushTests: XCTestCase {
@@ -86,5 +102,41 @@ private actor PushHTTPMock: PushHTTP {
         let first = await sync.update(target(enabled: false)); XCTAssertEqual(first, .disabled)
         let second = await sync.update(target(enabled: false, device: "second")); XCTAssertEqual(second, .disabled)
         let forgotten = await sync.update(nil); XCTAssertEqual(forgotten, .disabled)
+    }
+    func testWaitingForAppleStillClearsPersistedRegistrationWhenForgotten() async throws {
+        let http = PushHTTPMock(), sync = PushRegistrationSync(http: http)
+        let waiting = await sync.update(target(nil)); XCTAssertEqual(waiting, .waitingForToken)
+        let forgotten = await sync.update(nil); XCTAssertEqual(forgotten, .disabled)
+        let requests = await http.requests
+        XCTAssertEqual(requests.count, 1)
+        let body = try JSONDecoder().decode(JSON.self, from: XCTUnwrap(requests.first?.httpBody))
+        XCTAssertEqual(body["registration"], .null)
+    }
+    func testReenableRegistersAgainAfterUncertainDisable() async throws {
+        let http = PushHTTPMock(), sync = PushRegistrationSync(http: http)
+        _ = await sync.update(target())
+        await http.failNextUnregister()
+        let failed = await sync.update(target(enabled: false)); XCTAssertEqual(failed, .failed)
+        let restored = await sync.update(target()); XCTAssertEqual(restored, .registered)
+        let requests = await http.requests
+        let body = try JSONDecoder().decode(JSON.self, from: XCTUnwrap(requests.last?.httpBody))
+        XCTAssertEqual(body["registration"]["token"].string, "aabb")
+        XCTAssertGreaterThan(requests.count, 3)
+    }
+    func testColdModelForgetUsesSavedCredentialsEvenBeforeAppleRegistration() async throws {
+        let http = PushHTTPMock(), sync = PushRegistrationSync(http: http)
+        let suite = "ColdPushTests-\(UUID())", saved = target().session
+        let defaults = UserDefaults(suiteName: suite)!
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let push = NativePushNotifications(defaults: defaults, sync: sync)
+        let model = AppModel(relay: PushRelay(), push: push, notifications: LocalNotifications(defaults: defaults), sessionLoader: { saved })
+        model.hasSession = true
+        await model.forget()
+        let requests = await http.requests
+        XCTAssertEqual(requests.count, 1)
+        XCTAssertEqual(requests[0].value(forHTTPHeaderField: "Authorization"), "Bearer client-secret")
+        let body = try JSONDecoder().decode(JSON.self, from: XCTUnwrap(requests[0].httpBody))
+        XCTAssertEqual(body["registration"], .null)
+        XCTAssertFalse(model.hasSession)
     }
 }

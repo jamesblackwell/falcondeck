@@ -2,7 +2,7 @@ import Foundation
 
 @MainActor extension AppModel {
     func restoreInputs() async {
-        guard let session = try? SessionVault.load() else { return }
+        guard let session = try? sessionLoader() else { return }
         do {
             let store = try DraftStore(session: session)
             let drafts = try await store.load()

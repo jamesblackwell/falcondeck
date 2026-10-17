@@ -14,14 +14,16 @@ final class AppModel {
     var composerCatalogs: [String: ComposerCatalog] = [:]
     let extensions = NativeExtensions()
     let automations = AutomationStore()
-    let notifications = LocalNotifications()
-    let push = NativePushNotifications.shared
+    let notifications: LocalNotifications
+    let push: NativePushNotifications
+    @ObservationIgnored let sessionLoader: @Sendable () throws -> SavedSession?
     var pendingNotification: NotificationDestination?
     private(set) var connectionID = UUID()
 
-    init(relay: any RelayServing = RelayClient(), voice: VoiceRecorder = VoiceRecorder()) {
+    init(relay: any RelayServing = RelayClient(), voice: VoiceRecorder = VoiceRecorder(), push: NativePushNotifications = .shared, notifications: LocalNotifications = LocalNotifications(), sessionLoader: @escaping @Sendable () throws -> SavedSession? = { try SessionVault.load() }) {
         self.voice = voice
         self.relay = relay
+        self.push = push; self.notifications = notifications; self.sessionLoader = sessionLoader
         NativeSpeechBridge.handler = { [weak self] action in await self?.speechAction(action) }
         notifications.openTask = { [weak self] id in Task { await self?.openTask(id) } }
         notifications.openDestination = { [weak self] destination in
@@ -29,7 +31,7 @@ final class AppModel {
             Task { await self?.openPendingNotification() }
         }
         notifications.shouldPresent = { [weak self] destination in
-            guard let self, !self.demo, (try? SessionVault.load())?.sessionID == destination.sessionID else { return false }
+            guard let self, !self.demo, (try? sessionLoader())?.sessionID == destination.sessionID else { return false }
             return self.selection != .task(destination.threadID)
         }
     }
@@ -116,7 +118,7 @@ final class AppModel {
         }
         if ProcessInfo.processInfo.arguments.contains("--demo") { await useDemo(); return }
         let current = connectionID
-        hasSession = (try? SessionVault.load()) != nil
+        hasSession = (try? sessionLoader()) != nil
         await restoreInputs()
         do {
             let restored = try await relay.restore(connectionID: current)
@@ -125,7 +127,7 @@ final class AppModel {
             synchronizePush()
         } catch {
             guard current == connectionID else { return }
-            self.error = error.localizedDescription; hasSession = (try? SessionVault.load()) != nil; scheduleReconnect()
+            self.error = error.localizedDescription; hasSession = (try? sessionLoader()) != nil; scheduleReconnect()
         }
     }
 
@@ -154,18 +156,27 @@ final class AppModel {
         guard !busy else { return }
         busy = true; error = nil
         defer { busy = false }
+        let previousSession = try? sessionLoader()
         do {
             let input = try PairingInput(text: pairingText, relay: relayURL)
             await saveAllInputs(); draftStore = nil; savedDrafts = [:]; pendingSelection = nil
             let current = beginConnection(clearData: true); demo = false
             try await relay.pair(input, connectionID: current)
             guard current == connectionID else { return }
+            await push.forget(session: previousSession)
             hasSession = true; pairingText = ""; showConnection = false
             synchronizePush()
             await restoreInputs()
         } catch {
             self.error = error.localizedDescription
-            hasSession = (try? SessionVault.load()) != nil
+            let saved = try? sessionLoader()
+            if let previousSession, let saved,
+               previousSession.relay != saved.relay || previousSession.sessionID != saved.sessionID || previousSession.deviceID != saved.deviceID {
+                // A claim can save its new identity before the first socket
+                // connection fails. Retire the prior computer in that case too.
+                await push.forget(session: previousSession)
+            }
+            hasSession = saved != nil
         }
     }
 
@@ -193,12 +204,12 @@ final class AppModel {
         draftStore = nil; savedDrafts = [:]; pendingSelection = nil
         hasSession = false
         beginConnection(clearData: true); demo = false
-        await push.configure(session: nil)
+        await push.forget(session: try? sessionLoader())
         do {
             try await relay.disconnect(forget: true)
             try await oldStore?.clear()
             hasSession = false; error = nil; status = "Not connected"
-        } catch { self.error = error.localizedDescription; hasSession = (try? SessionVault.load()) != nil }
+        } catch { self.error = error.localizedDescription; hasSession = (try? sessionLoader()) != nil }
     }
     func useDemo() async {
         guard !busy else { return }

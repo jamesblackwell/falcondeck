@@ -21,11 +21,12 @@ struct NotificationDestination: Equatable, Sendable {
     private var token: String?
     private var session: SavedSession?
     private var eventNotifications = true
-    private let sync = PushRegistrationSync()
+    private let sync: PushRegistrationSync
+    private let defaults: UserDefaults
     private var version = 0
 
-    private init() {
-        let defaults = UserDefaults.standard
+    init(defaults: UserDefaults = .standard, sync: PushRegistrationSync = PushRegistrationSync()) {
+        self.defaults = defaults; self.sync = sync
         enabled = defaults.object(forKey: "native.notifications.push") == nil ? defaults.bool(forKey: "native.notifications.connected") : defaults.bool(forKey: "native.notifications.push")
         defaults.set(enabled, forKey: "native.notifications.push")
         defaults.set(enabled, forKey: "native.notifications.connected")
@@ -36,8 +37,8 @@ struct NotificationDestination: Equatable, Sendable {
             guard try await UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .badge, .sound]) else { throw PilotError("Allow notifications for Falcon Native in this device’s Settings.") }
         }
         self.enabled = enabled
-        UserDefaults.standard.set(enabled, forKey: "native.notifications.push")
-        UserDefaults.standard.set(enabled, forKey: "native.notifications.connected")
+        defaults.set(enabled, forKey: "native.notifications.push")
+        defaults.set(enabled, forKey: "native.notifications.connected")
         if enabled { UIApplication.shared.registerForRemoteNotifications() }
         await reconcile()
     }
@@ -50,13 +51,23 @@ struct NotificationDestination: Equatable, Sendable {
         self.token = token.map { String(format: "%02x", $0) }.joined()
         Task { await reconcile() }
     }
+    func forget(session old: SavedSession?) async {
+        session = nil; version += 1; registered = false
+        let current = version
+        if let old {
+            let target = PushTarget(session: old, token: nil, topic: "", environment: "", enabled: false)
+            let result = await sync.forget(target)
+            guard current == version else { return }
+            status = result.message
+        } else { await reconcile() }
+    }
     func registrationFailed() { version += 1; status = "Apple device registration failed. Check your internet connection, then reopen Notifications to retry." }
     private func reconcile() async {
         version += 1; let current = version
         let target = session.map { PushTarget(session: $0, token: token, topic: Bundle.main.bundleIdentifier ?? "", environment: Bundle.main.object(forInfoDictionaryKey: "NativePushEnvironment") as? String ?? "", enabled: enabled && eventNotifications) }
         let result = await sync.update(target)
         guard current == version else { return }
-        registered = session != nil && result == .registered
+        registered = session != nil && [.registered, .registeredWithPendingCleanup].contains(result)
         status = session == nil ? "Connect a computer to register background notifications." : result.message
     }
 }

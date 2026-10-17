@@ -21,7 +21,7 @@ private actor ExtensionRelay: RelayServing {
     private func catalog(_ contributions: JSON = .object([:])) -> JSON { .object(["id": .string(id), "enabled": .bool(true), "contributes": contributions]) }
     func testLiveStageAndDeletionWinAgainstALateExtensionSnapshot() async {
         for deleting in [false, true] {
-            let relay = ExtensionRelay(), model = AppModel(relay: relay)
+            let relay = ExtensionRelay(), model = AppModel.testing(relay: relay)
             model.connected = true
             let store = model.extensions
             store.setBase(.null, token: "index")
@@ -37,7 +37,7 @@ private actor ExtensionRelay: RelayServing {
         }
     }
     func testAReplacementSnapshotRemovesOldUntouchedViews() async {
-        let relay = ExtensionRelay(), model = AppModel(relay: relay)
+        let relay = ExtensionRelay(), model = AppModel.testing(relay: relay)
         model.connected = true
         let store = model.extensions
         store.catalog = [catalog()]; store.views = [view("done")]
@@ -50,7 +50,7 @@ private actor ExtensionRelay: RelayServing {
         XCTAssertNil(store.stage(task))
     }
     func testDemoMarkReadAdvancesReadSequence() async {
-        let model = AppModel(relay: ExtensionRelay())
+        let model = AppModel.testing(relay: ExtensionRelay())
         model.demo = true
         let unread = AgentTask(task.raw.setting("attention", .object(["unread": .bool(true), "last_agent_activity_seq": .number(5), "last_read_seq": .number(2)])))
         model.tasks = [unread]

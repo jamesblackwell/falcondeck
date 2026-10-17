@@ -30,7 +30,7 @@ private actor FeatureRelay: RelayServing {
 
     func testDraftFirstSendCreatesOneTaskThenSendsWithCapturedSettings() async {
         let relay = FeatureRelay()
-        let controlled = AppModel(relay: relay)
+        let controlled = AppModel.testing(relay: relay)
         controlled.connected = true; controlled.projects = Demo.projects
         let draft = controlled.draftTask(project: Demo.projects[0], folderID: nil)
         let chat = controlled.chat(for: draft)
@@ -49,7 +49,7 @@ private actor FeatureRelay: RelayServing {
 
     func testFailedFirstSendKeepsDraftOnCreatedTaskWithoutCreatingAgain() async {
         let relay = FeatureRelay(failTurn: true)
-        let model = AppModel(relay: relay)
+        let model = AppModel.testing(relay: relay)
         model.connected = true; model.projects = Demo.projects
         let draft = model.draftTask(project: Demo.projects[0], folderID: nil)
         model.chat(for: draft).draft = "Keep this message"
@@ -62,7 +62,7 @@ private actor FeatureRelay: RelayServing {
     }
 
     func testGoalDemoLifecycleAndBudget() async throws {
-        let model = AppModel(relay: FeatureRelay())
+        let model = AppModel.testing(relay: FeatureRelay())
         model.demo = true; model.tasks = [task]
         try await model.setGoal(task, objective: "Finish the work", budget: 2000)
         let active = try XCTUnwrap(model.tasks.first)
@@ -75,7 +75,7 @@ private actor FeatureRelay: RelayServing {
     }
 
     func testQueueEditKeepsFullTextAndRemoveUsesStableID() async throws {
-        let model = AppModel(relay: FeatureRelay())
+        let model = AppModel.testing(relay: FeatureRelay())
         let queued = AgentTask(task.raw.setting("queued_turns", .array([.object(["id": .string("queue-1"), "text": .string("Old message"), "preview": .string("Old")])])))
         model.demo = true; model.tasks = [queued]
         let text = String(repeating: "Full message ", count: 100)
@@ -86,7 +86,7 @@ private actor FeatureRelay: RelayServing {
     }
 
     func testDemoPinsAreMutuallyExclusiveAndModelDoesNotChangePermissions() async throws {
-        let model = AppModel(relay: FeatureRelay())
+        let model = AppModel.testing(relay: FeatureRelay())
         let pinned = AgentTask(task.raw.setting("is_pinned", .bool(true)).setting("agent", .object(["sandbox_mode": .string("read-only")])))
         model.demo = true; model.tasks = [pinned]
         _ = try await model.taskRequest(pinned, method: "thread.update", fields: ["pinned_in_project": .bool(true), "model_id": .string("model")])
@@ -101,7 +101,7 @@ private actor FeatureRelay: RelayServing {
         try Data([1]).write(to: recording)
         defaults.set(recording.path, forKey: "native.voice.pending")
         defer { try? FileManager.default.removeItem(at: recording); defaults.removePersistentDomain(forName: suite) }
-        let model = AppModel(relay: FeatureRelay(failChat: true), voice: VoiceRecorder(defaults: defaults))
+        let model = AppModel.testing(relay: FeatureRelay(failChat: true), voice: VoiceRecorder(defaults: defaults))
         model.connected = true
         let project = Project(.object(["id": .string("project"), "path": .string("/work/project")]))
         model.projects = [project]; model.selection = .draft(project.id, nil)
@@ -116,7 +116,7 @@ private actor FeatureRelay: RelayServing {
         let suite = "speech-insert-test-" + UUID().uuidString
         let defaults = UserDefaults(suiteName: suite)!
         defer { defaults.removePersistentDomain(forName: suite) }
-        let model = AppModel(relay: FeatureRelay(), voice: VoiceRecorder(defaults: defaults))
+        let model = AppModel.testing(relay: FeatureRelay(), voice: VoiceRecorder(defaults: defaults))
         model.connected = true
         let project = Project(.object(["id": .string("project"), "path": .string("/work/project")]))
         model.projects = [project]

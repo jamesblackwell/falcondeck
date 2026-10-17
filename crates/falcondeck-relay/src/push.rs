@@ -419,6 +419,115 @@ mod tests {
     use ring::signature::{ECDSA_P256_SHA256_FIXED, KeyPair, UnparsedPublicKey};
 
     #[tokio::test]
+    async fn apns_retries_transient_failures_and_preserves_permanent_failure_meaning() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        for (statuses, expected) in [
+            (vec![503, 503, 200], DeliveryOutcome::Accepted),
+            (vec![403], DeliveryOutcome::Failed),
+            (vec![410], DeliveryOutcome::Unregistered(90_000)),
+        ] {
+            let attempts = Arc::new(AtomicUsize::new(0));
+            let observed = attempts.clone();
+            let count = statuses.len();
+            let router=axum::Router::new().route("/3/device/{token}",axum::routing::post(move || {
+                let status=statuses[observed.fetch_add(1,Ordering::SeqCst).min(statuses.len()-1)];
+                async move { (axum::http::StatusCode::from_u16(status).unwrap(),axum::Json(serde_json::json!({"reason":if status==410 {"Unregistered"} else {"InvalidProviderToken"},"timestamp":90_000}))) }
+            }));
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let provider = ApnsProvider::mock(format!("http://{}", listener.local_addr().unwrap()));
+            let task = tokio::spawn(async move {
+                axum::serve(listener, router).await.unwrap();
+            });
+            let registration = PushRegistration::Apns {
+                token: "aabb".to_owned(),
+                topic: "org.example.native".to_owned(),
+                environment: ApnsEnvironment::Sandbox,
+            };
+            assert_eq!(
+                provider
+                    .deliver(
+                        &registration,
+                        &serde_json::json!({"aps":{"alert":"Test"}}),
+                        "collapse"
+                    )
+                    .await,
+                expected
+            );
+            assert_eq!(attempts.load(Ordering::SeqCst), count);
+            task.abort();
+        }
+    }
+
+    #[test]
+    fn configured_topics_share_identity_but_different_teams_do_not() {
+        let directory = tempfile::tempdir().unwrap();
+        let der =
+            EcdsaKeyPair::generate_pkcs8(&ECDSA_P256_SHA256_FIXED_SIGNING, &SystemRandom::new())
+                .unwrap();
+        let key_path = directory.path().join("test.p8");
+        std::fs::write(
+            &key_path,
+            format!(
+                "-----BEGIN PRIVATE KEY-----\n{}\n-----END PRIVATE KEY-----\n",
+                STANDARD.encode(der.as_ref())
+            ),
+        )
+        .unwrap();
+        let applications = [("org.example.one","TESTTEAM00"),("org.example.two","TESTTEAM00"),("org.example.other","OTHERTEAM0")].map(|(topic,team)| serde_json::json!({"topic":topic,"environment":"sandbox","team_id":team,"key_id":"TESTKEY000","private_key_file":key_path}));
+        let config_path = directory.path().join("config.json");
+        std::fs::write(
+            &config_path,
+            serde_json::to_vec(&serde_json::json!({"applications":applications})).unwrap(),
+        )
+        .unwrap();
+        let provider = ApnsProvider::load(config_path).unwrap();
+        let app = |topic: &str| ApnsApplication {
+            topic: topic.to_owned(),
+            environment: ApnsEnvironment::Sandbox,
+        };
+        assert!(Arc::ptr_eq(
+            &provider.applications[&app("org.example.one")],
+            &provider.applications[&app("org.example.two")]
+        ));
+        assert!(!Arc::ptr_eq(
+            &provider.applications[&app("org.example.one")],
+            &provider.applications[&app("org.example.other")]
+        ));
+    }
+
+    #[tokio::test]
+    #[ignore = "requires FALCONDECK_RELAY_TEST_APNS_CONFIG with authorized sandbox signing credentials"]
+    async fn live_apns_sandbox_authentication_uses_http2_without_notifying_a_device() {
+        let path = std::env::var_os("FALCONDECK_RELAY_TEST_APNS_CONFIG")
+            .expect("set private sandbox APNs config path");
+        let provider = ApnsProvider::load(PathBuf::from(path)).unwrap();
+        let (app, identity) = provider
+            .applications
+            .iter()
+            .find(|(app, _)| app.environment == ApnsEnvironment::Sandbox)
+            .expect("sandbox application required");
+        // All-zero synthetic tokens cannot identify a user's device. This
+        // checks TLS, HTTP/2 and real Apple credentials without sending an alert.
+        let response = identity
+            .client
+            .post(format!(
+                "https://api.sandbox.push.apple.com/3/device/{}",
+                "0".repeat(64)
+            ))
+            .bearer_auth(identity.bearer().await.unwrap())
+            .header("apns-topic", &app.topic)
+            .header("apns-push-type", "alert")
+            .json(&serde_json::json!({"aps":{"alert":{"title":"Synthetic token validation"}}}))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.version(), reqwest::Version::HTTP_2);
+        assert_eq!(response.status().as_u16(), 400);
+        let body: serde_json::Value = response.json().await.unwrap();
+        assert_eq!(body["reason"], "BadDeviceToken");
+    }
+
+    #[tokio::test]
     async fn jwt_is_valid_es256_and_reused() {
         let provider = ApnsProvider::mock("http://127.0.0.1".to_owned());
         let identity = provider.applications.values().next().unwrap();

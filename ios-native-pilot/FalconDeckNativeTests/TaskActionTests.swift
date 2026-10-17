@@ -26,7 +26,7 @@ private actor ActionRelay: RelayServing {
 @MainActor final class TaskActionTests: XCTestCase {
     private var source: AgentTask { AgentTask(.object(["id": .string("source"), "workspace_id": .string(Demo.projects[0].id), "provider": .string("codex"), "status": .string("idle"), "title": .string("Original"), "agent": .object(["model_id": .string("chosen"), "sandbox_mode": .string("read-only")])])) }
     private func setup() -> (AppModel, ActionRelay) {
-        let relay = ActionRelay(source.raw), model = AppModel(relay: relay)
+        let relay = ActionRelay(source.raw), model = AppModel.testing(relay: relay)
         model.connected = true; model.projects = Demo.projects; model.tasks = [source]; model.selection = .task(source.id)
         return (model, relay)
     }

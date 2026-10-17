@@ -2,13 +2,14 @@ import Foundation
 import UserNotifications
 
 @MainActor final class LocalNotifications: NSObject, UNUserNotificationCenterDelegate {
+    private let defaults: UserDefaults
     var openTask: ((String) -> Void)?
     var openDestination: ((NotificationDestination) -> Void)?
     var shouldPresent: ((NotificationDestination) -> Bool)?
-    override init() { super.init(); UNUserNotificationCenter.current().delegate = self }
+    init(defaults: UserDefaults = .standard) { self.defaults = defaults; super.init(); UNUserNotificationCenter.current().delegate = self }
     func authorize() async throws -> Bool { try await UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .badge, .sound]) }
     func announce(title: String, body: String, taskID: String) {
-        guard UserDefaults.standard.bool(forKey: "native.notifications.connected") else { return }
+        guard defaults.bool(forKey: "native.notifications.connected") else { return }
         let content = UNMutableNotificationContent()
         content.title = title; content.body = String(body.prefix(240)); content.sound = .default
         content.userInfo = ["thread_id": taskID]

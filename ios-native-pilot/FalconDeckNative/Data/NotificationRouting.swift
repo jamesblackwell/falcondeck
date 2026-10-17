@@ -3,7 +3,7 @@ import Foundation
 @MainActor extension AppModel {
     func synchronizePush() {
         guard !demo, hasSession else { return }
-        let session = try? SessionVault.load()
+        let session = try? sessionLoader()
         let eventNotifications = preferences["notifications"]["enabled"] != .bool(false)
         let current = connectionID
         Task {
@@ -13,7 +13,7 @@ import Foundation
     }
     func openPendingNotification() async {
         guard let destination = pendingNotification, !demo, connected else { return }
-        guard (try? SessionVault.load())?.sessionID == destination.sessionID else {
+        guard (try? sessionLoader())?.sessionID == destination.sessionID else {
             pendingNotification = nil; error = "This notification belongs to another computer connection."; return
         }
         pendingNotification = nil

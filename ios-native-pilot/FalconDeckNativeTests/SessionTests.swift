@@ -35,7 +35,7 @@ private actor ControlledRelay: RelayServing {
     }
 
     func testDemoCancelsPendingSummariesAndRejectsOldSnapshotsAndErrors() async throws {
-        let model = AppModel(relay: ControlledRelay())
+        let model = AppModel.testing(relay: ControlledRelay())
         let oldID = model.connectionID
         model.receive(RelayUpdate(connectionID: oldID, event: summary(task)))
         await model.useDemo()
@@ -48,7 +48,7 @@ private actor ControlledRelay: RelayServing {
     }
 
     func testForgetCancelsPendingSummaryAndRejectsQueuedEvents() async throws {
-        let model = AppModel(relay: ControlledRelay())
+        let model = AppModel.testing(relay: ControlledRelay())
         model.hasSession = true
         let oldID = model.connectionID
         model.receive(RelayUpdate(connectionID: oldID, event: summary(task)))
@@ -62,7 +62,7 @@ private actor ControlledRelay: RelayServing {
 
     func testTurnEndPreservesDaemonErrorAndRetryStatuses() async throws {
         for status in ["error", "running"] {
-            let model = AppModel(relay: ControlledRelay())
+            let model = AppModel.testing(relay: ControlledRelay())
             model.tasks = [task]
             let updated = AgentTask(task.raw.setting("status", .string(status)))
             model.receive(RelayUpdate(connectionID: model.connectionID, event: summary(updated)))
@@ -75,7 +75,7 @@ private actor ControlledRelay: RelayServing {
 
     func testOldHistoryResponseCannotPopulateDemoWorkspace() async {
         let relay = ControlledRelay()
-        let controlled = AppModel(relay: relay)
+        let controlled = AppModel.testing(relay: relay)
         controlled.tasks = [task]
         let load = Task { await controlled.loadChat(task) }
         await relay.waitForRequest()
@@ -89,7 +89,7 @@ private actor ControlledRelay: RelayServing {
 
     func testInterruptAcknowledgementDoesNotOverwriteNewerTaskState() async {
         let relay = ControlledRelay()
-        let controlled = AppModel(relay: relay)
+        let controlled = AppModel.testing(relay: relay)
         controlled.tasks = [task]
         let stop = Task { await controlled.stop(task) }
         await relay.waitForRequest()
@@ -104,7 +104,7 @@ private actor ControlledRelay: RelayServing {
 
     func testReconnectRestoresAnUnconfirmedSendIntoRetainedChat() async {
         let relay = ControlledRelay()
-        let controlled = AppModel(relay: relay)
+        let controlled = AppModel.testing(relay: relay)
         controlled.tasks = [task]; controlled.connected = true; controlled.hasSession = true
         let chat = controlled.chat(for: task)
         chat.draft = "Keep across reconnect"
@@ -124,7 +124,7 @@ private actor ControlledRelay: RelayServing {
     func testAnEarlyEchoSurvivesBothStartedAndQueuedAcknowledgements() async {
         for (status, response) in [("running", "started"), ("running", "queued"), ("idle", "queued")] {
             let relay = ControlledRelay()
-            let model = AppModel(relay: relay)
+            let model = AppModel.testing(relay: relay)
             let task = AgentTask(self.task.raw.setting("status", .string(status)))
             model.tasks = [task]; model.connected = true
             let chat = model.chat(for: task); chat.draft = "Confirmed message"
@@ -143,7 +143,7 @@ private actor ControlledRelay: RelayServing {
 
     func testHistoryBufferOverflowKeepsLiveTranscriptAndShowsRecoveryError() async {
         let relay = ControlledRelay()
-        let model = AppModel(relay: relay)
+        let model = AppModel.testing(relay: relay)
         model.tasks = [task]
         let chat = model.chat(for: task)
         let load = Task { await model.loadChat(task) }

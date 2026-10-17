@@ -6191,6 +6191,14 @@ mod tests {
         let json = serde_json::to_value(message).unwrap();
         assert_eq!(json["type"], "ready");
         assert_eq!(json["role"], "daemon");
+        let legacy: RelayServerMessage = serde_json::from_value(serde_json::json!({"type":"ready","session_id":"session-1","role":"client","next_seq":3})).unwrap();
+        assert!(matches!(
+            legacy,
+            RelayServerMessage::Ready {
+                client_activity_supported: false,
+                ..
+            }
+        ));
     }
 
     #[test]

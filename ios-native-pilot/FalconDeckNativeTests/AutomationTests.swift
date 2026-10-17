@@ -56,7 +56,7 @@ private actor AutomationRelay: RelayServing {
     }
     func testControlMutationsCarryRevisionAndUniqueIdempotencyKeys() async throws {
         let relay = AutomationRelay(.object(["ok": .bool(true), "data": .null]))
-        let model = AppModel(relay: relay)
+        let model = AppModel.testing(relay: relay)
         for _ in 0..<2 {
             try await model.automations.execute("automation.pause", arguments: .object(["automation_id": .string("a")]), revision: 7, model: model)
         }
@@ -67,7 +67,7 @@ private actor AutomationRelay: RelayServing {
     }
     func testControlErrorsAreNotTreatedAsSuccessfulSaves() async {
         let relay = AutomationRelay(.object(["ok": .bool(false), "error": .object(["message": .string("Not allowed")])]))
-        let model = AppModel(relay: relay)
+        let model = AppModel.testing(relay: relay)
         do {
             try await model.automations.execute("automation.create", arguments: .null, model: model)
             XCTFail("Expected a control error")

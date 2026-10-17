@@ -37,7 +37,7 @@ private actor PageRelay: RelayServing {
     }
     func testACompletePagePrunesOnlyUnconfirmedCarriedRows() async {
         let relay = PageRelay()
-        let controlled = AppModel(relay: relay)
+        let controlled = AppModel.testing(relay: relay)
         controlled.connected = true; controlled.tasks = [row("stale"), row("live")]
         var index = CompactSync(token: "index", counts: counts(2)); index.carried = ["stale", "live"]; index.touched = ["live"]
         controlled.syncIndex = index
@@ -49,7 +49,7 @@ private actor PageRelay: RelayServing {
         XCTAssertFalse(controlled.hasMoreTasks("p"))
     }
     func testLatePageCannotReviveATaskArchivedByALiveEvent() async throws {
-        let relay = PageRelay(), model = AppModel(relay: relay)
+        let relay = PageRelay(), model = AppModel.testing(relay: relay)
         model.connected = true; model.tasks = [row("task")]
         model.syncIndex = CompactSync(token: "index", counts: counts(1))
         let pending = Task { await model.loadTaskPage("p") }
