@@ -127,6 +127,8 @@ private struct ChatContent: View {
         }
         .onChange(of: chat.transcriptExpansion) { _, _ in scroll.followLatest = false }
         .sheet(isPresented: $showGoal) { GoalView(taskID: task.id) }
+        // The editor outlives the queue row if that message dispatches meanwhile.
+        .sheet(item: $chat.queuedEdit) { QueuedMessageEditor(task: task, edit: $0) }
         .task(id: task.activitySeq) {
             do { try await Task.sleep(for: .milliseconds(600)) } catch { return }
             await model.markRead(task, automatic: true)

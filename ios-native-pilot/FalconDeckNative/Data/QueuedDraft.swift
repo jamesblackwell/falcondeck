@@ -1,5 +1,10 @@
 import Foundation
 
+struct QueuedMessageEdit: Identifiable {
+    let id: String
+    let text: String
+}
+
 struct QueuedDraft: Sendable {
     let id: String
     let text: String

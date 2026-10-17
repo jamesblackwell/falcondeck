@@ -63,7 +63,7 @@ struct TranscriptRow: View {
         .simultaneousGesture(TapGesture().onEnded { onInteraction() })
         // A native List creates rows lazily and recreates them after navigation.
         .onChange(of: expansion, initial: true) { _, directive in if let directive { userToggled = true; expanded = directive.expanded } }
-        .sheet(isPresented: $showOutput) { if let fullOutput { TextDocumentView(title: message.raw["title"].string.nonempty ?? "Tool output", text: fullOutput) } }
+        .fullScreenCover(isPresented: $showOutput) { if let fullOutput { TextDocumentView(title: message.raw["title"].string.nonempty ?? "Tool output", text: fullOutput) } }
     }
     private var messageBody: some View {
         VStack(alignment: .leading, spacing: 6) {

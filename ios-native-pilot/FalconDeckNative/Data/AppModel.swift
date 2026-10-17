@@ -241,6 +241,24 @@ final class AppModel {
         error = nil; status = "Demo workspace"
         projects = Demo.projects; tasks = Demo.tasks; preferences = Demo.preferences; requests = Demo.requests
         #if DEBUG
+        if let argument = ProcessInfo.processInfo.arguments.first(where: { $0.hasPrefix("--review-preview=") }), let task = tasks.first {
+            let mode = argument.split(separator: "=").last.map(String.init)
+            let chat = chat(for: task)
+            chat.loaded = true; chat.transcript.items = Demo.messages
+            if mode == "offline" {
+                demo = false; hasSession = true; connected = false; status = "Offline"
+            } else if mode == "queue" || mode == "queue-error" || mode == "dispatched" {
+                let text = "Keep the full queued message.\n\n" + Demo.longRequest
+                if mode != "dispatched" {
+                    tasks[0] = AgentTask(task.raw.setting("queued_turns", .array([.object(["id": .string("review-queue"), "text": .string(text), "preview": .string("Keep the full queued message."), "attachment_count": .number(0)])])))
+                } else { chat.queuedEdit = QueuedMessageEdit(id: "review-queue", text: text) }
+                if mode == "queue-error" { demo = false; hasSession = true; connected = true; status = "Preview computer" }
+            } else if mode == "output" {
+                let full = JSON.object(["id": .string("review-output"), "kind": .string("tool_call"), "title": .string("Review output"), "status": .string("completed"), "output": .string("Native output search\nAll focused checks passed.\nSearch keeps the full output selectable.")])
+                chat.transcript.items = [Message(full.setting("display", .object(["output_total_bytes": .number(200)])))]
+                itemCache["\(connectionID):\(task.id):review-output"] = full
+            }
+        }
         if let argument = ProcessInfo.processInfo.arguments.first(where: { $0.hasPrefix("--voice-preview=") }),
            let phase = argument.split(separator: "=").last.map(String.init), ["starting", "recording", "transcribing", "failed"].contains(phase), let task = tasks.first {
             voice.preview(phase, ownerID: task.id)

@@ -54,24 +54,25 @@ struct SpeechSettingsView: View {
                             Task {
                                 defer { inserting = false }
                                 if await model.insertRecoveredSpeech(recovered) { recovered = ""; model.showSpeechSettings = false }
+                                else { error = model.error ?? "Couldn't create a task. Your transcript is still here; you can retry or copy it." }
                             }
                         }.disabled(!model.demo && !model.connected)
                     }
                     Button("Discard recording", role: .destructive) { model.voice.discard(); recovered = "" }
-                    if let error = model.voice.error { Text(error).font(.footnote).foregroundStyle(.orange) }
                 } header: { Text("Saved recording") }.listRowBackground(FD.surface).disabled(model.voice.transcribing || inserting)
             }
-            if let error { Text(error).font(.footnote).foregroundStyle(.orange) }
+            if let error = error ?? model.voice.error { Text(error).font(.footnote).foregroundStyle(.orange) }
         }.scrollContentBackground(.hidden).background(FD.background).navigationTitle("Speech")
             .task { if provider == "openrouter" { await refresh() } }
-            .onChange(of: provider) { _, value in if value == "openrouter" { Task { await refresh() } } }
-            .toolbar { if modal { ToolbarItem(placement: .confirmationAction) { Button("Done") { dismiss() } } } }
+            .onChange(of: provider) { _, value in error = nil; if value == "openrouter" { Task { await refresh() } } }
+            .toolbar { if modal { ToolbarItem(placement: .confirmationAction) { Button("Done") { dismiss() }.disabled(inserting) } } }
+            .interactiveDismissDisabled(inserting)
     }
     private func recover(using provider: String) {
         model.readAloud.stop(); error = nil
         Task {
             do { recovered = try await model.voice.transcribe(model: model, using: provider) }
-            catch { self.error = error.localizedDescription }
+            catch { if !(error is CancellationError) { self.error = error.localizedDescription } }
         }
     }
     private func refresh() async {

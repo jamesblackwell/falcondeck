@@ -1,9 +1,46 @@
 import UIKit
 import AVFoundation
+import CoreTransferable
+import UniformTypeIdentifiers
 import XCTest
 @testable import FalconDeckNative
 
 @MainActor final class MediaTests: XCTestCase {
+    func testImageSharingNegotiatesTheConcreteFormatWithoutReencoding() async throws {
+        let image = UIGraphicsImageRenderer(size: CGSize(width: 8, height: 8)).image { context in
+            UIColor.systemGreen.setFill(); context.fill(CGRect(x: 0, y: 0, width: 8, height: 8))
+        }
+        for (bytes, type, wrongType) in [(try XCTUnwrap(image.pngData()), UTType.png, UTType.jpeg), (try XCTUnwrap(image.jpegData(compressionQuality: 0.9)), UTType.jpeg, UTType.png)] {
+            let provider = NSItemProvider(); provider.register(ExportedImage(data: bytes, title: "Original"))
+            XCTAssertTrue(provider.hasItemConformingToTypeIdentifier(type.identifier))
+            XCTAssertFalse(provider.hasItemConformingToTypeIdentifier(wrongType.identifier))
+            let received: Data = try await withCheckedThrowingContinuation { continuation in
+                _ = provider.loadFileRepresentation(forTypeIdentifier: type.identifier) { url, error in
+                    if let error { continuation.resume(throwing: error); return }
+                    do { continuation.resume(returning: try Data(contentsOf: XCTUnwrap(url))) }
+                    catch { continuation.resume(throwing: error) }
+                }
+            }
+            XCTAssertEqual(received, bytes)
+        }
+    }
+
+    func testImageSharingRetainsOriginalBytesAndResolution() throws {
+        let format = UIGraphicsImageRendererFormat(); format.scale = 1
+        let renderer = UIGraphicsImageRenderer(size: CGSize(width: 2500, height: 8), format: format)
+        let original = renderer.pngData { context in UIColor.systemGreen.setFill(); context.fill(CGRect(x: 0, y: 0, width: 2500, height: 8)) }
+        let preview = try NativeAttachment.prepare(original)
+        XCTAssertLessThan(try XCTUnwrap(UIImage(data: preview.data)).size.width, 2500)
+        let url = try ExportedImage(data: original, title: "../../Original 🦅").fileURL()
+        defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
+        let shared = try Data(contentsOf: url)
+        XCTAssertEqual(shared, original)
+        XCTAssertEqual(try XCTUnwrap(UIImage(data: shared)).size.width, 2500)
+        XCTAssertEqual(url.pathExtension, "png")
+        XCTAssertFalse(url.lastPathComponent.contains("/"))
+        XCTAssertThrowsError(try ExportedImage(data: Data("invalid".utf8), title: "Invalid").fileURL())
+    }
+
     func testAttachmentPreparationAndImageOnlyWireInput() throws {
         let renderer = UIGraphicsImageRenderer(size: CGSize(width: 8, height: 8))
         let data = renderer.pngData { context in UIColor.systemGreen.setFill(); context.fill(CGRect(x: 0, y: 0, width: 8, height: 8)) }

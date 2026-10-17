@@ -45,7 +45,7 @@ struct ComposerView: View {
                             .buttonStyle(.plain).disabled(chat.stopping || (!model.connected && !model.demo)).accessibilityLabel("Stop task").accessibilityIdentifier("stop-task")
                     }
                     Button {
-                    submitDraft()
+                        submitDraft()
                     } label: {
                         Group { if chat.sending { ActivityDiamond() } else { Image(systemName: task.running ? "arrow.up.to.line" : "arrow.up").fontWeight(.semibold) } }.frame(width: 44, height: 44).contentShape(.rect)
                     }

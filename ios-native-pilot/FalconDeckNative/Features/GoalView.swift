@@ -10,7 +10,7 @@ struct GoalView: View {
     @State private var budget = ""
     @State private var pending = false
     @State private var error: String?
-    private var task: AgentTask? { model.tasks.first { $0.id == taskID } }
+    private var task: AgentTask? { model.task(taskID) }
     var body: some View {
         NavigationStack {
             Form {

@@ -96,7 +96,7 @@ private struct ImageDetailView: View {
                 .toolbar {
                     ToolbarItem(placement: .confirmationAction) { Button("Done") { dismiss() } }
                     ToolbarItemGroup(placement: .bottomBar) {
-                        ShareLink(item: Image(uiImage: image), preview: SharePreview(title, image: Image(uiImage: image))) { Label("Share", systemImage: "square.and.arrow.up") }
+                        ShareLink(item: ExportedImage(data: data, title: title), preview: SharePreview(title, image: Image(uiImage: image))) { Label("Share", systemImage: "square.and.arrow.up") }
                         Spacer()
                         Button(saved ? "Saved" : "Save to Photos", systemImage: saved ? "checkmark" : "square.and.arrow.down") { Task { await save() } }.disabled(saving || saved)
                     }

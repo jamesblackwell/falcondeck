@@ -11,6 +11,7 @@ struct TaskOptionsView: View {
     @State private var compact = false
     @State private var instructions = ""
     private var task: AgentTask? { model.task(taskID) }
+    private var canMutate: Bool { model.demo || model.connected }
     var body: some View {
         NavigationStack {
             Form {
@@ -32,7 +33,7 @@ struct TaskOptionsView: View {
                                 }
                             }
                             }
-                        }.listRowBackground(FD.surface)
+                        }.listRowBackground(FD.surface).disabled(!canMutate)
                         Section {
                             TaskStageMenu(task: task)
                             Button(task.pinned ? "Unpin" : "Pin", systemImage: "pin") { run { _ = try await model.taskRequest(task, method: "thread.update", fields: ["pinned": .bool(!task.pinned)]) } }
@@ -42,34 +43,34 @@ struct TaskOptionsView: View {
                                 ForEach(model.folders.filter { $0.projectID == task.projectID }) { folder in Button(folder.name) { move(task, folder: folder.id) } }
                             }
                             if task.activitySeq > 0 { Button(task.unread ? "Mark read" : "Mark unread", systemImage: "circle") { run { await model.markRead(task, unread: !task.unread) } } }
-                        }.listRowBackground(FD.surface)
+                        }.listRowBackground(FD.surface).disabled(!canMutate)
                         Section {
                             if task.goal != .null || model.projects.first(where: { $0.id == task.projectID })?.capabilities(task.provider)["supports_goals"].bool == true || model.demo {
-                                Button(task.goal == .null ? "Set a goal" : "View goal", systemImage: "target") { goal = true }
+                                Button(task.goal == .null ? "Set a goal" : "View goal", systemImage: "target") { goal = true }.disabled(task.goal == .null && !canMutate)
                             }
                             if model.projects.first(where: { $0.id == task.projectID })?.capabilities(task.provider)["supports_compaction"].bool == true || model.demo {
-                                Button("Compact context", systemImage: "arrow.down.right.and.arrow.up.left") { compact = true }.disabled(task.running || task.status == "waiting_for_input")
+                                Button("Compact context", systemImage: "arrow.down.right.and.arrow.up.left") { compact = true }.disabled(!canMutate || task.running || task.status == "waiting_for_input")
                             }
                             let chat = model.chat(for: task)
                             ShareLink(item: ExportedText(text: TranscriptExport.markdown(chat.transcript.items, title: task.title, partial: chat.hasOlder), title: task.title), preview: SharePreview(task.title)) {
                                 Label(chat.loading ? "Loading conversation…" : chat.hasOlder ? "Share loaded conversation" : "Share conversation", systemImage: "square.and.arrow.up")
-                            }.disabled(!chat.loaded || chat.loading || chat.transcript.items.isEmpty)
+                            }.disabled(!chat.loaded || chat.loading || chat.transcript.items.isEmpty).accessibilityIdentifier("share-conversation")
                             if let error = chat.error, !chat.loaded {
                                 Text(error).font(.footnote).foregroundStyle(.orange)
-                                Button("Retry loading conversation") { Task { await model.loadChat(task) } }
+                                Button("Retry loading conversation") { Task { await model.loadChat(task) } }.disabled(!canMutate)
                             }
 
-                            if let project = model.projects.first(where: { $0.id == task.projectID }) {
+                            if let project = model.projects.first(where: { $0.id == task.projectID }), project.providers.contains(where: { $0 != task.provider }) {
                                 Menu("Continue with another agent", systemImage: "arrow.triangle.branch") {
                                     ForEach(project.providers.filter { $0 != task.provider }, id: \.self) { provider in
                                         Button(provider.capitalized) { run { try await model.handoff(task, provider: provider) } }
                                     }
-                                }
+                                }.disabled(!canMutate)
                             }
-                            if task.archived { Button("Restore task", systemImage: "arrow.uturn.backward") { run { try await model.unarchive(task) } } }
-                            else { Button("Archive task", systemImage: "archivebox", role: .destructive) { run { await model.archive(task) } } }
+                            if task.archived { Button("Restore task", systemImage: "arrow.uturn.backward") { run { try await model.unarchive(task) } }.disabled(!canMutate) }
+                            else { Button("Archive task", systemImage: "archivebox", role: .destructive) { run { await model.archive(task) } }.disabled(!canMutate) }
                         }.listRowBackground(FD.surface)
-                    }.disabled(!model.demo && !model.connected)
+                    }
                 }
                 if let task {
                     // These presentation controls stay available offline.
@@ -87,7 +88,7 @@ struct TaskOptionsView: View {
             .scrollContentBackground(.hidden).background(FD.background).navigationTitle("Task options").navigationBarTitleDisplayMode(.inline)
             .toolbar { ToolbarItem(placement: .confirmationAction) { Button("Done") { dismiss() }.disabled(pending) } }
             .onAppear { title = task?.title ?? "" }
-            .task(id: taskID) { if let task, !model.chat(for: task).loaded { await model.loadChat(task) } }
+            .task(id: taskID) { if canMutate, let task, !model.chat(for: task).loaded { await model.loadChat(task) } }
             .sheet(isPresented: $goal) { GoalView(taskID: taskID) }
             .alert("Compact context", isPresented: $compact) {
                 TextField("Guidance (optional)", text: $instructions)
@@ -111,10 +112,13 @@ struct ArchivedTasksView: View {
     @State private var error: String?
     @State private var pending: String?
     @State private var search = ""
+    @State private var loading = false
+    @State private var hasLoaded = false
+    private var filtered: [AgentTask] { model.archivedTasks.filter { search.isEmpty || $0.title.localizedCaseInsensitiveContains(search) } }
     var body: some View {
         List {
-            if let error { Text(error).foregroundStyle(.orange) }
-            ForEach(model.archivedTasks.filter { search.isEmpty || $0.title.localizedCaseInsensitiveContains(search) }) { task in
+            if let error, !model.archivedTasks.isEmpty { Text(error).font(.footnote).foregroundStyle(.orange) }
+            ForEach(filtered) { task in
                 HStack {
                     Button { model.selection = .task(task.id) } label: { VStack(alignment: .leading) { Text(task.title); Text(task.provider.capitalized).font(.caption).foregroundStyle(FD.secondary) }.frame(maxWidth: .infinity, alignment: .leading) }.buttonStyle(.plain)
                     Spacer()
@@ -128,8 +132,23 @@ struct ArchivedTasksView: View {
                 }.listRowBackground(FD.surface)
             }
         }.scrollContentBackground(.hidden).background(FD.background).navigationTitle("Archived tasks")
-            .overlay { if model.archivedTasks.isEmpty && error == nil { ContentUnavailableView("No archived tasks", systemImage: "archivebox").allowsHitTesting(false) } }
+            .overlay {
+                if model.archivedTasks.isEmpty && (loading || !hasLoaded) {
+                    ActivityDiamond().accessibilityLabel("Loading archived tasks")
+                } else if model.archivedTasks.isEmpty, let error {
+                    ContentUnavailableView {
+                        Label("Couldn't load archived tasks", systemImage: "wifi.exclamationmark")
+                    } description: { Text(error) } actions: {
+                        Button("Retry") { Task { await load() } }.disabled(!model.demo && !model.connected)
+                    }
+                } else if !search.isEmpty && filtered.isEmpty { ContentUnavailableView.search(text: search).allowsHitTesting(false) }
+                else if model.archivedTasks.isEmpty { ContentUnavailableView("No archived tasks", systemImage: "archivebox").allowsHitTesting(false) }
+            }
             .searchable(text: $search).task { await load() }.refreshable { await load() }
     }
-    private func load() async { do { try await model.loadArchived() } catch { self.error = error.localizedDescription } }
+    private func load() async {
+        guard !loading else { return }; loading = true; error = nil
+        defer { loading = false; hasLoaded = true }
+        do { try await model.loadArchived() } catch { if !(error is CancellationError) { self.error = error.localizedDescription } }
+    }
 }

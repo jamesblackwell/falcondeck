@@ -3,7 +3,17 @@ import SwiftUI
 @main
 struct FalconDeckNativeApp: App {
     @UIApplicationDelegateAdaptor(NativeAppDelegate.self) private var appDelegate
-    @State private var model = AppModel()
+    @State private var model = makeModel()
+    private static func makeModel() -> AppModel {
+        #if DEBUG
+        if ProcessInfo.processInfo.arguments.contains("--review-preview=offline") || ProcessInfo.processInfo.arguments.contains("--review-preview=queue-error") {
+            let suite = "NativeReviewPreview", defaults = UserDefaults(suiteName: "NativeReviewPreview")!
+            defaults.removePersistentDomain(forName: suite)
+            return AppModel(relay: UnavailablePreviewRelay(), push: NativePushNotifications(defaults: defaults), notifications: LocalNotifications(defaults: defaults), sessionLoader: { nil })
+        }
+        #endif
+        return AppModel()
+    }
     var body: some Scene {
         WindowGroup {
             RootView()

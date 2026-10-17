@@ -15,6 +15,7 @@ final class ChatSession {
     var recoveredSubmission = false
     @ObservationIgnored var changed: (() -> Void)?
     var pendingQueue: [QueuedDraft] = []
+    var queuedEdit: QueuedMessageEdit?
     var preparingAttachments = false
     var voiceInputOpen = false
     var voiceInsertion: VoiceDraftInsertion?
