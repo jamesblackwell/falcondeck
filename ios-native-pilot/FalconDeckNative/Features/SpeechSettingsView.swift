@@ -13,6 +13,7 @@ struct SpeechSettingsView: View {
     @State private var recovered = ""
     @State private var error: String?
     @State private var loading = false
+    @State private var inserting = false
     var body: some View {
         Form {
             Section {
@@ -49,18 +50,16 @@ struct SpeechSettingsView: View {
                         TextField("Recovered transcript", text: $recovered, axis: .vertical).lineLimit(3...12)
                         Button("Copy transcript") { UIPasteboard.general.string = recovered }
                         Button("Use in a new task") {
+                            guard !inserting else { return }; inserting = true
                             Task {
-                                await model.newChat()
-                                if case .draft(let projectID, let folder) = model.selection, let project = model.projects.first(where: { $0.id == projectID }) {
-                                    model.chat(for: model.draftTask(project: project, folderID: folder)).draft = recovered
-                                    model.voice.discard(); model.showSpeechSettings = false
-                                }
+                                defer { inserting = false }
+                                if await model.insertRecoveredSpeech(recovered) { recovered = ""; model.showSpeechSettings = false }
                             }
                         }.disabled(!model.demo && !model.connected)
                     }
                     Button("Discard recording", role: .destructive) { model.voice.discard(); recovered = "" }
                     if let error = model.voice.error { Text(error).font(.footnote).foregroundStyle(.orange) }
-                } header: { Text("Saved recording") }.listRowBackground(FD.surface).disabled(model.voice.transcribing)
+                } header: { Text("Saved recording") }.listRowBackground(FD.surface).disabled(model.voice.transcribing || inserting)
             }
             if let error { Text(error).font(.footnote).foregroundStyle(.orange) }
         }.scrollContentBackground(.hidden).background(FD.background).navigationTitle("Speech")
@@ -87,6 +86,6 @@ struct SpeechSettingsView: View {
             let response = try await model.relay.call("speech.models", params: .object([:]))
             guard current == model.connectionID else { return }
             models = response.array
-        } catch { self.error = error.localizedDescription; desktopStatus = "Could not connect" }
+        } catch { if current == model.connectionID { self.error = error.localizedDescription; desktopStatus = "Could not connect" } }
     }
 }

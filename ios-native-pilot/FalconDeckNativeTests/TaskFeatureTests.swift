@@ -4,7 +4,8 @@ import XCTest
 private actor FeatureRelay: RelayServing {
     var calls: [(String, JSON)] = []
     let failTurn: Bool
-    init(failTurn: Bool = false) { self.failTurn = failTurn }
+    let failChat: Bool
+    init(failTurn: Bool = false, failChat: Bool = false) { self.failTurn = failTurn; self.failChat = failChat }
     func events() -> AsyncStream<RelayUpdate> { AsyncStream { $0.finish() } }
     func pair(_ input: PairingInput, connectionID: UUID) { }
     func restore(connectionID: UUID) -> Bool { true }
@@ -14,6 +15,10 @@ private actor FeatureRelay: RelayServing {
     func call(_ method: String, params: JSON) throws -> JSON {
         calls.append((method, params))
         if method == "turn.start", failTurn { throw PilotError("Synthetic send failure") }
+        if method == "chat.create" {
+            if failChat { throw PilotError("Synthetic chat failure") }
+            return .object(["id": .string("project"), "path": .string("/work/project"), "default_provider": .string("codex")])
+        }
         if method == "thread.start" { return .object(["thread": .object(["id": .string("created-task"), "workspace_id": params["workspace_id"], "provider": params["provider"], "status": .string("idle"), "title": .string("New task")])]) }
         return .object(["ok": .bool(true)])
     }
@@ -88,5 +93,37 @@ private actor FeatureRelay: RelayServing {
         XCTAssertFalse(model.tasks[0].pinned)
         XCTAssertTrue(model.tasks[0].pinnedInProject)
         XCTAssertEqual(model.tasks[0].raw["agent"]["sandbox_mode"].string, "read-only")
+    }
+    func testFailedChatCreationKeepsTheRecordingAndExistingDraft() async throws {
+        let suite = "speech-recovery-test-" + UUID().uuidString
+        let defaults = UserDefaults(suiteName: suite)!
+        let recording = FileManager.default.temporaryDirectory.appending(path: UUID().uuidString + ".m4a")
+        try Data([1]).write(to: recording)
+        defaults.set(recording.path, forKey: "native.voice.pending")
+        defer { try? FileManager.default.removeItem(at: recording); defaults.removePersistentDomain(forName: suite) }
+        let model = AppModel(relay: FeatureRelay(failChat: true), voice: VoiceRecorder(defaults: defaults))
+        model.connected = true
+        let project = Project(.object(["id": .string("project"), "path": .string("/work/project")]))
+        model.projects = [project]; model.selection = .draft(project.id, nil)
+        let chat = model.chat(for: model.draftTask(project: project, folderID: nil)); chat.draft = "Keep my draft"
+        let inserted = await model.insertRecoveredSpeech("Recovered text")
+        XCTAssertFalse(inserted)
+        XCTAssertEqual(chat.draft, "Keep my draft")
+        XCTAssertEqual(model.voice.pendingURL, recording)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: recording.path))
+    }
+    func testRecoveredSpeechAppendsToARetainedDraftAfterSuccessfulCreation() async {
+        let suite = "speech-insert-test-" + UUID().uuidString
+        let defaults = UserDefaults(suiteName: suite)!
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let model = AppModel(relay: FeatureRelay(), voice: VoiceRecorder(defaults: defaults))
+        model.connected = true
+        let project = Project(.object(["id": .string("project"), "path": .string("/work/project")]))
+        model.projects = [project]
+        let chat = model.chat(for: model.draftTask(project: project, folderID: nil)); chat.draft = "Keep my draft"
+        let inserted = await model.insertRecoveredSpeech("Recovered text")
+        XCTAssertTrue(inserted)
+        XCTAssertEqual(chat.draft, "Keep my draft\n\nRecovered text")
+        XCTAssertEqual(model.selection, .draft(project.id, nil))
     }
 }

@@ -8,7 +8,7 @@ enum Destination: Hashable, Codable {
 @MainActor @Observable
 final class AppModel {
     let relay: any RelayServing
-    let voice = VoiceRecorder()
+    let voice: VoiceRecorder
     let readAloud = ReadAloud()
     let realtimeAudio = RealtimeAudio()
     var composerCatalogs: [String: ComposerCatalog] = [:]
@@ -17,7 +17,8 @@ final class AppModel {
     let notifications = LocalNotifications()
     private(set) var connectionID = UUID()
 
-    init(relay: any RelayServing = RelayClient()) {
+    init(relay: any RelayServing = RelayClient(), voice: VoiceRecorder = VoiceRecorder()) {
+        self.voice = voice
         self.relay = relay
         NativeSpeechBridge.handler = { [weak self] action in await self?.speechAction(action) }
         notifications.openTask = { [weak self] id in Task { await self?.openTask(id) } }
@@ -122,6 +123,7 @@ final class AppModel {
     @discardableResult private func beginConnection(clearData: Bool) -> UUID {
         reconnectTask?.cancel(); reconnectTask = nil
         if voice.recording { voice.finishRecording() }
+        voice.cancelTranscription()
         readAloud.stop(); realtimeAudio.reset(); automations.reset(); extensions.reset(); composerCatalogs = [:]
         connectionID = UUID(); lastEventSeq = 0; connected = false; syncIndex = nil; taskPageLoads = []
         itemCache = [:]; itemCacheOrder = []; itemLoads = [:]; mediaGate = MediaTransferGate()
@@ -486,6 +488,12 @@ enum Demo {
     | Navigation | Projects and folders |
     | Privacy | End-to-end encrypted |
 
+    ```mermaid
+    flowchart LR
+        Phone[Native app] --> Relay[Encrypted relay]
+        Relay --> Computer[Your computer]
+    ```
+
     > Your computer remains the source of truth.
 
     [FalconDeck](https://falcondeck.com)
@@ -505,7 +513,7 @@ enum Demo {
     ]
     static let messages: [Message] = [
         message("1", "user_message", "Let’s explore a truly native FalconDeck. Keep the core experience simple, but make it feel great on iPhone."),
-        message("2", "assistant_message", "I’ve narrowed the pilot down to three things: your projects, the tasks inside them, and the conversations that matter.\n\nThe interface uses **native SwiftUI navigation**, SF Symbols, and glass controls. Project cards open with a zoom transition, and the layout adapts to your text size."),
+        message("2", "assistant_message", "I’ve narrowed the pilot down to three things: your projects, the tasks inside them, and the conversations that matter.\n\nThe interface uses **native SwiftUI navigation**, SF Symbols, and glass controls. Projects stay in the sidebar, and the conversation layout adapts to your text size."),
         message("3", "user_message", "Can it talk to the real relay too?"),
         message("4", "assistant_message", markdownReply)
     ]

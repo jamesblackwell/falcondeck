@@ -1,100 +1,119 @@
-# Falcon Native pilot
+# Falcon Native
 
-A standalone iPhone/iPad SwiftUI client for FalconDeck. This is a local
-prototype, with its own bundle ID, Xcode project, dependency graph, and Keychain
-namespace. It does not change the Expo app, daemon, shared protocol, or releases.
+Standalone SwiftUI development client for iPhone and iPad (iOS 26+). It uses the
+existing encrypted relay and daemon RPCs. The app and speech widget have separate
+bundle identifiers from the released app; they can be installed alongside it.
+Production clients, daemon, relay, Expo, OTA and TestFlight are unchanged.
 
-## Try it locally
+## Run locally
 
-Requires Xcode with an iOS 26+ simulator runtime and XcodeGen (`brew install xcodegen`).
-From this directory:
+Requires Xcode, an iOS 26+ simulator runtime, and XcodeGen.
 
 ```sh
-./scripts/run.sh           # restore a paired computer, or show welcome
-./scripts/run.sh --demo    # clearly labelled sample data
+cd ios-native-pilot
+./scripts/run.sh         # restore saved pairing or show welcome
+./scripts/run.sh --demo  # sample projects and local replies
 ```
 
-Select **FalconDeck Native Pilot** in Device Hub (Simulator on older Xcode). The script creates/reuses a
-dedicated simulator and leaves other simulators alone. Set `SIMULATOR_UDID` to
-use another device. Alternatively, open `FalconDeckNative.xcodeproj` and run the
-`FalconDeckNative` scheme. Regenerate the project with `xcodegen generate` after
-adding source files or changing `project.yml`.
-The build generates the app icon locally from the checked-in Falcon vector mark.
+Set `SIMULATOR_UDID` to use a specific simulator. The default script reuses
+**FalconDeck Native Pilot** and leaves other simulators alone. Open
+`FalconDeckNative.xcodeproj` to run in Xcode. Regenerate it with `xcodegen generate`
+after adding files or editing `project.yml`. Keep simulator signing enabled:
+`CODE_SIGNING_ALLOWED=NO` prevents Keychain access.
 
-Keep Xcode's local simulator signing enabled: building with
-`CODE_SIGNING_ALLOWED=NO` prevents Keychain access. Simulator builds use local
-ad-hoc signing and do not need distribution credentials. No TestFlight, EAS,
-deployment, or production build steps are included.
+## Install on a development device
 
-## Connect real projects
+```sh
+./scripts/install-device.sh <paired-device-identifier>
+```
 
-1. In the desktop app, create a remote pairing link under remote access settings.
-2. Open **Connection** in Falcon Native and paste the **complete secure link**.
-3. Tap **Connect securely**. A custom relay in the link is honored; the default
-   is `https://connect.falcondeck.com`.
+The script builds Debug with Apple Development signing, then installs and
+launches **Falcon Native** using `devicectl`. A paired device on the same Wi-Fi
+network works without a cable when Developer Mode is enabled and the device is
+reachable/unlocked. Use `xcrun devicectl list devices` to find it. Set
+`DEVELOPMENT_TEAM` if a different development team is needed. There is no archive,
+upload, distribution, TestFlight or deployment step.
 
-This registers an additional device named **Falcon Native Pilot**. It does not
-reuse the Expo app's identity. Credentials and the session data key live in this
-client's Keychain; project lists and conversations stay in memory. A normal
-relaunch restores the connection. **Forget this connection** deletes the local
-credentials; revoke the trusted device from desktop settings if no longer needed.
+The device build includes the native speech Live Activity extension. Build output
+is in `build-device/Build/Products/Debug-iphoneos/FalconDeckNative.app`.
 
-The pilot owns only `falcondeck-native://pair?code=…` deep links so it cannot
-intercept the released app's links. Ordinary HTTPS pairing links can be pasted.
-Pairing credentials should never be added to source control or screenshots.
+## Connect
+
+Create a signed pairing link in the desktop app's remote-access settings. In
+Falcon Native, open Connections and scan the QR code or paste the complete link.
+The default relay is `https://connect.falcondeck.com`; a relay in the signed link
+is honored. This registers a separate trusted client named **Falcon Native
+Pilot**. It does not reuse the released mobile app's credentials.
+
+The app owns `falcondeck-native://` links. HTTPS pairing links can be pasted or
+scanned without intercepting the released app's links. Do not put pairing links,
+keys, tokens, real device inventory or private screenshots in git.
 
 ## Included
 
-- Adaptive native sidebar: global pins, projects, project pins, synced folders,
-  task search, paging, and the daemon's project ordering/visibility preferences.
-- Create tasks with an agent/model selection; rename, pin, move, and archive.
-- Create, rename, collapse, and delete folders using atomic daemon mutations.
-- Send messages and queued follow-ups, choose model/reasoning effort, stop turns,
-  and receive encrypted live replies without waiting for sidebar refreshes.
-- Native Markdown: headings, nested lists, links, quotes, tables, selectable text,
-  highlighted code blocks with copying, and horizontal code/table scrolling.
-- Collapsible reasoning, tools, plans, changes, and earlier-history pagination.
-- Exact provider approval choices, plan review, and question/secret-answer forms.
-- Glass composer/toolbars/sheets, keyboard avoidance, jump-to-latest behavior,
-  haptics, SF Symbols, and share menus. iPad keeps sidebar and chat side by side.
-- Dynamic Type, Reduce Motion support, and the existing Falcon dark palette/mark.
-- Signed secure pairing, pinned daemon identity, NaCl session-key unwrap,
-  CryptoKit AES-GCM, WebSocket tickets, and bounded chunk reassembly.
+- Conversation-first navigation, adaptive sidebar, casual chats, projects,
+  global/project pins, synced folders, archive reading/restoration, project order,
+  visibility and icon choices, task sort, filters and lazy paging.
+- Draft-first task creation; provider/model/effort/mode/permissions/sandbox/speed;
+  slash skills and saved prompts; queue/edit/remove/steer; interrupt/resume;
+  rename/suggest title; read/unread; goals and context compaction.
+- Edit/retry in a new branch and cross-agent handoff. Handoff leaves the source
+  task intact and holds context at the daemon until the first destination send.
+- Live Markdown, code highlighting/copy, tables, reasoning/tool groups,
+  display preferences, plans/diffs/files, citations, images, artifacts,
+  operational notices, token usage and inspectable unknown items.
+- Photos/camera/files/clipboard image attachments; native image preview,
+  zoom/save/share; full tool-output sheets and explicit partial transcript export.
+- Retained voice recordings, on-device recognition, computer transcription,
+  system/computer read aloud, speech Live Activities and Lock Screen/headset
+  playback controls; bounded native realtime PCM audio.
+- Automations: list/create/edit/pause/resume/delete/run/history using control RPC,
+  revision checks and idempotency keys. Demo actions never start a real agent.
+- Settings: all 19 shared theme palettes, text size/Dynamic Type, conversation,
+  connected alerts, speech, connection diagnostics, about and developer tools.
+- Extension stages, declarative filters/panels and follow-up suggestions. Buttons
+  submit a suggestion independently of the user's unsent draft and images.
 
-CryptoKit handles signing and content encryption. [Swift-Sodium](https://github.com/jedisct1/swift-sodium)
-0.11.0 handles the NaCl box format already used by the relay. No JavaScript,
-React Native bridge, webview, or wrapper UI is involved.
-The Markdown renderer uses [MarkdownUI](https://github.com/gonzalezreal/swift-markdown-ui)
-2.4.1 with Falcon's native colors and code presentation.
+SwiftUI/UIKit/ActivityKit render the interface. CryptoKit and
+[Swift-Sodium 0.11.0](https://github.com/jedisct1/swift-sodium) implement the existing
+crypto protocol. [MarkdownUI 2.4.1](https://github.com/gonzalezreal/swift-markdown-ui)
+renders Markdown. No JavaScript runtime, React Native bridge or webview ships in
+the app. `scripts/sync-palettes.mjs` reads the existing mobile theme source to
+refresh the checked-in native palette catalog.
 
-## Deliberately small
+## Recovery and boundaries
 
-This remains a prototype, with the core task/chat flow implemented against the
-existing daemon RPCs. Sending messages and handling requests are real actions on
-the paired computer. Permission settings are inherited from the task; choosing a
-model does not silently change them. Failed/uncertain sends are never retried
-automatically. A message sent while a task is busy is queued by the daemon.
+Keychain holds this client's identity and relay credentials. Unsent text, image
+attachments, composer choices and the last conversation selection are encrypted
+per pairing in protected device files. Conversations remain in memory; the
+daemon and native agent storage are authoritative. Forget removes this pairing's
+input files and credentials. Revoke the trusted device from desktop settings if
+it should no longer connect.
 
-It requests an authoritative snapshot on connection, on pull-to-refresh, and
-every 10 seconds while running. Live events update the selected transcript
-immediately and sidebar metadata in bounded batches. UTF-16 offsets suppress
-duplicate text and detect gaps, which trigger authoritative history recovery.
-History requests replay events that arrive while a page loads. A buffer overflow
-keeps the live transcript and reports an explicit recovery error. Connection
-identifiers prevent old events and RPC results from changing a new session or
-demo workspace. Interrupt acknowledgements leave task status to daemon events. No relay cursor
-is persisted; pruned replay is never treated as a local source of truth.
-Background/foreground reconnect and explicit reconnect are included;
-automatic network retry with backoff is a future step.
+Connections bootstrap through `sync.index`, expand shared catalogs once, and
+page project/folder lists with `sync.threads`. A legacy snapshot fallback is used
+only when compact sync is unavailable. Live events stream immediately; sidebar
+metadata is coalesced. Fresh snapshots, connection identities, touched-row/view
+tracking and UTF-16 offsets protect reconnects and paged history. Network retry
+uses bounded backoff. Mutations and uncertain sends are never retried automatically.
+Search covers loaded tasks and explicitly offers loading more.
 
-Attachments/image rendering, notifications, QR scanning, light theme, queue
-editing, git/diff panels, and extensions/settings parity are still omitted.
-Markdown images display a placeholder rather than silently fetching external
-content. Tool-output previews are bounded. Syntax coloring is lightweight rather
-than a language-server parser. Demo chat produces a fixed labelled local reply;
-live mode uses the actual agent. No release or deployment steps are included.
+Known limits:
 
-## Verification
+- Background remote push is unavailable: the current relay only delivers Expo
+  push. A native APNs relay path requires separate server work/deployment. James
+  was notified via NTFY; production was left untouched. Opt-in connected local
+  alerts work while the app can maintain its connection. They cannot detect
+  desktop activity.
+- Common Mermaid flowcharts render as native shapes. Other Mermaid syntax shows
+  its complete copyable source. Code coloring is lightweight.
+- Extensions must publish supported declarative mobile UI. Desktop frontend
+  panels have an explicit desktop fallback.
+- Camera, microphone, speech languages, Live Activity behavior and Wi-Fi install
+  still need verification on the physical devices when reachable. Simulator
+  checks do not establish physical hardware behavior.
+
+## Verify
 
 ```sh
 xcodebuild -project FalconDeckNative.xcodeproj -scheme FalconDeckNative \
@@ -102,15 +121,9 @@ xcodebuild -project FalconDeckNative.xcodeproj -scheme FalconDeckNative \
   -derivedDataPath build test
 ```
 
-Twenty-three focused tests cover TypeScript AES interoperability and tamper rejection,
-secure pairing parsing/URL policy, signed authority verification, pinned signed
-NaCl bootstrap verification, ordered transport reassembly/type-first ACKs,
-UTF-16 streaming/overlap/gap handling, optimistic echo reconciliation, paged
-history merging, content targets, permission-preserving requests, and exact
-approval scopes, connection isolation, delayed summaries, interrupt acknowledgements,
-retry/error status preservation, and history-buffer overflow.
-
-Local simulator checks also exercise real hosted-relay pairing, project/task
-reads, task creation, real chat round trips, rendered Markdown, and Keychain
-restoration after relaunch. Screenshots
-and build products are local ignored artifacts, not release assets.
+See [PARITY.md](PARITY.md) for the implementation/verification ledger. Tests cover
+crypto interoperability, pairing authority, chunks/ACKs, UTF-16 streaming,
+connection races, history recovery, drafts, queues, control revisions,
+attachments, PCM, handoff, extension replacement/tombstones, theme callbacks and
+native flowchart parsing. Simulator screenshots and build products stay in
+ignored local `artifacts/` and `build*/` directories.

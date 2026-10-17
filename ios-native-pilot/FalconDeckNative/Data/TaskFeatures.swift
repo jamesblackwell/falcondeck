@@ -108,14 +108,24 @@ extension Project {
         await loadChat(task)
     }
 
-    func newChat() async {
+    @discardableResult func newChat() async -> Project? {
         do {
             let current = connectionID
             let project = demo ? Demo.projects[0] : Project(try await relay.call("chat.create", params: .object(["create": .bool(true)])))
-            guard current == connectionID else { return }
+            guard current == connectionID else { return nil }
+            guard !project.id.isEmpty else { throw PilotError("The computer returned an incomplete chat project.") }
             if !projects.contains(where: { $0.id == project.id }) { projects.append(project) }
             selection = .draft(project.id, nil)
-        } catch { self.error = error.localizedDescription }
+            return project
+        } catch { self.error = error.localizedDescription; return nil }
+    }
+
+    func insertRecoveredSpeech(_ text: String) async -> Bool {
+        let current = connectionID, recording = voice.pendingURL
+        guard let project = await newChat(), current == connectionID, voice.pendingURL == recording else { return false }
+        let chat = chat(for: draftTask(project: project, folderID: nil))
+        chat.draft = chat.draft.isEmpty ? text : chat.draft + "\n\n" + text
+        voice.discard(); return true
     }
 
     func draftTask(project: Project, folderID: String?) -> AgentTask {
