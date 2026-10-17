@@ -2,6 +2,20 @@ import XCTest
 @testable import FalconDeckNative
 
 final class PresentationTests: XCTestCase {
+    func testInitialHistoryMatchesExposSmallTailAndOlderPagesRemainAvailable() {
+        let task = AgentTask(.object(["id": .string("t"), "workspace_id": .string("p")]))
+        let tail = NativeRequest.history(task: task, before: nil)
+        XCTAssertEqual(tail["limit"].int, 20)
+        XCTAssertEqual(tail["mode"].string, "tail")
+        XCTAssertTrue(tail["strict_limit"].bool)
+        XCTAssertFalse(tail["inline_images"].bool)
+        XCTAssertTrue(tail["compact_workspace"].bool)
+        let older = NativeRequest.history(task: task, before: "first-visible")
+        XCTAssertEqual(older["limit"].int, 50)
+        XCTAssertEqual(older["mode"].string, "before")
+        XCTAssertEqual(older["before_item_id"].string, "first-visible")
+    }
+
     func testHarnessProjectionHidesScaffoldingAndKeepsTypedQuery() {
         XCTAssertEqual(UserTextProjection.project("<environment_context>private scaffold</environment_context>\n<user_query>Hello 👋</user_query>"), .prompt("Hello 👋", automated: false))
         XCTAssertEqual(UserTextProjection.project("# AGENTS.md instructions for /project\n<INSTRUCTIONS>rules</INSTRUCTIONS>"), .hidden)

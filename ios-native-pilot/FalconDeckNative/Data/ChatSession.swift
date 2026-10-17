@@ -26,6 +26,8 @@ final class ChatSession {
     var hasOlder = false
     var oldestID: String?
     var error: String?
+    var historyError: String?
+    var olderHistoryError: String?
     var notice: String?
     var bufferedEvents: [JSON] = []
     var loadID = UUID()

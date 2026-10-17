@@ -1,5 +1,19 @@
 import Foundation
 
+struct TaskPageScope: Hashable {
+    let projectID: String
+    var folderID: String? = nil
+    func key(sort: String) -> String { CompactSync.key(project: projectID, folder: folderID, sort: sort) }
+}
+
+struct TaskPagePlan: Hashable {
+    let connectionID: UUID
+    let token: String?
+    let connected: Bool
+    let sort: String
+    let scopes: [TaskPageScope]
+}
+
 struct CompactSync {
     let token: String
     let counts: JSON
@@ -43,6 +57,17 @@ struct CompactSync {
 }
 
 @MainActor extension AppModel {
+    /// One initial page per visible scope, serially. Reopening a section does
+    /// not fetch another page; a fresh index token does restart initial loads.
+    func loadInitialTaskPages(_ plan: TaskPagePlan) async {
+        for scope in plan.scopes {
+            guard !Task.isCancelled, plan.connected, connected, connectionID == plan.connectionID, let index = syncIndex, index.token == plan.token else { return }
+            if index.cursors[scope.key(sort: plan.sort)] == nil, hasMoreTasks(scope.projectID, folderID: scope.folderID, sort: plan.sort) {
+                await loadTaskPage(scope.projectID, folderID: scope.folderID, sort: plan.sort)
+            }
+        }
+    }
+
     func loadTaskPage(_ projectID: String, folderID: String? = nil, sort: String = "last_updated", limit: Int = 10) async {
         guard let state = syncIndex, !demo, connected else { return }
         let key = CompactSync.key(project: projectID, folder: folderID, sort: sort)
@@ -53,12 +78,17 @@ struct CompactSync {
         do {
             var params = JSON.object(["token": .string(token), "workspace_id": .string(projectID), "cursor": state.cursors[key] ?? .number(0), "sort": .string(sort), "limit": .number(Double(folderID == nil ? max(1, min(50, limit)) : 50))])
             if let folderID { params = params.setting("folder_id", .string(folderID)) }
-            let page = try await relay.call("sync.threads", params: params)
-            guard current == connectionID, !Task.isCancelled, var index = syncIndex, index.token == token, page["token"].string == token else { return }
+            // A view can disappear while another visible scope still needs
+            // this same read. Connection/index checks own its result lifetime.
+            let page = try await Task { try await relay.call("sync.threads", params: params) }.value
+            // A collapsed/reopened scope may cancel its view task while this
+            // read is in flight. Its valid page still belongs to this index.
+            guard current == connectionID, var index = syncIndex, index.token == token, page["token"].string == token else { return }
             let rows = page["threads"].array.map(AgentTask.init)
             guard page["workspace_id"].string == projectID, rows.allSatisfy({ $0.projectID == projectID }) else { throw PilotError("Project page scope did not match.") }
+            let accepted = rows.filter { !index.touched.contains($0.id) && (task($0.id) == nil || index.carried.contains($0.id)) }
+            upsertTasks(accepted.map(\.raw))
             for row in rows {
-                if !index.touched.contains(row.id), task(row.id) == nil || index.carried.contains(row.id) { upsertTask(row.raw) }
                 index.carried.remove(row.id)
             }
             if folderID == nil, page["next_cursor"] == .null {

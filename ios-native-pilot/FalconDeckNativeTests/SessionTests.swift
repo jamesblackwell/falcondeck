@@ -15,6 +15,7 @@ private actor ControlledRelay: RelayServing {
     func detail(task: AgentTask, before: String?) async throws -> JSON { try await call("thread.detail", params: .null) }
     func call(_ method: String, params: JSON) async throws -> JSON {
         lastParams = params
+        if method == "thread.archive" { return .object(["ok": .bool(true)]) }
         return try await withCheckedThrowingContinuation {
             pending = $0; waiter?.resume(); waiter = nil
         }
@@ -25,6 +26,7 @@ private actor ControlledRelay: RelayServing {
         await withCheckedContinuation { waiter = $0 }
     }
     func complete(_ result: JSON) { pending?.resume(returning: result); pending = nil }
+    func fail(_ error: Error) { pending?.resume(throwing: error); pending = nil }
 }
 
 @MainActor final class SessionTests: XCTestCase {
@@ -158,8 +160,59 @@ private actor ControlledRelay: RelayServing {
         await relay.complete(.object(["thread": task.raw, "items": .array([])]))
         await load.value
         XCTAssertEqual(chat.transcript.items.first?.text.count, 2049)
-        XCTAssertNotNil(chat.error)
+        XCTAssertNotNil(chat.historyError)
         XCTAssertFalse(chat.loaded)
         XCTAssertFalse(chat.loading)
+    }
+
+    func testLeavingAConversationDoesNotDiscardItsValidInFlightHistory() async {
+        let relay = ControlledRelay()
+        let controlled = AppModel.testing(relay: relay)
+        controlled.tasks = [task]
+        let load = Task { await controlled.loadChat(task) }
+        await relay.waitForRequest()
+        load.cancel()
+        // Reopening while the first read is pending shares that load.
+        await controlled.loadChat(task)
+        let item = JSON.object(["id": .string("reply"), "kind": .string("assistant_message"), "text": .string("Loaded once")])
+        await relay.complete(.object(["thread": task.raw, "items": .array([item])]))
+        await load.value
+        let chat = controlled.chat(for: task)
+        XCTAssertTrue(chat.loaded)
+        XCTAssertFalse(chat.loading)
+        XCTAssertEqual(chat.transcript.items.first?.text, "Loaded once")
+    }
+
+    func testHistoryCannotReviveAConversationArchivedDuringTheRequest() async {
+        let relay = ControlledRelay()
+        let controlled = AppModel.testing(relay: relay)
+        controlled.tasks = [task]; controlled.connected = true
+        let load = Task { await controlled.loadChat(task) }
+        await relay.waitForRequest()
+        await controlled.archive(task)
+        let newer = task.raw.setting("updated_at", .string("2026-10-17T12:00:00Z"))
+        await relay.complete(.object(["thread": newer, "items": .array([])]))
+        await load.value
+        XCTAssertTrue(controlled.tasks.isEmpty)
+        XCTAssertTrue(controlled.archivedTasks.first?.archived == true)
+        XCTAssertNil(controlled.chats[task.id])
+    }
+
+    func testAnOlderPageFailureDoesNotInvalidateAlreadyLoadedHistory() async {
+        let relay = ControlledRelay()
+        let model = AppModel.testing(relay: relay)
+        model.tasks = [task]
+        let chat = model.chat(for: task)
+        chat.loaded = true; chat.hasOlder = true; chat.oldestID = "first"
+        chat.transcript.items = [Message(.object(["id": .string("first"), "kind": .string("assistant_message"), "text": .string("Already readable")]))]
+        let load = Task { await model.loadChat(task, older: true) }
+        await relay.waitForRequest()
+        await relay.fail(PilotError("Older page unavailable"))
+        await load.value
+        XCTAssertTrue(chat.loaded)
+        XCTAssertFalse(chat.loading)
+        XCTAssertNil(chat.historyError)
+        XCTAssertEqual(chat.olderHistoryError, "Older page unavailable")
+        XCTAssertEqual(chat.transcript.items.first?.text, "Already readable")
     }
 }

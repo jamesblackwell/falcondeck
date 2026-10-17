@@ -343,13 +343,7 @@ actor RelayClient: RelayServing {
     }
 
     func detail(task: AgentTask, before: String? = nil) async throws -> JSON {
-        var params = JSON.object([
-            "workspace_id": .string(task.projectID), "thread_id": .string(task.id),
-            "mode": .string(before == nil ? "tail" : "before"), "limit": .number(50), "strict_limit": .bool(true),
-            "inline_images": .bool(false), "tool_output_bytes": .number(1024), "compact_workspace": .bool(true)
-        ])
-        if let before { params = params.setting("before_item_id", .string(before)) }
-        return try await call("thread.detail", params: params)
+        try await call("thread.detail", params: NativeRequest.history(task: task, before: before))
     }
 
     func call(_ method: String, params: JSON) async throws -> JSON {

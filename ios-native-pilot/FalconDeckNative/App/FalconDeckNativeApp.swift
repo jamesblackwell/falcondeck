@@ -6,6 +6,11 @@ struct FalconDeckNativeApp: App {
     @State private var model = makeModel()
     private static func makeModel() -> AppModel {
         #if DEBUG
+        if ProcessInfo.processInfo.arguments.contains(where: { $0.hasPrefix("--loading-preview=") }) {
+            let defaults = UserDefaults(suiteName: "NativeLoadingPreview")!
+            defaults.removePersistentDomain(forName: "NativeLoadingPreview")
+            return AppModel(relay: LoadingPreviewRelay(failFirst: ProcessInfo.processInfo.arguments.contains("--loading-preview=retry")), push: NativePushNotifications(defaults: defaults), notifications: LocalNotifications(defaults: defaults), sessionLoader: { nil })
+        }
         if ProcessInfo.processInfo.arguments.contains("--review-preview=offline") || ProcessInfo.processInfo.arguments.contains("--review-preview=queue-error") {
             let suite = "NativeReviewPreview", defaults = UserDefaults(suiteName: "NativeReviewPreview")!
             defaults.removePersistentDomain(forName: suite)

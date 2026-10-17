@@ -241,6 +241,11 @@ final class AppModel {
         error = nil; status = "Demo workspace"
         projects = Demo.projects; tasks = Demo.tasks; preferences = Demo.preferences; requests = Demo.requests
         #if DEBUG
+        if ProcessInfo.processInfo.arguments.contains(where: { $0.hasPrefix("--loading-preview=") }) {
+            projects = LoadingPreviewRelay.projects; tasks = [LoadingPreviewRelay.task]; requests = []
+            syncIndex = CompactSync(token: LoadingPreviewRelay.token, counts: LoadingPreviewRelay.counts)
+            demo = false; hasSession = true; connected = true; status = "Preview computer"
+        }
         if let argument = ProcessInfo.processInfo.arguments.first(where: { $0.hasPrefix("--review-preview=") }), let task = tasks.first {
             let mode = argument.split(separator: "=").last.map(String.init)
             let chat = chat(for: task)
@@ -297,7 +302,8 @@ final class AppModel {
         let chat = chat(for: task)
         guard !chat.loading else { return }
         let current = connectionID
-        chat.loading = true; chat.error = nil; chat.bufferedEvents = []; chat.bufferOverflowed = false
+        chat.loading = true; chat.bufferedEvents = []; chat.bufferOverflowed = false
+        if older { chat.olderHistoryError = nil } else { chat.historyError = nil; chat.olderHistoryError = nil }
         let loadID = UUID(); chat.loadID = loadID
         defer { if chat.loadID == loadID { chat.loading = false } }
         if demo {
@@ -305,8 +311,12 @@ final class AppModel {
             chat.loaded = true; return
         }
         do {
-            let page = try await relay.detail(task: task, before: older ? chat.oldestID : nil)
-            guard current == connectionID, chat.loadID == loadID, !Task.isCancelled else { return }
+            let before = older ? chat.oldestID : nil
+            let page = try await Task { try await relay.detail(task: task, before: before) }.value
+            // Cache valid reads even if their view disappeared during the
+            // request. Reopening then shares the result instead of waiting on
+            // an in-flight load whose response would otherwise be discarded.
+            guard current == connectionID, chats[task.id] === chat, chat.loadID == loadID else { return }
             guard !chat.bufferOverflowed else { throw PilotError("Too many live updates arrived while loading history. Refresh this task to recover.") }
             let items = page["items"].array.map(Message.init)
             if older { chat.transcript.prepend(items) }
@@ -325,7 +335,12 @@ final class AppModel {
             chat.loaded = true
             chat.settleSubmission(queued: page["thread"]["queued_turns"].array)
             upsertTask(page["thread"])
-        } catch { if current == connectionID, chat.loadID == loadID { chat.error = error.localizedDescription } }
+        } catch {
+            if current == connectionID, chats[task.id] === chat, chat.loadID == loadID {
+                if older { chat.olderHistoryError = error.localizedDescription }
+                else { chat.historyError = error.localizedDescription }
+            }
+        }
     }
 
     func send(_ task: AgentTask, textOverride: String? = nil) async {

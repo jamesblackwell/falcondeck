@@ -62,4 +62,35 @@ private actor PageRelay: RelayServing {
         XCTAssertTrue(model.tasks.isEmpty)
         XCTAssertTrue(model.archivedTasks.first?.archived == true)
     }
+
+    func testInitialPagesLoadEachUnloadedScopeOnceAndKeepCancelledReadResults() async {
+        let relay = PageRelay(), model = AppModel.testing(relay: relay)
+        model.connected = true
+        model.syncIndex = CompactSync(token: "index", counts: counts(3))
+        let plan = TaskPagePlan(connectionID: model.connectionID, token: "index", connected: true, sort: "last_updated", scopes: [TaskPageScope(projectID: "p")])
+        let load = Task { await model.loadInitialTaskPages(plan) }
+        await relay.wait()
+        load.cancel()
+        await relay.finish(.object(["token": .string("index"), "workspace_id": .string("p"), "threads": .array([row("one").raw]), "next_cursor": .number(1)]))
+        await load.value
+        XCTAssertEqual(model.tasks.map(\.id), ["one"])
+        XCTAssertEqual(model.syncIndex?.cursors[CompactSync.key(project: "p", folder: nil)], .number(1))
+        // This would hang if reopening silently fetched the next page.
+        await model.loadInitialTaskPages(plan)
+        XCTAssertTrue(model.taskPageLoads.isEmpty)
+    }
+
+    func testARefreshedIndexLoadsTheStillExpandedScopeAgain() async {
+        let relay = PageRelay(), model = AppModel.testing(relay: relay)
+        model.connected = true
+        for token in ["one", "two"] {
+            model.syncIndex = CompactSync(token: token, counts: counts(1))
+            let plan = TaskPagePlan(connectionID: model.connectionID, token: token, connected: true, sort: "last_updated", scopes: [TaskPageScope(projectID: "p")])
+            let load = Task { await model.loadInitialTaskPages(plan) }
+            await relay.wait()
+            await relay.finish(.object(["token": .string(token), "workspace_id": .string("p"), "threads": .array([row(token).raw]), "next_cursor": .null]))
+            await load.value
+            XCTAssertNotNil(model.task(token))
+        }
+    }
 }

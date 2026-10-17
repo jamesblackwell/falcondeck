@@ -80,6 +80,17 @@ struct Transcript: Sendable {
 }
 
 enum NativeRequest {
+    static func history(task: AgentTask, before: String?) -> JSON {
+        // Match Expo's small foreground tail; older pages retain fifty items.
+        var params = JSON.object([
+            "workspace_id": .string(task.projectID), "thread_id": .string(task.id),
+            "mode": .string(before == nil ? "tail" : "before"), "limit": .number(before == nil ? 20 : 50),
+            "strict_limit": .bool(true), "inline_images": .bool(false), "tool_output_bytes": .number(2048), "compact_workspace": .bool(true)
+        ])
+        if let before { params = params.setting("before_item_id", .string(before)) }
+        return params
+    }
+
     static func turnSettings(_ overrides: [String: JSON], task: AgentTask, model: AgentModel?) -> [String: JSON] {
         var result = overrides
         let tiers = model?.raw["service_tiers"].array ?? []

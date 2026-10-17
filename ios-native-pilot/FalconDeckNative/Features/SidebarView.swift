@@ -23,13 +23,12 @@ struct SidebarView: View {
     @State private var editingFolder: ProjectFolder?
     @State private var showFolderEditor = false
     @State private var deleteFolder: ProjectFolder?
-    @State private var savingFolders: Set<String> = []
-    @State private var openFolders: [String: Bool] = [:]
+    @State private var disclosures = FolderDisclosures()
 
     private var projects: [Project] {
         let hidden = Set(model.preferences["hidden_workspace_ids"].array.map(\.string))
         return model.sortedProjects.filter {
-            (showHidden || !hidden.contains($0.id)) && (search.isEmpty || $0.name.localizedCaseInsensitiveContains(search) || model.tasks(in: $0).contains { $0.title.localizedCaseInsensitiveContains(search) })
+            ($0.raw["kind"].string == "casual" || showHidden || !hidden.contains($0.id)) && (search.isEmpty || $0.name.localizedCaseInsensitiveContains(search) || model.tasks(in: $0).contains { $0.title.localizedCaseInsensitiveContains(search) })
         }
     }
     private var pins: [AgentTask] { model.tasks.filter { $0.pinned && matches($0) }.sorted { $0.updatedAt > $1.updatedAt } }
@@ -38,8 +37,11 @@ struct SidebarView: View {
         let projectsOpen = !search.isEmpty || projectGroups.contains { expanded.contains($0.id) }
         let pinsOpen = pinsExpanded || !search.isEmpty
         let chatsOpen = chatsExpanded || !search.isEmpty
-        ScrollView {
-            LazyVStack(alignment: .leading, spacing: 0) {
+        let casual = projects.filter { $0.raw["kind"].string == "casual" }
+        let plan = TaskPagePlan(connectionID: model.connectionID, token: model.syncIndex?.token, connected: model.connected, sort: sort,
+            scopes: initialScopes(projectGroups, casual: chatsOpen ? casual : []))
+        List {
+            Group {
                 sidebarAction("New chat", symbol: "square.and.pencil") { Task { if await model.newChat() != nil { openDetail() } } }
                     .disabled(!model.demo && !model.connected).accessibilityIdentifier("sidebar-new-chat")
                 sidebarAction("Activity", symbol: "tray.full", selected: model.selection == .activity) { navigate(.activity) }
@@ -57,7 +59,7 @@ struct SidebarView: View {
                         animate { if expanded.contains(project.id) { expanded.remove(project.id) } else { expanded.insert(project.id) } }
                     } label: {
                         HStack(spacing: 8) {
-                            Image(systemName: isOpen ? "chevron.down" : "chevron.right")
+                            Image(systemName: "chevron.right").rotationEffect(.degrees(isOpen ? 90 : 0))
                                 .font(.system(size: 10, weight: .semibold)).foregroundStyle(FD.muted).frame(width: 12)
                             WorkspaceGlyph(project: project).font(.subheadline).frame(width: 18, height: 20)
                             Text(project.name).font(.subheadline.weight(.medium)).lineLimit(1)
@@ -79,14 +81,11 @@ struct SidebarView: View {
                         Button("Project options", systemImage: "slider.horizontal.3") { optionsProject = project }
                         ShareLink(item: project.path) { Label("Share project path", systemImage: "square.and.arrow.up") }
                     }
-                    if isOpen { projectContents(project).task(id: project.id + ":" + sort) { await model.loadTaskPage(project.id, sort: sort) } }
+                    if isOpen { projectContents(project) }
                 }
-                let casual = projects.filter { $0.raw["kind"].string == "casual" }
                 if !casual.isEmpty {
                     sectionHeading("Chats", expanded: chatsOpen) { animate { chatsExpanded.toggle() } }
-                    if chatsOpen {
-                        ForEach(casual) { project in taskPage(model.tasks(in: project).filter { !$0.pinned && matches($0) }, key: project.id, indent: 0) }
-                    }
+                    if chatsOpen { chatContents(casual) }
                 }
                 if !search.isEmpty, model.syncIndex != nil, model.sortedProjects.contains(where: { model.hasMoreTasks($0.id, sort: sort) }) {
                     VStack(alignment: .leading, spacing: 8) {
@@ -98,11 +97,18 @@ struct SidebarView: View {
                     Label(error, systemImage: "exclamationmark.circle").font(.caption).foregroundStyle(.orange).padding(12)
                     Button("Dismiss error") { model.error = nil }.font(.caption).padding(.horizontal, 12)
                 }
-            }.padding(.horizontal, 10).padding(.bottom, 16)
+            }
+            .listRowInsets(EdgeInsets(top: 0, leading: 10, bottom: 0, trailing: 10))
+            .listRowSeparator(.hidden).listRowBackground(Color.clear)
         }
+        .listStyle(.plain).scrollContentBackground(.hidden)
+        .environment(\.defaultMinListRowHeight, 0)
+        .contentMargins(.top, 0, for: .scrollContent).contentMargins(.bottom, 16, for: .scrollContent)
         .background(FD.background).navigationTitle("Tasks").navigationBarTitleDisplayMode(.inline)
         .searchable(text: $search, placement: .navigationBarDrawer(displayMode: .always), prompt: "Search tasks")
         .refreshable { await model.refresh() }
+        .task(id: plan) { await model.loadInitialTaskPages(plan) }
+        .onChange(of: model.connectionID) { _, _ in disclosures.reset() }
         .toolbar {
             ToolbarItem(placement: .bottomBar) {
                 Button { navigate(.settings) } label: { Image(systemName: "gearshape") }
@@ -150,7 +156,7 @@ struct SidebarView: View {
         .onChange(of: model.selection) { _, destination in
             guard case .task(let id) = destination, let task = model.task(id), !task.pinned else { return }
             expanded.insert(task.projectID)
-            if let folder = model.folders.first(where: { $0.taskIDs.contains(id) }) { openFolders[folder.id] = true }
+            if let folder = model.folders.first(where: { $0.taskIDs.contains(id) }) { disclosures.reveal(folder.id) }
         }
         .onChange(of: model.projects.isEmpty) { _, empty in
             if !empty && expanded.isEmpty, let project = projects.first(where: { $0.raw["kind"].string != "casual" }) { expanded.insert(project.id) }
@@ -183,29 +189,24 @@ struct SidebarView: View {
         ForEach(tasks.filter(\.pinnedInProject)) { taskLink($0, indent: 20) }
         ForEach(folders) { folder in
             let children = tasks.filter { folder.taskIDs.contains($0.id) && !$0.pinnedInProject }
-            let isOpen = !search.isEmpty || (openFolders[folder.id] ?? !folder.collapsed)
+            let isOpen = !search.isEmpty || disclosures.isExpanded(folder)
             Button {
-                openFolders[folder.id] = !isOpen; savingFolders.insert(folder.id)
-                Task {
-                    defer { savingFolders.remove(folder.id); openFolders.removeValue(forKey: folder.id) }
-                    do { try await model.folderMutation(projectID: project.id, action: "set_collapsed", folderID: folder.id, collapsed: isOpen) }
-                    catch { model.error = error.localizedDescription }
-                }
+                animate { disclosures.toggle(folder, model: model) }
             } label: {
                 HStack {
                     Label(folder.name, systemImage: "folder").font(.subheadline)
                     Spacer()
-                    if savingFolders.contains(folder.id) { ActivityDiamond() }
-                    else { Image(systemName: isOpen ? "chevron.down" : "chevron.right").font(.caption2.weight(.semibold)) }
+                    Image(systemName: "chevron.right").rotationEffect(.degrees(isOpen ? 90 : 0)).font(.caption2.weight(.semibold))
                 }.foregroundStyle(FD.secondary).padding(.leading, 26).padding(.trailing, 10).frame(minHeight: 44).contentShape(.rect)
             }
-            .disabled(savingFolders.contains(folder.id) || !search.isEmpty).accessibilityValue(isOpen ? "Expanded" : "Collapsed")
+            .disabled(!search.isEmpty).accessibilityValue(isOpen ? "Expanded" : "Collapsed")
+            .accessibilityIdentifier("sidebar-folder-\(folder.id)")
             .contextMenu {
                 Button { newTask(project, folderID: folder.id) } label: { Label("New task", systemImage: "square.and.pencil") }
                 Button { editFolder(projectID: project.id, folder: folder) } label: { Label("Rename folder", systemImage: "pencil") }
                 Button("Delete folder", systemImage: "trash", role: .destructive) { deleteFolder = folder }
             }
-            if isOpen { taskPage(children, key: folder.id, indent: 40).task(id: folder.id + ":" + sort) { await model.loadTaskPage(project.id, folderID: folder.id, sort: sort) } }
+            if isOpen { taskPage(children, key: folder.id, indent: 40) }
         }
         taskPage(tasks.filter { !$0.pinnedInProject && !filed.contains($0.id) }, key: project.id, indent: 20)
     }
@@ -218,12 +219,45 @@ struct SidebarView: View {
         }
         let folder = model.folders.first { $0.id == key }
         let projectID = folder?.projectID ?? key
-        if tasks.count > limit || model.hasMoreTasks(projectID, folderID: folder?.id, sort: sort) {
-            Button("Show more") {
+        let loading = model.taskPageLoads.contains(CompactSync.key(project: projectID, folder: folder?.id, sort: sort))
+        if tasks.isEmpty, loading {
+            HStack(spacing: 8) { ActivityDiamond(); Text("Loading tasks…").font(.caption).foregroundStyle(FD.secondary) }
+                .padding(.leading, indent + 28).frame(minHeight: 44)
+        } else if tasks.count > limit || model.hasMoreTasks(projectID, folderID: folder?.id, sort: sort) {
+            Button {
                 limits[key] = limit + 10
                 Task { await model.loadTaskPage(projectID, folderID: folder?.id, sort: sort) }
-            }.font(.caption).foregroundStyle(FD.secondary).padding(.leading, indent + 28).frame(minHeight: 44)
-                .disabled(model.taskPageLoads.contains(CompactSync.key(project: projectID, folder: folder?.id, sort: sort)))
+            } label: { HStack(spacing: 8) { if loading { ActivityDiamond() }; Text("Show more") } }
+                .font(.caption).foregroundStyle(FD.secondary).padding(.leading, indent + 28).frame(minHeight: 44).disabled(loading)
+        }
+    }
+
+    private func initialScopes(_ projects: [Project], casual: [Project]) -> [TaskPageScope] {
+        projects.filter { expanded.contains($0.id) || !search.isEmpty }.flatMap { project in
+            [TaskPageScope(projectID: project.id)] + model.folders.filter {
+                $0.projectID == project.id && (!search.isEmpty || disclosures.isExpanded($0))
+            }.map { TaskPageScope(projectID: project.id, folderID: $0.id) }
+        } + casual.map { TaskPageScope(projectID: $0.id) }
+    }
+
+    @ViewBuilder private func chatContents(_ projects: [Project]) -> some View {
+        let all = projects.flatMap { model.tasks(in: $0) }.filter { !$0.pinned && matches($0) }
+        let tasks = sorted(all.filter(\.pinnedInProject)) + sorted(all.filter { !$0.pinnedInProject })
+        let limit = search.isEmpty ? limits["chats", default: 10] : tasks.count
+        let next = projects.first { model.hasMoreTasks($0.id, sort: sort) }
+        let loading = projects.contains { model.taskPageLoads.contains(CompactSync.key(project: $0.id, folder: nil, sort: sort)) }
+        ForEach(tasks.prefix(limit)) { taskLink($0) }
+        if case .task(let selectedID) = model.selection, let selected = tasks.dropFirst(limit).first(where: { $0.id == selectedID }) { taskLink(selected) }
+        if tasks.isEmpty && loading {
+            HStack(spacing: 8) { ActivityDiamond(); Text("Loading chats…").font(.caption).foregroundStyle(FD.secondary) }
+                .frame(maxWidth: .infinity, minHeight: 64).accessibilityIdentifier("sidebar-chats-loading")
+        } else if tasks.count > limit || next != nil {
+            Button {
+                limits["chats"] = limit + 10
+                if let next { Task { await model.loadTaskPage(next.id, sort: sort) } }
+            } label: { HStack(spacing: 8) { if loading { ActivityDiamond() }; Text("Show more") } }
+                .font(.caption).foregroundStyle(FD.secondary).padding(.leading, 28).frame(minHeight: 44)
+                .disabled(loading).accessibilityIdentifier("sidebar-chats-more")
         }
     }
     private func taskLink(_ task: AgentTask, indent: CGFloat = 0) -> some View {
@@ -259,7 +293,7 @@ struct SidebarView: View {
             HStack {
                 Text(title.uppercased()).font(.system(.caption2, design: .monospaced).weight(.medium)).tracking(0.8)
                 Spacer()
-                Image(systemName: expanded ? "chevron.down" : "chevron.right").font(.system(size: 10, weight: .semibold))
+                Image(systemName: "chevron.right").rotationEffect(.degrees(expanded ? 90 : 0)).font(.system(size: 10, weight: .semibold))
             }.foregroundStyle(FD.muted).padding(.horizontal, 12).frame(minHeight: 40).padding(.top, 8).contentShape(.rect)
         }.buttonStyle(.plain).disabled(!search.isEmpty).accessibilityIdentifier("sidebar-section-\(title.lowercased())")
             .accessibilityValue(expanded ? "Expanded" : "Collapsed")

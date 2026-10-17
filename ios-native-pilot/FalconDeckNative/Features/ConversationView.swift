@@ -15,7 +15,6 @@ struct ConversationView: View {
             let session = model.chat(for: task); chat = session
             if task.isDraft { session.loaded = true }
             else if !session.loaded { await model.loadChat(task) }
-            await model.markRead(current, automatic: true)
         }
         .onChange(of: model.connected) { _, connected in if connected && !task.isDraft { Task { await model.loadChat(current) } } }
     }
@@ -28,6 +27,7 @@ private struct ChatContent: View {
     @Bindable var chat: ChatSession
     @State private var scroll = TranscriptScrollState()
     @State private var showGoal = false
+    @State private var visible = false
     private var expansion: TranscriptExpansion? { chat.transcriptExpansion }
     @State private var contextHeight: CGFloat = 0
     @State private var viewportHeight: CGFloat = 600
@@ -40,6 +40,7 @@ private struct ChatContent: View {
     private var blocks: [TranscriptBlock] { TranscriptBlock.build(chat.transcript.items, preferences: preferences, running: task.running) }
     var body: some View {
         let actions = actionIDs
+        let blocks = blocks
         ScrollViewReader { proxy in
             List {
                 Group {
@@ -50,20 +51,13 @@ private struct ChatContent: View {
                         } label: { HStack { if chat.loading { ActivityDiamond() }; Text("Load earlier messages") }.frame(maxWidth: .infinity) }
                             .font(.footnote).foregroundStyle(FD.secondary).disabled(chat.loading)
                     }
-                    if chat.loading && chat.transcript.items.isEmpty { ActivityDiamond().frame(maxWidth: .infinity).padding(.vertical, 64) }
-                    if chat.loaded && chat.transcript.items.isEmpty {
-                        VStack(spacing: 8) {
-                            Text("No messages yet").font(.headline)
-                            Text("Send a message to get started").font(.subheadline).foregroundStyle(FD.secondary)
-                        }.frame(maxWidth: .infinity).padding(.vertical, 48)
-                    }
                     ForEach(blocks) { block in
                         Group {
                             if block.grouped { TranscriptGroup(block: block, task: task, expansion: expansion, onInteraction: { scroll.followLatest = false }).id(block.id) }
                             else if let item = block.items.first { TranscriptRow(message: item, task: task, firstDiff: block.firstDiff, showsActions: actions.contains(item.id), expansion: expansion, onInteraction: { scroll.followLatest = false }).id(item.id) }
                         }.frame(maxWidth: 820).frame(maxWidth: .infinity)
                     }
-                    if task.running {
+                    if task.running && !chat.transcript.items.isEmpty {
                         HStack(spacing: 8) { ActivityDiamond(); Text("\(task.provider.capitalized) is working…").font(.footnote).foregroundStyle(FD.secondary) }.padding(.vertical, 8).frame(maxWidth: 820, alignment: .leading).frame(maxWidth: .infinity)
                     }
                     Color.clear.frame(height: 1).id("latest")
@@ -108,6 +102,34 @@ private struct ChatContent: View {
             }
             .onChange(of: chat.loaded, initial: true) { _, loaded in if loaded { scrollToLatest(proxy, animated: false) } }
             .onChange(of: chat.sending) { _, sending in if sending { scroll.followLatest = true; scrollToLatest(proxy, animated: true) } }
+            // Pane states stay outside the bottom-anchored list so they cannot
+            // scroll off screen, including during keyboard/composer resizing.
+            .overlay {
+                if blocks.isEmpty {
+                    VStack(spacing: 12) {
+                        if chat.loading {
+                            ActivityDiamond()
+                            Text("Loading conversation…").font(.subheadline).foregroundStyle(FD.secondary)
+                        } else if let error = chat.historyError {
+                            Image(systemName: "exclamationmark.arrow.trianglehead.2.clockwise.rotate.90").foregroundStyle(FD.secondary)
+                            Text("Couldn’t load this conversation").font(.headline)
+                            Text(error).font(.subheadline).foregroundStyle(FD.secondary).multilineTextAlignment(.center)
+                            Button("Try again") { Task { await model.loadChat(task) } }
+                                .buttonStyle(.glass).accessibilityIdentifier("conversation-retry")
+                        } else if chat.loaded {
+                            Text(chat.hasOlder ? "No recent messages" : "No messages yet").font(.headline)
+                            Text(chat.hasOlder ? "Load earlier messages to see this conversation." : "Send a message to get started")
+                                .font(.subheadline).foregroundStyle(FD.secondary)
+                        } else if !model.connected && !model.demo {
+                            Text("Waiting for your computer").font(.headline)
+                            Text("This conversation will load when you reconnect.").font(.subheadline).foregroundStyle(FD.secondary)
+                        }
+                    }
+                    .padding(24).frame(maxWidth: 420)
+                    .accessibilityElement(children: .contain)
+                    .accessibilityIdentifier(chat.loading ? "conversation-loading" : "conversation-empty")
+                }
+            }
             .overlay(alignment: .bottomTrailing) {
                 LatestMessageShortcut(state: scroll, hasMessages: !chat.transcript.items.isEmpty) {
                     scroll.followLatest = true; scrollToLatest(proxy, animated: true)
@@ -129,7 +151,10 @@ private struct ChatContent: View {
         .sheet(isPresented: $showGoal) { GoalView(taskID: task.id) }
         // The editor outlives the queue row if that message dispatches meanwhile.
         .sheet(item: $chat.queuedEdit) { QueuedMessageEditor(task: task, edit: $0) }
-        .task(id: task.activitySeq) {
+        .onAppear { visible = true }
+        .onDisappear { visible = false }
+        .task(id: ConversationReadState(taskID: task.id, activitySeq: task.activitySeq, historyReady: chat.loaded && !chat.loading && chat.historyError == nil, foreground: model.foreground, visible: visible)) {
+            guard visible, chat.loaded, !chat.loading, chat.historyError == nil, model.foreground else { return }
             do { try await Task.sleep(for: .milliseconds(600)) } catch { return }
             await model.markRead(task, automatic: true)
         }
@@ -166,11 +191,11 @@ private struct ChatContent: View {
                 }
                 if !task.queued.isEmpty || !chat.pendingQueue.isEmpty { QueuedMessagesView(task: task) }
                 ForEach(requests, id: \.self) { request in InteractiveCard(request: request) }
-                if let error = chat.error ?? model.error {
+                if let error = chat.error ?? (!chat.transcript.items.isEmpty ? chat.historyError : nil) ?? chat.olderHistoryError ?? model.error {
                     HStack(alignment: .top) {
                         Image(systemName: "exclamationmark.circle")
                         Text(error).frame(maxWidth: .infinity, alignment: .leading)
-                        Button { chat.error = nil; model.error = nil } label: { Image(systemName: "xmark") }.accessibilityLabel("Dismiss error")
+                        Button { chat.error = nil; chat.historyError = nil; chat.olderHistoryError = nil; model.error = nil } label: { Image(systemName: "xmark") }.accessibilityLabel("Dismiss error")
                     }.font(.footnote).foregroundStyle(.orange).padding(12).background(FD.surface, in: .rect(cornerRadius: 12))
                 }
                 if let notice = chat.notice { Text(notice).font(.footnote).foregroundStyle(FD.secondary).onTapGesture { chat.notice = nil } }
@@ -186,6 +211,14 @@ private struct ChatContent: View {
             withAnimation(animated && !reduceMotion ? .easeOut(duration: 0.15) : nil) { proxy.scrollTo("latest", anchor: .bottom) }
         }
     }
+}
+
+private struct ConversationReadState: Hashable {
+    let taskID: String
+    let activitySeq: Int
+    let historyReady: Bool
+    let foreground: Bool
+    let visible: Bool
 }
 
 struct DraftConversationView: View {

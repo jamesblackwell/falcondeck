@@ -48,18 +48,29 @@ import Foundation
     }
 
     func upsertTask(_ raw: JSON) {
-        guard !raw["id"].string.isEmpty else { return }
-        let task = AgentTask(raw)
-        let current = pendingSummaries[task.id] ?? tasks.first(where: { $0.id == task.id })?.raw ?? archivedTasks.first(where: { $0.id == task.id })?.raw
-        if let current, TaskSummaryOrder.isStale(raw, comparedTo: current) { return }
-        if task.archived {
-            tasks.removeAll { $0.id == task.id }
-            if let index = archivedTasks.firstIndex(where: { $0.id == task.id }) { archivedTasks[index] = task } else { archivedTasks.append(task) }
-            return
+        upsertTasks([raw])
+    }
+
+    /// Publish a page/burst once, rebuilding the sidebar's task groups once
+    /// rather than once for every row in the response.
+    func upsertTasks(_ rows: [JSON]) {
+        guard !rows.isEmpty else { return }
+        var active = tasks, archived = archivedTasks
+        for raw in rows {
+            guard !raw["id"].string.isEmpty else { continue }
+            let task = AgentTask(raw)
+            let current = pendingSummaries[task.id] ?? active.first(where: { $0.id == task.id })?.raw ?? archived.first(where: { $0.id == task.id })?.raw
+            if let current, TaskSummaryOrder.isStale(raw, comparedTo: current) { continue }
+            if task.archived {
+                active.removeAll { $0.id == task.id }
+                if let index = archived.firstIndex(where: { $0.id == task.id }) { archived[index] = task } else { archived.append(task) }
+            } else {
+                archived.removeAll { $0.id == task.id }
+                if let index = active.firstIndex(where: { $0.id == task.id }) { active[index] = task } else { active.append(task) }
+            }
         }
-        archivedTasks.removeAll { $0.id == task.id }
-        if let index = tasks.firstIndex(where: { $0.id == task.id }) { tasks[index] = task }
-        else { tasks.append(task) }
+        if active != tasks { tasks = active }
+        if archived != archivedTasks { archivedTasks = archived }
     }
 
     func applyEnvelope(_ envelope: JSON, rebase: Bool = false) {
@@ -142,7 +153,7 @@ import Foundation
             do { try await Task.sleep(for: .milliseconds(200)) } catch { return }
             let updates = self.pendingSummaries
             self.pendingSummaries = [:]; self.summaryFlush = nil
-            for (_, raw) in updates { self.upsertTask(raw) }
+            self.upsertTasks(Array(updates.values))
         }
     }
 
