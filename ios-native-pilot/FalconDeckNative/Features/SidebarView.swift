@@ -12,6 +12,8 @@ struct SidebarView: View {
     @State private var editingFolder: ProjectFolder?
     @State private var showFolderEditor = false
     @State private var deleteFolder: ProjectFolder?
+    @State private var savingFolders: Set<String> = []
+    @State private var openFolders: [String: Bool] = [:]
 
     private var projects: [Project] {
         let hidden = Set(model.preferences["hidden_workspace_ids"].array.map(\.string))
@@ -34,24 +36,25 @@ struct SidebarView: View {
             }
             Section("Projects") {
                 ForEach(projects) { project in
-                    DisclosureGroup(isExpanded: Binding(get: { expanded.contains(project.id) || !search.isEmpty }, set: { value in
-                        if value { expanded.insert(project.id) } else { expanded.remove(project.id) }
-                    })) {
-                        if expanded.contains(project.id) || !search.isEmpty { projectContents(project) }
+                    let isOpen = expanded.contains(project.id) || !search.isEmpty
+                    Button {
+                        if expanded.contains(project.id) { expanded.remove(project.id) } else { expanded.insert(project.id) }
                     } label: {
                         HStack(spacing: 10) {
                             ProjectIcon(name: project.name).font(.subheadline).frame(width: 20, height: 24).foregroundStyle(FD.accent)
                             Text(project.name).font(.subheadline.weight(.semibold)).lineLimit(1)
                             Spacer(minLength: 2)
                             if model.tasks(in: project).contains(where: \.running) { ActivityDiamond() }
+                            Image(systemName: isOpen ? "chevron.down" : "chevron.right").font(.caption2.weight(.semibold)).foregroundStyle(FD.secondary)
                         }.padding(.vertical, 3)
                     }
-                    .accessibilityIdentifier("project-\(project.name)")
+                    .foregroundStyle(FD.foreground).accessibilityIdentifier("project-\(project.name)").accessibilityValue(isOpen ? "Expanded" : "Collapsed")
                     .contextMenu {
                         Button { newTask(project) } label: { Label("New task", systemImage: "square.and.pencil") }
                         Button { editFolder(projectID: project.id) } label: { Label("New folder", systemImage: "folder.badge.plus") }
                         ShareLink(item: project.path) { Label("Share project path", systemImage: "square.and.arrow.up") }
                     }
+                    if isOpen { projectContents(project) }
                 }
             }
             if model.projects.isEmpty {
@@ -128,36 +131,44 @@ struct SidebarView: View {
         let tasks = model.tasks(in: project).filter { !$0.pinned && matches($0, project: project) }
         let folders = model.folders.filter { $0.projectID == project.id }
         let filed = folders.reduce(into: Set<String>()) { $0.formUnion($1.taskIDs) }
-        ForEach(tasks.filter(\.pinnedInProject)) { taskLink($0) }
+        ForEach(tasks.filter(\.pinnedInProject)) { taskLink($0, indent: 20) }
         ForEach(folders) { folder in
             let children = tasks.filter { folder.taskIDs.contains($0.id) && !$0.pinnedInProject }
-            DisclosureGroup(isExpanded: Binding(get: { !folder.collapsed || !search.isEmpty }, set: { value in
+            let isOpen = openFolders[folder.id] ?? (!folder.collapsed || !search.isEmpty)
+            Button {
+                openFolders[folder.id] = !isOpen; savingFolders.insert(folder.id)
                 Task {
-                    do { try await model.folderMutation(projectID: project.id, action: "set_collapsed", folderID: folder.id, collapsed: !value) }
+                    defer { savingFolders.remove(folder.id); openFolders.removeValue(forKey: folder.id) }
+                    do { try await model.folderMutation(projectID: project.id, action: "set_collapsed", folderID: folder.id, collapsed: isOpen) }
                     catch { model.error = error.localizedDescription }
                 }
-            })) {
-                taskPage(children, key: folder.id)
             } label: {
-                Label(folder.name, systemImage: "folder").font(.subheadline).foregroundStyle(FD.secondary)
+                HStack {
+                    Label(folder.name, systemImage: "folder").font(.subheadline)
+                    Spacer()
+                    if savingFolders.contains(folder.id) { ActivityDiamond() }
+                    else { Image(systemName: isOpen ? "chevron.down" : "chevron.right").font(.caption2.weight(.semibold)) }
+                }.foregroundStyle(FD.secondary).padding(.leading, 20)
             }
+            .disabled(savingFolders.contains(folder.id)).accessibilityValue(isOpen ? "Expanded" : "Collapsed")
             .contextMenu {
                 Button { newTask(project, folderID: folder.id) } label: { Label("New task", systemImage: "square.and.pencil") }
                 Button { editFolder(projectID: project.id, folder: folder) } label: { Label("Rename folder", systemImage: "pencil") }
                 Button("Delete folder", systemImage: "trash", role: .destructive) { deleteFolder = folder }
             }
+            if isOpen { taskPage(children, key: folder.id, indent: 40) }
         }
-        taskPage(tasks.filter { !$0.pinnedInProject && !filed.contains($0.id) }, key: project.id)
-        Button { newTask(project) } label: { Label("New task", systemImage: "plus").font(.subheadline).foregroundStyle(FD.secondary) }
+        taskPage(tasks.filter { !$0.pinnedInProject && !filed.contains($0.id) }, key: project.id, indent: 20)
+        Button { newTask(project) } label: { Label("New task", systemImage: "plus").font(.subheadline).foregroundStyle(FD.secondary).padding(.leading, 20) }
     }
-    @ViewBuilder private func taskPage(_ tasks: [AgentTask], key: String) -> some View {
+    @ViewBuilder private func taskPage(_ tasks: [AgentTask], key: String, indent: CGFloat) -> some View {
         let limit = search.isEmpty ? limits[key, default: 5] : tasks.count
-        ForEach(tasks.prefix(limit)) { taskLink($0) }
+        ForEach(tasks.prefix(limit)) { taskLink($0, indent: indent) }
         if tasks.count > limit {
-            Button("Show more (\(tasks.count - limit))") { limits[key] = limit + 10 }.font(.caption).foregroundStyle(FD.secondary)
+            Button("Show more (\(tasks.count - limit))") { limits[key] = limit + 10 }.font(.caption).foregroundStyle(FD.secondary).padding(.leading, indent)
         }
     }
-    private func taskLink(_ task: AgentTask) -> some View {
+    private func taskLink(_ task: AgentTask, indent: CGFloat = 0) -> some View {
         NavigationLink(value: Destination.task(task.id)) {
             HStack(alignment: .top, spacing: 9) {
                 Group {
@@ -171,7 +182,7 @@ struct SidebarView: View {
                 }
                 Spacer(minLength: 0)
                 if task.unread { Circle().fill(.blue).frame(width: 5, height: 5).padding(.top, 7) }
-            }.padding(.vertical, 3)
+            }.padding(.vertical, 3).padding(.leading, indent)
         }
         .contextMenu { TaskActions(task: task) }
     }
