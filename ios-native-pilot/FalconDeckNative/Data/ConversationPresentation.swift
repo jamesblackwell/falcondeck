@@ -11,7 +11,7 @@ struct ConversationPreferences {
         if autoExpand("errors"), message.raw["display"]["is_error"].bool || message.raw["status"].string == "failed" { return true }
         if autoExpand("failed_tests"), message.raw["display"]["activity_kind"].string == "test", message.raw["exit_code"] != .null, message.raw["exit_code"] != .number(0) { return true }
         if ["diff", "file_change"].contains(message.kind), firstDiff, autoExpand("first_diff") { return true }
-        return tools == "expanded" || tools == "auto" && message.raw["status"].string == "running"
+        return tools == "expanded" || tools == "auto" && message.running
     }
 }
 
@@ -20,7 +20,7 @@ struct TranscriptBlock: Identifiable {
     let grouped: Bool
     let firstDiff: Bool
     var id: String { items.first?.id ?? "" }
-    var running: Bool { items.contains { $0.raw["status"].string == "running" || $0.streaming } }
+    var running: Bool { items.contains { $0.running || $0.streaming } }
     /// Keep secondary controls on the final assistant message of each turn.
     /// Earlier commentary remains available through the message context menu.
     static func actionMessageIDs(_ input: [Message]) -> Set<String> {
@@ -60,4 +60,25 @@ struct TranscriptBlock: Identifiable {
 struct TranscriptExpansion: Equatable {
     let id = UUID()
     let expanded: Bool
+}
+
+enum ConversationActivity {
+    static func reasoningLabel(_ item: Message) -> String {
+        if item.streaming { return "Thinking…" }
+        if item.raw["lifecycle"].string == "interrupted" { return "Thought interrupted" }
+        if item.raw["lifecycle"].string == "error" { return "Thought failed" }
+        return item.raw["summary"].string.components(separatedBy: .newlines)
+            .map { $0.trimmingCharacters(in: .whitespaces) }.first { !$0.isEmpty } ?? "Thought process"
+    }
+    /// Match Expo's fallback: live reasoning and tool activity own their status.
+    static func label(blocks: [TranscriptBlock], running: Bool, submitting: Bool) -> String? {
+        guard running else { return submitting ? "Sending…" : nil }
+        guard let last = blocks.last else { return "Thinking…" }
+        if last.grouped && last.running { return nil }
+        if let item = last.items.last {
+            if item.kind == "reasoning", item.streaming { return nil }
+            if item.kind == "tool_call", item.running { return nil }
+        }
+        return "Thinking…"
+    }
 }

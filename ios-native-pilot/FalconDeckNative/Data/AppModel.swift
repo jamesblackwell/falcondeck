@@ -264,6 +264,9 @@ final class AppModel {
         #if DEBUG
         if ProcessInfo.processInfo.arguments.contains(where: { $0.hasPrefix("--loading-preview=") }) {
             projects = LoadingPreviewRelay.projects; tasks = [LoadingPreviewRelay.task]; requests = []
+            if ProcessInfo.processInfo.arguments.contains("--loading-preview=retry") {
+                tasks[0] = AgentTask(tasks[0].raw.setting("status", .string("running")))
+            }
             syncIndex = CompactSync(token: LoadingPreviewRelay.token, counts: LoadingPreviewRelay.counts)
             demo = false; hasSession = true; connected = true; hasLiveSnapshot = true; status = "Preview computer"
             if ProcessInfo.processInfo.arguments.contains("--loading-preview=cached") {
@@ -300,6 +303,7 @@ final class AppModel {
             voice.preview(phase, ownerID: task.id)
             let chat = chat(for: task); chat.voiceInputOpen = true; chat.draft = "Keep my existing draft."
         }
+        StreamingPreview.start(in: self)
         #endif
     }
     func tasks(in project: Project) -> [AgentTask] {

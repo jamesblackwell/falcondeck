@@ -3,6 +3,12 @@ import UIKit
 @testable import FalconDeckNative
 
 @MainActor final class NativeListScrollingTests: XCTestCase {
+    private final class GestureScrollView: UIScrollView {
+        var simulatedTracking = false, simulatedDragging = false, simulatedDeceleration = false
+        override var isTracking: Bool { simulatedTracking }
+        override var isDragging: Bool { simulatedDragging }
+        override var isDecelerating: Bool { simulatedDeceleration }
+    }
     private func viewport(in window: UIWindow) -> UIScrollView {
         let view = UIScrollView(frame: CGRect(x: 0, y: 0, width: 320, height: 480))
         view.contentSize = CGSize(width: 320, height: 1_000)
@@ -59,5 +65,35 @@ import UIKit
         scrolling.cancel()
         await settle()
         XCTAssertEqual(view.contentOffset.y, 0)
+    }
+    func testAReadingGestureWinsOverAnAlreadyQueuedBottomRequest() async {
+        let window = UIWindow(), scrolling = NativeListScrolling()
+        let view = GestureScrollView(frame: CGRect(x: 0, y: 0, width: 320, height: 480))
+        window.addSubview(view); view.contentSize = CGSize(width: 320, height: 1_000)
+        scrolling.attach(view); scrolling.setActive(true)
+        for phase in 0..<3 {
+            view.contentOffset.y = 200
+            scrolling.bottom(animated: false)
+            view.simulatedTracking = phase == 0; view.simulatedDragging = phase == 1; view.simulatedDeceleration = phase == 2
+            await settle()
+            XCTAssertEqual(view.contentOffset.y, 200, "Pending following must respect tracking, dragging, and deceleration")
+            view.simulatedTracking = false; view.simulatedDragging = false; view.simulatedDeceleration = false
+        }
+        scrolling.bottom(animated: false)
+        await settle()
+        XCTAssertEqual(view.contentOffset.y, 520)
+    }
+    func testExplicitJumpInterruptsMomentumAndCancelsQueuedFollowing() async {
+        let window = UIWindow(), scrolling = NativeListScrolling()
+        let view = GestureScrollView(frame: CGRect(x: 0, y: 0, width: 320, height: 480))
+        window.addSubview(view); view.contentSize = CGSize(width: 320, height: 1_000)
+        scrolling.attach(view); scrolling.setActive(true)
+        view.contentOffset.y = 200
+        scrolling.bottom(animated: false)
+        view.simulatedDeceleration = true
+        scrolling.jump(animated: false)
+        XCTAssertEqual(view.contentOffset.y, 520, "An explicit jump must not wait for momentum to finish")
+        await settle()
+        XCTAssertEqual(view.contentOffset.y, 520)
     }
 }

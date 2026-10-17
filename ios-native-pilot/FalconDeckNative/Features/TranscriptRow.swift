@@ -29,10 +29,14 @@ struct TranscriptRow: View {
             case "unsupported": unsupported
             case "reasoning":
                 DisclosureGroup(isExpanded: open) {
-                    NativeMarkdown(text: message.text).padding(.leading, 12).overlay(alignment: .leading) { Rectangle().fill(FD.line).frame(width: 2) }
+                    NativeMarkdown(text: message.text, streaming: message.streaming).padding(.leading, 12).overlay(alignment: .leading) { Rectangle().fill(FD.line).frame(width: 2) }
                 } label: {
                     VStack(alignment: .leading, spacing: 5) {
-                        Label(message.streaming ? "Thinking…" : "Thinking", systemImage: "brain").font(.footnote)
+                        HStack(spacing: 8) {
+                            if message.streaming { ActivityDiamond() }
+                            else { Image(systemName: "brain") }
+                            Text(ConversationActivity.reasoningLabel(message)).lineLimit(1)
+                        }.font(.footnote)
                         if preferences.thinking == "preview", !open.wrappedValue { Text(message.text).font(.caption).lineLimit(2) }
                     }.foregroundStyle(FD.secondary)
                 }
@@ -80,7 +84,7 @@ struct TranscriptRow: View {
                 Text(message.text).font(.body).lineSpacing(4).lineLimit(long && !longMessageExpanded ? 12 : nil).textSelection(.enabled)
                 if long { Button(longMessageExpanded ? "Show less" : "Show more") { onInteraction(); longMessageExpanded.toggle() }.font(.caption).foregroundStyle(FD.accent) }
             }
-            else { NativeMarkdown(text: message.text); AssistantSources(message: message) }
+            else { NativeMarkdown(text: message.text, streaming: message.streaming); AssistantSources(message: message) }
             if showsActions, message.kind != "user_message", !message.streaming, !message.text.isEmpty {
                 HStack(spacing: 0) {
                     Button { UIPasteboard.general.string = message.text } label: { Image(systemName: "doc.on.doc").frame(width: 44, height: 44).contentShape(.rect) }.accessibilityLabel("Copy response")
@@ -136,7 +140,7 @@ struct TranscriptRow: View {
             }
         } label: {
             HStack(spacing: 8) {
-                if message.raw["status"].string == "running" { ActivityDiamond() }
+                if message.running { ActivityDiamond() }
                 else { Image(systemName: message.raw["status"].string == "failed" ? "exclamationmark.circle" : "checkmark").foregroundStyle(FD.secondary) }
                 Text(message.raw["title"].string.nonempty ?? "Tool activity").lineLimit(2)
             }.font(.footnote).foregroundStyle(FD.secondary)
@@ -158,7 +162,7 @@ extension TranscriptRow {
             Label(message.raw["artifact"]["title"].string.nonempty ?? "Artifact", systemImage: "doc.richtext").font(.subheadline.weight(.medium))
             let content = message.raw["artifact"]["content"].string
             if !content.isEmpty {
-                if message.raw["artifact"]["mime_type"].string.contains("markdown") { NativeMarkdown(text: content) }
+                if message.raw["artifact"]["mime_type"].string.contains("markdown") { NativeMarkdown(text: content, streaming: message.streaming) }
                 else { NativeCodeBlock(content: content, language: message.raw["artifact"]["mime_type"].string) }
                 ShareLink(item: content) { Label("Share artifact", systemImage: "square.and.arrow.up").font(.caption) }
             }

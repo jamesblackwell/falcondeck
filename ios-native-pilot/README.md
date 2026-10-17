@@ -140,8 +140,8 @@ xcodebuild -project FalconDeckNative.xcodeproj -scheme FalconDeckNativeUI \
   -derivedDataPath build-ui test
 ```
 
-The latest run has 151 passing unit tests and passing pairing/chat/automation UI checks on
-both phone and tablet simulators. See [VERIFICATION.md](VERIFICATION.md) for the
+The latest unit run has 164 passing tests. Pairing/chat/automation UI checks have
+passed on both phone and tablet simulators. See [VERIFICATION.md](VERIFICATION.md) for the
 review and device handoff, and [PARITY.md](PARITY.md) for the feature ledger. Tests cover
 crypto interoperability, pairing authority, chunks/ACKs, UTF-16 streaming,
 connection races, history recovery, drafts, queues, control revisions,

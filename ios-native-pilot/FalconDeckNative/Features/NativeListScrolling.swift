@@ -39,10 +39,24 @@ import SwiftUI
             await Task.yield()
             guard !Task.isCancelled, let self, self.active, let view = self.view, view.window != nil else { return }
             self.wantsBottom = false
-            view.layoutIfNeeded()
-            let y = max(-view.adjustedContentInset.top, view.contentSize.height - view.bounds.height + view.adjustedContentInset.bottom)
-            view.setContentOffset(CGPoint(x: view.contentOffset.x, y: y), animated: animated)
+            // A request queued before touch-down must not fight that gesture.
+            guard !view.isTracking, !view.isDragging, !view.isDecelerating else { return }
+            self.moveToBottom(view, animated: animated)
         }
+    }
+    /// Explicit navigation owns the scroll immediately, including during momentum.
+    /// It cannot be replaced by a queued automatic follow request.
+    func jump(animated: Bool) {
+        cancel()
+        guard active, let view, view.window != nil else { return }
+        view.setContentOffset(view.contentOffset, animated: false)
+        moveToBottom(view, animated: animated)
+    }
+    private func moveToBottom(_ view: UIScrollView, animated: Bool) {
+        view.layoutIfNeeded()
+        let y = max(-view.adjustedContentInset.top, view.contentSize.height - view.bounds.height + view.adjustedContentInset.bottom)
+        guard abs(view.contentOffset.y - y) > 0.5 else { return }
+        view.setContentOffset(CGPoint(x: view.contentOffset.x, y: y), animated: animated)
     }
     func cancel() {
         scheduled?.cancel(); scheduled = nil; wantsBottom = false

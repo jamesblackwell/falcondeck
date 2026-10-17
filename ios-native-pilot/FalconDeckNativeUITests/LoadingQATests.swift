@@ -93,6 +93,7 @@ import XCTest
         let retry = app.buttons["conversation-retry"]
         XCTAssertTrue(retry.waitForExistence(timeout: 10))
         XCTAssertTrue(retry.isHittable)
+        XCTAssertTrue(app.buttons["stop-task"].exists, "A running task must still show its failed history load and retry")
         XCTAssertFalse(app.staticTexts["No messages yet"].exists)
         capture("Conversation failure has a visible retry")
         retry.tap()

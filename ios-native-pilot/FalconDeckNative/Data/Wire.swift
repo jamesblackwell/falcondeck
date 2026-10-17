@@ -120,6 +120,10 @@ struct Message: Identifiable, Sendable, Equatable {
         }
     }
     var streaming: Bool { raw["lifecycle"].string == "streaming" }
+    var running: Bool {
+        let status = raw["status"].string
+        return status == "running" || kind == "tool_call" && status == "in_progress"
+    }
     init(_ v: JSON) { raw = v }
     var isMessage: Bool { kind == "user_message" || kind == "assistant_message" }
 }

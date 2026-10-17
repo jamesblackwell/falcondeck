@@ -3,6 +3,19 @@ import SwiftUI
 
 struct NativeMarkdown: View {
     let text: String
+    var streaming = false
+    @State private var display = StreamingText()
+    var body: some View {
+        ParsedMarkdown(text: display.displayed(text, streaming: streaming)).equatable()
+            .onChange(of: text, initial: true) { _, text in display.update(text, streaming: streaming) }
+            .onChange(of: streaming) { _, streaming in display.update(text, streaming: streaming) }
+            .onDisappear { display.reset() }
+    }
+}
+
+/// Unchanged history must not be reparsed when a neighbouring response streams.
+private struct ParsedMarkdown: View, Equatable {
+    let text: String
     var body: some View {
         Markdown(text).markdownTheme(.falcon).markdownImageProvider(ExplicitImageProvider()).textSelection(.enabled)
             .fixedSize(horizontal: false, vertical: true)

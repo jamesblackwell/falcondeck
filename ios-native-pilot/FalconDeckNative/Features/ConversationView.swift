@@ -42,6 +42,7 @@ private struct ChatContent: View {
     var body: some View {
         let actions = actionIDs
         let blocks = blocks
+        let activity = !chat.loading && chat.historyError == nil && (model.connected || model.demo) ? ConversationActivity.label(blocks: blocks, running: task.running, submitting: chat.sending) : nil
         Group {
             List {
                 Group {
@@ -61,8 +62,8 @@ private struct ChatContent: View {
                         }.frame(maxWidth: 820).frame(maxWidth: .infinity)
                             .listRowBackground(NativeListScrollProbe(scrolling: listScrolling, rowID: block.id))
                     }
-                    if task.running && !chat.transcript.items.isEmpty && (model.connected || model.demo) {
-                        HStack(spacing: 8) { ActivityDiamond(); Text("\(task.provider.capitalized) is working…").font(.footnote).foregroundStyle(FD.secondary) }.padding(.vertical, 8).frame(maxWidth: 820, alignment: .leading).frame(maxWidth: .infinity)
+                    if let activity {
+                        HStack(spacing: 8) { ActivityDiamond(); Text(activity).font(.footnote).foregroundStyle(FD.secondary) }.frame(minHeight: 44).frame(maxWidth: 820, alignment: .leading).frame(maxWidth: .infinity)
                             .listRowBackground(NativeListScrollProbe(scrolling: listScrolling))
                     }
                     Color.clear.frame(height: 1).id("latest").listRowBackground(NativeListScrollProbe(scrolling: listScrolling))
@@ -104,14 +105,16 @@ private struct ChatContent: View {
             .scrollDismissesKeyboard(.interactively)
             .refreshable { if !task.isDraft { await model.loadChat(task) } }
             .onChange(of: chat.transcript.revision) { _, _ in
-                if scroll.followLatest || chat.sending { scrollToLatest(animated: true) }
+                // Token delivery must not restart a UIKit scrolling animation.
+                // Geometry updates follow the growing row without animation too.
+                if scroll.followLatest || chat.sending { scrollToLatest(animated: false) }
             }
             .onChange(of: chat.loaded, initial: true) { _, loaded in if loaded { scrollToLatest(animated: false) } }
-            .onChange(of: chat.sending) { _, sending in if sending { scroll.followLatest = true; scrollToLatest(animated: true) } }
+            .onChange(of: chat.sending) { _, sending in if sending { jumpToLatest() } }
             // Pane states stay outside the bottom-anchored list so they cannot
             // scroll off screen, including during keyboard/composer resizing.
             .overlay {
-                if blocks.isEmpty {
+                if blocks.isEmpty && activity == nil {
                     VStack(spacing: 12) {
                         if chat.loading {
                             ActivityDiamond()
@@ -141,7 +144,7 @@ private struct ChatContent: View {
             }
             .overlay(alignment: .bottomTrailing) {
                 LatestMessageShortcut(state: scroll, hasMessages: !chat.transcript.items.isEmpty) {
-                    scroll.followLatest = true; scrollToLatest(animated: true)
+                    jumpToLatest()
                 }
             }
         }
@@ -214,8 +217,13 @@ private struct ChatContent: View {
             .accessibilityIdentifier("conversation-context").frame(height: min(contextHeight, max(0, min(200, min(viewportHeight * 0.28, viewportHeight - 180)))))
     }
     private func scrollToLatest(animated: Bool) {
-        guard visible, scroll.followLatest || chat.sending else { return }
+        guard visible, !scroll.userScrolling, scroll.followLatest || chat.sending else { return }
         listScrolling.bottom(animated: animated && !reduceMotion)
+    }
+    private func jumpToLatest() {
+        guard visible else { return }
+        scroll.userScrolling = false; scroll.followLatest = true
+        listScrolling.jump(animated: !reduceMotion)
     }
     private func stopFollowing() { scroll.followLatest = false; listScrolling.cancel() }
 }

@@ -4,6 +4,35 @@ The reference is the running Mac app, `DESIGN.md`, and the Expo sidebar,
 conversation, composer and pairing implementations. This pass changes only the
 standalone native client. It does not deploy the daemon, relay or released apps.
 
+## Streaming and thinking follow-up
+
+Markdown presentation now coalesces incoming text at Expo's 50 ms cadence and
+keeps unchanged Markdown views from reparsing. Completion and replacement text
+appear immediately; resetting a recycled row cancels its pending paint. Wire
+events, transcript storage, copying and speech still use the full received text.
+
+Automatic following no longer starts an animated scroll for each delta. Both the
+SwiftUI scroll state and the native scroll owner yield to reading gestures, even
+when a follow request was queued before touch-down. Send and Jump to latest use
+an explicit navigation path that can interrupt momentum scrolling.
+
+The fallback says “Thinking…” or “Sending…” and is suppressed when live reasoning
+or tool activity already owns an indicator. Reasoning headers follow Expo's
+lifecycle/summary labels. Tool status recognition is shared across the row,
+group and auto-expansion policy, including `in_progress`.
+
+All 164 unit tests pass. Focused iPhone and iPad UI checks cover the live stream,
+reading during delivery, jumping back to the final response, first send, keyboard
+resizing, long-message expansion, recreated tool rows and failed history retry.
+Before/after recordings and inspected screenshots remain in the ignored
+`artifacts/streaming-2026-10-17/index.html` gallery.
+
+Repo Autoreview runs used `.agents/skills/autoreview/scripts/autoreview --mode local
+--max-priority P2` in a native-only review worktree with presentation/scroll source
+datasets. Verified findings corrected the running-task history error's precedence,
+explicit navigation during deceleration and the `in_progress` activity indicator.
+The final review is clean, with no actionable P0–P2 findings.
+
 ## Composer control follow-up
 
 The composer follows Expo's action order: attachments, model/options, microphone,

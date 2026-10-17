@@ -56,6 +56,39 @@ final class PresentationTests: XCTestCase {
         XCTAssertFalse(blocks[0].items[0].streaming)
         XCTAssertTrue(blocks[1].items[0].streaming)
     }
+    func testThinkingFallbackMatchesExposPlainLabels() {
+        XCTAssertEqual(ConversationActivity.label(blocks: [], running: true, submitting: false), "Thinking…")
+        XCTAssertEqual(ConversationActivity.label(blocks: [], running: false, submitting: true), "Sending…")
+        XCTAssertNil(ConversationActivity.label(blocks: [], running: false, submitting: false))
+        let reply = TranscriptBlock(items: [message("reply", kind: "assistant_message")], grouped: false, firstDiff: false)
+        XCTAssertEqual(ConversationActivity.label(blocks: [reply], running: true, submitting: false), "Thinking…")
+    }
+    func testReasoningHeaderFollowsLifecycleAndUsesOneSummaryLine() {
+        let thought = message("thought", kind: "reasoning")
+        XCTAssertEqual(ConversationActivity.reasoningLabel(thought), "Thought process")
+        XCTAssertEqual(ConversationActivity.reasoningLabel(Message(thought.raw.setting("lifecycle", .string("streaming")))), "Thinking…")
+        XCTAssertEqual(ConversationActivity.reasoningLabel(Message(thought.raw.setting("lifecycle", .string("interrupted")))), "Thought interrupted")
+        XCTAssertEqual(ConversationActivity.reasoningLabel(Message(thought.raw.setting("lifecycle", .string("error")))), "Thought failed")
+        XCTAssertEqual(ConversationActivity.reasoningLabel(Message(thought.raw.setting("summary", .string("\n  A short summary  \nA longer explanation")))), "A short summary")
+    }
+    func testLiveReasoningAndToolsDoNotGetADuplicateThinkingIndicator() {
+        let thought = Message(message("thought", kind: "reasoning").raw.setting("lifecycle", .string("streaming")))
+        let tool = Message(message("tool", kind: "tool_call").raw.setting("status", .string("running")))
+        for block in [TranscriptBlock(items: [thought], grouped: false, firstDiff: false), TranscriptBlock(items: [tool], grouped: false, firstDiff: false), TranscriptBlock(items: [tool, thought], grouped: true, firstDiff: false)] {
+            XCTAssertNil(ConversationActivity.label(blocks: [block], running: true, submitting: false))
+        }
+        let completed = TranscriptBlock(items: [message("tool", kind: "tool_call")], grouped: true, firstDiff: false)
+        XCTAssertEqual(ConversationActivity.label(blocks: [completed], running: true, submitting: false), "Thinking…")
+    }
+    func testInProgressToolsOwnTheirVisibleActivityIndicator() {
+        let tool = Message(message("tool", kind: "tool_call").raw.setting("status", .string("in_progress")))
+        let block = TranscriptBlock(items: [tool], grouped: true, firstDiff: false)
+        XCTAssertTrue(tool.running)
+        XCTAssertTrue(block.running)
+        XCTAssertTrue(ConversationPreferences(raw: .object(["tool_details_mode": .string("auto")])).opens(tool))
+        XCTAssertNil(ConversationActivity.label(blocks: [block], running: true, submitting: false))
+        XCTAssertNil(ConversationActivity.label(blocks: [TranscriptBlock(items: [tool], grouped: false, firstDiff: false)], running: true, submitting: false))
+    }
     func testSummaryOrderingParsesFractionalSecondsAndProtectsTerminalState() {
         let current = JSON.object(["updated_at": .string("2026-10-17T10:00:00.12Z"), "status": .string("idle")])
         let old = current.setting("updated_at", .string("2026-10-17T10:00:00.1Z")).setting("status", .string("running"))
