@@ -2,8 +2,8 @@ import XCTest
 
 @MainActor final class NativeSmokeTests: XCTestCase {
     override func setUp() { super.setUp(); continueAfterFailure = false }
-    private func capture(_ name: String, app: XCUIApplication) {
-        let attachment = XCTAttachment(screenshot: app.screenshot())
+    private func capture(_ name: String) {
+        let attachment = XCTAttachment(screenshot: XCUIScreen.main.screenshot())
         attachment.name = name; attachment.lifetime = .keepAlways; add(attachment)
     }
     private func launchDemo() -> XCUIApplication {
@@ -16,9 +16,11 @@ import XCTest
         XCTAssertTrue(app.buttons["Connection settings"].waitForExistence(timeout: 5))
     }
     func testAutomationCanSaveAndDismissInLandscape() {
+        let app = launchDemo()
         XCUIDevice.shared.orientation = .landscapeLeft
         defer { XCUIDevice.shared.orientation = .portrait }
-        let app = launchDemo()
+        let landscape = XCTNSPredicateExpectation(predicate: NSPredicate { _, _ in app.frame.width > app.frame.height }, object: nil)
+        XCTAssertEqual(XCTWaiter.wait(for: [landscape], timeout: 5), .completed)
         sidebar(app)
         app.buttons["Connection settings"].tap()
         app.buttons["Automations"].tap()
@@ -30,7 +32,7 @@ import XCTest
         app.buttons["save-automation"].tap()
         XCTAssertTrue(app.staticTexts["Native UI regression"].waitForExistence(timeout: 5))
         XCTAssertEqual(app.state, .runningForeground)
-        capture("Landscape automation saved", app: app)
+        capture("Landscape automation saved")
     }
     func testFirstSendCreatesTaskAndRendersMarkdown() {
         XCUIDevice.shared.orientation = .portrait
@@ -47,6 +49,6 @@ import XCTest
         let reply = app.staticTexts.matching(NSPredicate(format: "label CONTAINS %@", "A native place for your work")).firstMatch
         XCTAssertTrue(reply.waitForExistence(timeout: 5))
         XCTAssertEqual(app.state, .runningForeground)
-        capture("Native first reply", app: app)
+        capture("Native first reply")
     }
 }

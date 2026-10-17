@@ -109,9 +109,10 @@ Known limits:
   its complete copyable source. Code coloring is lightweight.
 - Extensions must publish supported declarative mobile UI. Desktop frontend
   panels have an explicit desktop fallback.
-- Camera, microphone, speech languages, Live Activity behavior and Wi-Fi install
-  still need verification on the physical devices when reachable. Simulator
-  checks do not establish physical hardware behavior.
+- Camera, microphone, speech languages and Live Activity behavior still need
+  verification on unlocked physical devices. Wi-Fi installation on the iPhone
+  succeeded; launching it requires unlocking. The physical iPad needs unlocking
+  before its development image can mount and installation can proceed.
 
 ## Verify
 
@@ -119,9 +120,15 @@ Known limits:
 xcodebuild -project FalconDeckNative.xcodeproj -scheme FalconDeckNative \
   -destination 'platform=iOS Simulator,name=FalconDeck Native Pilot' \
   -derivedDataPath build test
+
+xcodebuild -project FalconDeckNative.xcodeproj -scheme FalconDeckNativeUI \
+  -destination 'platform=iOS Simulator,name=FalconDeck Native iPad' \
+  -derivedDataPath build-ui test
 ```
 
-See [PARITY.md](PARITY.md) for the implementation/verification ledger. Tests cover
+The final run has 85 passing unit tests and passing chat/automation UI checks on
+both phone and tablet simulators. See [VERIFICATION.md](VERIFICATION.md) for the
+review and device handoff, and [PARITY.md](PARITY.md) for the feature ledger. Tests cover
 crypto interoperability, pairing authority, chunks/ACKs, UTF-16 streaming,
 connection races, history recovery, drafts, queues, control revisions,
 attachments, PCM, handoff, extension replacement/tombstones, theme callbacks and

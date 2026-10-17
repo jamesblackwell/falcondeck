@@ -16,14 +16,14 @@ outside this work. The daemon and agent storage remain authoritative.
 | Transcript | Markdown/code/tables, reasoning/tools/groups, plans/diffs/files, images, search/artifacts/reviews/unknown fallback | All wire item kinds have a native renderer or inspectable fallback; grouping, preferences, harness projection, citations, native Mermaid flowcharts and complete-source fallback implemented |
 | Media | Library/camera/clipboard attachments, image preview/save/share, read aloud, recording/transcription | Native attachments, read aloud, on-device/computer transcription, speech Live Activity/Lock Screen controls and bounded realtime PCM implemented; physical media QA awaits device |
 | Activity | Running/attention/all tasks, navigation | Matches Needs input / Failed / Ready to review / Running / Recent sections; archived tasks remain separate |
-| Automations | List/create/edit/enable/delete/run/history/settings via control RPC | Implemented and tested (control revision/idempotency/validation); UI QA continuing |
+| Automations | List/create/edit/enable/delete/run/history/settings via control RPC | Implemented and tested (control revision/idempotency/validation); iPad landscape create/save UI check passes |
 | Settings | Appearance palettes/text, conversation preferences, notifications, speech, connection, about/developer | Implemented: all 19 palettes, text size, conversation, connected alerts, speech, connections and diagnostics |
 | Extensions | Tags/stage markers, sidebar filters/panel fallbacks, composer suggestions | Stages, filters, suggestions and declarative native panels implemented; unavailable panels use the mobile desktop fallback |
-| Device support | iPhone/iPad, portrait/landscape/multitasking, keyboard, Dynamic Type, Reduce Motion | Phone navigation/theme changes and iPad split-view/settings/automation creation verified; broader QA continues |
-| Installation | Separate app ID, development-signed device build, Wi-Fi install command | Device build succeeds with existing Apple Development identity; phone currently offline |
+| Device support | iPhone/iPad, portrait/landscape/multitasking, keyboard, Dynamic Type, Reduce Motion | Phone navigation/theme changes and iPad split-view/settings/automation creation verified; first-send keyboard and Markdown UI regression passes |
+| Installation | Separate app ID, development-signed device build, Wi-Fi install command | Apple Development app/widget build and signature verification pass; installed over Wi-Fi on iPhone; launch requires unlocking; physical iPad install also requires unlocking |
 
-This is a working checklist, not a claim of completed parity. Replace pending
-entries with concrete implementation and verification as each area lands.
+Implementation is ready for device testing. Hardware behavior and the platform
+constraints below remain explicit gaps; this is not a claim of exhaustive parity.
 
 Core parity milestone: 28 iPhone simulator unit tests pass. A development-signed
 arm64 build succeeds for the separate native bundle ID. UI parity QA continues.
@@ -50,3 +50,5 @@ Rich-media milestone: 81 tests pass. Separate WidgetKit extension builds with na
 QA fix milestone: 83 tests pass. A failing background color-resolution test reproduced the iPad editor-dismissal crash; the theme provider is now nonisolated and explicitly Sendable. Background network/audio/media-command callbacks declare their concurrency boundary. The same iPad automation creation/save flow now completes and remains visible. Realtime Stop suppresses further chunks until stream end/new start. Both app and WidgetKit extension development signing succeeded; rebuild the final binary after all QA fixes.
 
 Speech recovery milestone: 85 tests pass. Failed new-chat creation preserves the recording and existing draft; successful recovery appends without overwriting input. Pending recovery actions are disabled while creating the chat. Transcription callbacks explicitly cross onto the main actor, and connection changes cancel recognition while retaining audio. Phone/tablet orientations and iPad resizing are declared explicitly. README now documents the actual native feature set and remaining hardware/push limits.
+
+Final UI regression: the original composer failed to focus when its blank input area was tapped. A 44-point content shape now focuses the complete field; the same keyboard/type/first-send/Markdown test passes. The signed Debug app is installed alongside the released app on the iPhone. The device is locked, so launch and physical media testing await unlock. The physical iPad also requires unlock before Xcode can mount its development image and install. No production deployment occurred.
