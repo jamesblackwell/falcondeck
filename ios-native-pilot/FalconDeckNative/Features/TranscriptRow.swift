@@ -61,7 +61,8 @@ struct TranscriptRow: View {
             }
         }.frame(maxWidth: .infinity, alignment: .leading)
         .simultaneousGesture(TapGesture().onEnded { onInteraction() })
-        .onChange(of: expansion) { _, directive in if let directive { userToggled = true; expanded = directive.expanded } }
+        // A native List creates rows lazily and recreates them after navigation.
+        .onChange(of: expansion, initial: true) { _, directive in if let directive { userToggled = true; expanded = directive.expanded } }
         .sheet(isPresented: $showOutput) { if let fullOutput { TextDocumentView(title: message.raw["title"].string.nonempty ?? "Tool output", text: fullOutput) } }
     }
     private var messageBody: some View {
@@ -86,11 +87,13 @@ struct TranscriptRow: View {
                     Button {
                         Task { await model.readAloud.play(message.text, id: message.id, model: model) }
                     } label: {
-                        if model.readAloud.messageID == message.id, model.readAloud.loading { ActivityDiamond() }
-                        else { Image(systemName: model.readAloud.messageID == message.id ? "stop.fill" : "speaker.wave.2").frame(width: 44, height: 44).contentShape(.rect) }
+                        Group {
+                            if model.readAloud.messageID == message.id, model.readAloud.loading { ActivityDiamond() }
+                            else { Image(systemName: model.readAloud.messageID == message.id ? "stop.fill" : "speaker.wave.2") }
+                        }.frame(width: 44, height: 44).contentShape(.rect)
                     }.accessibilityLabel(model.readAloud.messageID == message.id ? "Stop read aloud" : "Read aloud").disabled(model.voice.recording || model.voice.transcribing)
                     if model.readAloud.messageID == message.id, !model.readAloud.loading {
-                        Button { model.readAloud.togglePause() } label: { Image(systemName: model.readAloud.paused ? "play.fill" : "pause.fill") }.accessibilityLabel(model.readAloud.paused ? "Resume read aloud" : "Pause read aloud")
+                        Button { model.readAloud.togglePause() } label: { Image(systemName: model.readAloud.paused ? "play.fill" : "pause.fill").frame(width: 44, height: 44).contentShape(.rect) }.accessibilityLabel(model.readAloud.paused ? "Resume read aloud" : "Pause read aloud")
                     }
                 }.font(.caption).foregroundStyle(FD.secondary).buttonStyle(.plain).padding(.leading, -12)
                 if model.readAloud.errorMessageID == message.id, let error = model.readAloud.error { Text(error).font(.caption).foregroundStyle(.orange) }

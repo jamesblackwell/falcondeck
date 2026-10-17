@@ -19,6 +19,6 @@ struct TranscriptGroup: View {
                     .font(.caption).foregroundStyle(FD.secondary)
             }.frame(minHeight: 36, alignment: .leading)
         }.tint(FD.secondary)
-            .onChange(of: expansion) { _, value in if let value { expanded = value.expanded } }
+            .onChange(of: expansion, initial: true) { _, value in if let value { expanded = value.expanded } }
     }
 }

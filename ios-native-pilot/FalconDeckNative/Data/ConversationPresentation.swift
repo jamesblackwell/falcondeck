@@ -25,7 +25,7 @@ struct TranscriptBlock: Identifiable {
     /// Earlier commentary remains available through the message context menu.
     static func actionMessageIDs(_ input: [Message]) -> Set<String> {
         var ids: Set<String> = [], pending: String?
-        for message in input {
+        for message in UserTextProjection.messages(input) {
             if message.kind == "user_message" {
                 if let pending { ids.insert(pending) }
                 pending = nil

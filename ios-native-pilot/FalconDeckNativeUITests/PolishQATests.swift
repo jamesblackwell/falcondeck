@@ -21,6 +21,64 @@ import XCTest
     private func transcript(_ app: XCUIApplication) -> XCUIElement {
         app.descendants(matching: .any).matching(identifier: "conversation-transcript").firstMatch
     }
+    private func showSidebar(_ app: XCUIApplication) {
+        if !app.buttons["sidebar-settings"].isHittable {
+            let back = app.buttons["BackButton"]
+            XCTAssertTrue(back.waitForExistence(timeout: 5)); back.tap()
+        }
+        XCTAssertTrue(app.buttons["sidebar-settings"].isHittable)
+    }
+    func testReselectingTheSameSidebarDestinationReopensDetail() {
+        let app = launch()
+        for _ in 0..<2 {
+            app.buttons["sidebar-task-native"].tap()
+            XCTAssertTrue(app.textFields["chat-input"].isHittable)
+            showSidebar(app)
+        }
+        for _ in 0..<2 {
+            app.buttons["sidebar-settings"].tap()
+            XCTAssertTrue(app.buttons["About FalconDeck"].isHittable)
+            showSidebar(app)
+        }
+    }
+    func testSearchRevealsTasksInsideCollapsedSections() {
+        let app = launch()
+        app.buttons["sidebar-section-pinned"].tap()
+        let search = app.searchFields.firstMatch
+        search.tap(); search.typeText("voice")
+        XCTAssertTrue(app.buttons["sidebar-task-voice"].waitForExistence(timeout: 3))
+        search.typeText(String(repeating: XCUIKeyboardKey.delete.rawValue, count: 5))
+        XCTAssertFalse(app.buttons["sidebar-task-voice"].exists, "Clearing search must restore the collapsed section")
+        let folder = app.buttons["Native app"]
+        folder.tap()
+        search.tap(); search.typeText("sidebar")
+        XCTAssertTrue(app.buttons["sidebar-task-review"].waitForExistence(timeout: 3))
+        search.typeText(String(repeating: XCUIKeyboardKey.delete.rawValue, count: 7))
+        XCTAssertFalse(app.buttons["sidebar-task-review"].exists, "Search must not change a folder's saved collapsed state")
+        let chats = app.buttons["sidebar-section-chats"]
+        for _ in 0..<4 where !chats.isHittable { app.swipeUp() }
+        chats.tap()
+        for _ in 0..<4 where !search.isHittable { app.swipeDown() }
+        search.tap(); search.typeText("release")
+        XCTAssertTrue(app.buttons["sidebar-task-chat"].waitForExistence(timeout: 3))
+    }
+    func testExpandAllSurvivesRecreatedTranscriptRows() {
+        let app = launch()
+        app.buttons["sidebar-task-native"].tap()
+        app.buttons["task-menu"].tap()
+        let expand = app.buttons["Expand all activity"]
+        for _ in 0..<4 where !expand.isHittable { app.swipeUp() }
+        expand.tap()
+        app.navigationBars["Task options"].buttons["Done"].tap()
+        showSidebar(app)
+        app.buttons["Activity"].tap()
+        showSidebar(app)
+        app.buttons["sidebar-task-native"].tap()
+        let output = app.staticTexts["All focused checks passed."]
+        for _ in 0..<8 where !output.isHittable { transcript(app).swipeDown() }
+        XCTAssertTrue(output.isHittable, "The retained expand-all directive must apply when list cells are created")
+        capture("Expanded activity after reopening conversation")
+    }
     func testSidebarHierarchyDensityAndSheetTransitions() {
         let app = launch()
         let pin = app.buttons["sidebar-task-native"]

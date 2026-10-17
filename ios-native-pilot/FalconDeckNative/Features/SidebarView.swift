@@ -5,6 +5,7 @@ private enum SidebarOptionsAction { case reorder, filters }
 struct SidebarView: View {
     @Environment(AppModel.self) private var model
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    let openDetail: () -> Void
     @State private var search = ""
     @State private var showOptions = false
     @State private var deferredOptionsAction: SidebarOptionsAction?
@@ -33,17 +34,18 @@ struct SidebarView: View {
     }
     private var pins: [AgentTask] { model.tasks.filter { $0.pinned && matches($0) }.sorted { $0.updatedAt > $1.updatedAt } }
     var body: some View {
-        @Bindable var model = model
         let projectGroups = projects.filter { $0.raw["kind"].string != "casual" }
-        let projectsOpen = projectGroups.contains { expanded.contains($0.id) }
+        let projectsOpen = !search.isEmpty || projectGroups.contains { expanded.contains($0.id) }
+        let pinsOpen = pinsExpanded || !search.isEmpty
+        let chatsOpen = chatsExpanded || !search.isEmpty
         ScrollView {
             LazyVStack(alignment: .leading, spacing: 0) {
-                sidebarAction("New chat", symbol: "square.and.pencil") { Task { await model.newChat() } }
+                sidebarAction("New chat", symbol: "square.and.pencil") { Task { if await model.newChat() != nil { openDetail() } } }
                     .disabled(!model.demo && !model.connected).accessibilityIdentifier("sidebar-new-chat")
-                sidebarAction("Activity", symbol: "tray.full", selected: model.selection == .activity) { model.selection = .activity }
+                sidebarAction("Activity", symbol: "tray.full", selected: model.selection == .activity) { navigate(.activity) }
                 if !pins.isEmpty {
-                    sectionHeading("Pinned", expanded: pinsExpanded) { animate { pinsExpanded.toggle() } }
-                    if pinsExpanded { ForEach(pins) { taskLink($0) } }
+                    sectionHeading("Pinned", expanded: pinsOpen) { animate { pinsExpanded.toggle() } }
+                    if pinsOpen { ForEach(pins) { taskLink($0) } }
                 }
                 sectionHeading("Projects", expanded: projectsOpen) {
                     animate { if projectsOpen { expanded.subtract(projectGroups.map(\.id)) } else { expanded.formUnion(projectGroups.map(\.id)) } }
@@ -63,7 +65,7 @@ struct SidebarView: View {
                             if model.tasks(in: project).contains(where: \.working) { ActivityDiamond() }
                         }.padding(.horizontal, 10).frame(minHeight: 44).contentShape(.rect)
                     }
-                    .buttonStyle(.plain).foregroundStyle(FD.foreground)
+                    .buttonStyle(.plain).foregroundStyle(FD.foreground).disabled(!search.isEmpty)
                     .accessibilityIdentifier("project-\(project.name)").accessibilityValue(isOpen ? "Expanded" : "Collapsed")
                     Button { newTask(project) } label: {
                         Image(systemName: "square.and.pencil").font(.caption).foregroundStyle(FD.muted)
@@ -81,8 +83,8 @@ struct SidebarView: View {
                 }
                 let casual = projects.filter { $0.raw["kind"].string == "casual" }
                 if !casual.isEmpty {
-                    sectionHeading("Chats", expanded: chatsExpanded) { animate { chatsExpanded.toggle() } }
-                    if chatsExpanded {
+                    sectionHeading("Chats", expanded: chatsOpen) { animate { chatsExpanded.toggle() } }
+                    if chatsOpen {
                         ForEach(casual) { project in taskPage(model.tasks(in: project).filter { !$0.pinned && matches($0) }, key: project.id, indent: 0) }
                     }
                 }
@@ -103,7 +105,7 @@ struct SidebarView: View {
         .refreshable { await model.refresh() }
         .toolbar {
             ToolbarItem(placement: .bottomBar) {
-                Button { model.selection = .settings } label: { Image(systemName: "gearshape") }
+                Button { navigate(.settings) } label: { Image(systemName: "gearshape") }
                     .accessibilityLabel("Settings").accessibilityIdentifier("sidebar-settings")
             }
             ToolbarItem(placement: .bottomBar) { Spacer() }
@@ -130,8 +132,8 @@ struct SidebarView: View {
                     }.listRowBackground(FD.surface)
                     Section {
                         if !model.extensions.filters.isEmpty { Button("Filter tasks", systemImage: "line.3.horizontal.decrease") { deferredOptionsAction = .filters; showOptions = false } }
-                        Button("Automations", systemImage: "calendar.badge.clock") { showOptions = false; model.selection = .automations }
-                        Button("Archived tasks", systemImage: "archivebox") { showOptions = false; model.selection = .archived }
+                        Button("Automations", systemImage: "calendar.badge.clock") { showOptions = false; navigate(.automations) }
+                        Button("Archived tasks", systemImage: "archivebox") { showOptions = false; navigate(.archived) }
                     }.listRowBackground(FD.surface)
                 }.scrollContentBackground(.hidden).background(FD.background)
                     .navigationTitle("Sidebar options").navigationBarTitleDisplayMode(.inline)
@@ -181,7 +183,7 @@ struct SidebarView: View {
         ForEach(tasks.filter(\.pinnedInProject)) { taskLink($0, indent: 20) }
         ForEach(folders) { folder in
             let children = tasks.filter { folder.taskIDs.contains($0.id) && !$0.pinnedInProject }
-            let isOpen = openFolders[folder.id] ?? (!folder.collapsed || !search.isEmpty)
+            let isOpen = !search.isEmpty || (openFolders[folder.id] ?? !folder.collapsed)
             Button {
                 openFolders[folder.id] = !isOpen; savingFolders.insert(folder.id)
                 Task {
@@ -197,7 +199,7 @@ struct SidebarView: View {
                     else { Image(systemName: isOpen ? "chevron.down" : "chevron.right").font(.caption2.weight(.semibold)) }
                 }.foregroundStyle(FD.secondary).padding(.leading, 26).padding(.trailing, 10).frame(minHeight: 44).contentShape(.rect)
             }
-            .disabled(savingFolders.contains(folder.id)).accessibilityValue(isOpen ? "Expanded" : "Collapsed")
+            .disabled(savingFolders.contains(folder.id) || !search.isEmpty).accessibilityValue(isOpen ? "Expanded" : "Collapsed")
             .contextMenu {
                 Button { newTask(project, folderID: folder.id) } label: { Label("New task", systemImage: "square.and.pencil") }
                 Button { editFolder(projectID: project.id, folder: folder) } label: { Label("Rename folder", systemImage: "pencil") }
@@ -225,7 +227,7 @@ struct SidebarView: View {
         }
     }
     private func taskLink(_ task: AgentTask, indent: CGFloat = 0) -> some View {
-        Button { model.selection = .task(task.id) } label: {
+        Button { navigate(.task(task.id)) } label: {
             HStack(spacing: 8) {
                 Group {
                     if task.working { ActivityDiamond() }
@@ -259,7 +261,7 @@ struct SidebarView: View {
                 Spacer()
                 Image(systemName: expanded ? "chevron.down" : "chevron.right").font(.system(size: 10, weight: .semibold))
             }.foregroundStyle(FD.muted).padding(.horizontal, 12).frame(minHeight: 40).padding(.top, 8).contentShape(.rect)
-        }.buttonStyle(.plain).accessibilityIdentifier("sidebar-section-\(title.lowercased())")
+        }.buttonStyle(.plain).disabled(!search.isEmpty).accessibilityIdentifier("sidebar-section-\(title.lowercased())")
             .accessibilityValue(expanded ? "Expanded" : "Collapsed")
     }
     private func animate(_ changes: () -> Void) { withAnimation(reduceMotion ? nil : .snappy(duration: 0.22), changes) }
@@ -278,7 +280,11 @@ struct SidebarView: View {
         }
     }
     private func newTask(_ project: Project, folderID: String? = nil) {
-        model.selection = .draft(project.id, folderID)
+        navigate(.draft(project.id, folderID))
+    }
+    private func navigate(_ destination: Destination) {
+        model.selection = destination
+        openDetail()
     }
     private func editFolder(projectID: String, folder: ProjectFolder? = nil) {
         folderProject = projectID; editingFolder = folder; folderName = folder?.name ?? ""; showFolderEditor = true

@@ -49,7 +49,9 @@ struct RootView: View {
 
     private var workspace: some View {
         NavigationSplitView(preferredCompactColumn: $compactColumn) {
-            SidebarView()
+            SidebarView {
+                if sizeClass == .compact { compactColumn = .detail }
+            }
                 .navigationSplitViewColumnWidth(min: 280, ideal: 320, max: 380)
         } detail: {
             NavigationStack {
@@ -69,8 +71,8 @@ struct RootView: View {
         }
         .navigationSplitViewStyle(.balanced)
         .sensoryFeedback(.selection, trigger: model.selection)
-        // Sidebar rows are plain buttons so UIKit does not add disclosure
-        // chevrons. This binding owns their compact push into the detail pane.
+        // Sidebar taps also reveal an unchanged selection. This observer handles
+        // destinations opened elsewhere, including incoming notifications.
         .onChange(of: model.selection) { _, selection in
             if selection != nil && sizeClass == .compact { compactColumn = .detail }
         }

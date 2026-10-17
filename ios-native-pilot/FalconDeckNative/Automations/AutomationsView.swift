@@ -29,7 +29,10 @@ struct AutomationsView: View {
                             Button("Edit", systemImage: "pencil") { edit(row) }
                             Button("Run history", systemImage: "clock") { history = row }
                             Button("Delete", systemImage: "trash", role: .destructive) { deleting = row }
-                        } label: { if pending == row.id { ActivityDiamond() } else { Image(systemName: "ellipsis").frame(width: 44, height: 44).contentShape(.rect) } }
+                        } label: {
+                            Group { if pending == row.id { ActivityDiamond() } else { Image(systemName: "ellipsis") } }
+                                .frame(width: 44, height: 44).contentShape(.rect)
+                        }
                             .accessibilityLabel("Automation options").disabled(pending != nil || (!model.connected && !model.demo))
                     }
                     if !row.raw["description"].string.isEmpty { Text(row.raw["description"].string).font(.subheadline).foregroundStyle(FD.secondary) }

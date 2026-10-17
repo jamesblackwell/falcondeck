@@ -25,12 +25,16 @@ final class PresentationTests: XCTestCase {
         XCTAssertFalse(blocks[1].grouped)
     }
     func testActionsStayOnTheLastAssistantResponseOfEachTurn() {
-        let rows = [message("u1", kind: "user_message"), message("commentary", kind: "assistant_message"), message("tool", kind: "tool_call"), message("final1", kind: "assistant_message"), message("u2", kind: "user_message"), message("final2", kind: "assistant_message")]
+        let rows = [message("u1", kind: "user_message", text: "First request"), message("commentary", kind: "assistant_message"), message("tool", kind: "tool_call"), message("final1", kind: "assistant_message"), message("u2", kind: "user_message", text: "Second request"), message("final2", kind: "assistant_message")]
         XCTAssertEqual(TranscriptBlock.actionMessageIDs(rows), ["final1", "final2"])
     }
     func testStreamingReplyDoesNotLeaveAnEarlierCommentaryActionBar() {
         let rows = [message("commentary", kind: "assistant_message"), Message(message("streaming", kind: "assistant_message").raw.setting("lifecycle", .string("streaming")))]
         XCTAssertTrue(TranscriptBlock.actionMessageIDs(rows).isEmpty)
+    }
+    func testHiddenHarnessMessagesDoNotSplitAssistantActionBars() {
+        let rows = [message("u", kind: "user_message", text: "Review this"), message("commentary", kind: "assistant_message", text: "Checking"), message("scaffold", kind: "user_message", text: "<environment_context>private</environment_context>"), message("final", kind: "assistant_message", text: "Done")]
+        XCTAssertEqual(TranscriptBlock.actionMessageIDs(rows), ["final"])
     }
     func testOnlyTrailingReasoningRemainsStreaming() {
         let rows = [Message(message("r1", kind: "reasoning").raw.setting("lifecycle", .string("streaming"))), Message(message("r2", kind: "reasoning").raw.setting("lifecycle", .string("streaming")))]
