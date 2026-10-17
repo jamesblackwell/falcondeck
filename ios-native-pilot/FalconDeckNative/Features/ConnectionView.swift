@@ -41,7 +41,7 @@ struct ConnectionView: View {
                 }
                 Section("This pilot") {
                     LabeledContent("Connection", value: model.status)
-                    LabeledContent("Client", value: "SwiftUI · Read-only")
+                    LabeledContent("Client", value: "SwiftUI · Native pilot")
                     if let date = model.refreshedAt {
                         LabeledContent("Last refreshed") { Text(date, style: .time) }
                     }

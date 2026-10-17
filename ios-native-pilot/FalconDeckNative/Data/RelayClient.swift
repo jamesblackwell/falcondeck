@@ -30,12 +30,14 @@ struct ChunkReceiver {
 enum ClientEvent: Sendable {
     case status(String, connected: Bool)
     case snapshot(JSON)
+    case events([JSON])
+    case rebase([JSON])
     case error(String)
 }
 
-/// Owns networking and cryptography off the UI actor. This deliberately uses
-/// authoritative snapshots instead of implementing the production event reducer.
-/// It never persists replay cursors or treats relay history as a local database.
+/// Owns networking and cryptography off the UI actor. A fresh daemon snapshot
+/// anchors every connection; ordered live events follow it. No history DB or
+/// durable replay cursor is added by this client.
 actor RelayClient {
     private let log = Logger(subsystem: "com.falcondeck.pilot.native", category: "relay")
     private let http = URLSession(configuration: .ephemeral)
@@ -49,6 +51,10 @@ actor RelayClient {
     private var refreshInFlight = false
     private var lastReceived = Date.now
     private var lastBootstrapRequest = Date.distantPast
+    private var bufferedEvents: [JSON] = []
+    private var transferID = 0
+    private var bulkSending = false
+    private var acknowledgements: [String: CheckedContinuation<Void, Error>] = [:]
 
     func events() -> AsyncStream<ClientEvent> {
         let (stream, continuation) = AsyncStream<ClientEvent>.makeStream()
@@ -89,7 +95,8 @@ actor RelayClient {
         generation = UUID()
         reader?.cancel(); heartbeat?.cancel()
         socket?.cancel(with: .goingAway, reason: nil)
-        socket = nil; session = nil; refreshInFlight = false
+        socket = nil; session = nil; refreshInFlight = false; bulkSending = false
+        bufferedEvents = []
         failPending(PilotError("The connection closed."))
         if forget { try SessionVault.clear() }
         sink?.yield(.status("Disconnected", connected: false))
@@ -150,6 +157,9 @@ actor RelayClient {
                     guard current == generation else { return }
                     if let complete { try await handle(JSON.decode(complete)) }
                 case "transport-cancel": chunks = .init()
+                case "transport-ack":
+                    let key = "\(frame["id"].int):\(frame["index"].int)"
+                    acknowledgements.removeValue(forKey: key)?.resume()
                 default: try await handle(frame)
                 }
             }
@@ -173,6 +183,10 @@ actor RelayClient {
             if frame["presence"] != .null { applyPresence(frame["presence"]) }
         case "update": try await consume(frame["update"])
         case "presence": applyPresence(frame["presence"])
+        case "ephemeral":
+            if let key = session?.dataKey, frame["body"]["kind"].string == "encrypted-daemon-event" {
+                publish(NativeRequest.events(try RelayCrypto.decrypt(frame["body"]["envelope"], key: key)))
+            }
         case "rpc-result":
             log.info("RPC response received; success: \(frame["ok"].bool)")
             let id = frame["request_id"].string
@@ -200,8 +214,24 @@ actor RelayClient {
             scheduleRefresh()
         } else if body["t"].string == "presence" { applyPresence(body["presence"]) }
         else if body["t"].string == "snapshot-invalidated" { scheduleRefresh() }
-        // Live encrypted events are intentionally not reduced in this pilot.
-        // Pull-to-refresh and a 10-second authoritative snapshot keep it current.
+        else if body["t"].string == "encrypted", let key = session?.dataKey {
+            publish(NativeRequest.events(try RelayCrypto.decrypt(body["envelope"], key: key)))
+        }
+    }
+
+    private func publish(_ events: [JSON]) {
+        let live = events.filter { $0["event"]["type"].string != "snapshot" }
+        if refreshInFlight {
+            bufferedEvents.append(contentsOf: live)
+            if bufferedEvents.count > 2048 {
+                // A full snapshot will be retried rather than silently dropping
+                // deltas. Closing also releases every pending mutation honestly.
+                connectionFailed(PilotError("Live updates fell behind. Reconnect to recover."), generation: generation)
+            }
+        }
+        // A sidebar refresh must never pause the selected transcript. Metadata
+        // is rebased after the snapshot without replaying text a second time.
+        if !live.isEmpty { sink?.yield(.events(live)) }
     }
 
     private func applyPresence(_ presence: JSON) {
@@ -224,6 +254,7 @@ actor RelayClient {
     func refresh() async {
         guard session?.dataKey != nil, !refreshInFlight else { return }
         refreshInFlight = true
+        bufferedEvents = []
         let current = generation
         defer { if current == generation { refreshInFlight = false } }
         do {
@@ -232,33 +263,42 @@ actor RelayClient {
                 "include_thread_diffs": .bool(false), "include_agent_skills": .bool(false), "include_workspace_skills": .bool(false)
             ]))
             guard current == generation else { return }
-            sink?.yield(.snapshot(result)); sink?.yield(.status("Connected", connected: true))
+            sink?.yield(.snapshot(result))
+            sink?.yield(.rebase(bufferedEvents)); bufferedEvents = []
+            sink?.yield(.status("Connected", connected: true))
         } catch {
             guard current == generation else { return }
+            bufferedEvents = []
             sink?.yield(.error(error.localizedDescription))
         }
     }
 
-    func detail(task: AgentTask) async throws -> JSON {
-        try await call("thread.detail", params: .object([
+    func detail(task: AgentTask, before: String? = nil) async throws -> JSON {
+        var params = JSON.object([
             "workspace_id": .string(task.projectID), "thread_id": .string(task.id),
-            "mode": .string("tail"), "limit": .number(50), "strict_limit": .bool(true),
+            "mode": .string(before == nil ? "tail" : "before"), "limit": .number(50), "strict_limit": .bool(true),
             "inline_images": .bool(false), "tool_output_bytes": .number(1024), "compact_workspace": .bool(true)
-        ]))
+        ])
+        if let before { params = params.setting("before_item_id", .string(before)) }
+        return try await call("thread.detail", params: params)
     }
 
-    private func call(_ method: String, params: JSON) async throws -> JSON {
-        // Keep the pilot read-only at the transport boundary as well as the UI.
-        guard ["snapshot.current", "thread.detail"].contains(method), let key = session?.dataKey, socket != nil else {
+    func call(_ method: String, params: JSON) async throws -> JSON {
+        let allowed = ["snapshot.current", "thread.detail", "thread.start", "thread.update", "thread.archive", "thread.mark_read", "turn.start", "turn.interrupt", "preferences.update", "interactive.respond"]
+        guard allowed.contains(method), let key = session?.dataKey, socket != nil else {
             throw PilotError("Connect to your computer first.")
         }
         let id = "swift-pilot-\(UUID().uuidString)"
+        let current = generation
         log.info("Requesting \(method, privacy: .public)")
         let frame = JSON.object(["type": .string("rpc-call"), "request_id": .string(id), "method": .string(method), "params": try RelayCrypto.encrypt(params, key: key)])
         return try await withCheckedThrowingContinuation { continuation in
             pending[id] = continuation
             Task {
-                do { try await self.send(frame) }
+                do {
+                    guard current == self.generation else { throw CancellationError() }
+                    try await self.send(frame, requestID: id)
+                }
                 catch { self.finish(id, error: error) }
             }
             Task {
@@ -271,20 +311,54 @@ actor RelayClient {
     private func failPending(_ error: Error) {
         let continuations = pending.values; pending.removeAll()
         for c in continuations { c.resume(throwing: error) }
+        let acks = acknowledgements.values; acknowledgements.removeAll()
+        for c in acks { c.resume(throwing: error) }
     }
     private func connectionFailed(_ error: Error, generation current: UUID) {
         guard current == generation else { return }
+        generation = UUID(); refreshInFlight = false; bufferedEvents = []; bulkSending = false
         log.error("Connection failed: \(error.localizedDescription, privacy: .private)")
         socket?.cancel(with: .goingAway, reason: nil); socket = nil; heartbeat?.cancel()
         failPending(error)
         sink?.yield(.status("Disconnected", connected: false)); sink?.yield(.error(error.localizedDescription))
     }
-    private func send(_ value: JSON) async throws {
+    private func send(_ value: JSON, requestID: String? = nil) async throws {
         guard let socket else { throw PilotError("Relay is disconnected.") }
         let text = try value.wireText()
-        // All read-only requests fit one transport frame; bulk is receive-only.
-        guard text.utf8.count <= 11 * 1024 else { throw PilotError("Request exceeds the pilot’s transport limit.") }
-        try await socket.send(.string(text))
+        let bytes = Data(text.utf8)
+        guard bytes.count <= 40 * 1024 * 1024 else { throw PilotError("Message exceeds the relay’s transport limit.") }
+        if bytes.count <= 11 * 1024 { try await socket.send(.string(text)); return }
+        guard !bulkSending else { throw PilotError("Another large message is still sending. Wait a moment before sending again.") }
+        bulkSending = true
+        let current = generation
+        transferID += 1
+        let id = transferID
+        defer { if current == generation { bulkSending = false } }
+        do {
+            for (index, offset) in stride(from: 0, to: bytes.count, by: 11 * 1024).enumerated() {
+                guard current == generation else { throw CancellationError() }
+                if let requestID, pending[requestID] == nil { throw CancellationError() }
+                let part = bytes.subdata(in: offset..<min(offset + 11 * 1024, bytes.count))
+                let frame = JSON.object(["type": .string("transport-chunk"), "id": .number(Double(id)), "index": .number(Double(index)), "total": .number(Double(bytes.count)), "data": .string(part.base64EncodedString())])
+                let ackKey = "\(id):\(index)"
+                try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+                    acknowledgements[ackKey] = continuation
+                    Task {
+                        do { try await socket.send(.string(frame.wireText())) }
+                        catch { self.acknowledgements.removeValue(forKey: ackKey)?.resume(throwing: error) }
+                    }
+                    Task {
+                        try? await Task.sleep(for: .seconds(25))
+                        self.acknowledgements.removeValue(forKey: ackKey)?.resume(throwing: PilotError("The relay did not acknowledge this message."))
+                    }
+                }
+            }
+        } catch {
+            if current == generation {
+                try? await socket.send(.string(JSON.object(["type": .string("transport-cancel"), "id": .number(Double(id))]).wireText()))
+            }
+            throw error
+        }
     }
     private func post(_ relay: URL, path: String, body: JSON? = nil, token: String? = nil) async throws -> JSON {
         var request = URLRequest(url: relay.appending(path: path))

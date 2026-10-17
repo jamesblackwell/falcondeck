@@ -1,8 +1,8 @@
 import Foundation
 
-/// Only the protocol fields this read-only client needs. Unknown fields survive
+/// Only the protocol fields this client needs. Unknown fields survive
 /// decoding at the JSON boundary without coupling the pilot to every extension.
-enum JSON: Codable, Sendable, Equatable {
+enum JSON: Codable, Sendable, Hashable {
     case object([String: JSON]), array([JSON]), string(String), number(Double), bool(Bool), null
 
     init(from decoder: Decoder) throws {
@@ -46,6 +46,15 @@ enum JSON: Codable, Sendable, Equatable {
         return "{\"type\":\(first),\(rest)"
     }
     static func decode(_ data: Data) throws -> JSON { try JSONDecoder().decode(JSON.self, from: data) }
+    func setting(_ key: String, _ value: JSON) -> JSON {
+        guard case .object(var fields) = self else { return self }
+        fields[key] = value
+        return .object(fields)
+    }
+    var optionalInt: Int? {
+        guard case .number(let v) = self, v.isFinite, v >= 0, v < Double(Int.max), v.rounded() == v else { return nil }
+        return Int(v)
+    }
 }
 
 struct PilotError: LocalizedError, Sendable {
@@ -55,16 +64,21 @@ struct PilotError: LocalizedError, Sendable {
 }
 
 struct Project: Identifiable, Hashable, Sendable {
+    static func == (lhs: Project, rhs: Project) -> Bool { lhs.id == rhs.id }
+    func hash(into hasher: inout Hasher) { hasher.combine(id) }
+    let raw: JSON
     let id: String
     let path: String
     let status: String
     var name: String { URL(fileURLWithPath: path).lastPathComponent }
     init(_ value: JSON) {
+        raw = value
         id = value["id"].string; path = value["path"].string; status = value["status"].string
     }
 }
 
 struct AgentTask: Identifiable, Hashable, Sendable {
+    let raw: JSON
     let id: String
     let projectID: String
     let title: String
@@ -74,25 +88,38 @@ struct AgentTask: Identifiable, Hashable, Sendable {
     let updatedAt: String
     let pinned: Bool
     let unread: Bool
+    var pinnedInProject: Bool { raw["is_pinned_in_project"].bool }
+    var modelID: String { raw["agent"]["model_id"].string }
+    var effort: String { raw["agent"]["reasoning_effort"].string }
+    var latestTurnID: String { raw["latest_turn_id"].string }
     var running: Bool { status == "running" }
     var needsAttention: Bool { ["waiting_for_input", "awaiting_approval", "error"].contains(status) }
     init(_ v: JSON) {
+        raw = v
         id = v["id"].string; projectID = v["workspace_id"].string
-        title = v["title"].string; provider = v["provider"].string
+        title = v["title"].string == "Untitled thread" ? "New task" : v["title"].string; provider = v["provider"].string
         status = v["status"].string; preview = v["last_message_preview"].string
         updatedAt = v["updated_at"].string; pinned = v["is_pinned"].bool
         unread = v["attention"]["unread"].bool
     }
 }
 
-struct Message: Identifiable, Sendable {
-    let id: String
-    let kind: String
-    let text: String
-    init(_ v: JSON) {
-        id = v["id"].string; kind = v["kind"].string
-        text = v["text"].string
+struct Message: Identifiable, Sendable, Equatable {
+    var raw: JSON
+    var id: String { raw["id"].string }
+    var kind: String { raw["kind"].string }
+    var text: String {
+        switch kind {
+        case "reasoning": raw["summary"].string.nonempty ?? raw["content"].string
+        case "tool_call": raw["output"].string
+        case "service": raw["message"].string
+        case "diff": raw["diff"].string
+        case "code_review": raw["content"].string
+        default: raw["text"].string
+        }
     }
+    var streaming: Bool { raw["lifecycle"].string == "streaming" }
+    init(_ v: JSON) { raw = v }
     var isMessage: Bool { kind == "user_message" || kind == "assistant_message" }
 }
 

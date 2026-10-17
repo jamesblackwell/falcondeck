@@ -57,9 +57,6 @@ struct ProjectsView: View {
         .background(FD.background)
         .navigationTitle("Projects")
         .toolbar {
-            ToolbarItem(placement: .topBarLeading) {
-                Image("FalconMark").resizable().scaledToFit().frame(width: 28, height: 28).foregroundStyle(FD.accent).accessibilityHidden(true)
-            }
             ToolbarItem(placement: .topBarTrailing) { ConnectionPill() }
         }
         .searchable(text: $search, prompt: "Find a project")

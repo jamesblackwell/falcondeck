@@ -9,6 +9,9 @@ settings:
     SWIFT_VERSION: "6.0"
     CODE_SIGN_STYLE: Automatic
 packages:
+  MarkdownUI:
+    url: https://github.com/gonzalezreal/swift-markdown-ui.git
+    exactVersion: 2.4.1
   Sodium:
     url: https://github.com/jedisct1/swift-sodium.git
     exactVersion: 0.11.0
@@ -19,6 +22,7 @@ targets:
     sources: [FalconDeckNative]
     dependencies:
       - package: Sodium
+      - package: MarkdownUI
     preBuildScripts:
       - name: Generate native pilot icon
         script: xcrun --sdk macosx swift -sdk "$(xcrun --sdk macosx --show-sdk-path)" "$SRCROOT/scripts/generate-icon.swift" "$SRCROOT/FalconDeckNative/Assets.xcassets/FalconMark.imageset/mark.svg" "$SRCROOT/FalconDeckNative/Assets.xcassets/AppIcon.appiconset/icon.png"

@@ -21,20 +21,32 @@ struct FalconDeckNativeApp: App {
 struct RootView: View {
     @Environment(AppModel.self) private var model
     @Environment(\.scenePhase) private var scenePhase
-    @State private var tab = 0
+    @Environment(\.horizontalSizeClass) private var sizeClass
+    @State private var compactColumn: NavigationSplitViewColumn = .sidebar
     var body: some View {
         @Bindable var model = model
-        TabView(selection: $tab) {
-            Tab("Projects", systemImage: "square.grid.2x2", value: 0) {
-                NavigationStack { ProjectsView() }
-            }
-            Tab("Activity", systemImage: "waveform.path", value: 1) {
-                NavigationStack { ActivityView() }
-            }
+        NavigationSplitView(preferredCompactColumn: $compactColumn) {
+            SidebarView()
+                .navigationSplitViewColumnWidth(min: 280, ideal: 320, max: 380)
+        } detail: {
+            NavigationStack {
+                switch model.selection {
+                case .task(let id):
+                    if let task = model.tasks.first(where: { $0.id == id }) {
+                        ConversationView(task: task).id(id)
+                    } else { ProjectsView() }
+                case .activity: ActivityView()
+                default: ProjectsView()
+                }
+            }.id(model.selection)
         }
-        .tabBarMinimizeBehavior(.onScrollDown)
-        .sensoryFeedback(.selection, trigger: tab)
+        .navigationSplitViewStyle(.balanced)
+        .sensoryFeedback(.selection, trigger: model.selection)
+        .onChange(of: model.selection) { _, selection in
+            if selection != nil && sizeClass == .compact { compactColumn = .detail }
+        }
         .sheet(isPresented: $model.showConnection) { ConnectionView() }
+        .sheet(isPresented: $model.showNewTask) { NewTaskView() }
         .onChange(of: scenePhase) { _, phase in
             if phase == .active && model.hasSession && !model.demo { Task { await model.reconnect() } }
         }

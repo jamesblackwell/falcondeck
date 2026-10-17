@@ -3,87 +3,100 @@ import SwiftUI
 struct ConversationView: View {
     @Environment(AppModel.self) private var model
     let task: AgentTask
-    @State private var messages: [Message] = []
-    @State private var loading = true
-    @State private var error: String?
-    @State private var hasOlder = false
-    @State private var otherItems = 0
+    @State private var chat: ChatSession?
+    private var current: AgentTask { model.tasks.first { $0.id == task.id } ?? task }
     var body: some View {
-        ScrollView {
-            LazyVStack(alignment: .leading, spacing: 24) {
-                VStack(alignment: .leading, spacing: 12) {
-                    StatusBadge(task: model.tasks.first { $0.id == task.id } ?? task)
-                    Text(task.title).font(.title2.weight(.semibold)).textSelection(.enabled)
-                    Text("\(task.provider.capitalized) · \(model.demo ? "Sample conversation" : "Latest conversation")")
-                        .font(.subheadline).foregroundStyle(FD.secondary)
-                }.padding(.bottom, 8)
-                if loading { HStack { Spacer(); ActivityDiamond(); Spacer() }.padding(40) }
-                if let error {
-                    ContentUnavailableView {
-                        Label("Couldn’t load this task", systemImage: "wifi.exclamationmark")
-                    } description: { Text(error) } actions: {
-                        Button("Try again") { Task { await load() } }.buttonStyle(.glass)
-                    }
-                }
-                if hasOlder || otherItems > 0 {
-                    Label("Showing recent messages. Earlier history and tool activity are omitted in this pilot.", systemImage: "clock")
-                        .font(.footnote).foregroundStyle(FD.secondary)
-                }
-                ForEach(messages) { message in
-                    MessageCard(message: message)
-                }
-                if !loading && error == nil && messages.isEmpty {
-                    ContentUnavailableView("No messages yet", systemImage: "text.bubble", description: Text("This task has no user or assistant messages in its latest page."))
-                }
-            }
-            .padding(FD.inset).padding(.bottom, 32).frame(maxWidth: 720).frame(maxWidth: .infinity)
+        Group {
+            if let chat { ChatContent(task: current, chat: chat) }
+            else { ActivityDiamond().frame(maxWidth: .infinity, maxHeight: .infinity).background(FD.background) }
         }
-        .defaultScrollAnchor(.bottom)
-        .defaultScrollAnchor(.top, for: .alignment)
-        .background(FD.background)
-        .navigationTitle("Task").navigationBarTitleDisplayMode(.inline)
-        .toolbar(.hidden, for: .tabBar)
-        .toolbar { ToolbarItem(placement: .topBarTrailing) { ConnectionPill() } }
-        .safeAreaInset(edge: .bottom) {
-            Label(model.demo ? "Demo conversation · Read-only pilot" : "Read-only pilot · Pull to refresh", systemImage: "eye")
-                .font(.footnote).foregroundStyle(FD.secondary)
-                .padding(14).frame(maxWidth: .infinity).glassEffect(in: .rect(cornerRadius: 22))
-                .padding(.horizontal, 20).padding(.bottom, 8)
+        .task(id: task.id) {
+            let session = model.chat(for: task); chat = session
+            if !session.loaded { await model.loadChat(task) }
         }
-        .task(id: task.id) { await load() }
-        .refreshable { await load() }
-    }
-    private func load() async {
-        loading = messages.isEmpty; error = nil
-        defer { loading = false }
-        if model.demo { messages = Demo.messages; return }
-        do {
-            let detail = try await model.relay.detail(task: task)
-            guard !Task.isCancelled else { return }
-            let all = detail["items"].array.map(Message.init)
-            messages = all.filter(\.isMessage)
-            otherItems = all.count - messages.count; hasOlder = detail["has_older"].bool || detail["is_partial"].bool
-        } catch { self.error = error.localizedDescription }
+        .onChange(of: model.connected) { _, connected in if connected { Task { await model.loadChat(current) } } }
     }
 }
 
-struct MessageCard: View {
-    let message: Message
-    private var isUser: Bool { message.kind == "user_message" }
+private struct ChatContent: View {
+    @Environment(AppModel.self) private var model
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    let task: AgentTask
+    @Bindable var chat: ChatSession
+    @State private var followLatest = true
+    @State private var rename = false
+    @State private var title = ""
+    private var project: Project? { model.projects.first { $0.id == task.projectID } }
+    private var requests: [JSON] { model.requests.filter { $0["thread_id"].string == task.id } }
+
     var body: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            HStack(spacing: 8) {
-                Image(systemName: isUser ? "person.crop.circle" : "sparkle")
-                Text(isUser ? "You" : "Assistant").fontWeight(.semibold)
-            }.font(.caption).foregroundStyle(isUser ? FD.secondary : FD.accent)
-            Text(LocalizedStringKey(message.text))
-                .font(.body).lineSpacing(5).foregroundStyle(FD.foreground)
-                .textSelection(.enabled).tint(FD.accent)
+        ScrollViewReader { proxy in
+            ScrollView {
+                LazyVStack(alignment: .leading, spacing: 20) {
+                    if chat.hasOlder {
+                        Button {
+                            let anchor = chat.transcript.items.first?.id
+                            Task { await model.loadChat(task, older: true); if let anchor { proxy.scrollTo(anchor, anchor: .top) } }
+                        } label: { HStack { if chat.loading { ActivityDiamond() }; Text("Load earlier messages") }.frame(maxWidth: .infinity) }
+                            .font(.footnote).foregroundStyle(FD.secondary).disabled(chat.loading)
+                    }
+                    if chat.loading && chat.transcript.items.isEmpty { ActivityDiamond().frame(maxWidth: .infinity).padding(.vertical, 64) }
+                    if chat.loaded && chat.transcript.items.isEmpty {
+                        ContentUnavailableView("What are we working on?", systemImage: "sparkle", description: Text("Send a message to \(task.provider.capitalized) to get started."))
+                    }
+                    ForEach(chat.transcript.items) { item in TranscriptRow(message: item).id(item.id) }
+                    if task.running {
+                        HStack(spacing: 8) { ActivityDiamond(); Text("\(task.provider.capitalized) is working…").font(.footnote).foregroundStyle(FD.secondary) }.padding(.vertical, 8)
+                    }
+                    Color.clear.frame(height: 1).id("latest")
+                }
+                .padding(.horizontal, FD.inset).padding(.vertical, 20).frame(maxWidth: 820).frame(maxWidth: .infinity)
+            }
+            .defaultScrollAnchor(.bottom, for: .initialOffset)
+            .onScrollGeometryChange(for: Bool.self) { g in g.contentOffset.y + g.containerSize.height >= g.contentSize.height - 120 } action: { _, value in followLatest = value }
+            .scrollDismissesKeyboard(.interactively)
+            .refreshable { await model.loadChat(task) }
+            .onChange(of: chat.transcript.revision) { _, _ in
+                if followLatest || chat.sending { withAnimation(reduceMotion ? nil : .easeOut(duration: 0.15)) { proxy.scrollTo("latest", anchor: .bottom) } }
+            }
+            .onChange(of: chat.loaded) { _, loaded in if loaded { proxy.scrollTo("latest", anchor: .bottom) } }
+            .overlay(alignment: .bottomTrailing) {
+                if !followLatest && !chat.transcript.items.isEmpty {
+                    Button { withAnimation(reduceMotion ? nil : .smooth) { proxy.scrollTo("latest", anchor: .bottom) } } label: { Image(systemName: "arrow.down").padding(12) }
+                        .glassEffect().padding(16).accessibilityLabel("Jump to latest message")
+                }
+            }
         }
-        .padding(isUser ? 18 : 4).frame(maxWidth: .infinity, alignment: .leading)
-        .background(isUser ? FD.raised : .clear, in: .rect(cornerRadius: FD.radius))
-        .contextMenu {
-            ShareLink(item: message.text) { Label("Share message", systemImage: "square.and.arrow.up") }
+        .background(FD.background).navigationTitle(task.title.nonempty ?? "New task").navigationBarTitleDisplayMode(.inline)
+        .toolbar {
+            ToolbarItem(placement: .topBarTrailing) {
+                Menu {
+                    Button("Rename task", systemImage: "pencil") { title = task.title; rename = true }
+                    TaskActions(task: task)
+                    Divider()
+                    Button("Connection", systemImage: "lock.shield") { model.showConnection = true }
+                } label: { Image(systemName: "ellipsis") }.accessibilityLabel("Task options")
+            }
+        }
+        .alert("Rename task", isPresented: $rename) {
+            TextField("Task title", text: $title)
+            Button("Cancel", role: .cancel) { }
+            Button("Save") { Task { await model.updateTask(task, fields: ["title": .string(title)]) } }.disabled(title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+        }
+        .safeAreaInset(edge: .bottom, spacing: 0) {
+            VStack(spacing: 10) {
+                ForEach(requests, id: \.self) { request in InteractiveCard(request: request) }
+                if let error = chat.error ?? model.error {
+                    HStack(alignment: .top) {
+                        Image(systemName: "exclamationmark.circle")
+                        Text(error).frame(maxWidth: .infinity, alignment: .leading)
+                        Button { chat.error = nil; model.error = nil } label: { Image(systemName: "xmark") }.accessibilityLabel("Dismiss error")
+                    }.font(.footnote).foregroundStyle(.orange).padding(12).background(FD.surface, in: .rect(cornerRadius: 12))
+                }
+                if let notice = chat.notice { Text(notice).font(.footnote).foregroundStyle(FD.secondary).onTapGesture { chat.notice = nil } }
+                ComposerView(task: task, project: project, chat: chat)
+            }
+            .padding(.horizontal, 12).padding(.top, 8).padding(.bottom, 8).frame(maxWidth: 844).frame(maxWidth: .infinity)
         }
     }
 }
