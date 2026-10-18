@@ -42,7 +42,6 @@ private struct ChatContent: View {
         let presentation = chat.presentation(preferences: preferences, running: task.running)
         let actions = presentation.actionIDs
         let blocks = presentation.blocks
-        let showsTranscript = blocks.isEmpty || listScrolling.positioned || !scroll.followLatest
         let activity = !chat.loading && chat.historyError == nil && (model.connected || model.demo) ? ConversationActivity.label(blocks: blocks, running: task.running, submitting: chat.sending) : nil
         let rowOrder = (chat.hasOlder ? ["earlier"] : []) + blocks.map(\.id) + (activity == nil ? [] : ["activity"]) + ["latest"]
         Group {
@@ -68,7 +67,7 @@ private struct ChatContent: View {
                         HStack(spacing: 8) { ActivityDiamond(); NativeActivityText(text: activity).font(.footnote).foregroundStyle(FD.secondary) }.frame(minHeight: 44).frame(maxWidth: 820, alignment: .leading).frame(maxWidth: .infinity)
                             .listRowBackground(NativeListScrollProbe(scrolling: listScrolling, rowOrder: rowOrder))
                     }
-                    Color.clear.frame(height: 1).id("latest").listRowBackground(NativeListScrollProbe(scrolling: listScrolling, endHasContent: !blocks.isEmpty, rowOrder: rowOrder))
+                    Color.clear.frame(height: 1).id("latest").listRowBackground(NativeListScrollProbe(scrolling: listScrolling, rowOrder: rowOrder))
                 }
                 .listRowInsets(EdgeInsets(top: 6, leading: FD.inset, bottom: 6, trailing: FD.inset))
                 .listRowSeparator(.hidden)
@@ -82,9 +81,8 @@ private struct ChatContent: View {
             .transaction(value: chat.transcript.revision) { transaction in
                 transaction.animation = nil; transaction.disablesAnimations = true
             }
-            .opacity(showsTranscript ? 1 : 0)
-            .allowsHitTesting(showsTranscript)
-            .accessibilityHidden(!showsTranscript)
+            // Loaded messages stay visible and interactive even if UIKit has
+            // not realized the final row or delivered a layout callback yet.
             .accessibilityIdentifier("conversation-transcript")
             .onScrollGeometryChange(for: TranscriptGeometry.self) { g in
                 TranscriptGeometry(nearLatest: g.contentOffset.y + g.containerSize.height >= g.contentSize.height - 120, contentHeight: g.contentSize.height)
@@ -181,8 +179,8 @@ private struct ChatContent: View {
         .sheet(item: $chat.queuedEdit) { QueuedMessageEditor(task: task, edit: $0) }
         .onAppear { visible = true; listScrolling.setActive(true); if chat.loaded { scrollToLatest(animated: false) } }
         .onDisappear { visible = false; listScrolling.setActive(false) }
-        .task(id: ConversationReadState(taskID: task.id, activitySeq: task.activitySeq, historyReady: showsTranscript && chat.loaded && !chat.needsRefresh && !chat.loading && chat.historyError == nil, foreground: model.foreground, visible: visible)) {
-            guard visible, showsTranscript, chat.loaded, !chat.needsRefresh, !chat.loading, chat.historyError == nil, model.foreground else { return }
+        .task(id: ConversationReadState(taskID: task.id, activitySeq: task.activitySeq, historyReady: chat.loaded && !chat.needsRefresh && !chat.loading && chat.historyError == nil, foreground: model.foreground, visible: visible)) {
+            guard visible, chat.loaded, !chat.needsRefresh, !chat.loading, chat.historyError == nil, model.foreground else { return }
             do { try await Task.sleep(for: .milliseconds(600)) } catch { return }
             await model.markRead(task, automatic: true)
         }

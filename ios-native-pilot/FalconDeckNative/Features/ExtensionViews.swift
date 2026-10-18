@@ -97,7 +97,7 @@ struct ExtensionPanelsView: View {
             ForEach(model.extensions.enabled, id: \.self) { extensionItem in
                 Section(extensionItem["name"].string) {
                     ForEach(extensionItem["contributes"]["panels"].array, id: \.self) { contribution in
-                        NavigationLink(contribution["title"].string.nonempty ?? extensionItem["name"].string) { ExtensionPanelView(extensionID: extensionItem["id"].string, contribution: contribution) }
+                        NavigationLink(contribution["title"].string.nonempty ?? extensionItem["name"].string, value: DetailDestination.extensionPanel(extensionID: extensionItem["id"].string, contribution: contribution))
                     }
                     if extensionItem["contributes"]["panels"].array.isEmpty { Text("Connected extension").font(.footnote).foregroundStyle(FD.secondary) }
                 }.listRowBackground(FD.surface)
@@ -109,7 +109,7 @@ struct ExtensionPanelsView: View {
     }
 }
 
-private struct ExtensionPanelView: View {
+struct ExtensionPanelView: View {
     @Environment(AppModel.self) private var model
     let extensionID: String
     let contribution: JSON

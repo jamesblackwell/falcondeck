@@ -30,28 +30,27 @@ import UIKit
         scrolling.cancel(); view.contentOffset.y = 500; view.contentSize.height = 5_000
         scrolling.layoutUpdated(); XCTAssertEqual(view.contentOffset.y, 500, "A reader's position must win over layout following")
     }
-    func testPresentationWaitsForANonemptyVisibleEndRow() async {
+    func testLoadedListDoesNotWaitForAnUnrealizedEndRow() async {
         let window = UIWindow(), scrolling = NativeListScrolling(), view = viewport(in: window)
-        let end = UIView(frame: CGRect(x: 0, y: 990, width: 320, height: 10)); view.addSubview(end)
-        scrolling.attach(view); scrolling.setActive(true)
-        await scrolling.bottom(animated: false)?.value
-        scrolling.registerEnd(end, hasContent: false); await finishLayoutCallbacks()
-        XCTAssertFalse(scrolling.positioned, "The empty loading list cannot reveal a later unpositioned history")
-        end.frame.origin.y = 100
-        scrolling.registerEnd(end, hasContent: true); await finishLayoutCallbacks()
-        XCTAssertFalse(scrolling.positioned, "An estimated offset does not prove the last row is visible")
-        end.frame.origin.y = 990
-        scrolling.registerEnd(end, hasContent: true); await finishLayoutCallbacks()
-        XCTAssertTrue(scrolling.positioned)
+        let message = UIView(frame: CGRect(x: 0, y: 600, width: 320, height: 400)); view.addSubview(message)
+        scrolling.attach(view); scrolling.setActive(true); scrolling.register(message, id: "loaded-message")
+        await scrolling.bottom(animated: false)?.value; await finishLayoutCallbacks()
+        XCTAssertEqual(view.contentOffset.y, 520)
+        XCTAssertTrue(message.convert(message.bounds, to: view).intersects(view.bounds))
+        view.contentSize.height += 200; message.frame.origin.y += 200
+        scrolling.layoutUpdated()
+        XCTAssertEqual(view.contentOffset.y, 720, "Following must work from ordinary rows, without an end-row readiness signal")
     }
-    func testDisappearingListCannotPublishQueuedPresentationReadiness() async {
+    func testReopenedListFollowsWithoutWaitingForAnEndMarker() async {
         let window = UIWindow(), scrolling = NativeListScrolling(), view = viewport(in: window)
-        let end = UIView(frame: CGRect(x: 0, y: 990, width: 320, height: 10)); view.addSubview(end)
         scrolling.attach(view); scrolling.setActive(true)
         await scrolling.bottom(animated: false)?.value
-        scrolling.registerEnd(end, hasContent: true); scrolling.setActive(false)
-        await finishLayoutCallbacks()
-        XCTAssertFalse(scrolling.positioned)
+        scrolling.setActive(false); view.contentSize.height = 4_000
+        scrolling.layoutUpdated(); XCTAssertEqual(view.contentOffset.y, 520)
+        scrolling.setActive(true); await scrolling.bottom(animated: false)?.value
+        XCTAssertEqual(view.contentOffset.y, 3_520)
+        view.contentSize.height = 5_000; scrolling.layoutUpdated()
+        XCTAssertEqual(view.contentOffset.y, 4_520)
     }
     func testPendingScrollUsesCurrentLayoutAfterRowsAreReplaced() async {
         var pending: Task<Void, Never>?

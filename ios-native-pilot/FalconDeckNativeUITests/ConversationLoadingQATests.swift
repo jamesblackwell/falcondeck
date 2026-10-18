@@ -10,6 +10,62 @@ import XCTest
     private func capture(_ name: String) {
         let shot = XCTAttachment(screenshot: XCUIScreen.main.screenshot()); shot.name = name; shot.lifetime = .keepAlways; add(shot)
     }
+    private func revealSidebar(_ app: XCUIApplication) {
+        // A notification banner covers the native back button on a real phone.
+        // Wait for it to leave rather than accidentally opening its source app.
+        let banner = XCUIApplication(bundleIdentifier: "com.apple.springboard").descendants(matching: .any).matching(identifier: "NotificationShortLookView").firstMatch
+        XCTAssertTrue(banner.waitForNonExistence(timeout: 12))
+        let settings = app.buttons["sidebar-settings"]
+        if !settings.exists || !settings.isHittable {
+            let back = app.buttons["BackButton"]
+            XCTAssertTrue(back.exists); back.tap()
+        }
+        let shown = XCTNSPredicateExpectation(predicate: NSPredicate { _, _ in settings.exists && settings.isHittable }, object: nil)
+        XCTAssertEqual(XCTWaiter.wait(for: [shown], timeout: 3), .completed)
+    }
+    func testLoadedMessagesStayVisibleAcrossReopeningAndBackgrounding() {
+        let app = launch()
+        let latest = app.staticTexts["Latest response. This should appear in its final position immediately."]
+        XCTAssertTrue(latest.waitForExistence(timeout: 5)); XCTAssertTrue(latest.isHittable)
+        let pill = app.descendants(matching: .any).matching(identifier: "loading-pill").firstMatch
+        XCTAssertTrue(pill.waitForNonExistence(timeout: 12))
+        for cycle in 1...3 {
+            revealSidebar(app)
+            app.buttons["sidebar-settings"].tap()
+            XCTAssertTrue(app.navigationBars["Settings"].waitForExistence(timeout: 3))
+            revealSidebar(app)
+            app.buttons["sidebar-task-native"].tap()
+            capture("Reopened conversation cycle \(cycle)")
+            XCTAssertTrue(latest.waitForExistence(timeout: 3), "Opening cycle \(cycle) must render the cached transcript")
+            XCTAssertTrue(latest.isHittable)
+            XCTAssertTrue(app.navigationBars.staticTexts["A more native way to work"].exists, "Reopening must preserve the chat title")
+            XCUIDevice.shared.press(.home); app.activate()
+            XCTAssertTrue(latest.waitForExistence(timeout: 3), "Returning cycle \(cycle) must retain the transcript")
+            XCTAssertTrue(latest.isHittable)
+            XCTAssertTrue(app.navigationBars.staticTexts["A more native way to work"].exists, "Returning must preserve the chat title")
+            XCTAssertLessThan(latest.frame.maxY, app.textFields["chat-input"].frame.minY)
+        }
+        capture("Loaded conversation remains visible after three reopen and resume cycles")
+    }
+    func testSwitchingFromNestedSettingsResetsTheDetailDestination() {
+        let app = launch()
+        let latest = app.staticTexts["Latest response. This should appear in its final position immediately."]
+        XCTAssertTrue(latest.waitForExistence(timeout: 5))
+        revealSidebar(app); app.buttons["sidebar-settings"].tap()
+        app.buttons["Connections"].tap()
+        XCTAssertTrue(app.navigationBars["Connections"].waitForExistence(timeout: 3))
+        let task = app.buttons["sidebar-task-native"]
+        if !task.exists || !task.isHittable {
+            app.navigationBars["Connections"].buttons.firstMatch.tap()
+            revealSidebar(app)
+        }
+        task.tap()
+        XCTAssertTrue(latest.waitForExistence(timeout: 3)); XCTAssertTrue(latest.isHittable)
+        revealSidebar(app); app.buttons["sidebar-settings"].tap()
+        XCTAssertTrue(app.navigationBars["Settings"].waitForExistence(timeout: 3))
+        XCTAssertFalse(app.navigationBars["Connections"].exists, "A different sidebar destination must clear nested navigation")
+        capture("Switching from nested settings replaces the detail without replacing its navigation stack")
+    }
     func testCachedTailStaysInPlaceWhenFullHistoryArrives() {
         let app = launch()
         let latest = app.staticTexts["Latest response. This should appear in its final position immediately."]

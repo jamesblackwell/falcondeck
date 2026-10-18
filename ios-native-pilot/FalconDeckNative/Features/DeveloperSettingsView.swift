@@ -11,7 +11,7 @@ struct DeveloperSettingsView: View {
                 LabeledContent("Threads", value: String(sample.threads))
                 Toggle("Performance overlay", isOn: $overlay)
             }.listRowBackground(FD.surface)
-            Section("Connection") { NavigationLink("Connection log") { ConnectionLogView() } }.listRowBackground(FD.surface)
+            Section("Connection") { NavigationLink("Connection log", value: DetailDestination.connectionLog) }.listRowBackground(FD.surface)
         }.scrollContentBackground(.hidden).background(FD.background).navigationTitle("Developer")
             .task {
                 while !Task.isCancelled {

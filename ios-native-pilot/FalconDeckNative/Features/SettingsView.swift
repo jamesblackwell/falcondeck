@@ -5,19 +5,19 @@ struct SettingsView: View {
     var body: some View {
         List {
             Section {
-                NavigationLink { ConnectionSettingsView() } label: { Label("Connections", systemImage: "laptopcomputer.and.iphone") }
-                NavigationLink { ExtensionPanelsView() } label: { Label("Extensions", systemImage: "puzzlepiece.extension") }
-                NavigationLink { AutomationsView() } label: { Label("Automations", systemImage: "calendar.badge.clock") }
+                NavigationLink(value: DetailDestination.connections) { Label("Connections", systemImage: "laptopcomputer.and.iphone") }
+                NavigationLink(value: DetailDestination.extensions) { Label("Extensions", systemImage: "puzzlepiece.extension") }
+                NavigationLink(value: DetailDestination.automations) { Label("Automations", systemImage: "calendar.badge.clock") }
             }.listRowBackground(FD.surface)
             Section("Preferences") {
-                NavigationLink { AppearanceSettingsView() } label: { Label("Appearance", systemImage: "paintpalette") }
-                NavigationLink { ConversationSettingsView() } label: { Label("Conversation", systemImage: "text.bubble") }
-                NavigationLink { NotificationSettingsView() } label: { Label("Notifications", systemImage: "bell") }
-                NavigationLink { SpeechSettingsView() } label: { Label("Speech", systemImage: "mic") }
+                NavigationLink(value: DetailDestination.appearance) { Label("Appearance", systemImage: "paintpalette") }
+                NavigationLink(value: DetailDestination.conversation) { Label("Conversation", systemImage: "text.bubble") }
+                NavigationLink(value: DetailDestination.notifications) { Label("Notifications", systemImage: "bell") }
+                NavigationLink(value: DetailDestination.speech) { Label("Speech", systemImage: "mic") }
             }.listRowBackground(FD.surface)
             Section {
-                NavigationLink { DeveloperSettingsView() } label: { Label("Developer", systemImage: "gauge.with.dots.needle.33percent") }
-                NavigationLink { AboutView() } label: { Label("About FalconDeck", systemImage: "info.circle") }
+                NavigationLink(value: DetailDestination.developer) { Label("Developer", systemImage: "gauge.with.dots.needle.33percent") }
+                NavigationLink(value: DetailDestination.about) { Label("About FalconDeck", systemImage: "info.circle") }
             }.listRowBackground(FD.surface)
         }.scrollContentBackground(.hidden).background(FD.background).navigationTitle("Settings")
     }
@@ -61,7 +61,7 @@ struct ConnectionSettingsView: View {
             }.listRowBackground(FD.surface)
             Section {
                 Button("Pair a computer") { model.showConnection = true }
-                NavigationLink("Connection log") { ConnectionLogView() }
+                NavigationLink("Connection log", value: DetailDestination.connectionLog)
                 if model.hasSession {
                     Button("Forget this connection", role: .destructive) { confirmForget = true }.disabled(model.busy)
                 }
@@ -85,5 +85,28 @@ struct AboutView: View {
                 Link("Source code", destination: URL(string: "https://github.com/jamesblackwell/falcondeck")!)
             }.listRowBackground(FD.surface)
         }.scrollContentBackground(.hidden).background(FD.background).navigationTitle("About")
+    }
+}
+
+// The detail stack owns one explicit path so selecting a sidebar destination
+// clears nested pages without replacing the navigation controller itself.
+enum DetailDestination: Hashable {
+    case connections, extensions, automations, appearance, conversation, notifications, speech, developer, about, connectionLog
+    case extensionPanel(extensionID: String, contribution: JSON)
+
+    @MainActor @ViewBuilder var view: some View {
+        switch self {
+        case .connections: ConnectionSettingsView()
+        case .extensions: ExtensionPanelsView()
+        case .automations: AutomationsView()
+        case .appearance: AppearanceSettingsView()
+        case .conversation: ConversationSettingsView()
+        case .notifications: NotificationSettingsView()
+        case .speech: SpeechSettingsView()
+        case .developer: DeveloperSettingsView()
+        case .about: AboutView()
+        case .connectionLog: ConnectionLogView()
+        case .extensionPanel(let extensionID, let contribution): ExtensionPanelView(extensionID: extensionID, contribution: contribution)
+        }
     }
 }

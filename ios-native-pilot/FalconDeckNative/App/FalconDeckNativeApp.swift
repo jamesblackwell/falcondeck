@@ -65,6 +65,7 @@ struct RootView: View {
     @AppStorage("native.debug.overlay") private var showPerformance = false
     @State private var compactColumn: NavigationSplitViewColumn = .sidebar
     @State private var columnVisibility: NavigationSplitViewVisibility = .all
+    @State private var detailPath: [DetailDestination] = []
     var body: some View {
         @Bindable var model = model
         Group {
@@ -93,9 +94,16 @@ struct RootView: View {
             }
                 .navigationSplitViewColumnWidth(min: 280, ideal: 320, max: 380)
         } detail: {
-            NavigationStack {
-                destination
-            }.id(model.selection).navigationBarTitleDisplayMode(.inline)
+            // Keep the navigation controller stable while the compact column
+            // opens. Replacing the stack can deliver disappearance to the new
+            // transcript, cancelling its initial scroll and read acknowledgement.
+            NavigationStack(path: $detailPath) {
+                ZStack { destination.id(model.selection) }
+                    // Keep the root title's preference provider stable too;
+                    // a removed destination can otherwise clear the new title.
+                    .navigationTitle(detailTitle)
+                    .navigationDestination(for: DetailDestination.self) { $0.view }
+            }.navigationBarTitleDisplayMode(.inline)
         }
         .navigationSplitViewStyle(.balanced)
         .onAppear {
@@ -107,8 +115,25 @@ struct RootView: View {
         // Sidebar taps also reveal an unchanged selection. This observer handles
         // destinations opened elsewhere, including incoming notifications.
         .onChange(of: model.selection) { _, selection in
+            var reset = Transaction(); reset.disablesAnimations = true
+            withTransaction(reset) { detailPath.removeAll() }
             if selection != nil && sizeClass == .compact { compactColumn = .detail }
         }
+    }
+    private var detailTitle: String {
+        switch model.selection {
+        case .task(let id): model.task(id)?.title.nonempty ?? "New task"
+        case .draft(let projectID, _): projectTitle(model.projects.first { $0.id == projectID })
+        case .activity: "Activity"
+        case .archived: "Archived tasks"
+        case .settings: "Settings"
+        case .automations: "Automations"
+        case .projects, nil: projectTitle(model.sortedProjects.first { $0.raw["kind"].string == "casual" } ?? model.sortedProjects.first)
+        }
+    }
+    private func projectTitle(_ project: Project?) -> String {
+        guard let project else { return "FalconDeck" }
+        return project.raw["kind"].string == "casual" ? "New chat" : project.name
     }
     @ViewBuilder private var destination: some View {
         switch model.selection {

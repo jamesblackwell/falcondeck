@@ -1,31 +1,26 @@
 import SwiftUI
-import Observation
 
 /// Scroll a native list by its laid-out bounds. ScrollViewProxy retains an
 /// item index until SwiftUI's next collection update; that index can be invalid
 /// when a streamed tool group changes rows or its conversation disappears.
-@MainActor @Observable final class NativeListScrolling {
+@MainActor final class NativeListScrolling {
     struct ReadingAnchor {
         fileprivate let view: ObjectIdentifier
         fileprivate let revision: Int
         fileprivate let rows: [(id: String, relativeY: CGFloat)]
     }
     private struct WeakRow { weak var view: UIView? }
-    private(set) var positioned = false
-    @ObservationIgnored private weak var view: UIScrollView?
-    @ObservationIgnored private weak var endRow: UIView?
-    @ObservationIgnored private var endHasContent = false
-    @ObservationIgnored private var rows: [String: WeakRow] = [:]
-    @ObservationIgnored private var scheduled: Task<Void, Never>?
-    @ObservationIgnored private var followsBottom = false
-    @ObservationIgnored private var active = false
-    @ObservationIgnored private var positionRevision = 0
-    @ObservationIgnored private var revealing = false
-    @ObservationIgnored private var adjusting = false
-    @ObservationIgnored private var restoration: (anchor: ReadingAnchor, revision: Int)?
-    @ObservationIgnored private var rowOrder: [String] = []
-    @ObservationIgnored private var rowPositions: [String: Int] = [:]
-    @ObservationIgnored private var requestedRow: (path: IndexPath, height: CGFloat)?
+    private weak var view: UIScrollView?
+    private var rows: [String: WeakRow] = [:]
+    private var scheduled: Task<Void, Never>?
+    private var followsBottom = false
+    private var active = false
+    private var positionRevision = 0
+    private var adjusting = false
+    private var restoration: (anchor: ReadingAnchor, revision: Int)?
+    private var rowOrder: [String] = []
+    private var rowPositions: [String: Int] = [:]
+    private var requestedRow: (path: IndexPath, height: CGFloat)?
 
     func updateRows(_ ids: [String]) {
         guard ids != rowOrder else { return }
@@ -47,10 +42,6 @@ import Observation
         rows[id] = WeakRow(view: row)
         if rows.count > 256 { rows = rows.filter { $0.value.view?.window != nil } }
     }
-    func registerEnd(_ row: UIView, hasContent: Bool) {
-        endRow = row; endHasContent = hasContent
-        revealWhenPositioned()
-    }
     func unregister(_ row: UIView, id: String) {
         if rows[id]?.view === row { rows.removeValue(forKey: id) }
     }
@@ -64,7 +55,6 @@ import Observation
             // A request queued before touch-down must not fight that gesture.
             guard !view.isTracking, !view.isDragging, !view.isDecelerating else { return }
             self.moveToBottom(view, animated: animated)
-            self.revealWhenPositioned()
         }
         return scheduled
     }
@@ -81,23 +71,6 @@ import Observation
             if abs(view.contentOffset.y - y) > 0.5 {
                 UIView.performWithoutAnimation { view.setContentOffset(CGPoint(x: view.contentOffset.x, y: y), animated: false) }
             }
-        }
-        revealWhenPositioned()
-    }
-    private func revealWhenPositioned() {
-        guard !positioned, !revealing, active, endHasContent else { return }
-        revealing = true
-        // Publishing outside UIKit's layout callback avoids changing SwiftUI
-        // state during its update. The actual last row must be in the viewport;
-        // an estimated content height alone is not a readiness signal.
-        DispatchQueue.main.async { [weak self] in
-            guard let self else { return }; self.revealing = false
-            guard self.active, self.endHasContent, let view = self.view, let row = self.endRow,
-                  row.window != nil, row.isDescendant(of: view), abs(view.contentOffset.y - self.bottomOffset(view)) <= 1 else { return }
-            let frame = row.convert(row.bounds, to: view)
-            let bottom = view.contentOffset.y + view.bounds.height - view.adjustedContentInset.bottom
-            guard frame.minY >= view.contentOffset.y + view.adjustedContentInset.top - 1, frame.maxY <= bottom + 1 else { return }
-            self.positioned = true
         }
     }
     /// Explicit navigation owns the scroll immediately, including during momentum.
@@ -203,24 +176,22 @@ import Observation
 struct NativeListScrollProbe: UIViewRepresentable {
     let scrolling: NativeListScrolling
     var rowID: String? = nil
-    var endHasContent: Bool? = nil
     var rowOrder: [String] = []
     func makeUIView(context: Context) -> Probe {
         scrolling.updateRows(rowOrder)
-        return Probe(scrolling: scrolling, rowID: rowID, endHasContent: endHasContent)
+        return Probe(scrolling: scrolling, rowID: rowID)
     }
     func updateUIView(_ uiView: Probe, context: Context) {
         scrolling.updateRows(rowOrder)
         if uiView.rowID != rowID || uiView.scrolling !== scrolling, let old = uiView.rowID { uiView.scrolling?.unregister(uiView, id: old) }
-        uiView.scrolling = scrolling; uiView.rowID = rowID; uiView.endHasContent = endHasContent; uiView.attach()
+        uiView.scrolling = scrolling; uiView.rowID = rowID; uiView.attach()
     }
 
     final class Probe: UIView {
         weak var scrolling: NativeListScrolling?
         var rowID: String?
-        var endHasContent: Bool?
-        init(scrolling: NativeListScrolling, rowID: String?, endHasContent: Bool? = nil) {
-            self.scrolling = scrolling; self.rowID = rowID; self.endHasContent = endHasContent; super.init(frame: .zero)
+        init(scrolling: NativeListScrolling, rowID: String?) {
+            self.scrolling = scrolling; self.rowID = rowID; super.init(frame: .zero)
             isUserInteractionEnabled = false; backgroundColor = .clear
         }
         required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
@@ -232,7 +203,6 @@ struct NativeListScrollProbe: UIViewRepresentable {
         }
         override func layoutSubviews() {
             super.layoutSubviews()
-            if let endHasContent { scrolling?.registerEnd(self, hasContent: endHasContent) }
             scrolling?.layoutUpdated()
         }
         func attach() {
@@ -242,7 +212,6 @@ struct NativeListScrollProbe: UIViewRepresentable {
                 if let list = current as? UICollectionView {
                     scrolling?.attach(list)
                     if let rowID { scrolling?.register(self, id: rowID) }
-                    if let endHasContent { scrolling?.registerEnd(self, hasContent: endHasContent) }
                     return
                 }
                 ancestor = current.superview

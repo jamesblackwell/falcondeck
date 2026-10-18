@@ -192,10 +192,23 @@ on the paired iPhone over Wi-Fi. Expo, production, OTA and TestFlight were uncha
 
 ## Conversation presentation — 18 October 2026
 
-Cached chats reuse their existing session in the opening frame. The transcript
-is revealed once its actual last row is positioned, and row-layout callbacks
-keep following at the bottom before display. History/token revisions suppress
-native insertion animations; explicit disclosure and press animations remain.
+Cached chats reuse their existing session in the opening frame. Loaded messages
+always remain visible and interactive, independently of UIKit row realization
+or scroll position. A previous end-row readiness gate could remain unset after
+navigation or resume and leave real content invisible; that gate and its queued
+publication have been removed. Row-layout callbacks still align the bottom
+before display. History/token revisions suppress native insertion animations;
+explicit disclosure and press animations remain.
+
+The detail NavigationStack keeps its controller identity across sidebar selections;
+only the destination and explicit nested navigation path reset. Settings,
+connection logs and extension panels use that path. A stable root container also
+owns the root title so a disappearing destination cannot clear its replacement's
+navigation title. Rebuilding the stack while the compact column opened
+could deliver onDisappear to the newly visible transcript, cancel scrolling and
+read acknowledgement, and strand the old visibility gate. Repeated navigation and
+resume checks cover this sequence; nested Settings navigation also resets when
+switching destinations.
 
 Refreshes preserve the visible reading message and its relative position. When
 List recycles that cell, restoration resolves its stable ID against the current
@@ -204,12 +217,18 @@ metadata and disappearing cells are rejected. Gestures, explicit jumps and
 navigation cancel restoration. No fixed loading delay, permanent frame timer or
 new data store is used in production; the slow history fixture is local QA only.
 
-Validation: all 260 optimized unit tests passed, including a real UICollectionView
-recycled-cell/stale-index regression. Focused loading and reading-position UI
-checks passed on iPhone and iPad simulators; phone streaming/reading checks,
-tablet streaming and image recovery checks passed too. Recordings and screenshots
-were inspected. Native-only Autoreview (`.agents/skills/autoreview/scripts/autoreview
---mode local --max-priority P2 --prompt-file settling-review-context.md` in an
-isolated worktree) finished clean. The optimized development build passed strict
-signature verification and was installed on the iPhone over Wi-Fi. Expo,
+Validation: all 260 optimized unit tests passed, including ordinary-row following
+without an end marker, reactivation, and real UICollectionView recycled-cell/index
+regressions. Focused iPhone/iPad simulator checks cover cached/full-history
+replacement, reading during refresh, three reopen/background/foreground cycles,
+visible chat titles, and switching out of nested Settings. Settings navigation,
+connection diagnostics, streaming/reading and image recovery checks also passed
+during this fix. On the physical iPhone the final signed build passed three
+reopen/resume cycles with visible messages and title using local content; earlier
+checks also covered nested navigation. Screenshots were visually inspected.
+Native-only Autoreview (`.agents/skills/autoreview/scripts/autoreview --mode local
+--max-priority P2 --prompt-file blank-review-context.md` in an isolated worktree)
+finished clean. The optimized development build passed strict signature
+verification, was installed over Wi-Fi, and was relaunched without QA arguments
+for its normal paired session. QA did not start any turns on the paired relay. Expo,
 production, OTA and TestFlight were unchanged.
