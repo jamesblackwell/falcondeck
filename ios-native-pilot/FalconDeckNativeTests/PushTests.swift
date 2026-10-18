@@ -1,4 +1,5 @@
 import XCTest
+import os
 @testable import FalconDeckNative
 
 private actor PushHTTPMock: PushHTTP {
@@ -56,6 +57,33 @@ private actor PushRelay: RelayServing {
         }
         let liveRequests = await http.requests
         XCTAssertFalse(liveRequests.isEmpty, "The live snapshot must apply the actual notification policy")
+    }
+    func testSlowerCredentialReadCannotUndoANewerNotificationPreference() async throws {
+        let saved = target().session, gate = DispatchSemaphore(value: 0)
+        let calls = OSAllocatedUnfairLock(initialState: 0)
+        let suite = "PushOrderingTests-\(UUID())", defaults = UserDefaults(suiteName: suite)!
+        defer { defaults.removePersistentDomain(forName: suite); gate.signal() }
+        defaults.set(true, forKey: "native.notifications.push")
+        let push = NativePushNotifications(defaults: defaults, sync: PushRegistrationSync(http: PushHTTPMock()))
+        let model = AppModel(relay: PushRelay(), voice: VoiceRecorder(defaults: defaults), push: push, notifications: LocalNotifications(defaults: defaults), sessionLoader: {
+            let count = calls.withLock { $0 += 1; return $0 }
+            if count == 1 { _ = gate.wait(timeout: .now() + 3) }
+            return saved
+        })
+        model.preferences = .object(["notifications": .object(["enabled": .bool(true)])])
+        model.hasSession = true; model.hasLiveSnapshot = true
+        let older = model.synchronizePush()
+        for _ in 0..<1000 {
+            if calls.withLock({ $0 > 0 }) { break }
+            try await Task.sleep(for: .milliseconds(1))
+        }
+        XCTAssertEqual(calls.withLock { $0 }, 1)
+        model.preferences = .object(["notifications": .object(["enabled": .bool(false)])])
+        await model.synchronizePush()?.value
+        XCTAssertEqual(push.status, PushSyncStatus.disabled.message)
+        gate.signal()
+        await older?.value
+        XCTAssertEqual(push.status, PushSyncStatus.disabled.message, "An older credential load must not re-enable event notifications")
     }
     func testLocalAlertsUseTheSameSessionScopedRoutingAsPush() throws {
         let destination = try XCTUnwrap(NotificationDestination(userInfo: ["sessionId": "origin", "workspaceId": "project", "threadId": "task"]))

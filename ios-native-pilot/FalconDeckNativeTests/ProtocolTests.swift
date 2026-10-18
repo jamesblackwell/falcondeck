@@ -81,6 +81,15 @@ final class ProtocolTests: XCTestCase {
         XCTAssertThrowsError(try RelayCrypto.bootstrap(material, session: otherClient))
     }
 
+    func testChunkMetadataMustUseNonnegativeWholeNumbers() {
+        let chunk = JSON.object(["type": .string("transport-chunk"), "id": .number(1), "index": .number(0), "total": .number(1), "data": .string(Data([65]).base64EncodedString())])
+        for field in ["id", "index", "total"] {
+            for invalid in [JSON.number(-1), .number(0.5), .number(1.5), .string("0"), .null] {
+                var receiver = ChunkReceiver()
+                XCTAssertThrowsError(try receiver.receive(chunk.setting(field, invalid)), "Invalid \(field): \(invalid)")
+            }
+        }
+    }
     func testChunkReassemblyAndOrderingAndWirePrefix() throws {
         var receiver = ChunkReceiver()
         let first = Data(repeating: 65, count: 11 * 1024), last = Data("tail".utf8)
@@ -93,5 +102,20 @@ final class ProtocolTests: XCTestCase {
         let ack = JSON.object(["type": .string("transport-ack"), "id": .number(1), "index": .number(0)])
         XCTAssertTrue(try ack.wireText().hasPrefix("{\"type\":\"transport-ack\""))
         XCTAssertEqual(try JSON.decode(Data(ack.wireText().utf8)), ack)
+    }
+    func testCancellationOnlyResetsItsOwnIncomingTransfer() throws {
+        var receiver = ChunkReceiver()
+        let first = Data(repeating: 65, count: 11 * 1024), last = Data("tail".utf8)
+        func chunk(_ id: Int, _ index: Int, _ data: Data) -> JSON {
+            .object(["id": .number(Double(id)), "index": .number(Double(index)), "total": .number(Double(first.count + last.count)), "data": .string(data.base64EncodedString())])
+        }
+        XCTAssertNil(try receiver.receive(chunk(7, 0, first)))
+        receiver.cancel(id: 6) // A delayed cancellation belongs to the older transfer.
+        XCTAssertEqual(try receiver.receive(chunk(7, 1, last)), first + last)
+        XCTAssertNil(try receiver.receive(chunk(8, 0, first)))
+        receiver.cancel(id: 8)
+        XCTAssertThrowsError(try receiver.receive(chunk(8, 1, last)))
+        XCTAssertNil(try receiver.receive(chunk(9, 0, first)))
+        XCTAssertEqual(try receiver.receive(chunk(9, 1, last)), first + last)
     }
 }

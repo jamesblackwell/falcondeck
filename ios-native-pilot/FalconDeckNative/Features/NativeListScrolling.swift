@@ -33,8 +33,8 @@ import SwiftUI
     func unregister(_ row: UIView, id: String) {
         if rows[id]?.view === row { rows.removeValue(forKey: id) }
     }
-    func bottom(animated: Bool) {
-        guard active else { return }
+    @discardableResult func bottom(animated: Bool) -> Task<Void, Never>? {
+        guard active else { return nil }
         wantsBottom = true
         scheduled?.cancel()
         scheduled = Task { @MainActor [weak self] in
@@ -45,6 +45,7 @@ import SwiftUI
             guard !view.isTracking, !view.isDragging, !view.isDecelerating else { return }
             self.moveToBottom(view, animated: animated)
         }
+        return scheduled
     }
     /// Explicit navigation owns the scroll immediately, including during momentum.
     /// It cannot be replaced by a queued automatic follow request.
@@ -78,8 +79,8 @@ import SwiftUI
         guard !visible.isEmpty else { return nil }
         return ReadingAnchor(view: ObjectIdentifier(view), revision: positionRevision, rows: visible)
     }
-    func restore(_ anchor: ReadingAnchor) {
-        guard anchor.revision == positionRevision else { return }
+    @discardableResult func restore(_ anchor: ReadingAnchor) -> Task<Void, Never>? {
+        guard anchor.revision == positionRevision else { return nil }
         cancel()
         let revision = positionRevision
         scheduled = Task { @MainActor [weak self] in
@@ -99,6 +100,7 @@ import SwiftUI
             let y = min(bottom, max(top, row.convert(row.bounds, to: view).minY - target.relativeY))
             view.setContentOffset(CGPoint(x: view.contentOffset.x, y: y), animated: false)
         }
+        return scheduled
     }
 }
 

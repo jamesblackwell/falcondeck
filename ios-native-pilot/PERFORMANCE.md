@@ -101,3 +101,20 @@ The optimized build was installed successfully on the paired iPhone over Wi-Fi.
 A normal launch was attempted with no fixture arguments; iOS refused it because
 the device was locked. Open Falcon Native after unlocking to use the new build.
 The installed app's signature verifies and retains development APNs entitlements.
+
+
+## Fresh code review — 18 October 2026
+
+A separate reread and commit review of `61c5db40` found no additional Autoreview
+findings. Manual regression tests exposed duplicate concurrent startup and stale
+notification policy after out-of-order credential reads; both now have passing
+regressions. Startup guards before its first suspension, and only the latest
+push-sync request can configure notifications. Duplicate queued requests are
+coalesced before reading credentials.
+
+Incoming chunks now reject missing, negative, fractional and nonnumeric indexes;
+transfer cancellation only affects the matching incoming transfer. Scrolling
+requests return awaitable task handles, so tests await completion instead of
+using a fixed delay. All 240 optimized unit tests and three optimized UI scenarios
+each on iPhone/iPad simulators passed. The isolated native-only fix review used
+`autoreview --mode local --max-priority P2` and returned no actionable findings.

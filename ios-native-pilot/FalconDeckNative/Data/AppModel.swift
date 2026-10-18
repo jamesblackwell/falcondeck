@@ -97,6 +97,7 @@ final class AppModel {
     @ObservationIgnored var pendingSelection: Destination?
     var preferences = JSON.object([:]) { didSet { preferencesRevision += 1; synchronizePush(); schedulePreviewSave() } }
     @ObservationIgnored var preferencesRevision = 0
+    @ObservationIgnored var pushSyncID = UUID()
     @ObservationIgnored var preferenceWrite: (id: UUID, task: Task<Void, Error>)?
     var requests: [JSON] = []
     var serviceNotices: [JSON] = []
@@ -115,7 +116,8 @@ final class AppModel {
     @ObservationIgnored var itemCacheOrder: [String] = []
     var chats: [String: ChatSession] = [:]
     var lastEventSeq = 0
-    private var observation: Task<Void, Never>?
+    @ObservationIgnored private var observation: Task<Void, Never>?
+    @ObservationIgnored private var startupInFlight = false
     @ObservationIgnored var reconnectTask: Task<Void, Never>?
     @ObservationIgnored private var networkMonitor: NetworkMonitor?
     var reconnectAttempt = 0
@@ -123,8 +125,10 @@ final class AppModel {
     var foreground = true
 
     func start() async {
-        guard observation == nil else { return }
+        guard observation == nil, !startupInFlight else { return }
+        startupInFlight = true
         defer {
+            startupInFlight = false
             restoringSession = false
             consumeQueuedPairingPayload()
         }

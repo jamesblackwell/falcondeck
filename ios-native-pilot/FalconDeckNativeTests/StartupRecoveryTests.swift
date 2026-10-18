@@ -13,6 +13,21 @@ import XCTest
         let model = AppModel(relay: relay, voice: VoiceRecorder(defaults: defaults), push: NativePushNotifications(defaults: defaults), notifications: LocalNotifications(defaults: defaults), sessionLoader: { session }, sessionCacheRoot: cache, inputDraftRoot: input)
         return (model, session, input, cache)
     }
+    func testConcurrentStartupSubscribesAndRestoresOnlyOnce() async throws {
+        let relay = StartupSubscriptionRelay()
+        let (model, _, _, _) = try fixture(relay: relay)
+        let first = Task { await model.start() }
+        for _ in 0..<1000 {
+            if await relay.subscriptions > 0 { break }
+            try await Task.sleep(for: .milliseconds(1))
+        }
+        await model.start() // A second scene starts while the first awaits events().
+        await relay.release()
+        await first.value
+        let subscriptions = await relay.subscriptions, restores = await relay.restores
+        XCTAssertEqual(subscriptions, 1, "Two scenes must share one event subscription")
+        XCTAssertEqual(restores, 1, "Concurrent startup must not replace the active connection")
+    }
     func testCorruptNavigationDoesNotDiscardRecoveredInputOrDisableSaving() async throws {
         let (model, session, root, _) = try fixture(relay: UnavailablePreviewRelay())
         let store = try DraftStore(session: session, root: root)
@@ -64,6 +79,24 @@ private actor PausedStartupRelay: RelayServing {
         if id == "old-task", !released { await withCheckedContinuation { gate = $0 } }
     }
     func events() -> AsyncStream<RelayUpdate> { AsyncStream { $0.finish() } }
+    func restore(connectionID: UUID) -> Bool { restores += 1; return true }
+    func pair(_ input: PairingInput, connectionID: UUID) { }
+    func disconnect(forget: Bool) { }
+    func refresh() { }
+    func detail(task: AgentTask, before: String?) -> JSON { .null }
+    func call(_ method: String, params: JSON) -> JSON { .null }
+}
+
+private actor StartupSubscriptionRelay: RelayServing {
+    private var gate: CheckedContinuation<AsyncStream<RelayUpdate>, Never>?
+    private(set) var subscriptions = 0
+    private(set) var restores = 0
+    func events() async -> AsyncStream<RelayUpdate> {
+        subscriptions += 1
+        if subscriptions == 1 { return await withCheckedContinuation { gate = $0 } }
+        return AsyncStream { $0.finish() }
+    }
+    func release() { gate?.resume(returning: AsyncStream { $0.finish() }); gate = nil }
     func restore(connectionID: UUID) -> Bool { restores += 1; return true }
     func pair(_ input: PairingInput, connectionID: UUID) { }
     func disconnect(forget: Bool) { }

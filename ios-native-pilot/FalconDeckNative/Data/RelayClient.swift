@@ -8,8 +8,8 @@ struct ChunkReceiver {
     private var bytes = Data()
     private var started = Date.distantPast
     mutating func receive(_ frame: JSON) throws -> Data? {
-        let chunkID = frame["id"].int, chunkIndex = frame["index"].int, size = frame["total"].int
-        guard chunkID > 0, size > 0, size <= 40 * 1024 * 1024,
+        guard let chunkID = frame["id"].optionalInt, let chunkIndex = frame["index"].optionalInt, let size = frame["total"].optionalInt,
+              chunkID > 0, size > 0, size <= 40 * 1024 * 1024,
               let part = Data(base64Encoded: frame["data"].string), !part.isEmpty, part.count <= 11 * 1024 else {
             throw PilotError("Invalid relay transfer.")
         }
@@ -24,6 +24,9 @@ struct ChunkReceiver {
         let result = bytes
         self = .init()
         return result
+    }
+    mutating func cancel(id: Int) {
+        if id > 0, id == self.id { self = .init() }
     }
 }
 
@@ -206,7 +209,8 @@ actor RelayClient: RelayServing {
                     try await send(.object(["type": .string("transport-ack"), "id": frame["id"], "index": frame["index"]]))
                     guard current == generation else { return }
                     if let complete { try await handle(JSON.decode(complete), generation: current) }
-                case "transport-cancel": chunks = .init()
+                case "transport-cancel":
+                    if let id = frame["id"].optionalInt { chunks.cancel(id: id) }
                 case "transport-ack":
                     if let upload, frame["id"].optionalInt == upload.id, let index = frame["index"].optionalInt {
                         await upload.transfer.acknowledge(index)

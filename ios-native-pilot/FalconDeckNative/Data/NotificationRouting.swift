@@ -6,16 +6,20 @@ import Foundation
               let destination = NotificationDestination(userInfo: ["sessionId": session.sessionID, "workspaceId": workspaceID, "threadId": taskID]) else { return }
         notifications.announce(title: title, body: body, destination: destination)
     }
-    func synchronizePush() {
+    @discardableResult func synchronizePush() -> Task<Void, Never>? {
         // Cached preferences are rendering hints, not permission to change a
         // remote registration. Wait for this connection's authoritative state.
-        guard !demo, hasSession, hasLiveSnapshot else { return }
+        guard !demo, hasSession, hasLiveSnapshot else { return nil }
         let loader = sessionLoader
-        let eventNotifications = preferences["notifications"]["enabled"] != .bool(false)
-        let current = connectionID
-        Task {
+        let current = connectionID, syncID = UUID()
+        pushSyncID = syncID
+        return Task {
+            // Coalesce requests queued by the same snapshot, and reject an
+            // older Keychain read if a newer policy won while it was loading.
+            guard current == connectionID, syncID == pushSyncID else { return }
             let session = await Task.detached { try? loader() }.value
-            guard current == connectionID, hasSession, hasLiveSnapshot, !demo else { return }
+            guard current == connectionID, syncID == pushSyncID, hasSession, hasLiveSnapshot, !demo else { return }
+            let eventNotifications = preferences["notifications"]["enabled"] != .bool(false)
             await push.configure(session: session, eventNotifications: eventNotifications)
         }
     }
