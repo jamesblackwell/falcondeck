@@ -8,7 +8,7 @@ struct ConversationView: View {
     private var current: AgentTask { model.task(task.id) ?? task }
     var body: some View {
         Group {
-            if let chat { ChatContent(task: current, chat: chat) }
+            if let session = chat ?? model.chats[task.id] { ChatContent(task: current, chat: session) }
             else { ActivityDiamond().frame(maxWidth: .infinity, maxHeight: .infinity).background(FD.background) }
         }
         .task(id: task.id) {
@@ -27,6 +27,7 @@ private struct ChatContent: View {
     @Bindable var chat: ChatSession
     @State private var scroll = TranscriptScrollState()
     @State private var listScrolling = NativeListScrolling()
+    @State private var readingAnchor: NativeListScrolling.ReadingAnchor?
     @State private var showGoal = false
     @State private var visible = false
     private var expansion: TranscriptExpansion? { chat.transcriptExpansion }
@@ -41,7 +42,9 @@ private struct ChatContent: View {
         let presentation = chat.presentation(preferences: preferences, running: task.running)
         let actions = presentation.actionIDs
         let blocks = presentation.blocks
+        let showsTranscript = blocks.isEmpty || listScrolling.positioned || !scroll.followLatest
         let activity = !chat.loading && chat.historyError == nil && (model.connected || model.demo) ? ConversationActivity.label(blocks: blocks, running: task.running, submitting: chat.sending) : nil
+        let rowOrder = (chat.hasOlder ? ["earlier"] : []) + blocks.map(\.id) + (activity == nil ? [] : ["activity"]) + ["latest"]
         Group {
             List {
                 Group {
@@ -52,20 +55,20 @@ private struct ChatContent: View {
                             Task { await model.loadChat(task, older: true); if let anchor { listScrolling.restore(anchor) } }
                         } label: { HStack { if chat.loading { ActivityDiamond() }; Text("Load earlier messages") }.frame(maxWidth: .infinity) }
                             .font(.footnote).foregroundStyle(FD.secondary).disabled(chat.loading)
-                            .listRowBackground(NativeListScrollProbe(scrolling: listScrolling))
+                            .listRowBackground(NativeListScrollProbe(scrolling: listScrolling, rowOrder: rowOrder))
                     }
                     ForEach(blocks) { block in
                         Group {
                             if block.grouped { TranscriptGroup(block: block, task: task, expansion: expansion, onInteraction: stopFollowing).id(block.id) }
                             else if let item = block.items.first { TranscriptRow(message: item, task: task, firstDiff: block.firstDiff, showsActions: actions.contains(item.id), expansion: expansion, onInteraction: stopFollowing).id(item.id) }
                         }.frame(maxWidth: 820).frame(maxWidth: .infinity)
-                            .listRowBackground(NativeListScrollProbe(scrolling: listScrolling, rowID: block.id))
+                            .listRowBackground(NativeListScrollProbe(scrolling: listScrolling, rowID: block.id, rowOrder: rowOrder))
                     }
                     if let activity {
                         HStack(spacing: 8) { ActivityDiamond(); NativeActivityText(text: activity).font(.footnote).foregroundStyle(FD.secondary) }.frame(minHeight: 44).frame(maxWidth: 820, alignment: .leading).frame(maxWidth: .infinity)
-                            .listRowBackground(NativeListScrollProbe(scrolling: listScrolling))
+                            .listRowBackground(NativeListScrollProbe(scrolling: listScrolling, rowOrder: rowOrder))
                     }
-                    Color.clear.frame(height: 1).id("latest").listRowBackground(NativeListScrollProbe(scrolling: listScrolling))
+                    Color.clear.frame(height: 1).id("latest").listRowBackground(NativeListScrollProbe(scrolling: listScrolling, endHasContent: !blocks.isEmpty, rowOrder: rowOrder))
                 }
                 .listRowInsets(EdgeInsets(top: 6, leading: FD.inset, bottom: 6, trailing: FD.inset))
                 .listRowSeparator(.hidden)
@@ -74,6 +77,14 @@ private struct ChatContent: View {
             .listStyle(.plain).scrollContentBackground(.hidden)
             .environment(\.defaultMinListRowHeight, 0)
             .contentMargins(.vertical, 10, for: .scrollContent)
+            // History and token updates have no insertion animation. User
+            // disclosure/press animations keep their own unchanged transaction.
+            .transaction(value: chat.transcript.revision) { transaction in
+                transaction.animation = nil; transaction.disablesAnimations = true
+            }
+            .opacity(showsTranscript ? 1 : 0)
+            .allowsHitTesting(showsTranscript)
+            .accessibilityHidden(!showsTranscript)
             .accessibilityIdentifier("conversation-transcript")
             .onScrollGeometryChange(for: TranscriptGeometry.self) { g in
                 TranscriptGeometry(nearLatest: g.contentOffset.y + g.containerSize.height >= g.contentSize.height - 120, contentHeight: g.contentSize.height)
@@ -96,13 +107,19 @@ private struct ChatContent: View {
                 scroll.userScrolling = phase == .tracking || phase == .interacting || phase == .decelerating
                 // A drag expresses reading intent even if the near-end value did
                 // not cross its threshold during that gesture.
-                if phase == .interacting { scroll.followLatest = false; listScrolling.cancel() }
-                else if phase == .idle && (previous == .interacting || previous == .decelerating) && scroll.nearLatest {
-                    scroll.followLatest = true
+                if phase == .interacting { scroll.followLatest = false; readingAnchor = nil; listScrolling.cancel() }
+                else if phase == .idle && (previous == .interacting || previous == .decelerating) {
+                    scroll.followLatest = scroll.nearLatest
+                    if !scroll.followLatest { readingAnchor = listScrolling.readingAnchor() }
                 }
             }
             .scrollDismissesKeyboard(.interactively)
             .refreshable { if !task.isDraft { await model.loadChat(task) } }
+            .onChange(of: chat.loading) { _, loading in
+                guard !scroll.followLatest, !scroll.userScrolling else { return }
+                if loading { readingAnchor = listScrolling.readingAnchor() }
+                else if let anchor = readingAnchor { listScrolling.restore(anchor); readingAnchor = nil }
+            }
             .onChange(of: chat.transcript.revision) { _, _ in
                 // Token delivery must not restart a UIKit scrolling animation.
                 // Geometry updates follow the growing row without animation too.
@@ -164,8 +181,8 @@ private struct ChatContent: View {
         .sheet(item: $chat.queuedEdit) { QueuedMessageEditor(task: task, edit: $0) }
         .onAppear { visible = true; listScrolling.setActive(true); if chat.loaded { scrollToLatest(animated: false) } }
         .onDisappear { visible = false; listScrolling.setActive(false) }
-        .task(id: ConversationReadState(taskID: task.id, activitySeq: task.activitySeq, historyReady: chat.loaded && !chat.needsRefresh && !chat.loading && chat.historyError == nil, foreground: model.foreground, visible: visible)) {
-            guard visible, chat.loaded, !chat.needsRefresh, !chat.loading, chat.historyError == nil, model.foreground else { return }
+        .task(id: ConversationReadState(taskID: task.id, activitySeq: task.activitySeq, historyReady: showsTranscript && chat.loaded && !chat.needsRefresh && !chat.loading && chat.historyError == nil, foreground: model.foreground, visible: visible)) {
+            guard visible, showsTranscript, chat.loaded, !chat.needsRefresh, !chat.loading, chat.historyError == nil, model.foreground else { return }
             do { try await Task.sleep(for: .milliseconds(600)) } catch { return }
             await model.markRead(task, automatic: true)
         }
@@ -224,7 +241,7 @@ private struct ChatContent: View {
         scroll.userScrolling = false; scroll.followLatest = true
         listScrolling.jump(animated: !reduceMotion)
     }
-    private func stopFollowing() { scroll.followLatest = false; listScrolling.cancel() }
+    private func stopFollowing() { scroll.followLatest = false; readingAnchor = listScrolling.readingAnchor() }
 }
 
 private struct TranscriptGeometry: Equatable {

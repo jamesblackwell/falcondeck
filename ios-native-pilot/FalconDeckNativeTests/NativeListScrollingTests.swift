@@ -15,6 +15,44 @@ import UIKit
         window.addSubview(view)
         return view
     }
+    private func finishLayoutCallbacks() async {
+        await withCheckedContinuation { continuation in DispatchQueue.main.async { continuation.resume() } }
+    }
+    func testMeasuredRowsStayAtTheBottomBeforeTheNextDisplayPass() async {
+        let window = UIWindow(), scrolling = NativeListScrolling(), view = viewport(in: window)
+        scrolling.attach(view); scrolling.setActive(true)
+        await scrolling.bottom(animated: false)?.value
+        view.contentSize.height = 4_000
+        scrolling.layoutUpdated()
+        XCTAssertEqual(view.contentOffset.y, 3_520, "History replacement must align synchronously, before displaying an old offset")
+        view.bounds.size.height = 600
+        scrolling.layoutUpdated(); XCTAssertEqual(view.contentOffset.y, 3_400)
+        scrolling.cancel(); view.contentOffset.y = 500; view.contentSize.height = 5_000
+        scrolling.layoutUpdated(); XCTAssertEqual(view.contentOffset.y, 500, "A reader's position must win over layout following")
+    }
+    func testPresentationWaitsForANonemptyVisibleEndRow() async {
+        let window = UIWindow(), scrolling = NativeListScrolling(), view = viewport(in: window)
+        let end = UIView(frame: CGRect(x: 0, y: 990, width: 320, height: 10)); view.addSubview(end)
+        scrolling.attach(view); scrolling.setActive(true)
+        await scrolling.bottom(animated: false)?.value
+        scrolling.registerEnd(end, hasContent: false); await finishLayoutCallbacks()
+        XCTAssertFalse(scrolling.positioned, "The empty loading list cannot reveal a later unpositioned history")
+        end.frame.origin.y = 100
+        scrolling.registerEnd(end, hasContent: true); await finishLayoutCallbacks()
+        XCTAssertFalse(scrolling.positioned, "An estimated offset does not prove the last row is visible")
+        end.frame.origin.y = 990
+        scrolling.registerEnd(end, hasContent: true); await finishLayoutCallbacks()
+        XCTAssertTrue(scrolling.positioned)
+    }
+    func testDisappearingListCannotPublishQueuedPresentationReadiness() async {
+        let window = UIWindow(), scrolling = NativeListScrolling(), view = viewport(in: window)
+        let end = UIView(frame: CGRect(x: 0, y: 990, width: 320, height: 10)); view.addSubview(end)
+        scrolling.attach(view); scrolling.setActive(true)
+        await scrolling.bottom(animated: false)?.value
+        scrolling.registerEnd(end, hasContent: true); scrolling.setActive(false)
+        await finishLayoutCallbacks()
+        XCTAssertFalse(scrolling.positioned)
+    }
     func testPendingScrollUsesCurrentLayoutAfterRowsAreReplaced() async {
         var pending: Task<Void, Never>?
         let window = UIWindow()
@@ -114,5 +152,46 @@ import UIKit
         XCTAssertEqual(view.contentOffset.y, 520, "An explicit jump must not wait for momentum to finish")
         await pending?.value
         XCTAssertEqual(view.contentOffset.y, 520)
+    }
+    func testRecycledReadingRowIsRecoveredOnlyAgainstTheCurrentCollection() async throws {
+        let scrolling = NativeListScrolling(), window = UIWindow(frame: CGRect(x: 0, y: 0, width: 320, height: 480))
+        let layout = UICollectionViewFlowLayout(); layout.itemSize = CGSize(width: 320, height: 80)
+        layout.minimumLineSpacing = 0; layout.minimumInteritemSpacing = 0
+        let view = OffsetCollection(frame: window.bounds, collectionViewLayout: layout)
+        view.register(UICollectionViewCell.self, forCellWithReuseIdentifier: "row")
+        let source = CollectionRows(ids: (40..<60).map { "row-\($0)" }, scrolling: scrolling)
+        defer { withExtendedLifetime(source) {}; window.isHidden = true }
+        scrolling.updateRows(source.ids); view.dataSource = source; window.addSubview(view)
+        view.reloadData(); view.layoutIfNeeded(); scrolling.attach(view); scrolling.setActive(true)
+        view.setContentOffset(CGPoint(x: 0, y: 830), animated: false); view.layoutIfNeeded()
+        await finishLayoutCallbacks()
+        let anchor = try XCTUnwrap(scrolling.readingAnchor())
+        source.ids = (0..<60).map { "row-\($0)" }; view.reloadData(); view.layoutIfNeeded()
+        await finishLayoutCallbacks()
+        await scrolling.restore(anchor)?.value
+        XCTAssertLessThan(view.contentOffset.y, 2_000, "Stale row metadata must not supply an index to a new collection")
+        let restored = expectation(description: "Recovered the same row and its 30-point reading offset")
+        view.offsetChanged = { y in if abs(y - 4_030) < 1 { restored.fulfill() } }
+        scrolling.updateRows(source.ids); scrolling.layoutUpdated(); view.layoutIfNeeded()
+        await fulfillment(of: [restored], timeout: 2)
+        XCTAssertEqual(view.contentOffset.y, 4_030, accuracy: 1)
+    }
+
+    private final class OffsetCollection: UICollectionView {
+        var offsetChanged: ((CGFloat) -> Void)?
+        override func setContentOffset(_ contentOffset: CGPoint, animated: Bool) {
+            super.setContentOffset(contentOffset, animated: animated); offsetChanged?(self.contentOffset.y)
+        }
+    }
+    private final class CollectionRows: NSObject, UICollectionViewDataSource {
+        var ids: [String]
+        let scrolling: NativeListScrolling
+        init(ids: [String], scrolling: NativeListScrolling) { self.ids = ids; self.scrolling = scrolling }
+        func collectionView(_ collectionView: UICollectionView, numberOfItemsInSection section: Int) -> Int { ids.count }
+        func collectionView(_ collectionView: UICollectionView, cellForItemAt indexPath: IndexPath) -> UICollectionViewCell {
+            let cell = collectionView.dequeueReusableCell(withReuseIdentifier: "row", for: indexPath)
+            cell.backgroundView = NativeListScrollProbe.Probe(scrolling: scrolling, rowID: ids[indexPath.item])
+            return cell
+        }
     }
 }

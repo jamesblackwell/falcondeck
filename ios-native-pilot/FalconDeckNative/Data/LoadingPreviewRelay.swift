@@ -12,6 +12,10 @@ actor LoadingPreviewRelay: RelayServing {
     static let counts = JSON.object(Dictionary(uniqueKeysWithValues: projects.map {
         ($0.id, .object(["total": .number($0.id == "falcondeck" ? 3 : 1)]))
     }))
+    static let settlingHistory: [Message] = (0..<40).flatMap { index in [
+        Message(.object(["id": .string("settle-user-\(index)"), "kind": .string("user_message"), "text": .string("Review change \(index + 1) and keep the existing behavior.")])),
+        Message(.object(["id": .string("settle-answer-\(index)"), "kind": .string("assistant_message"), "text": .string(index == 39 ? "Latest response. This should appear in its final position immediately." : "## Change \(index + 1)\n\n" + String(repeating: "The layout should stay steady while the conversation loads. ", count: index % 4 + 1))]))
+    ] }
     private var historyRequests = 0
     private var preferences = Demo.preferences
     private let failFirst: Bool
@@ -28,9 +32,11 @@ actor LoadingPreviewRelay: RelayServing {
     func detail(task: AgentTask, before: String?) async throws -> JSON {
         historyRequests += 1
         let fails = failFirst && historyRequests == 1
-        try await Task.sleep(for: .seconds(5))
+        let settling = ProcessInfo.processInfo.arguments.contains("--loading-preview=settling")
+        let delay = settling ? ProcessInfo.processInfo.arguments.contains("--settling-slow") ? 10 : 2 : 5
+        try await Task.sleep(for: .seconds(delay))
         if fails { throw PilotError("The preview computer took too long to respond.") }
-        return .object(["thread": task.raw, "items": .array(Demo.messages.map(\.raw)), "has_older": .bool(false)])
+        return .object(["thread": task.raw, "items": .array((settling ? Self.settlingHistory : Demo.messages).map(\.raw)), "has_older": .bool(false)])
     }
     func call(_ method: String, params: JSON) async throws -> JSON {
         if method == "provider.hydrate" {

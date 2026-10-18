@@ -310,6 +310,11 @@ final class AppModel {
                 chat.transcript.items = Demo.messages; chat.loaded = true; chat.needsRefresh = true
                 cachedAt = .now
             }
+            if ProcessInfo.processInfo.arguments.contains("--loading-preview=settling"), let task = tasks.first {
+                let chat = chat(for: task); chat.loaded = true; chat.needsRefresh = true; chat.hasOlder = true
+                chat.transcript.items = Array(LoadingPreviewRelay.settlingHistory.suffix(16))
+                cachedAt = .now; selection = .task(task.id)
+            }
             if ProcessInfo.processInfo.arguments.contains("--loading-preview=connecting") || ProcessInfo.processInfo.arguments.contains("--loading-preview=empty") {
                 connected = false; hasLiveSnapshot = false; syncIndex = nil; status = "Connecting…"
                 if ProcessInfo.processInfo.arguments.contains("--loading-preview=empty") { projects = []; tasks = [] }

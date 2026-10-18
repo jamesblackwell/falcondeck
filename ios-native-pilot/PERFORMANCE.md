@@ -189,3 +189,27 @@ Autoreview (`.agents/skills/autoreview/scripts/autoreview --mode local
 finished clean after two verified cache-initialization races were fixed. The
 optimized development build passed strict signature verification and was installed
 on the paired iPhone over Wi-Fi. Expo, production, OTA and TestFlight were unchanged.
+
+## Conversation presentation — 18 October 2026
+
+Cached chats reuse their existing session in the opening frame. The transcript
+is revealed once its actual last row is positioned, and row-layout callbacks
+keep following at the bottom before display. History/token revisions suppress
+native insertion animations; explicit disclosure and press animations remain.
+
+Refreshes preserve the visible reading message and its relative position. When
+List recycles that cell, restoration resolves its stable ID against the current
+collection's row count and realized cell identities before using an index. Stale
+metadata and disappearing cells are rejected. Gestures, explicit jumps and
+navigation cancel restoration. No fixed loading delay, permanent frame timer or
+new data store is used in production; the slow history fixture is local QA only.
+
+Validation: all 260 optimized unit tests passed, including a real UICollectionView
+recycled-cell/stale-index regression. Focused loading and reading-position UI
+checks passed on iPhone and iPad simulators; phone streaming/reading checks,
+tablet streaming and image recovery checks passed too. Recordings and screenshots
+were inspected. Native-only Autoreview (`.agents/skills/autoreview/scripts/autoreview
+--mode local --max-priority P2 --prompt-file settling-review-context.md` in an
+isolated worktree) finished clean. The optimized development build passed strict
+signature verification and was installed on the iPhone over Wi-Fi. Expo,
+production, OTA and TestFlight were unchanged.

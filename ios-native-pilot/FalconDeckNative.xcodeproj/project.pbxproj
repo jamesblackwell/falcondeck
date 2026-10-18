@@ -24,6 +24,7 @@
 		134C76AC2C036B54F33862E1 /* NativeListScrollingTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 983A9DFB86A38F96D1D69EE2 /* NativeListScrollingTests.swift */; };
 		149F05F2245270BC57838768 /* LoadingPreviewRelay.swift in Sources */ = {isa = PBXBuildFile; fileRef = DBB126BA06F3597D8F820373 /* LoadingPreviewRelay.swift */; };
 		159126A64A6E265097F9773E /* AutomationEditorView.swift in Sources */ = {isa = PBXBuildFile; fileRef = CEECDD653CB6C9377BB2BABF /* AutomationEditorView.swift */; };
+		17F8107EE006CF70152364C0 /* ConversationLoadingQATests.swift in Sources */ = {isa = PBXBuildFile; fileRef = BD371329FA7F098CA025CB61 /* ConversationLoadingQATests.swift */; };
 		1B73C53563A77DCBFF8BC49A /* NativeMotion.swift in Sources */ = {isa = PBXBuildFile; fileRef = C6A68935F0E396694EE0D3B7 /* NativeMotion.swift */; };
 		1CD9200164829F2C0C1D28CF /* NativeAppearance.swift in Sources */ = {isa = PBXBuildFile; fileRef = 442A4132DA6ED6163D931BC7 /* NativeAppearance.swift */; };
 		1E886A7C75DDFCAC66A578A0 /* LocalNotifications.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0425536D3162A63CF5341E63 /* LocalNotifications.swift */; };
@@ -300,6 +301,7 @@
 		B4DE01C9A23E93D617C80776 /* NetworkMonitor.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NetworkMonitor.swift; sourceTree = "<group>"; };
 		B4F5B200EA896AD3877A6291 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist; path = Info.plist; sourceTree = "<group>"; };
 		B5919E1ACD316A3F2E80CCC8 /* PairingFlow.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PairingFlow.swift; sourceTree = "<group>"; };
+		BD371329FA7F098CA025CB61 /* ConversationLoadingQATests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ConversationLoadingQATests.swift; sourceTree = "<group>"; };
 		BDFD49C7343F3873CA6B2CBD /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist; path = Info.plist; sourceTree = "<group>"; };
 		BF64180787F03484AD67C0C0 /* ComposerCatalog.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ComposerCatalog.swift; sourceTree = "<group>"; };
 		C5475B8650A18171591091CA /* VoiceComposerTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VoiceComposerTests.swift; sourceTree = "<group>"; };
@@ -520,6 +522,7 @@
 		B3B2BB09C083CAC860457964 /* FalconDeckNativeUITests */ = {
 			isa = PBXGroup;
 			children = (
+				BD371329FA7F098CA025CB61 /* ConversationLoadingQATests.swift */,
 				0F6A9857BE033A995E981821 /* ImageRecoveryQATests.swift */,
 				685578BE89CCBFBF7C19BC7C /* LoadingQATests.swift */,
 				EAB9A842816A2AC1D9338085 /* MotionQATests.swift */,
@@ -926,6 +929,7 @@
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				17F8107EE006CF70152364C0 /* ConversationLoadingQATests.swift in Sources */,
 				BE893B627EE993BC93760213 /* ImageRecoveryQATests.swift in Sources */,
 				8C81C801497C67BF0F9D0739 /* LoadingQATests.swift in Sources */,
 				C630ACC25E82F18FE7E50E6B /* MotionQATests.swift in Sources */,
