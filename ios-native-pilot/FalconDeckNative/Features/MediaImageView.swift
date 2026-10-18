@@ -11,61 +11,28 @@ struct MediaImageView: View {
     nonisolated init(reference: JSON, itemID: String? = nil, task: AgentTask? = nil, lifecycle: String = "") {
         self.reference = reference; self.itemID = itemID; self.task = task; self.lifecycle = lifecycle
     }
-    @State private var bytes: Data?
-    @State private var image: UIImage?
-    @State private var error: String?
-    @State private var loading = false
+    @State private var display = ImageDisplay()
     @State private var preview = false
-    @State private var loadID = UUID()
-    @State private var activeSource: String?
-    @State private var loadedSource: String?
-    private var sourceKey: String { "\(lifecycle):\(reference["url"].string):\(reference["local_path"].string)" }
+    private var resource: MediaImageResource { MediaImageResource(reference: reference, task: task, itemID: itemID, lifecycle: lifecycle) }
+    private var trigger: ImageLoadTrigger { ImageLoadTrigger(resource: resource, scope: model.sessionScope, connection: model.connectionID, cache: model.sessionCache.map(ObjectIdentifier.init), connected: model.connected, foreground: model.foreground) }
     private var label: String { reference["alt_text"].string.nonempty ?? reference["name"].string.nonempty ?? "Image" }
     var body: some View {
-        Group {
-            if let image {
+        ZStack {
+            if let image = display.image {
                 Button { preview = true } label: {
                     Image(uiImage: image).resizable().scaledToFit().frame(maxHeight: 320).clipShape(.rect(cornerRadius: 12))
                 }.buttonStyle(.plain).accessibilityLabel("Preview \(label)")
             } else {
-                Button { Task { await load() } } label: {
+                Button { Task { await display.load(resource, model: model) } } label: {
                     HStack(spacing: 8) {
-                        if loading || ["pending", "streaming"].contains(lifecycle) { ActivityDiamond() } else { Image(systemName: "photo") }
-                        Text(["pending", "streaming"].contains(lifecycle) ? "Generating image…" : error == nil ? "Load \(label)" : "Couldn't load image · Retry").font(.footnote)
+                        if display.loading || resource.generating { ActivityDiamond() } else { Image(systemName: "photo") }
+                        Text(resource.generating ? "Generating image…" : display.loading ? "Loading \(label)…" : display.error == nil ? "Load \(label)" : "Couldn't load image · Retry").font(.footnote)
                     }.padding(20).frame(maxWidth: .infinity).background(FD.raised, in: .rect(cornerRadius: 12))
-                }.buttonStyle(.plain).disabled(loading)
+                }.buttonStyle(.plain).disabled(display.loading)
             }
         }
-        .task(id: sourceKey) { await load() }
-        .sheet(isPresented: $preview) { if let bytes, let image { ImageDetailView(data: bytes, image: image, title: label) } }
-    }
-    private func load() async {
-        let sourceIdentity = sourceKey
-        guard loadedSource != sourceIdentity || image == nil else { return }
-        guard activeSource != sourceIdentity || !loading else { return }
-        let id = UUID(); loadID = id; activeSource = sourceIdentity
-        image = nil; bytes = nil; error = nil
-        if ["pending", "streaming"].contains(lifecycle), reference["url"].string.isEmpty { loading = false; activeSource = nil; return }
-        loading = true
-        defer { if loadID == id { loading = false; activeSource = nil } }
-        do {
-            var source = reference["url"].string
-            if MediaURL.data(source) == nil, MediaURL.external(source) == nil, let task, let itemID {
-                let item = try await model.fullItem(task, itemID: itemID)
-                if item["kind"].string == "image" { source = item["image"]["url"].string }
-                else {
-                    source = item["attachments"].array.first(where: { $0["id"] == reference["id"] })?["url"].string ?? ""
-                }
-            }
-            let data: Data
-            if let decoded = MediaURL.data(source) { data = decoded }
-            else if let url = MediaURL.external(source) {
-                data = try await BoundedImageDownload.shared.download(url)
-            } else { throw PilotError("This image is unavailable on this device.") }
-            let thumbnail = try await Task.detached { try NativeAttachment.prepare(data).data }.value
-            guard loadID == id, !Task.isCancelled, let decoded = UIImage(data: thumbnail) else { return }
-            bytes = data; image = decoded; loadedSource = sourceIdentity
-        } catch { if loadID == id, !Task.isCancelled { self.error = error.localizedDescription } }
+        .task(id: trigger) { await display.load(resource, model: model, foreground: model.foreground) }
+        .sheet(isPresented: $preview) { if let bytes = display.bytes, let image = display.image { ImageDetailView(data: bytes, image: image, title: label) } }
     }
 }
 

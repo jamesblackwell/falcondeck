@@ -70,7 +70,7 @@ final class AppModel {
     var hasLiveSnapshot = false
     var cachedAt: Date?
     @ObservationIgnored var previewTaskIDs: Set<String> = []
-    @ObservationIgnored var sessionCache: SessionCacheStore?
+    var sessionCache: SessionCacheStore?
     @ObservationIgnored var previewSave: Task<Void, Never>?
     var showConnection = false
     var pairingText = ""
@@ -349,6 +349,7 @@ final class AppModel {
         await PerformancePreview.start(in: self)
         StreamingPreview.start(in: self)
         MotionPreview.start(in: self)
+        await ImagePreview.start(in: self)
         #endif
     }
     func tasks(in project: Project) -> [AgentTask] {

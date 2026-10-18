@@ -169,3 +169,23 @@ was not installed because the phone was unavailable. Native-only Autoreview
 (`.agents/skills/autoreview/scripts/autoreview --mode local --max-priority P2`
 in an isolated review worktree) finished clean after both verified lifecycle
 findings were fixed. Expo, production, OTA and TestFlight were untouched.
+
+## Image recovery — 18 October 2026
+
+Resolved images now have a separate per-pairing encrypted display cache, bounded
+at 16 MiB in memory and 64 MiB / 128 files on disk, with seven-day expiry. The
+cache retains original bytes for export and a prepared thumbnail for display.
+Image loading observes foreground, connection generation/readiness, pairing scope
+and cache availability. A cache arriving after the image displays still saves
+that image. Cancelled or stale loads cannot replace another source or pairing.
+
+Validation: 256 optimized native unit tests passed, including nine image/cache
+regressions. The image recovery UI scenario passed on iPhone and iPad simulators:
+relay readiness, Home/return, offline cold relaunch, preview and delayed cache
+initialization. Phone and tablet screenshots were inspected. The same UI scenario
+failed with the old image view, confirming the reconnect regression. Native-only
+Autoreview (`.agents/skills/autoreview/scripts/autoreview --mode local
+--max-priority P2 --prompt-file image-review-context.md` in an isolated worktree)
+finished clean after two verified cache-initialization races were fixed. The
+optimized development build passed strict signature verification and was installed
+on the paired iPhone over Wi-Fi. Expo, production, OTA and TestFlight were unchanged.

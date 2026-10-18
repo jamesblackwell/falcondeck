@@ -33,6 +33,9 @@ struct FalconDeckNativeApp: App {
         if ProcessInfo.processInfo.arguments.contains("--demo") {
             let suite = "NativeDemoPreview", defaults = UserDefaults(suiteName: suite)!
             defaults.removePersistentDomain(forName: suite)
+            if ProcessInfo.processInfo.arguments.contains(where: { $0.hasPrefix("--image-preview=") }) {
+                return AppModel(relay: ImagePreviewRelay(), voice: VoiceRecorder(defaults: defaults), push: NativePushNotifications(defaults: defaults), notifications: LocalNotifications(defaults: defaults), sessionLoader: { nil })
+            }
             return AppModel(voice: VoiceRecorder(defaults: defaults), push: NativePushNotifications(defaults: defaults), notifications: LocalNotifications(defaults: defaults), sessionLoader: { nil })
         }
         #endif

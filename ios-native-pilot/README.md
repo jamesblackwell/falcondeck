@@ -105,6 +105,10 @@ and active approvals are excluded. New-task choices are remembered separately
 per workspace and harness, with access modes checked against current capabilities. Cached history remains visible
 while fresh history loads, and cannot automatically mark a task read until that
 refresh succeeds. No replay cursor or sync token is restored from this cache.
+Resolved images have a separate encrypted display cache: 16 MiB in memory,
+64 MiB / 128 files on disk, with a seven-day expiry. Original bytes are retained
+for sharing and saving. Missing images retry automatically when the app resumes,
+the relay reconnects, or the pairing's cache becomes available.
 The daemon and native agent storage remain authoritative. Forget removes this
 pairing's cache, input files and credentials. Revoke the trusted device from desktop settings if
 it should no longer connect.
