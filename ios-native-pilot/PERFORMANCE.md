@@ -261,3 +261,33 @@ selection. Native-only Autoreview (`.agents/skills/autoreview/scripts/autoreview
 isolated worktree) finished clean after fixing its refresh-ordering finding.
 The signed development build was installed over Wi-Fi. No Expo, daemon, relay,
 production, OTA or TestFlight code or deployments changed.
+
+## Desktop renames and pinned project icons — 18 October 2026
+
+The daemon's text coalescer advances a merged delta's sequence while preserving
+its original queue slot. A following thread summary can therefore arrive with a
+lower sequence. The native global sequence high-water mark silently discarded
+that summary, including desktop renames. Delivery deduplication now uses a
+bounded set of 8,192 recent sequences instead. Unseen lower sequences apply;
+duplicate text still applies only once. Connection resets clear the set, and
+existing timestamp guards continue to reject stale summaries and history reads.
+
+Globally pinned tasks show their project's existing favicon or fallback glyph.
+Row height, touch targets and activity indicators remain intact. Project headings
+and pins share pending icon reads and a pairing-scoped memory cache of at most
+64 decoded thumbnails, each at most 128 pixels. Reconnects retain those images;
+new etags fetch fresh ones. Changing the pairing cancels pending reads and clears
+the cache. Decoding runs off the UI actor; failed image reads remain retryable.
+
+Validation: the new rename regression failed before the fix for both batched and
+separate deliveries. All 272 optimized unit tests passed on the final source.
+Five iPhone simulator UI checks passed, including the new rename scenario and
+existing loading, reading-position, background/reopen and navigation regressions.
+The rename scenario also passed on iPad and the physical iPhone using only local
+test content. It verifies the open header, the pinned row and a delayed history
+response that must not restore the old name. Phone/tablet screenshots were
+visually inspected. Native-only Autoreview (`.agents/skills/autoreview/scripts/autoreview
+--mode local --max-priority P2 --prompt-file rename-review-context.md` in an
+isolated worktree) finished clean. The signed standalone development build was
+installed over Wi-Fi and launched normally afterward. No real agent turns were
+started; Expo, production, OTA and TestFlight were unchanged.

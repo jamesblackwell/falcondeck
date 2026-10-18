@@ -19,6 +19,27 @@ import XCTest
         for _ in 0..<3 where !option.isHittable { form.swipeUp() }
         return option
     }
+    func testDesktopRenameUpdatesOpenChatAndPinnedRowWhileAnotherChatStreams() {
+        let app = launch("rename")
+        let pinned = app.buttons["sidebar-task-native"]
+        XCTAssertTrue(pinned.waitForExistence(timeout: 5))
+        XCTAssertGreaterThanOrEqual(pinned.frame.height, 44)
+        capture("Pinned chats show compact project icons and status indicators")
+        pinned.tap()
+        let title = app.navigationBars.staticTexts["Renamed on desktop"]
+        XCTAssertTrue(title.waitForExistence(timeout: 8), "A desktop rename must update the open header without navigating away")
+        // Wait for the older in-flight history response as well: it must not
+        // overwrite the live title that arrived during the read.
+        XCTAssertTrue(app.otherElements["conversation-loading"].waitForNonExistence(timeout: 8))
+        XCTAssertTrue(app.staticTexts.matching(NSPredicate(format: "label CONTAINS 'Use the composer to continue the conversation'")).firstMatch.waitForExistence(timeout: 5))
+        XCTAssertTrue(title.exists)
+        capture("Open conversation retains its live title after history finishes")
+        if app.buttons["BackButton"].isHittable { app.buttons["BackButton"].tap() }
+        else if app.buttons["sidebar-toggle"].isHittable { app.buttons["sidebar-toggle"].tap() }
+        XCTAssertTrue(app.buttons["sidebar-task-native"].waitForExistence(timeout: 5))
+        XCTAssertTrue(app.buttons["sidebar-task-native"].label.contains("Renamed on desktop"))
+        capture("Desktop rename appears in the existing pinned row")
+    }
     func testAllHarnessesShowExistingModelAndReasoning() {
         for (provider, label) in [("codex", "GPT-5.4"), ("claude", "Fable 5.1"), ("opencode", "GLM 5 · openrouter")] {
             let app = launch("harness-" + provider)

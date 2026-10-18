@@ -1,5 +1,4 @@
 import SwiftUI
-import ImageIO
 
 struct ProjectOptionsView: View {
     @Environment(AppModel.self) private var model
@@ -99,15 +98,24 @@ struct WorkspaceGlyph: View {
             if model.preferences["workspace_icons"][project.id]["mode"].string == "folder" { Image(systemName: "folder") }
             else if let image { Image(uiImage: image).resizable().scaledToFit().frame(width: size, height: size).clipShape(.rect(cornerRadius: 5)) }
             else { ProjectIcon(name: project.name, size: size) }
-        }.task(id: "\(model.connectionID):\(project.raw["icon"]["etag"].string):\(model.connected)") {
-            image = nil
-            guard model.connected, project.raw["icon"]["kind"].string == "image" else { return }
+        }.accessibilityHidden(true)
+        .task(id: WorkspaceIconTrigger(connectionID: model.connectionID, projectID: project.id, icon: project.raw["icon"], preference: model.preferences["workspace_icons"][project.id], connected: model.connected)) {
+            image = model.workspaceIcons.cached(project)
+            guard model.connected, project.raw["icon"]["kind"].string == "image", model.preferences["workspace_icons"][project.id]["mode"].string != "folder" else { return }
             let current = model.connectionID
             do {
-                let result = try await model.relay.call("workspace.icon", params: .object(["workspace_id": .string(project.id)]))
-                guard current == model.connectionID, !Task.isCancelled, result["kind"].string == "image", result["data"].string.utf8.count < 1_500_000, let data = Data(base64Encoded: result["data"].string) else { return }
-                if let source = CGImageSourceCreateWithData(data as CFData, nil), let thumbnail = CGImageSourceCreateThumbnailAtIndex(source, 0, [kCGImageSourceCreateThumbnailFromImageAlways: true, kCGImageSourceCreateThumbnailWithTransform: true, kCGImageSourceThumbnailMaxPixelSize: 128] as CFDictionary) { image = UIImage(cgImage: thumbnail) }
+                let loaded = try await model.workspaceIcons.load(project, connectionID: current, relay: model.relay)
+                guard current == model.connectionID, !Task.isCancelled else { return }
+                image = loaded
             } catch { /* Automatic icon remains visible while offline. */ }
         }
     }
+}
+
+private struct WorkspaceIconTrigger: Hashable {
+    let connectionID: UUID
+    let projectID: String
+    let icon: JSON
+    let preference: JSON
+    let connected: Bool
 }

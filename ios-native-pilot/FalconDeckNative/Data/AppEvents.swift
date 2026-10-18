@@ -1,5 +1,25 @@
 import Foundation
 
+/// Relay coalescing can advance a text delta's sequence without moving its
+/// queue slot. Deduplicate deliveries, rather than rejecting every event below
+/// a global high-water mark (which would lose unrelated summaries and items).
+struct RecentEventSequences {
+    private var seen: Set<Int> = []
+    private var ring: [Int] = []
+    private var next = 0
+    private let capacity = 8192
+
+    mutating func insert(_ sequence: Int) -> Bool {
+        guard seen.insert(sequence).inserted else { return false }
+        if ring.count < capacity { ring.append(sequence) }
+        else {
+            seen.remove(ring[next]); ring[next] = sequence
+            next = (next + 1) % capacity
+        }
+        return true
+    }
+}
+
 @MainActor extension AppModel {
     func receive(_ update: RelayUpdate) {
         guard update.connectionID == connectionID, !demo else { return }
@@ -12,7 +32,7 @@ import Foundation
             if reconnected { for catalog in composerCatalogs.values { catalog.modelsError = nil } }
             if connectionLog.last?.message != text { connectionLog.append(ConnectionLogEntry(message: text)); if connectionLog.count > 100 { connectionLog.removeFirst(connectionLog.count - 100) } }
             if online { reconnectAttempt = 0; reconnectTask?.cancel(); reconnectTask = nil; automations.scheduleRefresh(model: self); synchronizePush(); Task { await self.extensions.load(model: self); await self.openPendingNotification() } }
-            if text == "Connecting…" { lastEventSeq = 0 }
+            if text == "Connecting…" { receivedEventSequences = RecentEventSequences() }
         case .snapshot(let value):
             if pairingPending { pairingPending = false; hasSession = true; showConnection = false }
             summaryFlush?.cancel(); summaryFlush = nil; pendingSummaries = [:]
@@ -92,8 +112,7 @@ import Foundation
     }
 
     func applyEnvelope(_ envelope: JSON, rebase: Bool = false) {
-        guard !demo, let seq = envelope["seq"].optionalInt, rebase || seq > lastEventSeq else { return }
-        if !rebase { lastEventSeq = seq }
+        guard !demo, let seq = envelope["seq"].optionalInt, rebase || receivedEventSequences.insert(seq) else { return }
         let event = envelope["event"], id = envelope["thread_id"].string
         if !rebase, !voice.starting, !voice.recording, !voice.transcribing, readAloud.messageID == nil { realtimeAudio.handle(event, taskID: id) }
         switch event["type"].string {

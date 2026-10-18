@@ -37,6 +37,40 @@ private actor ControlledRelay: RelayServing {
         .events([.object(["seq": .number(Double(seq)), "thread_id": .string(task.id), "event": .object(["type": .string("thread-updated"), "thread": task.raw])])])
     }
 
+    func testCoalescedStreamingDoesNotDiscardALocalRename() async throws {
+        for sameBatch in [true, false] {
+            let model = AppModel.testing(relay: ControlledRelay())
+            model.tasks = [task]
+            let chat = model.chat(for: task); chat.loaded = true
+            chat.transcript.items = [Message(.object(["id": .string("answer"), "kind": .string("assistant_message"), "text": .string("Hello")]))]
+            // The daemon coalescer keeps a merged delta in its original slot
+            // while advancing its sequence past an intervening thread summary.
+            let delta = JSON.object(["seq": .number(12), "thread_id": .string(task.id), "event": .object(["type": .string("text"), "item_id": .string("answer"), "delta": .string(" there")])])
+            let renamed = AgentTask(task.raw.setting("title", .string("Renamed on desktop")))
+            if sameBatch, case .events(let rows) = summary(renamed, seq: 11) {
+                model.receive(.init(connectionID: model.connectionID, event: .events([delta] + rows)))
+            } else {
+                model.receive(.init(connectionID: model.connectionID, event: .events([delta])))
+                model.receive(.init(connectionID: model.connectionID, event: summary(renamed, seq: 11)))
+            }
+            model.receive(.init(connectionID: model.connectionID, event: .events([delta])))
+            try await Task.sleep(for: .milliseconds(250))
+            XCTAssertEqual(model.task(task.id)?.title, "Renamed on desktop")
+            XCTAssertEqual(chat.transcript.items.last?.text, "Hello there", "Duplicate delivery must not append the same text twice")
+        }
+    }
+
+    func testEventDeduplicationIsBoundedAndAcceptsUnseenLowerSequences() {
+        var sequences = RecentEventSequences()
+        XCTAssertTrue(sequences.insert(20))
+        XCTAssertTrue(sequences.insert(10))
+        XCTAssertFalse(sequences.insert(20))
+        for seq in 21...8212 { XCTAssertTrue(sequences.insert(seq)) }
+        XCTAssertFalse(sequences.insert(8212))
+        XCTAssertTrue(sequences.insert(19), "A previously unseen lower sequence is valid after coalescing")
+        XCTAssertTrue(sequences.insert(10), "The duplicate cache must have a bounded lifetime")
+    }
+
     func testItemUpdatePreventsAnOlderReadFromRepopulatingTheCache() async throws {
         let relay = ControlledRelay(), model = AppModel.testing(relay: relay)
         let read = Task { try await model.fullItem(task, itemID: "image") }

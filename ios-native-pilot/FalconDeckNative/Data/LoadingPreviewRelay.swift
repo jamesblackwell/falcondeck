@@ -1,5 +1,6 @@
 #if DEBUG
 import Foundation
+import UIKit
 
 /// A compact index with unloaded casual workspaces and a deliberately slow
 /// history response. Previews never read a pairing or contact a real computer.
@@ -31,6 +32,21 @@ actor LoadingPreviewRelay: RelayServing {
     func refresh() { }
     func detail(task: AgentTask, before: String?) async throws -> JSON {
         historyRequests += 1
+        if ProcessInfo.processInfo.arguments.contains("--loading-preview=rename"), historyRequests == 1 {
+            let current = connectionID
+            Task {
+                try? await Task.sleep(for: .seconds(2))
+                guard current == connectionID else { return }
+                let renamed = task.raw.setting("title", .string("Renamed on desktop"))
+                    .setting("updated_at", .string(Date.now.ISO8601Format()))
+                // Reproduce the real coalescer: merged text advances past an
+                // intervening summary, then both are delivered in queue order.
+                sink?.yield(.init(connectionID: current, event: .events([
+                    .object(["seq": .number(12), "thread_id": .string("polish"), "event": .object(["type": .string("text"), "item_id": .string("fixture"), "delta": .string("Another conversation is streaming")])]),
+                    .object(["seq": .number(11), "thread_id": .string(task.id), "event": .object(["type": .string("thread-updated"), "thread": renamed])])
+                ])))
+            }
+        }
         let fails = failFirst && historyRequests == 1
         let settling = ProcessInfo.processInfo.arguments.contains("--loading-preview=settling")
         let delay = settling ? ProcessInfo.processInfo.arguments.contains("--settling-slow") ? 10 : 2 : 5
@@ -43,6 +59,10 @@ actor LoadingPreviewRelay: RelayServing {
         sink?.yield(.init(connectionID: connectionID, event: .events([.object(["seq": .number(Double(sequence)), "event": .object(["type": .string("workspace-updated"), "workspace": raw])])])))
     }
     func call(_ method: String, params: JSON) async throws -> JSON {
+        if method == "workspace.icon", ProcessInfo.processInfo.arguments.contains("--loading-preview=rename") {
+            let data = await MainActor.run { UIImage(named: "FalconMark")?.pngData()?.base64EncodedString() ?? "" }
+            return .object(["kind": .string("image"), "data": .string(data)])
+        }
         if method == "provider.hydrate" {
             if ProcessInfo.processInfo.arguments.contains(where: { $0.hasPrefix("--loading-preview=harness-") }) { return .object(["ok": .bool(true)]) }
             let id = params["workspace_id"].string

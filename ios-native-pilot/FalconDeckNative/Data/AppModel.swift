@@ -11,6 +11,7 @@ final class AppModel {
     let voice: VoiceRecorder
     let readAloud = ReadAloud()
     let realtimeAudio = RealtimeAudio()
+    @ObservationIgnored let workspaceIcons = WorkspaceIconCache()
     var composerCatalogs: [String: ComposerCatalog] = [:]
     let extensions = NativeExtensions()
     let automations = AutomationStore()
@@ -115,7 +116,7 @@ final class AppModel {
     @ObservationIgnored var itemCache: [String: JSON] = [:]
     @ObservationIgnored var itemCacheOrder: [String] = []
     var chats: [String: ChatSession] = [:]
-    var lastEventSeq = 0
+    @ObservationIgnored var receivedEventSequences = RecentEventSequences()
     @ObservationIgnored private var observation: Task<Void, Never>?
     @ObservationIgnored private var startupInFlight = false
     @ObservationIgnored var reconnectTask: Task<Void, Never>?
@@ -177,11 +178,12 @@ final class AppModel {
         previewSave?.cancel(); previewSave = nil; hasLiveSnapshot = false
         if clearData {
             sessionScope = UUID()
+            workspaceIcons.reset()
             if voice.recording { voice.finishRecording() }
             voice.cancelTranscription(); readAloud.stop()
         }
         realtimeAudio.reset(); automations.reset(); extensions.reset(); composerCatalogs = [:]
-        connectionID = UUID(); lastEventSeq = 0; connected = false; syncIndex = nil; taskPageLoads = []; pairingNeedsReconnect = false
+        connectionID = UUID(); receivedEventSequences = RecentEventSequences(); connected = false; syncIndex = nil; taskPageLoads = []; pairingNeedsReconnect = false
         preferenceWrite = nil; archivedLoadID = nil; archivedTouched = []
         itemCache = [:]; itemCacheOrder = []; itemLoads = [:]; mediaGate = MediaTransferGate()
         summaryFlush?.cancel(); summaryFlush = nil; pendingSummaries = [:]
@@ -305,6 +307,12 @@ final class AppModel {
                 _ = try? await relay.restore(connectionID: connectionID)
             }
             demo = false; hasSession = true; connected = true; hasLiveSnapshot = true; status = "Preview computer"
+            if ProcessInfo.processInfo.arguments.contains("--loading-preview=rename") {
+                projects = Demo.projects.map { $0.id == "falcondeck" ? Project($0.raw.setting("icon", .object(["kind": .string("image"), "etag": .string("local-brand-fixture")]))) : $0 }
+                tasks = Demo.tasks.filter(\.pinned).map { AgentTask($0.raw.setting("status", .string("idle"))) }
+                syncIndex = nil
+                _ = try? await relay.restore(connectionID: connectionID)
+            }
             if ProcessInfo.processInfo.arguments.contains("--loading-preview=cached") {
                 let chat = chat(for: LoadingPreviewRelay.task)
                 chat.transcript.items = Demo.messages; chat.loaded = true; chat.needsRefresh = true

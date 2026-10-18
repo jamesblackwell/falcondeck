@@ -50,7 +50,7 @@ struct SidebarView: View {
                 sidebarAction("Activity", symbol: "tray.full", selected: model.selection == .activity) { navigate(.activity) }
                 if !pins.isEmpty {
                     sectionHeading("Pinned", expanded: pinsOpen) { animate { pinsExpanded.toggle() } }
-                    if pinsOpen { ForEach(pins) { taskLink($0) } }
+                    if pinsOpen { ForEach(pins) { taskLink($0, projectIcon: true) } }
                 }
                 sectionHeading("Projects", expanded: projectsOpen) {
                     animate { if projectsOpen { expanded.subtract(projectGroups.map(\.id)) } else { expanded.formUnion(projectGroups.map(\.id)) } }
@@ -269,9 +269,12 @@ struct SidebarView: View {
                 .disabled(loading).accessibilityIdentifier("sidebar-chats-more")
         }
     }
-    private func taskLink(_ task: AgentTask, indent: CGFloat = 0) -> some View {
+    private func taskLink(_ task: AgentTask, indent: CGFloat = 0, projectIcon: Bool = false) -> some View {
         Button { navigate(.task(task.id)) } label: {
             HStack(spacing: 8) {
+                if projectIcon, let project = model.projects.first(where: { $0.id == task.projectID }) {
+                    WorkspaceGlyph(project: project).font(.subheadline).frame(width: 18, height: 20)
+                }
                 Group {
                     if task.working { ActivityDiamond() }
                     else if task.needsAttention { Circle().fill(.orange).frame(width: 6, height: 6) }
