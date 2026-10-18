@@ -7,9 +7,9 @@ import XCTest
         let shot = XCTAttachment(screenshot: XCUIScreen.main.screenshot())
         shot.name = name; shot.lifetime = .keepAlways; add(shot)
     }
-    private func launch() -> XCUIApplication {
+    private func launch(arguments: [String] = []) -> XCUIApplication {
         XCUIDevice.shared.orientation = .portrait
-        let app = XCUIApplication(); app.launchArguments = ["--demo"]; app.launch()
+        let app = XCUIApplication(); app.launchArguments = ["--demo"] + arguments; app.launch()
         if !app.buttons["sidebar-settings"].exists, app.buttons["BackButton"].exists { app.buttons["BackButton"].tap() }
         XCTAssertTrue(app.buttons["sidebar-settings"].waitForExistence(timeout: 5)); return app
     }
@@ -210,6 +210,30 @@ import XCTest
         XCTAssertTrue(again.navigationBars["Activity"].waitForExistence(timeout: 5))
         capture("Activity dense task feed")
     }
+    func testGoalDeletionStaysVisibleForLongCompletedAndActiveGoals() {
+        for provider in ["codex", "claude"] {
+            for status in ["complete", "active"] {
+                let app = launch(arguments: ["--goal-preview=\(provider)-\(status)"])
+                app.buttons["sidebar-task-native"].tap()
+                let goal = app.buttons["Goal · \(status.capitalized)"]
+                XCTAssertTrue(goal.waitForExistence(timeout: 5)); goal.tap()
+                let delete = app.buttons["delete-goal"]
+                XCTAssertTrue(delete.waitForExistence(timeout: 5))
+                XCTAssertTrue(delete.isHittable, "Long goals must not push deletion off-screen")
+                if status == "complete" { XCTAssertFalse(app.buttons["Pause goal"].exists) }
+                capture("\(provider) \(status) goal has a visible delete action")
+                delete.tap()
+                XCTAssertTrue(app.navigationBars["Goal"].waitForNonExistence(timeout: 5))
+                XCTAssertFalse(goal.exists)
+                XCTAssertTrue(app.textFields["chat-input"].exists, "Deleting a goal keeps its conversation")
+                app.buttons["task-menu"].tap()
+                let create = app.buttons["Set a goal"]
+                for _ in 0..<3 where !create.isHittable { app.swipeUp() }
+                XCTAssertTrue(create.isHittable, "A new goal can be created after deletion")
+                app.terminate()
+            }
+        }
+    }
     func testGoalEditorActiveAndPausedStates() {
         let app = launch()
         app.buttons["sidebar-task-native"].tap()
@@ -230,7 +254,7 @@ import XCTest
         app.buttons["View goal"].tap()
         XCTAssertTrue(app.buttons["Resume goal"].waitForExistence(timeout: 5))
         capture("Paused goal controls")
-        app.buttons["Stop goal"].tap()
+        app.buttons["delete-goal"].tap()
         XCTAssertTrue(app.buttons["Set a goal"].waitForExistence(timeout: 5))
     }
     func testSidebarSearchFiltersAndRestoresTheProjectTree() {

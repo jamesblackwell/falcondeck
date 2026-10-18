@@ -17,7 +17,7 @@ metadata, reconnect and forgetting a computer live in **Settings → Connections
 
 ## Client validation
 
-- 215 native unit tests pass, including crypto/wire compatibility, pairing
+- 217 native unit tests pass, including crypto/wire compatibility, pairing
   authority, connection epochs, drafts/queues, media, controls/extensions,
   push registration/cleanup the whole-source review regressions and harness composer/cache recovery.
 - All 39 UI checks pass on iPad. On iPhone, 38 passed in the complete run;
@@ -37,6 +37,21 @@ metadata, reconnect and forgetting a computer live in **Settings → Connections
   encryption. Demo UI tests send only in-memory messages/automations.
 - Apple Development arm64 app/widget builds succeed. Build products, Xcode
   results and screenshots remain local and ignored.
+
+## Goal deletion — 18 October
+
+Tap a task's goal badge (or Task options → View goal), then **Delete goal** in
+the fixed sheet toolbar. The old below-the-details "Stop goal" action was
+misleading for completed goals and could be off-screen for long objectives.
+Deletion uses the existing `thread.goal.clear` RPC for Codex and Claude, removes
+the goal badge, preserves the conversation/draft and permits a new goal.
+Pause/resume remain Codex-only, matching Expo and the daemon contract.
+
+The 217 native unit tests pass, including shared clear requests for active,
+paused and complete goals and failure/retry preservation. Focused iPhone/iPad
+UI checks cover long active/completed Codex/Claude goals and the Codex
+start/pause/delete flow using local demo content. Autoreview
+(`--mode local --max-priority P2`) is clean. No real goals were cleared in QA.
 
 ## Harness composer parity — 18 October
 

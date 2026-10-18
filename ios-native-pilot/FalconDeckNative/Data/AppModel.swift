@@ -302,6 +302,13 @@ final class AppModel {
                 else { cachedAt = .now }
             }
         }
+        if let argument = ProcessInfo.processInfo.arguments.first(where: { $0.hasPrefix("--goal-preview=") }), let task = tasks.first {
+            let mode = String(argument.dropFirst("--goal-preview=".count))
+            let provider = mode.hasPrefix("claude-") ? "claude" : "codex"
+            let status = mode.hasSuffix("complete") ? "complete" : "active"
+            let goal = JSON.object(["objective": .string(String(repeating: "Keep the native app polished and reliable. ", count: 80)), "status": .string(status), "tokens_used": .number(2000), "token_budget": .number(5000), "time_used_seconds": .number(3600)])
+            tasks[0] = AgentTask(task.raw.setting("provider", .string(provider)).setting("goal", goal))
+        }
         if let argument = ProcessInfo.processInfo.arguments.first(where: { $0.hasPrefix("--review-preview=") }), let task = tasks.first {
             let mode = argument.split(separator: "=").last.map(String.init)
             let chat = chat(for: task)

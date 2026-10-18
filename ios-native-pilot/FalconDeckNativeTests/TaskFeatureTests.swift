@@ -74,6 +74,34 @@ private actor FeatureRelay: RelayServing {
         XCTAssertEqual(model.tasks.first?.goal, .null)
     }
 
+    func testClearGoalUsesTheSharedRPCForActivePausedAndCompletedGoals() async throws {
+        for provider in ["codex", "claude"] {
+            for status in provider == "codex" ? ["active", "paused", "complete"] : ["active", "complete"] {
+                let source = AgentTask(task.raw.setting("provider", .string(provider)).setting("goal", .object(["objective": .string("Finish this work"), "status": .string(status)])))
+                let relay = GoalRelay(result: source.raw.setting("goal", .null))
+                let model = AppModel.testing(relay: relay); model.connected = true; model.tasks = [source]
+                let chat = model.chat(for: source); chat.draft = "Keep my unsent message"
+                try await model.setGoal(source, clear: true)
+                let calls = await relay.calls
+                XCTAssertEqual(calls.count, 1)
+                XCTAssertEqual(calls.first?.0, "thread.goal.clear")
+                XCTAssertEqual(calls.first?.1, .object(["workspace_id": .string(source.projectID), "thread_id": .string(source.id)]))
+                XCTAssertEqual(model.task(source.id)?.goal, .null)
+                XCTAssertEqual(model.tasks.count, 1)
+                XCTAssertEqual(chat.draft, "Keep my unsent message")
+            }
+        }
+    }
+    func testFailedGoalDeletionKeepsTheGoalAndCanBeRetried() async throws {
+        let source = AgentTask(task.raw.setting("goal", .object(["objective": .string("Keep until confirmed"), "status": .string("complete")])))
+        let relay = GoalRelay(result: source.raw.setting("goal", .null), failFirst: true)
+        let model = AppModel.testing(relay: relay); model.connected = true; model.tasks = [source]
+        do { try await model.setGoal(source, clear: true); XCTFail("Expected the synthetic RPC error") }
+        catch { XCTAssertEqual(model.task(source.id)?.goal, source.goal) }
+        try await model.setGoal(source, clear: true)
+        XCTAssertEqual(model.task(source.id)?.goal, .null)
+    }
+
     func testQueueEditKeepsFullTextAndRemoveUsesStableID() async throws {
         let model = AppModel.testing(relay: FeatureRelay())
         let queued = AgentTask(task.raw.setting("queued_turns", .array([.object(["id": .string("queue-1"), "text": .string("Old message"), "preview": .string("Old")])])))
@@ -125,5 +153,23 @@ private actor FeatureRelay: RelayServing {
         XCTAssertTrue(inserted)
         XCTAssertEqual(chat.draft, "Keep my draft\n\nRecovered text")
         XCTAssertEqual(model.selection, .draft(project.id, nil))
+    }
+}
+
+private actor GoalRelay: RelayServing {
+    let result: JSON
+    let failFirst: Bool
+    private(set) var calls: [(String, JSON)] = []
+    init(result: JSON, failFirst: Bool = false) { self.result = result; self.failFirst = failFirst }
+    func events() -> AsyncStream<RelayUpdate> { AsyncStream { $0.finish() } }
+    func pair(_ input: PairingInput, connectionID: UUID) { }
+    func restore(connectionID: UUID) -> Bool { true }
+    func disconnect(forget: Bool) { }
+    func refresh() { }
+    func detail(task: AgentTask, before: String?) -> JSON { .null }
+    func call(_ method: String, params: JSON) throws -> JSON {
+        calls.append((method, params))
+        if failFirst, calls.count == 1 { throw PilotError("Synthetic goal clear failure") }
+        return result
     }
 }

@@ -23,14 +23,13 @@ struct GoalView: View {
                             if let limit = task.goal["token_budget"].optionalInt { LabeledContent("Token budget", value: limit.formatted()) }
                             if let seconds = task.goal["time_used_seconds"].optionalInt { LabeledContent("Elapsed", value: Duration.seconds(seconds).formatted(.units(allowed: [.hours, .minutes, .seconds], width: .abbreviated))) }
                         }.listRowBackground(FD.surface)
-                        Section {
-                            if task.provider == "codex", task.goal["status"].string != "complete" {
+                        if task.provider == "codex", task.goal["status"].string != "complete" {
+                            Section {
                                 Button(task.goal["status"].string == "paused" ? "Resume goal" : "Pause goal") {
                                     run { try await model.setGoal(task, status: task.goal["status"].string == "paused" ? "active" : "paused") }
                                 }
-                            }
-                            Button("Stop goal", role: .destructive) { run { try await model.setGoal(task, clear: true) } }
-                        }.listRowBackground(FD.surface)
+                            }.listRowBackground(FD.surface)
+                        }
                     } else {
                         Section("What should the agent accomplish?") {
                             TextField("Goal objective", text: $objective, axis: .vertical).lineLimit(3...10).accessibilityIdentifier("goal-objective")
@@ -48,7 +47,16 @@ struct GoalView: View {
             .disabled(pending || (!model.connected && !model.demo))
             .scrollContentBackground(.hidden).background(FD.background)
             .navigationTitle("Goal").navigationBarTitleDisplayMode(.inline)
-            .toolbar { ToolbarItem(placement: .confirmationAction) { Button("Done") { dismiss() }.disabled(pending) } }
+            .toolbar {
+                if let task, task.goal != .null {
+                    ToolbarItem(placement: .topBarLeading) {
+                        Button("Delete goal", role: .destructive) { run { try await model.setGoal(task, clear: true) } }
+                            .disabled(pending || (!model.connected && !model.demo))
+                            .accessibilityIdentifier("delete-goal")
+                    }
+                }
+                ToolbarItem(placement: .confirmationAction) { Button("Done") { dismiss() }.disabled(pending) }
+            }
         }.onAppear { if objective.isEmpty { objective = initialObjective } }.nativeOptionsSheet().interactiveDismissDisabled(pending)
     }
     private func run(_ action: @escaping @MainActor () async throws -> Void) {
