@@ -71,6 +71,7 @@ actor RelayClient: RelayServing {
     private var generation = UUID()
     private var sink: AsyncStream<RelayUpdate>.Continuation?
     private var pending: [String: CheckedContinuation<JSON, Error>] = [:]
+    private var requestTasks: [String: Task<Void, Never>] = [:]
     private var rpcReady: Bool?
     private var selectedThread: String?
     private var refreshed = Date.distantPast
@@ -82,7 +83,9 @@ actor RelayClient: RelayServing {
     private var bulkSending = false
     private var foreground = true
     private var supportsClientActivity = false
-    private var acknowledgements: [String: CheckedContinuation<Void, Error>] = [:]
+    private var upload: (id: Int, transfer: RelayUpload)?
+    private var refreshTask: Task<Void, Never>?
+    private var refreshSchedule = RelayRefreshSchedule()
 
     func selectThread(_ id: String?) { selectedThread = id }
     func setForeground(_ active: Bool) async {
@@ -160,10 +163,7 @@ actor RelayClient: RelayServing {
         let ticket = try await post(relay, path: "v1/sessions/\(saved.sessionID)/ws-ticket", token: saved.token)
         guard current == generation else { throw CancellationError() }
         guard !ticket["ticket"].string.isEmpty else { throw PilotError("Relay did not provide a connection ticket.") }
-        var c = URLComponents(url: relay.appending(path: "v1/updates/ws"), resolvingAgainstBaseURL: false)!
-        c.scheme = relay.scheme == "https" ? "wss" : "ws"
-        c.queryItems = [URLQueryItem(name: "session_id", value: saved.sessionID), URLQueryItem(name: "ticket", value: ticket["ticket"].string), URLQueryItem(name: "transport", value: "chunks-v1")]
-        let ws = http.webSocketTask(with: c.url!)
+        let ws = http.webSocketTask(with: try NativeRelayEndpoint.updates(relay: relay, sessionID: saved.sessionID, ticket: ticket["ticket"].string))
         ws.maximumMessageSize = 40 * 1024 * 1024
         socket = ws; lastReceived = .now; ws.resume()
         reader = Task { await self.read(ws, generation: current) }
@@ -176,7 +176,7 @@ actor RelayClient: RelayServing {
                     try await self.send(.object(["type": .string("ping")]))
                     guard current == self.generation else { return }
                     if self.session?.dataKey == nil { try await self.requestBootstrap() }
-                    else if Date.now.timeIntervalSince(self.refreshed) > 60 { await self.refresh() }
+                    else if Date.now.timeIntervalSince(self.refreshed) > 300 { self.scheduleRefresh() }
                 } catch is CancellationError { return }
                 catch { self.connectionFailed(error, generation: current); return }
             }
@@ -208,8 +208,9 @@ actor RelayClient: RelayServing {
                     if let complete { try await handle(JSON.decode(complete), generation: current) }
                 case "transport-cancel": chunks = .init()
                 case "transport-ack":
-                    let key = "\(frame["id"].int):\(frame["index"].int)"
-                    acknowledgements.removeValue(forKey: key)?.resume()
+                    if let upload, frame["id"].optionalInt == upload.id, let index = frame["index"].optionalInt {
+                        await upload.transfer.acknowledge(index)
+                    }
                 default: try await handle(frame, generation: current)
                 }
             }
@@ -231,7 +232,7 @@ actor RelayClient: RelayServing {
             try await send(.object(["type": .string("sync"), "after_seq": .number(Double(max(0, frame["next_seq"].int - 1)))]))
             guard current == generation else { return }
             if session?.dataKey == nil { try await requestBootstrap() }
-            else { scheduleRefresh() }
+            else { scheduleRefresh(urgent: true) }
         case "sync":
             for update in frame["updates"].array { try consume(update) }
             if frame["presence"] != .null { applyPresence(frame["presence"]) }
@@ -245,6 +246,7 @@ actor RelayClient: RelayServing {
             log.info("RPC response received; success: \(frame["ok"].bool)")
             let id = frame["request_id"].string
             guard let continuation = pending.removeValue(forKey: id) else { return }
+            requestTasks.removeValue(forKey: id)?.cancel()
             do {
                 guard let key = session?.dataKey else { throw PilotError("The encrypted session is not ready.") }
                 if frame["ok"].bool {
@@ -265,7 +267,7 @@ actor RelayClient: RelayServing {
            body["material"]["client_public_key"].string == (try RelayIdentity(secret: saved.secret).publicKey) {
             saved.dataKey = try RelayCrypto.bootstrap(body["material"], session: saved)
             try SessionVault.save(saved); session = saved
-            scheduleRefresh()
+            scheduleRefresh(urgent: true)
         } else if body["t"].string == "presence" { applyPresence(body["presence"]) }
         else if body["t"].string == "snapshot-invalidated" { scheduleRefresh() }
         else if body["t"].string == "encrypted", let key = session?.dataKey {
@@ -274,6 +276,9 @@ actor RelayClient: RelayServing {
     }
 
     private func publish(_ events: [JSON]) {
+        // Older relays can ignore compact_index and still push full snapshots.
+        // Treat those as invalidations too, so legacy metadata stays fresh.
+        if events.contains(where: { $0["event"]["type"].string == "snapshot" }) { scheduleRefresh() }
         let live = events.filter { $0["event"]["type"].string != "snapshot" }
         if refreshInFlight {
             bufferedEvents.append(contentsOf: live)
@@ -290,12 +295,13 @@ actor RelayClient: RelayServing {
     }
 
     private func applyPresence(_ presence: JSON) {
+        let wasReady = rpcReady
         rpcReady = presence["daemon_connected"].bool && presence["daemon_rpc_ready"] != .bool(false)
         guard presence["daemon_connected"].bool else {
             emit(.status("Computer offline", connected: false)); return
         }
         if presence["daemon_rpc_ready"] == .bool(false) { emit(.status("Preparing computer…", connected: false)); return }
-        if session?.dataKey != nil { scheduleRefresh() }
+        if wasReady != true, session?.dataKey != nil { scheduleRefresh(urgent: true) }
     }
 
     private func requestBootstrap() async throws {
@@ -307,16 +313,33 @@ actor RelayClient: RelayServing {
         ])]))
     }
 
-    private func scheduleRefresh() {
+    private func scheduleRefresh(urgent: Bool = false) {
+        let delay = refreshSchedule.request(urgent: urgent)
+        guard !refreshInFlight else { return }
+        if urgent { refreshTask?.cancel(); refreshTask = nil }
+        guard refreshTask == nil else { return }
         let current = generation
-        Task { if current == self.generation { await self.refresh() } }
+        refreshTask = Task {
+            do { try await Task.sleep(for: delay) } catch { return }
+            guard current == self.generation else { return }
+            self.refreshTask = nil
+            await self.refresh()
+        }
     }
     func refresh() async {
-        guard session?.dataKey != nil, rpcReady != false, !refreshInFlight else { return }
+        guard session?.dataKey != nil, rpcReady != false else { return }
+        guard !refreshInFlight else { _ = refreshSchedule.request(); return }
+        refreshTask?.cancel(); refreshTask = nil
+        refreshSchedule.began()
         refreshInFlight = true
         bufferedEvents = []
         let current = generation
-        defer { if current == generation { refreshInFlight = false } }
+        defer {
+            if current == generation {
+                refreshInFlight = false
+                if refreshSchedule.dirty { scheduleRefresh() }
+            }
+        }
         do {
             let result: JSON
             do {
@@ -358,7 +381,7 @@ actor RelayClient: RelayServing {
         let frame = JSON.object(["type": .string("rpc-call"), "request_id": .string(id), "method": .string(method), "params": try RelayCrypto.encrypt(params, key: key)])
         return try await withCheckedThrowingContinuation { continuation in
             pending[id] = continuation
-            Task {
+            requestTasks[id] = Task {
                 do {
                     guard current == self.generation else { throw CancellationError() }
                     try await self.send(frame, requestID: id)
@@ -374,12 +397,16 @@ actor RelayClient: RelayServing {
             }
         }
     }
-    private func finish(_ id: String, error: Error) { pending.removeValue(forKey: id)?.resume(throwing: error) }
+    private func finish(_ id: String, error: Error) {
+        requestTasks.removeValue(forKey: id)?.cancel()
+        pending.removeValue(forKey: id)?.resume(throwing: error)
+    }
     private func failPending(_ error: Error) {
         let continuations = pending.values; pending.removeAll()
+        for task in requestTasks.values { task.cancel() }; requestTasks = [:]
         for c in continuations { c.resume(throwing: error) }
-        let acks = acknowledgements.values; acknowledgements.removeAll()
-        for c in acks { c.resume(throwing: error) }
+        if let upload { Task { await upload.transfer.cancel(error) } }; upload = nil
+        refreshTask?.cancel(); refreshTask = nil; refreshSchedule = .init()
     }
     private func connectionFailed(_ error: Error, generation current: UUID) {
         guard current == generation else { return }
@@ -403,25 +430,11 @@ actor RelayClient: RelayServing {
         let id = transferID
         defer { if current == generation { bulkSending = false } }
         do {
-            for (index, offset) in stride(from: 0, to: bytes.count, by: 11 * 1024).enumerated() {
-                guard current == generation else { throw CancellationError() }
-                guard ContinuousClock.now < deadline else { throw PilotError("The upload took too long. Try a smaller attachment.") }
-                let timeout = min(Duration.seconds(25), ContinuousClock.now.duration(to: deadline))
-                if let requestID, pending[requestID] == nil { throw CancellationError() }
-                let part = bytes.subdata(in: offset..<min(offset + 11 * 1024, bytes.count))
-                let frame = JSON.object(["type": .string("transport-chunk"), "id": .number(Double(id)), "index": .number(Double(index)), "total": .number(Double(bytes.count)), "data": .string(part.base64EncodedString())])
-                let ackKey = "\(id):\(index)"
-                try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
-                    acknowledgements[ackKey] = continuation
-                    Task {
-                        do { try await self.writer.send(frame.wireText(), to: socket, timeout: timeout) }
-                        catch { self.acknowledgements.removeValue(forKey: ackKey)?.resume(throwing: error) }
-                    }
-                    Task {
-                        try? await Task.sleep(for: timeout)
-                        self.acknowledgements.removeValue(forKey: ackKey)?.resume(throwing: PilotError("The relay did not acknowledge this message."))
-                    }
-                }
+            let transfer = RelayUpload()
+            upload = (id, transfer)
+            defer { if current == generation { upload = nil } }
+            try await transfer.send(bytes, id: id) { frame in
+                try await self.writeChunk(frame, socket: socket, generation: current, requestID: requestID, deadline: deadline)
             }
         } catch {
             if current == generation {
@@ -429,6 +442,12 @@ actor RelayClient: RelayServing {
             }
             throw error
         }
+    }
+    private func writeChunk(_ frame: JSON, socket: URLSessionWebSocketTask, generation current: UUID, requestID: String?, deadline: ContinuousClock.Instant) async throws {
+        guard current == generation else { throw CancellationError() }
+        if let requestID, pending[requestID] == nil { throw CancellationError() }
+        let timeout = min(Duration.seconds(25), ContinuousClock.now.duration(to: deadline))
+        try await writer.send(frame.wireText(), to: socket, timeout: timeout)
     }
     private func post(_ relay: URL, path: String, body: JSON? = nil, token: String? = nil) async throws -> JSON {
         var request = URLRequest(url: relay.appending(path: path))

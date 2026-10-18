@@ -37,11 +37,10 @@ private struct ChatContent: View {
     private var requests: [JSON] { model.requests.filter { $0["thread_id"].string == task.id } }
 
     private var preferences: ConversationPreferences { ConversationPreferences(raw: model.preferences["conversation"]) }
-    private var actionIDs: Set<String> { TranscriptBlock.actionMessageIDs(chat.transcript.items) }
-    private var blocks: [TranscriptBlock] { TranscriptBlock.build(chat.transcript.items, preferences: preferences, running: task.running) }
     var body: some View {
-        let actions = actionIDs
-        let blocks = blocks
+        let presentation = chat.presentation(preferences: preferences, running: task.running)
+        let actions = presentation.actionIDs
+        let blocks = presentation.blocks
         let activity = !chat.loading && chat.historyError == nil && (model.connected || model.demo) ? ConversationActivity.label(blocks: blocks, running: task.running, submitting: chat.sending) : nil
         Group {
             List {

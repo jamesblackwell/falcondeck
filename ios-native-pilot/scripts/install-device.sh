@@ -10,8 +10,10 @@ if [ -z "$pilot_device" ]; then
   exit 1
 fi
 xcodegen generate
+# Keep development signing/sandbox push, with normal Swift runtime optimization.
 xcodebuild -project FalconDeckNative.xcodeproj -scheme FalconDeckNative \
   -configuration Debug -destination 'generic/platform=iOS' -derivedDataPath build-device \
+  SWIFT_OPTIMIZATION_LEVEL=-O SWIFT_COMPILATION_MODE=wholemodule \
   DEVELOPMENT_TEAM="$pilot_team" -allowProvisioningUpdates build > build-device.log 2>&1 \
   || { tail -60 build-device.log; exit 1; }
 xcrun devicectl device install app --device "$pilot_device" \

@@ -33,13 +33,16 @@ struct SidebarView: View {
     }
     private var pins: [AgentTask] { model.tasks.filter { $0.pinned && matches($0) }.sorted { $0.updatedAt > $1.updatedAt } }
     var body: some View {
+        let projects = projects
+        let pins = pins
+        let folders = model.folders
         let projectGroups = projects.filter { $0.raw["kind"].string != "casual" }
         let projectsOpen = !search.isEmpty || projectGroups.contains { expanded.contains($0.id) }
         let pinsOpen = pinsExpanded || !search.isEmpty
         let chatsOpen = chatsExpanded || !search.isEmpty
         let casual = projects.filter { $0.raw["kind"].string == "casual" }
         let plan = TaskPagePlan(connectionID: model.connectionID, token: model.syncIndex?.token, connected: model.connected, sort: sort,
-            scopes: initialScopes(projectGroups, casual: chatsOpen ? casual : []))
+            scopes: initialScopes(projectGroups, casual: chatsOpen ? casual : [], folders: folders))
         List {
             Group {
                 sidebarAction("New chat", symbol: "square.and.pencil") { Task { if await model.newChat() != nil { openDetail() } } }
@@ -81,7 +84,7 @@ struct SidebarView: View {
                         Button("Project options", systemImage: "slider.horizontal.3") { optionsProject = project }
                         ShareLink(item: project.path) { Label("Share project path", systemImage: "square.and.arrow.up") }
                     }
-                    if isOpen { projectContents(project) }
+                    if isOpen { projectContents(project, folders: folders.filter { $0.projectID == project.id }) }
                 }
                 if !casual.isEmpty {
                     sectionHeading("Chats", expanded: chatsOpen) { animate { chatsExpanded.toggle() } }
@@ -189,13 +192,11 @@ struct SidebarView: View {
         } message: { Text("Its tasks return to the project. They will not be archived.") }
     }
 
-    @ViewBuilder private func projectContents(_ project: Project) -> some View {
+    @ViewBuilder private func projectContents(_ project: Project, folders: [ProjectFolder]) -> some View {
         let tasks = model.tasks(in: project).filter { !$0.pinned && matches($0, project: project) }
-        let folders = model.folders.filter { $0.projectID == project.id }
         let filed = folders.reduce(into: Set<String>()) { $0.formUnion($1.taskIDs) }
         ForEach(tasks.filter(\.pinnedInProject)) { taskLink($0, indent: 20) }
         ForEach(folders) { folder in
-            let children = tasks.filter { folder.taskIDs.contains($0.id) && !$0.pinnedInProject }
             let isOpen = !search.isEmpty || disclosures.isExpanded(folder)
             Button {
                 animate { disclosures.toggle(folder, model: model) }
@@ -213,18 +214,20 @@ struct SidebarView: View {
                 Button { editFolder(projectID: project.id, folder: folder) } label: { Label("Rename folder", systemImage: "pencil") }
                 Button("Delete folder", systemImage: "trash", role: .destructive) { deleteFolder = folder }
             }
-            if isOpen { taskPage(children, key: folder.id, indent: 40) }
+            if isOpen {
+                let members = folder.taskIDs
+                taskPage(tasks.filter { members.contains($0.id) && !$0.pinnedInProject }, key: folder.id, indent: 40, folder: folder)
+            }
         }
         taskPage(tasks.filter { !$0.pinnedInProject && !filed.contains($0.id) }, key: project.id, indent: 20)
     }
-    @ViewBuilder private func taskPage(_ tasks: [AgentTask], key: String, indent: CGFloat) -> some View {
+    @ViewBuilder private func taskPage(_ tasks: [AgentTask], key: String, indent: CGFloat, folder: ProjectFolder? = nil) -> some View {
         let limit = search.isEmpty ? limits[key, default: 5] : tasks.count
         let ordered = sorted(tasks)
         ForEach(ordered.prefix(limit)) { taskLink($0, indent: indent) }
         if case .task(let selectedID) = model.selection, let selected = ordered.dropFirst(limit).first(where: { $0.id == selectedID }) {
             taskLink(selected, indent: indent)
         }
-        let folder = model.folders.first { $0.id == key }
         let projectID = folder?.projectID ?? key
         let loading = model.taskPageLoads.contains(CompactSync.key(project: projectID, folder: folder?.id, sort: sort))
         if tasks.isEmpty, loading {
@@ -239,9 +242,9 @@ struct SidebarView: View {
         }
     }
 
-    private func initialScopes(_ projects: [Project], casual: [Project]) -> [TaskPageScope] {
+    private func initialScopes(_ projects: [Project], casual: [Project], folders: [ProjectFolder]) -> [TaskPageScope] {
         projects.filter { expanded.contains($0.id) || !search.isEmpty }.flatMap { project in
-            [TaskPageScope(projectID: project.id)] + model.folders.filter {
+            [TaskPageScope(projectID: project.id)] + folders.filter {
                 $0.projectID == project.id && (!search.isEmpty || disclosures.isExpanded($0))
             }.map { TaskPageScope(projectID: project.id, folderID: $0.id) }
         } + casual.map { TaskPageScope(projectID: $0.id) }

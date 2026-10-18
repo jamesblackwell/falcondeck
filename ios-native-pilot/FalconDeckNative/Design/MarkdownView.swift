@@ -73,24 +73,33 @@ struct NativeCodeBlock: View {
             }.padding(.horizontal, 14).padding(.vertical, 10)
             Rectangle().fill(FD.line).frame(height: 1)
             ScrollView(.horizontal) {
-                Text(highlighted).font(.system(.footnote, design: .monospaced)).lineSpacing(4)
-                    .textSelection(.enabled).fixedSize(horizontal: true, vertical: false).padding(14)
+                HighlightedCode(content: content, lightPalette: NativeAppearance.shared.lightID, darkPalette: NativeAppearance.shared.darkID).equatable()
             }
         }
         .background(FD.surface, in: .rect(cornerRadius: 12))
         .overlay { RoundedRectangle(cornerRadius: 12).strokeBorder(FD.line) }.markdownMargin(top: 8, bottom: 16)
     }
+}
+
+private struct HighlightedCode: View, Equatable {
+    let content: String
+    let lightPalette: String
+    let darkPalette: String
+    private static let patterns = [
+        #"\b(func|let|var|struct|class|enum|import|return|if|else|for|while|guard|switch|case|const|function|async|await|def|fn|pub|use|true|false|null|nil|try|throw)\b"#,
+        #"\b\d+(?:\.\d+)?\b"#,
+        #""(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'"#,
+        #"(?m)//[^\n]*|^\s*#[^\n]*"#
+    ].compactMap { try? NSRegularExpression(pattern: $0) }
+    var body: some View {
+        Text(highlighted).font(.system(.footnote, design: .monospaced)).lineSpacing(4)
+            .textSelection(.enabled).fixedSize(horizontal: true, vertical: false).padding(14)
+    }
     private var highlighted: AttributedString {
         var result = AttributedString(content)
         result.foregroundColor = FD.foreground
-        let rules: [(String, Color)] = [
-            (#"\b(func|let|var|struct|class|enum|import|return|if|else|for|while|guard|switch|case|const|function|async|await|def|fn|pub|use|true|false|null|nil|try|throw)\b"#, FD.accent),
-            (#"\b\d+(?:\.\d+)?\b"#, .orange),
-            (#""(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'"#, .blue),
-            (#"(?m)//[^\n]*|^\s*#[^\n]*"#, FD.muted)
-        ]
-        for (pattern, color) in rules {
-            guard let regex = try? NSRegularExpression(pattern: pattern) else { continue }
+        let colors: [Color] = [FD.accent, .orange, .blue, FD.muted]
+        for (regex, color) in zip(Self.patterns, colors) {
             for match in regex.matches(in: content, range: NSRange(content.startIndex..., in: content)) {
                 if let range = Range(match.range, in: content), let attributedRange = Range(range, in: result) { result[attributedRange].foregroundColor = color }
             }

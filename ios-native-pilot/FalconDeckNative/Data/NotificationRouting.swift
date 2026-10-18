@@ -10,10 +10,11 @@ import Foundation
         // Cached preferences are rendering hints, not permission to change a
         // remote registration. Wait for this connection's authoritative state.
         guard !demo, hasSession, hasLiveSnapshot else { return }
-        let session = try? sessionLoader()
+        let loader = sessionLoader
         let eventNotifications = preferences["notifications"]["enabled"] != .bool(false)
         let current = connectionID
         Task {
+            let session = await Task.detached { try? loader() }.value
             guard current == connectionID, hasSession, hasLiveSnapshot, !demo else { return }
             await push.configure(session: session, eventNotifications: eventNotifications)
         }

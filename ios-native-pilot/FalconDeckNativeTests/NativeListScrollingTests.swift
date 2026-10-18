@@ -15,7 +15,9 @@ import UIKit
         window.addSubview(view)
         return view
     }
-    private func settle() async { for _ in 0..<5 { await Task.yield() } }
+    // Task.yield can immediately resume this same test under optimization.
+    // Suspend so the queued main-actor scroll also gets an executor turn.
+    private func settle() async { try? await Task.sleep(for: .milliseconds(25)) }
     func testPendingScrollUsesCurrentLayoutAfterRowsAreReplaced() async {
         let window = UIWindow()
         let view = viewport(in: window)

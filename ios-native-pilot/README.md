@@ -29,7 +29,8 @@ after adding files or editing `project.yml`. Keep simulator signing enabled:
 ./scripts/install-device.sh <paired-device-identifier>
 ```
 
-The script builds Debug with Apple Development signing, then installs and
+The script builds optimized Swift (`-O`) in Debug with Apple Development signing
+and sandbox push entitlements, then installs and
 launches **Falcon Native** using `devicectl`. A paired device on the same Wi-Fi
 network works without a cable when Developer Mode is enabled and the device is
 reachable/unlocked. Use `xcrun devicectl list devices` to find it. Set
@@ -144,7 +145,7 @@ xcodebuild -project FalconDeckNative.xcodeproj -scheme FalconDeckNativeUI \
   -derivedDataPath build-ui test
 ```
 
-The latest unit run has 199 passing tests. Pairing/chat/automation UI checks have
+The latest unit run has 236 passing tests. Pairing/chat/automation UI checks have
 passed on both phone and tablet simulators. See [VERIFICATION.md](VERIFICATION.md) for the
 review and device handoff, and [PARITY.md](PARITY.md) for the feature ledger. Tests cover
 crypto interoperability, pairing authority, chunks/ACKs, UTF-16 streaming,
@@ -159,3 +160,6 @@ for the screen inventory, findings and device status.
 
 See [LOADING-QA.md](LOADING-QA.md) for the conversation loading, Chats paging and
 folder responsiveness fixes and the latest phone/tablet regression checks.
+
+See [PERFORMANCE.md](PERFORMANCE.md) for measured streaming/sync improvements,
+cache behavior and the twelve-conversation phone/tablet workload.

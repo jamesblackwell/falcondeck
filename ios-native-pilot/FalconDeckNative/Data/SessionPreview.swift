@@ -2,9 +2,20 @@ import Foundation
 
 @MainActor extension AppModel {
     func restorePreview() async {
+        let current = connectionID, loader = sessionLoader
+        let session = await Task.detached { try? loader() }.value
+        guard current == connectionID else { return }
+        await restorePreview(session: session)
+    }
+    func restorePreview(session: SavedSession?) async {
         let current = connectionID
-        guard !demo, let session = try? sessionLoader(), let store = try? SessionCacheStore(session: session, root: sessionCacheRoot) else { return }
+        guard !demo, let session else { return }
+        let root = sessionCacheRoot
+        guard let store = try? await Task.detached(operation: { try SessionCacheStore(session: session, root: root) }).value else { return }
         let preview = await store.load()
+        let histories = await Task.detached(priority: .userInitiated) {
+            preview?.histories.mapValues { $0.items.map(Message.init) } ?? [:]
+        }.value
         guard current == connectionID, !demo else { return }
         sessionCache = store
         schedulePreviewSave()
@@ -23,7 +34,7 @@ import Foundation
         for (id, history) in preview.histories {
             guard let task = task(id) else { continue }
             let chat = chat(for: task)
-            chat.transcript = Transcript(items: history.items.map(Message.init))
+            chat.transcript = Transcript(items: histories[id] ?? [])
             chat.loaded = true; chat.needsRefresh = true
             chat.hasOlder = history.hasOlder; chat.oldestID = chat.transcript.items.first?.id
         }

@@ -2,17 +2,33 @@ import Foundation
 
 @MainActor extension AppModel {
     func restoreInputs() async {
-        guard let session = try? sessionLoader() else { return }
+        let current = connectionID, loader = sessionLoader
+        let session = await Task.detached { try? loader() }.value
+        guard current == connectionID else { return }
+        await restoreInputs(session: session)
+    }
+    func restoreInputs(session: SavedSession?) async {
+        let current = connectionID
+        guard !demo, let session else { return }
         do {
-            let store = try DraftStore(session: session)
+            let root = inputDraftRoot
+            let store = try await Task.detached { try DraftStore(session: session, root: root) }.value
             let drafts = try await store.load()
             let unreadable = await store.unreadableDraftCount
+            let preferences = (try? await store.loadComposerPreferences()) ?? [:]
+            let selection: Destination?
+            var selectionFailed = false
+            do { selection = try await store.loadSelection() }
+            catch { selection = nil; selectionFailed = true }
+            guard current == connectionID, !demo else { return }
+            if selectionFailed { error = "Saved navigation couldn't be read. Your input has been restored." }
             draftStore = store; savedDrafts = Dictionary(drafts.map { ($0.id, $0) }, uniquingKeysWith: { _, new in new })
-            composerPreferences = (try? await store.loadComposerPreferences()) ?? [:]
-            pendingSelection = try await store.loadSelection()
+            composerPreferences = preferences
+            pendingSelection = selection
             if case .task(let id) = pendingSelection { await relay.selectThread(id) }
+            guard current == connectionID, !demo else { return }
             if unreadable > 0 { error = "Some saved input couldn't be read. Other drafts have been restored." }
-        } catch { self.error = "Input recovery failed: \(error.localizedDescription)" }
+        } catch { if current == connectionID, !demo { self.error = "Input recovery failed: \(error.localizedDescription)" } }
     }
     func scheduleInputSave(_ id: String, chat: ChatSession) {
         guard !demo, let store = draftStore else { return }

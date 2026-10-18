@@ -1,4 +1,5 @@
 import Foundation
+import CoreFoundation
 
 /// Only the protocol fields this client needs. Unknown fields survive
 /// decoding at the JSON boundary without coupling the pilot to every extension.
@@ -45,7 +46,21 @@ enum JSON: Codable, Sendable, Hashable {
         let rest = String(decoding: try JSON.object(fields).data().dropFirst(), as: UTF8.self)
         return "{\"type\":\(first),\(rest)"
     }
-    static func decode(_ data: Data) throws -> JSON { try JSONDecoder().decode(JSON.self, from: data) }
+    static func decode(_ data: Data) throws -> JSON {
+        try fromFoundation(JSONSerialization.jsonObject(with: data, options: [.fragmentsAllowed]))
+    }
+    private static func fromFoundation(_ value: Any) throws -> JSON {
+        if value is NSNull { return .null }
+        if let value = value as? String { return .string(value) }
+        if let value = value as? NSNumber {
+            if CFGetTypeID(value) == CFBooleanGetTypeID() { return .bool(value.boolValue) }
+            guard value.doubleValue.isFinite else { throw PilotError("Invalid JSON number.") }
+            return .number(value.doubleValue)
+        }
+        if let value = value as? [Any] { return .array(try value.map(fromFoundation)) }
+        if let value = value as? [String: Any] { return .object(try value.mapValues(fromFoundation)) }
+        throw PilotError("Invalid JSON value.")
+    }
     func setting(_ key: String, _ value: JSON) -> JSON {
         guard case .object(var fields) = self else { return self }
         fields[key] = value
@@ -106,7 +121,15 @@ struct AgentTask: Identifiable, Hashable, Sendable {
 }
 
 struct Message: Identifiable, Sendable, Equatable {
-    var raw: JSON
+    var raw: JSON {
+        didSet {
+            if raw["kind"] != oldValue["kind"] || raw["kind"].string == "user_message" && raw["text"] != oldValue["text"] { userProjection = Self.project(raw) }
+        }
+    }
+    private(set) var userProjection: UserTextProjection.Cached?
+    private static func project(_ raw: JSON) -> UserTextProjection.Cached? {
+        raw["kind"].string == "user_message" ? UserTextProjection.Cached(raw["text"].string) : nil
+    }
     var id: String { raw["id"].string }
     var kind: String { raw["kind"].string }
     var text: String {
@@ -124,7 +147,7 @@ struct Message: Identifiable, Sendable, Equatable {
         let status = raw["status"].string
         return status == "running" || kind == "tool_call" && status == "in_progress"
     }
-    init(_ v: JSON) { raw = v }
+    init(_ v: JSON) { raw = v; userProjection = Self.project(v) }
     var isMessage: Bool { kind == "user_message" || kind == "assistant_message" }
 }
 

@@ -18,15 +18,17 @@ final class AppModel {
     let push: NativePushNotifications
     @ObservationIgnored let sessionLoader: @Sendable () throws -> SavedSession?
     @ObservationIgnored let sessionCacheRoot: URL?
+    @ObservationIgnored let inputDraftRoot: URL?
     var pendingNotification: NotificationDestination?
     private(set) var connectionID = UUID()
     // Local audio survives socket replacement, but never a pairing switch.
     private(set) var sessionScope = UUID()
 
-    init(relay: any RelayServing = RelayClient(), voice: VoiceRecorder = VoiceRecorder(), push: NativePushNotifications = .shared, notifications: LocalNotifications = LocalNotifications(), sessionLoader: @escaping @Sendable () throws -> SavedSession? = { try SessionVault.load() }, sessionCacheRoot: URL? = nil) {
+    init(relay: any RelayServing = RelayClient(), voice: VoiceRecorder = VoiceRecorder(), push: NativePushNotifications = .shared, notifications: LocalNotifications = LocalNotifications(), sessionLoader: @escaping @Sendable () throws -> SavedSession? = { try SessionVault.load() }, sessionCacheRoot: URL? = nil, inputDraftRoot: URL? = nil) {
         self.voice = voice
         self.relay = relay
         self.push = push; self.notifications = notifications; self.sessionLoader = sessionLoader; self.sessionCacheRoot = sessionCacheRoot
+        self.inputDraftRoot = inputDraftRoot
         NativeSpeechBridge.handler = { [weak self] action in await self?.speechAction(action) }
         notifications.openDestination = { [weak self] destination in
             self?.pendingNotification = destination
@@ -143,9 +145,13 @@ final class AppModel {
         }
         if ProcessInfo.processInfo.arguments.contains("--demo") { await useDemo(); return }
         let current = connectionID
-        hasSession = (try? sessionLoader()) != nil
-        await restoreInputs()
-        await restorePreview()
+        let loader = sessionLoader
+        let saved = await Task.detached(priority: .userInitiated) { try? loader() }.value
+        guard current == connectionID else { return }
+        hasSession = saved != nil
+        await restoreInputs(session: saved)
+        guard current == connectionID else { return }
+        await restorePreview(session: saved)
         guard current == connectionID else { return }
         // Reveal local content before waiting on the relay handshake.
         restoringSession = false
@@ -156,7 +162,7 @@ final class AppModel {
             synchronizePush()
         } catch {
             guard current == connectionID else { return }
-            self.error = error.localizedDescription; hasSession = (try? sessionLoader()) != nil; scheduleReconnect()
+            self.error = error.localizedDescription; scheduleReconnect()
         }
     }
 
@@ -212,7 +218,9 @@ final class AppModel {
             guard attempt == connectionID else { return }
             hasSession = true; pairingText = ""
             synchronizePush()
-            await restoreInputs(); await restorePreview()
+            await restoreInputs()
+            guard attempt == connectionID else { return }
+            await restorePreview()
         } catch {
             guard current == nil || current == connectionID else { return }
             self.error = error.localizedDescription
@@ -238,7 +246,9 @@ final class AppModel {
         let current = beginConnection(clearData: demo); demo = false
         defer { busy = false }
         if draftStore == nil { await restoreInputs() }
+        guard current == connectionID else { return }
         if sessionCache == nil { await restorePreview() }
+        guard current == connectionID else { return }
         do { let restored = try await relay.restore(connectionID: current); if current == connectionID { hasSession = restored; synchronizePush() } }
         catch { if current == connectionID { self.error = error.localizedDescription; scheduleReconnect() } }
     }
@@ -332,6 +342,7 @@ final class AppModel {
             voice.preview(phase, ownerID: task.id)
             let chat = chat(for: task); chat.voiceInputOpen = true; chat.draft = "Keep my existing draft."
         }
+        await PerformancePreview.start(in: self)
         StreamingPreview.start(in: self)
         #endif
     }
@@ -339,11 +350,11 @@ final class AppModel {
         taskGroups[project.id] ?? []
     }
     var sortedProjects: [Project] {
-        let order = preferences["workspace_order"].array.map(\.string)
+        let order = Dictionary(preferences["workspace_order"].array.map(\.string).enumerated().map { ($0.element, $0.offset) }, uniquingKeysWith: { first, _ in first })
         let running = Set(tasks.filter(\.running).map(\.projectID))
         return projects.sorted { lhs, rhs in
-            let leftOrder = order.firstIndex(of: lhs.id) ?? Int.max
-            let rightOrder = order.firstIndex(of: rhs.id) ?? Int.max
+            let leftOrder = order[lhs.id] ?? Int.max
+            let rightOrder = order[rhs.id] ?? Int.max
             if leftOrder != rightOrder { return leftOrder < rightOrder }
             let left = running.contains(lhs.id)
             let right = running.contains(rhs.id)
@@ -395,12 +406,14 @@ final class AppModel {
         do {
             let before = older ? chat.oldestID : nil
             let page = try await Task { try await relay.detail(task: task, before: before) }.value
+            // Harness prompts can include large instruction blocks. Project
+            // them once off the UI actor before publishing the history page.
+            let items = await Task.detached(priority: .userInitiated) { page["items"].array.map(Message.init) }.value
             // Cache valid reads even if their view disappeared during the
             // request. Reopening then shares the result instead of waiting on
             // an in-flight load whose response would otherwise be discarded.
             guard current == connectionID, chats[task.id] === chat, chat.loadID == loadID else { return }
             guard older || !chat.bufferOverflowed else { throw PilotError("Too many live updates arrived while loading history. Refresh this task to recover.") }
-            let items = page["items"].array.map(Message.init)
             if older { chat.transcript.prepend(items) }
             else {
                 // Preserve unacknowledged local rows, then replay events that

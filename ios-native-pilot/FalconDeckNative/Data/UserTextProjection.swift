@@ -3,7 +3,16 @@ import Foundation
 /// Mirrors client-core's harness-user-text projection. Agent scaffolding remains
 /// in the source transcript, while the visible transcript shows the typed prompt.
 enum UserTextProjection {
-    enum Result: Equatable { case prompt(String, automated: Bool), service(String), hidden }
+    enum Result: Equatable, Sendable { case prompt(String, automated: Bool), service(String), hidden }
+    struct Cached: Equatable, Sendable {
+        let result: Result
+        let skillEcho: Bool
+        init(_ text: String) {
+            result = project(text)
+            let preamble = text.trimmingCharacters(in: .whitespacesAndNewlines)
+            skillEcho = preamble.hasPrefix("Use the FalconDeck skill defined at ") || preamble.hasPrefix("Apply the FalconDeck skill named '")
+        }
+    }
     private static let tags = ["environment_context", "recommended_plugins", "user_instructions", "system-reminder", "command-name", "command-message", "local-command-stdout", "INSTRUCTIONS", "task-notification", "user_info", "local-command-caveat"]
     private static let hiddenPrefixes = ["Caveat: The messages below were generated", "# AGENTS.md instructions for", "The following is the Codex agent history", "[Request interrupted"]
     static func project(_ text: String) -> Result {
@@ -14,6 +23,9 @@ enum UserTextProjection {
             guard let end = source.range(of: wrapper.1, range: source.index(source.startIndex, offsetBy: wrapper.0.count)..<source.endIndex) else { return .hidden }
             source = String(source[end.upperBound...]).trimmingCharacters(in: .whitespacesAndNewlines)
         }
+        // Ordinary typed prompts cannot contain harness wrappers. Avoid the
+        // many Unicode tag searches for the overwhelmingly common plain case.
+        if !source.contains("<") { return prompt(source) }
         for tag in tags + ["user_query"] {
             var rest = source[...]
             while let open = rest.range(of: "<\(tag)>") {
@@ -55,12 +67,13 @@ enum UserTextProjection {
         var visible: [Message] = []
         for item in items {
             guard item.kind == "user_message" else { visible.append(item); continue }
-            switch project(item.text) {
+            let cached = item.userProjection ?? Cached(item.text)
+            switch cached.result {
             case .prompt(let text, let automated):
-                let preamble = item.text.trimmingCharacters(in: .whitespacesAndNewlines)
-                let hasSkill = preamble.hasPrefix("Use the FalconDeck skill defined at ") || preamble.hasPrefix("Apply the FalconDeck skill named '")
-                let previous = visible.reversed().first { !["service", "reasoning", "tool_call"].contains($0.kind) }
-                if hasSkill, item.raw["attachments"].array.isEmpty, previous?.kind == "user_message", previous?.text.trimmingCharacters(in: .whitespacesAndNewlines) == text { continue }
+                if cached.skillEcho, item.raw["attachments"].array.isEmpty {
+                    let previous = visible.reversed().first { !["service", "reasoning", "tool_call"].contains($0.kind) }
+                    if previous?.kind == "user_message", previous?.text.trimmingCharacters(in: .whitespacesAndNewlines) == text { continue }
+                }
                 visible.append(Message(item.raw.setting("text", .string(text)).setting("automated", .bool(automated))))
             case .service(let text): visible.append(Message(item.raw.setting("kind", .string("service")).setting("message", .string(text))))
             case .hidden:

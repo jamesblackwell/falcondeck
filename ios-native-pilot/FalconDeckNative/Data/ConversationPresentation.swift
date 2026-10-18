@@ -24,8 +24,11 @@ struct TranscriptBlock: Identifiable {
     /// Keep secondary controls on the final assistant message of each turn.
     /// Earlier commentary remains available through the message context menu.
     static func actionMessageIDs(_ input: [Message]) -> Set<String> {
+        actions(in: UserTextProjection.messages(input))
+    }
+    fileprivate static func actions(in source: [Message]) -> Set<String> {
         var ids: Set<String> = [], pending: String?
-        for message in UserTextProjection.messages(input) {
+        for message in source {
             if message.kind == "user_message" {
                 if let pending { ids.insert(pending) }
                 pending = nil
@@ -37,7 +40,9 @@ struct TranscriptBlock: Identifiable {
         return ids
     }
     static func build(_ input: [Message], preferences: ConversationPreferences, running: Bool) -> [TranscriptBlock] {
-        let source = UserTextProjection.messages(input)
+        blocks(from: UserTextProjection.messages(input), preferences: preferences, running: running)
+    }
+    fileprivate static func blocks(from source: [Message], preferences: ConversationPreferences, running: Bool) -> [TranscriptBlock] {
         var blocks: [TranscriptBlock] = [], buffer: [Message] = []
         var seenDiff = false
         func flush() { if !buffer.isEmpty { blocks.append(TranscriptBlock(items: buffer, grouped: true, firstDiff: false)); buffer = [] } }
@@ -54,6 +59,18 @@ struct TranscriptBlock: Identifiable {
             else { flush(); blocks.append(TranscriptBlock(items: [item], grouped: false, firstDiff: first)) }
         }
         flush(); return blocks
+    }
+}
+
+/// One projection shared by row grouping and turn actions. ChatSession retains
+/// only the latest result, so draft edits and scroll geometry don't rebuild it.
+struct TranscriptPresentation {
+    let blocks: [TranscriptBlock]
+    let actionIDs: Set<String>
+    init(_ items: [Message], preferences: ConversationPreferences, running: Bool) {
+        let source = UserTextProjection.messages(items)
+        blocks = TranscriptBlock.blocks(from: source, preferences: preferences, running: running)
+        actionIDs = TranscriptBlock.actions(in: source)
     }
 }
 
