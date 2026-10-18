@@ -118,3 +118,54 @@ requests return awaitable task handles, so tests await completion instead of
 using a fixed delay. All 240 optimized unit tests and three optimized UI scenarios
 each on iPhone/iPad simulators passed. The isolated native-only fix review used
 `autoreview --mode local --max-priority P2` and returned no actionable findings.
+
+## Native motion polish — 18 October 2026
+
+Voice feedback now draws two bounded paths in a Canvas instead of laying out
+one SwiftUI capsule per bar. TimelineView schedules three interpolation dates
+per 100 ms audio sample and then stops; settled audio cannot leave a continuous
+waveform clock running. Microphone sampling and transcription providers are
+unchanged. The activity text shader only changes text ink toward the current
+palette's foreground, so it cannot animate text placement or row height.
+
+Button presses and disclosure chevrons share a short native animation. The
+existing sidebar, prompt control order, hit areas and native sheets remain.
+Goal completion emits ten small particles around the existing goal badge for
+less than a second, only for the same visible, live goal changing from active
+to complete. Cached completions and background updates do not trigger it.
+
+A scene-level policy disables continuous effects for Reduce Motion, Low Power
+Mode and inactive scenes. Hidden activity labels pause their timelines; native
+loading symbols pause too. The waveform still displays actual samples with
+motion disabled. Animation clocks remain inside leaf views, not AppModel.
+
+Indicative process CPU measurements on the same optimized iPad simulator,
+after two seconds of warmup and over eight seconds of sampling:
+
+| Local fixture | Motion enabled | Low Power visual fallback |
+| --- | ---: | ---: |
+| Thinking | 6.37% | 0.00% |
+| Recording and changing audio samples | 10.85% | 5.87% |
+
+These are percentages of one host CPU core, not device energy, GPU utilization,
+FPS, or a comparison with the previous app. Other simulator/host work can affect
+them. Real iPhone energy/frame profiling remains pending because the paired
+phone became unavailable. The Animation Hitches instrument does not support
+this simulator target; no hitch-free claim is made from that failed trace.
+
+Local fixtures: `--demo --motion-preview=recording`, `thinking`, or `goal`.
+Append `--motion-reduce` or `--motion-low-power` for static feedback. They use no
+microphone, agent turn or relay request. Screenshots and recorded frames were
+checked in light and dark appearances. The particle-rendering regression
+reproduced an initially empty scene failing to start; a persistent container
+fixes it. Waveform and shader lifecycle handlers also use persistent containers.
+
+Validation: all 247 optimized unit tests passed. Seven focused UI scenarios
+passed on each phone/tablet simulator, including twelve concurrent local streams
+and folder persistence latency. After the lifecycle fixes, six relevant phone
+scenarios and three tablet motion scenarios passed again. The signed optimized
+device build and strict code-signature verification passed; this motion build
+was not installed because the phone was unavailable. Native-only Autoreview
+(`.agents/skills/autoreview/scripts/autoreview --mode local --max-priority P2`
+in an isolated review worktree) finished clean after both verified lifecycle
+findings were fixed. Expo, production, OTA and TestFlight were untouched.

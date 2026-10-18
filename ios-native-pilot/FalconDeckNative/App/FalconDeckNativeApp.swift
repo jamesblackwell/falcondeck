@@ -42,6 +42,7 @@ struct FalconDeckNativeApp: App {
         WindowGroup {
             RootView()
                 .environment(model)
+                .modifier(NativeMotionScope())
                 .preferredColorScheme(NativeAppearance.shared.colorScheme)
                 .tint(FD.accent)
                 .task { if !Self.isUnitTestHost { await model.start() } }

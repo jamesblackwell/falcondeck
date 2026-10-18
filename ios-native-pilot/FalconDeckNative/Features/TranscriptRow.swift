@@ -2,6 +2,7 @@ import SwiftUI
 
 struct TranscriptRow: View {
     @Environment(AppModel.self) private var model
+    @Environment(\.nativeMotion) private var motion
     let message: Message
     var task: AgentTask? = nil
     var firstDiff = false
@@ -35,11 +36,11 @@ struct TranscriptRow: View {
                         HStack(spacing: 8) {
                             if message.streaming { ActivityDiamond() }
                             else { Image(systemName: "brain") }
-                            Text(ConversationActivity.reasoningLabel(message)).lineLimit(1)
+                            NativeActivityText(text: ConversationActivity.reasoningLabel(message), active: message.streaming).lineLimit(1)
                         }.font(.footnote)
                         if preferences.thinking == "preview", !open.wrappedValue { Text(message.text).font(.caption).lineLimit(2) }
                     }.foregroundStyle(FD.secondary)
-                }
+                }.animation(motion.interactionAnimation, value: open.wrappedValue)
             case "tool_call": tool
             case "plan":
                 DisclosureGroup {

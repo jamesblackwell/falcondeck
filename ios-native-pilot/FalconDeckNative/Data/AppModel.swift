@@ -348,6 +348,7 @@ final class AppModel {
         }
         await PerformancePreview.start(in: self)
         StreamingPreview.start(in: self)
+        MotionPreview.start(in: self)
         #endif
     }
     func tasks(in project: Project) -> [AgentTask] {

@@ -1,6 +1,7 @@
 import SwiftUI
 
 struct TranscriptGroup: View {
+    @Environment(\.nativeMotion) private var motion
     let block: TranscriptBlock
     let task: AgentTask
     var expansion: TranscriptExpansion?
@@ -15,10 +16,11 @@ struct TranscriptGroup: View {
             HStack(spacing: 8) {
                 if block.running { ActivityDiamond() }
                 let count = block.items.filter { $0.kind == "tool_call" }.count
-                Text(block.running ? "Working…" : "Worked · \(count) \(count == 1 ? "activity" : "activities")")
+                NativeActivityText(text: block.running ? "Working…" : "Worked · \(count) \(count == 1 ? "activity" : "activities")", active: block.running)
                     .font(.caption).foregroundStyle(FD.secondary)
             }.frame(minHeight: 36, alignment: .leading)
         }.tint(FD.secondary)
+            .animation(motion.interactionAnimation, value: expanded)
             .onChange(of: expansion, initial: true) { _, value in if let value { expanded = value.expanded } }
     }
 }

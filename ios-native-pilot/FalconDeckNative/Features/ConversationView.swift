@@ -62,7 +62,7 @@ private struct ChatContent: View {
                             .listRowBackground(NativeListScrollProbe(scrolling: listScrolling, rowID: block.id))
                     }
                     if let activity {
-                        HStack(spacing: 8) { ActivityDiamond(); Text(activity).font(.footnote).foregroundStyle(FD.secondary) }.frame(minHeight: 44).frame(maxWidth: 820, alignment: .leading).frame(maxWidth: .infinity)
+                        HStack(spacing: 8) { ActivityDiamond(); NativeActivityText(text: activity).font(.footnote).foregroundStyle(FD.secondary) }.frame(minHeight: 44).frame(maxWidth: 820, alignment: .leading).frame(maxWidth: .infinity)
                             .listRowBackground(NativeListScrollProbe(scrolling: listScrolling))
                     }
                     Color.clear.frame(height: 1).id("latest").listRowBackground(NativeListScrollProbe(scrolling: listScrolling))
@@ -198,7 +198,7 @@ private struct ChatContent: View {
                 }
                 if task.raw["handoff_from"]["context_pending"].bool { Text("The previous conversation is sent with your first message.").font(.footnote).foregroundStyle(FD.secondary) }
                 if task.goal != .null {
-                    Button { showGoal = true } label: { Label("Goal · \(task.goal["status"].string.capitalized)", systemImage: "target").font(.caption) }.buttonStyle(.glass)
+                    GoalStatusButton(task: task) { showGoal = true }
                 }
                 if !task.queued.isEmpty || !chat.pendingQueue.isEmpty { QueuedMessagesView(task: task) }
                 ForEach(requests, id: \.self) { request in InteractiveCard(request: request) }

@@ -23,13 +23,16 @@ import SwiftUI
 }
 
 struct ActivityDiamond: View {
-    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @Environment(\.nativeMotion) private var motion
+    @State private var visible = false
     var body: some View {
         Image(systemName: "diamond.fill")
             .font(.caption2).foregroundStyle(FD.accent)
             // Animate the symbol, so transcript reflow cannot animate its placement.
-            .symbolEffect(.pulse, options: .repeating, isActive: !reduceMotion)
+            .symbolEffect(.pulse, options: .repeating, isActive: motion.effectsEnabled && visible)
             .accessibilityLabel("Loading")
+            .onAppear { visible = true }.onDisappear { visible = false }
+            .onScrollVisibilityChange(threshold: 0.01) { visible = $0 }
     }
 }
 

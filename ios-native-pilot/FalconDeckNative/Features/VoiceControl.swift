@@ -22,6 +22,7 @@ struct VoiceControl: View {
             Image(systemName: "mic").font(.system(size: ComposerMetrics.iconSize))
                 .frame(width: ComposerMetrics.controlSize, height: ComposerMetrics.controlSize).contentShape(.rect)
         }
+            .buttonStyle(NativePressStyle())
             .accessibilityLabel(recorder.pendingURL == nil ? "Record voice message" : "Recover saved recording")
             .accessibilityIdentifier("record-voice")
             .disabled(chat.sending || chat.preparingAttachments || recorder.starting || recorder.recording || recorder.transcribing)
@@ -58,12 +59,12 @@ struct RecordingPanel: View {
             } else {
                 VStack(alignment: .leading, spacing: 4) {
                     HStack(spacing: 8) {
-                        Text(status).foregroundStyle(recorder.recording ? FD.accent : FD.secondary).lineLimit(textSize.isAccessibilitySize ? 2 : 1)
+                        NativeActivityText(text: status, active: recorder.transcribing).foregroundStyle(recorder.recording ? FD.accent : FD.secondary).lineLimit(textSize.isAccessibilitySize ? 2 : 1)
                             .accessibilityIdentifier("voice-status")
                         Spacer(minLength: 0)
                         if !recorder.starting { Text(duration).monospacedDigit().foregroundStyle(FD.muted) }
                     }.font(.footnote.weight(.medium))
-                    if recorder.recording { VoiceWaveform(levels: recorder.levels).frame(height: 32) }
+                    if recorder.recording { VoiceWaveform(recorder: recorder).frame(height: 32) }
                 }.frame(maxWidth: .infinity, alignment: .leading)
                 if recorder.transcribing {
                     ActivityDiamond().frame(width: ComposerMetrics.controlSize, height: ComposerMetrics.controlSize).accessibilityLabel(status)
@@ -97,7 +98,7 @@ struct RecordingPanel: View {
                 .frame(width: ComposerMetrics.controlSize, height: ComposerMetrics.controlSize).background(prominent ? FD.accent : FD.raised, in: Circle())
                 .foregroundStyle(prominent ? FD.background : FD.foreground)
                 .contentShape(.rect)
-        }.buttonStyle(.plain).accessibilityLabel(label)
+        }.buttonStyle(NativePressStyle()).accessibilityLabel(label)
     }
     private func close() {
         recorder.finishRecording(); recorder.cancelTranscription(); chat.voiceInputOpen = false
@@ -116,21 +117,5 @@ struct RecordingPanel: View {
                 onTranscript(text, submit)
             } catch { /* Failed audio remains available to retry, recover or discard. */ }
         }
-    }
-}
-
-private struct VoiceWaveform: View {
-    let levels: [Float]
-    var body: some View {
-        GeometryReader { geometry in
-            let count = max(0, Int((geometry.size.width + 3) / 6))
-            let visible = Array(levels.suffix(count))
-            HStack(spacing: 3) {
-                ForEach(0..<count, id: \.self) { index in
-                    Capsule().fill(index < visible.count ? FD.muted : FD.line)
-                        .frame(width: 3, height: index < visible.count ? 4 + CGFloat(visible[index]) * 22 : 4)
-                }
-            }.frame(height: 32)
-        }.accessibilityHidden(true)
     }
 }

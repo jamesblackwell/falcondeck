@@ -4,7 +4,7 @@ private enum SidebarOptionsAction { case reorder, filters }
 
 struct SidebarView: View {
     @Environment(AppModel.self) private var model
-    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @Environment(\.nativeMotion) private var motion
     let openDetail: () -> Void
     @State private var search = ""
     @State private var showOptions = false
@@ -62,8 +62,7 @@ struct SidebarView: View {
                         animate { if expanded.contains(project.id) { expanded.remove(project.id) } else { expanded.insert(project.id) } }
                     } label: {
                         HStack(spacing: 8) {
-                            Image(systemName: "chevron.right").rotationEffect(.degrees(isOpen ? 90 : 0))
-                                .font(.system(size: 10, weight: .semibold)).foregroundStyle(FD.muted).frame(width: 12)
+                            NativeDisclosureChevron(expanded: isOpen).foregroundStyle(FD.muted).frame(width: 12)
                             WorkspaceGlyph(project: project).font(.subheadline).frame(width: 18, height: 20)
                             Text(project.name).font(.subheadline.weight(.medium)).lineLimit(1)
                             Spacer(minLength: 2)
@@ -204,7 +203,7 @@ struct SidebarView: View {
                 HStack {
                     Label(folder.name, systemImage: "folder").font(.subheadline)
                     Spacer()
-                    Image(systemName: "chevron.right").rotationEffect(.degrees(isOpen ? 90 : 0)).font(.caption2.weight(.semibold))
+                    NativeDisclosureChevron(expanded: isOpen, size: 12)
                 }.foregroundStyle(FD.secondary).padding(.leading, 26).padding(.trailing, 10).frame(minHeight: 44).contentShape(.rect)
             }
             .disabled(!search.isEmpty).accessibilityValue(isOpen ? "Expanded" : "Collapsed")
@@ -303,12 +302,12 @@ struct SidebarView: View {
             HStack {
                 Text(title.uppercased()).font(.system(.caption2, design: .monospaced).weight(.medium)).tracking(0.8)
                 Spacer()
-                Image(systemName: "chevron.right").rotationEffect(.degrees(expanded ? 90 : 0)).font(.system(size: 10, weight: .semibold))
+                NativeDisclosureChevron(expanded: expanded)
             }.foregroundStyle(FD.muted).padding(.horizontal, 12).frame(minHeight: 40).padding(.top, 8).contentShape(.rect)
         }.buttonStyle(.plain).disabled(!search.isEmpty).accessibilityIdentifier("sidebar-section-\(title.lowercased())")
             .accessibilityValue(expanded ? "Expanded" : "Collapsed")
     }
-    private func animate(_ changes: () -> Void) { withAnimation(reduceMotion ? nil : .snappy(duration: 0.22), changes) }
+    private func animate(_ changes: () -> Void) { withAnimation(motion.interactionAnimation, changes) }
     private func matches(_ task: AgentTask, project: Project? = nil) -> Bool {
         model.extensions.matches(task) && (search.isEmpty || task.title.localizedCaseInsensitiveContains(search) || project?.name.localizedCaseInsensitiveContains(search) == true)
     }

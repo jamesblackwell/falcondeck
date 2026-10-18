@@ -51,7 +51,7 @@ struct ComposerView: View {
                                 .lineLimit(1).truncationMode(.tail)
                             Image(systemName: "chevron.down").font(.system(size: 11, weight: .semibold))
                         }.font(.subheadline).padding(.horizontal, 6).frame(maxWidth: .infinity, minHeight: ComposerMetrics.controlSize, alignment: .leading).contentShape(.rect)
-                    }.buttonStyle(.plain).accessibilityLabel("Choose model").accessibilityIdentifier("composer-model")
+                    }.buttonStyle(NativePressStyle(scales: false)).accessibilityLabel("Choose model").accessibilityIdentifier("composer-model")
                     ComposerOptions(task: task, project: project, chat: chat)
                     VoiceControl(task: task, chat: chat, onBegin: beginVoiceInput)
                     Button {
@@ -62,9 +62,9 @@ struct ComposerView: View {
                             if chat.sending || chat.stopping { ActivityDiamond() }
                             else { Image(systemName: showsStop ? "stop.fill" : "arrow.up").font(.system(size: showsStop ? 14 : ComposerMetrics.iconSize, weight: .semibold)) }
                         }.frame(width: ComposerMetrics.controlSize, height: ComposerMetrics.controlSize).contentShape(.rect)
+                            .background(showsStop ? FD.foreground : FD.accent.opacity(hasContent ? 1 : 0.15), in: Circle())
                     }
-                    .background(showsStop ? FD.foreground : FD.accent.opacity(hasContent ? 1 : 0.15), in: Circle())
-                    .buttonStyle(.plain).foregroundStyle(showsStop || hasContent ? FD.background : FD.secondary)
+                    .buttonStyle(NativePressStyle()).foregroundStyle(showsStop || hasContent ? FD.background : FD.secondary)
                     .disabled(primaryDisabled)
                     .accessibilityLabel(showsStop ? "Stop task" : task.running ? "Queue message" : "Send message")
                     .accessibilityIdentifier(showsStop ? "stop-task" : "send-message")
