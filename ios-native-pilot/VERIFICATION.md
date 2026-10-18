@@ -4,10 +4,10 @@ Visual polish follow-up: see [VISUAL-QA.md](VISUAL-QA.md) for the expanded
 screen/state checks, screenshot gallery and current device status.
 
 Falcon Native uses the separate `com.falcondeck.pilot.native` application ID and
-Apple Development signing. The preceding streaming/prompt Debug app and speech
-widget were installed over Wi-Fi on the paired iPhone. The build from the whole
-Swift source review is signed and retained locally; this review did not install
-it on a physical device. No device inventory or credentials are checked in.
+Apple Development signing. The latest model/reasoning picker Debug app and
+speech widget were installed over Wi-Fi on the paired iPhone on 18 October.
+iOS refused automatic launch because the phone was locked; open Falcon Native
+after unlocking. No device inventory or credentials are checked in.
 
 The opening screen now follows Expo: **Scan QR code**, or enter the full secure
 code/link and **Connect**. Scanning or opening a native pairing link connects
