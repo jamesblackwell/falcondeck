@@ -114,8 +114,10 @@ Use `falcondeck_message_thread` to send `message` (1–24000 characters) to an
 existing `thread_id` in this workspace. Find the id with list and read its
 recent work with view first. Messages are labelled with the sending thread id
 and title. `delivery` defaults to `steer`: inject into an active turn when
-supported, otherwise queue; an idle target starts a new turn. Choose `queue`
-to wait for its current turn. Self-messaging is rejected. The tool returns
+supported, otherwise queue; an idle target starts a new turn. Prefer direct
+steering for coordination, corrections, status requests, and results relevant
+to the recipient's current work. Choose `queue` only when the message should
+wait until its current turn finishes. Self-messaging is rejected. The tool returns
 admission status (`steered`, `queued`, or `turn started`), not the recipient's
 reply; use view to read replies. Existing target settings and UI approvals
 apply. Send only when the user's task authorizes contacting another agent.

@@ -1105,6 +1105,9 @@ provider, model, or permission settings. The daemon prefixes the caller's id
 and title as visible provenance, not an authority signal. `delivery: steer`
 (default) steers an active turn when available and falls back to queue;
 `delivery: queue` waits behind active work. Idle targets start a normal turn.
+Agent guidance prefers direct steering for coordination, corrections, status
+requests, and results relevant to current work; queue only when a message
+should wait until the recipient's current turn finishes.
 Self-messaging and targets outside the workspace are rejected. The tool returns
 admission status without waiting for completion; replies can be read with view.
 Existing turn approvals remain in FalconDeck UI.
