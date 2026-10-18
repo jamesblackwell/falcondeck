@@ -330,3 +330,26 @@ device authorization was canceled; no on-device interaction or physical haptic
 validation is claimed. The app was relaunched normally into its paired session.
 No real agent turns were started. Expo, production, OTA and TestFlight were
 unchanged.
+
+## Floating conversation title — 18 October 2026
+
+Removed the conversation's forced opaque navigation background. Root conversation
+destinations now use a native Liquid Glass title capsule and a transparent toolbar,
+with the List's soft top scroll-edge treatment keeping text visible behind the
+header. Native back/sidebar and task-options controls remain in place. Other
+destinations keep automatic toolbar backgrounds and their existing titles.
+
+The title stays on the stable root preference provider and the NavigationStack
+keeps its identity. No content offsets, history loading, safe-area padding or
+transcript positioning logic changed. Live renames continue to update the title.
+
+Validation: seven optimized iPhone and three iPad simulator UI cases passed.
+Coverage includes scrolling beneath the capsule, accessibility text size, opening
+and dismissing task options, cached/fresh history positioning, reopening and
+backgrounding, nested Settings navigation and live desktop renames. Dark/light
+screenshots were visually inspected. Native-only Autoreview (`.agents/skills/autoreview/scripts/autoreview
+--mode local --max-priority P2 --prompt-file header-review-context.md` in an
+isolated worktree) finished clean. The signed development build passed strict
+signature verification, was installed over Wi-Fi and relaunched normally into
+its paired session. No real agent turns were started; Expo, production, OTA and
+TestFlight were unchanged.

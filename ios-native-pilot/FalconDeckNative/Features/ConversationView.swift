@@ -74,6 +74,7 @@ private struct ChatContent: View {
                 .buttonStyle(.plain)
             }
             .listStyle(.plain).scrollContentBackground(.hidden)
+            .scrollEdgeEffectStyle(.soft, for: .top)
             .environment(\.defaultMinListRowHeight, 0)
             .contentMargins(.vertical, 10, for: .scrollContent)
             // History and token updates have no insertion animation. User
@@ -163,8 +164,6 @@ private struct ChatContent: View {
             }
         }
         .background(FD.background).navigationTitle(task.title.nonempty ?? "New task").navigationBarTitleDisplayMode(.inline)
-        .toolbarBackground(FD.background, for: .navigationBar)
-        .toolbarBackground(.visible, for: .navigationBar)
         .toolbar {
             ToolbarItem(placement: .topBarTrailing) {
                 if !task.isDraft {

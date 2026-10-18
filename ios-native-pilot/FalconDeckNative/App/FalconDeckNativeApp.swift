@@ -104,6 +104,20 @@ struct RootView: View {
                     // Keep the root title's preference provider stable too;
                     // a removed destination can otherwise clear the new title.
                     .navigationTitle(detailTitle)
+                    .toolbarBackgroundVisibility(floatingConversationHeader ? .hidden : .automatic, for: .navigationBar)
+                    .toolbar {
+                        if floatingConversationHeader {
+                            ToolbarItem(placement: .principal) {
+                                Text(detailTitle)
+                                    .font(.subheadline.weight(.semibold))
+                                    .foregroundStyle(FD.foreground)
+                                    .lineLimit(1).truncationMode(.tail)
+                                    .padding(.horizontal, 14).padding(.vertical, 8)
+                                    .glassEffect(.regular, in: .capsule)
+                                    .accessibilityIdentifier("conversation-title")
+                            }
+                        }
+                    }
                     .navigationDestination(for: DetailDestination.self) { $0.view }
             }.navigationBarTitleDisplayMode(.inline)
         }
@@ -120,6 +134,13 @@ struct RootView: View {
             var reset = Transaction(); reset.disablesAnimations = true
             withTransaction(reset) { detailPath.removeAll() }
             if selection != nil && sizeClass == .compact { compactColumn = .detail }
+        }
+    }
+    private var floatingConversationHeader: Bool {
+        guard detailPath.isEmpty else { return false }
+        switch model.selection {
+        case .task, .draft, .projects, nil: return true
+        default: return false
         }
     }
     private var detailTitle: String {

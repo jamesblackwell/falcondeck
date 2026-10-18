@@ -106,3 +106,49 @@ import XCTest
         capture("Reading anchor retained after refresh")
     }
 }
+
+@MainActor final class ConversationHeaderQATests: XCTestCase {
+    override func setUp() { super.setUp(); continueAfterFailure = false }
+    private func launch(largeText: Bool = false) -> XCUIApplication {
+        XCUIDevice.shared.orientation = .portrait
+        let app = XCUIApplication()
+        app.launchArguments = ["--demo", "--loading-preview=settling"]
+        if largeText { app.launchArguments += ["-UIPreferredContentSizeCategoryName", "UICTContentSizeCategoryAccessibilityXXXL"] }
+        app.launch(); return app
+    }
+    private func capture(_ name: String) {
+        let shot = XCTAttachment(screenshot: XCUIScreen.main.screenshot())
+        shot.name = name; shot.lifetime = .keepAlways; add(shot)
+    }
+    func testGlassTitleStaysInPlaceWhileHistoryScrollsAndOptionsOpen() {
+        let app = launch()
+        let title = app.staticTexts["conversation-title"]
+        XCTAssertTrue(title.waitForExistence(timeout: 5))
+        XCTAssertEqual(title.label, "A more native way to work")
+        let position = title.frame
+        let transcript = app.descendants(matching: .any).matching(identifier: "conversation-transcript").firstMatch
+        XCTAssertTrue(transcript.waitForExistence(timeout: 5))
+        transcript.swipeDown()
+        XCTAssertEqual(title.frame.minY, position.minY, accuracy: 1)
+        XCTAssertTrue(app.buttons["task-menu"].isHittable)
+        XCTAssertTrue(app.buttons["composer-model"].isHittable)
+        capture("Glass title floats over scrolling conversation history")
+        app.buttons["task-menu"].tap()
+        XCTAssertTrue(app.navigationBars["Task options"].waitForExistence(timeout: 5))
+        app.buttons["Done"].tap()
+        XCTAssertTrue(title.waitForExistence(timeout: 5))
+        XCTAssertEqual(title.frame.minY, position.minY, accuracy: 1)
+        capture("Glass conversation title remains after dismissing options")
+    }
+    func testGlassTitleRemainsReadableWithAccessibilityText() {
+        let app = launch(largeText: true)
+        let title = app.staticTexts["conversation-title"]
+        XCTAssertTrue(title.waitForExistence(timeout: 5))
+        XCTAssertEqual(title.label, "A more native way to work")
+        let bar = app.navigationBars.firstMatch
+        XCTAssertGreaterThan(title.frame.height, 10)
+        XCTAssertLessThanOrEqual(title.frame.maxY, bar.frame.maxY + 1)
+        XCTAssertTrue(app.buttons["task-menu"].isHittable)
+        capture("Glass conversation title at accessibility text size")
+    }
+}
