@@ -138,7 +138,10 @@ struct AgentModel: Identifiable, Hashable, Sendable {
     let raw: JSON
     var id: String { raw["id"].string }
     var label: String { raw["label"].string.nonempty ?? id }
-    var efforts: [String] { raw["supported_reasoning_efforts"].array.map { $0["reasoning_effort"].string.nonempty ?? $0["id"].string }.filter { !$0.isEmpty } }
+    var efforts: [String] {
+        let supported = raw["supported_reasoning_efforts"].array.map { $0["reasoning_effort"].string.nonempty ?? $0["id"].string }.filter { !$0.isEmpty }
+        return supported.isEmpty ? raw["default_reasoning_effort"].string.nonempty.map { [$0] } ?? [] : supported
+    }
 }
 
 extension Project {
@@ -149,7 +152,22 @@ extension Project {
     }
     func models(for provider: String) -> [AgentModel] {
         let agent = raw["agents"].array.first { $0["provider"].string == provider }
-        let values = agent?["models"].array ?? (provider == defaultProvider ? raw["models"].array : [])
+        let catalog = agent?["models"] ?? .null
+        let values = catalog == .null && provider == defaultProvider ? raw["models"].array : catalog.array
         return values.map { AgentModel(raw: $0) }
+    }
+    func resolvedModel(for provider: String, id: String) -> AgentModel? {
+        let models = models(for: provider)
+        if id.isEmpty { return models.first { $0.raw["is_default"].bool } ?? models.first }
+        if let exact = models.first(where: { $0.id == id }) { return exact }
+        // Existing Claude tasks can retain a versioned model while the catalog
+        // advertises its short alias. Keep the recorded version in the label.
+        if provider == "claude", id.range(of: #"^claude-(opus|sonnet|haiku|fable)-\d+-\d+(?:-\d{8})?$"#, options: .regularExpression) != nil {
+            let parts = id.split(separator: "-").map(String.init)
+            if let alias = models.first(where: { $0.id == parts[1] }) {
+                return AgentModel(raw: alias.raw.setting("id", .string(id)).setting("label", .string("\(parts[1].capitalized) \(parts[2]).\(parts[3])")))
+            }
+        }
+        return AgentModel(raw: .object(["id": .string(id)]))
     }
 }

@@ -6,9 +6,10 @@ struct ComposerOptions: View {
     let project: Project?
     @Bindable var chat: ChatSession
     @State private var showSettings = false
-    private var capabilities: JSON { project?.capabilities(task.provider) ?? .null }
-    private var modes: [JSON] { project?.modes(task.provider) ?? [] }
-    private var activeModel: AgentModel? { project?.models(for: task.provider).first { $0.id == chat.modelID } ?? project?.models(for: task.provider).first { $0.raw["is_default"].bool } }
+    private var currentProject: Project? { model.projects.first { $0.id == task.projectID } ?? project }
+    private var capabilities: JSON { currentProject?.capabilities(task.provider) ?? .null }
+    private var modes: [JSON] { currentProject?.modes(task.provider) ?? [] }
+    private var activeModel: AgentModel? { currentProject?.resolvedModel(for: task.provider, id: chat.modelID) }
     var body: some View {
         Button { showSettings = true } label: {
             Image(systemName: "slider.horizontal.3").font(.system(size: ComposerMetrics.iconSize))
@@ -25,12 +26,6 @@ struct ComposerOptions: View {
         .onChange(of: chat.provider) { _, provider in
             guard task.isDraft else { return }
             chat.modelID = ""; chat.effort = ""; chat.overrides = [:]
-            if let project, project.models(for: provider).isEmpty, !model.demo {
-                Task {
-                    do { _ = try await model.relay.call("provider.hydrate", params: .object(["workspace_id": .string(project.id), "provider": .string(provider)])) }
-                    catch { chat.error = error.localizedDescription }
-                }
-            }
         }
     }
     @ViewBuilder private var settings: some View {

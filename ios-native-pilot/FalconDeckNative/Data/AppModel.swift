@@ -277,6 +277,12 @@ final class AppModel {
                 tasks[0] = AgentTask(tasks[0].raw.setting("status", .string("running")))
             }
             syncIndex = CompactSync(token: LoadingPreviewRelay.token, counts: LoadingPreviewRelay.counts)
+            if ProcessInfo.processInfo.arguments.contains(where: { $0.hasPrefix("--loading-preview=models") }) {
+                projects = Demo.projects.map { project in
+                    Project(project.raw.setting("models", .array([])).setting("agents", .array(project.raw["agents"].array.map { $0.setting("models", .array([])) })))
+                }
+                _ = try? await relay.restore(connectionID: connectionID)
+            }
             demo = false; hasSession = true; connected = true; hasLiveSnapshot = true; status = "Preview computer"
             if ProcessInfo.processInfo.arguments.contains("--loading-preview=cached") {
                 let chat = chat(for: LoadingPreviewRelay.task)

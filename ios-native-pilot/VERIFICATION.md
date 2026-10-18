@@ -38,6 +38,36 @@ metadata, reconnect and forgetting a computer live in **Settings → Connections
 - Apple Development arm64 app/widget builds succeed. Build products, Xcode
   results and screenshots remain local and ignored.
 
+## Model and reasoning picker — 18 October
+
+The native composer now requests lazy provider metadata on new tasks and when
+an existing task has no model catalog, matching Expo's `provider.hydrate` flow.
+The RPC acknowledges scheduling; workspace events deliver the actual models.
+The picker observes live project metadata and shows loading/retry states while
+waiting. Requests are shared per project/provider and connection, have a
+bounded wait, and can restart if a previously populated live catalog empties.
+Late metadata clears obsolete loading errors.
+
+Legacy workspace catalogs remain usable when an agent omits its model field.
+Reasoning falls back to an advertised default effort when no supported-effort
+list is supplied. Versioned Claude models inherit the alias's reasoning
+metadata while retaining their recorded model/version. Explicitly clearing a
+model selection displays the provider default's reasoning choices. Selected
+model and effort values are verified in both first-turn and existing-task RPCs.
+
+Two metadata regressions and the empty existing-task picker failed before the
+fix. All 199 unit tests pass. Three focused UI flows pass on both iPhone and
+iPad: new task, existing task with retained reasoning selection, and retry after
+hydration fails. Screenshots were inspected, including loading and tablet
+scrolling. Fixtures use local content and never start real agent turns.
+
+Repo-local Autoreview uses `--mode local --max-priority P2` with the native-only
+patch and adjacent provider, model-selection and request contracts. Its initial
+findings about metadata invalidation and clearing a model selection were
+verified and fixed. The final rerun reported no actionable P0–P2 findings.
+The signed development build remains a separate native
+app; Expo, the daemon, relay, OTA and TestFlight are unchanged by this fix.
+
 ## Whole Swift source review
 
 All 116 Swift files were read: 88 app, widget and utility files, 23 unit-test

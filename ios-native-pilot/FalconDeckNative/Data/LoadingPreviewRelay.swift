@@ -15,10 +15,14 @@ actor LoadingPreviewRelay: RelayServing {
     private var historyRequests = 0
     private var preferences = Demo.preferences
     private let failFirst: Bool
+    private var sink: AsyncStream<RelayUpdate>.Continuation?
+    private var connectionID = UUID()
+    private var modelRequests: [String: Int] = [:]
+    private var sequence = 0
     init(failFirst: Bool) { self.failFirst = failFirst }
-    func events() -> AsyncStream<RelayUpdate> { AsyncStream { $0.finish() } }
+    func events() -> AsyncStream<RelayUpdate> { AsyncStream { sink = $0 } }
     func pair(_ input: PairingInput, connectionID: UUID) { }
-    func restore(connectionID: UUID) -> Bool { true }
+    func restore(connectionID: UUID) -> Bool { self.connectionID = connectionID; return true }
     func disconnect(forget: Bool) { }
     func refresh() { }
     func detail(task: AgentTask, before: String?) async throws -> JSON {
@@ -29,6 +33,21 @@ actor LoadingPreviewRelay: RelayServing {
         return .object(["thread": task.raw, "items": .array(Demo.messages.map(\.raw)), "has_older": .bool(false)])
     }
     func call(_ method: String, params: JSON) async throws -> JSON {
+        if method == "provider.hydrate" {
+            let id = params["workspace_id"].string
+            let key = id + ":" + params["provider"].string
+            modelRequests[key, default: 0] += 1
+            if ProcessInfo.processInfo.arguments.contains("--loading-preview=models-retry"), modelRequests[key] == 1 { throw PilotError("The preview computer couldn't load models.") }
+            guard let project = Demo.projects.first(where: { $0.id == id }) else { return .null }
+            let current = connectionID
+            Task {
+                try? await Task.sleep(for: .seconds(3))
+                guard current == connectionID else { return }
+                sequence += 1
+                sink?.yield(.init(connectionID: current, event: .events([.object(["seq": .number(Double(sequence)), "event": .object(["type": .string("workspace-updated"), "workspace": project.raw])])])))
+            }
+            return .object(["ok": .bool(true)])
+        }
         if method == "sync.threads" {
             try await Task.sleep(for: .milliseconds(100))
             let id = params["workspace_id"].string

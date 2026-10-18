@@ -12,8 +12,10 @@ struct ComposerView: View {
     @State private var showModels = false
     @State private var goalSeed = ""
     @State private var goalCommand = ""
-    private var models: [AgentModel] { project?.models(for: task.provider) ?? [] }
-    private var activeModel: AgentModel? { models.first { $0.id == chat.modelID } ?? models.first { $0.raw["is_default"].bool } ?? models.first }
+    private var currentProject: Project? { model.projects.first { $0.id == task.projectID } ?? project }
+    private var models: [AgentModel] { currentProject?.models(for: task.provider) ?? [] }
+    private var activeModel: AgentModel? { currentProject?.resolvedModel(for: task.provider, id: chat.modelID) }
+    private var modelLoadScope: String { "\(model.connectionID):\(task.projectID):\(task.provider):\(model.connected):\(models.isEmpty)" }
     private var voiceActive: Bool { chat.voiceInputOpen && model.voice.ownerID == task.id }
     private var hasContent: Bool { !chat.draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !chat.attachments.isEmpty }
     private var showsStop: Bool { !hasContent && (task.running || task.status == "waiting_for_input") }
@@ -80,20 +82,37 @@ struct ComposerView: View {
                             ForEach(models) { Text($0.label).tag($0.id) }
                         }.pickerStyle(.inline).labelsHidden()
                     }.listRowBackground(FD.surface)
+                    if model.catalog(task).modelsLoading, models.isEmpty {
+                        Section { HStack(spacing: 10) { ActivityDiamond(); Text("Loading models…").foregroundStyle(FD.secondary) } }
+                            .listRowBackground(FD.surface).accessibilityIdentifier("composer-models-loading")
+                    }
+                    if let error = model.catalog(task).modelsError {
+                        Section {
+                            Text(error).font(.footnote).foregroundStyle(FD.secondary)
+                            Button("Retry loading models") { Task { await model.loadModels(task, force: true) } }
+                                .disabled(!model.connected || model.catalog(task).modelsLoading)
+                        }.listRowBackground(FD.surface)
+                    }
                     if let activeModel, !activeModel.efforts.isEmpty {
                         Section("Reasoning") {
                             Picker("Reasoning effort", selection: $chat.effort) {
                                 Text("Default").tag("")
+                                if !chat.effort.isEmpty, !activeModel.efforts.contains(chat.effort) { Text(chat.effort.capitalized).tag(chat.effort) }
                                 ForEach(activeModel.efforts, id: \.self) { Text($0.capitalized).tag($0) }
                             }.pickerStyle(.inline).labelsHidden()
                         }.listRowBackground(FD.surface)
                     }
-                }.scrollContentBackground(.hidden).background(FD.background)
+                }.accessibilityIdentifier("composer-model-options").scrollContentBackground(.hidden).background(FD.background)
                     .navigationTitle("Model & reasoning").navigationBarTitleDisplayMode(.inline)
                     .toolbar { ToolbarItem(placement: .confirmationAction) { Button("Done") { showModels = false } } }
             }.nativeOptionsSheet()
+                .task(id: modelLoadScope) { await model.loadModels(task) }
         }
-        .task(id: task.projectID + ":" + task.provider + ":" + String(model.connected)) { await model.loadCatalog(task) }
+        .task(id: modelLoadScope) {
+            async let catalog: Void = model.loadCatalog(task)
+            await model.loadModels(task)
+            await catalog
+        }
         .sheet(isPresented: $showGoal) { GoalView(taskID: task.id, initialObjective: goalSeed) { if chat.draft == goalCommand { chat.draft = "" } } }
         .onChange(of: chat.modelID) { _, value in
             chat.effort = ""; chat.overrides["model_id"] = value.isEmpty ? .null : .string(value)

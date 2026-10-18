@@ -13,6 +13,47 @@ import XCTest
         let shot = XCTAttachment(screenshot: XCUIScreen.main.screenshot())
         shot.name = name; shot.lifetime = .keepAlways; add(shot)
     }
+    private func reasoningOption(_ name: String, app: XCUIApplication) -> XCUIElement {
+        let option = app.buttons[name]
+        let form = app.collectionViews["composer-model-options"]
+        for _ in 0..<3 where !option.isHittable { form.swipeUp() }
+        return option
+    }
+    func testExistingTaskLoadsItsModelsAndReasoningWithoutSwitchingAgent() {
+        let app = launch("models")
+        app.buttons["sidebar-task-native"].tap()
+        app.buttons["composer-model"].tap()
+        XCTAssertTrue(app.staticTexts["Loading models…"].waitForExistence(timeout: 2))
+        capture("Model picker shows loading until the catalog arrives")
+        XCTAssertTrue(app.staticTexts["GPT-5.4"].waitForExistence(timeout: 8))
+        let effort = reasoningOption("High", app: app)
+        XCTAssertTrue(effort.waitForExistence(timeout: 5))
+        effort.tap()
+        app.buttons["Done"].tap(); app.buttons["composer-model"].tap()
+        XCTAssertTrue(reasoningOption("High", app: app).isSelected)
+        capture("Existing task models and reasoning loaded")
+    }
+    func testNewTaskLoadsItsModelsAndReasoningWithoutSwitchingAgent() {
+        let app = launch("models")
+        app.buttons["New task in falcondeck"].tap()
+        XCTAssertTrue(app.textFields["chat-input"].waitForExistence(timeout: 5))
+        app.buttons["composer-model"].tap()
+        XCTAssertTrue(app.staticTexts["GPT-5.4"].waitForExistence(timeout: 8))
+        XCTAssertTrue(reasoningOption("High", app: app).exists)
+        capture("New task models and reasoning loaded")
+    }
+    func testModelFailureOffersRetryAndKeepsTheSheetOpen() {
+        let app = launch("models-retry")
+        app.buttons["sidebar-task-native"].tap(); app.buttons["composer-model"].tap()
+        let retry = app.buttons["Retry loading models"]
+        XCTAssertTrue(retry.waitForExistence(timeout: 5))
+        capture("Model hydration failure is recoverable")
+        retry.tap()
+        XCTAssertTrue(app.staticTexts["GPT-5.4"].waitForExistence(timeout: 8))
+        XCTAssertTrue(reasoningOption("High", app: app).exists)
+        XCTAssertFalse(retry.exists)
+        capture("Retry restores models and reasoning")
+    }
     func testTaskOptionsExposeHistoryFailureAndRetry() {
         let app = launch("retry")
         app.buttons["sidebar-task-native"].press(forDuration: 1)
