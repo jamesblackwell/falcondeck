@@ -2,6 +2,7 @@ import SwiftUI
 
 struct ComposerView: View {
     @Environment(AppModel.self) private var model
+    @Environment(\.nativeMotion) private var motion
     let task: AgentTask
     let project: Project?
     @Bindable var chat: ChatSession
@@ -12,6 +13,7 @@ struct ComposerView: View {
     @State private var showModels = false
     @State private var goalSeed = ""
     @State private var goalCommand = ""
+    @State private var transcriptFeedback = 0
     private var models: [AgentModel] { model.effectiveModels(projectID: task.projectID, provider: task.provider) }
     private var providerLabel: String { (model.projects.first { $0.id == task.projectID } ?? project)?.providerLabel(task.provider) ?? task.provider.capitalized }
     private var activeModel: AgentModel? { AgentModel.resolve(models: models, provider: task.provider, id: chat.modelID) }
@@ -51,7 +53,7 @@ struct ComposerView: View {
                                 .lineLimit(1).truncationMode(.tail)
                             Image(systemName: "chevron.down").font(.system(size: 11, weight: .semibold))
                         }.font(.subheadline).padding(.horizontal, 6).frame(maxWidth: .infinity, minHeight: ComposerMetrics.controlSize, alignment: .leading).contentShape(.rect)
-                    }.buttonStyle(NativePressStyle(scales: false)).accessibilityLabel("Choose model").accessibilityIdentifier("composer-model")
+                    }.buttonStyle(ComposerControlStyle(role: .model)).accessibilityLabel("Choose model").accessibilityIdentifier("composer-model")
                     ComposerOptions(task: task, project: project, chat: chat)
                     VoiceControl(task: task, chat: chat, onBegin: beginVoiceInput)
                     Button {
@@ -60,11 +62,12 @@ struct ComposerView: View {
                     } label: {
                         Group {
                             if chat.sending || chat.stopping { ActivityDiamond() }
-                            else { Image(systemName: showsStop ? "stop.fill" : "arrow.up").font(.system(size: showsStop ? 14 : ComposerMetrics.iconSize, weight: .semibold)) }
+                            else { Image(systemName: showsStop ? "stop.fill" : "arrow.up").font(.system(size: showsStop ? 14 : ComposerMetrics.iconSize, weight: .semibold))
+                                    .contentTransition(motion.effectsEnabled ? .symbolEffect(.replace) : .identity)
+                                    .animation(motion.interactionAnimation, value: showsStop) }
                         }.frame(width: ComposerMetrics.controlSize, height: ComposerMetrics.controlSize).contentShape(.rect)
-                            .background(showsStop ? FD.foreground : FD.accent.opacity(hasContent ? 1 : 0.15), in: Circle())
                     }
-                    .buttonStyle(NativePressStyle()).foregroundStyle(showsStop || hasContent ? FD.background : FD.secondary)
+                    .buttonStyle(ComposerControlStyle(role: showsStop ? .stop : .send))
                     .disabled(primaryDisabled)
                     .accessibilityLabel(showsStop ? "Stop task" : task.running ? "Queue message" : "Send message")
                     .accessibilityIdentifier(showsStop ? "stop-task" : "send-message")
@@ -72,6 +75,7 @@ struct ComposerView: View {
             }
         }
         .padding(.horizontal, 8).padding(.top, 12).padding(.bottom, 8).glassEffect(.regular.tint(FD.surface), in: .rect(cornerRadius: 26))
+        .sensoryFeedback(.success, trigger: transcriptFeedback) { _, _ in motion.active }
         .sheet(isPresented: $showModels) {
             ComposerModelSheet(task: task, chat: chat, models: models) { showModels = false }
                 .task(id: modelLoadScope) { await model.loadModels(task) }
@@ -92,6 +96,7 @@ struct ComposerView: View {
     }
     private func receiveTranscript(_ text: String, submit: Bool) {
         guard let caret = model.finishVoiceInput(text, ownerID: task.id, chat: chat) else { return }
+        transcriptFeedback &+= 1
         if submit { submitDraft() }
         else {
             let draft = chat.draft, offset = caret.utf16Offset(in: chat.draft)

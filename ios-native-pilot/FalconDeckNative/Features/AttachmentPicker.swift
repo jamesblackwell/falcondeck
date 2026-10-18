@@ -22,6 +22,7 @@ struct AttachmentPicker: View {
             Group { if loading { ActivityDiamond() } else { Image(systemName: "plus").font(.system(size: ComposerMetrics.iconSize)) } }
                 .frame(width: ComposerMetrics.controlSize, height: ComposerMetrics.controlSize).contentShape(.rect)
         }
+        .buttonStyle(ComposerControlStyle())
         .accessibilityLabel("Add attachment").disabled(loading || chat.preparingAttachments || chat.sending)
         .photosPicker(isPresented: $showPhotos, selection: $photos, maxSelectionCount: 10, matching: .images)
         .onChange(of: photos) { _, items in

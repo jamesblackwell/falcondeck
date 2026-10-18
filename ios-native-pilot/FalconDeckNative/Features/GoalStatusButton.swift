@@ -20,14 +20,19 @@ struct GoalStatusButton: View {
     let action: () -> Void
     @State private var visible = false
     @State private var burst: UUID?
+    @State private var openFeedback = 0
     private var observation: GoalCompletionObservation {
         GoalCompletionObservation(taskID: task.id, objective: task.goal["objective"].string,
             status: task.goal["status"].string, live: (model.demo || model.hasLiveSnapshot) && motion.active)
     }
     var body: some View {
-        Button(action: action) {
+        Button { openFeedback &+= 1; action() } label: {
             Label("Goal · \(task.goal["status"].string.capitalized)", systemImage: "target").font(.caption)
         }.buttonStyle(.glass).accessibilityIdentifier("goal-status-button")
+            .sensoryFeedback(.selection, trigger: openFeedback) { _, _ in motion.active }
+            .sensoryFeedback(.success, trigger: observation) { previous, next in
+                visible && motion.active && next.completed(after: previous)
+            }
             .overlay(alignment: .leading) {
                 if burst != nil && motion.effectsEnabled {
                     GoalCompletionParticles(color: FD.accent).id(burst)

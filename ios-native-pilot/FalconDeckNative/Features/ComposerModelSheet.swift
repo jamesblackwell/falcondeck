@@ -2,11 +2,13 @@ import SwiftUI
 
 struct ComposerModelSheet: View {
     @Environment(AppModel.self) private var model
+    @Environment(\.nativeMotion) private var motion
     let task: AgentTask
     @Bindable var chat: ChatSession
     let models: [AgentModel]
     let done: () -> Void
     @State private var query = ""
+    @State private var feedback = 0
     private var activeModel: AgentModel? { AgentModel.resolve(models: models, provider: task.provider, id: chat.modelID) }
     private var filtered: [AgentModel] {
         let text = query.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -21,6 +23,7 @@ struct ComposerModelSheet: View {
             .navigationTitle("Model & reasoning").navigationBarTitleDisplayMode(.inline)
             .toolbar { ToolbarItem(placement: .confirmationAction) { Button("Done", action: done) } }
         }.nativeOptionsSheet()
+            .sensoryFeedback(.selection, trigger: feedback) { _, _ in motion.active }
     }
     private var form: some View {
         Form {
@@ -28,7 +31,7 @@ struct ComposerModelSheet: View {
             // the selected model's effort reachable before that long list.
             if models.count > 12, query.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { reasoningSection }
             Section("Model") {
-                Picker("Model", selection: Binding(get: { chat.modelID }, set: { chat.chooseModel($0) })) {
+                Picker("Model", selection: Binding(get: { chat.modelID }, set: { if chat.modelID != $0 { chat.chooseModel($0); feedback &+= 1 } })) {
                     Text("Task default").tag("")
                     // Keep a valid tag for a recorded model or a selection that
                     // is temporarily outside the search results.
@@ -68,7 +71,7 @@ struct ComposerModelSheet: View {
         }
     }
     private func reasoningPicker(_ activeModel: AgentModel) -> some View {
-        Picker("Reasoning", selection: Binding(get: { chat.effort }, set: { chat.chooseEffort($0) })) {
+        Picker("Reasoning", selection: Binding(get: { chat.effort }, set: { if chat.effort != $0 { chat.chooseEffort($0); feedback &+= 1 } })) {
             Text(activeModel.efforts.contains("default") ? "Agent default" : "Default").tag("")
             if !chat.effort.isEmpty, !activeModel.efforts.contains(chat.effort) { Text(chat.effort.capitalized).tag(chat.effort) }
             ForEach(activeModel.efforts, id: \.self) { Text($0.capitalized).tag($0) }

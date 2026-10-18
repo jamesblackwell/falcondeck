@@ -59,6 +59,7 @@ struct FalconDeckNativeApp: App {
 
 struct RootView: View {
     @Environment(AppModel.self) private var model
+    @Environment(\.nativeMotion) private var motion
     @Environment(\.scenePhase) private var scenePhase
     @Environment(\.horizontalSizeClass) private var sizeClass
     @Environment(\.dynamicTypeSize) private var textSize
@@ -81,6 +82,7 @@ struct RootView: View {
         .sheet(isPresented: $model.showSpeechSettings) { NavigationStack { SpeechSettingsView(modal: true) } }
         .overlay(alignment: .topTrailing) { if showPerformance { PerformanceOverlay() } }
         .sheet(item: Binding(get: { model.taskOptionsID.map { TaskOptionsTarget(id: $0) } }, set: { model.taskOptionsID = $0?.id })) { target in TaskOptionsView(taskID: target.id) }
+        .sensoryFeedback(.selection, trigger: model.taskOptionsID) { _, id in id != nil && motion.active }
         .onChange(of: scenePhase) { _, phase in model.setForeground(phase == .active) }
         // Keep presented sheets on the same appearance and menu policy.
         .menuOrder(.fixed)
@@ -111,7 +113,7 @@ struct RootView: View {
                 switch model.selection { case .task, .draft: compactColumn = .detail; default: break }
             }
         }
-        .sensoryFeedback(.selection, trigger: model.selection)
+        .sensoryFeedback(.selection, trigger: model.selection) { _, _ in motion.active }
         // Sidebar taps also reveal an unchanged selection. This observer handles
         // destinations opened elsewhere, including incoming notifications.
         .onChange(of: model.selection) { _, selection in

@@ -281,6 +281,7 @@ private struct LatestMessageShortcut: View {
     var body: some View {
         if !state.followLatest && !state.nearLatest && hasMessages {
             Button(action: jump) { Image(systemName: "arrow.down").padding(12) }
+                .buttonStyle(NativePressStyle(feedback: .selection))
                 .glassEffect().padding(16).accessibilityLabel("Jump to latest message")
         }
     }

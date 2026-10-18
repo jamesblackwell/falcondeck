@@ -69,7 +69,7 @@ struct SidebarView: View {
                             if model.tasks(in: project).contains(where: \.working) { ActivityDiamond() }
                         }.padding(.horizontal, 10).frame(minHeight: 44).contentShape(.rect)
                     }
-                    .buttonStyle(.plain).foregroundStyle(FD.foreground).disabled(!search.isEmpty)
+                    .buttonStyle(NativePressStyle(scales: false, feedback: .selection)).foregroundStyle(FD.foreground).disabled(!search.isEmpty)
                     .accessibilityIdentifier("project-\(project.name)").accessibilityValue(isOpen ? "Expanded" : "Collapsed")
                     Button { newTask(project) } label: {
                         Image(systemName: "square.and.pencil").font(.caption).foregroundStyle(FD.muted)
@@ -118,6 +118,7 @@ struct SidebarView: View {
         .refreshable { await model.refresh() }
         .task(id: plan) { await model.loadInitialTaskPages(plan) }
         .onChange(of: model.connectionID) { _, _ in disclosures.reset() }
+        .sensoryFeedback(.selection, trigger: showOptions) { _, open in open && motion.active }
         .toolbar {
             ToolbarItem(placement: .bottomBar) {
                 Button { navigate(.settings) } label: { Image(systemName: "gearshape") }
@@ -206,6 +207,7 @@ struct SidebarView: View {
                     NativeDisclosureChevron(expanded: isOpen, size: 12)
                 }.foregroundStyle(FD.secondary).padding(.leading, 26).padding(.trailing, 10).frame(minHeight: 44).contentShape(.rect)
             }
+            .buttonStyle(NativePressStyle(scales: false, feedback: .selection))
             .disabled(!search.isEmpty).accessibilityValue(isOpen ? "Expanded" : "Collapsed")
             .accessibilityIdentifier("sidebar-folder-\(folder.id)")
             .contextMenu {
@@ -307,7 +309,7 @@ struct SidebarView: View {
                 Spacer()
                 NativeDisclosureChevron(expanded: expanded)
             }.foregroundStyle(FD.muted).padding(.horizontal, 12).frame(minHeight: 40).padding(.top, 8).contentShape(.rect)
-        }.buttonStyle(.plain).disabled(!search.isEmpty).accessibilityIdentifier("sidebar-section-\(title.lowercased())")
+        }.buttonStyle(NativePressStyle(scales: false, feedback: .selection)).disabled(!search.isEmpty).accessibilityIdentifier("sidebar-section-\(title.lowercased())")
             .accessibilityValue(expanded ? "Expanded" : "Collapsed")
     }
     private func animate(_ changes: () -> Void) { withAnimation(motion.interactionAnimation, changes) }

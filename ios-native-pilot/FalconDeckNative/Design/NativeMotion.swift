@@ -47,11 +47,15 @@ struct NativeMotionScope: ViewModifier {
 struct NativePressStyle: ButtonStyle {
     @Environment(\.nativeMotion) private var motion
     var scales = true
+    var feedback: SensoryFeedback? = nil
     func makeBody(configuration: Configuration) -> some View {
         configuration.label
             .opacity(configuration.isPressed ? 0.72 : 1)
             .scaleEffect(configuration.isPressed && scales && motion.effectsEnabled ? 0.96 : 1)
             .animation(motion.interactionAnimation, value: configuration.isPressed)
+            .sensoryFeedback(trigger: configuration.isPressed) { _, pressed in
+                pressed && motion.active ? feedback : nil
+            }
     }
 }
 

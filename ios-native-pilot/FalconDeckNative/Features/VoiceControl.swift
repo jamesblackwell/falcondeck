@@ -22,7 +22,7 @@ struct VoiceControl: View {
             Image(systemName: "mic").font(.system(size: ComposerMetrics.iconSize))
                 .frame(width: ComposerMetrics.controlSize, height: ComposerMetrics.controlSize).contentShape(.rect)
         }
-            .buttonStyle(NativePressStyle())
+            .buttonStyle(ComposerControlStyle())
             .accessibilityLabel(recorder.pendingURL == nil ? "Record voice message" : "Recover saved recording")
             .accessibilityIdentifier("record-voice")
             .disabled(chat.sending || chat.preparingAttachments || recorder.starting || recorder.recording || recorder.transcribing)
@@ -33,6 +33,7 @@ struct VoiceControl: View {
 /// It replaces the normal input and footer instead of stacking another card.
 struct RecordingPanel: View {
     @Environment(AppModel.self) private var model
+    @Environment(\.nativeMotion) private var motion
     @Environment(\.dynamicTypeSize) private var textSize
     let task: AgentTask
     @Bindable var chat: ChatSession
@@ -48,6 +49,9 @@ struct RecordingPanel: View {
                 }
             } else { compactRow }
         }.frame(minHeight: 52).accessibilityIdentifier("voice-input")
+            .sensoryFeedback(.error, trigger: recorder.error) { _, error in
+                error != nil && motion.active && recorder.ownerID == task.id && chat.voiceInputOpen
+            }
     }
     private var compactRow: some View {
         HStack(spacing: 6) {
@@ -95,10 +99,9 @@ struct RecordingPanel: View {
     private func control(_ label: String, symbol: String, prominent: Bool = false, action: @escaping () -> Void) -> some View {
         Button(action: action) {
             Image(systemName: symbol).font(.system(size: symbol == "stop.fill" ? 14 : ComposerMetrics.iconSize, weight: .medium))
-                .frame(width: ComposerMetrics.controlSize, height: ComposerMetrics.controlSize).background(prominent ? FD.accent : FD.raised, in: Circle())
-                .foregroundStyle(prominent ? FD.background : FD.foreground)
+                .frame(width: ComposerMetrics.controlSize, height: ComposerMetrics.controlSize)
                 .contentShape(.rect)
-        }.buttonStyle(NativePressStyle()).accessibilityLabel(label)
+        }.buttonStyle(ComposerControlStyle(role: prominent ? .send : .secondary, inset: 0)).accessibilityLabel(label)
     }
     private func close() {
         recorder.finishRecording(); recorder.cancelTranscription(); chat.voiceInputOpen = false

@@ -152,6 +152,7 @@
 		EF433FE3B4AC40DAC4A97106 /* NetworkMonitor.swift in Sources */ = {isa = PBXBuildFile; fileRef = B4DE01C9A23E93D617C80776 /* NetworkMonitor.swift */; };
 		F27E639A8EB26288E5078949 /* AppEvents.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2FBF8ECE5AF03C46A31F12C8 /* AppEvents.swift */; };
 		F5649421BB78F56628125818 /* SessionTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = AD2AC5615C2A38A0579CCC41 /* SessionTests.swift */; };
+		FB0F8D9ED032FF26B4AEACD3 /* ComposerControlStyle.swift in Sources */ = {isa = PBXBuildFile; fileRef = C1A7B9C5D04A886A9E653CF3 /* ComposerControlStyle.swift */; };
 		FE0BB475C53D2FB9DFAB3E5E /* StreamingLayoutTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = FA390BDFB782446DC6A4B1B6 /* StreamingLayoutTests.swift */; };
 		FF69CC996850CB5E75423267 /* SettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 47E16BD30B154E9D9C2EBCDA /* SettingsView.swift */; };
 /* End PBXBuildFile section */
@@ -308,6 +309,7 @@
 		BD371329FA7F098CA025CB61 /* ConversationLoadingQATests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ConversationLoadingQATests.swift; sourceTree = "<group>"; };
 		BDFD49C7343F3873CA6B2CBD /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist; path = Info.plist; sourceTree = "<group>"; };
 		BF64180787F03484AD67C0C0 /* ComposerCatalog.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ComposerCatalog.swift; sourceTree = "<group>"; };
+		C1A7B9C5D04A886A9E653CF3 /* ComposerControlStyle.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ComposerControlStyle.swift; sourceTree = "<group>"; };
 		C5475B8650A18171591091CA /* VoiceComposerTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VoiceComposerTests.swift; sourceTree = "<group>"; };
 		C59AE23C86FA89E146466AC7 /* MotionPreview.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MotionPreview.swift; sourceTree = "<group>"; };
 		C6A68935F0E396694EE0D3B7 /* NativeMotion.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NativeMotion.swift; sourceTree = "<group>"; };
@@ -474,6 +476,7 @@
 			isa = PBXGroup;
 			children = (
 				CAE3544CBDE8EF0B8248994F /* ActivitySweep.metal */,
+				C1A7B9C5D04A886A9E653CF3 /* ComposerControlStyle.swift */,
 				1A7A99561FEE75CA40F56613 /* LoadingFeedback.swift */,
 				42B8AF3942CD1C580C831846 /* MarkdownView.swift */,
 				442A4132DA6ED6163D931BC7 /* NativeAppearance.swift */,
@@ -845,6 +848,7 @@
 				EA85C35CDDA6D07FFEB11C00 /* ChatSession.swift in Sources */,
 				85B5748AE0DE7905D1D862D9 /* CompactSync.swift in Sources */,
 				3F05260C8DBEFE4C662BA73A /* ComposerCatalog.swift in Sources */,
+				FB0F8D9ED032FF26B4AEACD3 /* ComposerControlStyle.swift in Sources */,
 				064907C5FACE055CD297E28D /* ComposerModelSheet.swift in Sources */,
 				A0828133E2C0DA0D390D48E2 /* ComposerOptions.swift in Sources */,
 				252B512E089B96938D51FA74 /* ComposerSelection.swift in Sources */,

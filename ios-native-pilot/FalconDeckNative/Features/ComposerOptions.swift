@@ -2,10 +2,12 @@ import SwiftUI
 
 struct ComposerOptions: View {
     @Environment(AppModel.self) private var model
+    @Environment(\.nativeMotion) private var motion
     let task: AgentTask
     let project: Project?
     @Bindable var chat: ChatSession
     @State private var showSettings = false
+    @State private var feedback = 0
     private var currentProject: Project? { model.projects.first { $0.id == task.projectID } ?? project }
     private var capabilities: JSON { currentProject?.capabilities(task.provider) ?? .null }
     private var modes: [JSON] { currentProject?.modes(task.provider) ?? [] }
@@ -14,7 +16,7 @@ struct ComposerOptions: View {
         Button { showSettings = true } label: {
             Image(systemName: "slider.horizontal.3").font(.system(size: ComposerMetrics.iconSize))
                 .frame(width: ComposerMetrics.controlSize, height: ComposerMetrics.controlSize).contentShape(.rect)
-        }.buttonStyle(.plain).accessibilityLabel("Agent and task settings")
+        }.buttonStyle(ComposerControlStyle()).accessibilityLabel("Agent and task settings")
         .sheet(isPresented: $showSettings) {
             NavigationStack {
                 Form { settings }
@@ -22,12 +24,13 @@ struct ComposerOptions: View {
                     .navigationTitle("Task settings").navigationBarTitleDisplayMode(.inline)
                     .toolbar { ToolbarItem(placement: .confirmationAction) { Button("Done") { showSettings = false } } }
             }.nativeOptionsSheet()
+                .sensoryFeedback(.selection, trigger: feedback) { _, _ in motion.active }
         }
     }
     @ViewBuilder private var settings: some View {
         Section {
             if task.isDraft {
-                Picker("Agent", selection: Binding(get: { chat.provider }, set: { model.chooseProvider($0, task: task, chat: chat) })) {
+                Picker("Agent", selection: Binding(get: { chat.provider }, set: { if chat.provider != $0 { model.chooseProvider($0, task: task, chat: chat); feedback &+= 1 } })) {
                     ForEach(currentProject?.providers ?? [task.provider], id: \.self) { Text(currentProject?.providerLabel($0) ?? $0.capitalized).tag($0) }
                 }.accessibilityIdentifier("composer-provider")
             }
@@ -47,6 +50,7 @@ struct ComposerOptions: View {
     }
     private func modePicker(_ label: String, key: String, options: [(String, String)]) -> some View {
         Picker(label, selection: Binding(get: { (chat.overrides[key] ?? task.raw["agent"][key]).string.nonempty ?? (key == "service_tier" ? "default" : "") }, set: { value in
+            if (chat.overrides[key] ?? task.raw["agent"][key]).string != value { feedback &+= 1 }
             chat.overrides[key] = value.isEmpty ? .null : .string(value)
             if key == "permission_mode", task.provider == "codex" { chat.overrides["approval_policy"] = value.isEmpty ? .null : .string(value == "default" ? "on-request" : value) }
         })) {

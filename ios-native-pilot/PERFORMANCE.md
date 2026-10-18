@@ -291,3 +291,42 @@ visually inspected. Native-only Autoreview (`.agents/skills/autoreview/scripts/a
 isolated worktree) finished clean. The signed standalone development build was
 installed over Wi-Fi and launched normally afterward. No real agent turns were
 started; Expo, production, OTA and TestFlight were unchanged.
+
+## Composer interaction polish — 18 October 2026
+
+Composer controls retain their existing order and 48pt frames. Token-based
+surfaces, fine edge highlights, spring compression and pointer feedback give
+the buttons more depth. The model control stays flat at rest so it does not
+become a wide empty chip on iPad. Recording controls retain their full painted
+size and the existing Canvas waveform.
+
+A local Metal touch response adds a soft ring and short highlight on a press or
+when Send becomes ready. SwiftUI keyframes finish in 0.55 seconds with transparent
+endpoints. No idle timeline, whole-composer shader, transcript movement or glass
+opacity animation is added. Inactive scenes, Reduce Motion and Low Power Mode
+disable the shader; ordinary low-power press feedback remains available.
+
+Native sensory feedback covers composer presses, explicit model/reasoning and
+agent-setting choices, project/folder disclosures, navigation and options,
+jump-to-latest, goal opening/live completion and transcription success/failure.
+Feedback is scene-active and does not follow streaming tokens or automatic
+catalog reconciliation. Existing goal identity and recording-ownership guards
+also govern their completion/error feedback. Hardware and system preferences
+decide which haptics play.
+
+Validation: all 272 optimized unit tests passed. Seven iPhone and three iPad
+simulator UI cases passed for control order/size, stop/queue/send, recording
+states and draft retention, goal geometry, folder races, Reduce Motion and Low
+Power Mode. Two tablet cases passed again after the final visual refinement.
+Dark and light screenshots were inspected; an AXe held-press capture and video
+verified the shader response and settings-sheet opening. Native-only Autoreview
+(`.agents/skills/autoreview/scripts/autoreview --mode local --max-priority P2
+--prompt-file controls-review-context.md` in an isolated worktree) finished clean;
+the subsequent model-chip paint adjustment was isolated styling.
+
+The final signed development build passed strict signature verification and was
+installed over Wi-Fi. Physical iPhone UI automation did not initialize because
+device authorization was canceled; no on-device interaction or physical haptic
+validation is claimed. The app was relaunched normally into its paired session.
+No real agent turns were started. Expo, production, OTA and TestFlight were
+unchanged.
