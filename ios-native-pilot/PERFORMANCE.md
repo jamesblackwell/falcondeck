@@ -232,3 +232,32 @@ finished clean. The optimized development build passed strict signature
 verification, was installed over Wi-Fi, and was relaunched without QA arguments
 for its normal paired session. QA did not start any turns on the paired relay. Expo,
 production, OTA and TestFlight were unchanged.
+
+
+## Model catalog recovery — 18 October 2026
+
+The picker keeps waiting through a connecting workspace placeholder, even when
+that replacement briefly resets `models_loading` to false. This was incorrectly
+shown as a terminal “Codex reconnecting” error before the real catalog arrived.
+Nonempty live catalogs now clear old picker errors immediately, and returning
+connections make visible composers eligible to retry. Model and reasoning
+selections and the existing scoped encrypted catalog cache remain intact.
+
+Explicit retry requests both the existing compact refresh and provider hydration.
+A coalesced refresh can return before its snapshot is delivered, so it is not a
+completion barrier or a reason to skip hydration. Concurrent picker callers
+still share one request; terminal empty results, authentication/error labels,
+connection-generation guards and the bounded loading deadline remain.
+
+Validation: all 266 optimized unit tests passed. New regressions cover reconnect
+placeholders, late catalog recovery, observable updates, reconnect retry, and
+concurrent forced retries with delayed snapshot delivery. Seven iPhone and three
+iPad simulator cases passed across Codex, Claude and OpenCode, including new and
+existing tasks, reasoning persistence, model search and retry. The final retry
+and reconnect UI cases passed again after review. Physical iPhone QA read the
+actual paired Codex catalog and reasoning without sending a turn or changing a
+selection. Native-only Autoreview (`.agents/skills/autoreview/scripts/autoreview
+--mode local --max-priority P2 --prompt-file models-review-context.md` in an
+isolated worktree) finished clean after fixing its refresh-ordering finding.
+The signed development build was installed over Wi-Fi. No Expo, daemon, relay,
+production, OTA or TestFlight code or deployments changed.

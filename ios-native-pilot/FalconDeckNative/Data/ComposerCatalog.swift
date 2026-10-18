@@ -79,20 +79,33 @@ import Observation
             defer { value.modelsLoading = false }
             do {
                 guard current == connectionID, connected else { throw CancellationError() }
+                // Retry also repairs missed metadata. Refresh can be coalesced
+                // with an in-flight read, so it is not a completion barrier;
+                // hydration and the loop below still own this request.
+                if force { await relay.refresh() }
+                guard current == connectionID else { throw CancellationError() }
+                guard connected else { throw PilotError("Connect to your computer to load models.") }
                 _ = try await relay.call("provider.hydrate", params: .object(["workspace_id": .string(task.projectID), "provider": .string(task.provider)]))
                 while current == connectionID {
                     guard connected else { throw PilotError("Connect to your computer to load models.") }
                     guard let project = projects.first(where: { $0.id == task.projectID }) else { throw CancellationError() }
                     if !project.models(for: task.provider).isEmpty { return }
                     let agent = project.agent(task.provider), loading = agent["models_loading"].bool
-                    if value.modelsLoadingObserved && !loading {
+                    // Connecting publishes a replacement placeholder with a
+                    // false loading flag before the provider catalog arrives.
+                    // Its account label (e.g. "Codex reconnecting") is progress.
+                    if value.modelsLoadingObserved && !loading && project.status != "connecting" {
                         throw PilotError(agent["account"]["label"].string.nonempty ?? "No models are available for this agent. Try again.")
                     }
                     value.modelsLoadingObserved = value.modelsLoadingObserved || loading
                     guard ContinuousClock.now < deadline else { throw PilotError("Models took too long to load. Try again.") }
                     try await Task.sleep(for: .milliseconds(200))
                 }
-            } catch { if current == connectionID { value.modelsError = error.localizedDescription } }
+            } catch {
+                if current == connectionID, projects.first(where: { $0.id == task.projectID })?.models(for: task.provider).isEmpty != false {
+                    value.modelsError = error.localizedDescription
+                }
+            }
         }
         value.modelsRequest = request
         await request.value

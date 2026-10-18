@@ -41,7 +41,11 @@ struct CachedModelCatalog: Codable, Sendable, Equatable {
                     catalog.modelsLoadingObserved = true
                 }
                 let models = project.models(for: provider).map(\.raw)
-                guard !models.isEmpty, models.count <= CachedModelCatalog.maxModels else { continue }
+                guard !models.isEmpty else { continue }
+                // Live metadata recovers an already open picker even if its
+                // earlier request failed or timed out. No extra tap is needed.
+                composerCatalogs[project.id + ":" + provider]?.modelsError = nil
+                guard models.count <= CachedModelCatalog.maxModels else { continue }
                 if let index = modelCatalogCache.firstIndex(where: { $0.projectID == project.id && $0.provider == provider }) {
                     if modelCatalogCache[index].models != models { modelCatalogCache[index] = CachedModelCatalog(projectID: project.id, provider: provider, models: models) }
                 } else { modelCatalogCache.append(CachedModelCatalog(projectID: project.id, provider: provider, models: models)) }

@@ -1,4 +1,5 @@
 import XCTest
+import Observation
 @testable import FalconDeckNative
 
 @MainActor final class ModelCatalogTests: XCTestCase {
@@ -27,6 +28,43 @@ import XCTest
             XCTAssertEqual(calls.count, 1)
             XCTAssertEqual(calls.first?["provider"].string, task.provider)
         }
+    }
+    func testReconnectPlaceholderDoesNotFinishTheModelRequest() async {
+        let relay = ModelRelay(), model = AppModel.testing(relay: relay)
+        model.connected = true; model.projects = [emptyProject]
+        let task = Demo.tasks[0], catalog = model.catalog(Demo.tasks[0])
+        let load = Task { await model.loadModels(task, timeout: .seconds(2)) }
+        await relay.waitForRequests(1)
+        model.projects = [Project(emptyProject.raw.setting("agents", .array(emptyProject.raw["agents"].array.map {
+            $0.setting("models_loading", .bool(true))
+        })))]
+        model.projects = [Project(emptyProject.raw.setting("status", .string("connecting")).setting("agents", .array(emptyProject.raw["agents"].array.map {
+            $0.setting("models_loading", .bool(false)).setting("account", .object(["status": .string("unknown"), "label": .string("Codex reconnecting")]))
+        })))]
+        // Publish after the polling loop has had a chance to see the intermediate
+        // workspace placeholder, as happens while a lazy provider boots.
+        try? await Task.sleep(for: .milliseconds(450))
+        let stillLoading = catalog.modelsLoading, error = catalog.modelsError
+        workspaceUpdate(model); await load.value
+        XCTAssertTrue(stillLoading, "A reconnect placeholder is not a finished empty catalog")
+        XCTAssertNil(error)
+        XCTAssertNil(catalog.modelsError)
+    }
+    func testLiveCatalogClearsErrorsWithoutAnotherPickerRequest() async {
+        let model = AppModel.testing(relay: ModelRelay())
+        model.connected = true; model.projects = [emptyProject]
+        await model.loadModels(Demo.tasks[0], timeout: .milliseconds(20))
+        XCTAssertNotNil(model.catalog(Demo.tasks[0]).modelsError)
+        workspaceUpdate(model)
+        XCTAssertNil(model.catalog(Demo.tasks[0]).modelsError, "Late authoritative metadata must recover an already open picker")
+    }
+    func testCatalogUpdateInvalidatesAnObservedPicker() {
+        let model = AppModel.testing(relay: ModelRelay())
+        model.projects = [emptyProject]
+        let changed = expectation(description: "Model picker observed workspace metadata")
+        withObservationTracking { _ = model.effectiveModels(projectID: emptyProject.id, provider: "codex") } onChange: { changed.fulfill() }
+        workspaceUpdate(model)
+        wait(for: [changed], timeout: 1)
     }
     func testFastEmptyHydrationDoesNotWaitForTheFullTimeout() async {
         let relay = ModelRelay(), model = AppModel.testing(relay: relay)
@@ -67,6 +105,45 @@ import XCTest
         XCTAssertFalse(oldCatalog === model.catalog(task))
         XCTAssertNil(model.catalog(task).modelsError)
         XCTAssertFalse(model.catalog(task).modelsLoading)
+    }
+    func testReconnectingMakesAFailedPickerEligibleToLoadAgain() async {
+        let relay = ModelRelay(failFirst: true), model = AppModel.testing(relay: relay)
+        model.connected = true; model.projects = [emptyProject]
+        let task = Demo.tasks[0]
+        await model.loadModels(task)
+        XCTAssertNotNil(model.catalog(task).modelsError)
+        model.receive(.init(connectionID: model.connectionID, event: .status("Computer offline", connected: false)))
+        model.receive(.init(connectionID: model.connectionID, event: .status("Connected", connected: true)))
+        let retry = Task { await model.loadModels(task, timeout: .seconds(2)) }
+        await relay.waitForRequests(2); workspaceUpdate(model); await retry.value
+        XCTAssertNil(model.catalog(task).modelsError)
+    }
+    func testRetryReadsFreshMetadataBeforeWarmingTheProviderAgain() async {
+        let relay = ModelRelay(), model = AppModel.testing(relay: relay)
+        model.connected = true; model.projects = [emptyProject]
+        let retry = Task { await model.loadModels(Demo.tasks[0], force: true, timeout: .seconds(2)) }
+        await relay.waitForRequests(1); workspaceUpdate(model); await retry.value
+        let refreshes = await relay.refreshes
+        XCTAssertEqual(refreshes, 1)
+    }
+    func testConcurrentRetriesShareHydrationAndAnAsynchronousRefresh() async {
+        let relay = ModelRelay(), model = AppModel.testing(relay: relay)
+        model.connected = true; model.projects = [emptyProject]
+        // A coalesced relay refresh may return before its snapshot is delivered.
+        await relay.setRefreshAction { [weak model] in
+            Task { @MainActor in
+                try? await Task.sleep(for: .milliseconds(300))
+                model?.projects = Demo.projects
+            }
+        }
+        let first = Task { await model.loadModels(Demo.tasks[0], force: true, timeout: .seconds(2)) }
+        await relay.waitForRequests(1)
+        let second = Task { await model.loadModels(Demo.tasks[0], force: true, timeout: .seconds(2)) }
+        await first.value; await second.value
+        let calls = await relay.calls, refreshes = await relay.refreshes
+        XCTAssertEqual(refreshes, 1); XCTAssertEqual(calls.count, 1)
+        XCTAssertFalse(model.projects[0].models(for: "codex").isEmpty)
+        XCTAssertNil(model.catalog(Demo.tasks[0]).modelsError)
     }
     func testExistingLiveCatalogDoesNotNeedAnotherHydration() async {
         let relay = ModelRelay(), model = AppModel.testing(relay: relay)
@@ -134,13 +211,16 @@ import XCTest
 private actor ModelRelay: RelayServing {
     private(set) var calls: [JSON] = []
     private(set) var turns: [JSON] = []
+    private(set) var refreshes = 0
+    private var refreshAction: (@MainActor @Sendable () -> Void)?
     let failFirst: Bool
     init(failFirst: Bool = false) { self.failFirst = failFirst }
     func events() -> AsyncStream<RelayUpdate> { AsyncStream { $0.finish() } }
     func pair(_ input: PairingInput, connectionID: UUID) { }
     func restore(connectionID: UUID) -> Bool { true }
     func disconnect(forget: Bool) { }
-    func refresh() { }
+    func setRefreshAction(_ action: @escaping @MainActor @Sendable () -> Void) { refreshAction = action }
+    func refresh() async { refreshes += 1; await refreshAction?() }
     func detail(task: AgentTask, before: String?) -> JSON { .null }
     func call(_ method: String, params: JSON) throws -> JSON {
         if method == "turn.start" { turns.append(params) }

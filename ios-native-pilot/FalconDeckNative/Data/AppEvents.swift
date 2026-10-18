@@ -5,7 +5,11 @@ import Foundation
         guard update.connectionID == connectionID, !demo else { return }
         switch update.event {
         case .status(let text, let online):
+            let reconnected = online && !connected
             status = text; connected = online
+            // Visible composers retry through their connection-scoped task.
+            // Do not leave a failed request latched across a daemon reconnect.
+            if reconnected { for catalog in composerCatalogs.values { catalog.modelsError = nil } }
             if connectionLog.last?.message != text { connectionLog.append(ConnectionLogEntry(message: text)); if connectionLog.count > 100 { connectionLog.removeFirst(connectionLog.count - 100) } }
             if online { reconnectAttempt = 0; reconnectTask?.cancel(); reconnectTask = nil; automations.scheduleRefresh(model: self); synchronizePush(); Task { await self.extensions.load(model: self); await self.openPendingNotification() } }
             if text == "Connecting…" { lastEventSeq = 0 }

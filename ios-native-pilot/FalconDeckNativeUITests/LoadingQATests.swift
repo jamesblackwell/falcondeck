@@ -96,6 +96,21 @@ import XCTest
         XCTAssertTrue(reasoningOption("High", app: app).exists)
         capture("New task models and reasoning loaded")
     }
+    func testNewAndExistingCodexPickersRecoverThroughAReconnectPlaceholder() {
+        for draft in [false, true] {
+            let app = launch("models-reconnecting")
+            app.buttons[draft ? "New task in falcondeck" : "sidebar-task-native"].tap()
+            app.buttons["composer-model"].tap()
+            XCTAssertTrue(app.staticTexts["GPT-5.4"].waitForExistence(timeout: 8))
+            XCTAssertFalse(app.staticTexts["Codex reconnecting"].exists)
+            let effort = reasoningOption("High", app: app)
+            XCTAssertTrue(effort.waitForExistence(timeout: 3)); effort.tap()
+            app.buttons["Done"].tap(); app.buttons["composer-model"].tap()
+            XCTAssertTrue(reasoningOption("High", app: app).isSelected)
+            capture(draft ? "New Codex task models and reasoning survive reconnect hydration" : "Existing Codex task models and reasoning survive reconnect hydration")
+            app.terminate()
+        }
+    }
     func testModelFailureOffersRetryAndKeepsTheSheetOpen() {
         let app = launch("models-retry")
         app.buttons["sidebar-task-native"].tap(); app.buttons["composer-model"].tap()
@@ -225,5 +240,37 @@ import XCTest
         XCTAssertTrue(app.staticTexts.matching(NSPredicate(format: "label CONTAINS 'Use the composer to continue the conversation'")).firstMatch.waitForExistence(timeout: 10))
         app.buttons["task-menu"].tap()
         XCTAssertTrue(app.buttons["Mark unread"].waitForExistence(timeout: 5), "A shared history load must acknowledge the currently visible conversation")
+    }
+}
+
+// Opt-in only: a normal QA run never reads the user's pairing. The dedicated
+// device xctestrun supplies these nonsecret identifiers for a read-only check.
+@MainActor final class PairedCatalogQATests: XCTestCase {
+    func testExistingCodexModelAndReasoningFromThePairedRelay() throws {
+        let environment = ProcessInfo.processInfo.environment
+        try XCTSkipUnless(environment["NATIVE_PAIRED_CATALOG_QA"] == "1")
+        let taskID = try XCTUnwrap(environment["NATIVE_PAIRED_TASK_ID"])
+        let modelLabel = try XCTUnwrap(environment["NATIVE_PAIRED_MODEL_LABEL"])
+        continueAfterFailure = false
+        let app = XCUIApplication(); app.launchArguments = []; app.launch()
+        let settings = app.buttons["sidebar-settings"]
+        if !settings.exists || !settings.isHittable {
+            let banner = XCUIApplication(bundleIdentifier: "com.apple.springboard").descendants(matching: .any).matching(identifier: "NotificationShortLookView").firstMatch
+            XCTAssertTrue(banner.waitForNonExistence(timeout: 12))
+            let back = app.buttons["BackButton"]
+            XCTAssertTrue(back.waitForExistence(timeout: 20)); back.tap()
+        }
+        let task = app.buttons["sidebar-task-" + taskID]
+        XCTAssertTrue(task.waitForExistence(timeout: 20)); task.tap()
+        let picker = app.buttons["composer-model"]
+        XCTAssertTrue(picker.waitForExistence(timeout: 10)); picker.tap()
+        XCTAssertTrue(app.buttons[modelLabel].waitForExistence(timeout: 30))
+        let form = app.collectionViews["composer-model-options"], high = app.buttons["High"]
+        for _ in 0..<5 where !high.isHittable { form.swipeUp() }
+        XCTAssertTrue(high.exists && high.isHittable)
+        XCTAssertFalse(app.staticTexts["Codex reconnecting"].exists)
+        let shot = XCTAttachment(screenshot: XCUIScreen.main.screenshot())
+        shot.name = "Paired relay Codex catalog and reasoning, read only"; shot.lifetime = .keepAlways; add(shot)
+        app.buttons["Done"].tap()
     }
 }

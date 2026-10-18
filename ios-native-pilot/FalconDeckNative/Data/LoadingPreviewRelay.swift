@@ -38,6 +38,10 @@ actor LoadingPreviewRelay: RelayServing {
         if fails { throw PilotError("The preview computer took too long to respond.") }
         return .object(["thread": task.raw, "items": .array((settling ? Self.settlingHistory : Demo.messages).map(\.raw)), "has_older": .bool(false)])
     }
+    private func publishWorkspace(_ raw: JSON) {
+        sequence += 1
+        sink?.yield(.init(connectionID: connectionID, event: .events([.object(["seq": .number(Double(sequence)), "event": .object(["type": .string("workspace-updated"), "workspace": raw])])])))
+    }
     func call(_ method: String, params: JSON) async throws -> JSON {
         if method == "provider.hydrate" {
             if ProcessInfo.processInfo.arguments.contains(where: { $0.hasPrefix("--loading-preview=harness-") }) { return .object(["ok": .bool(true)]) }
@@ -47,11 +51,21 @@ actor LoadingPreviewRelay: RelayServing {
             if ProcessInfo.processInfo.arguments.contains("--loading-preview=models-retry"), modelRequests[key] == 1 { throw PilotError("The preview computer couldn't load models.") }
             guard let project = Demo.projects.first(where: { $0.id == id }) else { return .null }
             let current = connectionID
+            if ProcessInfo.processInfo.arguments.contains("--loading-preview=models-reconnecting") {
+                let empty = project.raw.setting("agents", .array(project.raw["agents"].array.map { $0.setting("models", .array([])) }))
+                publishWorkspace(empty.setting("agents", .array(empty["agents"].array.map { $0.setting("models_loading", .bool(true)) })))
+                Task {
+                    try? await Task.sleep(for: .milliseconds(300))
+                    guard current == connectionID else { return }
+                    publishWorkspace(empty.setting("status", .string("connecting")).setting("agents", .array(empty["agents"].array.map {
+                        $0.setting("models_loading", .bool(false)).setting("account", .object(["status": .string("unknown"), "label": .string("Codex reconnecting")]))
+                    })))
+                }
+            }
             Task {
                 try? await Task.sleep(for: .seconds(3))
                 guard current == connectionID else { return }
-                sequence += 1
-                sink?.yield(.init(connectionID: current, event: .events([.object(["seq": .number(Double(sequence)), "event": .object(["type": .string("workspace-updated"), "workspace": project.raw])])])))
+                publishWorkspace(project.raw)
             }
             return .object(["ok": .bool(true)])
         }
