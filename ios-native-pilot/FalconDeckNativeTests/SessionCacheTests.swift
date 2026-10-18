@@ -35,6 +35,45 @@ import XCTest
         let wrongKey = try SessionCacheStore(session: session(secret: 2), root: root)
         let wrongCache = await wrongKey.load(); XCTAssertNil(wrongCache)
     }
+    func testModelCatalogsSurviveEmptyLiveCatalogsAndEncryptedRelaunch() async throws {
+        let root = try root(), session = session()
+        let model = AppModel.testing(relay: CacheHistoryRelay())
+        let project = HarnessPreview.project; model.projects = [project]
+        let empty = Project(project.raw.setting("agents", .array(project.raw["agents"].array.map { $0.setting("models", .array([])) })))
+        model.projects = [empty]
+        XCTAssertTrue(model.projects[0].models(for: "opencode").isEmpty)
+        XCTAssertFalse(model.effectiveModels(projectID: project.id, provider: "opencode").isEmpty)
+        XCTAssertTrue(model.effectiveModels(projectID: "other-project", provider: "opencode").isEmpty)
+        XCTAssertTrue(model.effectiveModels(projectID: project.id, provider: "unknown").isEmpty)
+        let store = try SessionCacheStore(session: session, root: root)
+        try await store.save(SessionCacheInput(projects: [empty.raw], tasks: [], preferences: .null, selectedID: nil, histories: [:], modelCatalogs: model.modelCatalogCache))
+        let defaults = UserDefaults(suiteName: "CatalogCache-\(UUID())")!
+        let restored = AppModel(relay: CacheHistoryRelay(), voice: VoiceRecorder(defaults: defaults), push: NativePushNotifications(defaults: defaults), notifications: LocalNotifications(defaults: defaults), sessionLoader: { session }, sessionCacheRoot: root)
+        await restored.restorePreview()
+        for (provider, modelID, effort) in HarnessPreview.selections {
+            let models = restored.effectiveModels(projectID: project.id, provider: provider)
+            XCTAssertTrue(models.contains { $0.id == modelID && $0.efforts.contains(effort) })
+        }
+        let fresh = HarnessPreview.model("new", label: "Fresh", efforts: [])
+        restored.projects = [Project(empty.raw.setting("agents", .array([.object(["provider": .string("opencode"), "models": .array([fresh])])])))]
+        XCTAssertEqual(restored.effectiveModels(projectID: project.id, provider: "opencode").map(\.id), ["new"])
+        restored.projects = [empty]
+        XCTAssertEqual(restored.effectiveModels(projectID: project.id, provider: "opencode").map(\.id), ["new"])
+    }
+    func testModelCatalogBoundsAndOldPreviewCompatibility() throws {
+        let small = HarnessPreview.model("m", label: "M", efforts: [])
+        let oversized = small.setting("label", .string(String(repeating: "x", count: CachedModelCatalog.maxCatalogBytes)))
+        let entries = (0..<80).map { CachedModelCatalog(projectID: "p-\($0)", provider: "opencode", models: [small]) }
+            + [CachedModelCatalog(projectID: "huge", provider: "codex", models: [oversized])]
+        let bounded = CachedModelCatalog.bounded(entries)
+        XCTAssertEqual(bounded.count, CachedModelCatalog.maxEntries)
+        XCTAssertFalse(bounded.contains { $0.projectID == "huge" })
+        XCTAssertLessThanOrEqual(try JSONEncoder().encode(bounded).count, CachedModelCatalog.maxTotalBytes)
+        let old = SessionCache(projects: [], tasks: [], preferences: .null, histories: [:])
+        let restored = try JSONDecoder().decode(SessionCache.self, from: JSONEncoder().encode(old))
+        XCTAssertNil(restored.modelCatalogs)
+    }
+
     func testHistoryBoundsKeepAContiguousSuffixAndExcludePendingSends() async throws {
         let store = try SessionCacheStore(session: session(), root: root())
         let history = (0..<180).map { item("\($0)", text: String(repeating: "a", count: 900)) }

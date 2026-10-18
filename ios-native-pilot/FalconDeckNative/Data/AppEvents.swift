@@ -14,6 +14,7 @@ import Foundation
             summaryFlush?.cancel(); summaryFlush = nil; pendingSummaries = [:]
             projects = value["workspaces"].array.filter { $0["kind"].string != "scratch" }.map(Project.init)
             let incoming = value["threads"].array.filter { !$0["is_archived"].bool }.map(AgentTask.init)
+            previewTaskIDs.subtract(incoming.map(\.id))
             let selected: String? = { if case .task(let id) = selection { return id }; return nil }()
             if !value["native_sync"]["token"].string.isEmpty {
                 var index = CompactSync(token: value["native_sync"]["token"].string, counts: value["native_sync"]["counts"])
@@ -72,6 +73,7 @@ import Foundation
             if let current, !previewTaskIDs.contains(task.id), TaskSummaryOrder.isStale(raw, comparedTo: current) { continue }
             if archivedLoadID != nil { archivedTouched.insert(task.id) }
             previewTaskIDs.remove(task.id)
+            chats[task.id]?.reconcileSettings(task)
             if task.archived {
                 active.removeAll { $0.id == task.id }
                 if let index = archived.firstIndex(where: { $0.id == task.id }) { archived[index] = task } else { archived.append(task) }

@@ -9,7 +9,7 @@ struct ComposerOptions: View {
     private var currentProject: Project? { model.projects.first { $0.id == task.projectID } ?? project }
     private var capabilities: JSON { currentProject?.capabilities(task.provider) ?? .null }
     private var modes: [JSON] { currentProject?.modes(task.provider) ?? [] }
-    private var activeModel: AgentModel? { currentProject?.resolvedModel(for: task.provider, id: chat.modelID) }
+    private var activeModel: AgentModel? { AgentModel.resolve(models: model.effectiveModels(projectID: task.projectID, provider: task.provider), provider: task.provider, id: chat.modelID) }
     var body: some View {
         Button { showSettings = true } label: {
             Image(systemName: "slider.horizontal.3").font(.system(size: ComposerMetrics.iconSize))
@@ -23,17 +23,13 @@ struct ComposerOptions: View {
                     .toolbar { ToolbarItem(placement: .confirmationAction) { Button("Done") { showSettings = false } } }
             }.nativeOptionsSheet()
         }
-        .onChange(of: chat.provider) { _, provider in
-            guard task.isDraft else { return }
-            chat.modelID = ""; chat.effort = ""; chat.overrides = [:]
-        }
     }
     @ViewBuilder private var settings: some View {
         Section {
             if task.isDraft {
-                Picker("Agent", selection: $chat.provider) {
-                    ForEach(project?.providers ?? [task.provider], id: \.self) { Text($0.capitalized).tag($0) }
-                }
+                Picker("Agent", selection: Binding(get: { chat.provider }, set: { model.chooseProvider($0, task: task, chat: chat) })) {
+                    ForEach(currentProject?.providers ?? [task.provider], id: \.self) { Text(currentProject?.providerLabel($0) ?? $0.capitalized).tag($0) }
+                }.accessibilityIdentifier("composer-provider")
             }
             if !modes.isEmpty {
                 modePicker("Mode", key: "collaboration_mode_id", options: modes.map { ($0["id"].string, $0["label"].string) })
@@ -56,7 +52,7 @@ struct ComposerOptions: View {
         })) {
             if key == "service_tier" { Text("Standard").tag("default") }
             else { Text("Default").tag("") }
-            ForEach(options, id: \.0) { option in Text(option.1.nonempty ?? modeLabel(option.0)).tag(option.0) }
+            ForEach(options.filter { key != "service_tier" || $0.0 != "default" }, id: \.0) { option in Text(option.1.nonempty ?? modeLabel(option.0)).tag(option.0) }
         }
     }
     private func modeLabel(_ value: String) -> String {

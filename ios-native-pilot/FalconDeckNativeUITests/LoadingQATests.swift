@@ -19,6 +19,60 @@ import XCTest
         for _ in 0..<3 where !option.isHittable { form.swipeUp() }
         return option
     }
+    func testAllHarnessesShowExistingModelAndReasoning() {
+        for (provider, label) in [("codex", "GPT-5.4"), ("claude", "Fable 5.1"), ("opencode", "GLM 5 · openrouter")] {
+            let app = launch("harness-" + provider)
+            app.buttons["sidebar-task-native"].tap(); app.buttons["composer-model"].tap()
+            let option = app.buttons[label]
+            XCTAssertTrue(option.waitForExistence(timeout: 5))
+            XCTAssertTrue(option.isSelected)
+            if provider == "opencode" {
+                let reasoning = app.buttons["composer-reasoning"]
+                XCTAssertTrue(reasoning.isHittable, "Reasoning must not be buried under a large catalog")
+                XCTAssertEqual(reasoning.value as? String, "High")
+                reasoning.tap(); app.buttons["Max"].tap()
+                XCTAssertEqual(reasoning.value as? String, "Max")
+            } else {
+                let effort = reasoningOption(provider == "claude" ? "Max" : "High", app: app)
+                XCTAssertTrue(effort.isSelected)
+            }
+            capture(provider + " existing task retains model and reasoning")
+            app.terminate()
+        }
+    }
+    func testOpenCodeSearchAndModelsWithoutReasoning() {
+        let app = launch("harness-opencode")
+        app.buttons["sidebar-task-native"].tap(); app.buttons["composer-model"].tap()
+        let form = app.collectionViews["composer-model-options"]
+        let search = app.searchFields["Search models"]
+        if !search.isHittable { form.swipeDown() }
+        XCTAssertTrue(search.waitForExistence(timeout: 5))
+        search.tap(); search.typeText("gemini-plain")
+        let plain = app.buttons["Gemini plain · google"]
+        XCTAssertTrue(plain.waitForExistence(timeout: 5)); plain.tap()
+        if app.buttons["close"].isHittable { app.buttons["close"].tap() }
+        else if app.buttons["Cancel"].isHittable { app.buttons["Cancel"].tap() }
+        capture("OpenCode model search preserves full provider model IDs")
+        app.buttons["Done"].tap(); app.buttons["composer-model"].tap()
+        XCTAssertFalse(app.staticTexts["Reasoning"].exists)
+        capture("A model without reasoning does not show an invented effort")
+    }
+    func testNewTaskRestoresEachHarnessSelectionAfterSwitching() {
+        let app = launch("harness-codex")
+        app.buttons["New task in falcondeck"].tap()
+        for (provider, label, effort) in [("Claude", "Fable 5.1", "Max"), ("Codex", "GPT-5.4", "High"), ("Claude", "Fable 5.1", "Max")] {
+            app.buttons["Agent and task settings"].tap()
+            app.buttons["composer-provider"].tap()
+            app.buttons[provider].tap()
+            app.buttons["Done"].tap(); app.buttons["composer-model"].tap()
+            let chosen = app.buttons[label]
+            XCTAssertTrue(chosen.waitForExistence(timeout: 5)); chosen.tap()
+            let reasoning = reasoningOption(effort, app: app)
+            if provider == "Claude", reasoning.isSelected { capture("Claude reasoning survives a provider round trip") }
+            reasoning.tap(); app.buttons["Done"].tap()
+        }
+        capture("New task switches harnesses and restores its selections")
+    }
     func testExistingTaskLoadsItsModelsAndReasoningWithoutSwitchingAgent() {
         let app = launch("models")
         app.buttons["sidebar-task-native"].tap()

@@ -34,6 +34,7 @@ actor LoadingPreviewRelay: RelayServing {
     }
     func call(_ method: String, params: JSON) async throws -> JSON {
         if method == "provider.hydrate" {
+            if ProcessInfo.processInfo.arguments.contains(where: { $0.hasPrefix("--loading-preview=harness-") }) { return .object(["ok": .bool(true)]) }
             let id = params["workspace_id"].string
             let key = id + ":" + params["provider"].string
             modelRequests[key, default: 0] += 1
@@ -68,7 +69,8 @@ actor LoadingPreviewRelay: RelayServing {
         }
         if method == "speech.transcribe" { return .object(["text": .string("A clear native transcript.")]) }
         if method == "thread.mark_read" {
-            return .object(["thread": Self.task.raw.setting("attention", .object(["unread": .bool(false), "last_agent_activity_seq": .number(1), "last_read_seq": .number(1)]))])
+            let task = ProcessInfo.processInfo.arguments.contains(where: { $0.hasPrefix("--loading-preview=harness-") }) ? HarnessPreview.task : Self.task
+            return .object(["thread": task.raw.setting("attention", .object(["unread": .bool(false), "last_agent_activity_seq": .number(1), "last_read_seq": .number(1)]))])
         }
         return .null
     }

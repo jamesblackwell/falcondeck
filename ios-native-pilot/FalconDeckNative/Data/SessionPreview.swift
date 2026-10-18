@@ -8,10 +8,16 @@ import Foundation
         guard current == connectionID, !demo else { return }
         sessionCache = store
         schedulePreviewSave()
+        if let preview {
+            // A snapshot can win the race with disk I/O; keep its catalogs first.
+            modelCatalogCache += (preview.modelCatalogs ?? []).filter { cached in
+                !modelCatalogCache.contains { $0.projectID == cached.projectID && $0.provider == cached.provider }
+            }
+        }
         guard let preview, !hasLiveSnapshot else { return }
         projects = preview.projects.map(Project.init)
+        previewTaskIDs = Set(preview.tasks.map { $0["id"].string })
         tasks = preview.tasks.map(AgentTask.init)
-        previewTaskIDs = Set(tasks.map(\.id))
         preferences = preview.preferences
         cachedAt = preview.savedAt
         for (id, history) in preview.histories {
@@ -58,7 +64,7 @@ import Foundation
             guard let chat = chats[task.id], chat.loaded, !chat.needsRefresh, !chat.transcript.needsRecovery else { continue }
             histories[task.id] = CachedHistory(items: chat.transcript.items.suffix(150).map(\.raw), hasOlder: chat.hasOlder || chat.transcript.items.count > 150)
         }
-        let input = SessionCacheInput(projects: projects.map(\.raw), tasks: tasks.map(\.raw), preferences: preferences, selectedID: selected, histories: histories)
+        let input = SessionCacheInput(projects: projects.map(\.raw), tasks: tasks.map(\.raw), preferences: preferences, selectedID: selected, histories: histories, modelCatalogs: modelCatalogCache)
         try? await store.save(input)
     }
 }

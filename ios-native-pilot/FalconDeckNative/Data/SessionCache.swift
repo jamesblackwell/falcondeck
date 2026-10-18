@@ -15,6 +15,7 @@ struct SessionCache: Codable, Sendable, Equatable {
     var tasks: [JSON]
     var preferences: JSON
     var histories: [String: CachedHistory]
+    var modelCatalogs: [CachedModelCatalog]? = nil
 }
 
 struct SessionCacheInput: Sendable {
@@ -23,6 +24,7 @@ struct SessionCacheInput: Sendable {
     var preferences: JSON
     var selectedID: String?
     var histories: [String: CachedHistory]
+    var modelCatalogs: [CachedModelCatalog] = []
 }
 
 /// Serialization, trimming, encryption and disk I/O run off the UI actor.
@@ -56,8 +58,10 @@ actor SessionCacheStore {
             let data = try AES.GCM.open(AES.GCM.SealedBox(combined: encrypted), using: key)
             let cache = try JSONDecoder().decode(SessionCache.self, from: data)
             guard cache.version == 1, cache.tasks.count <= 200, cache.histories.count <= 5 else { throw PilotError("Unsupported preview") }
-            previous = cache
-            return cache
+            var validated = cache
+            validated.modelCatalogs = CachedModelCatalog.bounded(cache.modelCatalogs ?? [])
+            previous = validated
+            return validated
         } catch {
             // Missing/corrupt/evicted previews are a cache miss, never a broken
             // pairing or a reason to discard the separately protected drafts.
@@ -105,7 +109,9 @@ actor SessionCacheStore {
                 $0.setting("skills", .array([])).setting("models", .array([]))
             }))
         }
-        var cache = SessionCache(projects: projects, tasks: rows, preferences: input.preferences, histories: histories)
+        let projectIDs = Set(input.projects.map { $0["id"].string })
+        let catalogs = CachedModelCatalog.bounded(input.modelCatalogs.filter { projectIDs.contains($0.projectID) })
+        var cache = SessionCache(projects: projects, tasks: rows, preferences: input.preferences, histories: histories, modelCatalogs: catalogs)
         // Avoid re-encrypting identical content just because a refresh completed.
         if let previous { cache.savedAt = previous.savedAt; if cache == previous { return } }
         cache.savedAt = .now

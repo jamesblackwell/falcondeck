@@ -39,13 +39,16 @@ final class AppModel {
     }
     var syncIndex: CompactSync?
     var taskPageLoads: Set<String> = []
-    var projects: [Project] = []
+    var projects: [Project] = [] { didSet { rememberModelCatalogs() } }
+    var modelCatalogCache: [CachedModelCatalog] = []
+    var composerPreferences: [String: WorkspaceComposerPreferences] = [:]
     var tasks: [AgentTask] = [] {
         didSet {
             taskGroups = Dictionary(grouping: tasks, by: \.projectID).mapValues { values in
                 values.sorted { $0.pinned != $1.pinned ? $0.pinned : $0.updatedAt > $1.updatedAt }
             }
             for task in tasks {
+                if !previewTaskIDs.contains(task.id) { chats[task.id]?.reconcileSettings(task) }
                 if let chat = chats[task.id], !chat.pendingQueue.isEmpty {
                     chat.pendingQueue = QueuedDraft.reconcile(chat.pendingQueue, queued: task.queued, items: chat.transcript.items)
                 }
@@ -176,6 +179,7 @@ final class AppModel {
             chat.loadID = UUID(); chat.loading = false; chat.bufferedEvents = []; chat.needsRefresh = true
         }
         if clearData {
+            modelCatalogCache = []; composerPreferences = [:]
             projects = []; tasks = []; chats = [:]; requests = []; preferences = .object([:])
             archivedTasks = []; readSuppression = [:]; taskOptionsID = nil; serviceNotices = []; operationalConditions = []; tokenUsage = .object([:])
             selection = .projects; refreshedAt = nil; cachedAt = nil; previewTaskIDs = []
@@ -276,6 +280,9 @@ final class AppModel {
             if ProcessInfo.processInfo.arguments.contains("--loading-preview=retry") {
                 tasks[0] = AgentTask(tasks[0].raw.setting("status", .string("running")))
             }
+            if ProcessInfo.processInfo.arguments.contains(where: { $0.hasPrefix("--loading-preview=harness-") }) {
+                projects = [HarnessPreview.project]; tasks = [HarnessPreview.task]
+            }
             syncIndex = CompactSync(token: LoadingPreviewRelay.token, counts: LoadingPreviewRelay.counts)
             if ProcessInfo.processInfo.arguments.contains(where: { $0.hasPrefix("--loading-preview=models") }) {
                 projects = Demo.projects.map { project in
@@ -343,8 +350,26 @@ final class AppModel {
         if let value = chats[task.id] { return value }
         let value = ChatSession(); value.modelID = task.modelID; value.effort = task.effort; value.provider = task.provider
         if let saved = savedDrafts.removeValue(forKey: task.id) { value.restore(saved) }
+        else if task.isDraft, let saved = composerPreferences[task.projectID]?.selections[task.provider] {
+            value.applySelection(saved.validated(project: projects.first { $0.id == task.projectID }, provider: task.provider))
+        }
+        if task.isDraft, value.provider != task.provider {
+            // A saved draft may target a harness removed from this workspace.
+            // Preserve its input, but do not carry settings into a different agent.
+            value.provider = task.provider
+            let selection = composerPreferences[task.projectID]?.selections[task.provider]
+                ?? ComposerSelection(modelID: "", effort: "", overrides: [:])
+            value.applySelection(selection.validated(project: projects.first { $0.id == task.projectID }, provider: task.provider))
+        }
+        if !task.isDraft {
+            value.provider = task.provider
+            if !previewTaskIDs.contains(task.id) { value.reconcileSettings(task) }
+        }
         chats[task.id] = value
-        value.changed = { [weak self, weak value] in if let self, let value { self.scheduleInputSave(task.id, chat: value) } }
+        value.changed = { [weak self, weak value] in if let self, let value, !value.restoringSelection {
+            if task.isDraft { self.rememberComposer(projectID: task.projectID, chat: value) }
+            self.scheduleInputSave(task.id, chat: value)
+        } }
         return value
     }
 
@@ -413,8 +438,7 @@ final class AppModel {
         let recoversInput = consumesComposer || initialInput != nil
         let text = (initialInput?.text ?? textOverride ?? chat.draft).trimmingCharacters(in: .whitespacesAndNewlines)
         let selectedModel = initialInput?.modelID ?? chat.modelID, selectedEffort = initialInput?.effort ?? chat.effort
-        let models = projects.first(where: { $0.id == task.projectID })?.models(for: task.provider) ?? []
-        let activeModel = models.first { $0.id == selectedModel } ?? models.first { $0.raw["is_default"].bool }
+        let activeModel = AgentModel.resolve(models: effectiveModels(projectID: task.projectID, provider: task.provider), provider: task.provider, id: selectedModel)
         let turnSettings = NativeRequest.turnSettings(initialInput?.overrides ?? chat.overrides, task: task, model: activeModel)
         var selectedOverrides = initialInput?.overrides ?? chat.overrides
         if selectedOverrides["service_tier"] != nil { selectedOverrides["service_tier"] = turnSettings["service_tier"] }

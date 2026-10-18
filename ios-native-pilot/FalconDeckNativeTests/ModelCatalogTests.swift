@@ -28,6 +28,18 @@ import XCTest
             XCTAssertEqual(calls.first?["provider"].string, task.provider)
         }
     }
+    func testFastEmptyHydrationDoesNotWaitForTheFullTimeout() async {
+        let relay = ModelRelay(), model = AppModel.testing(relay: relay)
+        model.connected = true; model.projects = [emptyProject]
+        let load = Task { await model.loadModels(Demo.tasks[0], timeout: .seconds(2)) }
+        await relay.waitForRequests(1)
+        let loading = emptyProject.raw.setting("agents", .array(emptyProject.raw["agents"].array.map { $0.setting("models_loading", .bool(true)) }))
+        model.projects = [Project(loading)]
+        model.projects = [emptyProject]
+        await load.value
+        XCTAssertNotNil(model.catalog(Demo.tasks[0]).modelsError)
+        XCTAssertFalse(model.catalog(Demo.tasks[0]).modelsError!.contains("too long"))
+    }
     func testFailedHydrationCanBeRetried() async {
         let relay = ModelRelay(failFirst: true), model = AppModel.testing(relay: relay)
         model.connected = true; model.projects = [emptyProject]

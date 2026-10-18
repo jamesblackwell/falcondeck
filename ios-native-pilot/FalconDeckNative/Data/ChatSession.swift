@@ -13,6 +13,7 @@ final class ChatSession {
     var attachments: [NativeAttachment] = [] { didSet { changed?() } }
     var submission: SavedSubmission? { didSet { changed?() } }
     var recoveredSubmission = false
+    @ObservationIgnored var restoringSelection = false
     @ObservationIgnored var changed: (() -> Void)?
     var pendingQueue: [QueuedDraft] = []
     var queuedEdit: QueuedMessageEdit?

@@ -24,6 +24,7 @@ actor DraftStore {
     private let directory: URL
     private let key: SymmetricKey
     private(set) var unreadableDraftCount = 0
+    private var previousComposerPreferences: [String: WorkspaceComposerPreferences]?
     init(session: SavedSession, root: URL? = nil) throws {
         let root = try root ?? FileManager.default.url(for: .applicationSupportDirectory, in: .userDomainMask, appropriateFor: nil, create: true).appending(path: "InputDrafts", directoryHint: .isDirectory)
         let namespace = Self.hash(session.relay.absoluteString + ":" + session.sessionID + ":" + session.deviceID)
@@ -58,6 +59,18 @@ actor DraftStore {
         let url = directory.appending(path: "selection")
         guard FileManager.default.fileExists(atPath: url.path) else { return nil }
         return try JSONDecoder().decode(Destination?.self, from: decrypt(Data(contentsOf: url)))
+    }
+    func loadComposerPreferences() throws -> [String: WorkspaceComposerPreferences] {
+        let url = directory.appending(path: "composer-preferences")
+        guard FileManager.default.fileExists(atPath: url.path) else { return [:] }
+        let preferences = try JSONDecoder().decode([String: WorkspaceComposerPreferences].self, from: decrypt(Data(contentsOf: url)))
+        previousComposerPreferences = preferences
+        return preferences
+    }
+    func saveComposerPreferences(_ preferences: [String: WorkspaceComposerPreferences]) throws {
+        guard preferences != previousComposerPreferences else { return }
+        try write(JSONEncoder().encode(preferences), to: directory.appending(path: "composer-preferences"))
+        previousComposerPreferences = preferences
     }
     func clear() throws { try FileManager.default.removeItem(at: directory) }
     private func write(_ data: Data, to url: URL) throws {

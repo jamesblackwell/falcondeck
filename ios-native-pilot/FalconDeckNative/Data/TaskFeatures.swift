@@ -9,7 +9,10 @@ extension AgentTask {
 }
 
 extension Project {
-    func agent(_ provider: String) -> JSON { raw["agents"].array.first { $0["provider"].string == provider } ?? raw }
+    func agent(_ provider: String) -> JSON { raw["agents"].array.first { $0["provider"].string == provider } ?? (provider == defaultProvider ? raw : .null) }
+    func providerLabel(_ provider: String) -> String {
+        agent(provider)["label"].string.nonempty ?? ["codex": "Codex", "claude": "Claude", "opencode": "OpenCode"][provider] ?? provider.capitalized
+    }
     func capabilities(_ provider: String) -> JSON { agent(provider)["capabilities"] }
     func modes(_ provider: String) -> [JSON] { agent(provider)["collaboration_modes"].array }
 }
@@ -136,7 +139,8 @@ extension Project {
 
     func draftTask(project: Project, folderID: String?) -> AgentTask {
         let id = "draft:\(project.id):\(folderID ?? "root")"
-        let provider = chats[id]?.provider.nonempty ?? project.defaultProvider
+        let remembered = chats[id]?.provider.nonempty ?? savedDrafts[id]?.provider.nonempty ?? composerPreferences[project.id]?.provider
+        let provider = remembered.flatMap { project.providers.contains($0) ? $0 : nil } ?? project.defaultProvider
         return AgentTask(.object(["id": .string(id), "workspace_id": .string(project.id), "title": .string("New task"), "provider": .string(provider), "status": .string("idle"), "native_draft": .bool(true), "folder_id": folderID.map(JSON.string) ?? .null]))
     }
 }

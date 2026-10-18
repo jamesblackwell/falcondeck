@@ -12,10 +12,10 @@ struct ComposerView: View {
     @State private var showModels = false
     @State private var goalSeed = ""
     @State private var goalCommand = ""
-    private var currentProject: Project? { model.projects.first { $0.id == task.projectID } ?? project }
-    private var models: [AgentModel] { currentProject?.models(for: task.provider) ?? [] }
-    private var activeModel: AgentModel? { currentProject?.resolvedModel(for: task.provider, id: chat.modelID) }
-    private var modelLoadScope: String { "\(model.connectionID):\(task.projectID):\(task.provider):\(model.connected):\(models.isEmpty)" }
+    private var models: [AgentModel] { model.effectiveModels(projectID: task.projectID, provider: task.provider) }
+    private var providerLabel: String { (model.projects.first { $0.id == task.projectID } ?? project)?.providerLabel(task.provider) ?? task.provider.capitalized }
+    private var activeModel: AgentModel? { AgentModel.resolve(models: models, provider: task.provider, id: chat.modelID) }
+    private var modelLoadScope: String { "\(model.connectionID):\(task.projectID):\(task.provider):\(model.connected):\(model.projects.first { $0.id == task.projectID }?.models(for: task.provider).isEmpty ?? true)" }
     private var voiceActive: Bool { chat.voiceInputOpen && model.voice.ownerID == task.id }
     private var hasContent: Bool { !chat.draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !chat.attachments.isEmpty }
     private var showsStop: Bool { !hasContent && (task.running || task.status == "waiting_for_input") }
@@ -38,7 +38,7 @@ struct ComposerView: View {
                 RecordingPanel(task: task, chat: chat, onTranscript: receiveTranscript)
             } else {
                 SlashCommandsView(task: task, chat: chat) { openGoal() }
-                TextField(task.running ? "Queue a follow-up…" : "Message \(task.provider.capitalized)…", text: $chat.draft, selection: selectionBinding, axis: .vertical)
+                TextField(task.running ? "Queue a follow-up…" : "Message \(providerLabel)…", text: $chat.draft, selection: selectionBinding, axis: .vertical)
                     .lineLimit(1...6).font(.body).focused($focused).padding(.horizontal, 8).accessibilityIdentifier("chat-input").submitLabel(.return)
                     .frame(minHeight: 44, alignment: .topLeading)
                     .contentShape(Rectangle())
@@ -47,7 +47,7 @@ struct ComposerView: View {
                     if project?.capabilities(task.provider)["supports_images"] != .bool(false) { AttachmentPicker(chat: chat) }
                     Button { focused = false; showModels = true } label: {
                         HStack(spacing: 5) {
-                            Text(activeModel?.label ?? chat.modelID.nonempty ?? task.provider.capitalized)
+                            Text(activeModel?.label ?? chat.modelID.nonempty ?? providerLabel)
                                 .lineLimit(1).truncationMode(.tail)
                             Image(systemName: "chevron.down").font(.system(size: 11, weight: .semibold))
                         }.font(.subheadline).padding(.horizontal, 6).frame(maxWidth: .infinity, minHeight: ComposerMetrics.controlSize, alignment: .leading).contentShape(.rect)
@@ -73,39 +73,7 @@ struct ComposerView: View {
         }
         .padding(.horizontal, 8).padding(.top, 12).padding(.bottom, 8).glassEffect(.regular.tint(FD.surface), in: .rect(cornerRadius: 26))
         .sheet(isPresented: $showModels) {
-            NavigationStack {
-                Form {
-                    Section("Model") {
-                        Picker("Model", selection: $chat.modelID) {
-                            Text("Task default").tag("")
-                            if !chat.modelID.isEmpty && !models.contains(where: { $0.id == chat.modelID }) { Text(chat.modelID).tag(chat.modelID) }
-                            ForEach(models) { Text($0.label).tag($0.id) }
-                        }.pickerStyle(.inline).labelsHidden()
-                    }.listRowBackground(FD.surface)
-                    if model.catalog(task).modelsLoading, models.isEmpty {
-                        Section { HStack(spacing: 10) { ActivityDiamond(); Text("Loading models…").foregroundStyle(FD.secondary) } }
-                            .listRowBackground(FD.surface).accessibilityIdentifier("composer-models-loading")
-                    }
-                    if let error = model.catalog(task).modelsError {
-                        Section {
-                            Text(error).font(.footnote).foregroundStyle(FD.secondary)
-                            Button("Retry loading models") { Task { await model.loadModels(task, force: true) } }
-                                .disabled(!model.connected || model.catalog(task).modelsLoading)
-                        }.listRowBackground(FD.surface)
-                    }
-                    if let activeModel, !activeModel.efforts.isEmpty {
-                        Section("Reasoning") {
-                            Picker("Reasoning effort", selection: $chat.effort) {
-                                Text("Default").tag("")
-                                if !chat.effort.isEmpty, !activeModel.efforts.contains(chat.effort) { Text(chat.effort.capitalized).tag(chat.effort) }
-                                ForEach(activeModel.efforts, id: \.self) { Text($0.capitalized).tag($0) }
-                            }.pickerStyle(.inline).labelsHidden()
-                        }.listRowBackground(FD.surface)
-                    }
-                }.accessibilityIdentifier("composer-model-options").scrollContentBackground(.hidden).background(FD.background)
-                    .navigationTitle("Model & reasoning").navigationBarTitleDisplayMode(.inline)
-                    .toolbar { ToolbarItem(placement: .confirmationAction) { Button("Done") { showModels = false } } }
-            }.nativeOptionsSheet()
+            ComposerModelSheet(task: task, chat: chat, models: models) { showModels = false }
                 .task(id: modelLoadScope) { await model.loadModels(task) }
         }
         .task(id: modelLoadScope) {
@@ -114,13 +82,8 @@ struct ComposerView: View {
             await catalog
         }
         .sheet(isPresented: $showGoal) { GoalView(taskID: task.id, initialObjective: goalSeed) { if chat.draft == goalCommand { chat.draft = "" } } }
-        .onChange(of: chat.modelID) { _, value in
-            chat.effort = ""; chat.overrides["model_id"] = value.isEmpty ? .null : .string(value)
-            chat.overrides["reasoning_effort"] = .null
-            chat.overrides.removeValue(forKey: "service_tier")
-        }
-        .onChange(of: chat.effort) { _, value in chat.overrides["reasoning_effort"] = value.isEmpty ? .null : .string(value) }
     }
+
     private func beginVoiceInput() {
         // TextSelection indices can outlive a send or draft edit. Keep their
         // owning text, and validate them once when dictation begins.

@@ -96,8 +96,12 @@ Keychain holds this client's identity and relay credentials. Unsent text, image
 attachments, composer choices and the last conversation selection are encrypted
 per pairing in protected device files. A separate encrypted, disposable cache
 restores projects, up to 200 task summaries and five recent conversation tails
-on relaunch. Each tail holds at most 150 items / 64 KiB; catalogs, plans, diffs,
-pending sends and active approvals are excluded. Cached history remains visible
+on relaunch. Each tail holds at most 150 items / 64 KiB. Model catalogs have a
+separate bound of 32 workspace/harness entries, 1,000 models / 256 KiB per entry
+and 1 MiB total. Last-known models keep the picker usable while live metadata
+hydrates; nonempty live lists always win. Skills, plans, diffs, pending sends
+and active approvals are excluded. New-task choices are remembered separately
+per workspace and harness, with access modes checked against current capabilities. Cached history remains visible
 while fresh history loads, and cannot automatically mark a task read until that
 refresh succeeds. No replay cursor or sync token is restored from this cache.
 The daemon and native agent storage remain authoritative. Forget removes this

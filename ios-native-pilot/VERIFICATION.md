@@ -4,7 +4,7 @@ Visual polish follow-up: see [VISUAL-QA.md](VISUAL-QA.md) for the expanded
 screen/state checks, screenshot gallery and current device status.
 
 Falcon Native uses the separate `com.falcondeck.pilot.native` application ID and
-Apple Development signing. The latest model/reasoning picker Debug app and
+Apple Development signing. The latest harness/composer/cache Debug app and
 speech widget were installed over Wi-Fi on the paired iPhone on 18 October.
 iOS refused automatic launch because the phone was locked; open Falcon Native
 after unlocking. No device inventory or credentials are checked in.
@@ -17,9 +17,9 @@ metadata, reconnect and forgetting a computer live in **Settings → Connections
 
 ## Client validation
 
-- 188 native unit tests pass, including crypto/wire compatibility, pairing
+- 215 native unit tests pass, including crypto/wire compatibility, pairing
   authority, connection epochs, drafts/queues, media, controls/extensions,
-  push registration/cleanup and the whole-source review regressions.
+  push registration/cleanup the whole-source review regressions and harness composer/cache recovery.
 - All 39 UI checks pass on iPad. On iPhone, 38 passed in the complete run;
   one goal check was interrupted by an accidental overlapping unit run and
   passed when rerun alone. The final changed build also passes first send and
@@ -37,6 +37,41 @@ metadata, reconnect and forgetting a computer live in **Settings → Connections
   encryption. Demo UI tests send only in-memory messages/automations.
 - Apple Development arm64 app/widget builds succeed. Build products, Xcode
   results and screenshots remain local and ignored.
+
+## Harness composer parity — 18 October
+
+Compared the native composer with Expo's model selection, catalog cache,
+provider hydration, provider switching, reasoning and service-tier contracts.
+Codex, Claude and OpenCode use the same normalized daemon fields; OpenCode
+native variants and ACP reasoning options are already normalized server-side.
+
+Changes include encrypted last-known model catalogs, live-first replacement,
+provider-specific saved choices for new tasks/folders, searchable large model
+lists with accessible reasoning controls, Claude version/context labels, correct
+workspace defaults and isolated
+capabilities. Existing task settings follow authoritative daemon updates while
+preserving unsubmitted local picks. Fast empty hydration results no longer
+wait for the full timeout just because polling missed the loading transition.
+
+Caching is display metadata only: 32 workspace/provider entries, 1,000 models
+and 256 KiB per catalog, 1 MiB total, inside the existing pairing-encrypted
+preview. Empty lazy snapshots retain useful catalogs; nonempty live metadata
+replaces them. Old previews still decode. Permission and sandbox choices never
+come from the model cache. Composer preferences avoid identical disk writes.
+
+Validation uses local fixtures shaped from each daemon transport's metadata,
+including OpenCode slash IDs, variants, plain models and its synthetic default.
+It does not start paid/live agent turns or change harness installations.
+
+All 215 native unit tests pass. The 14 loading/harness UI scenarios pass across
+phone and tablet, including focused reruns after layout changes; screenshots
+were inspected for both sizes. Expo/shared reference checks pass (65 tests).
+Apple Development app/widget builds succeed with the existing standalone ID.
+
+Repo-local Autoreview (`--mode local --max-priority P2`) reported no actionable
+findings for the harness/cache changes and subsequent settings/cache fixes.
+The final restore fallback and search layout changes also reviewed clean.
+The final picker/search layouts were verified with phone/iPad UI tests.
 
 ## Model and reasoning picker — 18 October
 

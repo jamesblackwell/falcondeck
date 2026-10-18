@@ -145,7 +145,12 @@ struct AgentModel: Identifiable, Hashable, Sendable {
 }
 
 extension Project {
-    var defaultProvider: String { raw["default_provider"].string.nonempty ?? "codex" }
+    var defaultProvider: String {
+        let declared = raw["default_provider"].string.nonempty
+        let offered = raw["agents"].array.map { $0["provider"].string }.filter { !$0.isEmpty }
+        if let declared, offered.isEmpty || offered.contains(declared) { return declared }
+        return offered.first ?? "codex"
+    }
     var providers: [String] {
         let values = raw["agents"].array.map { $0["provider"].string }.filter { !$0.isEmpty }
         return values.isEmpty ? [defaultProvider] : values
@@ -157,17 +162,27 @@ extension Project {
         return values.map { AgentModel(raw: $0) }
     }
     func resolvedModel(for provider: String, id: String) -> AgentModel? {
-        let models = models(for: provider)
+        AgentModel.resolve(models: models(for: provider), provider: provider, id: id)
+    }
+}
+
+extension AgentModel {
+    static func resolve(models: [AgentModel], provider: String, id: String) -> AgentModel? {
         if id.isEmpty { return models.first { $0.raw["is_default"].bool } ?? models.first }
-        if let exact = models.first(where: { $0.id == id }) { return exact }
-        // Existing Claude tasks can retain a versioned model while the catalog
-        // advertises its short alias. Keep the recorded version in the label.
-        if provider == "claude", id.range(of: #"^claude-(opus|sonnet|haiku|fable)-\d+-\d+(?:-\d{8})?$"#, options: .regularExpression) != nil {
-            let parts = id.split(separator: "-").map(String.init)
-            if let alias = models.first(where: { $0.id == parts[1] }) {
-                return AgentModel(raw: alias.raw.setting("id", .string(id)).setting("label", .string("\(parts[1].capitalized) \(parts[2]).\(parts[3])")))
+        let exact = models.first { $0.id == id }
+        // Match Claude's versioned and extended-context IDs without changing
+        // the wire ID or inventing reasoning for an unknown model family.
+        let pattern = #"^claude-(opus|sonnet|haiku|fable)-(\d+)(?:-(\d{1,2}))?(?:-\d{8})?(\[1m\])?$"#
+        if provider == "claude", let regex = try? NSRegularExpression(pattern: pattern),
+           let result = regex.firstMatch(in: id, range: NSRange(id.startIndex..., in: id)) {
+            let match = (0..<result.numberOfRanges).map { Range(result.range(at: $0), in: id).map { String(id[$0]) } ?? "" }
+            let family = match[1], version = match[2] + (match[3].isEmpty ? "" : "." + match[3])
+            let metadata = exact ?? models.first { $0.id == family }
+            if let metadata {
+                let label = exact?.label != id ? exact?.label : nil
+                return AgentModel(raw: metadata.raw.setting("id", .string(id)).setting("label", .string(label ?? "\(family.capitalized) \(version)\(match[4].isEmpty ? "" : " (1M)")")))
             }
         }
-        return AgentModel(raw: .object(["id": .string(id)]))
+        return exact ?? AgentModel(raw: .object(["id": .string(id)]))
     }
 }

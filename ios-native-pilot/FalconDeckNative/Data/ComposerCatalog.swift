@@ -11,6 +11,7 @@ import Observation
     var modelsLoading = false
     var modelsError: String?
     @ObservationIgnored var modelsRequested = false
+    @ObservationIgnored var modelsLoadingObserved = false
     @ObservationIgnored var modelsRequest: Task<Void, Never>?
     static func alias(_ input: String) -> String {
         let text = input.trimmingCharacters(in: .whitespacesAndNewlines).replacingOccurrences(of: #"^[/$]+"#, with: "", options: .regularExpression).lowercased()
@@ -72,23 +73,22 @@ import Observation
             if !task.isDraft || value.modelsRequested { return }
         }
         guard force || value.modelsError == nil else { return }
-        value.modelsRequested = true; value.modelsLoading = true; value.modelsError = nil
+        value.modelsRequested = true; value.modelsLoading = true; value.modelsLoadingObserved = false; value.modelsError = nil
         let current = connectionID, deadline = ContinuousClock.now.advanced(by: timeout)
         let request = Task {
             defer { value.modelsLoading = false }
             do {
                 guard current == connectionID, connected else { throw CancellationError() }
                 _ = try await relay.call("provider.hydrate", params: .object(["workspace_id": .string(task.projectID), "provider": .string(task.provider)]))
-                var sawLoading = false
                 while current == connectionID {
                     guard connected else { throw PilotError("Connect to your computer to load models.") }
                     guard let project = projects.first(where: { $0.id == task.projectID }) else { throw CancellationError() }
                     if !project.models(for: task.provider).isEmpty { return }
                     let agent = project.agent(task.provider), loading = agent["models_loading"].bool
-                    if sawLoading && !loading {
+                    if value.modelsLoadingObserved && !loading {
                         throw PilotError(agent["account"]["label"].string.nonempty ?? "No models are available for this agent. Try again.")
                     }
-                    sawLoading = sawLoading || loading
+                    value.modelsLoadingObserved = value.modelsLoadingObserved || loading
                     guard ContinuousClock.now < deadline else { throw PilotError("Models took too long to load. Try again.") }
                     try await Task.sleep(for: .milliseconds(200))
                 }
