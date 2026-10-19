@@ -1138,7 +1138,10 @@ Each calls an operation the UI already uses; none adds new stored state.
 
 `falcondeck_create_thread` also accepts `title`, `folder` / `create_folder`
 (resolved after cap admission, so a rejected call creates nothing), and
-`notify_parent`. With `notify_parent`, a daemon watcher on the event stream
+`notify_parent`. Agent guidance leaves `notify_parent` false for routine work
+and reserves it for critical updates requiring attention or notifications the
+user explicitly requests. Long-running work alone does not justify enabling it.
+With `notify_parent`, a daemon watcher on the event stream
 queues a labelled notice to the parent (normal `send_turn`, `steer: false`)
 when the child first enters `waiting_for_input` and when it stops running after
 having run. The parent therefore wakes on completion instead of polling.

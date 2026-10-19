@@ -19,6 +19,13 @@ not optional flavour.
   `falcondeck_organize_thread`, `falcondeck_interrupt_thread`, and
   `falcondeck_answer_question`.
 
+## Notifications
+
+Send proactive notifications only for critical issues requiring attention or
+when the user explicitly requests them. Keep routine progress and ordinary
+completion updates in the normal reply. Long-running work alone does not
+justify notifications.
+
 ## Next actions
 
 Near the end of a turn that still has useful leftover steps, call
@@ -125,10 +132,16 @@ apply. Send only when the user's task authorizes contacting another agent.
 ## Coordinating children
 
 `falcondeck_create_thread` also takes `title`, `folder` (folder id or exact name;
-add `create_folder: true` to create it), and `notify_parent`. With
-`notify_parent: true`, FalconDeck queues a daemon-labelled notice to this thread
-when the child needs input and when it stops running. Dispatch children, then end
-your turn; do not poll in a loop. Notices do not survive a daemon restart.
+add `create_folder: true` to create it), and `notify_parent`. Leave
+`notify_parent` false by default. Enable it only when notifying the parent is
+critical or the user explicitly requests these updates. For routine delegated
+work, read thread summaries at natural checkpoints.
+
+With `notify_parent: true`, FalconDeck queues a daemon-labelled notice to this
+thread whenever the child needs input or stops running, including later turns.
+The flag does not filter for critical events. When notifications are warranted
+and enabled, dispatch children, then end your turn; do not poll in a loop.
+Notices do not survive a daemon restart.
 
 `falcondeck_wait_thread` waits up to 25 seconds for one thread to stop running.
 It reports the status and the pending requests with the ids needed to answer.

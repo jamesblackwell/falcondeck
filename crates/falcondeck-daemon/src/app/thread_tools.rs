@@ -66,7 +66,7 @@ pub(super) fn catalog() -> Vec<ExtensionAgentTool> {
             "title": {"type":"string", "minLength":1, "maxLength":200},
             "folder": {"type":"string", "minLength":1, "description":"Project folder id or exact name for the new thread."},
             "create_folder": {"type":"boolean", "default":false, "description":"Create the named folder when no folder matches."},
-            "notify_parent": {"type":"boolean", "default":false, "description":"Queue a daemon notification to this thread whenever the child stops running or starts waiting for input. In memory; does not survive a daemon restart."}
+            "notify_parent": {"type":"boolean", "default":false, "description":"Leave false for routine work. Enable only for critical updates requiring attention or when the user explicitly requests notifications. When enabled, queues a daemon notice whenever the child stops running or needs input, including later turns. In memory; does not survive a daemon restart."}
         }), vec![]),
     ].into_iter().chain(actions::catalog()).map(|(name,title,description,properties,required)| ExtensionAgentTool {
         name: name.into(), extension_id: "falcondeck".into(), tool_id: name.trim_start_matches("falcondeck_").into(), title: title.into(), description: description.into(),

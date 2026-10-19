@@ -33,7 +33,7 @@ pub(super) fn catalog() -> Vec<Entry> {
         (
             WAIT,
             "Wait for thread",
-            "Wait up to wait_seconds (default 20, max 25) for a thread in this workspace to stop running, then report its status, last preview/error, and pending requests with the request and question ids falcondeck_answer_question needs. For longer work, create children with notify_parent instead of polling.",
+            "Wait up to wait_seconds (default 20, max 25) for a thread in this workspace to stop running, then report its status, last preview/error, and pending requests with the request and question ids falcondeck_answer_question needs. For longer work, read summaries at natural checkpoints. Enable notify_parent only for critical updates or at the user's explicit request.",
             json!({
                 "thread_id": {"type":"string", "minLength":1},
                 "wait_seconds": {"type":"integer", "minimum":0, "maximum":MAX_WAIT_SECS, "default":20}
@@ -266,7 +266,7 @@ impl AppState {
                 }
                 if waited && is_busy(&thread) {
                     text.push_str(
-                        "- Still running after the wait; check again or rely on notify_parent.\n",
+                        "- Still running after the wait; read its summary at a natural checkpoint.\n",
                     );
                 }
                 text.push_str(&pending_markdown(
