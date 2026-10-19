@@ -152,6 +152,22 @@ import UIKit
         await pending?.value
         XCTAssertEqual(view.contentOffset.y, 520)
     }
+    func testExplicitJumpFollowsRowsMeasuredAfterTheJump() {
+        let window = UIWindow(), scrolling = NativeListScrolling(), view = viewport(in: window)
+        scrolling.attach(view); scrolling.setActive(true)
+        view.contentOffset.y = 200
+        scrolling.jump(animated: false)
+        XCTAssertEqual(view.contentOffset.y, 520)
+        // Lazy Markdown rows can revise the estimated content height after
+        // the jump has already reached the list's previous bottom.
+        view.contentSize.height = 1_800
+        scrolling.layoutUpdated()
+        XCTAssertEqual(view.contentOffset.y, 1_320)
+        scrolling.cancel() // A subsequent reading gesture still wins.
+        view.contentOffset.y = 400; view.contentSize.height = 2_000
+        scrolling.layoutUpdated()
+        XCTAssertEqual(view.contentOffset.y, 400)
+    }
     func testRecycledReadingRowIsRecoveredOnlyAgainstTheCurrentCollection() async throws {
         let scrolling = NativeListScrolling(), window = UIWindow(frame: CGRect(x: 0, y: 0, width: 320, height: 480))
         let layout = UICollectionViewFlowLayout(); layout.itemSize = CGSize(width: 320, height: 80)

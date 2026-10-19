@@ -173,8 +173,8 @@ struct RecentEventSequences {
                 if chat.bufferedEvents.count < 2048 { chat.bufferedEvents.append(event) }
                 else { chat.bufferOverflowed = true }
             }
-            chat.transcript.apply(event)
-            chat.settleSubmission(queued: tasks.first(where: { $0.id == id })?.queued ?? [])
+            chat.apply(event)
+            if chat.submission != nil { chat.settleSubmission(queued: tasks.first(where: { $0.id == id })?.queued ?? []) }
             if chat.outgoingMessage?.needsHistoryRecheck == true, let task = task(id) { recheckOutgoingHistory(task, chat: chat) }
             if !chat.pendingQueue.isEmpty {
                 chat.pendingQueue = QueuedDraft.reconcile(chat.pendingQueue, queued: tasks.first(where: { $0.id == id })?.queued ?? [], items: chat.transcript.items)

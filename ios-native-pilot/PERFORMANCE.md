@@ -471,3 +471,65 @@ reviewed again. Expo, relay/production, OTA and TestFlight were unchanged.
 The signed standalone development build passed strict signature verification
 and was installed over Wi-Fi on the paired iPhone. Physical send interactions
 and haptic feel are not claimed by the simulator checks.
+
+## Streaming and waiting-screen energy — 19 October 2026
+
+Repeated the same local workloads before and after, using optimized Debug
+(`-O`, whole-module compilation) on the iPad simulator. Each time below covers
+the entire workload. These measure client computation, not network or model
+response latency.
+
+| Workload | Before | After |
+| --- | ---: | ---: |
+| 400 token updates and presentation reads with 1,200 history messages | 478.1 ms | 4.0 ms |
+| 400 metadata events and presentation reads with the same history | 511.3 ms | 0.4 ms |
+| 2,400 updates across twelve chats, including 200 presentation reads | 19.3 ms | 3.9 ms |
+
+Metadata and audio events no longer invoke a no-op mutation of the observable
+transcript, which previously invalidated the view and its presentation cache.
+Assistant text updates retain a single pending final row and reuse the settled
+history's projection, grouping and actions. Presentation materializes that row
+only when requested; hidden chats and multiple tokens before a frame do not
+rebuild row arrays. Earlier-message edits, new rows, reasoning/tools, history
+replacement, preference changes and running-state changes retain the full
+projection path. Input reconciliation also skips looking up task queues when
+there is no pending submission. Every wire token still applies immediately.
+
+Tracing a failed Jump to latest UI check showed taps reaching the message
+underneath its floating arrow. The button now defines a 44-point rectangular
+hit area. A separate native regression exposed jumps stopping at an outdated
+estimated bottom: it failed at 520 points instead of the newly measured 1,320.
+Explicit jumps now retain following through lazy row measurements; a subsequent
+reading gesture still cancels following.
+
+Activity text now performs one 2.4-second highlight when it appears and then
+settles into ordinary text, replacing its indefinite 30 fps shader timeline.
+Native loading diamonds retain their existing pulse. Scene, visibility, Low
+Power Mode and Reduce Motion still gate effects.
+
+For `--demo --motion-preview=thinking`, process CPU fell from 7.69% to 3.60%
+of one host core (about 53% less). Each sample follows five seconds of warmup
+and measures the change in cumulative process CPU time over ten seconds on the
+same iPad simulator. The Low Power visual fallback measured 0.00% before and
+0.10% after, within sampling granularity. A settled-screen stack sample showed
+the main thread waiting for events. These are simulator CPU measurements, not
+physical-device battery or GPU energy measurements.
+
+Validation: all 322 optimized unit tests passed. New regressions compare the
+incremental result with full projection through Unicode deltas, replay,
+multiple updates between reads, earlier edits, new messages, completion and
+preference/running-state changes. Observation tracking verifies that metadata
+updates still apply without scheduling a transcript render.
+
+Final iPhone and iPad simulator reruns passed three scenarios each: twelve
+concurrent streams with editable drafts and navigation, stable reading position
+with a usable 44-point Jump to latest button, and completed Markdown positioned
+above the composer. Earlier checks also passed reopening/backgrounding, immediate
+typed-send acceptance, Reduce Motion and Low Power semantic feedback on both
+sizes. The final optimized development build passed strict signature verification
+and was installed and launched normally on the paired physical iPhone.
+
+Repository Autoreview (`.agents/skills/autoreview/scripts/autoreview --mode local
+--prompt-file ios-native-pilot/artifacts/performance-review-context.md`) found
+no actionable findings at its default P0 threshold, with adjacent transcript,
+projection and motion contracts supplied as context.

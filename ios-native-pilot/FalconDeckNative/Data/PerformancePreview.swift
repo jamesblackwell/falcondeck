@@ -27,12 +27,12 @@ import Foundation
                 for round in 0..<600 {
                     guard let model, model.demo, model.sessionScope == scope else { return }
                     for chat in chats {
-                        chat.transcript.apply(.object(["type": .string("text"), "item_id": .string("live"), "target": .string("assistant_message"), "delta": .string("Words 👋 "), "start_offset": .number(Double(round * 9)), "end_offset": .number(Double((round + 1) * 9))]))
+                        chat.apply(.object(["type": .string("text"), "item_id": .string("live"), "target": .string("assistant_message"), "delta": .string("Words 👋 "), "start_offset": .number(Double(round * 9)), "end_offset": .number(Double((round + 1) * 9))]))
                     }
                     try await Task.sleep(for: .milliseconds(30))
                 }
                 guard let model, model.demo, model.sessionScope == scope else { return }
-                for chat in chats { chat.transcript.apply(.object(["type": .string("turn-end")])) }
+                for chat in chats { chat.apply(.object(["type": .string("turn-end")])) }
                 model.tasks = model.tasks.map { AgentTask($0.raw.setting("status", .string("idle"))) }
             } catch { }
         }

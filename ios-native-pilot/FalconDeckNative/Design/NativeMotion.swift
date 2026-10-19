@@ -78,21 +78,35 @@ struct NativeActivityText: View {
     let text: String
     var active = true
     @State private var visible = false
-    @State private var epoch = Date()
-    @State private var size = CGSize.zero
     var body: some View {
         ZStack(alignment: .leading) {
-            if active && motion.effectsEnabled {
-                TimelineView(.animation(minimumInterval: 1.0 / 30, paused: !visible)) { timeline in
-                    Text(text).colorEffect(ShaderLibrary.activitySweep(
-                        .float2(Float(size.width), Float(size.height)),
-                        .float(Float(timeline.date.timeIntervalSince(epoch))), .color(FD.foreground)))
-                }
+            if active && motion.effectsEnabled && visible {
+                ActivityTextHighlight(text: text)
             } else { Text(text) }
         }
-        .onGeometryChange(for: CGSize.self) { $0.size } action: { size = $0 }
-        .onAppear { epoch = .now; visible = true }
+        .onAppear { visible = true }
         .onDisappear { visible = false }
         .onScrollVisibilityChange(threshold: 0.01) { visible = $0 }
+    }
+}
+
+/// One sweep when activity appears, then ordinary text with no frame clock.
+/// Removing this leaf also cancels its animation when the scene is inactive.
+private struct ActivityTextHighlight: View {
+    let text: String
+    @State private var started = false
+    @State private var size = CGSize.zero
+    var body: some View {
+        Text(text)
+            .keyframeAnimator(initialValue: CGFloat(1), trigger: started) { label, phase in
+                label.colorEffect(ShaderLibrary.activitySweep(
+                    .float2(Float(size.width), Float(size.height)),
+                    .float(Float(phase * 2.4)), .color(FD.foreground)), isEnabled: phase < 1)
+            } keyframes: { _ in
+                MoveKeyframe(CGFloat(0))
+                LinearKeyframe(CGFloat(1), duration: 2.4)
+            }
+            .onGeometryChange(for: CGSize.self) { $0.size } action: { size = $0 }
+            .onAppear { started = true }
     }
 }

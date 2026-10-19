@@ -36,6 +36,8 @@ import XCTest
         transcript.swipeDown()
         let jump = app.buttons["Jump to latest message"]
         XCTAssertTrue(jump.waitForExistence(timeout: 3))
+        XCTAssertGreaterThanOrEqual(jump.frame.width, 44)
+        XCTAssertGreaterThanOrEqual(jump.frame.height, 44)
         let anchor = transcript.staticTexts.allElementsBoundByIndex.first { $0.isHittable && $0.label.count > 60 }
         XCTAssertNotNil(anchor)
         guard let anchor else { return }

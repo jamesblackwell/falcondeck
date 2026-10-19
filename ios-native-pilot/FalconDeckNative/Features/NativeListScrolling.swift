@@ -78,6 +78,8 @@ import SwiftUI
     func jump(animated: Bool) {
         cancel()
         guard active, let view, view.window != nil else { return }
+        // Lazy row measurements can revise the bottom after this first move.
+        followsBottom = true
         view.setContentOffset(view.contentOffset, animated: false)
         moveToBottom(view, animated: animated)
     }

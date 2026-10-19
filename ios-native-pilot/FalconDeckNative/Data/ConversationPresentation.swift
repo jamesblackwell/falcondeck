@@ -72,6 +72,22 @@ struct TranscriptPresentation {
         blocks = TranscriptBlock.blocks(from: source, preferences: preferences, running: running)
         actionIDs = TranscriptBlock.actions(in: source)
     }
+
+    private init(blocks: [TranscriptBlock], actionIDs: Set<String>) {
+        self.blocks = blocks; self.actionIDs = actionIDs
+    }
+
+    /// The common token path only changes the final assistant row. Projection,
+    /// tool grouping and earlier turns' action buttons are already settled.
+    func updatingAssistantTail(_ message: Message) -> TranscriptPresentation? {
+        guard message.kind == "assistant_message", let last = blocks.last,
+              !last.grouped, last.items.count == 1,
+              last.items[0].id == message.id, last.items[0].kind == message.kind else { return nil }
+        var blocks = blocks, actions = actionIDs
+        blocks[blocks.count - 1] = TranscriptBlock(items: [message], grouped: false, firstDiff: false)
+        if message.streaming { actions.remove(message.id) } else { actions.insert(message.id) }
+        return TranscriptPresentation(blocks: blocks, actionIDs: actions)
+    }
 }
 
 struct TranscriptExpansion: Equatable {

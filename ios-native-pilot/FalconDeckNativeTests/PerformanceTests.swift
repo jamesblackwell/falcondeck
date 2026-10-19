@@ -70,6 +70,40 @@ import XCTest
         report("cached-presentation", since: start, operations: 1000)
         XCTAssertEqual(count, 1_200_000)
     }
+    func testBenchmarkLivePresentationWithLongHistory() {
+        let model = AppModel.testing(relay: UnavailablePreviewRelay())
+        let task = row(0)
+        model.tasks = [task]
+        let chat = model.chat(for: task), preferences = ConversationPreferences(raw: .null)
+        chat.transcript = Transcript(items: (0..<1200).map { index in
+            Message(.object(["id": .string("m-\(index)"), "kind": .string(index.isMultiple(of: 2) ? "user_message" : "assistant_message"), "text": .string("A settled response or typed prompt")]))
+        })
+        _ = chat.presentation(preferences: preferences, running: true)
+        let start = ContinuousClock.now
+        for index in 0..<400 {
+            model.applyEnvelope(.object(["seq": .number(Double(index + 1)), "thread_id": .string(task.id), "event": .object(["type": .string("text"), "item_id": .string("m-1199"), "target": .string("assistant_message"), "delta": .string("Words 👋 ")])]))
+            XCTAssertEqual(chat.presentation(preferences: preferences, running: true).blocks.count, 1200)
+        }
+        report("live-presentation-long-history", since: start, operations: 400)
+        XCTAssertTrue(chat.transcript.items.last!.text.hasSuffix(String(repeating: "Words 👋 ", count: 400)))
+    }
+    func testBenchmarkMetadataWithCachedHistory() {
+        let model = AppModel.testing(relay: UnavailablePreviewRelay())
+        let task = row(0)
+        model.tasks = [task]
+        let chat = model.chat(for: task), preferences = ConversationPreferences(raw: .null)
+        chat.transcript = Transcript(items: (0..<1200).map { index in
+            Message(.object(["id": .string("m-\(index)"), "kind": .string(index.isMultiple(of: 2) ? "user_message" : "assistant_message"), "text": .string("A settled response or typed prompt")]))
+        })
+        _ = chat.presentation(preferences: preferences, running: true)
+        let start = ContinuousClock.now
+        for index in 0..<400 {
+            model.applyEnvelope(.object(["seq": .number(Double(index + 1)), "thread_id": .string(task.id), "event": .object(["type": .string("thread-token-usage-updated"), "usage": .object(["total": .number(Double(index))])])]))
+            XCTAssertEqual(chat.presentation(preferences: preferences, running: true).blocks.count, 1200)
+        }
+        report("metadata-cached-history", since: start, operations: 400)
+        XCTAssertEqual(model.tokenUsage[task.id]["total"].int, 399)
+    }
     func testBenchmarkTwelveConcurrentConversations() {
         let model = AppModel.testing(relay: UnavailablePreviewRelay())
         model.tasks = (0..<3000).map(row)

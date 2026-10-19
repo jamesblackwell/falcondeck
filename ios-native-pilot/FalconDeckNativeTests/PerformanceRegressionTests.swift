@@ -1,4 +1,5 @@
 import Foundation
+import Observation
 import XCTest
 import os
 @testable import FalconDeckNative
@@ -36,6 +37,60 @@ import os
         chat.transcript.items = [Message(.object(["id": .string("tool"), "kind": .string("tool_call"), "status": .string("complete")]))]
         XCTAssertTrue(chat.presentation(preferences: preferences, running: false).blocks[0].grouped)
         XCTAssertFalse(chat.presentation(preferences: ConversationPreferences(raw: .object(["tool_details_mode": .string("expanded")])), running: false).blocks[0].grouped)
+    }
+    func testMetadataDoesNotInvalidateTranscriptObservers() {
+        let model = AppModel.testing(relay: UnavailablePreviewRelay())
+        let task = AgentTask(.object(["id": .string("task"), "workspace_id": .string("project")]))
+        model.tasks = [task]
+        let chat = model.chat(for: task), changes = OSAllocatedUnfairLock(initialState: 0)
+        chat.transcript = Transcript(items: [Message(.object(["id": .string("a"), "kind": .string("assistant_message"), "text": .string("Keep this history")]))])
+        withObservationTracking { _ = chat.transcript } onChange: { changes.withLock { $0 += 1 } }
+        model.applyEnvelope(.object(["seq": .number(1), "thread_id": .string(task.id), "event": .object(["type": .string("thread-token-usage-updated"), "usage": .object(["total": .number(42)])])]))
+        XCTAssertEqual(model.tokenUsage[task.id]["total"].int, 42)
+        XCTAssertEqual(changes.withLock { $0 }, 0, "Metadata must not schedule a transcript render")
+        model.applyEnvelope(.object(["seq": .number(2), "thread_id": .string(task.id), "event": .object(["type": .string("text"), "item_id": .string("a"), "target": .string("assistant_message"), "delta": .string(" updated")])]))
+        XCTAssertEqual(changes.withLock { $0 }, 1)
+        XCTAssertEqual(chat.transcript.items[0].text, "Keep this history updated")
+    }
+    func testStreamingTailPresentationMatchesFullProjection() {
+        let chat = ChatSession()
+        func item(_ id: String, _ kind: String, _ text: String) -> Message {
+            Message(.object(["id": .string(id), "kind": .string(kind), "text": .string(text)]))
+        }
+        chat.transcript = Transcript(items: [item("u1", "user_message", "First question"), item("a1", "assistant_message", "Earlier answer"), item("u2", "user_message", "<user_query>Second question</user_query>"), item("thought", "reasoning", ""), item("a2", "assistant_message", "Hello")])
+        let preferences = ConversationPreferences(raw: .null)
+        func check(_ preferences: ConversationPreferences, running: Bool = true, file: StaticString = #filePath, line: UInt = #line) {
+            let cached = chat.presentation(preferences: preferences, running: running)
+            let rebuilt = TranscriptPresentation(chat.transcript.items, preferences: preferences, running: running)
+            XCTAssertEqual(cached.actionIDs, rebuilt.actionIDs, file: file, line: line)
+            XCTAssertEqual(cached.blocks.count, rebuilt.blocks.count, file: file, line: line)
+            for (actual, expected) in zip(cached.blocks, rebuilt.blocks) {
+                XCTAssertEqual(actual.items, expected.items, file: file, line: line)
+                XCTAssertEqual(actual.grouped, expected.grouped, file: file, line: line)
+                XCTAssertEqual(actual.firstDiff, expected.firstDiff, file: file, line: line)
+            }
+        }
+        check(preferences)
+        let delta = JSON.object(["type": .string("text"), "item_id": .string("a2"), "target": .string("assistant_message"), "delta": .string(" 👋"), "start_offset": .number(5), "end_offset": .number(8)])
+        chat.apply(delta); check(preferences)
+        XCTAssertFalse(chat.presentation(preferences: preferences, running: true).actionIDs.contains("a2"))
+        chat.apply(delta); check(preferences) // Replay keeps the cached projection.
+        for _ in 0..<4 {
+            chat.apply(.object(["type": .string("text"), "item_id": .string("a2"), "target": .string("assistant_message"), "delta": .string(" more")]))
+        }
+        check(preferences)
+        chat.apply(.object(["type": .string("text"), "item_id": .string("a1"), "target": .string("assistant_message"), "delta": .string(" edited")]))
+        check(preferences) // Edits to earlier rows rebuild normally.
+        chat.apply(.object(["type": .string("text"), "item_id": .string("thought"), "target": .string("reasoning_summary"), "delta": .string("Checking")]))
+        check(preferences)
+        let expanded = ConversationPreferences(raw: .object(["tool_details_mode": .string("expanded"), "thinking_display": .string("always_expanded")]))
+        check(expanded, running: false)
+        chat.apply(.object(["type": .string("conversation-item-added"), "item": item("u3", "user_message", "Third question").raw]))
+        chat.apply(.object(["type": .string("text"), "item_id": .string("a3"), "target": .string("assistant_message"), "delta": .string("New answer")]))
+        check(expanded)
+        chat.apply(.object(["type": .string("turn-end")]))
+        check(expanded, running: false)
+        XCTAssertTrue(chat.presentation(preferences: expanded, running: false).actionIDs.contains("a3"))
     }
     func testTranscriptIndexAndUTF16CacheSurviveReplacementsPrependAndReplay() {
         func item(_ id: String, _ text: String) -> Message { Message(.object(["id": .string(id), "kind": .string("assistant_message"), "text": .string(text)])) }
