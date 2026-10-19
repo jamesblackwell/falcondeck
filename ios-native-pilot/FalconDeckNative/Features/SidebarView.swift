@@ -75,7 +75,6 @@ struct SidebarView: View {
                         Image(systemName: "square.and.pencil").font(.caption).foregroundStyle(FD.muted)
                             .frame(width: 44, height: 44).contentShape(.rect)
                     }.buttonStyle(.plain).accessibilityLabel("New task in \(project.name)")
-                        .disabled(!model.demo && !model.connected)
                     }
                     .contextMenu {
                         Button { newTask(project) } label: { Label("New task", systemImage: "square.and.pencil") }

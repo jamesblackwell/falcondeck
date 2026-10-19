@@ -96,6 +96,8 @@ final class AppModel {
             Task { try? await store.saveSelection(value, revision: revision) }
         }
     }
+    var detailRequestID = UUID()
+    @ObservationIgnored var pendingShortcuts: [NativeShortcutNavigation] = []
     @ObservationIgnored var draftStore: DraftStore?
     @ObservationIgnored var savedDrafts: [String: SavedDraft] = [:]
     @ObservationIgnored var draftSaves: [String: Task<Void, Never>] = [:]
@@ -139,6 +141,7 @@ final class AppModel {
             startupInFlight = false
             restoringSession = false
             consumeQueuedPairingPayload()
+            applyPendingShortcut()
         }
         SpeechLiveActivity.shared.voice(nil); SpeechLiveActivity.shared.readAloud(nil)
         let events = await relay.events()
@@ -168,6 +171,7 @@ final class AppModel {
         guard current == connectionID else { return }
         // Reveal local content before waiting on the relay handshake.
         restoringSession = false
+        applyPendingShortcut()
         do {
             let restored = try await relay.restore(connectionID: current)
             guard current == connectionID else { return }
@@ -186,6 +190,7 @@ final class AppModel {
         previewSave?.cancel(); previewSave = nil; hasLiveSnapshot = false
         if clearData {
             sessionScope = UUID()
+            pendingShortcuts.removeAll()
             taskActivity.stop()
             workspaceIcons.reset()
             if voice.recording { voice.finishRecording() }
@@ -372,6 +377,7 @@ final class AppModel {
         StreamingPreview.start(in: self)
         MotionPreview.start(in: self)
         await ImagePreview.start(in: self)
+        await NativeShortcutPreview.start(in: self)
         if ProcessInfo.processInfo.arguments.contains("--task-activity-preview"), let task = tasks.first {
             // Explicit local QA fixture: no relay, turn, microphone or push.
             taskActivity.restore(pairing: nil)

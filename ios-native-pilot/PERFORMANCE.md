@@ -400,3 +400,32 @@ was installed over Wi-Fi and launched normally into its paired session. Physical
 Lock Screen interaction is not claimed: device UI automation was not retried.
 No real agent turns were started. Expo, relay/production, OTA and TestFlight were
 unchanged.
+
+## App Intents and draft project selection — 19 October 2026
+
+New task, Open project and View activity are foreground App Intents, exposed
+through App Shortcuts. They require authentication and prepare native UI without
+starting agent turns. A supplied prompt appends to existing unsent input; pending
+submissions are protected. Project entities are scoped to the paired computer.
+Queries use the current catalog or a coalesced encrypted preview-cache read off
+the main actor, cached for 30 seconds during startup. A fresh snapshot, including
+an empty workspace, always supersedes a disk read that was already in flight.
+
+Cold launches retain accepted shortcuts in a bounded FIFO until local input
+recovery finishes. Multiple prompts followed by Activity cannot replace each
+other. Explicit navigation reveals even unchanged destinations on compact
+screens. The glass new-task title now opens a searchable project sheet from both
+the landing view and normal project drafts. Like Expo, each project/folder keeps
+its own text, attachments and harness choices; switching cannot move an existing
+thread. Known-project drafts can be opened offline.
+
+Validation: 300 optimized native unit tests passed. Five phone and three tablet
+UI checks passed using local fixtures, including real intent perform methods,
+cold navigation, search, independent drafts and existing glass-title behavior.
+Phone dark and tablet light screenshots were visually inspected. App Intents
+metadata contains all three new actions, their shortcuts and the project entity.
+Native-only Autoreview (`.agents/skills/autoreview/scripts/autoreview --mode local
+--max-priority P2 --prompt-file intents-review-context.md` in an isolated worktree)
+finished clean after verified startup races were fixed and reviewed again.
+Physical Siri/Action button interaction has not been verified. No real agent
+turns were started; Expo, relay/production, OTA and TestFlight were unchanged.

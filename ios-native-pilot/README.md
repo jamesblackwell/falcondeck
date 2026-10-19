@@ -63,6 +63,12 @@ keys, tokens, real device inventory or private screenshots in git.
 - Draft-first task creation; provider/model/effort/mode/permissions/sandbox/speed;
   slash skills and saved prompts; queue/edit/remove/steer; interrupt/resume;
   rename/suggest title; read/unread; goals and context compaction.
+- A searchable project switcher in every new-task title. Each project/folder
+  keeps its own unsent text, attachments and model choices when switching.
+- App Shortcuts: New task (optional project and prompt), Open project, and View
+  activity. Find Falcon Native in Shortcuts to use them with Siri or the Action
+  button. New task opens input for review; it never sends a turn automatically.
+  Project choices use the paired computer's live or encrypted cached catalog.
 - Edit/retry in a new branch and cross-agent handoff. Handoff leaves the source
   task intact and holds context at the daemon until the first destination send.
 - Live Markdown, code highlighting/copy, tables, reasoning/tool groups,
@@ -173,7 +179,7 @@ xcodebuild -project FalconDeckNative.xcodeproj -scheme FalconDeckNativeUI \
   -derivedDataPath build-ui test
 ```
 
-The latest unit run has 240 passing tests. Pairing/chat/automation UI checks have
+The latest unit run has 300 passing tests. Pairing/chat/automation UI checks have
 passed on both phone and tablet simulators. See [VERIFICATION.md](VERIFICATION.md) for the
 review and device handoff, and [PARITY.md](PARITY.md) for the feature ledger. Tests cover
 crypto interoperability, pairing authority, chunks/ACKs, UTF-16 streaming,

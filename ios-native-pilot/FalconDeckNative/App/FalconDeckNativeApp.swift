@@ -1,10 +1,16 @@
+import AppIntents
 import SwiftUI
 
 @main
 struct FalconDeckNativeApp: App {
     @Environment(\.scenePhase) private var scenePhase
     @UIApplicationDelegateAdaptor(NativeAppDelegate.self) private var appDelegate
-    @State private var model = makeModel()
+    @State private var model: AppModel
+    init() {
+        let model = Self.makeModel()
+        _model = State(initialValue: model)
+        AppDependencyManager.shared.add(dependency: NativeIntentContext(model: model))
+    }
     static var isUnitTestHost: Bool {
         #if DEBUG
         ProcessInfo.processInfo.environment["XCTestBundlePath"]?.hasSuffix("/FalconDeckNativeTests.xctest") == true
@@ -49,7 +55,12 @@ struct FalconDeckNativeApp: App {
                 .modifier(NativeMotionScope())
                 .preferredColorScheme(NativeAppearance.shared.colorScheme)
                 .tint(FD.accent)
-                .task { if !Self.isUnitTestHost { await model.start() } }
+                .task {
+                    if !Self.isUnitTestHost {
+                        await model.start()
+                        if !model.demo { FalconNativeShortcuts.updateAppShortcutParameters() }
+                    }
+                }
                 .onOpenURL { url in
                     if url.scheme == "falcondeck-native", url.host == "task" { Task { await model.openTaskActivity(url) } }
                     else if url.host == "speech" { if model.voice.pendingURL != nil { model.showSpeechSettings = true } }
@@ -114,13 +125,17 @@ struct RootView: View {
                     .toolbar {
                         if floatingConversationHeader {
                             ToolbarItem(placement: .principal) {
-                                Text(detailTitle)
-                                    .font(.subheadline.weight(.semibold))
-                                    .foregroundStyle(FD.foreground)
-                                    .lineLimit(1).truncationMode(.tail)
-                                    .padding(.horizontal, 14).padding(.vertical, 8)
-                                    .glassEffect(.regular, in: .capsule)
-                                    .accessibilityIdentifier("conversation-title")
+                                if model.isNewConversation {
+                                    DraftProjectPicker(title: detailTitle)
+                                } else {
+                                    Text(detailTitle)
+                                        .font(.subheadline.weight(.semibold))
+                                        .foregroundStyle(FD.foreground)
+                                        .lineLimit(1).truncationMode(.tail)
+                                        .padding(.horizontal, 14).padding(.vertical, 8)
+                                        .glassEffect(.regular, in: .capsule)
+                                        .accessibilityIdentifier("conversation-title")
+                                }
                             }
                         }
                     }
@@ -130,7 +145,9 @@ struct RootView: View {
         .navigationSplitViewStyle(.balanced)
         .onAppear {
             if sizeClass == .compact {
-                switch model.selection { case .task, .draft: compactColumn = .detail; default: break }
+                // A cold-launch Intent may select its destination before this
+                // workspace appears. Default launches still open the sidebar.
+                switch model.selection { case .projects, nil: break; default: compactColumn = .detail }
             }
         }
         .sensoryFeedback(.selection, trigger: model.selection) { _, _ in motion.active }
@@ -140,6 +157,11 @@ struct RootView: View {
             var reset = Transaction(); reset.disablesAnimations = true
             withTransaction(reset) { detailPath.removeAll() }
             if selection != nil && sizeClass == .compact { compactColumn = .detail }
+        }
+        .onChange(of: model.detailRequestID) { _, _ in
+            var reset = Transaction(); reset.disablesAnimations = true
+            withTransaction(reset) { detailPath.removeAll() }
+            if sizeClass == .compact { compactColumn = .detail }
         }
     }
     private var floatingConversationHeader: Bool {

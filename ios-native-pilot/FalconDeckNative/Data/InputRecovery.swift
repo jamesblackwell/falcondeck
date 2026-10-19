@@ -24,7 +24,7 @@ import Foundation
             if selectionFailed { error = "Saved navigation couldn't be read. Your input has been restored." }
             draftStore = store; savedDrafts = Dictionary(drafts.map { ($0.id, $0) }, uniquingKeysWith: { _, new in new })
             composerPreferences = preferences
-            pendingSelection = selection
+            pendingSelection = pendingShortcuts.isEmpty ? selection : nil
             if case .task(let id) = pendingSelection { await relay.selectThread(id) }
             guard current == connectionID, !demo else { return }
             if unreadable > 0 { error = "Some saved input couldn't be read. Other drafts have been restored." }
