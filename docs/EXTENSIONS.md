@@ -1142,6 +1142,12 @@ Each calls an operation the UI already uses; none adds new stored state.
 queues a labelled notice to the parent (normal `send_turn`, `steer: false`)
 when the child first enters `waiting_for_input` and when it stops running after
 having run. The parent therefore wakes on completion instead of polling.
+Completions for the same workspace and parent are combined within a fixed
+500 ms window. Input requests flush that parent's pending batch immediately.
+Each child appears once per batch with its title, thread id, current status,
+nonempty preview or error, and any pending request details. Delivery rechecks
+the child so a resumed turn does not produce a stale stop notice. Later turns
+can still notify the parent; idle updates alone do not generate more notices.
 Subscriptions live only in memory: a daemon restart ends the child's turn and
 the parent's turn too. Notices are skipped during shutdown and for archived
 parents.

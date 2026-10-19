@@ -13,6 +13,8 @@ pub(super) const WAIT: &str = "falcondeck_wait_thread";
 /// Stays under the bridge's 30-second HTTP timeout.
 const MAX_WAIT_SECS: u64 = 25;
 const WAIT_POLL: std::time::Duration = std::time::Duration::from_millis(250);
+/// Fixed from the first completion so a busy event stream cannot postpone delivery.
+const CHILD_NOTICE_WINDOW: std::time::Duration = std::time::Duration::from_millis(500);
 
 pub(super) fn is_action(name: &str) -> bool {
     matches!(name, ORGANIZE | INTERRUPT | ANSWER | WAIT)
@@ -135,10 +137,18 @@ pub(crate) struct ChildWatch {
     waiting_notified: bool,
 }
 
+#[derive(Clone, Copy)]
 enum Settle {
     Waiting,
     Finished,
 }
+
+struct ChildNoticeBatch {
+    deadline: tokio::time::Instant,
+    children: Vec<(String, Settle)>,
+}
+
+type ChildNoticeBatches = HashMap<(String, String), ChildNoticeBatch>;
 
 fn status_name(status: &ThreadStatus) -> &'static str {
     match status {
@@ -515,17 +525,47 @@ impl AppState {
         let mut events = self.subscribe();
         let inner = Arc::downgrade(&self.inner);
         tokio::spawn(async move {
+            let mut batches = ChildNoticeBatches::new();
             loop {
-                let event = events.recv().await;
+                let deadline = batches.values().map(|batch| batch.deadline).min();
+                let event = tokio::select! {
+                    biased;
+                    _ = async {
+                        match deadline {
+                            Some(deadline) => tokio::time::sleep_until(deadline).await,
+                            None => std::future::pending::<()>().await,
+                        }
+                    } => None,
+                    event = events.recv() => Some(event),
+                };
                 let Some(inner) = inner.upgrade() else { return };
                 let app = AppState { inner };
                 match event {
-                    Ok(envelope) => {
-                        if let UnifiedEvent::ThreadUpdated { thread } = &envelope.event {
-                            app.observe_child(thread);
+                    None => {
+                        let now = tokio::time::Instant::now();
+                        let ready: Vec<_> = batches
+                            .iter()
+                            .filter(|(_, batch)| batch.deadline <= now)
+                            .map(|(key, _)| key.clone())
+                            .collect();
+                        for (workspace, parent) in ready {
+                            if let Some(batch) =
+                                batches.remove(&(workspace.clone(), parent.clone()))
+                            {
+                                let app = app.clone();
+                                tokio::spawn(async move {
+                                    app.notify_parent(&workspace, &parent, &batch.children)
+                                        .await;
+                                });
+                            }
                         }
                     }
-                    Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
+                    Some(Ok(envelope)) => {
+                        if let UnifiedEvent::ThreadUpdated { thread } = &envelope.event {
+                            app.observe_child(thread, &mut batches);
+                        }
+                    }
+                    Some(Err(tokio::sync::broadcast::error::RecvError::Lagged(_))) => {
                         let watched: Vec<_> = app
                             .inner
                             .agent_spawn_watches
@@ -537,17 +577,17 @@ impl AppState {
                             .collect();
                         for (workspace, id) in watched {
                             if let Ok(thread) = app.thread_summary(&workspace, &id).await {
-                                app.observe_child(&thread);
+                                app.observe_child(&thread, &mut batches);
                             }
                         }
                     }
-                    Err(tokio::sync::broadcast::error::RecvError::Closed) => return,
+                    Some(Err(tokio::sync::broadcast::error::RecvError::Closed)) => return,
                 }
             }
         });
     }
 
-    fn observe_child(&self, thread: &ThreadSummary) {
+    fn observe_child(&self, thread: &ThreadSummary, batches: &mut ChildNoticeBatches) {
         let settle = {
             let mut watches = self
                 .inner
@@ -574,17 +614,29 @@ impl AppState {
             settle.map(|s| (s, watch.parent_thread_id.clone()))
         };
         if let Some((settle, parent)) = settle {
-            let app = self.clone();
-            let thread = thread.clone();
-            tokio::spawn(async move { app.notify_parent(&thread, &parent, settle).await });
+            let batch = batches
+                .entry((thread.workspace_id.clone(), parent))
+                .or_insert_with(|| ChildNoticeBatch {
+                    deadline: tokio::time::Instant::now() + CHILD_NOTICE_WINDOW,
+                    children: Vec::new(),
+                });
+            if let Some((_, previous)) = batch.children.iter_mut().find(|(id, _)| id == &thread.id)
+            {
+                *previous = settle;
+            } else {
+                batch.children.push((thread.id.clone(), settle));
+            }
+            // Questions and approvals must not wait behind completion batching.
+            if matches!(settle, Settle::Waiting) {
+                batch.deadline = tokio::time::Instant::now();
+            }
         }
     }
 
-    async fn notify_parent(&self, child: &ThreadSummary, parent: &str, settle: Settle) {
+    async fn notify_parent(&self, workspace: &str, parent: &str, children: &[(String, Settle)]) {
         if self.is_shutting_down() {
             return;
         }
-        let workspace = &child.workspace_id;
         if self
             .thread_summary(workspace, parent)
             .await
@@ -592,24 +644,55 @@ impl AppState {
         {
             return;
         }
-        let event = match settle {
-            Settle::Waiting => "is waiting for input",
-            Settle::Finished => "stopped running",
-        };
-        let mut text = format!(
-            "FalconDeck notification (generated by the daemon, not written by the child): thread {} ({}) {event}.\n\n- Status: {}\n- Last preview: {}\n",
-            line(&child.id, 256),
-            line(&child.title, 256),
-            status_name(&child.status),
-            line(child.last_message_preview.as_deref().unwrap_or(""), 600)
-        );
-        if let Some(error) = &child.last_error {
-            text.push_str(&format!("- Last error: {}\n", line(error, 600)));
+        let mut text = String::new();
+        for (id, settle) in children {
+            let Ok(child) = self.thread_summary(workspace, id).await else {
+                continue;
+            };
+            // A child can resume while its completion is being batched. Read the
+            // latest summary for both status and preview instead of sending stale data.
+            if is_busy(&child)
+                || (child.status == ThreadStatus::WaitingForInput)
+                    != matches!(settle, Settle::Waiting)
+            {
+                continue;
+            }
+            let event = match child.status {
+                ThreadStatus::WaitingForInput => "needs input",
+                ThreadStatus::Error => "failed (error)",
+                _ => "stopped (idle)",
+            };
+            text.push_str(&format!(
+                "- {}: {event} [{}]\n",
+                line(&child.title, 160),
+                line(&child.id, 256),
+            ));
+            if let Some(preview) = child
+                .last_message_preview
+                .as_deref()
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+            {
+                text.push_str(&format!("  Preview: {}\n", line(preview, 400)));
+            }
+            if let Some(error) = child
+                .last_error
+                .as_deref()
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+            {
+                text.push_str(&format!("  Error: {}\n", line(error, 600)));
+            }
+            text.push_str(&pending_markdown(
+                &self.pending_thread_requests(workspace, &child.id).await,
+            ));
         }
-        text.push_str(&pending_markdown(
-            &self.pending_thread_requests(workspace, &child.id).await,
-        ));
-        text.push_str("\nRead its work with falcondeck_view_thread.\n");
+        if text.is_empty() {
+            return;
+        }
+        let text = format!(
+            "FalconDeck child updates (daemon):\n\n{text}\nDetails: falcondeck_view_thread.\n"
+        );
         let request = serde_json::from_value::<SendTurnRequest>(json!({
             "workspace_id": workspace, "thread_id": parent,
             "inputs": [{"type":"text","text":text}], "steer": false
@@ -619,7 +702,7 @@ impl AppState {
             Err(error) => Err(error.into()),
         };
         if let Err(error) = result {
-            tracing::warn!(%error, child = %child.id, %parent, "failed to notify parent thread");
+            tracing::warn!(%error, %workspace, %parent, "failed to notify parent thread");
         }
     }
 }
@@ -657,6 +740,28 @@ mod tests {
             Some(id.into()),
             UnifiedEvent::ThreadUpdated { thread },
         );
+    }
+
+    async fn queued_notices(app: &AppState, parent: &str) -> Vec<String> {
+        app.inner.workspaces.lock().await["workspace-1"].threads[parent]
+            .queued_requests
+            .iter()
+            .map(|q| q.summary.text.clone())
+            .collect()
+    }
+
+    async fn wait_for_notices(app: &AppState, parent: &str, count: usize) -> Vec<String> {
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop {
+                let notices = queued_notices(app, parent).await;
+                if notices.len() >= count {
+                    break notices;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("parent should receive child notices")
     }
 
     async fn add_request(
@@ -943,6 +1048,109 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn notify_parent_batches_nearby_completions_with_compact_previews() {
+        let (app, _temp) = fixture().await;
+        let first = child(&app, json!({"notify_parent":true,"title":"Layouts"})).await;
+        let second = child(&app, json!({"notify_parent":true,"title":"Copy"})).await;
+        app.with_thread_mut("workspace-1", "thread-1", |t| {
+            t.status = ThreadStatus::Running
+        })
+        .await
+        .unwrap();
+        app.with_thread_mut("workspace-1", &second, |t| {
+            t.last_message_preview = Some(" \n ".into());
+        })
+        .await
+        .unwrap();
+        for id in [&first, &second] {
+            set_status(&app, id, ThreadStatus::Running).await;
+            set_status(&app, id, ThreadStatus::Idle).await;
+            set_status(&app, id, ThreadStatus::Idle).await;
+        }
+        // The final preview can arrive after the status event that started the batch.
+        app.with_thread_mut("workspace-1", &first, |t| {
+            t.last_message_preview = Some("Created six layouts.".into());
+        })
+        .await
+        .unwrap();
+        let notices = wait_for_notices(&app, "thread-1", 1).await;
+        assert_eq!(notices.len(), 1, "{notices:?}");
+        assert_eq!(
+            notices[0],
+            format!(
+                "FalconDeck child updates (daemon):\n\n- Layouts: stopped (idle) [{first}]\n  Preview: Created six layouts.\n- Copy: stopped (idle) [{second}]\n\nDetails: falcondeck_view_thread."
+            )
+        );
+        let workspaces = app.inner.workspaces.lock().await;
+        let queued = &workspaces["workspace-1"].threads["thread-1"].queued_requests;
+        assert!(!queued[0].request.steer);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn notify_parent_wakes_idle_parent_with_one_batched_turn() {
+        use std::os::unix::fs::PermissionsExt;
+        let (app, temp) = fixture().await;
+        let script = temp.path().join("fake-claude-notice");
+        let capture = temp.path().join("captured-notice");
+        std::fs::write(&script, format!("#!/bin/sh\nIFS= read -r input\nprintf '%s' \"$input\" > '{}'\nprintf '%s\\n' '{{\"type\":\"result\",\"subtype\":\"success\",\"result\":\"done\",\"session_id\":\"test-session\"}}'\n", capture.display())).unwrap();
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let runtime = crate::claude::ClaudeRuntime::for_test(
+            temp.path().to_string_lossy().into(),
+            script.to_string_lossy().into(),
+        );
+        app.inner
+            .workspaces
+            .lock()
+            .await
+            .get_mut("workspace-1")
+            .unwrap()
+            .claude_runtime = Some(runtime.clone());
+        // A coordinating parent already has a loaded transcript. The generic
+        // fixture's placeholder native id has no corresponding history file.
+        app.push_conversation_item(
+            "workspace-1",
+            "thread-1",
+            ConversationItem::UserMessage {
+                id: "request-1".into(),
+                text: "Delegate layouts and copy.".into(),
+                attachments: Vec::new(),
+                turn_id: None,
+                previous_turn_id: None,
+                created_at: Utc::now(),
+            },
+            false,
+        )
+        .await
+        .unwrap();
+        let first = child(&app, json!({"notify_parent":true})).await;
+        let second = child(&app, json!({"notify_parent":true})).await;
+        for id in [&first, &second] {
+            set_status(&app, id, ThreadStatus::Running).await;
+            set_status(&app, id, ThreadStatus::Idle).await;
+        }
+        let input = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop {
+                if let Ok(input) = std::fs::read_to_string(&capture)
+                    && serde_json::from_str::<Value>(&input).is_ok()
+                {
+                    break input;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("child completion should dispatch a parent turn");
+        assert!(input.contains(&first) && input.contains(&second), "{input}");
+        assert_eq!(
+            input.matches("FalconDeck child updates (daemon):").count(),
+            1
+        );
+        assert!(queued_notices(&app, "thread-1").await.is_empty());
+        runtime.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
     async fn notify_parent_queues_one_notice_per_settle() {
         let (app, _temp) = fixture().await;
         let watched = child(&app, json!({"notify_parent":true})).await;
@@ -955,10 +1163,38 @@ mod tests {
         .unwrap();
         // An idle update before any run is not a completion.
         set_status(&app, &watched, ThreadStatus::Idle).await;
+        add_request(
+            &app,
+            &watched,
+            "question-1",
+            InteractiveRequestKind::Question,
+            false,
+        )
+        .await;
         for status in [
             ThreadStatus::Running,
             ThreadStatus::WaitingForInput,
             ThreadStatus::WaitingForInput,
+        ] {
+            set_status(&app, &watched, status.clone()).await;
+            set_status(&app, &silent, status).await;
+        }
+        let waiting = wait_for_notices(&app, "thread-1", 1).await;
+        assert!(waiting[0].contains("needs input"), "{waiting:?}");
+        assert!(
+            waiting[0].contains("question-1") && waiting[0].contains("Question q1:"),
+            "{waiting:?}"
+        );
+        assert!(
+            waiting[0].contains("falcondeck_answer_question"),
+            "{waiting:?}"
+        );
+        app.inner
+            .interactive_requests
+            .lock()
+            .await
+            .remove(&("workspace-1".into(), "question-1".into()));
+        for status in [
             ThreadStatus::Running,
             ThreadStatus::Idle,
             ThreadStatus::Idle,
@@ -966,35 +1202,18 @@ mod tests {
             set_status(&app, &watched, status.clone()).await;
             set_status(&app, &silent, status).await;
         }
-        let queued = tokio::time::timeout(std::time::Duration::from_secs(5), async {
-            loop {
-                let texts: Vec<String> =
-                    app.inner.workspaces.lock().await["workspace-1"].threads["thread-1"]
-                        .queued_requests
-                        .iter()
-                        .map(|q| q.summary.text.clone())
-                        .collect();
-                if texts.len() >= 2 {
-                    break texts;
-                }
-                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
-            }
-        })
-        .await
-        .unwrap();
+        let queued = wait_for_notices(&app, "thread-1", 2).await;
         tokio::time::sleep(std::time::Duration::from_millis(200)).await;
         let all = app.inner.workspaces.lock().await["workspace-1"].threads["thread-1"]
             .queued_requests
             .len();
         assert_eq!(all, 2, "{queued:?}");
         assert!(
-            queued.iter().any(|t| t.contains("is waiting for input")),
+            queued.iter().any(|t| t.contains("needs input")),
             "{queued:?}"
         );
         assert!(
-            queued
-                .iter()
-                .any(|t| t.contains("stopped running") && t.contains("Status: idle")),
+            queued.iter().any(|t| t.contains("stopped (idle)")),
             "{queued:?}"
         );
         assert!(
@@ -1005,7 +1224,140 @@ mod tests {
         assert!(
             queued
                 .iter()
-                .all(|t| t.starts_with("FalconDeck notification (generated by the daemon"))
+                .all(|t| t.starts_with("FalconDeck child updates (daemon):"))
         );
+        set_status(&app, &watched, ThreadStatus::Running).await;
+        set_status(&app, &watched, ThreadStatus::Idle).await;
+        assert_eq!(wait_for_notices(&app, "thread-1", 3).await.len(), 3);
+    }
+
+    #[tokio::test]
+    async fn notify_parent_skips_resumed_children_and_reports_later_errors() {
+        let (app, _temp) = fixture().await;
+        let watched = child(&app, json!({"notify_parent":true})).await;
+        app.with_thread_mut("workspace-1", "thread-1", |t| {
+            t.status = ThreadStatus::Running
+        })
+        .await
+        .unwrap();
+        set_status(&app, &watched, ThreadStatus::Running).await;
+        set_status(&app, &watched, ThreadStatus::Idle).await;
+        set_status(&app, &watched, ThreadStatus::Running).await;
+        tokio::time::sleep(CHILD_NOTICE_WINDOW * 2).await;
+        assert!(queued_notices(&app, "thread-1").await.is_empty());
+
+        app.with_thread_mut("workspace-1", &watched, |t| {
+            t.last_error = Some("Build failed.".into());
+        })
+        .await
+        .unwrap();
+        set_status(&app, &watched, ThreadStatus::Error).await;
+        let notices = wait_for_notices(&app, "thread-1", 1).await;
+        assert!(notices[0].contains("failed (error)"), "{notices:?}");
+        assert!(notices[0].contains("Error: Build failed."), "{notices:?}");
+        assert!(!notices[0].contains("Preview:"), "{notices:?}");
+    }
+
+    #[tokio::test]
+    async fn notify_parent_keeps_batches_separate_for_each_parent() {
+        let (app, _temp) = fixture().await;
+        let first = child(&app, json!({"notify_parent":true})).await;
+        let second = child(&app, json!({"notify_parent":true})).await;
+        app.with_thread_mut("workspace-1", "thread-1", |t| {
+            t.status = ThreadStatus::Running
+        })
+        .await
+        .unwrap();
+        let mut other_parent = app.thread_summary("workspace-1", "thread-1").await.unwrap();
+        other_parent.id = "other-parent".into();
+        app.inner
+            .workspaces
+            .lock()
+            .await
+            .get_mut("workspace-1")
+            .unwrap()
+            .threads
+            .insert(
+                "other-parent".into(),
+                super::super::super::ManagedThread::new(other_parent),
+            );
+        app.watch_child("workspace-1", &second, "other-parent");
+        for id in [&first, &second] {
+            set_status(&app, id, ThreadStatus::Running).await;
+            set_status(&app, id, ThreadStatus::Idle).await;
+        }
+        let first_notices = wait_for_notices(&app, "thread-1", 1).await;
+        let second_notices = wait_for_notices(&app, "other-parent", 1).await;
+        assert!(first_notices[0].contains(&first) && !first_notices[0].contains(&second));
+        assert!(second_notices[0].contains(&second) && !second_notices[0].contains(&first));
+    }
+
+    #[tokio::test]
+    async fn child_batches_keep_the_first_deadline_and_flush_for_input() {
+        let (app, _temp) = fixture().await;
+        let first = child(&app, json!({"notify_parent":true})).await;
+        let second = child(&app, json!({"notify_parent":true})).await;
+        let mut thread = app.thread_summary("workspace-1", &first).await.unwrap();
+        let mut batches = ChildNoticeBatches::new();
+        let key = ("workspace-1".into(), "thread-1".into());
+        thread.status = ThreadStatus::Running;
+        app.observe_child(&thread, &mut batches);
+        thread.status = ThreadStatus::Idle;
+        app.observe_child(&thread, &mut batches);
+        let first_deadline = batches[&key].deadline;
+        // Multiple runs of one child within the window still produce one row.
+        thread.status = ThreadStatus::Running;
+        app.observe_child(&thread, &mut batches);
+        thread.status = ThreadStatus::Idle;
+        app.observe_child(&thread, &mut batches);
+        assert_eq!(batches[&key].children.len(), 1);
+        assert_eq!(batches[&key].deadline, first_deadline);
+
+        thread.id = second;
+        thread.status = ThreadStatus::WaitingForInput;
+        app.observe_child(&thread, &mut batches);
+        assert_eq!(batches[&key].children.len(), 2);
+        assert!(batches[&key].deadline < first_deadline);
+        assert!(batches[&key].deadline <= tokio::time::Instant::now());
+    }
+
+    #[tokio::test]
+    async fn notify_parent_suppresses_resolved_input_and_archived_or_shutdown_parents() {
+        let (app, _temp) = fixture().await;
+        let watched = child(&app, json!({"notify_parent":true})).await;
+        app.with_thread_mut("workspace-1", "thread-1", |t| {
+            t.status = ThreadStatus::Running
+        })
+        .await
+        .unwrap();
+        // An input notification overtaken by completion must not become a second stop notice.
+        app.notify_parent(
+            "workspace-1",
+            "thread-1",
+            &[(watched.clone(), Settle::Waiting)],
+        )
+        .await;
+        assert!(queued_notices(&app, "thread-1").await.is_empty());
+
+        app.with_thread_mut("workspace-1", "thread-1", |t| t.is_archived = true)
+            .await
+            .unwrap();
+        app.notify_parent(
+            "workspace-1",
+            "thread-1",
+            &[(watched.clone(), Settle::Finished)],
+        )
+        .await;
+        assert!(queued_notices(&app, "thread-1").await.is_empty());
+
+        app.with_thread_mut("workspace-1", "thread-1", |t| t.is_archived = false)
+            .await
+            .unwrap();
+        app.inner
+            .shutting_down
+            .store(true, std::sync::atomic::Ordering::Release);
+        app.notify_parent("workspace-1", "thread-1", &[(watched, Settle::Finished)])
+            .await;
+        assert!(queued_notices(&app, "thread-1").await.is_empty());
     }
 }
