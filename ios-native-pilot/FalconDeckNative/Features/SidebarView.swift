@@ -7,6 +7,9 @@ struct SidebarView: View {
     @Environment(\.nativeMotion) private var motion
     let openDetail: () -> Void
     @State private var search = ""
+    @State private var messageMatches: [JSON] = []
+    @State private var searchingMessages = false
+    @State private var messageSearchError: String?
     @State private var showOptions = false
     @State private var deferredOptionsAction: SidebarOptionsAction?
     @State private var chatsExpanded = true
@@ -88,10 +91,31 @@ struct SidebarView: View {
                     sectionHeading("Chats", expanded: chatsOpen) { animate { chatsExpanded.toggle() } }
                     if chatsOpen { chatContents(casual) }
                 }
-                if !search.isEmpty, model.syncIndex != nil, model.sortedProjects.contains(where: { model.hasMoreTasks($0.id, sort: sort) }) {
+                if !search.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                     VStack(alignment: .leading, spacing: 8) {
-                        Text("Searching loaded tasks").font(.caption).foregroundStyle(FD.secondary)
-                        Button("Search more tasks") { Task { for project in model.sortedProjects.filter({ model.hasMoreTasks($0.id, sort: sort) }).prefix(4) { await model.loadTaskPage(project.id, sort: sort, limit: 50) } } }
+                        HStack(spacing: 8) {
+                            if searchingMessages { ActivityDiamond() }
+                            Text("Conversation messages").font(.caption).foregroundStyle(FD.secondary)
+                        }
+                        ForEach(Array(messageMatches.enumerated()), id: \.offset) { _, match in
+                            Button {
+                                Task {
+                                    await model.openTask(match["thread_id"].string)
+                                    if model.selection == .task(match["thread_id"].string) { openDetail() }
+                                }
+                            } label: {
+                                VStack(alignment: .leading, spacing: 4) {
+                                    Text(model.task(match["thread_id"].string)?.title.nonempty ?? "Open conversation").font(.subheadline)
+                                    Text(match["snippet"].string).font(.caption).foregroundStyle(FD.secondary).lineLimit(3)
+                                }.frame(maxWidth: .infinity, minHeight: 44, alignment: .leading).contentShape(.rect)
+                            }.buttonStyle(.plain)
+                        }
+                        if let messageSearchError {
+                            Text(messageSearchError).font(.caption).foregroundStyle(.orange)
+                            Button("Retry search") { Task { await searchMessages() } }
+                        } else if !searchingMessages && messageMatches.isEmpty {
+                            Text("No matching messages").font(.caption).foregroundStyle(FD.secondary)
+                        }
                     }.padding(12)
                 }
                 if let error = model.error {
@@ -116,6 +140,7 @@ struct SidebarView: View {
         }
         .refreshable { await model.refresh() }
         .task(id: plan) { await model.loadInitialTaskPages(plan) }
+        .task(id: "\(model.connectionID):\(model.connected):\(search)") { await searchMessages() }
         .onChange(of: model.connectionID) { _, _ in disclosures.reset() }
         .sensoryFeedback(.selection, trigger: showOptions) { _, open in open && motion.active }
         .toolbar {
@@ -189,6 +214,25 @@ struct SidebarView: View {
                 }
             }
         } message: { Text("Its tasks return to the project. They will not be archived.") }
+    }
+
+    @MainActor private func searchMessages() async {
+        let query = search.trimmingCharacters(in: .whitespacesAndNewlines)
+        let connection = model.connectionID
+        messageMatches = []; messageSearchError = nil; searchingMessages = false
+        guard !query.isEmpty else { return }
+        guard model.connected else { messageSearchError = "Connect to your computer to search messages."; return }
+        searchingMessages = true
+        do {
+            try await Task.sleep(for: .milliseconds(300))
+            let response = try await model.relay.call("thread.search", params: .object(["query": .string(query), "limit": .number(12)]))
+            guard !Task.isCancelled, connection == model.connectionID, query == search.trimmingCharacters(in: .whitespacesAndNewlines) else { return }
+            messageMatches = response["matches"].array
+            searchingMessages = false
+        } catch {
+            guard !Task.isCancelled, connection == model.connectionID, query == search.trimmingCharacters(in: .whitespacesAndNewlines) else { return }
+            messageSearchError = error.localizedDescription; searchingMessages = false
+        }
     }
 
     @ViewBuilder private func projectContents(_ project: Project, folders: [ProjectFolder]) -> some View {

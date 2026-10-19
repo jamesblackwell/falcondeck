@@ -239,6 +239,7 @@ fn remote_rpc_is_read_only(method: &str) -> bool {
             | "sync.threads"
             | "sync.extensions"
             | "control.get"
+            | "thread.search"
             | "thread.detail"
             | "thread.item"
             | "thread.queue.attachment_preview"
@@ -278,6 +279,7 @@ pub(super) const REMOTE_RPC_METHODS: &[&str] = &[
     // required detail handler is still waiting in its registration queue.
     "thread.detail",
     "thread.item",
+    "thread.search",
     "sync.index",
     "sync.threads",
     "sync.extensions",
@@ -1111,6 +1113,14 @@ impl AppState {
         // waiting out the relay's 30s RPC timeout.
         async {
             match method {
+                "thread.search" => {
+                    let request = serde_json::from_value::<
+                        falcondeck_core::ThreadMessageSearchRequest,
+                    >(params.clone())
+                    .map_err(|e| e.to_string())?;
+                    serde_json::to_value(self.search_thread_messages(request).await)
+                        .map_err(|e| e.to_string())
+                }
                 "sync.index" => serde_json::to_value(
                     self.sync_index_open(params.get("selected_thread_id").and_then(Value::as_str))
                         .await?,
@@ -3229,6 +3239,34 @@ mod tests {
     fn registers_snapshot_and_thread_detail_before_optional_remote_actions() {
         assert_eq!(REMOTE_RPC_METHODS.first(), Some(&"snapshot.current"));
         assert_eq!(REMOTE_RPC_METHODS.get(1), Some(&"thread.detail"));
+    }
+
+    #[tokio::test]
+    async fn message_search_is_registered_read_only_and_validates_requests() {
+        assert!(REMOTE_RPC_METHODS.contains(&"thread.search"));
+        assert!(remote_rpc_is_read_only("thread.search"));
+        let temp_dir = tempfile::tempdir().unwrap();
+        let app = AppState::new_with_state_path(
+            "test".to_string(),
+            std::collections::HashMap::new(),
+            temp_dir.path().join("daemon-state.json"),
+        );
+        // Exercise RPC routing against an empty, fresh index without scanning
+        // the developer's native agent sessions.
+        *app.inner.thread_search_scanned_at.lock().unwrap() = Some(std::time::Instant::now());
+        assert!(
+            app.dispatch_remote_rpc("thread.search", serde_json::json!({}))
+                .await
+                .is_err()
+        );
+        let result = app
+            .dispatch_remote_rpc(
+                "thread.search",
+                serde_json::json!({"query": "", "limit": 12}),
+            )
+            .await
+            .unwrap();
+        assert_eq!(result["matches"], serde_json::json!([]));
     }
 
     #[test]
