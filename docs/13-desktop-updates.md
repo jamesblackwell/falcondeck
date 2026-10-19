@@ -52,15 +52,18 @@ Generated files:
 
 The generated schema files should change only when Tauri config or permissions change.
 
-## Local install backups
+## Local install cleanup
 
-`make desktop-install` retains the immediately previous app in
-`/Applications/.FalconDeck-backup-XXXXXX/FalconDeck.app` for manual rollback.
-After the replacement launches and its daemon passes the health check, the
-installer deletes older installer-created backup directories, keeping one
-previous app. Failed installs or health checks preserve existing backups.
-Temporary staging copies are cleaned up on both success and failure.
-`make desktop-restart` does not rotate or prune backups.
+`make desktop-install` temporarily retains the previous app in
+`/Applications/.FalconDeck-backup-XXXXXX/FalconDeck.app` until the replacement
+passes its daemon health check. After a successful health check, both
+`make desktop-install` and `make desktop-restart` remove all installer-created
+`.FalconDeck-backup-XXXXXX` and `.FalconDeck-stage-XXXXXX` directories from
+`/Applications`, including leftovers from interrupted runs. Cleanup runs under
+the restart lock and ignores symlinks and names outside the generated format.
+Failed installs or health checks preserve existing backups for manual rollback.
+The current run's staging copy is cleaned up on both success and failure.
+Cleanup failures produce warnings and are retried on the next successful run.
 
 Both commands launch the installed app once and allow up to two minutes for
 daemon health. The check probes all loopback listeners owned by the installed

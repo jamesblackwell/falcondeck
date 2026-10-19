@@ -1,7 +1,7 @@
 import { execFileSync, spawnSync } from 'node:child_process';
 import { closeSync, existsSync, mkdirSync, mkdtempSync, openSync, readdirSync, renameSync, rmSync } from 'node:fs';
 import { homedir } from 'node:os';
-import { basename, dirname, join, resolve } from 'node:path';
+import { join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 
 const executable = '/Applications/FalconDeck.app/Contents/MacOS/falcondeck-desktop';
@@ -11,17 +11,17 @@ const run = (command, args, { timeout = 15_000 } = {}) => execFileSync(command, 
   encoding: 'utf8', timeout, stdio: ['ignore', 'pipe', 'pipe'],
 });
 const sleep = (ms) => new Promise((done) => setTimeout(done, ms));
-const backupFiles = { existsSync, readdirSync, rmSync };
+const installFiles = { existsSync, readdirSync, rmSync };
 
-export function pruneDesktopBackups(keep, files = backupFiles) {
-  if (dirname(keep) !== '/Applications' || !/^\.FalconDeck-backup-[A-Za-z0-9]{6}$/.test(basename(keep))
-    || !files.existsSync(join(keep, 'FalconDeck.app'))) {
-    throw new Error('Expected an existing desktop backup to retain.');
+export function cleanupDesktopInstallDirectories(files = installFiles, warn = console.warn) {
+  if (!files.existsSync(executable)) {
+    throw new Error('Expected an installed desktop app before cleaning install directories.');
   }
   for (const entry of files.readdirSync('/Applications', { withFileTypes: true })) {
-    if (!entry.isDirectory() || !/^\.FalconDeck-backup-[A-Za-z0-9]{6}$/.test(entry.name)) continue;
+    if (!entry.isDirectory() || !/^\.FalconDeck-(?:backup|stage)-[A-Za-z0-9]{6}$/.test(entry.name)) continue;
     const path = join('/Applications', entry.name);
-    if (path !== keep) files.rmSync(path, { recursive: true });
+    try { files.rmSync(path, { recursive: true, force: true }); }
+    catch (error) { warn(`Could not remove desktop install directory ${path}: ${error.message}`); }
   }
 }
 
@@ -116,7 +116,7 @@ export async function waitForDesktopHealth({ io = run, delay = sleep, health = f
 
 export async function restartDesktop({ installFrom, io = run, delay = sleep, health = fetch,
   now = () => performance.now(), log = console.log,
-  files = { ...backupFiles, mkdtempSync, renameSync } } = {}) {
+  files = { ...installFiles, mkdtempSync, renameSync } } = {}) {
   const pids = () => mainPids(io('/bin/ps', ['-ww', '-axo', 'pid=,args=']));
   const waitFor = async (check, attempts, message) => {
     for (let attempt = 0; attempt < attempts; attempt++) {
@@ -169,7 +169,7 @@ export async function restartDesktop({ installFrom, io = run, delay = sleep, hea
       if (files.existsSync(app)) {
         backup = join(files.mkdtempSync('/Applications/.FalconDeck-backup-'), 'FalconDeck.app');
         files.renameSync(app, backup);
-        log(`Previous app retained at ${backup}`);
+        log(`Previous app retained until health check succeeds at ${backup}`);
       }
       try { files.renameSync(staged, app); } catch (error) {
         if (backup) files.renameSync(backup, app);
@@ -179,10 +179,9 @@ export async function restartDesktop({ installFrom, io = run, delay = sleep, hea
     // One launch only. Failure reports an error, never reschedules another restart.
     io('/usr/bin/open', ['-g', app]);
     await waitForDesktopHealth({ io, delay, health, now, log });
-    if (backup) {
-      try { pruneDesktopBackups(dirname(backup), files); }
-      catch (error) { console.warn(`Could not prune older desktop backups: ${error.message}`); }
-    }
+    // The CLI holds the restart lock, so other install runs cannot be staging here.
+    try { cleanupDesktopInstallDirectories(files); }
+    catch (error) { console.warn(`Could not clean desktop install directories: ${error.message}`); }
   } finally {
     if (stageDirectory) {
       try { files.rmSync(stageDirectory, { recursive: true, force: true }); }

@@ -6,7 +6,7 @@ import { once } from 'node:events';
 import { createServer } from 'node:http';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { mainPids, pruneDesktopBackups, restartDesktop, waitForDesktopHealth, withRestartLock } from './restart-desktop.mjs';
+import { cleanupDesktopInstallDirectories, mainPids, restartDesktop, waitForDesktopHealth, withRestartLock } from './restart-desktop.mjs';
 
 const binary = '/Applications/FalconDeck.app/Contents/MacOS/falcondeck-desktop';
 function fixture({ stale = false, stubborn = false, unhealthy = false, bootoutFails = false } = {}) {
@@ -15,6 +15,7 @@ function fixture({ stale = false, stubborn = false, unhealthy = false, bootoutFa
   let elapsed = 0;
   return {
     calls,
+    files: { existsSync: () => true, readdirSync: () => [] },
     now: () => elapsed,
     log: () => {},
     delay: async (ms) => { elapsed += ms; },
@@ -283,7 +284,7 @@ test('failed bundle promotion restores the previous app and cleans the stage', a
   assert.deepEqual(removed, ['/Applications/.FalconDeck-stage-test01']);
   assert.ok(!f.calls.some(([c]) => c.endsWith('/open')));
 });
-test('installs a verified staged bundle, retains backup, then opens once', async () => {
+test('installs a verified staged bundle, then cleans all backups and abandoned stages after health succeeds', async () => {
   const f = fixture();
   const moves = [];
   const removed = [];
@@ -294,12 +295,12 @@ test('installs a verified staged bundle, retains backup, then opens once', async
     renameSync: (from, to) => moves.push([from, to]),
     readdirSync: () => {
       assert.ok(healthy, 'must retain older backups until the replacement is healthy');
-      return ['test01', 'older1', 'older2'].map((suffix) => ({
-        name: `.FalconDeck-backup-${suffix}`, isDirectory: () => true,
+      return ['backup-test01', 'backup-older1', 'stage-older2'].map((suffix) => ({
+        name: `.FalconDeck-${suffix}`, isDirectory: () => true,
       }));
     },
     rmSync: (path, options) => {
-      assert.deepEqual(options, path.includes('-stage-') ? { recursive: true, force: true } : { recursive: true });
+      assert.deepEqual(options, { recursive: true, force: true });
       removed.push(path);
     },
   }, health: async (url) => { const result = await f.health(url); healthy = result.ok; return result; } });
@@ -307,7 +308,8 @@ test('installs a verified staged bundle, retains backup, then opens once', async
     ['/Applications/FalconDeck.app', '/Applications/.FalconDeck-backup-test01/FalconDeck.app'],
     ['/Applications/.FalconDeck-stage-test01/FalconDeck.app', '/Applications/FalconDeck.app'],
   ]);
-  assert.deepEqual(removed, ['/Applications/.FalconDeck-backup-older1', '/Applications/.FalconDeck-backup-older2',
+  assert.deepEqual(removed, ['/Applications/.FalconDeck-backup-test01', '/Applications/.FalconDeck-backup-older1',
+    '/Applications/.FalconDeck-stage-older2',
     '/Applications/.FalconDeck-stage-test01']);
   const verification = f.calls.findIndex(([c, ...args]) => c.endsWith('/codesign') && args.at(-1).includes('-stage-'));
   assert.ok(verification < f.calls.findIndex(([c]) => c.endsWith('/osascript')));
@@ -325,26 +327,72 @@ test('an unhealthy replacement preserves all previous backups', async () => {
   } }), /no automatic restart/);
   assert.deepEqual(removed, ['/Applications/.FalconDeck-stage-test01']);
 });
-test('backup pruning ignores unrelated directories and symlinks', () => {
+test('a restart without installation also cleans abandoned install directories after health succeeds', async () => {
+  const f = fixture();
   const removed = [];
-  pruneDesktopBackups('/Applications/.FalconDeck-backup-test01', {
+  let healthy = false;
+  await restartDesktop({ ...f, files: {
+    existsSync: () => true,
+    readdirSync: () => {
+      assert.ok(healthy);
+      return ['backup-older1', 'stage-older2'].map((suffix) => ({
+        name: `.FalconDeck-${suffix}`, isDirectory: () => true,
+      }));
+    },
+    rmSync: (path) => removed.push(path),
+  }, health: async (url) => { const result = await f.health(url); healthy = result.ok; return result; } });
+  assert.deepEqual(removed, ['/Applications/.FalconDeck-backup-older1', '/Applications/.FalconDeck-stage-older2']);
+  assert.ok(!f.calls.some(([c]) => c.endsWith('/ditto')));
+});
+test('an unhealthy restart preserves abandoned install directories', async () => {
+  const f = fixture({ unhealthy: true });
+  await assert.rejects(restartDesktop({ ...f, files: {
+    readdirSync: () => assert.fail('must not clean before health check succeeds'),
+    rmSync: () => assert.fail('must preserve recovery copies'),
+  } }), /no automatic restart/);
+});
+test('install cleanup ignores unrelated directories, files, and symlinks', () => {
+  const removed = [];
+  cleanupDesktopInstallDirectories({
     existsSync: () => true,
     readdirSync: () => [
       { name: '.FalconDeck-backup-test01', isDirectory: () => true },
       { name: '.FalconDeck-backup-older1', isDirectory: () => true },
       { name: '.FalconDeck-backup-linked', isDirectory: () => false },
+      { name: '.FalconDeck-stage-linked', isDirectory: () => false },
       { name: '.FalconDeck-backup-manual-archive', isDirectory: () => true },
+      { name: '.FalconDeck-stage-manual-archive', isDirectory: () => true },
+      { name: '.FalconDeck-stage-short', isDirectory: () => true },
+      { name: '.FalconDeck-stage-toolong', isDirectory: () => true },
       { name: 'FalconDeck.app', isDirectory: () => true },
       { name: '.FalconDeck-stage-test01', isDirectory: () => true },
     ],
     rmSync: (path) => removed.push(path),
   });
-  assert.deepEqual(removed, ['/Applications/.FalconDeck-backup-older1']);
+  assert.deepEqual(removed, ['/Applications/.FalconDeck-backup-test01', '/Applications/.FalconDeck-backup-older1',
+    '/Applications/.FalconDeck-stage-test01']);
 });
-test('backup pruning refuses to delete anything without a valid retained app', () => {
-  const files = { existsSync: () => false, readdirSync: () => assert.fail('must not enumerate backups') };
-  assert.throws(() => pruneDesktopBackups('/Applications/.FalconDeck-backup-test01', files), /existing desktop backup/);
-  assert.throws(() => pruneDesktopBackups('/Applications/FalconDeck.app', files), /existing desktop backup/);
+test('install cleanup refuses to delete anything without the installed executable', () => {
+  const files = { existsSync: (path) => { assert.equal(path, binary); return false; },
+    readdirSync: () => assert.fail('must not enumerate install directories') };
+  assert.throws(() => cleanupDesktopInstallDirectories(files), /installed desktop app/);
+});
+test('install cleanup reports a removal failure and continues with other directories', () => {
+  const removed = [];
+  const warnings = [];
+  cleanupDesktopInstallDirectories({
+    existsSync: () => true,
+    readdirSync: () => ['backup-older1', 'stage-older2'].map((suffix) => ({
+      name: `.FalconDeck-${suffix}`, isDirectory: () => true,
+    })),
+    rmSync: (path) => {
+      if (path.includes('-backup-')) throw new Error('permission denied');
+      removed.push(path);
+    },
+  }, (message) => warnings.push(message));
+  assert.deepEqual(removed, ['/Applications/.FalconDeck-stage-older2']);
+  assert.equal(warnings.length, 1);
+  assert.match(warnings[0], /\.FalconDeck-backup-older1.*permission denied/);
 });
 test('overlapping restart is rejected and lock is released on failure', { skip: process.platform !== 'darwin' }, async () => {
   const dir = mkdtempSync(join(tmpdir(), 'falcondeck-restart-test-'));
