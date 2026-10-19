@@ -2,6 +2,7 @@ import SwiftUI
 
 @main
 struct FalconDeckNativeApp: App {
+    @Environment(\.scenePhase) private var scenePhase
     @UIApplicationDelegateAdaptor(NativeAppDelegate.self) private var appDelegate
     @State private var model = makeModel()
     static var isUnitTestHost: Bool {
@@ -50,9 +51,16 @@ struct FalconDeckNativeApp: App {
                 .tint(FD.accent)
                 .task { if !Self.isUnitTestHost { await model.start() } }
                 .onOpenURL { url in
-                    if url.host == "speech" { if model.voice.pendingURL != nil { model.showSpeechSettings = true } }
+                    if url.scheme == "falcondeck-native", url.host == "task" { Task { await model.openTaskActivity(url) } }
+                    else if url.host == "speech" { if model.voice.pendingURL != nil { model.showSpeechSettings = true } }
                     else { Task { await model.receivePairingPayload(url.absoluteString) } }
                 }
+        }
+        // App-level phase aggregates iPad windows. Closing one scene must not
+        // mark an actively used second window as backgrounded.
+        .onChange(of: scenePhase) { _, phase in
+            model.setForeground(phase == .active)
+            if phase == .background { model.saveBeforeSuspension() }
         }
     }
 }
@@ -60,7 +68,6 @@ struct FalconDeckNativeApp: App {
 struct RootView: View {
     @Environment(AppModel.self) private var model
     @Environment(\.nativeMotion) private var motion
-    @Environment(\.scenePhase) private var scenePhase
     @Environment(\.horizontalSizeClass) private var sizeClass
     @Environment(\.dynamicTypeSize) private var textSize
     @AppStorage("native.debug.overlay") private var showPerformance = false
@@ -83,7 +90,6 @@ struct RootView: View {
         .overlay(alignment: .topTrailing) { if showPerformance { PerformanceOverlay() } }
         .sheet(item: Binding(get: { model.taskOptionsID.map { TaskOptionsTarget(id: $0) } }, set: { model.taskOptionsID = $0?.id })) { target in TaskOptionsView(taskID: target.id) }
         .sensoryFeedback(.selection, trigger: model.taskOptionsID) { _, id in id != nil && motion.active }
-        .onChange(of: scenePhase) { _, phase in model.setForeground(phase == .active) }
         // Keep presented sheets on the same appearance and menu policy.
         .menuOrder(.fixed)
         .dynamicTypeSize(NativeAppearance.shared.textSize(relativeTo: textSize))

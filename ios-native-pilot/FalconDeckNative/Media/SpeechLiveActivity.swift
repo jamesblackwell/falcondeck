@@ -47,11 +47,30 @@ import Foundation
 @MainActor extension AppModel {
     /// Only a registered draft may consume a saved recording. A transcription
     /// can finish after its task was archived or its chat instance replaced.
-    @discardableResult func finishVoiceInput(_ text: String, ownerID: String, chat: ChatSession) -> String.Index? {
-        guard chats[ownerID] === chat, voice.ownerID == ownerID else { return nil }
+    @discardableResult func finishVoiceInput(_ text: String, ownerID: String, chat: ChatSession) async -> String.Index? {
+        guard chats[ownerID] === chat, voice.ownerID == ownerID, !voice.acceptingTranscript else { return nil }
+        let current = sessionScope, recording = voice.pendingURL
+        let original = chat.draft, insertion = chat.voiceInsertion, wasOpen = chat.voiceInputOpen
+        let lease = backgroundExecution.begin("Save transcribed input")
+        voice.acceptingTranscript = true
+        defer { voice.acceptingTranscript = false; lease.finish() }
         let caret = chat.insertVoiceTranscript(text)
+        let inserted = chat.draft
+        draftSaves.removeValue(forKey: ownerID)?.cancel()
+        do {
+            if !demo {
+                guard let store = draftStore else { throw PilotError("Input storage is not ready. Your recording has been kept.") }
+                try await store.save(chat.saved(id: ownerID))
+            }
+        } catch {
+            guard current == sessionScope, chats[ownerID] === chat else { return nil }
+            if chat.draft.utf16.elementsEqual(inserted.utf16) { chat.draft = original; chat.voiceInsertion = insertion; chat.voiceInputOpen = wasOpen }
+            voice.error = "Couldn't save the transcript. Your recording is safe; retry when ready."
+            return nil
+        }
+        guard current == sessionScope, chats[ownerID] === chat, voice.ownerID == ownerID, voice.pendingURL == recording else { return nil }
         voice.discard()
-        return caret
+        return chat.draft.utf16.elementsEqual(inserted.utf16) ? caret : chat.draft.endIndex
     }
 
     func speechAction(_ action: NativeSpeechCommand) async {
@@ -61,12 +80,14 @@ import Foundation
         case .stop: readAloud.stop()
         case .finish:
             guard voice.recording else { SpeechLiveActivity.shared.voice(nil); return }
+            let lease = backgroundExecution.begin("Finish voice input")
+            defer { lease.finish() }
             voice.finishRecording()
             let current = sessionScope, owner = voice.ownerID
             do {
                 let text = try await voice.transcribe(model: self)
                 guard current == sessionScope, owner == voice.ownerID, let owner, let chat = chats[owner] else { return }
-                _ = finishVoiceInput(text, ownerID: owner, chat: chat)
+                _ = await finishVoiceInput(text, ownerID: owner, chat: chat)
             } catch { /* The recording remains available in Speech settings. */ }
         }
     }

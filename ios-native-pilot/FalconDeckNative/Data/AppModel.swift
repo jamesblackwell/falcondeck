@@ -17,6 +17,8 @@ final class AppModel {
     let automations = AutomationStore()
     let notifications: LocalNotifications
     let push: NativePushNotifications
+    let taskActivity: TaskLiveActivity
+    @ObservationIgnored let backgroundExecution: BackgroundExecution
     @ObservationIgnored let sessionLoader: @Sendable () throws -> SavedSession?
     @ObservationIgnored let sessionCacheRoot: URL?
     @ObservationIgnored let inputDraftRoot: URL?
@@ -25,11 +27,12 @@ final class AppModel {
     // Local audio survives socket replacement, but never a pairing switch.
     private(set) var sessionScope = UUID()
 
-    init(relay: any RelayServing = RelayClient(), voice: VoiceRecorder = VoiceRecorder(), push: NativePushNotifications = .shared, notifications: LocalNotifications = LocalNotifications(), sessionLoader: @escaping @Sendable () throws -> SavedSession? = { try SessionVault.load() }, sessionCacheRoot: URL? = nil, inputDraftRoot: URL? = nil) {
+    init(relay: any RelayServing = RelayClient(), voice: VoiceRecorder = VoiceRecorder(), push: NativePushNotifications = .shared, notifications: LocalNotifications = LocalNotifications(), taskActivity: TaskLiveActivity = TaskLiveActivity(), backgroundExecution: BackgroundExecution = BackgroundExecution(), sessionLoader: @escaping @Sendable () throws -> SavedSession? = { try SessionVault.load() }, sessionCacheRoot: URL? = nil, inputDraftRoot: URL? = nil) {
         self.voice = voice
         self.relay = relay
         self.push = push; self.notifications = notifications; self.sessionLoader = sessionLoader; self.sessionCacheRoot = sessionCacheRoot
         self.inputDraftRoot = inputDraftRoot
+        self.taskActivity = taskActivity; self.backgroundExecution = backgroundExecution
         NativeSpeechBridge.handler = { [weak self] action in await self?.speechAction(action) }
         notifications.openDestination = { [weak self] destination in
             self?.pendingNotification = destination
@@ -56,6 +59,7 @@ final class AppModel {
                     chat.pendingQueue = QueuedDraft.reconcile(chat.pendingQueue, queued: task.queued, items: chat.transcript.items)
                 }
             }
+            synchronizeTaskActivity()
         }
     }
     private var taskGroups: [String: [AgentTask]] = [:]
@@ -88,8 +92,8 @@ final class AppModel {
             schedulePreviewSave()
             guard !demo, let store = draftStore else { return }
             switch selection { case .task, .draft, .projects: break; default: return }
-            let value = selection
-            Task { try? await store.saveSelection(value) }
+            let value = selection, revision = InputWriteRevision.next()
+            Task { try? await store.saveSelection(value, revision: revision) }
         }
     }
     @ObservationIgnored var draftStore: DraftStore?
@@ -100,11 +104,11 @@ final class AppModel {
     @ObservationIgnored var preferencesRevision = 0
     @ObservationIgnored var pushSyncID = UUID()
     @ObservationIgnored var preferenceWrite: (id: UUID, task: Task<Void, Error>)?
-    var requests: [JSON] = []
+    var requests: [JSON] = [] { didSet { synchronizeTaskActivity() } }
     var serviceNotices: [JSON] = []
     var operationalConditions: [JSON] = []
     var tokenUsage = JSON.object([:])
-    var archivedTasks: [AgentTask] = []
+    var archivedTasks: [AgentTask] = [] { didSet { synchronizeTaskActivity() } }
     @ObservationIgnored var archivedLoadID: UUID?
     @ObservationIgnored var archivedTouched: Set<String> = []
     var readSuppression: [String: Int] = [:]
@@ -124,6 +128,9 @@ final class AppModel {
     var reconnectAttempt = 0
     var networkAvailable = true
     var foreground = true
+    @ObservationIgnored var foregroundRefresh: Task<Void, Never>?
+    @ObservationIgnored var backgroundSave: Task<Void, Never>?
+    @ObservationIgnored var backgroundSaveID = UUID()
 
     func start() async {
         guard observation == nil, !startupInFlight else { return }
@@ -154,6 +161,7 @@ final class AppModel {
         let saved = await Task.detached(priority: .userInitiated) { try? loader() }.value
         guard current == connectionID else { return }
         hasSession = saved != nil
+        taskActivity.restore(pairing: saved.map(TaskLiveActivity.pairingKey))
         await restoreInputs(session: saved)
         guard current == connectionID else { return }
         await restorePreview(session: saved)
@@ -178,6 +186,7 @@ final class AppModel {
         previewSave?.cancel(); previewSave = nil; hasLiveSnapshot = false
         if clearData {
             sessionScope = UUID()
+            taskActivity.stop()
             workspaceIcons.reset()
             if voice.recording { voice.finishRecording() }
             voice.cancelTranscription(); readAloud.stop()
@@ -363,6 +372,13 @@ final class AppModel {
         StreamingPreview.start(in: self)
         MotionPreview.start(in: self)
         await ImagePreview.start(in: self)
+        if ProcessInfo.processInfo.arguments.contains("--task-activity-preview"), let task = tasks.first {
+            // Explicit local QA fixture: no relay, turn, microphone or push.
+            taskActivity.restore(pairing: nil)
+            let active = AgentTask(task.raw.setting("status", .string("running")))
+            tasks = [active]; selection = .task(active.id); connected = true; hasLiveSnapshot = true
+            let chat = chat(for: active); chat.loaded = true; chat.needsRefresh = false; chat.transcript.items = Demo.messages
+        }
         #endif
     }
     func tasks(in project: Project) -> [AgentTask] {

@@ -353,3 +353,50 @@ isolated worktree) finished clean. The signed development build passed strict
 signature verification, was installed over Wi-Fi and relaunched normally into
 its paired session. No real agent turns were started; Expo, production, OTA and
 TestFlight were unchanged.
+
+## Task Live Activities and background handoff — 19 October 2026
+
+Task options can explicitly follow one working task on the Lock Screen and
+Dynamic Island. A WidgetBundle keeps the existing speech activity alongside the
+new task activity in the same signed extension. Status/title changes are
+coalesced; token events do not query ActivityKit. Encoded metadata is bounded
+below Apple's 4 KiB limit, including escaped text and extended emoji clusters.
+No prompts, replies or credentials enter the widget. Links validate a pairing
+fingerprint before read-only conversation navigation. Relaunch adopts the
+matching activity; dismissal, completion and forgetting do not recreate it.
+
+The pilot is local-only: no ActivityKit token is registered with the relay.
+After 90 seconds without an update, or a disconnect, the card shows last-known
+status with a frozen elapsed time. Continuous suspended updates need a separate
+ActivityKit APNs path; the existing Expo/native push registrations are untouched.
+
+App-level scene phase aggregates iPad windows. Actual background entry captures
+drafts/navigation and a bounded preview before yielding, under a finite UIKit
+execution assertion. Expiration cleanup runs synchronously. Draft, preference,
+selection and preview writes reject older snapshots using process-local
+revisions; clocks are not restored from disk. Draft revisions advance only after
+a durable write or deletion. A failed newer attempt cannot silently suppress a
+pending transcript save. Cleared stores cannot recreate forgotten input.
+
+Transcription has a finite background handoff window, retains audio on expiration
+and rejects late replies. Both composer and Speech settings recovery save the
+encrypted draft before deleting audio. Pairing scope, recording URL and chat
+identity protect handoff across socket replacement. No background polling,
+silent-audio keepalive or continuous socket execution is introduced.
+
+Validation: all 290 optimized native unit tests passed. Regressions cover actual
+disk-write failure, stale background batches after newer edits/sends, expiration,
+reconnect during a blocked recovery write, pairing links and ActivityKit payload
+size/lifecycle. iPhone and iPad simulator UI checks passed for actual ActivityKit
+presentation, following/hiding a task, and conversation reopening/backgrounding.
+All four Lock Screen states were captured and visually inspected on iPhone.
+Native-only Autoreview (`.agents/skills/autoreview/scripts/autoreview --mode local
+--max-priority P2 --prompt-file lockscreen-review-context.md` in an isolated
+worktree) finished clean after the verified findings were fixed and reviewed
+again. Final footer wording and simulator permission handling were mechanical.
+
+The signed standalone development build passed strict signature verification,
+was installed over Wi-Fi and launched normally into its paired session. Physical
+Lock Screen interaction is not claimed: device UI automation was not retried.
+No real agent turns were started. Expo, relay/production, OTA and TestFlight were
+unchanged.

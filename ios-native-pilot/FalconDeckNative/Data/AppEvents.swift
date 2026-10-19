@@ -33,6 +33,7 @@ struct RecentEventSequences {
             if connectionLog.last?.message != text { connectionLog.append(ConnectionLogEntry(message: text)); if connectionLog.count > 100 { connectionLog.removeFirst(connectionLog.count - 100) } }
             if online { reconnectAttempt = 0; reconnectTask?.cancel(); reconnectTask = nil; automations.scheduleRefresh(model: self); synchronizePush(); Task { await self.extensions.load(model: self); await self.openPendingNotification() } }
             if text == "Connecting…" { receivedEventSequences = RecentEventSequences() }
+            synchronizeTaskActivity()
         case .snapshot(let value):
             if pairingPending { pairingPending = false; hasSession = true; showConnection = false }
             summaryFlush?.cancel(); summaryFlush = nil; pendingSummaries = [:]
@@ -69,6 +70,7 @@ struct RecentEventSequences {
                 default: self.pendingSelection = nil
                 }
             }
+            synchronizeTaskActivity()
         case .events(let events):
             for event in events { applyEnvelope(event) }
         case .rebase(let events):
@@ -78,6 +80,7 @@ struct RecentEventSequences {
             error = message; connected = false; scheduleReconnect()
             connectionLog.append(ConnectionLogEntry(message: "Connection request failed"))
             if connectionLog.count > 100 { connectionLog.removeFirst(connectionLog.count - 100) }
+            synchronizeTaskActivity()
         }
     }
 
@@ -141,6 +144,7 @@ struct RecentEventSequences {
             if let index = projects.firstIndex(where: { $0.id == project.id }) { projects[index] = project }
             else { projects.append(project) }
             schedulePreviewSave()
+            synchronizeTaskActivity()
         case "preferences-updated": preferences = event["preferences"]
         case "interactive-request":
             let request = event["request"]

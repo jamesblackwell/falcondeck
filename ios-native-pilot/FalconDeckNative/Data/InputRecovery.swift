@@ -35,26 +35,26 @@ import Foundation
         draftSaves[id]?.cancel()
         draftSaves[id] = Task { [weak self, weak chat] in
             do { try await Task.sleep(for: .milliseconds(250)) } catch { return }
-            guard let self, let chat, self.chats[id] === chat else { return }
+            guard let self, let chat, self.chats[id] === chat, self.draftStore === store else { return }
             self.draftSaves.removeValue(forKey: id)
             do {
                 let preferences = self.composerPreferences
-                try await store.save(chat.saved(id: id))
-                try await store.saveComposerPreferences(preferences)
+                let draft = chat.saved(id: id)
+                try await store.saveInputs([draft], preferences: preferences, revision: draft.writeRevision)
             }
-            catch { chat.error = "Couldn't save input on this device: \(error.localizedDescription)" }
+            catch { if self.chats[id] === chat, self.draftStore === store { chat.error = "Couldn't save input on this device: \(error.localizedDescription)" } }
         }
     }
     func saveAllInputs() async {
         guard !demo, let store = draftStore else { return }
         for task in draftSaves.values { task.cancel() }; draftSaves = [:]
         let values = chats.map { $0.value.saved(id: $0.key) }
-        let preferences = composerPreferences
+        let preferences = composerPreferences, current = sessionScope
+        let revision = InputWriteRevision.next()
         do {
-            for value in values { try await store.save(value) }
-            try await store.saveComposerPreferences(preferences)
+            try await store.saveInputs(values, preferences: preferences, revision: revision)
         }
-        catch { self.error = "Couldn't save input on this device: \(error.localizedDescription)" }
+        catch { if current == sessionScope { self.error = "Couldn't save input on this device: \(error.localizedDescription)" } }
     }
 
 }

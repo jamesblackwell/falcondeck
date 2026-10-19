@@ -130,10 +130,30 @@ extension Project {
     }
 
     func insertRecoveredSpeech(_ text: String) async -> Bool {
-        let current = connectionID, recording = voice.pendingURL
-        guard let project = await newChat(), current == connectionID, voice.pendingURL == recording else { return false }
-        let chat = chat(for: draftTask(project: project, folderID: nil))
+        guard !voice.acceptingTranscript else { return false }
+        voice.acceptingTranscript = true
+        let lease = backgroundExecution.begin("Save recovered voice input")
+        defer { voice.acceptingTranscript = false; lease.finish() }
+        let current = sessionScope, recording = voice.pendingURL
+        guard let project = await newChat(), current == sessionScope, voice.pendingURL == recording else { return false }
+        let task = draftTask(project: project, folderID: nil), chat = chat(for: task)
+        let original = chat.draft
         chat.draft = chat.draft.isEmpty ? text : chat.draft + "\n\n" + text
+        let inserted = chat.draft
+        draftSaves.removeValue(forKey: task.id)?.cancel()
+        do {
+            if !demo {
+                guard let store = draftStore else { throw PilotError("Input storage is not ready.") }
+                try await store.save(chat.saved(id: task.id))
+            }
+        } catch {
+            if current == sessionScope {
+                if chat.draft.utf16.elementsEqual(inserted.utf16) { chat.draft = original }
+                self.error = "Couldn't save the transcript. Your recording is safe; retry when ready."
+            }
+            return false
+        }
+        guard current == sessionScope, voice.pendingURL == recording, chats[task.id] === chat else { return false }
         voice.discard(); return true
     }
 

@@ -3,7 +3,11 @@ import AppIntents
 import SwiftUI
 import WidgetKit
 
-@main struct FalconSpeechWidget: Widget {
+@main struct FalconActivityWidgets: WidgetBundle {
+    var body: some Widget { FalconSpeechWidget(); FalconTaskWidget() }
+}
+
+struct FalconSpeechWidget: Widget {
     var body: some WidgetConfiguration {
         ActivityConfiguration(for: NativeSpeechAttributes.self) { context in
             SpeechActivityBanner(context: context).padding(16).activityBackgroundTint(Color(red: 0.08, green: 0.08, blue: 0.1)).activitySystemActionForegroundColor(.white)

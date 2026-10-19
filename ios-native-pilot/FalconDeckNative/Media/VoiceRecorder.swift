@@ -8,6 +8,7 @@ final class VoiceRecorder: NSObject, AVAudioRecorderDelegate {
     var recording = false
     var starting = false
     var transcribing = false
+    var acceptingTranscript = false
     var waitingForConnection = false
     var elapsed: TimeInterval = 0
     var level: Float = 0
@@ -45,7 +46,7 @@ final class VoiceRecorder: NSObject, AVAudioRecorderDelegate {
     }
 
     func start(ownerID: String, provider: String, isCurrent: () -> Bool = { true }) async {
-        guard !starting, !recording, !transcribing, pendingURL == nil else { return }
+        guard !starting, !recording, !transcribing, !acceptingTranscript, pendingURL == nil else { return }
         let operation = UUID(); operationID = operation
         self.ownerID = ownerID; self.provider = provider
         starting = true; elapsed = 0; levels = []
@@ -125,8 +126,14 @@ final class VoiceRecorder: NSObject, AVAudioRecorderDelegate {
     }
 
     func transcribe(model: AppModel, using providerOverride: String? = nil) async throws -> String {
-        guard !transcribing, let url = pendingURL else { throw PilotError("Record a message first.") }
+        guard !transcribing, !acceptingTranscript, let url = pendingURL else { throw PilotError("Record a message first.") }
         let operation = UUID(); operationID = operation
+        let lease = model.backgroundExecution.begin("Transcribe voice message") { [weak self] in
+            guard let self, self.operationID == operation else { return }
+            self.cancelTranscription()
+            self.error = "Transcription paused in the background. Your recording is safe; retry when ready."
+        }
+        defer { lease.finish() }
         if let providerOverride { provider = providerOverride; defaults.set(providerOverride, forKey: "native.voice.provider") }
         finishRecording(); transcribing = true; transcriptionAttempt = 1; error = nil
         SpeechLiveActivity.shared.voice("transcribing")

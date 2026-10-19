@@ -2,6 +2,12 @@ import XCTest
 @testable import FalconDeckNative
 
 @MainActor final class SpeechTranscriptionTests: XCTestCase {
+    private func inputStore() throws -> DraftStore {
+        let root = FileManager.default.temporaryDirectory.appending(path: "SpeechDraft-\(UUID())")
+        addTeardownBlock { try? FileManager.default.removeItem(at: root) }
+        let session = SavedSession(relay: URL(string: "https://example.test")!, sessionID: "fixture", deviceID: "fixture", token: "fixture", secret: Data(repeating: 7, count: 32), daemonKey: "fixture", daemonIdentity: "fixture")
+        return try DraftStore(session: session, root: root)
+    }
     private func defaults() -> (UserDefaults, String) {
         let suite = "NativeSpeechTests-" + UUID().uuidString
         return (UserDefaults(suiteName: suite)!, suite)
@@ -150,24 +156,28 @@ import XCTest
         let calls = await relay.calls; XCTAssertTrue(calls.isEmpty)
         XCTAssertEqual(voice.pendingURL, url)
     }
-    func testAnArchivedOrReplacedChatCannotConsumeItsSavedRecording() throws {
+    func testAnArchivedOrReplacedChatCannotConsumeItsSavedRecording() async throws {
         let (defaults, suite) = defaults()
         let url = FileManager.default.temporaryDirectory.appending(path: UUID().uuidString + ".m4a")
         try Data([1]).write(to: url)
         defer { try? FileManager.default.removeItem(at: url); defaults.removePersistentDomain(forName: suite) }
         defaults.set(url.path, forKey: "native.voice.pending"); defaults.set("owner", forKey: "native.voice.owner")
         let voice = VoiceRecorder(defaults: defaults), model = AppModel.testing(relay: SpeechFixtureRelay(), voice: voice)
+        model.draftStore = try inputStore()
         let chat = model.chat(for: AgentTask(.object(["id": .string("owner")])))
         chat.draft = "Keep draft"; chat.voiceInputOpen = true
         model.chats.removeValue(forKey: "owner")
-        XCTAssertNil(model.finishVoiceInput("Transcript", ownerID: "owner", chat: chat))
+        let removed = await model.finishVoiceInput("Transcript", ownerID: "owner", chat: chat)
+        XCTAssertNil(removed)
         XCTAssertEqual(voice.pendingURL, url); XCTAssertEqual(chat.draft, "Keep draft")
         model.chats["owner"] = ChatSession()
-        XCTAssertNil(model.finishVoiceInput("Transcript", ownerID: "owner", chat: chat))
+        let replaced = await model.finishVoiceInput("Transcript", ownerID: "owner", chat: chat)
+        XCTAssertNil(replaced)
         XCTAssertTrue(FileManager.default.fileExists(atPath: url.path))
         // The rightful current draft consumes the recording only after insertion.
         let current = model.chats["owner"]!
-        XCTAssertNotNil(model.finishVoiceInput("Transcript", ownerID: "owner", chat: current))
+        let accepted = await model.finishVoiceInput("Transcript", ownerID: "owner", chat: current)
+        XCTAssertNotNil(accepted)
         XCTAssertEqual(current.draft, "Transcript"); XCTAssertNil(voice.pendingURL)
         XCTAssertFalse(FileManager.default.fileExists(atPath: url.path))
     }
@@ -180,6 +190,7 @@ import XCTest
         defaults.set("owner", forKey: "native.voice.owner"); defaults.set("openrouter", forKey: "native.voice.provider")
         let voice = VoiceRecorder(defaults: defaults), relay = SpeechFixtureRelay(transcript: "lexer")
         let model = AppModel.testing(relay: relay, voice: voice); model.connected = true
+        let store = try inputStore(); model.draftStore = store
         let task = AgentTask(.object(["id": .string("owner"), "workspace_id": .string("project")]))
         let chat = model.chat(for: task)
         chat.draft = "Fix parser"; chat.voiceInputOpen = true
@@ -189,6 +200,43 @@ import XCTest
         XCTAssertEqual(chat.draft, "Fix lexer")
         XCTAssertNil(chat.voiceInsertion); XCTAssertFalse(chat.voiceInputOpen)
         XCTAssertNil(voice.pendingURL); XCTAssertFalse(FileManager.default.fileExists(atPath: url.path))
+        let recovered = try await store.load()
+        XCTAssertEqual(recovered.first?.text, "Fix lexer", "Lock Screen finish saves the draft before deleting its recording")
+    }
+    func testFailedDraftWriteKeepsTheRecordingAndOriginalInput() async throws {
+        let (defaults, suite) = defaults(), store = try inputStore()
+        let url = FileManager.default.temporaryDirectory.appending(path: UUID().uuidString + ".m4a")
+        try Data([1]).write(to: url)
+        defer { try? FileManager.default.removeItem(at: url); defaults.removePersistentDomain(forName: suite) }
+        defaults.set(url.path, forKey: "native.voice.pending"); defaults.set("owner", forKey: "native.voice.owner")
+        let voice = VoiceRecorder(defaults: defaults), model = AppModel.testing(relay: SpeechFixtureRelay(), voice: voice)
+        model.draftStore = store
+        let chat = model.chat(for: AgentTask(.object(["id": .string("owner")])))
+        chat.draft = "Keep original"; chat.voiceInputOpen = true
+        try await store.clear()
+        let result = await model.finishVoiceInput("Transcript", ownerID: "owner", chat: chat)
+        XCTAssertNil(result); XCTAssertEqual(chat.draft, "Keep original")
+        XCTAssertTrue(chat.voiceInputOpen); XCTAssertFalse(voice.acceptingTranscript)
+        XCTAssertEqual(voice.pendingURL, url); XCTAssertTrue(FileManager.default.fileExists(atPath: url.path))
+        XCTAssertTrue(voice.error?.contains("recording is safe") == true)
+    }
+    func testBackgroundExpirationKeepsAudioAndRejectsALateCloudReply() async throws {
+        let (defaults, suite) = defaults()
+        let url = FileManager.default.temporaryDirectory.appending(path: UUID().uuidString + ".m4a")
+        try Data([1]).write(to: url)
+        defer { try? FileManager.default.removeItem(at: url); defaults.removePersistentDomain(forName: suite) }
+        defaults.set(url.path, forKey: "native.voice.pending"); defaults.set("owner", forKey: "native.voice.owner"); defaults.set("openrouter", forKey: "native.voice.provider")
+        let voice = VoiceRecorder(defaults: defaults), relay = SpeechFixtureRelay(blocked: true), provider = BackgroundTaskFixture()
+        let model = AppModel(relay: relay, voice: voice, push: NativePushNotifications(defaults: defaults), notifications: LocalNotifications(defaults: defaults), backgroundExecution: BackgroundExecution(provider: provider), sessionLoader: { nil })
+        model.connected = true
+        let work = Task { try await voice.transcribe(model: model) }
+        await relay.waitForRequest()
+        provider.expire(1)
+        XCTAssertFalse(voice.transcribing); XCTAssertEqual(voice.pendingURL, url)
+        await relay.completeRequest()
+        do { _ = try await work.value; XCTFail("Expired transcription must reject late replies") }
+        catch { XCTAssertTrue(error is CancellationError) }
+        XCTAssertTrue(FileManager.default.fileExists(atPath: url.path)); XCTAssertEqual(provider.ended, [1])
     }
     func testVoiceInsertionPreservesUnicodeSelectionAndAnAsyncDraftEdit() {
         let draft = "Fix 🦅 parser"

@@ -95,7 +95,10 @@ struct ComposerView: View {
         focused = false
     }
     private func receiveTranscript(_ text: String, submit: Bool) {
-        guard let caret = model.finishVoiceInput(text, ownerID: task.id, chat: chat) else { return }
+        Task { await acceptTranscript(text, submit: submit) }
+    }
+    private func acceptTranscript(_ text: String, submit: Bool) async {
+        guard let caret = await model.finishVoiceInput(text, ownerID: task.id, chat: chat) else { return }
         transcriptFeedback &+= 1
         if submit { submitDraft() }
         else {

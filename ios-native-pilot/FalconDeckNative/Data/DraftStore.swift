@@ -16,6 +16,14 @@ struct SavedDraft: Codable, Sendable {
     var provider: String
     var overrides: [String: JSON]
     var submission: SavedSubmission?
+    // Process-local ordering only; never restore a write clock from disk.
+    var writeRevision: UInt64 = 0
+    private enum CodingKeys: String, CodingKey { case id, text, attachments, modelID, effort, provider, overrides, submission }
+}
+
+@MainActor enum InputWriteRevision {
+    private static var value: UInt64 = 0
+    static func next() -> UInt64 { value += 1; return value }
 }
 
 /// Only unsent input and device navigation live here. Conversation history and
@@ -25,6 +33,10 @@ actor DraftStore {
     private let key: SymmetricKey
     private(set) var unreadableDraftCount = 0
     private var previousComposerPreferences: [String: WorkspaceComposerPreferences]?
+    private var cleared = false
+    private var draftRevisions: [String: UInt64] = [:]
+    private var preferencesRevision: UInt64 = 0
+    private var selectionRevision: UInt64 = 0
     init(session: SavedSession, root: URL? = nil) throws {
         let root = try root ?? FileManager.default.url(for: .applicationSupportDirectory, in: .userDomainMask, appropriateFor: nil, create: true).appending(path: "InputDrafts", directoryHint: .isDirectory)
         let namespace = Self.hash(session.relay.absoluteString + ":" + session.sessionID + ":" + session.deviceID)
@@ -47,12 +59,19 @@ actor DraftStore {
         }
     }
     func save(_ draft: SavedDraft) throws {
+        guard !cleared else { throw PilotError("This computer connection was forgotten.") }
+        guard draft.writeRevision == 0 || draft.writeRevision >= draftRevisions[draft.id, default: 0] else { return }
         let url = directory.appending(path: Self.hash(draft.id) + ".draft")
         if draft.text.isEmpty && draft.attachments.isEmpty && draft.submission == nil && draft.overrides.isEmpty && draft.modelID.isEmpty && draft.effort.isEmpty {
             if FileManager.default.fileExists(atPath: url.path) { try FileManager.default.removeItem(at: url) }
         } else { try write(JSONEncoder().encode(draft), to: url) }
+        // Only a durable newer draft can supersede a transcript handoff. A
+        // failed write must not make an older save falsely report success.
+        draftRevisions[draft.id] = max(draft.writeRevision, draftRevisions[draft.id, default: 0])
     }
-    func saveSelection(_ selection: Destination?) throws {
+    func saveSelection(_ selection: Destination?, revision: UInt64 = 0) throws {
+        guard revision == 0 || revision >= selectionRevision else { return }
+        selectionRevision = max(revision, selectionRevision)
         try write(JSONEncoder().encode(selection), to: directory.appending(path: "selection"))
     }
     func loadSelection() throws -> Destination? {
@@ -67,13 +86,25 @@ actor DraftStore {
         previousComposerPreferences = preferences
         return preferences
     }
-    func saveComposerPreferences(_ preferences: [String: WorkspaceComposerPreferences]) throws {
+    func saveComposerPreferences(_ preferences: [String: WorkspaceComposerPreferences], revision: UInt64 = 0) throws {
+        guard revision == 0 || revision >= preferencesRevision else { return }
+        preferencesRevision = max(revision, preferencesRevision)
         guard preferences != previousComposerPreferences else { return }
         try write(JSONEncoder().encode(preferences), to: directory.appending(path: "composer-preferences"))
         previousComposerPreferences = preferences
     }
-    func clear() throws { try FileManager.default.removeItem(at: directory) }
+    /// One actor hop prevents an older background batch interleaving individual
+    /// draft writes with a newer edit or a connection's clear operation.
+    func saveInputs(_ drafts: [SavedDraft], preferences: [String: WorkspaceComposerPreferences], revision: UInt64 = 0) throws {
+        for draft in drafts { try save(draft) }
+        try saveComposerPreferences(preferences, revision: revision)
+    }
+    func clear() throws {
+        cleared = true
+        if FileManager.default.fileExists(atPath: directory.path) { try FileManager.default.removeItem(at: directory) }
+    }
     private func write(_ data: Data, to url: URL) throws {
+        guard !cleared else { throw PilotError("This computer connection was forgotten.") }
         guard let sealed = try AES.GCM.seal(data, using: key).combined else { throw PilotError("Could not protect the input draft.") }
         try sealed.write(to: url, options: [.atomic, .completeFileProtectionUntilFirstUserAuthentication])
     }
@@ -82,7 +113,7 @@ actor DraftStore {
 }
 
 @MainActor extension ChatSession {
-    func saved(id: String) -> SavedDraft { SavedDraft(id: id, text: draft, attachments: attachments, modelID: modelID, effort: effort, provider: provider, overrides: overrides, submission: submission) }
+    func saved(id: String) -> SavedDraft { SavedDraft(id: id, text: draft, attachments: attachments, modelID: modelID, effort: effort, provider: provider, overrides: overrides, submission: submission, writeRevision: InputWriteRevision.next()) }
     func restore(_ value: SavedDraft) {
         draft = value.text; attachments = value.attachments; modelID = value.modelID; effort = value.effort; provider = value.provider; overrides = value.overrides
         submission = value.submission

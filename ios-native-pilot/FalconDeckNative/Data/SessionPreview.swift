@@ -61,7 +61,12 @@ import Foundation
 
     func savePreview() async {
         previewSave?.cancel(); previewSave = nil
-        guard !demo, hasLiveSnapshot, let store = sessionCache else { return }
+        guard let store = sessionCache, let input = previewInput() else { return }
+        try? await store.save(input)
+    }
+
+    func previewInput() -> SessionCacheInput? {
+        guard !demo, hasLiveSnapshot else { return nil }
         let selected: String? = { if case .task(let id) = selection { return id }; return nil }()
         // Copy only bounded tails here. Encoding/encryption belongs to the
         // cache actor, away from navigation, live tokens and prompt input.
@@ -75,7 +80,6 @@ import Foundation
             guard let chat = chats[task.id], chat.loaded, !chat.needsRefresh, !chat.transcript.needsRecovery else { continue }
             histories[task.id] = CachedHistory(items: chat.transcript.items.suffix(150).map(\.raw), hasOlder: chat.hasOlder || chat.transcript.items.count > 150)
         }
-        let input = SessionCacheInput(projects: projects.map(\.raw), tasks: tasks.map(\.raw), preferences: preferences, selectedID: selected, histories: histories, modelCatalogs: modelCatalogCache)
-        try? await store.save(input)
+        return SessionCacheInput(projects: projects.map(\.raw), tasks: tasks.map(\.raw), preferences: preferences, selectedID: selected, histories: histories, modelCatalogs: modelCatalogCache, writeRevision: InputWriteRevision.next())
     }
 }

@@ -25,6 +25,7 @@ struct SessionCacheInput: Sendable {
     var selectedID: String?
     var histories: [String: CachedHistory]
     var modelCatalogs: [CachedModelCatalog] = []
+    var writeRevision: UInt64 = 0
 }
 
 /// Serialization, trimming, encryption and disk I/O run off the UI actor.
@@ -36,6 +37,7 @@ actor SessionCacheStore {
     private let key: SymmetricKey
     private var previous: SessionCache?
     private var cleared = false
+    private var writeRevision: UInt64 = 0
     private var images: [String: CachedImage] = [:]
     private var imageOrder: [String] = []
     private var imageBytes = 0
@@ -79,6 +81,8 @@ actor SessionCacheStore {
 
     func save(_ input: SessionCacheInput) throws {
         guard !cleared else { return }
+        guard input.writeRevision == 0 || input.writeRevision >= writeRevision else { return }
+        writeRevision = max(writeRevision, input.writeRevision)
         let active = input.tasks.filter { !$0["is_archived"].bool }
         let recent = active.sorted { $0["updated_at"].string > $1["updated_at"].string }
         var ids = Set<String>(), rows: [JSON] = []

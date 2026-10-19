@@ -140,11 +140,15 @@ private actor FeatureRelay: RelayServing {
         XCTAssertEqual(model.voice.pendingURL, recording)
         XCTAssertTrue(FileManager.default.fileExists(atPath: recording.path))
     }
-    func testRecoveredSpeechAppendsToARetainedDraftAfterSuccessfulCreation() async {
+    func testRecoveredSpeechAppendsToARetainedDraftAfterSuccessfulCreation() async throws {
         let suite = "speech-insert-test-" + UUID().uuidString
         let defaults = UserDefaults(suiteName: suite)!
         defer { defaults.removePersistentDomain(forName: suite) }
         let model = AppModel.testing(relay: FeatureRelay(), voice: VoiceRecorder(defaults: defaults))
+        let root = FileManager.default.temporaryDirectory.appending(path: "RecoveredSpeech-\(UUID())")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let session = SavedSession(relay: URL(string: "https://example.test")!, sessionID: "fixture", deviceID: "fixture", token: "fixture", secret: Data(repeating: 7, count: 32), daemonKey: "fixture", daemonIdentity: "fixture")
+        let store = try DraftStore(session: session, root: root); model.draftStore = store
         model.connected = true
         let project = Project(.object(["id": .string("project"), "path": .string("/work/project")]))
         model.projects = [project]
@@ -153,7 +157,50 @@ private actor FeatureRelay: RelayServing {
         XCTAssertTrue(inserted)
         XCTAssertEqual(chat.draft, "Keep my draft\n\nRecovered text")
         XCTAssertEqual(model.selection, .draft(project.id, nil))
+        let saved = try await store.load()
+        XCTAssertEqual(saved.first?.text, "Keep my draft\n\nRecovered text")
     }
+    func testRecoveredSpeechSurvivesSocketReplacementDuringItsDraftWrite() async throws {
+        let suite = "speech-reconnect-test-" + UUID().uuidString
+        let defaults = UserDefaults(suiteName: suite)!
+        let root = FileManager.default.temporaryDirectory.appending(path: "SpeechReconnect-\(UUID())")
+        let recording = root.appending(path: "recording.m4a")
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        try Data([1]).write(to: recording)
+        defer { try? FileManager.default.removeItem(at: root); defaults.removePersistentDomain(forName: suite) }
+        defaults.set(recording.path, forKey: "native.voice.pending")
+        let model = AppModel.testing(relay: FeatureRelay(), voice: VoiceRecorder(defaults: defaults))
+        model.connected = true; model.hasSession = true
+        let project = Project(.object(["id": .string("project"), "path": .string("/work/project")]))
+        model.projects = [project]
+        let chat = model.chat(for: model.draftTask(project: project, folderID: nil)); chat.draft = "Keep my draft"
+        let session = SavedSession(relay: URL(string: "https://example.test")!, sessionID: "fixture", deviceID: "fixture", token: "fixture", secret: Data(repeating: 7, count: 32), daemonKey: "fixture", daemonIdentity: "fixture")
+        let store = try DraftStore(session: session, root: root.appending(path: "input")); model.draftStore = store
+        let gate = RecoveryWriteGate()
+        let blocking = Task.detached { await store.holdForRecoveryTest(gate) }
+        await Task.detached { gate.waitForStart() }.value
+        defer { gate.release.signal() }
+        let recovery = Task { await model.insertRecoveredSpeech("Recovered text") }
+        for _ in 0..<1000 where !chat.draft.contains("Recovered text") { try await Task.sleep(for: .milliseconds(1)) }
+        XCTAssertTrue(chat.draft.contains("Recovered text"))
+        let connection = model.connectionID, scope = model.sessionScope
+        await model.reconnect()
+        XCTAssertNotEqual(model.connectionID, connection); XCTAssertEqual(model.sessionScope, scope)
+        gate.release.signal(); await blocking.value
+        let inserted = await recovery.value
+        XCTAssertTrue(inserted); XCTAssertNil(model.voice.pendingURL)
+        XCTAssertEqual(chat.draft, "Keep my draft\n\nRecovered text")
+    }
+}
+
+private final class RecoveryWriteGate: @unchecked Sendable {
+    let started = DispatchSemaphore(value: 0), release = DispatchSemaphore(value: 0)
+    func waitForStart() { started.wait() }
+}
+private extension DraftStore {
+    /// Deliberately occupy this actor's executor to reproduce a delayed disk
+    /// write; the UI actor remains free to replace the socket in the meantime.
+    func holdForRecoveryTest(_ gate: RecoveryWriteGate) { gate.started.signal(); gate.release.wait() }
 }
 
 private actor GoalRelay: RelayServing {

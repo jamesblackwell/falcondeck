@@ -93,6 +93,21 @@ refresh the checked-in native palette catalog.
 
 ## Recovery and boundaries
 
+Task options → **Show on Lock Screen** follows one working task on this device.
+Its Live Activity shows the project/title, elapsed time and Working, Needs you,
+Completed or Needs attention status on the Lock Screen and Dynamic Island. Tap
+to open that conversation; **Hide from Lock Screen** dismisses it. It coexists
+with the existing speech activity. Titles are privacy-sensitive, and widget
+metadata contains no credentials, prompts or response text. Relaunch adopts the
+current pairing's activity; forgetting a connection retires its cards.
+
+This pilot uses local ActivityKit updates while the app can execute. After 90
+seconds without an update, or a disconnect, it shows last-known status with a
+frozen elapsed time. A disk preview cannot complete a live task. Continuous
+updates while suspended require a separate ActivityKit APNs token/relay path;
+ordinary notification tokens do not provide that. This feature does not alter
+the relay's existing Expo or native notification registrations.
+
 Keychain holds this client's identity and relay credentials. Unsent text, image
 attachments, composer choices and the last conversation selection are encrypted
 per pairing in protected device files. A separate encrypted, disposable cache
@@ -112,6 +127,15 @@ the relay reconnects, or the pairing's cache becomes available.
 The daemon and native agent storage remain authoritative. Forget removes this
 pairing's cache, input files and credentials. Revoke the trusted device from desktop settings if
 it should no longer connect.
+
+Entering the background captures unsent input and a bounded preview under a
+finite iOS background execution assertion. Process-local write revisions reject
+delayed snapshots after newer edits or sends; those clocks are never restored
+from disk. Transcription gets a finite handoff window too. If iOS expires it,
+the recording stays available for retry and a late reply cannot consume it.
+Accepted transcripts, including Speech settings recovery, reach the encrypted
+draft store before their source audio is deleted. These are finite operations,
+not a persistent background socket, polling loop or silent-audio keepalive.
 
 Connections bootstrap through `sync.index`, expand shared catalogs once, and
 page project/folder lists with `sync.threads`. A legacy snapshot fallback is used

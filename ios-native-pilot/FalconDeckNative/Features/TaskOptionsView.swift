@@ -73,6 +73,22 @@ struct TaskOptionsView: View {
                     }
                 }
                 if let task {
+                    if !model.demo || ProcessInfo.processInfo.arguments.contains("--task-activity-preview") {
+                        Section {
+                            if model.taskActivity.isTracking(task.id) {
+                                Button("Hide from Lock Screen", systemImage: "lock.slash") { model.taskActivity.stop() }
+                                    .accessibilityIdentifier("task-live-activity")
+                                    .accessibilityValue(model.taskActivity.record?.state.connected == false ? "Last known status" : model.taskActivity.record?.state.phase.label ?? "")
+                            } else {
+                                Button("Show on Lock Screen", systemImage: "lock.rectangle") {
+                                    do { try model.followOnLockScreen(task) } catch { self.error = error.localizedDescription }
+                                }.disabled(!model.taskActivity.enabled || !canMutate || !(task.running || task.awaitingInput))
+                                    .accessibilityIdentifier("task-live-activity")
+                            }
+                        } footer: {
+                            Text(activityHelp(task))
+                        }.listRowBackground(FD.surface)
+                    }
                     // These presentation controls stay available offline.
                     if ConversationPreferences(raw: model.preferences["conversation"]).flag("show_expand_all_controls") {
                         Section("Transcript") {
@@ -87,7 +103,7 @@ struct TaskOptionsView: View {
             .disabled(pending)
             .scrollContentBackground(.hidden).background(FD.background).navigationTitle("Task options").navigationBarTitleDisplayMode(.inline)
             .toolbar { ToolbarItem(placement: .confirmationAction) { Button("Done") { dismiss() }.disabled(pending) } }
-            .onAppear { title = task?.title ?? "" }
+            .onAppear { title = task?.title ?? ""; model.taskActivity.reconcileDismissal() }
             .task(id: "\(taskID):\(canMutate)") { if canMutate, let task, !model.chat(for: task).loaded || model.chat(for: task).needsRefresh { await model.loadChat(task) } }
             .sheet(isPresented: $goal) { GoalView(taskID: taskID) }
             .alert("Compact context", isPresented: $compact) {
@@ -96,6 +112,14 @@ struct TaskOptionsView: View {
                 Button("Compact") { if let task { run { try await model.compact(task, instructions: instructions) } } }
             } message: { Text("Ask the agent to condense this task's context. The original conversation stays in its native storage.") }
         }.presentationDetents([.large]).interactiveDismissDisabled(pending)
+    }
+    private func activityHelp(_ task: AgentTask) -> String {
+        if !model.taskActivity.enabled { return "Allow Live Activities for Falcon Native in iOS Settings." }
+        if !model.taskActivity.isTracking(task.id) {
+            if !canMutate { return "Connect to your computer to follow this task on the Lock Screen." }
+            if !task.running && !task.awaitingInput { return "Available while a task is working or needs your input." }
+        }
+        return "Follow one task on this device. Status updates while the app is connected; otherwise the card shows the last known status. Tap it to return here."
     }
     private func move(_ task: AgentTask, folder: String?) { run { try await model.folderMutation(projectID: task.projectID, action: "move_thread", folderID: folder, taskID: task.id) } }
     private func run(close: Bool = true, _ action: @escaping @MainActor () async throws -> Void) {
