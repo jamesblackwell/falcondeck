@@ -13,7 +13,7 @@ import Foundation
         do {
             let root = inputDraftRoot
             let store = try await Task.detached { try DraftStore(session: session, root: root) }.value
-            let drafts = try await store.load()
+            let drafts = SavedDraft.resolveSubmissionOwners(try await store.load())
             let unreadable = await store.unreadableDraftCount
             let preferences = (try? await store.loadComposerPreferences()) ?? [:]
             let selection: Destination?

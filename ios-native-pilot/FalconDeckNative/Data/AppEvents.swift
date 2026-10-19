@@ -168,12 +168,14 @@ struct RecentEventSequences {
         default: break
         }
         if !rebase, let chat = chats[id] {
+            chat.outgoingMessage?.observe(event)
             if chat.loading {
                 if chat.bufferedEvents.count < 2048 { chat.bufferedEvents.append(event) }
                 else { chat.bufferOverflowed = true }
             }
             chat.transcript.apply(event)
             chat.settleSubmission(queued: tasks.first(where: { $0.id == id })?.queued ?? [])
+            if chat.outgoingMessage?.needsHistoryRecheck == true, let task = task(id) { recheckOutgoingHistory(task, chat: chat) }
             if !chat.pendingQueue.isEmpty {
                 chat.pendingQueue = QueuedDraft.reconcile(chat.pendingQueue, queued: tasks.first(where: { $0.id == id })?.queued ?? [], items: chat.transcript.items)
             }

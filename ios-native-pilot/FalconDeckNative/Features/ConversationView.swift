@@ -5,14 +5,15 @@ struct ConversationView: View {
     @Environment(AppModel.self) private var model
     let task: AgentTask
     @State private var chat: ChatSession?
+    @State private var sessionTaskID: String?
     private var current: AgentTask { model.task(task.id) ?? task }
     var body: some View {
         Group {
-            if let session = chat ?? model.chats[task.id] { ChatContent(task: current, chat: session) }
+            if let session = (sessionTaskID == task.id ? chat : nil) ?? model.chats[task.id] { ChatContent(task: current, chat: session) }
             else { ActivityDiamond().frame(maxWidth: .infinity, maxHeight: .infinity).background(FD.background) }
         }
         .task(id: task.id) {
-            let session = model.chat(for: task); chat = session
+            let session = model.chat(for: task); chat = session; sessionTaskID = task.id
             if task.isDraft { session.loaded = true }
             else if (!session.loaded || session.needsRefresh) && (model.connected || model.demo) { await model.loadChat(task) }
         }
@@ -36,13 +37,18 @@ private struct ChatContent: View {
     @State private var bottomInsetHeight: CGFloat = 0
     private var project: Project? { model.projects.first { $0.id == task.projectID } }
     private var requests: [JSON] { model.requests.filter { $0["thread_id"].string == task.id } }
+    private var acceptedDeliveryID: String? {
+        guard let outgoing = chat.outgoingMessage, outgoing.phase != .sending else { return nil }
+        return outgoing.id
+    }
 
     private var preferences: ConversationPreferences { ConversationPreferences(raw: model.preferences["conversation"]) }
     var body: some View {
         let presentation = chat.presentation(preferences: preferences, running: task.running)
         let actions = presentation.actionIDs
         let blocks = presentation.blocks
-        let activity = !chat.loading && chat.historyError == nil && (model.connected || model.demo) ? ConversationActivity.label(blocks: blocks, running: task.running, submitting: chat.sending) : nil
+        let submitting = chat.sending && chat.outgoingMessage?.phase != .accepted && chat.outgoingMessage?.phase != .queued
+        let activity = submitting || (!chat.loading && chat.historyError == nil && (model.connected || model.demo)) ? ConversationActivity.label(blocks: blocks, running: task.running, submitting: submitting, accepted: chat.outgoingMessage?.awaitingAgent == true) : nil
         let rowOrder = (chat.hasOlder ? ["earlier"] : []) + blocks.map(\.id) + (activity == nil ? [] : ["activity"]) + ["latest"]
         Group {
             List {
@@ -59,12 +65,16 @@ private struct ChatContent: View {
                     ForEach(blocks) { block in
                         Group {
                             if block.grouped { TranscriptGroup(block: block, task: task, expansion: expansion, onInteraction: stopFollowing).id(block.id) }
-                            else if let item = block.items.first { TranscriptRow(message: item, task: task, firstDiff: block.firstDiff, showsActions: actions.contains(item.id), expansion: expansion, onInteraction: stopFollowing).id(item.id) }
+                            else if let item = block.items.first {
+                                TranscriptRow(message: item, task: task, firstDiff: block.firstDiff, showsActions: actions.contains(item.id), expansion: expansion, onInteraction: stopFollowing)
+                                    .modifier(OutgoingMessageArrival(delivery: chat.outgoingMessage.flatMap { $0.id == item.id ? $0 : nil })).id(item.id)
+                            }
                         }.frame(maxWidth: 820).frame(maxWidth: .infinity)
                             .listRowBackground(NativeListScrollProbe(scrolling: listScrolling, rowID: block.id, rowOrder: rowOrder))
                     }
                     if let activity {
                         HStack(spacing: 8) { ActivityDiamond(); NativeActivityText(text: activity).font(.footnote).foregroundStyle(FD.secondary) }.frame(minHeight: 44).frame(maxWidth: 820, alignment: .leading).frame(maxWidth: .infinity)
+                            .accessibilityElement(children: .combine).accessibilityIdentifier("conversation-delivery-status")
                             .listRowBackground(NativeListScrollProbe(scrolling: listScrolling, rowOrder: rowOrder))
                     }
                     Color.clear.frame(height: 1).id("latest").listRowBackground(NativeListScrollProbe(scrolling: listScrolling, rowOrder: rowOrder))
@@ -173,6 +183,9 @@ private struct ChatContent: View {
             }
         }
         .onChange(of: chat.transcriptExpansion) { _, _ in scroll.followLatest = false; listScrolling.cancel() }
+        .sensoryFeedback(.impact(weight: .light, intensity: 0.45), trigger: acceptedDeliveryID) { old, next in
+            next != nil && old != next && !reduceMotion && model.foreground
+        }
         .sheet(isPresented: $showGoal) { GoalView(taskID: task.id) }
         // The editor outlives the queue row if that message dispatches meanwhile.
         .sheet(item: $chat.queuedEdit) { QueuedMessageEditor(task: task, edit: $0) }

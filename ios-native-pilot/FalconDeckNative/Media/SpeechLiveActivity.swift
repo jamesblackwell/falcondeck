@@ -55,6 +55,9 @@ import Foundation
         voice.acceptingTranscript = true
         defer { voice.acceptingTranscript = false; lease.finish() }
         let caret = chat.insertVoiceTranscript(text)
+        // Keep the recording panel in its accepting state until the durable
+        // handoff finishes, avoiding a flash of editor text before auto-send.
+        chat.voiceInputOpen = wasOpen
         let inserted = chat.draft
         draftSaves.removeValue(forKey: ownerID)?.cancel()
         do {
@@ -69,6 +72,7 @@ import Foundation
             return nil
         }
         guard current == sessionScope, chats[ownerID] === chat, voice.ownerID == ownerID, voice.pendingURL == recording else { return nil }
+        chat.voiceInputOpen = false
         voice.discard()
         return chat.draft.utf16.elementsEqual(inserted.utf16) ? caret : chat.draft.endIndex
     }

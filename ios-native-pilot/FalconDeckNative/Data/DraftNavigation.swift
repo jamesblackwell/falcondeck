@@ -1,6 +1,20 @@
 import Foundation
 
+struct ConversationOrigin {
+    let selection: Destination?
+    let contentID: UUID
+}
+
 @MainActor extension AppModel {
+    var conversationOrigin: ConversationOrigin { ConversationOrigin(selection: selection, contentID: detailContentID) }
+    var selectedConversation: AgentTask? {
+        switch selection {
+        case .task(let id): task(id)
+        case .draft(let id, let folder): projects.first { $0.id == id }.map { draftTask(project: $0, folderID: folder) }
+        case .projects, nil: defaultDraftProject.map { draftTask(project: $0, folderID: nil) }
+        default: nil
+        }
+    }
     var defaultDraftProject: Project? {
         sortedProjects.first { $0.raw["kind"].string == "casual" } ?? sortedProjects.first
     }

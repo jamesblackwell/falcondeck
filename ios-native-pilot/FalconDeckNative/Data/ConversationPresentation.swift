@@ -88,8 +88,9 @@ enum ConversationActivity {
             .map { $0.trimmingCharacters(in: .whitespaces) }.first { !$0.isEmpty } ?? "Thought process"
     }
     /// Match Expo's fallback: live reasoning and tool activity own their status.
-    static func label(blocks: [TranscriptBlock], running: Bool, submitting: Bool) -> String? {
-        guard running else { return submitting ? "Sending…" : nil }
+    static func label(blocks: [TranscriptBlock], running: Bool, submitting: Bool, accepted: Bool = false) -> String? {
+        if submitting { return "Sending…" }
+        guard running || accepted else { return nil }
         guard let last = blocks.last else { return "Thinking…" }
         if last.grouped && last.running { return nil }
         if let item = last.items.last {

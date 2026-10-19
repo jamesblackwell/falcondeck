@@ -19,6 +19,18 @@ struct SavedDraft: Codable, Sendable {
     // Process-local ordering only; never restore a write clock from disk.
     var writeRevision: UInt64 = 0
     private enum CodingKeys: String, CodingKey { case id, text, attachments, modelID, effort, provider, overrides, submission }
+
+    /// A process can stop between writing the new task's recovery record and
+    /// retiring its source draft. The task owns that submission; keep any newer
+    /// input in the source draft, without recovering the first message twice.
+    static func resolveSubmissionOwners(_ drafts: [SavedDraft]) -> [SavedDraft] {
+        let owned = Set(drafts.filter { !$0.id.hasPrefix("draft:") }.compactMap { $0.submission?.id })
+        return drafts.map { original in
+            var draft = original
+            if draft.id.hasPrefix("draft:"), let pending = draft.submission, owned.contains(pending.id) { draft.submission = nil }
+            return draft
+        }
+    }
 }
 
 @MainActor enum InputWriteRevision {

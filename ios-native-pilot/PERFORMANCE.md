@@ -429,3 +429,45 @@ Native-only Autoreview (`.agents/skills/autoreview/scripts/autoreview --mode loc
 finished clean after verified startup races were fixed and reviewed again.
 Physical Siri/Action button interaction has not been verified. No real agent
 turns were started; Expo, relay/production, OTA and TestFlight were unchanged.
+
+## Immediate message delivery — 19 October 2026
+
+Typed and transcribed messages enter the transcript before task creation or
+network work. The same client ID and delivery object follow the first message
+into its created task. Sending switches to Thinking on the Mac's RPC acceptance
+or exact user-item echo; queued messages retain their queue semantics. History
+echoes replace the local row in place. Only that local bubble gets a finite
+settle animation; history and streaming updates keep their existing stillness.
+Typed sends keep keyboard focus, including the draft-to-task transition.
+
+The input recovery copy precedes dispatch. A first send persists the task's new
+ownership before retiring its project-draft record. Recovery resolves the narrow
+interrupted-transfer window by submission ID while keeping newer source input.
+Provider settings and navigation origin are captured before the first save.
+Delayed creation cannot override later navigation. Failed delivery restores the
+input and never automatically retries a turn. Transcription retains its existing
+busy panel through the durable handoff instead of briefly flashing editor text.
+
+Accepted delivery is distinct from an authoritative history echo. A fresh read
+captures the exact outgoing object and whether it was accepted before the read
+began. Older reads cannot settle a newer submission. If history overlaps
+acceptance, one fresh foreground read reconciles completion; reopening handles
+deferred reads. This is not background polling. No-output completions and recent
+tails missing an older user item stop the starting fallback without deleting
+unconfirmed local input based on another turn's metadata.
+
+Validation: 313 optimized native unit tests passed. Ten phone and eight tablet
+UI checks passed against local fixtures, including five-second task creation
+and acceptance delays, typed input, transcribed input, Reduce Motion, failure
+and explicit retry. Screenshot review caught and fixed lost tablet focus and a
+displaced phone bubble. The corrected first-send transition was recorded and
+checked again. The native-only tests started no real agent turns.
+
+Native-only Autoreview (`.agents/skills/autoreview/scripts/autoreview --mode local
+--max-priority P2 --prompt-file send-review-context.md` in an isolated worktree)
+finished clean after verified findings were fixed, regression-tested and
+reviewed again. Expo, relay/production, OTA and TestFlight were unchanged.
+
+The signed standalone development build passed strict signature verification
+and was installed over Wi-Fi on the paired iPhone. Physical send interactions
+and haptic feel are not claimed by the simulator checks.

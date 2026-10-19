@@ -87,6 +87,7 @@ final class AppModel {
     @ObservationIgnored var queuedPairingPayload: (text: String, relayURL: String)?
     var selection: Destination? = .projects {
         didSet {
+            if oldValue != selection { detailContentID = UUID() }
             let selected: String? = { if case .task(let id) = selection { return id }; return nil }()
             Task { await relay.selectThread(selected) }
             schedulePreviewSave()
@@ -97,6 +98,7 @@ final class AppModel {
         }
     }
     var detailRequestID = UUID()
+    var detailContentID = UUID()
     @ObservationIgnored var pendingShortcuts: [NativeShortcutNavigation] = []
     @ObservationIgnored var draftStore: DraftStore?
     @ObservationIgnored var savedDrafts: [String: SavedDraft] = [:]
@@ -378,6 +380,7 @@ final class AppModel {
         MotionPreview.start(in: self)
         await ImagePreview.start(in: self)
         await NativeShortcutPreview.start(in: self)
+        await SendPreview.start(in: self)
         if ProcessInfo.processInfo.arguments.contains("--task-activity-preview"), let task = tasks.first {
             // Explicit local QA fixture: no relay, turn, microphone or push.
             taskActivity.restore(pairing: nil)
@@ -439,7 +442,13 @@ final class AppModel {
         chat.loading = true; chat.bufferedEvents = []; chat.bufferOverflowed = false
         if older { chat.olderHistoryError = nil } else { chat.historyError = nil; chat.olderHistoryError = nil }
         let loadID = UUID(); chat.loadID = loadID
-        defer { if chat.loadID == loadID { chat.loading = false } }
+        let delivery = chat.outgoingMessage, acceptedBeforeRead = delivery?.phase == .accepted
+        defer {
+            if chat.loadID == loadID {
+                chat.loading = false
+                if !older { recheckOutgoingHistory(task, chat: chat) }
+            }
+        }
         if demo {
             if !chat.loaded { chat.transcript.items = Demo.messages }
             chat.loaded = true; return
@@ -472,6 +481,13 @@ final class AppModel {
             chat.oldestID = page["oldest_item_id"].string.nonempty ?? chat.transcript.items.first?.id
             chat.loaded = true; if !older { chat.needsRefresh = false }
             chat.settleSubmission(queued: page["thread"]["queued_turns"].array)
+            if !older, let outgoing = chat.outgoingMessage {
+                if outgoing === delivery {
+                    outgoing.reconcile(history: chat.transcript.items, thread: page["thread"], acceptedBeforeRead: acceptedBeforeRead)
+                } else {
+                    outgoing.needsHistoryRecheck = true
+                }
+            }
             upsertTask(page["thread"])
             schedulePreviewSave()
         } catch {
@@ -480,122 +496,6 @@ final class AppModel {
                 else { chat.historyError = error.localizedDescription }
             }
         }
-    }
-
-    func send(_ task: AgentTask, textOverride: String? = nil, initialInput: SavedDraft? = nil) async {
-        let current = connectionID
-        let chat = chat(for: task)
-        let id = "user-\(UUID().uuidString)"
-        var initialInputHandled = false
-        defer {
-            if let initialInput, !initialInputHandled {
-                // A first send can be rejected before creating an optimistic
-                // row (for example, if the connection dropped during creation).
-                // Its source draft has already been consumed by the caller.
-                restoreSubmission(task, chat: chat, id: id, text: initialInput.text, attachments: initialInput.attachments)
-            }
-        }
-        let consumesComposer = textOverride == nil && initialInput == nil
-        let recoversInput = consumesComposer || initialInput != nil
-        let text = (initialInput?.text ?? textOverride ?? chat.draft).trimmingCharacters(in: .whitespacesAndNewlines)
-        let selectedModel = initialInput?.modelID ?? chat.modelID, selectedEffort = initialInput?.effort ?? chat.effort
-        let activeModel = AgentModel.resolve(models: effectiveModels(projectID: task.projectID, provider: task.provider), provider: task.provider, id: selectedModel)
-        let turnSettings = NativeRequest.turnSettings(initialInput?.overrides ?? chat.overrides, task: task, model: activeModel)
-        var selectedOverrides = initialInput?.overrides ?? chat.overrides
-        if selectedOverrides["service_tier"] != nil { selectedOverrides["service_tier"] = turnSettings["service_tier"] }
-        let attachments = initialInput?.attachments ?? (consumesComposer ? chat.attachments : [])
-        let recoveryText = recoversInput ? text : ""
-        guard !task.isDraft || consumesComposer else { return }
-        guard !text.isEmpty || !attachments.isEmpty, !chat.sending, !chat.preparingAttachments, demo || connected else { return }
-        do {
-            try NativeAttachment.validate(attachments)
-            if !attachments.isEmpty, projects.first(where: { $0.id == task.projectID })?.capabilities(task.provider)["supports_images"] == .bool(false) { throw PilotError("This agent doesn't support image attachments.") }
-        } catch { chat.error = error.localizedDescription; return }
-        chat.sending = true; chat.error = nil; chat.notice = nil
-        if task.isDraft {
-            defer { chat.sending = false }
-            do {
-                guard let project = projects.first(where: { $0.id == task.projectID }) else { throw PilotError("Select a project first.") }
-                let input = SavedDraft(id: task.id, text: text, attachments: attachments, modelID: selectedModel, effort: selectedEffort, provider: chat.provider, overrides: selectedOverrides)
-                let created = try await createTask(project: project, provider: chat.provider, modelID: selectedModel, folderID: task.raw["folder_id"].string.nonempty, overrides: selectedOverrides, initialInput: input)
-                guard current == connectionID else { return }
-                if chat.draft.trimmingCharacters(in: .whitespacesAndNewlines) == text { chat.draft = "" }
-                chat.attachments.removeAll { attachment in attachments.contains { $0.id == attachment.id } }
-                // Submit the captured first input without consuming any newer
-                // edits made through the new task's sidebar entry.
-                await send(created, initialInput: input)
-            } catch { if current == connectionID { chat.error = error.localizedDescription } }
-            return
-        }
-        if recoversInput && (text == "/compact" || text.hasPrefix("/compact ")) {
-            defer { chat.sending = false }
-            do {
-                guard attachments.isEmpty else { throw PilotError("Remove attachments before compacting.") }
-                try await compact(task, instructions: String(text.dropFirst(8)).trimmingCharacters(in: .whitespacesAndNewlines)); initialInputHandled = true
-                if consumesComposer && chat.draft.trimmingCharacters(in: .whitespacesAndNewlines) == text { chat.draft = "" } }
-            catch { chat.error = error.localizedDescription }
-            return
-        }
-        initialInputHandled = true
-        let optimistic = Message(.object(["id": .string(id), "kind": .string("user_message"), "text": .string(text), "pending": .bool(true), "attachments": .array(attachments.map(\.input))]))
-        let expectQueued = task.running || task.status == "waiting_for_input"
-        let queued = QueuedDraft(id: id, text: text, attachmentCount: attachments.count, knownIDs: Set(task.queued.map { $0["id"].string }))
-        if expectQueued { chat.pendingQueue.append(queued) }
-        else { chat.transcript.upsert(optimistic) }
-        if recoversInput { chat.submission = SavedSubmission(id: id, text: text, attachments: attachments) }
-        if consumesComposer { chat.draft = ""; chat.attachments = [] }
-        if let store = draftStore {
-            do { try await store.save(chat.saved(id: task.id)) }
-            catch { restoreSubmission(task, chat: chat, id: id, text: recoveryText, attachments: attachments); chat.error = "Couldn't save a recovery copy: \(error.localizedDescription)"; chat.sending = false; return }
-        }
-        guard current == connectionID else { restoreSubmission(task, chat: chat, id: id, text: recoveryText, attachments: attachments); chat.sending = false; return }
-        defer { chat.sending = false }
-        if demo {
-            chat.pendingQueue.removeAll { $0.id == id }
-            chat.transcript.upsert(Message(optimistic.raw.setting("pending", .bool(false))))
-            if chat.submission?.id == id { chat.submission = nil }
-            chat.transcript.upsert(Message(.object(["id": .string("demo-\(UUID())"), "kind": .string("assistant_message"), "text": .string(Demo.markdownReply)])))
-            return
-        }
-        do {
-            if !selectedOverrides.isEmpty {
-                _ = try await taskRequest(task, method: "thread.update", fields: selectedOverrides)
-                guard current == connectionID else { restoreSubmission(task, chat: chat, id: id, text: recoveryText, attachments: attachments); return }
-            }
-            if text.contains("/") { await loadCatalog(task) }
-            guard current == connectionID else { restoreSubmission(task, chat: chat, id: id, text: recoveryText, attachments: attachments); return }
-            let params = NativeRequest.turn(task: task, text: text, itemID: id, modelID: selectedModel, effort: selectedEffort, overrides: turnSettings, attachments: attachments).setting("selected_skills", .array(ComposerCatalog.selected(text, skills: catalog(task).skills)))
-            let response = try await relay.call("turn.start", params: params)
-            guard current == connectionID else { restoreSubmission(task, chat: chat, id: id, text: recoveryText, attachments: attachments); return }
-            if response["message"].string == "queued" {
-                if chat.submission?.id == id { chat.submission = nil }
-                chat.transcript.items.removeAll { $0.id == id && $0.raw["pending"].bool }
-                if !expectQueued, !chat.transcript.items.contains(where: { $0.id == id && !$0.raw["pending"].bool }) { chat.pendingQueue.append(queued) }
-                chat.pendingQueue = QueuedDraft.reconcile(chat.pendingQueue, queued: tasks.first(where: { $0.id == task.id })?.queued ?? [], items: chat.transcript.items)
-            } else if expectQueued {
-                chat.pendingQueue.removeAll { $0.id == id }
-                if !chat.transcript.items.contains(where: { $0.id == id && !$0.raw["pending"].bool }) { chat.transcript.upsert(optimistic) }
-            }
-        } catch {
-            restoreSubmission(task, chat: chat, id: id, text: recoveryText, attachments: attachments)
-            if chats[task.id] === chat { chat.error = "\(error.localizedDescription) Refresh this task before resending if delivery is uncertain." }
-        }
-    }
-
-    private func restoreSubmission(_ task: AgentTask, chat: ChatSession, id: String, text: String, attachments: [NativeAttachment]) {
-        // Reconnect retains this session; forgetting/re-pairing replaces it.
-        // Recover only into the original instance, never into a new computer.
-        guard chats[task.id] === chat else { return }
-        chat.pendingQueue.removeAll { $0.id == id }
-        guard !chat.transcript.items.contains(where: { $0.id == id && !$0.raw["pending"].bool }) else { return }
-        chat.transcript.items.removeAll { $0.id == id && $0.raw["pending"].bool }
-        if !text.isEmpty {
-            if chat.draft.isEmpty { chat.draft = text }
-            else if chat.draft != text { chat.draft = text + "\n\n" + chat.draft }
-        }
-        chat.attachments = attachments + chat.attachments.filter { newer in !attachments.contains { $0.id == newer.id } }
-        if chat.submission?.id == id { chat.submission = nil }
-        chat.notice = "Delivery wasn't confirmed. Refresh this task before sending again."
     }
 
     func stop(_ task: AgentTask) async {
@@ -613,8 +513,8 @@ final class AppModel {
         } catch { if current == connectionID { chat.error = error.localizedDescription } }
     }
 
-    @discardableResult func createTask(project: Project, provider: String, modelID: String, folderID: String?, overrides: [String: JSON] = [:], initialInput: SavedDraft? = nil) async throws -> AgentTask {
-        let current = connectionID, sourceSelection = selection
+    @discardableResult func createTask(project: Project, provider: String, modelID: String, folderID: String?, overrides: [String: JSON] = [:], initialInput: SavedDraft? = nil, outgoingMessage: OutgoingMessage? = nil, origin: ConversationOrigin? = nil) async throws -> AgentTask {
+        let current = connectionID, origin = origin ?? conversationOrigin
         let raw: JSON
         if demo {
             raw = .object(["id": .string("demo-\(UUID())"), "workspace_id": .string(project.id), "title": .string("New task"), "provider": .string(provider), "status": .string("idle")])
@@ -629,8 +529,19 @@ final class AppModel {
         if let initialInput {
             chat.modelID = initialInput.modelID; chat.effort = initialInput.effort; chat.overrides = initialInput.overrides
             chat.sending = true
+            chat.outgoingMessage = outgoingMessage
+            if let outgoingMessage { chat.transcript.upsert(outgoingMessage.item) }
         }
-        defer { if initialInput != nil { chat.sending = false } }
+        var ready = false
+        defer {
+            if initialInput != nil {
+                chat.sending = false
+                if !ready, let outgoingMessage {
+                    chat.transcript.items.removeAll { $0.id == outgoingMessage.id && $0.raw["pending"].bool }
+                    if chat.outgoingMessage === outgoingMessage { chat.outgoingMessage = nil }
+                }
+            }
+        }
         upsertTask(raw)
         if let folderID {
             do { try await folderMutation(projectID: project.id, action: "move_thread", folderID: folderID, taskID: task.id) }
@@ -638,7 +549,14 @@ final class AppModel {
         }
         guard current == connectionID else { throw CancellationError() }
         guard chats[task.id] === chat, tasks.contains(where: { $0.id == task.id }) else { throw PilotError("The new task is no longer available.") }
-        if selection == sourceSelection { selection = .task(task.id) }
+        if selection == origin.selection && detailContentID == origin.contentID {
+            if let initialInput { chat.composerFocused = chats[initialInput.id]?.composerFocused ?? false }
+            let contentID = detailContentID
+            selection = .task(task.id)
+            // Continue the first send on the same list and keyboard surface.
+            if outgoingMessage != nil { detailContentID = contentID }
+        }
+        ready = true
         return task
     }
 

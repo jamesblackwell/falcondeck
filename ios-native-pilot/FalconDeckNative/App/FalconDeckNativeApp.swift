@@ -27,6 +27,12 @@ struct FalconDeckNativeApp: App {
             model.restoringSession = false
             return model
         }
+        if let argument = ProcessInfo.processInfo.arguments.first(where: { $0.hasPrefix("--send-preview=") }) {
+            let suite = "NativeSendPreview", defaults = UserDefaults(suiteName: "NativeSendPreview")!
+            defaults.removePersistentDomain(forName: suite)
+            let mode = String(argument.dropFirst("--send-preview=".count))
+            return AppModel(relay: SendPreviewRelay(mode: mode), voice: VoiceRecorder(defaults: defaults), push: NativePushNotifications(defaults: defaults), notifications: LocalNotifications(defaults: defaults), sessionLoader: { nil })
+        }
         if ProcessInfo.processInfo.arguments.contains(where: { $0.hasPrefix("--loading-preview=") }) {
             let defaults = UserDefaults(suiteName: "NativeLoadingPreview")!
             defaults.removePersistentDomain(forName: "NativeLoadingPreview")
@@ -117,7 +123,7 @@ struct RootView: View {
             // opens. Replacing the stack can deliver disappearance to the new
             // transcript, cancelling its initial scroll and read acknowledgement.
             NavigationStack(path: $detailPath) {
-                ZStack { destination.id(model.selection) }
+                ZStack { destination.id(model.detailContentID) }
                     // Keep the root title's preference provider stable too;
                     // a removed destination can otherwise clear the new title.
                     .navigationTitle(detailTitle)
@@ -187,17 +193,15 @@ struct RootView: View {
         return project.raw["kind"].string == "casual" ? "New chat" : project.name
     }
     @ViewBuilder private var destination: some View {
-        switch model.selection {
-        case .task(let id):
-            if let task = model.task(id) {
-                ConversationView(task: task).id(id)
-            } else { StartView() }
-        case .draft(let projectID, let folderID): DraftConversationView(projectID: projectID, folderID: folderID)
-        case .activity: ActivityView()
-        case .archived: ArchivedTasksView()
-        case .settings: SettingsView()
-        case .automations: AutomationsView()
-        default: StartView()
+        if let task = model.selectedConversation { ConversationView(task: task) }
+        else {
+            switch model.selection {
+            case .activity: ActivityView()
+            case .archived: ArchivedTasksView()
+            case .settings: SettingsView()
+            case .automations: AutomationsView()
+            default: StartView()
+            }
         }
     }
 }

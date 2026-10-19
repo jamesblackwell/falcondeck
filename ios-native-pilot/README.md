@@ -63,6 +63,10 @@ keys, tokens, real device inventory or private screenshots in git.
 - Draft-first task creation; provider/model/effort/mode/permissions/sandbox/speed;
   slash skills and saved prompts; queue/edit/remove/steer; interrupt/resume;
   rename/suggest title; read/unread; goals and context compaction.
+- Immediate local send feedback for typed and transcribed input, including the
+  first message. One bubble settles into place with Sending → Thinking on Mac
+  acceptance. Typed sends retain keyboard focus; failures recover the input
+  without automatically retrying uncertain deliveries.
 - A searchable project switcher in every new-task title. Each project/folder
   keeps its own unsent text, attachments and model choices when switching.
 - App Shortcuts: New task (optional project and prompt), Open project, and View
@@ -179,7 +183,7 @@ xcodebuild -project FalconDeckNative.xcodeproj -scheme FalconDeckNativeUI \
   -derivedDataPath build-ui test
 ```
 
-The latest unit run has 300 passing tests. Pairing/chat/automation UI checks have
+The latest unit run has 313 passing tests. Pairing/chat/automation UI checks have
 passed on both phone and tablet simulators. See [VERIFICATION.md](VERIFICATION.md) for the
 review and device handoff, and [PARITY.md](PARITY.md) for the feature ledger. Tests cover
 crypto interoperability, pairing authority, chunks/ACKs, UTF-16 streaming,

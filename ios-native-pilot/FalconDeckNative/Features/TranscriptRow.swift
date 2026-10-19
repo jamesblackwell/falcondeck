@@ -72,11 +72,10 @@ struct TranscriptRow: View {
     }
     private var messageBody: some View {
         VStack(alignment: .leading, spacing: 6) {
-            if message.raw["automated"].bool || message.raw["pending"].bool {
+            if message.raw["automated"].bool {
                 HStack {
-                    if message.raw["automated"].bool { Label("Scheduled task", systemImage: "calendar").font(.caption) }
+                    Label("Scheduled task", systemImage: "calendar").font(.caption)
                     Spacer()
-                    if message.raw["pending"].bool { Text("Sending…").font(.caption) }
                 }.foregroundStyle(FD.secondary)
             }
             ForEach(message.raw["attachments"].array, id: \.self) { reference in MediaImageView(reference: reference, itemID: message.id, task: task) }

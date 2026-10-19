@@ -39,6 +39,7 @@ struct RecordingPanel: View {
     @Bindable var chat: ChatSession
     var onTranscript: (String, Bool) -> Void
     private var recorder: VoiceRecorder { model.voice }
+    private var processing: Bool { recorder.transcribing || recorder.acceptingTranscript }
     var body: some View {
         Group {
             if let error = recorder.error, textSize.isAccessibilitySize {
@@ -63,14 +64,14 @@ struct RecordingPanel: View {
             } else {
                 VStack(alignment: .leading, spacing: 4) {
                     HStack(spacing: 8) {
-                        NativeActivityText(text: status, active: recorder.transcribing).foregroundStyle(recorder.recording ? FD.accent : FD.secondary).lineLimit(textSize.isAccessibilitySize ? 2 : 1)
+                        NativeActivityText(text: status, active: processing).foregroundStyle(recorder.recording ? FD.accent : FD.secondary).lineLimit(textSize.isAccessibilitySize ? 2 : 1)
                             .accessibilityIdentifier("voice-status")
                         Spacer(minLength: 0)
                         if !recorder.starting { Text(duration).monospacedDigit().foregroundStyle(FD.muted) }
                     }.font(.footnote.weight(.medium))
                     if recorder.recording { VoiceWaveform(recorder: recorder).frame(height: 32) }
                 }.frame(maxWidth: .infinity, alignment: .leading)
-                if recorder.transcribing {
+                if processing {
                     ActivityDiamond().frame(width: ComposerMetrics.controlSize, height: ComposerMetrics.controlSize).accessibilityLabel(status)
                 } else {
                     control("Stop and transcribe", symbol: "stop.fill") { transcribe(submit: false) }
@@ -82,7 +83,7 @@ struct RecordingPanel: View {
             }
         }
     }
-    private var cancelButton: some View { control("Cancel voice input", symbol: "xmark") { close() } }
+    private var cancelButton: some View { control("Cancel voice input", symbol: "xmark") { close() }.disabled(recorder.acceptingTranscript) }
     @ViewBuilder private var failureActions: some View {
         control("Speech settings", symbol: "gearshape") { close(); model.showSpeechSettings = true }
         if recorder.pendingURL != nil {
@@ -93,7 +94,7 @@ struct RecordingPanel: View {
         }
     }
     private var status: String {
-        recorder.transcribing ? (recorder.transcriptionAttempt > 1 ? "Retrying (\(recorder.transcriptionAttempt))" : "Transcribing…") : recorder.starting ? "Starting microphone…" : recorder.recording ? "Recording" : "Recording ready"
+        processing ? (recorder.transcriptionAttempt > 1 ? "Retrying (\(recorder.transcriptionAttempt))" : "Transcribing…") : recorder.starting ? "Starting microphone…" : recorder.recording ? "Recording" : "Recording ready"
     }
     private var duration: String { let seconds = max(0, Int(recorder.elapsed)); return String(format: "%d:%02d", seconds / 60, seconds % 60) }
     private func control(_ label: String, symbol: String, prominent: Bool = false, action: @escaping () -> Void) -> some View {

@@ -76,6 +76,8 @@ struct ComposerView: View {
         }
         .padding(.horizontal, 8).padding(.top, 12).padding(.bottom, 8).glassEffect(.regular.tint(FD.surface), in: .rect(cornerRadius: 26))
         .sensoryFeedback(.success, trigger: transcriptFeedback) { _, _ in motion.active }
+        .onChange(of: focused) { _, value in chat.composerFocused = value }
+        .onAppear { if chat.composerFocused { focused = true } }
         .sheet(isPresented: $showModels) {
             ComposerModelSheet(task: task, chat: chat, models: models) { showModels = false }
                 .task(id: modelLoadScope) { await model.loadModels(task) }
@@ -116,7 +118,6 @@ struct ComposerView: View {
         }
     }
     private func submitDraft() {
-        focused = false
         let text = chat.draft.trimmingCharacters(in: .whitespacesAndNewlines)
         if !task.isDraft && (text == "/goal" || text.hasPrefix("/goal ")) { openGoal() }
         else { Task { await model.send(task) } }

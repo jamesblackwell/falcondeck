@@ -12,6 +12,8 @@ final class ChatSession {
     var overrides: [String: JSON] = [:] { didSet { changed?() } }
     var attachments: [NativeAttachment] = [] { didSet { changed?() } }
     var submission: SavedSubmission? { didSet { changed?() } }
+    var outgoingMessage: OutgoingMessage?
+    var composerFocused = false
     var recoveredSubmission = false
     @ObservationIgnored var restoringSelection = false
     @ObservationIgnored var changed: (() -> Void)?
