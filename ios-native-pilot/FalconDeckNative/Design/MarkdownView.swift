@@ -98,7 +98,7 @@ private struct HighlightedCode: View, Equatable {
     private var highlighted: AttributedString {
         var result = AttributedString(content)
         result.foregroundColor = FD.foreground
-        let colors: [Color] = [FD.accent, .orange, .blue, FD.muted]
+        let colors: [Color] = ["keyword", "number", "string"].map { NativeAppearance.shared.color("code", $0) } + [FD.muted]
         for (regex, color) in zip(Self.patterns, colors) {
             for match in regex.matches(in: content, range: NSRange(content.startIndex..., in: content)) {
                 if let range = Range(match.range, in: content), let attributedRange = Range(range, in: result) { result[attributedRange].foregroundColor = color }

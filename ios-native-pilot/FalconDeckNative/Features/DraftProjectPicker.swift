@@ -6,13 +6,9 @@ struct DraftProjectPicker: View {
     let title: String
     var body: some View {
         Button { presented = true } label: {
-            HStack(spacing: 6) {
-                Text(title).font(.subheadline.weight(.semibold)).lineLimit(1).truncationMode(.tail)
-                Image(systemName: "chevron.down").font(.system(size: 11, weight: .semibold)).foregroundStyle(FD.secondary)
-            }
-            .foregroundStyle(FD.foreground).padding(.horizontal, 14).frame(minHeight: 44)
-            .glassEffect(.regular.interactive(), in: .capsule)
+            ConversationTitleLabel(title: title, projectPicker: true)
         }
+        .buttonStyle(.plain)
         .accessibilityLabel("Choose project").accessibilityValue(title)
         .accessibilityHint("Unsent drafts are kept separately for each project.")
         .accessibilityIdentifier("draft-project-picker")
@@ -47,7 +43,11 @@ private struct DraftProjectList: View {
                 }
             }
             .scrollContentBackground(.hidden).background(FD.background)
-            .searchable(text: $search, prompt: "Search projects")
+            .contentMargins(.top, 8, for: .scrollContent)
+            .safeAreaInset(edge: .top, spacing: 0) {
+                NativeSearchField(text: $search, prompt: "Search projects")
+                    .frame(minHeight: 44).padding(.horizontal, 20).padding(.bottom, 8).background(FD.background)
+            }
             .overlay { if !search.isEmpty && filtered.isEmpty { ContentUnavailableView.search(text: search).allowsHitTesting(false) } }
             .navigationTitle("Choose project").navigationBarTitleDisplayMode(.inline)
             .toolbar { ToolbarItem(placement: .confirmationAction) { Button("Done") { dismiss() } } }

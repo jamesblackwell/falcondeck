@@ -40,7 +40,9 @@ struct ComposerView: View {
                 RecordingPanel(task: task, chat: chat, onTranscript: receiveTranscript)
             } else {
                 SlashCommandsView(task: task, chat: chat) { openGoal() }
-                TextField(task.running ? "Queue a follow-up…" : "Message \(providerLabel)…", text: $chat.draft, selection: selectionBinding, axis: .vertical)
+                TextField("Message", text: $chat.draft, selection: selectionBinding,
+                    prompt: Text(task.running ? "Queue a follow-up…" : "Message \(providerLabel)…").foregroundStyle(FD.secondary), axis: .vertical)
+                    .foregroundStyle(FD.foreground)
                     .lineLimit(1...6).font(.body).focused($focused).padding(.horizontal, 8).accessibilityIdentifier("chat-input").submitLabel(.return)
                     .frame(minHeight: 44, alignment: .topLeading)
                     .contentShape(Rectangle())

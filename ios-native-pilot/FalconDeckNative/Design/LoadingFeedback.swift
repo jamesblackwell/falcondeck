@@ -67,7 +67,7 @@ struct NativeLoadingPill: View {
     var body: some View {
         Group {
             if loading && shown {
-                HStack(spacing: 7) { ActivityDiamond(); Text(label).font(.caption.weight(.medium)).foregroundStyle(FD.secondary) }
+                HStack(spacing: 7) { ActivityDiamond(); Text(label).font(.caption.weight(.medium)).foregroundStyle(.primary) }
                     .padding(.horizontal, 14).padding(.vertical, 9).glassEffect(in: .capsule)
                     .padding(.top, 8).accessibilityElement(children: .combine).accessibilityIdentifier("loading-pill")
             }

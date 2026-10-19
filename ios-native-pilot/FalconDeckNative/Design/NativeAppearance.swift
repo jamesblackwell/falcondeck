@@ -3,6 +3,25 @@ import Observation
 
 struct NativePalette: Identifiable, Sendable {
     let raw: JSON
+    private let readableInk: [String: String]
+    private let increasedInk: [String: String]
+    init(raw: JSON) {
+        self.raw = raw
+        let colors = raw["colors"], dark = raw["appearance"].string == "dark"
+        let backgrounds = (0...3).map { colors["surface"][String($0)].string }
+        let roles = ["primary", "secondary", "tertiary", "muted"].map { ($0, colors["fg"][$0].string) }
+            + [("code.keyword", colors["accent"]["strong"].string), ("code.number", colors["warning"]["default"].string), ("code.string", colors["info"]["default"].string)]
+        readableInk = Dictionary(uniqueKeysWithValues: roles.map { role, color in
+            (role, NativeTextContrast.adjusted(color, on: backgrounds, dark: dark, minimum: 4.5))
+        })
+        increasedInk = Dictionary(uniqueKeysWithValues: roles.map { role, color in
+            (role, NativeTextContrast.adjusted(color, on: backgrounds, dark: dark, minimum: 7))
+        })
+    }
+    func value(_ group: String, _ key: String = "default", increasedContrast: Bool = false) -> String? {
+        if group == "fg" || group == "code", let ink = (increasedContrast ? increasedInk : readableInk)[group == "code" ? "code." + key : key] { return ink }
+        return raw["colors"][group][key].string.nonempty ?? raw["colors"][group].string.nonempty
+    }
     var id: String { raw["id"].string }
     var label: String { raw["label"].string }
     var dark: Bool { raw["appearance"].string == "dark" }
@@ -31,13 +50,17 @@ final class NativeAppearance {
     func color(_ group: String, _ key: String = "default") -> Color {
         let light = Self.palettes.first { $0.id == lightID } ?? Self.palettes.first { !$0.dark }
         let dark = Self.palettes.first { $0.id == darkID } ?? Self.palettes.first { $0.dark }
-        let lightValue = light?.raw["colors"][group][key].string.nonempty ?? light?.raw["colors"][group].string.nonempty ?? "#17171c"
-        let darkValue = dark?.raw["colors"][group][key].string.nonempty ?? dark?.raw["colors"][group].string.nonempty ?? "#f4f4f6"
-        return Color(Self.dynamicColor(light: lightValue, dark: darkValue))
+        return Color(Self.dynamicColor(
+            light: light?.value(group, key) ?? "#17171c", dark: dark?.value(group, key) ?? "#f4f4f6",
+            increasedLight: light?.value(group, key, increasedContrast: true),
+            increasedDark: dark?.value(group, key, increasedContrast: true)))
     }
-    nonisolated static func dynamicColor(light: String, dark: String) -> UIColor {
+    nonisolated static func dynamicColor(light: String, dark: String, increasedLight: String? = nil, increasedDark: String? = nil) -> UIColor {
         // UIKit resolves traits on background render queues as well as main.
-        UIColor { @Sendable traits in Self.uiColor(traits.userInterfaceStyle == .dark ? dark : light) }
+        UIColor { @Sendable traits in
+            let high = traits.accessibilityContrast == .high
+            return Self.uiColor(traits.userInterfaceStyle == .dark ? (high ? increasedDark ?? dark : dark) : (high ? increasedLight ?? light : light))
+        }
     }
     func textSize(relativeTo system: DynamicTypeSize) -> DynamicTypeSize {
         let sizes: [DynamicTypeSize] = [.xSmall, .small, .medium, .large, .xLarge, .xxLarge, .xxxLarge, .accessibility1, .accessibility2, .accessibility3, .accessibility4, .accessibility5]

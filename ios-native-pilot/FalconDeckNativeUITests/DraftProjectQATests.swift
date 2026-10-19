@@ -13,7 +13,7 @@ import XCTest
             let shot = XCTAttachment(screenshot: app.screenshot()); shot.name = "Native searchable project sheet"; shot.lifetime = .keepAlways; add(shot)
         }
         if let search {
-            let field = app.searchFields.firstMatch
+            let field = app.searchFields["Search projects"]
             XCTAssertTrue(field.waitForExistence(timeout: 5)); field.tap(); field.typeText(search)
         }
         let row = app.buttons["choose-project-" + id]

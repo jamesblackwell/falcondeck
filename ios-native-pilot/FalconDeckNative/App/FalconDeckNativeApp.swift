@@ -134,15 +134,10 @@ struct RootView: View {
                                 if model.isNewConversation {
                                     DraftProjectPicker(title: detailTitle)
                                 } else {
-                                    Text(detailTitle)
-                                        .font(.subheadline.weight(.semibold))
-                                        .foregroundStyle(FD.foreground)
-                                        .lineLimit(1).truncationMode(.tail)
-                                        .padding(.horizontal, 14).padding(.vertical, 8)
-                                        .glassEffect(.regular, in: .capsule)
+                                    ConversationTitleLabel(title: detailTitle)
                                         .accessibilityIdentifier("conversation-title")
                                 }
-                            }
+                            }.sharedBackgroundVisibility(.hidden)
                         }
                     }
                     .navigationDestination(for: DetailDestination.self) { $0.view }

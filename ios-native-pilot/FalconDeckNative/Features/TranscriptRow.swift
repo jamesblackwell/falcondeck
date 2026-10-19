@@ -81,7 +81,7 @@ struct TranscriptRow: View {
             ForEach(message.raw["attachments"].array, id: \.self) { reference in MediaImageView(reference: reference, itemID: message.id, task: task) }
             if message.kind == "user_message" {
                 let long = preferences.flag("collapse_long_user_messages") && (message.text.count > 900 || message.text.filter { $0 == "\n" }.count > 12)
-                Text(message.text).font(.body).lineSpacing(4).lineLimit(long && !longMessageExpanded ? 12 : nil).textSelection(.enabled)
+                Text(message.text).font(.body).foregroundStyle(FD.foreground).lineSpacing(4).lineLimit(long && !longMessageExpanded ? 12 : nil).textSelection(.enabled)
                 if long { Button(longMessageExpanded ? "Show less" : "Show more") { onInteraction(); longMessageExpanded.toggle() }.font(.caption).foregroundStyle(FD.accent) }
             }
             else { NativeMarkdown(text: message.text, streaming: message.streaming); AssistantSources(message: message) }
