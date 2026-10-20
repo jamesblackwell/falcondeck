@@ -29,7 +29,15 @@ extension DaemonClient: DaemonServing {}
     var allProjects: [Project] = []
     var tasks: [AgentTask] = []
     var preferences: JSON = .object([:])
-    var snapshotRaw: JSON = .null
+    var snapshotRaw: JSON = .null {
+        didSet {
+            let value = snapshotRaw["extensions"]
+            if localExtensions != value { localExtensions = value }
+        }
+    }
+    // Task lists observe this projection instead of unrelated snapshot usage,
+    // notices and scheduling updates. Keep raw snapshot consumers live too.
+    private var localExtensions: JSON = .null
     var selectedSection = "project"
     var selectedExtensionID: String?
     var selectedPanelID: String?
@@ -128,7 +136,7 @@ extension DaemonClient: DaemonServing {}
     var selectedTask: AgentTask? { tasks.first { $0.id == selectedTaskID } }
     var extensions: JSON { extensionsForHost(selectedHostID) }
     func extensionsForHost(_ hostID: String?) -> JSON {
-        guard let hostID else { return snapshotRaw["extensions"] }
+        guard let hostID else { return localExtensions }
         return remoteExtensions[hostID] ?? .null
     }
     var composerKey: String { draftKey }

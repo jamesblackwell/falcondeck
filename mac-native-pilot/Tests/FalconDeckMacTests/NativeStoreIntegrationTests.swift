@@ -238,6 +238,26 @@ final class NativeStoreIntegrationTests: XCTestCase {
         XCTAssertTrue(store.navigationPreferences["project_folders"].array.isEmpty)
     }
 
+    @MainActor func testLocalUsageUpdatesDoNotInvalidateExtensionObservers() {
+        let store = AppStore(client: IntegrationDaemon())
+        let snapshot = integrationSnapshot().setting("extensions", .object(["catalog": .array([]), "views": .array([])]))
+        store.applyEnvelope(integrationSnapshotEnvelope(snapshot))
+        let extensionChanges = IntegrationObservationChanges(), snapshotChanges = IntegrationObservationChanges()
+        withObservationTracking { _ = store.extensionsForHost(nil) } onChange: { extensionChanges.count += 1 }
+        withObservationTracking { _ = store.snapshotRaw } onChange: { snapshotChanges.count += 1 }
+
+        store.applyEnvelope(.object(["thread_id": .string("task"), "event": .object([
+            "type": .string("thread-token-usage-updated"), "usage": .object(["total_tokens": .number(1234)])
+        ])]))
+        XCTAssertEqual(snapshotChanges.count, 1, "Usage must still reach consumers of the raw snapshot.")
+        XCTAssertEqual(extensionChanges.count, 0, "Unrelated usage must not rebuild extension-dependent task lists.")
+
+        let catalog: JSON = .array([.object(["id": .string("notes")])])
+        store.applyEnvelope(integrationEnvelope(.object(["type": .string("extension-catalog-updated"), "catalog": catalog])))
+        XCTAssertEqual(extensionChanges.count, 1, "Actual extension updates must remain observable.")
+        XCTAssertEqual(store.extensionsForHost(nil)["catalog"], catalog)
+    }
+
     @MainActor func testRemoteSnapshotMergesWithoutReplacingLocalPreferencesOrSelection() async {
         let store = AppStore(client: IntegrationDaemon())
         let local = integrationSnapshot()
