@@ -533,6 +533,10 @@ struct NativeGeneralSettingsView: View {
                 LabeledContent("Current native version", value: currentVersion)
                 LabeledContent("Status", value: updater.state.replacingOccurrences(of: "_", with: " ").capitalized)
                 RuntimeSettingsError(message: updater.error)
+                if updater.state == "unavailable" {
+                    Text("Automatic updates aren’t available in this preview build.")
+                        .font(NativePreferences.shared.font(size: 12)).foregroundStyle(FDTheme.muted)
+                }
                 if let version = updater.version {
                     Divider()
                     Text("FalconDeck \(version)").fontWeight(.medium)

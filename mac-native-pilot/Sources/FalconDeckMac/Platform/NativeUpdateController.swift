@@ -26,7 +26,7 @@ import Sparkle
     override init() {
         super.init()
         guard Self.configurationIsValid(Bundle.main) else {
-            error = "Signed native updates are not configured for this build. A native appcast and public signing key are required."
+            state = "unavailable"
             return
         }
         let updater = SPUUpdater(hostBundle: .main, applicationBundle: .main, userDriver: self, delegate: self)

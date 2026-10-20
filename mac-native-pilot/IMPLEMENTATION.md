@@ -39,5 +39,7 @@ separately with the two acknowledgment turns and confirmed archive cleanup.
 `.agents/skills/autoreview/scripts/autoreview --mode local` completed six bounded
 review passes with no accepted/actionable findings. The two completion WAV assets
 were checked with `file` and `afinfo`; autoreview was skipped for that separate
-mechanical asset-only commit. Native visual interaction remains pending foreground
-control permission; no macOS privacy grants were changed by automation.
+mechanical asset-only commit. Background app checks passed welcome dismissal,
+real-project sidebars and General settings. Complete visual interaction coverage
+and permission-dependent speech checks remain; no macOS privacy grants were changed
+by automation. A separate local review of the preview-updater wording also passed.
