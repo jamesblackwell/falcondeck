@@ -12,7 +12,7 @@ final class NavigationTests: XCTestCase {
                      item("work", project: "project", extra: ["attention": .object(["background_task_count": .number(1)])]),
                      item("blocked", project: "project", extra: ["status": .string("awaiting_approval")])]
         let summary = NativeProjectNavigationSummary(projects: projects, tasks: tasks)
-        XCTAssertEqual(summary.chatCount, 1)
+        XCTAssertEqual(summary.chatCount, 2)
         XCTAssertEqual(summary.attentionCount, 1)
         XCTAssertEqual(summary.projectCounts, ["chat": 2, "project": 2])
         XCTAssertEqual(summary.runningProjectIDs, ["project"])

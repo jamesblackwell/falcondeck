@@ -99,14 +99,17 @@ private actor ReviewDaemon: DaemonServing {
 }
 
 final class NativeStoreReviewTests: XCTestCase {
-    @MainActor func testChatsDoesNotSelectAGloballyPinnedChat() async {
-        let store = AppStore(client: ReviewDaemon())
-        store.applyEnvelope(reviewSnapshotEnvelope([reviewTask("pinned-chat", project: "chat", pinned: true)]))
+    @MainActor func testChatsRetainsAnOpenGloballyPinnedChat() async {
+        let daemon = ReviewDaemon(), store = AppStore(client: daemon)
+        let rows = [reviewTask("pinned-chat", project: "chat", pinned: true)]
+        await daemon.configure(rows)
+        store.applyEnvelope(reviewSnapshotEnvelope(rows))
+        await store.selectTask("pinned-chat")
         store.selectSection("chats")
-        XCTAssertNil(store.selectedTaskID)
+        XCTAssertEqual(store.selectedTaskID, "pinned-chat")
         XCTAssertEqual(store.selectedSection, "chats")
-        store.newTask() // Also invalidates any incorrectly queued selection before test teardown.
-        await Task.yield()
+        XCTAssertEqual(store.selectedProjectID, "chat")
+        XCTAssertEqual(store.messages.first?.text, "pinned-chat")
     }
 
     @MainActor func testOpeningAnUnpinnedSearchResultLeavesPins() async {

@@ -31,7 +31,8 @@ struct FalconDeckMacApp: App {
                 }
         }
         .defaultSize(width: 1320, height: 860)
-        .windowStyle(.hiddenTitleBar)
+        .windowStyle(.titleBar)
+        .windowToolbarStyle(.unifiedCompact)
         .commands {
             CommandGroup(replacing: .appSettings) {
                 Button("Settings…") { store.selectSection("settings") }

@@ -371,6 +371,74 @@ final class NativeStoreIntegrationTests: XCTestCase {
         XCTAssertEqual(store.tasks.map(\.id), ["task"])
     }
 
+    @MainActor func testOpeningPinUsesItsProjectWithoutAnIntermediatePinsDestination() async {
+        let daemon = IntegrationDaemon(), store = AppStore(client: daemon)
+        let pinned = integrationTask("pinned-task").setting("is_pinned", .bool(true))
+        await daemon.setDetailThread(pinned)
+        store.applyEnvelope(integrationSnapshotEnvelope(integrationSnapshot(tasks: [integrationTask("task"), pinned])))
+        await store.selectTask("task")
+        store.selectSection("activity")
+
+        await store.selectTask("pinned-task")
+
+        XCTAssertEqual(store.selectedSection, "project")
+        XCTAssertEqual(store.selectedProjectID, "local")
+        XCTAssertEqual(store.selectedTaskID, "pinned-task")
+        XCTAssertTrue(store.filteredTasks.contains { $0.id == "pinned-task" }, "The opened pin must remain available in its project list")
+        XCTAssertEqual(store.messages.first?.text, "Local history")
+        store.selectProject("local")
+        XCTAssertEqual(store.selectedTaskID, "pinned-task", "Selecting its project must not clear the already open pin")
+        XCTAssertEqual(store.messages.first?.text, "Local history")
+
+        await store.navigateHistory(-1)
+        XCTAssertEqual(store.selectedSection, "activity")
+        await store.navigateHistory(1)
+        XCTAssertEqual(store.selectedSection, "project")
+        XCTAssertEqual(store.selectedTaskID, "pinned-task")
+    }
+
+    @MainActor func testOpeningPinnedChatKeepsChatsAndRetainsItWhenSelectingChats() async {
+        let daemon = IntegrationDaemon(), store = AppStore(client: daemon)
+        let pinned = integrationTask("pinned-chat", project: "casual").setting("is_pinned", .bool(true))
+        await daemon.setDetailThread(pinned)
+        store.applyEnvelope(integrationSnapshotEnvelope(integrationSnapshot(
+            projects: [integrationProject("local"), integrationProject("casual", kind: "casual")],
+            tasks: [integrationTask("task"), pinned])))
+
+        await store.selectTask("pinned-chat")
+
+        XCTAssertEqual(store.selectedSection, "chats")
+        XCTAssertEqual(store.selectedProjectID, "casual")
+        XCTAssertEqual(store.selectedTaskID, "pinned-chat")
+        store.selectSection("chats")
+        XCTAssertEqual(store.selectedTaskID, "pinned-chat", "Chats includes pinned casual tasks instead of opening an unrelated draft")
+        XCTAssertFalse(store.isLoading)
+    }
+
+    @MainActor func testExplicitPinsDestinationRetainsScopeWhenOpeningAnotherPin() async {
+        let daemon = IntegrationDaemon(), store = AppStore(client: daemon)
+        let first = integrationTask("first-pin").setting("is_pinned", .bool(true))
+        let second = integrationTask("second-pin", project: "other").setting("is_pinned", .bool(true))
+        await daemon.setDetailThread(first)
+        await daemon.setDetailThread(second)
+        store.applyEnvelope(integrationSnapshotEnvelope(integrationSnapshot(
+            projects: [integrationProject("local"), integrationProject("other")], tasks: [first, second])))
+        await store.selectTask("first-pin")
+        store.selectSection("pins")
+
+        await store.selectTask("second-pin")
+
+        XCTAssertEqual(store.selectedSection, "pins")
+        XCTAssertEqual(store.selectedProjectID, "other")
+        XCTAssertEqual(store.selectedTaskID, "second-pin")
+
+        // The far-left shortcut still opens project context after browsing Pins.
+        await store.selectTask("first-pin", preservePinScope: false)
+        XCTAssertEqual(store.selectedSection, "project")
+        XCTAssertEqual(store.selectedProjectID, "local")
+        XCTAssertEqual(store.selectedTaskID, "first-pin")
+    }
+
     @MainActor func testPinsScopeSelectsTaskWithDaemonPinnedFlag() async {
         let daemon = IntegrationDaemon(), store = AppStore(client: daemon)
         let pinned = integrationTask("pinned-task").setting("is_pinned", .bool(true))

@@ -3,10 +3,6 @@ import SwiftUI
 struct ConversationComposerControls: View {
     @Bindable var store: AppStore
     @Binding var selection: NativeComposerSelection
-    let skills: [JSON]
-    let prompts: [JSON]
-    let loadingCatalog: Bool
-    var insert: (String) -> Void
     var attach: () -> Void
     var refreshCatalog: () -> Void
     var chooseAgent: (String) -> Void
@@ -32,32 +28,6 @@ struct ConversationComposerControls: View {
             Button(action: attach) { Image(systemName: "paperclip").frame(width: 24, height: 28) }
                 .help("Attach images or text files")
                 .accessibilityLabel("Attach files")
-            Menu {
-                if loadingCatalog { Text("Loading skills and prompts…") }
-                if !skills.isEmpty {
-                    Section("Skills") {
-                        ForEach(skills, id: \.self) { skill in
-                            Button(skill["label"].string.isEmpty ? skill["alias"].string : skill["label"].string) {
-                                insert(ConversationCatalog.alias(skill["alias"].string) + " ")
-                            }
-                        }
-                    }
-                }
-                if !prompts.isEmpty {
-                    Section("Saved prompts") {
-                        ForEach(prompts, id: \.self) { prompt in
-                            Button(prompt["label"].string.isEmpty ? prompt["alias"].string : prompt["label"].string) {
-                                insert(ConversationSlash.expandPrompt(prompt["body"].string, arguments: ""))
-                            }
-                        }
-                    }
-                }
-                Divider()
-                Button("Refresh skills and prompts", action: refreshCatalog)
-            } label: { Image(systemName: "slash.circle") }
-            .menuStyle(.borderlessButton).fixedSize().help("Skills and saved prompts")
-            .accessibilityLabel("Skills and saved prompts")
-
             Button { showAgents.toggle() } label: {
                 HStack(spacing: 4) {
                     Text(FDTheme.providerName(provider)).lineLimit(1)

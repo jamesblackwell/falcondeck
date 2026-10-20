@@ -143,6 +143,9 @@ import UniformTypeIdentifiers
 
 @MainActor final class ComposerNativeTextView: NSTextView {
     static let maximumComposerHeight: CGFloat = 164
+    private static let attachmentPasteboardTypes: [NSPasteboard.PasteboardType] = [
+        .fileURL, .png, .tiff, .init(UTType.jpeg.identifier)
+    ]
     var placeholder = ""
     var placeholderColor = NSColor.placeholderTextColor
     var onSend: () -> Void = {}
@@ -150,20 +153,41 @@ import UniformTypeIdentifiers
     var onAttachments: ([NativeMacAttachment]) -> Void = { _ in }
     var onError: (String) -> Void = { _ in }
 
-    /// Use TextKit's cached layout rather than writing SwiftUI state during
-    /// layout. The editor grows with wrapped text, then scrolls at the cap.
+    private lazy var measurement: (manager: NSLayoutManager, container: NSTextContainer) = {
+        let manager = NSLayoutManager()
+        let container = NSTextContainer(size: .zero)
+        manager.backgroundLayoutEnabled = false
+        manager.addTextContainer(container)
+        return (manager, container)
+    }()
+
+    /// SwiftUI can measure several widths before choosing one. Keep those
+    /// speculative layouts separate from the displayed editor's TextKit state.
     func fittingComposerHeight(width: CGFloat) -> CGFloat {
-        guard let textContainer, let layoutManager else { return 44 }
-        // widthTracksTextView makes the text view authoritative. Keep its
-        // frame in sync with the proposed width before asking TextKit to wrap.
-        if frame.width != width { setFrameSize(NSSize(width: width, height: frame.height)) }
-        let availableWidth = max(1, width - textContainerInset.width * 2)
-        if textContainer.containerSize.width != availableWidth {
-            textContainer.containerSize = NSSize(width: availableWidth, height: .greatestFiniteMagnitude)
+        guard let textStorage, let textContainer, let layoutManager else { return 44 }
+        let measurement = self.measurement
+        // Sharing storage avoids copying or comparing the draft on every
+        // resize proposal; TextKit invalidates both layouts when text changes.
+        if measurement.manager.textStorage !== textStorage {
+            measurement.manager.textStorage?.removeLayoutManager(measurement.manager)
+            textStorage.addLayoutManager(measurement.manager)
         }
-        layoutManager.ensureLayout(for: textContainer)
-        let textHeight = max(layoutManager.usedRect(for: textContainer).maxY,
-                             layoutManager.extraLineFragmentRect.maxY)
+        if measurement.manager.usesFontLeading != layoutManager.usesFontLeading {
+            measurement.manager.usesFontLeading = layoutManager.usesFontLeading
+        }
+        if measurement.container.lineFragmentPadding != textContainer.lineFragmentPadding {
+            measurement.container.lineFragmentPadding = textContainer.lineFragmentPadding
+        }
+        if measurement.container.lineBreakMode != textContainer.lineBreakMode {
+            measurement.container.lineBreakMode = textContainer.lineBreakMode
+        }
+        let availableWidth = max(1, width - textContainerInset.width * 2)
+        if measurement.container.containerSize.width != availableWidth {
+            measurement.container.containerSize = NSSize(width: availableWidth, height: .greatestFiniteMagnitude)
+        }
+        measurement.manager.ensureLayout(for: measurement.container)
+        let textHeight = max(measurement.manager.usedRect(for: measurement.container).maxY,
+                             measurement.manager.extraLineFragmentRect.maxY)
         return min(Self.maximumComposerHeight, max(44, ceil(textHeight + textContainerInset.height * 2)))
     }
 
@@ -202,6 +226,24 @@ import UniformTypeIdentifiers
     override func paste(_ sender: Any?) {
         if consumeAttachments(from: .general) { return }
         super.paste(sender)
+    }
+
+    override var readablePasteboardTypes: [NSPasteboard.PasteboardType] {
+        // Plain NSTextView excludes images. Advertising attachment formats
+        // also lets AppKit enable its normal Paste command for image-only data.
+        Self.attachmentPasteboardTypes + super.readablePasteboardTypes.filter {
+            !Self.attachmentPasteboardTypes.contains($0)
+        }
+    }
+
+    override func readSelection(from pasteboard: NSPasteboard, type: NSPasteboard.PasteboardType) -> Bool {
+        if Self.attachmentPasteboardTypes.contains(type), consumeAttachments(from: pasteboard) { return true }
+        return super.readSelection(from: pasteboard, type: type)
+    }
+
+    override func validateUserInterfaceItem(_ item: NSValidatedUserInterfaceItem) -> Bool {
+        if item.action == #selector(paste(_:)), isEditable, canAttach(.general) { return true }
+        return super.validateUserInterfaceItem(item)
     }
 
     override func draggingEntered(_ sender: NSDraggingInfo) -> NSDragOperation {
@@ -243,10 +285,11 @@ import UniformTypeIdentifiers
     }
 
     private func canAttach(_ pasteboard: NSPasteboard) -> Bool {
-        pasteboard.availableType(from: [.fileURL, .png, .tiff, NSPasteboard.PasteboardType(UTType.jpeg.identifier)]) != nil
+        isEditable && pasteboard.availableType(from: Self.attachmentPasteboardTypes) != nil
     }
 
     private func consumeAttachments(from pasteboard: NSPasteboard) -> Bool {
+        guard isEditable else { return false }
         if let files = pasteboard.readObjects(forClasses: [NSURL.self], options: [.urlReadingFileURLsOnly: true]) as? [URL], !files.isEmpty {
             let receive = onAttachments, report = onError
             Task {

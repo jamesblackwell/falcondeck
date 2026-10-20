@@ -1,8 +1,79 @@
 import AppKit
+import SwiftUI
 import XCTest
 @testable import FalconDeckMac
 
 final class ConversationComposerTests: XCTestCase {
+    @MainActor func testSpeculativeMeasurementDoesNotChangeTheDisplayedTextWidth() throws {
+        let draft = String(repeating: "The editor should fill all of the available space. ", count: 20)
+        let host = NSHostingView(rootView: ConversationTextEditor(
+            text: .constant(draft), placeholder: "Message", onSend: {}, onAttachments: { _ in }, onError: { _ in }
+        ).frame(maxWidth: .infinity))
+        host.frame = NSRect(x: 0, y: 0, width: 720, height: 164)
+        host.layoutSubtreeIfNeeded()
+        let scrollView = try XCTUnwrap(firstSubview(of: NSScrollView.self, in: host))
+        let editor = try XCTUnwrap(scrollView.documentView as? ComposerNativeTextView)
+        scrollView.tile()
+        let displayedFrame = editor.frame
+        let displayedContainerWidth = try XCTUnwrap(editor.textContainer).containerSize.width
+
+        // SwiftUI can ask about widths that it ultimately does not place.
+        _ = ConversationTextEditor.fittingSize(width: 220, scrollView: scrollView)
+        XCTAssertEqual(editor.frame, displayedFrame)
+        XCTAssertEqual(editor.textContainer?.containerSize.width, displayedContainerWidth)
+
+        host.setFrameSize(NSSize(width: 900, height: 164))
+        host.layoutSubtreeIfNeeded()
+        scrollView.tile()
+        XCTAssertEqual(editor.frame.width, scrollView.contentSize.width, accuracy: 0.5)
+        XCTAssertEqual(try XCTUnwrap(editor.textContainer).containerSize.width,
+                       scrollView.contentSize.width - editor.textContainerInset.width * 2, accuracy: 0.5)
+    }
+
+    @MainActor func testPlainEditorNegotiatesAndReadsAnImageOnlyPasteboard() async throws {
+        let editor = ComposerNativeTextView(frame: NSRect(x: 0, y: 0, width: 400, height: 100))
+        editor.isRichText = false
+        editor.importsGraphics = false
+        editor.string = "Keep this draft"
+        let pasteboard = NSPasteboard.withUniqueName()
+        defer { pasteboard.releaseGlobally() }
+        let image = try XCTUnwrap(NSBitmapImageRep(bitmapDataPlanes: nil, pixelsWide: 2, pixelsHigh: 2,
+            bitsPerSample: 8, samplesPerPixel: 4, hasAlpha: true, isPlanar: false, colorSpaceName: .deviceRGB,
+            bytesPerRow: 0, bitsPerPixel: 0))
+        let png = try XCTUnwrap(image.representation(using: .png, properties: [:]))
+        XCTAssertTrue(pasteboard.setData(png, forType: .png))
+        let type = try XCTUnwrap(editor.preferredPasteboardType(from: pasteboard.types ?? [], restrictedToTypesFrom: nil))
+        XCTAssertEqual(type, .png, "The normal AppKit Paste action must consider image-only clipboard data readable.")
+
+        let received = expectation(description: "Image attachment prepared")
+        editor.onAttachments = { attachments in
+            XCTAssertEqual(attachments.count, 1)
+            XCTAssertEqual(attachments.first?.kind, .image)
+            received.fulfill()
+        }
+        editor.onError = { error in XCTFail(error) }
+        XCTAssertTrue(editor.readSelection(from: pasteboard, type: type))
+        await fulfillment(of: [received], timeout: 5)
+        XCTAssertEqual(editor.string, "Keep this draft", "Images should be attachments rather than rich text inside the editor.")
+    }
+
+    @MainActor func testPlainTextPasteStillInsertsTextAtTheSelection() throws {
+        let editor = ComposerNativeTextView(frame: NSRect(x: 0, y: 0, width: 400, height: 100))
+        editor.isRichText = false
+        editor.string = "Before after"
+        editor.setSelectedRange(NSRange(location: 7, length: 0))
+        let pasteboard = NSPasteboard.withUniqueName()
+        defer { pasteboard.releaseGlobally() }
+        XCTAssertTrue(pasteboard.setString("pasted ", forType: .string))
+        XCTAssertTrue(editor.readSelection(from: pasteboard, type: .string))
+        XCTAssertEqual(editor.string, "Before pasted after")
+    }
+
+    @MainActor private func firstSubview<T: NSView>(of type: T.Type, in view: NSView) -> T? {
+        if let result = view as? T { return result }
+        return view.subviews.lazy.compactMap { self.firstSubview(of: type, in: $0) }.first
+    }
+
     @MainActor func testEditorGrowsForWrappingAndTrailingNewlinesAndShrinksAfterDeletion() {
         let editor = ComposerNativeTextView(frame: NSRect(x: 0, y: 0, width: 600, height: 44))
         editor.isVerticallyResizable = true
@@ -50,16 +121,21 @@ final class ConversationComposerTests: XCTestCase {
             editor.isVerticallyResizable = true
             editor.isHorizontallyResizable = false
             editor.maxSize = NSSize(width: CGFloat.greatestFiniteMagnitude, height: CGFloat.greatestFiniteMagnitude)
+            editor.autoresizingMask = [.width]
             editor.textContainer?.widthTracksTextView = true
             editor.textContainerInset = NSSize(width: 12, height: 10)
             editor.textContainer?.lineFragmentPadding = 0
             editor.font = .systemFont(ofSize: 15)
             scrollView.documentView = editor
+            scrollView.tile()
             editor.string = String(repeating: "A long draft must wrap inside its viewport. ", count: 100)
             let size = try XCTUnwrap(ConversationTextEditor.fittingSize(width: 360, scrollView: scrollView))
             XCTAssertEqual(size.width, 360)
             XCTAssertEqual(editor.frame.width, scrollView.contentSize.width, accuracy: 0.5)
-            let usedWidth = try XCTUnwrap(editor.layoutManager).usedRect(for: try XCTUnwrap(editor.textContainer)).maxX
+            let layoutManager = try XCTUnwrap(editor.layoutManager)
+            let textContainer = try XCTUnwrap(editor.textContainer)
+            layoutManager.ensureLayout(for: textContainer)
+            let usedWidth = layoutManager.usedRect(for: textContainer).maxX
             XCTAssertLessThanOrEqual(usedWidth + 24, scrollView.contentSize.width + 0.5)
         }
     }

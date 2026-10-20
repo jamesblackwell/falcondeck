@@ -17,7 +17,7 @@ struct NativeProjectNavigationSummary {
             if task.running { runningProjectIDs.insert(projectID) }
             if task.needsAttention { attentionCount += 1 }
             if task.pinned { pinCandidates.append(task) }
-            else if casualIDs.contains(projectID) { chatCount += 1 }
+            if casualIDs.contains(projectID) { chatCount += 1 }
         }
     }
 }

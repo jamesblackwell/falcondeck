@@ -95,14 +95,22 @@ struct ConversationView: View {
     }
 
     var conversationHeader: some View {
-        HStack(spacing: 12) {
-            VStack(alignment: .leading, spacing: 5) {
-                Text(store.selectedTask?.title ?? "New task").font(NativePreferences.shared.font(size: 16, weight: .semibold)).foregroundStyle(FDTheme.foreground)
+        HStack(spacing: 10) {
+            if let project = store.selectedProject {
+                ProjectNavigatorGlyph(store: store, project: project,
+                    preference: store.navigationPreferences["workspace_icons"][project.id], color: FDTheme.accent)
+            }
+            VStack(alignment: .leading, spacing: 3) {
+                Text(store.selectedTask?.title ?? "New task").font(NativePreferences.shared.font(size: 15, weight: .medium)).foregroundStyle(FDTheme.foreground)
                     .lineLimit(1).accessibilityIdentifier("conversation-title")
                 HStack(spacing: 5) {
-                    Image(systemName: store.selectedTask?.raw["variant"] == .null ? "folder" : "arrow.triangle.branch")
-                    Text(workingDirectory.isEmpty ? "Select a project to get started" : workingDirectory).lineLimit(1).truncationMode(.middle)
-                }.font(NativePreferences.shared.font(size: 12, surface: "code")).foregroundStyle(FDTheme.muted).help(workingDirectory)
+                    Text(store.selectedProject?.name ?? "Select a project to get started")
+                    if let task = store.selectedTask, !task.raw["variant"]["path"].string.isEmpty {
+                        Image(systemName: "arrow.triangle.branch")
+                        Text(URL(fileURLWithPath: workingDirectory).lastPathComponent)
+                    }
+                }.font(NativePreferences.shared.font(size: 12)).foregroundStyle(FDTheme.muted)
+                    .lineLimit(1).truncationMode(.middle).help(workingDirectory)
             }
             Spacer(minLength: 12)
             if actionPending { ProgressView().controlSize(.small) }
@@ -120,7 +128,7 @@ struct ConversationView: View {
                 }
                 taskMenu(task)
             }
-        }.padding(.horizontal, 28).padding(.vertical, 15).frame(minHeight: 68)
+        }.padding(.horizontal, 20).padding(.vertical, 8).frame(minHeight: 52)
             .overlay(alignment: .bottom) { FDTheme.hairline.frame(height: 1) }
     }
 
@@ -249,8 +257,8 @@ struct ConversationView: View {
                     .fixedSize(horizontal: false, vertical: true)
                     .accessibilityIdentifier("message-composer")
                 HStack(spacing: 10) {
-                    ConversationComposerControls(store: store, selection: $selection, skills: skills, prompts: prompts, loadingCatalog: loadingCatalog,
-                                                 insert: { store.draft += $0 }, attach: pickAttachments, refreshCatalog: { Task { await loadCatalog() } }, chooseAgent: { destination in
+                    ConversationComposerControls(store: store, selection: $selection,
+                                                 attach: pickAttachments, refreshCatalog: { Task { await loadCatalog() } }, chooseAgent: { destination in
                         if let task = store.selectedTask { action { try await handoff(task, provider: destination) } }
                         else { store.provider = destination }
                     })

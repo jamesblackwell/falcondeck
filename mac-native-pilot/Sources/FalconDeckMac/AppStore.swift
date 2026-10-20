@@ -156,7 +156,7 @@ extension DaemonClient: DaemonServing {}
     }
     var filteredTasks: [AgentTask] {
         tasks.filter {
-            $0.projectID == selectedProjectID && !$0.pinned && !$0.raw["is_archived"].bool &&
+            $0.projectID == selectedProjectID && !$0.raw["is_archived"].bool &&
             (searchText.isEmpty || $0.title.localizedCaseInsensitiveContains(searchText) || $0.preview.localizedCaseInsensitiveContains(searchText))
         }.sorted {
             if $0.raw["is_pinned_in_project"].bool != $1.raw["is_pinned_in_project"].bool { return $0.raw["is_pinned_in_project"].bool }
@@ -243,7 +243,7 @@ extension DaemonClient: DaemonServing {}
     func selectProject(_ id: String) {
         navigationID = UUID()
         selectedSection = allProjects.first(where: { $0.id == id })?.raw["kind"].string == "casual" ? "chats" : "project"
-        if selectedProjectID == id, selectedTask?.pinned != true { recordNavigation(); return }
+        if selectedProjectID == id { recordNavigation(); return }
         selectedProjectID = id
         newTask()
         let latest = filteredTasks.first
@@ -279,7 +279,7 @@ extension DaemonClient: DaemonServing {}
         recordNavigation(addingHistory: recordHistory)
     }
 
-    func selectTask(_ id: String, navigating: Bool = true, recordHistory: Bool = true) async {
+    func selectTask(_ id: String, navigating: Bool = true, recordHistory: Bool = true, preservePinScope: Bool = true) async {
         guard let task = tasks.first(where: { $0.id == id }) else { return }
         let beginsReading = navigating || loadedTaskID != id
         if navigating {
@@ -302,8 +302,11 @@ extension DaemonClient: DaemonServing {}
             Task { await NativeHostManager.shared.selectThread(hostID: host, threadID: NativeHostManager.split(id).id) }
         }
         if navigating {
-            if task.pinned, !task.raw["is_archived"].bool || selectedSection == "pins" { selectedSection = "pins" }
-            else { selectedSection = allProjects.first(where: { $0.id == task.projectID })?.raw["kind"].string == "casual" ? "chats" : "project" }
+            // A pin is a shortcut into its project, not a separate destination.
+            // Only the explicit All pinned tasks view keeps the shared pin list.
+            if !preservePinScope || selectedSection != "pins" || !task.pinned {
+                selectedSection = allProjects.first(where: { $0.id == task.projectID })?.raw["kind"].string == "casual" ? "chats" : "project"
+            }
         }
         if navigating { recordNavigation(addingHistory: recordHistory) }
         provider = task.provider
@@ -505,7 +508,7 @@ extension DaemonClient: DaemonServing {}
         if section == "chats" || section == "pins" {
             let candidates = tasks.filter { task in
                 if section == "pins" { return task.pinned && !task.raw["is_archived"].bool }
-                return allProjects.first(where: { $0.id == task.projectID })?.raw["kind"].string == "casual" && !task.pinned && !task.raw["is_archived"].bool
+                return allProjects.first(where: { $0.id == task.projectID })?.raw["kind"].string == "casual" && !task.raw["is_archived"].bool
             }.sorted { $0.updatedAt > $1.updatedAt }
             if !candidates.contains(where: { $0.id == selectedTaskID }) {
                 if let task = candidates.first {

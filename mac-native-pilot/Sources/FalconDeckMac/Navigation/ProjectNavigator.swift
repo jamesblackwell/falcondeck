@@ -33,10 +33,6 @@ struct ProjectNavigator: View {
         }.map(\.element)
     }
 
-    private var visibleProjects: [Project] {
-        orderedProjects.filter { showHidden || !hiddenIDs.contains($0.id) }
-    }
-
     private var pinCandidates: [AgentTask] {
         store.tasks.filter { $0.pinned && !$0.raw["is_archived"].bool }
     }
@@ -69,8 +65,7 @@ struct ProjectNavigator: View {
                 let parts = value.dropFirst(6).split(separator: ":", maxSplits: 1).map(String.init)
                 if parts.count == 2 { store.selectExtensionPanel(extensionID: parts[0], panelID: parts[1]) }
             } else if value.hasPrefix("task:") {
-                store.selectSection("pins")
-                Task { await store.selectTask(String(value.dropFirst(5))) }
+                Task { await store.selectTask(String(value.dropFirst(5)), preservePinScope: false) }
             } else if value.hasPrefix("section:") {
                 store.selectSection(String(value.dropFirst(8)))
             }
@@ -80,6 +75,8 @@ struct ProjectNavigator: View {
     var body: some View {
         let summary = NativeProjectNavigationSummary(projects: store.allProjects, tasks: store.tasks)
         let pins = pinnedTasks(summary.pinCandidates)
+        let hidden = hiddenIDs
+        let projects = orderedProjects.filter { showHidden || !hidden.contains($0.id) }
         // Streaming previews redraw rows without changing their order.
         let pinOrderKey = summary.pinCandidates.map(NativeTaskNavigationOrder.key)
         return VStack(spacing: 0) {
@@ -93,21 +90,24 @@ struct ProjectNavigator: View {
 
                 Section {
                     if pinsExpanded {
-                        navigationRow("All pinned tasks", symbol: "pin", section: "pins", count: pins.count)
                         ForEach(pins) { task in
                             pinnedTaskRow(task)
                                 .tag("task:\(task.id)")
                         }
                     }
                 } header: {
-                    sectionHeader("Pinned", expanded: $pinsExpanded)
+                    HStack(spacing: 4) {
+                        sectionHeader("Pinned", expanded: $pinsExpanded)
+                        Spacer(minLength: 0)
+                        pinnedOptionsMenu
+                    }
                 }
 
                 Section {
                     if projectsExpanded {
-                        ForEach(visibleProjects) { project in
+                        ForEach(projects) { project in
                             projectRow(project, taskCount: summary.projectCounts[project.id, default: 0],
-                                       running: summary.runningProjectIDs.contains(project.id))
+                                       running: summary.runningProjectIDs.contains(project.id), hidden: hidden.contains(project.id))
                                 .tag("project:\(project.id)")
                                 .draggable("falcondeck-project:\(project.id)")
                                 .dropDestination(for: String.self) { items, _ in
@@ -117,7 +117,7 @@ struct ProjectNavigator: View {
                                     return true
                                 }
                         }
-                        if visibleProjects.isEmpty {
+                        if projects.isEmpty {
                             Text(store.isConnected ? "Open a folder to add a project." : "Connecting to your Mac…")
                                 .font(NativePreferences.shared.font(size: 13, surface: "sidebar"))
                                 .foregroundStyle(FDTheme.muted)
@@ -203,9 +203,8 @@ struct ProjectNavigator: View {
         }
     }
 
-    private func projectRow(_ project: Project, taskCount: Int, running: Bool) -> some View {
-        let hidden = hiddenIDs.contains(project.id)
-        return HStack(spacing: 10) {
+    private func projectRow(_ project: Project, taskCount: Int, running: Bool, hidden: Bool) -> some View {
+        HStack(spacing: 10) {
             ProjectNavigatorGlyph(store: store, project: project, preference: store.navigationPreferences["workspace_icons"][project.id],
                                   color: projectColor(project.id))
             Text(project.name).font(NativePreferences.shared.font(size: 13, surface: "sidebar")).lineLimit(1)
@@ -273,6 +272,23 @@ struct ProjectNavigator: View {
         .disabled(busyProjects.contains(project.id))
     }
 
+    private var pinnedOptionsMenu: some View {
+        Menu {
+            Button("All pinned tasks", systemImage: "pin") { store.selectSection("pins") }
+                .accessibilityIdentifier("navigation-pins")
+        } label: {
+            Image(systemName: "ellipsis")
+                .font(NativePreferences.shared.font(size: 13, surface: "sidebar"))
+                .frame(width: 22, height: 22)
+                .contentShape(.rect)
+        }
+        .menuStyle(.borderlessButton)
+        .menuIndicator(.hidden)
+        .fixedSize()
+        .help("Pinned task options")
+        .accessibilityLabel("Pinned task options")
+    }
+
     private var projectOptionsMenu: some View {
         Menu {
             Button("Open project…", systemImage: "folder.badge.plus", action: openProject)
@@ -316,7 +332,7 @@ struct ProjectNavigator: View {
     }
 
     private var optionsFooter: some View {
-        HStack(spacing: 8) {
+        NativeSidebarFooter {
             Menu {
                 ForEach(ProjectNavigatorDestination.secondary) { destination in
                     Button(destination.title, systemImage: store.selectedSection == destination.id ? "checkmark" : destination.symbol) {
@@ -344,10 +360,9 @@ struct ProjectNavigator: View {
                 Text("Local daemon: \(store.connectionStatus)")
                 Button("Reconnect", systemImage: "arrow.clockwise") { Task { await store.reconnect() } }
             } label: {
-                Label(activeOptionTitle.map { "Options · \($0)" } ?? "Options", systemImage: "slider.horizontal.3")
+                Label("Options", systemImage: "slider.horizontal.3")
+                    .lineLimit(1)
             }
-            .font(NativePreferences.shared.font(size: 13, surface: "sidebar"))
-            .foregroundStyle(FDTheme.secondary)
             .menuStyle(.borderlessButton)
             .menuIndicator(.visible)
             .controlSize(.regular)
@@ -364,8 +379,6 @@ struct ProjectNavigator: View {
                 .help("Local daemon: \(store.connectionStatus)")
                 .accessibilityLabel("Local daemon: \(store.connectionStatus)")
         }
-        .padding(8)
-        .overlay(alignment: .top) { FDTheme.hairline.frame(height: 1) }
     }
 
     private func iconWebsiteSheet(_ project: Project) -> some View {
@@ -536,7 +549,7 @@ private struct ProjectNavigatorDestination: Identifiable {
     ]
 }
 
-private struct ProjectNavigatorGlyph: View {
+struct ProjectNavigatorGlyph: View {
     let store: AppStore
     let project: Project
     let preference: JSON
