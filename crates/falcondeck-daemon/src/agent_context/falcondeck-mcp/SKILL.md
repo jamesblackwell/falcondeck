@@ -5,8 +5,8 @@ description: Use FalconDeck MCP tools during a turn. Call falcondeck_suggest_fol
 
 # FalconDeck MCP
 
-This session has FalconDeck MCP tools. Use them; they are part of the product,
-not optional flavour.
+This session has FalconDeck MCP tools. Use them when they help with the user's
+task; do not wait for the user to name them.
 
 ## Servers
 
@@ -56,6 +56,10 @@ automation with `"thread": { "kind": "current" }`. Use a `managed` thread only
 for standing schedules that are not about this conversation.
 
 ## Sibling threads
+
+Only inspect sibling threads when the task needs context or coordination from
+other threads. Do not list threads as a routine startup step or repeatedly check
+them during unrelated work.
 
 Use `falcondeck_list_threads` to find work in this workspace. Results are bounded
 markdown summaries with last activity, folder, attention, a labelled preview, and
