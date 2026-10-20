@@ -70,9 +70,23 @@ import UniformTypeIdentifiers
     }
 
     func sizeThatFits(_ proposal: ProposedViewSize, nsView: NSScrollView, context: Context) -> CGSize? {
-        guard let width = proposal.width, width.isFinite, width > 0,
-              let editor = nsView.documentView as? ComposerNativeTextView else { return nil }
-        return CGSize(width: width, height: editor.fittingComposerHeight(width: width))
+        guard let width = proposal.width, width.isFinite, width > 0 else { return nil }
+        return Self.fittingSize(width: width, scrollView: nsView)
+    }
+
+    static func fittingSize(width: CGFloat, scrollView: NSScrollView) -> CGSize? {
+        guard let editor = scrollView.documentView as? ComposerNativeTextView else { return nil }
+        // Legacy scrollers occupy layout space; overlay scrollers do not.
+        // Measure and wrap against the clip area, not the outer scroll view.
+        let contentSize = NSScrollView.contentSize(
+            forFrameSize: NSSize(width: width, height: ComposerNativeTextView.maximumComposerHeight),
+            horizontalScrollerClass: nil,
+            verticalScrollerClass: scrollView.hasVerticalScroller ? NSScroller.self : nil,
+            borderType: scrollView.borderType,
+            controlSize: scrollView.verticalScroller?.controlSize ?? .regular,
+            scrollerStyle: scrollView.scrollerStyle
+        )
+        return CGSize(width: width, height: editor.fittingComposerHeight(width: max(1, contentSize.width)))
     }
 
     private func update(_ editor: ComposerNativeTextView, coordinator: Coordinator) {
@@ -128,6 +142,7 @@ import UniformTypeIdentifiers
 }
 
 @MainActor final class ComposerNativeTextView: NSTextView {
+    static let maximumComposerHeight: CGFloat = 164
     var placeholder = ""
     var placeholderColor = NSColor.placeholderTextColor
     var onSend: () -> Void = {}
@@ -149,7 +164,7 @@ import UniformTypeIdentifiers
         layoutManager.ensureLayout(for: textContainer)
         let textHeight = max(layoutManager.usedRect(for: textContainer).maxY,
                              layoutManager.extraLineFragmentRect.maxY)
-        return min(164, max(44, ceil(textHeight + textContainerInset.height * 2)))
+        return min(Self.maximumComposerHeight, max(44, ceil(textHeight + textContainerInset.height * 2)))
     }
 
     override func viewDidMoveToWindow() {

@@ -39,6 +39,31 @@ final class ConversationComposerTests: XCTestCase {
         XCTAssertLessThanOrEqual(editor.fittingComposerHeight(width: 600), 180)
     }
 
+    @MainActor func testCappedDraftFitsInsideBothLegacyAndOverlayScrollbars() throws {
+        for style in [NSScroller.Style.legacy, .overlay] {
+            let scrollView = NSScrollView(frame: NSRect(x: 0, y: 0, width: 360, height: 164))
+            scrollView.borderType = .noBorder
+            scrollView.hasVerticalScroller = true
+            scrollView.autohidesScrollers = false
+            scrollView.scrollerStyle = style
+            let editor = ComposerNativeTextView(frame: .zero)
+            editor.isVerticallyResizable = true
+            editor.isHorizontallyResizable = false
+            editor.maxSize = NSSize(width: CGFloat.greatestFiniteMagnitude, height: CGFloat.greatestFiniteMagnitude)
+            editor.textContainer?.widthTracksTextView = true
+            editor.textContainerInset = NSSize(width: 12, height: 10)
+            editor.textContainer?.lineFragmentPadding = 0
+            editor.font = .systemFont(ofSize: 15)
+            scrollView.documentView = editor
+            editor.string = String(repeating: "A long draft must wrap inside its viewport. ", count: 100)
+            let size = try XCTUnwrap(ConversationTextEditor.fittingSize(width: 360, scrollView: scrollView))
+            XCTAssertEqual(size.width, 360)
+            XCTAssertEqual(editor.frame.width, scrollView.contentSize.width, accuracy: 0.5)
+            let usedWidth = try XCTUnwrap(editor.layoutManager).usedRect(for: try XCTUnwrap(editor.textContainer)).maxX
+            XCTAssertLessThanOrEqual(usedWidth + 24, scrollView.contentSize.width + 0.5)
+        }
+    }
+
     func testSkillAliasMatchesWholeSlashTokenOnce() {
         let skill = JSON.object(["id": .string("review-id"), "alias": .string("review" )])
         XCTAssertEqual(ConversationCatalog.selectedSkills("/review check /review", skills: [skill]).count, 1)
