@@ -8320,6 +8320,163 @@ async fn queue_messages(app: &AppState, workspace_id: &str, count: usize) -> Vec
         .collect()
 }
 
+#[cfg(unix)]
+#[tokio::test]
+async fn stopping_a_reused_claude_process_settles_the_current_turn_and_accepts_another_send() {
+    for emit_second_output in [false, true] {
+        let temp = tempdir().unwrap();
+        let (app, workspace_id) = busy_thread_app(
+            &temp,
+            AgentProvider::CLAUDE,
+            falcondeck_core::AgentCapabilitySummary::claude(),
+        )
+        .await;
+        let project = temp.path().join("project-steer");
+        let cli = temp.path().join("claude-fixture");
+        let second_output = if emit_second_output {
+            "printf '%s\\n' '{\"type\":\"assistant\",\"message\":{\"id\":\"second-answer\",\"content\":[{\"type\":\"text\",\"text\":\"Working on the second prompt\"}]}}'"
+        } else {
+            ":"
+        };
+        std::fs::write(
+            &cli,
+            format!(
+                r#"#!/bin/sh
+trap 'exit 0' TERM
+printf '%s\n' "$$" >> claude-processes
+IFS= read -r prompt || exit 0
+printf '%s\n' '{{"type":"assistant","message":{{"id":"first-answer","content":[{{"type":"text","text":"First answer"}}]}}}}' '{{"type":"result","subtype":"success","is_error":false}}'
+IFS= read -r prompt || exit 0
+{second_output}
+: > claude-second-prompt
+while IFS= read -r prompt; do :; done
+"#
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&cli, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let runtime = crate::claude::ClaudeRuntime::for_test(
+            project.to_string_lossy().into_owned(),
+            cli.to_string_lossy().into_owned(),
+        );
+        {
+            let mut workspaces = app.inner.workspaces.lock().await;
+            let workspace = workspaces.get_mut(&workspace_id).unwrap();
+            workspace.claude_runtime = Some(runtime.clone());
+            workspace
+                .threads
+                .get_mut("thread-steer")
+                .unwrap()
+                .summary
+                .status = ThreadStatus::Idle;
+        }
+        let mut events = app.subscribe();
+        app.send_turn(steer_request(&workspace_id, false))
+            .await
+            .unwrap();
+        tokio::time::timeout(TokioDuration::from_secs(5), async {
+            while app
+                .thread_summary(&workspace_id, "thread-steer")
+                .await
+                .unwrap()
+                .status
+                != ThreadStatus::Idle
+            {
+                sleep(TokioDuration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("first result should park the process");
+        let first_turn = app
+            .thread_summary(&workspace_id, "thread-steer")
+            .await
+            .unwrap();
+
+        app.send_turn(steer_request(&workspace_id, false))
+            .await
+            .unwrap();
+        tokio::time::timeout(TokioDuration::from_secs(5), async {
+            while !project.join("claude-second-prompt").exists() {
+                sleep(TokioDuration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("second prompt should reach the parked process");
+        assert_eq!(
+            std::fs::read_to_string(project.join("claude-processes"))
+                .unwrap()
+                .lines()
+                .count(),
+            1,
+            "the regression must reuse the first process and its monitor"
+        );
+        let second_turn = app
+            .thread_summary(&workspace_id, "thread-steer")
+            .await
+            .unwrap();
+        assert_ne!(first_turn.latest_turn_id, second_turn.latest_turn_id);
+
+        app.interrupt_turn(workspace_id.clone(), "thread-steer".into())
+            .await
+            .unwrap();
+        tokio::time::timeout(TokioDuration::from_secs(5), async {
+            loop {
+                let event = events.recv().await.unwrap();
+                if let UnifiedEvent::TurnEnd {
+                    turn_id, status, ..
+                } = &event.event
+                {
+                    assert_eq!(Some(turn_id), second_turn.latest_turn_id.as_ref());
+                    assert_eq!(status, "interrupted");
+                    break;
+                }
+            }
+        })
+        .await
+        .expect("stopping a reused turn must emit its terminal receipt");
+        let stopped = app
+            .thread_summary(&workspace_id, "thread-steer")
+            .await
+            .unwrap();
+        assert_eq!(stopped.status, ThreadStatus::Idle);
+        assert!(stopped.last_error.is_none());
+
+        let response = app
+            .send_turn(steer_request(&workspace_id, true))
+            .await
+            .unwrap();
+        assert_ne!(response.message.as_deref(), Some("queued"));
+        tokio::time::timeout(TokioDuration::from_secs(5), async {
+            while app
+                .thread_summary(&workspace_id, "thread-steer")
+                .await
+                .unwrap()
+                .status
+                != ThreadStatus::Idle
+            {
+                sleep(TokioDuration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("the next message should complete in a fresh process");
+        assert_eq!(
+            std::fs::read_to_string(project.join("claude-processes"))
+                .unwrap()
+                .lines()
+                .count(),
+            2
+        );
+        assert!(
+            app.thread_summary(&workspace_id, "thread-steer")
+                .await
+                .unwrap()
+                .queued_turns
+                .is_empty()
+        );
+        runtime.shutdown().await.unwrap();
+    }
+}
+
 #[tokio::test]
 async fn a_failed_steer_of_a_queued_turn_puts_it_back_in_its_original_slot() {
     let temp_dir = tempdir().unwrap();

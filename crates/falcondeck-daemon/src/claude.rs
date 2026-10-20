@@ -90,6 +90,9 @@ pub struct ClaudeTurnSpawn {
 pub struct ClaudeTurnFinish {
     pub status: Option<std::process::ExitStatus>,
     pub interrupted: bool,
+    /// The process exited while waiting for another prompt, rather than
+    /// while serving a reused turn that the existing monitor still owns.
+    pub parked: bool,
     /// True when this turn was already superseded or reaped elsewhere; the
     /// caller must not finalize thread state based on it.
     pub stale: bool,
@@ -552,6 +555,14 @@ impl ClaudeRuntime {
         }
     }
 
+    pub async fn turn_is_parked(&self, thread_id: &str, generation: u64) -> bool {
+        self.active_turns
+            .lock()
+            .await
+            .get(thread_id)
+            .is_some_and(|turn| turn.generation == generation && turn.awaiting_next_turn)
+    }
+
     /// Ends a turn that reported its terminal `result` event. Closes stdin so
     /// the CLI exits, and reaps the process off-task so a slow shutdown cannot
     /// stall the thread's return to idle.
@@ -566,6 +577,7 @@ impl ClaudeRuntime {
                     return ClaudeTurnFinish {
                         status: None,
                         interrupted: false,
+                        parked: false,
                         stale: true,
                     };
                 }
@@ -597,6 +609,7 @@ impl ClaudeRuntime {
         ClaudeTurnFinish {
             status: None,
             interrupted,
+            parked: false,
             stale: false,
         }
     }
@@ -686,6 +699,7 @@ impl ClaudeRuntime {
                     return Ok(ClaudeTurnFinish {
                         status: None,
                         interrupted: false,
+                        parked: false,
                         stale: true,
                     });
                 }
@@ -693,6 +707,7 @@ impl ClaudeRuntime {
         };
         let interrupted = self.interrupted_turns.lock().await.remove(thread_id);
         if let Some(mut turn) = turn {
+            let parked = turn.awaiting_next_turn;
             // Reached when the stream ended without a terminal `result` event
             // (a crashed or signalled CLI). Stdin is still open, so close it
             // before waiting or a process that merely closed stdout would hang
@@ -712,12 +727,14 @@ impl ClaudeRuntime {
             return Ok(ClaudeTurnFinish {
                 status: Some(status),
                 interrupted,
+                parked,
                 stale: false,
             });
         }
         Ok(ClaudeTurnFinish {
             status: None,
             interrupted,
+            parked: false,
             stale: false,
         })
     }

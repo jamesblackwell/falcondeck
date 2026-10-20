@@ -1584,6 +1584,11 @@ impl AppState {
                 }
             });
             'stdout: loop {
+                if parked_between_turns
+                    && let Ok(runtime) = self.claude_runtime_for(&workspace_id).await
+                {
+                    parked_between_turns = runtime.turn_is_parked(&thread_id, turn_generation).await;
+                }
                 // The one place a parked thread's background count is
                 // published. Runs after every line and at least every
                 // CLAUDE_STALL_CHECK_INTERVAL, so task events land at once
@@ -1598,12 +1603,6 @@ impl AppState {
                 }
                 let line = match timeout(CLAUDE_STALL_CHECK_INTERVAL, line_rx.recv()).await {
                     Ok(Some(line)) => line,
-                    Ok(None) if parked_between_turns => {
-                        if let Ok(runtime) = self.claude_runtime_for(&workspace_id).await {
-                            let _ = runtime.finish_turn(&thread_id, turn_generation).await;
-                        }
-                        return;
-                    }
                     Ok(None) => break,
                     Err(_) => {
                         // Total stream silence — not even thinking heartbeats.
@@ -2125,6 +2124,17 @@ impl AppState {
             }
         }
 
+        // Reap before draining stderr: a child that closed stdout may still
+        // be waiting on its open stdin.
+        let finished = if let Ok(runtime) = self.claude_runtime_for(&workspace_id).await {
+            Some(if saw_result {
+                Ok(runtime.complete_turn(&thread_id, turn_generation).await)
+            } else {
+                runtime.finish_turn(&thread_id, turn_generation).await
+            })
+        } else {
+            None
+        };
         // Only the backstop path can await stderr: it ends at process exit,
         // which on the result path happens after the turn is already finished.
         let mut stderr_tail = Vec::new();
@@ -2135,15 +2145,16 @@ impl AppState {
         }
 
         let mut was_interrupted = false;
-        if let Ok(runtime) = self.claude_runtime_for(&workspace_id).await {
-            let finished = if saw_result {
-                Ok(runtime.complete_turn(&thread_id, turn_generation).await)
-            } else {
-                runtime.finish_turn(&thread_id, turn_generation).await
-            };
+        if let Some(finished) = finished {
             match finished {
                 Ok(finish) if finish.stale => {
                     // A newer turn owns this thread now; leave its state alone.
+                    return;
+                }
+                Ok(finish) if finish.parked && !finish.interrupted => {
+                    // A parked process can exit after its result was already
+                    // finalized. A reused process is no longer parked, even
+                    // when it exits before emitting its next output.
                     return;
                 }
                 Ok(finish) if finish.interrupted || saw_cancelled_result => {
@@ -2249,6 +2260,14 @@ impl AppState {
             .await;
         }
         let final_error = turn_error.clone();
+        // One monitor follows a parked process across multiple prompts;
+        // its original receipt belongs to the first of those turns.
+        let turn_id = self
+            .thread_summary(&workspace_id, &thread_id)
+            .await
+            .ok()
+            .and_then(|thread| thread.latest_turn_id)
+            .unwrap_or(turn_id);
         let settled_at = Utc::now();
         let tool_settlement = if was_interrupted {
             ToolSettlement::Interrupted
