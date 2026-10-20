@@ -45,10 +45,30 @@ import Foundation
 }
 
 @MainActor extension AppModel {
+    @discardableResult func discardVoiceInput() -> Bool {
+        guard !voice.acceptingTranscript else { return false }
+        if let owner = voice.ownerID, let chat = chats[owner] {
+            chat.voiceInputOpen = false; chat.voiceInsertion = nil
+        }
+        voice.discard()
+        return true
+    }
+
+    @discardableResult func recoverVoiceInput(in task: AgentTask) -> Bool {
+        let previous = voice.ownerID
+        guard voice.recover(ownerID: task.id) else { return false }
+        if let previous, previous != task.id, let chat = chats[previous] {
+            chat.voiceInputOpen = false; chat.voiceInsertion = nil
+        }
+        chat(for: task).voiceInputOpen = true
+        return true
+    }
+
     /// Only a registered draft may consume a saved recording. A transcription
     /// can finish after its task was archived or its chat instance replaced.
-    @discardableResult func finishVoiceInput(_ text: String, ownerID: String, chat: ChatSession) async -> String.Index? {
-        guard chats[ownerID] === chat, voice.ownerID == ownerID, !voice.acceptingTranscript else { return nil }
+    @discardableResult func finishVoiceInput(_ text: String, ownerID: String, chat: ChatSession, recording expectedRecording: URL? = nil) async -> String.Index? {
+        guard chats[ownerID] === chat, voice.ownerID == ownerID, !voice.acceptingTranscript,
+              expectedRecording == nil || voice.pendingURL == expectedRecording else { return nil }
         let current = sessionScope, recording = voice.pendingURL
         let original = chat.draft, insertion = chat.voiceInsertion, wasOpen = chat.voiceInputOpen
         let lease = backgroundExecution.begin("Save transcribed input")
@@ -79,7 +99,7 @@ import Foundation
 
     func speechAction(_ action: NativeSpeechCommand) async {
         switch action {
-        case .cancel: voice.discard()
+        case .cancel: discardVoiceInput()
         case .toggle: if readAloud.messageID != nil { readAloud.togglePause() } else { SpeechLiveActivity.shared.readAloud(nil) }
         case .stop: readAloud.stop()
         case .finish:
@@ -87,11 +107,11 @@ import Foundation
             let lease = backgroundExecution.begin("Finish voice input")
             defer { lease.finish() }
             voice.finishRecording()
-            let current = sessionScope, owner = voice.ownerID
+            let current = sessionScope, owner = voice.ownerID, recording = voice.pendingURL
             do {
                 let text = try await voice.transcribe(model: self)
                 guard current == sessionScope, owner == voice.ownerID, let owner, let chat = chats[owner] else { return }
-                _ = await finishVoiceInput(text, ownerID: owner, chat: chat)
+                _ = await finishVoiceInput(text, ownerID: owner, chat: chat, recording: recording)
             } catch { /* The recording remains available in Speech settings. */ }
         }
     }

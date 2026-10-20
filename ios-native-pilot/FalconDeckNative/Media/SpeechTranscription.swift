@@ -6,8 +6,12 @@ enum NativeSpeechSettings {
     static func provider(in defaults: UserDefaults) -> String {
         defaults.string(forKey: "native.speech.provider") == "on-device" ? "on-device" : defaultProvider
     }
+    static func validateAudio(_ audio: Data) throws {
+        guard !audio.isEmpty else { throw PilotError("This recording is empty. Delete it and record a new message.") }
+        guard audio.count <= 8 * 1024 * 1024 else { throw PilotError("Record a shorter message (up to 8 MB).") }
+    }
     static func parameters(audio: Data, defaults: UserDefaults) throws -> JSON {
-        guard !audio.isEmpty, audio.count <= 8 * 1024 * 1024 else { throw PilotError("Record a shorter message (up to 8 MB).") }
+        try validateAudio(audio)
         let model = defaults.string(forKey: "native.speech.model")?.trimmingCharacters(in: .whitespacesAndNewlines).nonempty ?? defaultModel
         var params = JSON.object(["audio_base64": .string(audio.base64EncodedString()), "format": .string("m4a"), "model": .string(model)])
         if let language = defaults.string(forKey: "native.speech.language")?.trimmingCharacters(in: .whitespacesAndNewlines).nonempty {

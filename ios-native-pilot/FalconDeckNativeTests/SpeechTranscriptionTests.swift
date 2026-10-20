@@ -12,6 +12,93 @@ import XCTest
         let suite = "NativeSpeechTests-" + UUID().uuidString
         return (UserDefaults(suiteName: suite)!, suite)
     }
+    private func recording(defaults: UserDefaults, owner: String = "owner") throws -> URL {
+        let url = FileManager.default.temporaryDirectory.appending(path: UUID().uuidString + ".m4a")
+        try Data([1, 2, 3]).write(to: url)
+        addTeardownBlock { try? FileManager.default.removeItem(at: url) }
+        defaults.set(url.path, forKey: "native.voice.pending")
+        defaults.set(owner, forKey: "native.voice.owner")
+        defaults.set("openrouter", forKey: "native.voice.provider")
+        return url
+    }
+    func testDeleteCancelsTranscriptionClearsRecoveryAndKeepsTheTypedDraft() async throws {
+        let (defaults, suite) = defaults(); defer { defaults.removePersistentDomain(forName: suite) }
+        let url = try recording(defaults: defaults)
+        let voice = VoiceRecorder(defaults: defaults), relay = SpeechFixtureRelay(blocked: true)
+        let model = AppModel.testing(relay: relay, voice: voice); model.connected = true
+        let chat = model.chat(for: AgentTask(.object(["id": .string("owner")])))
+        chat.draft = "Keep my typed message"; chat.voiceInputOpen = true
+        voice.elapsed = 42
+        let work = Task { try await voice.transcribe(model: model) }
+        await relay.waitForRequest()
+        XCTAssertTrue(model.discardVoiceInput())
+        XCTAssertFalse(chat.voiceInputOpen); XCTAssertEqual(chat.draft, "Keep my typed message")
+        XCTAssertNil(voice.pendingURL); XCTAssertNil(voice.ownerID); XCTAssertEqual(voice.elapsed, 0)
+        XCTAssertFalse(voice.recording); XCTAssertFalse(voice.transcribing); XCTAssertFalse(voice.starting)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: url.path))
+        for key in ["pending", "owner", "provider"] { XCTAssertNil(defaults.object(forKey: "native.voice." + key)) }
+        XCTAssertNil(VoiceRecorder(defaults: defaults).pendingURL)
+        await relay.completeRequest()
+        do { _ = try await work.value; XCTFail("Deleted recordings must ignore late replies") } catch { XCTAssertTrue(error is CancellationError) }
+        XCTAssertNil(voice.error); XCTAssertEqual(chat.draft, "Keep my typed message")
+    }
+    func testExplicitRecoveryTransfersTheClipWithoutChangingItsProviderOrDrafts() async throws {
+        let (defaults, suite) = defaults(); defer { defaults.removePersistentDomain(forName: suite) }
+        let url = try recording(defaults: defaults)
+        let voice = VoiceRecorder(defaults: defaults), relay = SpeechFixtureRelay(blocked: true)
+        let model = AppModel.testing(relay: relay, voice: voice); model.connected = true
+        let old = model.chat(for: AgentTask(.object(["id": .string("owner")])))
+        let task = AgentTask(.object(["id": .string("new-task")]))
+        let next = model.chat(for: task)
+        old.draft = "Original draft"; old.voiceInputOpen = true; next.draft = "New draft"
+        let work = Task { try await voice.transcribe(model: model) }; await relay.waitForRequest()
+        XCTAssertTrue(model.recoverVoiceInput(in: task))
+        XCTAssertEqual(voice.pendingURL, url); XCTAssertEqual(voice.ownerID, task.id); XCTAssertEqual(voice.provider, "openrouter")
+        XCTAssertEqual(defaults.string(forKey: "native.voice.owner"), task.id)
+        XCTAssertFalse(voice.transcribing); XCTAssertFalse(old.voiceInputOpen); XCTAssertTrue(next.voiceInputOpen)
+        XCTAssertEqual(old.draft, "Original draft"); XCTAssertEqual(next.draft, "New draft")
+        XCTAssertTrue(FileManager.default.fileExists(atPath: url.path))
+        let restored = VoiceRecorder(defaults: defaults)
+        XCTAssertEqual(restored.ownerID, task.id); XCTAssertEqual(restored.pendingURL, url); XCTAssertEqual(restored.provider, "openrouter")
+        await relay.completeRequest()
+        do { _ = try await work.value; XCTFail("Transferred clips must ignore the previous request") } catch { XCTAssertTrue(error is CancellationError) }
+        XCTAssertEqual(next.draft, "New draft")
+    }
+    func testRecoveryActionsCannotInterruptTheDurableTranscriptHandoff() throws {
+        let (defaults, suite) = defaults(); defer { defaults.removePersistentDomain(forName: suite) }
+        let url = try recording(defaults: defaults)
+        let voice = VoiceRecorder(defaults: defaults), model = AppModel.testing(relay: SpeechFixtureRelay(), voice: voice)
+        voice.acceptingTranscript = true
+        XCTAssertFalse(model.discardVoiceInput())
+        XCTAssertFalse(model.recoverVoiceInput(in: AgentTask(.object(["id": .string("new-task")]))))
+        XCTAssertEqual(voice.ownerID, "owner"); XCTAssertEqual(voice.pendingURL, url)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: url.path))
+    }
+    func testAnOldTranscriptCannotConsumeANewerRecordingInTheSameTask() async throws {
+        let (defaults, suite) = defaults(); defer { defaults.removePersistentDomain(forName: suite) }
+        let old = try recording(defaults: defaults), current = try recording(defaults: defaults)
+        let voice = VoiceRecorder(defaults: defaults), model = AppModel.testing(relay: SpeechFixtureRelay(), voice: voice)
+        model.draftStore = try inputStore()
+        let chat = model.chat(for: AgentTask(.object(["id": .string("owner")])))
+        chat.draft = "Keep current input"
+        let result = await model.finishVoiceInput("Stale transcript", ownerID: "owner", chat: chat, recording: old)
+        XCTAssertNil(result); XCTAssertEqual(chat.draft, "Keep current input")
+        XCTAssertEqual(voice.pendingURL, current); XCTAssertTrue(FileManager.default.fileExists(atPath: current.path))
+    }
+    func testDeleteWhilePermissionIsPendingCannotStartALateRecording() async {
+        let (defaults, suite) = defaults(); defer { defaults.removePersistentDomain(forName: suite) }
+        let requested = expectation(description: "Microphone permission requested")
+        var permission: CheckedContinuation<Bool, Never>?
+        let voice = VoiceRecorder(defaults: defaults, requestPermission: {
+            await withCheckedContinuation { permission = $0; requested.fulfill() }
+        })
+        let model = AppModel.testing(relay: SpeechFixtureRelay(), voice: voice)
+        let work = Task { await voice.start(ownerID: "owner", provider: "openrouter") }
+        await fulfillment(of: [requested], timeout: 2)
+        XCTAssertTrue(model.discardVoiceInput())
+        permission?.resume(returning: true); await work.value
+        XCTAssertFalse(voice.recording); XCTAssertFalse(voice.starting); XCTAssertNil(voice.pendingURL); XCTAssertNil(voice.ownerID)
+    }
     func testComputerIsDefaultAndExplicitLocalChoiceIsPreserved() throws {
         let (defaults, suite) = defaults(); defer { defaults.removePersistentDomain(forName: suite) }
         XCTAssertEqual(NativeSpeechSettings.provider(in: defaults), "openrouter")

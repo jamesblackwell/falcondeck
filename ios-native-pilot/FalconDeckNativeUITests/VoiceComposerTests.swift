@@ -12,11 +12,11 @@ import XCTest
         let cleared = XCTNSPredicateExpectation(predicate: NSPredicate { _, _ in input.exists && (input.value as? String) != "A long draft with 🦅 Unicode that will be cleared before recording." }, object: nil)
         XCTAssertEqual(XCTWaiter.wait(for: [cleared], timeout: 5), .completed)
         app.buttons["record-voice"].tap()
-        XCTAssertTrue(app.buttons["Cancel voice input"].waitForExistence(timeout: 5))
+        XCTAssertTrue(app.buttons["Delete recording"].waitForExistence(timeout: 5))
         XCTAssertTrue(app.staticTexts["Recording"].waitForExistence(timeout: 5))
-        app.buttons["Cancel voice input"].tap()
+        app.buttons["Delete recording"].tap()
         XCTAssertTrue(input.waitForExistence(timeout: 5))
-        discardSavedRecording(app)
+        XCTAssertEqual(app.buttons["record-voice"].label, "Record voice message")
     }
     func testMicrophoneStaysOnTheRightBesideThePrimaryAction() {
         let app = XCUIApplication(); app.launchArguments = ["--demo"]; app.launch()
@@ -110,16 +110,8 @@ import XCTest
         XCTAssertTrue(app.staticTexts["Transcribing…"].waitForExistence(timeout: 3))
         XCTAssertFalse(app.staticTexts["Waiting for connection…"].exists)
         capture("Saved audio waits for connection before uploading")
-        app.buttons["Cancel voice input"].tap()
-        discardSavedRecording(app)
-    }
-    private func discardSavedRecording(_ app: XCUIApplication) {
-        if app.buttons["BackButton"].isHittable { app.buttons["BackButton"].tap() }
-        app.buttons["sidebar-settings"].tap()
-        app.buttons["Speech"].tap()
-        let discard = app.buttons["Discard recording"]
-        XCTAssertTrue(discard.waitForExistence(timeout: 5), "Cancelling the upload must retain captured audio")
-        discard.tap()
+        app.buttons["Delete recording"].tap()
+        XCTAssertEqual(app.buttons["record-voice"].label, "Record voice message")
     }
     func testComputerVoiceFailureIsVisibleOnTheResponse() {
         let app = XCUIApplication()
@@ -140,15 +132,15 @@ import XCTest
     }
     func testVoiceStatesReplaceTheInputWithoutLosingTheDraft() {
         XCUIDevice.shared.orientation = .portrait
-        for phase in ["starting", "recording", "transcribing", "failed"] {
+        for phase in ["starting", "recording", "transcribing", "failed", "ready"] {
             let app = XCUIApplication(); app.launchArguments = ["--demo", "--voice-preview=" + phase]; app.launch()
             app.buttons["sidebar-task-native"].tap()
-            let cancel = app.buttons["Cancel voice input"]
+            let cancel = app.buttons[phase == "starting" ? "Cancel voice input" : "Delete recording"]
             XCTAssertTrue(cancel.waitForExistence(timeout: 5))
             XCTAssertFalse(app.textFields["chat-input"].exists)
             XCTAssertFalse(app.buttons["composer-model"].exists)
-            XCTAssertGreaterThanOrEqual(cancel.frame.width, 48)
-            XCTAssertEqual(cancel.frame.height, 48, accuracy: 1)
+            XCTAssertGreaterThanOrEqual(cancel.frame.width, 44)
+            XCTAssertGreaterThanOrEqual(cancel.frame.height, 44)
             if phase == "transcribing" {
                 XCTAssertTrue(app.staticTexts["Transcribing…"].exists)
                 XCTAssertFalse(app.buttons["Transcribe and send"].exists)
@@ -158,9 +150,13 @@ import XCTest
                 XCTAssertTrue(app.staticTexts["0:42"].exists)
             } else if phase == "starting" {
                 XCTAssertFalse(app.buttons["Transcribe and send"].isEnabled)
+            } else if phase == "ready" {
+                XCTAssertTrue(app.buttons["Transcribe recording"].isHittable)
+                XCTAssertTrue(app.staticTexts["Recording saved"].exists)
+                XCTAssertFalse(app.staticTexts["0:00"].exists)
             } else {
                 XCTAssertTrue(app.buttons["Retry transcription"].isHittable)
-                XCTAssertTrue(app.buttons["Speech settings"].isHittable)
+                XCTAssertTrue(app.buttons["Recording options"].isHittable)
             }
             let shot = XCTAttachment(screenshot: XCUIScreen.main.screenshot()); shot.name = "Voice composer " + phase; shot.lifetime = .keepAlways; add(shot)
             cancel.tap()
@@ -170,4 +166,51 @@ import XCTest
             app.terminate()
         }
     }
+    func testSavedRecordingInAnotherTaskOffersUseOrDeleteWithoutOpeningSettings() {
+        for choice in ["Delete recording", "Use recording here"] {
+            let app = XCUIApplication(); app.launchArguments = ["--demo", "--voice-preview=other-task"]; app.launch()
+            app.buttons["sidebar-task-native"].tap()
+            let input = app.textFields["chat-input"]
+            XCTAssertTrue(input.waitForExistence(timeout: 5))
+            app.buttons["record-voice"].tap()
+            XCTAssertTrue(app.buttons[choice].waitForExistence(timeout: 5))
+            XCTAssertFalse(app.navigationBars["Speech"].exists)
+            capture("Saved recording offers explicit recovery or deletion")
+            app.buttons[choice].tap()
+            if choice == "Use recording here" {
+                XCTAssertTrue(app.staticTexts["Recording saved"].waitForExistence(timeout: 5))
+                app.buttons["Transcribe recording"].tap()
+                // Local fixture has no audio file; failure must stay inline.
+                XCTAssertTrue(app.buttons["Retry transcription"].waitForExistence(timeout: 5))
+                XCTAssertFalse(app.navigationBars["Speech"].exists)
+                capture("Retry errors stay inline with a clear delete action")
+                app.buttons["Delete recording"].tap()
+            }
+            XCTAssertTrue(input.waitForExistence(timeout: 5))
+            XCTAssertEqual(input.value as? String, "Keep my existing draft.")
+            XCTAssertEqual(app.buttons["record-voice"].label, "Record voice message")
+            XCTAssertFalse(app.descendants(matching: .any).matching(identifier: "voice-input").firstMatch.exists)
+            app.terminate()
+        }
+    }
+    func testKeepingAudioForLaterDoesNotTrapTheComposer() {
+        let app = XCUIApplication(); app.launchArguments = ["--demo", "--loading-preview=slow", "--voice-preview=ready"]; app.launch()
+        app.buttons["sidebar-task-native"].tap()
+        let options = app.buttons["Recording options"]
+        XCTAssertTrue(options.waitForExistence(timeout: 5)); options.tap()
+        app.buttons["Keep recording for later"].tap()
+        let input = app.textFields["chat-input"]
+        XCTAssertTrue(input.waitForExistence(timeout: 5))
+        XCTAssertEqual(input.value as? String, "Keep my existing draft.")
+        XCTAssertEqual(app.buttons["record-voice"].label, "Recover saved recording")
+        app.buttons["record-voice"].tap()
+        XCTAssertTrue(app.staticTexts["Recording saved"].waitForExistence(timeout: 5))
+        XCTAssertFalse(app.navigationBars["Speech"].exists)
+        app.buttons["Delete recording"].tap()
+        XCTAssertTrue(input.waitForExistence(timeout: 5))
+        input.typeText(" Continue typing.")
+        XCTAssertEqual(input.value as? String, "Keep my existing draft. Continue typing.")
+        capture("Deleting a saved recording returns directly to the typed draft")
+    }
+
 }

@@ -323,6 +323,11 @@ final class AppModel {
                 _ = try? await relay.restore(connectionID: connectionID)
             }
             demo = false; hasSession = true; connected = true; hasLiveSnapshot = true; status = "Preview computer"
+            // Exercise durable transcript handoff without accessing a real pairing.
+            let inputRoot = FileManager.default.temporaryDirectory.appending(path: "NativeLoadingInputPreview")
+            try? FileManager.default.removeItem(at: inputRoot)
+            let inputSession = SavedSession(relay: URL(string: "https://loading-preview.test")!, sessionID: "loading-preview", deviceID: "loading-preview", token: "fixture", secret: Data(repeating: 7, count: 32), daemonKey: "fixture", daemonIdentity: "fixture")
+            draftStore = try? DraftStore(session: inputSession, root: inputRoot)
             if ProcessInfo.processInfo.arguments.contains("--loading-preview=rename") {
                 projects = Demo.projects.map { $0.id == "falcondeck" ? Project($0.raw.setting("icon", .object(["kind": .string("image"), "etag": .string("local-brand-fixture")]))) : $0 }
                 tasks = Demo.tasks.filter(\.pinned).map { AgentTask($0.raw.setting("status", .string("idle"))) }
@@ -371,8 +376,8 @@ final class AppModel {
             }
         }
         if let argument = ProcessInfo.processInfo.arguments.first(where: { $0.hasPrefix("--voice-preview=") }),
-           let phase = argument.split(separator: "=").last.map(String.init), ["starting", "recording", "transcribing", "failed"].contains(phase), let task = tasks.first {
-            voice.preview(phase, ownerID: task.id)
+           let phase = argument.split(separator: "=").last.map(String.init), ["starting", "recording", "transcribing", "failed", "ready", "other-task"].contains(phase), let task = tasks.first {
+            voice.preview(phase, ownerID: phase == "other-task" ? "another-task" : task.id)
             let chat = chat(for: task); chat.voiceInputOpen = true; chat.draft = "Keep my existing draft."
         }
         await PerformancePreview.start(in: self)

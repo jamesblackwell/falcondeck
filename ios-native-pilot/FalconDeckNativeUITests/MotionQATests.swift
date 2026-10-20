@@ -14,7 +14,7 @@ import XCTest
     }
     func testCanvasWaveformPreservesRecordingControlsAndDraft() {
         let app = launch("recording")
-        let cancel = app.buttons["Cancel voice input"], stop = app.buttons["Stop and transcribe"]
+        let cancel = app.buttons["Delete recording"], stop = app.buttons["Stop and transcribe"]
         XCTAssertTrue(cancel.waitForExistence(timeout: 5))
         XCTAssertTrue(app.staticTexts["Recording"].exists)
         for control in [cancel, stop, app.buttons["Transcribe and send"]] {
@@ -53,7 +53,7 @@ import XCTest
             app.terminate()
             let recording = launch("recording", policy: policy)
             XCTAssertTrue(recording.staticTexts["Recording"].waitForExistence(timeout: 5))
-            XCTAssertTrue(recording.buttons["Cancel voice input"].isHittable)
+            XCTAssertTrue(recording.buttons["Delete recording"].isHittable)
             capture("Voice feedback under " + policy)
             recording.terminate()
         }

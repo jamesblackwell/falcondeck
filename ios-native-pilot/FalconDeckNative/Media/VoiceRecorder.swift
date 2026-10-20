@@ -108,9 +108,18 @@ final class VoiceRecorder: NSObject, AVAudioRecorderDelegate {
     func discard() {
         finishRecording(); cancelTranscription()
         if let pendingURL { try? FileManager.default.removeItem(at: pendingURL) }
-        pendingURL = nil; ownerID = nil; error = nil; levels = []
+        pendingURL = nil; ownerID = nil; error = nil; levels = []; elapsed = 0; transcriptionAttempt = 1
         defaults.removeObject(forKey: "native.voice.pending")
         defaults.removeObject(forKey: "native.voice.owner")
+        defaults.removeObject(forKey: "native.voice.provider")
+    }
+
+    /// Explicit recovery transfers this clip, never silently changes its provider.
+    @discardableResult func recover(ownerID: String) -> Bool {
+        guard pendingURL != nil, !acceptingTranscript else { return false }
+        finishRecording(); cancelTranscription()
+        self.ownerID = ownerID; defaults.set(ownerID, forKey: "native.voice.owner")
+        return true
     }
 
     func cancelTranscription() {
@@ -144,7 +153,7 @@ final class VoiceRecorder: NSObject, AVAudioRecorderDelegate {
             if provider == "openrouter" {
                 let audio = try await Task.detached {
                     let data = try Data(contentsOf: url)
-                    guard !data.isEmpty, data.count <= 8 * 1024 * 1024 else { throw PilotError("Record a shorter message (up to 8 MB).") }
+                    try NativeSpeechSettings.validateAudio(data)
                     return data
                 }.value
                 guard current == model.sessionScope, operationID == operation else { throw CancellationError() }
@@ -199,8 +208,8 @@ final class VoiceRecorder: NSObject, AVAudioRecorderDelegate {
     #if DEBUG
     /// Local screenshot fixtures never open a microphone, file or relay request.
     func preview(_ phase: String, ownerID: String) {
-        self.ownerID = ownerID; provider = "openrouter"; elapsed = 42
-        pendingURL = FileManager.default.temporaryDirectory.appending(path: "voice-ui-preview.m4a")
+        self.ownerID = ownerID; provider = "openrouter"; elapsed = phase == "ready" || phase == "other-task" ? 0 : 42
+        pendingURL = phase == "starting" ? nil : FileManager.default.temporaryDirectory.appending(path: "voice-ui-preview.m4a")
         starting = phase == "starting"; recording = phase == "recording"; transcribing = phase == "transcribing"
         levels = (0..<100).map { Float(abs(sin(Double($0) * 0.43))) * 0.8 }
         error = phase == "failed" ? "Could not reach your computer. Your recording is safe, so you can retry." : nil

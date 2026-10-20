@@ -37,7 +37,7 @@ struct ComposerView: View {
         VStack(alignment: .leading, spacing: 6) {
             if !chat.attachments.isEmpty { AttachmentStrip(chat: chat) }
             if voiceActive {
-                RecordingPanel(task: task, chat: chat, onTranscript: receiveTranscript)
+                RecordingPanel(task: task, chat: chat, onClose: resumeTyping, onTranscript: receiveTranscript)
             } else {
                 SlashCommandsView(task: task, chat: chat) { openGoal() }
                 TextField("Message", text: $chat.draft, selection: selectionBinding,
@@ -98,25 +98,32 @@ struct ComposerView: View {
         chat.voiceInsertion = voiceSelection.map { VoiceDraftInsertion.capture($0.indices, in: $0.text) } ?? VoiceDraftInsertion(original: chat.draft, selection: nil)
         focused = false
     }
-    private func receiveTranscript(_ text: String, submit: Bool) {
-        Task { await acceptTranscript(text, submit: submit) }
+    private func receiveTranscript(_ text: String, submit: Bool, recording: URL) {
+        Task { await acceptTranscript(text, submit: submit, recording: recording) }
     }
-    private func acceptTranscript(_ text: String, submit: Bool) async {
-        guard let caret = await model.finishVoiceInput(text, ownerID: task.id, chat: chat) else { return }
+    private func acceptTranscript(_ text: String, submit: Bool, recording: URL) async {
+        guard let caret = await model.finishVoiceInput(text, ownerID: task.id, chat: chat, recording: recording) else { return }
         transcriptFeedback &+= 1
         if submit { submitDraft() }
-        else {
-            let draft = chat.draft, offset = caret.utf16Offset(in: chat.draft)
-            Task { @MainActor in
-                // The text field is recreated when the recording panel closes.
-                // Apply its caret after focus, so UIKit cannot restore the old
-                // selection over the freshly inserted transcript.
-                await Task.yield()
-                focused = true
-                await Task.yield()
-                guard !chat.voiceInputOpen, chat.draft.utf16.elementsEqual(draft.utf16) else { return }
-                selectionBinding.wrappedValue = TextSelection(insertionPoint: String.Index(utf16Offset: offset, in: chat.draft))
-            }
+        else { focusComposer(at: NSRange(location: caret.utf16Offset(in: chat.draft), length: 0)) }
+    }
+    private func resumeTyping() {
+        let previous = voiceSelection.flatMap { saved -> NSRange? in
+            guard saved.text.utf16.elementsEqual(chat.draft.utf16) else { return nil }
+            return VoiceDraftInsertion.capture(saved.indices, in: saved.text).selection
+        }
+        focusComposer(at: previous ?? NSRange(location: chat.draft.utf16.count, length: 0))
+    }
+    private func focusComposer(at range: NSRange) {
+        let draft = chat.draft
+        Task { @MainActor in
+            // The editor is recreated after voice input. Restore its selection
+            // after focus so UIKit cannot replace it with a stale caret.
+            await Task.yield()
+            focused = true
+            await Task.yield()
+            guard !chat.voiceInputOpen, chat.draft.utf16.elementsEqual(draft.utf16), let indices = Range(range, in: chat.draft) else { return }
+            selectionBinding.wrappedValue = indices.isEmpty ? TextSelection(insertionPoint: indices.lowerBound) : TextSelection(range: indices)
         }
     }
     private func submitDraft() {

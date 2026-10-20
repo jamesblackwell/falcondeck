@@ -43,23 +43,26 @@ struct SpeechSettingsView: View {
             if model.voice.pendingURL != nil {
                 Section {
                     Text(model.voice.recording ? "A recording is in progress." : "Your saved recording can be recovered here, even if its original task is no longer available.").font(.footnote).foregroundStyle(FD.secondary)
-                    Button("Transcribe on this device") { recover(using: "on-device") }
-                    Button("Transcribe on paired computer") { recover(using: "openrouter") }.disabled(!model.connected)
-                    if model.voice.transcribing { HStack { ActivityDiamond(); Text("Transcribing…") } }
-                    if !recovered.isEmpty {
-                        TextField("Recovered transcript", text: $recovered, axis: .vertical).lineLimit(3...12)
-                        Button("Copy transcript") { UIPasteboard.general.string = recovered }
-                        Button("Use in a new task") {
-                            guard !inserting else { return }; inserting = true
-                            Task {
-                                defer { inserting = false }
-                                if await model.insertRecoveredSpeech(recovered) { recovered = ""; model.showSpeechSettings = false }
-                                else { error = model.error ?? "Couldn't create a task. Your transcript is still here; you can retry or copy it." }
-                            }
-                        }.disabled(!model.demo && !model.connected)
-                    }
-                    Button("Discard recording", role: .destructive) { model.voice.discard(); recovered = "" }
-                } header: { Text("Saved recording") }.listRowBackground(FD.surface).disabled(model.voice.transcribing || inserting)
+                    Group {
+                        Button("Transcribe on this device") { recover(using: "on-device") }
+                        Button("Transcribe on paired computer") { recover(using: "openrouter") }.disabled(!model.connected)
+                        if model.voice.transcribing { HStack { ActivityDiamond(); Text("Transcribing…") } }
+                        if !recovered.isEmpty {
+                            TextField("Recovered transcript", text: $recovered, axis: .vertical).lineLimit(3...12)
+                            Button("Copy transcript") { UIPasteboard.general.string = recovered }
+                            Button("Use in a new task") {
+                                guard !inserting else { return }; inserting = true
+                                Task {
+                                    defer { inserting = false }
+                                    if await model.insertRecoveredSpeech(recovered) { recovered = ""; model.showSpeechSettings = false }
+                                    else { error = model.error ?? "Couldn't create a task. Your transcript is still here; you can retry or copy it." }
+                                }
+                            }.disabled(!model.demo && !model.connected)
+                        }
+                    }.disabled(model.voice.transcribing || model.voice.acceptingTranscript || inserting)
+                    Button("Delete recording", role: .destructive) { if model.discardVoiceInput() { recovered = ""; error = nil } }
+                        .disabled(model.voice.acceptingTranscript || inserting)
+                } header: { Text("Saved recording") }.listRowBackground(FD.surface)
             }
             if let error = error ?? model.voice.error { Text(error).font(.footnote).foregroundStyle(.orange) }
         }.scrollContentBackground(.hidden).background(FD.background).navigationTitle("Speech")

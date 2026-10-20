@@ -76,7 +76,7 @@ import XCTest
         XCTAssertFalse(app.textFields["chat-input"].exists)
         XCTAssertFalse(app.buttons["Transcribe and send"].exists)
         XCTAssertFalse(app.buttons["Stop and transcribe"].exists)
-        XCTAssertFalse(app.buttons["Cancel voice input"].isEnabled)
+        XCTAssertFalse(app.buttons["Delete recording"].isEnabled)
         capture("Transcript handoff remains in the existing busy surface", app: app)
     }
 }
