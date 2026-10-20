@@ -285,6 +285,9 @@ struct InnerState {
     /// fall back to their id; see `AppState::provider_bin`.
     provider_bins: HashMap<AgentProvider, String>,
     state_path: PathBuf,
+    /// An abandoned embedding retains ownership while background tasks exist.
+    /// Graceful shutdown explicitly releases this after stopping the server.
+    state_lock: StdMutex<Option<Arc<crate::state_lock::StateLock>>>,
     preferences_path: PathBuf,
     scheduled_tasks_path: PathBuf,
     sequence: AtomicU64,
@@ -596,6 +599,24 @@ fn builtin_rename_thread_tool() -> falcondeck_core::ExtensionAgentTool {
 }
 
 impl AppState {
+    pub(crate) fn retain_state_lock(&self, state_lock: Arc<crate::state_lock::StateLock>) {
+        *self
+            .inner
+            .state_lock
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(state_lock);
+    }
+
+    pub(crate) fn release_state_lock_after_shutdown(&self) {
+        if self.is_shutting_down() {
+            self.inner
+                .state_lock
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .take();
+        }
+    }
+
     /// Directory holding daemon-owned config files (providers.json,
     /// connectors.json, daemon-state.json).
     pub(crate) fn state_dir(&self) -> Option<std::path::PathBuf> {
@@ -921,6 +942,24 @@ impl AppState {
         deno_bin: String,
         computer_use_bin: Option<String>,
     ) -> Self {
+        Self::new_with_state_path_and_runtimes_and_host(
+            version,
+            provider_bins,
+            state_path,
+            deno_bin,
+            computer_use_bin,
+            None,
+        )
+    }
+
+    pub fn new_with_state_path_and_runtimes_and_host(
+        version: String,
+        provider_bins: HashMap<AgentProvider, String>,
+        state_path: PathBuf,
+        deno_bin: String,
+        computer_use_bin: Option<String>,
+        computer_use_host_bundle_id: Option<String>,
+    ) -> Self {
         // 512 envelopes cover any realistic burst between client paints while
         // bounding retained memory: each slot can hold a full snapshot event
         // with plan/diff artifacts.
@@ -930,7 +969,11 @@ impl AppState {
         let control_store = crate::control::store::control_store_path(&state_path);
         let extension_registry = extensions::ExtensionRegistry::new(&state_path);
         let extension_hosts = extension_host::ExtensionHostPool::new(state_path.clone(), deno_bin);
-        let computer_use = computer_use::ComputerUseHost::new(computer_use_bin, &state_path);
+        let computer_use = computer_use::ComputerUseHost::new(
+            computer_use_bin,
+            &state_path,
+            computer_use_host_bundle_id,
+        );
         let computer_use_available = computer_use.available();
         Self {
             inner: Arc::new(InnerState {
@@ -946,6 +989,7 @@ impl AppState {
                 interrupted_resume_gate: Mutex::new(()),
                 provider_bins,
                 state_path,
+                state_lock: StdMutex::new(None),
                 preferences_path,
                 scheduled_tasks_path,
                 sequence: AtomicU64::new(1),
@@ -2176,6 +2220,13 @@ impl AppState {
             let Ok(index) = spawn_blocking(move || thread_search::rescan(&previous)).await else {
                 return;
             };
+
+            // A scan can outlive graceful shutdown because blocking filesystem
+            // reads cannot be aborted. Do not let its stale cache overwrite the
+            // replacement runtime's index after state ownership is released.
+            if state.is_shutting_down() {
+                return;
+            }
 
             let path = thread_search::index_path(&state.inner.state_path);
             if let Ok(serialized) = serde_json::to_string(&index)

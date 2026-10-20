@@ -1,0 +1,8 @@
+@import 'tailwindcss';
+@import '@falcondeck/ui/styles.css';
+@source '../../../../../extensions/official';
+html, body, #root { margin: 0; height: 100%; width: 100%; overflow: hidden; background: var(--fd-bg-1); color: var(--fd-fg-0); }
+html { font-family: -apple-system, BlinkMacSystemFont, sans-serif; --fd-font-sans: -apple-system, BlinkMacSystemFont, sans-serif; --fd-font-mono: 'SF Mono', Menlo, monospace; }
+button, input, textarea, select { font: inherit; }
+button:not(:disabled) { cursor: pointer; }
+html[data-surface='tool-result'], html[data-surface='tool-result'] body, html[data-surface='tool-result'] #root { height: auto; min-height: 0; overflow: auto; background: transparent; }

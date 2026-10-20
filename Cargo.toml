@@ -3,6 +3,7 @@ members = [
   "crates/falcondeck-core",
   "crates/falcondeck-daemon",
   "crates/falcondeck-relay",
+  "crates/falcondeck-native-host",
   "apps/desktop/src-tauri",
 ]
 resolver = "2"

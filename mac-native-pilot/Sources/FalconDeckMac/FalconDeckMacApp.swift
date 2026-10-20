@@ -1,23 +1,56 @@
 import SwiftUI
 
-@main struct FalconDeckMacApp: App {
+struct FalconDeckMacApp: App {
+    @Environment(\.scenePhase) private var scenePhase
+    @NSApplicationDelegateAdaptor(RuntimeLifecycle.self) private var runtimeLifecycle
     @State private var store = AppStore()
+    @Bindable private var preferences = NativePreferences.shared
+    @State private var showWelcome = !UserDefaults.standard.bool(forKey: "falcondeck.native.onboarding.complete")
 
     var body: some Scene {
         Window("FalconDeck Native", id: "workspace") {
             WorkspaceView(store: store)
                 .frame(minWidth: 960, minHeight: 620)
-                .preferredColorScheme(.dark)
-                .task { await store.reconnect() }
+                .preferredColorScheme(preferences.preferredColorScheme)
+                .font(preferences.font(size: 14))
+                .task {
+                    runtimeLifecycle.store = store
+                    NativeCommandDispatcher.shared.attach(store: store)
+                    NativeSpeechController.shared.attach(store: store)
+                    NativePlatform.shared.attach(store: store, currentHost: { store.selectedHostID }, route: { host, _, task in
+                        let id = host.map { NativeHostManager.namespace(hostID: $0, id: task) } ?? task
+                        await store.selectTask(id)
+                        NSApp.activate(ignoringOtherApps: true)
+                    })
+                    await store.reconnect()
+                }
+                .sheet(isPresented: $showWelcome) { NativeWelcomeSetupView(store: store, onComplete: { showWelcome = false }) }
+                .onChange(of: scenePhase) { _, phase in
+                    Task { await NativeHostManager.shared.setForeground(phase == .active) }
+                    if phase == .active { store.markSelectedTaskRead() }
+                }
         }
         .defaultSize(width: 1320, height: 860)
         .windowStyle(.hiddenTitleBar)
         .commands {
+            CommandGroup(replacing: .appSettings) {
+                Button("Settings…") { store.selectSection("settings") }
+            }
             CommandGroup(after: .newItem) {
                 Button("New task") { store.newTask() }
-                    .keyboardShortcut("n", modifiers: .command)
+                Button("New chat") { Task { await store.newChat() } }
                 Button("Reconnect") { Task { await store.reconnect() } }
                     .keyboardShortcut("r", modifiers: [.command, .shift])
+            }
+            CommandMenu("Workspace") {
+                Button("Search tasks and commands") { NativeCommandDispatcher.shared.execute("commandPalette") }
+                Button("Activity") { store.selectSection("activity") }
+                Button("Automations") { store.selectSection("automations") }
+                Button("Usage") { store.selectSection("usage") }
+                Divider()
+                Button("Toggle sidebar") { NativeCommandDispatcher.shared.execute("toggleSidebar") }
+                Toggle("Show inspector", isOn: $store.showInspector)
+                Toggle("Show terminal", isOn: $store.showTerminal)
             }
         }
     }

@@ -275,6 +275,8 @@ pub struct BuiltinComputerUseSpec {
     pub binary: String,
     /// Private Unix socket of the host-owned `serve --embedded` daemon.
     pub socket_path: String,
+    /// Application identity of the embedded host, matching its TCC grants.
+    pub host_bundle_id: String,
 }
 
 /// Builds the in-memory cua-driver MCP proxy for one spawn.
@@ -289,7 +291,7 @@ pub fn builtin_computer_use_server(spec: &BuiltinComputerUseSpec) -> McpServerCo
                 "--socket".to_string(),
                 spec.socket_path.clone(),
                 "--host-bundle-id".to_string(),
-                "com.falcondeck.desktop".to_string(),
+                spec.host_bundle_id.clone(),
             ],
             env: BTreeMap::new(),
         },
@@ -1459,6 +1461,7 @@ mod tests {
         let spec = BuiltinComputerUseSpec {
             binary: "/Applications/FalconDeck.app/Contents/MacOS/cua-driver".to_string(),
             socket_path: "/tmp/cua.sock".to_string(),
+            host_bundle_id: "com.falcondeck.mac-native-pilot".to_string(),
         };
         let impostor = vec![McpServerConfig {
             name: BUILTIN_COMPUTER_USE_CONNECTOR_NAME.to_string(),
@@ -1486,7 +1489,7 @@ mod tests {
                 "--socket".to_string(),
                 "/tmp/cua.sock".to_string(),
                 "--host-bundle-id".to_string(),
-                "com.falcondeck.desktop".to_string(),
+                "com.falcondeck.mac-native-pilot".to_string(),
             ]
         );
         assert!(env.is_empty());

@@ -26,8 +26,9 @@ use tokio::{
 use super::AppState;
 use crate::error::DaemonError;
 
-/// Bundle id FalconDeck.app presents to TCC and to `health_report`.
-pub const HOST_BUNDLE_ID: &str = "com.falcondeck.desktop";
+/// Default identity for existing desktop embedders. Native hosts supply their
+/// own application identity through `DaemonConfig`.
+pub const DEFAULT_HOST_BUNDLE_ID: &str = "com.falcondeck.desktop";
 /// Release pin. Binary and skill pack must stay on this tag.
 pub const PINNED_DRIVER_VERSION: &str = "0.33.4";
 const READY_TIMEOUT: Duration = Duration::from_secs(10);
@@ -52,6 +53,7 @@ const MAX_THUMBNAIL_BYTES: u64 = 80_000;
 pub struct ComputerUseHost {
     binary: Option<PathBuf>,
     state_dir: PathBuf,
+    host_bundle_id: String,
     inner: tokio::sync::Mutex<HostInner>,
 }
 
@@ -69,7 +71,7 @@ struct HostInner {
 }
 
 impl ComputerUseHost {
-    pub fn new(binary: Option<String>, state_path: &Path) -> Self {
+    pub fn new(binary: Option<String>, state_path: &Path, host_bundle_id: Option<String>) -> Self {
         let binary = binary
             .filter(|value| !value.trim().is_empty())
             .map(PathBuf::from);
@@ -80,6 +82,10 @@ impl ComputerUseHost {
         Self {
             binary,
             state_dir,
+            host_bundle_id: host_bundle_id
+                .map(|value| value.trim().to_string())
+                .filter(|value| !value.is_empty())
+                .unwrap_or_else(|| DEFAULT_HOST_BUNDLE_ID.to_string()),
             inner: tokio::sync::Mutex::new(HostInner::default()),
         }
     }
@@ -141,15 +147,15 @@ impl ComputerUseHost {
             if let Some(socket) = inner.socket_path.clone() {
                 if socket_is_live(&socket) {
                     if inner.last_health.as_ref().is_some_and(tcc_grants_ok) {
-                        return Ok(connector_from(&inner, binary));
+                        return Ok(connector_from(&inner, binary, &self.host_bundle_id));
                     }
-                    match probe_health(binary, &socket).await {
+                    match probe_health(binary, &socket, &self.host_bundle_id).await {
                         Ok(health) => {
                             let ok = tcc_grants_ok(&health);
                             inner.last_health = Some(health);
                             inner.last_error = None;
                             if ok {
-                                return Ok(connector_from(&inner, binary));
+                                return Ok(connector_from(&inner, binary, &self.host_bundle_id));
                             }
                             return Ok(None);
                         }
@@ -162,9 +168,16 @@ impl ComputerUseHost {
         } else if inner.child.is_some() {
             stop_locked(&mut inner).await;
         }
-        start_locked(&mut inner, binary, &self.state_dir, prefs).await?;
+        start_locked(
+            &mut inner,
+            binary,
+            &self.state_dir,
+            &self.host_bundle_id,
+            prefs,
+        )
+        .await?;
         if inner.last_health.as_ref().is_some_and(tcc_grants_ok) {
-            Ok(connector_from(&inner, binary))
+            Ok(connector_from(&inner, binary, &self.host_bundle_id))
         } else {
             let error = inner
                 .last_error
@@ -219,14 +232,20 @@ impl ComputerUseHost {
             .await?
             .ok_or_else(|| missing_test_reason())?;
         let binary = self.binary.as_ref().ok_or("cua-driver binary missing")?;
-        let health = probe_health(binary, &connector.socket_path).await?;
+        let health = probe_health(binary, &connector.socket_path, &self.host_bundle_id).await?;
         {
             let mut inner = self.inner.lock().await;
             inner.last_health = Some(health.clone());
             inner.last_error = None;
         }
         let capture_dir = self.state_dir.join("computer-use");
-        let capture = capture_test_thumbnail(binary, &connector.socket_path, &capture_dir).await;
+        let capture = capture_test_thumbnail(
+            binary,
+            &connector.socket_path,
+            &capture_dir,
+            &self.host_bundle_id,
+        )
+        .await;
         let (thumbnail_data_url, black_frame, capture_error) = match capture {
             Ok(shot) => (shot.thumbnail_data_url, shot.black_frame, None),
             Err(error) => (None, false, Some(error)),
@@ -247,21 +266,27 @@ impl ComputerUseHost {
 pub struct ComputerUseConnector {
     pub binary: PathBuf,
     pub socket_path: PathBuf,
+    pub host_bundle_id: String,
 }
 
 #[cfg(test)]
-pub fn mcp_args(socket_path: &Path) -> Vec<String> {
+pub fn mcp_args(socket_path: &Path, host_bundle_id: &str) -> Vec<String> {
     vec![
         "mcp".to_string(),
         "--embedded".to_string(),
         "--socket".to_string(),
         socket_path.display().to_string(),
         "--host-bundle-id".to_string(),
-        HOST_BUNDLE_ID.to_string(),
+        host_bundle_id.to_string(),
     ]
 }
 
-pub fn serve_args(socket_path: &Path, overlay: bool, existing_profile: bool) -> Vec<String> {
+pub fn serve_args(
+    socket_path: &Path,
+    host_bundle_id: &str,
+    overlay: bool,
+    existing_profile: bool,
+) -> Vec<String> {
     let mut args = vec![
         "serve".to_string(),
         "--embedded".to_string(),
@@ -270,7 +295,7 @@ pub fn serve_args(socket_path: &Path, overlay: bool, existing_profile: bool) -> 
         "--socket".to_string(),
         socket_path.display().to_string(),
         "--host-bundle-id".to_string(),
-        HOST_BUNDLE_ID.to_string(),
+        host_bundle_id.to_string(),
         "--permission-mode".to_string(),
         "standard".to_string(),
     ];
@@ -283,7 +308,7 @@ pub fn serve_args(socket_path: &Path, overlay: bool, existing_profile: bool) -> 
     args
 }
 
-pub fn serve_env(telemetry: bool) -> BTreeMap<String, String> {
+pub fn serve_env(telemetry: bool, host_bundle_id: &str) -> BTreeMap<String, String> {
     let mut env = BTreeMap::new();
     for key in ENV_ALLOWLIST {
         if let Ok(value) = std::env::var(key) {
@@ -298,7 +323,7 @@ pub fn serve_env(telemetry: bool) -> BTreeMap<String, String> {
     env.insert("CUA_DRIVER_EMBEDDED".to_string(), "1".to_string());
     env.insert(
         "CUA_DRIVER_HOST_BUNDLE_ID".to_string(),
-        HOST_BUNDLE_ID.to_string(),
+        host_bundle_id.to_string(),
     );
     env.insert(
         "CUA_DRIVER_EMBEDDED_HOST_PID".to_string(),
@@ -386,10 +411,15 @@ fn check_passed(health: &ComputerUseHealth, name: &str) -> bool {
         .is_some_and(|check| check.status == "pass")
 }
 
-fn connector_from(inner: &HostInner, binary: &Path) -> Option<ComputerUseConnector> {
+fn connector_from(
+    inner: &HostInner,
+    binary: &Path,
+    host_bundle_id: &str,
+) -> Option<ComputerUseConnector> {
     Some(ComputerUseConnector {
         binary: binary.to_path_buf(),
         socket_path: inner.socket_path.clone()?,
+        host_bundle_id: host_bundle_id.to_string(),
     })
 }
 
@@ -397,6 +427,7 @@ async fn start_locked(
     inner: &mut HostInner,
     binary: &Path,
     state_dir: &Path,
+    host_bundle_id: &str,
     prefs: &ComputerUsePreferences,
 ) -> Result<(), String> {
     inner.generation = inner.generation.saturating_add(1);
@@ -415,6 +446,7 @@ async fn start_locked(
     command
         .args(serve_args(
             &socket_path,
+            host_bundle_id,
             prefs.overlay,
             prefs.existing_profile,
         ))
@@ -423,7 +455,7 @@ async fn start_locked(
         .stderr(Stdio::piped())
         .kill_on_drop(true)
         .env_clear();
-    for (key, value) in serve_env(prefs.telemetry) {
+    for (key, value) in serve_env(prefs.telemetry, host_bundle_id) {
         command.env(key, value);
     }
 
@@ -455,7 +487,7 @@ async fn start_locked(
     inner.overlay = prefs.overlay;
     inner.existing_profile = prefs.existing_profile;
 
-    match wait_until_ready(binary, &socket_path).await {
+    match wait_until_ready(binary, &socket_path, host_bundle_id).await {
         Ok(health) => {
             if !check_passed(&health, "bundle_identity") {
                 tracing::warn!(
@@ -485,11 +517,15 @@ async fn stop_locked(inner: &mut HostInner) {
     }
 }
 
-async fn wait_until_ready(binary: &Path, socket_path: &Path) -> Result<ComputerUseHealth, String> {
+async fn wait_until_ready(
+    binary: &Path,
+    socket_path: &Path,
+    host_bundle_id: &str,
+) -> Result<ComputerUseHealth, String> {
     let deadline = tokio::time::Instant::now() + READY_TIMEOUT;
     loop {
         if socket_path.exists() {
-            match probe_health(binary, socket_path).await {
+            match probe_health(binary, socket_path, host_bundle_id).await {
                 Ok(health) => return Ok(health),
                 Err(error) if tokio::time::Instant::now() >= deadline => return Err(error),
                 Err(_) => {}
@@ -501,11 +537,16 @@ async fn wait_until_ready(binary: &Path, socket_path: &Path) -> Result<ComputerU
     }
 }
 
-async fn probe_health(binary: &Path, socket_path: &Path) -> Result<ComputerUseHealth, String> {
+async fn probe_health(
+    binary: &Path,
+    socket_path: &Path,
+    host_bundle_id: &str,
+) -> Result<ComputerUseHealth, String> {
     let payload = serde_json::json!({ "include": HEALTH_INCLUDE });
     let (stdout, stderr) = call_tool(
         binary,
         socket_path,
+        host_bundle_id,
         "health_report",
         payload,
         Duration::from_secs(8),
@@ -523,6 +564,7 @@ async fn probe_health(binary: &Path, socket_path: &Path) -> Result<ComputerUseHe
 async fn call_tool(
     binary: &Path,
     socket_path: &Path,
+    host_bundle_id: &str,
     tool: &str,
     payload: serde_json::Value,
     limit: Duration,
@@ -539,6 +581,7 @@ async fn call_tool(
             ])
             .env_clear()
             .env("CUA_DRIVER_EMBEDDED", "1")
+            .env("CUA_DRIVER_HOST_BUNDLE_ID", host_bundle_id)
             .env("CUA_DRIVER_RS_UPDATE_CHECK", "false")
             .env("CUA_DRIVER_RS_TELEMETRY_ENABLED", "false")
             .kill_on_drop(true)
@@ -564,17 +607,18 @@ async fn capture_test_thumbnail(
     binary: &Path,
     socket_path: &Path,
     capture_dir: &Path,
+    host_bundle_id: &str,
 ) -> Result<CapturedThumbnail, String> {
     tokio::fs::create_dir_all(capture_dir)
         .await
         .map_err(|error| error.to_string())?;
     let capture_path = capture_dir.join("test-capture.png");
     let _ = tokio::fs::remove_file(&capture_path).await;
-    let window_error = capture_window_png(binary, socket_path, &capture_path)
+    let window_error = capture_window_png(binary, socket_path, &capture_path, host_bundle_id)
         .await
         .err();
     if !capture_path.is_file() {
-        let desktop_error = capture_desktop_png(binary, socket_path, &capture_path)
+        let desktop_error = capture_desktop_png(binary, socket_path, &capture_path, host_bundle_id)
             .await
             .err();
         if !capture_path.is_file() {
@@ -601,11 +645,13 @@ async fn capture_window_png(
     binary: &Path,
     socket_path: &Path,
     capture_path: &Path,
+    host_bundle_id: &str,
 ) -> Result<(), String> {
     let host_pid = std::process::id();
     let (list_stdout, _list_stderr) = call_tool(
         binary,
         socket_path,
+        host_bundle_id,
         "list_windows",
         serde_json::json!({ "pid": host_pid }),
         Duration::from_secs(8),
@@ -616,6 +662,7 @@ async fn capture_window_png(
         let (all_stdout, all_stderr) = call_tool(
             binary,
             socket_path,
+            host_bundle_id,
             "list_windows",
             serde_json::json!({}),
             Duration::from_secs(8),
@@ -644,6 +691,7 @@ async fn capture_window_png(
     let (stdout, stderr) = call_tool(
         binary,
         socket_path,
+        host_bundle_id,
         "get_window_state",
         payload,
         Duration::from_secs(12),
@@ -664,10 +712,12 @@ async fn capture_desktop_png(
     binary: &Path,
     socket_path: &Path,
     capture_path: &Path,
+    host_bundle_id: &str,
 ) -> Result<(), String> {
     let (stdout, stderr) = call_tool(
         binary,
         socket_path,
+        host_bundle_id,
         "get_desktop_state",
         serde_json::json!({
             "screenshot_out_file": capture_path.display().to_string(),
@@ -1059,6 +1109,7 @@ impl AppState {
             Ok(Some(connector)) => Some(crate::connectors::BuiltinComputerUseSpec {
                 binary: connector.binary.display().to_string(),
                 socket_path: connector.socket_path.display().to_string(),
+                host_bundle_id: connector.host_bundle_id,
             }),
             Ok(None) => None,
             Err(error) => {
@@ -1085,7 +1136,9 @@ mod tests {
             &binary,
             r#"#!/usr/bin/python3
 import sys, socket, os, json
+assert os.environ['CUA_DRIVER_HOST_BUNDLE_ID'] == 'com.falcondeck.mac-native-pilot'
 if sys.argv[1] == 'serve':
+    assert sys.argv[sys.argv.index('--host-bundle-id') + 1] == 'com.falcondeck.mac-native-pilot'
     server = socket.socket(socket.AF_UNIX)
     server.bind(sys.argv[sys.argv.index('--socket') + 1])
     server.listen()
@@ -1105,6 +1158,7 @@ else:
         let host = ComputerUseHost::new(
             Some(binary.display().to_string()),
             &temp.path().join("state.json"),
+            Some("com.falcondeck.mac-native-pilot".to_string()),
         );
         let prefs = ComputerUsePreferences {
             enabled: true,
@@ -1112,6 +1166,7 @@ else:
             ..Default::default()
         };
         let first = host.ensure_ready(&prefs).await.unwrap().unwrap();
+        assert_eq!(first.host_bundle_id, "com.falcondeck.mac-native-pilot");
         assert!(host.snapshot(&prefs, true).await.health.is_some());
         let mut socket = tokio::net::UnixStream::connect(&first.socket_path)
             .await
@@ -1163,6 +1218,7 @@ else:
         let result = call_tool(
             &binary,
             Path::new("/unused.sock"),
+            DEFAULT_HOST_BUNDLE_ID,
             "health_report",
             serde_json::json!({}),
             Duration::from_secs(2),
@@ -1184,9 +1240,19 @@ else:
     fn existing_profile_requires_explicit_launch_consent() {
         let prefs: ComputerUsePreferences = serde_json::from_str("{}").unwrap();
         assert!(!prefs.existing_profile);
-        let args = serve_args(Path::new("/tmp/cua.sock"), true, prefs.existing_profile);
+        let args = serve_args(
+            Path::new("/tmp/cua.sock"),
+            DEFAULT_HOST_BUNDLE_ID,
+            true,
+            prefs.existing_profile,
+        );
         assert!(!args.iter().any(|arg| arg == "--grant"));
-        let granted = serve_args(Path::new("/tmp/cua.sock"), true, true);
+        let granted = serve_args(
+            Path::new("/tmp/cua.sock"),
+            DEFAULT_HOST_BUNDLE_ID,
+            true,
+            true,
+        );
         assert!(
             granted
                 .windows(2)
@@ -1198,7 +1264,7 @@ else:
                 .any(|args| args == ["--permission-mode", "standard"])
         );
         assert!(
-            !mcp_args(Path::new("/tmp/cua.sock"))
+            !mcp_args(Path::new("/tmp/cua.sock"), DEFAULT_HOST_BUNDLE_ID)
                 .iter()
                 .any(|arg| arg == "--grant")
         );
@@ -1350,8 +1416,30 @@ else:
     }
 
     #[test]
+    fn host_identity_is_local_to_each_embedded_host() {
+        let state_path = Path::new("/tmp/falcondeck-state.json");
+        let desktop = ComputerUseHost::new(None, state_path, None);
+        let native = ComputerUseHost::new(
+            None,
+            state_path,
+            Some("com.falcondeck.mac-native-pilot".to_string()),
+        );
+        let blank = ComputerUseHost::new(None, state_path, Some("  ".to_string()));
+
+        assert_eq!(desktop.host_bundle_id, DEFAULT_HOST_BUNDLE_ID);
+        assert_eq!(native.host_bundle_id, "com.falcondeck.mac-native-pilot");
+        assert_eq!(blank.host_bundle_id, DEFAULT_HOST_BUNDLE_ID);
+        assert!(
+            serve_args(state_path, &native.host_bundle_id, true, false)
+                .windows(2)
+                .any(|args| args == ["--host-bundle-id", "com.falcondeck.mac-native-pilot"])
+        );
+    }
+
+    #[test]
     fn mcp_args_point_at_the_embedded_socket() {
-        let args = mcp_args(Path::new("/tmp/cua.sock"));
+        let host_bundle_id = "com.falcondeck.mac-native-pilot";
+        let args = mcp_args(Path::new("/tmp/cua.sock"), host_bundle_id);
         assert_eq!(
             args,
             vec![
@@ -1360,21 +1448,31 @@ else:
                 "--socket",
                 "/tmp/cua.sock",
                 "--host-bundle-id",
-                HOST_BUNDLE_ID,
+                host_bundle_id,
             ]
         );
     }
 
     #[test]
     fn serve_args_disable_the_overlay_when_asked() {
-        let with_overlay = serve_args(Path::new("/tmp/cua.sock"), true, false);
+        let with_overlay = serve_args(
+            Path::new("/tmp/cua.sock"),
+            DEFAULT_HOST_BUNDLE_ID,
+            true,
+            false,
+        );
         assert!(!with_overlay.iter().any(|arg| arg == "--no-overlay"));
         assert!(
             with_overlay
                 .iter()
                 .any(|arg| arg == "--parent-liveness-stdio")
         );
-        let without = serve_args(Path::new("/tmp/cua.sock"), false, false);
+        let without = serve_args(
+            Path::new("/tmp/cua.sock"),
+            DEFAULT_HOST_BUNDLE_ID,
+            false,
+            false,
+        );
         assert!(without.iter().any(|arg| arg == "--no-overlay"));
         assert!(without.iter().any(|arg| arg == "--embedded"));
         assert!(without.iter().any(|arg| arg == "standard"));
@@ -1383,14 +1481,15 @@ else:
 
     #[test]
     fn serve_env_disables_updates_and_defaults_telemetry_off() {
-        let env = serve_env(false);
+        let host_bundle_id = "com.falcondeck.mac-native-pilot";
+        let env = serve_env(false, host_bundle_id);
         assert_eq!(
             env.get("CUA_DRIVER_EMBEDDED").map(String::as_str),
             Some("1")
         );
         assert_eq!(
             env.get("CUA_DRIVER_HOST_BUNDLE_ID").map(String::as_str),
-            Some(HOST_BUNDLE_ID)
+            Some(host_bundle_id)
         );
         assert_eq!(
             env.get("CUA_DRIVER_RS_UPDATE_CHECK").map(String::as_str),
@@ -1409,6 +1508,7 @@ else:
         let host = ComputerUseHost::new(
             Some("/path/that/must/not/be-started".to_string()),
             Path::new("/tmp/falcondeck-state.json"),
+            None,
         );
         let error = host
             .test(&ComputerUsePreferences::default())

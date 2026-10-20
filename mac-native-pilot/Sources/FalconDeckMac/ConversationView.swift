@@ -1,352 +1,289 @@
 import SwiftUI
+import AppKit
 
 struct ConversationView: View {
     @Bindable var store: AppStore
-    @FocusState private var composerFocused: Bool
-    @State private var followsLatest = true
+    @State var followsLatest = true
+    @State var selection = NativeComposerSelection()
+    @State var attachments: [NativeMacAttachment] = []
+    @State var quote = ""
+    @State var skills: [JSON] = []
+    @State var prompts: [JSON] = []
+    @State var loadingCatalog = false
+    @State var actionPending = false
+    @State var activeSheet: ConversationSheet?
+    @State var findVisible = false
+    @State var findText = ""
+    @State var findIndex = 0
+    @State var expansionDirective = 0
 
-    private var canSend: Bool {
-        store.isConnected && store.selectedProject != nil && !store.isSending &&
-        !store.draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    var provider: String { store.selectedTask?.provider ?? store.provider }
+    var agent: JSON { ConversationCatalog.agent(store.selectedProject, provider: provider) }
+    var capabilities: JSON { agent["capabilities"] }
+    var catalogKey: String { (store.selectedProjectID ?? "") + ":" + provider }
+    var selectionKey: String { "selection:" + catalogKey }
+    var canSend: Bool {
+        store.isSelectedHostConnected && store.selectedProject != nil && !store.isSending && !actionPending && store.pendingSubmission == nil &&
+        (!store.draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !attachments.isEmpty)
+    }
+    var sendHelp: String {
+        let label = store.isRunning ? (selection.followUp == "steer" ? "Steer current turn" : "Queue follow-up") : "Send message"
+        guard let binding = NativePreferences.shared.bindings(for: "sendMessage").first else { return label }
+        return label + " (" + NativeShortcutDefinition.display(binding) + ")"
+    }
+    var matches: [String] {
+        findText.isEmpty ? [] : store.messages.filter { $0.text.localizedCaseInsensitiveContains(findText) || $0.title.localizedCaseInsensitiveContains(findText) }.map(\.id)
+    }
+    var workingDirectory: String {
+        let isolated = store.selectedTask?.raw["variant"]["path"].string ?? ""
+        return isolated.isEmpty ? store.selectedProject?.path ?? "" : isolated
+    }
+    var transcriptGroups: [ConversationMessageGroup] {
+        ConversationTranscriptGroups.groups(messages: store.messages, preferences: store.preferences, thinkingDisplay: NativePreferences.shared.thinkingDisplay).map { ConversationMessageGroup(items: $0) }
     }
 
     var body: some View {
         VStack(spacing: 0) {
             conversationHeader
-
-            if let error = store.errorMessage {
-                errorBanner(error)
-            }
-
+            if let error = store.errorMessage { errorBanner(error) }
+            if let pending = store.pendingSubmission { ConversationDeliveryRecovery(store: store, pending: pending).id(pending.id) }
             Group {
                 if store.isLoading && store.messages.isEmpty && store.selectedTaskID != nil {
-                    VStack(spacing: 12) {
-                        MacActivityDiamond(size: 11)
-                        Text("Loading conversation…")
-                            .font(.system(size: 12))
-                            .foregroundStyle(FDTheme.muted)
-                    }
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
-                    .accessibilityIdentifier("conversation-loading")
-                } else if store.messages.isEmpty {
-                    emptyConversation
-                } else {
-                    transcript
-                }
+                    VStack(spacing: 12) { MacActivityDiamond(size: 11); Text("Loading conversation…").font(NativePreferences.shared.font(size: 13)).foregroundStyle(FDTheme.muted) }
+                        .frame(maxWidth: .infinity, maxHeight: .infinity).accessibilityIdentifier("conversation-loading")
+                } else if store.messages.isEmpty { emptyConversation }
+                else { transcript }
             }
-
-            InteractiveRequestsView(store: store)
-                .padding(.horizontal, 28)
-
+            VStack(spacing: 10) {
+                if let task = store.selectedTask { ConversationTaskPanels(store: store, task: task, capabilities: capabilities).id(task.id) }
+                InteractiveRequestsView(store: store)
+            }.frame(maxWidth: 900).padding(.horizontal, 28)
+            NativeComposerSuggestionsView(store: store, settings: selection.validated(project: store.selectedProject, provider: provider).fields)
             composer
         }
         .background(FDTheme.background)
-        .onChange(of: store.selectedTaskID) { _, _ in
-            followsLatest = true
-            composerFocused = true
+        .task(id: catalogKey) { restoreSelection(); await loadCatalog() }
+        .onAppear { restorePayload() }
+        .onChange(of: store.composerKey) { _, _ in restorePayload(); followsLatest = true; findIndex = 0; expansionDirective = 0 }
+        .onChange(of: store.composerPayload(key: store.composerKey)) { _, _ in restorePayload() }
+        .onChange(of: selection) { _, value in ConversationLocalStorage.save(value, key: selectionKey) }
+        .onChange(of: store.isSelectedHostConnected) { _, connected in if connected { Task { await loadCatalog() } } }
+        .onChange(of: NativePreferences.shared.followUpBehavior) { _, behavior in selection.followUp = behavior }
+        .onChange(of: selection.followUp) { _, behavior in NativePreferences.shared.followUpBehavior = behavior }
+        .onReceive(NotificationCenter.default.publisher(for: Notification.Name("native.command"))) { note in
+            switch note.object as? String {
+            case "findInThread" where note.userInfo?["context"] as? String != "terminal": findVisible = true
+            case "sendMessage": send()
+            case "invertFollowUp": sendAlternate()
+            default: break
+            }
+        }
+        .sheet(item: $activeSheet) { sheet in
+            if let task = store.selectedTask {
+                switch sheet {
+                case .goal: ConversationGoalEditor(store: store, task: task)
+                case .compact: ConversationActionEditor(title: "Compact conversation", description: "Summarize the agent's context while keeping this conversation's history.", fieldLabel: "Optional instructions", value: "", allowsEmpty: true) { text in
+                    _ = try await ConversationActions.request(store, task: task, suffix: "/compact", body: .object(["instructions": text.isEmpty ? .null : .string(text)]))
+                }
+                case .rename: ConversationActionEditor(title: "Rename conversation", description: "", fieldLabel: "Title", value: task.title, allowsEmpty: false) { text in
+                    _ = try await ConversationActions.request(store, task: task, method: "PATCH", body: .object(["title": .string(text)]))
+                }
+            }
+        }
         }
     }
 
-    private var conversationHeader: some View {
+    var conversationHeader: some View {
         HStack(spacing: 12) {
             VStack(alignment: .leading, spacing: 5) {
-                Text(store.selectedTask?.title ?? "New task")
-                    .font(.system(size: 15, weight: .semibold))
-                    .foregroundStyle(FDTheme.foreground)
-                    .lineLimit(1)
-                    .accessibilityIdentifier("conversation-title")
+                Text(store.selectedTask?.title ?? "New task").font(NativePreferences.shared.font(size: 16, weight: .semibold)).foregroundStyle(FDTheme.foreground)
+                    .lineLimit(1).accessibilityIdentifier("conversation-title")
                 HStack(spacing: 5) {
-                    Image(systemName: "folder")
-                    Text(store.selectedProject?.path ?? "Select a project to get started")
-                        .lineLimit(1)
-                        .truncationMode(.middle)
-                }
-                .font(.system(size: 10, design: .monospaced))
-                .foregroundStyle(FDTheme.subtle)
-                .help(store.selectedProject?.path ?? "")
+                    Image(systemName: store.selectedTask?.raw["variant"] == .null ? "folder" : "arrow.triangle.branch")
+                    Text(workingDirectory.isEmpty ? "Select a project to get started" : workingDirectory).lineLimit(1).truncationMode(.middle)
+                }.font(NativePreferences.shared.font(size: 12, surface: "code")).foregroundStyle(FDTheme.muted).help(workingDirectory)
             }
             Spacer(minLength: 12)
+            if actionPending { ProgressView().controlSize(.small) }
             if let task = store.selectedTask {
                 HStack(spacing: 6) {
                     TaskStatusMark(status: task.status)
-                    Text(FDTheme.statusLabel(task.status))
-                        .font(.system(size: 11))
-                        .foregroundStyle(task.status == "running" ? FDTheme.accent : FDTheme.muted)
+                    Text(FDTheme.statusLabel(task.status)).font(NativePreferences.shared.font(size: 12)).foregroundStyle(task.running ? FDTheme.accent : FDTheme.muted)
+                }.padding(.horizontal, 10).padding(.vertical, 6).background(FDTheme.surface, in: .capsule)
+                Button { findVisible.toggle() } label: { Image(systemName: "magnifyingglass") }.buttonStyle(.plain).help("Find in conversation (⌘F)")
+                if ConversationTranscriptGroups.showsExpansionControls(preferences: store.preferences) {
+                    Menu {
+                        Button("Expand all activity") { expansionDirective = abs(expansionDirective) + 1 }
+                        Button("Collapse all activity") { expansionDirective = -(abs(expansionDirective) + 1) }
+                    } label: { Image(systemName: "rectangle.expand.vertical") }.menuStyle(.borderlessButton).fixedSize().help("Expand or collapse activity")
                 }
-                .padding(.horizontal, 10)
-                .padding(.vertical, 6)
-                .background(FDTheme.surface, in: .capsule)
-                .overlay { Capsule().strokeBorder(FDTheme.hairline) }
+                taskMenu(task)
             }
-        }
-        .padding(.horizontal, 28)
-        .padding(.vertical, 17)
-        .frame(minHeight: 72)
-        .overlay(alignment: .bottom) { FDTheme.hairline.frame(height: 1) }
+        }.padding(.horizontal, 28).padding(.vertical, 15).frame(minHeight: 68)
+            .overlay(alignment: .bottom) { FDTheme.hairline.frame(height: 1) }
     }
 
-    private var emptyConversation: some View {
-        VStack(spacing: 0) {
+    var emptyConversation: some View {
+        VStack {
             Spacer()
             VStack(alignment: .leading, spacing: 18) {
-                Image(systemName: "square.and.pencil")
-                    .font(.system(size: 23, weight: .light))
-                    .foregroundStyle(FDTheme.accent)
-                    .frame(width: 52, height: 52)
-                    .background(FDTheme.accentDim, in: .rect(cornerRadius: 14))
-                    .overlay { RoundedRectangle(cornerRadius: 14).strokeBorder(FDTheme.accentMuted) }
-                VStack(alignment: .leading, spacing: 9) {
-                    Text(store.selectedTaskID == nil ? "What are we working on?" : "The conversation starts here.")
-                        .font(.system(size: 25, weight: .semibold))
-                        .tracking(-0.7)
-                        .foregroundStyle(FDTheme.foreground)
-                    Text(store.selectedProject.map { "Your agent is ready in \($0.name). Describe a change, ask a question, or explore the project." } ?? "Choose a project from the sidebar, then start a task.")
-                        .font(.system(size: 14))
-                        .lineSpacing(5)
-                        .foregroundStyle(FDTheme.muted)
-                        .fixedSize(horizontal: false, vertical: true)
-                }
-                if store.selectedProject != nil && store.selectedTaskID == nil {
-                    HStack(spacing: 8) {
-                        Image(systemName: "arrow.turn.down.right")
-                        Text("Start with a message below")
-                    }
-                    .font(.system(size: 11))
-                    .foregroundStyle(FDTheme.subtle)
-                    .padding(.top, 4)
-                }
-            }
-            .frame(maxWidth: 480, alignment: .leading)
-            .padding(.horizontal, 36)
-            Spacer()
-            Spacer().frame(height: 32)
-        }
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                Image(systemName: "square.and.pencil").font(.system(size: 23, weight: .light)).foregroundStyle(FDTheme.accent)
+                    .frame(width: 52, height: 52).background(FDTheme.accentDim, in: .rect(cornerRadius: 14))
+                Text(store.selectedTaskID == nil ? "What are we working on?" : "The conversation starts here.")
+                    .font(NativePreferences.shared.font(size: 27, surface: "chat", weight: .semibold)).tracking(-0.7).foregroundStyle(FDTheme.foreground)
+                Text(store.selectedProject.map { "Your agent is ready in \($0.name). Describe a change, ask a question, or explore the project." } ?? "Choose a project or create a chat from the sidebar.")
+                    .font(NativePreferences.shared.font(size: 16, surface: "chat")).lineSpacing(6).foregroundStyle(FDTheme.muted).fixedSize(horizontal: false, vertical: true)
+            }.frame(maxWidth: 480, alignment: .leading).padding(.horizontal, 36)
+            Spacer(); Spacer().frame(height: 32)
+        }.frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 
-    private var transcript: some View {
+    var transcript: some View {
         GeometryReader { viewport in
             ScrollViewReader { proxy in
-                ScrollView {
-                    LazyVStack(alignment: .leading, spacing: 24) {
-                        if store.hasOlder {
-                            Button {
-                                let firstID = store.messages.first?.id
-                                followsLatest = false
-                                Task {
-                                    await store.loadOlder()
-                                    if let firstID { proxy.scrollTo(firstID, anchor: .top) }
-                                }
-                            } label: {
-                                HStack(spacing: 8) {
-                                    if store.isLoadingOlder { MacActivityDiamond(size: 6) }
-                                    else { Image(systemName: "arrow.up") }
-                                    Text(store.isLoadingOlder ? "Loading earlier messages…" : "Load earlier messages")
-                                }
-                                .font(.system(size: 11))
-                                .foregroundStyle(FDTheme.muted)
-                                .frame(maxWidth: .infinity)
-                                .padding(10)
+                VStack(spacing: 0) {
+                    if findVisible { findBar(proxy: proxy) }
+                    ScrollView {
+                        LazyVStack(alignment: .leading, spacing: 24) {
+                            if store.hasOlder {
+                                Button {
+                                    let firstID = store.messages.first?.id; followsLatest = false
+                                    Task { await store.loadOlder(); if let firstID { proxy.scrollTo(firstID, anchor: .top) } }
+                                } label: {
+                                    HStack(spacing: 8) { if store.isLoadingOlder { ProgressView().controlSize(.small) }; Text(store.isLoadingOlder ? "Loading earlier messages…" : "Load earlier messages") }
+                                        .font(NativePreferences.shared.font(size: 12)).foregroundStyle(FDTheme.muted).frame(maxWidth: .infinity).padding(10)
+                                }.buttonStyle(.plain).disabled(store.isLoadingOlder).accessibilityIdentifier("load-earlier-messages")
                             }
-                            .buttonStyle(.plain)
-                            .disabled(store.isLoadingOlder)
-                            .accessibilityIdentifier("load-earlier-messages")
-                        }
-                        ForEach(store.messages) { message in
-                            MacTranscriptRow(message: message, provider: store.selectedTask?.provider ?? store.provider)
-                                .equatable()
-                                .id(message.id)
-                        }
-                        if store.isRunning {
-                            HStack(spacing: 8) {
-                                MacActivityDiamond(size: 7)
-                                Text("\(FDTheme.providerName(store.selectedTask?.provider ?? store.provider)) is working")
-                                    .font(.system(size: 11))
-                                    .foregroundStyle(FDTheme.muted)
-                            }
-                            .padding(.leading, 35)
-                            .accessibilityIdentifier("agent-working")
-                        }
-                        Color.clear
-                            .frame(height: 1)
-                            .id("transcript-bottom")
-                            .background {
-                                GeometryReader { geometry in
-                                    Color.clear.preference(
-                                        key: TranscriptBottomPosition.self,
-                                        value: geometry.frame(in: .named("transcript-scroll")).maxY
-                                    )
+                            ForEach(transcriptGroups) { group in
+                                if group.items.count == 1, let message = group.items.first {
+                                    transcriptRow(message).padding(findText.isEmpty ? 0 : 8)
+                                        .background(matches.contains(message.id) ? FDTheme.accentDim : .clear, in: .rect(cornerRadius: 8)).id(message.id)
+                                } else {
+                                    ConversationTranscriptBurst(group: group, expansionDirective: expansionDirective, findText: findText) { message in
+                                        AnyView(transcriptRow(message).id(message.id))
+                                    }.id(group.id)
                                 }
                             }
+                            NativeExtensionToolResults(store: store, messages: store.messages)
+                            if store.isRunning {
+                                HStack(spacing: 8) { MacActivityDiamond(size: 7); Text("\(FDTheme.providerName(provider)) is working").font(NativePreferences.shared.font(size: 12)).foregroundStyle(FDTheme.muted) }
+                                    .padding(.leading, 35).accessibilityIdentifier("agent-working")
+                            }
+                            Color.clear.frame(height: 1).id("transcript-bottom").background {
+                                GeometryReader { geometry in Color.clear.preference(key: TranscriptBottomPosition.self, value: geometry.frame(in: .named("transcript-scroll")).maxY) }
+                            }
+                        }.frame(maxWidth: 900, alignment: .leading).padding(.horizontal, 32).padding(.top, 26).padding(.bottom, 20).frame(maxWidth: .infinity)
                     }
-                    .frame(maxWidth: 840, alignment: .leading)
-                    .padding(.horizontal, 32)
-                    .padding(.top, 28)
-                    .padding(.bottom, 20)
-                    .frame(maxWidth: .infinity)
-                }
-                .coordinateSpace(name: "transcript-scroll")
-                .onPreferenceChange(TranscriptBottomPosition.self) { bottom in
-                    followsLatest = bottom <= viewport.size.height + 100
-                }
-                .onAppear { proxy.scrollTo("transcript-bottom", anchor: .bottom) }
-                .onChange(of: store.messages.last?.text) { _, _ in
-                    if followsLatest { proxy.scrollTo("transcript-bottom", anchor: .bottom) }
-                }
-                .onChange(of: store.messages.count) { _, _ in
-                    if followsLatest { proxy.scrollTo("transcript-bottom", anchor: .bottom) }
-                }
-                .overlay(alignment: .bottom) {
-                    if !followsLatest {
-                        Button {
-                            followsLatest = true
-                            proxy.scrollTo("transcript-bottom", anchor: .bottom)
-                        } label: {
-                            Label("Jump to latest", systemImage: "arrow.down")
-                                .font(.system(size: 11, weight: .medium))
-                                .padding(.horizontal, 12)
-                                .padding(.vertical, 8)
+                    .coordinateSpace(name: "transcript-scroll")
+                    .onPreferenceChange(TranscriptBottomPosition.self) { followsLatest = $0 <= viewport.size.height + 100 }
+                    .onAppear { proxy.scrollTo("transcript-bottom", anchor: .bottom) }
+                    .onChange(of: store.messages.last?.text) { _, _ in if followsLatest { proxy.scrollTo("transcript-bottom", anchor: .bottom) } }
+                    .onChange(of: store.messages.count) { _, _ in if followsLatest { proxy.scrollTo("transcript-bottom", anchor: .bottom) } }
+                    .overlay(alignment: .bottom) {
+                        if !followsLatest {
+                            Button { followsLatest = true; proxy.scrollTo("transcript-bottom", anchor: .bottom) } label: {
+                                Label("Jump to latest", systemImage: "arrow.down").font(NativePreferences.shared.font(size: 12, weight: .medium)).padding(.horizontal, 12).padding(.vertical, 8)
+                            }.buttonStyle(.plain).foregroundStyle(FDTheme.secondary).background(FDTheme.raised, in: .capsule).overlay { Capsule().strokeBorder(FDTheme.line) }.padding(.bottom, 10)
                         }
-                        .buttonStyle(.plain)
-                        .foregroundStyle(FDTheme.secondary)
-                        .background(FDTheme.raised, in: .capsule)
-                        .overlay { Capsule().strokeBorder(FDTheme.line) }
-                        .padding(.bottom, 10)
-                    }
+                    }.accessibilityIdentifier("conversation-transcript")
                 }
-                .accessibilityIdentifier("conversation-transcript")
             }
         }
     }
 
-    private var composer: some View {
-        VStack(spacing: 10) {
+    func transcriptRow(_ message: Message) -> some View {
+        ConversationTranscriptRow(message: message, provider: provider, preferences: store.preferences,
+            firstDiff: message.id == ConversationTranscriptGroups.firstDiffItemID(messages: store.messages), expansionDirective: expansionDirective,
+            onQuote: { text in quote = text; persistPayload() },
+            onEdit: message.kind == "user_message" && !store.isRunning ? { action { try await edit(message, retry: false) } } : nil,
+            onRetry: message.kind == "assistant_message" && !store.isRunning ? { action { try await retry(message) } } : nil,
+            onReadAloud: { text in NativeAudioPlayback.shared.speak(messageID: message.id, text: text, store: store) },
+            onLoadFullOutput: {
+                guard let task = store.selectedTask else { throw PilotError("Select a task first.") }
+                return try await store.request(path: conversationPath(task) + "/items/" + conversationPathComponent(message.id))
+            }, onOpenFile: { path, line in NativeInspectorNavigation.open(store: store, path: path, line: line) })
+    }
+
+    func findBar(proxy: ScrollViewProxy) -> some View {
+        HStack(spacing: 10) {
+            TextField("Find in loaded messages", text: $findText).textFieldStyle(.roundedBorder).onSubmit { navigateFind(1, proxy: proxy) }
+            Text(matches.isEmpty ? "0 matches" : "\(min(findIndex + 1, matches.count)) of \(matches.count)").font(NativePreferences.shared.font(size: 12)).foregroundStyle(FDTheme.muted).fixedSize()
+            Button { navigateFind(-1, proxy: proxy) } label: { Image(systemName: "chevron.up") }.disabled(matches.isEmpty)
+            Button { navigateFind(1, proxy: proxy) } label: { Image(systemName: "chevron.down") }.disabled(matches.isEmpty)
+            Button { findVisible = false; findText = "" } label: { Image(systemName: "xmark") }
+        }.buttonStyle(.plain).padding(.horizontal, 28).padding(.vertical, 9).background(FDTheme.surface)
+            .onChange(of: findText) { _, _ in findIndex = 0; if let id = matches.first { followsLatest = false; proxy.scrollTo(id, anchor: .top) } }
+    }
+    func navigateFind(_ offset: Int, proxy: ScrollViewProxy) {
+        guard !matches.isEmpty else { return }; findIndex = (findIndex + offset + matches.count) % matches.count
+        followsLatest = false; proxy.scrollTo(matches[findIndex], anchor: .top)
+    }
+
+    var composer: some View {
+        let composerKey = store.composerKey
+        return VStack(spacing: 8) {
+            let slashItems = ConversationSlash.suggestions(store.draft, skills: skills, prompts: prompts)
+            if !slashItems.isEmpty {
+                ConversationSlashSuggestions(items: slashItems) { item in store.draft = ConversationSlash.insert(item, into: store.draft) }
+            }
             VStack(alignment: .leading, spacing: 0) {
-                ZStack(alignment: .topLeading) {
-                    if store.draft.isEmpty {
-                        Text(store.isRunning ? "Send a follow-up…" : "Message your agent…")
-                            .foregroundStyle(FDTheme.subtle)
-                            .padding(.top, 14)
-                            .padding(.leading, 16)
-                            .allowsHitTesting(false)
-                    }
-                    TextEditor(text: $store.draft)
-                        .font(.system(size: 14))
-                        .foregroundStyle(FDTheme.foreground)
-                        .scrollContentBackground(.hidden)
-                        .padding(.horizontal, 11)
-                        .padding(.top, 8)
-                        .frame(minHeight: 76, maxHeight: 120)
-                        .focused($composerFocused)
-                        .accessibilityLabel("Message your agent")
-                        .accessibilityIdentifier("message-composer")
+                if !quote.isEmpty {
+                    HStack(alignment: .top) {
+                        Image(systemName: "text.quote").foregroundStyle(FDTheme.accent)
+                        Text(quote).font(NativePreferences.shared.font(size: 12)).foregroundStyle(FDTheme.muted).lineLimit(3).frame(maxWidth: .infinity, alignment: .leading)
+                        Button { quote = ""; persistPayload() } label: { Image(systemName: "xmark") }.buttonStyle(.plain).help("Remove quote")
+                    }.padding(12).background(FDTheme.surface, in: .rect(cornerRadius: 7)).padding(8)
                 }
+                if !attachments.isEmpty {
+                    ConversationAttachmentStrip(attachments: attachments) { id in attachments.removeAll { $0.id == id }; persistPayload() }.padding(10)
+                }
+                ConversationTextEditor(text: $store.draft, placeholder: store.isRunning ? "Send a follow-up…" : "Message your agent…", onSend: send,
+                                       onAttachments: { appendAttachments($0, expectedKey: composerKey) }, onError: { store.errorMessage = $0 }, onAlternateSend: sendAlternate)
+                    .frame(minHeight: 80, idealHeight: 104, maxHeight: 190).accessibilityIdentifier("message-composer")
                 HStack(spacing: 10) {
-                    if store.selectedTaskID == nil {
-                        Picker("Agent", selection: $store.provider) {
-                            ForEach(store.availableProviders, id: \.self) { provider in
-                                Text(FDTheme.providerName(provider)).tag(provider)
-                            }
-                        }
-                        .pickerStyle(.menu)
-                        .controlSize(.small)
-                        .fixedSize()
-                        .accessibilityIdentifier("agent-picker")
-                    } else {
-                        HStack(spacing: 6) {
-                            Image(systemName: "terminal")
-                            Text(FDTheme.providerName(store.selectedTask?.provider ?? store.provider))
-                        }
-                        .font(.system(size: 11, weight: .medium))
-                        .foregroundStyle(FDTheme.muted)
-                    }
-                    Spacer()
+                    ConversationComposerControls(store: store, selection: $selection, skills: skills, prompts: prompts, loadingCatalog: loadingCatalog,
+                                                 insert: { store.draft += $0 }, attach: pickAttachments, refreshCatalog: { Task { await loadCatalog() } }, chooseAgent: { destination in
+                        if let task = store.selectedTask { action { try await handoff(task, provider: destination) } }
+                        else { store.provider = destination }
+                    })
+                    Spacer(minLength: 4)
+                    Button { NativeSpeechController.shared.startOrStop() } label: {
+                        Image(systemName: NativeSpeechController.shared.isRecording ? "stop.circle.fill" : "mic").font(.system(size: 13))
+                            .foregroundStyle(NativeSpeechController.shared.isRecording ? FDTheme.warning : FDTheme.muted)
+                    }.buttonStyle(.plain).disabled(!NativeSpeechController.shared.config.enabled || NativeSpeechController.shared.isBusy)
+                        .help(NativeSpeechController.shared.config.enabled ? "Dictate a message" : "Enable dictation in Voice settings").accessibilityLabel("Dictate message")
                     if store.isRunning {
-                        Button {
-                            Task { await store.interrupt() }
-                        } label: {
-                            Image(systemName: "stop.fill")
-                                .font(.system(size: 10))
-                                .frame(width: 28, height: 28)
-                                .background(FDTheme.hover, in: .rect(cornerRadius: 7))
-                        }
-                        .buttonStyle(.plain)
-                        .help("Stop the current turn")
-                        .accessibilityLabel("Stop agent")
-                        .accessibilityIdentifier("stop-agent")
+                        Button { Task { await store.interrupt() } } label: { Image(systemName: "stop.fill").font(.system(size: 10)).frame(width: 28, height: 28).background(FDTheme.hover, in: .rect(cornerRadius: 7)) }
+                            .buttonStyle(.plain).help("Stop the current turn").accessibilityLabel("Stop agent").accessibilityIdentifier("stop-agent")
                     }
-                    Button {
-                        send()
-                    } label: {
-                        Group {
-                            if store.isSending { ProgressView().controlSize(.small).tint(FDTheme.background) }
-                            else { Image(systemName: "arrow.up").font(.system(size: 14, weight: .semibold)) }
-                        }
-                        .frame(width: 30, height: 28)
-                        .foregroundStyle(canSend ? FDTheme.background : FDTheme.subtle)
-                        .background(canSend ? FDTheme.accent : FDTheme.hover, in: .rect(cornerRadius: 7))
-                    }
-                    .buttonStyle(.plain)
-                    .keyboardShortcut(.return, modifiers: .command)
-                    .disabled(!canSend)
-                    .help("Send message (⌘Return)")
-                    .accessibilityLabel("Send message")
-                    .accessibilityIdentifier("send-message")
-                }
-                .padding(.horizontal, 14)
-                .padding(.bottom, 12)
-                .padding(.top, 4)
-            }
-            .background(FDTheme.raised, in: .rect(cornerRadius: 12))
-            .overlay { RoundedRectangle(cornerRadius: 12).strokeBorder(composerFocused ? FDTheme.accent.opacity(0.45) : FDTheme.line) }
-
+                    Button(action: send) {
+                        Group { if store.isSending { ProgressView().controlSize(.small) } else { Image(systemName: store.isRunning && selection.followUp == "queue" ? "text.badge.plus" : "arrow.up").font(.system(size: 14, weight: .semibold)) } }
+                            .frame(width: 30, height: 28).foregroundStyle(canSend ? FDTheme.background : FDTheme.subtle)
+                            .background(canSend ? FDTheme.accent : FDTheme.hover, in: .rect(cornerRadius: 7))
+                    }.buttonStyle(.plain).disabled(!canSend)
+                        .help(sendHelp)
+                        .accessibilityLabel("Send message").accessibilityIdentifier("send-message")
+                }.padding(.horizontal, 14).padding(.bottom, 12).padding(.top, 5)
+            }.background(FDTheme.raised, in: .rect(cornerRadius: 12)).overlay { RoundedRectangle(cornerRadius: 12).strokeBorder(FDTheme.line) }
             HStack(spacing: 4) {
-                if !store.isConnected {
-                    Image(systemName: "wifi.slash")
-                    Text("Reconnect to send a message")
-                } else {
-                    Text("⌘ Return to send")
-                    Text("·").padding(.horizontal, 2)
-                    Text("Return for a new line")
+                if !store.isSelectedHostConnected { Image(systemName: "wifi.slash"); Text("Reconnect to send a message") }
+                else {
+                    Text(NativePreferences.shared.bindings(for: "sendMessage").first.map(NativeShortcutDefinition.display) ?? "Send")
+                    Text("to send"); Text("·").padding(.horizontal, 2)
+                    Text(NativePreferences.shared.bindings(for: "insertNewline").first.map(NativeShortcutDefinition.display) ?? "Shift + Return")
+                    Text("for a new line")
                 }
-            }
-            .font(.system(size: 10))
-            .foregroundStyle(FDTheme.subtle)
-        }
-        .frame(maxWidth: 840)
-        .padding(.horizontal, 28)
-        .padding(.top, 12)
-        .padding(.bottom, 14)
-        .frame(maxWidth: .infinity)
+            }.font(NativePreferences.shared.font(size: 11)).foregroundStyle(FDTheme.muted)
+        }.frame(maxWidth: 900).padding(.horizontal, 28).padding(.top, 12).padding(.bottom, 14).frame(maxWidth: .infinity)
     }
 
-    private func send() {
-        guard canSend else { return }
-        followsLatest = true
-        Task { await store.send() }
-    }
-
-    private func errorBanner(_ message: String) -> some View {
+    func errorBanner(_ message: String) -> some View {
         HStack(alignment: .top, spacing: 9) {
             Image(systemName: "exclamationmark.circle").foregroundStyle(FDTheme.warning)
-            Text(message)
-                .font(.system(size: 12))
-                .foregroundStyle(FDTheme.secondary)
-                .textSelection(.enabled)
-                .frame(maxWidth: .infinity, alignment: .leading)
-            Button("Retry") { Task { await store.reconnect() } }
-                .buttonStyle(.borderless)
-                .font(.system(size: 11, weight: .medium))
-            Button { store.errorMessage = nil } label: { Image(systemName: "xmark") }
-                .buttonStyle(.plain)
-                .font(.system(size: 10))
-                .foregroundStyle(FDTheme.muted)
-                .accessibilityLabel("Dismiss error")
-        }
-        .padding(.horizontal, 28)
-        .padding(.vertical, 12)
-        .background(FDTheme.warning.opacity(0.07))
-        .overlay(alignment: .bottom) { FDTheme.hairline.frame(height: 1) }
+            Text(message).font(NativePreferences.shared.font(size: 13)).foregroundStyle(FDTheme.secondary).textSelection(.enabled).frame(maxWidth: .infinity, alignment: .leading)
+            Button("Reconnect") { Task { await store.reconnect() } }.buttonStyle(.borderless).font(NativePreferences.shared.font(size: 12, weight: .medium))
+            Button { store.errorMessage = nil } label: { Image(systemName: "xmark") }.buttonStyle(.plain).font(.system(size: 10)).foregroundStyle(FDTheme.muted).accessibilityLabel("Dismiss error")
+        }.padding(.horizontal, 28).padding(.vertical, 12).background(FDTheme.warning.opacity(0.07))
     }
 }
 
@@ -354,327 +291,27 @@ private struct TranscriptBottomPosition: PreferenceKey {
     static let defaultValue: CGFloat = 0
     static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) { value = nextValue() }
 }
+enum ConversationSheet: String, Identifiable { case goal, compact, rename; var id: String { rawValue } }
 
-private struct MacTranscriptRow: View, Equatable {
-    let message: Message
-    let provider: String
+struct ConversationMessageGroup: Identifiable {
+    let items: [Message]
+    var id: String { items.first?.id ?? "empty" }
+}
+
+private struct ConversationTranscriptBurst: View {
+    let group: ConversationMessageGroup
+    let expansionDirective: Int
+    let findText: String
+    let row: (Message) -> AnyView
     @State private var expanded = false
-
-    static func == (lhs: Self, rhs: Self) -> Bool {
-        lhs.message == rhs.message && lhs.provider == rhs.provider
-    }
-
     var body: some View {
-        Group {
-            switch message.kind {
-            case "user_message": userMessage
-            case "assistant_message", "code_review": assistantMessage
-            case "tool_call": toolActivity
-            case "reasoning": reasoning
-            case "diff": detailCard("Changes", symbol: "plus.forwardslash.minus") { MacCodeBlock(text: message.text, language: "diff") }
-            case "file_change": fileChanges
-            case "plan": plan
-            case "interactive_request":
-                if message.raw["resolved"].bool {
-                    Label("Request resolved", systemImage: "checkmark.circle")
-                        .font(.system(size: 11))
-                        .foregroundStyle(FDTheme.muted)
-                        .padding(.leading, 35)
-                }
-            case "context_compaction":
-                Label("Context compacted", systemImage: "arrow.down.right.and.arrow.up.left")
-                    .font(.system(size: 11))
-                    .foregroundStyle(FDTheme.subtle)
-                    .padding(.leading, 35)
-            case "service":
-                Text(message.text)
-                    .font(.system(size: 12))
-                    .foregroundStyle(FDTheme.muted)
-                    .textSelection(.enabled)
-                    .padding(.leading, 35)
-            default: fallback
-            }
-        }
-        .frame(maxWidth: .infinity, alignment: .leading)
-    }
-
-    private var userMessage: some View {
-        HStack {
-            Spacer(minLength: 48)
-            VStack(alignment: .leading, spacing: 9) {
-                Text("YOU")
-                    .font(.system(size: 9, weight: .medium, design: .monospaced))
-                    .tracking(1)
-                    .foregroundStyle(FDTheme.subtle)
-                Text(message.text)
-                    .font(.system(size: 14))
-                    .lineSpacing(5)
-                    .foregroundStyle(FDTheme.foreground)
-                    .textSelection(.enabled)
-            }
-            .padding(16)
-            .frame(maxWidth: 640, alignment: .leading)
-            .background(FDTheme.raised, in: .rect(cornerRadius: 12))
-            .overlay { RoundedRectangle(cornerRadius: 12).strokeBorder(FDTheme.hairline) }
-        }
-        .contextMenu { Button("Copy message") { FDTheme.copy(message.text) } }
-    }
-
-    private var assistantMessage: some View {
-        HStack(alignment: .top, spacing: 12) {
-            Image(systemName: "terminal")
-                .font(.system(size: 11, weight: .medium))
-                .foregroundStyle(FDTheme.accent)
-                .frame(width: 23, height: 23)
-                .background(FDTheme.accentDim, in: .rect(cornerRadius: 6))
-                .padding(.top, 1)
-            VStack(alignment: .leading, spacing: 10) {
-                HStack(spacing: 8) {
-                    Text(FDTheme.providerName(provider))
-                        .font(.system(size: 11, weight: .semibold))
-                        .foregroundStyle(FDTheme.secondary)
-                    if message.streaming { MacActivityDiamond(size: 6) }
-                }
-                MacMarkdown(text: message.text)
-                if !message.streaming && !message.text.isEmpty {
-                    Button { FDTheme.copy(message.text) } label: {
-                        Image(systemName: "doc.on.doc")
-                            .font(.system(size: 11))
-                            .foregroundStyle(FDTheme.subtle)
-                            .frame(width: 24, height: 23)
-                            .contentShape(.rect)
-                    }
-                    .buttonStyle(.plain)
-                    .help("Copy response")
-                    .accessibilityLabel("Copy response")
-                    .padding(.leading, -5)
-                }
-            }
-            .frame(maxWidth: .infinity, alignment: .leading)
-        }
-        .contextMenu { Button("Copy response") { FDTheme.copy(message.text) } }
-    }
-
-    private var toolActivity: some View {
-        let failed = ["failed", "error"].contains(message.raw["status"].string)
-        return DisclosureGroup(isExpanded: $expanded) {
-            if !message.text.isEmpty {
-                MacCodeBlock(text: message.text, language: "output")
-                    .padding(.top, 10)
-            } else {
-                Text(message.running ? "Waiting for output…" : "No output recorded.")
-                    .font(.system(size: 11))
-                    .foregroundStyle(FDTheme.subtle)
-                    .padding(.top, 8)
-            }
-        } label: {
-            HStack(spacing: 8) {
-                if message.running { MacActivityDiamond(size: 7) }
-                else {
-                    Image(systemName: failed ? "exclamationmark.circle" : "checkmark")
-                        .font(.system(size: 10))
-                        .foregroundStyle(failed ? FDTheme.danger : FDTheme.subtle)
-                }
-                Text(message.raw["title"].string.isEmpty ? "Tool activity" : message.raw["title"].string)
-                    .font(.system(size: 11, design: .monospaced))
-                    .foregroundStyle(FDTheme.muted)
-                    .lineLimit(2)
-                Spacer(minLength: 0)
-            }
-        }
-        .padding(12)
-        .background(FDTheme.surface, in: .rect(cornerRadius: 8))
-        .overlay { RoundedRectangle(cornerRadius: 8).strokeBorder(FDTheme.hairline) }
-        .padding(.leading, 35)
-    }
-
-    private var reasoning: some View {
-        detailCard(message.streaming ? "Thinking…" : "Thought process", symbol: "brain") {
-            MacMarkdown(text: message.text)
-                .padding(.top, 8)
-                .foregroundStyle(FDTheme.muted)
-        }
-    }
-
-    private var fileChanges: some View {
-        detailCard("Changed files", symbol: "doc.badge.gearshape") {
-            VStack(alignment: .leading, spacing: 12) {
-                ForEach(Array(message.raw["changes"].array.enumerated()), id: \.offset) { _, change in
-                    VStack(alignment: .leading, spacing: 6) {
-                        Text(change["path"].string)
-                            .font(.system(size: 11, design: .monospaced))
-                            .foregroundStyle(FDTheme.secondary)
-                            .textSelection(.enabled)
-                        if !change["diff"].string.isEmpty { MacCodeBlock(text: change["diff"].string, language: "diff") }
-                    }
-                }
-            }
-            .padding(.top, 8)
-        }
-    }
-
-    private var plan: some View {
-        detailCard("Plan", symbol: "checklist") {
-            VStack(alignment: .leading, spacing: 10) {
-                ForEach(Array(message.raw["plan"]["steps"].array.enumerated()), id: \.offset) { _, step in
-                    Label(step["step"].string, systemImage: step["status"].string == "completed" ? "checkmark.circle.fill" : "circle")
-                        .font(.system(size: 12))
-                        .foregroundStyle(step["status"].string == "completed" ? FDTheme.accent : FDTheme.secondary)
-                }
-            }
-            .padding(.top, 10)
-        }
-    }
-
-    private var fallback: some View {
-        detailCard(message.raw["title"].string.isEmpty ? message.kind.replacingOccurrences(of: "_", with: " ").capitalized : message.raw["title"].string, symbol: "doc.text") {
-            if !message.text.isEmpty { MacMarkdown(text: message.text).padding(.top, 8) }
-            else {
-                Text("This activity has no text preview.")
-                    .font(.system(size: 11))
-                    .foregroundStyle(FDTheme.subtle)
-                    .padding(.top, 8)
-            }
-        }
-    }
-
-    private func detailCard<Content: View>(_ title: String, symbol: String, @ViewBuilder content: @escaping () -> Content) -> some View {
         DisclosureGroup(isExpanded: $expanded) {
-            content()
+            VStack(alignment: .leading, spacing: 12) { ForEach(group.items) { row($0) } }.padding(.top, 12)
         } label: {
-            Label(title, systemImage: symbol)
-                .font(.system(size: 11))
-                .foregroundStyle(FDTheme.muted)
-        }
-        .padding(.leading, 35)
-    }
-}
-
-/// Native SwiftUI text for prose; fenced code remains horizontally scrollable.
-private struct MacMarkdown: View {
-    let text: String
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            ForEach(Array(MarkdownBlock.parse(text).enumerated()), id: \.offset) { _, block in
-                switch block {
-                case .code(let language, let source):
-                    MacCodeBlock(text: source, language: language)
-                case .prose(let prose):
-                    proseView(prose)
-                }
-            }
-        }
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .textSelection(.enabled)
-    }
-
-    @ViewBuilder private func proseView(_ prose: String) -> some View {
-        let lines = prose.components(separatedBy: "\n")
-        VStack(alignment: .leading, spacing: 7) {
-            ForEach(Array(lines.enumerated()), id: \.offset) { _, line in
-                let trimmed = line.trimmingCharacters(in: .whitespaces)
-                if trimmed.hasPrefix("### ") {
-                    inline(String(trimmed.dropFirst(4))).font(.system(size: 15, weight: .semibold)).padding(.top, 5)
-                } else if trimmed.hasPrefix("## ") {
-                    inline(String(trimmed.dropFirst(3))).font(.system(size: 17, weight: .semibold)).padding(.top, 7)
-                } else if trimmed.hasPrefix("# ") {
-                    inline(String(trimmed.dropFirst(2))).font(.system(size: 20, weight: .semibold)).padding(.top, 8)
-                } else if trimmed == "---" || trimmed == "***" {
-                    Rectangle().fill(FDTheme.line).frame(height: 1).padding(.vertical, 5)
-                } else if trimmed.hasPrefix("> ") {
-                    inline(String(trimmed.dropFirst(2)))
-                        .foregroundStyle(FDTheme.muted)
-                        .padding(.leading, 12)
-                        .overlay(alignment: .leading) { Rectangle().fill(FDTheme.line).frame(width: 2) }
-                } else if trimmed.hasPrefix("- ") || trimmed.hasPrefix("* ") {
-                    HStack(alignment: .firstTextBaseline, spacing: 10) {
-                        Text("•").foregroundStyle(FDTheme.muted)
-                        inline(String(trimmed.dropFirst(2))).frame(maxWidth: .infinity, alignment: .leading)
-                    }
-                    .padding(.leading, 4)
-                } else if trimmed.isEmpty {
-                    Color.clear.frame(height: 2)
-                } else {
-                    inline(line)
-                }
-            }
-        }
-        .font(.system(size: 14))
-        .foregroundStyle(FDTheme.foreground)
-        .lineSpacing(5)
-        .fixedSize(horizontal: false, vertical: true)
-    }
-
-    private func inline(_ source: String) -> Text {
-        let options = AttributedString.MarkdownParsingOptions(interpretedSyntax: .inlineOnlyPreservingWhitespace)
-        return Text((try? AttributedString(markdown: source, options: options)) ?? AttributedString(source))
-    }
-}
-
-private enum MarkdownBlock {
-    case prose(String)
-    case code(String, String)
-
-    static func parse(_ text: String) -> [MarkdownBlock] {
-        var result: [MarkdownBlock] = []
-        var prose: [String] = []
-        var code: [String] = []
-        var fence: String?
-        var language = ""
-        for line in text.components(separatedBy: "\n") {
-            let trimmed = line.trimmingCharacters(in: .whitespaces)
-            if let marker = fence {
-                if trimmed.hasPrefix(marker) {
-                    result.append(.code(language, code.joined(separator: "\n")))
-                    code = []
-                    fence = nil
-                } else { code.append(line) }
-            } else if trimmed.hasPrefix("```") || trimmed.hasPrefix("~~~") {
-                if !prose.isEmpty { result.append(.prose(prose.joined(separator: "\n"))); prose = [] }
-                fence = String(trimmed.prefix(3))
-                language = String(trimmed.dropFirst(3)).trimmingCharacters(in: .whitespaces)
-            } else { prose.append(line) }
-        }
-        if fence != nil { result.append(.code(language, code.joined(separator: "\n"))) }
-        if !prose.isEmpty { result.append(.prose(prose.joined(separator: "\n"))) }
-        return result
-    }
-}
-
-private struct MacCodeBlock: View {
-    let text: String
-    let language: String
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 0) {
-            HStack {
-                Text(language.isEmpty ? "code" : language)
-                    .font(.system(size: 10, design: .monospaced))
-                    .foregroundStyle(FDTheme.subtle)
-                Spacer()
-                Button { FDTheme.copy(text) } label: {
-                    Image(systemName: "doc.on.doc").font(.system(size: 10))
-                }
-                .buttonStyle(.plain)
-                .foregroundStyle(FDTheme.muted)
-                .help("Copy code")
-                .accessibilityLabel("Copy code")
-            }
-            .padding(.horizontal, 13)
-            .padding(.vertical, 9)
-            .overlay(alignment: .bottom) { FDTheme.hairline.frame(height: 1) }
-            ScrollView(.horizontal) {
-                Text(text)
-                    .font(.system(size: 12, design: .monospaced))
-                    .foregroundStyle(FDTheme.secondary)
-                    .lineSpacing(4)
-                    .textSelection(.enabled)
-                    .fixedSize(horizontal: true, vertical: true)
-                    .padding(13)
-            }
-        }
-        .background(FDTheme.surface, in: .rect(cornerRadius: 8))
-        .overlay { RoundedRectangle(cornerRadius: 8).strokeBorder(FDTheme.line) }
+            Label(ConversationTranscriptGroups.title(for: group.items), systemImage: "square.stack.3d.up")
+                .font(NativePreferences.shared.font(size: 12)).foregroundStyle(FDTheme.muted)
+        }.padding(.leading, 35)
+            .onChange(of: expansionDirective) { _, directive in if directive != 0 { expanded = directive > 0 } }
+            .onChange(of: findText) { _, query in if !query.isEmpty && group.items.contains(where: { $0.text.localizedCaseInsensitiveContains(query) }) { expanded = true } }
     }
 }

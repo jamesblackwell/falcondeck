@@ -1,4 +1,5 @@
 import SwiftUI
+import AppKit
 
 struct ApprovalChoice: Identifiable {
     let id: String
@@ -40,19 +41,33 @@ private struct RequestCard: View {
     @State private var answers: [String: String] = [:]
     @State private var sending = false
     @State private var error: String?
+    @State private var planFeedback = ""
+    @State private var detailsExpanded = true
+    private var isElicitation: Bool { ["mcpServer/elicitation/request", "elicitation/create"].contains(request["method"].string) }
+    private var signInURL: URL? {
+        guard isElicitation, let url = URL(string: request["path"].string), ["https", "http"].contains(url.scheme?.lowercased() ?? ""),
+              url.host != nil, url.user == nil, url.password == nil else { return nil }
+        return url
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
             Label(request["title"].string, systemImage: "hand.raised.fill")
                 .font(.headline).foregroundStyle(.orange)
-            if !request["detail"].string.isEmpty {
-                ScrollView { Text(request["detail"].string).textSelection(.enabled).frame(maxWidth: .infinity, alignment: .leading) }
-                    .frame(maxHeight: 140)
+            if !request["detail"].string.isEmpty || !request["command"].string.isEmpty || !request["path"].string.isEmpty {
+                DisclosureGroup("Details", isExpanded: $detailsExpanded) {
+                    VStack(alignment: .leading, spacing: 9) {
+                        if !request["detail"].string.isEmpty {
+                            ScrollView { NativeMarkdownView(text: request["detail"].string).frame(maxWidth: .infinity, alignment: .leading) }.frame(maxHeight: 160)
+                        }
+                        if !request["command"].string.isEmpty {
+                            ScrollView(.horizontal) { Text(request["command"].string).font(.system(.caption, design: .monospaced)).textSelection(.enabled) }
+                        }
+                        if !request["path"].string.isEmpty { Text(request["path"].string).font(.caption).foregroundStyle(.secondary) }
+                    }.padding(.top, 8)
+                }.font(.caption)
             }
-            if !request["command"].string.isEmpty {
-                ScrollView(.horizontal) { Text(request["command"].string).font(.system(.caption, design: .monospaced)).textSelection(.enabled) }
-            }
-            if !request["path"].string.isEmpty { Text(request["path"].string).font(.caption).foregroundStyle(.secondary) }
+            if let signInURL { Link("Open sign-in page", destination: signInURL).font(.caption) }
             if request["kind"].string == "question" {
                 ScrollView {
                     VStack(alignment: .leading, spacing: 12) {
@@ -78,10 +93,16 @@ private struct RequestCard: View {
                 Button("Send answers") {
                     respond(.object(["kind": .string("question"), "answers": .object(answers.mapValues { .array([.string($0)]) })]))
                 }.disabled(request["questions"].array.contains { answers[$0["id"].string, default: ""].trimmingCharacters(in: .whitespacesAndNewlines).isEmpty })
+                if isElicitation {
+                    Button("Decline", role: .destructive) { respond(.object(["kind": .string("approval"), "decision": .string("deny")])) }
+                }
             } else if request["kind"].string == "plan_approval" {
+                TextField("Optional feedback for the agent", text: $planFeedback, axis: .vertical)
+                    .textFieldStyle(.roundedBorder).lineLimit(2...5)
                 HStack {
-                    Button("Approve plan") { respond(.object(["kind": .string("plan_approval"), "outcome": .string("approved")])) }
-                    Button("Keep planning") { respond(.object(["kind": .string("plan_approval"), "outcome": .string("cancelled")])) }
+                    Button("Approve plan") { respond(planResponse("approved")) }
+                    Button("Request changes") { respond(planResponse("cancelled")) }
+                    Button("Abandon plan", role: .destructive) { respond(planResponse("abandoned")) }
                 }
             } else {
                 let choices = ApprovalChoice.choices(for: request)
@@ -99,18 +120,29 @@ private struct RequestCard: View {
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(.orange.opacity(0.08), in: RoundedRectangle(cornerRadius: 12))
         .overlay { RoundedRectangle(cornerRadius: 12).strokeBorder(.orange.opacity(0.3)) }
-        .disabled(sending || !store.isConnected)
+        .disabled(sending || !store.isSelectedHostConnected)
+        .onAppear {
+            let setting = store.preferences["conversation"]["auto_expand"]["approvals"]
+            detailsExpanded = setting == .null || setting.bool
+        }
     }
 
     private func binding(_ question: JSON) -> Binding<String> {
         Binding(get: { answers[question["id"].string, default: ""] }, set: { answers[question["id"].string] = $0 })
+    }
+    private func planResponse(_ outcome: String) -> JSON {
+        let feedback = planFeedback.trimmingCharacters(in: .whitespacesAndNewlines)
+        return .object(["kind": .string("plan_approval"), "outcome": .string(outcome), "feedback": feedback.isEmpty ? .null : .string(feedback)])
     }
     private func respond(_ response: JSON) {
         sending = true
         error = nil
         Task {
             defer { sending = false }
-            do { try await store.respond(request: request, response: response) }
+            do {
+                try await store.respond(request: request, response: response)
+                if response["decision"].string == "allow", let signInURL { NSWorkspace.shared.open(signInURL) }
+            }
             catch { self.error = error.localizedDescription }
         }
     }

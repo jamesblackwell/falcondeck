@@ -37,6 +37,7 @@ mod ship;
 mod skill_library;
 mod skills;
 mod ssh_config;
+mod state_lock;
 pub mod stdio_helper;
 mod terminal;
 pub mod unreal_agent_acp;
@@ -47,6 +48,7 @@ mod workspace_icons;
 use std::collections::HashMap;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use falcondeck_core::AgentProvider;
 
@@ -75,6 +77,9 @@ pub struct DaemonConfig {
     pub deno_bin: String,
     /// Optional bundled `cua-driver` binary. Set only by the desktop embedding.
     pub computer_use_bin: Option<String>,
+    /// Host application identity supplied to the embedded computer-use runtime.
+    /// Defaults to the Tauri desktop identity when omitted by older embedders.
+    pub computer_use_host_bundle_id: Option<String>,
     /// Optional persisted state location for daemon-local state.
     pub state_path: Option<PathBuf>,
     /// Restores sessions, extensions, and the transcript index after the
@@ -96,6 +101,7 @@ impl Default for DaemonConfig {
             claude_bin: "claude".to_string(),
             deno_bin: "deno".to_string(),
             computer_use_bin: None,
+            computer_use_host_bundle_id: None,
             state_path: None,
             background_restore: true,
         }
@@ -129,6 +135,7 @@ pub struct EmbeddedDaemonHandle {
     restore_task: Option<JoinHandle<()>>,
     shutdown: Option<oneshot::Sender<()>>,
     join_handle: JoinHandle<Result<(), std::io::Error>>,
+    _state_lock: Arc<state_lock::StateLock>,
 }
 
 impl EmbeddedDaemonHandle {
@@ -175,7 +182,11 @@ impl EmbeddedDaemonHandle {
         if let Some(shutdown) = self.shutdown.take() {
             let _ = shutdown.send(());
         }
-        self.join_handle.await.unwrap_or(Ok(()))
+        let result = self.join_handle.await.unwrap_or(Ok(()));
+        if result.is_ok() {
+            self.state.release_state_lock_after_shutdown();
+        }
+        result
     }
 }
 
@@ -197,6 +208,9 @@ pub async fn spawn_embedded(config: DaemonConfig) -> Result<EmbeddedDaemonHandle
                 )
             })
     });
+    // Acquire before logging, restore, or scheduler startup can mutate any
+    // daemon-owned state. All desktop and standalone entry points share this.
+    let state_lock = Arc::new(state_lock::StateLock::acquire(&state_path)?);
     // Installed here rather than in `run`: the desktop app embeds the daemon
     // and never goes through that path, so every diagnostic it logged used to
     // be dropped on the floor.
@@ -205,13 +219,15 @@ pub async fn spawn_embedded(config: DaemonConfig) -> Result<EmbeddedDaemonHandle
     if let Err(error) = process_limits::prepare_file_descriptor_limit() {
         tracing::warn!(%error, "failed to raise daemon file descriptor limit");
     }
-    let state = AppState::new_with_state_path_and_runtimes(
+    let state = AppState::new_with_state_path_and_runtimes_and_host(
         "0.1.0".to_string(),
         provider_bins,
         state_path,
         config.deno_bin,
         config.computer_use_bin,
+        config.computer_use_host_bundle_id,
     );
+    state.retain_state_lock(Arc::clone(&state_lock));
     state.begin_local_restore();
     // Scheduled definitions are small, local, and must be present before the
     // listener advertises readiness. Otherwise an early snapshot or mutation
@@ -224,9 +240,11 @@ pub async fn spawn_embedded(config: DaemonConfig) -> Result<EmbeddedDaemonHandle
     if let Err(error) = state.restore_control_state().await {
         tracing::warn!("failed to restore agent control state: {error}");
     }
-    control::scheduler::start(&state);
     let listener = TcpListener::bind(config.bind_addr).await?;
     let local_addr = listener.local_addr()?;
+    // A failed bind must not leave a detached scheduler holding state ownership
+    // or executing automations for a runtime that never became available.
+    control::scheduler::start(&state);
     // The Claude PreToolUse hook posts back to this URL; record the actual
     // bound address since the configured port may be 0 (OS-assigned).
     state.set_local_base_url(format!("http://{local_addr}"));
@@ -284,6 +302,7 @@ pub async fn spawn_embedded(config: DaemonConfig) -> Result<EmbeddedDaemonHandle
         restore_task,
         shutdown: Some(shutdown_tx),
         join_handle,
+        _state_lock: state_lock,
     })
 }
 
@@ -324,6 +343,50 @@ async fn wait_for_shutdown_signal() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn state_lock_is_retained_until_background_state_clones_are_gone() {
+        let directory = tempfile::tempdir().unwrap();
+        let state_path = directory.path().join("daemon-state.json");
+        let lock = Arc::new(state_lock::StateLock::acquire(&state_path).unwrap());
+        let state = AppState::new_with_state_path_and_runtimes(
+            "test".to_string(),
+            HashMap::new(),
+            state_path.clone(),
+            "deno".to_string(),
+            None,
+        );
+        state.retain_state_lock(Arc::clone(&lock));
+        let background_state = state.clone();
+        drop(lock);
+        drop(state);
+
+        assert!(matches!(
+            state_lock::StateLock::acquire(&state_path),
+            Err(DaemonError::Conflict(_))
+        ));
+        drop(background_state);
+        let _next_owner = state_lock::StateLock::acquire(&state_path).unwrap();
+    }
+
+    #[tokio::test]
+    async fn graceful_shutdown_releases_state_ownership_with_retained_state_clones() {
+        let directory = tempfile::tempdir().unwrap();
+        let state_path = directory.path().join("daemon-state.json");
+        let config = || DaemonConfig {
+            bind_addr: ([127, 0, 0, 1], 0).into(),
+            state_path: Some(state_path.clone()),
+            background_restore: false,
+            ..DaemonConfig::default()
+        };
+        let first = spawn_embedded(config()).await.unwrap();
+        let retained_state = first.app_state().clone();
+        first.shutdown().await.unwrap();
+
+        let second = spawn_embedded(config()).await.unwrap();
+        assert!(retained_state.is_shutting_down());
+        second.shutdown().await.unwrap();
+    }
 
     #[test]
     fn daemon_installs_a_rustls_crypto_provider() {

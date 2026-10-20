@@ -1,7 +1,7 @@
 import Foundation
 
-/// Connects to the existing local daemon. This prototype never starts another
-/// daemon or reads native agent sessions directly.
+/// Speaks the local daemon contract. NativeRuntime owns verified discovery and
+/// starts the packaged Rust runtime only when another desktop does not own it.
 actor DaemonClient {
     private let configuredURL: URL?
     private let session: URLSession
@@ -32,25 +32,14 @@ actor DaemonClient {
             endpoint = validated
             return validated
         }
-        let listeners = await Task.detached { Self.runningDaemonListeners() }.value
-        var candidates = listeners
-        let developmentURL = URL(string: "http://127.0.0.1:4123")!
-        if !candidates.contains(developmentURL) { candidates.append(developmentURL) }
-        for url in candidates {
-            try Task.checkCancellation()
-            do {
-                try await verifyHealth(url)
-                endpoint = url
-                return url
-            } catch is CancellationError { throw CancellationError() }
-            catch { continue }
-        }
-        throw PilotError("Open FalconDeck to start its local daemon, then reconnect.")
+        let resolved = try await NativeRuntime.shared.endpoint()
+        endpoint = resolved
+        return resolved
     }
 
     func snapshot() async throws -> JSON {
         try await request(["api", "snapshot"], query: [
-            URLQueryItem(name: "include_archived_threads", value: "false"),
+            URLQueryItem(name: "include_archived_threads", value: "true"),
             URLQueryItem(name: "include_thread_plans", value: "false"),
             URLQueryItem(name: "include_thread_diffs", value: "false")
         ])
@@ -102,6 +91,10 @@ actor DaemonClient {
 
     func respond(projectID: String, requestID: String, response: JSON) async throws {
         _ = try await request(["api", "workspaces", projectID, "interactive-requests", requestID, "respond"], method: "POST", body: .object(["response": response]))
+    }
+
+    func requestJSON(_ path: [String], method: String = "GET", query: [URLQueryItem] = [], body: JSON? = nil) async throws -> JSON {
+        try await request(path, method: method, query: query, body: body, timeout: method == "GET" ? 60 : 120)
     }
 
     /// One connection, owned by the caller's reconnect loop. Every connection

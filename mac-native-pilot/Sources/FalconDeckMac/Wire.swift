@@ -35,6 +35,8 @@ enum JSON: Codable, Sendable, Hashable {
     var string: String { if case .string(let value) = self { value } else { "" } }
     var bool: Bool { if case .bool(let value) = self { value } else { false } }
     var array: [JSON] { if case .array(let value) = self { value } else { [] } }
+    var fields: [String: JSON] { if case .object(let value) = self { value } else { [:] } }
+    var double: Double { if case .number(let value) = self { value } else { 0 } }
     var optionalInt: Int? {
         guard case .number(let value) = self, value.isFinite, value >= 0,
               value < Double(Int.max), value.rounded() == value else { return nil }
@@ -49,6 +51,10 @@ enum JSON: Codable, Sendable, Hashable {
         fields[key] = value
         return .object(fields)
     }
+}
+
+extension String {
+    var nonempty: String? { isEmpty ? nil : self }
 }
 
 struct PilotError: LocalizedError, Sendable {

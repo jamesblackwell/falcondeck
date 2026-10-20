@@ -1423,6 +1423,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "falcondeck-native-host"
+version = "0.1.4"
+dependencies = [
+ "falcondeck-daemon",
+ "rustls",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
+]
+
+[[package]]
 name = "falcondeck-relay"
 version = "0.1.4"
 dependencies = [

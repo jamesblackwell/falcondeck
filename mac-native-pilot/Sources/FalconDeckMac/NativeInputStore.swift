@@ -1,0 +1,102 @@
+import CryptoKit
+import Foundation
+import Security
+
+struct NativeInputSnapshot: Codable, Sendable {
+    var drafts: [String: String] = [:]
+    var payloads: [String: JSON] = [:]
+    var submissions: [String: NativePendingSubmission] = [:]
+
+    init(drafts: [String: String] = [:], payloads: [String: JSON] = [:], submissions: [String: NativePendingSubmission] = [:]) {
+        self.drafts = drafts; self.payloads = payloads; self.submissions = submissions
+    }
+
+    private enum CodingKeys: String, CodingKey { case drafts, payloads, submissions }
+    init(from decoder: Decoder) throws {
+        let values = try decoder.container(keyedBy: CodingKeys.self)
+        drafts = try values.decodeIfPresent([String: String].self, forKey: .drafts) ?? [:]
+        payloads = try values.decodeIfPresent([String: JSON].self, forKey: .payloads) ?? [:]
+        submissions = try values.decodeIfPresent([String: NativePendingSubmission].self, forKey: .submissions) ?? [:]
+    }
+}
+
+struct NativePendingSubmission: Codable, Sendable, Equatable, Identifiable {
+    enum Status: String, Codable, Sendable { case prepared, uncertain, checking, checkedMissing }
+    var id: String
+    var userItemID: String
+    var sourceKey: String
+    var composerKey: String
+    var projectID: String
+    var threadID: String?
+    var provider: String
+    var inputs: [JSON]
+    var settings: [String: JSON]
+    var draft: String
+    var payload: JSON
+    var knownQueueIDs: Set<String>
+    var status: Status = .prepared
+    var lastError: String?
+    var preserveComposer: Bool? = nil
+}
+
+/// Recoverable user input, separate from disposable conversation previews.
+actor NativeInputStore {
+    static let shared = NativeInputStore()
+    private let file: URL
+    private let service: String
+    private var key: SymmetricKey?
+    private var latestRevision: UInt64 = 0
+
+    init(directory: URL? = nil, service: String = "com.falcondeck.mac-native-pilot.input", encryptionKey: SymmetricKey? = nil) {
+        let root = directory ?? FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0].appendingPathComponent("FalconDeck Native", isDirectory: true)
+        file = root.appendingPathComponent("input.enc")
+        self.service = service
+        self.key = encryptionKey
+    }
+
+    func load() throws -> NativeInputSnapshot {
+        guard FileManager.default.fileExists(atPath: file.path) else { return .init() }
+        let size = try file.resourceValues(forKeys: [.fileSizeKey]).fileSize ?? 0
+        guard size <= 128 * 1024 * 1024 else { throw PilotError("Saved input exceeds the recovery limit.") }
+        let data = try Data(contentsOf: file)
+        let plaintext = try AES.GCM.open(AES.GCM.SealedBox(combined: data), using: loadKey())
+        return try JSONDecoder().decode(NativeInputSnapshot.self, from: plaintext)
+    }
+
+    func save(_ value: NativeInputSnapshot, revision: UInt64) throws {
+        guard revision >= latestRevision else { return }
+        latestRevision = revision
+        let data = try JSONEncoder().encode(value)
+        guard data.count <= 128 * 1024 * 1024 else { throw PilotError("Saved input exceeds the recovery limit.") }
+        let encrypted = try AES.GCM.seal(data, using: loadKey()).combined
+        guard let encrypted else { throw PilotError("Input encryption failed.") }
+        let directory = file.deletingLastPathComponent()
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
+        try encrypted.write(to: file, options: .atomic)
+        try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: file.path)
+    }
+
+    private func loadKey() throws -> SymmetricKey {
+        if let key { return key }
+        let query: [String: Any] = [kSecClass as String: kSecClassGenericPassword,
+            kSecAttrService as String: service, kSecAttrAccount as String: "input-key",
+            kSecReturnData as String: true, kSecMatchLimit as String: kSecMatchLimitOne]
+        var item: CFTypeRef?
+        let status = SecItemCopyMatching(query as CFDictionary, &item)
+        if status == errSecSuccess, let data = item as? Data, data.count == 32 {
+            let key = SymmetricKey(data: data); self.key = key; return key
+        }
+        guard status == errSecItemNotFound else { throw PilotError("Input recovery key is unavailable (\(status)).") }
+        let generated = SymmetricKey(size: .bits256)
+        var record = query
+        record.removeValue(forKey: kSecReturnData as String)
+        record.removeValue(forKey: kSecMatchLimit as String)
+        record[kSecValueData as String] = generated.withUnsafeBytes { Data($0) }
+        record[kSecAttrAccessible as String] = kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly
+        let saved = SecItemAdd(record as CFDictionary, nil)
+        if saved == errSecDuplicateItem { return try loadKey() }
+        guard saved == errSecSuccess else { throw PilotError("Input recovery key couldn’t be saved (\(saved)).") }
+        key = generated
+        return generated
+    }
+}

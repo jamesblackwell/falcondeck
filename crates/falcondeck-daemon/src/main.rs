@@ -68,6 +68,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     .map(|value| value.trim().to_string())
                     .filter(|value| !value.is_empty())
             }),
+        computer_use_host_bundle_id: None,
         state_path: None,
         background_restore: true,
     };
