@@ -2,6 +2,119 @@ import XCTest
 @testable import FalconDeckMac
 
 final class ConversationTranscriptContentTests: XCTestCase {
+    func testEmptyAndSummaryOnlyThoughtsAreLabelsInEveryThinkingMode() {
+        for content: JSON in [.null, .string(""), .string(" \n ")] {
+            let thought = Message(.object([
+                "id": .string("thought"), "kind": .string("reasoning"),
+                "summary": .string("Checking the result"), "content": content,
+                "duration_ms": .number(2), "lifecycle": .string("complete")
+            ]))
+            XCTAssertFalse(TranscriptPresentation.hasReasoningBody(thought.raw))
+            XCTAssertEqual(TranscriptPresentation.reasoningTitle(thought), "Checking the result · 2 ms")
+            for mode in ["auto", "preview", "always_expanded", "always_collapsed"] {
+                XCTAssertFalse(TranscriptPresentation.defaultExpanded(thought, preferences: .object(["thinking_display": .string(mode)])))
+                let tools = [tool("before"), thought, tool("after")]
+                XCTAssertEqual(ConversationTranscriptGroups.groups(messages: tools, preferences: .null, thinkingDisplay: mode).map { $0.map(\.id) }, [["before", "thought", "after"]])
+            }
+        }
+        let empty = Message(.object(["kind": .string("reasoning")]))
+        XCTAssertEqual(TranscriptPresentation.reasoningTitle(empty), "Thought")
+        XCTAssertEqual(TranscriptPresentation.reasoningTitle(Message(empty.raw.setting("lifecycle", .string("interrupted")))), "Thought interrupted")
+        XCTAssertEqual(TranscriptPresentation.reasoningTitle(Message(empty.raw.setting("lifecycle", .string("error")))), "Thought failed")
+        XCTAssertEqual(TranscriptPresentation.reasoningTitle(Message(empty.raw.setting("lifecycle", .string("streaming")).setting("duration_ms", .number(2)))), "Thinking…")
+    }
+
+    func testProgressUpdatesStayVisibleBetweenCollapsedWorkAndFinalAnswer() {
+        let progress = Message(.object([
+            "id": .string("progress"), "kind": .string("assistant_message"),
+            "phase": .string("commentary"), "text": .string("The **build passed**. I’m checking the result."),
+            "lifecycle": .string("streaming")
+        ]))
+        let answer = Message(progress.raw.setting("id", .string("answer")).setting("phase", .string("final_answer")))
+        var transcript = Transcript(items: [tool("read")])
+        transcript.apply(.object(["type": .string("conversation-item-added"), "item": progress.raw]))
+        transcript.apply(.object([
+            "type": .string("text"), "item_id": .string("progress"),
+            "target": .string("assistant_text"), "delta": .string(" Next check.")
+        ]))
+        transcript.upsert(tool("check")); transcript.upsert(answer)
+        XCTAssertTrue(TranscriptPresentation.isProgressUpdate(transcript.items[1]))
+        XCTAssertFalse(TranscriptPresentation.isProgressUpdate(answer))
+        for mode in ["collapsed", "expanded", "auto", "compact", "hide_read_only_details"] {
+            let groups = ConversationTranscriptGroups.groups(messages: transcript.items, preferences: .object(["tool_details_mode": .string(mode)]))
+            XCTAssertEqual(groups.map { $0.map(\.id) }, [["read"], ["progress"], ["check"], ["answer"]])
+            XCTAssertEqual(groups[1][0].text, progress.text + " Next check.")
+        }
+    }
+
+    func testOneRoutineToolUsesWorkFoldButHighSignalItemsStayVisible() {
+        XCTAssertTrue(ConversationTranscriptGroups.isActivityGroup([tool("read")], preferences: .null))
+        XCTAssertFalse(ConversationTranscriptGroups.isActivityGroup([tool("read")], preferences: .object(["tool_details_mode": .string("expanded")])))
+        for display: JSON in [
+            .object(["artifact_kind": .string("diff")]),
+            .object(["artifact_kind": .string("approval_related")]),
+            .object(["provider_output_summary": .object(["images": .number(1)])])
+        ] {
+            XCTAssertFalse(ConversationTranscriptGroups.isActivityGroup([Message(tool("signal").raw.setting("display", display))], preferences: .null))
+        }
+        let trailing = Message(.object(["id": .string("thought"), "kind": .string("reasoning"), "lifecycle": .string("streaming")]))
+        let groups = ConversationTranscriptGroups.groups(messages: [trailing], preferences: .null, isStreaming: false)
+        XCTAssertFalse(groups[0][0].streaming)
+        XCTAssertTrue(trailing.streaming)
+        XCTAssertEqual(ConversationTranscriptGroups.title(for: [tool("read")], running: true), "Working…")
+        XCTAssertEqual(ConversationTranscriptGroups.title(for: [tool("read"), trailing], running: true), "Thinking…")
+    }
+
+    func testProgressAfterRunningWorkDoesNotMarkThatWorkComplete() {
+        let active = Message(tool("read").raw.setting("status", .string("running")))
+        let progress = Message(.object([
+            "id": .string("progress"), "kind": .string("assistant_message"),
+            "phase": .string("commentary"), "text": .string("The check is still running.")
+        ]))
+        let groups = ConversationTranscriptGroups.groups(messages: [active, progress], preferences: .null)
+        XCTAssertEqual(groups.map { $0.map(\.id) }, [["read"], ["progress"]])
+        XCTAssertTrue(ConversationTranscriptGroups.isRunning(groups[0], keepAlive: false))
+        XCTAssertEqual(ConversationTranscriptGroups.title(for: groups[0], running: false), "Working…")
+        let thought = Message(.object(["id": .string("thought"), "kind": .string("reasoning")]))
+        XCTAssertEqual(ConversationTranscriptGroups.title(for: [active, thought], running: true), "Working…")
+        XCTAssertFalse(ConversationTranscriptGroups.isRunning([tool("complete")]))
+        XCTAssertTrue(ConversationTranscriptGroups.isRunning([tool("complete")], keepAlive: true))
+    }
+
+    func testCompletedToolOutputDoesNotHideTheContinuingTurnIndicator() {
+        var transcript = Transcript(items: [Message(tool("check").raw.setting("status", .string("running")))])
+        XCTAssertTrue(TranscriptPresentation.hasActivityIndicator(transcript.items[0]))
+        transcript.apply(.object([
+            "type": .string("text"), "target": .string("tool_output"),
+            "item_id": .string("check"), "delta": .string("Checks passed")
+        ]))
+        transcript.apply(.object([
+            "type": .string("tool-call-end"), "item_id": .string("check"), "status": .string("completed"), "exit_code": .number(0)
+        ]))
+        XCTAssertTrue(transcript.items[0].streaming, "Output lifecycle can trail the terminal command status.")
+        XCTAssertFalse(TranscriptPresentation.hasActivityIndicator(transcript.items[0]))
+        for kind in ["assistant_message", "code_review", "reasoning"] {
+            XCTAssertTrue(TranscriptPresentation.hasActivityIndicator(Message(.object([
+                "kind": .string(kind), "lifecycle": .string("streaming")
+            ]))))
+        }
+        XCTAssertFalse(TranscriptPresentation.hasActivityIndicator(Message(.object(["kind": .string("image"), "lifecycle": .string("streaming")]))))
+    }
+
+    func testFoldedToolTitleMatchesTheSameSearchThatRevealsItsGroup() {
+        let command = Message(tool("check").raw.setting("title", .string("Run the Markdown regression suite"))
+            .setting("output", .string("45 checks passed.")))
+        let groups = ConversationTranscriptGroups.groups(messages: [command], preferences: .null)
+        XCTAssertTrue(ConversationTranscriptGroups.isActivityGroup(groups[0], preferences: .null))
+        XCTAssertFalse(command.text.localizedCaseInsensitiveContains("markdown"))
+        for query in ["markdown", "CHECKS PASSED"] {
+            XCTAssertTrue(TranscriptPresentation.matchesSearch(command, query: query))
+            XCTAssertTrue(groups[0].contains { TranscriptPresentation.matchesSearch($0, query: query) })
+        }
+        XCTAssertFalse(TranscriptPresentation.matchesSearch(command, query: "missing"))
+        XCTAssertFalse(TranscriptPresentation.matchesSearch(command, query: ""))
+    }
+
     func testReasoningBodyPreservesFullThoughtWhenSummaryIsPresent() {
         let body = "The replay starts after the retained cursor.\n\nRecover a fresh snapshot before applying later events."
         let item: JSON = .object([
@@ -9,7 +122,7 @@ final class ConversationTranscriptContentTests: XCTestCase {
             "content": .string(body), "lifecycle": .string("complete")
         ])
         XCTAssertEqual(TranscriptPresentation.reasoningBody(item), body)
-        XCTAssertEqual(TranscriptPresentation.reasoningBody(item.setting("content", .string("  \n"))), "Inspecting replay state")
+        XCTAssertFalse(TranscriptPresentation.hasReasoningBody(item.setting("content", .string("  \n"))))
         XCTAssertEqual(TranscriptPresentation.reasoningBody(item.setting("summary", .null)), body)
     }
 
@@ -66,5 +179,9 @@ final class ConversationTranscriptContentTests: XCTestCase {
     func testBareFilenameLineLinksAcceptQueryAndFragmentLocations() {
         XCTAssertEqual(TranscriptFileLink.parse("README.md:12?line=4"), .init(path: "./README.md", line: 4))
         XCTAssertEqual(TranscriptFileLink.parse("README.md:12:8?line=4#L6"), .init(path: "./README.md", line: 6))
+    }
+
+    private func tool(_ id: String) -> Message {
+        Message(.object(["id": .string(id), "kind": .string("tool_call"), "status": .string("completed")]))
     }
 }

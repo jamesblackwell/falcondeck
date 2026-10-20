@@ -42,6 +42,11 @@ enum TranscriptTableAlignment: Equatable {
     }
 }
 
+struct TranscriptMarkdownDocument {
+    var blocks: [TranscriptMarkdownBlock]
+    var referenceDefinitions: String
+}
+
 enum TranscriptMarkdownParser {
     private struct Fence {
         var marker: Character
@@ -59,10 +64,17 @@ enum TranscriptMarkdownParser {
     }
 
     static func parse(_ source: String) -> [TranscriptMarkdownBlock] {
-        parseLines(source.replacingOccurrences(of: "\r\n", with: "\n").replacingOccurrences(of: "\r", with: "\n").components(separatedBy: "\n"))
+        document(source).blocks
     }
 
-    private static func parseLines(_ lines: [String], depth: Int = 0) -> [TranscriptMarkdownBlock] {
+    static func document(_ source: String) -> TranscriptMarkdownDocument {
+        let lines = source.replacingOccurrences(of: "\r\n", with: "\n").replacingOccurrences(of: "\r", with: "\n").components(separatedBy: "\n")
+        var definitions: [String] = []
+        let blocks = parseLines(lines, referenceDefinitions: &definitions)
+        return TranscriptMarkdownDocument(blocks: blocks, referenceDefinitions: definitions.joined(separator: "\n"))
+    }
+
+    private static func parseLines(_ lines: [String], depth: Int = 0, referenceDefinitions: inout [String]) -> [TranscriptMarkdownBlock] {
         // Agent output is untrusted content. Render an excessive nesting tail as
         // literal text rather than exhausting the parser or SwiftUI view stack.
         guard depth < 32 else { return [.paragraph(lines.joined(separator: "\n"))] }
@@ -83,6 +95,26 @@ enum TranscriptMarkdownParser {
                 blocks.append(.code(language: opening.language, text: content.joined(separator: "\n")))
                 continue
             }
+            if indentation(line) >= 4 {
+                var content: [String] = []
+                while index < lines.count {
+                    let next = lines[index]
+                    if next.trimmingCharacters(in: .whitespaces).isEmpty {
+                        content.append("")
+                    } else if indentation(next) >= 4 {
+                        content.append(removingIndent(next, atMost: 4))
+                    } else { break }
+                    index += 1
+                }
+                while content.last == "" { content.removeLast() }
+                blocks.append(.code(language: "", text: content.joined(separator: "\n")))
+                continue
+            }
+            if let definition = referenceDefinition(lines, at: index) {
+                referenceDefinitions.append(definition.source)
+                index = definition.next
+                continue
+            }
             if let heading = heading(line) {
                 blocks.append(.heading(level: heading.0, text: heading.1)); index += 1; continue
             }
@@ -96,10 +128,10 @@ enum TranscriptMarkdownParser {
                 while index < lines.count, let quoted = quoteContent(lines[index]) {
                     content.append(quoted); index += 1
                 }
-                blocks.append(.quote(parseLines(content, depth: depth + 1))); continue
+                blocks.append(.quote(parseLines(content, depth: depth + 1, referenceDefinitions: &referenceDefinitions))); continue
             }
             if let marker = listMarker(line) {
-                let result = parseList(lines, start: index, first: marker, depth: depth)
+                let result = parseList(lines, start: index, first: marker, depth: depth, referenceDefinitions: &referenceDefinitions)
                 blocks.append(result.block); index = result.next; continue
             }
             if index + 1 < lines.count, let headers = tableCells(line), let alignments = tableSeparator(lines[index + 1]), headers.count == alignments.count {
@@ -117,7 +149,7 @@ enum TranscriptMarkdownParser {
                 blocks.append(.image(alt: image.0, destination: image.1)); index += 1; continue
             }
 
-            var paragraph = [line.trimmingCharacters(in: .whitespaces)]
+            var paragraph = [paragraphLine(line)]
             index += 1
             while index < lines.count, !lines[index].trimmingCharacters(in: .whitespaces).isEmpty {
                 let next = lines[index]
@@ -127,11 +159,34 @@ enum TranscriptMarkdownParser {
                 }
                 if fence(next) != nil || heading(next) != nil || isRule(next) || quoteContent(next) != nil || listMarker(next) != nil || standaloneImage(next) != nil { break }
                 if index + 1 < lines.count, tableCells(next) != nil, tableSeparator(lines[index + 1]) != nil { break }
-                paragraph.append(next.trimmingCharacters(in: .whitespaces)); index += 1
+                paragraph.append(paragraphLine(next)); index += 1
             }
             if !paragraph.isEmpty { blocks.append(.paragraph(paragraph.joined(separator: "\n"))) }
         }
         return blocks
+    }
+
+    private static func paragraphLine(_ line: String) -> String {
+        // Trailing spaces are Markdown hard-break syntax, including within lists.
+        String(line.drop { $0 == " " || $0 == "\t" })
+    }
+
+    private static func referenceDefinition(_ lines: [String], at index: Int) -> (source: String, next: Int)? {
+        guard lines[index].range(of: #"^ {0,3}\[(?:\\.|[^\[\]\\]){1,999}\]:"#, options: .regularExpression) != nil else { return nil }
+        let definitionPattern = #"^ {0,3}\[(?:\\.|[^\[\]\\]){1,999}\]:[ \t]*(?:\n[ \t]*)?(?:<(?:\\.|[^<>\\\n])*>|(?:\\.|[^\s<>\\])+)(?:(?:[ \t]+|[ \t]*\n[ \t]*)(?:\"(?:\\.|[^\"\\])*\"|'(?:\\.|[^'\\])*'|\((?:\\.|[^()\\])*\)))?[ \t]*$"#
+        // Let Foundation validate destinations, escaping and optional titles. An
+        // accepted definition produces no visible text, but so do rules and
+        // other empty blocks: first require the shape of one definition only.
+        for end in stride(from: min(lines.count, index + 3), through: index + 1, by: -1) {
+            let candidate = lines[index..<end]
+            guard candidate.allSatisfy({ !$0.trimmingCharacters(in: .whitespaces).isEmpty }) else { continue }
+            let source = candidate.joined(separator: "\n")
+            guard source.range(of: definitionPattern, options: .regularExpression) != nil else { continue }
+            if let parsed = try? AttributedString(markdown: source), parsed.characters.isEmpty {
+                return (source, end)
+            }
+        }
+        return nil
     }
 
     private static func fence(_ line: String) -> Fence? {
@@ -198,7 +253,7 @@ enum TranscriptMarkdownParser {
         return ListMarker(ordered: ordered, number: ordered ? Int(marker.dropLast()) ?? 1 : 1, indent: indent, contentIndent: indent + marker.count + max(1, gap.count), text: String(content[textRange]))
     }
 
-    private static func parseList(_ lines: [String], start: Int, first: ListMarker, depth: Int) -> (block: TranscriptMarkdownBlock, next: Int) {
+    private static func parseList(_ lines: [String], start: Int, first: ListMarker, depth: Int, referenceDefinitions: inout [String]) -> (block: TranscriptMarkdownBlock, next: Int) {
         var index = start
         var items: [TranscriptMarkdownListItem] = []
         while index < lines.count, !isRule(lines[index]), let marker = listMarker(lines[index]), marker.indent == first.indent, marker.ordered == first.ordered {
@@ -206,7 +261,7 @@ enum TranscriptMarkdownParser {
             var checked: Bool?
             if firstLine.range(of: #"^\[[ xX]\](?:\s|$)"#, options: .regularExpression) != nil {
                 checked = firstLine.dropFirst().first?.lowercased() == "x"
-                firstLine = String(firstLine.dropFirst(3)).trimmingCharacters(in: .whitespaces)
+                firstLine = paragraphLine(String(firstLine.dropFirst(3)))
             }
             var content = [firstLine]
             index += 1
@@ -227,10 +282,10 @@ enum TranscriptMarkdownParser {
                     break
                 } else {
                     // Markdown permits a continuation paragraph without indentation.
-                    content.append(next.trimmingCharacters(in: .whitespaces)); index += 1
+                    content.append(paragraphLine(next)); index += 1
                 }
             }
-            items.append(TranscriptMarkdownListItem(checked: checked, blocks: parseLines(content, depth: depth + 1)))
+            items.append(TranscriptMarkdownListItem(checked: checked, blocks: parseLines(content, depth: depth + 1, referenceDefinitions: &referenceDefinitions)))
         }
         return (.list(ordered: first.ordered, start: first.number, items: items), index)
     }
@@ -306,12 +361,14 @@ enum TranscriptMarkdownParser {
 struct NativeMarkdownView: View {
     let text: String
     var onOpenFile: ((String, Int?) -> Void)? = nil
+    var fontSize: CGFloat = 16
+    var foreground: Color? = nil
     @Environment(\.transcriptOpenFile) private var inheritedOpenFile
 
     var body: some View {
         ParsedTranscriptMarkdown(text: text).equatable()
-            .font(NativePreferences.shared.font(size: 16, surface: "chat"))
-            .foregroundStyle(FDTheme.foreground)
+            .font(NativePreferences.shared.font(size: fontSize, surface: "chat"))
+            .foregroundStyle(foreground ?? FDTheme.foreground)
             .lineSpacing(6)
             .textSelection(.enabled)
             .frame(maxWidth: .infinity, alignment: .leading)
@@ -331,12 +388,14 @@ private struct ParsedTranscriptMarkdown: View, Equatable {
     let text: String
 
     var body: some View {
-        TranscriptMarkdownBlocks(blocks: TranscriptMarkdownParser.parse(text))
+        let document = TranscriptMarkdownParser.document(text)
+        TranscriptMarkdownBlocks(blocks: document.blocks, referenceDefinitions: document.referenceDefinitions)
     }
 }
 
 private struct TranscriptMarkdownBlocks: View {
     let blocks: [TranscriptMarkdownBlock]
+    let referenceDefinitions: String
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
@@ -351,9 +410,9 @@ private struct TranscriptMarkdownBlocks: View {
     @ViewBuilder private func blockView(_ block: TranscriptMarkdownBlock) -> some View {
         switch block {
         case .paragraph(let text):
-            TranscriptInlineText(text: text)
+            TranscriptInlineText(text: text, referenceDefinitions: referenceDefinitions)
         case .heading(let level, let text):
-            TranscriptInlineText(text: text)
+            TranscriptInlineText(text: text, referenceDefinitions: referenceDefinitions)
                 .font(NativePreferences.shared.font(size: headingSize(level), surface: "chat", weight: .semibold))
                 .padding(.top, level < 3 ? 6 : 2)
         case .code(let language, let text):
@@ -361,7 +420,7 @@ private struct TranscriptMarkdownBlocks: View {
         case .rule:
             FDTheme.line.frame(height: 1).padding(.vertical, 4)
         case .quote(let children):
-            AnyView(TranscriptMarkdownBlocks(blocks: children))
+            AnyView(TranscriptMarkdownBlocks(blocks: children, referenceDefinitions: referenceDefinitions))
                 .foregroundStyle(FDTheme.secondary)
                 .padding(.leading, 14)
                 .overlay(alignment: .leading) { FDTheme.line.frame(width: 3) }
@@ -381,12 +440,12 @@ private struct TranscriptMarkdownBlocks: View {
                                 .monospacedDigit()
                                 .frame(minWidth: ordered ? 24 : 18, alignment: .trailing)
                         }
-                        AnyView(TranscriptMarkdownBlocks(blocks: item.blocks))
+                        AnyView(TranscriptMarkdownBlocks(blocks: item.blocks, referenceDefinitions: referenceDefinitions))
                     }
                 }
             }
         case .table(let headers, let alignments, let rows):
-            TranscriptMarkdownTable(headers: headers, alignments: alignments, rows: rows)
+            TranscriptMarkdownTable(headers: headers, alignments: alignments, rows: rows, referenceDefinitions: referenceDefinitions)
         case .image(let alt, let destination):
             TranscriptMediaView(reference: .object([
                 "url": .string(destination), "alt_text": .string(alt), "mime_type": .string("image/*")
@@ -401,6 +460,7 @@ private struct TranscriptMarkdownBlocks: View {
 
 private struct TranscriptInlineText: View {
     let text: String
+    let referenceDefinitions: String
 
     var body: some View {
         Text(attributed)
@@ -410,8 +470,37 @@ private struct TranscriptInlineText: View {
     }
 
     private var attributed: AttributedString {
-        let options = AttributedString.MarkdownParsingOptions(interpretedSyntax: .inlineOnlyPreservingWhitespace)
-        var value = (try? AttributedString(markdown: text, options: options)) ?? AttributedString(text)
+        TranscriptMarkdownInline.styled(text, referenceDefinitions: referenceDefinitions)
+    }
+}
+
+enum TranscriptMarkdownInline {
+    static func attributed(_ text: String, referenceDefinitions: String = "") -> AttributedString {
+        // Full parsing resolves document-wide references and distinguishes hard
+        // breaks from source wrapping. A removed punctuation prefix keeps #, >
+        // and - inline without making leading underscore emphasis intraword.
+        let prefix = ":"
+        let footer = referenceDefinitions.isEmpty ? "" : "\n\n" + referenceDefinitions
+        guard var value = try? AttributedString(markdown: prefix + text + footer), value.characters.first == ":" else { return AttributedString(text) }
+        value.removeSubrange(value.startIndex..<value.characters.index(after: value.startIndex))
+        var result = AttributedString()
+        for run in value.runs {
+            var segment = AttributedString(value[run.range])
+            segment.presentationIntent = nil
+            if let imageURL = run.imageURL {
+                // Keep Markdown-authored images explicit links, like desktop;
+                // typed image output owns previewing and loading media.
+                if String(segment.characters) == "\u{FFFC}" { segment = AttributedString("[Linked image]") }
+                segment.imageURL = nil
+                segment.link = imageURL
+            }
+            result += segment
+        }
+        return result
+    }
+
+    @MainActor static func styled(_ text: String, referenceDefinitions: String = "") -> AttributedString {
+        var value = attributed(text, referenceDefinitions: referenceDefinitions)
         for run in value.runs where run.inlinePresentationIntent?.contains(.code) == true {
             value[run.range].font = NativePreferences.shared.font(size: 13, surface: "code")
             value[run.range].foregroundColor = FDTheme.accentStrong
@@ -425,6 +514,7 @@ private struct TranscriptMarkdownTable: View {
     let headers: [String]
     let alignments: [TranscriptTableAlignment]
     let rows: [[String]]
+    let referenceDefinitions: String
 
     var body: some View {
         ScrollView(.horizontal) {
@@ -448,17 +538,13 @@ private struct TranscriptMarkdownTable: View {
     }
 
     private func cell(_ text: String, column: Int) -> some View {
-        Text(inline(text))
+        Text(TranscriptMarkdownInline.styled(text, referenceDefinitions: referenceDefinitions))
             .tint(FDTheme.accent)
             .padding(.horizontal, 12)
             .padding(.vertical, 9)
             .frame(minWidth: 80, maxWidth: 340, maxHeight: .infinity, alignment: alignments[column].alignment)
             .overlay(alignment: .bottom) { FDTheme.hairline.frame(height: 1) }
             .overlay(alignment: .trailing) { FDTheme.hairline.frame(width: 1) }
-    }
-
-    private func inline(_ source: String) -> AttributedString {
-        (try? AttributedString(markdown: source, options: .init(interpretedSyntax: .inlineOnlyPreservingWhitespace))) ?? AttributedString(source)
     }
 }
 

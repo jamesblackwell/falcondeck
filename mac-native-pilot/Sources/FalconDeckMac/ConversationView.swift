@@ -33,14 +33,14 @@ struct ConversationView: View {
         return label + " (" + NativeShortcutDefinition.display(binding) + ")"
     }
     var matches: [String] {
-        findText.isEmpty ? [] : store.messages.filter { $0.text.localizedCaseInsensitiveContains(findText) || $0.title.localizedCaseInsensitiveContains(findText) }.map(\.id)
+        findText.isEmpty ? [] : store.messages.filter { TranscriptPresentation.matchesSearch($0, query: findText) }.map(\.id)
     }
     var workingDirectory: String {
         let isolated = store.selectedTask?.raw["variant"]["path"].string ?? ""
         return isolated.isEmpty ? store.selectedProject?.path ?? "" : isolated
     }
     var transcriptGroups: [ConversationMessageGroup] {
-        ConversationTranscriptGroups.groups(messages: store.messages, preferences: store.preferences, thinkingDisplay: NativePreferences.shared.thinkingDisplay).map { ConversationMessageGroup(items: $0) }
+        ConversationTranscriptGroups.groups(messages: store.messages, preferences: store.preferences, thinkingDisplay: NativePreferences.shared.thinkingDisplay, isStreaming: store.isRunning).map { ConversationMessageGroup(items: $0) }
     }
 
     var body: some View {
@@ -150,12 +150,17 @@ struct ConversationView: View {
     var transcript: some View {
         let retrySources = ConversationActionSemantics.retrySources(messages: store.messages)
         let firstDiffID = ConversationTranscriptGroups.firstDiffItemID(messages: store.messages)
+        let groups = transcriptGroups
+        let liveGroupID = store.isRunning ? groups.last?.id : nil
+        let hasLiveActivityGroup = groups.last.map {
+            store.isRunning && ConversationTranscriptGroups.isActivityGroup($0.items, preferences: store.preferences)
+        } ?? false
         return GeometryReader { viewport in
             ScrollViewReader { proxy in
                 VStack(spacing: 0) {
                     if findVisible { findBar(proxy: proxy) }
                     ScrollView {
-                        LazyVStack(alignment: .leading, spacing: 24) {
+                        LazyVStack(alignment: .leading, spacing: 16) {
                             if store.hasOlder {
                                 Button {
                                     let firstID = store.messages.first?.id; followsLatest = false
@@ -165,22 +170,22 @@ struct ConversationView: View {
                                         .font(NativePreferences.shared.font(size: 12)).foregroundStyle(FDTheme.muted).frame(maxWidth: .infinity).padding(10)
                                 }.buttonStyle(.plain).disabled(store.isLoadingOlder).accessibilityIdentifier("load-earlier-messages")
                             }
-                            ForEach(transcriptGroups) { group in
+                            ForEach(groups) { group in
                                 // Give the lazy stack one child per group so it
                                 // need not traverse conditional row trees on every delta.
                                 VStack(alignment: .leading, spacing: 0) {
-                                    if group.items.count == 1, let message = group.items.first {
+                                    if !ConversationTranscriptGroups.isActivityGroup(group.items, preferences: store.preferences), let message = group.items.first {
                                         transcriptRow(message, firstDiffID: firstDiffID, retryable: retrySources[message.id] != nil).padding(findText.isEmpty ? 0 : 8)
                                             .background(matches.contains(message.id) ? FDTheme.accentDim : .clear, in: .rect(cornerRadius: 8)).id(message.id)
                                     } else {
-                                        ConversationTranscriptBurst(group: group, expansionDirective: expansionDirective, findText: findText) { message in
-                                            AnyView(transcriptRow(message, firstDiffID: firstDiffID, retryable: retrySources[message.id] != nil).id(message.id))
+                                        ConversationTranscriptBurst(group: group, running: ConversationTranscriptGroups.isRunning(group.items, keepAlive: group.id == liveGroupID), expansionDirective: expansionDirective, findText: findText) { message in
+                                            AnyView(transcriptRow(message, firstDiffID: firstDiffID, retryable: retrySources[message.id] != nil, activityInset: 0).id(message.id))
                                         }.id(group.id)
                                     }
                                 }
                             }
                             NativeExtensionToolResults(store: store, messages: store.messages)
-                            if store.isRunning {
+                            if store.isRunning && !hasLiveActivityGroup && groups.last?.items.last.map(TranscriptPresentation.hasActivityIndicator) != true {
                                 HStack(spacing: 8) { MacActivityDiamond(size: 7); Text("\(FDTheme.providerName(provider)) is working").font(NativePreferences.shared.font(size: 12)).foregroundStyle(FDTheme.muted) }
                                     .padding(.leading, 35).accessibilityIdentifier("agent-working")
                             }
@@ -206,9 +211,9 @@ struct ConversationView: View {
         }
     }
 
-    func transcriptRow(_ message: Message, firstDiffID: String?, retryable: Bool) -> some View {
+    func transcriptRow(_ message: Message, firstDiffID: String?, retryable: Bool, activityInset: CGFloat = 35) -> some View {
         ConversationTranscriptRow(message: message, provider: provider, preferences: store.preferences,
-            firstDiff: message.id == firstDiffID, expansionDirective: expansionDirective,
+            firstDiff: message.id == firstDiffID, activityInset: activityInset, expansionDirective: expansionDirective,
             onQuote: { text in quote = text; persistPayload() },
             onEdit: canBranch && message.kind == "user_message" && !message.raw["turn_id"].string.isEmpty ? { action { try await edit(message, retry: false) } } : nil,
             onRetry: canBranch && retryable ? { action { try await retry(message) } } : nil,
@@ -327,18 +332,23 @@ struct ConversationMessageGroup: Identifiable {
 
 private struct ConversationTranscriptBurst: View {
     let group: ConversationMessageGroup
+    let running: Bool
     let expansionDirective: Int
     let findText: String
     let row: (Message) -> AnyView
     @State private var expanded = false
     var body: some View {
         DisclosureGroup(isExpanded: $expanded) {
-            VStack(alignment: .leading, spacing: 12) { ForEach(group.items) { row($0) } }.padding(.top, 12)
+            VStack(alignment: .leading, spacing: 8) { ForEach(group.items) { row($0) } }.padding(.top, 6)
         } label: {
-            Label(ConversationTranscriptGroups.title(for: group.items), systemImage: "square.stack.3d.up")
-                .font(NativePreferences.shared.font(size: 12)).foregroundStyle(FDTheme.muted)
+            HStack(spacing: 7) {
+                if running { MacActivityDiamond(size: 7) }
+                Text(ConversationTranscriptGroups.title(for: group.items, running: running))
+            }.font(NativePreferences.shared.font(size: 13, surface: "chat")).foregroundStyle(FDTheme.muted)
         }.padding(.leading, 35)
-            .onChange(of: expansionDirective) { _, directive in if directive != 0 { expanded = directive > 0 } }
-            .onChange(of: findText) { _, query in if !query.isEmpty && group.items.contains(where: { $0.text.localizedCaseInsensitiveContains(query) }) { expanded = true } }
+            .onChange(of: expansionDirective, initial: true) { _, directive in if directive != 0 { expanded = directive > 0 } }
+            .onChange(of: findText, initial: true) { _, query in
+                if group.items.contains(where: { TranscriptPresentation.matchesSearch($0, query: query) }) { expanded = true }
+            }
     }
 }

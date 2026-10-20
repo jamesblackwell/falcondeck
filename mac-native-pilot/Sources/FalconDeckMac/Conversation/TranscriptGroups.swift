@@ -3,7 +3,7 @@ import Foundation
 /// Stable ordered groups. Only activity folds together; messages, approvals,
 /// artifacts and changes keep their own selectable transcript rows.
 enum ConversationTranscriptGroups {
-    static func groups(messages: [Message], preferences source: JSON, thinkingDisplay: String? = nil) -> [[Message]] {
+    static func groups(messages: [Message], preferences source: JSON, thinkingDisplay: String? = nil, isStreaming: Bool = true) -> [[Message]] {
         var preferences = TranscriptPresentation.conversationPreferences(source)
         if let thinkingDisplay { preferences = preferences.setting("thinking_display", .string(thinkingDisplay)) }
         let mode = TranscriptPresentation.toolMode(preferences)
@@ -11,7 +11,7 @@ enum ConversationTranscriptGroups {
         // Settle old thoughts even when tools are shown without grouping.
         let messages = messages.enumerated().map { index, original in
             var message = original
-            if message.kind == "reasoning", message.streaming, index < messages.count - 1 {
+            if message.kind == "reasoning", message.streaming, index < messages.count - 1 || !isStreaming {
                 message.raw = message.raw.setting("lifecycle", .string("complete"))
             }
             return message
@@ -22,25 +22,37 @@ enum ConversationTranscriptGroups {
             if !pending.isEmpty { result.append(pending); pending.removeAll(keepingCapacity: true) }
         }
         for message in messages {
-            if message.kind == "reasoning", mode == "collapsed", !pending.isEmpty,
-               preferences["thinking_display"].string != "preview",
-               !TranscriptPresentation.defaultExpanded(message, preferences: preferences) {
-                pending.append(message)
-                continue
+            if message.kind == "reasoning", mode == "collapsed", !pending.isEmpty {
+                let showBody = TranscriptPresentation.hasReasoningBody(message.raw)
+                    && (preferences["thinking_display"].string == "preview"
+                        || TranscriptPresentation.defaultExpanded(message, preferences: preferences))
+                if !showBody { pending.append(message); continue }
             }
-            let tool = message.kind == "tool_call"
-            let signal = TranscriptPresentation.hasRenderableArtifacts(message.raw)
-                || TranscriptPresentation.isApproval(message.raw) && TranscriptPresentation.autoExpand("approvals", preferences: preferences)
-                || message.raw["display"]["artifact_kind"].string == "diff"
-                || TranscriptPresentation.failedTests(message.raw) && TranscriptPresentation.autoExpand("failed_tests", preferences: preferences)
-                || mode != "collapsed" && TranscriptPresentation.defaultExpanded(message, preferences: preferences)
-            let mayGroup = tool && !signal && (mode == "collapsed"
-                || TranscriptPresentation.flag("group_read_only_tools", preferences: preferences) && TranscriptPresentation.isReadOnly(message.raw))
-            if mayGroup { pending.append(message) }
+            if mayGroup(message, preferences: preferences) { pending.append(message) }
             else { flush(); result.append([message]) }
         }
         flush()
         return result
+    }
+
+    /// Collapsed mode folds even one routine tool. Group size must not decide
+    /// whether a command appears as a full card or a quiet work receipt.
+    static func isActivityGroup(_ messages: [Message], preferences: JSON) -> Bool {
+        messages.count > 1 || messages.first.map {
+            TranscriptPresentation.toolMode(preferences) == "collapsed" && mayGroup($0, preferences: preferences)
+        } == true
+    }
+
+    private static func mayGroup(_ message: Message, preferences: JSON) -> Bool {
+        guard message.kind == "tool_call" else { return false }
+        let mode = TranscriptPresentation.toolMode(preferences)
+        let signal = TranscriptPresentation.hasRenderableArtifacts(message.raw)
+            || TranscriptPresentation.isApproval(message.raw) && TranscriptPresentation.autoExpand("approvals", preferences: preferences)
+            || message.raw["display"]["artifact_kind"].string == "diff"
+            || TranscriptPresentation.failedTests(message.raw) && TranscriptPresentation.autoExpand("failed_tests", preferences: preferences)
+            || mode != "collapsed" && TranscriptPresentation.defaultExpanded(message, preferences: preferences)
+        return !signal && (mode == "collapsed"
+            || TranscriptPresentation.flag("group_read_only_tools", preferences: preferences) && TranscriptPresentation.isReadOnly(message.raw))
     }
 
     static func firstDiffItemID(messages: [Message]) -> String? {
@@ -54,11 +66,17 @@ enum ConversationTranscriptGroups {
         TranscriptPresentation.flag("show_expand_all_controls", preferences: preferences)
     }
 
-    static func title(for messages: [Message]) -> String {
+    static func isRunning(_ messages: [Message], keepAlive: Bool = false) -> Bool {
+        keepAlive || messages.contains { $0.running }
+    }
+
+    static func title(for messages: [Message], running: Bool = false) -> String {
         let tools = messages.filter { $0.kind == "tool_call" }
-        let running = tools.contains { $0.running }
+        if isRunning(messages, keepAlive: running) {
+            return messages.last?.kind == "reasoning" && !tools.contains(where: { $0.running }) ? "Thinking…" : "Working…"
+        }
         let label = tools.allSatisfy { TranscriptPresentation.isReadOnly($0.raw) } ? "Explored" : "Worked"
-        return "\(running ? "Working" : label) · \(tools.count) \(tools.count == 1 ? "step" : "steps")"
+        return "\(label) · \(tools.count) \(tools.count == 1 ? "step" : "steps")"
     }
 }
 

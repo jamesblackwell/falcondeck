@@ -87,7 +87,7 @@ final class ConversationTranscriptTests: XCTestCase {
     }
 
     func testReasoningExpansionRespectsExplicitPreferences() {
-        let streaming = Message(.object(["kind": .string("reasoning"), "lifecycle": .string("streaming")]))
+        let streaming = Message(.object(["kind": .string("reasoning"), "lifecycle": .string("streaming"), "content": .string("Checking the result.")]))
         let completed = Message(streaming.raw.setting("lifecycle", .string("complete")))
         XCTAssertTrue(TranscriptPresentation.defaultExpanded(streaming, preferences: .null))
         XCTAssertFalse(TranscriptPresentation.defaultExpanded(completed, preferences: .null))
@@ -123,7 +123,7 @@ final class ConversationTranscriptTests: XCTestCase {
         XCTAssertTrue(TranscriptPresentation.autoExpand("failed_tests", preferences: root))
         XCTAssertFalse(ConversationTranscriptGroups.showsExpansionControls(preferences: root))
         XCTAssertTrue(ConversationTranscriptGroups.showsExpansionControls(preferences: .null))
-        let reasoning = Message(.object(["kind": .string("reasoning"), "lifecycle": .string("complete")]))
+        let reasoning = Message(.object(["kind": .string("reasoning"), "lifecycle": .string("complete"), "content": .string("Checking the result.")]))
         XCTAssertTrue(TranscriptPresentation.defaultExpanded(reasoning, preferences: root))
     }
 
@@ -155,7 +155,7 @@ final class ConversationTranscriptTests: XCTestCase {
     }
 
     func testLocalThinkingPreferenceControlsReasoningGroupsAndSettlesOldStreaming() {
-        let reasoning = Message(.object(["id": .string("thinking"), "kind": .string("reasoning"), "lifecycle": .string("complete")]))
+        let reasoning = Message(.object(["id": .string("thinking"), "kind": .string("reasoning"), "lifecycle": .string("complete"), "content": .string("Checking the result.")]))
         let messages = [tool("before"), reasoning]
         let preferences: JSON = .object(["conversation": .object(["tool_details_mode": .string("collapsed"), "thinking_display": .string("always_expanded")])])
         for local in ["always_expanded", "preview"] {

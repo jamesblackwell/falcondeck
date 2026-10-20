@@ -27,7 +27,9 @@ extension DaemonClient: DaemonServing {}
 @MainActor @Observable final class AppStore {
     var projects: [Project] = []
     var allProjects: [Project] = []
-    var tasks: [AgentTask] = []
+    var tasks: [AgentTask] = [] {
+        didSet { refreshSelectedTask() }
+    }
     var preferences: JSON = .object([:])
     var snapshotRaw: JSON = .null {
         didSet {
@@ -52,7 +54,12 @@ extension DaemonClient: DaemonServing {}
         didSet { UserDefaults.standard.set(showTerminal, forKey: "falcondeck.native.terminal") }
     }
     private(set) var selectedProjectID: String?
-    private(set) var selectedTaskID: String?
+    private(set) var selectedTaskID: String? {
+        didSet { refreshSelectedTask() }
+    }
+    // Conversation views must not observe the full task index: another agent's
+    // metadata updates should only redraw that task's navigation rows.
+    private(set) var selectedTask: AgentTask?
     private(set) var transcript = Transcript()
     private(set) var isConnected = false
     private(set) var isLoading = false
@@ -136,7 +143,6 @@ extension DaemonClient: DaemonServing {}
 
     var messages: [Message] { transcript.items }
     var selectedProject: Project? { allProjects.first { $0.id == selectedProjectID } }
-    var selectedTask: AgentTask? { tasks.first { $0.id == selectedTaskID } }
     var extensions: JSON { extensionsForHost(selectedHostID) }
     func extensionsForHost(_ hostID: String?) -> JSON {
         guard let hostID else { return localExtensions }
@@ -537,6 +543,11 @@ extension DaemonClient: DaemonServing {}
         if let index = tasks.firstIndex(where: { $0.id == task.id }) {
             tasks[index] = AgentTask(NativeHostProjection.mergeTask(previous: tasks[index].raw, incoming: raw))
         } else { tasks.append(task) }
+    }
+
+    private func refreshSelectedTask() {
+        let selected = selectedTaskID.flatMap { id in tasks.first { $0.id == id } }
+        if selectedTask?.raw != selected?.raw { selectedTask = selected }
     }
 
     func selectSection(_ section: String) {

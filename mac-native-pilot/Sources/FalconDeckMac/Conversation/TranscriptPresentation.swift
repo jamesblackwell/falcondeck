@@ -6,9 +6,43 @@ enum TranscriptPresentation {
         values.first { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty } ?? ""
     }
 
-    /// The summary labels a thought; expanding it must reveal the retained body.
+    /// A summary labels a thought. Only a retained body makes it expandable.
     static func reasoningBody(_ item: JSON) -> String {
-        nonempty(item["content"].string, item["summary"].string)
+        item["content"].string
+    }
+
+    static func hasReasoningBody(_ item: JSON) -> Bool {
+        !reasoningBody(item).trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+
+    static func reasoningTitle(_ message: Message) -> String {
+        if message.streaming { return "Thinking…" }
+        let label: String
+        switch message.raw["lifecycle"].string {
+        case "interrupted": label = "Thought interrupted"
+        case "error": label = "Thought failed"
+        default: label = nonempty(message.raw["summary"].string.trimmingCharacters(in: .whitespacesAndNewlines), "Thought")
+        }
+        return label + (duration(message.raw["duration_ms"]).map { " · \($0)" } ?? "")
+    }
+
+    static func isProgressUpdate(_ message: Message) -> Bool {
+        message.kind == "assistant_message" && message.raw["phase"].string == "commentary"
+    }
+
+    /// Tool output can retain a streaming lifecycle after its command ends.
+    /// Follow the indicator the row actually draws, rather than that lifecycle.
+    static func hasActivityIndicator(_ message: Message) -> Bool {
+        switch message.kind {
+        case "assistant_message", "code_review", "reasoning": return message.streaming
+        case "tool_call": return message.running
+        default: return false
+        }
+    }
+
+    static func matchesSearch(_ message: Message, query: String) -> Bool {
+        !query.isEmpty && (message.text.localizedCaseInsensitiveContains(query)
+            || message.title.localizedCaseInsensitiveContains(query))
     }
 
     static func pretty(_ value: JSON) -> String {
@@ -81,6 +115,7 @@ enum TranscriptPresentation {
     static func defaultExpanded(_ message: Message, preferences source: JSON, firstDiff: Bool = false) -> Bool {
         let preferences = conversationPreferences(source)
         if message.kind == "reasoning" {
+            guard hasReasoningBody(message.raw) else { return false }
             switch preferences["thinking_display"].string {
             case "always_expanded": return true
             case "always_collapsed", "preview": return false

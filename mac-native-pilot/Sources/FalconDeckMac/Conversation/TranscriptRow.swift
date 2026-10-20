@@ -8,6 +8,7 @@ struct ConversationTranscriptRow: View {
     let provider: String
     var preferences: JSON = .null
     var firstDiff = false
+    var activityInset: CGFloat = 35
     /// Positive values expand; negative values collapse. Increment the absolute
     /// value for each command so repeated clicks still override a manual toggle.
     var expansionDirective: Int = 0
@@ -42,7 +43,9 @@ struct ConversationTranscriptRow: View {
         Group {
             switch message.kind {
             case "user_message": userMessage
-            case "assistant_message", "code_review": assistantMessage
+            case "assistant_message", "code_review":
+                if TranscriptPresentation.isProgressUpdate(message) { progressUpdate }
+                else { assistantMessage }
             case "reasoning": reasoning
             case "tool_call": toolActivity
             case "plan": plan
@@ -51,7 +54,7 @@ struct ConversationTranscriptRow: View {
             case "file_change": fileChanges
             case "image":
                 TranscriptMediaView(reference: raw["image"], resolvedURL: mediaURL?(raw["image"]), loadReference: imageLoader)
-                    .padding(.leading, 35)
+                    .padding(.leading, activityInset)
             case "web_search": webSearch
             case "artifact": artifact
             case "context_compaction":
@@ -156,6 +159,31 @@ struct ConversationTranscriptRow: View {
         .contextMenu { messageActions }
     }
 
+    private var progressUpdate: some View {
+        VStack(alignment: .leading, spacing: 5) {
+            HStack(spacing: 7) {
+                Text("Progress update").font(NativePreferences.shared.font(size: 11, surface: "chat", weight: .medium))
+                if message.streaming { MacActivityDiamond(size: 6) }
+            }.foregroundStyle(FDTheme.muted)
+            NativeMarkdownView(text: itemText, fontSize: 15, foreground: FDTheme.secondary)
+            attachments
+            citations
+            if !raw["error"].string.isEmpty {
+                Text(raw["error"].string).font(NativePreferences.shared.font(size: 12, surface: "chat"))
+                    .foregroundStyle(FDTheme.danger).textSelection(.enabled)
+            }
+            if raw["lifecycle"].string == "interrupted" {
+                Text("Response interrupted").font(NativePreferences.shared.font(size: 12, surface: "chat"))
+                    .foregroundStyle(FDTheme.muted)
+            }
+        }
+        .padding(.leading, 12)
+        .overlay(alignment: .leading) { FDTheme.line.frame(width: 2) }
+        .padding(.leading, activityInset)
+        .accessibilityLabel("Assistant progress update")
+        .contextMenu { messageActions }
+    }
+
     @ViewBuilder private var attachments: some View {
         ForEach(Array(raw["attachments"].array.enumerated()), id: \.offset) { index, reference in
             TranscriptMediaView(reference: reference, resolvedURL: mediaURL?(reference), loadReference: attachmentLoader(reference, index: index))
@@ -203,19 +231,38 @@ struct ConversationTranscriptRow: View {
     private var reasoning: some View {
         let content = TranscriptPresentation.reasoningBody(raw)
         return VStack(alignment: .leading, spacing: 6) {
-            card(reasoningTitle, symbol: "brain") {
-                NativeMarkdownView(text: content).foregroundStyle(FDTheme.muted)
+            if TranscriptPresentation.hasReasoningBody(raw) {
+                DisclosureGroup(isExpanded: open) {
+                    NativeMarkdownView(text: content, fontSize: 14, foreground: FDTheme.muted)
+                        .padding(.leading, 12).padding(.top, 5)
+                        .overlay(alignment: .leading) { FDTheme.line.frame(width: 2) }
+                } label: { reasoningLabel }
+            } else {
+                reasoningLabel
             }
-            if displayPreferences["thinking_display"].string == "preview", !open.wrappedValue {
-                Text(content).font(NativePreferences.shared.font(size: 12, surface: "chat")).lineLimit(2).foregroundStyle(FDTheme.muted)
-                    .padding(.leading, 35)
+            if TranscriptPresentation.hasReasoningBody(raw), displayPreferences["thinking_display"].string == "preview", !open.wrappedValue {
+                NativeMarkdownView(text: content, fontSize: 14, foreground: FDTheme.muted)
+                    .frame(maxHeight: 88, alignment: .top).clipped()
+                    .overlay(alignment: .bottom) {
+                        Button("Show the full thought") { open.wrappedValue = true }
+                            .buttonStyle(.plain).font(NativePreferences.shared.font(size: 11, surface: "chat"))
+                            .foregroundStyle(FDTheme.accent).padding(.horizontal, 8).padding(.vertical, 3)
+                            .background(FDTheme.background, in: .capsule)
+                    }
+                    .padding(.leading, 12)
             }
-        }
+        }.padding(.leading, activityInset)
     }
 
-    private var reasoningTitle: String {
-        let duration = TranscriptPresentation.duration(raw["duration_ms"]).map { " · \($0)" } ?? ""
-        return (message.streaming ? "Thinking…" : "Thought process") + duration
+    private var reasoningLabel: some View {
+        HStack(spacing: 7) {
+            if message.streaming { MacActivityDiamond(size: 7) }
+            else if failed { Image(systemName: "exclamationmark.circle").foregroundStyle(FDTheme.danger) }
+            else if raw["lifecycle"].string == "interrupted" { Image(systemName: "pause.circle") }
+            Text(TranscriptPresentation.reasoningTitle(message))
+                .lineLimit(2).multilineTextAlignment(.leading)
+        }.font(NativePreferences.shared.font(size: 13, surface: "chat"))
+            .foregroundStyle(FDTheme.muted)
     }
 
     private var toolActivity: some View {
@@ -253,7 +300,7 @@ struct ConversationTranscriptRow: View {
         .padding(12)
         .background(failed ? FDTheme.danger.opacity(0.04) : FDTheme.surface, in: .rect(cornerRadius: 8))
         .overlay { RoundedRectangle(cornerRadius: 8).strokeBorder(failed ? FDTheme.danger.opacity(0.3) : FDTheme.hairline) }
-        .padding(.leading, 35)
+        .padding(.leading, activityInset)
     }
 
     @ViewBuilder private var toolOutput: some View {
@@ -366,7 +413,7 @@ struct ConversationTranscriptRow: View {
                     .font(NativePreferences.shared.font(size: 12, surface: "chat")).foregroundStyle(FDTheme.muted)
             }
         }.padding(14).background(FDTheme.surface, in: .rect(cornerRadius: 10))
-            .overlay { RoundedRectangle(cornerRadius: 10).strokeBorder(FDTheme.line) }.padding(.leading, 35)
+            .overlay { RoundedRectangle(cornerRadius: 10).strokeBorder(FDTheme.line) }.padding(.leading, activityInset)
     }
 
     @ViewBuilder private var citations: some View {
@@ -422,7 +469,7 @@ struct ConversationTranscriptRow: View {
         let level = raw["level"].string
         let color = ["error", "fatal"].contains(level) ? FDTheme.danger : ["warning", "warn"].contains(level) ? FDTheme.warning : FDTheme.muted
         return Label(itemText, systemImage: level == "error" ? "exclamationmark.circle" : "info.circle")
-            .font(NativePreferences.shared.font(size: 12, surface: "chat")).foregroundStyle(color).textSelection(.enabled).padding(.leading, 35)
+            .font(NativePreferences.shared.font(size: 12, surface: "chat")).foregroundStyle(color).textSelection(.enabled).padding(.leading, activityInset)
     }
 
     private var realtime: some View {
@@ -441,7 +488,7 @@ struct ConversationTranscriptRow: View {
     }
 
     private func activityLabel(_ title: String, symbol: String) -> some View {
-        Label(title, systemImage: symbol).font(NativePreferences.shared.font(size: 12, surface: "chat")).foregroundStyle(FDTheme.muted).padding(.leading, 35)
+        Label(title, systemImage: symbol).font(NativePreferences.shared.font(size: 12, surface: "chat")).foregroundStyle(FDTheme.muted).padding(.leading, activityInset)
     }
 
     private func card<Content: View>(_ title: String, symbol: String, @ViewBuilder content: @escaping () -> Content) -> some View {
@@ -449,6 +496,6 @@ struct ConversationTranscriptRow: View {
             VStack(alignment: .leading, spacing: 12, content: content).padding(.top, 10)
         } label: {
             Label(title, systemImage: symbol).font(NativePreferences.shared.font(size: 12, surface: "chat")).foregroundStyle(FDTheme.muted)
-        }.padding(.leading, 35)
+        }.padding(.leading, activityInset)
     }
 }
