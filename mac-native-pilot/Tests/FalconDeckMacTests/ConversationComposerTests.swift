@@ -121,6 +121,74 @@ final class ConversationComposerTests: XCTestCase {
         XCTAssertEqual(editor.string, "Before pasted after")
     }
 
+    @MainActor func testJPEGDragBecomesAnAttachmentAndPreservesTheDraft() async throws {
+        let editor = ComposerNativeTextView(frame: NSRect(x: 0, y: 0, width: 400, height: 100))
+        editor.isRichText = false
+        editor.importsGraphics = false
+        editor.string = "Review this image with my draft"
+        let selection = NSRange(location: 7, length: 4)
+        editor.setSelectedRange(selection)
+        let pasteboard = NSPasteboard.withUniqueName()
+        defer { pasteboard.releaseGlobally() }
+        XCTAssertTrue(pasteboard.setData(try clipboardImage(using: .jpeg), forType: .init("public.jpeg")))
+        let drag = ComposerTestDraggingInfo(pasteboard: pasteboard)
+        let received = expectation(description: "JPEG drag prepared as an image attachment")
+        editor.onAttachments = { attachments in
+            XCTAssertEqual(attachments.count, 1)
+            XCTAssertEqual(attachments.first?.kind, .image)
+            XCTAssertEqual(attachments.first?.input["type"].string, "image")
+            XCTAssertTrue(attachments.first?.input["url"].string.hasPrefix("data:image/") == true)
+            received.fulfill()
+        }
+        editor.onError = { error in XCTFail(error); received.fulfill() }
+
+        XCTAssertEqual(editor.draggingEntered(drag), .copy)
+        XCTAssertEqual(editor.draggingUpdated(drag), .copy)
+        XCTAssertTrue(editor.prepareForDragOperation(drag))
+        XCTAssertTrue(editor.performDragOperation(drag))
+        await fulfillment(of: [received], timeout: 5)
+        XCTAssertEqual(editor.string, "Review this image with my draft")
+        XCTAssertEqual(editor.selectedRange(), selection)
+    }
+
+    @MainActor func testTextFileDragBecomesTextContextAndPreservesTheDraft() async throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let file = directory.appendingPathComponent("Review.swift")
+        let source = "struct Eagle { let emoji = \"🦅\" }\n"
+        try Data(source.utf8).write(to: file)
+        let editor = ComposerNativeTextView(frame: NSRect(x: 0, y: 0, width: 400, height: 100))
+        editor.isRichText = false
+        editor.importsGraphics = false
+        editor.string = "Review this source file"
+        let selection = NSRange(location: 4, length: 0)
+        editor.setSelectedRange(selection)
+        let pasteboard = NSPasteboard.withUniqueName()
+        defer { pasteboard.releaseGlobally() }
+        XCTAssertTrue(pasteboard.writeObjects([file as NSURL]))
+        let drag = ComposerTestDraggingInfo(pasteboard: pasteboard)
+        let received = expectation(description: "File URL drag prepared as text context")
+        editor.onAttachments = { attachments in
+            XCTAssertEqual(attachments.count, 1)
+            XCTAssertEqual(attachments.first?.kind, .text)
+            XCTAssertEqual(attachments.first?.name, "Review.swift")
+            XCTAssertEqual(attachments.first?.text, source)
+            XCTAssertEqual(attachments.first?.input["type"].string, "text")
+            XCTAssertEqual(attachments.first?.input["text"].string, "Attached text file: Review.swift\n\n\(source)")
+            received.fulfill()
+        }
+        editor.onError = { error in XCTFail(error); received.fulfill() }
+
+        XCTAssertEqual(editor.draggingEntered(drag), .copy)
+        XCTAssertEqual(editor.draggingUpdated(drag), .copy)
+        XCTAssertTrue(editor.prepareForDragOperation(drag))
+        XCTAssertTrue(editor.performDragOperation(drag))
+        await fulfillment(of: [received], timeout: 5)
+        XCTAssertEqual(editor.string, "Review this source file")
+        XCTAssertEqual(editor.selectedRange(), selection)
+    }
+
     @MainActor private func firstSubview<T: NSView>(of type: T.Type, in view: NSView) -> T? {
         if let result = view as? T { return result }
         return view.subviews.lazy.compactMap { self.firstSubview(of: type, in: $0) }.first

@@ -78,7 +78,7 @@ extension DaemonClient: DaemonServing {}
     @ObservationIgnored private let readVisibility: @MainActor () -> Bool
     @ObservationIgnored private var connectionTask: Task<Void, Never>?
     @ObservationIgnored private var loadID = UUID()
-    @ObservationIgnored private var navigationID = UUID()
+    @ObservationIgnored private(set) var navigationID = UUID()
     @ObservationIgnored private var olderLoadID: UUID?
     @ObservationIgnored private var loadedTaskID: String?
     @ObservationIgnored private var connectionID = UUID()
@@ -276,7 +276,7 @@ extension DaemonClient: DaemonServing {}
         }
     }
 
-    func newTask(recordHistory: Bool = true) {
+    func newTask(recordHistory: Bool = true, focusComposer: Bool = false) {
         NativeAudioPlayback.shared.stop()
         NativeAudioPlayback.shared.stopRealtime()
         navigationID = UUID()
@@ -297,9 +297,19 @@ extension DaemonClient: DaemonServing {}
         if !availableProviders.contains(provider) { provider = availableProviders.first ?? "codex" }
         errorMessage = nil
         recordNavigation(addingHistory: recordHistory)
+        if focusComposer { requestComposerFocus() }
     }
 
-    func selectTask(_ id: String, navigating: Bool = true, recordHistory: Bool = true, preservePinScope: Bool = true) async {
+    func requestComposerFocus() {
+        let key = composerKey, navigation = navigationID
+        DispatchQueue.main.async { [weak self] in
+            guard let self, self.navigationID == navigation,
+                  self.composerKey == key, self.isInputReady else { return }
+            NotificationCenter.default.post(name: .init("native.command"), object: "focusComposer")
+        }
+    }
+
+    func selectTask(_ id: String, navigating: Bool = true, recordHistory: Bool = true, preservePinScope: Bool = true, focusComposer: Bool = false) async {
         guard let task = tasks.first(where: { $0.id == id }) else { return }
         let beginsReading = navigating || loadedTaskID != id
         if navigating {
@@ -311,6 +321,7 @@ extension DaemonClient: DaemonServing {}
             recoveryID = UUID()
             recoveryTask?.cancel(); recoveryTask = nil
         } else if selectedTaskID != id { return }
+        let focusNavigation = navigationID
         let identity = UUID()
         loadID = identity
         olderLoadID = nil
@@ -357,6 +368,7 @@ extension DaemonClient: DaemonServing {}
                 pendingReads.removeValue(forKey: id)
             }
             errorMessage = nil
+            if focusComposer, navigationID == focusNavigation { requestComposerFocus() }
         } catch {
             guard loadID == identity else { return }
             if !navigating {
@@ -366,6 +378,11 @@ extension DaemonClient: DaemonServing {}
             }
             errorMessage = "Couldn’t load this task. \(error.localizedDescription)"
         }
+    }
+
+    func openCreatedTask(_ id: String, after navigation: UUID) async {
+        guard navigationID == navigation else { return }
+        await selectTask(id, focusComposer: true)
     }
 
     func loadOlder() async {
@@ -752,10 +769,10 @@ extension DaemonClient: DaemonServing {}
                 upsertTask(result["thread"])
                 guard navigationID == navigation else { return }
                 selectedProjectID = project.id
-                await selectTask(result["thread"]["id"].string)
+                await selectTask(result["thread"]["id"].string, focusComposer: true)
             } else {
                 guard navigationID == navigation else { return }
-                selectedProjectID = project.id; newTask()
+                selectedProjectID = project.id; newTask(focusComposer: true)
             }
         } catch { errorMessage = error.localizedDescription }
     }

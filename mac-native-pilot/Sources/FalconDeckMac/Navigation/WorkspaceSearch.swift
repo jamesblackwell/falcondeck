@@ -156,14 +156,10 @@ struct WorkspaceSearch: View {
             store.selectProject(String(id.dropFirst(8)))
         } else if id.hasPrefix("task:") {
             let taskID = String(id.dropFirst(5))
-            if let task = store.tasks.first(where: { $0.id == taskID }) {
-                let casual = store.allProjects.first { $0.id == task.projectID }?.raw["kind"].string == "casual"
-                store.selectSection(task.pinned ? "pins" : casual ? "chats" : "project")
-            }
-            Task { await store.selectTask(taskID) }
+            Task { await store.selectTask(taskID, preservePinScope: false) }
         } else if id == "command:new-task" {
             store.selectSection(store.selectedProject?.raw["kind"].string == "casual" ? "chats" : "project")
-            store.newTask()
+            store.newTask(focusComposer: true)
         } else if id == "command:new-chat" {
             Task { await store.newChat() }
         } else if id == "command:open-project" {

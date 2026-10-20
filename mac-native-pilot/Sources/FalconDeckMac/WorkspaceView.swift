@@ -79,7 +79,7 @@ struct WorkspaceView: View {
             Task { await store.newChat() }
         } else {
             store.selectSection(store.selectedProject?.raw["kind"].string == "casual" ? "chats" : "project")
-            store.newTask()
+            store.newTask(focusComposer: true)
         }
     }
 

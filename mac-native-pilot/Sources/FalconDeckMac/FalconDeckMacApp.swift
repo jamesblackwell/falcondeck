@@ -39,7 +39,7 @@ struct FalconDeckMacApp: App {
                     .keyboardShortcut(NativeCommandDispatcher.menuShortcut(for: "openSettings", preferences: preferences))
             }
             CommandGroup(after: .newItem) {
-                Button("New task") { store.newTask() }
+                Button("New task") { store.newTask(focusComposer: true) }
                     .keyboardShortcut(NativeCommandDispatcher.menuShortcut(for: "newThread", preferences: preferences))
                 Button("New chat") { Task { await store.newChat() } }
                     .keyboardShortcut(NativeCommandDispatcher.menuShortcut(for: "newChat", preferences: preferences))

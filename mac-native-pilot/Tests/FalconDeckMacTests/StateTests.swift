@@ -131,6 +131,74 @@ private actor SuspendedInputStore: NativeInputStoring {
 }
 
 final class StateTests: XCTestCase {
+    @MainActor func testDeferredNewTaskFocusIsCancelledBySettingsNavigation() async {
+        let store = AppStore(client: TestDaemon())
+        store.applyEnvelope(snapshot)
+        let observer = NotificationCenter.default.addObserver(forName: .init("native.command"), object: nil, queue: nil) { note in
+            if note.object as? String == "focusComposer" { XCTFail("Deferred focus must follow navigation, not just the draft key") }
+        }
+        defer { NotificationCenter.default.removeObserver(observer) }
+        store.newTask(focusComposer: true)
+        let key = store.composerKey
+        store.selectSection("settings")
+        XCTAssertEqual(store.composerKey, key, "Settings keeps the task's draft key")
+        await withCheckedContinuation { continuation in
+            DispatchQueue.main.async { continuation.resume() }
+        }
+        await store.prepareForQuit()
+    }
+
+    @MainActor func testCreatedTaskDoesNotReplaceLaterProjectNavigation() async {
+        let store = AppStore(client: TestDaemon())
+        store.applyEnvelope(snapshot)
+        store.tasks = [AgentTask(task("created"))]
+        store.selectProject("p1")
+        let navigation = store.navigationID
+        store.selectProject("p2")
+        await store.openCreatedTask("created", after: navigation)
+        XCTAssertEqual(store.selectedProjectID, "p2")
+        XCTAssertNil(store.selectedTaskID)
+        await store.prepareForQuit()
+    }
+
+    @MainActor func testLateHistoryDoesNotFocusTheComposerAfterOpeningSettings() async {
+        let client = TestDaemon()
+        let subject = AppStore(client: client)
+        subject.applyEnvelope(snapshot)
+        subject.tasks = [AgentTask(task("created"))]
+        let observer = NotificationCenter.default.addObserver(forName: .init("native.command"), object: nil, queue: nil) { note in
+            if note.object as? String == "focusComposer" { XCTFail("A stale task load must not request composer focus") }
+        }
+        defer { NotificationCenter.default.removeObserver(observer) }
+        let opening = Task { await subject.selectTask("created", focusComposer: true) }
+        await client.waitForDetail("created")
+        subject.selectSection("settings")
+        await client.finishDetail("created", text: "History")
+        await opening.value
+        await withCheckedContinuation { continuation in
+            DispatchQueue.main.async { continuation.resume() }
+        }
+        XCTAssertEqual(subject.selectedSection, "settings")
+        await subject.prepareForQuit()
+    }
+
+    @MainActor func testNewTaskCommandRequestsComposerFocusAndPreservesTheDraft() async {
+        let store = AppStore(client: TestDaemon())
+        store.applyEnvelope(snapshot)
+        store.selectProject("p1")
+        store.draft = "Keep this unsent draft"
+        let focus = expectation(description: "New task focuses the message editor")
+        let observer = NotificationCenter.default.addObserver(forName: .init("native.command"), object: nil, queue: nil) { note in
+            if note.object as? String == "focusComposer" { focus.fulfill() }
+        }
+        defer { NotificationCenter.default.removeObserver(observer) }
+        NativeCommandDispatcher.shared.execute("newThread", store: store)
+        await fulfillment(of: [focus], timeout: 1)
+        XCTAssertNil(store.selectedTaskID)
+        XCTAssertEqual(store.draft, "Keep this unsent draft")
+        await store.prepareForQuit()
+    }
+
     @MainActor func testKeychainWaitDoesNotBlockProjectsOrAllowInputOverwrite() async throws {
         let client = TestDaemon(), inputs = SuspendedInputStore()
         let store = AppStore(client: client, inputStore: inputs)

@@ -48,7 +48,7 @@ struct ProjectNavigator: View {
             if store.selectedSection == "extension-panel", let extensionID = store.selectedExtensionID, let panelID = store.selectedPanelID {
                 return "panel:\(extensionID):\(panelID)"
             }
-            if ["project", "pins"].contains(store.selectedSection),
+            if ["project", "chats", "pins"].contains(store.selectedSection),
                let task = store.selectedTask, task.pinned, !task.raw["is_archived"].bool {
                 let id = task.id
                 return "task:\(id)"

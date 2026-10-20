@@ -112,7 +112,7 @@ import SwiftUI
             store.selectSection("settings")
             NotificationCenter.default.post(name: .init("falcondeck.native.openSettingsSection"), object: "keyboard")
         case "newChat": Task { await store.newChat() }
-        case "newThread": store.newTask()
+        case "newThread": store.newTask(focusComposer: true)
         case "navigateBack": Task { await store.navigateHistory(-1) }
         case "navigateForward": Task { await store.navigateHistory(1) }
         case "previousThread": Task { await store.navigateTask(-1) }

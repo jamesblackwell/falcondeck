@@ -440,6 +440,7 @@ struct TaskNavigator: View {
         if store.selectedSection == "chats" || store.selectedProject == nil {
             Task { await store.newChat() }
         } else if let folder, let projectID {
+            let navigation = store.navigationID
             NativeTaskActions.perform(store) {
                 let handle = try await store.request(path: "/api/workspaces/\(projectID)/threads", method: "POST", body: .object([
                     "workspace_id": .string(projectID), "provider": .string(store.provider)
@@ -447,11 +448,11 @@ struct TaskNavigator: View {
                 let task = AgentTask(handle["thread"])
                 try await NativeTaskActions.move(task, to: folder, store: store)
                 await store.refresh()
-                await store.selectTask(task.id)
+                await store.openCreatedTask(task.id, after: navigation)
             }
         } else {
             store.selectSection(store.selectedProject?.raw["kind"].string == "casual" ? "chats" : "project")
-            store.newTask()
+            store.newTask(focusComposer: true)
         }
     }
 
