@@ -2,6 +2,23 @@ import XCTest
 @testable import FalconDeckMac
 
 final class NavigationTests: XCTestCase {
+    func testSidebarSummaryKeepsArchivePinsAttentionAndBackgroundWorkSemantics() {
+        let projects = [Project(.object(["id": .string("chat"), "kind": .string("casual")])), Project(.object(["id": .string("project"), "kind": .string("project")]))]
+        func item(_ id: String, project: String, extra: [String: JSON] = [:]) -> AgentTask {
+            AgentTask(.object(["id": .string(id), "workspace_id": .string(project), "status": .string("idle")].merging(extra) { _, rhs in rhs }))
+        }
+        let tasks = [item("chat", project: "chat"), item("pin", project: "chat", extra: ["is_pinned": .bool(true)]),
+                     item("archived", project: "chat", extra: ["is_archived": .bool(true), "status": .string("error")]),
+                     item("work", project: "project", extra: ["attention": .object(["background_task_count": .number(1)])]),
+                     item("blocked", project: "project", extra: ["status": .string("awaiting_approval")])]
+        let summary = NativeProjectNavigationSummary(projects: projects, tasks: tasks)
+        XCTAssertEqual(summary.chatCount, 1)
+        XCTAssertEqual(summary.attentionCount, 1)
+        XCTAssertEqual(summary.projectCounts, ["chat": 2, "project": 2])
+        XCTAssertEqual(summary.runningProjectIDs, ["project"])
+        XCTAssertEqual(summary.pinCandidates.map(\.id), ["pin"])
+    }
+
     func testPriorityReadingDoesNotDemoteAndNewResponsePromotes() {
         var order = NativeTaskNavigationOrder()
         let unread = navigationTask("unread", date: "02", unread: true)

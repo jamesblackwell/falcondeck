@@ -12,7 +12,7 @@ struct FalconDeckMacApp: App {
             WorkspaceView(store: store)
                 .frame(minWidth: 960, minHeight: 620)
                 .preferredColorScheme(preferences.preferredColorScheme)
-                .font(preferences.font(size: 14))
+                .font(preferences.font(size: 13))
                 .task {
                     runtimeLifecycle.store = store
                     NativeCommandDispatcher.shared.attach(store: store)

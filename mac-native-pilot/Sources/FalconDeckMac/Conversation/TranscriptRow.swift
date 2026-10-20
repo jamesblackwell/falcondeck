@@ -3,6 +3,7 @@ import SwiftUI
 /// A wire item, rendered with native text and controls. Actions belong to the
 /// selected task's owner; rows never mutate transcript history themselves.
 struct ConversationTranscriptRow: View {
+    @MainActor private static let timestampParser = ISO8601DateFormatter()
     let message: Message
     let provider: String
     var preferences: JSON = .null
@@ -167,7 +168,7 @@ struct ConversationTranscriptRow: View {
     }
 
     @ViewBuilder private var timestamp: some View {
-        if let date = ISO8601DateFormatter().date(from: raw["created_at"].string) {
+        if let date = Self.timestampParser.date(from: raw["created_at"].string) {
             Text(date, style: .time).font(NativePreferences.shared.font(size: 12, surface: "chat")).foregroundStyle(FDTheme.muted)
                 .help(date.formatted(date: .long, time: .shortened))
         }

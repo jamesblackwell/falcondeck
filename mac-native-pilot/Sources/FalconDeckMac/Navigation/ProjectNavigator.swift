@@ -41,15 +41,11 @@ struct ProjectNavigator: View {
         store.tasks.filter { $0.pinned && !$0.raw["is_archived"].bool }
     }
 
-    private var pinnedTasks: [AgentTask] {
-        let byID = Dictionary(pinCandidates.map { ($0.id, $0) }, uniquingKeysWith: { _, rhs in rhs })
+    private func pinnedTasks(_ candidates: [AgentTask]) -> [AgentTask] {
+        let byID = Dictionary(candidates.map { ($0.id, $0) }, uniquingKeysWith: { _, rhs in rhs })
         let ordered = Set(pinnedOrder)
-        return pinnedOrder.compactMap { byID[$0] } + pinCandidates.filter { !ordered.contains($0.id) }
+        return pinnedOrder.compactMap { byID[$0] } + candidates.filter { !ordered.contains($0.id) }
     }
-
-    /// Streaming previews and timestamps redraw the row without changing its
-    /// position. Resort when a task is added, retitled, stopped or unpinned.
-    private var pinOrderKey: [NativeTaskNavigationOrder.Key] { pinCandidates.map(NativeTaskNavigationOrder.key) }
 
     private var selection: Binding<String?> {
         Binding(get: {
@@ -57,7 +53,8 @@ struct ProjectNavigator: View {
                 return "panel:\(extensionID):\(panelID)"
             }
             if ["project", "pins"].contains(store.selectedSection),
-               let id = store.selectedTaskID, pinnedTasks.contains(where: { $0.id == id }) {
+               let task = store.selectedTask, task.pinned, !task.raw["is_archived"].bool {
+                let id = task.id
                 return "task:\(id)"
             }
             if store.selectedSection == "project", let id = store.selectedProjectID {
@@ -81,23 +78,23 @@ struct ProjectNavigator: View {
     }
 
     var body: some View {
-        VStack(spacing: 0) {
+        let summary = NativeProjectNavigationSummary(projects: store.allProjects, tasks: store.tasks)
+        let pins = pinnedTasks(summary.pinCandidates)
+        // Streaming previews redraw rows without changing their order.
+        let pinOrderKey = summary.pinCandidates.map(NativeTaskNavigationOrder.key)
+        return VStack(spacing: 0) {
             List(selection: selection) {
                 Section {
                     navigationRow("Chats", symbol: "bubble.left.and.bubble.right", section: "chats",
-                                  count: store.tasks.filter { task in
-                                      !task.raw["is_archived"].bool && !task.pinned && store.allProjects.contains {
-                                          $0.id == task.projectID && $0.raw["kind"].string == "casual"
-                                      }
-                                  }.count)
+                                  count: summary.chatCount)
                     navigationRow("Activity", symbol: "tray", section: "activity",
-                                  count: store.tasks.filter { $0.needsAttention && !$0.raw["is_archived"].bool }.count)
+                                  count: summary.attentionCount)
                 }
 
                 Section {
                     if pinsExpanded {
-                        navigationRow("All pinned tasks", symbol: "pin", section: "pins", count: pinnedTasks.count)
-                        ForEach(pinnedTasks) { task in
+                        navigationRow("All pinned tasks", symbol: "pin", section: "pins", count: pins.count)
+                        ForEach(pins) { task in
                             pinnedTaskRow(task)
                                 .tag("task:\(task.id)")
                         }
@@ -109,7 +106,8 @@ struct ProjectNavigator: View {
                 Section {
                     if projectsExpanded {
                         ForEach(visibleProjects) { project in
-                            projectRow(project)
+                            projectRow(project, taskCount: summary.projectCounts[project.id, default: 0],
+                                       running: summary.runningProjectIDs.contains(project.id))
                                 .tag("project:\(project.id)")
                                 .draggable("falcondeck-project:\(project.id)")
                                 .dropDestination(for: String.self) { items, _ in
@@ -128,63 +126,18 @@ struct ProjectNavigator: View {
                         }
                     }
                 } header: {
-                    HStack(spacing: 3) {
+                    HStack(spacing: 4) {
                         sectionHeader("Projects", expanded: $projectsExpanded)
                         Spacer(minLength: 0)
-                        if !hiddenIDs.isEmpty {
-                            Button { showHidden.toggle() } label: {
-                                Image(systemName: showHidden ? "eye" : "eye.slash")
-                                    .font(NativePreferences.shared.font(size: 11, surface: "sidebar"))
-                            }
-                            .buttonStyle(.plain)
-                            .help(showHidden ? "Hide hidden projects" : "Show hidden projects (\(hiddenIDs.count))")
-                            .accessibilityLabel(showHidden ? "Hide hidden projects" : "Show hidden projects")
-                        }
-                        Button(action: openProject) {
-                            Image(systemName: "plus").font(NativePreferences.shared.font(size: 12, surface: "sidebar", weight: .medium))
-                        }
-                        .buttonStyle(.plain)
-                        .help("Open project…")
-                        .accessibilityLabel("Open project")
-                        .disabled(!store.isConnected)
-                    }
-                }
-
-                Section {
-                    navigationRow("Automations", symbol: "clock.arrow.circlepath", section: "automations")
-                    navigationRow("Usage", symbol: "chart.bar", section: "usage")
-                    navigationRow("Plugins", symbol: "puzzlepiece.extension", section: "plugins")
-                    navigationRow("Extensions", symbol: "square.stack.3d.up", section: "extensions")
-                }
-                let panels = NativeSidebarExtensions(store.extensions).panels
-                if !panels.isEmpty {
-                    Section("Workspace") {
-                        ForEach(panels) { panel in
-                            Label(panel.title, systemImage: panel.symbol)
-                                .font(NativePreferences.shared.font(size: 13, surface: "sidebar", weight: .medium))
-                                .padding(.vertical, 5)
-                                .tag("panel:\(panel.id)")
-                        }
+                        projectOptionsMenu
                     }
                 }
             }
             .listStyle(.sidebar)
             .scrollContentBackground(.hidden)
+            .environment(\.defaultMinListRowHeight, 26)
 
-            VStack(spacing: 2) {
-                footerButton("Open project…", symbol: "folder.badge.plus", action: openProject)
-                    .disabled(!store.isConnected)
-                    .accessibilityIdentifier("open-project")
-                footerButton("Project library", symbol: "books.vertical") { showingLibrary = true }
-                    .disabled(!store.isSelectedHostConnected)
-                footerButton("Settings", symbol: "gearshape") { store.selectSection("settings") }
-                    .background(store.selectedSection == "settings" ? FDTheme.hover : Color.clear,
-                                in: RoundedRectangle(cornerRadius: 6))
-            }
-            .padding(8)
-            .overlay(alignment: .top) { FDTheme.hairline.frame(height: 1) }
-
-            connectionFooter
+            optionsFooter
         }
         .background(FDTheme.surface)
         .sheet(isPresented: $showingLibrary) {
@@ -211,8 +164,8 @@ struct ProjectNavigator: View {
                     .foregroundStyle(FDTheme.subtle)
             }
         }
-        .font(NativePreferences.shared.font(size: 13, surface: "sidebar", weight: .medium))
-        .padding(.vertical, 5)
+        .font(NativePreferences.shared.font(size: 13, surface: "sidebar"))
+        .padding(.vertical, 3)
         .tag("section:\(section)")
         .accessibilityIdentifier("navigation-\(section)")
     }
@@ -225,7 +178,7 @@ struct ProjectNavigator: View {
                 Text(title).font(NativePreferences.shared.font(size: 12, surface: "sidebar", weight: .medium))
             }
             .foregroundStyle(FDTheme.subtle)
-            .padding(.vertical, 3)
+            .padding(.vertical, 2)
         }
         .buttonStyle(.plain)
         .accessibilityLabel("\(expanded.wrappedValue ? "Collapse" : "Expand") \(title)")
@@ -235,7 +188,7 @@ struct ProjectNavigator: View {
         HStack(spacing: 10) {
             TaskStatusMark(status: task.status).frame(width: 18)
             Text(task.title)
-                .font(NativePreferences.shared.font(size: 13, surface: "sidebar", weight: task.unread ? .semibold : .regular))
+                .font(NativePreferences.shared.font(size: 13, surface: "sidebar", weight: task.unread ? .medium : .regular))
                 .lineLimit(1)
             Spacer(minLength: 0)
             if task.unread {
@@ -243,21 +196,19 @@ struct ProjectNavigator: View {
                     .accessibilityLabel("Unread")
             }
         }
-        .padding(.vertical, 4)
+        .padding(.vertical, 2)
         .help(task.title)
         .contextMenu {
             NativeTaskContextMenu(store: store, task: task, rename: { renamingTask = task })
         }
     }
 
-    private func projectRow(_ project: Project) -> some View {
-        let activeTasks = store.tasks.filter { $0.projectID == project.id && !$0.raw["is_archived"].bool }
-        let running = activeTasks.contains { $0.running }
+    private func projectRow(_ project: Project, taskCount: Int, running: Bool) -> some View {
         let hidden = hiddenIDs.contains(project.id)
         return HStack(spacing: 10) {
             ProjectNavigatorGlyph(store: store, project: project, preference: store.navigationPreferences["workspace_icons"][project.id],
                                   color: projectColor(project.id))
-            Text(project.name).font(NativePreferences.shared.font(size: 13, surface: "sidebar", weight: .medium)).lineLimit(1)
+            Text(project.name).font(NativePreferences.shared.font(size: 13, surface: "sidebar")).lineLimit(1)
                 .foregroundStyle(hidden ? FDTheme.muted : FDTheme.foreground)
             Spacer(minLength: 0)
             if busyProjects.contains(project.id) || running {
@@ -265,11 +216,11 @@ struct ProjectNavigator: View {
             } else if hidden {
                 Image(systemName: "eye.slash").font(NativePreferences.shared.font(size: 11, surface: "sidebar")).foregroundStyle(FDTheme.subtle)
             } else {
-                Text("\(activeTasks.count)").font(NativePreferences.shared.font(size: 11, surface: "sidebar").monospaced())
+                Text("\(taskCount)").font(NativePreferences.shared.font(size: 11, surface: "sidebar").monospaced())
                     .foregroundStyle(FDTheme.subtle)
             }
         }
-        .padding(.vertical, 6)
+        .padding(.vertical, 3)
         .help(project.path)
         .accessibilityIdentifier("project-\(project.name)")
         .contextMenu {
@@ -322,34 +273,98 @@ struct ProjectNavigator: View {
         .disabled(busyProjects.contains(project.id))
     }
 
-    private func footerButton(_ title: String, symbol: String, action: @escaping () -> Void) -> some View {
-        Button(action: action) {
-            Label(title, systemImage: symbol)
+    private var projectOptionsMenu: some View {
+        Menu {
+            Button("Open project…", systemImage: "folder.badge.plus", action: openProject)
+                .disabled(!store.isConnected)
+                .accessibilityIdentifier("open-project")
+            Button("Project library…", systemImage: "books.vertical") { showingLibrary = true }
+                .disabled(!store.isSelectedHostConnected)
+            if !hiddenIDs.isEmpty {
+                Divider()
+                Toggle("Show hidden projects (\(hiddenIDs.count))", isOn: $showHidden)
+            }
+        } label: {
+            Image(systemName: "ellipsis")
                 .font(NativePreferences.shared.font(size: 13, surface: "sidebar"))
-                .foregroundStyle(FDTheme.secondary)
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .padding(.horizontal, 8)
-                .padding(.vertical, 7)
+                .frame(width: 22, height: 22)
                 .contentShape(.rect)
         }
-        .buttonStyle(.plain)
+        .menuStyle(.borderlessButton)
+        .menuIndicator(.hidden)
+        .fixedSize()
+        .help("Project options")
+        .accessibilityLabel("Project options")
+        .accessibilityIdentifier("project-options")
     }
 
-    private var connectionFooter: some View {
-        HStack(spacing: 8) {
-            Circle().fill(store.isConnected ? FDTheme.accent : FDTheme.warning).frame(width: 6, height: 6)
-            VStack(alignment: .leading, spacing: 3) {
-                Text(store.isConnected ? "Local daemon" : "Connection")
-                    .font(NativePreferences.shared.font(size: 12, surface: "sidebar", weight: .medium)).foregroundStyle(FDTheme.secondary)
-                Text(store.connectionStatus).font(NativePreferences.shared.font(size: 11, surface: "sidebar")).foregroundStyle(FDTheme.subtle).lineLimit(1)
-            }
-            Spacer(minLength: 0)
-            Button { Task { await store.reconnect() } } label: { Image(systemName: "arrow.clockwise") }
-                .buttonStyle(NativeIconButtonStyle())
-                .help("Reconnect to the local daemon")
-                .accessibilityLabel("Reconnect")
+    private var extensionPanels: [NativeSidebarExtensionPanel] {
+        NativeSidebarExtensions(store.extensions).panels
+    }
+
+    private var activeOptionTitle: String? {
+        if let destination = ProjectNavigatorDestination.secondary.first(where: { $0.id == store.selectedSection }) {
+            return destination.title
         }
-        .padding(14)
+        if store.selectedSection == "settings" { return "Settings" }
+        if store.selectedSection == "extension-panel" {
+            return extensionPanels.first {
+                $0.extensionID == store.selectedExtensionID && $0.panelID == store.selectedPanelID
+            }?.title
+        }
+        return nil
+    }
+
+    private var optionsFooter: some View {
+        HStack(spacing: 8) {
+            Menu {
+                ForEach(ProjectNavigatorDestination.secondary) { destination in
+                    Button(destination.title, systemImage: store.selectedSection == destination.id ? "checkmark" : destination.symbol) {
+                        store.selectSection(destination.id)
+                    }
+                    .accessibilityIdentifier("navigation-\(destination.id)")
+                }
+                if !extensionPanels.isEmpty {
+                    Divider()
+                    ForEach(extensionPanels) { panel in
+                        Button(panel.title, systemImage: store.selectedSection == "extension-panel" && store.selectedExtensionID == panel.extensionID && store.selectedPanelID == panel.panelID ? "checkmark" : panel.symbol) {
+                            store.selectExtensionPanel(extensionID: panel.extensionID, panelID: panel.panelID)
+                        }
+                    }
+                }
+                Divider()
+                Button("Keyboard shortcuts…", systemImage: "keyboard") {
+                    store.selectSection("settings")
+                    NotificationCenter.default.post(name: .init("falcondeck.native.openSettingsSection"), object: "keyboard")
+                }
+                Button("Settings…", systemImage: store.selectedSection == "settings" ? "checkmark" : "gearshape") {
+                    store.selectSection("settings")
+                }
+                Divider()
+                Text("Local daemon: \(store.connectionStatus)")
+                Button("Reconnect", systemImage: "arrow.clockwise") { Task { await store.reconnect() } }
+            } label: {
+                Label(activeOptionTitle.map { "Options · \($0)" } ?? "Options", systemImage: "slider.horizontal.3")
+            }
+            .font(NativePreferences.shared.font(size: 13, surface: "sidebar"))
+            .foregroundStyle(FDTheme.secondary)
+            .menuStyle(.borderlessButton)
+            .menuIndicator(.visible)
+            .controlSize(.regular)
+            .frame(maxWidth: .infinity, minHeight: 28, alignment: .leading)
+            .contentShape(.rect)
+            .background(activeOptionTitle == nil ? Color.clear : FDTheme.hover, in: .rect(cornerRadius: 6))
+            .help("Options")
+            .accessibilityLabel(activeOptionTitle.map { "Options, \($0) selected" } ?? "Options")
+            .accessibilityIdentifier("navigation-options")
+
+            Circle().fill(store.isConnected ? FDTheme.accent : FDTheme.warning)
+                .frame(width: 6, height: 6)
+                .padding(.trailing, 8)
+                .help("Local daemon: \(store.connectionStatus)")
+                .accessibilityLabel("Local daemon: \(store.connectionStatus)")
+        }
+        .padding(8)
         .overlay(alignment: .top) { FDTheme.hairline.frame(height: 1) }
     }
 
@@ -506,6 +521,19 @@ struct ProjectNavigator: View {
             catch { store.errorMessage = error.localizedDescription }
         }
     }
+}
+
+private struct ProjectNavigatorDestination: Identifiable {
+    let id: String
+    let title: String
+    let symbol: String
+
+    static let secondary: [Self] = [
+        .init(id: "automations", title: "Automations", symbol: "clock.arrow.circlepath"),
+        .init(id: "usage", title: "Usage", symbol: "chart.bar"),
+        .init(id: "plugins", title: "Plugins", symbol: "puzzlepiece.extension"),
+        .init(id: "extensions", title: "Extensions", symbol: "square.stack.3d.up")
+    ]
 }
 
 private struct ProjectNavigatorGlyph: View {

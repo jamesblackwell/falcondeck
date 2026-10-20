@@ -158,13 +158,17 @@ struct ConversationView: View {
                                 }.buttonStyle(.plain).disabled(store.isLoadingOlder).accessibilityIdentifier("load-earlier-messages")
                             }
                             ForEach(transcriptGroups) { group in
-                                if group.items.count == 1, let message = group.items.first {
-                                    transcriptRow(message, firstDiffID: firstDiffID, retryable: retrySources[message.id] != nil).padding(findText.isEmpty ? 0 : 8)
-                                        .background(matches.contains(message.id) ? FDTheme.accentDim : .clear, in: .rect(cornerRadius: 8)).id(message.id)
-                                } else {
-                                    ConversationTranscriptBurst(group: group, expansionDirective: expansionDirective, findText: findText) { message in
-                                        AnyView(transcriptRow(message, firstDiffID: firstDiffID, retryable: retrySources[message.id] != nil).id(message.id))
-                                    }.id(group.id)
+                                // Give the lazy stack one child per group so it
+                                // need not traverse conditional row trees on every delta.
+                                VStack(alignment: .leading, spacing: 0) {
+                                    if group.items.count == 1, let message = group.items.first {
+                                        transcriptRow(message, firstDiffID: firstDiffID, retryable: retrySources[message.id] != nil).padding(findText.isEmpty ? 0 : 8)
+                                            .background(matches.contains(message.id) ? FDTheme.accentDim : .clear, in: .rect(cornerRadius: 8)).id(message.id)
+                                    } else {
+                                        ConversationTranscriptBurst(group: group, expansionDirective: expansionDirective, findText: findText) { message in
+                                            AnyView(transcriptRow(message, firstDiffID: firstDiffID, retryable: retrySources[message.id] != nil).id(message.id))
+                                        }.id(group.id)
+                                    }
                                 }
                             }
                             NativeExtensionToolResults(store: store, messages: store.messages)
@@ -242,7 +246,9 @@ struct ConversationView: View {
                 }
                 ConversationTextEditor(text: $store.draft, placeholder: store.isRunning ? "Send a follow-up…" : "Message your agent…", onSend: send,
                                        onAttachments: { appendAttachments($0, expectedKey: composerKey) }, onError: { store.errorMessage = $0 }, onAlternateSend: sendAlternate)
-                    .frame(minHeight: 80, idealHeight: 104, maxHeight: 190).accessibilityIdentifier("message-composer")
+                    .frame(minHeight: 64, idealHeight: 88, maxHeight: 140)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .accessibilityIdentifier("message-composer")
                 HStack(spacing: 10) {
                     ConversationComposerControls(store: store, selection: $selection, skills: skills, prompts: prompts, loadingCatalog: loadingCatalog,
                                                  insert: { store.draft += $0 }, attach: pickAttachments, refreshCatalog: { Task { await loadCatalog() } }, chooseAgent: { destination in

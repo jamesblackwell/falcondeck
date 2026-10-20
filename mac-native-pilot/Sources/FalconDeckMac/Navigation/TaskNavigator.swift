@@ -83,7 +83,8 @@ struct TaskNavigator: View {
         var result = tasks.filter { $0.raw["is_pinned_in_project"].bool }
         var groupedIDs = Set(result.map(\.id))
         for folder in folders {
-            let members = tasks.filter { folder.taskIDs.contains($0.id) && !groupedIDs.contains($0.id) }
+            let memberIDs = folder.taskIDs
+            let members = tasks.filter { memberIDs.contains($0.id) && !groupedIDs.contains($0.id) }
             groupedIDs.formUnion(members.map(\.id))
             if isFolderExpanded(folder) { result.append(contentsOf: members) }
         }
@@ -246,7 +247,8 @@ struct TaskNavigator: View {
             }
         }
         ForEach(folders) { folder in
-            let members = tasks.filter { folder.taskIDs.contains($0.id) && !$0.raw["is_pinned_in_project"].bool }
+            let memberIDs = folder.taskIDs
+            let members = tasks.filter { memberIDs.contains($0.id) && !$0.raw["is_pinned_in_project"].bool }
             Section {
                 if isFolderExpanded(folder) {
                     ForEach(members.filter { included.contains($0.id) }) { task in taskRow(task) }
@@ -522,16 +524,16 @@ struct TaskNavigationRow: View {
     var stage: JSON?
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 7) {
+        VStack(alignment: .leading, spacing: 5) {
             HStack(alignment: .firstTextBaseline, spacing: 6) {
                 if task.unread { Circle().fill(FDTheme.info).frame(width: 5, height: 5).accessibilityLabel("Unread") }
-                Text(task.title).font(NativePreferences.shared.font(size: 14, surface: "sidebar", weight: task.unread ? .semibold : .medium))
+                Text(task.title).font(NativePreferences.shared.font(size: 13, surface: "sidebar", weight: task.unread ? .medium : .regular))
                     .foregroundStyle(FDTheme.foreground).lineLimit(2).frame(maxWidth: .infinity, alignment: .leading)
                 TaskStatusMark(status: task.status)
             }
             if !task.preview.isEmpty {
                 Text(task.preview.replacingOccurrences(of: "\n", with: " "))
-                    .font(NativePreferences.shared.font(size: 12, surface: "sidebar")).foregroundStyle(FDTheme.muted).lineLimit(2).lineSpacing(3)
+                    .font(NativePreferences.shared.font(size: 12, surface: "sidebar")).foregroundStyle(FDTheme.muted).lineLimit(1)
             }
             HStack(spacing: 5) {
                 if let stage {

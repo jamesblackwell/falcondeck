@@ -78,7 +78,11 @@ extension DaemonClient: DaemonServing {}
     @ObservationIgnored private var hostTask: Task<Void, Never>?
     @ObservationIgnored private var localSnapshot: JSON = .null
     @ObservationIgnored private var localEventRevision: UInt64 = 0
-    private var remoteSnapshots: [String: JSON] = [:]
+    // Raw host replay caches change on every envelope. Only their explicit UI
+    // projections should participate in SwiftUI observation.
+    @ObservationIgnored private var remoteSnapshots: [String: JSON] = [:]
+    private var remoteNavigationPreferences: [String: JSON] = [:]
+    private var remoteExtensions: [String: JSON] = [:]
     private var remoteStatuses: [String: NativeHostStatus] = [:]
     @ObservationIgnored private var preferenceRevision: [String: UInt64] = [:]
     @ObservationIgnored private var preferenceWrites: [String: Task<Void, Error>] = [:]
@@ -125,7 +129,7 @@ extension DaemonClient: DaemonServing {}
     var extensions: JSON { extensionsForHost(selectedHostID) }
     func extensionsForHost(_ hostID: String?) -> JSON {
         guard let hostID else { return snapshotRaw["extensions"] }
-        return NativeHostProjection.extensions((remoteSnapshots[hostID] ?? .null)["extensions"], host: hostID)
+        return remoteExtensions[hostID] ?? .null
     }
     var composerKey: String { draftKey }
     var pendingSubmission: NativePendingSubmission? {
@@ -637,8 +641,8 @@ extension DaemonClient: DaemonServing {}
         var result = preferences.fields
         let arrays = ["workspace_order", "hidden_workspace_ids", "project_folders"]
         let maps = ["workspace_icons", "workspace_colors"]
-        for host in remoteSnapshots.keys.sorted() {
-            let remote = NativeHostProjection.preferences((remoteSnapshots[host] ?? .null)["preferences"], host: host)
+        for host in remoteNavigationPreferences.keys.sorted() {
+            let remote = remoteNavigationPreferences[host] ?? .null
             for key in arrays { result[key] = .array((result[key] ?? .null).array + remote[key].array) }
             for key in maps {
                 result[key] = .object((result[key] ?? .null).fields.merging(remote[key].fields) { _, remote in remote })
@@ -681,6 +685,7 @@ extension DaemonClient: DaemonServing {}
                 // request() projects relation IDs for its consumer; snapshots remain raw.
                 let raw = NativeHostProjection.rawIDs(value)
                 self.remoteSnapshots[hostID] = (self.remoteSnapshots[hostID] ?? .object([:])).setting("preferences", raw)
+                self.refreshRemoteMetadata(hostID: hostID)
             } else {
                 self.preferences = value
                 self.snapshotRaw = self.snapshotRaw.setting("preferences", value)
@@ -1013,6 +1018,7 @@ extension DaemonClient: DaemonServing {}
         case .snapshot(let value):
             remoteStatuses[update.hostID] = .connected
             remoteSnapshots[update.hostID] = value
+            refreshRemoteMetadata(hostID: update.hostID)
             preferenceRevision[update.hostID, default: 0] &+= 1
             if client is DaemonClient { NativePlatform.shared.handle(.object(["event": .object(["type": .string("snapshot"), "snapshot": value])]), hostID: update.hostID) }
             rebuildIndexes()
@@ -1023,12 +1029,17 @@ extension DaemonClient: DaemonServing {}
             for value in values {
                 remoteSnapshots[update.hostID] = NativeHostProjection.reduce(remoteSnapshots[update.hostID] ?? .object([:]), envelope: value)
             }
+            refreshRemoteMetadata(hostID: update.hostID)
             rebuildIndexes()
         case .events(let values):
             for value in values {
                 remoteSnapshots[update.hostID] = NativeHostProjection.reduce(remoteSnapshots[update.hostID] ?? .object([:]), envelope: value)
                 if client is DaemonClient { NativePlatform.shared.handle(value, hostID: update.hostID) }
-                if value["event"]["type"].string == "snapshot" {
+                let type = value["event"]["type"].string
+                if ["snapshot", "preferences-updated", "extension-catalog-updated", "extension-view-updated"].contains(type) {
+                    refreshRemoteMetadata(hostID: update.hostID)
+                }
+                if type == "snapshot" {
                     preferenceRevision[update.hostID, default: 0] &+= 1
                     rebuildIndexes()
                     recoverRemoteSelection(hostID: update.hostID)
@@ -1040,10 +1051,23 @@ extension DaemonClient: DaemonServing {}
         case .removed:
             if client is DaemonClient { NativePlatform.shared.handle(.object(["event": .object(["type": .string("snapshot"), "snapshot": .object([:])])]), hostID: update.hostID) }
             remoteSnapshots.removeValue(forKey: update.hostID)
+            refreshRemoteMetadata(hostID: update.hostID)
             remoteStatuses.removeValue(forKey: update.hostID)
             rebuildIndexes()
         case .status(let status, _): remoteStatuses[update.hostID] = status; eventRevision &+= 1
         }
+    }
+
+    private func refreshRemoteMetadata(hostID: String) {
+        guard let snapshot = remoteSnapshots[hostID] else {
+            remoteNavigationPreferences.removeValue(forKey: hostID)
+            remoteExtensions.removeValue(forKey: hostID)
+            return
+        }
+        let preferences = NativeHostProjection.preferences(snapshot["preferences"], host: hostID)
+        if remoteNavigationPreferences[hostID] != preferences { remoteNavigationPreferences[hostID] = preferences }
+        let extensions = NativeHostProjection.extensions(snapshot["extensions"], host: hostID)
+        if remoteExtensions[hostID] != extensions { remoteExtensions[hostID] = extensions }
     }
 
     private func rebuildIndexes() {

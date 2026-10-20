@@ -1,4 +1,5 @@
 import Foundation
+import Observation
 import XCTest
 @testable import FalconDeckMac
 
@@ -111,6 +112,10 @@ private func integrationSnapshotEnvelope(_ value: JSON) -> JSON {
     integrationEnvelope(.object(["type": .string("snapshot"), "snapshot": value]))
 }
 
+private final class IntegrationObservationChanges: @unchecked Sendable {
+    var count = 0
+}
+
 final class NativeStoreIntegrationTests: XCTestCase {
     @MainActor func testLocalThreadPatchUsesPathScopeAndPreservesExplicitNull() async throws {
         let daemon = IntegrationDaemon(), store = AppStore(client: daemon)
@@ -179,6 +184,58 @@ final class NativeStoreIntegrationTests: XCTestCase {
         }
         let requests = await daemon.requests
         XCTAssertTrue(requests.isEmpty)
+    }
+
+    @MainActor func testStreamingDoesNotInvalidateNavigationOrExtensionProjections() async {
+        let store = AppStore(client: IntegrationDaemon(), readVisibility: { false })
+        store.applyEnvelope(integrationSnapshotEnvelope(integrationSnapshot()))
+        await store.selectTask("task")
+        store.receiveHost(.init(hostID: "server-a", event: .snapshot(integrationSnapshot())))
+        let changes = IntegrationObservationChanges()
+        withObservationTracking {
+            _ = store.navigationPreferences
+            _ = store.extensions
+            _ = store.extensionsForHost("server-a")
+        } onChange: { changes.count += 1 }
+
+        let text: JSON = .object([
+            "thread_id": .string("task"), "event": .object([
+                "type": .string("text"), "item_id": .string("message"), "delta": .string("!")
+            ])
+        ])
+        store.receiveHost(.init(hostID: "server-a", event: .events([text])))
+        store.applyEnvelope(text)
+
+        XCTAssertEqual(changes.count, 0, "Text envelopes must update the transcript without rebuilding unrelated sidebar projections")
+        XCTAssertEqual(store.messages.first?.text, "Local history!")
+    }
+
+    @MainActor func testRemoteMetadataEventsRefreshAndRemovalRetractsObservedProjections() {
+        let store = AppStore(client: IntegrationDaemon())
+        store.applyEnvelope(integrationSnapshotEnvelope(integrationSnapshot()))
+        let remote = integrationSnapshot().setting("extensions", .object(["views": .array([])]))
+        store.receiveHost(.init(hostID: "server-a", event: .snapshot(remote)))
+        let navigationChanges = IntegrationObservationChanges(), extensionChanges = IntegrationObservationChanges()
+        withObservationTracking { _ = store.navigationPreferences } onChange: { navigationChanges.count += 1 }
+        withObservationTracking { _ = store.extensionsForHost("server-a") } onChange: { extensionChanges.count += 1 }
+        let remotePreferences: JSON = .object([
+            "workspace_colors": .object(["local": .string("blue")]),
+            "project_folders": .array([.object(["id": .string("folder"), "workspace_id": .string("local"), "thread_ids": .array([.string("task")])])])
+        ])
+        store.receiveHost(.init(hostID: "server-a", event: .events([
+            integrationEnvelope(.object(["type": .string("preferences-updated"), "preferences": remotePreferences])),
+            integrationEnvelope(.object(["type": .string("extension-view-updated"), "extension_id": .string("notes"), "view_id": .string("panel"), "scope": .object(["kind": .string("thread"), "id": .string("task")]), "view": .object(["extension_id": .string("notes"), "view_id": .string("panel"), "scope": .object(["kind": .string("thread"), "id": .string("task")])])]))
+        ])))
+
+        XCTAssertEqual(navigationChanges.count, 1)
+        XCTAssertEqual(extensionChanges.count, 1)
+        XCTAssertEqual(store.navigationPreferences["workspace_colors"]["remote:server-a:local"], .string("blue"))
+        XCTAssertEqual(store.navigationPreferences["project_folders"].array.first?["thread_ids"], .array([.string("remote:server-a:task")]))
+        XCTAssertEqual(store.extensionsForHost("server-a")["views"].array.first?["scope"]["id"], .string("remote:server-a:task"))
+        store.receiveHost(.init(hostID: "server-a", event: .removed))
+        XCTAssertEqual(store.extensionsForHost("server-a"), .null)
+        XCTAssertEqual(store.navigationPreferences["workspace_colors"]["remote:server-a:local"], .null)
+        XCTAssertTrue(store.navigationPreferences["project_folders"].array.isEmpty)
     }
 
     @MainActor func testRemoteSnapshotMergesWithoutReplacingLocalPreferencesOrSelection() async {

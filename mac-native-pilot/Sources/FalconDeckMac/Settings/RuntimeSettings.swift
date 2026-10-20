@@ -9,15 +9,16 @@ private struct RuntimeSettingsSection<Content: View>: View {
     @ViewBuilder var content: Content
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 12) {
+        VStack(alignment: .leading, spacing: 10) {
             VStack(alignment: .leading, spacing: 4) {
-                Text(title).font(NativePreferences.shared.font(size: 14, weight: .semibold))
-                if !detail.isEmpty { Text(detail).font(NativePreferences.shared.font(size: 13)).foregroundStyle(.secondary) }
+                Text(title).font(NativePreferences.shared.font(size: 13, weight: .medium))
+                if !detail.isEmpty { Text(detail).font(NativePreferences.shared.font(size: 12)).foregroundStyle(FDTheme.muted) }
             }
-            VStack(alignment: .leading, spacing: 12) { content }
+            VStack(alignment: .leading, spacing: 10) { content }
                 .padding(16)
                 .frame(maxWidth: .infinity, alignment: .leading)
-                .background(.quaternary.opacity(0.35), in: RoundedRectangle(cornerRadius: 10))
+                .background(FDTheme.raised, in: RoundedRectangle(cornerRadius: 10))
+                .overlay(RoundedRectangle(cornerRadius: 10).strokeBorder(FDTheme.hairline))
         }
     }
 }
@@ -30,8 +31,8 @@ private struct RuntimeSettingsToggle: View {
     var body: some View {
         Toggle(isOn: $value) {
             VStack(alignment: .leading, spacing: 4) {
-                Text(title)
-                Text(detail).font(NativePreferences.shared.font(size: 11)).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+                Text(title).font(NativePreferences.shared.font(size: 13))
+                Text(detail).font(NativePreferences.shared.font(size: 12)).foregroundStyle(FDTheme.muted).fixedSize(horizontal: false, vertical: true)
             }
         }.toggleStyle(.switch)
     }
@@ -555,31 +556,41 @@ struct NativeGeneralSettingsView: View {
                     }
                 }
                 if let progress = updater.progress { ProgressView(value: progress).accessibilityLabel("Update download") }
-                HStack {
-                    if ["checking", "downloading"].contains(updater.state) { ProgressView().controlSize(.small) }
-                    Button("Check for updates") { Task { await updater.check() } }.disabled(!updater.canCheck)
-                    if updater.state == "available" {
-                        Button("Download and install") { Task { await updater.downloadAndInstall() } }.buttonStyle(.borderedProminent)
-                    }
-                    if updater.state == "installed" {
-                        Button("Restart to update") { Task { await updater.restart() } }.buttonStyle(.borderedProminent)
-                    }
-                    Link("View downloads", destination: URL(string: "https://github.com/jamesblackwell/falcondeck/releases")!)
+                ViewThatFits(in: .horizontal) {
+                    HStack(spacing: 8) { updateActions }
+                    VStack(alignment: .leading, spacing: 8) { updateActions }
                 }
                 Text("Updates include the app and its local services. Your projects and conversations are preserved.")
                     .font(NativePreferences.shared.font(size: 11)).foregroundStyle(.secondary)
             }
             RuntimeSettingsSection(title: "First-run setup", detail: "Review connection, project and computer-use setup without changing existing projects, conversations or keys.") {
-                HStack {
-                    Button("Open welcome setup") { showWelcome = true }
-                    Button(resetWelcome ? "Welcome will appear next launch" : "Show welcome at next launch") {
-                        UserDefaults.standard.set(false, forKey: "falcondeck.native.onboarding.complete")
-                        resetWelcome = true
-                    }.disabled(resetWelcome)
+                ViewThatFits(in: .horizontal) {
+                    HStack(spacing: 8) { welcomeActions }
+                    VStack(alignment: .leading, spacing: 8) { welcomeActions }
                 }
             }
         }
         .sheet(isPresented: $showWelcome) { NativeWelcomeSetupView(store: store) { showWelcome = false; resetWelcome = false } }
+    }
+
+    @ViewBuilder private var updateActions: some View {
+        if ["checking", "downloading"].contains(updater.state) { ProgressView().controlSize(.small) }
+        Button("Check for updates") { Task { await updater.check() } }.disabled(!updater.canCheck)
+        if updater.state == "available" {
+            Button("Download and install") { Task { await updater.downloadAndInstall() } }.buttonStyle(.borderedProminent)
+        }
+        if updater.state == "installed" {
+            Button("Restart to update") { Task { await updater.restart() } }.buttonStyle(.borderedProminent)
+        }
+        Link("View downloads", destination: URL(string: "https://github.com/jamesblackwell/falcondeck/releases")!)
+    }
+
+    @ViewBuilder private var welcomeActions: some View {
+        Button("Open welcome setup") { showWelcome = true }
+        Button(resetWelcome ? "Welcome will appear next launch" : "Show welcome at next launch") {
+            UserDefaults.standard.set(false, forKey: "falcondeck.native.onboarding.complete")
+            resetWelcome = true
+        }.disabled(resetWelcome)
     }
 
 }

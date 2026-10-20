@@ -112,12 +112,14 @@ struct NativeSettingsView: View {
     }
 
     var body: some View {
-        HSplitView {
+        HStack(spacing: 0) {
             VStack(spacing: 0) {
                 TextField("Search settings", text: $query)
                     .textFieldStyle(.roundedBorder)
+                    .font(NativePreferences.shared.font(size: 12))
                     .focused($searchFocused)
-                    .padding(12)
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 10)
                     .onChange(of: query) { _, new in
                         if !selected.matches(new), let first = NativeSettingsSection.allCases.first(where: { $0.matches(new) }) { selected = first }
                     }
@@ -125,33 +127,58 @@ struct NativeSettingsView: View {
                     ForEach(["App", "Agents", "Connection & data"], id: \.self) { group in
                         let sections = NativeSettingsSection.allCases.filter { $0.group == group && $0.matches(query) }
                         if !sections.isEmpty {
-                            Section(group) {
+                            Section {
                                 ForEach(sections) { section in
-                                    Label(section.title, systemImage: section.symbol).tag(section).padding(.vertical, 3)
+                                    HStack(spacing: 9) {
+                                        Image(systemName: section.symbol)
+                                            .foregroundStyle(selected == section ? FDTheme.accent : FDTheme.muted)
+                                            .frame(width: 16)
+                                        Text(section.title)
+                                            .foregroundStyle(FDTheme.foreground)
+                                    }
+                                    .font(NativePreferences.shared.font(size: 12, surface: "sidebar"))
+                                    .tag(section)
+                                    .listRowInsets(EdgeInsets(top: 3, leading: 10, bottom: 3, trailing: 10))
                                 }
+                            } header: {
+                                Text(group)
+                                    .font(NativePreferences.shared.font(size: 11, surface: "sidebar", weight: .medium))
+                                    .foregroundStyle(FDTheme.muted)
                             }
                         }
                     }
-                }.listStyle(.sidebar)
+                }
+                .listStyle(.sidebar)
+                .environment(\.defaultMinListRowHeight, 28)
+                .scrollContentBackground(.hidden)
                 if !query.isEmpty && !NativeSettingsSection.allCases.contains(where: { $0.matches(query) }) {
                     Text("No matching settings").font(NativePreferences.shared.font(size: 11)).foregroundStyle(.secondary).padding()
                 }
             }
-            .frame(minWidth: 205, idealWidth: 228, maxWidth: 300)
+            .frame(width: 220)
+            .background(FDTheme.background)
+
+            Divider()
 
             VStack(alignment: .leading, spacing: 0) {
-                HStack(alignment: .top) {
-                    VStack(alignment: .leading, spacing: 5) {
-                        Text(selected.title).font(NativePreferences.shared.font(size: 22, weight: .semibold))
-                        Text(selected.detail).font(NativePreferences.shared.font(size: 13)).foregroundStyle(.secondary)
+                HStack(alignment: .center, spacing: 16) {
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text(selected.title).font(NativePreferences.shared.font(size: 18, weight: .semibold))
+                        Text(selected.detail).font(NativePreferences.shared.font(size: 12)).foregroundStyle(FDTheme.muted)
                     }
-                    Spacer()
+                    Spacer(minLength: 0)
                     Label(store.isConnected ? "Connected" : "Offline", systemImage: store.isConnected ? "circle.fill" : "circle")
-                        .font(NativePreferences.shared.font(size: 11)).foregroundStyle(store.isConnected ? Color.green : Color.secondary)
-                }.padding(.horizontal, 24).padding(.vertical, 20)
+                        .font(NativePreferences.shared.font(size: 11)).foregroundStyle(FDTheme.muted)
+                        .fixedSize()
+                }.padding(.horizontal, 24).padding(.vertical, 16)
                 Divider()
                 detail.id(selected)
-            }.frame(minWidth: 475, maxWidth: .infinity, maxHeight: .infinity)
+                    .frame(maxWidth: 880, maxHeight: .infinity, alignment: .topLeading)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+                    .scrollContentBackground(.hidden)
+            }
+            .frame(minWidth: 0, maxWidth: .infinity, maxHeight: .infinity)
+            .background(FDTheme.surface)
         }
         .onChange(of: selected) { _, next in savedSection = next.rawValue }
         .onReceive(NotificationCenter.default.publisher(for: .init("falcondeck.native.openSettingsSection"))) { notification in
@@ -173,14 +200,21 @@ struct NativeSettingsView: View {
         case .connectors: NativeConnectorsSettingsView(store: store)
         case .agentControl: scrolling { NativeAgentControlSettingsView(store: store) }
         case .computerUse: scrolling { NativeComputerUseSettingsView(store: store) }
-        case .speech: NativeVoiceSettingsView(store: store)
+        case .speech: scrolling { NativeVoiceSettingsView(store: store) }
         case .models: NativeModelsSettingsView(store: store)
         case .remote: NativeRemoteSettingsView(store: store)
         case .servers: NativeServersSettingsView(store: store)
         case .backup: NativeBackupSettingsView(store: store)
         }
     }
-    private func scrolling<Content: View>(@ViewBuilder content: () -> Content) -> some View {
-        ScrollView { content().padding(24).frame(maxWidth: 900, alignment: .leading).frame(maxWidth: .infinity) }
+    private func scrolling<Content: View>(@ViewBuilder content: @escaping () -> Content) -> some View {
+        GeometryReader { geometry in
+            ScrollView {
+                content()
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(24)
+                    .frame(width: geometry.size.width, alignment: .leading)
+            }
+        }
     }
 }
