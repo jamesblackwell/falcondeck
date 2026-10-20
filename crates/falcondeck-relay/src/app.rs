@@ -66,6 +66,10 @@ const WS_SYNC_REPLAY_MAX_BYTES: usize = 512 << 10;
 /// new challenge request replaces any outstanding one for the pairing.
 const PAIRING_CHALLENGE_TTL_SECONDS: i64 = 300;
 const PENDING_RPC_TTL_SECONDS: i64 = 30;
+const PENDING_RPC_MAX_COUNT: usize = 256;
+/// Pending params outlive transport queue admission while the daemon works.
+/// Retain room for one maximum accepted message plus routing metadata.
+const PENDING_RPC_MAX_BYTES: usize = PEER_QUEUE_MAX_BYTES;
 /// A daemon that drops usually reconnects within seconds (its supervisor
 /// retries on a 1-10s backoff). Calls arriving in this window after a
 /// disconnect are parked for re-dispatch instead of failing fast, so a
@@ -567,6 +571,7 @@ struct LiveSession {
     /// new calls while older owners remain as deterministic fallbacks.
     rpc_methods: HashMap<String, Vec<String>>,
     pending_rpc: HashMap<String, PendingRpc>,
+    pending_rpc_budget: PendingRpcBudget,
     /// When the most recent daemon peer disconnected. Used to park new RPC
     /// calls during the reconnect grace window instead of failing them.
     daemon_disconnected_at: Option<DateTime<Utc>>,
@@ -582,9 +587,51 @@ struct PendingRpc {
     /// Retained so a parked call can be re-dispatched to a new daemon peer.
     params: EncryptedEnvelope,
     expires_at: DateTime<Utc>,
+    _timeout: PendingRpcTimeout,
+    _params_permit: OwnedSemaphorePermit,
+}
+
+struct PendingRpcBudget(Arc<Semaphore>);
+
+impl Default for PendingRpcBudget {
+    fn default() -> Self {
+        Self(Arc::new(Semaphore::new(PENDING_RPC_MAX_BYTES)))
+    }
+}
+
+struct PendingRpcTimeout(tokio::task::AbortHandle);
+
+impl Drop for PendingRpcTimeout {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
 }
 
 impl LiveSession {
+    fn reserve_rpc_params(
+        &self,
+        request_id: &str,
+        method: &str,
+        params: &EncryptedEnvelope,
+    ) -> Option<OwnedSemaphorePermit> {
+        if self.pending_rpc.len() >= PENDING_RPC_MAX_COUNT {
+            return None;
+        }
+        // String clones retain their length in bytes. The allowance covers
+        // map entries, identifiers, timer state, and fixed envelope fields.
+        let bytes = params
+            .ciphertext
+            .len()
+            .saturating_add(request_id.len())
+            .saturating_add(method.len())
+            .saturating_add(1024);
+        self.pending_rpc_budget
+            .0
+            .clone()
+            .try_acquire_many_owned(u32::try_from(bytes).ok()?)
+            .ok()
+    }
+
     fn daemon_connected(&self) -> bool {
         self.peers
             .values()
@@ -2490,7 +2537,6 @@ impl AppState {
     ) {
         let mut response = None;
         let mut target = None;
-        let mut parked = false;
         let mut expired = Vec::new();
         // Forwarded calls carry a peer-namespaced request id so identical
         // client-chosen ids from different devices cannot collide or route
@@ -2504,6 +2550,21 @@ impl AppState {
                 // previous entry expired is replaced instead of failed.
                 expired = live.take_expired_rpcs(Utc::now());
                 let requester = live.peers.get(peer_id).map(|peer| peer.tx.clone());
+                let reject = |failure| {
+                    requester.as_ref().map(|tx| {
+                        (
+                            peer_id.to_string(),
+                            tx.clone(),
+                            RelayServerMessage::RpcResult {
+                                request_id: request_id.clone(),
+                                ok: false,
+                                result: None,
+                                error: None,
+                                failure: Some(failure),
+                            },
+                        )
+                    })
+                };
                 if live.pending_rpc.contains_key(&namespaced_request_id) {
                     warn!(
                         session_id,
@@ -2512,62 +2573,50 @@ impl AppState {
                         method,
                         "rejecting duplicate in-flight relay rpc request"
                     );
-                    response = requester.map(|tx| {
-                        (
-                            peer_id.to_string(),
-                            tx,
-                            RelayServerMessage::RpcResult {
-                                request_id: request_id.clone(),
-                                ok: false,
-                                result: None,
-                                error: None,
-                                failure: Some(RelayRpcFailureCode::RequestConflict),
-                            },
-                        )
-                    });
-                } else if let Some((owner_peer_id, owner_tx)) = live
-                    .rpc_owner(&method)
-                    .map(|(peer_id, peer)| (peer_id.to_owned(), peer.tx.clone()))
+                    response = reject(RelayRpcFailureCode::RequestConflict);
+                } else if live.rpc_owner(&method).is_some()
+                    || live.daemon_reconnect_grace_active(Utc::now())
                 {
-                    live.pending_rpc.insert(
-                        namespaced_request_id.clone(),
-                        PendingRpc {
-                            started_at: std::time::Instant::now(),
-                            method: method.clone(),
-                            requester_peer_id: peer_id.to_string(),
-                            responder_peer_id: Some(owner_peer_id.clone()),
-                            params: params.clone(),
-                            expires_at: Utc::now() + Duration::seconds(PENDING_RPC_TTL_SECONDS),
-                        },
-                    );
-                    target = Some((owner_peer_id, owner_tx));
-                } else if live.daemon_reconnect_grace_active(Utc::now()) {
-                    // The daemon was here moments ago and its supervisor
-                    // reconnects on a short backoff: park the call so the
-                    // reconnect flap resolves invisibly instead of erroring.
-                    // A registered-but-missing method on a *connected* daemon
-                    // stays a fast failure below — that is version skew, not
-                    // a flap. The TTL sweep fails parked calls if no daemon
-                    // returns in time.
-                    warn!(
-                        session_id,
-                        peer_id,
-                        request_id,
-                        method,
-                        "daemon just disconnected; parking relay rpc for its reconnect"
-                    );
-                    live.pending_rpc.insert(
-                        namespaced_request_id.clone(),
-                        PendingRpc {
-                            started_at: std::time::Instant::now(),
-                            method: method.clone(),
-                            requester_peer_id: peer_id.to_string(),
-                            responder_peer_id: None,
-                            params: params.clone(),
-                            expires_at: Utc::now() + Duration::seconds(PENDING_RPC_TTL_SECONDS),
-                        },
-                    );
-                    parked = true;
+                    if let Some(permit) =
+                        live.reserve_rpc_params(&namespaced_request_id, &method, &params)
+                    {
+                        target = live
+                            .rpc_owner(&method)
+                            .map(|(peer_id, peer)| (peer_id.to_owned(), peer.tx.clone()));
+                        if target.is_none() {
+                            // The daemon was here moments ago and its supervisor
+                            // reconnects on a short backoff: park the call so the
+                            // reconnect flap resolves invisibly instead of erroring.
+                            // A registered-but-missing method on a *connected* daemon
+                            // stays a fast failure below — that is version skew, not
+                            // a flap. The TTL sweep fails parked calls if no daemon
+                            // returns in time.
+                            warn!(
+                                session_id,
+                                peer_id,
+                                request_id,
+                                method,
+                                "daemon just disconnected; parking relay rpc for its reconnect"
+                            );
+                        }
+                        live.pending_rpc.insert(
+                            namespaced_request_id.clone(),
+                            PendingRpc {
+                                started_at: std::time::Instant::now(),
+                                method: method.clone(),
+                                requester_peer_id: peer_id.to_string(),
+                                responder_peer_id: target
+                                    .as_ref()
+                                    .map(|(peer_id, _)| peer_id.clone()),
+                                params: params.clone(),
+                                expires_at: Utc::now() + Duration::seconds(PENDING_RPC_TTL_SECONDS),
+                                _timeout: self.schedule_rpc_timeout(session_id),
+                                _params_permit: permit,
+                            },
+                        );
+                    } else {
+                        response = reject(RelayRpcFailureCode::ResourceExhausted);
+                    }
                 } else {
                     warn!(
                         session_id,
@@ -2577,25 +2626,12 @@ impl AppState {
                         daemon_connected = live.daemon_connected(),
                         "relay rpc method is unavailable"
                     );
-                    response = requester.map(|tx| {
-                        (
-                            peer_id.to_string(),
-                            tx,
-                            RelayServerMessage::RpcResult {
-                                request_id: request_id.clone(),
-                                ok: false,
-                                result: None,
-                                error: None,
-                                failure: Some(RelayRpcFailureCode::MethodUnavailable),
-                            },
-                        )
-                    });
+                    response = reject(RelayRpcFailureCode::MethodUnavailable);
                 }
             }
         }
 
         self.notify_expired_rpcs(session_id, expired);
-        let dispatched = target.is_some();
         if let Some((owner_peer_id, tx)) = target {
             self.queue_message(
                 session_id,
@@ -2610,21 +2646,23 @@ impl AppState {
         } else if let Some((requester_peer_id, tx, message)) = response {
             self.queue_message(session_id, &requester_peer_id, &tx, message);
         }
-        if dispatched || parked {
-            // The websocket idle sweep is only a fallback and can run almost
-            // ten seconds after the nominal deadline. Schedule a per-request
-            // sweep so the relay's structured timeout reaches clients before
-            // their 35-second delivery deadline.
-            let state = self.clone();
-            let session_id = session_id.to_string();
-            tokio::spawn(async move {
-                tokio::time::sleep(std::time::Duration::from_secs(
-                    PENDING_RPC_TTL_SECONDS as u64,
-                ))
-                .await;
-                state.sweep_expired_rpcs(&session_id).await;
-            });
-        }
+    }
+
+    fn schedule_rpc_timeout(&self, session_id: &str) -> PendingRpcTimeout {
+        // The idle sweep can miss the client's delivery deadline. Keep a
+        // deadline timer only while the request is pending; completed calls
+        // must not leave sleeping tasks retaining the relay for another 30s.
+        let inner = Arc::downgrade(&self.inner);
+        let session_id = session_id.to_string();
+        let deadline =
+            tokio::time::Instant::now() + StdDuration::from_secs(PENDING_RPC_TTL_SECONDS as u64);
+        let task = tokio::spawn(async move {
+            tokio::time::sleep_until(deadline).await;
+            if let Some(inner) = inner.upgrade() {
+                AppState { inner }.sweep_expired_rpcs(&session_id).await;
+            }
+        });
+        PendingRpcTimeout(task.abort_handle())
     }
 
     /// Drop pending RPC entries older than their TTL and fail them back to
@@ -4947,6 +4985,298 @@ mod tests {
         normalize_persisted_secrets, prune_state, push_dedupe_key, push_notification_content,
         secret_verifier, strip_rpc_request_id_namespace, sync_messages, verify_secret,
     };
+
+    async fn rpc_test_state() -> (
+        super::AppState,
+        tokio::sync::mpsc::Receiver<super::BudgetedRelayMessage>,
+        tokio::sync::mpsc::Receiver<super::BudgetedRelayMessage>,
+    ) {
+        let state = super::AppState::from_parts(
+            "test".into(),
+            Duration::minutes(5),
+            RetentionConfig::default(),
+            PersistedState::default(),
+            std::sync::Arc::new(crate::persistence::FileBackend::new(
+                std::env::temp_dir().join("unused-relay-rpc-state.json"),
+            )),
+            true,
+        );
+        let (requester_tx, requester_rx) = PeerQueue::new(4);
+        let (responder_tx, responder_rx) = PeerQueue::new(4);
+        let mut live = LiveSession::default();
+        for (peer_id, role, tx) in [
+            (
+                "requester",
+                falcondeck_core::RelayPeerRole::Client,
+                requester_tx,
+            ),
+            (
+                "responder",
+                falcondeck_core::RelayPeerRole::Daemon,
+                responder_tx,
+            ),
+        ] {
+            live.peers.insert(
+                peer_id.into(),
+                PeerHandle {
+                    foreground: true,
+                    role,
+                    device_id: None,
+                    tx,
+                    operation_lock: std::sync::Arc::new(tokio::sync::Mutex::new(())),
+                },
+            );
+        }
+        live.rpc_methods
+            .insert("snapshot.current".into(), vec!["responder".into()]);
+        state
+            .inner
+            .store
+            .lock()
+            .await
+            .live_sessions
+            .insert("session".into(), live);
+        (state, requester_rx, responder_rx)
+    }
+
+    fn rpc_params(bytes: usize) -> EncryptedEnvelope {
+        EncryptedEnvelope {
+            encryption_variant: EncryptionVariant::DataKeyV1,
+            ciphertext: "x".repeat(bytes),
+            snapshot_hint: false,
+        }
+    }
+
+    #[tokio::test]
+    async fn pending_rpc_count_limit_rejects_without_forwarding_or_disconnect() {
+        let (state, mut requester_rx, mut responder_rx) = rpc_test_state().await;
+        for index in 0..256 {
+            state
+                .forward_rpc_call(
+                    "session",
+                    "requester",
+                    format!("request-{index}"),
+                    "snapshot.current".into(),
+                    rpc_params(1),
+                )
+                .await;
+            assert!(responder_rx.try_recv().is_ok());
+        }
+        state
+            .forward_rpc_call(
+                "session",
+                "requester",
+                "overflow".into(),
+                "snapshot.current".into(),
+                rpc_params(1),
+            )
+            .await;
+        assert!(
+            responder_rx.try_recv().is_err(),
+            "rejected call reached daemon"
+        );
+        let rejected = requester_rx
+            .try_recv()
+            .expect("missing correlated rejection");
+        assert!(
+            matches!(rejected.message(), falcondeck_core::RelayServerMessage::RpcResult {
+            request_id, ok: false, failure: Some(falcondeck_core::RelayRpcFailureCode::ResourceExhausted), ..
+        } if request_id == "overflow")
+        );
+        assert_eq!(
+            state.inner.store.lock().await.live_sessions["session"]
+                .pending_rpc
+                .len(),
+            256
+        );
+        state
+            .resolve_rpc(
+                "session",
+                "responder",
+                namespaced_rpc_request_id("requester", "request-0"),
+                true,
+                None,
+                None,
+            )
+            .await;
+        let reply = requester_rx.try_recv().unwrap();
+        assert!(
+            matches!(reply.message(), falcondeck_core::RelayServerMessage::RpcResult { request_id, ok: true, .. } if request_id == "request-0")
+        );
+        state
+            .forward_rpc_call(
+                "session",
+                "requester",
+                "retry".into(),
+                "snapshot.current".into(),
+                rpc_params(1),
+            )
+            .await;
+        assert!(
+            responder_rx.try_recv().is_ok(),
+            "completed call did not release its slot"
+        );
+    }
+
+    #[tokio::test]
+    async fn pending_rpc_byte_limit_releases_on_reply_timeout_and_disconnect() {
+        for cleanup in ["reply", "timeout", "disconnect"] {
+            let (state, mut requester_rx, mut responder_rx) = rpc_test_state().await;
+            let budget = std::sync::Arc::new(tokio::sync::Semaphore::new(4096));
+            state
+                .inner
+                .store
+                .lock()
+                .await
+                .live_sessions
+                .get_mut("session")
+                .unwrap()
+                .pending_rpc_budget
+                .0 = budget.clone();
+            state
+                .forward_rpc_call(
+                    "session",
+                    "requester",
+                    "large".into(),
+                    "snapshot.current".into(),
+                    rpc_params(3000),
+                )
+                .await;
+            assert!(responder_rx.try_recv().is_ok());
+            state
+                .forward_rpc_call(
+                    "session",
+                    "requester",
+                    "overflow".into(),
+                    "snapshot.current".into(),
+                    rpc_params(700),
+                )
+                .await;
+            assert!(
+                responder_rx.try_recv().is_err(),
+                "rejected params reached daemon"
+            );
+            let rejected = requester_rx.try_recv().unwrap();
+            assert!(
+                matches!(rejected.message(), falcondeck_core::RelayServerMessage::RpcResult {
+                request_id, failure: Some(falcondeck_core::RelayRpcFailureCode::ResourceExhausted), ..
+            } if request_id == "overflow")
+            );
+            let request_id = namespaced_rpc_request_id("requester", "large");
+            assert_eq!(
+                state.inner.store.lock().await.live_sessions["session"]
+                    .pending_rpc
+                    .len(),
+                1
+            );
+            match cleanup {
+                "reply" => {
+                    state
+                        .resolve_rpc("session", "responder", request_id, true, None, None)
+                        .await;
+                    assert!(requester_rx.try_recv().is_ok());
+                }
+                "timeout" => {
+                    state
+                        .inner
+                        .store
+                        .lock()
+                        .await
+                        .live_sessions
+                        .get_mut("session")
+                        .unwrap()
+                        .pending_rpc
+                        .get_mut(&request_id)
+                        .unwrap()
+                        .expires_at = Utc::now() - Duration::seconds(1);
+                    state.sweep_expired_rpcs("session").await;
+                    let reply = requester_rx.try_recv().unwrap();
+                    assert!(matches!(
+                        reply.message(),
+                        falcondeck_core::RelayServerMessage::RpcResult {
+                            failure: Some(falcondeck_core::RelayRpcFailureCode::TimedOut),
+                            ..
+                        }
+                    ));
+                }
+                "disconnect" => state.unregister_peer("session", "requester").await,
+                _ => unreachable!(),
+            }
+            assert!(
+                state.inner.store.lock().await.live_sessions["session"]
+                    .pending_rpc
+                    .is_empty()
+            );
+            assert_eq!(
+                budget.available_permits(),
+                4096,
+                "budget leaked after {cleanup}"
+            );
+            if cleanup != "disconnect" {
+                state
+                    .forward_rpc_call(
+                        "session",
+                        "requester",
+                        "retry".into(),
+                        "snapshot.current".into(),
+                        rpc_params(3000),
+                    )
+                    .await;
+                assert!(
+                    responder_rx.try_recv().is_ok(),
+                    "call did not recover after {cleanup}"
+                );
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn completed_rpc_burst_releases_relay_state_before_the_timeout() {
+        let (state, mut requester_rx, mut responder_rx) = rpc_test_state().await;
+        let mut timeouts = Vec::new();
+        for index in 0..64 {
+            let request_id = format!("request-{index}");
+            state
+                .forward_rpc_call(
+                    "session",
+                    "requester",
+                    request_id.clone(),
+                    "snapshot.current".into(),
+                    EncryptedEnvelope {
+                        encryption_variant: EncryptionVariant::DataKeyV1,
+                        ciphertext: "params".into(),
+                        snapshot_hint: false,
+                    },
+                )
+                .await;
+            assert!(responder_rx.try_recv().is_ok());
+            timeouts.push(
+                state.inner.store.lock().await.live_sessions["session"].pending_rpc
+                    [&namespaced_rpc_request_id("requester", &request_id)]
+                    ._timeout
+                    .0
+                    .clone(),
+            );
+            state
+                .resolve_rpc(
+                    "session",
+                    "responder",
+                    namespaced_rpc_request_id("requester", &request_id),
+                    true,
+                    None,
+                    None,
+                )
+                .await;
+            assert!(requester_rx.try_recv().is_ok());
+        }
+        let retained = std::sync::Arc::strong_count(&state.inner);
+        assert_eq!(
+            retained, 1,
+            "completed RPC timeout tasks retain relay state"
+        );
+        tokio::task::yield_now().await;
+        assert!(timeouts.iter().all(tokio::task::AbortHandle::is_finished));
+    }
 
     #[test]
     fn compact_peers_skip_snapshot_bytes_without_changing_replay_identity() {

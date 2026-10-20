@@ -162,8 +162,31 @@ struct ActiveTurn {
     /// True after a successful `result` while stdin is still open, so the
     /// next turn can write another user line instead of spawning `--resume`.
     awaiting_next_turn: bool,
+    parked_at: Option<tokio::time::Instant>,
+    /// Kept after `Child::wait` reaps the leader so MCP helpers still stop.
+    process_group_id: Option<u32>,
     /// Per-launch `--mcp-config`; unlinked when this turn is dropped.
     _mcp_config: Option<crate::connectors::LeasedMcpConfig>,
+}
+
+impl ActiveTurn {
+    fn terminate_process_tree(&mut self) {
+        #[cfg(unix)]
+        if let Some(pid) = self
+            .process_group_id
+            .take()
+            .and_then(|pid| libc::pid_t::try_from(pid).ok())
+        {
+            // SAFETY: each Claude launch creates its own process group.
+            unsafe { libc::kill(-pid, libc::SIGKILL) };
+        }
+    }
+}
+
+impl Drop for ActiveTurn {
+    fn drop(&mut self) {
+        self.terminate_process_tree();
+    }
 }
 
 /// How long to wait for the CLI to exit cleanly after SIGTERM before
@@ -183,6 +206,7 @@ const WRITE_TIMEOUT: tokio::time::Duration = tokio::time::Duration::from_secs(10
 /// SessionEnd hooks after SIGTERM. This is a ceiling, not a required delay.
 const SHUTDOWN_GRACE: tokio::time::Duration = tokio::time::Duration::from_millis(500);
 const SHUTDOWN_POLL_INTERVAL: tokio::time::Duration = tokio::time::Duration::from_millis(50);
+const WARM_IDLE_GRACE: tokio::time::Duration = tokio::time::Duration::from_secs(5 * 60);
 
 pub struct ClaudeRuntime {
     workspace_path: String,
@@ -311,6 +335,7 @@ impl ClaudeRuntime {
             let still_alive = turn.child.try_wait().ok().flatten().is_none();
             if still_alive && turn.awaiting_next_turn && turn.construction == construction {
                 turn.awaiting_next_turn = false;
+                turn.parked_at = None;
                 let generation = turn.generation;
                 let input = Arc::clone(&turn.input);
                 let session_id = turn.construction.session_id.clone();
@@ -378,6 +403,8 @@ impl ClaudeRuntime {
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .kill_on_drop(true);
+        #[cfg(unix)]
+        command.process_group(0);
         if let Some(path) = preferred_command_path(&resolved.executable) {
             command.env("PATH", path);
         }
@@ -441,6 +468,7 @@ impl ClaudeRuntime {
         let writer_input = Arc::clone(&input);
         let stdout = child.stdout.take();
         let stderr = child.stderr.take();
+        let process_group_id = child.id();
         let generation = self
             .next_turn_generation
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -452,6 +480,8 @@ impl ClaudeRuntime {
                 input,
                 construction,
                 awaiting_next_turn: false,
+                parked_at: None,
+                process_group_id,
                 _mcp_config: mcp_config,
             },
         );
@@ -549,6 +579,7 @@ impl ClaudeRuntime {
         match active.get_mut(thread_id) {
             Some(turn) if turn.generation == generation => {
                 turn.awaiting_next_turn = true;
+                turn.parked_at = Some(tokio::time::Instant::now());
                 true
             }
             _ => false,
@@ -561,6 +592,71 @@ impl ClaudeRuntime {
             .await
             .get(thread_id)
             .is_some_and(|turn| turn.generation == generation && turn.awaiting_next_turn)
+    }
+
+    /// Helpers can inherit stdout after their CLI exits, preventing pipe EOF.
+    /// The existing stream-monitor wakeup also observes the process leader.
+    pub(crate) async fn stop_exited_turn_helpers(&self, thread_id: &str, generation: u64) {
+        let mut active = self.active_turns.lock().await;
+        if let Some(turn) = active.get_mut(thread_id)
+            && turn.generation == generation
+            && turn.child.try_wait().ok().flatten().is_some()
+        {
+            turn.terminate_process_tree();
+        }
+    }
+
+    /// The monitor calls this only when the CLI reports no background tasks.
+    /// Share spawn's gate so reuse and retirement cannot claim the same CLI.
+    pub(crate) async fn retire_parked_turn_if_idle(
+        &self,
+        thread_id: &str,
+        generation: u64,
+    ) -> bool {
+        let turn_lock = self.turn_lock(thread_id).await;
+        let _turn_guard = turn_lock.lock().await;
+        let turn = {
+            let mut active = self.active_turns.lock().await;
+            let eligible = active.get(thread_id).is_some_and(|turn| {
+                turn.generation == generation
+                    && turn.awaiting_next_turn
+                    && turn
+                        .parked_at
+                        .is_some_and(|at| at.elapsed() >= WARM_IDLE_GRACE)
+            });
+            if !eligible {
+                return false;
+            }
+            active.remove(thread_id)
+        };
+        if let Some(turn) = turn {
+            tracing::info!(%thread_id, "retiring idle warm Claude process");
+            Self::reap_completed_turn(turn).await;
+            true
+        } else {
+            false
+        }
+    }
+
+    async fn reap_completed_turn(mut turn: ActiveTurn) {
+        turn.input.close().await;
+        tokio::spawn(async move {
+            if tokio::time::timeout(EXIT_GRACE, turn.child.wait())
+                .await
+                .is_ok()
+            {
+                return;
+            }
+            tracing::warn!("claude turn did not exit after stdin close; terminating");
+            let _ = request_graceful_stop(&mut turn.child);
+            if tokio::time::timeout(INTERRUPT_GRACE, turn.child.wait())
+                .await
+                .is_err()
+            {
+                let _ = turn.child.start_kill();
+                let _ = turn.child.wait().await;
+            }
+        });
     }
 
     /// Ends a turn that reported its terminal `result` event. Closes stdin so
@@ -584,27 +680,10 @@ impl ClaudeRuntime {
             }
         };
         let interrupted = self.interrupted_turns.lock().await.remove(thread_id);
-        if let Some(mut turn) = turn {
+        if let Some(turn) = turn {
             // Closed before the reaper is spawned so a steer racing this
             // completion fails fast instead of writing into a dying process.
-            turn.input.close().await;
-            tokio::spawn(async move {
-                if tokio::time::timeout(EXIT_GRACE, turn.child.wait())
-                    .await
-                    .is_ok()
-                {
-                    return;
-                }
-                tracing::warn!("claude turn did not exit after stdin close; terminating");
-                let _ = request_graceful_stop(&mut turn.child);
-                if tokio::time::timeout(INTERRUPT_GRACE, turn.child.wait())
-                    .await
-                    .is_err()
-                {
-                    let _ = turn.child.start_kill();
-                    let _ = turn.child.wait().await;
-                }
-            });
+            Self::reap_completed_turn(turn).await;
         }
         ClaudeTurnFinish {
             status: None,
@@ -615,7 +694,7 @@ impl ClaudeRuntime {
     }
 
     pub async fn interrupt_turn(&self, thread_id: &str) -> Result<(), DaemonError> {
-        let signalled = {
+        let (signalled, generation) = {
             let mut active = self.active_turns.lock().await;
             match active.get_mut(thread_id) {
                 Some(turn) => {
@@ -627,7 +706,7 @@ impl ClaudeRuntime {
                         .await
                         .insert(thread_id.to_string());
                     match request_graceful_stop(&mut turn.child) {
-                        Ok(signalled) => signalled,
+                        Ok(signalled) => (signalled, turn.generation),
                         Err(error) => {
                             // Nothing was signalled; do not misreport the
                             // turn's eventual natural exit as an interrupt.
@@ -660,12 +739,13 @@ impl ClaudeRuntime {
                 {
                     let mut active = self.active_turns.lock().await;
                     match active.get_mut(thread_id) {
-                        Some(turn) => {
+                        Some(turn) if turn.generation == generation => {
                             if turn.child.try_wait().ok().flatten().is_some() {
+                                turn.terminate_process_tree();
                                 return Ok(());
                             }
                         }
-                        None => return Ok(()),
+                        _ => return Ok(()),
                     }
                 }
                 if tokio::time::Instant::now() >= deadline {
@@ -676,10 +756,13 @@ impl ClaudeRuntime {
         }
 
         let mut active = self.active_turns.lock().await;
-        if let Some(turn) = active.get_mut(thread_id) {
+        if let Some(turn) = active.get_mut(thread_id)
+            && turn.generation == generation
+        {
             turn.child.start_kill().map_err(|error| {
                 DaemonError::Process(format!("failed to interrupt claude turn: {error}"))
             })?;
+            turn.terminate_process_tree();
         }
         Ok(())
     }
@@ -3149,6 +3232,215 @@ mod tests {
             deny["hookSpecificOutput"]["permissionDecisionReason"],
             "FalconDeck approval unavailable"
         );
+    }
+
+    #[cfg(unix)]
+    async fn parked_fixture(runtime: &ClaudeRuntime, script: &str) -> u32 {
+        let mut child = Command::new("/bin/sh")
+            .args(["-c", script])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .process_group(0)
+            .kill_on_drop(true)
+            .spawn()
+            .unwrap();
+        let pid = child.id().unwrap();
+        let input = Arc::new(TurnInput::new(child.stdin.take()));
+        runtime.active_turns.lock().await.insert(
+            "thread-1".to_string(),
+            ActiveTurn {
+                generation: 1,
+                child,
+                input,
+                construction: TurnConstruction {
+                    session_id: "native-session".to_string(),
+                    cwd: "/tmp/project".to_string(),
+                    model_id: None,
+                    effort: None,
+                    permission_mode: None,
+                    hooks_enabled: false,
+                    control_mcp: false,
+                    extensions_mcp: false,
+                },
+                awaiting_next_turn: true,
+                parked_at: Some(tokio::time::Instant::now() - WARM_IDLE_GRACE),
+                process_group_id: Some(pid),
+                _mcp_config: None,
+            },
+        );
+        pid
+    }
+
+    #[cfg(unix)]
+    async fn fixture_process_exits(pid: u32) {
+        tokio::time::timeout(tokio::time::Duration::from_secs(2), async {
+            loop {
+                // SAFETY: signal zero only observes our fixture process.
+                if unsafe { libc::kill(pid as libc::pid_t, 0) } != 0 {
+                    break;
+                }
+                tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("fixture process must be reaped");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn idle_retirement_keeps_active_warm_and_newer_generations_alive() {
+        let runtime = ClaudeRuntime::for_test("/tmp/project".to_string(), "claude".to_string());
+        let pid = parked_fixture(&runtime, "cat >/dev/null").await;
+        {
+            let mut active = runtime.active_turns.lock().await;
+            active.get_mut("thread-1").unwrap().awaiting_next_turn = false;
+        }
+        assert!(!runtime.retire_parked_turn_if_idle("thread-1", 1).await);
+        assert!(runtime.park_turn("thread-1", 1).await);
+        assert!(!runtime.retire_parked_turn_if_idle("thread-1", 1).await);
+        runtime
+            .active_turns
+            .lock()
+            .await
+            .get_mut("thread-1")
+            .unwrap()
+            .parked_at = Some(tokio::time::Instant::now() - WARM_IDLE_GRACE);
+        assert!(!runtime.retire_parked_turn_if_idle("thread-1", 0).await);
+        assert!(runtime.retire_parked_turn_if_idle("thread-1", 1).await);
+        assert!(runtime.active_turns.lock().await.is_empty());
+        fixture_process_exits(pid).await;
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn warm_reuse_claims_the_parked_process_before_idle_retirement() {
+        let runtime = ClaudeRuntime::for_test("/tmp/project".to_string(), "claude".to_string());
+        let pid = parked_fixture(&runtime, "cat >/dev/null").await;
+        let settings = tempfile::tempdir().unwrap();
+        let spawn = runtime
+            .spawn_turn(
+                "thread-1",
+                Some("native-session"),
+                None,
+                "continue",
+                &[],
+                None,
+                None,
+                None,
+                None,
+                settings.path(),
+                "/tmp/project",
+                &Default::default(),
+                None,
+            )
+            .await
+            .unwrap();
+        assert_eq!(spawn.generation, 1);
+        assert!(spawn.stdout.is_none(), "a warm turn must reuse its reader");
+        assert!(!runtime.retire_parked_turn_if_idle("thread-1", 1).await);
+        runtime.shutdown().await.unwrap();
+        fixture_process_exits(pid).await;
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn idle_retirement_stops_descendants_after_the_cli_exits() {
+        let runtime = ClaudeRuntime::for_test("/tmp/project".to_string(), "claude".to_string());
+        let directory = tempfile::tempdir().unwrap();
+        let pid_file = directory.path().join("helper.pid");
+        let script = format!(
+            "sleep 600 & echo $! > '{}'; cat >/dev/null",
+            pid_file.display()
+        );
+        let pid = parked_fixture(&runtime, &script).await;
+        let helper = tokio::time::timeout(tokio::time::Duration::from_secs(2), async {
+            loop {
+                if let Ok(value) = fs::read_to_string(&pid_file)
+                    && let Ok(pid) = value.trim().parse::<u32>()
+                {
+                    break pid;
+                }
+                tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+        assert!(runtime.retire_parked_turn_if_idle("thread-1", 1).await);
+        fixture_process_exits(pid).await;
+        fixture_process_exits(helper).await;
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn exited_cli_helpers_cannot_keep_the_monitor_pipe_open() {
+        use tokio::io::AsyncReadExt;
+
+        let runtime = ClaudeRuntime::for_test("/tmp/project".to_string(), "claude".to_string());
+        let pid = parked_fixture(&runtime, "sleep 600 & exit 0").await;
+        let mut stdout = runtime
+            .active_turns
+            .lock()
+            .await
+            .get_mut("thread-1")
+            .unwrap()
+            .child
+            .stdout
+            .take()
+            .unwrap();
+        tokio::time::timeout(tokio::time::Duration::from_secs(2), async {
+            loop {
+                if runtime
+                    .active_turns
+                    .lock()
+                    .await
+                    .get_mut("thread-1")
+                    .unwrap()
+                    .child
+                    .try_wait()
+                    .unwrap()
+                    .is_some()
+                {
+                    break;
+                }
+                tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+        let mut buffer = [0u8; 1];
+        assert!(
+            tokio::time::timeout(
+                tokio::time::Duration::from_millis(50),
+                stdout.read(&mut buffer)
+            )
+            .await
+            .is_err(),
+            "the exited CLI's helper must reproduce an inherited open pipe"
+        );
+        runtime.stop_exited_turn_helpers("thread-1", 0).await;
+        assert!(
+            tokio::time::timeout(
+                tokio::time::Duration::from_millis(50),
+                stdout.read(&mut buffer)
+            )
+            .await
+            .is_err(),
+            "a stale monitor must not stop the current generation's helper"
+        );
+        runtime.stop_exited_turn_helpers("thread-1", 1).await;
+        assert_eq!(
+            tokio::time::timeout(
+                tokio::time::Duration::from_secs(2),
+                stdout.read(&mut buffer)
+            )
+            .await
+            .unwrap()
+            .unwrap(),
+            0
+        );
+        runtime.finish_turn("thread-1", 1).await.unwrap();
+        fixture_process_exits(pid).await;
     }
 
     #[tokio::test]

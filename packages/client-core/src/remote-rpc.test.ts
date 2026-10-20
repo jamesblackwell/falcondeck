@@ -50,6 +50,12 @@ describe('relayRpcFailureMessage', () => {
     )
   })
 
+  it('identifies overload as a rejection before execution', () => {
+    expect(relayRpcFailureMessage('resource_exhausted', 'turn.start')).toBe(
+      'The relay is busy; this request was not executed. Try again in a moment.',
+    )
+  })
+
   it('does not collapse missing relay detail into a generic action error', () => {
     expect(relayRpcFailureMessage(undefined, 'thread.detail')).toBe(
       'The request failed without details.',

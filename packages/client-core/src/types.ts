@@ -1935,7 +1935,8 @@ export type RelayRpcFailureCode =
   | "method_unavailable"
   | "request_conflict"
   | "responder_disconnected"
-  | "timed_out";
+  | "timed_out"
+  | "resource_exhausted";
 
 export type SyncCursor = {
   session_id: string;

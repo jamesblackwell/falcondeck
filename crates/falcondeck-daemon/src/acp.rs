@@ -15,7 +15,7 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::Path;
 use std::process::Stdio;
 use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
-use std::sync::{Arc, OnceLock};
+use std::sync::{Arc, Mutex as StdMutex, OnceLock};
 
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -1381,7 +1381,7 @@ pub struct AcpRuntime {
     executable: String,
     stdin: Mutex<ChildStdin>,
     next_id: AtomicI64,
-    pending: Mutex<HashMap<i64, oneshot::Sender<Result<Value, DaemonError>>>>,
+    pending: PendingResponses,
     /// thread id -> ACP session id
     sessions: Mutex<HashMap<String, String>>,
     /// ACP session id -> thread id
@@ -1487,6 +1487,45 @@ pub struct AcpRuntime {
     /// the cached runtime and writing to its stdin.
     retirement: RwLock<()>,
     events: mpsc::UnboundedSender<AcpEvent>,
+}
+
+/// Reader tasks own the runtime, so abandoning setup must explicitly stop it.
+pub(crate) struct PendingAcpRuntime(Option<Arc<AcpRuntime>>);
+
+type PendingResponses = StdMutex<HashMap<i64, oneshot::Sender<Result<Value, DaemonError>>>>;
+
+struct PendingAcpRequest<'a> {
+    id: i64,
+    pending: &'a PendingResponses,
+}
+
+impl Drop for PendingAcpRequest<'_> {
+    fn drop(&mut self) {
+        self.pending
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .remove(&self.id);
+    }
+}
+
+impl PendingAcpRuntime {
+    pub(crate) fn new(runtime: Arc<AcpRuntime>) -> Self {
+        Self(Some(runtime))
+    }
+
+    pub(crate) fn disarm(&mut self) {
+        self.0.take();
+    }
+}
+
+impl Drop for PendingAcpRuntime {
+    fn drop(&mut self) {
+        if let Some(runtime) = self.0.take() {
+            if !runtime.closed.swap(true, Ordering::AcqRel) {
+                runtime.terminate_process_tree();
+            }
+        }
+    }
 }
 
 /// Steer state for one session's active turn. Mirrors the semantics bb's ACP
@@ -2106,6 +2145,8 @@ impl AcpRuntime {
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .kill_on_drop(true);
+        #[cfg(unix)]
+        command.process_group(0);
 
         let mut child = command.spawn().map_err(|error| {
             DaemonError::Process(format!(
@@ -2132,7 +2173,7 @@ impl AcpRuntime {
             child: Mutex::new(child),
             stdin: Mutex::new(stdin),
             next_id: AtomicI64::new(1),
-            pending: Mutex::new(HashMap::new()),
+            pending: StdMutex::new(HashMap::new()),
             sessions: Mutex::new(HashMap::new()),
             threads_by_session: Mutex::new(HashMap::new()),
             session_gates: Mutex::new(HashMap::new()),
@@ -2174,6 +2215,7 @@ impl AcpRuntime {
             retirement: RwLock::new(()),
             events,
         });
+        let mut setup = PendingAcpRuntime::new(Arc::clone(&runtime));
 
         tokio::spawn(Self::read_loop(Arc::clone(&runtime), stdout));
         if let Some(stderr) = stderr {
@@ -2200,17 +2242,14 @@ impl AcpRuntime {
             .await
         {
             Ok(result) => result,
-            Err(error @ DaemonError::AcpRequestTimeout { .. }) => {
-                runtime.closed.store(true, Ordering::Release);
-                let _ = runtime.child.lock().await.kill().await;
+            Err(error) => {
+                runtime.shutdown().await;
                 return Err(error);
             }
-            Err(error) => return Err(error),
         };
         let negotiated_version = init.get("protocolVersion").and_then(Value::as_u64);
         if negotiated_version != Some(ACP_PROTOCOL_VERSION) {
-            runtime.closed.store(true, Ordering::Release);
-            let _ = runtime.child.lock().await.kill().await;
+            runtime.shutdown().await;
             return Err(DaemonError::Rpc(format!(
                 "ACP provider '{}' negotiated unsupported protocol version {} (FalconDeck supports {})",
                 runtime.config.id,
@@ -2261,6 +2300,7 @@ impl AcpRuntime {
                 .supports_interject
                 .store(supported, Ordering::Release);
         }
+        setup.disarm();
         Ok(runtime)
     }
 
@@ -2300,7 +2340,11 @@ impl AcpRuntime {
     /// A runtime with outstanding requests is working even when no thread
     /// reads as running (background metadata discovery, a pending probe).
     pub async fn has_requests_in_flight(&self) -> bool {
-        !self.pending.lock().await.is_empty()
+        !self
+            .pending
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .is_empty()
     }
 
     /// Whether the agent is holding a user-facing question: a permission
@@ -2578,7 +2622,13 @@ impl AcpRuntime {
         &self,
         method: &str,
         params: Value,
-    ) -> Result<(i64, oneshot::Receiver<Result<Value, DaemonError>>), DaemonError> {
+    ) -> Result<
+        (
+            PendingAcpRequest<'_>,
+            oneshot::Receiver<Result<Value, DaemonError>>,
+        ),
+        DaemonError,
+    > {
         if self.is_closed() {
             return Err(DaemonError::Process(format!(
                 "ACP provider '{}' is not running",
@@ -2588,20 +2638,33 @@ impl AcpRuntime {
         self.activity.touch();
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
         let (sender, receiver) = oneshot::channel();
-        self.pending.lock().await.insert(id, sender);
-        if let Err(error) = self
-            .write_message(&json!({
-                "jsonrpc": "2.0",
-                "id": id,
-                "method": method,
-                "params": params
-            }))
-            .await
         {
-            self.pending.lock().await.remove(&id);
-            return Err(error);
+            let mut pending = self
+                .pending
+                .lock()
+                .unwrap_or_else(|error| error.into_inner());
+            // Disconnect sets closed before draining this same map. Recheck
+            // under its lock so a racing request cannot be inserted afterward.
+            if self.is_closed() {
+                return Err(DaemonError::Process(format!(
+                    "ACP provider '{}' is not running",
+                    self.config.id
+                )));
+            }
+            pending.insert(id, sender);
         }
-        Ok((id, receiver))
+        let pending = PendingAcpRequest {
+            id,
+            pending: &self.pending,
+        };
+        self.write_message(&json!({
+            "jsonrpc": "2.0",
+            "id": id,
+            "method": method,
+            "params": params
+        }))
+        .await?;
+        Ok((pending, receiver))
     }
 
     async fn request_inner(
@@ -2615,12 +2678,11 @@ impl AcpRuntime {
         // acquire it again beneath this point: the lock is write-preferring,
         // so a nested read behind a waiting retirement would deadlock.
         let _lease = self.retirement.read().await;
-        let (id, receiver) = self.begin_request(method, params).await?;
+        let (_pending, receiver) = self.begin_request(method, params).await?;
         let response = if let Some(response_timeout) = response_timeout {
             match timeout(response_timeout, receiver).await {
                 Ok(response) => response,
                 Err(_) => {
-                    self.pending.lock().await.remove(&id);
                     return Err(DaemonError::AcpRequestTimeout {
                         provider: self.config.id.clone(),
                         method: method.to_string(),
@@ -3375,7 +3437,7 @@ impl AcpRuntime {
                 }
             }
             let result = match begun {
-                Ok((_, receiver)) => receiver
+                Ok((_pending, receiver)) => receiver
                     .await
                     .map_err(|_| {
                         DaemonError::Process(format!(
@@ -3958,10 +4020,27 @@ impl AcpRuntime {
 
     /// Terminates the agent process.
     pub async fn shutdown(&self) {
-        self.closed.store(true, Ordering::Release);
+        if !self.closed.swap(true, Ordering::AcqRel) {
+            self.terminate_process_tree();
+        }
         let mut child = self.child.lock().await;
         let _ = child.start_kill();
         let _ = child.wait().await;
+    }
+
+    fn terminate_process_tree(&self) {
+        #[cfg(unix)]
+        if let Some(pid) = self
+            .child_pid
+            .and_then(|pid| libc::pid_t::try_from(pid).ok())
+        {
+            // SAFETY: connect creates a private process group owned by this PID.
+            unsafe { libc::kill(-pid, libc::SIGKILL) };
+        }
+        #[cfg(not(unix))]
+        if let Ok(mut child) = self.child.try_lock() {
+            let _ = child.start_kill();
+        }
     }
 
     async fn read_loop(runtime: Arc<Self>, stdout: tokio::process::ChildStdout) {
@@ -3983,13 +4062,21 @@ impl AcpRuntime {
             runtime.handle_message(message).await;
         }
         let expected_shutdown = runtime.closed.swap(true, Ordering::AcqRel);
+        // A wrapper may close stdout while its MCP helpers keep running.
+        if !expected_shutdown {
+            runtime.terminate_process_tree();
+        }
+        let _ = runtime.child.lock().await.wait().await;
         let stderr_tail = runtime.stderr_summary().await;
         let detail = if stderr_tail.is_empty() {
             String::new()
         } else {
             format!(": {stderr_tail}")
         };
-        let mut pending = runtime.pending.lock().await;
+        let mut pending = runtime
+            .pending
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
         // Sessions outlive turns. An exit with no outstanding RPC did not
         // interrupt a response, even if a completed thread still uses it.
         let interrupted_request = !pending.is_empty();
@@ -4108,7 +4195,12 @@ impl AcpRuntime {
             }) else {
                 return;
             };
-            let Some(sender) = self.pending.lock().await.remove(&id) else {
+            let Some(sender) = self
+                .pending
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .remove(&id)
+            else {
                 return;
             };
             if let Some(error) = message.get("error") {
@@ -4881,6 +4973,54 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn initialize_error_reaps_the_rejected_agent_process() {
+        let directory = tempfile::tempdir().unwrap();
+        let pid_file = directory.path().join("agent.pid");
+        let script = format!(
+            r#"const helper = require('node:child_process').spawn(process.execPath,
+  ['--eval', 'setInterval(() => {{}}, 1000)'], {{ stdio: 'inherit' }});
+require('node:fs').writeFileSync({}, JSON.stringify([process.pid, helper.pid]));
+require('node:readline').createInterface({{ input: process.stdin }}).on('line', line => {{
+  const request = JSON.parse(line);
+  process.stdout.write(JSON.stringify({{ jsonrpc: '2.0', id: request.id,
+    error: {{ code: -32000, message: 'fixture initialize failure' }} }}) + '\n');
+}});"#,
+            serde_json::to_string(&pid_file).unwrap()
+        );
+        let config = AcpProviderConfig {
+            id: "initialize-error-fixture".to_string(),
+            label: "Initialize error fixture".to_string(),
+            command: vec!["node".to_string(), "--eval".to_string(), script],
+            env: HashMap::new(),
+            transport: ProviderTransport::default(),
+        };
+        let (events, _receiver) = mpsc::unbounded_channel();
+        let result = AcpRuntime::connect(config, env!("CARGO_MANIFEST_DIR"), events).await;
+        assert!(result.is_err(), "the fixture must reject initialize");
+        let pids: Vec<libc::pid_t> =
+            serde_json::from_str(&std::fs::read_to_string(pid_file).unwrap()).unwrap();
+        let exited = timeout(Duration::from_secs(2), async {
+            loop {
+                // SAFETY: signal zero observes only the fixture PID.
+                if pids.iter().all(|pid| unsafe { libc::kill(*pid, 0) } != 0) {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await;
+        if exited.is_err() {
+            // SAFETY: clean up this test's still-live fixture before failing.
+            unsafe { libc::kill(-pids[0], libc::SIGKILL) };
+        }
+        assert!(
+            exited.is_ok(),
+            "a rejected ACP setup leaked its child process"
+        );
+    }
+
     async fn timeout_fixture_runtime() -> Arc<AcpRuntime> {
         let fixture =
             Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/acp_conformance_agent.mjs");
@@ -4899,6 +5039,68 @@ mod tests {
         AcpRuntime::connect(config, env!("CARGO_MANIFEST_DIR"), events)
             .await
             .expect("fixture should initialize")
+    }
+
+    #[tokio::test]
+    async fn cancelled_request_does_not_pin_idle_runtime() {
+        for block_write in [false, true] {
+            let runtime = timeout_fixture_runtime().await;
+            let write_guard = if block_write {
+                Some(runtime.stdin.lock().await)
+            } else {
+                None
+            };
+            let request = tokio::spawn({
+                let runtime = Arc::clone(&runtime);
+                async move { runtime.request("session/new", json!({})).await }
+            });
+            timeout(Duration::from_secs(2), async {
+                while !runtime.has_requests_in_flight().await {
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .unwrap();
+            request.abort();
+            let _ = request.await;
+            let retained_request = runtime.has_requests_in_flight().await;
+            drop(write_guard);
+            runtime.shutdown().await;
+            assert!(
+                !retained_request,
+                "a cancelled request permanently pins idle retirement (blocked write: {block_write})"
+            );
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn disconnect_prevents_a_request_racing_pending_registration() {
+        let runtime = timeout_fixture_runtime().await;
+        let pending = runtime.pending.lock().unwrap();
+        let next_id = runtime.next_id.load(Ordering::Relaxed);
+        let request = tokio::spawn({
+            let runtime = Arc::clone(&runtime);
+            async move { runtime.request("session/new", json!({})).await }
+        });
+        let deadline = std::time::Instant::now() + Duration::from_secs(2);
+        // The increment follows the first closed check, before map insertion.
+        while runtime.next_id.load(Ordering::Relaxed) == next_id {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "request did not reach registration"
+            );
+            std::thread::yield_now();
+        }
+        runtime.closed.store(true, Ordering::Release);
+        drop(pending);
+        let result = timeout(Duration::from_secs(2), request).await;
+        let retained_request = runtime.has_requests_in_flight().await;
+        runtime.shutdown().await;
+        assert!(matches!(result, Ok(Ok(Err(DaemonError::Process(_))))));
+        assert!(
+            !retained_request,
+            "disconnect must seal pending registration"
+        );
     }
 
     async fn plan_approval_fixture_runtime() -> (Arc<AcpRuntime>, mpsc::UnboundedReceiver<AcpEvent>)
@@ -5032,7 +5234,7 @@ mod tests {
         let runtime = AcpRuntime::connect(config, env!("CARGO_MANIFEST_DIR"), events_tx)
             .await
             .unwrap();
-        let (_, pending) = runtime
+        let (_request, pending) = runtime
             .begin_request("session/new", json!({}))
             .await
             .unwrap();
@@ -6225,7 +6427,11 @@ mod tests {
                 Duration::from_millis(50),
             )
             .await;
-        let pending_count = runtime.pending.lock().await.len();
+        let pending_count = runtime
+            .pending
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .len();
         runtime.shutdown().await;
 
         assert_eq!(pending_count, 0);

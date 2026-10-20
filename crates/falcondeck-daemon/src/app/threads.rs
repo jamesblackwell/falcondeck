@@ -1590,6 +1590,11 @@ impl AppState {
                 }
             });
             'stdout: loop {
+                if let Ok(runtime) = self.claude_runtime_for(&workspace_id).await {
+                    runtime
+                        .stop_exited_turn_helpers(&thread_id, turn_generation)
+                        .await;
+                }
                 if parked_between_turns
                     && let Ok(runtime) = self.claude_runtime_for(&workspace_id).await
                 {
@@ -1606,6 +1611,14 @@ impl AppState {
                         published_background_count = visible;
                         self.publish_background_task_count(&workspace_id, &thread_id, visible)
                             .await;
+                    }
+                    if outstanding_tasks.is_empty()
+                        && let Ok(runtime) = self.claude_runtime_for(&workspace_id).await
+                        && runtime
+                            .retire_parked_turn_if_idle(&thread_id, turn_generation)
+                            .await
+                    {
+                        break 'stdout;
                     }
                 }
                 let line = tokio::select! {
@@ -3569,6 +3582,10 @@ struct OutstandingTasks {
 }
 
 impl OutstandingTasks {
+    fn is_empty(&self) -> bool {
+        self.started_at.is_empty()
+    }
+
     fn insert(&mut self, task_id: String) {
         self.started_at
             .entry(task_id)
@@ -4498,6 +4515,7 @@ mod tests {
 
         assert!(tasks.remove("tests"));
         assert_eq!(tasks.visible_count(), 0);
+        assert!(!tasks.is_empty(), "aged background work still owns its CLI");
         assert!(!tasks.remove("tests"));
         tasks.replace(HashSet::new());
         assert!(tasks.started_at.is_empty());

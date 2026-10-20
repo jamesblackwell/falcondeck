@@ -5681,6 +5681,9 @@ pub enum RelayRpcFailureCode {
     ResponderDisconnected,
     /// The relay's pending-request deadline elapsed.
     TimedOut,
+    /// The relay rejected the request before dispatch because its pending
+    /// request count or retained-payload budget is exhausted.
+    ResourceExhausted,
 }
 
 /// Messages sent by daemon and clients to the relay websocket.

@@ -25,6 +25,8 @@ export function relayRpcFailureMessage(
       return 'Desktop disconnected from the relay.'
     case 'timed_out':
       return 'Timed out waiting for a response.'
+    case 'resource_exhausted':
+      return 'The relay is busy; this request was not executed. Try again in a moment.'
     default:
       return 'The request failed without details.'
   }

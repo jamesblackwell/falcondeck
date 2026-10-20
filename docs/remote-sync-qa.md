@@ -53,6 +53,13 @@ In a staging relay, exercise each client with:
    The relay must return structured `timed_out` at its 30-second deadline,
    before the client's 35-second delivery timeout, rather than leaving the UI
    with only a generic local timeout.
+10. a registered daemon that holds RPC replies while a client fills the
+    session's pending-request budget (256 calls or 41 MiB of retained encrypted
+    params and routing overhead). Additional calls must receive a correlated
+    `resource_exhausted` failure without reaching the daemon or disconnecting
+    sibling requests. Resolving, expiring, or disconnecting a requester must
+    release its budget so subsequent calls can proceed. Older clients show
+    their generic routing-failure message for this additive failure code.
 
 The expected result is either exactly-once visible state or harmless
 idempotent reapplication; no cursor may advance beyond an unapplied update.

@@ -802,6 +802,9 @@ impl AppState {
         provider: &AgentProvider,
         thread_id: Option<&str>,
     ) -> Result<Arc<AcpRuntime>, DaemonError> {
+        if self.is_shutting_down() {
+            return Err(DaemonError::Process("daemon is shutting down".to_string()));
+        }
         let key = AcpRuntimeKey::new(provider, thread_id);
         let cached = {
             let workspaces = self.inner.workspaces.lock().await;
@@ -945,6 +948,9 @@ impl AppState {
 
         let (events_tx, events_rx) = mpsc::unbounded_channel();
         let runtime = AcpRuntime::connect(config, &workspace_path, events_tx).await?;
+        // Discovery can be cancelled by its caller's deadline before the
+        // workspace and event pump take ownership of this process.
+        let mut pending = crate::acp::PendingAcpRuntime::new(Arc::clone(&runtime));
         // Grok (and similar) already advertise a catalog on initialize.
         // Publish it before the discovery session so a new-thread composer
         // can pick a model while plugins/MCP are still loading.
@@ -978,29 +984,32 @@ impl AppState {
                 None => false,
             }
         };
-        // Only a cached runtime needs a retirement timer; one that never
-        // reached the workspace is already nobody's to stop.
-        if cached {
-            if let (Some(state_dir), Some(child_pid)) = (self.state_dir(), runtime.child_pid()) {
-                crate::agent_orphans::register(
-                    &state_dir,
-                    crate::agent_orphans::ACP_REGISTRY_FILE,
-                    child_pid,
-                    runtime.command_markers(),
-                );
-            }
-            self.schedule_acp_idle_retirement(workspace_id, &key, Arc::clone(&runtime));
+        if !cached {
+            return Err(DaemonError::NotFound("workspace not found".to_string()));
         }
-        self.publish_acp_agent_metadata(workspace_id, provider, &runtime)
-            .await;
-
+        if let (Some(state_dir), Some(child_pid)) = (self.state_dir(), runtime.child_pid()) {
+            crate::agent_orphans::register(
+                &state_dir,
+                crate::agent_orphans::ACP_REGISTRY_FILE,
+                child_pid,
+                runtime.command_markers(),
+            );
+        }
         let app = self.clone();
         let workspace = workspace_id.to_string();
         let pump_runtime = Arc::clone(&runtime);
-        self.spawn_background_task(async move {
+        if !self.spawn_background_task(async move {
             app.pump_acp_events(workspace, pump_runtime, events_rx)
                 .await;
-        });
+        }) {
+            return Err(DaemonError::Process("daemon is shutting down".to_string()));
+        }
+        // There are no awaits between installation and transferring ownership
+        // to the registered pump. Later caller cancellation leaves it managed.
+        pending.disarm();
+        self.schedule_acp_idle_retirement(workspace_id, &key, Arc::clone(&runtime));
+        self.publish_acp_agent_metadata(workspace_id, provider, &runtime)
+            .await;
 
         Ok(runtime)
     }
@@ -3298,6 +3307,10 @@ mod hermes_tests;
 
 #[cfg(test)]
 mod hermes_history_tests;
+
+#[cfg(all(test, unix))]
+#[path = "acp_threads/runtime_lifecycle_tests.rs"]
+mod runtime_lifecycle_tests;
 
 #[cfg(test)]
 mod tests {

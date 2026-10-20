@@ -482,13 +482,15 @@ fn is_non_fatal_codex_cache_diagnostic(line: &str) -> bool {
             || line.contains("failed to renew cache TTL"))
 }
 
+type PendingCodexResponses = HashMap<u64, oneshot::Sender<Result<Value, DaemonError>>>;
+
 pub struct CodexSession {
     workspace_id: String,
     workspace_path: String,
     stdin: Mutex<ChildStdin>,
     child: Mutex<Child>,
     next_id: AtomicU64,
-    pending: Mutex<HashMap<u64, oneshot::Sender<Result<Value, DaemonError>>>>,
+    pending: StdMutex<PendingCodexResponses>,
     closed: AtomicBool,
     /// Set before an intentional shutdown so the stdout reader does not treat
     /// the exit as a crash and schedule a reconnect.
@@ -516,6 +518,17 @@ pub struct CodexSession {
     process_group_id: Option<u32>,
     connector_proxy: Option<crate::connector_proxy::ConnectorProxy>,
     state: AppState,
+}
+
+struct PendingCodexRequest<'a> {
+    session: &'a CodexSession,
+    id: u64,
+}
+
+impl Drop for PendingCodexRequest<'_> {
+    fn drop(&mut self) {
+        self.session.pending_responses().remove(&self.id);
+    }
 }
 
 /// Keeps a Codex app-server live for the duration of one daemon operation.
@@ -740,7 +753,7 @@ impl CodexSession {
             stdin: Mutex::new(stdin),
             child: Mutex::new(child),
             next_id: AtomicU64::new(1),
-            pending: Mutex::new(HashMap::new()),
+            pending: StdMutex::new(HashMap::new()),
             closed: AtomicBool::new(false),
             expected_exit: AtomicBool::new(false),
             reconnect_on_exit: AtomicBool::new(false),
@@ -898,7 +911,7 @@ impl CodexSession {
         self.expected_exit.store(true, Ordering::Release);
         let was_closed = self.closed.swap(true, Ordering::AcqRel);
         {
-            let pending = std::mem::take(&mut *self.pending.lock().await);
+            let pending = std::mem::take(&mut *self.pending_responses());
             for (_, tx) in pending {
                 let _ = tx.send(Err(DaemonError::Rpc(
                     "codex app-server is shutting down".to_string(),
@@ -993,6 +1006,12 @@ impl CodexSession {
         DaemonError::Rpc("codex app-server is no longer running for this workspace".to_string())
     }
 
+    fn pending_responses(&self) -> std::sync::MutexGuard<'_, PendingCodexResponses> {
+        self.pending
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
     pub async fn send_request(&self, method: &str, params: Value) -> Result<Value, DaemonError> {
         self.send_request_with_timeout(method, params, None).await
     }
@@ -1008,9 +1027,8 @@ impl CodexSession {
             .await
     }
 
-    /// The single place a request awaits its response: the timeout branch must
-    /// remove the pending entry itself, otherwise an elapsed control request
-    /// would leak its response slot in `pending` forever.
+    /// Own the response slot across every await so cancellation, as well as
+    /// ordinary errors and timeouts, releases it immediately.
     async fn send_request_with_timeout(
         &self,
         method: &str,
@@ -1031,7 +1049,16 @@ impl CodexSession {
         let line = serde_json::to_vec(&payload)?;
 
         let (tx, rx) = oneshot::channel();
-        self.pending.lock().await.insert(id, tx);
+        let _pending_request = {
+            let mut pending = self.pending_responses();
+            // Pair insertion with the disconnect drain: a caller that passed
+            // the earlier check must not register after that drain finishes.
+            if self.is_closed() {
+                return Err(self.disconnected_error());
+            }
+            pending.insert(id, tx);
+            PendingCodexRequest { session: self, id }
+        };
 
         let write_result = {
             let mut stdin = self.stdin.lock().await;
@@ -1043,7 +1070,6 @@ impl CodexSession {
             .await
         };
         if let Err(error) = write_result {
-            self.pending.lock().await.remove(&id);
             return Err(DaemonError::Rpc(format!(
                 "failed to send codex request {method}: {error}"
             )));
@@ -1053,7 +1079,6 @@ impl CodexSession {
             Some(duration) => match timeout(duration, rx).await {
                 Ok(received) => received,
                 Err(_) => {
-                    self.pending.lock().await.remove(&id);
                     return Err(DaemonError::Rpc(format!(
                         "codex app-server did not respond to {method} within {}s",
                         duration.as_secs()
@@ -1064,12 +1089,9 @@ impl CodexSession {
         };
         let result = match received {
             Ok(result) => result,
-            Err(_) => {
-                self.pending.lock().await.remove(&id);
-                Err(DaemonError::Rpc(format!(
-                    "codex app-server disconnected before responding to {method}"
-                )))
-            }
+            Err(_) => Err(DaemonError::Rpc(format!(
+                "codex app-server disconnected before responding to {method}"
+            ))),
         };
         self.touch();
         result
@@ -1308,7 +1330,7 @@ impl CodexSession {
                     if let Some(id) = message.get("id").and_then(Value::as_u64)
                         && message.get("method").is_none()
                     {
-                        if let Some(tx) = self.pending.lock().await.remove(&id) {
+                        if let Some(tx) = self.pending_responses().remove(&id) {
                             if let Some(error) = message.get("error") {
                                 let _ = tx.send(Err(DaemonError::Rpc(error.to_string())));
                             } else {
@@ -1368,11 +1390,12 @@ impl CodexSession {
         // would wait on the response channel forever.
         // Pairs with activation's SeqCst store/load so an exit concurrent with
         // attachment always schedules on one side of the race.
-        self.closed.store(true, Ordering::SeqCst);
-        if let Some(proxy) = &self.connector_proxy {
-            proxy.stop();
+        if !self.closed.swap(true, Ordering::SeqCst) {
+            // EOF or a read error does not prove the wrapper and its MCP
+            // children exited. Stop the owned group before waiting on Child.
+            self.terminate_process_tree();
         }
-        let pending = std::mem::take(&mut *self.pending.lock().await);
+        let pending = std::mem::take(&mut *self.pending_responses());
         for (_, tx) in pending {
             let _ = tx.send(Err(DaemonError::Rpc(
                 "codex app-server disconnected before responding".to_string(),
@@ -2495,7 +2518,7 @@ mod tests {
             stdin: Mutex::new(stdin),
             child: Mutex::new(child),
             next_id: AtomicU64::new(1),
-            pending: Mutex::new(HashMap::new()),
+            pending: StdMutex::new(HashMap::new()),
             closed: AtomicBool::new(false),
             expected_exit: AtomicBool::new(false),
             reconnect_on_exit: AtomicBool::new(false),
@@ -2530,9 +2553,7 @@ mod tests {
                     method => panic!("unexpected metadata request {method}"),
                 };
                 responder
-                    .pending
-                    .lock()
-                    .await
+                    .pending_responses()
                     .remove(&request["id"].as_u64().unwrap())
                     .unwrap()
                     .send(result)
@@ -2566,9 +2587,7 @@ mod tests {
                 json!(["cli", "vscode", "appServer", "unknown"])
             );
             responder
-                .pending
-                .lock()
-                .await
+                .pending_responses()
                 .remove(&request["id"].as_u64().unwrap())
                 .unwrap()
                 .send(Ok(json!({"data": []})))
@@ -2611,9 +2630,7 @@ mod tests {
                 }
                 let id = request["id"].as_u64().unwrap();
                 responder
-                    .pending
-                    .lock()
-                    .await
+                    .pending_responses()
                     .remove(&id)
                     .unwrap()
                     .send(Ok(response))
@@ -2669,6 +2686,57 @@ mod tests {
         assert!(session.is_closed());
         assert!(session.expected_exit.load(Ordering::Acquire));
         assert!(!session.reconnect_scheduled.load(Ordering::Acquire));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn stdout_disconnect_terminates_the_remaining_process_group() {
+        let (_directory, session, stdout) = piped_test_session("exec 1>&-; sleep 30 & wait");
+        let reader_session = Arc::clone(&session);
+        let mut reader = tokio::spawn(async move { reader_session.read_stdout(stdout).await });
+
+        let finished = timeout(Duration::from_secs(1), &mut reader).await;
+        // Always clean up the test-owned group, including when reproducing
+        // the old reader waiting forever for a process that closed stdout.
+        if finished.is_err() {
+            kill_process_group(session.process_group_id.unwrap()).unwrap();
+            timeout(Duration::from_secs(2), reader)
+                .await
+                .unwrap()
+                .unwrap();
+        }
+        finished
+            .expect("disconnect must reap the remaining process group")
+            .unwrap();
+        assert!(session.is_closed());
+        assert!(session.child.lock().await.try_wait().unwrap().is_some());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn cancelling_a_request_releases_its_pending_response_slot() {
+        let (_directory, session, stdout) = piped_test_session("cat");
+        let requester = Arc::clone(&session);
+        let request = tokio::spawn(async move {
+            requester
+                .send_request("thread/read", json!({"threadId": "t"}))
+                .await
+        });
+        let mut lines = BufReader::new(stdout).lines();
+        timeout(Duration::from_secs(2), lines.next_line())
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        request.abort();
+        let _ = request.await;
+        let pending_count = session.pending_responses().len();
+        session.shutdown().await.unwrap();
+
+        assert_eq!(
+            pending_count, 0,
+            "cancelled requests must release response slots"
+        );
     }
 
     #[cfg(unix)]

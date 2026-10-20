@@ -7,7 +7,9 @@
 //! app-server; ACP agents (Grok, Cursor, Gemini) keep one process per
 //! workspace shared by every thread (Hermes uses thread-owned processes);
 //! native OpenCode keeps an
-//! `opencode serve`. Claude and agy spawn a CLI per turn and need no timer.
+//! `opencode serve`. Claude parks its CLI between turns; the existing stream
+//! monitor retires it after five idle minutes without unfinished background
+//! tasks. Antigravity still spawns a CLI per turn and needs no idle timer.
 //!
 //! Grace periods differ because restart costs differ, not because the
 //! providers differ in kind. A runtime that has only answered the composer's
