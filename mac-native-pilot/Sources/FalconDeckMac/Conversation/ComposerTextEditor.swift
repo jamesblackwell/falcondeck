@@ -6,6 +6,7 @@ import UniformTypeIdentifiers
 /// undo and selection while accepting file/image paste and drop operations.
 @MainActor struct ConversationTextEditor: NSViewRepresentable {
     @Binding var text: String
+    @Environment(\.isEnabled) private var isEnabled
     @Bindable private var preferences = NativePreferences.shared
     let placeholder: String
     let onSend: () -> Void
@@ -58,7 +59,7 @@ import UniformTypeIdentifiers
         editor.font = preferences.nativeFont(size: 15, surface: "chat")
         editor.setAccessibilityLabel("Message")
         editor.setAccessibilityIdentifier("conversation-composer")
-        editor.registerForDraggedTypes([.fileURL, .png, .tiff, .string])
+        editor.registerForDraggedTypes(ComposerNativeTextView.attachmentPasteboardTypes + [.string])
         scrollView.documentView = editor
         update(editor, coordinator: context.coordinator)
         return scrollView
@@ -91,6 +92,13 @@ import UniformTypeIdentifiers
 
     private func update(_ editor: ComposerNativeTextView, coordinator: Coordinator) {
         coordinator.parent = self
+        let wasEditable = editor.isEditable
+        editor.isEditable = isEnabled
+        if !isEnabled, let window = editor.window, window.firstResponder === editor {
+            window.makeFirstResponder(nil)
+        } else if isEnabled, !wasEditable {
+            editor.focusIfAvailable()
+        }
         editor.placeholder = placeholder
         editor.onSend = onSend
         editor.onAlternateSend = onAlternateSend
@@ -128,7 +136,7 @@ import UniformTypeIdentifiers
         }
         deinit { NotificationCenter.default.removeObserver(self) }
         @objc private func commandReceived(_ notification: Notification) {
-            guard notification.object as? String == "focusComposer", let editor,
+            guard notification.object as? String == "focusComposer", let editor, editor.isEditable,
                   let window = editor.window, window.isKeyWindow else { return }
             window.makeFirstResponder(editor)
             editor.scrollRangeToVisible(editor.selectedRange())
@@ -143,7 +151,7 @@ import UniformTypeIdentifiers
 
 @MainActor final class ComposerNativeTextView: NSTextView {
     static let maximumComposerHeight: CGFloat = 164
-    private static let attachmentPasteboardTypes: [NSPasteboard.PasteboardType] = [
+    fileprivate static let attachmentPasteboardTypes: [NSPasteboard.PasteboardType] = [
         .fileURL, .png, .tiff, .init(UTType.jpeg.identifier)
     ]
     var placeholder = ""
@@ -193,9 +201,13 @@ import UniformTypeIdentifiers
 
     override func viewDidMoveToWindow() {
         super.viewDidMoveToWindow()
+        focusIfAvailable()
+    }
+
+    func focusIfAvailable() {
         guard let window else { return }
         DispatchQueue.main.async { [weak self, weak window] in
-            guard let self, let window, self.window === window,
+            guard let self, self.isEditable, let window, self.window === window, window.isKeyWindow,
                   window.firstResponder == nil || window.firstResponder === window else { return }
             window.makeFirstResponder(self)
         }
@@ -224,6 +236,7 @@ import UniformTypeIdentifiers
     }
 
     override func paste(_ sender: Any?) {
+        guard isEditable else { return }
         if consumeAttachments(from: .general) { return }
         super.paste(sender)
     }
@@ -237,6 +250,7 @@ import UniformTypeIdentifiers
     }
 
     override func readSelection(from pasteboard: NSPasteboard, type: NSPasteboard.PasteboardType) -> Bool {
+        guard isEditable else { return false }
         if Self.attachmentPasteboardTypes.contains(type), consumeAttachments(from: pasteboard) { return true }
         return super.readSelection(from: pasteboard, type: type)
     }
@@ -247,19 +261,23 @@ import UniformTypeIdentifiers
     }
 
     override func draggingEntered(_ sender: NSDraggingInfo) -> NSDragOperation {
-        canAttach(sender.draggingPasteboard) ? .copy : super.draggingEntered(sender)
+        guard isEditable else { return [] }
+        return canAttach(sender.draggingPasteboard) ? .copy : super.draggingEntered(sender)
     }
 
     override func draggingUpdated(_ sender: NSDraggingInfo) -> NSDragOperation {
-        canAttach(sender.draggingPasteboard) ? .copy : super.draggingUpdated(sender)
+        guard isEditable else { return [] }
+        return canAttach(sender.draggingPasteboard) ? .copy : super.draggingUpdated(sender)
     }
 
     override func prepareForDragOperation(_ sender: NSDraggingInfo) -> Bool {
-        canAttach(sender.draggingPasteboard) || super.prepareForDragOperation(sender)
+        guard isEditable else { return false }
+        return canAttach(sender.draggingPasteboard) || super.prepareForDragOperation(sender)
     }
 
     override func performDragOperation(_ sender: NSDraggingInfo) -> Bool {
-        consumeAttachments(from: sender.draggingPasteboard) || super.performDragOperation(sender)
+        guard isEditable else { return false }
+        return consumeAttachments(from: sender.draggingPasteboard) || super.performDragOperation(sender)
     }
 
     /// The app dispatcher consumes configured commands first. This responder
@@ -267,7 +285,7 @@ import UniformTypeIdentifiers
     /// Returning true prevents AppKit from subsequently delivering keyDown for
     /// the same key equivalent.
     func handleComposerShortcut(_ event: NSEvent, preferences: NativePreferences? = nil) -> Bool {
-        guard !hasMarkedText(), let binding = NativeShortcutDefinition.binding(from: event) else { return false }
+        guard isEditable, !hasMarkedText(), let binding = NativeShortcutDefinition.binding(from: event) else { return false }
         let preferences = preferences ?? NativePreferences.shared
         if preferences.bindings(for: "insertNewline").contains(binding) {
             insertNewline(nil)

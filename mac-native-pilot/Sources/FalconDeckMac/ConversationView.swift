@@ -24,7 +24,7 @@ struct ConversationView: View {
     var selectionKey: String { "selection:" + catalogKey }
     var steersCurrentTurn: Bool { selection.followUp == "steer" && capabilities["supports_steering"].bool }
     var canSend: Bool {
-        store.isSelectedHostConnected && store.selectedProject != nil && !store.isSending && !actionPending && store.pendingSubmission == nil &&
+        store.isInputReady && store.isSelectedHostConnected && store.selectedProject != nil && !store.isSending && !actionPending && store.pendingSubmission == nil &&
         (!store.draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !attachments.isEmpty)
     }
     var sendHelp: String {
@@ -237,6 +237,18 @@ struct ConversationView: View {
     var composer: some View {
         let composerKey = store.composerKey
         return VStack(spacing: 8) {
+            if !store.isInputReady {
+                HStack(spacing: 8) {
+                    Image(systemName: "lock")
+                    Text(store.inputRecoveryError ?? "Waiting for Keychain to restore saved input…")
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                    if !store.isRestoringInput {
+                        Button("Retry") { Task { await store.reconnect() } }
+                            .buttonStyle(.plain)
+                    }
+                }
+                .font(NativePreferences.shared.font(size: 12)).foregroundStyle(FDTheme.muted)
+            }
             let slashItems = ConversationSlash.suggestions(store.draft, skills: skills, prompts: prompts)
             if !slashItems.isEmpty {
                 ConversationSlashSuggestions(items: slashItems) { item in store.draft = ConversationSlash.insert(item, into: store.draft) }
@@ -252,7 +264,7 @@ struct ConversationView: View {
                 if !attachments.isEmpty {
                     ConversationAttachmentStrip(attachments: attachments) { id in attachments.removeAll { $0.id == id }; persistPayload() }.padding(10)
                 }
-                ConversationTextEditor(text: $store.draft, placeholder: store.isRunning ? "Send a follow-up…" : "Message your agent…", onSend: send,
+                ConversationTextEditor(text: $store.draft, placeholder: !store.isInputReady ? "Restoring saved input…" : store.isRunning ? "Send a follow-up…" : "Message your agent…", onSend: send,
                                        onAttachments: { appendAttachments($0, expectedKey: composerKey) }, onError: { store.errorMessage = $0 }, onAlternateSend: sendAlternate)
                     .fixedSize(horizontal: false, vertical: true)
                     .accessibilityIdentifier("message-composer")
@@ -283,7 +295,8 @@ struct ConversationView: View {
                         .help(sendHelp)
                         .accessibilityLabel("Send message").accessibilityIdentifier("send-message")
                 }.padding(.horizontal, 12).padding(.bottom, 10).padding(.top, 2)
-            }.background(FDTheme.raised, in: .rect(cornerRadius: 12)).overlay { RoundedRectangle(cornerRadius: 12).strokeBorder(FDTheme.line) }
+            }.disabled(!store.isInputReady)
+                .background(FDTheme.raised, in: .rect(cornerRadius: 12)).overlay { RoundedRectangle(cornerRadius: 12).strokeBorder(FDTheme.line) }
             if !store.isSelectedHostConnected {
                 Label("Reconnect to send a message", systemImage: "wifi.slash")
                     .font(NativePreferences.shared.font(size: 12)).foregroundStyle(FDTheme.muted)

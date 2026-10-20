@@ -21,10 +21,20 @@ private actor TestDaemon: DaemonServing {
     private var detailWaiters: [String: CheckedContinuation<Void, Never>] = [:]
     private var sendContinuation: CheckedContinuation<JSON, Error>?
     private var sendWaiter: CheckedContinuation<Void, Never>?
+    private var connectionCount = 0
+    private var connectionWaiters: [(Int, CheckedContinuation<Void, Never>)] = []
 
     func snapshot() async throws -> JSON { FalconDeckMacTestsSnapshot() }
     func events() async throws -> AsyncThrowingStream<JSON, Error> {
-        AsyncThrowingStream { $0.yield(FalconDeckMacTestsSnapshot()) }
+        connectionCount += 1
+        let ready = connectionWaiters.filter { $0.0 <= connectionCount }
+        connectionWaiters.removeAll { $0.0 <= connectionCount }
+        for (_, waiter) in ready { waiter.resume() }
+        return AsyncThrowingStream { $0.yield(FalconDeckMacTestsSnapshot()) }
+    }
+    func waitForConnections(_ count: Int) async {
+        if connectionCount >= count { return }
+        await withCheckedContinuation { connectionWaiters.append((count, $0)) }
     }
     func disconnect() async {}
     func threadDetail(projectID: String, threadID: String, before: String?) async throws -> JSON {
@@ -96,7 +106,107 @@ private actor TestDaemon: DaemonServing {
 
 private func FalconDeckMacTestsSnapshot() -> JSON { snapshot }
 
+private actor SuspendedInputStore: NativeInputStoring {
+    private var continuation: CheckedContinuation<(value: NativeInputSnapshot, revision: UInt64), Error>?
+    private var waiter: CheckedContinuation<Void, Never>?
+    private(set) var loadCount = 0
+    private(set) var saveCount = 0
+    func loadWithRevision() async throws -> (value: NativeInputSnapshot, revision: UInt64) {
+        loadCount += 1
+        return try await withCheckedThrowingContinuation {
+            continuation = $0
+            waiter?.resume(); waiter = nil
+        }
+    }
+    func save(_ value: NativeInputSnapshot, revision: UInt64) { saveCount += 1 }
+    func waitForLoad() async {
+        if continuation != nil { return }
+        await withCheckedContinuation { waiter = $0 }
+    }
+    func finish(_ value: NativeInputSnapshot = .init(), fail: Bool = false) {
+        if fail { continuation?.resume(throwing: PilotError("Keychain denied access")) }
+        else { continuation?.resume(returning: (value, 10)) }
+        continuation = nil
+    }
+}
+
 final class StateTests: XCTestCase {
+    @MainActor func testKeychainWaitDoesNotBlockProjectsOrAllowInputOverwrite() async throws {
+        let client = TestDaemon(), inputs = SuspendedInputStore()
+        let store = AppStore(client: client, inputStore: inputs)
+        let connecting = Task { await store.reconnect() }
+        await inputs.waitForLoad()
+        await client.waitForConnections(1)
+        for _ in 0..<1000 where !store.isConnected { await Task.yield() }
+        XCTAssertTrue(store.isConnected, "The daemon must connect while Keychain is still waiting")
+        XCTAssertEqual(store.projects.count, 2)
+        XCTAssertFalse(store.isInputReady)
+        XCTAssertTrue(store.isRestoringInput)
+        store.selectProject("p1")
+        store.draft = "Must not replace a stored draft"
+        store.setComposerPayload(.object(["quote": .string("Unsaved replacement")]), key: store.composerKey)
+        XCTAssertEqual(store.draft, "")
+        XCTAssertEqual(store.composerPayload(key: store.composerKey), .object([:]))
+        await store.sendInputs([.object(["type": .string("text"), "text": .string("Do not send")])])
+        let mutations = await client.recordedMutations()
+        XCTAssertTrue(mutations.isEmpty)
+        do { try await store.persistInputState(); XCTFail("Unrestored input must not be saved") }
+        catch { }
+        let saves = await inputs.saveCount
+        XCTAssertEqual(saves, 0)
+
+        let reconnecting = Task { await store.reconnect() }
+        await client.waitForConnections(2)
+        let reads = await inputs.loadCount
+        XCTAssertEqual(reads, 1, "Reconnect must share the pending Keychain read")
+        await inputs.finish(.init(drafts: ["draft:p1": "Recovered draft"],
+                                  payloads: ["draft:p1": .object(["quote": .string("Recovered quote")])]))
+        await connecting.value
+        await reconnecting.value
+        XCTAssertTrue(store.isInputReady)
+        XCTAssertFalse(store.isRestoringInput)
+        XCTAssertEqual(store.draft, "Recovered draft")
+        XCTAssertEqual(store.composerPayload(key: store.composerKey)["quote"].string, "Recovered quote")
+        await store.prepareForQuit()
+    }
+
+    @MainActor func testInputRecoveryFailureRemainsVisibleAndCanRetryWithoutDisconnecting() async {
+        let client = TestDaemon(), inputs = SuspendedInputStore()
+        let store = AppStore(client: client, inputStore: inputs)
+        let connecting = Task { await store.reconnect() }
+        await inputs.waitForLoad()
+        await inputs.finish(fail: true)
+        await connecting.value
+        for _ in 0..<1000 where !store.isConnected { await Task.yield() }
+        XCTAssertTrue(store.isConnected)
+        XCTAssertFalse(store.isInputReady)
+        XCTAssertTrue(store.inputRecoveryError?.contains("Keychain denied access") == true)
+        XCTAssertFalse(store.isRestoringInput)
+        store.applyEnvelope(snapshot)
+        XCTAssertNotNil(store.inputRecoveryError, "A fresh snapshot must not hide a failed draft recovery")
+        let retrying = Task { await store.reconnect() }
+        await inputs.waitForLoad()
+        await inputs.finish()
+        await retrying.value
+        XCTAssertTrue(store.isInputReady)
+        XCTAssertNil(store.inputRecoveryError)
+        await store.prepareForQuit()
+    }
+
+    @MainActor func testQuitCancelsPendingInputRecoveryWithoutSavingEmptyState() async {
+        let client = TestDaemon(), inputs = SuspendedInputStore()
+        let store = AppStore(client: client, inputStore: inputs)
+        let connecting = Task { await store.reconnect() }
+        await inputs.waitForLoad()
+        await store.prepareForQuit()
+        await inputs.finish(.init(drafts: ["draft:p1": "Late recovery"] ))
+        await connecting.value
+        XCTAssertFalse(store.isInputReady)
+        XCTAssertFalse(store.isRestoringInput)
+        let saves = await inputs.saveCount
+        XCTAssertEqual(saves, 0)
+    }
+
     func testUTF16ReplayIsIdempotentAndGapRequestsRecovery() {
         var transcript = Transcript()
         let delta: JSON = .object(["type": .string("text"), "item_id": .string("m1"), "delta": .string("Hi 🦅"), "start_offset": .number(0), "end_offset": .number(5)])

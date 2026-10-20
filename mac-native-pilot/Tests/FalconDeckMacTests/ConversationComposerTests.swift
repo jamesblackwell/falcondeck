@@ -4,6 +4,57 @@ import XCTest
 @testable import FalconDeckMac
 
 final class ConversationComposerTests: XCTestCase {
+    @MainActor func testHostedDisabledEditorRejectsPasteDropsAndSendThenBecomesEditable() throws {
+        var sends = 0
+        var attachmentsReceived = 0
+        func content(disabled: Bool) -> some View {
+            ConversationTextEditor(text: .constant("Restoring draft"), placeholder: "Message",
+                onSend: { sends += 1 }, onAttachments: { attachmentsReceived += $0.count }, onError: { XCTFail($0) })
+                .disabled(disabled)
+        }
+        let host = NSHostingView(rootView: content(disabled: true))
+        host.frame = NSRect(x: 0, y: 0, width: 600, height: 164)
+        host.layoutSubtreeIfNeeded()
+        let editor = try XCTUnwrap(firstSubview(of: ComposerNativeTextView.self, in: host))
+        XCTAssertFalse(editor.isEditable)
+        XCTAssertTrue(editor.registeredDraggedTypes.contains(.init("public.jpeg")), "JPEG drops must be registered alongside PNG and TIFF.")
+        let pasteboard = NSPasteboard.withUniqueName()
+        defer { pasteboard.releaseGlobally() }
+        let drag = ComposerTestDraggingInfo(pasteboard: pasteboard)
+        for type in [NSPasteboard.PasteboardType.string, .png] {
+            pasteboard.clearContents()
+            if type == .string {
+                XCTAssertTrue(pasteboard.setString("Do not replace recovery data", forType: type))
+            } else {
+                XCTAssertTrue(pasteboard.setData(try clipboardImage(using: .png), forType: type))
+            }
+            XCTAssertFalse(editor.readSelection(from: pasteboard, type: type))
+            XCTAssertEqual(editor.draggingEntered(drag), [])
+            XCTAssertEqual(editor.draggingUpdated(drag), [])
+            XCTAssertFalse(editor.prepareForDragOperation(drag))
+            XCTAssertFalse(editor.performDragOperation(drag))
+        }
+        // This returns before touching the general clipboard when disabled.
+        editor.paste(nil)
+        let enter = try XCTUnwrap(NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: [], timestamp: 1,
+            windowNumber: 0, context: nil, characters: "\r", charactersIgnoringModifiers: "\r", isARepeat: false, keyCode: 36))
+        XCTAssertFalse(editor.handleComposerShortcut(enter))
+        XCTAssertEqual(editor.string, "Restoring draft")
+        XCTAssertEqual(attachmentsReceived, 0)
+        XCTAssertEqual(sends, 0)
+
+        host.rootView = content(disabled: false)
+        host.layoutSubtreeIfNeeded()
+        let enabledEditor = try XCTUnwrap(firstSubview(of: ComposerNativeTextView.self, in: host))
+        XCTAssertTrue(enabledEditor === editor)
+        XCTAssertTrue(enabledEditor.isEditable)
+        pasteboard.clearContents()
+        XCTAssertTrue(pasteboard.setString(" recovered", forType: .string))
+        enabledEditor.setSelectedRange(NSRange(location: enabledEditor.string.utf16.count, length: 0))
+        XCTAssertTrue(enabledEditor.readSelection(from: pasteboard, type: .string))
+        XCTAssertEqual(enabledEditor.string, "Restoring draft recovered")
+    }
+
     @MainActor func testSpeculativeMeasurementDoesNotChangeTheDisplayedTextWidth() throws {
         let draft = String(repeating: "The editor should fill all of the available space. ", count: 20)
         let host = NSHostingView(rootView: ConversationTextEditor(
@@ -30,31 +81,32 @@ final class ConversationComposerTests: XCTestCase {
                        scrollView.contentSize.width - editor.textContainerInset.width * 2, accuracy: 0.5)
     }
 
-    @MainActor func testPlainEditorNegotiatesAndReadsAnImageOnlyPasteboard() async throws {
+    @MainActor func testPlainEditorNegotiatesAndReadsImageOnlyPasteboards() async throws {
         let editor = ComposerNativeTextView(frame: NSRect(x: 0, y: 0, width: 400, height: 100))
         editor.isRichText = false
         editor.importsGraphics = false
         editor.string = "Keep this draft"
         let pasteboard = NSPasteboard.withUniqueName()
         defer { pasteboard.releaseGlobally() }
-        let image = try XCTUnwrap(NSBitmapImageRep(bitmapDataPlanes: nil, pixelsWide: 2, pixelsHigh: 2,
-            bitsPerSample: 8, samplesPerPixel: 4, hasAlpha: true, isPlanar: false, colorSpaceName: .deviceRGB,
-            bytesPerRow: 0, bitsPerPixel: 0))
-        let png = try XCTUnwrap(image.representation(using: .png, properties: [:]))
-        XCTAssertTrue(pasteboard.setData(png, forType: .png))
-        let type = try XCTUnwrap(editor.preferredPasteboardType(from: pasteboard.types ?? [], restrictedToTypesFrom: nil))
-        XCTAssertEqual(type, .png, "The normal AppKit Paste action must consider image-only clipboard data readable.")
+        for (pasteboardType, imageType) in [(NSPasteboard.PasteboardType.png, NSBitmapImageRep.FileType.png),
+                                           (.tiff, .tiff), (.init("public.jpeg"), .jpeg)] {
+            pasteboard.clearContents()
+            XCTAssertTrue(pasteboard.setData(try clipboardImage(using: imageType), forType: pasteboardType))
+            // AppKit may negotiate a synthesized TIFF representation for JPEG.
+            // Verify that its chosen representation becomes an attachment.
+            let type = try XCTUnwrap(editor.preferredPasteboardType(from: pasteboard.types ?? [], restrictedToTypesFrom: nil))
 
-        let received = expectation(description: "Image attachment prepared")
-        editor.onAttachments = { attachments in
-            XCTAssertEqual(attachments.count, 1)
-            XCTAssertEqual(attachments.first?.kind, .image)
-            received.fulfill()
+            let received = expectation(description: "Image attachment prepared")
+            editor.onAttachments = { attachments in
+                XCTAssertEqual(attachments.count, 1)
+                XCTAssertEqual(attachments.first?.kind, .image)
+                received.fulfill()
+            }
+            editor.onError = { error in XCTFail(error) }
+            XCTAssertTrue(editor.readSelection(from: pasteboard, type: type))
+            await fulfillment(of: [received], timeout: 5)
+            XCTAssertEqual(editor.string, "Keep this draft", "Images should be attachments rather than rich text inside the editor.")
         }
-        editor.onError = { error in XCTFail(error) }
-        XCTAssertTrue(editor.readSelection(from: pasteboard, type: type))
-        await fulfillment(of: [received], timeout: 5)
-        XCTAssertEqual(editor.string, "Keep this draft", "Images should be attachments rather than rich text inside the editor.")
     }
 
     @MainActor func testPlainTextPasteStillInsertsTextAtTheSelection() throws {
@@ -72,6 +124,13 @@ final class ConversationComposerTests: XCTestCase {
     @MainActor private func firstSubview<T: NSView>(of type: T.Type, in view: NSView) -> T? {
         if let result = view as? T { return result }
         return view.subviews.lazy.compactMap { self.firstSubview(of: type, in: $0) }.first
+    }
+
+    @MainActor private func clipboardImage(using type: NSBitmapImageRep.FileType) throws -> Data {
+        let image = try XCTUnwrap(NSBitmapImageRep(bitmapDataPlanes: nil, pixelsWide: 2, pixelsHigh: 2,
+            bitsPerSample: 8, samplesPerPixel: 3, hasAlpha: false, isPlanar: false, colorSpaceName: .deviceRGB,
+            bytesPerRow: 0, bitsPerPixel: 0))
+        return try XCTUnwrap(image.representation(using: type, properties: [:]))
     }
 
     @MainActor func testEditorGrowsForWrappingAndTrailingNewlinesAndShrinksAfterDeletion() {
@@ -208,4 +267,27 @@ final class ConversationComposerTests: XCTestCase {
         XCTAssertTrue(export.contains("Partial export"))
         XCTAssertTrue(export.contains("````text\n```nested```\n````"))
     }
+}
+
+@MainActor private final class ComposerTestDraggingInfo: NSObject, NSDraggingInfo {
+    let draggingPasteboard: NSPasteboard
+    var draggingDestinationWindow: NSWindow? { nil }
+    var draggingSourceOperationMask: NSDragOperation { .copy }
+    var draggingLocation: NSPoint { .zero }
+    var draggedImageLocation: NSPoint { .zero }
+    nonisolated var draggedImage: NSImage? { nil }
+    var draggingSource: Any? { nil }
+    var draggingSequenceNumber: Int { 1 }
+    var draggingFormation: NSDraggingFormation = .default
+    var animatesToDestination = false
+    var numberOfValidItemsForDrop = 1
+    var springLoadingHighlight: NSSpringLoadingHighlight { .none }
+
+    init(pasteboard: NSPasteboard) { draggingPasteboard = pasteboard }
+    func slideDraggedImage(to screenPoint: NSPoint) {}
+    nonisolated override func namesOfPromisedFilesDropped(atDestination dropDestination: URL) -> [String]? { nil }
+    func resetSpringLoading() {}
+    func enumerateDraggingItems(options enumOpts: NSDraggingItemEnumerationOptions, for view: NSView?,
+        classes classArray: [AnyClass], searchOptions: [NSPasteboard.ReadingOptionKey: Any],
+        using block: @escaping (NSDraggingItem, Int, UnsafeMutablePointer<ObjCBool>) -> Void) {}
 }

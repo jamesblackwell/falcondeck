@@ -39,8 +39,13 @@ struct NativePendingSubmission: Codable, Sendable, Equatable, Identifiable {
     var preserveComposer: Bool? = nil
 }
 
+protocol NativeInputStoring: Sendable {
+    func loadWithRevision() async throws -> (value: NativeInputSnapshot, revision: UInt64)
+    func save(_ value: NativeInputSnapshot, revision: UInt64) async throws
+}
+
 /// Recoverable user input, separate from disposable conversation previews.
-actor NativeInputStore {
+actor NativeInputStore: NativeInputStoring {
     static let shared = NativeInputStore()
     private let file: URL
     private let service: String

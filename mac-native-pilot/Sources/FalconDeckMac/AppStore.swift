@@ -68,10 +68,13 @@ extension DaemonClient: DaemonServing {}
     private var inputSubmissions: [String: NativePendingSubmission] = [:]
     private var inputRevision: UInt64 = 0
     @ObservationIgnored private var inputWriteTask: Task<Void, Never>?
-    @ObservationIgnored private var didLoadInputs = false
+    private var didLoadInputs = false
+    private(set) var isRestoringInput = false
+    private(set) var inputRecoveryError: String?
+    @ObservationIgnored private var inputRecoveryTask: Task<Void, Never>?
     private var requests: [JSON] = []
     @ObservationIgnored private let client: any DaemonServing
-    @ObservationIgnored private let inputStore: NativeInputStore?
+    @ObservationIgnored private let inputStore: (any NativeInputStoring)?
     @ObservationIgnored private let readVisibility: @MainActor () -> Bool
     @ObservationIgnored private var connectionTask: Task<Void, Never>?
     @ObservationIgnored private var loadID = UUID()
@@ -116,10 +119,10 @@ extension DaemonClient: DaemonServing {}
         return remoteStatuses[host] == .connected
     }
 
-    init(client: any DaemonServing = DaemonClient(), inputStore: NativeInputStore? = nil,
+    init(client: any DaemonServing = DaemonClient(), inputStore: (any NativeInputStoring)? = nil,
          readVisibility: (@MainActor () -> Bool)? = nil) {
         self.client = client
-        self.inputStore = inputStore ?? (client is DaemonClient ? .shared : nil)
+        self.inputStore = inputStore ?? (client is DaemonClient ? NativeInputStore.shared : nil)
         self.readVisibility = readVisibility ?? {
             NSApp?.isActive == true && NSApp?.keyWindow != nil && NativePlatform.nativeDesktopPresence() != false
         }
@@ -144,6 +147,7 @@ extension DaemonClient: DaemonServing {}
         inputSubmissions.values.first { $0.composerKey == draftKey || $0.sourceKey == draftKey || ($0.threadID != nil && $0.threadID == selectedTaskID) }
     }
     var isRunning: Bool { selectedTask?.status == "running" }
+    var isInputReady: Bool { inputStore == nil || didLoadInputs }
     var pendingRequests: [JSON] { requests.filter { $0["thread_id"].string == selectedTaskID } }
     var availableProviders: [String] {
         let offered = selectedProject?.raw["agents"].array.map { $0["provider"].string }.filter { !$0.isEmpty } ?? []
@@ -152,7 +156,10 @@ extension DaemonClient: DaemonServing {}
     private var draftKey: String { selectedTaskID ?? "draft:\(selectedProjectID ?? "none")" }
     var draft: String {
         get { drafts[draftKey, default: ""] }
-        set { drafts[draftKey] = newValue; scheduleInputSave() }
+        set {
+            guard isInputReady else { return }
+            drafts[draftKey] = newValue; scheduleInputSave()
+        }
     }
     var filteredTasks: [AgentTask] {
         tasks.filter {
@@ -177,25 +184,6 @@ extension DaemonClient: DaemonServing {}
                 }
             }
             NativeHostManager.shared.start()
-        }
-        if !didLoadInputs {
-            do {
-                let restored = try await inputStore?.loadWithRevision()
-                guard connectionID == identity else { return }
-                let saved = restored?.value ?? .init()
-                inputRevision = max(inputRevision, restored?.revision ?? 0)
-                for (key, value) in saved.drafts where drafts[key] == nil { drafts[key] = value }
-                for (key, value) in saved.payloads where composerPayloads[key] == nil { composerPayloads[key] = value }
-                for (key, var value) in saved.submissions where inputSubmissions[key] == nil {
-                    // A check or POST interrupted by app termination cannot establish delivery.
-                    if value.status == .checking { value.status = .uncertain }
-                    inputSubmissions[key] = value
-                }
-                didLoadInputs = true
-            } catch {
-                guard connectionID == identity else { return }
-                errorMessage = "Saved input couldn’t be read. \(error.localizedDescription)"
-            }
         }
         await client.disconnect()
         guard connectionID == identity else { return }
@@ -238,6 +226,38 @@ extension DaemonClient: DaemonServing {}
                 }
             }
         }
+        // Keychain can wait for user interaction indefinitely. Start the daemon
+        // stream first so projects and history remain available during recovery.
+        await restoreInputIfNeeded()
+    }
+
+    private func restoreInputIfNeeded() async {
+        guard !didLoadInputs, let inputStore else { return }
+        if let inputRecoveryTask { await inputRecoveryTask.value; return }
+        isRestoringInput = true
+        inputRecoveryError = nil
+        let task = Task<Void, Never> { [weak self] in
+            do {
+                let restored = try await inputStore.loadWithRevision()
+                guard !Task.isCancelled, let self else { return }
+                inputRevision = max(inputRevision, restored.revision)
+                for (key, value) in restored.value.drafts where drafts[key] == nil { drafts[key] = value }
+                for (key, value) in restored.value.payloads where composerPayloads[key] == nil { composerPayloads[key] = value }
+                for (key, var value) in restored.value.submissions where inputSubmissions[key] == nil {
+                    if value.status == .checking { value.status = .uncertain }
+                    inputSubmissions[key] = value
+                }
+                didLoadInputs = true
+            } catch {
+                guard !Task.isCancelled, let self else { return }
+                inputRecoveryError = "Saved input couldn’t be read. \(error.localizedDescription)"
+            }
+            guard !Task.isCancelled, let self else { return }
+            isRestoringInput = false
+            inputRecoveryTask = nil
+        }
+        inputRecoveryTask = task
+        await task.value
     }
 
     func selectProject(_ id: String) {
@@ -741,6 +761,10 @@ extension DaemonClient: DaemonServing {}
     }
 
     func sendInputs(_ inputs: [JSON], settings: [String: JSON] = [:], preserveComposer: Bool = false) async {
+        guard isInputReady else {
+            errorMessage = "Wait for saved input to be restored before sending."
+            return
+        }
         guard isSelectedHostConnected, !isSending, !inputs.isEmpty, pendingSubmission == nil, let projectID = selectedProjectID else { return }
         guard !preserveComposer || selectedTask != nil else {
             errorMessage = "Select an existing task before sending a suggested follow-up."; return
@@ -939,7 +963,10 @@ extension DaemonClient: DaemonServing {}
     }
 
     func composerPayload(key: String) -> JSON { composerPayloads[key] ?? .object([:]) }
-    func setComposerPayload(_ value: JSON, key: String) { composerPayloads[key] = value; scheduleInputSave() }
+    func setComposerPayload(_ value: JSON, key: String) {
+        guard isInputReady else { return }
+        composerPayloads[key] = value; scheduleInputSave()
+    }
 
     private func scheduleInputSave() {
         inputRevision &+= 1
@@ -966,6 +993,8 @@ extension DaemonClient: DaemonServing {}
     }
 
     func prepareForQuit() async {
+        inputRecoveryTask?.cancel(); inputRecoveryTask = nil
+        isRestoringInput = false
         connectionTask?.cancel(); connectionTask = nil
         recoveryTask?.cancel(); recoveryTask = nil
         hostTask?.cancel(); hostTask = nil
