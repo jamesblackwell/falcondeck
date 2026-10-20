@@ -11,8 +11,10 @@ struct NativePairingInput: Sendable {
         var rawCode = text
         var rawRelay = relay
         if let link = URLComponents(string: text), let scheme = link.scheme {
+            let isPairingPage = link.path == "/pair" ||
+                (link.host == "app.falcondeck.com" && ["", "/"].contains(link.path))
             guard ["https", "falcondeck", "falcondeck-native"].contains(scheme),
-                  (scheme != "https" || link.path == "/pair") else { throw PilotError("Paste a pairing link or the complete secure code.") }
+                  (scheme != "https" || isPairingPage) else { throw PilotError("Paste a pairing link or the complete secure code.") }
             rawCode = link.queryItems?.first(where: { $0.name == "code" })?.value ?? ""
             rawRelay = link.queryItems?.first(where: { $0.name == "relay" })?.value ?? relay
         }

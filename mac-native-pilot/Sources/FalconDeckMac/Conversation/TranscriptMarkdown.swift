@@ -106,6 +106,8 @@ enum TranscriptMarkdownParser {
                 index += 2
                 var rows: [[String]] = []
                 while index < lines.count, let cells = tableCells(lines[index]), !lines[index].trimmingCharacters(in: .whitespaces).isEmpty {
+                    let next = lines[index]
+                    if fence(next) != nil || heading(next) != nil || isRule(next) || quoteContent(next) != nil || listMarker(next) != nil { break }
                     rows.append(Array((cells + Array(repeating: "", count: headers.count)).prefix(headers.count)))
                     index += 1
                 }
@@ -119,12 +121,12 @@ enum TranscriptMarkdownParser {
             index += 1
             while index < lines.count, !lines[index].trimmingCharacters(in: .whitespaces).isEmpty {
                 let next = lines[index]
-                if fence(next) != nil || heading(next) != nil || isRule(next) || quoteContent(next) != nil || listMarker(next) != nil || standaloneImage(next) != nil { break }
-                if index + 1 < lines.count, tableCells(next) != nil, tableSeparator(lines[index + 1]) != nil { break }
                 if let level = setextLevel(next) {
                     blocks.append(.heading(level: level, text: paragraph.joined(separator: "\n")))
                     paragraph = []; index += 1; break
                 }
+                if fence(next) != nil || heading(next) != nil || isRule(next) || quoteContent(next) != nil || listMarker(next) != nil || standaloneImage(next) != nil { break }
+                if index + 1 < lines.count, tableCells(next) != nil, tableSeparator(lines[index + 1]) != nil { break }
                 paragraph.append(next.trimmingCharacters(in: .whitespaces)); index += 1
             }
             if !paragraph.isEmpty { blocks.append(.paragraph(paragraph.joined(separator: "\n"))) }
@@ -199,7 +201,7 @@ enum TranscriptMarkdownParser {
     private static func parseList(_ lines: [String], start: Int, first: ListMarker, depth: Int) -> (block: TranscriptMarkdownBlock, next: Int) {
         var index = start
         var items: [TranscriptMarkdownListItem] = []
-        while index < lines.count, let marker = listMarker(lines[index]), marker.indent == first.indent, marker.ordered == first.ordered {
+        while index < lines.count, !isRule(lines[index]), let marker = listMarker(lines[index]), marker.indent == first.indent, marker.ordered == first.ordered {
             var firstLine = marker.text
             var checked: Bool?
             if firstLine.range(of: #"^\[[ xX]\](?:\s|$)"#, options: .regularExpression) != nil {

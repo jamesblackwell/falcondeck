@@ -93,7 +93,7 @@ impl AppState {
                 },
             );
             let app = self.clone();
-            tokio::spawn(run_extension_event_worker(
+            self.spawn_background_task(run_extension_event_worker(
                 app, package, receiver, cancelled,
             ));
         }

@@ -110,14 +110,14 @@ pub(super) async fn connect_workspace(
         },
     );
 
-    let app = app.clone();
-    tokio::spawn(async move {
-        if let Err(error) = app
+    let task_app = app.clone();
+    app.spawn_background_task(async move {
+        if let Err(error) = task_app
             .connect_workspace_internal(request, Some(&persisted_workspace))
             .await
         {
             tracing::warn!(%error, path = %path_string, "failed to connect workspace");
-            let _ = app
+            let _ = task_app
                 .update_workspace_placeholder_status(
                     &path_string,
                     WorkspaceStatus::Disconnected,
@@ -184,9 +184,9 @@ pub(super) async fn create_chat_at(
         },
     );
 
-    let app = app.clone();
-    tokio::spawn(async move {
-        if let Err(error) = app
+    let task_app = app.clone();
+    app.spawn_background_task(async move {
+        if let Err(error) = task_app
             .connect_workspace_internal(
                 ConnectWorkspaceRequest {
                     path: path_string.clone(),
@@ -197,7 +197,7 @@ pub(super) async fn create_chat_at(
             .await
         {
             tracing::warn!(%error, path = %path_string, "failed to start casual chat workspace");
-            let _ = app
+            let _ = task_app
                 .update_workspace_placeholder_status(
                     &path_string,
                     WorkspaceStatus::Disconnected,
@@ -376,11 +376,18 @@ pub(super) async fn connect_workspace_internal(
         };
         // These are independent read-only catalogs. The RPC transport correlates
         // responses by id, so a slow native scan need not delay the other reads.
-        let (threads, skills, subagents) = tokio::join!(
-            session.workspace_threads(),
-            load_codex_provider_skills(app, &session),
-            discover_subagents,
-        );
+        let (threads, skills, subagents) = tokio::select! {
+            () = app.wait_for_shutdown() => {
+                return Err(DaemonError::Process("daemon is shutting down".to_string()));
+            }
+            catalogs = async {
+                tokio::join!(
+                    session.workspace_threads(),
+                    load_codex_provider_skills(app, &session),
+                    discover_subagents,
+                )
+            } => catalogs,
+        };
         Ok::<_, DaemonError>((
             session,
             agent,
@@ -413,6 +420,9 @@ pub(super) async fn connect_workspace_internal(
             )
         }
         Err(error) => {
+            if app.is_shutting_down() {
+                return Err(error);
+            }
             // Built-in and optional providers connect independently. An ACP
             // or Antigravity project must not require Codex or Claude.
             let has_alternative =
@@ -2783,7 +2793,10 @@ impl AppState {
         let app = self.clone();
         let workspace_id = workspace_id.to_string();
         let thread_id = thread_id.to_string();
-        tokio::spawn(async move {
+        self.spawn_background_task(async move {
+            if app.is_shutting_down() {
+                return;
+            }
             let next = {
                 let mut workspaces = app.inner.workspaces.lock().await;
                 let Some(workspace) = workspaces.get_mut(&workspace_id) else {
@@ -4984,7 +4997,12 @@ impl AppState {
 pub(super) async fn run_codex_reconnect(app: &AppState, workspace_id: &str) {
     let mut last_error = "unknown error".to_string();
     for attempt in 0..CODEX_RECONNECT_MAX_ATTEMPTS {
-        tokio::time::sleep(codex_reconnect_delay(attempt)).await;
+        if !app
+            .sleep_unless_shutting_down(codex_reconnect_delay(attempt))
+            .await
+        {
+            return;
+        }
         // Never race the daemon's own shutdown with a fresh app-server spawn.
         if app.is_shutting_down() {
             return;
@@ -5052,6 +5070,10 @@ async fn try_codex_reconnect(app: &AppState, workspace_id: &str) -> CodexReconne
     };
     let _gate = gate.lock().await;
 
+    if app.is_shutting_down() {
+        return CodexReconnectAttempt::Failed("daemon is shutting down".to_string());
+    }
+
     let workspace_path = {
         let workspaces = app.inner.workspaces.lock().await;
         let Some(workspace) = workspaces.get(workspace_id) else {
@@ -5067,14 +5089,17 @@ async fn try_codex_reconnect(app: &AppState, workspace_id: &str) -> CodexReconne
         workspace.summary.path.clone()
     };
 
-    let bootstrap = match CodexSession::reconnect(
-        workspace_id.to_string(),
-        workspace_path,
-        app.provider_bin(&AgentProvider::CODEX),
-        app.clone(),
-    )
-    .await
-    {
+    let bootstrap = match tokio::select! {
+        () = app.wait_for_shutdown() => {
+            return CodexReconnectAttempt::Failed("daemon is shutting down".to_string());
+        }
+        bootstrap = CodexSession::reconnect(
+            workspace_id.to_string(),
+            workspace_path,
+            app.provider_bin(&AgentProvider::CODEX),
+            app.clone(),
+        ) => bootstrap,
+    } {
         Ok(bootstrap) => bootstrap,
         Err(error) => return CodexReconnectAttempt::Failed(error.to_string()),
     };
@@ -5089,6 +5114,9 @@ async fn try_codex_reconnect(app: &AppState, workspace_id: &str) -> CodexReconne
     } = bootstrap;
 
     let mut workspaces = app.inner.workspaces.lock().await;
+    if app.is_shutting_down() {
+        return CodexReconnectAttempt::Failed("daemon is shutting down".to_string());
+    }
     let stale = match workspaces.get_mut(workspace_id) {
         None => Some(CodexReconnectAttempt::WorkspaceGone),
         Some(workspace)

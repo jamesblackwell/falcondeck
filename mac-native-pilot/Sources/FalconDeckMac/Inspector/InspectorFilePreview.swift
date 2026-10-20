@@ -84,7 +84,7 @@ struct InspectorCodeEditor: NSViewRepresentable {
         configure(view, coordinator: context.coordinator)
     }
 
-    private func configure(_ view: NSTextView, coordinator: Coordinator) {
+    func configure(_ view: NSTextView, coordinator: Coordinator) {
         let changed = view.string != text
         let appearance = NativeCodeTypography.signature
         let styleChanged = coordinator.editable != editable || coordinator.language != language || coordinator.diff != diff || coordinator.appearance != appearance
@@ -99,6 +99,8 @@ struct InspectorCodeEditor: NSViewRepresentable {
         view.isSelectable = true
         view.setAccessibilityLabel(editable ? "File editor" : diff ? "File diff" : "File contents")
         if changed {
+            view.breakUndoCoalescing()
+            coordinator.undoHistory.removeAllActions()
             let selection = view.selectedRange()
             view.string = text
             if selection.location <= (text as NSString).length { view.setSelectedRange(NSRange(location: selection.location, length: min(selection.length, (text as NSString).length - selection.location))) }
@@ -135,7 +137,9 @@ struct InspectorCodeEditor: NSViewRepresentable {
         var diff = false
         var requestedLine: Int?
         var appearance = ""
+        let undoHistory = UndoManager()
         init(_ parent: InspectorCodeEditor) { self.parent = parent }
+        func undoManager(for view: NSTextView) -> UndoManager? { undoHistory }
         func textDidChange(_ notification: Notification) {
             guard let view = notification.object as? NSTextView else { return }
             parent.text = view.string

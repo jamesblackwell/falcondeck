@@ -198,52 +198,52 @@ impl AppState {
         let workspace_id = workspace_id.to_string();
         // The flag is the composer's only signal that a catalog is coming, so
         // every exit below (success, error, deadline, panic) must clear it.
-        let work = tokio::spawn({
-            let app = app.clone();
-            let workspace_id = workspace_id.clone();
-            let provider = provider.clone();
-            async move {
-                app.set_agent_models_loading(&workspace_id, &provider, true)
+        self.spawn_background_task(async move {
+            let work = tokio::spawn({
+                let app = app.clone();
+                let workspace_id = workspace_id.clone();
+                let provider = provider.clone();
+                async move {
+                    app.set_agent_models_loading(&workspace_id, &provider, true)
+                        .await;
+                    let started = std::time::Instant::now();
+                    tracing::info!(
+                        provider = %provider,
+                        workspace_id = %workspace_id,
+                        "provider metadata hydration started"
+                    );
+                    let outcome = tokio::time::timeout(
+                        PROVIDER_HYDRATION_DEADLINE,
+                        app.hydrate_provider_metadata(&workspace_id, &provider),
+                    )
                     .await;
-                let started = std::time::Instant::now();
-                tracing::info!(
-                    provider = %provider,
-                    workspace_id = %workspace_id,
-                    "provider metadata hydration started"
-                );
-                let outcome = tokio::time::timeout(
-                    PROVIDER_HYDRATION_DEADLINE,
-                    app.hydrate_provider_metadata(&workspace_id, &provider),
-                )
-                .await;
-                let failure = match outcome {
-                    Ok(Ok(())) => None,
-                    Ok(Err(error)) => Some(error.to_string()),
-                    Err(_) => Some(format!(
-                        "no response after {}s",
-                        PROVIDER_HYDRATION_DEADLINE.as_secs()
-                    )),
-                };
-                match &failure {
-                    None => tracing::info!(
-                        provider = %provider,
-                        workspace_id = %workspace_id,
-                        elapsed_ms = started.elapsed().as_millis() as u64,
-                        "provider metadata hydration finished"
-                    ),
-                    Some(error) => tracing::warn!(
-                        provider = %provider,
-                        workspace_id = %workspace_id,
-                        elapsed_ms = started.elapsed().as_millis() as u64,
-                        %error,
-                        "provider metadata hydration failed"
-                    ),
+                    let failure = match outcome {
+                        Ok(Ok(())) => None,
+                        Ok(Err(error)) => Some(error.to_string()),
+                        Err(_) => Some(format!(
+                            "no response after {}s",
+                            PROVIDER_HYDRATION_DEADLINE.as_secs()
+                        )),
+                    };
+                    match &failure {
+                        None => tracing::info!(
+                            provider = %provider,
+                            workspace_id = %workspace_id,
+                            elapsed_ms = started.elapsed().as_millis() as u64,
+                            "provider metadata hydration finished"
+                        ),
+                        Some(error) => tracing::warn!(
+                            provider = %provider,
+                            workspace_id = %workspace_id,
+                            elapsed_ms = started.elapsed().as_millis() as u64,
+                            %error,
+                            "provider metadata hydration failed"
+                        ),
+                    }
+                    app.finish_agent_models_loading(&workspace_id, &provider, failure.as_deref())
+                        .await;
                 }
-                app.finish_agent_models_loading(&workspace_id, &provider, failure.as_deref())
-                    .await;
-            }
-        });
-        tokio::spawn(async move {
+            });
             if let Err(error) = work.await
                 && error.is_panic()
             {
@@ -446,7 +446,7 @@ impl AppState {
         let app = self.clone();
         let workspace_id = workspace_id.to_string();
         let thread_id = thread_id.to_string();
-        tokio::spawn(async move {
+        self.spawn_background_task(async move {
             let started = std::time::Instant::now();
             let gate = app.acp_hydration_gate(&workspace_id, &thread_id).await;
             let _guard = gate.lock_owned().await;
@@ -997,7 +997,7 @@ impl AppState {
         let app = self.clone();
         let workspace = workspace_id.to_string();
         let pump_runtime = Arc::clone(&runtime);
-        tokio::spawn(async move {
+        self.spawn_background_task(async move {
             app.pump_acp_events(workspace, pump_runtime, events_rx)
                 .await;
         });
@@ -1212,7 +1212,15 @@ impl AppState {
         // channel right now, bracketed by ReplayStarted/ReplayFinished. The
         // pump is the channel's only consumer, so plain local state is enough.
         let mut replaying_sessions: HashSet<String> = HashSet::new();
-        while let Some(event) = events.recv().await {
+        loop {
+            let event = tokio::select! {
+                biased;
+                () = self.wait_for_shutdown() => return,
+                event = events.recv() => match event {
+                    Some(event) => event,
+                    None => return,
+                },
+            };
             if let Err(error) = self
                 .apply_acp_event(&workspace_id, &runtime, event, &mut replaying_sessions)
                 .await
@@ -2653,13 +2661,14 @@ pub(super) async fn start_acp_turn(
         )
         .await;
     }
-    let app = app.clone();
+    let task_app = app.clone();
     let workspace_id = workspace_id.to_string();
     let thread_id = thread_id.to_string();
     let provider = provider.clone();
     let inputs = inputs.to_vec();
     let selected_skills = selected_skills.to_vec();
-    tokio::spawn(async move {
+    app.spawn_background_task(async move {
+        let app = task_app;
         if let Err(error) = run_acp_turn_startup(
             &app,
             &workspace_id,
@@ -2671,6 +2680,9 @@ pub(super) async fn start_acp_turn(
         )
         .await
         {
+            if app.is_shutting_down() {
+                return;
+            }
             let provider_label = app
                 .fresh_acp_provider_configs()
                 .into_iter()
@@ -3104,10 +3116,11 @@ async fn run_acp_turn_startup(
     )
     .await?;
 
-    let app = app.clone();
+    let task_app = app.clone();
     let workspace_id = workspace_id.to_string();
     let thread_id = thread_id.to_string();
-    tokio::spawn(async move {
+    app.spawn_background_task(async move {
+        let app = task_app;
         let outcome = runtime.prompt(&session_id, content.blocks).await;
         let (status, error) = match &outcome {
             Ok(stop_reason) if stop_reason == "cancelled" => (ThreadStatus::Idle, None),
@@ -3120,6 +3133,9 @@ async fn run_acp_turn_startup(
                 .unwrap_or((ThreadStatus::Idle, None)),
             Err(error) => (ThreadStatus::Error, Some(error.to_string())),
         };
+        if app.is_shutting_down() {
+            return;
+        }
         let updated = app
             .upsert_thread(&workspace_id, &thread_id, |thread| {
                 thread.status = status.clone();

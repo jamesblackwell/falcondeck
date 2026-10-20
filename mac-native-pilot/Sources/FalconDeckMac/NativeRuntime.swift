@@ -144,14 +144,35 @@ actor NativeRuntime {
         let output = try commandOutput("/usr/sbin/lsof", ["-nP", "-iTCP", "-sTCP:LISTEN", "-Fpcn"], allowEmptyResult: true)
         let listeners = listenerCandidates(from: output)
         let processOutput = try commandOutput("/bin/ps", ["-axo", "pid=,comm="])
+        let argumentsOutput = try commandOutput("/bin/ps", ["-axww", "-o", "pid=,args="])
         let ownPID = ProcessInfo.processInfo.processIdentifier
-        let names: Set<String> = ["falcondeck-desktop", "falcondeck-daemon", "FalconDeck", "FalconDeckMac"]
-        let hasOtherRuntime = processOutput.split(separator: "\n").contains { line in
-            let parts = line.trimmingCharacters(in: .whitespaces).split(maxSplits: 1, whereSeparator: \.isWhitespace)
-            guard parts.count == 2, let pid = Int32(parts[0]), pid != ownPID else { return false }
-            return names.contains(URL(fileURLWithPath: String(parts[1])).lastPathComponent)
+        return (listeners, hasOtherRuntime(processes: processOutput, arguments: argumentsOutput, ownPID: ownPID))
+    }
+
+    nonisolated static func hasOtherRuntime(processes: String, arguments: String, ownPID: Int32) -> Bool {
+        func records(_ output: String) -> [(Int32, String)] {
+            output.split(separator: "\n").compactMap { line in
+                let parts = line.trimmingCharacters(in: .whitespaces).split(maxSplits: 1, whereSeparator: \.isWhitespace)
+                guard parts.count == 2, let pid = Int32(parts[0]) else { return nil }
+                return (pid, String(parts[1]))
+            }
         }
-        return (listeners, hasOtherRuntime)
+        let argumentsByPID = Dictionary(records(arguments), uniquingKeysWith: { _, newer in newer })
+        let names: Set<String> = ["falcondeck-desktop", "falcondeck-daemon", "FalconDeck", "FalconDeckMac"]
+        return records(processes).contains { pid, executable in
+            let name = URL(fileURLWithPath: executable).lastPathComponent
+            guard pid != ownPID, names.contains(name) else { return false }
+            // MCP helpers execute the app binary but own no daemon. A crashed
+            // shell can leave these children alive; they must not block recovery.
+            // Keep unknown/racing process records conservative for older shells.
+            guard let arguments = argumentsByPID[pid] else { return true }
+            for invocation in [executable, name] where arguments.hasPrefix(invocation + " ") {
+                let firstArgument = arguments.dropFirst(invocation.count)
+                    .split(whereSeparator: \.isWhitespace).first.map(String.init)
+                return firstArgument != "mcp" && !(firstArgument?.hasPrefix("mcp-") ?? false)
+            }
+            return true
+        }
     }
 
     nonisolated static func listenerCandidates(from output: String) -> [URL] {

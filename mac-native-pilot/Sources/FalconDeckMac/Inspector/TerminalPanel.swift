@@ -7,7 +7,7 @@ extension Notification.Name {
     static let nativeTerminalFind = Notification.Name("FalconDeck.nativeTerminalFind")
 }
 
-@MainActor @Observable private final class NativeTerminalPanelModel {
+@MainActor @Observable final class NativeTerminalPanelModel {
     var workspaceID: String?
     var selected: [String: String] = [:]
     var sessions: [String: [NativeTerminalSession]] = [:]
@@ -15,6 +15,7 @@ extension Notification.Name {
     var creating = false
     var error: String?
     @ObservationIgnored private var creatingScopes: Set<String> = []
+    @ObservationIgnored private var closedSessions: Set<String> = []
     @ObservationIgnored private var loadToken = UUID()
 
     var tabs: [NativeTerminalSession] { workspaceID.flatMap { sessions[$0] } ?? [] }
@@ -35,19 +36,22 @@ extension Notification.Name {
         loading = workspaceID != nil
         creating = workspaceID.map { creatingScopes.contains($0) } ?? false
         guard let workspaceID else { return }
+        let initialIDs = Set((sessions[workspaceID] ?? []).map(\.id))
         do {
             let response = try await store.request(["api", "workspaces", workspaceID, "terminals"])
             try Task.checkCancellation()
             guard loadToken == token, store.selectedHostID == nil, self.workspaceID == workspaceID else { return }
-            let infos = response["sessions"].array.compactMap(NativeTerminalInfo.init)
             let previous = sessions[workspaceID] ?? []
+            let infos = response["sessions"].array.compactMap(NativeTerminalInfo.init).filter { !closedSessions.contains($0.id) }
             let restored = infos.map { info in previous.first { $0.id == info.id } ?? NativeTerminalSession(info: info) }
-            let disappeared = previous.filter { old in !infos.contains { $0.id == old.id } }
+            let returnedIDs = Set(infos.map(\.id))
+            let createdDuringLoad = previous.filter { !initialIDs.contains($0.id) && !returnedIDs.contains($0.id) }
+            let disappeared = previous.filter { initialIDs.contains($0.id) && !returnedIDs.contains($0.id) }
             for session in disappeared where session.status != .exited {
                 session.detach()
                 session.markExited("This terminal is no longer running.")
             }
-            sessions[workspaceID] = restored + disappeared
+            sessions[workspaceID] = restored + createdDuringLoad + disappeared
             for session in restored { session.attach { try await store.daemonEndpoint() } }
             loading = false
             if tabs.isEmpty, store.terminalCreationRequest == nil { await create(store: store) }
@@ -93,6 +97,7 @@ extension Notification.Name {
             if session.status != .exited { self.error = "Couldn’t close terminal. \(error.localizedDescription)"; return }
         }
         session.detach()
+        closedSessions.insert(session.id)
         let workspace = session.info.workspaceID
         let previous = sessions[workspace] ?? []
         let index = previous.firstIndex { $0.id == session.id } ?? 0
@@ -114,7 +119,12 @@ extension Notification.Name {
         selected[workspaceID] = tabs[index].id
     }
 
-    func detach() { sessions.values.flatMap { $0 }.forEach { $0.detach() } }
+    func detach() {
+        sessions.values.flatMap { $0 }.forEach { $0.detach() }
+        loadToken = UUID()
+        workspaceID = nil
+        loading = false; creating = false
+    }
 }
 
 /// A native VT100/xterm surface backed exclusively by daemon-owned PTYs.

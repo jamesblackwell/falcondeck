@@ -79,7 +79,7 @@ actor NativeParakeetRuntime {
         }
         let response = try await request(operation: "transcribe", path: path)
         let text = response.text?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-        guard !text.isEmpty else { throw ParakeetFailure("Parakeet did not detect any speech.") }
+        guard !text.isEmpty else { throw ParakeetFailure("No speech was detected by Parakeet.") }
         return text
     }
 

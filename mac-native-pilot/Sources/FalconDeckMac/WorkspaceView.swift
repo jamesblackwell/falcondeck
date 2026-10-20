@@ -41,6 +41,7 @@ struct WorkspaceView: View {
             }
         }
         .navigationTitle("FalconDeck")
+        .background(NativeWorkspaceWindowAnchor())
         .tint(FDTheme.accent)
         .toolbar {
             ToolbarItemGroup(placement: .primaryAction) {
@@ -89,6 +90,29 @@ struct WorkspaceView: View {
         panel.begin { response in
             guard response == .OK, let url = panel.url else { return }
             Task { @MainActor in await store.openProject(path: url.path) }
+        }
+    }
+}
+
+/// Auxiliary windows route task opens back to the workspace instead of leaving
+/// the changed conversation hidden behind Activity or a notification popover.
+@MainActor enum NativeWorkspaceWindow {
+    static weak var window: NSWindow?
+    static func show() {
+        guard let window else { return }
+        NSApp.activate(ignoringOtherApps: true)
+        if window.isMiniaturized { window.deminiaturize(nil) }
+        window.makeKeyAndOrderFront(nil)
+    }
+}
+
+private struct NativeWorkspaceWindowAnchor: NSViewRepresentable {
+    func makeNSView(context: Context) -> Anchor { Anchor(frame: .zero) }
+    func updateNSView(_ nsView: Anchor, context: Context) {}
+    final class Anchor: NSView {
+        override func viewDidMoveToWindow() {
+            super.viewDidMoveToWindow()
+            if let window { NativeWorkspaceWindow.window = window }
         }
     }
 }

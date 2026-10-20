@@ -44,7 +44,10 @@ import Observation
         didSet { fd_native_speech_suspend_shortcuts(isCapturingShortcut) }
     }
 
-    @ObservationIgnored private let defaults = UserDefaults.standard
+    @ObservationIgnored private let defaults: UserDefaults
+    @ObservationIgnored private let historyURL: URL
+    @ObservationIgnored private let recoveryURL: URL
+    @ObservationIgnored private let recordingDirectory: URL
     @ObservationIgnored private weak var store: AppStore?
     @ObservationIgnored private var observers: [NSObjectProtocol] = []
     @ObservationIgnored private var processing: Task<Void, Never>?
@@ -62,14 +65,20 @@ import Observation
     private var reasoningByModel: [String: [String]] = [:]
     @ObservationIgnored private var overlay: NativeSpeechPanel?
 
-    private init() {
+    init(defaults: UserDefaults = .standard, historyURL: URL = NativeSpeechFiles.historyURL,
+         recoveryURL: URL = NativeSpeechFiles.recoveryURL,
+         recordingDirectory: URL = FileManager.default.temporaryDirectory) {
+        self.defaults = defaults
+        self.historyURL = historyURL
+        self.recoveryURL = recoveryURL
+        self.recordingDirectory = recordingDirectory
         config = defaults.data(forKey: "native.voice.configuration")
             .flatMap { try? JSONDecoder().decode(NativeVoiceConfiguration.self, from: $0) } ?? NativeVoiceConfiguration()
         dictionary = defaults.data(forKey: "native.voice.dictionary")
             .flatMap { try? JSONDecoder().decode([NativeDictionaryEntry].self, from: $0) } ?? []
-        history = (try? Data(contentsOf: NativeSpeechFiles.historyURL))
+        history = (try? Data(contentsOf: historyURL))
             .flatMap { try? JSONDecoder().decode([NativeRecording].self, from: $0) } ?? []
-        if let data = try? Data(contentsOf: NativeSpeechFiles.recoveryURL),
+        if let data = try? Data(contentsOf: recoveryURL),
            let recovery = try? JSONDecoder().decode(NativeTranscriptRecovery.self, from: data) {
             lastTranscript = recovery.text
             hasPendingTranscript = !recovery.text.isEmpty
@@ -209,6 +218,8 @@ import Observation
 
     func retryPending() {
         guard !isRecording && !isBusy && pendingIsReadable else { return }
+        dismissTask?.cancel()
+        isBusy = true
         recoveryCopy = true
         retryModel = nil
         generation = UUID()
@@ -216,8 +227,10 @@ import Observation
     }
 
     func undoCancellation() {
+        guard canUndo && !isRecording && !isBusy else { return }
         dismissTask?.cancel()
         canUndo = false
+        isBusy = true
         recoveryCopy = false
         fd_dictation_retry(false)
     }
@@ -232,7 +245,7 @@ import Observation
         hasPendingRecording = false
         hasPendingTranscript = false
         lastTranscript = ""
-        try? FileManager.default.removeItem(at: NativeSpeechFiles.recoveryURL)
+        try? FileManager.default.removeItem(at: recoveryURL)
         dismissOverlay()
     }
 
@@ -245,6 +258,7 @@ import Observation
 
     func pastePending() {
         guard !lastTranscript.isEmpty && !isBusy else { return }
+        dismissTask?.cancel()
         // Explicit retry always captures the live destination. If it is our own
         // editor, take a fresh task/caret identity before the native callback.
         captureTextTarget()
@@ -338,17 +352,23 @@ import Observation
         }
     }
 
-    private static func validShortcut(_ value: String) -> Bool {
+    static func validShortcut(_ value: String) -> Bool {
         let modifiers = ["right_command", "left_command", "left_function", "right_option", "left_option", "right_control", "left_control", "caps_lock"]
         if modifiers.contains(value) { return true }
-        let parts = value.split(separator: "+").map(String.init)
+        let parts = value.split(separator: "+", omittingEmptySubsequences: false).map(String.init)
         guard !parts.isEmpty, let key = parts.last, !key.isEmpty,
               parts.dropLast().allSatisfy({ ["Mod", "Meta", "Command", "Ctrl", "Control", "Alt", "Option", "Shift"].contains($0) }) else { return false }
+        // Match the recorder: imported settings cannot consume ordinary typing.
+        if (key.count == 1 || key == "Space") && parts.dropLast().allSatisfy({ $0 == "Shift" }) { return false }
         return key.range(of: "^(?:[A-Za-z0-9]|F(?:[1-9]|1[0-9]|20)|Space|Enter|Return|Tab|Backspace|Delete|Home|End|PageUp|PageDown|Left|Right|Up|Down|[=,./;'\\[\\]`-])$", options: .regularExpression) != nil
     }
 
     func dismissOverlay() {
         dismissTask?.cancel()
+        if canUndo {
+            fd_dictation_drop_cancelled()
+            hasPendingRecording = false
+        }
         generation = UUID()
         processing?.cancel()
         if isBusy {
@@ -359,7 +379,7 @@ import Observation
         canUndo = false
         if !hasPendingRecording {
             hasPendingTranscript = false
-            try? FileManager.default.removeItem(at: NativeSpeechFiles.recoveryURL)
+            try? FileManager.default.removeItem(at: recoveryURL)
         }
     }
 
@@ -442,8 +462,9 @@ import Observation
             lastTranscript = recording.transcript ?? ""
             hasPendingTranscript = !lastTranscript.isEmpty
             if hasPendingTranscript { try remember(lastTranscript) }
-            else { try? FileManager.default.removeItem(at: NativeSpeechFiles.recoveryURL) }
+            else { try? FileManager.default.removeItem(at: recoveryURL) }
             currentRecordingPath = file.path
+            isBusy = true
             currentProvider = model == nil ? recording.provider : "openrouter"
             let provider: Int32 = currentProvider == "parakeet" ? 2 : currentProvider == "openrouter" ? 1 : 0
             file.path.withCString { fd_native_speech_retry_file($0, provider) }
@@ -460,38 +481,41 @@ import Observation
     }
 
     func clearHistory() {
-        let protected = retainedPath()
-        for recording in history where recording.path != protected {
+        let protected = protectedRecordingPaths()
+        for recording in history where !protected.contains(recording.path) {
             if let file = try? NativeSpeechFiles.validatedURL(recording.path) { try? FileManager.default.removeItem(at: file) }
         }
-        history.removeAll { $0.path != protected }
+        history.removeAll { !protected.contains($0.path) }
         persistHistory()
     }
 
     private func pruneHistory() {
         let threshold = Date().addingTimeInterval(-Double(max(0, config.historyRetentionHours)) * 3600)
-        let protected = retainedPath()
-        let expired = history.filter { $0.date < threshold && $0.path != protected }
+        let protected = protectedRecordingPaths()
+        let expired = history.filter { $0.date < threshold && !protected.contains($0.path) }
         for recording in expired {
             if let file = try? NativeSpeechFiles.validatedURL(recording.path) { try? FileManager.default.removeItem(at: file) }
         }
         history.removeAll { record in
-            record.path != protected && (record.date < threshold || !FileManager.default.fileExists(atPath: record.path))
+            !protected.contains(record.path) && (record.date < threshold || !FileManager.default.fileExists(atPath: record.path))
         }
         if history.count > 200 {
-            let overflow = history.dropFirst(200).filter { $0.path != protected }
+            let overflow = history.dropFirst(200).filter { !protected.contains($0.path) }
             for recording in overflow {
                 if let file = try? NativeSpeechFiles.validatedURL(recording.path) { try? FileManager.default.removeItem(at: file) }
             }
             let expiredIDs = Set(overflow.map(\.id))
             history.removeAll { expiredIDs.contains($0.id) }
         }
-        if config.historyRetentionHours > 0 {
-            let files = (try? FileManager.default.contentsOfDirectory(at: FileManager.default.temporaryDirectory,
+        // Capture/export can still be creating a sibling M4A before adoption.
+        // Sweep only after active work settles, including with retention off.
+        if !isRecording && !isBusy {
+            let files = (try? FileManager.default.contentsOfDirectory(at: recordingDirectory,
                 includingPropertiesForKeys: [.contentModificationDateKey], options: [.skipsHiddenFiles])) ?? []
             let indexed = Set(history.map(\.path))
-            for file in files where file.path != protected && !indexed.contains(file.path) {
+            for file in files where !protected.contains(file.path) && !indexed.contains(file.path) {
                 guard let owned = try? NativeSpeechFiles.validatedURL(file.path),
+                      !protected.contains(owned.path), !indexed.contains(owned.path),
                       let modified = try? owned.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate,
                       modified < threshold else { continue }
                 try? FileManager.default.removeItem(at: owned)
@@ -501,8 +525,14 @@ import Observation
     }
 
     private func persistHistory() {
-        do { try NativeSpeechFiles.save(history, at: NativeSpeechFiles.historyURL) }
+        do { try NativeSpeechFiles.save(history, at: historyURL) }
         catch { status = "Recording history could not be saved: \(error.localizedDescription)" }
+    }
+
+    private func protectedRecordingPaths() -> Set<String> {
+        var paths = Set(retainedPath().map { [$0] } ?? [])
+        if isRecording || isBusy, let currentRecordingPath { paths.insert(currentRecordingPath) }
+        return paths
     }
 
     private func retainedPath() -> String? {
@@ -528,12 +558,12 @@ import Observation
 
     private func remember(_ text: String) throws {
         // Persist successful text before clearing the native pending recording.
-        try NativeSpeechFiles.save(NativeTranscriptRecovery(text: text), at: NativeSpeechFiles.recoveryURL)
+        try NativeSpeechFiles.save(NativeTranscriptRecovery(text: text), at: recoveryURL)
         lastTranscript = text
         hasPendingTranscript = !text.isEmpty
     }
 
-    private func receive(kind: Int32, payload: String) {
+    func receive(kind: Int32, payload: String) {
         switch kind {
         case 0:
             NativeAudioPlayback.shared.stop()
@@ -549,7 +579,7 @@ import Observation
             lastInsertion = nil
             lastTranscript = ""
             hasPendingTranscript = false
-            try? FileManager.default.removeItem(at: NativeSpeechFiles.recoveryURL)
+            try? FileManager.default.removeItem(at: recoveryURL)
             isRecording = true
             isBusy = false
             canUndo = false
@@ -741,7 +771,7 @@ import Observation
     private func finishDelivered(_ text: String) {
         isRecording = false; isBusy = false; hasPendingRecording = false; canUndo = false
         if !text.isEmpty { try? remember(text) }
-        else { lastTranscript = ""; hasPendingTranscript = false; try? FileManager.default.removeItem(at: NativeSpeechFiles.recoveryURL) }
+        else { lastTranscript = ""; hasPendingTranscript = false; try? FileManager.default.removeItem(at: recoveryURL) }
         status = text.isEmpty ? "Words removed" : recoveryCopy ? "Copied — paste when ready" : "Transcript ready"
         rewriteSelection = nil
         currentRecordingPath = nil

@@ -35,9 +35,9 @@ pub fn start(app: &AppState) {
         app.control().notify_scheduler();
         return;
     }
-    let app = app.clone();
-    tokio::spawn(async move {
-        scheduler_loop(app).await;
+    let task_app = app.clone();
+    app.spawn_background_task(async move {
+        scheduler_loop(task_app).await;
     });
 }
 
@@ -60,6 +60,7 @@ async fn scheduler_loop(app: AppState) {
                 duration.min(SCHEDULER_IDLE_POLL)
             });
         tokio::select! {
+            () = app.wait_for_shutdown() => return,
             () = app.control().scheduler_notified() => {}
             () = sleep(wait) => {}
         }
@@ -95,17 +96,32 @@ async fn dispatch_due(
 /// occurrence, which is the queue_one concurrency policy. Returns whether an
 /// executor was spawned.
 pub async fn try_execute_queued(app: &AppState, run_id: &str) -> bool {
+    if app.is_shutting_down() {
+        return false;
+    }
     // The atomic claim covers both gates at once: only queued runs are
     // taken, and a run whose automation already has an active occurrence
     // (queue_one) stays queued.
     if !app.control().claim_run_if_automation_free(run_id).await {
         return false;
     }
-    let app = app.clone();
-    let run_id = run_id.to_string();
-    tokio::spawn(async move {
-        execute_run(&app, &run_id).await;
-    });
+    let task_app = app.clone();
+    let task_run_id = run_id.to_string();
+    if !app.spawn_background_task(async move {
+        execute_run(&task_app, &task_run_id).await;
+    }) {
+        let _ = app
+            .control()
+            .finish_run(
+                run_id,
+                AutomationRunStatus::Cancelled,
+                Some("Daemon stopped before the run completed".to_string()),
+                None,
+            )
+            .await;
+        emit_runs_changed(app).await;
+        return false;
+    }
     true
 }
 
@@ -311,6 +327,19 @@ async fn execute_run(app: &AppState, run_id: &str) {
     terminal_poll.tick().await;
     loop {
         let event = tokio::select! {
+            () = app.wait_for_shutdown() => {
+                let _ = app
+                    .control()
+                    .finish_run(
+                        run_id,
+                        AutomationRunStatus::Cancelled,
+                        Some("Daemon stopped before the run completed".to_string()),
+                        None,
+                    )
+                    .await;
+                emit_runs_changed(app).await;
+                return;
+            }
             event = events.recv() => Some(event),
             _ = terminal_poll.tick() => None,
         };

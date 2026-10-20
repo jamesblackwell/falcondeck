@@ -6,6 +6,11 @@ enum TranscriptPresentation {
         values.first { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty } ?? ""
     }
 
+    /// The summary labels a thought; expanding it must reveal the retained body.
+    static func reasoningBody(_ item: JSON) -> String {
+        nonempty(item["content"].string, item["summary"].string)
+    }
+
     static func pretty(_ value: JSON) -> String {
         if case .string(let text) = value { return text }
         guard value != .null, let data = try? value.data(),

@@ -30,4 +30,32 @@ final class RuntimeTests: XCTestCase {
         let active = await runtime.activeThreadCount()
         XCTAssertEqual(active, 0)
     }
+
+    func testStdioHelpersDoNotBlockDaemonRecovery() {
+        XCTAssertFalse(NativeRuntime.hasOtherRuntime(processes: """
+        1 /Applications/FalconDeck.app/Contents/MacOS/falcondeck-desktop
+        2 /Applications/FalconDeck Native.app/Contents/MacOS/FalconDeckMac
+        3 /opt/falcondeck-daemon
+        4 /Applications/FalconDeck.app/Contents/MacOS/falcondeck-desktop
+        """, arguments: """
+        1 /Applications/FalconDeck.app/Contents/MacOS/falcondeck-desktop mcp
+        2 /Applications/FalconDeck Native.app/Contents/MacOS/FalconDeckMac mcp-extensions
+        3 falcondeck-daemon mcp-future
+        4 /Applications/FalconDeck.app/Contents/MacOS/falcondeck-desktop
+        """, ownPID: 4))
+    }
+
+    func testOrdinaryRuntimeStillBlocksDaemonTakeover() {
+        XCTAssertTrue(NativeRuntime.hasOtherRuntime(
+            processes: "1 /Applications/FalconDeck Native.app/Contents/MacOS/FalconDeckMac",
+            arguments: "1 /Applications/FalconDeck Native.app/Contents/MacOS/FalconDeckMac",
+            ownPID: 2
+        ))
+    }
+
+    func testMissingProcessArgumentsConservativelyProtectsTheRuntime() {
+        XCTAssertTrue(NativeRuntime.hasOtherRuntime(
+            processes: "1 /opt/falcondeck-daemon", arguments: "", ownPID: 2
+        ))
+    }
 }

@@ -24,7 +24,37 @@ final class ConversationComposerTests: XCTestCase {
         selection.select("model_id", value: "different", provider: "agent")
         XCTAssertEqual(selection.fields["model_id"], .string("different"))
         XCTAssertEqual(selection.fields["reasoning_effort"], .null)
-        XCTAssertNil(selection.fields["service_tier"])
+        // Omitting the field leaves an existing task's speed unchanged.
+        XCTAssertEqual(selection.fields["service_tier"], .null)
+    }
+
+    func testExistingTaskDoesNotInheritNewTaskPermissionAndModelPicks() {
+        let project = Project(.object(["id": .string("p")]))
+        let task = AgentTask(.object(["id": .string("existing"), "agent": .object([
+            "model_id": .string("task-model"), "permission_mode": .string("default"), "sandbox_mode": .string("read-only")
+        ])]))
+        let stored = NativeComposerSelection(fields: ["model_id": .string("preferred-model"), "permission_mode": .string("never"), "sandbox_mode": .string("danger-full-access")])
+        let restored = NativeComposerSelection.restored(stored, task: task, project: project, provider: "codex")
+        XCTAssertTrue(restored.fields.isEmpty)
+        XCTAssertEqual(restored.value("model_id", task: task), "task-model")
+        XCTAssertEqual(restored.value("permission_mode", task: task), "default")
+        XCTAssertEqual(restored.value("sandbox_mode", task: task), "read-only")
+        XCTAssertEqual(NativeComposerSelection.restored(NativeComposerSelection(fields: ["model_id": .string("preferred-model")]), task: nil, project: project, provider: "codex").fields["model_id"], .string("preferred-model"))
+    }
+
+    func testEffortValidationUsesExistingTaskModelInsteadOfProviderDefault() {
+        func model(_ id: String, effort: String, isDefault: Bool) -> JSON {
+            .object(["id": .string(id), "is_default": .bool(isDefault), "supported_reasoning_efforts": .array([
+                .object(["reasoning_effort": .string(effort)])
+            ])])
+        }
+        let project = Project(.object(["id": .string("p"), "default_provider": .string("codex"), "models": .array([
+            model("default-model", effort: "low", isDefault: true), model("task-model", effort: "high", isDefault: false)
+        ])]))
+        let task = AgentTask(.object(["id": .string("t"), "agent": .object(["model_id": .string("task-model")])]))
+        let selection = NativeComposerSelection(fields: ["reasoning_effort": .string("high")])
+        XCTAssertEqual(selection.validated(project: project, provider: "codex", task: task).fields["reasoning_effort"], .string("high"))
+        XCTAssertNil(selection.validated(project: project, provider: "codex").fields["reasoning_effort"])
     }
 
     func testSavedPromptInsertionKeepsArgumentsAndEarlierLines() {

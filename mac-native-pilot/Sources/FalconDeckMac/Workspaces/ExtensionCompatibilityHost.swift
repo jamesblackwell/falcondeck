@@ -67,6 +67,7 @@ struct NativeExtensionCompatibilityHost: NSViewRepresentable {
         private var ready = false
         private var closing = false
         private var lastPayload: JSON?
+        private var scope: NativeExtensionBridgeScope { .init(hostID: parent.hostID) }
         private var identity: String {
             [parent.hostID ?? "local", parent.extensionID, parent.panelID, parent.toolResult?.id ?? "", parent.presentation].joined(separator: "\0")
         }
@@ -150,15 +151,16 @@ struct NativeExtensionCompatibilityHost: NSViewRepresentable {
                         if let refreshed = try? await store.request(path: "/api/extensions", hostID: hostID), requestIdentity == identity {
                             parent.repository.adopt(refreshed)
                         }
-                        let projected = JSON.object(["result": response["result"], "updatedViews": .array(response["updated_views"].array.filter { $0["extension_id"].string == extensionID }.map(Self.appView))])
+                        let projected = JSON.object(["result": response["result"], "updatedViews": .array(response["updated_views"].array.filter { $0["extension_id"].string == extensionID }.map(scope.appView))])
                         replyHandler(try JSONSerialization.jsonObject(with: projected.data(), options: .fragmentsAllowed), nil)
                     case "openThread":
+                        let taskID = try scope.appID(request["threadId"].string)
+                        let projectID = try scope.appID(request["workspaceId"].string)
                         guard parent.toolResult == nil, item["granted_permissions"].array.contains(.string("threads:read")),
-                              NativeHostManager.split(request["threadId"].string).hostID == hostID,
-                              parent.store.tasks.contains(where: { $0.id == request["threadId"].string && $0.projectID == request["workspaceId"].string }) else {
+                              parent.store.tasks.contains(where: { $0.id == taskID && $0.projectID == projectID }) else {
                             throw PilotError("This task is not available to the extension.")
                         }
-                        await parent.store.selectTask(request["threadId"].string)
+                        await parent.store.selectTask(taskID)
                         replyHandler(NSNull(), nil)
                     case "startTask":
                         guard parent.toolResult == nil, parent.store.selectedHostID == hostID else { throw PilotError("Return to this extension's host before creating a task.") }
@@ -213,7 +215,7 @@ struct NativeExtensionCompatibilityHost: NSViewRepresentable {
             let canRead = parent.toolResult == nil && permissions.contains(.string("threads:read"))
             let threads: [JSON] = canRead ? parent.store.tasks.filter { NativeHostManager.split($0.id).hostID == parent.hostID }.sorted { $0.updatedAt > $1.updatedAt }.prefix(1000).map { task in
                 .object([
-                    "id": .string(task.id), "workspaceId": .string(task.projectID),
+                    "id": .string(scope.localID(task.id)), "workspaceId": .string(scope.localID(task.projectID)),
                     "title": .string(String(task.title.prefix(256))), "status": .string(task.status),
                     "updatedAt": .string(task.updatedAt),
                     "pendingApprovalCount": task.raw["attention"]["pending_approval_count"],
@@ -221,9 +223,9 @@ struct NativeExtensionCompatibilityHost: NSViewRepresentable {
                 ])
             } : []
             let workspaces: [JSON] = canRead ? parent.store.allProjects.filter { NativeHostManager.split($0.id).hostID == parent.hostID }.map { project in
-                .object(["id": .string(project.id), "name": .string(project.name), "kind": project.raw["kind"]])
+                .object(["id": .string(scope.localID(project.id)), "name": .string(project.name), "kind": project.raw["kind"]])
             } : []
-            let views = parent.repository.snapshot["views"].array.filter { $0["extension_id"].string == parent.extensionID }.map(Self.appView)
+            let views = parent.repository.snapshot["views"].array.filter { $0["extension_id"].string == parent.extensionID }.map(scope.appView)
             var payload = JSON.object([
                 "extensionId": .string(parent.extensionID), "panelId": .string(parent.panelID),
                 "permissions": .array(permissions), "threads": .array(threads), "workspaces": .array(workspaces),
@@ -246,10 +248,6 @@ struct NativeExtensionCompatibilityHost: NSViewRepresentable {
                     }
                 }
             } catch { parent.repository.error = error.localizedDescription }
-        }
-
-        private static func appView(_ view: JSON) -> JSON {
-            .object(["viewId": view["view_id"], "scope": view["scope"], "value": view["value"], "updatedAt": view["updated_at"]])
         }
     }
 }

@@ -753,6 +753,9 @@ impl AppState {
     /// it from status polling, startup recovery, and a worker's exit path.
     async fn ensure_remote_bridge_running(&self) {
         let mut remote = self.inner.remote.lock().await;
+        if self.is_shutting_down() {
+            return;
+        }
         reconcile_remote_runtime_state(&mut remote);
 
         if remote.task.is_some()
@@ -797,6 +800,9 @@ impl AppState {
         relay_url: String,
         daemon_token: String,
     ) {
+        if self.is_shutting_down() {
+            return;
+        }
         let (command_tx, command_rx) = mpsc::unbounded_channel();
         let app = self.clone();
         let task = tokio::spawn(async move {
@@ -808,9 +814,15 @@ impl AppState {
             // task: calling it inline would observe this task as unfinished
             // and early-return, leaving the bridge down until the next
             // remote_status poll — which never comes when no UI is open.
-            tokio::spawn(async move {
-                sleep(Duration::from_secs(1)).await;
-                app.ensure_remote_bridge_running().await;
+            let respawn_app = app.clone();
+            app.spawn_background_task(async move {
+                if !respawn_app
+                    .sleep_unless_shutting_down(Duration::from_secs(1))
+                    .await
+                {
+                    return;
+                }
+                respawn_app.ensure_remote_bridge_running().await;
             });
         });
         remote.command_tx = Some(command_tx);

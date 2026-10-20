@@ -18,6 +18,8 @@ import Observation
     @ObservationIgnored private var preparationTask: Task<Void, Never>?
     @ObservationIgnored private var generation = UUID()
     @ObservationIgnored private weak var playbackStore: AppStore?
+    @ObservationIgnored private var playbackTaskID: String?
+    @ObservationIgnored private var playbackHostID: String?
     @ObservationIgnored private var pendingChunks: [String] = []
     @ObservationIgnored private var engine: AVAudioEngine?
     @ObservationIgnored private var realtimeNode: AVAudioPlayerNode?
@@ -32,7 +34,7 @@ import Observation
 
     /// Calling this again for the same message also stops a request that is still preparing.
     func speak(messageID: String, text: String, store: AppStore) {
-        if currentlyPlayingID == messageID { stop(); return }
+        if currentlyPlayingID == messageID, matchesReadAloudSelection(store) { stop(); return }
         stop()
         stopRealtime()
         error = nil
@@ -46,6 +48,8 @@ import Observation
         }
         currentlyPlayingID = messageID
         playbackStore = store
+        playbackTaskID = store.selectedTaskID
+        playbackHostID = store.selectedHostID
         playNextChunk()
     }
 
@@ -58,6 +62,8 @@ import Observation
         player = nil
         currentlyPlayingID = nil
         playbackStore = nil
+        playbackTaskID = nil
+        playbackHostID = nil
         pendingChunks.removeAll()
         isPlaying = false
         isPreparing = false
@@ -67,18 +73,21 @@ import Observation
 
     private func playNextChunk() {
         guard let store = playbackStore, currentlyPlayingID != nil, !pendingChunks.isEmpty else { stop(); return }
+        guard matchesReadAloudSelection(store) else { stop(); return }
         let text = pendingChunks.removeFirst()
         let current = generation
+        let hostID = playbackHostID
         isPreparing = true
         isPlaying = false
         preparationTask = Task { [weak self, weak store] in
             guard let store else { return }
             do {
                 let response = try await store.request(
-                    ["api", "speech", "synthesize"], method: "POST", body: .object(["text": .string(text)])
+                    ["api", "speech", "synthesize"], method: "POST", body: .object(["text": .string(text)]), hostID: hostID
                 )
                 try Task.checkCancellation()
                 guard let self, self.generation == current, self.currentlyPlayingID != nil else { return }
+                guard self.matchesReadAloudSelection(store) else { self.stop(); return }
                 let data = try Self.decodeSynthesizedAudio(response)
                 let player = try AVAudioPlayer(data: data)
                 player.delegate = self
@@ -90,10 +99,15 @@ import Observation
                 self.preparationTask = nil
             } catch {
                 guard let self, self.generation == current else { return }
+                guard self.matchesReadAloudSelection(store) else { self.stop(); return }
                 if error is CancellationError { self.stop() }
                 else { self.failReadAloud(error) }
             }
         }
+    }
+
+    private func matchesReadAloudSelection(_ store: AppStore) -> Bool {
+        playbackStore === store && playbackTaskID == store.selectedTaskID && playbackHostID == store.selectedHostID
     }
 
     private func failReadAloud(_ failure: Error) {
@@ -164,12 +178,12 @@ import Observation
             realtimeTaskID = taskID
             realtimeEnding = false
         case "realtime-audio-ended":
+            guard realtimeTaskID == taskID else { return }
             if event["interrupted"].bool { stopRealtime() }
-            else if realtimeTaskID == taskID {
+            else {
                 realtimeEnding = true
                 if realtimeQueuedBytes == 0 { stopRealtime() }
             }
-            if silencedTaskID == taskID { silencedTaskID = nil }
         case "realtime-audio-delta":
             guard silencedTaskID != taskID else { return }
             if let current = realtimeTaskID, current != taskID { stopRealtime() }

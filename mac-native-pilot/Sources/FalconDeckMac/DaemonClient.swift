@@ -6,6 +6,7 @@ actor DaemonClient {
     private let configuredURL: URL?
     private let session: URLSession
     private var endpoint: URL?
+    private var discoveryGeneration = UUID()
     private var socket: URLSessionWebSocketTask?
     private var receiveTask: Task<Void, Never>?
     private var streamID: UUID?
@@ -19,20 +20,22 @@ actor DaemonClient {
     /// normal development daemon. Only FalconDeck-owned listeners are probed.
     func discover() async throws -> URL {
         if let endpoint { return endpoint }
+        let current = discoveryGeneration
+        let resolved: URL
         if let configuredURL {
             let url = try Self.validateEndpoint(configuredURL)
             try await verifyHealth(url)
-            endpoint = url
-            return url
-        }
-        if let value = ProcessInfo.processInfo.environment["FALCONDECK_DAEMON_URL"], !value.isEmpty {
+            resolved = url
+        } else if let value = ProcessInfo.processInfo.environment["FALCONDECK_DAEMON_URL"], !value.isEmpty {
             guard let url = URL(string: value) else { throw PilotError("The local daemon address is invalid.") }
             let validated = try Self.validateEndpoint(url)
             try await verifyHealth(validated)
-            endpoint = validated
-            return validated
+            resolved = validated
+        } else {
+            resolved = try await NativeRuntime.shared.endpoint()
         }
-        let resolved = try await NativeRuntime.shared.endpoint()
+        try Task.checkCancellation()
+        guard current == discoveryGeneration else { throw CancellationError() }
         endpoint = resolved
         return resolved
     }
@@ -102,7 +105,17 @@ actor DaemonClient {
     /// The caller applies event envelopes as idempotent upserts.
     func events() async throws -> AsyncThrowingStream<JSON, Error> {
         stopStream()
-        let base = try await discover()
+        let id = UUID()
+        streamID = id
+        let base: URL
+        do {
+            base = try await discover()
+            try Task.checkCancellation()
+            guard streamID == id else { throw CancellationError() }
+        } catch {
+            stopStream(id: id)
+            throw error
+        }
         var components = URLComponents(url: Self.apiURL(base: base, path: ["api", "events"]), resolvingAgainstBaseURL: false)!
         components.scheme = "ws"
         var request = URLRequest(url: components.url!)
@@ -111,9 +124,7 @@ actor DaemonClient {
         request.setValue("tauri://localhost", forHTTPHeaderField: "Origin")
         let ws = session.webSocketTask(with: request)
         ws.maximumMessageSize = 64 * 1024 * 1024
-        let id = UUID()
         socket = ws
-        streamID = id
         ws.resume()
         return AsyncThrowingStream { continuation in
             receiveTask = Task { [weak self] in
@@ -147,7 +158,7 @@ actor DaemonClient {
     /// Clears discovery so a daemon restarted on a new ephemeral port is found.
     func disconnect() {
         stopStream()
-        endpoint = nil
+        invalidateDiscovery()
     }
 
     private func stopStream(id: UUID? = nil) {
@@ -165,7 +176,12 @@ actor DaemonClient {
         socket = nil
         receiveTask = nil
         streamID = nil
+        invalidateDiscovery()
+    }
+
+    private func invalidateDiscovery() {
         endpoint = nil
+        discoveryGeneration = UUID()
     }
 
     private func threadPath(_ projectID: String, _ threadID: String) -> [String] {

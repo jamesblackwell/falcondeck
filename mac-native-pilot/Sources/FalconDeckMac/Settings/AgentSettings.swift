@@ -302,11 +302,11 @@ struct NativeHarnessesSettingsView: View {
     private var hostSelection: Binding<String> {
         Binding(get: {
             if target.isEmpty { return "local" }
-            return NativeHostManager.shared.hosts.first { $0.sshTarget == target && String($0.sshPort) == (port.isEmpty ? "22" : port) }?.id ?? "manual"
+            return NativeHostManager.shared.hosts.first { $0.sshTarget == target && ($0.sshPort.map(String.init) ?? "") == port }?.id ?? "manual"
         }, set: { value in
             if value == "local" { target = ""; port = "" }
             else if let host = NativeHostManager.shared.hosts.first(where: { $0.id == value }), let ssh = host.sshTarget {
-                target = ssh; port = host.sshPort == 22 ? "" : String(host.sshPort)
+                target = ssh; port = host.sshPort.map(String.init) ?? ""
             } else { return }
             Task { await load(deep: !target.isEmpty) }
         })
@@ -326,7 +326,7 @@ struct NativeHarnessesSettingsView: View {
                     ForEach(NativeHostManager.shared.hosts.filter { $0.sshTarget != nil }) { host in
                         Text(host.name).tag(host.id)
                     }
-                    if !target.isEmpty && !NativeHostManager.shared.hosts.contains(where: { $0.sshTarget == target }) {
+                    if !target.isEmpty && !NativeHostManager.shared.hosts.contains(where: { $0.sshTarget == target && ($0.sshPort.map(String.init) ?? "") == port }) {
                         Text("Custom SSH target").tag("manual")
                     }
                 }

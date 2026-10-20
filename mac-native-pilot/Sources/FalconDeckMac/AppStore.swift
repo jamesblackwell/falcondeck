@@ -64,37 +64,55 @@ extension DaemonClient: DaemonServing {}
     private var requests: [JSON] = []
     @ObservationIgnored private let client: any DaemonServing
     @ObservationIgnored private let inputStore: NativeInputStore?
+    @ObservationIgnored private let readVisibility: @MainActor () -> Bool
     @ObservationIgnored private var connectionTask: Task<Void, Never>?
     @ObservationIgnored private var loadID = UUID()
+    @ObservationIgnored private var navigationID = UUID()
+    @ObservationIgnored private var olderLoadID: UUID?
+    @ObservationIgnored private var loadedTaskID: String?
     @ObservationIgnored private var connectionID = UUID()
     @ObservationIgnored private var bufferedEvents: [JSON] = []
     @ObservationIgnored private var bufferedOverflow = false
     @ObservationIgnored private var recoveryTask: Task<Void, Never>?
+    @ObservationIgnored private var recoveryID = UUID()
     @ObservationIgnored private var hostTask: Task<Void, Never>?
     @ObservationIgnored private var localSnapshot: JSON = .null
+    @ObservationIgnored private var localEventRevision: UInt64 = 0
     private var remoteSnapshots: [String: JSON] = [:]
     private var remoteStatuses: [String: NativeHostStatus] = [:]
     @ObservationIgnored private var preferenceRevision: [String: UInt64] = [:]
     @ObservationIgnored private var preferenceWrites: [String: Task<Void, Error>] = [:]
     @ObservationIgnored private var lastReadSequences: [String: Int] = [:]
+    private struct PendingRead { let id: UUID; let sequence: Int }
+    @ObservationIgnored private var pendingReads: [String: PendingRead] = [:]
+    private var projectOrderSlots: [String] = []
     private struct Navigation: Equatable {
         var section: String
         var project: String?
         var task: String?
+        var extensionID: String?
+        var panelID: String?
     }
     @ObservationIgnored private var navigationHistory: [Navigation] = []
     @ObservationIgnored private var navigationIndex = -1
-    @ObservationIgnored private var restoringNavigation = false
+    @ObservationIgnored private var taskNavigationIDs: [String] = []
+    @ObservationIgnored private var taskNavigationSection: String?
+    @ObservationIgnored private var taskNavigationProject: String?
     var selectedHostID: String? { selectedProjectID.flatMap { NativeHostManager.split($0).hostID } }
     var isSelectedHostConnected: Bool {
         guard let host = selectedHostID else { return isConnected }
         return remoteStatuses[host] == .connected
     }
 
-    init(client: any DaemonServing = DaemonClient(), inputStore: NativeInputStore? = nil) {
+    init(client: any DaemonServing = DaemonClient(), inputStore: NativeInputStore? = nil,
+         readVisibility: (@MainActor () -> Bool)? = nil) {
         self.client = client
         self.inputStore = inputStore ?? (client is DaemonClient ? .shared : nil)
+        self.readVisibility = readVisibility ?? {
+            NSApp?.isActive == true && NSApp?.keyWindow != nil && NativePlatform.nativeDesktopPresence() != false
+        }
         if client is DaemonClient {
+            projectOrderSlots = UserDefaults.standard.stringArray(forKey: "falcondeck.native.projectOrderSlots") ?? []
             selectedProjectID = UserDefaults.standard.string(forKey: "falcondeck.native.selectedProject")
             selectedTaskID = UserDefaults.standard.string(forKey: "falcondeck.native.selectedTask")
             selectedSection = UserDefaults.standard.string(forKey: "falcondeck.native.selectedSection") ?? "project"
@@ -107,7 +125,7 @@ extension DaemonClient: DaemonServing {}
     var extensions: JSON { extensionsForHost(selectedHostID) }
     func extensionsForHost(_ hostID: String?) -> JSON {
         guard let hostID else { return snapshotRaw["extensions"] }
-        return NativeHostProjection.snapshot(remoteSnapshots[hostID] ?? .null, host: hostID)["extensions"]
+        return NativeHostProjection.extensions((remoteSnapshots[hostID] ?? .null)["extensions"], host: hostID)
     }
     var composerKey: String { draftKey }
     var pendingSubmission: NativePendingSubmission? {
@@ -126,15 +144,18 @@ extension DaemonClient: DaemonServing {}
     }
     var filteredTasks: [AgentTask] {
         tasks.filter {
-            $0.projectID == selectedProjectID && !$0.raw["is_archived"].bool &&
+            $0.projectID == selectedProjectID && !$0.pinned && !$0.raw["is_archived"].bool &&
             (searchText.isEmpty || $0.title.localizedCaseInsensitiveContains(searchText) || $0.preview.localizedCaseInsensitiveContains(searchText))
         }.sorted {
-            if $0.raw["is_pinned"].bool != $1.raw["is_pinned"].bool { return $0.raw["is_pinned"].bool }
+            if $0.raw["is_pinned_in_project"].bool != $1.raw["is_pinned_in_project"].bool { return $0.raw["is_pinned_in_project"].bool }
             return $0.updatedAt > $1.updatedAt
         }
     }
 
     func reconnect() async {
+        connectionTask?.cancel()
+        connectionID = UUID()
+        let identity = connectionID
         if client is DaemonClient, hostTask == nil {
             let updates = NativeHostManager.shared.events()
             hostTask = Task { [weak self] in
@@ -147,7 +168,10 @@ extension DaemonClient: DaemonServing {}
         }
         if !didLoadInputs {
             do {
-                let saved = try await inputStore?.load() ?? .init()
+                let restored = try await inputStore?.loadWithRevision()
+                guard connectionID == identity else { return }
+                let saved = restored?.value ?? .init()
+                inputRevision = max(inputRevision, restored?.revision ?? 0)
                 for (key, value) in saved.drafts where drafts[key] == nil { drafts[key] = value }
                 for (key, value) in saved.payloads where composerPayloads[key] == nil { composerPayloads[key] = value }
                 for (key, var value) in saved.submissions where inputSubmissions[key] == nil {
@@ -156,12 +180,13 @@ extension DaemonClient: DaemonServing {}
                     inputSubmissions[key] = value
                 }
                 didLoadInputs = true
-            } catch { errorMessage = "Saved input couldn’t be read. \(error.localizedDescription)" }
+            } catch {
+                guard connectionID == identity else { return }
+                errorMessage = "Saved input couldn’t be read. \(error.localizedDescription)"
+            }
         }
-        connectionTask?.cancel()
-        connectionID = UUID()
-        let identity = connectionID
         await client.disconnect()
+        guard connectionID == identity else { return }
         isConnected = false
         connectionStatus = "Connecting…"
         connectionTask = Task { [weak self] in
@@ -182,7 +207,7 @@ extension DaemonClient: DaemonServing {}
                                 let navigation = self.loadID
                                 Task {
                                     guard self.selectedTaskID == id, self.loadID == navigation else { return }
-                                    await self.selectTask(id)
+                                    await self.selectTask(id, navigating: false)
                                 }
                             }
                         }
@@ -204,23 +229,32 @@ extension DaemonClient: DaemonServing {}
     }
 
     func selectProject(_ id: String) {
-        selectedSection = "project"
-        guard selectedProjectID != id else { return }
+        navigationID = UUID()
+        selectedSection = allProjects.first(where: { $0.id == id })?.raw["kind"].string == "casual" ? "chats" : "project"
+        if selectedProjectID == id, selectedTask?.pinned != true { recordNavigation(); return }
         selectedProjectID = id
         newTask()
         let latest = filteredTasks.first
         if let latest {
+            let navigation = navigationID
             Task {
-                guard selectedProjectID == id, selectedTaskID == nil else { return }
+                guard navigationID == navigation, selectedProjectID == id, selectedTaskID == nil else { return }
                 await selectTask(latest.id)
             }
         }
     }
 
-    func newTask() {
+    func newTask(recordHistory: Bool = true) {
+        NativeAudioPlayback.shared.stop()
         NativeAudioPlayback.shared.stopRealtime()
+        navigationID = UUID()
         selectedSection = selectedProject?.raw["kind"].string == "casual" ? "chats" : "project"
         loadID = UUID()
+        olderLoadID = nil
+        isLoadingOlder = false
+        loadedTaskID = nil
+        recoveryID = UUID()
+        recoveryTask?.cancel(); recoveryTask = nil
         selectedTaskID = nil
         transcript = Transcript()
         bufferedEvents = []
@@ -230,25 +264,38 @@ extension DaemonClient: DaemonServing {}
         provider = selectedProject?.raw["default_provider"].string ?? "codex"
         if !availableProviders.contains(provider) { provider = availableProviders.first ?? "codex" }
         errorMessage = nil
-        recordNavigation()
+        recordNavigation(addingHistory: recordHistory)
     }
 
-    func selectTask(_ id: String) async {
-        NativeAudioPlayback.shared.stopRealtime()
+    func selectTask(_ id: String, navigating: Bool = true, recordHistory: Bool = true) async {
         guard let task = tasks.first(where: { $0.id == id }) else { return }
+        let beginsReading = navigating || loadedTaskID != id
+        if navigating {
+            navigationID = UUID()
+            if selectedTaskID != id {
+                NativeAudioPlayback.shared.stop()
+                NativeAudioPlayback.shared.stopRealtime()
+            }
+            recoveryID = UUID()
+            recoveryTask?.cancel(); recoveryTask = nil
+        } else if selectedTaskID != id { return }
         let identity = UUID()
         loadID = identity
+        olderLoadID = nil
+        isLoadingOlder = false
+        loadedTaskID = nil
         selectedTaskID = id
         selectedProjectID = task.projectID
         if let host = NativeHostManager.split(task.projectID).hostID {
             Task { await NativeHostManager.shared.selectThread(hostID: host, threadID: NativeHostManager.split(id).id) }
         }
-        if selectedSection != "pins" {
-            selectedSection = allProjects.first(where: { $0.id == task.projectID })?.raw["kind"].string == "casual" ? "chats" : "project"
+        if navigating {
+            if task.pinned, !task.raw["is_archived"].bool || selectedSection == "pins" { selectedSection = "pins" }
+            else { selectedSection = allProjects.first(where: { $0.id == task.projectID })?.raw["kind"].string == "casual" ? "chats" : "project" }
         }
-        recordNavigation()
+        if navigating { recordNavigation(addingHistory: recordHistory) }
         provider = task.provider
-        transcript = Transcript()
+        if navigating { transcript = Transcript() }
         bufferedEvents = []
         bufferedOverflow = false
         hasOlder = false
@@ -257,7 +304,7 @@ extension DaemonClient: DaemonServing {}
             if loadID == identity {
                 isLoading = false
                 scheduleRecoveryIfNeeded(for: id)
-                markSelectedTaskRead()
+                if loadedTaskID == id { markSelectedTaskRead() }
             }
         }
         do {
@@ -269,10 +316,19 @@ extension DaemonClient: DaemonServing {}
             for event in bufferedEvents { transcript.apply(event) }
             if bufferedOverflow { transcript.needsRecovery = true }
             bufferedEvents = []
+            loadedTaskID = id
+            if beginsReading, selectedTask?.unread == true {
+                lastReadSequences.removeValue(forKey: id)
+                pendingReads.removeValue(forKey: id)
+            }
             errorMessage = nil
-            markSelectedTaskRead()
         } catch {
             guard loadID == identity else { return }
+            if !navigating {
+                for event in bufferedEvents { transcript.apply(event) }
+                if bufferedOverflow { transcript.needsRecovery = true }
+                bufferedEvents = []
+            }
             errorMessage = "Couldn’t load this task. \(error.localizedDescription)"
         }
     }
@@ -280,8 +336,10 @@ extension DaemonClient: DaemonServing {}
     func loadOlder() async {
         guard hasOlder, !isLoadingOlder, let task = selectedTask, let before = messages.first?.id else { return }
         let identity = loadID
+        let pageIdentity = UUID()
+        olderLoadID = pageIdentity
         isLoadingOlder = true
-        defer { isLoadingOlder = false }
+        defer { if olderLoadID == pageIdentity { olderLoadID = nil; isLoadingOlder = false } }
         do {
             let detail = try await loadDetail(task: task, before: before)
             guard loadID == identity else { return }
@@ -291,11 +349,12 @@ extension DaemonClient: DaemonServing {}
     }
 
     func openProject(path: String) async {
+        let navigation = navigationID
         do {
             let project = try await client.connectProject(path: path)
             if !projects.contains(where: { $0.id == project.id }) { projects.append(project) }
             if !allProjects.contains(where: { $0.id == project.id }) { allProjects.append(project) }
-            selectProject(project.id)
+            if navigationID == navigation { selectProject(project.id) }
         } catch { errorMessage = error.localizedDescription }
     }
 
@@ -325,6 +384,7 @@ extension DaemonClient: DaemonServing {}
 
     func applyEnvelope(_ envelope: JSON, originHost: String? = nil, notifyPlatform: Bool = true) {
         eventRevision &+= 1
+        if originHost == nil { localEventRevision &+= 1 }
         let event = envelope["event"], taskID = envelope["thread_id"].string
         if event["type"].string != "snapshot", originHost == nil {
             localSnapshot = NativeHostProjection.reduce(localSnapshot, envelope: envelope)
@@ -345,12 +405,12 @@ extension DaemonClient: DaemonServing {}
             tasks = snapshot["threads"].array.map(AgentTask.init)
             requests = snapshot["interactive_requests"].array
             appendRemoteIndexes()
-            if !allProjects.contains(where: { $0.id == selectedProjectID }) {
+            if !allProjects.contains(where: { $0.id == selectedProjectID }), !isAwaitingRemoteSelection {
                 let projectIDs = Set(projects.map(\.id))
                 selectedProjectID = tasks.filter { projectIDs.contains($0.projectID) }.max { $0.updatedAt < $1.updatedAt }?.projectID ?? projects.first?.id
                 newTask()
             }
-            if let id = selectedTaskID, !tasks.contains(where: { $0.id == id }) { newTask() }
+            if let id = selectedTaskID, !tasks.contains(where: { $0.id == id }), !isAwaitingRemoteSelection { newTask() }
         case "thread-started", "thread-updated":
             upsertTask(event["thread"])
             if event["thread"]["id"].string == selectedTaskID { markSelectedTaskRead() }
@@ -358,7 +418,9 @@ extension DaemonClient: DaemonServing {}
             let project = Project(event["workspace"])
             if let index = allProjects.firstIndex(where: { $0.id == project.id }) { allProjects[index] = project }
             else { allProjects.append(project) }
-            guard !["scratch", "casual"].contains(project.raw["kind"].string) else { return }
+            guard !["scratch", "casual"].contains(project.raw["kind"].string) else {
+                projects.removeAll { $0.id == project.id }; return
+            }
             if let index = projects.firstIndex(where: { $0.id == project.id }) { projects[index] = project }
             else { projects.append(project) }
         case "interactive-request":
@@ -394,11 +456,25 @@ extension DaemonClient: DaemonServing {}
 
     private func scheduleRecoveryIfNeeded(for taskID: String) {
         if transcript.needsRecovery, recoveryTask == nil, !isLoading {
-            let navigation = loadID
+            let initialLoad = loadID
+            let identity = UUID()
+            recoveryID = identity
             recoveryTask = Task {
-                defer { recoveryTask = nil }
-                guard selectedTaskID == taskID, loadID == navigation else { return }
-                await selectTask(taskID)
+                defer { if recoveryID == identity { recoveryTask = nil } }
+                var expectedLoad = initialLoad
+                for attempt in 0..<3 {
+                    guard !Task.isCancelled, selectedTaskID == taskID, loadID == expectedLoad else { return }
+                    await selectTask(taskID, navigating: false)
+                    guard !Task.isCancelled, selectedTaskID == taskID, recoveryID == identity,
+                          transcript.needsRecovery else { return }
+                    expectedLoad = loadID
+                    if attempt == 2 {
+                        errorMessage = "This conversation is still catching up. Reopen the task to reload its latest messages."
+                        return
+                    }
+                    do { try await Task.sleep(for: .milliseconds(250 * (attempt + 1))) }
+                    catch { return }
+                }
             }
         }
     }
@@ -407,25 +483,37 @@ extension DaemonClient: DaemonServing {}
         let task = AgentTask(raw)
         guard !task.id.isEmpty else { return }
         if let index = tasks.firstIndex(where: { $0.id == task.id }) {
-            if tasks[index].updatedAt > task.updatedAt { return }
-            tasks[index] = task
+            tasks[index] = AgentTask(NativeHostProjection.mergeTask(previous: tasks[index].raw, incoming: raw))
         } else { tasks.append(task) }
     }
 
     func selectSection(_ section: String) {
+        navigationID = UUID()
         selectedSection = section
         if section == "chats" || section == "pins" {
             let candidates = tasks.filter { task in
                 if section == "pins" { return task.pinned && !task.raw["is_archived"].bool }
-                return allProjects.first(where: { $0.id == task.projectID })?.raw["kind"].string == "casual" && !task.raw["is_archived"].bool
+                return allProjects.first(where: { $0.id == task.projectID })?.raw["kind"].string == "casual" && !task.pinned && !task.raw["is_archived"].bool
             }.sorted { $0.updatedAt > $1.updatedAt }
             if !candidates.contains(where: { $0.id == selectedTaskID }) {
                 if let task = candidates.first {
+                    if selectedTaskID != task.id {
+                        NativeAudioPlayback.shared.stop()
+                        NativeAudioPlayback.shared.stopRealtime()
+                    }
                     selectedProjectID = task.projectID
                     selectedTaskID = task.id
                     transcript = Transcript()
+                    loadedTaskID = nil
+                    loadID = UUID()
+                    olderLoadID = nil; isLoadingOlder = false
+                    recoveryID = UUID(); recoveryTask?.cancel(); recoveryTask = nil
                     isLoading = true
-                    Task { guard self.selectedSection == section else { return }; await self.selectTask(task.id) }
+                    let identity = loadID
+                    Task {
+                        guard self.loadID == identity, self.selectedTaskID == task.id else { return }
+                        await self.selectTask(task.id, navigating: false)
+                    }
                 } else {
                     selectedProjectID = section == "chats" ? allProjects.first(where: { $0.raw["kind"].string == "casual" })?.id : nil
                     newTask()
@@ -436,9 +524,11 @@ extension DaemonClient: DaemonServing {}
         recordNavigation()
     }
 
-    private func recordNavigation() {
-        let entry = Navigation(section: selectedSection, project: selectedProjectID, task: selectedTaskID)
-        if !restoringNavigation, (!navigationHistory.indices.contains(navigationIndex) || navigationHistory[navigationIndex] != entry) {
+    private func recordNavigation(addingHistory: Bool = true) {
+        let entry = Navigation(section: selectedSection, project: selectedProjectID, task: selectedTaskID,
+            extensionID: selectedSection == "extension-panel" ? selectedExtensionID : nil,
+            panelID: selectedSection == "extension-panel" ? selectedPanelID : nil)
+        if addingHistory, (!navigationHistory.indices.contains(navigationIndex) || navigationHistory[navigationIndex] != entry) {
             if navigationIndex + 1 < navigationHistory.count { navigationHistory.removeSubrange((navigationIndex + 1)... ) }
             navigationHistory.append(entry)
             if navigationHistory.count > 100 { navigationHistory.removeFirst() }
@@ -456,25 +546,40 @@ extension DaemonClient: DaemonServing {}
         guard navigationHistory.indices.contains(target) else { return }
         navigationIndex = target
         let entry = navigationHistory[target]
-        restoringNavigation = true
-        defer { restoringNavigation = false; recordNavigation() }
+        navigationID = UUID()
         selectedProjectID = entry.project
         selectedSection = entry.section
+        selectedExtensionID = entry.extensionID
+        selectedPanelID = entry.panelID
         if let id = entry.task, tasks.contains(where: { $0.id == id }) {
-            if ["project", "chats", "pins"].contains(entry.section) { await selectTask(id) }
-            else { selectedTaskID = id }
-        } else { newTask(); selectedSection = entry.section }
+            if ["project", "chats", "pins"].contains(entry.section) { await selectTask(id, recordHistory: false) }
+            else { selectedTaskID = id; recordNavigation(addingHistory: false) }
+        } else { newTask(recordHistory: false); selectedSection = entry.section; recordNavigation(addingHistory: false) }
     }
 
     func navigateTask(_ delta: Int) async {
-        let candidates = tasks.filter { $0.projectID == selectedProjectID && (showArchived || !$0.raw["is_archived"].bool) }.sorted { $0.updatedAt > $1.updatedAt }
+        guard ["project", "chats", "pins"].contains(selectedSection),
+              taskNavigationSection == selectedSection,
+              taskNavigationProject == (selectedSection == "project" ? selectedProjectID : nil) else { return }
+        let existing = Set(tasks.map(\.id))
+        let candidates = taskNavigationIDs.filter { existing.contains($0) }
         guard !candidates.isEmpty else { return }
-        let current = candidates.firstIndex { $0.id == selectedTaskID } ?? 0
-        await selectTask(candidates[(current + delta + candidates.count) % candidates.count].id)
+        let current = candidates.firstIndex { $0 == selectedTaskID }
+        let index = current.map { (($0 + delta) % candidates.count + candidates.count) % candidates.count }
+            ?? (delta < 0 ? candidates.count - 1 : 0)
+        await selectTask(candidates[index])
+    }
+
+    func registerTaskNavigation(_ ids: [String], section: String, projectID: String?) {
+        taskNavigationIDs = ids
+        taskNavigationSection = section
+        taskNavigationProject = projectID
     }
 
     func selectExtensionPanel(extensionID: String, panelID: String) {
+        navigationID = UUID()
         selectedExtensionID = extensionID; selectedPanelID = panelID; selectedSection = "extension-panel"
+        recordNavigation()
     }
 
     func request(_ path: String, method: String = "GET", body: JSON? = nil, hostID: String? = nil) async throws -> JSON {
@@ -500,10 +605,7 @@ extension DaemonClient: DaemonServing {}
         }
         if let host = hostID ?? pathHosts.first {
             let rawPath = path.map { NativeHostManager.split($0).id }
-            let relations = Set(["workspace_id", "workspaceId", "thread_id", "threadId", "folder_id", "folderId", "request_id", "requestId"])
-            let rawQuery = query.map { item in
-                URLQueryItem(name: item.name, value: relations.contains(item.name) ? item.value.map { NativeHostManager.split($0).id } : item.value)
-            }
+            let rawQuery = try NativeHostProjection.rawQuery(query, host: host)
             let rawBody = try scopedBody.map { try NativeHostProjection.rawIDs($0, host: host) }
             let result = try await NativeHostManager.shared.request(hostID: host, path: rawPath, method: method, query: rawQuery, body: rawBody)
             return NativeHostProjection.response(result, host: host, path: rawPath)
@@ -517,8 +619,10 @@ extension DaemonClient: DaemonServing {}
     }
 
     func refresh() async {
+        let revision = localEventRevision
         do {
             let snapshot = try await client.snapshot()
+            guard localEventRevision == revision else { return }
             applyEnvelope(.object(["event": .object(["type": .string("snapshot"), "snapshot": snapshot])]))
         } catch { errorMessage = error.localizedDescription }
     }
@@ -534,17 +638,25 @@ extension DaemonClient: DaemonServing {}
         let arrays = ["workspace_order", "hidden_workspace_ids", "project_folders"]
         let maps = ["workspace_icons", "workspace_colors"]
         for host in remoteSnapshots.keys.sorted() {
-            let remote = NativeHostProjection.snapshot(remoteSnapshots[host] ?? .null, host: host)["preferences"]
+            let remote = NativeHostProjection.preferences((remoteSnapshots[host] ?? .null)["preferences"], host: host)
             for key in arrays { result[key] = .array((result[key] ?? .null).array + remote[key].array) }
             for key in maps {
                 result[key] = .object((result[key] ?? .null).fields.merging(remote[key].fields) { _, remote in remote })
             }
         }
+        let projectIDs = Set(projects.map(\.id))
+        let order = (result["workspace_order"] ?? .null).array.map(\.string).filter { projectIDs.contains($0) } + projects.map(\.id)
+        result["workspace_order"] = .array(NativeProjectOrder.interleave(authoritative: order, slots: projectOrderSlots).map(JSON.string))
         return .object(result)
     }
 
     func updateNavigationPreferences(_ patch: JSON, hostID: String?) async throws {
         var fields = patch.fields
+        if let order = fields["workspace_order"] {
+            projectOrderSlots = NativeProjectOrder.updatingSlots(previous: projectOrderSlots,
+                visibleOrder: order.array.map(\.string), availableHosts: Set(remoteSnapshots.keys).union(["local"]))
+            if client is DaemonClient { UserDefaults.standard.set(projectOrderSlots, forKey: "falcondeck.native.projectOrderSlots") }
+        }
         for key in ["workspace_order", "hidden_workspace_ids"] where fields[key] != nil {
             fields[key] = .array(fields[key]!.array.filter { NativeHostManager.split($0.string).hostID == hostID })
         }
@@ -593,7 +705,7 @@ extension DaemonClient: DaemonServing {}
     }
 
     func newChat() async {
-        let navigation = loadID, host = selectedHostID
+        let navigation = navigationID, host = selectedHostID
         do {
             let result = try await request("/api/chats", method: "POST", hostID: host)
             let project = Project(result["workspace"] == .null ? result : result["workspace"])
@@ -602,14 +714,13 @@ extension DaemonClient: DaemonServing {}
             }
             if !result["thread"]["id"].string.isEmpty {
                 upsertTask(result["thread"])
-                guard loadID == navigation else { return }
+                guard navigationID == navigation else { return }
                 selectedProjectID = project.id
                 await selectTask(result["thread"]["id"].string)
             } else {
-                guard loadID == navigation else { return }
+                guard navigationID == navigation else { return }
                 selectedProjectID = project.id; newTask()
             }
-            selectedSection = "chats"
         } catch { errorMessage = error.localizedDescription }
     }
 
@@ -634,7 +745,7 @@ extension DaemonClient: DaemonServing {}
 
     private func submit(_ captured: NativePendingSubmission) async {
         guard !isSending else { return }
-        let navigation = loadID
+        let navigation = navigationID
         var submission = captured
         var turnWasPosted = false
         var creationWasPosted = false
@@ -655,11 +766,12 @@ extension DaemonClient: DaemonServing {}
                 upsertTask(created.raw)
                 submission.threadID = created.id; submission.composerKey = created.id
                 submission.knownQueueIDs = Set(created.raw["queued_turns"].array.map { $0["id"].string })
-                if loadID == navigation, draftKey == submission.sourceKey {
+                if navigationID == navigation, draftKey == submission.sourceKey {
                     // New edits follow the still-selected project composer into its created task.
                     drafts[created.id] = drafts.removeValue(forKey: submission.sourceKey)
                     composerPayloads[created.id] = composerPayloads.removeValue(forKey: submission.sourceKey)
-                    selectedTaskID = created.id; transcript = Transcript()
+                    selectedTaskID = created.id; transcript = Transcript(); loadedTaskID = created.id
+                    recordNavigation()
                 } else {
                     // Navigation cannot strand the captured input or move newer edits to another task.
                     drafts[created.id] = drafts[created.id] ?? submission.draft
@@ -842,7 +954,7 @@ extension DaemonClient: DaemonServing {}
         recoveryTask?.cancel(); recoveryTask = nil
         hostTask?.cancel(); hostTask = nil
         inputWriteTask?.cancel(); inputWriteTask = nil
-        connectionID = UUID(); loadID = UUID()
+        connectionID = UUID(); loadID = UUID(); navigationID = UUID(); recoveryID = UUID()
         NativeAudioPlayback.shared.stop()
         NativeAudioPlayback.shared.stopRealtime()
         await client.disconnect()
@@ -853,23 +965,27 @@ extension DaemonClient: DaemonServing {}
     }
 
     func markSelectedTaskRead() {
-        guard client is DaemonClient, NSApp?.isActive == true, NSApp?.keyWindow != nil,
-              NativePlatform.nativeDesktopPresence() != false,
+        guard readVisibility(),
               ["project", "chats", "pins"].contains(selectedSection), let task = selectedTask,
-              !isLoading else { return }
+              !isLoading, loadedTaskID == task.id else { return }
         let sequence = task.raw["attention"]["last_agent_activity_seq"].int
-        guard sequence > (lastReadSequences[task.id] ?? -1) else { return }
-        lastReadSequences[task.id] = sequence
-        let navigation = loadID
+        guard sequence > task.raw["attention"]["last_read_seq"].int,
+              sequence > max(lastReadSequences[task.id] ?? -1, pendingReads[task.id]?.sequence ?? -1) else { return }
+        let operation = UUID()
+        pendingReads[task.id] = PendingRead(id: operation, sequence: sequence)
+        let navigation = navigationID, detailIdentity = loadID
         Task {
-            guard selectedTaskID == task.id, loadID == navigation, NSApp?.isActive == true else { return }
+            defer { if pendingReads[task.id]?.id == operation { pendingReads.removeValue(forKey: task.id) } }
+            guard selectedTaskID == task.id, loadID == detailIdentity, navigationID == navigation,
+                  ["project", "chats", "pins"].contains(selectedSection), readVisibility() else { return }
             do {
                 if NativeHostManager.split(task.projectID).hostID == nil {
                     try await client.markRead(projectID: task.projectID, threadID: task.id, readSeq: sequence)
                 } else {
                     _ = try await request(["api", "workspaces", task.projectID, "threads", task.id, "read"], method: "POST", body: .object(["read_seq": .number(Double(sequence))]))
                 }
-            } catch { if lastReadSequences[task.id] == sequence { lastReadSequences.removeValue(forKey: task.id) } }
+                if pendingReads[task.id]?.id == operation { lastReadSequences[task.id] = max(lastReadSequences[task.id] ?? -1, sequence) }
+            } catch { /* Leave the watermark retryable when delivery fails. */ }
         }
     }
 
@@ -901,7 +1017,14 @@ extension DaemonClient: DaemonServing {}
             if client is DaemonClient { NativePlatform.shared.handle(.object(["event": .object(["type": .string("snapshot"), "snapshot": value])]), hostID: update.hostID) }
             rebuildIndexes()
             recoverRemoteSelection(hostID: update.hostID)
-        case .events(let values), .rebase(let values):
+        case .rebase(let values):
+            // These envelopes already reached the live transcript while a fresh
+            // snapshot was loading. Replay only their index metadata.
+            for value in values {
+                remoteSnapshots[update.hostID] = NativeHostProjection.reduce(remoteSnapshots[update.hostID] ?? .object([:]), envelope: value)
+            }
+            rebuildIndexes()
+        case .events(let values):
             for value in values {
                 remoteSnapshots[update.hostID] = NativeHostProjection.reduce(remoteSnapshots[update.hostID] ?? .object([:]), envelope: value)
                 if client is DaemonClient { NativePlatform.shared.handle(value, hostID: update.hostID) }
@@ -929,10 +1052,10 @@ extension DaemonClient: DaemonServing {}
         tasks = localSnapshot["threads"].array.map(AgentTask.init)
         requests = localSnapshot["interactive_requests"].array
         appendRemoteIndexes()
-        if let id = selectedProjectID, !allProjects.contains(where: { $0.id == id }) {
+        if let id = selectedProjectID, !allProjects.contains(where: { $0.id == id }), !isAwaitingRemoteSelection {
             selectedProjectID = projects.first?.id
             newTask()
-        } else if let id = selectedTaskID, !tasks.contains(where: { $0.id == id }) { newTask() }
+        } else if let id = selectedTaskID, !tasks.contains(where: { $0.id == id }), !isAwaitingRemoteSelection { newTask() }
         eventRevision &+= 1
     }
 
@@ -941,7 +1064,12 @@ extension DaemonClient: DaemonServing {}
         let navigation = loadID
         Task {
             guard loadID == navigation, selectedTaskID == taskID, selectedHostID == hostID else { return }
-            await selectTask(taskID)
+            await selectTask(taskID, navigating: false)
         }
+    }
+
+    private var isAwaitingRemoteSelection: Bool {
+        guard let host = selectedHostID, remoteSnapshots[host] == nil else { return false }
+        return remoteStatuses[host] != nil || (client is DaemonClient && NativeHostManager.shared.hosts.contains { $0.id == host })
     }
 }

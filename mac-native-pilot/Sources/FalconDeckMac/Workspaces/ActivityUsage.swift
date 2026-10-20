@@ -149,7 +149,7 @@ struct NativeActivityView: View {
 
     private func activityRow(_ task: AgentTask) -> some View {
         let section = NativeActivitySection.section(task)
-        return Button { Task { await store.selectTask(task.id) } } label: {
+        return Button { openTask(task.id) } label: {
             HStack(alignment: .top, spacing: 12) {
                 Group {
                     if section == .running { MacActivityDiamond() }
@@ -179,7 +179,7 @@ struct NativeActivityView: View {
         }
         .buttonStyle(.plain)
         .contextMenu {
-            Button("Open task") { Task { await store.selectTask(task.id) } }
+            Button("Open task") { openTask(task.id) }
             Button("Quick Look") { preview = task }
             Divider()
             Button(task.unread ? "Mark as read" : "Mark as unread") { Task { await mark(task, read: task.unread) } }
@@ -192,6 +192,11 @@ struct NativeActivityView: View {
     private func markAllRead() async {
         let tasks = rows.filter { $0.unread && NativeActivitySection.section($0) != .running }
         for task in tasks { await mark(task, read: true) }
+    }
+
+    private func openTask(_ id: String) {
+        NativeWorkspaceWindow.show()
+        Task { await store.selectTask(id) }
     }
 
     private static func isUnread(_ task: AgentTask) -> Bool {
@@ -221,7 +226,9 @@ struct NativeActivityView: View {
         let next = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 650, height: 780), styleMask: [.titled, .closable, .miniaturizable, .resizable], backing: .buffered, defer: false)
         next.title = "Activity — FalconDeck"
         next.minSize = NSSize(width: 420, height: 420)
-        next.contentView = NSHostingView(rootView: NativeActivityView(store: store, allowsPopOut: false))
+        next.contentView = NSHostingView(rootView: NativeActivityWindowContent(store: store, applyAppearance: { [weak next] appearance in
+            next?.appearance = appearance
+        }))
         next.isReleasedWhenClosed = false
         next.delegate = self
         next.center()
@@ -229,6 +236,24 @@ struct NativeActivityView: View {
         next.makeKeyAndOrderFront(nil)
     }
     func windowWillClose(_ notification: Notification) { window = nil }
+}
+
+private struct NativeActivityWindowContent: View {
+    let store: AppStore
+    let applyAppearance: (NSAppearance?) -> Void
+    @Bindable private var preferences = NativePreferences.shared
+    private var appearance: NSAppearance? {
+        preferences.theme == "system" ? nil : NSAppearance(named: preferences.theme == "dark" ? .darkAqua : .aqua)
+    }
+
+    var body: some View {
+        NativeActivityView(store: store, allowsPopOut: false)
+            .preferredColorScheme(preferences.preferredColorScheme)
+            .font(preferences.font(size: 14))
+            .tint(FDTheme.accent)
+            .onAppear { applyAppearance(appearance) }
+            .onChange(of: preferences.theme) { _, _ in applyAppearance(appearance) }
+    }
 }
 
 private struct NativeActivityPreview: View {
@@ -246,7 +271,11 @@ private struct NativeActivityPreview: View {
                     Text("Recent messages").font(.caption).foregroundStyle(FDTheme.muted)
                 }
                 Spacer()
-                Button("Open task") { dismiss(); Task { await store.selectTask(task.id) } }
+                Button("Open task") {
+                    dismiss()
+                    NativeWorkspaceWindow.show()
+                    Task { await store.selectTask(task.id) }
+                }
                 Button("Done") { dismiss() }.keyboardShortcut(.cancelAction)
             }.padding(20)
             Divider()

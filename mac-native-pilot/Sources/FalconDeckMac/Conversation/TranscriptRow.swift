@@ -200,12 +200,13 @@ struct ConversationTranscriptRow: View {
     }
 
     private var reasoning: some View {
-        VStack(alignment: .leading, spacing: 6) {
+        let content = TranscriptPresentation.reasoningBody(raw)
+        return VStack(alignment: .leading, spacing: 6) {
             card(reasoningTitle, symbol: "brain") {
-                NativeMarkdownView(text: itemText).foregroundStyle(FDTheme.muted)
+                NativeMarkdownView(text: content).foregroundStyle(FDTheme.muted)
             }
             if displayPreferences["thinking_display"].string == "preview", !open.wrappedValue {
-                Text(itemText).font(NativePreferences.shared.font(size: 12, surface: "chat")).lineLimit(2).foregroundStyle(FDTheme.muted)
+                Text(content).font(NativePreferences.shared.font(size: 12, surface: "chat")).lineLimit(2).foregroundStyle(FDTheme.muted)
                     .padding(.leading, 35)
             }
         }

@@ -5530,6 +5530,33 @@ async fn shutdown_marks_running_threads_as_error_and_persists_them() {
         },
     );
 
+    let worker_app = app.clone();
+    assert!(app.spawn_background_task(async move {
+        worker_app.wait_for_shutdown().await;
+        // Wait until shutdown has captured the runtime snapshot and begun
+        // draining completion handlers, then emulate an admitted provider
+        // response winning the workspace lock after teardown started.
+        loop {
+            let draining = worker_app
+                .inner
+                .background_tasks
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .is_empty();
+            if draining {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+        worker_app
+            .with_thread_mut("workspace-1", "thread-1", |thread| {
+                thread.status = ThreadStatus::Idle;
+                thread.last_error = Some("late provider completion".to_string());
+            })
+            .await
+            .unwrap();
+    }));
+
     app.shutdown().await.unwrap();
 
     let snapshot = app.snapshot().await;

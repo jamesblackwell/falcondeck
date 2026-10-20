@@ -484,20 +484,21 @@ impl ProviderRuntime {
                     },
                 );
                 if spawn.stdout.is_some() || spawn.stderr.is_some() {
-                    let app = app.clone();
+                    let task_app = app.clone();
                     let workspace_id = spec.workspace_id.to_string();
                     let thread_id = spec.thread_id.to_string();
-                    tokio::spawn(async move {
-                        app.monitor_claude_turn(
-                            workspace_id,
-                            thread_id,
-                            turn_id,
-                            spawn.generation,
-                            spawn.stdout,
-                            spawn.stderr,
-                            spec.resume_interrupted,
-                        )
-                        .await;
+                    app.spawn_background_task(async move {
+                        task_app
+                            .monitor_claude_turn(
+                                workspace_id,
+                                thread_id,
+                                turn_id,
+                                spawn.generation,
+                                spawn.stdout,
+                                spawn.stderr,
+                                spec.resume_interrupted,
+                            )
+                            .await;
                     });
                 }
                 Ok(())
@@ -533,19 +534,20 @@ impl ProviderRuntime {
                     .await?;
                     app.persist_local_state().await?;
                 }
-                let app = app.clone();
+                let task_app = app.clone();
                 let workspace_id = spec.workspace_id.to_string();
                 let thread_id = spec.thread_id.to_string();
-                tokio::spawn(async move {
-                    app.monitor_agy_turn(
-                        workspace_id,
-                        thread_id,
-                        spawn.generation,
-                        spawn.stdout,
-                        spawn.stderr,
-                        spec.resume_interrupted,
-                    )
-                    .await;
+                app.spawn_background_task(async move {
+                    task_app
+                        .monitor_agy_turn(
+                            workspace_id,
+                            thread_id,
+                            spawn.generation,
+                            spawn.stdout,
+                            spawn.stderr,
+                            spec.resume_interrupted,
+                        )
+                        .await;
                 });
                 Ok(())
             }

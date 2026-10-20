@@ -611,7 +611,7 @@ private struct NativePluginKeySheet: View {
     }
 }
 
-private struct NativePluginConnectorDraft: Identifiable {
+struct NativePluginConnectorDraft: Identifiable {
     let id = UUID()
     let scope: String
     var originalName = ""
@@ -647,16 +647,31 @@ private struct NativePluginConnectorDraft: Identifiable {
         if mode == "command" {
             guard !command.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { throw PilotError("Enter a command.") }
             fields["command"] = .string(command.trimmingCharacters(in: .whitespacesAndNewlines))
-            fields["args"] = .array(arguments.split(separator: "\n", omittingEmptySubsequences: false).filter { !$0.isEmpty }.map { .string(String($0)) })
-            fields["env"] = .object(try pairs(environment, separator: "="))
+            // A line editor cannot losslessly represent every valid argument
+            // or environment value (for example a single empty argument or a
+            // multiline value). Keep unchanged wire fields verbatim.
+            if let original = originalEntry["args"], arguments == original.array.map(\.string).joined(separator: "\n") {
+                fields["args"] = original
+            } else {
+                fields["args"] = .array(arguments.isEmpty ? [] : arguments.split(separator: "\n", omittingEmptySubsequences: false).map { .string(String($0)) })
+            }
+            fields["env"] = try unchangedPairs(environment, key: "env", separator: "=")
         } else {
             guard let parsed = URL(string: url.trimmingCharacters(in: .whitespacesAndNewlines)), ["https", "http"].contains(parsed.scheme?.lowercased() ?? ""), parsed.host != nil else {
                 throw PilotError("Enter an HTTP or HTTPS server URL.")
             }
             fields["url"] = .string(parsed.absoluteString)
-            fields["headers"] = .object(try pairs(headers, separator: ":"))
+            fields["headers"] = try unchangedPairs(headers, key: "headers", separator: ":")
         }
         return .object(fields)
+    }
+
+    private func unchangedPairs(_ text: String, key: String, separator: Character) throws -> JSON {
+        if case .object(let values) = originalEntry[key] {
+            let originalText = values.sorted { $0.key < $1.key }.map { $0.key + String(separator) + (separator == ":" ? " " : "") + $0.value.string }.joined(separator: "\n")
+            if text == originalText { return .object(values) }
+        }
+        return .object(try pairs(text, separator: separator))
     }
 
     private func pairs(_ text: String, separator: Character) throws -> [String: JSON] {

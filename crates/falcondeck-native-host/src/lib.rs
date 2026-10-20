@@ -250,7 +250,27 @@ mod tests {
         assert!(response.starts_with("HTTP/1.1 200"));
         assert!(response.contains("\"ok\":true"));
         assert_eq!(status().unwrap()["active_threads"], 0);
+        {
+            let slot = host().lock().unwrap();
+            let host = slot.as_ref().unwrap();
+            let state = host.daemon.app_state().clone();
+            host.runtime.spawn(async move {
+                std::future::pending::<()>().await;
+                drop(state);
+            });
+        }
         assert_eq!(shutdown().unwrap()["owned"], false);
         assert!(std::net::TcpStream::connect(address).is_err());
+
+        // Destroying the embedding's runtime must drop all remaining daemon
+        // tasks before a new runtime can own the same persisted directory.
+        let restarted = start(HostConfig {
+            state_path: Some(directory.path().join("state.json")),
+            background_restore: Some(false),
+            ..HostConfig::default()
+        })
+        .unwrap();
+        assert_eq!(restarted["owned"], true);
+        assert_eq!(shutdown().unwrap()["owned"], false);
     }
 }

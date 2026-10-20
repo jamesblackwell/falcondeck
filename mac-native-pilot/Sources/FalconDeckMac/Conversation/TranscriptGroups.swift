@@ -7,19 +7,21 @@ enum ConversationTranscriptGroups {
         var preferences = TranscriptPresentation.conversationPreferences(source)
         if let thinkingDisplay { preferences = preferences.setting("thinking_display", .string(thinkingDisplay)) }
         let mode = TranscriptPresentation.toolMode(preferences)
+        // Providers can omit a final lifecycle update before the next item.
+        // Settle old thoughts even when tools are shown without grouping.
+        let messages = messages.enumerated().map { index, original in
+            var message = original
+            if message.kind == "reasoning", message.streaming, index < messages.count - 1 {
+                message.raw = message.raw.setting("lifecycle", .string("complete"))
+            }
+            return message
+        }
         guard mode != "expanded" else { return messages.map { [$0] } }
         var result: [[Message]] = [], pending: [Message] = []
         func flush() {
             if !pending.isEmpty { result.append(pending); pending.removeAll(keepingCapacity: true) }
         }
-        for (index, original) in messages.enumerated() {
-            var message = original
-            // Only the trailing reasoning item can still be receiving text.
-            // Providers sometimes omit a final lifecycle update when a tool
-            // immediately follows the thought.
-            if message.kind == "reasoning", message.streaming, index < messages.count - 1 {
-                message.raw = message.raw.setting("lifecycle", .string("complete"))
-            }
+        for message in messages {
             if message.kind == "reasoning", mode == "collapsed", !pending.isEmpty,
                preferences["thinking_display"].string != "preview",
                !TranscriptPresentation.defaultExpanded(message, preferences: preferences) {
@@ -71,27 +73,28 @@ struct TranscriptFileLink: Equatable {
               !value.contains("\0") else { return nil }
         // Foundation treats `README.md:12` as a URI scheme. An explicit
         // filename plus source line is a relative file destination instead.
-        let relativeLine = value.range(of: #"^[^/:?#]+\.[^/:?#]+:[1-9][0-9]*(?::[1-9][0-9]*)?(?:#.*)?$"#, options: .regularExpression) != nil
+        let relativeLine = value.range(of: #"^[^/:?#]+\.[^/:?#]+:[1-9][0-9]*(?::[1-9][0-9]*)?(?:\?[^#]*)?(?:#.*)?$"#, options: .regularExpression) != nil
         guard let url = URL(string: relativeLine ? "./" + value : value) else { return nil }
         let scheme = url.scheme?.lowercased()
         guard scheme == nil || scheme == "file", url.user == nil, url.password == nil,
               url.host == nil || url.host == "" || url.host == "localhost" else { return nil }
-        var path = url.path
-        guard !path.isEmpty, !path.hasPrefix("//") else { return nil }
+        guard let components = URLComponents(url: url, resolvingAgainstBaseURL: false) else { return nil }
+        // Source locations use literal colons; an encoded colon belongs to the
+        // filename and must survive suffix parsing before the path is decoded.
+        var path = components.percentEncodedPath
         var line: Int?
         if let fragment = url.fragment {
             let number = fragment.drop { $0 == "L" || $0 == "l" }.prefix { $0.isNumber }
             if let value = Int(number), value > 0 { line = value }
         }
-        if line == nil, let components = URLComponents(url: url, resolvingAgainstBaseURL: false),
-           let rawLine = components.queryItems?.first(where: { $0.name == "line" })?.value,
+        if line == nil, let rawLine = components.queryItems?.first(where: { $0.name == "line" })?.value,
            let value = Int(rawLine), value > 0 { line = value }
         if let match = path.range(of: #":([1-9][0-9]*)(?::[1-9][0-9]*)?$"#, options: .regularExpression) {
             let suffix = path[match].dropFirst().split(separator: ":").first
             if line == nil, let suffix { line = Int(suffix) }
             path.removeSubrange(match)
         }
-        guard !path.isEmpty else { return nil }
+        guard let path = path.removingPercentEncoding, !path.isEmpty, !path.hasPrefix("//"), !path.contains("\0") else { return nil }
         // Absolute paths and explicit relative file paths are supported. A bare
         // word such as "settings" is not silently interpreted as a local file.
         guard path.hasPrefix("/") || path.hasPrefix("./") || path.hasPrefix("../") || path.hasPrefix("~/") || path.contains("/") || path.contains(".") else { return nil }

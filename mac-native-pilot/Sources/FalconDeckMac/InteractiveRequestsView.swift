@@ -26,6 +26,29 @@ struct ApprovalChoice: Identifiable {
     }
 }
 
+enum InteractiveQuestionResponse {
+    static func definitionError(_ request: JSON) -> String? {
+        let questions = request["questions"].array
+        guard !questions.isEmpty else { return "This provider did not supply any questions to answer." }
+        let ids = questions.map { $0["id"].string }
+        guard !ids.contains(""), Set(ids).count == ids.count else {
+            return "This provider supplied questions without distinct identifiers."
+        }
+        return nil
+    }
+
+    static func payload(_ request: JSON, answers: [String: String]) -> JSON? {
+        guard definitionError(request) == nil else { return nil }
+        var values: [String: JSON] = [:]
+        for question in request["questions"].array {
+            let id = question["id"].string
+            guard let answer = answers[id], !answer.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return nil }
+            values[id] = .array([.string(answer)])
+        }
+        return .object(["kind": .string("question"), "answers": .object(values)])
+    }
+}
+
 struct InteractiveRequestsView: View {
     let store: AppStore
     var body: some View {
@@ -69,6 +92,9 @@ private struct RequestCard: View {
             }
             if let signInURL { Link("Open sign-in page", destination: signInURL).font(.caption) }
             if request["kind"].string == "question" {
+                if let definitionError = InteractiveQuestionResponse.definitionError(request) {
+                    Text(definitionError).font(.caption).foregroundStyle(FDTheme.warning)
+                }
                 ScrollView {
                     VStack(alignment: .leading, spacing: 12) {
                         ForEach(request["questions"].array, id: \.self) { question in
@@ -91,8 +117,8 @@ private struct RequestCard: View {
                     }
                 }.frame(maxHeight: 240)
                 Button("Send answers") {
-                    respond(.object(["kind": .string("question"), "answers": .object(answers.mapValues { .array([.string($0)]) })]))
-                }.disabled(request["questions"].array.contains { answers[$0["id"].string, default: ""].trimmingCharacters(in: .whitespacesAndNewlines).isEmpty })
+                    if let response = InteractiveQuestionResponse.payload(request, answers: answers) { respond(response) }
+                }.disabled(InteractiveQuestionResponse.payload(request, answers: answers) == nil)
                 if isElicitation {
                     Button("Decline", role: .destructive) { respond(.object(["kind": .string("approval"), "decision": .string("deny")])) }
                 }
@@ -101,7 +127,7 @@ private struct RequestCard: View {
                     .textFieldStyle(.roundedBorder).lineLimit(2...5)
                 HStack {
                     Button("Approve plan") { respond(planResponse("approved")) }
-                    Button("Request changes") { respond(planResponse("cancelled")) }
+                    Button("Request changes") { respond(planResponse("cancelled")) }.disabled(planFeedback.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
                     Button("Abandon plan", role: .destructive) { respond(planResponse("abandoned")) }
                 }
             } else {

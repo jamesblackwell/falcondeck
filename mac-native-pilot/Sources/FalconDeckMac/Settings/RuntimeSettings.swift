@@ -199,16 +199,30 @@ struct NativeAgentControlSettingsView: View {
     }
 }
 
+struct NativeComputerUsePermissionState: Equatable {
+    let accessibility: Bool
+    let screenRecording: Bool
+    let canRequest: Bool
+
+    init(status: JSON, ownsRuntime: Bool) {
+        accessibility = status["permissions"]["accessibility"].bool
+        screenRecording = status["permissions"]["screen_recording"].bool
+        canRequest = ownsRuntime
+    }
+
+    var allGranted: Bool { accessibility && screenRecording }
+}
+
 struct NativeComputerUseSettingsView: View {
     let store: AppStore
     @State private var status: JSON = .null
     @State private var test: JSON = .null
-    @State private var accessibility = false
-    @State private var screenRecording = false
+    @State private var ownsRuntime = false
     @State private var busy = false
     @State private var error: String?
 
     private var available: Bool { status != .null && status["available"].bool }
+    private var permissions: NativeComputerUsePermissionState { .init(status: status, ownsRuntime: ownsRuntime) }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 24) {
@@ -235,18 +249,18 @@ struct NativeComputerUseSettingsView: View {
                 Text("Computer use must also be enabled. Changing this setting restarts the driver and disconnects active sessions. Restart FalconDeck to reconnect agent tools. Turning it off stops FalconDeck access but does not disable Chrome’s remote-debugging setting.")
                     .font(NativePreferences.shared.font(size: 11)).foregroundStyle(.secondary)
             }
-            RuntimeSettingsSection(title: "macOS permissions", detail: "Grant permissions to the native FalconDeck app. Existing grants to the Tauri app may belong to a different app identity.") {
-                permissionRow("Accessibility", detail: "Allows agents to click, type and read other apps without stealing focus.", granted: accessibility, privacy: "Privacy_Accessibility") {
+            RuntimeSettingsSection(title: "macOS permissions", detail: permissions.canRequest ? "Grant permissions to the native FalconDeck app." : "Permissions belong to the connected daemon. Open the app running that daemon to request its macOS grants.") {
+                permissionRow("Accessibility", detail: "Allows agents to click, type and read other apps without stealing focus.", granted: permissions.accessibility, privacy: "Privacy_Accessibility") {
                     let options = [kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String: true] as CFDictionary
                     _ = AXIsProcessTrustedWithOptions(options)
-                    refreshLocalPermissions()
+                    Task { await refresh(restartAfterGrant: true) }
                 }
                 Divider()
-                permissionRow("Screen Recording", detail: "Allows agents to see window contents. macOS calls this Screen & System Audio Recording.", granted: screenRecording, privacy: "Privacy_ScreenCapture") {
+                permissionRow("Screen Recording", detail: "Allows agents to see window contents. macOS calls this Screen & System Audio Recording.", granted: permissions.screenRecording, privacy: "Privacy_ScreenCapture") {
                     _ = CGRequestScreenCaptureAccess()
-                    refreshLocalPermissions()
+                    Task { await refresh(restartAfterGrant: true) }
                 }
-                Text("After changing permissions, return here and restart the driver. If captures are blank, quit and reopen FalconDeck so macOS can apply the grant.")
+                Text(permissions.canRequest ? "After changing permissions, return here and restart the driver. If captures are blank, quit and reopen FalconDeck so macOS can apply the grant." : "After changing permissions, restart the driver. If captures are blank, quit and reopen the app running the connected daemon so macOS can apply the grant.")
                     .font(NativePreferences.shared.font(size: 11)).foregroundStyle(.secondary)
             }
             RuntimeSettingsSection(title: "Driver", detail: status["driver_version"].string.isEmpty ? "The driver starts when an agent first needs it." : "Bundled cua-driver \(status["driver_version"].string)") {
@@ -298,7 +312,7 @@ struct NativeComputerUseSettingsView: View {
             }
             Spacer()
             Text(granted ? "Granted" : "Needed").font(NativePreferences.shared.font(size: 11)).foregroundStyle(granted ? Color.green : Color.orange)
-            if !granted { Button("Grant", action: grant) }
+            if !granted && permissions.canRequest { Button("Grant", action: grant) }
             Button("Settings") { if let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?\(privacy)") { NSWorkspace.shared.open(url) } }
         }
     }
@@ -307,20 +321,16 @@ struct NativeComputerUseSettingsView: View {
         Binding(get: { status[key] == .null ? fallback : status[key].bool }, set: { value in Task { await update(.object([key: .bool(value)])) } })
     }
 
-    @MainActor private func refreshLocalPermissions() {
-        accessibility = AXIsProcessTrusted()
-        screenRecording = CGPreflightScreenCaptureAccess()
-    }
-
     @MainActor private func refresh(restartAfterGrant: Bool = false) async {
         guard !busy else { return }
-        let wasGranted = accessibility && screenRecording
-        refreshLocalPermissions()
+        let wasGranted = permissions.allGranted
         busy = true; error = nil
         defer { busy = false }
         do {
-            status = try await store.request("/api/computer-use")
-            if restartAfterGrant && !wasGranted && accessibility && screenRecording && status["enabled"].bool {
+            let updatedStatus = try await store.request("/api/computer-use")
+            ownsRuntime = await NativeRuntime.shared.isOwned()
+            status = updatedStatus
+            if restartAfterGrant && !wasGranted && permissions.allGranted && status["enabled"].bool {
                 status = try await store.request("/api/computer-use/restart", method: "POST")
             }
         } catch { self.error = error.localizedDescription }

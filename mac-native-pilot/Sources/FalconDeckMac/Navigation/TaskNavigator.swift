@@ -93,17 +93,13 @@ struct TaskNavigator: View {
     private var page: NativeTaskNavigationPage {
         NativeTaskNavigationPage(orderedIDs: displayOrderedTasks.map(\.id), limit: pageLimit, selectedID: store.selectedTaskID)
     }
+    private var displayOrderedIDs: [String] { displayOrderedTasks.map(\.id) }
     private var pageScope: String {
         [store.selectedSection, projectID ?? "", store.searchText, sort, filter, String(archived)].joined(separator: "|")
     }
     /// Do not sort the whole project each time a streaming preview changes.
     /// Token updates redraw existing rows while structural changes refresh order.
-    private var orderKey: String {
-        [store.selectedSection, projectID ?? "", store.searchText, sort, filter, String(archived)]
-            .joined(separator: "|") + scopeTasks.map {
-                "\($0.id):\($0.title):\($0.status):\($0.pinned):\($0.raw["is_pinned_in_project"].bool):\($0.raw["is_archived"].bool):\($0.unread):\($0.running ? "" : $0.updatedAt)"
-            }.joined(separator: "|")
-    }
+    private var orderKey: [NativeTaskNavigationOrder.Key] { scopeTasks.map(NativeTaskNavigationOrder.key) }
     private var selection: Binding<String?> {
         Binding(get: { store.selectedTaskID }, set: { id in
             guard let id else { return }
@@ -144,8 +140,9 @@ struct TaskNavigator: View {
         }
         .background(FDTheme.surface)
         .onAppear { refreshExtensions(); revealSelection(); refreshOrder() }
-        .onChange(of: pageScope) { _, _ in pageLimit = NativeTaskNavigationPage.initialLimit }
+        .onChange(of: pageScope) { _, _ in pageLimit = NativeTaskNavigationPage.initialLimit; refreshOrder() }
         .onChange(of: orderKey) { _, _ in refreshOrder() }
+        .onChange(of: displayOrderedIDs) { _, _ in registerNavigation() }
         .onChange(of: store.extensions) { _, snapshot in
             extensionState = NativeSidebarExtensions(snapshot)
             refreshOrder()
@@ -374,7 +371,7 @@ struct TaskNavigator: View {
                     Label(store.selectedSection == "chats" ? "New chat" : "New task", systemImage: "plus")
                 }
                 .buttonStyle(.plain)
-                .disabled(!store.isConnected)
+                .disabled(!store.isSelectedHostConnected)
             }
             Spacer()
             if isProject, let projectID {
@@ -445,6 +442,12 @@ struct TaskNavigator: View {
 
     private func refreshOrder() {
         orderedIDs = ordering.ordered(scopeTasks.filter(matches), mode: sort, scope: "\(store.selectedSection):\(projectID ?? "")")
+        registerNavigation()
+    }
+
+    private func registerNavigation() {
+        guard ["project", "chats", "pins"].contains(store.selectedSection) else { return }
+        store.registerTaskNavigation(displayOrderedIDs, section: store.selectedSection, projectID: projectID)
     }
 
     private func newTask(folder: String? = nil) {

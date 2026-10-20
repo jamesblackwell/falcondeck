@@ -103,7 +103,10 @@ struct InspectorDocument {
     var editing = false
     var dirty: Bool { text != original }
     var hasText: Bool { if case .string = raw["content"] { true } else { false } }
-    var editable: Bool { hasText && !raw["truncated"].bool && !raw["version"].string.isEmpty }
+    var editable: Bool {
+        hasText && !raw["is_binary"].bool && !raw["truncated"].bool
+            && !raw["version"].string.isEmpty && raw["content"].string.utf8.count <= 1_000_000
+    }
     init(_ raw: JSON) { self.raw = raw; text = raw["content"].string; original = text }
 }
 
@@ -156,7 +159,7 @@ struct InspectorDocument {
         selectedPath = selections[scope]; expanded = expansions[scope, default: []]
         file = nil; targetLine = nil; diff = ""; diffFallback = ""; changes = []; branch = ""; paths = []; treeRows = []
         query = ""; filesError = nil; fileError = nil; gitError = nil; notice = nil
-        loadingFile = false
+        loading = false; loadingFile = false
         guard projectID != nil else { return }
         await refreshGit(store: store)
     }
@@ -224,12 +227,14 @@ struct InspectorDocument {
                 // with. Reload is explicit, so a refresh cannot erase edits.
                 if file?.dirty != true || discardDraft {
                     let textAtRequest = file?.text
+                    let versionAtRequest = file?.raw["version"]
                     let result = try await store.request(["api", "workspaces", projectID, "files", "content"], query: threadQuery + [URLQueryItem(name: "path", value: path)])
                     guard fileRequest == request else { return }
                     // Typing can begin while a refresh is in flight. An
                     // explicit discard applies to the text at the click,
                     // never to later keystrokes.
-                    if file?.dirty != true || (discardDraft && file?.text == textAtRequest) {
+                    if file?.raw["version"] == versionAtRequest,
+                       file?.dirty != true || (discardDraft && file?.text == textAtRequest) {
                         var refreshed = InspectorDocument(result)
                         refreshed.editing = file?.editing ?? false
                         file = refreshed
@@ -248,6 +253,13 @@ struct InspectorDocument {
         guard selectedPath != nil else { return }
         if let file, file.dirty { drafts[documentKey] = file }
         else { drafts.removeValue(forKey: documentKey) }
+    }
+
+    func closeSelection() {
+        rememberDocument()
+        fileRequest = UUID()
+        selectedPath = nil; targetLine = nil; file = nil
+        diff = ""; diffFallback = ""; fileError = nil; loadingFile = false
     }
 
     func save(store: AppStore) async {
@@ -501,7 +513,7 @@ struct NativeInspectorView: View {
                         if model.file?.dirty == true { discardAlert = true }
                         else { Task { await model.loadSelection(store: store, tab: tab, discardDraft: true) } }
                     }
-                    Button("Close file") { model.rememberDocument(); model.selectedPath = nil; model.file = nil }
+                    Button("Close file") { model.closeSelection() }
                 } label: { Image(systemName: "ellipsis") }.menuStyle(.borderlessButton).fixedSize().frame(width: 22)
             }.font(NativePreferences.shared.font(size: 11)).padding(.leading, 10).padding(.trailing, 6).frame(height: 34)
             Divider()
@@ -532,6 +544,7 @@ struct NativeInspectorView: View {
     @ViewBuilder private var previewBody: some View {
         if let file = model.file, file.editing {
             InspectorCodeEditor(text: Binding(get: { model.file?.text ?? "" }, set: { model.file?.text = $0 }), editable: true, language: model.selectedPath ?? "", line: model.targetLine)
+                .id(model.documentKey)
         } else if tab == .changes && !model.diff.isEmpty {
             InspectorCodeEditor(text: .constant(model.diff), editable: false, language: "diff", diff: true)
         } else if let file = model.file {
@@ -627,6 +640,7 @@ struct NativeInspectorView: View {
               route.threadID == nil || route.threadID == store.selectedTask?.id,
               model.scope == scope else { return }
         consumedRoute = route.id
+        let routeScope = scope
         tabValue = InspectorTab.files.rawValue
         var path = route.path
         if !localRoot.isEmpty, path.hasPrefix(localRoot + "/") { path = String(path.dropFirst(localRoot.count + 1)) }
@@ -636,6 +650,8 @@ struct NativeInspectorView: View {
         }
         if route.line != nil { preview = false }
         await model.refreshFiles(store: store)
+        guard !Task.isCancelled, scope == routeScope, model.scope == routeScope,
+              NativeInspectorNavigation.shared.pending?.id == route.id else { return }
         await model.select(path: path, store: store, tab: .files, line: route.line)
         if NativeInspectorNavigation.shared.pending?.id == route.id { NativeInspectorNavigation.shared.pending = nil }
     }

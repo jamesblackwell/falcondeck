@@ -755,7 +755,7 @@ impl CodexSession {
 
         {
             let session = Arc::clone(&session);
-            tokio::spawn(async move {
+            state.spawn_background_task(async move {
                 session.read_stdout(stdout).await;
             });
         }

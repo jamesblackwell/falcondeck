@@ -32,7 +32,7 @@ struct NativeRelayChunkReceiver {
 
 enum NativeRelayEvent: Sendable {
     case status(String, connected: Bool)
-    case snapshot(JSON)
+    case snapshot(JSON, rebase: [JSON] = [])
     case events([JSON])
     case rebase([JSON])
     case error(String)
@@ -223,6 +223,7 @@ actor NativeRelayClient: NativeRemoteTransport {
             guard frame["session_id"].string == session?.sessionID, frame["role"].string == "client" else { throw PilotError("Unexpected relay session.") }
             supportsClientActivity = frame["client_activity_supported"].bool
             await setForeground(foreground)
+            guard current == generation else { return }
             emit(.status("Securing connection…", connected: false))
             // Fresh snapshots are our source of truth; skip old ciphertext and
             // request a signed bootstrap addressed to this independent client.
@@ -237,8 +238,8 @@ actor NativeRelayClient: NativeRemoteTransport {
         case "update": try consume(frame["update"])
         case "presence": applyPresence(frame["presence"])
         case "ephemeral":
-            if let key = session?.dataKey, frame["body"]["kind"].string == "encrypted-daemon-event" {
-                publish(NativeRelayPayload.events(try NativeRelayCrypto.decrypt(frame["body"]["envelope"], key: key)))
+            if frame["body"]["kind"].string == "encrypted-daemon-event" {
+                publish(try NativeRelayPayload.decryptEvents(frame["body"]["envelope"], key: session?.dataKey, awaitingBootstrap: awaitingBootstrap))
             }
         case "rpc-result":
             log.info("RPC response received; success: \(frame["ok"].bool)")
@@ -269,8 +270,8 @@ actor NativeRelayClient: NativeRemoteTransport {
             scheduleRefresh(urgent: true)
         } else if body["t"].string == "presence" { applyPresence(body["presence"]) }
         else if body["t"].string == "snapshot-invalidated" { scheduleRefresh() }
-        else if body["t"].string == "encrypted", let key = session?.dataKey {
-            publish(NativeRelayPayload.events(try NativeRelayCrypto.decrypt(body["envelope"], key: key)))
+        else if body["t"].string == "encrypted" {
+            publish(try NativeRelayPayload.decryptEvents(body["envelope"], key: session?.dataKey, awaitingBootstrap: awaitingBootstrap))
         }
     }
 
@@ -289,7 +290,7 @@ actor NativeRelayClient: NativeRemoteTransport {
             }
         }
         // A sidebar refresh must never pause the selected transcript. Metadata
-        // is rebased after the snapshot without replaying text a second time.
+        // is rebased into the snapshot without replaying text a second time.
         if !live.isEmpty { emit(.events(live)) }
     }
 
@@ -346,8 +347,7 @@ actor NativeRelayClient: NativeRemoteTransport {
             ]))
             guard current == generation else { return }
             refreshed = .now
-            emit(.snapshot(result))
-            emit(.rebase(bufferedEvents)); bufferedEvents = []
+            emit(.snapshot(result, rebase: bufferedEvents)); bufferedEvents = []
             emit(.status("Connected", connected: true))
         } catch {
             guard current == generation else { return }
@@ -489,6 +489,14 @@ extension String {
 
 
 enum NativeRelayPayload {
+    static func decryptEvents(_ envelope: JSON, key: Data?, awaitingBootstrap: Bool) throws -> [JSON] {
+        // The saved key may have rotated while this Mac was disconnected.
+        // Live traffic can arrive before the requested bootstrap; the fresh
+        // snapshot after authentication recovers everything skipped here.
+        guard !awaitingBootstrap, let key else { return [] }
+        return events(try NativeRelayCrypto.decrypt(envelope, key: key))
+    }
+
     static func events(_ payload: JSON) -> [JSON] {
         switch payload["kind"].string {
         case "daemon-event": [payload["event"]]

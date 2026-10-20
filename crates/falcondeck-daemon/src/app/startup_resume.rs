@@ -32,7 +32,7 @@ impl AppState {
         }
         let app = self.clone();
         let path = workspace.path.clone();
-        tokio::spawn(async move {
+        self.spawn_background_task(async move {
             app.resume_interrupted_threads_after_restore(&path, &thread_ids)
                 .await;
         });

@@ -672,7 +672,7 @@ impl AppState {
                                         continue;
                                     };
                                     let outbox = writer.clone();
-                                    tokio::spawn(async move {
+                                    self.spawn_background_task(async move {
                                         let _permit = permit;
                                         if let Err(error) = app
                                             .handle_remote_rpc(

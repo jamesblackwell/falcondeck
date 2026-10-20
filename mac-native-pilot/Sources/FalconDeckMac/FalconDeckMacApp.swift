@@ -35,22 +35,31 @@ struct FalconDeckMacApp: App {
         .commands {
             CommandGroup(replacing: .appSettings) {
                 Button("Settings…") { store.selectSection("settings") }
+                    .keyboardShortcut(NativeCommandDispatcher.menuShortcut(for: "openSettings", preferences: preferences))
             }
             CommandGroup(after: .newItem) {
                 Button("New task") { store.newTask() }
+                    .keyboardShortcut(NativeCommandDispatcher.menuShortcut(for: "newThread", preferences: preferences))
                 Button("New chat") { Task { await store.newChat() } }
+                    .keyboardShortcut(NativeCommandDispatcher.menuShortcut(for: "newChat", preferences: preferences))
                 Button("Reconnect") { Task { await store.reconnect() } }
                     .keyboardShortcut("r", modifiers: [.command, .shift])
             }
             CommandMenu("Workspace") {
                 Button("Search tasks and commands") { NativeCommandDispatcher.shared.execute("commandPalette") }
+                    .keyboardShortcut(NativeCommandDispatcher.menuShortcut(for: "commandPalette", preferences: preferences))
                 Button("Activity") { store.selectSection("activity") }
+                    .keyboardShortcut(NativeCommandDispatcher.menuShortcut(for: "openActivity", preferences: preferences))
                 Button("Automations") { store.selectSection("automations") }
                 Button("Usage") { store.selectSection("usage") }
+                    .keyboardShortcut(NativeCommandDispatcher.menuShortcut(for: "openUsage", preferences: preferences))
                 Divider()
                 Button("Toggle sidebar") { NativeCommandDispatcher.shared.execute("toggleSidebar") }
+                    .keyboardShortcut(NativeCommandDispatcher.menuShortcut(for: "toggleSidebar", preferences: preferences))
                 Toggle("Show inspector", isOn: $store.showInspector)
+                    .keyboardShortcut(NativeCommandDispatcher.menuShortcut(for: "toggleChanges", preferences: preferences))
                 Toggle("Show terminal", isOn: $store.showTerminal)
+                    .keyboardShortcut(NativeCommandDispatcher.menuShortcut(for: "toggleTerminal", preferences: preferences))
             }
         }
     }

@@ -263,7 +263,7 @@ struct NativeExtensionPanel: View {
     }
     private var document: JSON {
         let published = repository.snapshot["views"].array.first { $0["extension_id"].string == extensionID && $0["view_id"].string == contribution["view"].string && $0["scope"] == .null }?["value"] ?? .null
-        return published["version"] != .null && published["root"] != .null ? published : contribution["ui"]
+        return NativeExtensionDocument.resolve(published: published, fallback: contribution["ui"])
     }
 
     var body: some View {
@@ -313,18 +313,105 @@ struct NativeExtensionPanel: View {
 }
 
 enum NativeExtensionDocument {
+    static func resolve(published: JSON, fallback: JSON) -> JSON {
+        // A published document with malformed fields must remain unsupported;
+        // replacing it with the manifest would hide the incompatible update.
+        published.fields["version"] != nil && published.fields["root"] != nil ? published : fallback
+    }
+
     static func valid(_ document: JSON) -> Bool {
-        guard document["version"].int == 1 else { return false }
+        guard hasOnlyKeys(document, ["version", "root"]), document["version"] == .number(1) else { return false }
         var count = 0
-        func visit(_ node: JSON, _ depth: Int) -> Bool {
-            count += 1
-            guard count <= 200, depth <= 12, ["stack", "row", "list", "text", "badge", "divider", "button", "state", "select"].contains(node["type"].string) else { return false }
-            guard ["text", "label", "title", "description"].allSatisfy({ node[$0].string.count <= 8000 }) else { return false }
-            if node["type"].string == "button" && node["action"]["actionId"].string.isEmpty { return false }
-            if node["type"].string == "select" && (node["id"].string.isEmpty || node["options"].array.count > 100) { return false }
-            return node[node["type"].string == "list" ? "items" : "children"].array.allSatisfy { visit($0, depth + 1) }
+        return validNode(document["root"], depth: 1, count: &count)
+    }
+
+    // Keep these bounds and schemas aligned with client-core/extension-ui.ts.
+    private static let tones: Set<String> = ["default", "muted", "accent", "success", "warning", "danger", "info", "gray", "red", "orange", "yellow", "green", "blue", "purple", "pink"]
+    private static let gaps: Set<String> = ["none", "small", "medium", "large"]
+
+    private static func validNode(_ node: JSON, depth: Int, count: inout Int) -> Bool {
+        count += 1
+        guard depth <= 32, count <= 256 else { return false }
+        switch node["type"].string {
+        case "stack", "row", "list":
+            let type = node["type"].string
+            let childrenKey = type == "list" ? "items" : "children"
+            let allowed = type == "row" ? ["type", "gap", "wrap", "children"] : type == "stack" ? ["type", "gap", "children"] : ["type", "items"]
+            guard hasOnlyKeys(node, allowed), case .array(let children) = node[childrenKey], children.count <= 256 else { return false }
+            if type != "list", !optionalEnum(node, key: "gap", values: gaps) { return false }
+            if type == "row", !optionalBoolean(node, key: "wrap") { return false }
+            return children.allSatisfy { validNode($0, depth: depth + 1, count: &count) }
+        case "text":
+            return hasOnlyKeys(node, ["type", "text", "style", "tone"]) && text(node["text"])
+                && optionalEnum(node, key: "style", values: ["body", "heading", "caption", "mono"])
+                && optionalEnum(node, key: "tone", values: tones)
+        case "badge":
+            return hasOnlyKeys(node, ["type", "text", "tone"]) && text(node["text"]) && optionalEnum(node, key: "tone", values: tones)
+        case "divider": return hasOnlyKeys(node, ["type"])
+        case "button":
+            return hasOnlyKeys(node, ["type", "label", "action", "variant", "disabled"]) && text(node["label"], allowEmpty: false)
+                && validAction(node["action"]) && optionalEnum(node, key: "variant", values: ["secondary", "primary", "ghost", "danger"])
+                && optionalBoolean(node, key: "disabled")
+        case "select":
+            guard hasOnlyKeys(node, ["type", "id", "label", "multiple", "options", "binding"]), identifier(node["id"]), text(node["label"], allowEmpty: false),
+                  optionalBoolean(node, key: "multiple"), case .array(let options) = node["options"], options.count <= 256,
+                  validFilterBinding(node["binding"]) else { return false }
+            var values: Set<String> = []
+            return options.allSatisfy { option in
+                hasOnlyKeys(option, ["value", "label", "tone"]) && text(option["value"], limit: 256) && !option["value"].string.isEmpty
+                    && values.insert(option["value"].string).inserted && text(option["label"], allowEmpty: false)
+                    && optionalEnum(option, key: "tone", values: tones)
+            }
+        case "state":
+            return hasOnlyKeys(node, ["type", "state", "title", "description"]) && ["loading", "empty", "error"].contains(node["state"].string)
+                && text(node["title"], allowEmpty: false) && (node.fields["description"] == nil || text(node["description"]))
+        default: return false
         }
-        return visit(document["root"], 1)
+    }
+
+    private static func validAction(_ action: JSON) -> Bool {
+        guard hasOnlyKeys(action, ["actionId", "input", "target"]), identifier(action["actionId"]) else { return false }
+        if let input = action.fields["input"] {
+            let encoder = JSONEncoder()
+            encoder.outputFormatting = [.withoutEscapingSlashes]
+            guard let data = try? encoder.encode(input), data.count <= 64 * 1024 else { return false }
+        }
+        if let target = action.fields["target"] {
+            guard hasOnlyKeys(target, ["kind", "id"]), text(target["kind"], limit: 64), !target["kind"].string.isEmpty,
+                  text(target["id"], limit: 512), !target["id"].string.isEmpty else { return false }
+        }
+        return true
+    }
+
+    private static func validFilterBinding(_ binding: JSON) -> Bool {
+        guard hasOnlyKeys(binding, ["view", "path", "operator"]), identifier(binding["view"]), binding["operator"] == .string("includes_any"),
+              case .array(let path) = binding["path"], !path.isEmpty, path.count <= 16 else { return false }
+        return path.allSatisfy { text($0, limit: 128) && !$0.string.isEmpty && !["__proto__", "constructor", "prototype"].contains($0.string) }
+    }
+
+    private static func hasOnlyKeys(_ value: JSON, _ allowed: [String]) -> Bool {
+        guard case .object(let fields) = value else { return false }
+        return fields.keys.allSatisfy(allowed.contains)
+    }
+
+    private static func identifier(_ value: JSON) -> Bool {
+        guard case .string(let string) = value else { return false }
+        return string.range(of: "^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$", options: .regularExpression) != nil
+    }
+
+    private static func text(_ value: JSON, limit: Int = 4096, allowEmpty: Bool = true) -> Bool {
+        guard case .string(let string) = value, string.unicodeScalars.count <= limit else { return false }
+        return allowEmpty || !string.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+
+    private static func optionalEnum(_ value: JSON, key: String, values: Set<String>) -> Bool {
+        value.fields[key] == nil || values.contains(value[key].string)
+    }
+
+    private static func optionalBoolean(_ value: JSON, key: String) -> Bool {
+        if value.fields[key] == nil { return true }
+        if case .bool = value[key] { return true }
+        return false
     }
 }
 

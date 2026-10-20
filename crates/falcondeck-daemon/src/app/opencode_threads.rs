@@ -270,7 +270,7 @@ impl AppState {
         let app = self.clone();
         let workspace_id = workspace_id.to_string();
         let thread_id = thread_id.to_string();
-        tokio::spawn(async move {
+        self.spawn_background_task(async move {
             let result: Result<(), DaemonError> = async {
                 let session_id = app
                     .thread_summary(&workspace_id, &thread_id)
@@ -409,10 +409,11 @@ pub(super) async fn start_opencode_turn(
             thread.opencode_interrupt_requested = false;
         })
         .await;
+    let spawn_app = app.clone();
     let app = app.clone();
     let workspace_id = workspace_id.to_string();
     let thread_id = thread_id.to_string();
-    tokio::spawn(async move {
+    spawn_app.spawn_background_task(async move {
         let outcome = async {
             let wait = runtime.wait_for_settlement(&session_id);
             tokio::pin!(wait);
@@ -421,6 +422,9 @@ pub(super) async fn start_opencode_turn(
             let mut projected = std::collections::HashMap::<String, Value>::new();
             loop {
                 tokio::select! {
+                    () = app.wait_for_shutdown() => {
+                        return Err(DaemonError::Process("daemon is shutting down".to_string()));
+                    }
                     result = &mut wait => {
                         break result?;
                     }
@@ -499,6 +503,9 @@ pub(super) async fn start_opencode_turn(
             project_settled_messages(&app, &workspace_id, &thread_id, &current_messages).await
         }
         .await;
+        if app.is_shutting_down() {
+            return;
+        }
         let mut interrupted = false;
         let _ = app
             .with_managed_thread_mut(&workspace_id, &thread_id, |thread| {

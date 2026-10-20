@@ -48,6 +48,17 @@ final class NativeHostProjectionTests: XCTestCase {
         ] { XCTAssertThrowsError(try NativeHostProjection.rawIDs(value, host: host)) }
     }
 
+    func testQueryRelationshipsRejectForeignHostsBeforeStrippingEveryAlias() throws {
+        let aliases = ["workspace_id", "workspaceId", "thread_id", "threadId", "request_id", "requestId", "folder_id", "folderId", "current_thread_id", "currentThreadId", "parent_thread_id", "parentThreadId", "before_thread_id", "beforeThreadId", "after_thread_id", "afterThreadId", "task_id", "taskId", "automation_id", "automationId"]
+        for key in aliases {
+            let owned = URLQueryItem(name: key, value: scoped("same-id").string)
+            XCTAssertEqual(try NativeHostProjection.rawQuery([owned], host: host), [URLQueryItem(name: key, value: "same-id")])
+            XCTAssertThrowsError(try NativeHostProjection.rawQuery([URLQueryItem(name: key, value: "remote:other-server:same-id")], host: host), key)
+        }
+        let opaque = [URLQueryItem(name: "path", value: "remote:other-server:file"), URLQueryItem(name: "query", value: "remote:other-server:text"), URLQueryItem(name: "thread_id", value: nil), URLQueryItem(name: "thread_id", value: "plain-id")]
+        XCTAssertEqual(try NativeHostProjection.rawQuery(opaque, host: host), opaque, "Opaque values, nil values, and duplicate query items retain their HTTP semantics")
+    }
+
     func testOpaqueInputIDsAndTextSurviveUnprojection() throws {
         let opaque: JSON = .object(["id": .string("remote:server-b:item"), "thread_id": .string("remote:server-b:user-field"), "text": .string("remote:server-b:text")])
         let value: JSON = .object([
@@ -140,5 +151,27 @@ final class NativeHostProjectionTests: XCTestCase {
         let snapshot: JSON = .object(["threads": .array([current])])
         let old = current.setting("updated_at", .string("2026-10-19T12:00:00Z")).setting("title", .string("Old"))
         XCTAssertEqual(NativeHostProjection.reduce(snapshot, envelope: .object(["event": .object(["type": .string("thread-updated"), "thread": old])]))["threads"], .array([current]))
+    }
+
+    func testEqualTimestampReplayPreservesReadAndActivityWatermarks() {
+        func summary(activity: Int, read: Int) -> JSON {
+            .object(["id": .string("thread"), "updated_at": .string("2026-10-20T12:00:00Z"), "status": .string("idle"),
+                     "attention": .object(["last_agent_activity_seq": .number(Double(activity)), "last_read_seq": .number(Double(read)), "unread": .bool(activity > read), "level": .string(activity > read ? "unread" : "none")])])
+        }
+        let current = summary(activity: 12, read: 12)
+        let replay = summary(activity: 10, read: 8)
+        let result = NativeHostProjection.reduce(.object(["threads": .array([current])]), envelope: .object(["event": .object(["type": .string("thread-updated"), "thread": replay])]))
+        XCTAssertEqual(result["threads"].array[0]["attention"], current["attention"])
+
+        let unread = summary(activity: 12, read: 0).setting("updated_at", .string("2026-10-20T12:00:01Z"))
+        let markedUnread = NativeHostProjection.reduce(result, envelope: .object(["event": .object(["type": .string("thread-updated"), "thread": unread])]))
+        XCTAssertEqual(markedUnread["threads"].array[0]["attention"]["last_read_seq"], .number(0), "An explicit newer mark-unread may lower the read watermark")
+    }
+
+    func testEqualTimestampReplayCannotReviveSettledThread() {
+        let current = JSON.object(["id": .string("thread"), "status": .string("idle"), "updated_at": .string("2026-10-20T12:00:00Z")])
+        let replay = current.setting("status", .string("running"))
+        let result = NativeHostProjection.reduce(.object(["threads": .array([current])]), envelope: .object(["event": .object(["type": .string("thread-updated"), "thread": replay])]))
+        XCTAssertEqual(result["threads"], .array([current]))
     }
 }

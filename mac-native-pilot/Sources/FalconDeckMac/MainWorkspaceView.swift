@@ -41,8 +41,12 @@ struct MainWorkspaceView: View {
         .toolbar {
             if conversation {
                 ToolbarItemGroup(placement: .primaryAction) {
-                    Button { store.showInspector.toggle() } label: { Image(systemName: "sidebar.right") }.help("Info, changes and files")
-                    Button { store.showTerminal.toggle() } label: { Image(systemName: "terminal") }.help("Terminal")
+                    Button { store.showInspector.toggle() } label: { Image(systemName: "sidebar.right") }
+                        .help("Info, changes and files")
+                        .accessibilityLabel(store.showInspector ? "Hide inspector" : "Show inspector")
+                    Button { store.showTerminal.toggle() } label: { Image(systemName: "terminal") }
+                        .help("Terminal")
+                        .accessibilityLabel(store.showTerminal ? "Hide terminal" : "Show terminal")
                 }
             }
         }

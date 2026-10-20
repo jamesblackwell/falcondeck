@@ -49,11 +49,7 @@ struct ProjectNavigator: View {
 
     /// Streaming previews and timestamps redraw the row without changing its
     /// position. Resort when a task is added, retitled, stopped or unpinned.
-    private var pinOrderKey: [PinOrderEntry] {
-        pinCandidates.map { PinOrderEntry(id: $0.id, title: $0.title, status: $0.status,
-                                       pinned: $0.pinned, archived: $0.raw["is_archived"].bool,
-                                       unread: $0.unread, timestamp: $0.running ? "" : $0.updatedAt) }
-    }
+    private var pinOrderKey: [NativeTaskNavigationOrder.Key] { pinCandidates.map(NativeTaskNavigationOrder.key) }
 
     private var selection: Binding<String?> {
         Binding(get: {
@@ -180,7 +176,7 @@ struct ProjectNavigator: View {
                     .disabled(!store.isConnected)
                     .accessibilityIdentifier("open-project")
                 footerButton("Project library", symbol: "books.vertical") { showingLibrary = true }
-                    .disabled(!store.isConnected)
+                    .disabled(!store.isSelectedHostConnected)
                 footerButton("Settings", symbol: "gearshape") { store.selectSection("settings") }
                     .background(store.selectedSection == "settings" ? FDTheme.hover : Color.clear,
                                 in: RoundedRectangle(cornerRadius: 6))
@@ -512,16 +508,6 @@ struct ProjectNavigator: View {
     }
 }
 
-private struct PinOrderEntry: Equatable {
-    let id: String
-    let title: String
-    let status: String
-    let pinned: Bool
-    let archived: Bool
-    let unread: Bool
-    let timestamp: String
-}
-
 private struct ProjectNavigatorGlyph: View {
     let store: AppStore
     let project: Project
@@ -614,6 +600,11 @@ private struct ProjectLibrarySheet: View {
         entries.filter { search.isEmpty || $0.path.localizedCaseInsensitiveContains(search) }
     }
 
+    private var hostConnected: Bool {
+        guard let hostID else { return store.isConnected }
+        return NativeHostManager.shared.hosts.first { $0.id == hostID }?.status == .connected
+    }
+
     var body: some View {
         VStack(spacing: 0) {
             HStack {
@@ -652,7 +643,7 @@ private struct ProjectLibrarySheet: View {
                         }
                         Spacer()
                         Button(openingID == project.id ? "Opening…" : "Open") { open(project) }
-                            .disabled(openingID != nil || !store.isConnected)
+                            .disabled(openingID != nil || !hostConnected)
                     }
                     .padding(.vertical, 6)
                     .help(project.path)

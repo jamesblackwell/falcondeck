@@ -479,9 +479,9 @@ pub(super) fn start_scheduler(app: &AppState) {
         app.inner.scheduled_notify.notify_one();
         return;
     }
-    let app = app.clone();
-    tokio::spawn(async move {
-        scheduler_loop(app).await;
+    let task_app = app.clone();
+    app.spawn_background_task(async move {
+        scheduler_loop(task_app).await;
     });
 }
 
@@ -518,6 +518,7 @@ async fn scheduler_loop(app: AppState) {
             if let Err(error) = enqueue_run(&app, &task_id, trigger, scheduled_for).await {
                 tracing::warn!(task_id, %error, "failed to enqueue scheduled task run");
                 tokio::select! {
+                    () = app.wait_for_shutdown() => return,
                     _ = sleep(Duration::from_secs(5)) => {},
                     _ = app.inner.scheduled_notify.notified() => {},
                 }
@@ -539,6 +540,7 @@ async fn scheduler_loop(app: AppState) {
                 duration.min(SCHEDULER_IDLE_POLL)
             });
         tokio::select! {
+            () = app.wait_for_shutdown() => return,
             _ = sleep(wait) => {},
             _ = app.inner.scheduled_notify.notified() => {},
         }
@@ -968,11 +970,11 @@ async fn enqueue_run(
 }
 
 fn spawn_run(app: &AppState, task_id: &str, run_id: &str) {
-    let app = app.clone();
+    let task_app = app.clone();
     let task_id = task_id.to_string();
     let run_id = run_id.to_string();
-    tokio::spawn(async move {
-        execute_run(app, task_id, run_id).await;
+    app.spawn_background_task(async move {
+        execute_run(task_app, task_id, run_id).await;
     });
 }
 
@@ -1144,6 +1146,7 @@ async fn execute_run(app: AppState, task_id: String, run_id: String) {
     terminal_poll.tick().await;
     loop {
         let event = tokio::select! {
+            () = app.wait_for_shutdown() => return,
             event = events.recv() => Some(event),
             _ = terminal_poll.tick() => None,
         };

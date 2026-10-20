@@ -3,6 +3,29 @@ import Foundation
 /// A live work queue promotes new work immediately, while reading a result
 /// must not move the row out from under the user's pointer.
 struct NativeTaskNavigationOrder {
+    struct Key: Equatable {
+        let id: String
+        let title: String
+        let status: String
+        let pinned: Bool
+        let projectPinned: Bool
+        let archived: Bool
+        let unread: Bool
+        let awaitingInput: Bool
+        let running: Bool
+        let priority: Int
+        let timestamp: String
+    }
+
+    /// The queue depends on attention as well as status. Pending requests can
+    /// change independently, while streamed text must not churn its order.
+    static func key(_ task: AgentTask) -> Key {
+        Key(id: task.id, title: task.title, status: task.status, pinned: task.pinned,
+            projectPinned: task.raw["is_pinned_in_project"].bool, archived: task.raw["is_archived"].bool,
+            unread: task.unread, awaitingInput: task.awaitingInput, running: task.running, priority: rank(task),
+            timestamp: task.running ? "" : task.updatedAt)
+    }
+
     private struct Priority { var bucket: Int; let order: Int }
     private struct Recency { let key: String; let running: Bool }
     private var priority: [String: Priority] = [:]
@@ -65,10 +88,13 @@ struct NativeTaskNavigationOrder {
     }
 
     static func rank(_ task: AgentTask) -> Int {
+        // Failed tasks can retain a pending-request count. The daemon and the
+        // shared client resolve the failure before those obsolete requests.
+        if task.status == "error" || task.raw["attention"]["level"].string == "error" { return task.unread ? 1 : 4 }
         if task.awaitingInput { return 0 }
-        if task.status == "error" && task.unread { return 1 }
+        if task.running { return 3 }
         if task.status == "idle" && task.unread { return 2 }
-        return task.running ? 3 : 4
+        return 4
     }
 
     private static func moreRecent(_ lhs: AgentTask, _ rhs: AgentTask) -> Bool {

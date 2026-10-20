@@ -19,7 +19,7 @@ struct NativeRemoteHost: Identifiable, Codable, Equatable, Sendable {
     var name: String
     var relayURL: String
     var sshTarget: String?
-    var sshPort: Int
+    var sshPort: Int?
     var enabled: Bool
     var lastConnectedAt: Date?
     var status: NativeHostStatus = .disconnected
@@ -89,11 +89,11 @@ struct NativeHostUpdate: Sendable {
 
     @discardableResult
     func addHost(name: String, pairingText: String, relay: String = NativePairingInput.defaultRelay,
-                 sshTarget: String? = nil, sshPort: Int = 22) async throws -> String {
+                 sshTarget: String? = nil, sshPort: Int? = nil) async throws -> String {
         let input = try NativePairingInput(text: pairingText, relay: relay)
         let name = name.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !name.isEmpty else { throw PilotError("Enter a name for this server.") }
-        guard (1...65535).contains(sshPort) else { throw PilotError("Enter an SSH port between 1 and 65535.") }
+        if let sshPort, !(1...65535).contains(sshPort) { throw PilotError("Enter an SSH port between 1 and 65535.") }
         let id = UUID().uuidString
         hosts.append(NativeRemoteHost(id: id, name: name, relayURL: input.relay.absoluteString,
                                       sshTarget: sshTarget?.trimmingCharacters(in: .whitespacesAndNewlines),
@@ -114,10 +114,12 @@ struct NativeHostUpdate: Sendable {
 
     private func pair(hostID: String, input: NativePairingInput) async throws {
         reconnects.removeValue(forKey: hostID)?.cancel()
-        let client = await transport(hostID)
         let generation = UUID()
         generations[hostID] = generation
         setStatus(hostID, .connecting)
+        let client = await transport(hostID)
+        guard generations[hostID] == generation,
+              hosts.contains(where: { $0.id == hostID && $0.enabled }) else { throw CancellationError() }
         do {
             try await client.pair(input, connectionID: generation)
         } catch {
@@ -137,10 +139,12 @@ struct NativeHostUpdate: Sendable {
 
     private func connectHost(_ hostID: String) async throws {
         guard hosts.contains(where: { $0.id == hostID && $0.enabled }) else { return }
-        let client = await transport(hostID)
         let generation = UUID()
         generations[hostID] = generation
         setStatus(hostID, .connecting)
+        let client = await transport(hostID)
+        guard generations[hostID] == generation,
+              hosts.contains(where: { $0.id == hostID && $0.enabled }) else { throw CancellationError() }
         do {
             guard try await client.restore(connectionID: generation) else {
                 throw PilotError("Pair this server again to restore its credentials.")
@@ -155,8 +159,10 @@ struct NativeHostUpdate: Sendable {
 
     func disconnect(hostID: String) async {
         reconnects.removeValue(forKey: hostID)?.cancel()
-        generations[hostID] = UUID()
+        let generation = UUID()
+        generations[hostID] = generation
         try? await clients[hostID]?.disconnect(forget: false)
+        guard generations[hostID] == generation else { return }
         setStatus(hostID, .disconnected)
     }
 
@@ -168,9 +174,9 @@ struct NativeHostUpdate: Sendable {
         else { await disconnect(hostID: hostID) }
     }
 
-    func update(hostID: String, name: String, sshTarget: String?, sshPort: Int) throws {
+    func update(hostID: String, name: String, sshTarget: String?, sshPort: Int?) throws {
         let name = name.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !name.isEmpty, (1...65535).contains(sshPort) else { throw PilotError("Enter a server name and valid SSH port.") }
+        guard !name.isEmpty, sshPort.map({ (1...65535).contains($0) }) ?? true else { throw PilotError("Enter a server name and valid SSH port.") }
         guard let index = hosts.firstIndex(where: { $0.id == hostID }) else { throw PilotError("This server was removed.") }
         hosts[index].name = name
         hosts[index].sshTarget = sshTarget?.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -239,6 +245,7 @@ struct NativeHostUpdate: Sendable {
         let client = factory(hostID)
         clients[hostID] = client
         let stream = await client.events()
+        guard clients[hostID] != nil else { return client }
         readers[hostID] = Task { [weak self] in
             for await update in stream {
                 guard !Task.isCancelled else { return }
@@ -259,9 +266,13 @@ struct NativeHostUpdate: Sendable {
                 attempts[hostID] = 0
                 reconnects.removeValue(forKey: hostID)?.cancel()
             } else if status == .disconnected { scheduleReconnect(hostID) }
-        case .snapshot(let value):
-            snapshots[hostID] = value
-            emit(hostID, .snapshot(value))
+        case .snapshot(let value, let rebase):
+            // The RPC snapshot may predate live events already delivered to
+            // the UI. Reconcile its metadata before publishing it, so selection
+            // never sees a temporarily missing thread or workspace.
+            let rebased = rebase.reduce(value) { NativeHostProjection.reduce($0, envelope: $1) }
+            snapshots[hostID] = rebased
+            emit(hostID, .snapshot(rebased))
         case .events(let values): emit(hostID, .events(values))
         case .rebase(let values): emit(hostID, .rebase(values))
         case .error(let message):

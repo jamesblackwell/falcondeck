@@ -532,8 +532,13 @@ static BOOL FDTranscriptRangeMatches(NSString *value, NSString *original, CFRang
 
 @interface FDDictationController : NSObject <AVCaptureFileOutputRecordingDelegate> {
   AXUIElementRef _pasteTargetElement;
+  CFTypeRef _pasteTargetTextMarkerRange;
   AXUIElementRef _lastPastedElement;
 }
+@property(nonatomic) CFRange pasteTargetSelectedRange;
+@property(nonatomic) BOOL pasteTargetSelectedRangeKnown;
+@property(nonatomic, copy) NSString *pasteTargetValue;
+@property(nonatomic) BOOL pasteTargetAllowsUnknownSelection;
 @property(nonatomic) CFRange lastPastedRange;
 @property(nonatomic) BOOL lastPastedRangeKnown;
 @property(nonatomic) pid_t lastPastedApplicationPid;
@@ -547,6 +552,7 @@ static BOOL FDTranscriptRangeMatches(NSString *value, NSString *original, CFRang
 @property(nonatomic) BOOL cancelling;
 @property(nonatomic) BOOL recording;
 @property(nonatomic) BOOL stopping;
+@property(nonatomic) BOOL cancelledCaptureTranscription;
 @property(nonatomic) BOOL shuttingDown;
 @property(nonatomic) BOOL retryCopiesTranscript;
 @property(nonatomic, strong) AVAssetExportSession *recordingExport;
@@ -628,9 +634,12 @@ static BOOL FDTranscriptRangeMatches(NSString *value, NSString *original, CFRang
                           output:(AVCaptureAudioFileOutput *)output
                              url:(NSURL *)url;
 - (BOOL)claimSpeechCompletion:(NSUInteger)generation API_AVAILABLE(macos(10.15));
+- (void)cancelProcessing;
 - (void)surfaceRetainedRecordingIfNeeded;
 - (void)prepareRecordingForTranscription:(NSURL *)url provider:(FDProvider)provider;
 - (void)capturePasteTarget;
+- (void)capturePasteTargetSelection;
+- (BOOL)pasteTargetSelectionIsCurrent;
 - (void)recapturePasteTarget;
 - (void)returnFocusToPasteTarget;
 - (BOOL)refreshPasteTargetIfFocused;
@@ -735,6 +744,7 @@ static CGEventRef FDEventTapCallback(CGEventTapProxy proxy, CGEventType type,
 }
 
 - (void)dealloc {
+  if (_pasteTargetTextMarkerRange) CFRelease(_pasteTargetTextMarkerRange);
   if (_lastPastedElement) CFRelease(_lastPastedElement);
   if (_pasteTargetElement) CFRelease(_pasteTargetElement);
 }
@@ -785,6 +795,7 @@ static CGEventRef FDEventTapCallback(CGEventTapProxy proxy, CGEventType type,
           rewriteEnabled:(BOOL)rewriteEnabled
          rewriteShortcut:(FDHotkey)rewriteShortcut
       autoCleanupEnabled:(BOOL)autoCleanupEnabled {
+  BOOL wasActive = self.enabled || self.rewriteEnabled;
   self.retainRecordings = retainRecordings;
   BOOL shouldResetModifier =
       self.enabled != enabled || !FDHotkeysEqual(self.shortcut, shortcut);
@@ -811,7 +822,7 @@ static CGEventRef FDEventTapCallback(CGEventTapProxy proxy, CGEventType type,
   }
   if (enabled || rewriteEnabled) {
     [self installEventTapIfNeeded];
-    [self surfaceRetainedRecordingIfNeeded];
+    if (!wasActive) [self surfaceRetainedRecordingIfNeeded];
   } else {
     // Stop routing every system-wide keystroke through the callback while
     // dictation and rewrite are both off; re-enabling re-arms the existing tap.
@@ -1004,7 +1015,9 @@ static CGEventRef FDEventTapCallback(CGEventTapProxy proxy, CGEventType type,
       } else {
         self.modifierDown = NO;
       }
-      [self handleTriggerRelease:self.rewriteSession];
+      if (self.activationMode == FDActivationModeHold) {
+        [self handleTriggerRelease:self.rewriteSession];
+      }
     }
     return;
   }
@@ -1152,6 +1165,7 @@ static CGEventRef FDEventTapCallback(CGEventTapProxy proxy, CGEventType type,
 }
 
 - (void)capturePasteTarget {
+  self.pasteTargetAllowsUnknownSelection = NO;
   if (_pasteTargetElement) {
     CFRelease(_pasteTargetElement);
     _pasteTargetElement = NULL;
@@ -1178,17 +1192,77 @@ static CGEventRef FDEventTapCallback(CGEventTapProxy proxy, CGEventType type,
       applicationProcessIdentifier > 0
           ? applicationProcessIdentifier
           : self.pasteTargetProcessIdentifier;
+  [self capturePasteTargetSelection];
   os_log_info(FDPasteLog(),
               "captured target elementPid=%{public}d appPid=%{public}d",
               self.pasteTargetProcessIdentifier,
               self.pasteTargetApplicationProcessIdentifier);
 }
 
-// Refreshes the target without moving focus. Overlay clicks and Tauri window
-// resizes can flip `frontmostApplication` to FalconDeck momentarily, so when
-// the focused AX element still matches the captured target, refresh just the
-// element reference and keep the original app PID. Only when focus genuinely
-// moved elsewhere is a full re-capture taken.
+- (void)capturePasteTargetSelection {
+  self.pasteTargetSelectedRangeKnown = NO;
+  self.pasteTargetValue = nil;
+  if (_pasteTargetTextMarkerRange) CFRelease(_pasteTargetTextMarkerRange);
+  _pasteTargetTextMarkerRange = NULL;
+  if (!_pasteTargetElement) return;
+  CFTypeRef rangeValue = NULL;
+  AXUIElementCopyAttributeValue(_pasteTargetElement,
+                                kAXSelectedTextRangeAttribute, &rangeValue);
+  CFRange range = CFRangeMake(-1, 0);
+  if (rangeValue && CFGetTypeID(rangeValue) == AXValueGetTypeID() &&
+      AXValueGetValue((AXValueRef)rangeValue, kAXValueCFRangeType, &range) &&
+      range.location >= 0 && range.length >= 0) {
+    self.pasteTargetSelectedRange = range;
+    self.pasteTargetSelectedRangeKnown = YES;
+  }
+  if (rangeValue) CFRelease(rangeValue);
+  AXUIElementCopyAttributeValue(_pasteTargetElement,
+      CFSTR("AXSelectedTextMarkerRange"), &_pasteTargetTextMarkerRange);
+  CFTypeRef value = NULL;
+  AXUIElementCopyAttributeValue(_pasteTargetElement, kAXValueAttribute, &value);
+  if (value && CFGetTypeID(value) == CFStringGetTypeID()) {
+    self.pasteTargetValue = (__bridge NSString *)value;
+  }
+  if (value) CFRelease(value);
+}
+
+- (BOOL)pasteTargetSelectionIsCurrent {
+  if (self.pasteTargetApplicationProcessIdentifier ==
+      NSProcessInfo.processInfo.processIdentifier) return YES;
+  BOOL hasIdentity = self.pasteTargetSelectedRangeKnown || _pasteTargetTextMarkerRange;
+  if (!hasIdentity) return self.pasteTargetAllowsUnknownSelection;
+  CFTypeRef rangeValue = NULL;
+  BOOL sameSelection = YES;
+  if (self.pasteTargetSelectedRangeKnown) {
+    CFRange range = CFRangeMake(-1, 0);
+    AXUIElementCopyAttributeValue(_pasteTargetElement,
+                                  kAXSelectedTextRangeAttribute, &rangeValue);
+    sameSelection = rangeValue && CFGetTypeID(rangeValue) == AXValueGetTypeID() &&
+        AXValueGetValue((AXValueRef)rangeValue, kAXValueCFRangeType, &range) &&
+        range.location == self.pasteTargetSelectedRange.location &&
+        range.length == self.pasteTargetSelectedRange.length;
+    if (rangeValue) CFRelease(rangeValue);
+  }
+  if (_pasteTargetTextMarkerRange) {
+    CFTypeRef markers = NULL;
+    AXUIElementCopyAttributeValue(_pasteTargetElement,
+        CFSTR("AXSelectedTextMarkerRange"), &markers);
+    sameSelection = sameSelection && markers &&
+        CFEqual(markers, _pasteTargetTextMarkerRange);
+    if (markers) CFRelease(markers);
+  }
+  if (self.pasteTargetValue) {
+    CFTypeRef value = NULL;
+    AXUIElementCopyAttributeValue(_pasteTargetElement, kAXValueAttribute, &value);
+    sameSelection = sameSelection && value && CFGetTypeID(value) == CFStringGetTypeID() &&
+        [self.pasteTargetValue isEqualToString:(__bridge NSString *)value];
+    if (value) CFRelease(value);
+  }
+  return sameSelection;
+}
+
+// Enabling manual accessibility can expose a more specific editor. Refresh
+// only while choosing the initial rewrite destination, before recording.
 - (void)recapturePasteTarget {
   pid_t focusedProcessIdentifier = 0;
   AXUIElementRef focusedElement =
@@ -1199,6 +1273,7 @@ static CGEventRef FDEventTapCallback(CGEventTapProxy proxy, CGEventType type,
            self.pasteTargetApplicationProcessIdentifier)) {
     if (_pasteTargetElement) CFRelease(_pasteTargetElement);
     _pasteTargetElement = focusedElement;
+    [self capturePasteTargetSelection];
     os_log_info(FDPasteLog(),
                 "recaptured target elementPid=%{public}d appPid=%{public}d",
                 self.pasteTargetProcessIdentifier,
@@ -1265,6 +1340,8 @@ static CGEventRef FDEventTapCallback(CGEventTapProxy proxy, CGEventType type,
   // through FalconDeck's global event stream or into a newly focused app.
   [self capturePasteTarget];
   if (rewrite) {
+    [self enableManualAccessibilityForPasteTarget];
+    [self recapturePasteTarget];
     NSString *selection = nil;
     if (self.pendingRewriteAxResolved) {
       selection = self.pendingRewriteSelection;
@@ -1344,6 +1421,7 @@ static CGEventRef FDEventTapCallback(CGEventTapProxy proxy, CGEventType type,
   self.audioFileOutput = output;
   [self setRetainedRecordingURL:url provider:self.provider];
   self.cancelling = NO;
+  self.cancelledCaptureTranscription = NO;
   self.recordingShortcut = rewrite ? self.rewriteShortcut : self.shortcut;
   self.recordingProvider = self.provider;
   self.recording = YES;
@@ -1419,6 +1497,18 @@ static CGEventRef FDEventTapCallback(CGEventTapProxy proxy, CGEventType type,
   [self stopAudioLevelMeter];
   if ([self finishOrphanedStop]) return;
   [self.audioFileOutput stopRecording];
+}
+
+- (void)cancelProcessing {
+  // A stop can still be finalizing the file before an export or speech task
+  // exists. Keep that audio, but do not begin transcription after cancellation.
+  if (self.stopping) self.cancelledCaptureTranscription = YES;
+  self.speechGeneration += 1;
+  [self.speechTask cancel];
+  self.speechTask = nil;
+  self.speechRecognizer = nil;
+  [self.recordingExport cancelExport];
+  self.recordingExport = nil;
 }
 
 // `stopping` is normally cleared by the file-output delegate, or by
@@ -1521,6 +1611,11 @@ static CGEventRef FDEventTapCallback(CGEventTapProxy proxy, CGEventType type,
       return;
     }
     [self setRecordingDurationSeconds:duration];
+    if (self.cancelledCaptureTranscription) {
+      self.cancelledCaptureTranscription = NO;
+      FDEmit(FDEventFailedRetained, @"Transcription cancelled. Your recording is retained.");
+      return;
+    }
     // -stopRecording announces processing; an unrequested finish has not yet.
     if (finishedUnrequested) FDEmit(FDEventProcessing, @"");
     if (!self.shuttingDown) {
@@ -1545,10 +1640,12 @@ static BOOL FDRecordingIsReadable(NSURL *url) {
   }
   if ([url.pathExtension isEqualToString:@"caf"]) {
     if (self.recordingExport) return;
-    NSURL *compressedURL = [[url URLByDeletingPathExtension]
-        URLByAppendingPathExtension:@"m4a"];
-    // A previous interrupted export may have left an incomplete destination.
-    [NSFileManager.defaultManager removeItemAtURL:compressedURL error:nil];
+    // A cancelled export may finish after Retry starts. Each export owns its
+    // destination so the older completion can only remove its own file.
+    NSString *compressedName = [NSString stringWithFormat:
+        @"falcondeck-native-dictation-%@.m4a", NSUUID.UUID.UUIDString];
+    NSURL *compressedURL = [[url URLByDeletingLastPathComponent]
+        URLByAppendingPathComponent:compressedName];
     AVAssetExportSession *export = [[AVAssetExportSession alloc]
         initWithAsset:[AVURLAsset URLAssetWithURL:url options:nil]
            presetName:AVAssetExportPresetAppleM4A];
@@ -1568,6 +1665,7 @@ static BOOL FDRecordingIsReadable(NSURL *url) {
         self.recordingExport = nil;
         if (export.status != AVAssetExportSessionStatusCompleted ||
             !FDRecordingIsReadable(compressedURL)) {
+          [NSFileManager.defaultManager removeItemAtURL:compressedURL error:nil];
           FDEmit(FDEventFailedRetained, @"Could not prepare the saved audio. Retry transcription to try again.");
           return;
         }
@@ -1599,6 +1697,7 @@ static BOOL FDRecordingIsReadable(NSURL *url) {
 // superseded this transcription.
 - (BOOL)claimSpeechCompletion:(NSUInteger)generation {
   if (generation != self.speechGeneration) return NO;
+  self.speechGeneration += 1;
   self.speechTask = nil;
   self.speechRecognizer = nil;
   return YES;
@@ -1668,26 +1767,15 @@ static BOOL FDRecordingIsReadable(NSURL *url) {
         FDEmit(FDEventRewriteInstruction, text);
         return;
       }
-      if (YES) {
-        FDEmit(FDEventCleanupTranscript, text);
-        return;
-      }
-      if (![self pasteText:text]) {
-        // Carries the transcript so the overlay can offer a clipboard copy.
-        FDEmit(FDEventPasteFailed, text);
-        return;
-      }
-      if (!self.retainRecordings) {
-        [[NSFileManager defaultManager] removeItemAtURL:url error:nil];
-      }
-      [self setRetainedRecordingURL:nil provider:0];
-      FDEmit(FDEventCompleted, text);
+      FDEmit(FDEventCleanupTranscript, text);
     });
   }];
 }
 
-// Automatic delivery is bound to the app and editor captured at recording
-// start. Only the explicit Retry paste action may capture a new destination.
+// Automatic delivery is bound to the app, editor, text and selection captured
+// at recording start. Only Retry paste may choose a new destination. A retry
+// can use editors without AX selection APIs because it has no transcription
+// delay; known ranges and markers are still checked before the shortcut.
 static BOOL FDTargetIdentityIsCurrent(pid_t captured, pid_t frontmost,
                                       BOOL hadEditor, BOOL sameEditor) {
   return captured > 0 && captured == frontmost && (!hadEditor || sameEditor);
@@ -1701,7 +1789,8 @@ static BOOL FDTargetIdentityIsCurrent(pid_t captured, pid_t frontmost,
                         focusedProcessIdentifier == self.pasteTargetApplicationProcessIdentifier;
   BOOL sameEditor = focused && expectedProcess && _pasteTargetElement && CFEqual(focused, _pasteTargetElement);
   BOOL valid = FDTargetIdentityIsCurrent(self.pasteTargetApplicationProcessIdentifier,
-                                        frontmost, _pasteTargetElement != NULL, sameEditor);
+                                        frontmost, _pasteTargetElement != NULL, sameEditor) &&
+      [self pasteTargetSelectionIsCurrent];
   if (focused) CFRelease(focused);
   return valid;
 }
@@ -1980,7 +2069,6 @@ static BOOL FDTargetIdentityIsCurrent(pid_t captured, pid_t frontmost,
 
 - (NSString *)captureSelectedText {
   [self enableManualAccessibilityForPasteTarget];
-  [self recapturePasteTarget];
   NSString *axText = FDCopySelectedTextNearElement(_pasteTargetElement, YES);
   if (FDNonEmptyString(axText)) {
     os_log_info(FDPasteLog(), "rewrite selection from ax chars=%{public}lu",
@@ -2073,6 +2161,7 @@ static BOOL FDTargetIdentityIsCurrent(pid_t captured, pid_t frontmost,
   // Verify that a controlled editor accepted the selection before Command-V.
   AXUIElementRef element = (AXUIElementRef)CFRetain(_lastPastedElement);
   BOOL verified = [FDSelectedTextFromElement(element) isEqualToString:original];
+  if (verified) [self capturePasteTargetSelection];
   BOOL pastedText = verified && [self pasteText:replacement];
   if (!pastedText) {
     AXValueRef previous = AXValueCreate(kAXValueCFRangeType, &selected);
@@ -2087,10 +2176,8 @@ static BOOL FDTargetIdentityIsCurrent(pid_t captured, pid_t frontmost,
   return [self pasteText:text attemptTargetedFirst:NO];
 }
 
-// Re-checks the target at delivery time, reclassifying a capture that went
-// stale while transcription was running: if the focused element is now (or is
-// again) FalconDeck itself, the transcript goes through the deterministic
-// self-insert event instead of a synthetic paste into an external app.
+// Re-check the captured destination at delivery time. FalconDeck's own editor
+// uses a separate Swift text anchor through the native insertion handler.
 - (BOOL)pasteText:(NSString *)text attemptTargetedFirst:(BOOL)attemptTargetedFirst {
   if (text.length == 0) return NO;
   if (self.retryCopiesTranscript) return fd_dictation_copy_text(text.UTF8String);
@@ -2334,11 +2421,12 @@ static BOOL FDTargetIdentityIsCurrent(pid_t captured, pid_t frontmost,
     return;
   }
   [self capturePasteTarget];
+  self.pasteTargetAllowsUnknownSelection = YES;
   FDEmit(FDEventProcessing, @"");
   NSString *attempt = [text copy];
   dispatch_async(dispatch_get_main_queue(), ^{
     if ([self pasteText:attempt attemptTargetedFirst:YES]) {
-      [self setRetainedRecordingURL:nil provider:0];
+      [self markLastRecordingCompleted];
       FDEmit(FDEventCompleted, attempt);
     } else {
       FDEmit(FDEventPasteFailed, attempt);
@@ -2828,6 +2916,7 @@ void fd_native_speech_retry_file(const char *path, int32_t provider) {
       FDEmit(FDEventFailedRetained, @"Finish the current recording first.");
       return;
     }
+    [controller clearRewriteSession];
     [controller setRetainedRecordingURL:[NSURL fileURLWithPath:value] provider:(FDProvider)provider];
     [controller retryLastRecordingCopyOnly:YES];
   });
@@ -2837,13 +2926,11 @@ int32_t fd_native_speech_retained_provider(void) {
 }
 
 void fd_native_speech_cancel_processing(void) {
-  FDDictationController *controller = [FDDictationController sharedController];
-  controller.speechGeneration += 1;
-  [controller.speechTask cancel];
-  controller.speechTask = nil;
-  controller.speechRecognizer = nil;
-  [controller.recordingExport cancelExport];
-  controller.recordingExport = nil;
+  void (^cancel)(void) = ^{
+    [[FDDictationController sharedController] cancelProcessing];
+  };
+  if (NSThread.isMainThread) cancel();
+  else dispatch_sync(dispatch_get_main_queue(), cancel);
 }
 void fd_native_speech_suspend_shortcuts(bool suspend) {
   FDNativeShortcutsSuspended = suspend;

@@ -478,7 +478,7 @@ impl AppState {
         let app = self.clone();
         let workspace_id = workspace_id.to_string();
         let thread_id = thread_id.to_string();
-        tokio::spawn(async move {
+        self.spawn_background_task(async move {
             let _operation = app.codex_runtime_operation_guard(&workspace_id).await;
             if app
                 .inner
@@ -555,7 +555,7 @@ impl AppState {
             return;
         }
         let app = self.clone();
-        tokio::spawn(async move {
+        self.spawn_background_task(async move {
             if let Err(error) = app.refresh_codex_thread_goal(&key.0, &key.1).await {
                 tracing::debug!(
                     workspace_id = %key.0,
@@ -942,10 +942,11 @@ impl AppState {
         };
 
         let app = self.clone();
-        tokio::spawn(async move {
-            let generated = app
-                .generate_ai_thread_title(&workspace_id, &title_input)
-                .await;
+        self.spawn_background_task(async move {
+            let generated = tokio::select! {
+                () = app.wait_for_shutdown() => return,
+                generated = app.generate_ai_thread_title(&workspace_id, &title_input) => generated,
+            };
             match generated {
                 Some(title) => {
                     let _ = app
@@ -1079,11 +1080,16 @@ impl AppState {
             let app = self.clone();
             let workspace_id = workspace_id.to_string();
             let thread_id = thread_id.to_string();
-            tokio::spawn(async move {
+            self.spawn_background_task(async move {
                 let delay_ms = TRANSIENT_RETRY_DELAYS_MS[(attempt as usize)
                     .saturating_sub(1)
                     .min(TRANSIENT_RETRY_DELAYS_MS.len() - 1)];
-                tokio::time::sleep(Duration::from_millis(delay_ms)).await;
+                if !app
+                    .sleep_unless_shutting_down(Duration::from_millis(delay_ms))
+                    .await
+                {
+                    return;
+                }
                 app.run_transient_turn_retry(workspace_id, thread_id, generation)
                     .await;
             });
@@ -1587,7 +1593,8 @@ impl AppState {
                 if parked_between_turns
                     && let Ok(runtime) = self.claude_runtime_for(&workspace_id).await
                 {
-                    parked_between_turns = runtime.turn_is_parked(&thread_id, turn_generation).await;
+                    parked_between_turns =
+                        runtime.turn_is_parked(&thread_id, turn_generation).await;
                 }
                 // The one place a parked thread's background count is
                 // published. Runs after every line and at least every
@@ -1601,7 +1608,12 @@ impl AppState {
                             .await;
                     }
                 }
-                let line = match timeout(CLAUDE_STALL_CHECK_INTERVAL, line_rx.recv()).await {
+                let line = tokio::select! {
+                    biased;
+                    () = self.wait_for_shutdown() => return,
+                    line = timeout(CLAUDE_STALL_CHECK_INTERVAL, line_rx.recv()) => line,
+                };
+                let line = match line {
                     Ok(Some(line)) => line,
                     Ok(None) => break,
                     Err(_) => {
@@ -2407,7 +2419,12 @@ impl AppState {
                 }
             });
             'stdout: loop {
-                let line = match timeout(CLAUDE_STALL_CHECK_INTERVAL, line_rx.recv()).await {
+                let line = tokio::select! {
+                    biased;
+                    () = self.wait_for_shutdown() => return,
+                    line = timeout(CLAUDE_STALL_CHECK_INTERVAL, line_rx.recv()) => line,
+                };
+                let line = match line {
                     Ok(Some(line)) => line,
                     Ok(None) => break,
                     Err(_) => {
@@ -3540,9 +3557,7 @@ fn claude_task_holds_turn_open(task_type: Option<&str>) -> bool {
     // recognisably an agent is treated as fire-and-forget. A workflow is a
     // script of agents and finishes like one. Teammates are left out: an idle
     // teammate waits for messages indefinitely.
-    task_type.is_some_and(|task_type| {
-        task_type.contains("agent") || task_type == "local_workflow"
-    })
+    task_type.is_some_and(|task_type| task_type.contains("agent") || task_type == "local_workflow")
 }
 
 /// Tasks the CLI still lists, with when each was first seen, so a parked
@@ -3567,7 +3582,8 @@ impl OutstandingTasks {
     /// Adopts the CLI's authoritative list, keeping first-seen times for
     /// tasks it already knew about.
     fn replace(&mut self, task_ids: HashSet<String>) {
-        self.started_at.retain(|task_id, _| task_ids.contains(task_id));
+        self.started_at
+            .retain(|task_id, _| task_ids.contains(task_id));
         for task_id in task_ids {
             self.insert(task_id);
         }

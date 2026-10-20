@@ -68,15 +68,25 @@ import SwiftUI
     /// Same-provider forks use the provider capability when offered. Other
     /// providers receive the retained text as daemon-owned first-turn context.
     /// Reading the source never starts a turn or consumes model tokens.
+    nonisolated static func forkBlockedReason(_ task: AgentTask, provider: String, project: Project?) -> String? {
+        guard provider == task.provider else { return nil }
+        if task.raw["variant"] != .null {
+            return "Forking an isolated task onto the same agent is not supported. Continue with another agent instead."
+        }
+        let supportsFork = project?.raw["agents"].array.first { $0["provider"].string == provider }?["capabilities"]["supports_forking"].bool ?? false
+        if supportsFork, !task.latestTurnID.isEmpty, ["running", "waiting_for_input"].contains(task.status) {
+            return "Wait for the active turn to finish before forking this agent’s session. You can continue with another agent now."
+        }
+        return nil
+    }
+
     static func fork(_ task: AgentTask, provider: String, store: AppStore) async throws {
         guard let project = store.allProjects.first(where: { $0.id == task.projectID }) else {
             throw PilotError("The source project is no longer available.")
         }
-        if provider == task.provider, task.raw["variant"] != .null {
-            throw PilotError("Forking an isolated task onto the same agent is not supported. Continue with another agent instead.")
-        }
+        if let reason = forkBlockedReason(task, provider: provider, project: project) { throw PilotError(reason) }
         let supportsFork = project.raw["agents"].array.first { $0["provider"].string == provider }?["capabilities"]["supports_forking"].bool ?? false
-        let handle: JSON
+        var handle: JSON
         if provider == task.provider, supportsFork, !task.latestTurnID.isEmpty {
             handle = try await store.request(path: path(task) + "/fork", method: "POST", body: .object([
                 "workspace_id": .string(task.projectID), "thread_id": .string(task.id),
@@ -101,29 +111,35 @@ import SwiftUI
                     if task.raw["agent"][key] != .null { payload[key] = task.raw["agent"][key] }
                 }
             }
-            handle = try await store.request(path: "/api/workspaces/\(task.projectID)/threads", method: "POST", body: .object(payload))
+            handle = try await store.request(["api", "workspaces", task.projectID, "threads"], method: "POST", body: .object(payload))
             let destination = AgentTask(handle["thread"])
             let title = sameAgent ? "\(task.title) (fork)" : "\(task.title) · \(FDTheme.providerName(provider))"
-            try await store.updateTask(destination, patch: .object(["title": .string(title)]))
+            // A title failure must not hide a successfully created destination.
+            if let renamed = try? await store.request(path: path(destination), method: "PATCH", body: .object(["title": .string(title)])) {
+                handle = renamed["thread"] == .null ? .object(["thread": renamed]) : renamed
+            }
         }
         let id = handle["thread"]["id"].string
         guard !id.isEmpty else { throw PilotError("The daemon did not return the new task.") }
-        await store.refresh()
         store.selectSection(project.raw["kind"].string == "casual" ? "chats" : "project")
-        await store.selectTask(id)
+        // The mutation response is authoritative even before the remote event
+        // arrives; refreshing the local daemon cannot discover a remote fork.
+        await store.acceptTask(handle)
     }
 
     /// Retain opening context and recent messages with an explicit gap marker;
     /// never silently join unrelated fragments of a source message.
     nonisolated static func boundedContext(_ messages: [Message], limit: Int = 48_000) -> String {
-        let texts = messages.filter { $0.isMessage && !$0.text.isEmpty }.map {
-            "\($0.role == "user" ? "User" : "Assistant"):\n\($0.text)"
-        }
-        let full = texts.joined(separator: "\n\n")
+        guard !messages.isEmpty, limit > 0 else { return "" }
+        let full = ConversationExport.markdown(messages, title: "Previous session", partial: false)
+        guard full != "# Previous session\n" else { return "" }
         guard full.count > limit else { return full }
-        let opening = String(full.prefix(limit / 3))
-        let recent = String(full.suffix(limit - limit / 3))
-        return opening + "\n\n[Middle of transcript omitted to fit context budget.]\n\n" + recent
+        let marker = "\n\n[Middle of transcript omitted to fit context budget.]\n\n"
+        guard limit > marker.count else { return String(full.prefix(limit)) }
+        let budget = limit - marker.count
+        let opening = String(full.prefix(budget / 3))
+        let recent = String(full.suffix(budget - budget / 3))
+        return opening + marker + recent
     }
 }
 
@@ -212,7 +228,7 @@ struct NativeTaskContextMenu: View {
                 Button(provider == task.provider ? "Same agent (\(FDTheme.providerName(provider)))" : "Continue with \(FDTheme.providerName(provider))") {
                     NativeTaskActions.perform(store) { try await NativeTaskActions.fork(task, provider: provider, store: store) }
                 }
-                .disabled(task.running || provider == task.provider && task.raw["variant"] != .null)
+                .disabled(NativeTaskActions.forkBlockedReason(task, provider: provider, project: project) != nil)
             }
         }
         Divider()

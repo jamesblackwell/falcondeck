@@ -101,7 +101,7 @@ struct AgentTask: Identifiable, Hashable, Sendable {
     var unread: Bool {
         raw["attention"]["unread"].bool || raw["attention"]["last_agent_activity_seq"].int > raw["attention"]["last_read_seq"].int
     }
-    var running: Bool { status == "running" }
+    var running: Bool { status == "running" || (status == "idle" && raw["attention"]["background_task_count"].int > 0) }
     var awaitingInput: Bool {
         ["waiting_for_input", "awaiting_approval"].contains(status)
         || raw["attention"]["pending_approval_count"].int + raw["attention"]["pending_question_count"].int > 0

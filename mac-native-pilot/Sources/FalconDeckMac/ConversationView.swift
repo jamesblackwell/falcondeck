@@ -22,12 +22,13 @@ struct ConversationView: View {
     var capabilities: JSON { agent["capabilities"] }
     var catalogKey: String { (store.selectedProjectID ?? "") + ":" + provider }
     var selectionKey: String { "selection:" + catalogKey }
+    var steersCurrentTurn: Bool { selection.followUp == "steer" && capabilities["supports_steering"].bool }
     var canSend: Bool {
         store.isSelectedHostConnected && store.selectedProject != nil && !store.isSending && !actionPending && store.pendingSubmission == nil &&
         (!store.draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !attachments.isEmpty)
     }
     var sendHelp: String {
-        let label = store.isRunning ? (selection.followUp == "steer" ? "Steer current turn" : "Queue follow-up") : "Send message"
+        let label = store.isRunning ? (steersCurrentTurn ? "Steer current turn" : "Queue follow-up") : "Send message"
         guard let binding = NativePreferences.shared.bindings(for: "sendMessage").first else { return label }
         return label + " (" + NativeShortcutDefinition.display(binding) + ")"
     }
@@ -58,15 +59,15 @@ struct ConversationView: View {
                 if let task = store.selectedTask { ConversationTaskPanels(store: store, task: task, capabilities: capabilities).id(task.id) }
                 InteractiveRequestsView(store: store)
             }.frame(maxWidth: 900).padding(.horizontal, 28)
-            NativeComposerSuggestionsView(store: store, settings: selection.validated(project: store.selectedProject, provider: provider).fields)
+            NativeComposerSuggestionsView(store: store, settings: selection.validated(project: store.selectedProject, provider: provider, task: store.selectedTask).fields)
             composer
         }
         .background(FDTheme.background)
         .task(id: catalogKey) { restoreSelection(); await loadCatalog() }
         .onAppear { restorePayload() }
-        .onChange(of: store.composerKey) { _, _ in restorePayload(); followsLatest = true; findIndex = 0; expansionDirective = 0 }
+        .onChange(of: store.composerKey) { _, _ in restorePayload(); restoreSelection(); followsLatest = true; findIndex = 0; expansionDirective = 0 }
         .onChange(of: store.composerPayload(key: store.composerKey)) { _, _ in restorePayload() }
-        .onChange(of: selection) { _, value in ConversationLocalStorage.save(value, key: selectionKey) }
+        .onChange(of: selection) { _, value in if store.selectedTask == nil { ConversationLocalStorage.save(value, key: selectionKey) } }
         .onChange(of: store.isSelectedHostConnected) { _, connected in if connected { Task { await loadCatalog() } } }
         .onChange(of: NativePreferences.shared.followUpBehavior) { _, behavior in selection.followUp = behavior }
         .onChange(of: selection.followUp) { _, behavior in NativePreferences.shared.followUpBehavior = behavior }
@@ -82,8 +83,8 @@ struct ConversationView: View {
             if let task = store.selectedTask {
                 switch sheet {
                 case .goal: ConversationGoalEditor(store: store, task: task)
-                case .compact: ConversationActionEditor(title: "Compact conversation", description: "Summarize the agent's context while keeping this conversation's history.", fieldLabel: "Optional instructions", value: "", allowsEmpty: true) { text in
-                    _ = try await ConversationActions.request(store, task: task, suffix: "/compact", body: .object(["instructions": text.isEmpty ? .null : .string(text)]))
+                case .compact: ConversationActionEditor(title: "Compact conversation", description: "Summarize the agent's context while keeping this conversation's history.", fieldLabel: "Optional instructions", value: "", allowsEmpty: true, acceptsInput: capabilities["supports_compaction_instructions"].bool) { text in
+                    _ = try await ConversationActions.request(store, task: task, suffix: "/compact", body: ConversationActionSemantics.compactionBody(instructions: text, capabilities: capabilities))
                 }
                 case .rename: ConversationActionEditor(title: "Rename conversation", description: "", fieldLabel: "Title", value: task.title, allowsEmpty: false) { text in
                     _ = try await ConversationActions.request(store, task: task, method: "PATCH", body: .object(["title": .string(text)]))
@@ -139,7 +140,9 @@ struct ConversationView: View {
     }
 
     var transcript: some View {
-        GeometryReader { viewport in
+        let retrySources = ConversationActionSemantics.retrySources(messages: store.messages)
+        let firstDiffID = ConversationTranscriptGroups.firstDiffItemID(messages: store.messages)
+        return GeometryReader { viewport in
             ScrollViewReader { proxy in
                 VStack(spacing: 0) {
                     if findVisible { findBar(proxy: proxy) }
@@ -156,11 +159,11 @@ struct ConversationView: View {
                             }
                             ForEach(transcriptGroups) { group in
                                 if group.items.count == 1, let message = group.items.first {
-                                    transcriptRow(message).padding(findText.isEmpty ? 0 : 8)
+                                    transcriptRow(message, firstDiffID: firstDiffID, retryable: retrySources[message.id] != nil).padding(findText.isEmpty ? 0 : 8)
                                         .background(matches.contains(message.id) ? FDTheme.accentDim : .clear, in: .rect(cornerRadius: 8)).id(message.id)
                                 } else {
                                     ConversationTranscriptBurst(group: group, expansionDirective: expansionDirective, findText: findText) { message in
-                                        AnyView(transcriptRow(message).id(message.id))
+                                        AnyView(transcriptRow(message, firstDiffID: firstDiffID, retryable: retrySources[message.id] != nil).id(message.id))
                                     }.id(group.id)
                                 }
                             }
@@ -191,12 +194,12 @@ struct ConversationView: View {
         }
     }
 
-    func transcriptRow(_ message: Message) -> some View {
+    func transcriptRow(_ message: Message, firstDiffID: String?, retryable: Bool) -> some View {
         ConversationTranscriptRow(message: message, provider: provider, preferences: store.preferences,
-            firstDiff: message.id == ConversationTranscriptGroups.firstDiffItemID(messages: store.messages), expansionDirective: expansionDirective,
+            firstDiff: message.id == firstDiffID, expansionDirective: expansionDirective,
             onQuote: { text in quote = text; persistPayload() },
-            onEdit: message.kind == "user_message" && !store.isRunning ? { action { try await edit(message, retry: false) } } : nil,
-            onRetry: message.kind == "assistant_message" && !store.isRunning ? { action { try await retry(message) } } : nil,
+            onEdit: canBranch && message.kind == "user_message" && !message.raw["turn_id"].string.isEmpty ? { action { try await edit(message, retry: false) } } : nil,
+            onRetry: canBranch && retryable ? { action { try await retry(message) } } : nil,
             onReadAloud: { text in NativeAudioPlayback.shared.speak(messageID: message.id, text: text, store: store) },
             onLoadFullOutput: {
                 guard let task = store.selectedTask else { throw PilotError("Select a task first.") }
@@ -257,7 +260,7 @@ struct ConversationView: View {
                             .buttonStyle(.plain).help("Stop the current turn").accessibilityLabel("Stop agent").accessibilityIdentifier("stop-agent")
                     }
                     Button(action: send) {
-                        Group { if store.isSending { ProgressView().controlSize(.small) } else { Image(systemName: store.isRunning && selection.followUp == "queue" ? "text.badge.plus" : "arrow.up").font(.system(size: 14, weight: .semibold)) } }
+                        Group { if store.isSending { ProgressView().controlSize(.small) } else { Image(systemName: store.isRunning && !steersCurrentTurn ? "text.badge.plus" : "arrow.up").font(.system(size: 14, weight: .semibold)) } }
                             .frame(width: 30, height: 28).foregroundStyle(canSend ? FDTheme.background : FDTheme.subtle)
                             .background(canSend ? FDTheme.accent : FDTheme.hover, in: .rect(cornerRadius: 7))
                     }.buttonStyle(.plain).disabled(!canSend)

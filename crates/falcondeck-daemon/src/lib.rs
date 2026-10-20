@@ -174,19 +174,21 @@ impl EmbeddedDaemonHandle {
     }
 
     /// Stops the daemon and waits for the server task to exit.
+    /// State ownership remains held by outstanding [`AppState`] clones until
+    /// their background work completes or the embedding runtime drops them.
     pub async fn shutdown(mut self) -> Result<(), std::io::Error> {
         if let Some(restore_task) = self.restore_task.take() {
             restore_task.abort();
         }
-        let _ = self.state.shutdown().await;
+        let state_result = self.state.shutdown().await.map_err(std::io::Error::other);
         if let Some(shutdown) = self.shutdown.take() {
             let _ = shutdown.send(());
         }
-        let result = self.join_handle.await.unwrap_or(Ok(()));
-        if result.is_ok() {
-            self.state.release_state_lock_after_shutdown();
-        }
-        result
+        let server_result = self
+            .join_handle
+            .await
+            .unwrap_or_else(|error| Err(std::io::Error::other(error)));
+        state_result.and(server_result)
     }
 }
 
@@ -370,7 +372,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn graceful_shutdown_releases_state_ownership_with_retained_state_clones() {
+    async fn graceful_shutdown_retains_state_ownership_while_old_state_can_write() {
         let directory = tempfile::tempdir().unwrap();
         let state_path = directory.path().join("daemon-state.json");
         let config = || DaemonConfig {
@@ -383,9 +385,142 @@ mod tests {
         let retained_state = first.app_state().clone();
         first.shutdown().await.unwrap();
 
-        let second = spawn_embedded(config()).await.unwrap();
         assert!(retained_state.is_shutting_down());
+        assert!(matches!(
+            spawn_embedded(config()).await,
+            Err(DaemonError::Conflict(_))
+        ));
+        drop(retained_state);
+        // The scheduler was notified by shutdown and releases its state clone.
+        tokio::task::yield_now().await;
+        let second = spawn_embedded(config()).await.unwrap();
         second.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn embedded_shutdown_reports_persistence_failure() {
+        let directory = tempfile::tempdir().unwrap();
+        let daemon = spawn_embedded(DaemonConfig {
+            bind_addr: ([127, 0, 0, 1], 0).into(),
+            state_path: Some(directory.path().join("daemon-state.json")),
+            background_restore: false,
+            ..DaemonConfig::default()
+        })
+        .await
+        .unwrap();
+        // Make the scheduled-task store unwritable without depending on user
+        // permissions (the test may run as an administrator).
+        let scheduled_path = directory.path().join("scheduled-tasks.json");
+        tokio::fs::remove_file(&scheduled_path).await.unwrap();
+        tokio::fs::create_dir(&scheduled_path).await.unwrap();
+        let address = daemon.local_addr;
+
+        assert!(daemon.shutdown().await.is_err());
+        assert!(tokio::net::TcpStream::connect(address).await.is_err());
+        assert!(directory.path().join("daemon-state.json").exists());
+    }
+
+    #[tokio::test]
+    async fn shutdown_finishes_registered_writers_before_state_is_reused() {
+        let directory = tempfile::tempdir().unwrap();
+        let state_path = directory.path().join("daemon-state.json");
+        let config = || DaemonConfig {
+            bind_addr: ([127, 0, 0, 1], 0).into(),
+            state_path: Some(state_path.clone()),
+            background_restore: false,
+            ..DaemonConfig::default()
+        };
+        let daemon = spawn_embedded(config()).await.unwrap();
+        let state = daemon.app_state().clone();
+        let marker = directory.path().join("writer-finished");
+        let task_marker = marker.clone();
+        assert!(daemon.app_state().spawn_background_task(async move {
+            state.wait_for_shutdown().await;
+            tokio::fs::write(task_marker, "finished").await.unwrap();
+        }));
+
+        daemon.shutdown().await.unwrap();
+
+        assert!(marker.exists());
+        let next = spawn_embedded(config()).await.unwrap();
+        next.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn shutdown_signal_is_visible_to_waiters_registered_after_shutdown() {
+        let directory = tempfile::tempdir().unwrap();
+        let daemon = spawn_embedded(DaemonConfig {
+            bind_addr: ([127, 0, 0, 1], 0).into(),
+            state_path: Some(directory.path().join("daemon-state.json")),
+            background_restore: false,
+            ..DaemonConfig::default()
+        })
+        .await
+        .unwrap();
+        let state = daemon.app_state().clone();
+        daemon.shutdown().await.unwrap();
+
+        tokio::time::timeout(std::time::Duration::from_secs(1), state.wait_for_shutdown())
+            .await
+            .unwrap();
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn shutdown_cancels_an_admitted_provider_bootstrap_before_restarting() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let directory = tempfile::tempdir().unwrap();
+        let workspace = directory.path().join("workspace");
+        std::fs::create_dir(&workspace).unwrap();
+        let started = directory.path().join("provider-started");
+        let executable = directory.path().join("pending-codex");
+        std::fs::write(
+            &executable,
+            format!(
+                "#!/bin/sh\nif [ \"$1\" = app-server ]; then\n : > '{}'\n exec /bin/cat >/dev/null\nfi\n",
+                started.display(),
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let config = || DaemonConfig {
+            bind_addr: ([127, 0, 0, 1], 0).into(),
+            state_path: Some(directory.path().join("daemon-state.json")),
+            codex_bin: executable.to_string_lossy().into_owned(),
+            claude_bin: "/usr/bin/false".to_string(),
+            provider_bins: HashMap::from([("agy".to_string(), "/usr/bin/false".to_string())]),
+            background_restore: false,
+            ..DaemonConfig::default()
+        };
+        let daemon = spawn_embedded(config()).await.unwrap();
+        daemon
+            .app_state()
+            .connect_workspace(falcondeck_core::ConnectWorkspaceRequest {
+                path: workspace.to_string_lossy().into_owned(),
+                kind: Default::default(),
+            })
+            .await
+            .unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            while !started.exists() {
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+
+        let shutdown_started = std::time::Instant::now();
+        tokio::time::timeout(std::time::Duration::from_secs(5), daemon.shutdown())
+            .await
+            .unwrap()
+            .unwrap();
+        eprintln!(
+            "pending-provider shutdown took {:?}",
+            shutdown_started.elapsed()
+        );
+        let next = spawn_embedded(config()).await.unwrap();
+        next.shutdown().await.unwrap();
     }
 
     #[test]

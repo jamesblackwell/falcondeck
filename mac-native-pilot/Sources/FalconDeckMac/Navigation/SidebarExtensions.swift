@@ -4,6 +4,15 @@ struct NativeSidebarExtensionFilter: Identifiable {
     let extensionID: String
     let contribution: JSON
     let document: JSON
+    let supported: Bool
+
+    init(extensionID: String, contribution: JSON, document: JSON) {
+        self.extensionID = extensionID
+        self.contribution = contribution
+        self.document = document
+        supported = Self.supports(document)
+    }
+
     var id: String { extensionID + ":" + contribution["id"].string }
     var title: String {
         let label = document["root"]["label"].string
@@ -11,13 +20,45 @@ struct NativeSidebarExtensionFilter: Identifiable {
     }
     var options: [JSON] { document["root"]["options"].array }
     var multiple: Bool { document["root"]["multiple"].bool }
-    var supported: Bool {
-        let binding = document["root"]["binding"], path = binding["path"].array
-        return document["version"].int == 1 && document["root"]["type"].string == "select"
-            && binding["operator"].string == "includes_any" && !binding["view"].string.isEmpty
-            && !path.isEmpty && path.count <= 16
-            && path.allSatisfy { !$0.string.isEmpty && !["__proto__", "prototype", "constructor"].contains($0.string) }
-            && options.count <= 100
+    private static func supports(_ document: JSON) -> Bool {
+        let root = document["root"], binding = root["binding"]
+        guard Self.hasOnlyKeys(document, ["version", "root"]), document["version"] == .number(1),
+              Self.hasOnlyKeys(root, ["type", "id", "label", "multiple", "options", "binding"]),
+              root["type"] == .string("select"), Self.identifier(root["id"]), Self.text(root["label"]),
+              root.fields["multiple"] == nil || Self.boolean(root["multiple"]),
+              Self.hasOnlyKeys(binding, ["view", "path", "operator"]), Self.identifier(binding["view"]),
+              binding["operator"] == .string("includes_any"),
+              case .array(let path) = binding["path"], !path.isEmpty, path.count <= 16,
+              path.allSatisfy({ Self.text($0, limit: 128, allowWhitespace: true) && !["__proto__", "prototype", "constructor"].contains($0.string) }),
+              case .array(let options) = root["options"], options.count <= 256 else { return false }
+        var values: Set<String> = []
+        return options.allSatisfy { option in
+            Self.hasOnlyKeys(option, ["value", "label", "tone"])
+                && Self.text(option["value"], limit: 256, allowWhitespace: true)
+                && values.insert(option["value"].string).inserted && Self.text(option["label"])
+                && (option.fields["tone"] == nil || Self.tones.contains(option["tone"].string))
+        }
+    }
+
+    private static let tones: Set<String> = ["default", "muted", "accent", "success", "warning", "danger", "info", "gray", "red", "orange", "yellow", "green", "blue", "purple", "pink"]
+
+    private static func hasOnlyKeys(_ value: JSON, _ allowed: Set<String>) -> Bool {
+        guard case .object(let fields) = value else { return false }
+        return Set(fields.keys).isSubset(of: allowed)
+    }
+
+    private static func identifier(_ value: JSON) -> Bool {
+        value.string.range(of: "^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$", options: .regularExpression) != nil
+    }
+
+    private static func text(_ value: JSON, limit: Int = 4096, allowWhitespace: Bool = false) -> Bool {
+        guard case .string(let text) = value, !text.isEmpty, text.unicodeScalars.count <= limit else { return false }
+        return allowWhitespace || !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+
+    private static func boolean(_ value: JSON) -> Bool {
+        if case .bool = value { return true }
+        return false
     }
 }
 
@@ -35,10 +76,14 @@ struct NativeSidebarExtensions {
     static let stagesID = "falcondeck.thread-tags"
     let enabled: [JSON]
     private let views: [JSON: JSON]
+    let filters: [NativeSidebarExtensionFilter]
 
     init(_ snapshot: JSON) {
-        enabled = snapshot["catalog"].array.filter { $0["enabled"].bool }
-        views = Dictionary(snapshot["views"].array.map { (Self.key($0), $0) }, uniquingKeysWith: { _, latest in latest })
+        let enabled = snapshot["catalog"].array.filter { $0["enabled"].bool }
+        let views = Dictionary(snapshot["views"].array.map { (Self.key($0), $0) }, uniquingKeysWith: { _, latest in latest })
+        self.enabled = enabled
+        self.views = views
+        filters = Self.makeFilters(enabled: enabled, views: views)
     }
 
     private static func key(_ view: JSON) -> JSON {
@@ -46,6 +91,10 @@ struct NativeSidebarExtensions {
     }
 
     func view(extensionID: String, viewID: String, taskID: String? = nil) -> JSON {
+        Self.view(views, extensionID: extensionID, viewID: viewID, taskID: taskID)
+    }
+
+    private static func view(_ views: [JSON: JSON], extensionID: String, viewID: String, taskID: String? = nil) -> JSON {
         views[.array([.string(extensionID), .string(viewID), taskID == nil ? .null : .string("thread"), taskID.map(JSON.string) ?? .null])]?["value"] ?? .null
     }
 
@@ -57,13 +106,14 @@ struct NativeSidebarExtensions {
         }}
     }
 
-    var filters: [NativeSidebarExtensionFilter] {
-        enabled.flatMap { item in item["contributes"]["sidebarFilters"].array.map { contribution in
-            let published = view(extensionID: item["id"].string, viewID: contribution["view"].string)
-            var document = published["version"] != .null && published["root"] != .null ? published : contribution["ui"]
+    private static func makeFilters(enabled: [JSON], views: [JSON: JSON]) -> [NativeSidebarExtensionFilter] {
+        let stages = stageValues(enabled: enabled, views: views)
+        return enabled.flatMap { item in item["contributes"]["sidebarFilters"].array.map { contribution in
+            let published = view(views, extensionID: item["id"].string, viewID: contribution["view"].string)
+            var document = published.fields["version"] != nil && published.fields["root"] != nil ? published : contribution["ui"]
             // The bundled Kanban projection publishes custom stages as data;
             // its manifest supplies the binding and default declarative UI.
-            if item["id"].string == Self.stagesID, !stages.isEmpty {
+            if item["id"].string == stagesID, !stages.isEmpty {
                 let options = stages.map { stage in JSON.object(["value": stage["id"], "label": stage["label"], "tone": stage["color"]]) }
                 document = document.setting("root", document["root"].setting("options", .array(options)))
             }
@@ -77,14 +127,16 @@ struct NativeSidebarExtensions {
             guard filter.supported, !selected.isEmpty else { return true }
             let binding = filter.document["root"]["binding"]
             let value = binding["path"].array.reduce(view(extensionID: filter.extensionID, viewID: binding["view"].string, taskID: taskID)) { $0[$1.string] }
-            return value.array.contains { selected.contains($0.string) }
+            return value.array.contains { if case .string(let value) = $0 { return selected.contains(value) }; return false }
         }
     }
 
     var stagesEnabled: Bool { enabled.contains { $0["id"].string == Self.stagesID } }
-    var stages: [JSON] {
-        guard stagesEnabled else { return [] }
-        let values = view(extensionID: Self.stagesID, viewID: "tag-index")["tags"].array.filter { !$0["id"].string.isEmpty && !$0["label"].string.isEmpty }
+    var stages: [JSON] { Self.stageValues(enabled: enabled, views: views) }
+
+    private static func stageValues(enabled: [JSON], views: [JSON: JSON]) -> [JSON] {
+        guard enabled.contains(where: { $0["id"].string == stagesID }) else { return [] }
+        let values = view(views, extensionID: stagesID, viewID: "tag-index")["tags"].array.filter { !$0["id"].string.isEmpty && !$0["label"].string.isEmpty }
         let legacy: Set<String> = ["gray", "red", "orange", "yellow", "green", "blue", "purple", "pink"]
         if !values.isEmpty && !(values.count == 8 && Set(values.map { $0["id"].string }) == legacy) { return values }
         return [("backlog", "Backlog", "gray"), ("in_progress", "In progress", "yellow"), ("in_review", "In review", "green"), ("done", "Done", "orange"), ("canceled", "Canceled", "gray")].map {

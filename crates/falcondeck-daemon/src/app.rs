@@ -285,8 +285,8 @@ struct InnerState {
     /// fall back to their id; see `AppState::provider_bin`.
     provider_bins: HashMap<AgentProvider, String>,
     state_path: PathBuf,
-    /// An abandoned embedding retains ownership while background tasks exist.
-    /// Graceful shutdown explicitly releases this after stopping the server.
+    /// Background tasks can still finish persistence after shutdown. Retain
+    /// ownership until their AppState clones have actually been dropped.
     state_lock: StdMutex<Option<Arc<crate::state_lock::StateLock>>>,
     preferences_path: PathBuf,
     scheduled_tasks_path: PathBuf,
@@ -413,6 +413,9 @@ struct InnerState {
     /// Set at the start of `shutdown` so respawn/reconnect paths cannot race
     /// the teardown with fresh agent processes.
     shutting_down: AtomicBool,
+    shutdown_notify: Notify,
+    /// Daemon workers that shutdown must finish or retire before restart.
+    background_tasks: StdMutex<Vec<JoinHandle<()>>>,
     /// True while a deferred `persist_local_state` is scheduled; lets bursts of
     /// small changes coalesce into one write. See `schedule_persist`.
     persist_pending: AtomicBool,
@@ -605,16 +608,6 @@ impl AppState {
             .state_lock
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(state_lock);
-    }
-
-    pub(crate) fn release_state_lock_after_shutdown(&self) {
-        if self.is_shutting_down() {
-            self.inner
-                .state_lock
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner())
-                .take();
-        }
     }
 
     /// Directory holding daemon-owned config files (providers.json,
@@ -1063,6 +1056,8 @@ impl AppState {
                 harness_jobs: Mutex::new(HashMap::new()),
                 control: crate::control::ControlService::new(control_store),
                 shutting_down: AtomicBool::new(false),
+                shutdown_notify: Notify::new(),
+                background_tasks: StdMutex::new(Vec::new()),
                 persist_pending: AtomicBool::new(false),
                 acp_hydrations_started: StdMutex::new(HashSet::new()),
                 acp_hydration_reloads: StdMutex::new(HashSet::new()),
@@ -1647,7 +1642,7 @@ impl AppState {
         });
         if !workspaces_to_restore.is_empty() {
             let app = self.clone();
-            tokio::spawn(async move {
+            self.spawn_background_task(async move {
                 app.restore_workspaces(
                     workspaces_to_restore,
                     preferences.auto_resume_interrupted_sessions,
@@ -1972,6 +1967,41 @@ impl AppState {
         self.inner.shutting_down.load(Ordering::Acquire)
     }
 
+    pub(crate) async fn wait_for_shutdown(&self) {
+        let notified = self.inner.shutdown_notify.notified();
+        tokio::pin!(notified);
+        // Register before reading the flag: notify_waiters does not retain a
+        // permit for a waiter that has not yet registered.
+        notified.as_mut().enable();
+        if !self.is_shutting_down() {
+            notified.await;
+        }
+    }
+
+    pub(crate) async fn sleep_unless_shutting_down(&self, duration: Duration) -> bool {
+        tokio::select! {
+            () = self.wait_for_shutdown() => false,
+            () = tokio::time::sleep(duration) => true,
+        }
+    }
+
+    pub(crate) fn spawn_background_task(
+        &self,
+        task: impl Future<Output = ()> + Send + 'static,
+    ) -> bool {
+        let mut tasks = self
+            .inner
+            .background_tasks
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if self.is_shutting_down() {
+            return false;
+        }
+        tasks.retain(|task| !task.is_finished());
+        tasks.push(tokio::spawn(task));
+        true
+    }
+
     pub(crate) fn begin_local_restore(&self) {
         *self
             .inner
@@ -2079,57 +2109,80 @@ impl AppState {
     }
 
     pub async fn shutdown(&self) -> Result<(), DaemonError> {
-        // Flag first: reconnect/respawn paths check this before spawning new
-        // agent processes, so nothing new starts while we tear down.
-        self.inner.shutting_down.store(true, Ordering::Release);
+        // Capture the active turns under the same lock as their terminal
+        // updates, then close admission before any teardown awaits. Workers
+        // that finish during shutdown cannot erase this interruption set.
+        let interrupted_threads = {
+            let workspaces = self.inner.workspaces.lock().await;
+            self.inner.shutting_down.store(true, Ordering::Release);
+            self.inner.shutdown_notify.notify_waiters();
+            workspaces
+                .values()
+                .flat_map(|workspace| {
+                    workspace.threads.values().filter_map(move |thread| {
+                        matches!(
+                            thread.summary.status,
+                            ThreadStatus::Running | ThreadStatus::WaitingForInput
+                        )
+                        .then(|| (workspace.summary.id.clone(), thread.summary.id.clone()))
+                    })
+                })
+                .collect::<Vec<_>>()
+        };
+        // A workspace bootstrap may already be past its admission check.
+        // Drain that phase before taking runtimes so it cannot install a new
+        // provider after the shutdown snapshot has been collected.
+        let _workspace_starts = self
+            .inner
+            .workspace_start_slots
+            .acquire_many(workspace_restore::WORKSPACE_RESTORE_CONCURRENCY as u32)
+            .await
+            .ok();
+        self.inner.workspace_start_slots.close();
+        self.inner
+            .runtime_lifecycle
+            .finish_startup_before_shutdown()
+            .await;
         // The control scheduler only notices the flag between waits. Wake it
         // or shutdown sits until the idle poll, up to 60 seconds.
         self.control().notify_scheduler();
+        // Stop relay ingress without clearing the trusted-device state that
+        // the next runtime must restore. Await cancellation outside its lock.
+        let remote_tasks = {
+            let mut remote = self.inner.remote.lock().await;
+            remote.command_tx = None;
+            [remote.task.take(), remote.pairing_watch_task.take()]
+        };
+        for task in remote_tasks.into_iter().flatten() {
+            task.abort();
+            let _ = task.await;
+        }
         self.inner.computer_use.stop().await;
         self.inner.terminals.shutdown_all().await;
         self.inner.scheduled_notify.notify_waiters();
-        scheduled_tasks::interrupt_active_runs(self).await?;
+        // A store error must be reported, but it must not skip terminating
+        // agents and extensions or the final daemon-state persist.
+        let scheduled_result = scheduled_tasks::interrupt_active_runs(self).await;
         let snapshots = {
-            let workspaces = self.inner.workspaces.lock().await;
+            let mut workspaces = self.inner.workspaces.lock().await;
             workspaces
-                .values()
+                .values_mut()
                 .map(|workspace| {
                     (
-                        workspace.summary.id.clone(),
-                        workspace.summary.path.clone(),
-                        workspace.codex_session.clone(),
-                        workspace.claude_runtime.clone(),
-                        workspace.agy_runtime.clone(),
-                        workspace.opencode_runtime.clone(),
-                        workspace.acp_runtimes.values().cloned().collect::<Vec<_>>(),
-                        workspace
-                            .threads
-                            .values()
-                            .map(|thread| {
-                                (
-                                    thread.summary.id.clone(),
-                                    matches!(
-                                        thread.summary.status,
-                                        ThreadStatus::Running | ThreadStatus::WaitingForInput
-                                    ),
-                                )
-                            })
+                        workspace.codex_session.take(),
+                        workspace.claude_runtime.take(),
+                        workspace.agy_runtime.take(),
+                        workspace.opencode_runtime.take(),
+                        std::mem::take(&mut workspace.acp_runtimes)
+                            .into_values()
                             .collect::<Vec<_>>(),
                     )
                 })
                 .collect::<Vec<_>>()
         };
 
-        for (
-            workspace_id,
-            _path,
-            codex_session,
-            claude_runtime,
-            agy_runtime,
-            opencode_runtime,
-            acp_runtimes,
-            threads,
-        ) in snapshots
+        for (codex_session, claude_runtime, agy_runtime, opencode_runtime, acp_runtimes) in
+            snapshots
         {
             if let Some(runtime) = claude_runtime {
                 let _ = runtime.shutdown().await;
@@ -2146,27 +2199,6 @@ impl AppState {
             for runtime in acp_runtimes {
                 runtime.shutdown().await;
             }
-            for (thread_id, was_running) in threads {
-                if !was_running {
-                    continue;
-                }
-                let settled_at = Utc::now();
-                let _ = self
-                    .with_thread_mut(&workspace_id, &thread_id, |thread| {
-                        thread.status = ThreadStatus::Error;
-                        thread.last_error = Some(SHUTDOWN_INTERRUPTED_TURN_ERROR.to_string());
-                        thread.updated_at = settled_at;
-                    })
-                    .await;
-                self.settle_turn_items_with_error(
-                    &workspace_id,
-                    &thread_id,
-                    settled_at,
-                    ToolSettlement::Interrupted,
-                    Some(SHUTDOWN_INTERRUPTED_TURN_ERROR),
-                )
-                .await;
-            }
         }
 
         self.stop_extension_event_workers();
@@ -2174,7 +2206,39 @@ impl AppState {
         for host in extension_hosts {
             host.lock().await.stop().await;
         }
-        self.persist_local_state().await
+        let background_tasks = std::mem::take(
+            &mut *self
+                .inner
+                .background_tasks
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner()),
+        );
+        for task in background_tasks {
+            let _ = task.await;
+        }
+        // All registered completion handlers have finished. Apply shutdown
+        // settlement last so their normal terminal updates cannot overwrite
+        // the durable interruption marker or tool lifecycle.
+        for (workspace_id, thread_id) in interrupted_threads {
+            let settled_at = Utc::now();
+            let _ = self
+                .with_thread_mut(&workspace_id, &thread_id, |thread| {
+                    thread.status = ThreadStatus::Error;
+                    thread.last_error = Some(SHUTDOWN_INTERRUPTED_TURN_ERROR.to_string());
+                    thread.updated_at = settled_at;
+                })
+                .await;
+            self.settle_turn_items_with_error(
+                &workspace_id,
+                &thread_id,
+                settled_at,
+                ToolSettlement::Interrupted,
+                Some(SHUTDOWN_INTERRUPTED_TURN_ERROR),
+            )
+            .await;
+        }
+        let persist_result = self.persist_local_state().await;
+        scheduled_result.and(persist_result)
     }
 
     /// How long an excerpt index is trusted before a search triggers another
@@ -2185,9 +2249,13 @@ impl AppState {
     /// first search after launch has content to match against.
     pub fn start_thread_search_index(&self) {
         let state = self.clone();
-        tokio::spawn(async move {
+        self.spawn_background_task(async move {
             let path = thread_search::index_path(&state.inner.state_path);
-            if let Ok(contents) = tokio::fs::read_to_string(&path).await
+            let contents = tokio::select! {
+                () = state.wait_for_shutdown() => return,
+                contents = tokio::fs::read_to_string(&path) => contents,
+            };
+            if let Ok(contents) = contents
                 && let Ok(index) =
                     serde_json::from_str::<thread_search::ThreadSearchIndex>(&contents)
             {
@@ -2208,7 +2276,7 @@ impl AppState {
         let scan = async move {
             let _guard = state.inner.thread_search_scan.lock().await;
             // Another task may have refreshed while this one queued.
-            if state.thread_search_index_is_fresh() {
+            if state.is_shutting_down() || state.thread_search_index_is_fresh() {
                 return;
             }
             let previous = state
@@ -2217,7 +2285,12 @@ impl AppState {
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner())
                 .clone();
-            let Ok(index) = spawn_blocking(move || thread_search::rescan(&previous)).await else {
+            let rescan = spawn_blocking(move || thread_search::rescan(&previous));
+            let result = tokio::select! {
+                () = state.wait_for_shutdown() => return,
+                result = rescan => result,
+            };
+            let Ok(index) = result else {
                 return;
             };
 
@@ -2249,7 +2322,7 @@ impl AppState {
         if wait {
             scan.await;
         } else {
-            tokio::spawn(scan);
+            self.spawn_background_task(scan);
         }
     }
 
@@ -3344,7 +3417,7 @@ impl AppState {
 
     pub(crate) fn spawn_workspace_icon_refresh(&self, workspace_id: String, path: String) {
         let app = self.clone();
-        tokio::spawn(async move {
+        self.spawn_background_task(async move {
             if app
                 .resolve_and_apply_workspace_icon(&workspace_id, &path)
                 .await
@@ -3991,13 +4064,18 @@ impl AppState {
     /// window only defers the write, `shutdown`'s final persist still runs
     /// after it.
     pub(crate) fn schedule_persist(&self) {
-        if self.inner.persist_pending.swap(true, Ordering::AcqRel) {
+        if self.is_shutting_down() || self.inner.persist_pending.swap(true, Ordering::AcqRel) {
             return;
         }
         let app = self.clone();
-        tokio::spawn(async move {
-            tokio::time::sleep(PERSIST_COALESCE_WINDOW).await;
+        self.spawn_background_task(async move {
+            let elapsed = app
+                .sleep_unless_shutting_down(PERSIST_COALESCE_WINDOW)
+                .await;
             app.inner.persist_pending.store(false, Ordering::Release);
+            if !elapsed {
+                return;
+            }
             if let Err(error) = app.persist_local_state().await {
                 tracing::warn!(%error, "deferred state persist failed");
             }
@@ -4176,7 +4254,7 @@ impl AppState {
             return;
         }
         let app = self.clone();
-        tokio::spawn(async move {
+        self.spawn_background_task(async move {
             workspace_ops::run_codex_reconnect(&app, &workspace_id).await;
         });
     }
@@ -4235,7 +4313,7 @@ impl AppState {
         let event_thread_id = thread_id.clone();
         let service_message = message.clone();
         let service_level = level.clone();
-        tokio::spawn(async move {
+        self.spawn_background_task(async move {
             let _ = app
                 .push_conversation_item(
                     &workspace_id,

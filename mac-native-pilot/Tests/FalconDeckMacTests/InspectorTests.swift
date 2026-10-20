@@ -1,4 +1,6 @@
+import AppKit
 import Foundation
+import SwiftUI
 import XCTest
 @testable import FalconDeckMac
 
@@ -167,10 +169,74 @@ final class InspectorTests: XCTestCase {
         XCTAssertFalse(model.loadingFile)
     }
 
+    @MainActor func testReloadStartedBeforeSaveCannotRestoreOldContentsOrVersion() async {
+        let daemon = InspectorDaemon(), store = AppStore(client: daemon), model = NativeInspectorModel()
+        model.projectID = "project"; model.scope = "project:task"
+        await model.select(path: "a.swift", store: store, tab: .files)
+        model.file?.text = "Saved correction"
+        await daemon.hold("a.swift")
+        let reload = Task { await model.loadSelection(store: store, tab: .files, discardDraft: true) }
+        await daemon.waitForRead()
+        await model.save(store: store)
+        await daemon.finishRead()
+        await reload.value
+        XCTAssertEqual(model.file?.text, "Saved correction")
+        XCTAssertEqual(model.file?.raw["version"], .string("opaque:2"))
+        XCTAssertFalse(model.loadingFile)
+    }
+
+    @MainActor func testClosingSelectionInvalidatesPendingRead() async {
+        let daemon = InspectorDaemon(), store = AppStore(client: daemon), model = NativeInspectorModel()
+        model.projectID = "project"; model.scope = "project:task"
+        await daemon.hold("a.swift")
+        let read = Task { await model.select(path: "a.swift", store: store, tab: .files) }
+        await daemon.waitForRead()
+        model.closeSelection()
+        await daemon.finishRead()
+        await read.value
+        XCTAssertNil(model.selectedPath)
+        XCTAssertNil(model.file)
+        XCTAssertFalse(model.loadingFile)
+    }
+
+    @MainActor func testEmptyScopeClearsPreviousLoadingState() async {
+        let store = AppStore(client: InspectorDaemon()), model = NativeInspectorModel()
+        model.loading = true
+        await model.changeScope(store: store)
+        XCTAssertFalse(model.loading)
+    }
+
+    @MainActor func testReplacingEditorTextClearsOnlyItsOwnUndoHistory() {
+        _ = NSApplication.shared
+        var editor = InspectorCodeEditor(text: .constant("File A"), editable: true)
+        let coordinator = InspectorCodeEditor.Coordinator(editor)
+        let view = NSTextView(frame: .zero)
+        view.delegate = coordinator; view.allowsUndo = true; view.isRichText = false
+        editor.configure(view, coordinator: coordinator)
+        view.insertText("Edited A", replacementRange: NSRange(location: 0, length: 6))
+        XCTAssertTrue(coordinator.undoHistory.canUndo)
+        XCTAssertTrue(view.undoManager === coordinator.undoHistory)
+        editor = InspectorCodeEditor(text: .constant("Edited A"), editable: true)
+        editor.configure(view, coordinator: coordinator)
+        XCTAssertTrue(coordinator.undoHistory.canUndo, "Ordinary typing must remain undoable")
+        editor = InspectorCodeEditor(text: .constant("B"), editable: true)
+        editor.configure(view, coordinator: coordinator)
+        XCTAssertFalse(coordinator.undoHistory.canUndo)
+        coordinator.undoHistory.undo()
+        XCTAssertEqual(view.string, "B")
+    }
+
     func testMissingVersionAndBinaryOrTruncatedFilesAreNotEditable() {
         XCTAssertFalse(InspectorDocument(inspectorDocument("a").setting("version", .null)).editable)
         XCTAssertFalse(InspectorDocument(inspectorDocument("a").setting("content", .null).setting("is_binary", .bool(true))).editable)
         XCTAssertFalse(InspectorDocument(inspectorDocument("a").setting("truncated", .bool(true))).editable)
         XCTAssertTrue(InspectorDocument(inspectorDocument("a", text: "")).editable)
+    }
+
+    func testMediaPreviewTextStillUsesDaemonEditorByteLimit() {
+        let atLimit = inspectorDocument("large.svg", text: String(repeating: "é", count: 500_000))
+        XCTAssertTrue(InspectorDocument(atLimit).editable)
+        XCTAssertFalse(InspectorDocument(atLimit.setting("content", .string(String(repeating: "é", count: 500_001)))).editable)
+        XCTAssertFalse(InspectorDocument(inspectorDocument("a").setting("is_binary", .bool(true))).editable)
     }
 }

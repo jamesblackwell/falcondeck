@@ -55,7 +55,15 @@ enum ConversationExport {
         switch value {
         case .string(let text) where text.hasPrefix("data:image/") || text.hasPrefix("data:audio/"): return .string("[Binary media retained in original conversation]")
         case .array(let values): return .array(values.map(inspectable))
-        case .object(let fields): return .object(fields.mapValues(inspectable))
+        case .object(var fields):
+            let kind = TranscriptPresentation.nonempty(fields["type"]?.string ?? "", fields["kind"]?.string ?? "")
+            if ["image", "audio", "input_audio", "output_audio"].contains(kind), fields["data"] != nil {
+                fields["data"] = .string("[Binary media retained in original conversation]")
+            }
+            if fields["uri"] != nil, fields["blob"] != nil {
+                fields["blob"] = .string("[Binary media retained in original conversation]")
+            }
+            return .object(fields.mapValues(inspectable))
         default: return value
         }
     }

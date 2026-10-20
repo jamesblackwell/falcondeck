@@ -71,6 +71,15 @@ impl RuntimeLifecycle {
             .await
             .map_err(|_| DaemonError::Process("optional runtime start gate closed".to_string()))
     }
+
+    pub(super) async fn finish_startup_before_shutdown(&self) {
+        let _starts = self
+            .optional_start_slots
+            .acquire_many(MAX_CONCURRENT_OPTIONAL_STARTS as u32)
+            .await
+            .ok();
+        self.optional_start_slots.close();
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -137,7 +146,7 @@ impl AppState {
     /// without creating another timer or another process monitor.
     pub(crate) fn schedule_codex_idle_retirement(&self, session: Arc<CodexSession>) {
         let app = self.clone();
-        tokio::spawn(async move {
+        self.spawn_background_task(async move {
             loop {
                 if app.is_shutting_down() || session.is_closed() {
                     return;
@@ -145,13 +154,17 @@ impl AppState {
 
                 let idle_for = session.idle_for();
                 if let Some(remaining) = CODEX_WARM_IDLE_GRACE.checked_sub(idle_for) {
-                    tokio::time::sleep(remaining).await;
+                    if !app.sleep_unless_shutting_down(remaining).await {
+                        return;
+                    }
                 }
 
                 match app.retire_codex_session_if_idle(&session).await {
                     IdleRetirement::Retired | IdleRetirement::Stale => return,
                     IdleRetirement::Busy => {
-                        tokio::time::sleep(BUSY_RECHECK_INTERVAL).await;
+                        if !app.sleep_unless_shutting_down(BUSY_RECHECK_INTERVAL).await {
+                            return;
+                        }
                     }
                 }
             }
@@ -249,8 +262,10 @@ impl AppState {
         }
         let app = self.clone();
         let workspace_id = workspace_id.to_string();
-        tokio::spawn(async move {
-            tokio::time::sleep(PLUGIN_REFRESH_SETTLE).await;
+        self.spawn_background_task(async move {
+            if !app.sleep_unless_shutting_down(PLUGIN_REFRESH_SETTLE).await {
+                return;
+            }
             let session = {
                 let workspaces = app.inner.workspaces.lock().await;
                 let Some(workspace) = workspaces.get(&workspace_id) else {
@@ -300,13 +315,17 @@ impl AppState {
             }
             let Some(session) = session else { continue };
             let app = self.clone();
-            tokio::spawn(async move {
+            self.spawn_background_task(async move {
                 loop {
                     if app.is_shutting_down() || session.is_closed() {
                         return;
                     }
                     match app.retire_codex_session_if_quiet(&session, false).await {
-                        IdleRetirement::Busy => tokio::time::sleep(BUSY_RECHECK_INTERVAL).await,
+                        IdleRetirement::Busy => {
+                            if !app.sleep_unless_shutting_down(BUSY_RECHECK_INTERVAL).await {
+                                return;
+                            }
+                        }
                         IdleRetirement::Retired | IdleRetirement::Stale => return,
                     }
                 }
@@ -330,14 +349,16 @@ impl AppState {
         let app = self.clone();
         let workspace_id = workspace_id.to_string();
         let key = key.clone();
-        tokio::spawn(async move {
+        self.spawn_background_task(async move {
             loop {
                 if app.is_shutting_down() || runtime.is_closed() {
                     return;
                 }
                 let grace = warm_grace(runtime.served_prompt(), ACP_WARM_IDLE_GRACE);
                 if let Some(remaining) = grace.checked_sub(runtime.idle_for()) {
-                    tokio::time::sleep(remaining).await;
+                    if !app.sleep_unless_shutting_down(remaining).await {
+                        return;
+                    }
                     // The window lengthens the moment a hydration-only
                     // runtime serves its first turn, so re-derive it rather
                     // than retiring on the window this sleep was sized for.
@@ -349,7 +370,9 @@ impl AppState {
                 {
                     IdleRetirement::Retired | IdleRetirement::Stale => return,
                     IdleRetirement::Busy => {
-                        tokio::time::sleep(BUSY_RECHECK_INTERVAL).await;
+                        if !app.sleep_unless_shutting_down(BUSY_RECHECK_INTERVAL).await {
+                            return;
+                        }
                     }
                 }
             }
@@ -449,14 +472,16 @@ impl AppState {
     ) {
         let app = self.clone();
         let workspace_id = workspace_id.to_string();
-        tokio::spawn(async move {
+        self.spawn_background_task(async move {
             loop {
                 if app.is_shutting_down() {
                     return;
                 }
                 let grace = warm_grace(runtime.served_prompt(), OPENCODE_WARM_IDLE_GRACE);
                 if let Some(remaining) = grace.checked_sub(runtime.idle_for()) {
-                    tokio::time::sleep(remaining).await;
+                    if !app.sleep_unless_shutting_down(remaining).await {
+                        return;
+                    }
                     continue;
                 }
                 match app
@@ -465,7 +490,9 @@ impl AppState {
                 {
                     IdleRetirement::Retired | IdleRetirement::Stale => return,
                     IdleRetirement::Busy => {
-                        tokio::time::sleep(BUSY_RECHECK_INTERVAL).await;
+                        if !app.sleep_unless_shutting_down(BUSY_RECHECK_INTERVAL).await {
+                            return;
+                        }
                     }
                 }
             }

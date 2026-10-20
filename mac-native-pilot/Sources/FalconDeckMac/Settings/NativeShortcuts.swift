@@ -45,6 +45,23 @@ struct NativeShortcutDefinition: Identifiable {
         .init(id: "insertNewline", label: "Insert newline", category: "Composer", context: "composer", defaults: ["Shift+Enter"])
     ]
 
+    /// The web client names arrow and plus keys differently from NSEvent.
+    static func nativeBinding(_ binding: String) -> String {
+        var tokens = binding.components(separatedBy: "+")
+        guard let key = tokens.last else { return binding }
+        let aliases = ["Up": "ArrowUp", "Down": "ArrowDown", "Left": "ArrowLeft", "Right": "ArrowRight", "Plus": "="]
+        tokens[tokens.count - 1] = aliases[key] ?? key
+        return tokens.joined(separator: "+")
+    }
+
+    static func portableBinding(_ binding: String) -> String {
+        var tokens = nativeBinding(binding).components(separatedBy: "+")
+        guard let key = tokens.last else { return binding }
+        let aliases = ["ArrowUp": "Up", "ArrowDown": "Down", "ArrowLeft": "Left", "ArrowRight": "Right"]
+        tokens[tokens.count - 1] = key == "=" && tokens.dropLast().contains("Shift") ? "Plus" : aliases[key] ?? key
+        return tokens.joined(separator: "+")
+    }
+
     static func validation(_ binding: String, context: String) -> String? {
         let tokens = binding.split(separator: "+").map(String.init)
         guard let key = tokens.last, !key.isEmpty, binding.count < 80 else { return "Choose a key combination." }

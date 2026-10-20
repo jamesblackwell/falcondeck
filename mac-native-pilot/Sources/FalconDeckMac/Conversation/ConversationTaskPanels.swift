@@ -59,7 +59,7 @@ struct ConversationTaskPanels: View {
                     Spacer()
                     Menu {
                         Button("Edit goal") { showGoal = true }
-                        if ["active", "paused"].contains(goal["status"].string) {
+                        if ConversationActionSemantics.canSetGoalStatus(task) {
                             Button(goal["status"].string == "paused" ? "Resume goal" : "Pause goal") {
                                 run { _ = try await ConversationActions.request(store, task: task, suffix: "/goal", body: .object(["status": .string(goal["status"].string == "paused" ? "active" : "paused")])) }
                             }

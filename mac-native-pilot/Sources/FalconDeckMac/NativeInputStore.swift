@@ -44,35 +44,45 @@ actor NativeInputStore {
     static let shared = NativeInputStore()
     private let file: URL
     private let service: String
+    private let maximumPlaintextBytes: Int
+    // CryptoKit's combined AES-GCM representation includes a 12-byte nonce and 16-byte tag.
+    private let encryptionOverheadBytes = 28
     private var key: SymmetricKey?
     private var latestRevision: UInt64 = 0
 
-    init(directory: URL? = nil, service: String = "com.falcondeck.mac-native-pilot.input", encryptionKey: SymmetricKey? = nil) {
+    init(directory: URL? = nil, service: String = "com.falcondeck.mac-native-pilot.input", encryptionKey: SymmetricKey? = nil,
+         maximumPlaintextBytes: Int = 128 * 1024 * 1024) {
         let root = directory ?? FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0].appendingPathComponent("FalconDeck Native", isDirectory: true)
         file = root.appendingPathComponent("input.enc")
         self.service = service
         self.key = encryptionKey
+        self.maximumPlaintextBytes = maximumPlaintextBytes
     }
 
-    func load() throws -> NativeInputSnapshot {
-        guard FileManager.default.fileExists(atPath: file.path) else { return .init() }
-        let size = try file.resourceValues(forKeys: [.fileSizeKey]).fileSize ?? 0
-        guard size <= 128 * 1024 * 1024 else { throw PilotError("Saved input exceeds the recovery limit.") }
+    func load() throws -> NativeInputSnapshot { try loadWithRevision().value }
+
+    /// A replacement writer must continue this actor's revision sequence.
+    /// Reading both together keeps its first save newer than the recovered input.
+    func loadWithRevision() throws -> (value: NativeInputSnapshot, revision: UInt64) {
+        guard FileManager.default.fileExists(atPath: file.path) else { return (.init(), latestRevision) }
+        let size = (try FileManager.default.attributesOfItem(atPath: file.path)[.size] as? NSNumber)?.intValue ?? 0
+        guard size <= maximumPlaintextBytes + encryptionOverheadBytes else { throw PilotError("Saved input exceeds the recovery limit.") }
         let data = try Data(contentsOf: file)
         let plaintext = try AES.GCM.open(AES.GCM.SealedBox(combined: data), using: loadKey())
-        return try JSONDecoder().decode(NativeInputSnapshot.self, from: plaintext)
+        guard plaintext.count <= maximumPlaintextBytes else { throw PilotError("Saved input exceeds the recovery limit.") }
+        return (try JSONDecoder().decode(NativeInputSnapshot.self, from: plaintext), latestRevision)
     }
 
     func save(_ value: NativeInputSnapshot, revision: UInt64) throws {
         guard revision >= latestRevision else { return }
-        latestRevision = revision
         let data = try JSONEncoder().encode(value)
-        guard data.count <= 128 * 1024 * 1024 else { throw PilotError("Saved input exceeds the recovery limit.") }
+        guard data.count <= maximumPlaintextBytes else { throw PilotError("Saved input exceeds the recovery limit.") }
         let encrypted = try AES.GCM.seal(data, using: loadKey()).combined
         guard let encrypted else { throw PilotError("Input encryption failed.") }
         let directory = file.deletingLastPathComponent()
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
         try encrypted.write(to: file, options: .atomic)
+        latestRevision = revision
         try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: file.path)
     }
 

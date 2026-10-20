@@ -14,14 +14,20 @@ struct NativeComposerSelection: Codable, Equatable {
         fields[key] = value.isEmpty ? .null : .string(value)
         if key == "model_id" {
             fields["reasoning_effort"] = .null
-            fields.removeValue(forKey: "service_tier")
+            fields["service_tier"] = .null
         }
         if key == "permission_mode", provider == "codex" {
             fields["approval_policy"] = value.isEmpty ? .null : .string(value == "default" ? "on-request" : value)
         }
     }
 
-    func validated(project: Project?, provider: String) -> Self {
+    /// Remember new-task defaults separately from the settings owned by an
+    /// existing task. A pick made in one task must not reconfigure another.
+    static func restored(_ stored: Self?, task: AgentTask?, project: Project?, provider: String) -> Self {
+        (task == nil ? stored ?? Self() : Self()).validated(project: project, provider: provider, task: task)
+    }
+
+    func validated(project: Project?, provider: String, task: AgentTask? = nil) -> Self {
         var result = self
         let capability = ConversationCatalog.agent(project, provider: provider)["capabilities"]
         for key in ["permission_mode", "sandbox_mode"] {
@@ -38,7 +44,7 @@ struct NativeComposerSelection: Codable, Equatable {
             result.fields.removeValue(forKey: "reasoning_effort")
             result.fields.removeValue(forKey: "service_tier")
         }
-        let effectiveID = result.fields["model_id"]?.string ?? ""
+        let effectiveID = result.value("model_id", task: task)
         if let model = models.first(where: { $0["id"].string == effectiveID }) ?? models.first(where: { $0["is_default"].bool }) {
             if let effort = result.fields["reasoning_effort"], effort != .null,
                !ConversationCatalog.efforts(model).contains(effort.string) {

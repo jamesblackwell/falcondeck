@@ -6,6 +6,16 @@ import os
 @testable import FalconDeckMac
 
 final class RemoteProtocolTests: XCTestCase {
+    func testReconnectSkipsRotatedKeyTrafficUntilFreshBootstrap() throws {
+        let oldKey = Data(repeating: 41, count: 32), rotatedKey = Data(repeating: 42, count: 32)
+        let event = JSON.object(["event": .object(["type": .string("thread-updated")])])
+        let envelope = try NativeRelayCrypto.encrypt(.object(["kind": .string("daemon-event"), "event": event]), key: rotatedKey)
+        XCTAssertThrowsError(try NativeRelayCrypto.decrypt(envelope, key: oldKey), "The previous session key cannot decrypt live traffic after rotation")
+        XCTAssertEqual(try NativeRelayPayload.decryptEvents(envelope, key: oldKey, awaitingBootstrap: true), [])
+        XCTAssertEqual(try NativeRelayPayload.decryptEvents(envelope, key: rotatedKey, awaitingBootstrap: false), [event])
+        XCTAssertThrowsError(try NativeRelayPayload.decryptEvents(envelope, key: oldKey, awaitingBootstrap: false), "Authenticated sessions must still reject invalid ciphertext")
+    }
+
     func testStalledWriteTimesOutAndIgnoresALateCompletion() async throws {
         let writer = NativeRelayWriter()
         let callback = OSAllocatedUnfairLock<(@Sendable (Error?) -> Void)?>(initialState: nil)

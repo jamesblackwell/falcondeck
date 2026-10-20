@@ -168,9 +168,13 @@ enum NativeHostProjection {
     }
 
     private static let relationKeys: Set<String> = [
-        "workspace_id", "workspaceId", "thread_id", "threadId", "request_id", "requestId", "folder_id",
-        "current_thread_id", "parent_thread_id", "before_thread_id", "after_thread_id", "task_id", "automation_id"
-    ]
+        "workspace_id", "thread_id", "request_id", "folder_id", "current_thread_id", "parent_thread_id",
+        "before_thread_id", "after_thread_id", "task_id", "automation_id"
+    ].reduce(into: Set<String>()) { keys, key in
+        keys.insert(key)
+        let words = key.split(separator: "_")
+        keys.insert(String(words[0]) + words.dropFirst().map { $0.prefix(1).uppercased() + $0.dropFirst() }.joined())
+    }
     private static let relationArrays: Set<String> = ["workspace_order", "hidden_workspace_ids", "thread_ids"]
     private static let relationMaps: Set<String> = ["workspace_colors", "workspace_icons", "thread_token_usage"]
     private static let opaqueKeys: Set<String> = ["input", "inputs", "arguments", "payload", "value", "result", "answers", "input_schema"]
@@ -183,6 +187,41 @@ enum NativeHostProjection {
     /// Validate every typed relationship before dispatching to the selected host.
     static func rawIDs(_ value: JSON, host: String) throws -> JSON {
         try unproject(value, key: "", host: host)
+    }
+
+    static func rawQuery(_ query: [URLQueryItem], host: String) throws -> [URLQueryItem] {
+        try query.map { item in
+            guard relationKeys.contains(item.name), let value = item.value else { return item }
+            return URLQueryItem(name: item.name, value: try rawID(value, host: host))
+        }
+    }
+
+    /// Read operations keep the thread's recency unchanged. A replay with the
+    /// same timestamp must preserve read/activity watermarks from the snapshot.
+    static func mergeTask(previous: JSON, incoming: JSON) -> JSON {
+        guard previous["id"] == incoming["id"] else { return incoming }
+        func timestamp(_ value: JSON) -> Date? {
+            (try? Date.ISO8601FormatStyle(includingFractionalSeconds: true).parse(value["updated_at"].string))
+                ?? (try? Date.ISO8601FormatStyle().parse(value["updated_at"].string))
+        }
+        let previousAt = timestamp(previous), incomingAt = timestamp(incoming)
+        let isNewer: Bool
+        if let previousAt, let incomingAt {
+            if incomingAt < previousAt { return previous }
+            let terminal: Set<String> = ["idle", "error"]
+            if incomingAt == previousAt, terminal.contains(previous["status"].string), !terminal.contains(incoming["status"].string) { return previous }
+            isNewer = incomingAt > previousAt
+        } else { isNewer = false }
+        guard case .object = incoming["attention"] else { return incoming }
+        let activity = max(previous["attention"]["last_agent_activity_seq"].double, incoming["attention"]["last_agent_activity_seq"].double)
+        let read = isNewer ? incoming["attention"]["last_read_seq"].double : max(previous["attention"]["last_read_seq"].double, incoming["attention"]["last_read_seq"].double)
+        let unread = activity > read
+        var attention = incoming["attention"].setting("last_agent_activity_seq", .number(activity))
+            .setting("last_read_seq", .number(read)).setting("unread", .bool(unread))
+        if ["none", "unread"].contains(attention["level"].string) {
+            attention = attention.setting("level", .string(unread ? "unread" : "none"))
+        }
+        return incoming.setting("attention", attention)
     }
 
     private static func rawID(_ value: String, host: String?) throws -> String {
@@ -229,8 +268,11 @@ enum NativeHostProjection {
             guard !value[identifier].string.isEmpty else { return }
             var values = result[key].array
             if let index = values.firstIndex(where: { $0[identifier] == value[identifier] }) {
-                if values[index]["updated_at"].string > value["updated_at"].string { return }
-                values[index] = value
+                if key == "threads" { values[index] = mergeTask(previous: values[index], incoming: value) }
+                else {
+                    if values[index]["updated_at"].string > value["updated_at"].string { return }
+                    values[index] = value
+                }
             } else { values.append(value) }
             result = result.setting(key, .array(values))
         }

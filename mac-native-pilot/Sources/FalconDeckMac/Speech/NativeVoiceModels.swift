@@ -134,7 +134,7 @@ enum NativeSpeechFiles {
     }
 
     static func save<T: Encodable>(_ value: T, at url: URL) throws {
-        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true,
+        try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true,
                                                attributes: [.posixPermissions: 0o700])
         try JSONEncoder().encode(value).write(to: url, options: [.atomic, .completeFileProtectionUnlessOpen])
         try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: url.path)

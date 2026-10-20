@@ -22,10 +22,14 @@ import Sparkle
     @ObservationIgnored private var expectedBytes: UInt64 = 0
     @ObservationIgnored private var receivedBytes: UInt64 = 0
     @ObservationIgnored private var restarting = false
+    @ObservationIgnored private var installationRevision = UUID()
+    @ObservationIgnored private let activeThreadCount: @MainActor () async -> Int
 
-    override init() {
+    init(startUpdater: Bool = true,
+         activeThreadCount: @escaping @MainActor () async -> Int = { await NativeRuntime.shared.activeThreadCount() }) {
+        self.activeThreadCount = activeThreadCount
         super.init()
-        guard Self.configurationIsValid(Bundle.main) else {
+        guard startUpdater, Self.configurationIsValid(Bundle.main) else {
             state = "unavailable"
             return
         }
@@ -77,7 +81,11 @@ import Sparkle
         guard state == "installed", !restarting, installChoice != nil || retryTermination != nil else { return }
         restarting = true
         defer { restarting = false }
-        let count = await NativeRuntime.shared.activeThreadCount()
+        let revision = installationRevision
+        let count = await activeThreadCount()
+        // Sparkle can abort while the daemon count is being fetched. Never
+        // invoke a termination retry from a different or dismissed cycle.
+        guard installationRevision == revision, state == "installed", installChoice != nil || retryTermination != nil else { return }
         if count > 0 {
             error = "\(count == 1 ? "1 task is" : "\(count) tasks are") still running in the native daemon. Let active tasks finish or stop them before restarting to install the update."
             return
@@ -99,6 +107,7 @@ import Sparkle
     }
 
     func showUpdateFound(with appcastItem: SUAppcastItem, state updateState: SPUUserUpdateState, reply: @escaping (SPUUserUpdateChoice) -> Void) {
+        installationRevision = UUID()
         version = appcastItem.displayVersionString
         releaseNotes = Self.readableNotes(appcastItem.itemDescription)
         error = nil
@@ -165,6 +174,7 @@ import Sparkle
     }
 
     func showReady(toInstallAndRelaunch reply: @escaping (SPUUserUpdateChoice) -> Void) {
+        installationRevision = UUID()
         installChoice = reply
         state = "installed"
         progress = nil
@@ -183,12 +193,15 @@ import Sparkle
     }
 
     func dismissUpdateInstallation() {
+        installationRevision = UUID()
         updateChoice = nil
         installChoice = nil
         retryTermination = nil
-        if state == "checking" || state == "downloading" { state = "idle" }
+        // Removed callbacks cannot service Download or Restart buttons. Keep
+        // outcome messages, but tear down every state with an active action.
+        if ["checking", "available", "downloading", "installed"].contains(state) { state = "idle" }
         progress = nil
-        canCheck = updater != nil && state != "installed"
+        canCheck = updater != nil
     }
 
     func updaterShouldPromptForPermissionToCheck(forUpdates updater: SPUUpdater) -> Bool { false }

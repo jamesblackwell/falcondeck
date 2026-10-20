@@ -22,7 +22,7 @@ struct NativeBackupSettingsView: View {
                     Button("Export backup…", systemImage: "square.and.arrow.up") { Task { await export() } }
                         .disabled(busy || !store.isConnected)
                 }
-                Text("Includes project pins, daemon preferences, extension data, automations and connectors, together with this Mac’s appearance, sounds and shortcuts. Credentials and agent conversation storage stay with their owners.")
+                Text("Includes project pins, daemon preferences, extension data, automations and connectors, together with this Mac’s appearance, sounds and shortcuts. Connector headers and environment variables are included; agent sign-in credentials and conversation storage stay with their owners.")
                     .font(NativePreferences.shared.font(size: 13)).foregroundStyle(.secondary)
             } header: { Text("Export backup") }
 
@@ -114,8 +114,7 @@ struct NativeBackupSettingsView: View {
             let client = NativeArchivePreferences.clientBackup(NativePreferences.shared.exportSettings())
                 .setting("dictation", NativeSpeechController.shared.exportConfiguration())
             let encoder = JSONEncoder(); encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
-            try encoder.encode(daemon.setting("client", client)).write(to: url, options: .atomic)
-            try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: url.path)
+            try NativeArchiveFile.write(encoder.encode(daemon.setting("client", client)), to: url)
             message = "Backup exported to \(url.lastPathComponent)."
         }
     }
@@ -172,13 +171,16 @@ struct NativeBackupSettingsView: View {
 
 @MainActor enum NativeArchivePreferences {
     static func clientBackup(_ native: JSON) -> JSON {
+        let portableBindings = native["shortcuts"].fields.mapValues { value in
+            JSON.array(value.array.map { .string(NativeShortcutDefinition.portableBinding($0.string)) })
+        }
         var appearance: [String: JSON] = [:]
         for key in NativePreferences.appearanceKeys where native[key] != .null { appearance[key] = native[key] }
         return .object([
             "appearance": .object(appearance),
             "sounds": .object(["enabled": native["soundEnabled"] == .null ? .bool(false) : native["soundEnabled"],
                                "soundId": .string(native["soundName"].string.isEmpty ? "glass" : native["soundName"].string.lowercased())]),
-            "shortcuts": .object(["version": .number(1), "bindings": native["shortcuts"] == .null ? .object([:]) : native["shortcuts"],
+            "shortcuts": .object(["version": .number(1), "bindings": .object(portableBindings),
                                   "followUpBehavior": native["followUpBehavior"] == .null ? .string("queue") : native["followUpBehavior"]]),
             "ui_preferences": .object(["native": native, "nativeLayout": collectLayout()]),
         ])
@@ -189,7 +191,7 @@ struct NativeBackupSettingsView: View {
         var fields: [String: JSON] = [:]
         for key in NativePreferences.appearanceKeys where client["appearance"][key] != .null { fields[key] = client["appearance"][key] }
         if case .bool = client["sounds"]["enabled"] { fields["soundEnabled"] = client["sounds"]["enabled"] }
-        let sounds = ["glass": "Glass", "ping": "Ping", "pop": "Pop", "tink": "Tink", "basso": "Basso", "blow": "Blow", "bottle": "Bottle", "frog": "Frog", "funk": "Funk", "hero": "Hero", "morse": "Morse", "purr": "Purr", "sosumi": "Sosumi", "submarine": "Submarine"]
+        let sounds = ["glass": "Glass", "ping": "Ping", "pop": "Pop", "tink": "Tink", "basso": "Basso", "blow": "Blow", "bottle": "Bottle", "frog": "Frog", "funk": "Funk", "hero": "Hero", "morse": "Morse", "purr": "Purr", "sosumi": "Sosumi", "submarine": "Submarine", "chime": "Chime", "drop": "Drop"]
         if let sound = sounds[client["sounds"]["soundId"].string] { fields["soundName"] = .string(sound) }
         if case .object = client["shortcuts"]["bindings"] { fields["shortcuts"] = client["shortcuts"]["bindings"] }
         if client["shortcuts"]["followUpBehavior"] != .null { fields["followUpBehavior"] = client["shortcuts"]["followUpBehavior"] }

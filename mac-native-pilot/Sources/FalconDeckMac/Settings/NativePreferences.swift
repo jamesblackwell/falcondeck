@@ -163,7 +163,7 @@ import SwiftUI
                 if case .array(let list) = bindings[definition.id] {
                     valid[definition.id] = .array(list.compactMap { entry in
                         guard case .string(let binding) = entry, NativeShortcutDefinition.validation(binding, context: definition.context) == nil else { return nil }
-                        return .string(binding)
+                        return .string(NativeShortcutDefinition.nativeBinding(binding))
                     })
                 }
             }

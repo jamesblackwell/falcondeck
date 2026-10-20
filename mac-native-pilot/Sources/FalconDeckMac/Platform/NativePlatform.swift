@@ -22,6 +22,12 @@ struct NativeAttentionNotice: Equatable {
     private(set) var notificationError: String?
 
     typealias NotificationRoute = @MainActor (String?, String, String) async -> Void
+    typealias NoticeDelivery = @MainActor (NativeAttentionNotice, String?) async -> Void
+    @ObservationIgnored private let preferences: NativePreferences
+    @ObservationIgnored private let sound: @MainActor (String) -> Void
+    @ObservationIgnored private let badge: @MainActor (Int) -> Void
+    @ObservationIgnored private let noticeDelivery: NoticeDelivery?
+    @ObservationIgnored private let viewed: (@MainActor (NativeAttentionNotice, String?) -> Bool)?
     @ObservationIgnored private weak var store: AppStore?
     @ObservationIgnored private var currentHost: @MainActor () -> String? = { nil }
     @ObservationIgnored private var route: NotificationRoute?
@@ -41,6 +47,19 @@ struct NativeAttentionNotice: Equatable {
         var seeded = false
         var dirtyTaskIDs: Set<String> = []
         var awaitingTaskIDs: Set<String> = []
+    }
+
+    init(preferences: NativePreferences? = nil,
+         sound: @escaping @MainActor (String) -> Void = { NativeCompletionSound.play(named: $0) },
+         badge: @escaping @MainActor (Int) -> Void = { NSApp?.dockTile.badgeLabel = $0 > 0 ? String($0) : nil },
+         noticeDelivery: NoticeDelivery? = nil,
+         viewed: (@MainActor (NativeAttentionNotice, String?) -> Bool)? = nil) {
+        self.preferences = preferences ?? .shared
+        self.sound = sound
+        self.badge = badge
+        self.noticeDelivery = noticeDelivery
+        self.viewed = viewed
+        super.init()
     }
 
     func attach(store: AppStore, currentHost: @escaping @MainActor () -> String? = { nil }, route: NotificationRoute? = nil) {
@@ -99,6 +118,15 @@ struct NativeAttentionNotice: Equatable {
             host.preferences = snapshot["preferences"]["notifications"]
             host.dirtyTaskIDs = Set(host.tasks.keys)
             host.awaitingTaskIDs = []
+            // Replay may include the turn-end already represented by this
+            // authoritative snapshot. It must not ring as a fresh completion.
+            for task in host.tasks.values {
+                if !["running", "waiting_for_input", "awaiting_approval"].contains(task["status"].string),
+                   task["attention"]["background_task_count"].int == 0,
+                   let turn = task["latest_turn_id"].string.nonempty {
+                    _ = remember("\(hostKey):sound:\(task["id"].string):\(turn)")
+                }
+            }
             if !host.seeded {
                 host.seeded = true
                 for task in host.tasks.values { seed(task: task, host: host, hostKey: hostKey) }
@@ -107,8 +135,7 @@ struct NativeAttentionNotice: Equatable {
             let task = event["thread"]
             let id = task["id"].string
             guard !id.isEmpty else { return }
-            if let previous = host.tasks[id], previous["updated_at"].string > task["updated_at"].string { return }
-            host.tasks[id] = task
+            host.tasks[id] = host.tasks[id].map { NativeHostProjection.mergeTask(previous: $0, incoming: task) } ?? task
             host.dirtyTaskIDs.insert(id)
         case "interactive-request":
             let request = event["request"]
@@ -127,8 +154,8 @@ struct NativeAttentionNotice: Equatable {
             let status = event["status"].string
             if !["failed", "error", "interrupted", "cancelled", "canceled"].contains(status), host.seeded {
                 let key = "\(hostKey):sound:\(taskID):\(event["turn_id"].string)"
-                if remember(key), NativePreferences.shared.soundEnabled {
-                    playSound(named: NativePreferences.shared.soundName)
+                if remember(key), preferences.soundEnabled {
+                    playSound(named: preferences.soundName)
                 }
             }
         case "preferences-updated":
@@ -142,7 +169,7 @@ struct NativeAttentionNotice: Equatable {
     }
 
     func playSound(named name: String) {
-        NativeCompletionSound.play(named: name)
+        sound(name)
     }
 
     static func notice(task: JSON, requests: [JSON]) -> NativeAttentionNotice? {
@@ -173,11 +200,11 @@ struct NativeAttentionNotice: Equatable {
         Task { [weak self] in
             await Task.yield()
             self?.pendingFlushes.remove(hostKey)
-            self?.flush(hostKey)
+            await self?.flush(hostKey)
         }
     }
 
-    private func flush(_ hostKey: String) {
+    func flush(_ hostKey: String) async {
         guard let host = hosts[hostKey], host.seeded else { return }
         let hostID = hostKey == "local" ? nil : hostKey
         let dirty = host.dirtyTaskIDs
@@ -189,10 +216,10 @@ struct NativeAttentionNotice: Equatable {
             let key = "\(hostKey):\(notice.projectID):\(notice.taskID):\(notice.key)"
             guard remember(key) else { continue }
             guard Self.enabled("enabled", in: host.preferences), Self.enabled(notice.kind, in: host.preferences) else { continue }
-            if !isViewed(notice, hostID: hostID) { Task { await deliver(notice, hostID: hostID) } }
+            if !isViewed(notice, hostID: hostID) { await deliver(notice, hostID: hostID) }
         }
         let pending = hosts.values.reduce(0) { $0 + $1.awaitingTaskIDs.count }
-        NSApp.dockTile.badgeLabel = pending > 0 ? String(pending) : nil
+        badge(pending)
     }
 
     private func seed(task: JSON, host: AttentionHost, hostKey: String) {
@@ -217,16 +244,18 @@ struct NativeAttentionNotice: Equatable {
     }
 
     private func deliver(_ notice: NativeAttentionNotice, hostID: String?) async {
+        if let noticeDelivery {
+            guard isCurrent(notice, hostID: hostID) else { return }
+            await noticeDelivery(notice, hostID)
+            return
+        }
         guard let center else { return }
         await refreshPermission()
         if permission == "default" { await requestPermission() }
         guard permission == "granted" else { return }
         // A permission prompt can outlive the request, a read action, a host
         // switch or a settings change. Revalidate after every suspension.
-        guard let host = hosts[hostID ?? "local"], let task = host.tasks[notice.taskID],
-              Self.enabled("enabled", in: host.preferences), Self.enabled(notice.kind, in: host.preferences),
-              Self.notice(task: task, requests: host.requests)?.key == notice.key,
-              !isViewed(notice, hostID: hostID) else { return }
+        guard isCurrent(notice, hostID: hostID) else { return }
         let content = UNMutableNotificationContent()
         content.title = notice.title
         content.body = notice.body
@@ -238,9 +267,17 @@ struct NativeAttentionNotice: Equatable {
     }
 
     private func isViewed(_ notice: NativeAttentionNotice, hostID: String?) -> Bool {
-        NSApp.isActive && NSApp.keyWindow != nil && desktopPresent
+        if let viewed { return viewed(notice, hostID) }
+        return NSApp.isActive && NSApp.keyWindow != nil && desktopPresent
             && currentHost() == hostID && store?.selectedTaskID.map { NativeHostManager.split($0).id } == notice.taskID
             && ["project", "pins", "chats"].contains(store?.selectedSection ?? "")
+    }
+
+    private func isCurrent(_ notice: NativeAttentionNotice, hostID: String?) -> Bool {
+        guard let host = hosts[hostID ?? "local"], let task = host.tasks[notice.taskID] else { return false }
+        return Self.enabled("enabled", in: host.preferences) && Self.enabled(notice.kind, in: host.preferences)
+            && Self.notice(task: task, requests: host.requests)?.key == notice.key
+            && !isViewed(notice, hostID: hostID)
     }
 
     private func samplePresence() {
@@ -274,8 +311,7 @@ struct NativeAttentionNotice: Equatable {
         Task { @MainActor in
             defer { completionHandler() }
             guard !taskID.isEmpty, !projectID.isEmpty else { return }
-            NSApp.activate(ignoringOtherApps: true)
-            NSApp.windows.first { $0.canBecomeMain && $0.isVisible }?.makeKeyAndOrderFront(nil)
+            NativeWorkspaceWindow.show()
             if let route { await route(hostID, projectID, taskID) }
             else if hostID == nil, let store, store.tasks.contains(where: { $0.id == taskID && $0.projectID == projectID }) {
                 await store.selectTask(taskID)

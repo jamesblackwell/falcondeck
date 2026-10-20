@@ -34,7 +34,7 @@ struct NativeRemoteSettingsView: View {
 
             Section {
                 HStack {
-                    Button(pairingCode.isEmpty ? "Start pairing" : "Generate new pairing code", systemImage: "qrcode") {
+                    Button("Get pairing code", systemImage: "qrcode") {
                         Task { await startPairing() }
                     }.disabled(busy || !store.isConnected)
                     if busy { ProgressView().controlSize(.small) }
@@ -231,7 +231,7 @@ struct NativeServersSettingsView: View {
                 TextField("Display name", text: $name)
                 if mode == "manual" {
                     TextField("SSH host (user@example.com)", text: $target)
-                    TextField("SSH port (22)", text: $port)
+                    TextField("SSH port", text: $port, prompt: Text("Default from SSH config"))
                 } else {
                     SecureField("Complete secure pairing code or link", text: $pairingCode)
                     Text("Use the complete code from the server daemon, including its authentication suffix.")
@@ -331,19 +331,17 @@ struct NativeServersSettingsView: View {
         let hostTarget = (connectionMode == "ssh" ? selectedSSH : target).trimmingCharacters(in: .whitespacesAndNewlines)
         let hostName = connectionMode == "ssh" || name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? hostTarget : name.trimmingCharacters(in: .whitespacesAndNewlines)
         let relayURL = relay.trimmingCharacters(in: .whitespacesAndNewlines)
-        let hostPort = connectionMode == "ssh" ? (sshHosts.first { $0["name"].string == selectedSSH }?["port"].optionalInt ?? 22)
-            : port.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? 22 : Int(port)
-        guard connectionMode == "code" || hostPort.map({ (1...65535).contains($0) }) == true else {
-            error = "Enter an SSH port between 1 and 65535."; return
-        }
+        let hostPort: Int?
+        do { hostPort = try NativeSSHSettings.port(mode: connectionMode == "code" ? "ssh" : connectionMode, text: port) }
+        catch { self.error = error.localizedDescription; return }
         await perform {
             if connectionMode == "code" {
                 _ = try await manager.addHost(name: name.isEmpty ? "Server" : name, pairingText: pairingCode, relay: relayURL)
             } else {
                 job = .object(["status": .string("running"), "stage": .string("connecting")])
-                let response = try await store.request("/api/hosts/provision", method: "POST", body: .object([
-                    "ssh_target": .string(hostTarget), "name": .string(hostName), "relay_url": .string(relayURL), "port": .number(Double(hostPort ?? 22)),
-                ]))
+                var fields = NativeSSHSettings.fields(target: hostTarget, port: hostPort)
+                fields["name"] = .string(hostName); fields["relay_url"] = .string(relayURL)
+                let response = try await store.request("/api/hosts/provision", method: "POST", body: .object(fields))
                 guard !response["job_id"].string.isEmpty else { throw PilotError("The daemon did not return a provisioning job.") }
                 let jobID = response["job_id"].string
                 while true {
@@ -355,7 +353,7 @@ struct NativeServersSettingsView: View {
                 guard job["status"].string == "completed", !job["pairing_code"].string.isEmpty else {
                     throw PilotError(job["error"].string.isEmpty ? "Server provisioning failed." : job["error"].string)
                 }
-                _ = try await manager.addHost(name: hostName, pairingText: job["pairing_code"].string, relay: relayURL, sshTarget: hostTarget, sshPort: hostPort ?? 22)
+                _ = try await manager.addHost(name: hostName, pairingText: job["pairing_code"].string, relay: relayURL, sshTarget: hostTarget, sshPort: hostPort)
             }
             showingAdd = false; pairingCode = ""; job = .null
             notice = "Server connected with end-to-end encryption."
@@ -365,9 +363,9 @@ struct NativeServersSettingsView: View {
     @MainActor private func runCommand(_ host: NativeRemoteHost, action: String) async {
         guard let target = host.sshTarget else { return }
         await perform {
-            let result = try await store.request("/api/hosts/command", method: "POST", body: .object([
-                "ssh_target": .string(target), "port": .number(Double(host.sshPort)), "action": .string(action), "relay_url": .string(host.relayURL),
-            ]))
+            var fields = NativeSSHSettings.fields(target: target, port: host.sshPort)
+            fields["action"] = .string(action); fields["relay_url"] = .string(host.relayURL)
+            let result = try await store.request("/api/hosts/command", method: "POST", body: .object(fields))
             if action == "pair" {
                 guard !result["pairing_code"].string.isEmpty else { throw PilotError("The server did not return a pairing code.") }
                 try await manager.repair(hostID: host.id, pairingText: result["pairing_code"].string, relay: host.relayURL)

@@ -49,6 +49,8 @@ private actor RemoteTestTransport: NativeRemoteTransport {
         guard let first = generations.first else { return }
         sink?.yield(.init(connectionID: first, event: .snapshot(.object(["stale": .bool(true)]))))
     }
+    func emitLive(_ values: [JSON]) { emit(.events(values)) }
+    func emitRefreshedSnapshot(_ value: JSON, rebase: [JSON]) { emit(.snapshot(value, rebase: rebase)) }
 }
 
 private final class RemoteTestFactory: @unchecked Sendable {
@@ -63,8 +65,83 @@ private final class RemoteTestFactory: @unchecked Sendable {
     }
 }
 
+private actor RemoteGatedTransport: NativeRemoteTransport {
+    private var eventWaiter: CheckedContinuation<AsyncStream<NativeRelayUpdate>, Never>?
+    private var startWaiter: CheckedContinuation<Void, Never>?
+    private var eventsStarted = false
+    private(set) var pairCount = 0
+    func events() async -> AsyncStream<NativeRelayUpdate> {
+        await withCheckedContinuation { waiter in
+            eventWaiter = waiter
+            eventsStarted = true
+            startWaiter?.resume(); startWaiter = nil
+        }
+    }
+    func waitUntilEventsStart() async {
+        if eventsStarted { return }
+        await withCheckedContinuation { startWaiter = $0 }
+    }
+    func releaseEvents() {
+        eventWaiter?.resume(returning: AsyncStream { $0.finish() }); eventWaiter = nil
+    }
+    func pair(_ input: NativePairingInput, connectionID: UUID) { pairCount += 1 }
+    func restore(connectionID: UUID) -> Bool { true }
+    func disconnect(forget: Bool) { }
+    func refresh() { }
+    func selectThread(_ id: String?) { }
+    func setForeground(_ active: Bool) { }
+    func call(_ method: String, params: JSON) -> JSON { .null }
+}
+
 final class RemoteHostTests: XCTestCase {
     private let code = "ABC." + Data(repeating: 7, count: 32).base64EncodedString()
+
+    @MainActor func testDisablingDuringTransportSetupPreventsPairing() async throws {
+        let suite = "RemoteHostTests.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let transport = RemoteGatedTransport()
+        let manager = NativeHostManager(defaults: defaults, credentials: RemoteMemoryCredentials(), factory: { _ in transport })
+        let pairing = Task { try await manager.addHost(name: "Server", pairingText: code) }
+        await transport.waitUntilEventsStart()
+        let id = try XCTUnwrap(manager.hosts.first?.id)
+        await manager.setEnabled(hostID: id, enabled: false)
+        await transport.releaseEvents()
+        do {
+            _ = try await pairing.value
+            XCTFail("A disabled host must not finish its suspended pairing")
+        } catch is CancellationError { }
+        let pairCount = await transport.pairCount
+        XCTAssertEqual(pairCount, 0)
+        XCTAssertEqual(manager.hosts.first?.status, .disconnected)
+    }
+
+    @MainActor func testRefreshPublishesRebasedMetadataAtomicallyAfterLiveEvents() async throws {
+        let suite = "RemoteHostTests.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let factory = RemoteTestFactory()
+        let manager = NativeHostManager(defaults: defaults, credentials: RemoteMemoryCredentials(), factory: { factory.transport($0) })
+        let id = try await manager.addHost(name: "Server", pairingText: code)
+        for _ in 0..<30 { await Task.yield() }
+        let workspace = JSON.object(["id": .string("project"), "current_thread_id": .string("a"), "path": .string("/srv/project"), "kind": .string("project")])
+        let threadA = JSON.object(["id": .string("a"), "workspace_id": .string("project"), "status": .string("idle"), "updated_at": .string("2026-10-20T08:00:00Z")])
+        let threadB = threadA.setting("id", .string("b")).setting("updated_at", .string("2026-10-20T08:00:01Z"))
+        let started = JSON.object(["workspace_id": .string("project"), "thread_id": .string("b"), "event": .object(["type": .string("thread-started"), "thread": threadB])])
+        let text = JSON.object(["workspace_id": .string("project"), "thread_id": .string("b"), "event": .object(["type": .string("text"), "item_id": .string("assistant-b"), "delta": .string("Live text")])])
+        let staleSnapshot = JSON.object(["workspaces": .array([workspace]), "threads": .array([threadA])])
+        var updates = manager.events().makeAsyncIterator()
+        await factory.transport(id).emitLive([started, text])
+        guard let live = await updates.next(), case .events(let values) = live.event else { return XCTFail("Expected the original live events") }
+        XCTAssertEqual(values, [started, text])
+
+        await factory.transport(id).emitRefreshedSnapshot(staleSnapshot, rebase: [started, text])
+        guard let refreshed = await updates.next(), case .snapshot(let snapshot) = refreshed.event else { return XCTFail("The refresh must publish one final snapshot, without replaying live events") }
+        XCTAssertEqual(snapshot["threads"].array.map { $0["id"].string }, ["a", "b"], "Selection reconciliation must never see the stale snapshot that omits newly selected thread b")
+        XCTAssertEqual(snapshot["workspaces"].array[0]["current_thread_id"], .string("b"))
+        XCTAssertEqual(manager.snapshots[id], snapshot)
+        await manager.setEnabled(hostID: id, enabled: false)
+    }
 
     @MainActor func testIndependentHostsDoNotCollideAndRouteMutationsToTheirOwnDaemon() async throws {
         let suite = "RemoteHostTests.\(UUID().uuidString)"
@@ -131,6 +208,24 @@ final class RemoteHostTests: XCTestCase {
         XCTAssertEqual(restored.hosts.first?.sshPort, 2222)
         XCTAssertEqual(restored.hosts.first?.status, .disconnected)
         XCTAssertTrue(restored.snapshots.isEmpty)
+        await manager.setEnabled(hostID: id, enabled: false)
+    }
+
+    @MainActor func testSSHConfigDefaultPortRemainsUnsetAcrossMetadataRoundTrip() async throws {
+        let suite = "RemoteHostTests.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let factory = RemoteTestFactory()
+        let manager = NativeHostManager(defaults: defaults, credentials: RemoteMemoryCredentials(), factory: { factory.transport($0) })
+        let id = try await manager.addHost(name: "Server", pairingText: code, sshTarget: "ops-alias")
+        XCTAssertNil(manager.hosts.first?.sshPort)
+        let restored = NativeHostManager(defaults: defaults, credentials: RemoteMemoryCredentials(), factory: { factory.transport($0) })
+        XCTAssertNil(restored.hosts.first?.sshPort, "An SSH config alias must not become an explicit -p 22 override")
+        try manager.update(hostID: id, name: "Server", sshTarget: "ops-alias", sshPort: 2222)
+        XCTAssertEqual(manager.hosts.first?.sshPort, 2222)
+        XCTAssertThrowsError(try manager.update(hostID: id, name: "Server", sshTarget: "ops-alias", sshPort: 0))
+        try manager.update(hostID: id, name: "Server", sshTarget: "ops-alias", sshPort: nil)
+        XCTAssertNil(manager.hosts.first?.sshPort)
         await manager.setEnabled(hostID: id, enabled: false)
     }
 

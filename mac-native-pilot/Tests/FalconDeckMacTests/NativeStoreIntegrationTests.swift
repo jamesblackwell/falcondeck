@@ -62,6 +62,27 @@ private actor IntegrationDaemon: DaemonServing {
     }
 }
 
+private actor IntegrationRefreshTransport: NativeRemoteTransport {
+    private var sink: AsyncStream<NativeRelayUpdate>.Continuation?
+    private var connectionID = UUID()
+    let initialSnapshot: JSON
+    init(initialSnapshot: JSON) { self.initialSnapshot = initialSnapshot }
+    func events() -> AsyncStream<NativeRelayUpdate> {
+        AsyncStream { sink = $0 }
+    }
+    func pair(_ input: NativePairingInput, connectionID: UUID) {
+        self.connectionID = connectionID
+        emit(.snapshot(initialSnapshot))
+    }
+    func restore(connectionID: UUID) -> Bool { false }
+    func disconnect(forget: Bool) { }
+    func refresh() { }
+    func selectThread(_ id: String?) { }
+    func setForeground(_ active: Bool) { }
+    func call(_ method: String, params: JSON) -> JSON { .null }
+    func emit(_ event: NativeRelayEvent) { sink?.yield(.init(connectionID: connectionID, event: event)) }
+}
+
 private func integrationProject(_ id: String, kind: String = "project", path: String? = nil) -> JSON {
     .object([
         "id": .string(id), "kind": .string(kind), "path": .string(path ?? "/tmp/\(id)"),
@@ -176,6 +197,59 @@ final class NativeStoreIntegrationTests: XCTestCase {
         XCTAssertEqual(store.selectedProjectID, "local")
         XCTAssertEqual(store.selectedTaskID, "task")
         XCTAssertEqual(store.messages.first?.text, "Local history")
+    }
+
+    @MainActor func testRemoteRefreshRebasesBeforeReconcilingSelectedThreadAndDraft() async throws {
+        let suite = "NativeStoreIntegrationTests.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let initial = integrationSnapshot(tasks: [integrationTask("a")])
+        let transport = IntegrationRefreshTransport(initialSnapshot: initial)
+        let manager = NativeHostManager(defaults: defaults, factory: { _ in transport })
+        let store = AppStore(client: IntegrationDaemon())
+        store.applyEnvelope(integrationSnapshotEnvelope(integrationSnapshot(projects: [], tasks: [])))
+        var updates = manager.events().makeAsyncIterator()
+        let code = "ABC." + Data(repeating: 7, count: 32).base64EncodedString()
+        let host = try await manager.addHost(name: "Server", pairingText: code)
+        while let update = await updates.next() {
+            store.receiveHost(update)
+            if case .snapshot = update.event { break }
+        }
+        let thread = integrationTask("b").setting("updated_at", .string("2026-10-20T08:00:01Z"))
+        let started = JSON.object(["workspace_id": .string("local"), "thread_id": .string("b"), "event": .object(["type": .string("thread-started"), "thread": thread])])
+        await transport.emit(.events([started]))
+        let liveStart = await updates.next()
+        store.receiveHost(try XCTUnwrap(liveStart))
+        let selected = NativeHostManager.namespace(hostID: host, id: "b")
+        // Selecting is independent of the detail request: this fixture has no
+        // registered relay, so its history read fails while selection remains.
+        await store.selectTask(selected)
+        store.draft = "Unsent reply for b"
+        store.setComposerPayload(.object(["model_id": .string("chosen-model")]), key: selected)
+        let text = JSON.object(["workspace_id": .string("local"), "thread_id": .string("b"), "event": .object(["type": .string("text"), "item_id": .string("assistant-b"), "delta": .string("Live text")])])
+        await transport.emit(.events([text]))
+        let liveText = await updates.next()
+        store.receiveHost(try XCTUnwrap(liveText))
+
+        // The RPC was captured before b was created, while both envelopes have
+        // already reached the UI. The delivery boundary must publish them once.
+        await transport.emit(.snapshot(initial, rebase: [started, text]))
+        let refreshed = await updates.next()
+        store.receiveHost(try XCTUnwrap(refreshed))
+        XCTAssertEqual(store.selectedTaskID, selected)
+        XCTAssertEqual(store.selectedProjectID, NativeHostManager.namespace(hostID: host, id: "local"))
+        XCTAssertEqual(store.composerKey, selected)
+        XCTAssertEqual(store.draft, "Unsent reply for b")
+        XCTAssertEqual(store.composerPayload(key: selected)["model_id"], .string("chosen-model"))
+        XCTAssertEqual(store.messages.last?.text, "Live text", "The rebase must not apply transcript text twice")
+
+        // A final authoritative snapshot that truly omits b still removes its
+        // selection; only the intermediate stale refresh state is suppressed.
+        await transport.emit(.snapshot(initial))
+        let authoritative = await updates.next()
+        store.receiveHost(try XCTUnwrap(authoritative))
+        XCTAssertNil(store.selectedTaskID)
+        await manager.setEnabled(hostID: host, enabled: false)
     }
 
     @MainActor func testRemoteWorkspaceEventCannotLeakIntoLocalIndexesAfterRemoval() async {

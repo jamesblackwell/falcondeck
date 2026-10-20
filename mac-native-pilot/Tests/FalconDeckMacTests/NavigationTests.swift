@@ -81,16 +81,17 @@ final class NavigationTests: XCTestCase {
         let opening = "OPENING " + String(repeating: "a", count: 500)
         let recent = String(repeating: "z", count: 500) + " RECENT"
         let messages = [Message(.object(["id": .string("one"), "kind": .string("user_message"), "text": .string(opening)])), Message(.object(["id": .string("two"), "kind": .string("assistant_message"), "text": .string(recent)]))]
-        let result = NativeTaskActions.boundedContext(messages, limit: 120)
+        let result = NativeTaskActions.boundedContext(messages, limit: 200)
         XCTAssertTrue(result.contains("OPENING"))
         XCTAssertTrue(result.contains("RECENT"))
         XCTAssertTrue(result.contains("[Middle of transcript omitted"))
-        XCTAssertLessThan(result.count, 220)
+        XCTAssertLessThanOrEqual(result.count, 200)
     }
 
-    func testEmptyAndNonMessageItemsDoNotCreateForkContext() {
+    func testEmptyHistoryDoesNotCreateForkContextAndToolEvidenceIsRetained() {
         let message = Message(.object(["id": .string("tool"), "kind": .string("tool_call"), "output": .string("private tool output")]))
-        XCTAssertEqual(NativeTaskActions.boundedContext([message]), "")
+        XCTAssertEqual(NativeTaskActions.boundedContext([]), "")
+        XCTAssertTrue(NativeTaskActions.boundedContext([message]).contains("private tool output"))
     }
 }
 
