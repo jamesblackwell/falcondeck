@@ -139,6 +139,9 @@ import UniformTypeIdentifiers
     /// layout. The editor grows with wrapped text, then scrolls at the cap.
     func fittingComposerHeight(width: CGFloat) -> CGFloat {
         guard let textContainer, let layoutManager else { return 44 }
+        // widthTracksTextView makes the text view authoritative. Keep its
+        // frame in sync with the proposed width before asking TextKit to wrap.
+        if frame.width != width { setFrameSize(NSSize(width: width, height: frame.height)) }
         let availableWidth = max(1, width - textContainerInset.width * 2)
         if textContainer.containerSize.width != availableWidth {
             textContainer.containerSize = NSSize(width: availableWidth, height: .greatestFiniteMagnitude)

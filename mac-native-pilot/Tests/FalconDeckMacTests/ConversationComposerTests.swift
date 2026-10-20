@@ -5,6 +5,10 @@ import XCTest
 final class ConversationComposerTests: XCTestCase {
     @MainActor func testEditorGrowsForWrappingAndTrailingNewlinesAndShrinksAfterDeletion() {
         let editor = ComposerNativeTextView(frame: NSRect(x: 0, y: 0, width: 600, height: 44))
+        editor.isVerticallyResizable = true
+        editor.isHorizontallyResizable = false
+        editor.maxSize = NSSize(width: CGFloat.greatestFiniteMagnitude, height: CGFloat.greatestFiniteMagnitude)
+        editor.textContainer?.widthTracksTextView = true
         editor.font = .systemFont(ofSize: 15)
         editor.textContainerInset = NSSize(width: 12, height: 10)
         editor.textContainer?.lineFragmentPadding = 0
@@ -21,6 +25,10 @@ final class ConversationComposerTests: XCTestCase {
 
     @MainActor func testEditorHonorsLargerFontsAndCapsLongDraftHeight() {
         let editor = ComposerNativeTextView(frame: NSRect(x: 0, y: 0, width: 600, height: 44))
+        editor.isVerticallyResizable = true
+        editor.isHorizontallyResizable = false
+        editor.maxSize = NSSize(width: CGFloat.greatestFiniteMagnitude, height: CGFloat.greatestFiniteMagnitude)
+        editor.textContainer?.widthTracksTextView = true
         editor.textContainerInset = NSSize(width: 12, height: 10)
         editor.font = .systemFont(ofSize: 15)
         editor.string = "One line\nAnother line"
