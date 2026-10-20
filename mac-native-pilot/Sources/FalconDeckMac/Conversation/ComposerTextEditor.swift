@@ -51,11 +51,11 @@ import UniformTypeIdentifiers
         editor.minSize = .zero
         editor.maxSize = NSSize(width: CGFloat.greatestFiniteMagnitude, height: CGFloat.greatestFiniteMagnitude)
         editor.autoresizingMask = [.width]
-        editor.textContainerInset = NSSize(width: 12, height: 12)
+        editor.textContainerInset = NSSize(width: 12, height: 10)
         editor.textContainer?.containerSize = NSSize(width: scrollView.contentSize.width, height: CGFloat.greatestFiniteMagnitude)
         editor.textContainer?.widthTracksTextView = true
-        editor.textContainer?.lineFragmentPadding = 4
-        editor.font = preferences.nativeFont(size: 16, surface: "chat")
+        editor.textContainer?.lineFragmentPadding = 0
+        editor.font = preferences.nativeFont(size: 15, surface: "chat")
         editor.setAccessibilityLabel("Message")
         editor.setAccessibilityIdentifier("conversation-composer")
         editor.registerForDraggedTypes([.fileURL, .png, .tiff, .string])
@@ -69,6 +69,12 @@ import UniformTypeIdentifiers
         update(editor, coordinator: context.coordinator)
     }
 
+    func sizeThatFits(_ proposal: ProposedViewSize, nsView: NSScrollView, context: Context) -> CGSize? {
+        guard let width = proposal.width, width.isFinite, width > 0,
+              let editor = nsView.documentView as? ComposerNativeTextView else { return nil }
+        return CGSize(width: width, height: editor.fittingComposerHeight(width: width))
+    }
+
     private func update(_ editor: ComposerNativeTextView, coordinator: Coordinator) {
         coordinator.parent = self
         editor.placeholder = placeholder
@@ -76,10 +82,13 @@ import UniformTypeIdentifiers
         editor.onAlternateSend = onAlternateSend
         editor.onAttachments = onAttachments
         editor.onError = onError
+        let sendKey = preferences.bindings(for: "sendMessage").first.map(NativeShortcutDefinition.display) ?? "Return"
+        let newlineKey = preferences.bindings(for: "insertNewline").first.map(NativeShortcutDefinition.display) ?? "Shift + Return"
+        editor.toolTip = "\(sendKey) to send · \(newlineKey) for a new line"
         editor.textColor = NSColor(FDTheme.foreground)
         editor.insertionPointColor = NSColor(FDTheme.foreground)
         editor.placeholderColor = NSColor(FDTheme.subtle)
-        let font = preferences.nativeFont(size: 16, surface: "chat")
+        let font = preferences.nativeFont(size: 15, surface: "chat")
         if editor.font != font { editor.font = font }
         if editor.string != text {
             let selection = editor.selectedRange()
@@ -125,6 +134,20 @@ import UniformTypeIdentifiers
     var onAlternateSend: (() -> Void)?
     var onAttachments: ([NativeMacAttachment]) -> Void = { _ in }
     var onError: (String) -> Void = { _ in }
+
+    /// Use TextKit's cached layout rather than writing SwiftUI state during
+    /// layout. The editor grows with wrapped text, then scrolls at the cap.
+    func fittingComposerHeight(width: CGFloat) -> CGFloat {
+        guard let textContainer, let layoutManager else { return 44 }
+        let availableWidth = max(1, width - textContainerInset.width * 2)
+        if textContainer.containerSize.width != availableWidth {
+            textContainer.containerSize = NSSize(width: availableWidth, height: .greatestFiniteMagnitude)
+        }
+        layoutManager.ensureLayout(for: textContainer)
+        let textHeight = max(layoutManager.usedRect(for: textContainer).maxY,
+                             layoutManager.extraLineFragmentRect.maxY)
+        return min(164, max(44, ceil(textHeight + textContainerInset.height * 2)))
+    }
 
     override func viewDidMoveToWindow() {
         super.viewDidMoveToWindow()

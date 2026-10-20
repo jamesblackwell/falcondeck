@@ -28,8 +28,8 @@ struct ConversationComposerControls: View {
     }
 
     var body: some View {
-        HStack(spacing: 9) {
-            Button(action: attach) { Image(systemName: "paperclip") }
+        HStack(spacing: 8) {
+            Button(action: attach) { Image(systemName: "paperclip").frame(width: 24, height: 28) }
                 .help("Attach images or text files")
                 .accessibilityLabel("Attach files")
             Menu {
@@ -56,6 +56,7 @@ struct ConversationComposerControls: View {
                 Button("Refresh skills and prompts", action: refreshCatalog)
             } label: { Image(systemName: "slash.circle") }
             .menuStyle(.borderlessButton).fixedSize().help("Skills and saved prompts")
+            .accessibilityLabel("Skills and saved prompts")
 
             Button { showAgents.toggle() } label: {
                 HStack(spacing: 4) {
@@ -70,7 +71,7 @@ struct ConversationComposerControls: View {
                         .lineLimit(1)
                     Image(systemName: "chevron.down").font(.system(size: 8))
                 }
-            }.frame(maxWidth: 180).help("Choose model").accessibilityIdentifier("composer-model")
+            }.layoutPriority(-1).help("Choose model").accessibilityIdentifier("composer-model")
                 .popover(isPresented: $showModels, arrowEdge: .bottom) { modelPicker }
             if !ConversationCatalog.efforts(activeModel).isEmpty {
                 Picker("Reasoning effort", selection: choice("reasoning_effort")) {
@@ -86,6 +87,7 @@ struct ConversationComposerControls: View {
         .buttonStyle(.plain).controlSize(.small)
         .font(NativePreferences.shared.font(size: 12))
         .foregroundStyle(FDTheme.secondary)
+        .tint(FDTheme.secondary)
         .onReceive(NotificationCenter.default.publisher(for: Notification.Name("native.command"))) { note in
             switch note.object as? String {
             case "openModelMenu": showModels = true

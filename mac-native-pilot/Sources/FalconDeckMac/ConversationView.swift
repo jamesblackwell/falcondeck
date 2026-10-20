@@ -246,7 +246,6 @@ struct ConversationView: View {
                 }
                 ConversationTextEditor(text: $store.draft, placeholder: store.isRunning ? "Send a follow-up…" : "Message your agent…", onSend: send,
                                        onAttachments: { appendAttachments($0, expectedKey: composerKey) }, onError: { store.errorMessage = $0 }, onAlternateSend: sendAlternate)
-                    .frame(minHeight: 64, idealHeight: 88, maxHeight: 140)
                     .fixedSize(horizontal: false, vertical: true)
                     .accessibilityIdentifier("message-composer")
                 HStack(spacing: 10) {
@@ -256,11 +255,14 @@ struct ConversationView: View {
                         else { store.provider = destination }
                     })
                     Spacer(minLength: 4)
-                    Button { NativeSpeechController.shared.startOrStop() } label: {
-                        Image(systemName: NativeSpeechController.shared.isRecording ? "stop.circle.fill" : "mic").font(.system(size: 13))
-                            .foregroundStyle(NativeSpeechController.shared.isRecording ? FDTheme.warning : FDTheme.muted)
-                    }.buttonStyle(.plain).disabled(!NativeSpeechController.shared.config.enabled || NativeSpeechController.shared.isBusy)
-                        .help(NativeSpeechController.shared.config.enabled ? "Dictate a message" : "Enable dictation in Voice settings").accessibilityLabel("Dictate message")
+                    if NativeSpeechController.shared.config.enabled {
+                        Button { NativeSpeechController.shared.startOrStop() } label: {
+                            Image(systemName: NativeSpeechController.shared.isRecording ? "stop.circle.fill" : "mic")
+                                .font(.system(size: 13)).frame(width: 28, height: 28)
+                                .foregroundStyle(NativeSpeechController.shared.isRecording ? FDTheme.warning : FDTheme.muted)
+                        }.buttonStyle(.plain).disabled(NativeSpeechController.shared.isBusy)
+                            .help("Dictate a message").accessibilityLabel("Dictate message")
+                    }
                     if store.isRunning {
                         Button { Task { await store.interrupt() } } label: { Image(systemName: "stop.fill").font(.system(size: 10)).frame(width: 28, height: 28).background(FDTheme.hover, in: .rect(cornerRadius: 7)) }
                             .buttonStyle(.plain).help("Stop the current turn").accessibilityLabel("Stop agent").accessibilityIdentifier("stop-agent")
@@ -272,17 +274,12 @@ struct ConversationView: View {
                     }.buttonStyle(.plain).disabled(!canSend)
                         .help(sendHelp)
                         .accessibilityLabel("Send message").accessibilityIdentifier("send-message")
-                }.padding(.horizontal, 14).padding(.bottom, 12).padding(.top, 5)
+                }.padding(.horizontal, 12).padding(.bottom, 10).padding(.top, 2)
             }.background(FDTheme.raised, in: .rect(cornerRadius: 12)).overlay { RoundedRectangle(cornerRadius: 12).strokeBorder(FDTheme.line) }
-            HStack(spacing: 4) {
-                if !store.isSelectedHostConnected { Image(systemName: "wifi.slash"); Text("Reconnect to send a message") }
-                else {
-                    Text(NativePreferences.shared.bindings(for: "sendMessage").first.map(NativeShortcutDefinition.display) ?? "Send")
-                    Text("to send"); Text("·").padding(.horizontal, 2)
-                    Text(NativePreferences.shared.bindings(for: "insertNewline").first.map(NativeShortcutDefinition.display) ?? "Shift + Return")
-                    Text("for a new line")
-                }
-            }.font(NativePreferences.shared.font(size: 11)).foregroundStyle(FDTheme.muted)
+            if !store.isSelectedHostConnected {
+                Label("Reconnect to send a message", systemImage: "wifi.slash")
+                    .font(NativePreferences.shared.font(size: 12)).foregroundStyle(FDTheme.muted)
+            }
         }.frame(maxWidth: 900).padding(.horizontal, 28).padding(.top, 12).padding(.bottom, 14).frame(maxWidth: .infinity)
     }
 

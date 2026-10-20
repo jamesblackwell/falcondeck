@@ -1,7 +1,36 @@
+import AppKit
 import XCTest
 @testable import FalconDeckMac
 
 final class ConversationComposerTests: XCTestCase {
+    @MainActor func testEditorGrowsForWrappingAndTrailingNewlinesAndShrinksAfterDeletion() {
+        let editor = ComposerNativeTextView(frame: NSRect(x: 0, y: 0, width: 600, height: 44))
+        editor.font = .systemFont(ofSize: 15)
+        editor.textContainerInset = NSSize(width: 12, height: 10)
+        editor.textContainer?.lineFragmentPadding = 0
+        let empty = editor.fittingComposerHeight(width: 600)
+        XCTAssertLessThan(empty, 60, "An empty composer should be a compact input.")
+        editor.string = "A short draft\n\n"
+        XCTAssertGreaterThan(editor.fittingComposerHeight(width: 600), empty)
+        editor.string = String(repeating: "A draft with wrapped words. ", count: 8)
+        let wide = editor.fittingComposerHeight(width: 800)
+        XCTAssertGreaterThan(editor.fittingComposerHeight(width: 220), wide)
+        editor.string = ""
+        XCTAssertEqual(editor.fittingComposerHeight(width: 600), empty)
+    }
+
+    @MainActor func testEditorHonorsLargerFontsAndCapsLongDraftHeight() {
+        let editor = ComposerNativeTextView(frame: NSRect(x: 0, y: 0, width: 600, height: 44))
+        editor.textContainerInset = NSSize(width: 12, height: 10)
+        editor.font = .systemFont(ofSize: 15)
+        editor.string = "One line\nAnother line"
+        let regular = editor.fittingComposerHeight(width: 600)
+        editor.font = .systemFont(ofSize: 28)
+        XCTAssertGreaterThan(editor.fittingComposerHeight(width: 600), regular)
+        editor.string = String(repeating: "A long draft\n", count: 100)
+        XCTAssertLessThanOrEqual(editor.fittingComposerHeight(width: 600), 180)
+    }
+
     func testSkillAliasMatchesWholeSlashTokenOnce() {
         let skill = JSON.object(["id": .string("review-id"), "alias": .string("review" )])
         XCTAssertEqual(ConversationCatalog.selectedSkills("/review check /review", skills: [skill]).count, 1)
