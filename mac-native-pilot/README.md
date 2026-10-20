@@ -5,6 +5,9 @@ iOS pilot as a design reference. It is a prototype for browsing real projects
 and tasks and sending and receiving agent messages. Settings, speech, and the
 full desktop feature set are outside this prototype.
 
+The [feature parity plan](FEATURE-PARITY-PLAN.md) maps the current desktop app to
+the proposed native layout, settings, platform services and implementation milestones.
+
 The Rust daemon and native agent histories remain authoritative. This app uses
 the daemon already running on your Mac; it does not launch, stop, or restart the
 daemon. Keep your existing FalconDeck desktop app running while trying it.
