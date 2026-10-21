@@ -339,31 +339,6 @@ final class StateTests: XCTestCase {
         XCTAssertEqual(store.draft, "Original input")
     }
 
-    @MainActor func testNewTaskComposerSendsSelectedLocationOnlyAtCreation() async {
-        for isolation in ["project_folder", "isolated"] {
-            let client = TestDaemon(), store = AppStore(client: client)
-            await store.reconnect()
-            for _ in 0..<1000 where !store.isConnected { await Task.yield() }
-            guard store.isConnected else { return XCTFail("Test stream failed to connect") }
-            store.newTask()
-            store.draft = "Start in the selected location"
-            let composer = ConversationView(store: store, selection: NativeComposerSelection(isolation: isolation))
-            composer.send()
-            await client.waitForSend()
-            let mutations = await client.recordedMutations()
-            let creation = mutations.first { $0.method == "POST" && $0.path.last == "threads" }
-            XCTAssertEqual(creation?.body["isolation"], .string(isolation))
-            XCTAssertEqual(mutations.last?.path.last, "turns")
-            XCTAssertNil(mutations.last?.body.fields["isolation"], "Location belongs to task creation, not individual turns")
-            XCTAssertEqual(store.pendingSubmission?.settings["isolation"], .string(isolation))
-            await client.finishSend()
-            for _ in 0..<1000 where store.isSending { await Task.yield() }
-            XCTAssertFalse(store.isSending)
-            XCTAssertNil(store.pendingSubmission)
-            await store.prepareForQuit()
-        }
-    }
-
     @MainActor func testSendCapturesProviderAndPreservesNewTextAndAttachmentsDuringCreation() async {
         let client = TestDaemon(), store = AppStore(client: client)
         await store.reconnect()

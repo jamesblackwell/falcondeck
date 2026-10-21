@@ -50,7 +50,7 @@ struct ConversationComposerControls: View {
                 }.labelsHidden().pickerStyle(.menu).fixedSize().help("Reasoning effort")
             }
             Button { showOptions.toggle() } label: { Image(systemName: "slider.horizontal.3") }
-                .help("Agent permissions, mode and speed")
+                .help("Agent permissions, mode, speed and task location")
                 .accessibilityLabel("Task settings")
                 .popover(isPresented: $showOptions, arrowEdge: .bottom) { options }
         }
@@ -161,6 +161,13 @@ struct ConversationComposerControls: View {
                         Text($0["name"].string.isEmpty ? $0["id"].string : $0["name"].string).tag($0["id"].string)
                     }
                 }
+            }
+            if store.selectedTaskID == nil && store.selectedProject?.raw["kind"].string != "casual" {
+                Picker("Location", selection: $selection.isolation) {
+                    Text("Project folder").tag("project_folder")
+                    Text("Isolated checkout").tag("isolated")
+                }
+                Text("An isolated task works on its own branch and checkout.").font(NativePreferences.shared.font(size: 12)).foregroundStyle(FDTheme.muted)
             }
             if capabilities["supports_steering"].bool {
                 Picker("While agent is working", selection: $selection.followUp) {
