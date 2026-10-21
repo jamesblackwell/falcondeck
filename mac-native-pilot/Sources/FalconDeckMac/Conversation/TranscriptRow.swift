@@ -289,7 +289,7 @@ struct ConversationTranscriptRow: View {
                     }
                 }
                 Spacer(minLength: 0)
-                if let duration = TranscriptPresentation.duration(raw["detail"]["duration_ms"]) {
+                if let duration = TranscriptPresentation.notableDuration(raw["detail"]["duration_ms"]) {
                     Text(duration).font(NativePreferences.shared.font(size: 13, surface: "code")).foregroundStyle(FDTheme.muted)
                 }
                 if case .number(let exit) = raw["exit_code"], exit != 0 {

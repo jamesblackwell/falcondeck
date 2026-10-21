@@ -23,10 +23,7 @@ enum TranscriptPresentation {
         case "error": label = "Thought failed"
         default: label = nonempty(message.raw["summary"].string.trimmingCharacters(in: .whitespacesAndNewlines), "Thought")
         }
-        // A sub-second thought reads as "Thought · 8 ms", which is noise in a
-        // stream of them. Only a duration worth noticing earns the suffix.
-        guard let milliseconds = message.raw["duration_ms"].optionalInt, milliseconds >= 1000,
-              let elapsed = duration(.number(Double(milliseconds))) else { return label }
+        guard let elapsed = notableDuration(message.raw["duration_ms"]) else { return label }
         return label + " · " + elapsed
     }
 
@@ -149,6 +146,13 @@ enum TranscriptPresentation {
     static func duration(_ milliseconds: JSON) -> String? {
         guard let value = milliseconds.optionalInt else { return nil }
         return value < 1000 ? "\(value) ms" : String(format: "%.1f s", Double(value) / 1000)
+    }
+
+    /// A transcript reports elapsed time only when it is worth noticing. "0 ms"
+    /// beside a thought or a command is rounding, not a measurement.
+    static func notableDuration(_ milliseconds: JSON) -> String? {
+        guard let value = milliseconds.optionalInt, value >= 1000 else { return nil }
+        return duration(.number(Double(value)))
     }
 
     static func externalURL(_ value: String) -> URL? {
