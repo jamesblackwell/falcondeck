@@ -563,11 +563,11 @@ const FlatThreadList = memo(function FlatThreadList({
         />
       ))}
       {trailingSelected ? (
+        // Shown out of position, below the window, so it gets no connector:
+        // an elbow here would point at a parent that is not above it.
         <ThreadItem
           key={trailingSelected.id}
           thread={trailingSelected}
-          depth={nesting.get(trailingSelected.id)?.depth}
-          trunkMask={nesting.get(trailingSelected.id)?.trunkMask}
           workspaceId={group.workspace.id}
           isSelected
           onSelect={onSelectThread}
@@ -1599,7 +1599,8 @@ export const WorkspaceSidebar = memo(function WorkspaceSidebar({
       });
   }, [chatGroups, threadSort]);
   // Chats is one flat section across the casual workspaces, so nesting runs
-  // over the whole section rather than per workspace.
+  // over the whole section rather than per workspace. The rows carry a
+  // workspace id alongside the chat, so they follow the nested order by id.
   const nestedChatEntries = useMemo(() => {
     const { threads, nesting } = nestSpawnedThreads(
       chatEntries.map((entry) => entry.thread),
@@ -1609,10 +1610,7 @@ export const WorkspaceSidebar = memo(function WorkspaceSidebar({
       chatEntries.map((entry) => [entry.thread.id, entry]),
     );
     return {
-      entries: threads.flatMap((thread) => {
-        const entry = byThreadId.get(thread.id);
-        return entry ? [entry] : [];
-      }),
+      entries: threads.flatMap((thread) => byThreadId.get(thread.id) ?? []),
       nesting,
     };
   }, [chatEntries]);

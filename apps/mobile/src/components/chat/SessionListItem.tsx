@@ -30,9 +30,14 @@ interface SessionListItemProps {
   trunkMask?: number
 }
 
-/** Rung width, and where in it the connector's upright sits. */
+/**
+ * Connector geometry, mirrored by the web row in chat-ui's thread-item.tsx:
+ * how wide one rung is, where in it the upright sits, and how far short of
+ * the next rung the elbow's stub stops.
+ */
 const NESTING_RUNG = 14
 const NESTING_LINE = 6
+const NESTING_STUB_INSET = 2
 
 function SessionListItemInner({
   thread,
@@ -77,10 +82,15 @@ function SessionListItemInner({
     >
       {depth > 0 ? (
         // The elbow sits inside the row so the selection fill runs behind it.
-        // Negative vertical margins reach into the row's padding, so a middle
-        // child's upright meets the next sibling's with no seam.
+        // The negative vertical margins cancel the row's own padding, so a
+        // middle child's upright meets the next sibling's with no seam. The
+        // drawing says nothing to a screen reader, so it carries the label in
+        // place of the agent marker the nested row drops.
         <View
           testID="thread-nesting-connector"
+          accessible
+          accessibilityRole="image"
+          accessibilityLabel="Started by the chat above"
           pointerEvents="none"
           style={[styles.nesting, { width: depth * NESTING_RUNG }]}
         >
@@ -219,7 +229,7 @@ const styles = StyleSheet.create((theme) => ({
     position: 'absolute',
     top: 0,
     height: '50%',
-    right: 2,
+    right: NESTING_STUB_INSET,
     borderLeftWidth: StyleSheet.hairlineWidth,
     borderBottomWidth: StyleSheet.hairlineWidth,
     borderBottomLeftRadius: theme.radius.sm,

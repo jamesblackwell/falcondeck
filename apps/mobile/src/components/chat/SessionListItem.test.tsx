@@ -38,12 +38,16 @@ describe('SessionListItem agent origin', () => {
       id: 'child-1',
       origin: { kind: 'agent_spawn', parent_thread_id: 'parent-1' },
     })
+    // Every other prop keeps its identity, so the row only repaints if the
+    // memo comparator weighs the rung itself. Archiving a sibling or a parent
+    // re-cuts the connector exactly like this.
+    const onSelectThread = vi.fn()
     const renderRow = (depth: number, trunkMask = 0) => (
       <SessionListItem
         thread={spawned}
         workspaceId="workspace-1"
         isSelected={false}
-        onSelectThread={() => {}}
+        onSelectThread={onSelectThread}
         depth={depth}
         trunkMask={trunkMask}
       />
@@ -63,9 +67,14 @@ describe('SessionListItem agent origin', () => {
     expect(markers()).toHaveLength(0)
     expect(connectors()[0].children).toHaveLength(2)
 
-    // Last child: the elbow alone, with nothing continuing below it.
+    // That sibling goes away: the upright below the elbow goes with it.
     act(() => renderer.update(renderRow(1)))
     expect(connectors()[0].children).toHaveLength(1)
+
+    // The parent goes away: back to a plain row with the agent marker.
+    act(() => renderer.update(renderRow(0)))
+    expect(connectors()).toHaveLength(0)
+    expect(markers()).toHaveLength(1)
   })
 
   it('updates the marker with the origin without marking manual or automated tasks', () => {

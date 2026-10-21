@@ -87,36 +87,47 @@ describe('ThreadItem agent origin', () => {
     )
   })
 
-  it('swaps the marker for an elbow once the row nests under its parent', () => {
+  it('redraws the connector when nesting changes and nothing else does', () => {
     const spawned = {
       ...thread('2026-08-31T14:08:59Z'),
       origin: { kind: 'agent_spawn', parent_thread_id: 'parent-1' },
     } as ThreadSummary
-    const { rerender } = render(
+    // Every other prop keeps its identity, so the row only repaints if the
+    // memo comparator weighs the rung itself. Archiving a sibling or a parent
+    // re-cuts the connector exactly like this.
+    const onSelect = vi.fn()
+    const renderRow = (depth: number, trunkMask = 0) => (
       <ThreadItem
         thread={spawned}
         workspaceId="workspace-1"
         isSelected={false}
-        onSelect={() => {}}
-      />,
+        onSelect={onSelect}
+        depth={depth}
+        trunkMask={trunkMask}
+      />
     )
+    const trunks = () =>
+      screen.getByTestId('thread-nesting-connector').childElementCount
+    const { rerender } = render(renderRow(0))
     expect(screen.getByRole('img', { name: 'Created by an agent' })).toBeInTheDocument()
     expect(screen.queryByTestId('thread-nesting-connector')).not.toBeInTheDocument()
 
-    rerender(
-      <ThreadItem
-        thread={spawned}
-        workspaceId="workspace-1"
-        isSelected={false}
-        onSelect={() => {}}
-        depth={1}
-      />,
-    )
+    // Nested, with a sibling still below: the elbow plus the upright to it.
+    rerender(renderRow(1, 0b1))
     expect(screen.queryByRole('img', { name: 'Created by an agent' })).not.toBeInTheDocument()
-    expect(screen.getByTestId('thread-nesting-connector')).toBeInTheDocument()
+    expect(trunks()).toBe(2)
     expect(
       screen.getByRole('button', { name: /Started by the chat above/ }),
     ).toBeInTheDocument()
+
+    // That sibling goes away: the upright below the elbow goes with it.
+    rerender(renderRow(1))
+    expect(trunks()).toBe(1)
+
+    // The parent goes away: back to a plain row with the agent marker.
+    rerender(renderRow(0))
+    expect(screen.queryByTestId('thread-nesting-connector')).not.toBeInTheDocument()
+    expect(screen.getByRole('img', { name: 'Created by an agent' })).toBeInTheDocument()
   })
 
   it('refreshes the marker when the daemon adds or changes the origin', () => {

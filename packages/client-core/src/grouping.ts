@@ -281,42 +281,82 @@ export type ThreadNesting = {
 /** Deepest rung the sidebar indents to; deeper spawns share the last one. */
 export const MAX_THREAD_NESTING_DEPTH = 3
 
-export const EMPTY_THREAD_NESTING: ReadonlyMap<string, ThreadNesting> = new Map()
+const EMPTY_THREAD_NESTING: ReadonlyMap<string, ThreadNesting> = new Map()
+
+/** The chat this one was spawned from, when that chat is in the same list. */
+function spawnParentId(
+  thread: ThreadSummary,
+  byId: ReadonlyMap<string, ThreadSummary>,
+): string | null {
+  const origin = thread.origin
+  if (origin?.kind !== 'agent_spawn') return null
+  const parentId = origin.parent_thread_id
+  if (parentId === thread.id || !byId.has(parentId)) return null
+  return parentId
+}
 
 /**
  * Reorders an already-sorted list so agent-spawned chats follow the chat that
  * spawned them, and reports the rung each one sits on.
  *
- * A spawned chat only nests when its parent is in the same list: in the
- * archive view, a folder, or a window that cut the parent off, it keeps its
- * own place at the top level rather than vanishing. Lists with nothing to nest
- * are returned by identity so callers keep memoizing on the array.
+ * A family keeps the place of its best-placed member rather than its parent's,
+ * so the sort mode still decides where it lands: a child that just ran, or that
+ * needs an answer, pulls its parent up with it instead of being buried behind
+ * an idle one.
+ *
+ * A spawned chat only nests when its parent is in the same list. In the archive
+ * view, in another folder, or past the end of a window, it keeps its own place
+ * at the top level rather than vanishing. Lists with nothing to nest come back
+ * by identity so callers keep memoizing on the array.
  */
 export function nestSpawnedThreads(threads: readonly ThreadSummary[]): {
   threads: readonly ThreadSummary[]
   nesting: ReadonlyMap<string, ThreadNesting>
 } {
-  let childrenByParent: Map<string, ThreadSummary[]> | null = null
   const byId = new Map<string, ThreadSummary>()
-  for (const thread of threads) byId.set(thread.id, thread)
+  const rankById = new Map<string, number>()
+  threads.forEach((thread, index) => {
+    if (byId.has(thread.id)) return
+    byId.set(thread.id, thread)
+    rankById.set(thread.id, index)
+  })
+
+  const childrenByParent = new Map<string, ThreadSummary[]>()
+  const nestedIds = new Set<string>()
   for (const thread of threads) {
-    const origin = thread.origin
-    if (origin?.kind !== 'agent_spawn') continue
-    const parentId = origin.parent_thread_id
-    if (parentId === thread.id || !byId.has(parentId)) continue
-    childrenByParent ??= new Map()
+    const parentId = spawnParentId(thread, byId)
+    if (parentId == null) continue
+    nestedIds.add(thread.id)
     const siblings = childrenByParent.get(parentId)
     if (siblings) siblings.push(thread)
     else childrenByParent.set(parentId, [thread])
   }
-  if (!childrenByParent) return { threads, nesting: EMPTY_THREAD_NESTING }
+  if (childrenByParent.size === 0) {
+    return { threads, nesting: EMPTY_THREAD_NESTING }
+  }
 
-  const children = childrenByParent
+  // Best place anything in this chat's family holds in the sorted list.
+  const familyRank = new Map<string, number>()
+  const rankOfFamily = (thread: ThreadSummary): number => {
+    const cached = familyRank.get(thread.id)
+    if (cached !== undefined) return cached
+    const own = rankById.get(thread.id) ?? threads.length
+    // Recorded before recursing, so a chat spawned from its own descendant
+    // settles on its own place instead of looping.
+    familyRank.set(thread.id, own)
+    let best = own
+    for (const child of childrenByParent.get(thread.id) ?? []) {
+      best = Math.min(best, rankOfFamily(child))
+    }
+    familyRank.set(thread.id, best)
+    return best
+  }
+  const byFamilyRank = (left: ThreadSummary, right: ThreadSummary) =>
+    rankOfFamily(left) - rankOfFamily(right)
+  for (const siblings of childrenByParent.values()) siblings.sort(byFamilyRank)
+
   const ordered: ThreadSummary[] = []
   const nesting = new Map<string, ThreadNesting>()
-  // A parent spawned from a descendant of its own would otherwise recurse
-  // forever; emitting each chat at most once breaks the cycle and leaves the
-  // stragglers at the top level.
   const emitted = new Set<string>()
 
   const emit = (thread: ThreadSummary, depth: number, trunkMask: number) => {
@@ -324,34 +364,31 @@ export function nestSpawnedThreads(threads: readonly ThreadSummary[]): {
     emitted.add(thread.id)
     ordered.push(thread)
     if (depth > 0) nesting.set(thread.id, { depth, trunkMask })
-    const siblings = children.get(thread.id)
+    const siblings = childrenByParent.get(thread.id)
     if (!siblings) return
     const childDepth = Math.min(depth + 1, MAX_THREAD_NESTING_DEPTH)
-    // This row's own bit says whether a sibling of *this* chat follows; the
-    // children inherit it as an ancestor upright to draw through.
-    const inherited = trunkMask
+    const ownRung = 1 << (childDepth - 1)
     siblings.forEach((child, index) =>
+      // Each child inherits the uprights running past this row, and adds its
+      // own rung while a sibling of its own is still to come.
       emit(
         child,
         childDepth,
-        index === siblings.length - 1
-          ? inherited
-          : inherited | (1 << (childDepth - 1)),
+        index === siblings.length - 1 ? trunkMask : trunkMask | ownRung,
       ),
     )
   }
 
-  for (const thread of threads) {
-    const origin = thread.origin
-    const nests =
-      origin?.kind === 'agent_spawn' &&
-      origin.parent_thread_id !== thread.id &&
-      byId.has(origin.parent_thread_id)
-    // Children are emitted by their parent. Anything else keeps its own slot.
-    if (!nests) emit(thread, 0, 0)
+  for (const root of threads
+    .filter((thread) => !nestedIds.has(thread.id))
+    .sort(byFamilyRank)) {
+    emit(root, 0, 0)
   }
-  // Cycles leave their members unplaced; append them so nothing disappears.
-  for (const thread of threads) emit(thread, 0, 0)
+  if (ordered.length < threads.length) {
+    // Only a spawn cycle can be left over, since no root reaches it. Show its
+    // members at the top level rather than dropping them from the sidebar.
+    for (const thread of threads) emit(thread, 0, 0)
+  }
 
   return { threads: ordered, nesting }
 }

@@ -48,6 +48,43 @@ describe('buildSidebarRows', () => {
     ])
   })
 
+  it('drops the connector from a selected thread trailed below the window', () => {
+    const recent = Array.from({ length: VISIBLE_THREAD_LIMIT }, (_, index) =>
+      thread({
+        id: `recent-${index}`,
+        workspace_id: 'w1',
+        updated_at: `2026-10-0${index + 4}T00:00:00Z`,
+      }),
+    )
+    const rows = buildSidebarRows(
+      [
+        {
+          workspace: workspace({ id: 'w1', path: '/tmp/project-one' }),
+          threads: [
+            ...recent,
+            thread({ id: 'parent', workspace_id: 'w1', updated_at: '2026-10-02T00:00:00Z' }),
+            thread({
+              id: 'child',
+              workspace_id: 'w1',
+              updated_at: '2026-10-01T00:00:00Z',
+              origin: { kind: 'agent_spawn', parent_thread_id: 'parent' },
+            }),
+          ],
+        },
+      ],
+      emptyCollapsed,
+      defaultCounts,
+      'child',
+    )
+
+    // Its parent is past the window, so the child is trailed on its own. An
+    // elbow would point at whatever row happened to land above it.
+    const childRow = rows.find((row) => row.key === 'thread:child')
+    expect(childRow).toBeDefined()
+    expect(childRow?.type === 'thread' && childRow.depth).toBe(0)
+    expect(rows.some((row) => row.key === 'thread:parent')).toBe(false)
+  })
+
   it('creates workspace and thread rows in order', () => {
     const rows = buildSidebarRows(
       [

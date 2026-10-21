@@ -417,6 +417,42 @@ describe('nestSpawnedThreads', () => {
     expect(nested.nesting.get('g4')?.depth).toBe(3)
   })
 
+  it('moves a family to the place its best-placed member held', () => {
+    // Sorted order: the child ran most recently, its parent has gone quiet.
+    const nested = nestSpawnedThreads([
+      spawned('busy-child', 'idle-parent'),
+      summary({ id: 'unrelated' }),
+      summary({ id: 'idle-parent' }),
+    ])
+
+    // The parent rides up with its child rather than burying it at the bottom,
+    // where a short sidebar window would have cut it off.
+    expect(nested.threads.map(({ id }) => id)).toEqual([
+      'idle-parent',
+      'busy-child',
+      'unrelated',
+    ])
+  })
+
+  it('orders siblings by their own families, not just themselves', () => {
+    const nested = nestSpawnedThreads([
+      summary({ id: 'root' }),
+      spawned('busy-grandchild', 'quiet-child'),
+      spawned('loud-child', 'root'),
+      spawned('quiet-child', 'root'),
+    ])
+
+    expect(nested.threads.map(({ id }) => id)).toEqual([
+      'root',
+      'quiet-child',
+      'busy-grandchild',
+      'loud-child',
+    ])
+    expect(nested.nesting.get('quiet-child')).toEqual({ depth: 1, trunkMask: 0b1 })
+    expect(nested.nesting.get('busy-grandchild')).toEqual({ depth: 2, trunkMask: 0b1 })
+    expect(nested.nesting.get('loud-child')).toEqual({ depth: 1, trunkMask: 0 })
+  })
+
   it("runs an ancestor's upright through the rows nested beneath it", () => {
     const nested = nestSpawnedThreads([
       summary({ id: 'root' }),

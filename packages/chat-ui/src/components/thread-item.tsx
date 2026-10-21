@@ -72,9 +72,14 @@ export type ThreadItemProps = {
   trunkMask?: number
 }
 
-/** Rung width, and where in it the connector's upright sits. */
-const NESTING_RUNG_PX = 14
-const NESTING_LINE_PX = 6
+/**
+ * Connector geometry, mirrored by the mobile row in SessionListItem.tsx:
+ * how wide one rung is, where in it the upright sits, and how far short of
+ * the next rung the elbow's stub stops.
+ */
+const NESTING_RUNG = 14
+const NESTING_LINE = 6
+const NESTING_STUB_INSET = 2
 
 function timeAgo(dateStr: string) {
   const seconds = Math.floor((Date.now() - new Date(dateStr).getTime()) / 1000)
@@ -207,18 +212,21 @@ export const ThreadItem = memo(
         ) : null}
         {depth > 0 ? (
           // The elbow lives inside the row so the selection fill runs behind
-          // it, the way a native outline view draws its connectors. Negative
-          // margins reach into the row's padding so a middle child's upright
-          // meets the next sibling's with no seam.
+          // it, the way a native outline view draws its connectors. The
+          // negative margins cancel the row's own `py-2`, so a middle child's
+          // upright meets the next sibling's with no seam.
           <span
             aria-hidden="true"
             data-testid="thread-nesting-connector"
             className="pointer-events-none relative -my-2 shrink-0 self-stretch"
-            style={{ width: depth * NESTING_RUNG_PX }}
+            style={{ width: depth * NESTING_RUNG }}
           >
             <span
               className="absolute top-0 h-1/2 rounded-bl-[var(--fd-radius-sm)] border-b border-l border-border-emphasis"
-              style={{ left: (depth - 1) * NESTING_RUNG_PX + NESTING_LINE_PX, right: 2 }}
+              style={{
+                left: (depth - 1) * NESTING_RUNG + NESTING_LINE,
+                right: NESTING_STUB_INSET,
+              }}
             />
             {Array.from({ length: depth }, (_, index) => index + 1)
               .filter((rung) => trunkMask & (1 << (rung - 1)))
@@ -227,7 +235,7 @@ export const ThreadItem = memo(
                   key={rung}
                   className="absolute bottom-0 border-l border-border-emphasis"
                   style={{
-                    left: (rung - 1) * NESTING_RUNG_PX + NESTING_LINE_PX,
+                    left: (rung - 1) * NESTING_RUNG + NESTING_LINE,
                     // This row's own rung carries on from the elbow; an
                     // ancestor's runs the whole height, under the row.
                     top: rung === depth ? "50%" : 0,
@@ -472,6 +480,10 @@ export const ThreadItem = memo(
     prev.workspaceId === next.workspaceId &&
     prev.isSelected === next.isSelected &&
     prev.providerLabel === next.providerLabel &&
+    // Archiving a sibling or a parent re-cuts the connector without touching
+    // this thread, so the rung has to be compared like anything else drawn.
+    prev.depth === next.depth &&
+    prev.trunkMask === next.trunkMask &&
     projectMarkEqual(prev.projectMark, next.projectMark) &&
     prev.nowTick === next.nowTick &&
     prev.onSelect === next.onSelect &&

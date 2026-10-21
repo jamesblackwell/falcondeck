@@ -18,7 +18,7 @@ export const SHOW_MORE_STEP = 10
 
 type SortedProjectThreads = {
   pinnedInProject: ThreadSummary[]
-  unpinned: ThreadSummary[]
+  unpinned: readonly ThreadSummary[]
   unpinnedIndexes: Map<string, number>
   /** Spawn-tree rungs for `unpinned`; absent ids sit at the top level. */
   nesting: ReadonlyMap<string, ThreadNesting>
@@ -59,10 +59,9 @@ function sortedProjectThreads(
     const pinnedInProject = [...derived.partitions.pinnedInProject].sort(compare)
     // Agent-spawned chats are pulled under the chat that started them before
     // the window is measured, so a family pages as the rows it shows.
-    const { threads: nested, nesting } = nestSpawnedThreads(
+    const { threads: unpinned, nesting } = nestSpawnedThreads(
       [...derived.partitions.unpinned].sort(compare),
     )
-    const unpinned = nested as ThreadSummary[]
     const unpinnedIndexes = new Map<string, number>()
     for (let index = 0; index < unpinned.length; index += 1) {
       const id = unpinned[index].id
@@ -209,7 +208,8 @@ export function buildSidebarRows(
       return pinDelta || compare(left.thread, right.thread)
     })
   // Chats is one flat section across the casual workspaces, so spawned chats
-  // nest against the whole section rather than per workspace.
+  // nest against the whole section rather than per workspace. The rows carry a
+  // workspace id alongside the chat, so they follow the nested order by id.
   const chatNesting = nestSpawnedThreads(sortedChats.map((entry) => entry.thread))
   const chatsByThreadId = new Map(sortedChats.map((entry) => [entry.thread.id, entry]))
   const chatRows: SidebarRow[] = chatNesting.threads.flatMap((thread) => {
@@ -288,17 +288,24 @@ export function buildSidebarRows(
       : Math.max(remoteCursors[`${group.workspace.id}:${sortMode}`] === undefined ? 0 : 1, (remote?.total ?? 0) - group.threads.length)
     const hiddenCount = Math.max(0, sortedUnpinned.length - visibleUnpinned.length) + missing
     const canCollapse = hiddenCount === 0 && sortedUnpinned.length > VISIBLE_THREAD_LIMIT
-    const visible = [...sortedPinnedInProject, ...visibleUnpinned, ...(trailingSelected ? [trailingSelected] : [])]
+    const visible = [...sortedPinnedInProject, ...visibleUnpinned]
 
-    const threadRows: SidebarRow[] = visible.map((thread) => ({
+    const threadRow = (thread: ThreadSummary, nested: ThreadNesting | undefined): SidebarRow => ({
       key: `thread:${thread.id}`,
       type: 'thread',
       workspaceId: group.workspace.id,
       thread,
       isCollapsed: !isOpen,
-      depth: nesting.get(thread.id)?.depth ?? 0,
-      trunkMask: nesting.get(thread.id)?.trunkMask ?? 0,
-    }))
+      depth: nested?.depth ?? 0,
+      trunkMask: nested?.trunkMask ?? 0,
+    })
+    const threadRows: SidebarRow[] = visible.map((thread) =>
+      threadRow(thread, nesting.get(thread.id)),
+    )
+    // The trailing selected row is shown out of position, below the window, so
+    // it gets no connector: an elbow here would point at a parent that is not
+    // above it. Same for the one trailed below a folder.
+    if (trailingSelected) threadRows.push(threadRow(trailingSelected, undefined))
 
     // Folders lead, then project pins, then ordinary tasks.
     const rows: SidebarRow[] = [workspaceRow]
@@ -325,12 +332,15 @@ export function buildSidebarRows(
       const collapsed = !isOpen || folder.collapsed
       rows.push({ key: `folder:${folder.id}`, type: 'folder', workspaceId: group.workspace.id,
         folder, count: members.length, isCollapsed: !isOpen })
-      for (const thread of [...visibleMembers, ...(selected ? [selected] : [])]) {
-        rows.push({ key: `thread:${thread.id}`, type: 'thread', workspaceId: group.workspace.id,
-          folderId: folder.id, thread, isCollapsed: collapsed,
-          depth: sorted.nesting.get(thread.id)?.depth ?? 0,
-          trunkMask: sorted.nesting.get(thread.id)?.trunkMask ?? 0 })
+      const folderRow = (thread: ThreadSummary, nested: ThreadNesting | undefined): SidebarRow => ({
+        key: `thread:${thread.id}`, type: 'thread', workspaceId: group.workspace.id,
+        folderId: folder.id, thread, isCollapsed: collapsed,
+        depth: nested?.depth ?? 0, trunkMask: nested?.trunkMask ?? 0,
+      })
+      for (const thread of visibleMembers) {
+        rows.push(folderRow(thread, sorted.nesting.get(thread.id)))
       }
+      if (selected) rows.push(folderRow(selected, undefined))
       if (members.length > VISIBLE_THREAD_LIMIT) rows.push({
         key: `overflow:folder:${folder.id}`, type: 'overflow', workspaceId: group.workspace.id, folderId: folder.id,
         hiddenCount: Math.max(0, members.length - limit), visibleCount: visibleMembers.length,
