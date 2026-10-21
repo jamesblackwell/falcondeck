@@ -52,6 +52,11 @@ FalconDeck is a monorepo for a local daemon-first agent control plane:
 
 - Packaged Mac deployment: use `make desktop-install` (build/install/restart) or `make desktop-restart` (restart only). These are synchronous one-shot commands with a health check. Never use `launchctl submit`, KeepAlive jobs, or recurring automation for a one-off restart: a leftover job previously restarted the daemon 77 times and invalidated mobile sync tokens. Do not use broad `pkill` on the desktop binary; MCP helpers share it.
 - Multiple agents often work directly on `main`. Keep commits terse and scoped, commit completed work promptly, and exclude unrelated changes.
+- The Mac runs near-full on disk. Clean up after yourself before handing off:
+  - Delete simulators, emulators, and Docker containers/images/volumes you created (`xcrun simctl delete <udid>`, `docker rm`/`rmi`/`volume rm`). Shut down booted simulators you started.
+  - Remove temp worktrees (`git worktree remove`), scratch clones, `/tmp` build dirs, smoke-test state dirs, and one-off EAS/Xcode archives you produced.
+  - Prefer reusing existing `target/`, `DerivedData`, and `node_modules` over fresh copies; don't create extra cargo target dirs or per-worktree `npm install`s unless needed, and delete them when done.
+  - Only remove artifacts you created. Never prune shared caches, other agents' worktrees, or the user's simulators/containers without asking.
 - Read `docs/` before changing protocol or architecture.
 - Read `docs/EXTENSIONS.md` before changing extension contracts, contribution
   points, permissions, storage, or host behaviour.
