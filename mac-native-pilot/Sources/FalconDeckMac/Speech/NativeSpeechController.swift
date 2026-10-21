@@ -1,4 +1,5 @@
 import AppKit
+import ApplicationServices
 import AVFoundation
 import Foundation
 import NativeSpeechBridge
@@ -34,6 +35,9 @@ import Observation
     private(set) var hasPendingTranscript = false
     private(set) var isRecording = false
     private(set) var isBusy = false
+    /// A dictation failure that is really a missing grant. The overlay offers
+    /// the Settings pane rather than leaving the message with no way to act.
+    private(set) var needsAccessibility = false
     private(set) var audioLevel: Double = 0
     private(set) var keyConfigured = false
     private(set) var transcriptionModels = ["openai/gpt-4o-mini-transcribe", "mistralai/voxtral-mini-transcribe"]
@@ -199,11 +203,13 @@ import Observation
     func startOrStop() {
         if isRecording { fd_dictation_stop(); return }
         guard !isBusy else { return }
+        needsAccessibility = false
         guard config.enabled else { status = "Enable dictation first."; return }
         fd_dictation_start()
     }
 
     func cancel() {
+        needsAccessibility = false
         processing?.cancel()
         generation = UUID()
         if isRecording { fd_dictation_cancel() }
@@ -597,6 +603,7 @@ import Observation
         case 3, 6, 16:
             isRecording = false; isBusy = false; pendingIsReadable = kind != 16
             hasPendingRecording = retainedPath() != nil
+            needsAccessibility = !AXIsProcessTrusted()
             status = payload
             fileRecording(error: payload)
             showOverlay()

@@ -50,10 +50,15 @@ struct ProjectNavigator: View {
             if store.selectedSection == "extension-panel", let extensionID = store.selectedExtensionID, let panelID = store.selectedPanelID {
                 return "panel:\(extensionID):\(panelID)"
             }
-            if ["project", "chats", "pins"].contains(store.selectedSection),
-               let task = store.selectedTask, task.pinned, !task.raw["is_archived"].bool {
-                let id = task.id
+            // Tasks live in this list now, so a selected one owns the
+            // highlight. Only an open project with no task selected marks the
+            // project row. Pinned rows carry their own tag so the same thread
+            // appearing twice cannot claim the selection in both places.
+            if ["project", "chats"].contains(store.selectedSection), let id = store.selectedTaskID {
                 return "task:\(id)"
+            }
+            if store.selectedSection == "pins", let id = store.selectedTaskID {
+                return "pin:\(id)"
             }
             if store.selectedSection == "project", let id = store.selectedProjectID {
                 return "project:\(id)"
@@ -68,6 +73,8 @@ struct ProjectNavigator: View {
                 if parts.count == 2 { store.selectExtensionPanel(extensionID: parts[0], panelID: parts[1]) }
             } else if value.hasPrefix("task:") {
                 Task { await store.selectTask(String(value.dropFirst(5)), preservePinScope: false) }
+            } else if value.hasPrefix("pin:") {
+                Task { await store.selectTask(String(value.dropFirst(4)), preservePinScope: false) }
             } else if value.hasPrefix("section:") {
                 store.selectSection(String(value.dropFirst(8)))
             }
@@ -97,7 +104,7 @@ struct ProjectNavigator: View {
                     if pinsExpanded {
                         ForEach(pins) { task in
                             pinnedTaskRow(task)
-                                .tag("task:\(task.id)")
+                                .tag("pin:\(task.id)")
                         }
                     }
                 } header: {

@@ -1,4 +1,5 @@
 import AppKit
+import ApplicationServices
 import SwiftUI
 
 /// Buttons remain clickable while the destination editor keeps keyboard focus.
@@ -73,6 +74,21 @@ private struct NativeSpeechOverlay: View {
                         .font(.caption).foregroundStyle(FDTheme.muted)
                     Spacer()
                     Button("Cancel") { controller.cancel() }.controlSize(.small)
+                }
+            } else if controller.needsAccessibility {
+                // The two macOS panes both read "Accessibility"; this opens the
+                // Privacy one, which is the list the grant actually lives in.
+                HStack(spacing: 8) {
+                    Text("Add FalconDeck Native under Privacy & Security.")
+                        .font(.caption).foregroundStyle(FDTheme.muted)
+                    Spacer(minLength: 4)
+                    Button("Open Settings") {
+                        let options = [kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String: true] as CFDictionary
+                        _ = AXIsProcessTrustedWithOptions(options)
+                        if let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility") {
+                            NSWorkspace.shared.open(url)
+                        }
+                    }.controlSize(.small)
                 }
             } else {
                 if controller.hasPendingTranscript {
