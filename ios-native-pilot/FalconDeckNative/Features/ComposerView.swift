@@ -35,6 +35,23 @@ struct ComposerView: View {
     }
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
+            if task.isDraft, let project = model.projects.first(where: { $0.id == task.projectID }) ?? project, project.raw["kind"].string != "casual" {
+                HStack(spacing: 6) {
+                    Text("Work in").foregroundStyle(FD.secondary)
+                    Picker("Work in", selection: $chat.isolation) {
+                        Label("Project folder", systemImage: "folder").tag("project_folder")
+                        Label("Isolated copy", systemImage: "arrow.triangle.branch").tag("isolated")
+                    }
+                    .pickerStyle(.menu).labelsHidden().tint(FD.foreground)
+                    .frame(minHeight: 44)
+                    .accessibilityLabel("Work in")
+                    .accessibilityValue(chat.isolation == "isolated" ? "Isolated copy" : "Project folder")
+                    .accessibilityHint("An isolated copy has its own branch and checkout.")
+                    .accessibilityIdentifier("composer-isolation")
+                    .disabled(chat.sending)
+                    Spacer(minLength: 0)
+                }.font(.subheadline).padding(.horizontal, 8)
+            }
             if !chat.attachments.isEmpty { AttachmentStrip(chat: chat) }
             if voiceActive {
                 RecordingPanel(task: task, chat: chat, onClose: resumeTyping, onTranscript: receiveTranscript)

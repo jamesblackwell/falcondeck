@@ -157,11 +157,13 @@ import XCTest
         let model = AppModel.testing(relay: HarnessRelay()); model.projects = [HarnessPreview.project]
         let task = model.draftTask(project: HarnessPreview.project, folderID: nil), chat = model.chat(for: task)
         model.chooseProvider("claude", task: task, chat: chat); chat.chooseModel("fable"); chat.chooseEffort("max")
+        chat.isolation = "isolated"
         try await store.saveComposerPreferences(model.composerPreferences)
         let restored = AppModel.testing(relay: HarnessRelay()); restored.projects = [HarnessPreview.project]
         restored.composerPreferences = try await store.loadComposerPreferences()
         let draft = restored.draftTask(project: HarnessPreview.project, folderID: "another")
         XCTAssertEqual(draft.provider, "claude"); XCTAssertEqual(restored.chat(for: draft).effort, "max")
+        XCTAssertEqual(restored.chat(for: draft).isolation, "isolated")
         let other = SavedSession(relay: session.relay, sessionID: session.sessionID, deviceID: "other", token: session.token, secret: session.secret, daemonKey: session.daemonKey, daemonIdentity: session.daemonIdentity)
         let otherStore = try DraftStore(session: other, root: root), otherPreferences = try await otherStore.loadComposerPreferences()
         XCTAssertTrue(otherPreferences.isEmpty)

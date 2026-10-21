@@ -58,6 +58,8 @@ import Foundation
             }
             return
         }
+        // Isolation chooses the checkout at creation; it is not an agent setting.
+        selectedOverrides.removeValue(forKey: "isolation")
         if recoversInput && (text == "/compact" || text.hasPrefix("/compact ")) {
             defer { chat.sending = false }
             chat.transcript.items.removeAll { $0.id == id && $0.raw["pending"].bool }

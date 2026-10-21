@@ -525,6 +525,7 @@ final class AppModel {
             raw = .object(["id": .string("demo-\(UUID())"), "workspace_id": .string(project.id), "title": .string("New task"), "provider": .string(provider), "status": .string("idle")])
         } else {
             var params = JSON.object(overrides).setting("workspace_id", .string(project.id)).setting("provider", .string(provider))
+            params = params.setting("isolation", .string(project.raw["kind"].string != "casual" && overrides["isolation"] == .string("isolated") ? "isolated" : "project_folder"))
             if !modelID.isEmpty { params = params.setting("model_id", .string(modelID)) }
             raw = try await relay.call("thread.start", params: params)["thread"]
         }

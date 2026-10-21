@@ -36,15 +36,36 @@ private actor FeatureRelay: RelayServing {
         let chat = controlled.chat(for: draft)
         chat.draft = "Hello native"; chat.modelID = "chosen-model"; chat.effort = "high"
         chat.overrides = ["sandbox_mode": .string("read-only")]
+        chat.isolation = "isolated"
         await controlled.send(draft)
         let calls = await relay.requests()
         XCTAssertEqual(calls.map(\.0), ["thread.start", "thread.update", "turn.start"])
         XCTAssertEqual(calls[0].1["model_id"].string, "chosen-model")
+        XCTAssertEqual(calls[0].1["isolation"].string, "isolated")
+        XCTAssertEqual(calls[1].1["isolation"], .null)
+        XCTAssertEqual(calls[2].1["isolation"], .null)
         XCTAssertEqual(calls[2].1["sandbox_mode"].string, "read-only")
         XCTAssertEqual(calls[2].1["approval_policy"], .null)
         XCTAssertEqual(controlled.selection, .task("created-task"))
         XCTAssertTrue(chat.draft.isEmpty)
         XCTAssertEqual(controlled.tasks.count, 1)
+    }
+
+    func testNewTasksDefaultToProjectFolderAndCasualChatsCannotInheritIsolation() async {
+        for casual in [false, true] {
+            let relay = FeatureRelay(), model = AppModel.testing(relay: relay)
+            let project = Project(Demo.projects[0].raw.setting("kind", .string(casual ? "casual" : "project")))
+            model.projects = [project]; model.connected = true
+            let draft = model.draftTask(project: project, folderID: nil), chat = model.chat(for: draft)
+            XCTAssertEqual(chat.isolation, "project_folder")
+            if casual { chat.isolation = "isolated" }
+            chat.draft = "Start a task"
+            await model.send(draft)
+            let calls = await relay.requests()
+            XCTAssertEqual(calls.first?.1["isolation"].string, "project_folder")
+            XCTAssertTrue(calls.filter { $0.0 != "thread.start" }.allSatisfy { $0.1["isolation"] == .null })
+            XCTAssertNil(model.chats["created-task"]?.overrides["isolation"])
+        }
     }
 
     func testFailedFirstSendKeepsDraftOnCreatedTaskWithoutCreatingAgain() async {

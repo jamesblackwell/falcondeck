@@ -9,6 +9,7 @@ struct ComposerSelection: Codable, Sendable, Equatable {
     /// by this provider. A cached model list never grants a capability.
     func validated(project: Project?, provider: String) -> Self {
         var result = self
+        if project?.raw["kind"].string == "casual" { result.overrides.removeValue(forKey: "isolation") }
         let capabilities = project?.capabilities(provider) ?? .null
         for key in ["permission_mode", "sandbox_mode"] {
             if let value = result.overrides[key], !capabilities[key + "s"].array.contains(value) {
@@ -46,6 +47,10 @@ struct WorkspaceComposerPreferences: Codable, Sendable, Equatable {
 }
 
 @MainActor extension ChatSession {
+    var isolation: String {
+        get { overrides["isolation"] == .string("isolated") ? "isolated" : "project_folder" }
+        set { overrides["isolation"] = .string(newValue) }
+    }
     var composerSelection: ComposerSelection { ComposerSelection(modelID: modelID, effort: effort, overrides: overrides) }
     func applySelection(_ selection: ComposerSelection) {
         restoringSelection = true
@@ -57,6 +62,7 @@ struct WorkspaceComposerPreferences: Codable, Sendable, Equatable {
         guard !task.isDraft else { return }
         restoringSelection = true
         defer { restoringSelection = false }
+        overrides.removeValue(forKey: "isolation")
         for (key, value) in overrides where value == task.raw["agent"][key] {
             overrides.removeValue(forKey: key)
         }

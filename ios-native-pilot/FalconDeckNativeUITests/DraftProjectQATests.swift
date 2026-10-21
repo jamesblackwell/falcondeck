@@ -39,6 +39,27 @@ import XCTest
         XCTAssertEqual(input.value as? String, "Draft for Quizgecko")
         let shot = XCTAttachment(screenshot: app.screenshot()); shot.name = "Project picker stays available on new tasks"; shot.lifetime = .keepAlways; add(shot)
     }
+    func testNewTaskCanChooseAnIsolatedCopyAndRemembersItPerProject() {
+        let app = launch()
+        let compose = app.buttons["New task in falcondeck"]
+        XCTAssertTrue(compose.waitForExistence(timeout: 5)); compose.tap()
+        let location = app.buttons["composer-isolation"]
+        XCTAssertTrue(location.waitForExistence(timeout: 5))
+        XCTAssertEqual(location.value as? String, "Project folder")
+        location.tap()
+        app.buttons["Isolated copy"].tap()
+        XCTAssertEqual(location.value as? String, "Isolated copy")
+        choose("quizgecko", in: app)
+        XCTAssertEqual(location.value as? String, "Project folder")
+        choose("falcondeck", in: app)
+        XCTAssertEqual(location.value as? String, "Isolated copy")
+        let shot = XCTAttachment(screenshot: app.screenshot()); shot.name = "New task isolated copy selector"; shot.lifetime = .keepAlways; add(shot)
+        let input = app.textFields["chat-input"]
+        input.tap(); input.typeText("Work in an isolated copy")
+        app.buttons["send-message"].tap()
+        XCTAssertTrue(location.waitForNonExistence(timeout: 5), "An existing task's checkout cannot be changed from the composer")
+        XCTAssertTrue(app.buttons["task-menu"].waitForExistence(timeout: 5))
+    }
     func testActualShortcutOpensTheChosenProjectAndPreservesInput() {
         let app = launch(["--shortcut-preview=task"])
         let input = app.textFields["chat-input"]

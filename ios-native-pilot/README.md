@@ -61,6 +61,7 @@ keys, tokens, real device inventory or private screenshots in git.
   global/project pins, synced folders, archive reading/restoration, project order,
   visibility and icon choices, task sort, filters and lazy paging.
 - Draft-first task creation; provider/model/effort/mode/permissions/sandbox/speed;
+  project folder or isolated copy selection above the new-task composer;
   slash skills and saved prompts; queue/edit/remove/steer; interrupt/resume;
   rename/suggest title; read/unread; goals and context compaction.
 - Immediate local send feedback for typed and transcribed input, including the
