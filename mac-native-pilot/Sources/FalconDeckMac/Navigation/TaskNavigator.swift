@@ -515,8 +515,9 @@ struct TaskNavigationRow: View {
                     .foregroundStyle(FDTheme.foreground).lineLimit(2).frame(maxWidth: .infinity, alignment: .leading)
                 TaskStatusMark(status: task.status)
             }
-            if !task.preview.isEmpty {
-                Text(task.preview.replacingOccurrences(of: "\n", with: " "))
+            let preview = task.previewLine
+            if !preview.isEmpty {
+                Text(preview)
                     .font(NativePreferences.shared.font(size: 12, surface: "sidebar")).foregroundStyle(FDTheme.muted).lineLimit(1)
             }
             HStack(spacing: 5) {
@@ -533,20 +534,14 @@ struct TaskNavigationRow: View {
                     Text("·"); Text(FDTheme.statusLabel(task.status)).foregroundStyle(FDTheme.warning)
                 }
                 Spacer(minLength: 2)
-                if let date = NavigationTaskDate.date(task.updatedAt) { Text(date, style: .relative).lineLimit(1) }
+                if let age = NativeDates.shortRelative(iso: task.updatedAt) {
+                    Text(age).lineLimit(1).monospacedDigit()
+                        .help("Last updated " + NativeDates.absoluteLabel(iso: task.updatedAt))
+                        .accessibilityLabel("Updated \(age) ago")
+                }
             }
             .font(NativePreferences.shared.font(size: 11, surface: "sidebar")).foregroundStyle(FDTheme.subtle)
         }
         .padding(.horizontal, 7).padding(.vertical, 9).contentShape(.rect)
     }
-}
-
-@MainActor private enum NavigationTaskDate {
-    static let fractional: ISO8601DateFormatter = {
-        let formatter = ISO8601DateFormatter()
-        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
-        return formatter
-    }()
-    static let standard = ISO8601DateFormatter()
-    static func date(_ text: String) -> Date? { fractional.date(from: text) ?? standard.date(from: text) }
 }

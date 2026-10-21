@@ -41,17 +41,21 @@ struct NativeActivityView: View {
     @State private var pendingIDs: Set<String> = []
     @State private var preview: AgentTask?
 
-    private var rows: [AgentTask] {
+    private var projectsByID: [String: Project] {
+        Dictionary(store.allProjects.map { ($0.id, $0) }, uniquingKeysWith: { lhs, _ in lhs })
+    }
+
+    private func rows(projects: [String: Project]) -> [AgentTask] {
         let hidden = Set(store.preferences["hidden_workspace_ids"].array.map(\.string))
         return store.tasks.filter { task in
             guard !task.raw["is_archived"].bool else { return false }
-            let project = store.allProjects.first { $0.id == task.projectID }
+            let project = projects[task.projectID]
             if hidden.contains(task.projectID), project?.raw["kind"].string != "casual" { return false }
             if unreadOnly && !Self.isUnread(task) { return false }
             if !search.isEmpty && ![task.title, task.preview, project?.name ?? ""].contains(where: { $0.localizedCaseInsensitiveContains(search) }) { return false }
             if NativeActivitySection.section(task) != .recent { return true }
             guard task.raw["attention"]["last_agent_activity_seq"].int > 0,
-                  let date = NativeWorkspaceDates.parse(task.updatedAt) else { return false }
+                  let date = NativeDates.parse(task.updatedAt) else { return false }
             return date.timeIntervalSinceNow > -7 * 24 * 60 * 60
         }.sorted {
             if $0.updatedAt != $1.updatedAt { return $0.updatedAt > $1.updatedAt }
@@ -60,22 +64,26 @@ struct NativeActivityView: View {
     }
 
     var body: some View {
-        VStack(spacing: 0) {
-            header
+        // Each of these used to recompute the filtered, date-parsed task list
+        // from scratch, several times per render pass. Resolve it once.
+        let projects = projectsByID
+        let rows = rows(projects: projects)
+        return VStack(spacing: 0) {
+            header(rows: rows)
             if let error { NativeWorkspaceNotice(message: error) { self.error = nil } }
             if rows.isEmpty {
                 NativeEmptyState(symbol: "tray", title: search.isEmpty ? "All quiet" : "No matching tasks", detail: search.isEmpty ? "Running tasks, approvals and new replies across your projects appear here." : "Try another title, message or project name.")
             } else if layout == "board" {
-                board
+                board(rows: rows, projects: projects)
             } else {
-                inbox
+                inbox(rows: rows, projects: projects)
             }
         }
         .background(FDTheme.background)
         .sheet(item: $preview) { task in NativeActivityPreview(store: store, task: task) }
     }
 
-    private var header: some View {
+    private func header(rows: [AgentTask]) -> some View {
         VStack(alignment: .leading, spacing: 16) {
             HStack {
                 VStack(alignment: .leading, spacing: 4) {
@@ -87,7 +95,11 @@ struct NativeActivityView: View {
                 Picker("Layout", selection: $layout) {
                     Image(systemName: "list.bullet").tag("inbox").help("Inbox")
                     Image(systemName: "rectangle.split.3x1").tag("board").help("Board")
-                }.pickerStyle(.segmented).frame(width: 88)
+                }
+                // Without this the title is squeezed beside the control and
+                // wraps to one letter per line.
+                .pickerStyle(.segmented).labelsHidden().fixedSize()
+                .accessibilityLabel("Layout")
                 if allowsPopOut {
                     Button { NativeActivityWindow.shared.show(store: store) } label: { Image(systemName: "arrow.up.right.square") }
                         .buttonStyle(NativeIconButtonStyle()).help("Open Activity in a separate window")
@@ -101,37 +113,38 @@ struct NativeActivityView: View {
                 Toggle("Unread", isOn: $unreadOnly).toggleStyle(.checkbox).fixedSize()
                 Button("Mark all read") { Task { await markAllRead() } }
                     .disabled(!store.isConnected || !pendingIDs.isEmpty || !rows.contains(where: { $0.unread && NativeActivitySection.section($0) != .running }))
+                    .help("Mark every task outside Working as read")
             }.font(NativePreferences.shared.font(size: 13))
         }.padding(24)
             .overlay(alignment: .bottom) { Rectangle().fill(FDTheme.hairline).frame(height: 1) }
     }
 
-    private var inbox: some View {
-        ScrollView {
+    private func inbox(rows: [AgentTask], projects: [String: Project]) -> some View {
+        let needsYou = rows.filter { [.blocked, .failed].contains(NativeActivitySection.section($0)) }
+        let feed = rows.filter { ![.blocked, .failed].contains(NativeActivitySection.section($0)) }
+        return ScrollView {
             LazyVStack(alignment: .leading, spacing: 22) {
-                let needsYou = rows.filter { [.blocked, .failed].contains(NativeActivitySection.section($0)) }
-                let feed = rows.filter { ![.blocked, .failed].contains(NativeActivitySection.section($0)) }
-                if !needsYou.isEmpty { activityGroup("Needs you", tasks: needsYou) }
-                if !feed.isEmpty { activityGroup("Latest activity", tasks: feed) }
+                if !needsYou.isEmpty { activityGroup("Needs you", tasks: needsYou, projects: projects) }
+                if !feed.isEmpty { activityGroup("Latest activity", tasks: feed, projects: projects) }
             }.padding(24)
         }
     }
 
-    private var board: some View {
+    private func board(rows: [AgentTask], projects: [String: Project]) -> some View {
         ScrollView(.horizontal) {
             HStack(alignment: .top, spacing: 14) {
                 ForEach(NativeActivitySection.allCases) { section in
                     let tasks = rows.filter { task in
                         guard NativeActivitySection.section(task) == section else { return false }
                         if section != .recent { return true }
-                        return NativeWorkspaceDates.parse(task.updatedAt).map { $0.timeIntervalSinceNow > -6 * 60 * 60 } ?? false
+                        return NativeDates.parse(task.updatedAt).map { $0.timeIntervalSinceNow > -6 * 60 * 60 } ?? false
                     }
                     if !tasks.isEmpty {
                         ScrollView {
                             LazyVStack(alignment: .leading, spacing: 8) {
                                 Label("\(section.rawValue) · \(tasks.count)", systemImage: section.symbol)
                                     .font(NativePreferences.shared.font(size: 13, weight: .semibold)).foregroundStyle(section.color).padding(.bottom, 6)
-                                ForEach(Array(tasks.prefix(section == .recent ? 12 : tasks.count))) { task in activityRow(task) }
+                                ForEach(Array(tasks.prefix(section == .recent ? 12 : tasks.count))) { task in activityRow(task, projects: projects) }
                             }.padding(12)
                         }.frame(width: 310).background(FDTheme.surface, in: .rect(cornerRadius: 10))
                     }
@@ -140,14 +153,14 @@ struct NativeActivityView: View {
         }
     }
 
-    private func activityGroup(_ title: String, tasks: [AgentTask]) -> some View {
+    private func activityGroup(_ title: String, tasks: [AgentTask], projects: [String: Project]) -> some View {
         VStack(alignment: .leading, spacing: 9) {
             Text("\(title) · \(tasks.count)").font(NativePreferences.shared.font(size: 13, weight: .semibold)).foregroundStyle(FDTheme.muted)
-            LazyVStack(spacing: 1) { ForEach(tasks) { task in activityRow(task) } }
+            LazyVStack(spacing: 1) { ForEach(tasks) { task in activityRow(task, projects: projects) } }
         }
     }
 
-    private func activityRow(_ task: AgentTask) -> some View {
+    private func activityRow(_ task: AgentTask, projects: [String: Project]) -> some View {
         let section = NativeActivitySection.section(task)
         return Button { openTask(task.id) } label: {
             HStack(alignment: .top, spacing: 12) {
@@ -162,16 +175,18 @@ struct NativeActivityView: View {
                         Spacer(minLength: 4)
                         if task.unread && section != .running { Circle().fill(FDTheme.info).frame(width: 6, height: 6).accessibilityLabel("Unread") }
                     }
-                    Text(store.allProjects.first { $0.id == task.projectID }?.name ?? "Project")
+                    Text(projects[task.projectID]?.name ?? "Project")
                         .font(NativePreferences.shared.font(size: 11)).foregroundStyle(FDTheme.muted)
-                    let description = section == .failed ? task.raw["last_error"].string : task.preview
+                    let description = section == .failed ? NativePlainText.line(task.raw["last_error"].string) : task.previewLine
                     if !description.isEmpty { Text(description).font(NativePreferences.shared.font(size: 13)).foregroundStyle(FDTheme.secondary).lineLimit(2) }
                     HStack {
                         Text(FDTheme.providerName(task.provider))
                         Text("·")
                         Text(section == .recent ? FDTheme.statusLabel(task.status) : section.rawValue)
                         Spacer(minLength: 4)
-                        if let date = NativeWorkspaceDates.parse(task.updatedAt) { Text(date, style: .relative) }
+                        if let age = NativeDates.shortRelative(iso: task.updatedAt) {
+                            Text(age).monospacedDigit().help("Last updated " + NativeDates.absoluteLabel(iso: task.updatedAt))
+                        }
                     }.font(NativePreferences.shared.font(size: 11)).foregroundStyle(FDTheme.muted)
                 }
                 if pendingIDs.contains(task.id) { ProgressView().controlSize(.small) }
@@ -190,7 +205,7 @@ struct NativeActivityView: View {
     }
 
     private func markAllRead() async {
-        let tasks = rows.filter { $0.unread && NativeActivitySection.section($0) != .running }
+        let tasks = rows(projects: projectsByID).filter { $0.unread && NativeActivitySection.section($0) != .running }
         for task in tasks { await mark(task, read: true) }
     }
 
@@ -209,7 +224,7 @@ struct NativeActivityView: View {
         defer { pendingIDs.remove(task.id) }
         do {
             let body: JSON? = read ? .object(["read_seq": .number(Double(task.raw["attention"]["last_agent_activity_seq"].int))]) : nil
-            let path = "/api/workspaces/\(NativeWorkspaceDates.pathComponent(task.projectID))/threads/\(NativeWorkspaceDates.pathComponent(task.id))/\(read ? "read" : "unread")"
+            let path = "/api/workspaces/\(NativeDates.pathComponent(task.projectID))/threads/\(NativeDates.pathComponent(task.id))/\(read ? "read" : "unread")"
             // The event stream merges attention into the current task. An HTTP
             // response can arrive after newer activity, so never replace the
             // whole live summary with this response.
@@ -297,7 +312,7 @@ private struct NativeActivityPreview: View {
         }.frame(width: 650, height: 620).background(FDTheme.background)
             .task {
                 do {
-                    let path = "/api/workspaces/\(NativeWorkspaceDates.pathComponent(task.projectID))/threads/\(NativeWorkspaceDates.pathComponent(task.id))?mode=tail&limit=30&strict_limit=true&inline_images=false&tool_output_bytes=0&compact_workspace=true"
+                    let path = "/api/workspaces/\(NativeDates.pathComponent(task.projectID))/threads/\(NativeDates.pathComponent(task.id))?mode=tail&limit=30&strict_limit=true&inline_images=false&tool_output_bytes=0&compact_workspace=true"
                     let result = try await store.request(path: path)
                     messages = result["items"].array.map(Message.init).filter(\.isMessage)
                 } catch { self.error = error.localizedDescription }
@@ -339,7 +354,7 @@ struct NativeUsageView: View {
                 }
                 if let error { NativeWorkspaceNotice(message: error) { self.error = nil } }
                 if let notice { NativeWorkspaceNotice(message: notice, isError: false) { self.notice = nil } }
-                if let date = overview.flatMap({ NativeWorkspaceDates.parse($0["refreshed_at"].string) }) {
+                if let date = overview.flatMap({ NativeDates.parse($0["refreshed_at"].string) }) {
                     Text("Last refreshed \(date.formatted(date: .abbreviated, time: .shortened))").font(.caption).foregroundStyle(FDTheme.muted)
                 }
                 if loading && overview == nil { ProgressView("Reading usage…").padding(.vertical, 70).frame(maxWidth: .infinity) }
@@ -443,7 +458,7 @@ private struct NativeUsageProviderCard: View {
 
     private var credits: [NativeUsageCredit] {
         let value = usage["reset_credits"]
-        let rows = value["credits"].array.map { NativeUsageCredit(id: $0["id"].string, wireID: $0["id"].string, title: $0["title"].string, expiry: NativeWorkspaceDates.parse($0["expires_at"].string)) }
+        let rows = value["credits"].array.map { NativeUsageCredit(id: $0["id"].string, wireID: $0["id"].string, title: $0["title"].string, expiry: NativeDates.parse($0["expires_at"].string)) }
         if !rows.isEmpty { return rows }
         return value["available_count"].int > 0 ? [NativeUsageCredit(id: "*", wireID: nil, title: "Full reset · \(value["available_count"].int) available", expiry: nil)] : []
     }
@@ -526,7 +541,7 @@ private struct NativeUsageWindowRow: View {
                 ProgressView(value: percent, total: 100).tint(percent >= 95 ? FDTheme.danger : percent >= 80 ? FDTheme.warning : FDTheme.accent)
                     .accessibilityLabel(window["label"].string).accessibilityValue("\(Int(percent)) percent used")
             }
-            if let reset = NativeWorkspaceDates.parse(window["resets_at"].string) {
+            if let reset = NativeDates.parse(window["resets_at"].string) {
                 HStack(spacing: 3) {
                     Text(reset < Date() ? "Resetting now" : "Resets")
                     if reset >= Date() { Text(reset, style: .relative) }
@@ -550,18 +565,3 @@ private struct NativeWorkspaceNotice: View {
     }
 }
 
-@MainActor private enum NativeWorkspaceDates {
-    private static let fractional: ISO8601DateFormatter = {
-        let formatter = ISO8601DateFormatter()
-        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
-        return formatter
-    }()
-    private static let standard = ISO8601DateFormatter()
-    static func parse(_ value: String) -> Date? {
-        guard !value.isEmpty else { return nil }
-        return fractional.date(from: value) ?? standard.date(from: value)
-    }
-    static func pathComponent(_ value: String) -> String {
-        value.addingPercentEncoding(withAllowedCharacters: .alphanumerics) ?? value
-    }
-}

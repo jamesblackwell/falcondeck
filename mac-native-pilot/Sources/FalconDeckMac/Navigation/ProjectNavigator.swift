@@ -189,6 +189,7 @@ struct ProjectNavigator: View {
             TaskStatusMark(status: task.status).frame(width: 18)
             Text(task.title)
                 .font(NativePreferences.shared.font(size: 13, surface: "sidebar", weight: task.unread ? .medium : .regular))
+                .foregroundStyle(FDTheme.foreground)
                 .lineLimit(1)
             Spacer(minLength: 0)
             if task.unread {
@@ -331,6 +332,19 @@ struct ProjectNavigator: View {
         return nil
     }
 
+    private var activeOptionSymbol: String {
+        if let destination = ProjectNavigatorDestination.secondary.first(where: { $0.id == store.selectedSection }) {
+            return destination.symbol
+        }
+        if store.selectedSection == "settings" { return "gearshape" }
+        if store.selectedSection == "extension-panel" {
+            return extensionPanels.first {
+                $0.extensionID == store.selectedExtensionID && $0.panelID == store.selectedPanelID
+            }?.symbol ?? "slider.horizontal.3"
+        }
+        return "slider.horizontal.3"
+    }
+
     private var optionsFooter: some View {
         NativeSidebarFooter {
             Menu {
@@ -360,7 +374,9 @@ struct ProjectNavigator: View {
                 Text("Local daemon: \(store.connectionStatus)")
                 Button("Reconnect", systemImage: "arrow.clockwise") { Task { await store.reconnect() } }
             } label: {
-                Label("Options", systemImage: "slider.horizontal.3")
+                // Naming the open destination keeps the footer from reading as
+                // "Options" while Activity, Usage or Settings fills the window.
+                Label(activeOptionTitle ?? "Options", systemImage: activeOptionSymbol)
                     .lineLimit(1)
             }
             .menuStyle(.borderlessButton)

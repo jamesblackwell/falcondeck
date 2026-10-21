@@ -96,6 +96,9 @@ struct AgentTask: Identifiable, Hashable, Sendable {
     var provider: String { raw["provider"].string }
     var status: String { raw["status"].string }
     var preview: String { raw["last_message_preview"].string }
+    /// What lists should show: one line, no markdown punctuation, no scheduler
+    /// envelope. `preview` stays raw so search still matches the stored text.
+    var previewLine: String { NativePlainText.line(preview) }
     var updatedAt: String { raw["updated_at"].string }
     var pinned: Bool { raw["is_pinned"].bool }
     var unread: Bool {

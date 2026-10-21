@@ -23,7 +23,11 @@ enum TranscriptPresentation {
         case "error": label = "Thought failed"
         default: label = nonempty(message.raw["summary"].string.trimmingCharacters(in: .whitespacesAndNewlines), "Thought")
         }
-        return label + (duration(message.raw["duration_ms"]).map { " · \($0)" } ?? "")
+        // A sub-second thought reads as "Thought · 8 ms", which is noise in a
+        // stream of them. Only a duration worth noticing earns the suffix.
+        guard let milliseconds = message.raw["duration_ms"].optionalInt, milliseconds >= 1000,
+              let elapsed = duration(.number(Double(milliseconds))) else { return label }
+        return label + " · " + elapsed
     }
 
     static func isProgressUpdate(_ message: Message) -> Bool {

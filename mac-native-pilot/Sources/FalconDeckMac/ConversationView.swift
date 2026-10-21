@@ -119,7 +119,9 @@ struct ConversationView: View {
                     TaskStatusMark(status: task.status)
                     Text(FDTheme.statusLabel(task.status)).font(NativePreferences.shared.font(size: 12)).foregroundStyle(task.running ? FDTheme.accent : FDTheme.muted)
                 }.padding(.horizontal, 10).padding(.vertical, 6).background(FDTheme.surface, in: .capsule)
-                Button { findVisible.toggle() } label: { Image(systemName: "magnifyingglass") }.buttonStyle(.plain).help("Find in conversation (⌘F)")
+                // Distinct from the toolbar's task-and-command search.
+                Button { findVisible.toggle() } label: { Image(systemName: "text.magnifyingglass") }
+                    .buttonStyle(.plain).help("Find in conversation (⌘F)").accessibilityLabel("Find in conversation")
                 if ConversationTranscriptGroups.showsExpansionControls(preferences: store.preferences) {
                     Menu {
                         Button("Expand all activity") { expansionDirective = abs(expansionDirective) + 1 }
@@ -348,7 +350,10 @@ private struct ConversationTranscriptBurst: View {
         }.padding(.leading, 35)
             .onChange(of: expansionDirective, initial: true) { _, directive in if directive != 0 { expanded = directive > 0 } }
             .onChange(of: findText, initial: true) { _, query in
-                if group.items.contains(where: { TranscriptPresentation.matchesSearch($0, query: query) }) { expanded = true }
+                guard !query.isEmpty else { return }
+                // Reveal a burst that holds a match, and fold the ones that do
+                // not, so narrowing a search actually narrows what is on screen.
+                expanded = group.items.contains { TranscriptPresentation.matchesSearch($0, query: query) }
             }
     }
 }

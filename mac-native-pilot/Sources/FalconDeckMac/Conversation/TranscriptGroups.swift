@@ -9,13 +9,15 @@ enum ConversationTranscriptGroups {
         let mode = TranscriptPresentation.toolMode(preferences)
         // Providers can omit a final lifecycle update before the next item.
         // Settle old thoughts even when tools are shown without grouping.
-        let messages = messages.enumerated().map { index, original in
+        let settled = messages.enumerated().map { index, original in
             var message = original
             if message.kind == "reasoning", message.streaming, index < messages.count - 1 || !isStreaming {
                 message.raw = message.raw.setting("lifecycle", .string("complete"))
             }
             return message
         }
+        let messages = settled
+        // Expanded mode shows every item verbatim, including a bare thought.
         guard mode != "expanded" else { return messages.map { [$0] } }
         var result: [[Message]] = [], pending: [Message] = []
         func flush() {
@@ -32,7 +34,21 @@ enum ConversationTranscriptGroups {
             else { flush(); result.append([message]) }
         }
         flush()
-        return result
+        // A thought absorbed into a burst still reads as part of that work. One
+        // left on its own would draw a bare "Thought" line instead. If that is
+        // the whole turn, keep it: an empty transcript would look like loss.
+        let kept = result.filter { !($0.count == 1 && isEmptyThought($0[0])) }
+        return kept.isEmpty ? result : kept
+    }
+
+    /// A settled thought with no summary and no retained body draws a bare
+    /// "Thought" line that says nothing and cannot be opened. An interrupted or
+    /// failed thought still reports something, so it stays.
+    static func isEmptyThought(_ message: Message) -> Bool {
+        guard message.kind == "reasoning", !message.streaming,
+              !["interrupted", "error"].contains(message.raw["lifecycle"].string) else { return false }
+        return message.raw["summary"].string.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            && !TranscriptPresentation.hasReasoningBody(message.raw)
     }
 
     /// Collapsed mode folds even one routine tool. Group size must not decide

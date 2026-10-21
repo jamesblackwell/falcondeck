@@ -10,7 +10,10 @@ final class ConversationTranscriptContentTests: XCTestCase {
                 "duration_ms": .number(2), "lifecycle": .string("complete")
             ]))
             XCTAssertFalse(TranscriptPresentation.hasReasoningBody(thought.raw))
-            XCTAssertEqual(TranscriptPresentation.reasoningTitle(thought), "Checking the result · 2 ms")
+            // A sub-second thought reports no useful elapsed time.
+            XCTAssertEqual(TranscriptPresentation.reasoningTitle(thought), "Checking the result")
+            XCTAssertEqual(TranscriptPresentation.reasoningTitle(Message(thought.raw.setting("duration_ms", .number(4200)))),
+                           "Checking the result · 4.2 s")
             for mode in ["auto", "preview", "always_expanded", "always_collapsed"] {
                 XCTAssertFalse(TranscriptPresentation.defaultExpanded(thought, preferences: .object(["thinking_display": .string(mode)])))
                 let tools = [tool("before"), thought, tool("after")]
@@ -22,6 +25,28 @@ final class ConversationTranscriptContentTests: XCTestCase {
         XCTAssertEqual(TranscriptPresentation.reasoningTitle(Message(empty.raw.setting("lifecycle", .string("interrupted")))), "Thought interrupted")
         XCTAssertEqual(TranscriptPresentation.reasoningTitle(Message(empty.raw.setting("lifecycle", .string("error")))), "Thought failed")
         XCTAssertEqual(TranscriptPresentation.reasoningTitle(Message(empty.raw.setting("lifecycle", .string("streaming")).setting("duration_ms", .number(2)))), "Thinking…")
+    }
+
+    func testBareThoughtsAreDroppedOnlyWhenTheyWouldStandAlone() {
+        let bare = Message(.object(["id": .string("thought"), "kind": .string("reasoning"), "lifecycle": .string("complete")]))
+        let reply = Message(.object(["id": .string("reply"), "kind": .string("assistant_message")]))
+        func ids(_ messages: [Message], _ preferences: JSON) -> [[String]] {
+            ConversationTranscriptGroups.groups(messages: messages, preferences: preferences).map { $0.map(\.id) }
+        }
+        // Nothing to read and nothing to open: the row carries no information.
+        XCTAssertEqual(ids([reply, bare], .null), [["reply"]])
+        // Unless it is the whole transcript: an empty one would look like loss.
+        XCTAssertEqual(ids([bare], .null), [["thought"]])
+        // Folded into real work, or shown verbatim on request, it stays.
+        XCTAssertEqual(ids([tool("before"), bare, tool("after")], .null), [["before", "thought", "after"]])
+        XCTAssertEqual(ids([reply, bare], .object(["tool_details_mode": .string("expanded")])), [["reply"], ["thought"]])
+        // An interrupted or failed thought still says something.
+        for lifecycle in ["interrupted", "error"] {
+            XCTAssertEqual(ids([reply, Message(bare.raw.setting("lifecycle", .string(lifecycle)))], .null), [["reply"], ["thought"]])
+        }
+        // So does one with a summary, or one with a retained body.
+        XCTAssertEqual(ids([reply, Message(bare.raw.setting("summary", .string("Weighing two fixes")))], .null), [["reply"], ["thought"]])
+        XCTAssertEqual(ids([reply, Message(bare.raw.setting("content", .string("Two options.")))], .null), [["reply"], ["thought"]])
     }
 
     func testProgressUpdatesStayVisibleBetweenCollapsedWorkAndFinalAnswer() {
