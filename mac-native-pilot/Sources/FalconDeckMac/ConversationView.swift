@@ -233,6 +233,22 @@ struct ConversationView: View {
     var composer: some View {
         let composerKey = store.composerKey
         return VStack(spacing: 8) {
+            if store.selectedTaskID == nil, let project = store.selectedProject, project.raw["kind"].string != "casual" {
+                HStack(spacing: 6) {
+                    Image(systemName: selection.isolation == "isolated" ? "arrow.triangle.branch" : "folder")
+                        .accessibilityHidden(true)
+                    Picker("Work in", selection: $selection.isolation) {
+                        Text("Project folder").tag("project_folder")
+                        Text("Isolated copy").tag("isolated")
+                    }
+                    .pickerStyle(.menu).fixedSize().controlSize(.small)
+                    .accessibilityIdentifier("composer-isolation")
+                    .help("Choose where the new task works. An isolated copy has its own branch and checkout.")
+                    Spacer(minLength: 0)
+                }
+                .font(NativePreferences.shared.font(size: 12)).foregroundStyle(FDTheme.secondary)
+                .disabled(!store.isInputReady || store.isSending || store.pendingSubmission != nil)
+            }
             if !store.isInputReady {
                 HStack(spacing: 8) {
                     Image(systemName: "lock")
