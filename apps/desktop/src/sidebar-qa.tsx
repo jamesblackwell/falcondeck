@@ -8,7 +8,9 @@
    with stale filler projects (plus one used an hour ago) to exercise the
    project fold and its Show more row. `?activity=1` swaps in the Activity
    inbox with a pending approval on the first running task.
-   `?folders=1` enables an interactive project-folder fixture. */
+   `?folders=1` enables an interactive project-folder fixture.
+   The first project also carries agent-spawned threads (one with a spawn of
+   its own) so the nesting elbow and its middle-child upright are covered. */
 import { StrictMode, useState } from "react";
 import { createRoot } from "react-dom/client";
 
@@ -158,6 +160,28 @@ const groups: ProjectGroup[] = [
           last_agent_activity_seq: 3,
           last_read_seq: 3,
         },
+      }),
+      thread({
+        id: "thread-1a",
+        title: "Fix real bugs found in Sentry log scan",
+        provider: "codex",
+        origin: { kind: "agent_spawn", parent_thread_id: "thread-1" },
+        updated_at: minutesAgo(3),
+      }),
+      thread({
+        id: "thread-1b",
+        title: "Backfill the row-state fixtures",
+        provider: "codex",
+        origin: { kind: "agent_spawn", parent_thread_id: "thread-1" },
+        status: "running",
+        updated_at: minutesAgo(2),
+      }),
+      thread({
+        id: "thread-1b1",
+        title: "Check the connector in light mode",
+        provider: "claude",
+        origin: { kind: "agent_spawn", parent_thread_id: "thread-1b" },
+        updated_at: minutesAgo(2),
       }),
       thread({
         id: "thread-4",

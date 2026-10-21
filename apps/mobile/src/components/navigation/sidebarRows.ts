@@ -4,7 +4,9 @@ import {
   projectFoldersForWorkspace,
   partitionProjectFolders,
   type ProjectFolder,
+  nestSpawnedThreads,
   partitionSidebarThreads,
+  type ThreadNesting,
   summarizeThreadAttention,
   type ProjectGroup,
   type ThreadSortMode,
@@ -18,6 +20,8 @@ type SortedProjectThreads = {
   pinnedInProject: ThreadSummary[]
   unpinned: ThreadSummary[]
   unpinnedIndexes: Map<string, number>
+  /** Spawn-tree rungs for `unpinned`; absent ids sit at the top level. */
+  nesting: ReadonlyMap<string, ThreadNesting>
 }
 
 type ThreadDerivation = {
@@ -53,7 +57,12 @@ function sortedProjectThreads(
   if (!sorted) {
     const compare = compareThreads(sortMode)
     const pinnedInProject = [...derived.partitions.pinnedInProject].sort(compare)
-    const unpinned = [...derived.partitions.unpinned].sort(compare)
+    // Agent-spawned chats are pulled under the chat that started them before
+    // the window is measured, so a family pages as the rows it shows.
+    const { threads: nested, nesting } = nestSpawnedThreads(
+      [...derived.partitions.unpinned].sort(compare),
+    )
+    const unpinned = nested as ThreadSummary[]
     const unpinnedIndexes = new Map<string, number>()
     for (let index = 0; index < unpinned.length; index += 1) {
       const id = unpinned[index].id
@@ -63,6 +72,7 @@ function sortedProjectThreads(
       pinnedInProject,
       unpinned,
       unpinnedIndexes,
+      nesting,
     }
     derived.sorts.set(sortMode, sorted)
   }
@@ -115,6 +125,10 @@ export type SidebarRow =
        * unmounting.
        */
       isCollapsed: boolean
+      /** Spawn-tree rung; 0 draws a plain row, deeper values draw the elbow. */
+      depth: number
+      /** Rungs whose upright keeps running below this row, as a bitmask. */
+      trunkMask: number
     }
   | {
       key: string
@@ -177,28 +191,41 @@ export function buildSidebarRows(
           workspaceId: group.workspace.id,
           thread,
           isCollapsed: false,
+          depth: 0,
+          trunkMask: 0,
         })),
     )
     .sort((left, right) => compare(left.thread, right.thread))
 
-  const chatRows: SidebarRow[] = chatGroups
+  const sortedChats = chatGroups
     .flatMap((group) =>
       [...deriveThreads(group.threads).partitions.pinnedInProject,
         ...deriveThreads(group.threads).partitions.unpinned]
-        .map((thread) => ({
-          key: `chat:${group.workspace.id}:${thread.id}`,
-          type: 'thread' as const,
-          workspaceId: group.workspace.id,
-          thread,
-          isCollapsed: chatsCollapsed,
-        })),
+        .map((thread) => ({ workspaceId: group.workspace.id, thread })),
     )
     .sort((left, right) => {
-      if (left.type !== 'thread' || right.type !== 'thread') return 0
       const pinDelta =
         Number(right.thread.is_pinned_in_project) - Number(left.thread.is_pinned_in_project)
       return pinDelta || compare(left.thread, right.thread)
     })
+  // Chats is one flat section across the casual workspaces, so spawned chats
+  // nest against the whole section rather than per workspace.
+  const chatNesting = nestSpawnedThreads(sortedChats.map((entry) => entry.thread))
+  const chatsByThreadId = new Map(sortedChats.map((entry) => [entry.thread.id, entry]))
+  const chatRows: SidebarRow[] = chatNesting.threads.flatMap((thread) => {
+    const entry = chatsByThreadId.get(thread.id)
+    if (!entry) return []
+    const nested = chatNesting.nesting.get(thread.id)
+    return [{
+      key: `chat:${entry.workspaceId}:${thread.id}`,
+      type: 'thread' as const,
+      workspaceId: entry.workspaceId,
+      thread,
+      isCollapsed: chatsCollapsed,
+      depth: nested?.depth ?? 0,
+      trunkMask: nested?.trunkMask ?? 0,
+    }]
+  })
 
   for (const group of chatGroups) {
     const remaining = remoteCursors[`${group.workspace.id}:${sortMode}`] === null ? 0
@@ -245,6 +272,7 @@ export function buildSidebarRows(
       pinnedInProject: sortedPinnedInProject,
       unpinned: sortedUnpinned,
       unpinnedIndexes,
+      nesting,
     } = sortedProjectThreads(rootThreads, sortMode)
 
     const requestedCount = visibleThreadCounts.get(group.workspace.id) ?? VISIBLE_THREAD_LIMIT
@@ -268,6 +296,8 @@ export function buildSidebarRows(
       workspaceId: group.workspace.id,
       thread,
       isCollapsed: !isOpen,
+      depth: nesting.get(thread.id)?.depth ?? 0,
+      trunkMask: nesting.get(thread.id)?.trunkMask ?? 0,
     }))
 
     // Folders lead, then project pins, then ordinary tasks.
@@ -297,7 +327,9 @@ export function buildSidebarRows(
         folder, count: members.length, isCollapsed: !isOpen })
       for (const thread of [...visibleMembers, ...(selected ? [selected] : [])]) {
         rows.push({ key: `thread:${thread.id}`, type: 'thread', workspaceId: group.workspace.id,
-          folderId: folder.id, thread, isCollapsed: collapsed })
+          folderId: folder.id, thread, isCollapsed: collapsed,
+          depth: sorted.nesting.get(thread.id)?.depth ?? 0,
+          trunkMask: sorted.nesting.get(thread.id)?.trunkMask ?? 0 })
       }
       if (members.length > VISIBLE_THREAD_LIMIT) rows.push({
         key: `overflow:folder:${folder.id}`, type: 'overflow', workspaceId: group.workspace.id, folderId: folder.id,

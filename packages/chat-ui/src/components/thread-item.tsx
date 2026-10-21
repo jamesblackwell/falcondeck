@@ -60,7 +60,21 @@ export type ThreadItemProps = {
    * Pinned list. Casual chats have no project and omit it.
    */
   projectMark?: ThreadProjectMark | null
+  /**
+   * Rung in the spawn tree: 0 draws a plain row, deeper values indent and draw
+   * the elbow back up to the chat that started this one.
+   */
+  depth?: number
+  /**
+   * Rungs whose upright keeps running below this row, as packed by
+   * `nestSpawnedThreads`. Ancestor uprights pass straight through.
+   */
+  trunkMask?: number
 }
+
+/** Rung width, and where in it the connector's upright sits. */
+const NESTING_RUNG_PX = 14
+const NESTING_LINE_PX = 6
 
 function timeAgo(dateStr: string) {
   const seconds = Math.floor((Date.now() - new Date(dateStr).getTime()) / 1000)
@@ -105,6 +119,8 @@ export const ThreadItem = memo(
     archiveConfirmPending = false,
     onArchiveConfirm,
     onArchiveCancel,
+    depth = 0,
+    trunkMask = 0,
   }: ThreadItemProps) {
     const folderControls = useProjectFolders()
     const canDrag = Boolean(folderControls.onProjectFolderMutation && !thread.is_archived)
@@ -187,6 +203,37 @@ export const ThreadItem = memo(
         {projectMark ? (
           <span id={projectDescriptionId} className="sr-only">
             {projectMark.label}
+          </span>
+        ) : null}
+        {depth > 0 ? (
+          // The elbow lives inside the row so the selection fill runs behind
+          // it, the way a native outline view draws its connectors. Negative
+          // margins reach into the row's padding so a middle child's upright
+          // meets the next sibling's with no seam.
+          <span
+            aria-hidden="true"
+            data-testid="thread-nesting-connector"
+            className="pointer-events-none relative -my-2 shrink-0 self-stretch"
+            style={{ width: depth * NESTING_RUNG_PX }}
+          >
+            <span
+              className="absolute top-0 h-1/2 rounded-bl-[var(--fd-radius-sm)] border-b border-l border-border-emphasis"
+              style={{ left: (depth - 1) * NESTING_RUNG_PX + NESTING_LINE_PX, right: 2 }}
+            />
+            {Array.from({ length: depth }, (_, index) => index + 1)
+              .filter((rung) => trunkMask & (1 << (rung - 1)))
+              .map((rung) => (
+                <span
+                  key={rung}
+                  className="absolute bottom-0 border-l border-border-emphasis"
+                  style={{
+                    left: (rung - 1) * NESTING_RUNG_PX + NESTING_LINE_PX,
+                    // This row's own rung carries on from the elbow; an
+                    // ancestor's runs the whole height, under the row.
+                    top: rung === depth ? "50%" : 0,
+                  }}
+                />
+              ))}
           </span>
         ) : null}
         <button
@@ -274,14 +321,21 @@ export const ThreadItem = memo(
             </span>
           ) : null}
           {thread.origin?.kind === 'agent_spawn' ? (
-            <span
-              role="img"
-              aria-label="Created by an agent"
-              title="Created by an agent"
-              className="flex shrink-0 items-center text-fg-muted"
-            >
-              <Bot aria-hidden="true" className="h-3 w-3" />
-            </span>
+            depth > 0 ? (
+              // The elbow already says an agent started this one, so the row
+              // spends the space on its title instead. Screen readers get the
+              // relationship in words, since the connector is decorative.
+              <span className="sr-only">Started by the chat above</span>
+            ) : (
+              <span
+                role="img"
+                aria-label="Created by an agent"
+                title="Created by an agent"
+                className="flex shrink-0 items-center text-fg-muted"
+              >
+                <Bot aria-hidden="true" className="h-3 w-3" />
+              </span>
+            )
           ) : null}
           {thread.variant ? (
             // The same Split icon the composer uses for "Isolated copy", so

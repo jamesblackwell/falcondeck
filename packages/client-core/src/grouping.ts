@@ -260,6 +260,102 @@ export function partitionSidebarThreads(threads: readonly ThreadSummary[]) {
   return { globallyPinned, pinnedInProject, unpinned, archived }
 }
 
+/**
+ * Where a chat sits in the spawn tree the sidebar draws. A chat an agent
+ * started is shown under the chat that started it, one rung in, with an elbow
+ * connector instead of a line of its own.
+ */
+export type ThreadNesting = {
+  /** 0 for a top-level chat; one rung per spawning ancestor shown above it. */
+  depth: number
+  /**
+   * The rungs whose upright keeps running below this row: bit `k - 1` is set
+   * when another chat at rung `k` still follows. Rungs above this row's own
+   * belong to its ancestors, and their uprights pass straight through it, so
+   * a deep spawn never breaks the line back up to its family. Packed into one
+   * number rather than an array so sidebar rows stay shallow-comparable.
+   */
+  trunkMask: number
+}
+
+/** Deepest rung the sidebar indents to; deeper spawns share the last one. */
+export const MAX_THREAD_NESTING_DEPTH = 3
+
+export const EMPTY_THREAD_NESTING: ReadonlyMap<string, ThreadNesting> = new Map()
+
+/**
+ * Reorders an already-sorted list so agent-spawned chats follow the chat that
+ * spawned them, and reports the rung each one sits on.
+ *
+ * A spawned chat only nests when its parent is in the same list: in the
+ * archive view, a folder, or a window that cut the parent off, it keeps its
+ * own place at the top level rather than vanishing. Lists with nothing to nest
+ * are returned by identity so callers keep memoizing on the array.
+ */
+export function nestSpawnedThreads(threads: readonly ThreadSummary[]): {
+  threads: readonly ThreadSummary[]
+  nesting: ReadonlyMap<string, ThreadNesting>
+} {
+  let childrenByParent: Map<string, ThreadSummary[]> | null = null
+  const byId = new Map<string, ThreadSummary>()
+  for (const thread of threads) byId.set(thread.id, thread)
+  for (const thread of threads) {
+    const origin = thread.origin
+    if (origin?.kind !== 'agent_spawn') continue
+    const parentId = origin.parent_thread_id
+    if (parentId === thread.id || !byId.has(parentId)) continue
+    childrenByParent ??= new Map()
+    const siblings = childrenByParent.get(parentId)
+    if (siblings) siblings.push(thread)
+    else childrenByParent.set(parentId, [thread])
+  }
+  if (!childrenByParent) return { threads, nesting: EMPTY_THREAD_NESTING }
+
+  const children = childrenByParent
+  const ordered: ThreadSummary[] = []
+  const nesting = new Map<string, ThreadNesting>()
+  // A parent spawned from a descendant of its own would otherwise recurse
+  // forever; emitting each chat at most once breaks the cycle and leaves the
+  // stragglers at the top level.
+  const emitted = new Set<string>()
+
+  const emit = (thread: ThreadSummary, depth: number, trunkMask: number) => {
+    if (emitted.has(thread.id)) return
+    emitted.add(thread.id)
+    ordered.push(thread)
+    if (depth > 0) nesting.set(thread.id, { depth, trunkMask })
+    const siblings = children.get(thread.id)
+    if (!siblings) return
+    const childDepth = Math.min(depth + 1, MAX_THREAD_NESTING_DEPTH)
+    // This row's own bit says whether a sibling of *this* chat follows; the
+    // children inherit it as an ancestor upright to draw through.
+    const inherited = trunkMask
+    siblings.forEach((child, index) =>
+      emit(
+        child,
+        childDepth,
+        index === siblings.length - 1
+          ? inherited
+          : inherited | (1 << (childDepth - 1)),
+      ),
+    )
+  }
+
+  for (const thread of threads) {
+    const origin = thread.origin
+    const nests =
+      origin?.kind === 'agent_spawn' &&
+      origin.parent_thread_id !== thread.id &&
+      byId.has(origin.parent_thread_id)
+    // Children are emitted by their parent. Anything else keeps its own slot.
+    if (!nests) emit(thread, 0, 0)
+  }
+  // Cycles leave their members unplaced; append them so nothing disappears.
+  for (const thread of threads) emit(thread, 0, 0)
+
+  return { threads: ordered, nesting }
+}
+
 /** Reorders chats inside each project. Pinned rows are sorted separately. */
 export function sortProjectGroupThreads(
   groups: readonly ProjectGroup[],

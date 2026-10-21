@@ -87,6 +87,38 @@ describe('ThreadItem agent origin', () => {
     )
   })
 
+  it('swaps the marker for an elbow once the row nests under its parent', () => {
+    const spawned = {
+      ...thread('2026-08-31T14:08:59Z'),
+      origin: { kind: 'agent_spawn', parent_thread_id: 'parent-1' },
+    } as ThreadSummary
+    const { rerender } = render(
+      <ThreadItem
+        thread={spawned}
+        workspaceId="workspace-1"
+        isSelected={false}
+        onSelect={() => {}}
+      />,
+    )
+    expect(screen.getByRole('img', { name: 'Created by an agent' })).toBeInTheDocument()
+    expect(screen.queryByTestId('thread-nesting-connector')).not.toBeInTheDocument()
+
+    rerender(
+      <ThreadItem
+        thread={spawned}
+        workspaceId="workspace-1"
+        isSelected={false}
+        onSelect={() => {}}
+        depth={1}
+      />,
+    )
+    expect(screen.queryByRole('img', { name: 'Created by an agent' })).not.toBeInTheDocument()
+    expect(screen.getByTestId('thread-nesting-connector')).toBeInTheDocument()
+    expect(
+      screen.getByRole('button', { name: /Started by the chat above/ }),
+    ).toBeInTheDocument()
+  })
+
   it('refreshes the marker when the daemon adds or changes the origin', () => {
     const base = thread('2026-08-31T14:08:59Z')
     const onSelect = vi.fn()

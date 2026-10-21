@@ -33,6 +33,41 @@ describe('SessionListItem agent origin', () => {
     expect(onSelectThread).toHaveBeenCalledWith('workspace-1', 'child-1')
   })
 
+  it('swaps the marker for the nesting elbow once the row sits under its parent', () => {
+    const spawned = thread({
+      id: 'child-1',
+      origin: { kind: 'agent_spawn', parent_thread_id: 'parent-1' },
+    })
+    const renderRow = (depth: number, trunkMask = 0) => (
+      <SessionListItem
+        thread={spawned}
+        workspaceId="workspace-1"
+        isSelected={false}
+        onSelectThread={() => {}}
+        depth={depth}
+        trunkMask={trunkMask}
+      />
+    )
+    const renderer = renderComponent(renderRow(0))
+    const connectors = () =>
+      renderer.root.findAllByProps({ testID: 'thread-nesting-connector' })
+    const markers = () =>
+      renderer.root.findAllByProps({ accessibilityLabel: 'Created by an agent' })
+    expect(connectors()).toHaveLength(0)
+    expect(markers()).toHaveLength(1)
+
+    // Nested under its parent, with a sibling still to come: an elbow plus the
+    // upright that carries on down to it.
+    act(() => renderer.update(renderRow(1, 0b1)))
+    expect(connectors()).not.toHaveLength(0)
+    expect(markers()).toHaveLength(0)
+    expect(connectors()[0].children).toHaveLength(2)
+
+    // Last child: the elbow alone, with nothing continuing below it.
+    act(() => renderer.update(renderRow(1)))
+    expect(connectors()[0].children).toHaveLength(1)
+  })
+
   it('updates the marker with the origin without marking manual or automated tasks', () => {
     const base = thread()
     const onSelectThread = vi.fn()

@@ -22,6 +22,7 @@ import {
   forkProviderOptions,
   filterProjectGroupsByExtensions,
   partitionSidebarProjects,
+  nestSpawnedThreads,
   partitionSidebarThreads,
   summarizeThreadAttention,
   THREAD_TAGS_EXTENSION_ID,
@@ -482,7 +483,13 @@ const FlatThreadList = memo(function FlatThreadList({
     sortMode,
   );
   const pinnedInProjectThreads = useOrderedThreads(pinnedInProject, sortMode);
-  const unpinnedThreads = useOrderedThreads(unpinned, sortMode);
+  const orderedUnpinned = useOrderedThreads(unpinned, sortMode);
+  // Agent-spawned chats are pulled under the chat that started them, so the
+  // window below counts a family as the rows it actually shows.
+  const { threads: unpinnedThreads, nesting } = useMemo(
+    () => nestSpawnedThreads(orderedUnpinned),
+    [orderedUnpinned],
+  );
 
   if (viewingArchived && onHideArchived) {
     return (
@@ -535,6 +542,8 @@ const FlatThreadList = memo(function FlatThreadList({
         <ThreadItem
           key={thread.id}
           thread={thread}
+          depth={nesting.get(thread.id)?.depth}
+          trunkMask={nesting.get(thread.id)?.trunkMask}
           workspaceId={group.workspace.id}
           isSelected={selectedThreadId === thread.id}
           onSelect={onSelectThread}
@@ -557,6 +566,8 @@ const FlatThreadList = memo(function FlatThreadList({
         <ThreadItem
           key={trailingSelected.id}
           thread={trailingSelected}
+          depth={nesting.get(trailingSelected.id)?.depth}
+          trunkMask={nesting.get(trailingSelected.id)?.trunkMask}
           workspaceId={group.workspace.id}
           isSelected
           onSelect={onSelectThread}
@@ -1587,6 +1598,24 @@ export const WorkspaceSidebar = memo(function WorkspaceSidebar({
         return pinDelta || compare(left.thread, right.thread);
       });
   }, [chatGroups, threadSort]);
+  // Chats is one flat section across the casual workspaces, so nesting runs
+  // over the whole section rather than per workspace.
+  const nestedChatEntries = useMemo(() => {
+    const { threads, nesting } = nestSpawnedThreads(
+      chatEntries.map((entry) => entry.thread),
+    );
+    if (nesting.size === 0) return { entries: chatEntries, nesting };
+    const byThreadId = new Map(
+      chatEntries.map((entry) => [entry.thread.id, entry]),
+    );
+    return {
+      entries: threads.flatMap((thread) => {
+        const entry = byThreadId.get(thread.id);
+        return entry ? [entry] : [];
+      }),
+      nesting,
+    };
+  }, [chatEntries]);
   const archivedChatEntries = useMemo(() => {
     const compare = compareThreads(threadSort);
     return chatGroups
@@ -3292,10 +3321,14 @@ export const WorkspaceSidebar = memo(function WorkspaceSidebar({
                     threadTagsById={threadTagsById}
                   />
                 ) : (
-                  chatEntries.map(({ workspaceId, thread }) => (
+                  nestedChatEntries.entries.map(({ workspaceId, thread }) => (
                     <ThreadItem
                       key={`${workspaceId}:${thread.id}`}
                       thread={thread}
+                      depth={nestedChatEntries.nesting.get(thread.id)?.depth}
+                      trunkMask={
+                        nestedChatEntries.nesting.get(thread.id)?.trunkMask
+                      }
                       workspaceId={workspaceId}
                       isSelected={visualSelectedThreadId === thread.id}
                       onSelect={handleSelectThread}

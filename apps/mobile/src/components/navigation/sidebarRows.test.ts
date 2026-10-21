@@ -12,6 +12,42 @@ describe('buildSidebarRows', () => {
     const rows = buildSidebarRows([], emptyCollapsed, defaultCounts, null, 'last_updated', false, false, {}, {}, true)
     expect(rows).toEqual([{ key: 'section:projects', type: 'section', title: 'Projects', isOpen: false }])
   })
+  it('nests an agent-spawned thread under the thread that started it', () => {
+    const rows = buildSidebarRows(
+      [
+        {
+          workspace: workspace({ id: 'w1', path: '/tmp/project-one' }),
+          threads: [
+            thread({ id: 'parent', workspace_id: 'w1', updated_at: '2026-10-01T00:00:00Z' }),
+            thread({ id: 'other', workspace_id: 'w1', updated_at: '2026-10-03T00:00:00Z' }),
+            thread({
+              id: 'child',
+              workspace_id: 'w1',
+              updated_at: '2026-10-02T00:00:00Z',
+              origin: { kind: 'agent_spawn', parent_thread_id: 'parent' },
+            }),
+          ],
+        },
+      ],
+      emptyCollapsed,
+      defaultCounts,
+      null,
+    )
+
+    const threadRows = rows.filter((row) => row.type === 'thread')
+    expect(threadRows.map((row) => row.key)).toEqual([
+      'thread:other',
+      'thread:parent',
+      'thread:child',
+    ])
+    expect(threadRows.map((row) => row.type === 'thread' && row.depth)).toEqual([0, 0, 1])
+    expect(threadRows.map((row) => row.type === 'thread' && row.trunkMask)).toEqual([
+      0,
+      0,
+      0,
+    ])
+  })
+
   it('creates workspace and thread rows in order', () => {
     const rows = buildSidebarRows(
       [

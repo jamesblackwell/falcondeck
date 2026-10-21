@@ -4,6 +4,7 @@ import type { ThreadSummary, WorkspaceSummary } from './types'
 import {
   buildProjectGroups,
   compareThreads,
+  nestSpawnedThreads,
   partitionSidebarProjects,
   partitionSidebarThreads,
   sortProjectGroupThreads,
@@ -359,6 +360,107 @@ describe('partitionSidebarThreads', () => {
     const archived = summary({ id: 'archived', is_archived: true, is_pinned: true })
     expect(partitionSidebarThreads([archived]).archived).toEqual([archived])
     expect(partitionSidebarThreads([archived]).globallyPinned).toEqual([])
+  })
+})
+
+describe('nestSpawnedThreads', () => {
+  const spawned = (id: string, parent: string) =>
+    summary({ id, origin: { kind: 'agent_spawn', parent_thread_id: parent } })
+
+  it('leaves a list with nothing to nest untouched', () => {
+    const threads = [summary({ id: 'a' }), summary({ id: 'b' })]
+    const nested = nestSpawnedThreads(threads)
+    expect(nested.threads).toBe(threads)
+    expect(nested.nesting.size).toBe(0)
+  })
+
+  it('pulls spawned chats under the chat that started them', () => {
+    const parent = summary({ id: 'parent' })
+    const other = summary({ id: 'other' })
+    const first = spawned('first', 'parent')
+    const second = spawned('second', 'parent')
+
+    const nested = nestSpawnedThreads([parent, other, first, second])
+
+    expect(nested.threads.map(({ id }) => id)).toEqual([
+      'parent',
+      'first',
+      'second',
+      'other',
+    ])
+    expect(nested.nesting.get('first')).toEqual({ depth: 1, trunkMask: 0b1 })
+    expect(nested.nesting.get('second')).toEqual({ depth: 1, trunkMask: 0 })
+    expect(nested.nesting.has('parent')).toBe(false)
+  })
+
+  it('nests a grandchild one rung further in', () => {
+    const nested = nestSpawnedThreads([
+      summary({ id: 'root' }),
+      spawned('child', 'root'),
+      spawned('grandchild', 'child'),
+    ])
+
+    expect(nested.threads.map(({ id }) => id)).toEqual(['root', 'child', 'grandchild'])
+    expect(nested.nesting.get('grandchild')).toEqual({ depth: 2, trunkMask: 0 })
+  })
+
+  it('stops indenting past the deepest rung', () => {
+    const nested = nestSpawnedThreads([
+      summary({ id: 'g0' }),
+      spawned('g1', 'g0'),
+      spawned('g2', 'g1'),
+      spawned('g3', 'g2'),
+      spawned('g4', 'g3'),
+    ])
+
+    expect(nested.nesting.get('g3')?.depth).toBe(3)
+    expect(nested.nesting.get('g4')?.depth).toBe(3)
+  })
+
+  it("runs an ancestor's upright through the rows nested beneath it", () => {
+    const nested = nestSpawnedThreads([
+      summary({ id: 'root' }),
+      spawned('first', 'root'),
+      spawned('buried', 'first'),
+      spawned('second', 'root'),
+    ])
+
+    expect(nested.threads.map(({ id }) => id)).toEqual([
+      'root',
+      'first',
+      'buried',
+      'second',
+    ])
+    // 'first' has a sibling below, so its own rung keeps running, and the row
+    // between the two draws that same rung straight through.
+    expect(nested.nesting.get('first')).toEqual({ depth: 1, trunkMask: 0b1 })
+    expect(nested.nesting.get('buried')).toEqual({ depth: 2, trunkMask: 0b1 })
+    expect(nested.nesting.get('second')).toEqual({ depth: 1, trunkMask: 0 })
+  })
+
+  it('keeps a spawned chat at the top level when its parent is not listed', () => {
+    const orphan = spawned('orphan', 'elsewhere')
+    const nested = nestSpawnedThreads([summary({ id: 'a' }), orphan])
+
+    expect(nested.threads).toHaveLength(2)
+    expect(nested.nesting.size).toBe(0)
+  })
+
+  it('shows every chat in a spawn cycle exactly once', () => {
+    const left = spawned('left', 'right')
+    const right = spawned('right', 'left')
+
+    const nested = nestSpawnedThreads([left, right])
+
+    expect(nested.threads.map(({ id }) => id).sort()).toEqual(['left', 'right'])
+  })
+
+  it('ignores a chat that claims itself as its parent', () => {
+    const self = spawned('self', 'self')
+    const nested = nestSpawnedThreads([self])
+
+    expect(nested.threads).toEqual([self])
+    expect(nested.nesting.size).toBe(0)
   })
 })
 

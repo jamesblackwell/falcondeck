@@ -18,7 +18,21 @@ interface SessionListItemProps {
   onOpenThreadOptions?: (workspaceId: string, thread: ThreadSummary) => void
   nowTick?: number
   tags?: ThreadTag[]
+  /**
+   * Rung in the spawn tree: 0 draws a plain row, deeper values indent and draw
+   * the elbow back up to the chat that started this one.
+   */
+  depth?: number
+  /**
+   * Rungs whose upright keeps running below this row, as packed by
+   * `nestSpawnedThreads`. Ancestor uprights pass straight through.
+   */
+  trunkMask?: number
 }
+
+/** Rung width, and where in it the connector's upright sits. */
+const NESTING_RUNG = 14
+const NESTING_LINE = 6
 
 function SessionListItemInner({
   thread,
@@ -28,6 +42,8 @@ function SessionListItemInner({
   onOpenThreadOptions,
   nowTick = 0,
   tags = [],
+  depth = 0,
+  trunkMask = 0,
 }: SessionListItemProps) {
   const { theme } = useUnistyles()
   const presentation = useMemo(() => deriveThreadAttentionPresentation(thread), [thread])
@@ -59,6 +75,43 @@ function SessionListItemInner({
       onPress={handlePress}
       onLongPress={handleLongPress}
     >
+      {depth > 0 ? (
+        // The elbow sits inside the row so the selection fill runs behind it.
+        // Negative vertical margins reach into the row's padding, so a middle
+        // child's upright meets the next sibling's with no seam.
+        <View
+          testID="thread-nesting-connector"
+          pointerEvents="none"
+          style={[styles.nesting, { width: depth * NESTING_RUNG }]}
+        >
+          <View
+            style={[
+              styles.nestingElbow,
+              {
+                left: (depth - 1) * NESTING_RUNG + NESTING_LINE,
+                borderColor: theme.colors.border.emphasis,
+              },
+            ]}
+          />
+          {Array.from({ length: depth }, (_, index) => index + 1)
+            .filter(rung => trunkMask & (1 << (rung - 1)))
+            .map(rung => (
+              <View
+                key={rung}
+                style={[
+                  styles.nestingTrunk,
+                  {
+                    left: (rung - 1) * NESTING_RUNG + NESTING_LINE,
+                    // This row's own rung carries on from the elbow; an
+                    // ancestor's runs the whole height, under the row.
+                    top: rung === depth ? '50%' : 0,
+                    backgroundColor: theme.colors.border.emphasis,
+                  },
+                ]}
+              />
+            ))}
+        </View>
+      ) : null}
       <View style={styles.indicatorSlot}>
         {presentation.showSpinner ? (
           <ActivityDiamond size={14} color={theme.colors.accent.default} />
@@ -92,7 +145,9 @@ function SessionListItemInner({
           ))}
         </View>
       ) : null}
-      {thread.origin?.kind === 'agent_spawn' ? (
+      {thread.origin?.kind === 'agent_spawn' && depth === 0 ? (
+        // Nested rows skip the mark: the elbow already says an agent started
+        // them, and the row spends the space on its title instead.
         <View
           accessible
           accessibilityRole="image"
@@ -156,6 +211,25 @@ const styles = StyleSheet.create((theme) => ({
     height: 10,
     borderRadius: theme.radius.full,
   },
+  nesting: {
+    alignSelf: 'stretch',
+    marginVertical: -theme.spacing[2],
+  },
+  nestingElbow: {
+    position: 'absolute',
+    top: 0,
+    height: '50%',
+    right: 2,
+    borderLeftWidth: StyleSheet.hairlineWidth,
+    borderBottomWidth: StyleSheet.hairlineWidth,
+    borderBottomLeftRadius: theme.radius.sm,
+    borderCurve: 'continuous',
+  },
+  nestingTrunk: {
+    position: 'absolute',
+    bottom: 0,
+    width: StyleSheet.hairlineWidth,
+  },
   tags: { flexDirection: 'row', alignItems: 'center' },
   pin: {
     // lucide-react-native copies style onto each path, so rotate the wrapper.
@@ -170,6 +244,8 @@ const areEqual = (prev: SessionListItemProps, next: SessionListItemProps) =>
   prev.nowTick === next.nowTick &&
   prev.onSelectThread === next.onSelectThread &&
   prev.onOpenThreadOptions === next.onOpenThreadOptions &&
-  prev.tags === next.tags
+  prev.tags === next.tags &&
+  prev.depth === next.depth &&
+  prev.trunkMask === next.trunkMask
 
 export const SessionListItem = memo(SessionListItemInner, areEqual)

@@ -969,6 +969,8 @@ export const SidebarView = memo(function SidebarView({
             onOpenThreadOptions={openThreadOptions}
             nowTick={nowTick}
             tags={threadTagsById?.[item.thread.id]}
+            depth={item.depth}
+            trunkMask={item.trunkMask}
           />
           </View>
         </CollapsibleRow>
