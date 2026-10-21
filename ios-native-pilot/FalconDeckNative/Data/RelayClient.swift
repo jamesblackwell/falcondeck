@@ -383,6 +383,8 @@ actor RelayClient: RelayServing {
         let current = generation
         log.info("Requesting \(method, privacy: .public)")
         let frame = JSON.object(["type": .string("rpc-call"), "request_id": .string(id), "method": .string(method), "params": try RelayCrypto.encrypt(params, key: key)])
+        let responseTimeout = method == "speech.transcribe" ? NativeSpeechSettings.responseTimeout(params: params)
+            : Duration.seconds(["speech.synthesize", "turn.start", "thread.item"].contains(method) ? 120 : 35)
         return try await withCheckedThrowingContinuation { continuation in
             pending[id] = continuation
             requestTasks[id] = Task {
@@ -393,8 +395,7 @@ actor RelayClient: RelayServing {
                     // The daemon cannot act until the acknowledged upload is
                     // complete. Give its response a separate deadline, as well
                     // as the bounded transport deadline below.
-                    let seconds = ["speech.transcribe", "speech.synthesize", "turn.start", "thread.item"].contains(method) ? 120 : 35
-                    try await Task.sleep(for: .seconds(seconds))
+                    try await Task.sleep(for: responseTimeout)
                     self.finish(id, error: PilotError("The computer took too long to respond. Pull to refresh or reconnect."))
                 }
                 catch { self.finish(id, error: error) }

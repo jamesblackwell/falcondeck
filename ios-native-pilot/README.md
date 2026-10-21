@@ -101,6 +101,15 @@ renders Markdown. No JavaScript runtime, React Native bridge or webview ships in
 the app. `scripts/sync-palettes.mjs` reads the existing mobile theme source to
 refresh the checked-in native palette catalog.
 
+Voice capture allows up to 30 minutes of 16 kHz mono/32 kbps AAC. At the limit,
+the app finalizes and keeps the recording for transcription rather than starting
+another recording or discarding audio. OpenRouter requests include the captured
+duration, and their response deadline follows the daemon's existing long-recording
+budget. Short dictation keeps its usual deadline. The existing 8 MiB audio limit
+and encrypted relay transport are unchanged. Explicit on-device recognition still
+uses Apple's speech engine and its availability/recognition limits; an error never
+silently uploads that audio to another provider.
+
 ## Recovery and boundaries
 
 Task options → **Show on Lock Screen** follows one working task on this device.

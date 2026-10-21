@@ -376,7 +376,7 @@ final class AppModel {
             }
         }
         if let argument = ProcessInfo.processInfo.arguments.first(where: { $0.hasPrefix("--voice-preview=") }),
-           let phase = argument.split(separator: "=").last.map(String.init), ["starting", "recording", "transcribing", "failed", "ready", "other-task"].contains(phase), let task = tasks.first {
+           let phase = argument.split(separator: "=").last.map(String.init), ["starting", "recording", "transcribing", "failed", "ready", "other-task", "long", "limit"].contains(phase), let task = tasks.first {
             voice.preview(phase, ownerID: phase == "other-task" ? "another-task" : task.id)
             let chat = chat(for: task); chat.voiceInputOpen = true; chat.draft = "Keep my existing draft."
         }

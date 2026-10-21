@@ -213,4 +213,25 @@ import XCTest
         capture("Deleting a saved recording returns directly to the typed draft")
     }
 
+    func testLongRecordingAndHalfHourLimitKeepClearControlsAndDraft() {
+        for phase in ["long", "limit"] {
+            let app = XCUIApplication(); app.launchArguments = ["--demo", "--loading-preview=slow", "--voice-preview=" + phase]; app.launch()
+            app.buttons["sidebar-task-native"].tap()
+            if phase == "long" {
+                XCTAssertTrue(app.staticTexts["15:00"].waitForExistence(timeout: 5))
+                XCTAssertTrue(app.buttons["Stop and transcribe"].isEnabled)
+            } else {
+                XCTAssertTrue(app.staticTexts["30-minute limit reached. Your recording is saved and ready to transcribe."].waitForExistence(timeout: 5))
+                XCTAssertTrue(app.buttons["Transcribe recording"].isHittable)
+                XCTAssertFalse(app.staticTexts["Couldn't transcribe"].exists)
+            }
+            capture("Long recording composer " + phase)
+            app.buttons["Delete recording"].tap()
+            let input = app.textFields["chat-input"]
+            XCTAssertTrue(input.waitForExistence(timeout: 5))
+            XCTAssertEqual(input.value as? String, "Keep my existing draft.")
+            app.terminate()
+        }
+    }
+
 }

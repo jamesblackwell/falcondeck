@@ -3,21 +3,39 @@ import Foundation
 enum NativeSpeechSettings {
     static let defaultProvider = "openrouter"
     static let defaultModel = "openai/gpt-4o-mini-transcribe"
+    static let maximumRecordingDuration: TimeInterval = 30 * 60
+    static let recordingBitRate = 32_000
+    static let maximumAudioBytes = 8 * 1024 * 1024
     static func provider(in defaults: UserDefaults) -> String {
         defaults.string(forKey: "native.speech.provider") == "on-device" ? "on-device" : defaultProvider
     }
     static func validateAudio(_ audio: Data) throws {
         guard !audio.isEmpty else { throw PilotError("This recording is empty. Delete it and record a new message.") }
-        guard audio.count <= 8 * 1024 * 1024 else { throw PilotError("Record a shorter message (up to 8 MB).") }
+        guard audio.count <= maximumAudioBytes else { throw PilotError("Record a shorter message (up to 8 MB).") }
     }
-    static func parameters(audio: Data, defaults: UserDefaults) throws -> JSON {
+    static func parameters(audio: Data, defaults: UserDefaults, duration: TimeInterval = 0) throws -> JSON {
         try validateAudio(audio)
         let model = defaults.string(forKey: "native.speech.model")?.trimmingCharacters(in: .whitespacesAndNewlines).nonempty ?? defaultModel
         var params = JSON.object(["audio_base64": .string(audio.base64EncodedString()), "format": .string("m4a"), "model": .string(model)])
+        if duration.isFinite, duration > 0 { params = params.setting("duration_seconds", .number(duration)) }
         if let language = defaults.string(forKey: "native.speech.language")?.trimmingCharacters(in: .whitespacesAndNewlines).nonempty {
             params = params.setting("language", .string(language))
         }
         return params
+    }
+
+    static func responseTimeout(params: JSON) -> Duration {
+        let seconds: Double
+        if case .number(let measured) = params["duration_seconds"], measured.isFinite, measured > 0 {
+            seconds = measured
+        } else {
+            // Older/recovered captures may have no measured duration. Match
+            // the daemon's conservative compressed-audio bitrate estimate.
+            seconds = Double(params["audio_base64"].string.utf8.count) * 0.75 / 4_000
+        }
+        // Match speech.rs's 30 s + duration fallback budget (capped at 15 min),
+        // allowing key lookup/audio preparation before its provider deadline.
+        return .seconds(max(120, min(900, 30 + seconds) + 30))
     }
 }
 

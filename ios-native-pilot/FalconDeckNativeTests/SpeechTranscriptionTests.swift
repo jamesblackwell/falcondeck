@@ -1,3 +1,4 @@
+import AVFoundation
 import XCTest
 @testable import FalconDeckNative
 
@@ -20,6 +21,76 @@ import XCTest
         defaults.set(owner, forKey: "native.voice.owner")
         defaults.set("openrouter", forKey: "native.voice.provider")
         return url
+    }
+    func testCaptureContinuesPastThreeAndFifteenMinutesAndKeepsAudioAtThirty() throws {
+        let (defaults, suite) = defaults(); defer { defaults.removePersistentDomain(forName: suite) }
+        let url = try recording(defaults: defaults), voice = VoiceRecorder(defaults: defaults)
+        voice.recording = true
+        for time in [180.0, 900.0, 1799.0] {
+            voice.updateCapture(elapsed: time, level: 0.5)
+            XCTAssertTrue(voice.recording, "Capture must still be running at \(time) seconds")
+            XCTAssertEqual(voice.pendingURL, url)
+        }
+        voice.updateCapture(elapsed: 1800, level: 0.5)
+        XCTAssertFalse(voice.recording); XCTAssertEqual(voice.elapsed, 1800)
+        XCTAssertEqual(voice.pendingURL, url); XCTAssertEqual(voice.ownerID, "owner")
+        XCTAssertTrue(FileManager.default.fileExists(atPath: url.path)); XCTAssertNil(voice.error)
+        XCTAssertEqual(defaults.double(forKey: "native.voice.duration"), 1800)
+        let restored = VoiceRecorder(defaults: defaults)
+        XCTAssertEqual(restored.elapsed, 1800); XCTAssertEqual(restored.pendingURL, url)
+    }
+    func testRecoveredLongRecordingSendsDurationAndSurvivesTranscriptionFailure() async throws {
+        let (defaults, suite) = defaults(); defer { defaults.removePersistentDomain(forName: suite) }
+        let url = try recording(defaults: defaults)
+        defaults.set(1800.0, forKey: "native.voice.duration")
+        let voice = VoiceRecorder(defaults: defaults)
+        let relay = SpeechFixtureRelay(failures: 1, failure: "OpenRouter API key was rejected")
+        let model = AppModel.testing(relay: relay, voice: voice); model.connected = true
+        do { _ = try await voice.transcribe(model: model); XCTFail("Expected the fixture failure") }
+        catch { XCTAssertEqual(error.localizedDescription, "OpenRouter API key was rejected") }
+        let calls = await relay.calls
+        XCTAssertEqual(calls.count, 1); XCTAssertEqual(calls.first?.1["duration_seconds"], .number(1800))
+        XCTAssertEqual(voice.pendingURL, url); XCTAssertTrue(FileManager.default.fileExists(atPath: url.path))
+        voice.discard()
+        XCTAssertNil(defaults.object(forKey: "native.voice.duration"))
+    }
+    func testLongRecordingResponseDeadlineCoversDaemonFallbackWithoutSlowingShortDictation() {
+        let short = JSON.object(["duration_seconds": .number(42)])
+        XCTAssertEqual(NativeSpeechSettings.responseTimeout(params: short), .seconds(120))
+        for seconds in [900.0, 1800.0, 86_400.0] {
+            XCTAssertEqual(NativeSpeechSettings.responseTimeout(params: .object(["duration_seconds": .number(seconds)])), .seconds(930))
+        }
+        let recovered = JSON.object(["audio_base64": .string(String(repeating: "A", count: 960_000))])
+        XCTAssertEqual(NativeSpeechSettings.responseTimeout(params: recovered), .seconds(240))
+        for invalid in [-1.0, .infinity, .nan] {
+            XCTAssertEqual(NativeSpeechSettings.responseTimeout(params: recovered.setting("duration_seconds", .number(invalid))), .seconds(240))
+        }
+    }
+    func testThirtyMinuteAACCaptureFitsExistingSpeechAndEncryptedRelayLimits() async throws {
+        let (defaults, suite) = defaults(); defer { defaults.removePersistentDomain(forName: suite) }
+        let url = FileManager.default.temporaryDirectory.appending(path: "HalfHour-\(UUID()).m4a")
+        defer { try? FileManager.default.removeItem(at: url) }
+        // Encode the full half hour offline; this never opens a microphone or
+        // sends audio to a service. Reuse one PCM buffer to keep memory bounded.
+        try autoreleasepool {
+            let file = try AVAudioFile(forWriting: url, settings: [AVFormatIDKey: kAudioFormatMPEG4AAC, AVSampleRateKey: 16_000, AVNumberOfChannelsKey: 1, AVEncoderBitRateKey: NativeSpeechSettings.recordingBitRate])
+            let buffer = try XCTUnwrap(AVAudioPCMBuffer(pcmFormat: file.processingFormat, frameCapacity: 16_000))
+            buffer.frameLength = 16_000
+            let samples = try XCTUnwrap(buffer.floatChannelData?.pointee)
+            var seed: UInt32 = 7
+            for frame in 0..<16_000 {
+                seed = seed &* 1_664_525 &+ 1_013_904_223
+                samples[frame] = (Float(seed) / Float(UInt32.max) - 0.5) * 0.2
+            }
+            for _ in 0..<1800 { try file.write(from: buffer) }
+        }
+        let duration = try await AVURLAsset(url: url).load(.duration).seconds
+        XCTAssertEqual(duration, 1800, accuracy: 0.25)
+        let audio = try Data(contentsOf: url)
+        XCTAssertLessThan(audio.count, NativeSpeechSettings.maximumAudioBytes)
+        let params = try NativeSpeechSettings.parameters(audio: audio, defaults: defaults, duration: duration)
+        let frame = JSON.object(["type": .string("rpc-call"), "request_id": .string("local-long-recording-test"), "method": .string("speech.transcribe"), "params": try RelayCrypto.encrypt(params, key: Data(repeating: 7, count: 32))])
+        XCTAssertLessThan(try frame.wireText().utf8.count, 16 * 1024 * 1024)
     }
     func testDeleteCancelsTranscriptionClearsRecoveryAndKeepsTheTypedDraft() async throws {
         let (defaults, suite) = defaults(); defer { defaults.removePersistentDomain(forName: suite) }

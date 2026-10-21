@@ -98,7 +98,9 @@ struct RecordingPanel: View {
                     if let error = recorder.error {
                         Text(error).font(.caption).foregroundStyle(FD.secondary).fixedSize(horizontal: false, vertical: true).accessibilityIdentifier("voice-error")
                     } else {
-                        Text("Transcribe to review your message before sending.").font(.caption).foregroundStyle(FD.secondary)
+                        Text(recorder.elapsed >= NativeSpeechSettings.maximumRecordingDuration
+                            ? "30-minute limit reached. Your recording is saved and ready to transcribe."
+                            : "Transcribe to review your message before sending.").font(.caption).foregroundStyle(FD.secondary)
                     }
                 }.frame(maxWidth: .infinity, alignment: .leading)
                 Menu {

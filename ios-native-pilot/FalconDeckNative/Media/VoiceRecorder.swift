@@ -42,6 +42,8 @@ final class VoiceRecorder: NSObject, AVAudioRecorderDelegate {
             pendingURL = URL(fileURLWithPath: path)
             ownerID = defaults.string(forKey: "native.voice.owner")
             provider = defaults.string(forKey: "native.voice.provider") ?? "on-device"
+            let savedDuration = defaults.double(forKey: "native.voice.duration")
+            elapsed = savedDuration.isFinite && savedDuration > 0 ? savedDuration : 0
         }
     }
 
@@ -71,31 +73,39 @@ final class VoiceRecorder: NSObject, AVAudioRecorderDelegate {
             var resourceValues = URLResourceValues(); resourceValues.isExcludedFromBackup = true
             try protectedDirectory.setResourceValues(resourceValues)
             let url = directory.appending(path: "\(UUID()).m4a")
-            let recorder = try AVAudioRecorder(url: url, settings: [AVFormatIDKey: kAudioFormatMPEG4AAC, AVSampleRateKey: 16_000, AVNumberOfChannelsKey: 1, AVEncoderBitRateKey: 32_000])
+            let recorder = try AVAudioRecorder(url: url, settings: [AVFormatIDKey: kAudioFormatMPEG4AAC, AVSampleRateKey: 16_000, AVNumberOfChannelsKey: 1, AVEncoderBitRateKey: NativeSpeechSettings.recordingBitRate])
             recorder.delegate = self; recorder.isMeteringEnabled = true
             guard recorder.record() else { throw PilotError("Couldn't start the microphone.") }
             self.recorder = recorder; pendingURL = url; self.ownerID = ownerID; self.provider = provider
             defaults.set(url.path, forKey: "native.voice.pending")
             defaults.set(ownerID, forKey: "native.voice.owner")
             defaults.set(provider, forKey: "native.voice.provider")
+            defaults.removeObject(forKey: "native.voice.duration")
             recording = true; elapsed = 0
             SpeechLiveActivity.shared.voice("listening")
             meter = Task {
                 while !Task.isCancelled, self.recording {
                     if self.recorder?.isRecording != true { self.interrupted(); return }
                     self.recorder?.updateMeters()
-                    self.elapsed = self.recorder?.currentTime ?? self.elapsed
-                    self.level = min(1, max(0, 1 + (self.recorder?.averagePower(forChannel: 0) ?? -60) / 50))
-                    self.levels = Array(self.levels.suffix(119)) + [self.level]
-                    if self.elapsed >= 180 { self.finishRecording(); return }
+                    self.updateCapture(elapsed: self.recorder?.currentTime ?? self.elapsed,
+                        level: min(1, max(0, 1 + (self.recorder?.averagePower(forChannel: 0) ?? -60) / 50)))
                     do { try await Task.sleep(for: .milliseconds(100)) } catch { return }
                 }
             }
         } catch { self.error = error.localizedDescription; releaseAudioSession() }
     }
 
+    func updateCapture(elapsed: TimeInterval, level: Float) {
+        guard recording else { return }
+        self.elapsed = elapsed; self.level = level
+        levels = Array(levels.suffix(119)) + [level]
+        if elapsed >= NativeSpeechSettings.maximumRecordingDuration { finishRecording() }
+    }
+
     func finishRecording() {
+        if let recorder { elapsed = max(elapsed, recorder.currentTime) }
         recorder?.stop(); recorder = nil; meter?.cancel(); meter = nil; recording = false; level = 0
+        if pendingURL != nil { defaults.set(elapsed, forKey: "native.voice.duration") }
         SpeechLiveActivity.shared.voice(nil)
         releaseAudioSession()
     }
@@ -112,6 +122,7 @@ final class VoiceRecorder: NSObject, AVAudioRecorderDelegate {
         defaults.removeObject(forKey: "native.voice.pending")
         defaults.removeObject(forKey: "native.voice.owner")
         defaults.removeObject(forKey: "native.voice.provider")
+        defaults.removeObject(forKey: "native.voice.duration")
     }
 
     /// Explicit recovery transfers this clip, never silently changes its provider.
@@ -157,7 +168,7 @@ final class VoiceRecorder: NSObject, AVAudioRecorderDelegate {
                     return data
                 }.value
                 guard current == model.sessionScope, operationID == operation else { throw CancellationError() }
-                let params = try NativeSpeechSettings.parameters(audio: audio, defaults: defaults)
+                let params = try NativeSpeechSettings.parameters(audio: audio, defaults: defaults, duration: elapsed)
                 text = try await SpeechTranscription.transcribe(params: params, relay: model.relay, isCurrent: { current == model.sessionScope && self.operationID == operation }, onAttempt: { self.transcriptionAttempt = $0 }, beforeAttempt: {
                     defer { if self.operationID == operation { self.waitingForConnection = false } }
                     try await SpeechConnection.waitUntilReady(isReady: { model.connected }, isCurrent: { current == model.sessionScope && self.operationID == operation }, onWait: { self.waitingForConnection = true })
@@ -208,9 +219,10 @@ final class VoiceRecorder: NSObject, AVAudioRecorderDelegate {
     #if DEBUG
     /// Local screenshot fixtures never open a microphone, file or relay request.
     func preview(_ phase: String, ownerID: String) {
-        self.ownerID = ownerID; provider = "openrouter"; elapsed = phase == "ready" || phase == "other-task" ? 0 : 42
+        self.ownerID = ownerID; provider = "openrouter"
+        elapsed = phase == "long" ? 15 * 60 : phase == "limit" ? NativeSpeechSettings.maximumRecordingDuration : phase == "ready" || phase == "other-task" ? 0 : 42
         pendingURL = phase == "starting" ? nil : FileManager.default.temporaryDirectory.appending(path: "voice-ui-preview.m4a")
-        starting = phase == "starting"; recording = phase == "recording"; transcribing = phase == "transcribing"
+        starting = phase == "starting"; recording = phase == "recording" || phase == "long"; transcribing = phase == "transcribing"
         levels = (0..<100).map { Float(abs(sin(Double($0) * 0.43))) * 0.8 }
         error = phase == "failed" ? "Could not reach your computer. Your recording is safe, so you can retry." : nil
     }
