@@ -234,7 +234,7 @@ final class ConversationComposerTests: XCTestCase {
         editor.font = .systemFont(ofSize: 28)
         XCTAssertGreaterThan(editor.fittingComposerHeight(width: 600), regular)
         editor.string = String(repeating: "A long draft\n", count: 100)
-        XCTAssertLessThanOrEqual(editor.fittingComposerHeight(width: 600), 180)
+        XCTAssertEqual(editor.fittingComposerHeight(width: 600), ComposerNativeTextView.maximumComposerHeight)
     }
 
     @MainActor func testCappedDraftFitsInsideBothLegacyAndOverlayScrollbars() throws {

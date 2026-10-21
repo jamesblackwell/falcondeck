@@ -52,11 +52,11 @@ import UniformTypeIdentifiers
         editor.minSize = .zero
         editor.maxSize = NSSize(width: CGFloat.greatestFiniteMagnitude, height: CGFloat.greatestFiniteMagnitude)
         editor.autoresizingMask = [.width]
-        editor.textContainerInset = NSSize(width: 12, height: 10)
+        editor.textContainerInset = NSSize(width: 14, height: 13)
         editor.textContainer?.containerSize = NSSize(width: scrollView.contentSize.width, height: CGFloat.greatestFiniteMagnitude)
         editor.textContainer?.widthTracksTextView = true
         editor.textContainer?.lineFragmentPadding = 0
-        editor.font = preferences.nativeFont(size: 15, surface: "chat")
+        editor.font = preferences.nativeFont(size: 16, surface: "chat")
         editor.setAccessibilityLabel("Message")
         editor.setAccessibilityIdentifier("conversation-composer")
         editor.registerForDraggedTypes(ComposerNativeTextView.attachmentPasteboardTypes + [.string])
@@ -110,7 +110,7 @@ import UniformTypeIdentifiers
         editor.textColor = NSColor(FDTheme.foreground)
         editor.insertionPointColor = NSColor(FDTheme.foreground)
         editor.placeholderColor = NSColor(FDTheme.subtle)
-        let font = preferences.nativeFont(size: 15, surface: "chat")
+        let font = preferences.nativeFont(size: 16, surface: "chat")
         if editor.font != font { editor.font = font }
         if editor.string != text {
             let selection = editor.selectedRange()
@@ -150,7 +150,7 @@ import UniformTypeIdentifiers
 }
 
 @MainActor final class ComposerNativeTextView: NSTextView {
-    static let maximumComposerHeight: CGFloat = 164
+    static let maximumComposerHeight: CGFloat = 220
     fileprivate static let attachmentPasteboardTypes: [NSPasteboard.PasteboardType] = [
         .fileURL, .png, .tiff, .init(UTType.jpeg.identifier)
     ]
@@ -171,8 +171,11 @@ import UniformTypeIdentifiers
 
     /// SwiftUI can measure several widths before choosing one. Keep those
     /// speculative layouts separate from the displayed editor's TextKit state.
+    /// The resting height fits one line with even space above and below it.
+    static let minimumComposerHeight: CGFloat = 56
+
     func fittingComposerHeight(width: CGFloat) -> CGFloat {
-        guard let textStorage, let textContainer, let layoutManager else { return 44 }
+        guard let textStorage, let textContainer, let layoutManager else { return Self.minimumComposerHeight }
         let measurement = self.measurement
         // Sharing storage avoids copying or comparing the draft on every
         // resize proposal; TextKit invalidates both layouts when text changes.
@@ -196,7 +199,7 @@ import UniformTypeIdentifiers
         measurement.manager.ensureLayout(for: measurement.container)
         let textHeight = max(measurement.manager.usedRect(for: measurement.container).maxY,
                              measurement.manager.extraLineFragmentRect.maxY)
-        return min(Self.maximumComposerHeight, max(44, ceil(textHeight + textContainerInset.height * 2)))
+        return min(Self.maximumComposerHeight, max(Self.minimumComposerHeight, ceil(textHeight + textContainerInset.height * 2)))
     }
 
     override func viewDidMoveToWindow() {

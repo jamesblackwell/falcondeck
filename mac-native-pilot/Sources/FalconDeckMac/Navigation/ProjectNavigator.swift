@@ -9,6 +9,8 @@ struct ProjectNavigator: View {
     @AppStorage("native.navigation.pinsExpanded") private var pinsExpanded = true
     @AppStorage("native.navigation.projectsExpanded") private var projectsExpanded = true
     @AppStorage("native.tasks.sort") private var sort = "last_updated"
+    @AppStorage("native.tasks.filter") private var filter = "all"
+    @AppStorage("native.tasks.archived") private var archived = false
     @State private var showingLibrary = false
     @State private var iconProject: Project?
     @State private var iconDomain = ""
@@ -80,10 +82,13 @@ struct ProjectNavigator: View {
         // Streaming previews redraw rows without changing their order.
         let pinOrderKey = summary.pinCandidates.map(NativeTaskNavigationOrder.key)
         return VStack(spacing: 0) {
+            taskControls
+            ScrollViewReader { proxy in
             List(selection: selection) {
                 Section {
                     navigationRow("Chats", symbol: "bubble.left.and.bubble.right", section: "chats",
                                   count: summary.chatCount)
+                    if store.selectedSection == "chats" { taskList }
                     navigationRow("Activity", symbol: "tray", section: "activity",
                                   count: summary.attentionCount)
                 }
@@ -116,6 +121,9 @@ struct ProjectNavigator: View {
                                     moveProject(String(value.dropFirst(19)), before: project.id)
                                     return true
                                 }
+                            // The open project shows its own tasks inline, so a
+                            // second column is never needed to reach them.
+                            if store.selectedSection == "project", store.selectedProjectID == project.id { taskList }
                         }
                         if projects.isEmpty {
                             Text(store.isConnected ? "Open a folder to add a project." : "Connecting to your Mac…")
@@ -136,6 +144,11 @@ struct ProjectNavigator: View {
             .listStyle(.sidebar)
             .scrollContentBackground(.hidden)
             .environment(\.defaultMinListRowHeight, 26)
+            // Tasks live in this list now, so revealing one that was opened
+            // from Activity, a notification or ⌘K is this list's job.
+            .onChange(of: store.selectedTaskID) { _, id in scrollToTask(id, proxy: proxy) }
+            .onAppear { scrollToTask(store.selectedTaskID, proxy: proxy) }
+            }
 
             optionsFooter
         }
@@ -152,6 +165,134 @@ struct ProjectNavigator: View {
         .onAppear(perform: refreshPinOrder)
         .onChange(of: pinOrderKey) { _, _ in refreshPinOrder() }
         .onChange(of: sort) { _, _ in refreshPinOrder() }
+    }
+
+    private func scrollToTask(_ id: String?, proxy: ScrollViewProxy) {
+        guard let id else { return }
+        Task { @MainActor in
+            await Task.yield()
+            guard store.selectedTaskID == id else { return }
+            withAnimation(.none) { proxy.scrollTo(id, anchor: .center) }
+        }
+    }
+
+    private var taskList: some View {
+        TaskNavigator(store: store, rename: { renamingTask = $0 })
+    }
+
+    private var scopeTitle: String {
+        switch store.selectedSection {
+        case "chats": "chats"
+        case "pins": "pinned tasks"
+        default: store.selectedProject?.name ?? "tasks"
+        }
+    }
+
+    private var showsTaskControls: Bool {
+        ["project", "chats", "pins"].contains(store.selectedSection)
+    }
+
+    /// One filter field and one sort menu for whichever scope is open, in place
+    /// of a second column's worth of header.
+    @ViewBuilder private var taskControls: some View {
+        if showsTaskControls {
+            VStack(spacing: 7) {
+                HStack(spacing: 7) {
+                    Image(systemName: "magnifyingglass").font(NativePreferences.shared.font(size: 11, surface: "sidebar")).foregroundStyle(FDTheme.subtle)
+                    TextField("Filter \(scopeTitle)", text: $store.searchText)
+                        .textFieldStyle(.plain).font(NativePreferences.shared.font(size: 12, surface: "sidebar"))
+                        .accessibilityIdentifier("task-search")
+                    if !store.searchText.isEmpty {
+                        Button { store.searchText = "" } label: { Image(systemName: "xmark.circle.fill") }
+                            .buttonStyle(.plain).foregroundStyle(FDTheme.subtle).accessibilityLabel("Clear filter")
+                    }
+                    taskOptionsMenu
+                }
+                .padding(.horizontal, 9).padding(.vertical, 6)
+                .background(FDTheme.raised, in: .rect(cornerRadius: 7))
+                .overlay { RoundedRectangle(cornerRadius: 7).strokeBorder(FDTheme.hairline) }
+                if archived || filter != "all" {
+                    HStack(spacing: 6) {
+                        Text(archived ? "Archived tasks" : filterLabel)
+                            .font(NativePreferences.shared.font(size: 11, surface: "sidebar")).foregroundStyle(FDTheme.muted)
+                        Spacer(minLength: 0)
+                        Button("Clear") { archived = false; filter = "all" }
+                            .buttonStyle(.plain).font(NativePreferences.shared.font(size: 11, surface: "sidebar")).foregroundStyle(FDTheme.accent)
+                    }
+                }
+            }
+            .padding(.horizontal, 12).padding(.top, 8).padding(.bottom, 9)
+        }
+    }
+
+    private var filterLabel: String {
+        switch filter {
+        case "unread": "Unread tasks"
+        case "working": "Working tasks"
+        case "attention": "Tasks needing attention"
+        default: "All tasks"
+        }
+    }
+
+    private var taskOptionsMenu: some View {
+        Menu {
+            Picker("Sort tasks", selection: $sort) {
+                Text("Last updated").tag("last_updated")
+                Text("Alphabetical").tag("alphabetical")
+                Text("Needs attention first").tag("priority")
+            }
+            Divider()
+            Picker("Show", selection: $filter) {
+                Text("All tasks").tag("all")
+                Text("Unread").tag("unread")
+                Text("Working").tag("working")
+                Text("Needs attention").tag("attention")
+            }
+            Divider()
+            Toggle("Archived tasks", isOn: $archived)
+            if store.selectedSection == "project", let projectID = store.selectedProjectID {
+                Divider()
+                Button("New folder…", systemImage: "folder.badge.plus") { createFolder(projectID) }
+                Button("Mark all as read", systemImage: "envelope.open") { markAllRead() }
+                Button("Archive all tasks…", systemImage: "archivebox") { archiveAll(projectID) }
+            }
+        } label: { Image(systemName: "line.3.horizontal.decrease") }
+        .menuStyle(.borderlessButton).menuIndicator(.hidden).fixedSize()
+        .font(NativePreferences.shared.font(size: 11, surface: "sidebar"))
+        .foregroundStyle(filter == "all" && !archived ? FDTheme.muted : FDTheme.accent)
+        .help("Sort and filter tasks")
+        .accessibilityLabel("Sort and filter tasks")
+    }
+
+    private func createFolder(_ projectID: String) {
+        guard let name = NativeNavigationDialogs.name(title: "New folder", detail: "Folders organize tasks without changing their working directories.", action: "Create folder") else { return }
+        NativeTaskActions.perform(store) {
+            try await NativeTaskActions.folderMutation(store: store, projectID: projectID, fields: ["action": .string("create"), "name": .string(name)])
+        }
+    }
+
+    private func markAllRead() {
+        let tasks = store.tasks.filter { $0.projectID == store.selectedProjectID && $0.unread }
+        NativeTaskActions.perform(store) {
+            for task in tasks { try await NativeTaskActions.markRead(task, store: store) }
+        }
+    }
+
+    private func archiveAll(_ projectID: String) {
+        guard NativeNavigationDialogs.confirm(title: "Archive all tasks in \(scopeTitle)?", detail: "You can restore tasks from Archived tasks. Working tasks, tasks waiting for input and queued turns remain active.", action: "Archive all", destructive: true) else { return }
+        NativeTaskActions.perform(store) {
+            _ = try await store.request(path: "/api/workspaces/\(projectID)/threads/archive", method: "POST")
+            await store.refresh()
+        }
+    }
+
+    private func newTask() {
+        if store.selectedSection == "chats" || store.selectedProject == nil {
+            Task { await store.newChat() }
+        } else {
+            store.selectSection(store.selectedProject?.raw["kind"].string == "casual" ? "chats" : "project")
+            store.newTask(focusComposer: true)
+        }
     }
 
     private func navigationRow(_ title: String, symbol: String, section: String, count: Int = 0) -> some View {
@@ -347,6 +488,14 @@ struct ProjectNavigator: View {
 
     private var optionsFooter: some View {
         NativeSidebarFooter {
+            Button(action: newTask) {
+                Label(store.selectedSection == "chats" ? "New chat" : "New task", systemImage: "square.and.pencil")
+                    .labelStyle(.iconOnly)
+            }
+            .buttonStyle(NativeIconButtonStyle())
+            .disabled(!store.isSelectedHostConnected)
+            .help(store.selectedSection == "chats" ? "New chat (⌘N)" : "New task (⌘N)")
+            .accessibilityLabel(store.selectedSection == "chats" ? "New chat" : "New task")
             Menu {
                 ForEach(ProjectNavigatorDestination.secondary) { destination in
                     Button(destination.title, systemImage: store.selectedSection == destination.id ? "checkmark" : destination.symbol) {

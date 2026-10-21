@@ -1,45 +1,24 @@
 import AppKit
 import SwiftUI
 
-/// Projects remain in their own column; tasks have a second, independent
-/// selection so moving between workspaces does not turn the sidebar into a tree.
+/// One sidebar, the way the Tauri app arranges it: projects, pins and the open
+/// project's own tasks in a single column beside the conversation.
 struct WorkspaceView: View {
     @Bindable var store: AppStore
     @AppStorage("native.sidebar.visible") private var sidebarVisible = true
     @State private var columnVisibility: NavigationSplitViewVisibility = .all
     @State private var showingSearch = false
 
-    private var showsTaskColumn: Bool {
-        ["project", "chats", "pins"].contains(store.selectedSection)
-    }
-
     var body: some View {
-        Group {
-            if showsTaskColumn {
-                NavigationSplitView(columnVisibility: $columnVisibility) {
-                    ProjectNavigator(store: store)
-                        .navigationSplitViewColumnWidth(min: 180, ideal: 218, max: 320)
-                        .background(NativeSplitViewPersistence(name: "native.workspace.columns"))
-                } content: {
-                    TaskNavigator(store: store)
-                        .navigationSplitViewColumnWidth(min: 240, ideal: 300, max: 460)
-                } detail: {
-                    MainWorkspaceView(store: store)
-                        .frame(minWidth: 460)
-                }
-                .navigationSplitViewStyle(.balanced)
-            } else {
-                NavigationSplitView(columnVisibility: $columnVisibility) {
-                    ProjectNavigator(store: store)
-                        .navigationSplitViewColumnWidth(min: 180, ideal: 218, max: 320)
-                        .background(NativeSplitViewPersistence(name: "native.workspace.main-columns"))
-                } detail: {
-                    MainWorkspaceView(store: store)
-                        .frame(minWidth: 650)
-                }
-                .navigationSplitViewStyle(.balanced)
-            }
+        NavigationSplitView(columnVisibility: $columnVisibility) {
+            ProjectNavigator(store: store)
+                .navigationSplitViewColumnWidth(min: 240, ideal: 304, max: 440)
+                .background(NativeSplitViewPersistence(name: "native.workspace.columns"))
+        } detail: {
+            MainWorkspaceView(store: store)
+                .frame(minWidth: 520)
         }
+        .navigationSplitViewStyle(.balanced)
         .navigationTitle("FalconDeck")
         .background(NativeWorkspaceWindowAnchor())
         .tint(FDTheme.accent)
@@ -50,12 +29,6 @@ struct WorkspaceView: View {
                 }
                 .help("Search tasks and commands (⌘K)")
                 .accessibilityIdentifier("workspace-search")
-                Button(action: newTask) {
-                    Label("New task", systemImage: "square.and.pencil")
-                }
-                .help("New task (⌘N)")
-                .disabled(!store.isConnected)
-                .accessibilityIdentifier("new-task-toolbar")
             }
         }
         .sheet(isPresented: $showingSearch) {

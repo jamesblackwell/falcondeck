@@ -31,14 +31,17 @@ struct NativeTaskNavigationPage {
     var nextLimit: Int { min(orderedIDs.count, max(limit, 0) + Self.increment) }
 }
 
+/// The task list for the selected scope. It renders as sections inside the one
+/// sidebar rather than as its own column, so a project's tasks sit under the
+/// project they belong to.
 struct TaskNavigator: View {
     @Bindable var store: AppStore
+    var rename: (AgentTask) -> Void
     @AppStorage("native.tasks.sort") private var sort = "last_updated"
     @AppStorage("native.tasks.filter") private var filter = "all"
     @AppStorage("native.tasks.archived") private var archived = false
     @State private var orderedIDs: [String] = []
     @State private var ordering = NativeTaskNavigationOrder()
-    @State private var renaming: AgentTask?
     @State private var dropTarget: String?
     @State private var extensionState = NativeSidebarExtensions(.null)
     @State private var hostExtensionStates: [String: NativeSidebarExtensions] = [:]
@@ -48,13 +51,6 @@ struct TaskNavigator: View {
 
     private var isProject: Bool { store.selectedSection == "project" }
     private var projectID: String? { isProject ? store.selectedProjectID : nil }
-    private var title: String {
-        switch store.selectedSection {
-        case "chats": "Chats"
-        case "pins": "Pinned tasks"
-        default: store.selectedProject?.name ?? "Tasks"
-        }
-    }
     private var folders: [NativeProjectFolder] {
         guard let projectID else { return [] }
         return store.navigationPreferences["project_folders"].array
@@ -90,12 +86,6 @@ struct TaskNavigator: View {
     private var pageScope: String {
         [store.selectedSection, projectID ?? "", store.searchText, sort, filter, String(archived)].joined(separator: "|")
     }
-    private var selection: Binding<String?> {
-        Binding(get: { store.selectedTaskID }, set: { id in
-            guard let id else { return }
-            Task { await store.selectTask(id) }
-        })
-    }
 
     var body: some View {
         let tasks = scopeTasks
@@ -103,36 +93,17 @@ struct TaskNavigator: View {
         let sources = extensionSources(for: tasks)
         // Streaming redraws rows; only structural changes refresh their order.
         let orderKey = tasks.map(NativeTaskNavigationOrder.key)
-        return VStack(spacing: 0) {
-            header(taskCount: content.count, tasks: tasks)
-            FDTheme.hairline.frame(height: 1)
+        return Group {
+            if !extensionState.filters.isEmpty { extensionFilterRow }
             if content.count == 0 && content.folders.isEmpty {
-                NativeEmptyState(
-                    symbol: archived ? "archivebox" : "text.bubble",
-                    title: archived ? "No archived tasks" : "No tasks here",
-                    detail: store.searchText.isEmpty ? "Create a task, or change your filters to see more." : "Try another name or use ⌘K to search message content."
-                )
+                emptyRow
+            } else if isProject && !archived {
+                projectTaskGroups(content)
             } else {
-                ScrollViewReader { proxy in
-                    List(selection: selection) {
-                        if isProject && !archived {
-                            projectTaskGroups(content)
-                        } else {
-                            ForEach(content.root) { task in taskRow(task) }
-                        }
-                        if content.page.remainingCount > 0 { showMoreTasks(content.page) }
-                    }
-                    .listStyle(.plain)
-                    .scrollContentBackground(.hidden)
-                    .onAppear { scrollToSelection(proxy, page: content.page) }
-                    .onChange(of: store.selectedTaskID) { _, _ in scrollToSelection(proxy, page: content.page) }
-                    .onChange(of: pageScope) { _, _ in scrollToSelection(proxy, page: content.page) }
-                    .onChange(of: revealedFolderID) { _, _ in scrollToSelection(proxy, page: content.page) }
-                }
+                ForEach(content.root) { task in taskRow(task) }
             }
-            footer
+            if content.page.remainingCount > 0 { showMoreTasks(content.page) }
         }
-        .background(FDTheme.surface)
         .onAppear { refreshExtensions(); revealSelection(); refreshOrder() }
         .onChange(of: pageScope) { _, _ in pageLimit = NativeTaskNavigationPage.initialLimit; refreshOrder() }
         .onChange(of: orderKey) { _, _ in refreshOrder() }
@@ -147,117 +118,45 @@ struct TaskNavigator: View {
             if id == nil { archived = false; revealedFolderID = nil }
             else { revealSelection() }
         }
-        .sheet(item: $renaming) { task in
-            NativeTaskRenameSheet(store: store, task: task, dismiss: { renaming = nil })
-        }
     }
 
-    private func header(taskCount: Int, tasks: [AgentTask]) -> some View {
-        VStack(alignment: .leading, spacing: 13) {
-            HStack(spacing: 6) {
-                VStack(alignment: .leading, spacing: 3) {
-                    Text(title).font(NativePreferences.shared.font(size: 15, surface: "sidebar", weight: .semibold)).lineLimit(1)
-                    if archived { Text("Archived tasks").font(NativePreferences.shared.font(size: 12, surface: "sidebar")).foregroundStyle(FDTheme.muted) }
-                }
-                Spacer(minLength: 4)
-                Text("\(taskCount)").font(NativePreferences.shared.font(size: 11, surface: "sidebar").monospaced()).foregroundStyle(FDTheme.subtle)
-                Menu {
-                    Picker("Sort tasks", selection: $sort) {
-                        Text("Last updated").tag("last_updated")
-                        Text("Alphabetical").tag("alphabetical")
-                        Text("Needs attention first").tag("priority")
-                    }
-                    Divider()
-                    Picker("Show", selection: $filter) {
-                        Text("All tasks").tag("all")
-                        Text("Unread").tag("unread")
-                        Text("Working").tag("working")
-                        Text("Needs attention").tag("attention")
-                    }
-                    Divider()
-                    Toggle("Archived tasks", isOn: $archived)
-                    if isProject, let projectID {
-                        Divider()
-                        Button("New folder…", systemImage: "folder.badge.plus") { createFolder(projectID) }
-                        Button("Mark all as read", systemImage: "envelope.open") {
-                            NativeTaskActions.perform(store) {
-                                for task in tasks where task.unread { try await NativeTaskActions.markRead(task, store: store) }
-                            }
-                        }
-                        Button("Archive all tasks…", systemImage: "archivebox") { archiveAll(projectID) }
-                    }
-                } label: { Image(systemName: "line.3.horizontal.decrease") }
-                .menuStyle(.borderlessButton)
-                .fixedSize()
-                .help("Sort and filter tasks")
-                .accessibilityLabel("Sort and filter tasks")
-            }
-            HStack(spacing: 7) {
-                Image(systemName: "magnifyingglass").foregroundStyle(FDTheme.subtle)
-                TextField("Filter task names", text: $store.searchText)
-                    .textFieldStyle(.plain).font(NativePreferences.shared.font(size: 13, surface: "sidebar"))
-                    .accessibilityIdentifier("task-search")
-                if !store.searchText.isEmpty {
-                    Button { store.searchText = "" } label: { Image(systemName: "xmark.circle.fill") }
-                        .buttonStyle(.plain).accessibilityLabel("Clear filter")
-                }
-            }
-            .font(NativePreferences.shared.font(size: 11, surface: "sidebar"))
-            .padding(.horizontal, 10).padding(.vertical, 8)
-            .background(FDTheme.raised, in: .rect(cornerRadius: 7))
-            .overlay { RoundedRectangle(cornerRadius: 7).strokeBorder(FDTheme.hairline) }
-            if filter != "all" {
-                HStack {
-                    Text(filterLabel).font(NativePreferences.shared.font(size: 12, surface: "sidebar")).foregroundStyle(FDTheme.muted)
-                    Spacer()
-                    Button("Clear") { filter = "all" }.buttonStyle(.plain).font(NativePreferences.shared.font(size: 12, surface: "sidebar"))
-                }
-            }
-            if !extensionState.filters.isEmpty {
-                HStack(spacing: 8) {
-                    ForEach(extensionState.filters) { extensionFilter in
-                        extensionFilterMenu(extensionFilter)
-                    }
-                    Spacer(minLength: 0)
-                }
-            }
-        }
-        .padding(16)
-        .contentShape(.rect)
-        .dropDestination(for: String.self) { ids, _ in return drop(ids, folder: nil) }
+    private var emptyRow: some View {
+        Text(store.searchText.isEmpty
+             ? (archived ? "No archived tasks." : "No tasks here yet.")
+             : "No task names match. ⌘K searches message content.")
+            .font(NativePreferences.shared.font(size: 12, surface: "sidebar")).foregroundStyle(FDTheme.subtle)
+            .padding(.leading, 20).padding(.vertical, 5)
+            .listRowSeparator(.hidden)
     }
 
+    private var extensionFilterRow: some View {
+        HStack(spacing: 8) {
+            ForEach(extensionState.filters) { extensionFilter in
+                extensionFilterMenu(extensionFilter)
+            }
+            Spacer(minLength: 0)
+        }
+        .padding(.leading, 18).padding(.vertical, 3)
+        .listRowSeparator(.hidden)
+    }
+
+    /// Plain rows, not nested sections: these live inside the sidebar's own
+    /// Projects section. A task pinned in its project carries a pin glyph
+    /// instead of a second "Pinned" heading under the sidebar's own one.
     @ViewBuilder private func projectTaskGroups(_ content: NativeTaskNavigationContent) -> some View {
-        if content.pinnedCount > 0 {
-            Section {
-                ForEach(content.pinned) { task in taskRow(task) }
-            } header: {
-                Label("Pinned in project", systemImage: "pin").font(NativePreferences.shared.font(size: 12, surface: "sidebar", weight: .medium))
-            }
-        }
+        ForEach(content.pinned) { task in taskRow(task, pinnedInProject: true) }
         ForEach(content.folders) { group in
-            Section {
-                if isFolderExpanded(group.folder) {
-                    ForEach(group.tasks) { task in taskRow(task) }
-                    if group.count == 0 {
-                        Text("Drop tasks here").font(NativePreferences.shared.font(size: 11, surface: "sidebar")).foregroundStyle(FDTheme.subtle)
-                            .padding(.leading, 18).padding(.vertical, 5)
-                    }
+            folderHeader(group.folder, count: group.count)
+            if isFolderExpanded(group.folder) {
+                ForEach(group.tasks) { task in taskRow(task) }
+                if group.count == 0 {
+                    Text("Drop tasks here").font(NativePreferences.shared.font(size: 11, surface: "sidebar")).foregroundStyle(FDTheme.subtle)
+                        .padding(.leading, 30).padding(.vertical, 5)
+                        .listRowSeparator(.hidden)
                 }
-            } header: {
-                folderHeader(group.folder, count: group.count)
             }
         }
-        Section {
-            ForEach(content.root) { task in taskRow(task) }
-        } header: {
-            if !content.folders.isEmpty || content.pinnedCount > 0 {
-                Text("Tasks").font(NativePreferences.shared.font(size: 12, surface: "sidebar", weight: .medium))
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .contentShape(.rect)
-                    .dropDestination(for: String.self) { ids, _ in return drop(ids, folder: nil) }
-            }
-        }
+        ForEach(content.root) { task in taskRow(task) }
     }
 
     private func folderHeader(_ folder: NativeProjectFolder, count: Int) -> some View {
@@ -279,10 +178,11 @@ struct TaskNavigator: View {
                 Text("\(count)").foregroundStyle(FDTheme.subtle).monospacedDigit()
             }
             .font(NativePreferences.shared.font(size: 12, surface: "sidebar", weight: .medium))
-            .padding(.vertical, 6).contentShape(.rect)
+            .padding(.leading, 12).padding(.vertical, 6).contentShape(.rect)
             .background(dropTarget == folder.id ? FDTheme.accentMuted : Color.clear, in: .rect(cornerRadius: 5))
         }
         .buttonStyle(.plain)
+        .listRowSeparator(.hidden)
         .contextMenu {
             Button("Rename folder…", systemImage: "pencil") { renameFolder(folder) }
             Button("New task in folder", systemImage: "plus") { newTask(folder: folder.id) }
@@ -294,13 +194,14 @@ struct TaskNavigator: View {
         }
     }
 
-    private func taskRow(_ task: AgentTask) -> some View {
-        TaskNavigationRow(task: task, project: store.selectedSection == "pins" ? store.allProjects.first { $0.id == task.projectID } : nil, stage: extensions(for: task).stage(task))
-            .tag(task.id)
+    private func taskRow(_ task: AgentTask, pinnedInProject: Bool = false) -> some View {
+        TaskNavigationRow(task: task, project: store.selectedSection == "pins" ? store.allProjects.first { $0.id == task.projectID } : nil,
+                          stage: extensions(for: task).stage(task), pinnedInProject: pinnedInProject)
+            .tag("task:" + task.id)
             .id(task.id)
             .listRowSeparator(.hidden)
-            .listRowInsets(EdgeInsets(top: 3, leading: 10, bottom: 3, trailing: 10))
-            .contextMenu { NativeTaskContextMenu(store: store, task: task, rename: { renaming = task }) }
+            .listRowInsets(EdgeInsets(top: 2, leading: 16, bottom: 2, trailing: 8))
+            .contextMenu { NativeTaskContextMenu(store: store, task: task, rename: { rename(task) }) }
             .draggable("falcondeck-task:\(task.projectID):\(task.id)")
             .accessibilityIdentifier("task-\(task.id)")
     }
@@ -317,7 +218,7 @@ struct TaskNavigator: View {
             }
             .font(NativePreferences.shared.font(size: 12, surface: "sidebar"))
             .foregroundStyle(FDTheme.accent)
-            .padding(.vertical, 10)
+            .padding(.leading, 12).padding(.vertical, 8)
             .contentShape(.rect)
         }
         .buttonStyle(.plain)
@@ -337,35 +238,6 @@ struct TaskNavigator: View {
             store.searchText = ""; filter = "all"; extensionSelections = [:]
         }
         revealedFolderID = folders.first { $0.taskIDs.contains(id) && $0.collapsed }?.id
-    }
-
-    private func scrollToSelection(_ proxy: ScrollViewProxy, page: NativeTaskNavigationPage) {
-        guard let id = store.selectedTaskID, page.includedIDs.contains(id) else { return }
-        Task { @MainActor in
-            await Task.yield()
-            guard store.selectedTaskID == id else { return }
-            proxy.scrollTo(id, anchor: .center)
-        }
-    }
-
-    private var footer: some View {
-        NativeSidebarFooter {
-            if archived {
-                Button { archived = false } label: { Label("Back to active tasks", systemImage: "arrow.uturn.backward") }
-                    .buttonStyle(.plain)
-            } else {
-                Button { newTask() } label: {
-                    Label(store.selectedSection == "chats" ? "New chat" : "New task", systemImage: "plus")
-                }
-                .buttonStyle(.plain)
-                .disabled(!store.isSelectedHostConnected)
-            }
-            Spacer()
-            if isProject, let projectID {
-                Button { createFolder(projectID) } label: { Image(systemName: "folder.badge.plus") }
-                    .buttonStyle(NativeIconButtonStyle()).help("New folder").accessibilityLabel("New folder")
-            }
-        }
     }
 
     private var filterLabel: String {
@@ -456,13 +328,6 @@ struct TaskNavigator: View {
         }
     }
 
-    private func createFolder(_ projectID: String) {
-        guard let name = NativeNavigationDialogs.name(title: "New folder", detail: "Folders organize tasks without changing their working directories.", action: "Create folder") else { return }
-        NativeTaskActions.perform(store) {
-            try await NativeTaskActions.folderMutation(store: store, projectID: projectID, fields: ["action": .string("create"), "name": .string(name)])
-        }
-    }
-
     private func renameFolder(_ folder: NativeProjectFolder) {
         guard let projectID, let name = NativeNavigationDialogs.name(title: "Rename folder", initial: folder.name) else { return }
         NativeTaskActions.perform(store) {
@@ -476,14 +341,6 @@ struct TaskNavigator: View {
         guard let projectID, NativeNavigationDialogs.confirm(title: "Delete “\(folder.name)” ?", detail: "Its tasks will return to the project root.", action: "Delete folder", destructive: true) else { return }
         NativeTaskActions.perform(store) {
             try await NativeTaskActions.folderMutation(store: store, projectID: projectID, fields: ["action": .string("delete"), "folder_id": .string(folder.id)])
-        }
-    }
-
-    private func archiveAll(_ projectID: String) {
-        guard NativeNavigationDialogs.confirm(title: "Archive all tasks in \(title)?", detail: "You can restore tasks from Archived tasks. Working tasks, tasks waiting for input and queued turns remain active.", action: "Archive all", destructive: true) else { return }
-        NativeTaskActions.perform(store) {
-            _ = try await store.request(path: "/api/workspaces/\(projectID)/threads/archive", method: "POST")
-            await store.refresh()
         }
     }
 
@@ -506,11 +363,16 @@ struct TaskNavigationRow: View {
     let task: AgentTask
     var project: Project?
     var stage: JSON?
+    var pinnedInProject = false
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 5) {
-            HStack(alignment: .firstTextBaseline, spacing: 6) {
+        VStack(alignment: .leading, spacing: 3) {
+            HStack(alignment: .firstTextBaseline, spacing: 5) {
                 if task.unread { Circle().fill(FDTheme.info).frame(width: 5, height: 5).accessibilityLabel("Unread") }
+                if pinnedInProject {
+                    Image(systemName: "pin.fill").font(.system(size: 8)).foregroundStyle(FDTheme.subtle)
+                        .accessibilityLabel("Pinned in project")
+                }
                 Text(task.title).font(NativePreferences.shared.font(size: 13, surface: "sidebar", weight: task.unread ? .medium : .regular))
                     .foregroundStyle(FDTheme.foreground).lineLimit(2).frame(maxWidth: .infinity, alignment: .leading)
                 TaskStatusMark(status: task.status)
@@ -518,7 +380,7 @@ struct TaskNavigationRow: View {
             let preview = task.previewLine
             if !preview.isEmpty {
                 Text(preview)
-                    .font(NativePreferences.shared.font(size: 12, surface: "sidebar")).foregroundStyle(FDTheme.muted).lineLimit(1)
+                    .font(NativePreferences.shared.font(size: 11, surface: "sidebar")).foregroundStyle(FDTheme.muted).lineLimit(1)
             }
             HStack(spacing: 5) {
                 if let stage {
@@ -540,8 +402,8 @@ struct TaskNavigationRow: View {
                         .accessibilityLabel("Updated \(age) ago")
                 }
             }
-            .font(NativePreferences.shared.font(size: 11, surface: "sidebar")).foregroundStyle(FDTheme.subtle)
+            .font(NativePreferences.shared.font(size: 10, surface: "sidebar")).foregroundStyle(FDTheme.subtle)
         }
-        .padding(.horizontal, 7).padding(.vertical, 9).contentShape(.rect)
+        .padding(.horizontal, 7).padding(.vertical, 7).contentShape(.rect)
     }
 }

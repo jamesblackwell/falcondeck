@@ -1,5 +1,38 @@
 import SwiftUI
 
+/// Transcript activity rows are their own disclosure rather than SwiftUI's.
+/// A `DisclosureGroup` with a custom label gives that label no hit target, so
+/// only the chevron opens it — and every attempt to widen or wrap the label
+/// (a frame, a spacer, a button) puts SwiftUI into an endless layout
+/// transaction that pegs a core and blanks the transcript. Owning the header
+/// row makes the whole row clickable and keeps layout ordinary.
+struct TranscriptDisclosure<Label: View, Content: View>: View {
+    @Binding var expanded: Bool
+    @ViewBuilder var label: Label
+    @ViewBuilder var content: Content
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            Button { expanded.toggle() } label: {
+                HStack(alignment: .firstTextBaseline, spacing: 7) {
+                    Image(systemName: "chevron.right")
+                        .font(.system(size: 9, weight: .semibold))
+                        .foregroundStyle(FDTheme.subtle)
+                        .rotationEffect(.degrees(expanded ? 90 : 0))
+                        .frame(width: 10, alignment: .leading)
+                    label
+                    Spacer(minLength: 0)
+                }
+                .contentShape(.rect)
+            }
+            .buttonStyle(.plain)
+            .accessibilityAddTraits(expanded ? [.isButton, .isSelected] : .isButton)
+            .accessibilityHint(expanded ? "Collapses this activity" : "Expands this activity")
+            if expanded { content }
+        }
+    }
+}
+
 /// A wire item, rendered with native text and controls. Actions belong to the
 /// selected task's owner; rows never mutate transcript history themselves.
 struct ConversationTranscriptRow: View {
@@ -8,7 +41,7 @@ struct ConversationTranscriptRow: View {
     let provider: String
     var preferences: JSON = .null
     var firstDiff = false
-    var activityInset: CGFloat = 35
+    var activityInset: CGFloat = 0
     /// Positive values expand; negative values collapse. Increment the absolute
     /// value for each command so repeated clicks still override a manual toggle.
     var expansionDirective: Int = 0
@@ -26,6 +59,7 @@ struct ConversationTranscriptRow: View {
     @State private var outputError: String?
     @State private var outputGeneration = 0
     @State private var readOnlyDetailsVisible = false
+    @State private var hovering = false
 
     private var displayPreferences: JSON {
         TranscriptPresentation.conversationPreferences(preferences)
@@ -97,13 +131,17 @@ struct ConversationTranscriptRow: View {
         HStack {
             Spacer(minLength: 48)
             VStack(alignment: .leading, spacing: 10) {
-                HStack(spacing: 7) {
-                    Text(raw["automated"].bool ? "SCHEDULED TASK" : "YOU")
-                        .font(NativePreferences.shared.font(size: 13, surface: "code", weight: .medium)).tracking(1)
-                    if raw["pending"].bool { Text("Sending…").font(NativePreferences.shared.font(size: 12, surface: "chat")) }
-                    Spacer()
-                    timestamp
-                }.foregroundStyle(FDTheme.muted)
+                if raw["automated"].bool || raw["pending"].bool || hasTimestamp {
+                    HStack(spacing: 7) {
+                        if raw["automated"].bool {
+                            Text("SCHEDULED TASK")
+                                .font(NativePreferences.shared.font(size: 11, surface: "code", weight: .medium)).tracking(1)
+                        }
+                        if raw["pending"].bool { Text("Sending…").font(NativePreferences.shared.font(size: 12, surface: "chat")) }
+                        Spacer(minLength: 0)
+                        timestamp
+                    }.foregroundStyle(FDTheme.muted)
+                }
                 attachments
                 Text(itemText)
                     .font(NativePreferences.shared.font(size: 16, surface: "chat")).lineSpacing(6).textSelection(.enabled)
@@ -127,35 +165,36 @@ struct ConversationTranscriptRow: View {
             && (itemText.count > 900 || itemText.filter { $0 == "\n" }.count > 12)
     }
 
+    /// No avatar and no repeated provider name: a reply that is not in a user
+    /// bubble is the agent's, and saying so on every message is noise.
     private var assistantMessage: some View {
-        HStack(alignment: .top, spacing: 12) {
-            Image(systemName: message.kind == "code_review" ? "checkmark.shield" : "terminal")
-                .font(.system(size: 11, weight: .medium)).foregroundStyle(FDTheme.accent)
-                .frame(width: 23, height: 23).background(FDTheme.accentDim, in: .rect(cornerRadius: 6))
-            VStack(alignment: .leading, spacing: 10) {
+        VStack(alignment: .leading, spacing: 10) {
+            if message.kind == "code_review" || message.streaming || !raw["subject"].string.isEmpty {
                 HStack(spacing: 8) {
-                    Text(message.kind == "code_review" ? "Code review" : FDTheme.providerName(provider))
-                        .font(NativePreferences.shared.font(size: 12, surface: "chat", weight: .semibold)).foregroundStyle(FDTheme.secondary)
+                    if message.kind == "code_review" {
+                        Label("Code review", systemImage: "checkmark.shield")
+                            .font(NativePreferences.shared.font(size: 12, surface: "chat", weight: .semibold)).foregroundStyle(FDTheme.secondary)
+                    }
+                    if !raw["subject"].string.isEmpty {
+                        Text(raw["subject"].string).font(NativePreferences.shared.font(size: 12, surface: "chat", weight: .medium)).foregroundStyle(FDTheme.muted)
+                    }
                     if message.streaming { MacActivityDiamond(size: 6) }
-                    Spacer()
-                    timestamp
+                    Spacer(minLength: 0)
                 }
-                if !raw["subject"].string.isEmpty {
-                    Text(raw["subject"].string).font(NativePreferences.shared.font(size: 12, surface: "chat", weight: .medium)).foregroundStyle(FDTheme.muted)
-                }
-                NativeMarkdownView(text: itemText)
-                attachments
-                citations
-                if !raw["error"].string.isEmpty {
-                    Label(raw["error"].string, systemImage: "exclamationmark.circle")
-                        .font(NativePreferences.shared.font(size: 12, surface: "chat")).foregroundStyle(FDTheme.danger).textSelection(.enabled)
-                }
-                if raw["lifecycle"].string == "interrupted" {
-                    Label("Response interrupted", systemImage: "stop.circle").font(NativePreferences.shared.font(size: 12, surface: "chat")).foregroundStyle(FDTheme.muted)
-                }
-                if !message.streaming && !itemText.isEmpty { actionBar }
-            }.frame(maxWidth: .infinity, alignment: .leading)
+            }
+            NativeMarkdownView(text: itemText)
+            attachments
+            citations
+            if !raw["error"].string.isEmpty {
+                Label(raw["error"].string, systemImage: "exclamationmark.circle")
+                    .font(NativePreferences.shared.font(size: 12, surface: "chat")).foregroundStyle(FDTheme.danger).textSelection(.enabled)
+            }
+            if raw["lifecycle"].string == "interrupted" {
+                Label("Response interrupted", systemImage: "stop.circle").font(NativePreferences.shared.font(size: 12, surface: "chat")).foregroundStyle(FDTheme.muted)
+            }
+            if !message.streaming && !itemText.isEmpty { actionBar }
         }
+        .frame(maxWidth: .infinity, alignment: .leading)
         .contextMenu { messageActions }
     }
 
@@ -195,6 +234,8 @@ struct ConversationTranscriptRow: View {
         return { TranscriptPresentation.reference(try await onLoadFullOutput(), original: reference, attachmentIndex: index) }
     }
 
+    private var hasTimestamp: Bool { Self.timestampParser.date(from: raw["created_at"].string) != nil }
+
     @ViewBuilder private var timestamp: some View {
         if let date = Self.timestampParser.date(from: raw["created_at"].string) {
             Text(date, style: .time).font(NativePreferences.shared.font(size: 12, surface: "chat")).foregroundStyle(FDTheme.muted)
@@ -202,13 +243,22 @@ struct ConversationTranscriptRow: View {
         }
     }
 
+    /// Four icons under every reply read as chrome. They stay in the layout so
+    /// nothing shifts, and in the accessibility tree, but only draw on hover.
     private var actionBar: some View {
         HStack(spacing: 2) {
-            actionButton("Copy response", symbol: "doc.on.doc") { FDTheme.copy(itemText) }
-            if let onQuote { actionButton("Quote response", symbol: "quote.bubble") { onQuote(itemText) } }
-            if let onRetry { actionButton("Retry in a new branch", symbol: "arrow.clockwise", action: onRetry) }
-            if let onReadAloud { actionButton("Read aloud", symbol: "speaker.wave.2") { onReadAloud(itemText) } }
-        }.padding(.leading, -5)
+            Group {
+                actionButton("Copy response", symbol: "doc.on.doc") { FDTheme.copy(itemText) }
+                if let onQuote { actionButton("Quote response", symbol: "quote.bubble") { onQuote(itemText) } }
+                if let onRetry { actionButton("Retry in a new branch", symbol: "arrow.clockwise", action: onRetry) }
+                if let onReadAloud { actionButton("Read aloud", symbol: "speaker.wave.2") { onReadAloud(itemText) } }
+            }
+            .opacity(hovering ? 1 : 0)
+            Spacer(minLength: 8)
+            timestamp
+        }
+        .padding(.leading, -5)
+        .onHover { hovering = $0 }
     }
 
     @ViewBuilder private var messageActions: some View {
@@ -232,11 +282,13 @@ struct ConversationTranscriptRow: View {
         let content = TranscriptPresentation.reasoningBody(raw)
         return VStack(alignment: .leading, spacing: 6) {
             if TranscriptPresentation.hasReasoningBody(raw) {
-                DisclosureGroup(isExpanded: open) {
+                TranscriptDisclosure(expanded: open) {
+                    reasoningLabel
+                } content: {
                     NativeMarkdownView(text: content, fontSize: 14, foreground: FDTheme.muted)
                         .padding(.leading, 12).padding(.top, 5)
                         .overlay(alignment: .leading) { FDTheme.line.frame(width: 2) }
-                } label: { reasoningLabel }
+                }
             } else {
                 reasoningLabel
             }
@@ -266,7 +318,9 @@ struct ConversationTranscriptRow: View {
     }
 
     private var toolActivity: some View {
-        DisclosureGroup(isExpanded: open) {
+        TranscriptDisclosure(expanded: open) {
+            toolActivityLabel
+        } content: {
             VStack(alignment: .leading, spacing: 12) {
                 if TranscriptPresentation.suppressReadOnlyDetails(raw, preferences: displayPreferences), !readOnlyDetailsVisible {
                     Text("Read-only output is hidden by your conversation preferences.").font(NativePreferences.shared.font(size: 12, surface: "chat")).foregroundStyle(FDTheme.muted)
@@ -277,7 +331,14 @@ struct ConversationTranscriptRow: View {
                 }
                 if let outputError { Text(outputError).font(NativePreferences.shared.font(size: 12, surface: "chat")).foregroundStyle(FDTheme.danger) }
             }.padding(.top, 10)
-        } label: {
+        }
+        .padding(12)
+        .background(failed ? FDTheme.danger.opacity(0.04) : FDTheme.surface, in: .rect(cornerRadius: 8))
+        .overlay { RoundedRectangle(cornerRadius: 8).strokeBorder(failed ? FDTheme.danger.opacity(0.3) : FDTheme.hairline) }
+        .padding(.leading, activityInset)
+    }
+
+    private var toolActivityLabel: some View {
             HStack(spacing: 8) {
                 if message.running { MacActivityDiamond(size: 7) }
                 else { Image(systemName: failed ? "exclamationmark.circle" : "checkmark").font(.system(size: 11)).foregroundStyle(failed ? FDTheme.danger : FDTheme.muted) }
@@ -296,11 +357,6 @@ struct ConversationTranscriptRow: View {
                     Text("exit \(String(format: "%.0f", exit))").font(NativePreferences.shared.font(size: 13, surface: "code")).foregroundStyle(FDTheme.danger)
                 }
             }
-        }
-        .padding(12)
-        .background(failed ? FDTheme.danger.opacity(0.04) : FDTheme.surface, in: .rect(cornerRadius: 8))
-        .overlay { RoundedRectangle(cornerRadius: 8).strokeBorder(failed ? FDTheme.danger.opacity(0.3) : FDTheme.hairline) }
-        .padding(.leading, activityInset)
     }
 
     @ViewBuilder private var toolOutput: some View {
@@ -492,10 +548,10 @@ struct ConversationTranscriptRow: View {
     }
 
     private func card<Content: View>(_ title: String, symbol: String, @ViewBuilder content: @escaping () -> Content) -> some View {
-        DisclosureGroup(isExpanded: open) {
-            VStack(alignment: .leading, spacing: 12, content: content).padding(.top, 10)
-        } label: {
+        TranscriptDisclosure(expanded: open) {
             Label(title, systemImage: symbol).font(NativePreferences.shared.font(size: 12, surface: "chat")).foregroundStyle(FDTheme.muted)
+        } content: {
+            VStack(alignment: .leading, spacing: 12, content: content).padding(.top, 10)
         }.padding(.leading, activityInset)
     }
 }

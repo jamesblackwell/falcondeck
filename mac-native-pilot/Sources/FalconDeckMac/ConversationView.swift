@@ -94,43 +94,32 @@ struct ConversationView: View {
         }
     }
 
+    /// One line, one menu. The task's run state already shows in the sidebar row
+    /// and the composer's stop button, and the daemon's state lives in Options.
     var conversationHeader: some View {
-        HStack(spacing: 10) {
+        HStack(spacing: 8) {
             if let project = store.selectedProject {
                 ProjectNavigatorGlyph(store: store, project: project,
                     preference: store.navigationPreferences["workspace_icons"][project.id], color: FDTheme.accent)
             }
-            VStack(alignment: .leading, spacing: 3) {
-                Text(store.selectedTask?.title ?? "New task").font(NativePreferences.shared.font(size: 15, weight: .medium)).foregroundStyle(FDTheme.foreground)
-                    .lineLimit(1).accessibilityIdentifier("conversation-title")
-                HStack(spacing: 5) {
-                    Text(store.selectedProject?.name ?? "Select a project to get started")
-                    if let task = store.selectedTask, !task.raw["variant"]["path"].string.isEmpty {
-                        Image(systemName: "arrow.triangle.branch")
-                        Text(URL(fileURLWithPath: workingDirectory).lastPathComponent)
-                    }
-                }.font(NativePreferences.shared.font(size: 12)).foregroundStyle(FDTheme.muted)
-                    .lineLimit(1).truncationMode(.middle).help(workingDirectory)
-            }
+            Text(store.selectedTask?.title ?? "New task").font(NativePreferences.shared.font(size: 14, weight: .medium)).foregroundStyle(FDTheme.foreground)
+                .lineLimit(1).accessibilityIdentifier("conversation-title")
+            HStack(spacing: 5) {
+                Text(store.selectedProject?.name ?? "Select a project to get started")
+                if let task = store.selectedTask, !task.raw["variant"]["path"].string.isEmpty {
+                    Image(systemName: "arrow.triangle.branch")
+                    Text(URL(fileURLWithPath: workingDirectory).lastPathComponent)
+                }
+            }.font(NativePreferences.shared.font(size: 12)).foregroundStyle(FDTheme.muted)
+                .lineLimit(1).truncationMode(.middle).help(workingDirectory)
             Spacer(minLength: 12)
             if actionPending { ProgressView().controlSize(.small) }
             if let task = store.selectedTask {
-                HStack(spacing: 6) {
-                    TaskStatusMark(status: task.status)
-                    Text(FDTheme.statusLabel(task.status)).font(NativePreferences.shared.font(size: 12)).foregroundStyle(task.running ? FDTheme.accent : FDTheme.muted)
-                }.padding(.horizontal, 10).padding(.vertical, 6).background(FDTheme.surface, in: .capsule)
-                // Distinct from the toolbar's task-and-command search.
                 Button { findVisible.toggle() } label: { Image(systemName: "text.magnifyingglass") }
-                    .buttonStyle(.plain).help("Find in conversation (⌘F)").accessibilityLabel("Find in conversation")
-                if ConversationTranscriptGroups.showsExpansionControls(preferences: store.preferences) {
-                    Menu {
-                        Button("Expand all activity") { expansionDirective = abs(expansionDirective) + 1 }
-                        Button("Collapse all activity") { expansionDirective = -(abs(expansionDirective) + 1) }
-                    } label: { Image(systemName: "rectangle.expand.vertical") }.menuStyle(.borderlessButton).fixedSize().help("Expand or collapse activity")
-                }
+                    .buttonStyle(NativeIconButtonStyle()).help("Find in conversation (⌘F)").accessibilityLabel("Find in conversation")
                 taskMenu(task)
             }
-        }.padding(.horizontal, 20).padding(.vertical, 8).frame(minHeight: 52)
+        }.padding(.horizontal, 20).padding(.vertical, 6).frame(minHeight: 42)
             .overlay(alignment: .bottom) { FDTheme.hairline.frame(height: 1) }
     }
 
@@ -181,7 +170,7 @@ struct ConversationView: View {
                                             .background(matches.contains(message.id) ? FDTheme.accentDim : .clear, in: .rect(cornerRadius: 8)).id(message.id)
                                     } else {
                                         ConversationTranscriptBurst(group: group, running: ConversationTranscriptGroups.isRunning(group.items, keepAlive: group.id == liveGroupID), expansionDirective: expansionDirective, findText: findText) { message in
-                                            AnyView(transcriptRow(message, firstDiffID: firstDiffID, retryable: retrySources[message.id] != nil, activityInset: 0).id(message.id))
+                                            AnyView(transcriptRow(message, firstDiffID: firstDiffID, retryable: retrySources[message.id] != nil).id(message.id))
                                         }.id(group.id)
                                     }
                                 }
@@ -189,7 +178,7 @@ struct ConversationView: View {
                             NativeExtensionToolResults(store: store, messages: store.messages)
                             if store.isRunning && !hasLiveActivityGroup && groups.last?.items.last.map(TranscriptPresentation.hasActivityIndicator) != true {
                                 HStack(spacing: 8) { MacActivityDiamond(size: 7); Text("\(FDTheme.providerName(provider)) is working").font(NativePreferences.shared.font(size: 12)).foregroundStyle(FDTheme.muted) }
-                                    .padding(.leading, 35).accessibilityIdentifier("agent-working")
+                                    .accessibilityIdentifier("agent-working")
                             }
                             Color.clear.frame(height: 1).id("transcript-bottom").background {
                                 GeometryReader { geometry in Color.clear.preference(key: TranscriptBottomPosition.self, value: geometry.frame(in: .named("transcript-scroll")).maxY) }
@@ -213,9 +202,9 @@ struct ConversationView: View {
         }
     }
 
-    func transcriptRow(_ message: Message, firstDiffID: String?, retryable: Bool, activityInset: CGFloat = 35) -> some View {
+    func transcriptRow(_ message: Message, firstDiffID: String?, retryable: Bool) -> some View {
         ConversationTranscriptRow(message: message, provider: provider, preferences: store.preferences,
-            firstDiff: message.id == firstDiffID, activityInset: activityInset, expansionDirective: expansionDirective,
+            firstDiff: message.id == firstDiffID, expansionDirective: expansionDirective,
             onQuote: { text in quote = text; persistPayload() },
             onEdit: canBranch && message.kind == "user_message" && !message.raw["turn_id"].string.isEmpty ? { action { try await edit(message, retry: false) } } : nil,
             onRetry: canBranch && retryable ? { action { try await retry(message) } } : nil,
@@ -296,12 +285,12 @@ struct ConversationView: View {
                     }
                     Button(action: send) {
                         Group { if store.isSending { ProgressView().controlSize(.small) } else { Image(systemName: store.isRunning && !steersCurrentTurn ? "text.badge.plus" : "arrow.up").font(.system(size: 14, weight: .semibold)) } }
-                            .frame(width: 30, height: 28).foregroundStyle(canSend ? FDTheme.background : FDTheme.subtle)
-                            .background(canSend ? FDTheme.accent : FDTheme.hover, in: .rect(cornerRadius: 7))
+                            .frame(width: 30, height: 30).foregroundStyle(canSend ? FDTheme.background : FDTheme.subtle)
+                            .background(canSend ? FDTheme.accent : FDTheme.hover, in: .rect(cornerRadius: 8))
                     }.buttonStyle(.plain).disabled(!canSend)
                         .help(sendHelp)
                         .accessibilityLabel("Send message").accessibilityIdentifier("send-message")
-                }.padding(.horizontal, 12).padding(.bottom, 10).padding(.top, 2)
+                }.padding(.horizontal, 12).padding(.bottom, 11).padding(.top, 4)
             }.disabled(!store.isInputReady)
                 .background(FDTheme.raised, in: .rect(cornerRadius: 12)).overlay { RoundedRectangle(cornerRadius: 12).strokeBorder(FDTheme.line) }
             if !store.isSelectedHostConnected {
@@ -340,14 +329,14 @@ private struct ConversationTranscriptBurst: View {
     let row: (Message) -> AnyView
     @State private var expanded = false
     var body: some View {
-        DisclosureGroup(isExpanded: $expanded) {
-            VStack(alignment: .leading, spacing: 8) { ForEach(group.items) { row($0) } }.padding(.top, 6)
-        } label: {
+        TranscriptDisclosure(expanded: $expanded) {
             HStack(spacing: 7) {
                 if running { MacActivityDiamond(size: 7) }
                 Text(ConversationTranscriptGroups.title(for: group.items, running: running))
             }.font(NativePreferences.shared.font(size: 13, surface: "chat")).foregroundStyle(FDTheme.muted)
-        }.padding(.leading, 35)
+        } content: {
+            VStack(alignment: .leading, spacing: 8) { ForEach(group.items) { row($0) } }.padding(.top, 6)
+        }
             .onChange(of: expansionDirective, initial: true) { _, directive in if directive != 0 { expanded = directive > 0 } }
             .onChange(of: findText, initial: true) { _, query in
                 guard !query.isEmpty else { return }
