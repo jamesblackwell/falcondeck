@@ -10,7 +10,16 @@ APP_PATH="$BUILD_DIR/$APP_NAME.app"
 INSTALL_PATH="/Applications/$APP_NAME.app"
 CONFIGURATION="release"
 RUST_TARGET_DIR="${FALCONDECK_NATIVE_CARGO_TARGET_DIR:-/tmp/falcondeck-native-runtime-target}"
-SIGNING_IDENTITY="${FALCONDECK_NATIVE_SIGNING_IDENTITY:--}"
+# An ad hoc signature is different on every build, so macOS treats each build as
+# a new application and re-prompts for the login keychain password guarding the
+# encrypted input store. Prefer the same Developer ID the packaged desktop app
+# uses, which keeps one stable identity across rebuilds.
+SIGNING_IDENTITY="${FALCONDECK_NATIVE_SIGNING_IDENTITY:-}"
+if [ -z "$SIGNING_IDENTITY" ] && command -v security >/dev/null 2>&1; then
+    SIGNING_IDENTITY="$(security find-identity -v -p codesigning 2>/dev/null \
+        | awk -F'"' '/Developer ID Application: Version Zero Limited/ { print $2; exit }')"
+fi
+SIGNING_IDENTITY="${SIGNING_IDENTITY:--}"
 INSTALL=false
 LAUNCH=false
 
@@ -25,7 +34,8 @@ Build the native Mac prototype as build/FalconDeck Native.app.
 
 Bundles the Rust daemon, extension runtime, computer-use driver and speech helper.
 The app attaches to an existing FalconDeck daemon when one is running.
-Set FALCONDECK_NATIVE_SIGNING_IDENTITY for Developer ID signing.
+Signs with the repository's Developer ID when that identity is in the keychain,
+otherwise ad hoc. Set FALCONDECK_NATIVE_SIGNING_IDENTITY to choose another.
 USAGE
 }
 
