@@ -424,6 +424,14 @@ export function DictationOverlay({
                 )}
                 {copied ? "Copied" : rewrite ? "Copy rewrite" : "Copy transcript"}
               </button>
+              <button
+                type="button"
+                className="fd-focus -mr-1 inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-full text-fg-muted hover:bg-surface-3 hover:text-fg-primary"
+                aria-label="Close"
+                onClick={() => void invoke("dismiss_dictation_overlay")}
+              >
+                <X aria-hidden="true" className="h-4 w-4" />
+              </button>
               </div>
             ) : (
               <span className="ml-auto shrink-0 font-mono text-[length:var(--fd-text-xs)] text-fg-muted">

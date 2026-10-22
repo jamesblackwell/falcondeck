@@ -165,6 +165,12 @@ describe("DictationOverlay", () => {
     expect(screen.getByRole("button", { name: "Copy transcript" })).toBeInTheDocument();
   });
 
+  it("closes the completed pill from its close button", async () => {
+    render(<DictationOverlay initialEvent={{ state: "completed", text: "Sent words", retainedAudio: false }} subscribeToEvents={false} />);
+    await act(async () => { fireEvent.click(screen.getByRole("button", { name: "Close" })); });
+    expect(invoked).toContain("dismiss_dictation_overlay");
+  });
+
   it("offers a countdown undo after a cancelled take", async () => {
     vi.useFakeTimers({ shouldAdvanceTime: true });
     render(<DictationOverlay />);
