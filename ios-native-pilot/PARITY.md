@@ -52,7 +52,7 @@ The comparison with the existing mobile client confirmed these remaining gaps:
 This was a focused code and contract comparison around task navigation, read
 state and agent control, not an exhaustive device QA pass. The first native
 TestFlight app record and upload remain pending from the release preparation;
-the previously exported IPA predates these unread fixes and must be rebuilt.
+the signed TestFlight candidate has been rebuilt with these unread fixes.
 
 ## Earlier implementation milestones
 
