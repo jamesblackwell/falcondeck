@@ -122,4 +122,36 @@ final class ChatTests: XCTestCase {
         XCTAssertEqual(NativeRequest.events(.object(["kind": .string("daemon-events"), "events": .array([event])])), [event])
         XCTAssertTrue(NativeRequest.events(.object(["kind": .string("unrelated"), "events": .array([event])])).isEmpty)
     }
+
+    private var planRequest: JSON { .object(["kind": .string("plan_approval"), "detail": .string("## Plan\n\nKeep the existing API.")]) }
+
+    func testPlanChangesUseCancelledOutcomeAndPreserveMultilineFeedback() {
+        let response = PlanReviewAction.requestChanges.response(for: planRequest, feedback: " \nKeep the API unchanged.\nAdd validation. \n")
+        XCTAssertEqual(response, .object(["kind": .string("plan_approval"), "outcome": .string("cancelled"), "feedback": .string("Keep the API unchanged.\nAdd validation.")]))
+    }
+    func testPlanChangesRequireNonblankFeedback() {
+        for feedback in ["", "   ", "\n\t "] {
+            XCTAssertNil(PlanReviewAction.requestChanges.response(for: planRequest, feedback: feedback))
+        }
+    }
+    func testPlanApprovalDoesNotSubmitAnUnsentFeedbackDraft() {
+        XCTAssertEqual(PlanReviewAction.approve.response(for: planRequest, feedback: "Unsent changes"),
+            .object(["kind": .string("plan_approval"), "outcome": .string("approved")]))
+    }
+    func testPlanApprovalRequiresAPlanToReview() {
+        for plan in ["", " \n\t"] {
+            XCTAssertNil(PlanReviewAction.approve.response(for: planRequest.setting("detail", .string(plan)), feedback: ""))
+        }
+    }
+    func testAbandonPlanDoesNotApproveOrSubmitUnsentFeedback() {
+        XCTAssertEqual(PlanReviewAction.abandon.response(for: planRequest.setting("detail", .null), feedback: "Unsent changes"),
+            .object(["kind": .string("plan_approval"), "outcome": .string("abandoned")]))
+    }
+    func testPlanActionsCannotAnswerAQuestionOrToolApproval() {
+        for kind in ["question", "approval"] {
+            for action in [PlanReviewAction.approve, .requestChanges, .abandon] {
+                XCTAssertNil(action.response(for: planRequest.setting("kind", .string(kind)), feedback: "Changes"))
+            }
+        }
+    }
 }

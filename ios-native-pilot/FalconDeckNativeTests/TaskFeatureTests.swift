@@ -358,3 +358,60 @@ private actor ReadStateRelay: RelayServing {
         XCTAssertEqual(calls.map(\.0), ["thread.mark_read"])
     }
 }
+
+private actor PlanResponseRelay: RelayServing {
+    private let fail: Bool
+    private var calls: [(String, JSON)] = []
+    init(fail: Bool = false) { self.fail = fail }
+    func events() -> AsyncStream<RelayUpdate> { AsyncStream { $0.finish() } }
+    func pair(_ input: PairingInput, connectionID: UUID) { }
+    func restore(connectionID: UUID) -> Bool { true }
+    func disconnect(forget: Bool) { }
+    func refresh() { }
+    func detail(task: AgentTask, before: String?) -> JSON { .null }
+    func call(_ method: String, params: JSON) throws -> JSON {
+        calls.append((method, params))
+        if fail { throw PilotError("Plan response unavailable") }
+        return .object(["ok": .bool(true)])
+    }
+    func requests() -> [(String, JSON)] { calls }
+}
+
+@MainActor final class PlanResponseTests: XCTestCase {
+    private var request: JSON { .object(["request_id": .string("plan-review"), "workspace_id": .string("project"), "thread_id": .string("task"), "kind": .string("plan_approval"), "detail": .string("Review this plan.")]) }
+
+    func testAllPlanOutcomesReachTheExistingDaemonContractWithoutSendingTheComposer() async throws {
+        for (action, outcome) in [(PlanReviewAction.approve, "approved"), (.requestChanges, "cancelled"), (.abandon, "abandoned")] {
+            let relay = PlanResponseRelay(), model = AppModel.testing(relay: relay)
+            model.connected = true; model.requests = [request]
+            let task = AgentTask(.object(["id": .string("task"), "workspace_id": .string("project")]))
+            let chat = model.chat(for: task); chat.draft = "Keep my separate follow-up."
+            let response = try XCTUnwrap(action.response(for: request, feedback: " Revise validation. "))
+            try await model.respond(request: request, response: response)
+            let calls = await relay.requests()
+            XCTAssertEqual(calls.map(\.0), ["interactive.respond"])
+            XCTAssertEqual(calls[0].1["workspace_id"].string, "project")
+            XCTAssertEqual(calls[0].1["request_id"].string, "plan-review")
+            XCTAssertEqual(calls[0].1["response"]["kind"].string, "plan_approval")
+            XCTAssertEqual(calls[0].1["response"]["outcome"].string, outcome)
+            XCTAssertEqual(calls[0].1["response"]["feedback"], action == .requestChanges ? .string("Revise validation.") : .null)
+            XCTAssertTrue(model.requests.isEmpty)
+            XCTAssertEqual(chat.draft, "Keep my separate follow-up.")
+        }
+    }
+    func testFailedPlanResponsesLeaveThePendingReviewAndComposerIntact() async throws {
+        for action in [PlanReviewAction.approve, .requestChanges, .abandon] {
+            let relay = PlanResponseRelay(fail: true), model = AppModel.testing(relay: relay)
+            model.connected = true; model.requests = [request]
+            let task = AgentTask(.object(["id": .string("task"), "workspace_id": .string("project")]))
+            let chat = model.chat(for: task); chat.draft = "Keep my separate follow-up."
+            let response = try XCTUnwrap(action.response(for: request, feedback: "Revise validation."))
+            do {
+                try await model.respond(request: request, response: response)
+                XCTFail("A failed submission must remain available for retry")
+            } catch { XCTAssertEqual(error.localizedDescription, "Plan response unavailable") }
+            XCTAssertEqual(model.requests, [request])
+            XCTAssertEqual(chat.draft, "Keep my separate follow-up.")
+        }
+    }
+}

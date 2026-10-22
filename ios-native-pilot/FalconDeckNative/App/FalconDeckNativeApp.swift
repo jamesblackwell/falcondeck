@@ -38,7 +38,8 @@ struct FalconDeckNativeApp: App {
             defaults.removePersistentDomain(forName: "NativeLoadingPreview")
             return AppModel(relay: LoadingPreviewRelay(failFirst: ProcessInfo.processInfo.arguments.contains("--loading-preview=retry")), voice: VoiceRecorder(defaults: defaults), push: NativePushNotifications(defaults: defaults), notifications: LocalNotifications(defaults: defaults), sessionLoader: { nil })
         }
-        if ProcessInfo.processInfo.arguments.contains("--review-preview=offline") || ProcessInfo.processInfo.arguments.contains("--review-preview=queue-error") {
+        if ProcessInfo.processInfo.arguments.contains("--review-preview=offline") || ProcessInfo.processInfo.arguments.contains("--review-preview=queue-error")
+            || ProcessInfo.processInfo.arguments.contains("--review-preview=plan-error") || ProcessInfo.processInfo.arguments.contains("--review-preview=plan-offline") {
             let suite = "NativeReviewPreview", defaults = UserDefaults(suiteName: "NativeReviewPreview")!
             defaults.removePersistentDomain(forName: suite)
             return AppModel(relay: UnavailablePreviewRelay(), voice: VoiceRecorder(defaults: defaults), push: NativePushNotifications(defaults: defaults), notifications: LocalNotifications(defaults: defaults), sessionLoader: { nil })

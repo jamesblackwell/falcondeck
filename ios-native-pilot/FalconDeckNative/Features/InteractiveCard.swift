@@ -21,10 +21,26 @@ struct ApprovalChoice: Identifiable, Equatable {
     }
 }
 
+enum PlanReviewAction: String {
+    case approve = "approved", requestChanges = "cancelled", abandon = "abandoned"
+
+    func response(for request: JSON, feedback: String) -> JSON? {
+        guard request["kind"].string == "plan_approval" else { return nil }
+        let feedback = feedback.trimmingCharacters(in: .whitespacesAndNewlines)
+        if self == .approve, request["detail"].string.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { return nil }
+        if self == .requestChanges, feedback.isEmpty { return nil }
+        var response = JSON.object(["kind": .string("plan_approval"), "outcome": .string(rawValue)])
+        if self == .requestChanges { response = response.setting("feedback", .string(feedback)) }
+        return response
+    }
+}
+
 struct InteractiveCard: View {
     @Environment(AppModel.self) private var model
     let request: JSON
     @State private var answers: [String: String] = [:]
+    @State private var planFeedback = ""
+    @FocusState private var planFeedbackFocused: Bool
     @State private var sending = false
     @State private var error: String?
     @State private var showQuestions = false
@@ -44,6 +60,8 @@ struct InteractiveCard: View {
             if !request["path"].string.isEmpty { Text(request["path"].string).font(.caption.monospaced()).foregroundStyle(FD.secondary).textSelection(.enabled) }
             if !request["detail"].string.isEmpty {
                 ScrollView { NativeMarkdown(text: request["detail"].string) }.frame(maxHeight: 180)
+            } else if kind == "plan_approval" {
+                Text("This provider did not supply a plan to review.").font(.footnote).foregroundStyle(FD.secondary)
             }
             if let error { Text(error).font(.footnote).foregroundStyle(.orange) }
             if kind == "approval" {
@@ -54,9 +72,12 @@ struct InteractiveCard: View {
                     VStack(alignment: .leading) { ForEach(choices) { choice in choiceButton(choice) } }
                 }
             } else if kind == "plan_approval" {
-                HStack {
-                    Button("Approve plan") { respond(.object(["kind": .string("plan_approval"), "outcome": .string("approved")])) }.buttonStyle(.glassProminent)
-                    Button("Keep planning") { respond(.object(["kind": .string("plan_approval"), "outcome": .string("cancelled")])) }.buttonStyle(.glass)
+                TextField("Describe changes you want before implementation", text: $planFeedback, axis: .vertical)
+                    .lineLimit(2...4).textFieldStyle(.roundedBorder).focused($planFeedbackFocused)
+                    .accessibilityLabel("Requested plan changes").accessibilityIdentifier("plan-feedback")
+                ViewThatFits(in: .horizontal) {
+                    HStack { planButtons }
+                    VStack(alignment: .leading) { planButtons }
                 }
             } else if kind == "question" {
                 Button("Answer questions") { showQuestions = true }.buttonStyle(.glassProminent)
@@ -67,11 +88,37 @@ struct InteractiveCard: View {
         .overlay { RoundedRectangle(cornerRadius: 16).strokeBorder(FD.line) }
         .disabled(sending || (!model.connected && !model.demo))
         .sheet(isPresented: $showQuestions) { questionSheet }
+        .toolbar {
+            if planFeedbackFocused {
+                ToolbarItemGroup(placement: .keyboard) {
+                    Spacer()
+                    Button("Done") { planFeedbackFocused = false }
+                }
+            }
+        }
     }
     private func choiceButton(_ choice: ApprovalChoice) -> some View {
         Button(choice.label, role: choice.destructive ? .destructive : nil) { respond(choice.response) }.buttonStyle(.glass)
     }
+    private var planButtons: some View {
+        Group {
+            Button("Abandon plan", role: .destructive) { respondToPlan(.abandon) }.buttonStyle(.glass).tint(.red)
+                .accessibilityIdentifier("plan-abandon")
+            Button("Request changes") { respondToPlan(.requestChanges) }.buttonStyle(.glass)
+                .disabled(PlanReviewAction.requestChanges.response(for: request, feedback: planFeedback) == nil)
+                .accessibilityIdentifier("plan-request-changes")
+            Button("Approve and implement") { respondToPlan(.approve) }.buttonStyle(.glassProminent)
+                .disabled(PlanReviewAction.approve.response(for: request, feedback: planFeedback) == nil)
+                .accessibilityIdentifier("plan-approve")
+        }
+    }
+    private func respondToPlan(_ action: PlanReviewAction) {
+        guard let response = action.response(for: request, feedback: planFeedback) else { return }
+        planFeedbackFocused = false
+        respond(response)
+    }
     private func respond(_ response: JSON) {
+        guard !sending else { return }
         sending = true; error = nil
         Task {
             defer { sending = false }

@@ -12,6 +12,7 @@ alongside the unchanged Expo route. The daemon and agent storage remain authorit
 | New task | Draft composer, provider/model selection, first-send creation, folder filing | Implemented; first-send and failed-send regression tests pass |
 | Composer | Model, effort, permissions, sandbox, collaboration, speed, skills/prompts | Capability-based models/modes/permissions/sandbox/speed plus provider-scoped skills and saved prompt shortcuts |
 | Turns | Live replies, queue/edit/remove/steer, interrupt, resume interrupted, compact | Send/interrupt, queues, shutdown-resume, edit/retry branching and cross-agent handoff implemented |
+| Plan reviews | Approve implementation, request revisions with feedback, abandon the plan | Native actions use the existing `approved`, `cancelled` with trimmed multiline feedback, and `abandoned` responses; failed submissions retain feedback and the pending review |
 | Task actions | Rename/suggest, read/unread, archive/unarchive, branch/retry, handoff | Rename/suggest/read/unread/pin/archive/read-archived/restore, branch/retry and cross-agent handoff implemented; read/unread is available from task options, long-press menus and a leading swipe |
 | Goals | Set objective/budget, status/usage, pause/resume/stop | Implemented; local lifecycle/budget test passes |
 | Transcript | Markdown/code/tables, reasoning/tools/groups, plans/diffs/files, images, search/artifacts/reviews/unknown fallback | All wire item kinds have a native renderer or inspectable fallback; grouping, preferences, harness projection, citations, native Mermaid flowcharts and complete-source fallback implemented |
@@ -41,18 +42,26 @@ tests pass, and both read/unread UI checks pass on iPhone and iPad.
 `.agents/skills/autoreview/scripts/autoreview --mode local` is clean with native
 read-state source supplied as review context.
 
+Plan review now includes requested-change feedback and Abandon plan alongside
+Approve and implement. Blank feedback cannot be submitted as a revision request,
+and a missing plan cannot be approved. Submission leaves the separate composer
+draft untouched; failed responses keep the feedback and review available for
+retry. Actions are disabled while sending or disconnected. All 346 unit tests
+and the five plan-review UI checks on both iPhone and iPad pass; repo-local
+Autoreview is clean.
+
 The comparison with the existing mobile client confirmed these remaining gaps:
 
 | Gap | Evidence and user impact |
 | --- | --- |
-| Plan approval feedback and abandonment | Native `InteractiveCard` offers Approve plan and Keep planning, without a feedback field or an Abandon plan action. Expo's `PlanApprovalBanner` supports requested changes with feedback and the `abandoned` outcome. Native users must describe changes in a separate message or return to another client. |
 | Navigation between spawned tasks | The native sidebar sorts flat task lists and does not inspect `origin.kind == agent_spawn` or `origin.parent_thread_id`. Expo uses `nestSpawnedThreads` from `client-core` to group children under their parent and keep each family together when sorting and paging. Native child tasks remain accessible, but their relationship is missing. |
 | Production native push | The hosted relay's `/v1/push-capabilities` still advertises only the native sandbox topic as of this check. Native Release builds use production APNs, so TestFlight background notifications need a production configuration entry. Foreground relay operation and existing Expo notifications are independent of this gap. |
 
 This was a focused code and contract comparison around task navigation, read
 state and agent control, not an exhaustive device QA pass. The first native
 TestFlight app record and upload remain pending from the release preparation;
-the signed TestFlight candidate has been rebuilt with these unread fixes.
+the signed TestFlight candidate includes the unread fixes and needs another
+rebuild to include the plan-review actions.
 
 ## Earlier implementation milestones
 

@@ -80,6 +80,83 @@ import XCTest
     }
 }
 
+@MainActor final class PlanReviewQATests: XCTestCase {
+    override func setUp() { super.setUp(); continueAfterFailure = false }
+    private func launch(_ mode: String = "plan") -> XCUIApplication {
+        XCUIDevice.shared.orientation = .portrait
+        let app = XCUIApplication(); app.launchArguments = ["--demo", "--review-preview=" + mode]; app.launch()
+        if !app.buttons["sidebar-task-native"].isHittable, app.buttons["BackButton"].isHittable { app.buttons["BackButton"].tap() }
+        let task = app.buttons["sidebar-task-native"]
+        XCTAssertTrue(task.waitForExistence(timeout: 5)); task.tap()
+        XCTAssertTrue(app.buttons["plan-abandon"].waitForExistence(timeout: 5))
+        return app
+    }
+    @discardableResult private func reveal(_ id: String, in app: XCUIApplication, earlier: Bool = false) -> XCUIElement {
+        let element = app.descendants(matching: .any).matching(identifier: id).firstMatch
+        let context = app.scrollViews["conversation-context"]
+        for _ in 0..<5 where !element.isHittable {
+            if earlier { context.swipeDown() } else { context.swipeUp() }
+        }
+        XCTAssertTrue(element.isHittable, "Plan control \(id) must be reachable")
+        return element
+    }
+    private func capture(_ name: String) {
+        let shot = XCTAttachment(screenshot: XCUIScreen.main.screenshot())
+        shot.name = name; shot.lifetime = .keepAlways; add(shot)
+    }
+    func testRequestChangesRequiresFeedbackAndKeepsTheComposerDraft() {
+        let app = launch()
+        XCTAssertFalse(app.buttons["plan-request-changes"].isEnabled)
+        let feedback = reveal("plan-feedback", in: app, earlier: true)
+        feedback.tap(); feedback.typeText(" \n")
+        XCTAssertFalse(app.buttons["plan-request-changes"].isEnabled)
+        feedback.typeText("Revise validation.\nKeep the daemon API unchanged.")
+        app.buttons["Done"].tap()
+        XCTAssertTrue(app.buttons["plan-request-changes"].isEnabled)
+        reveal("plan-request-changes", in: app)
+        capture("Native plan review with revision feedback")
+        app.buttons["plan-request-changes"].tap()
+        XCTAssertTrue(app.buttons["plan-request-changes"].waitForNonExistence(timeout: 5))
+        XCTAssertEqual(app.textFields["chat-input"].value as? String, "Keep my separate follow-up.")
+    }
+    func testApproveAndAbandonResolveWithoutConsumingTheComposer() {
+        for id in ["plan-approve", "plan-abandon"] {
+            let app = launch()
+            reveal(id, in: app).tap()
+            XCTAssertTrue(app.buttons[id].waitForNonExistence(timeout: 5))
+            XCTAssertEqual(app.textFields["chat-input"].value as? String, "Keep my separate follow-up.")
+            app.terminate()
+        }
+    }
+    func testMissingPlanCannotBeApprovedButCanBeAbandoned() {
+        let app = launch("plan-empty")
+        XCTAssertFalse(app.buttons["plan-approve"].isEnabled)
+        XCTAssertTrue(app.staticTexts["This provider did not supply a plan to review."].exists)
+        reveal("plan-abandon", in: app).tap()
+        XCTAssertTrue(app.buttons["plan-abandon"].waitForNonExistence(timeout: 5))
+    }
+    func testFailureKeepsFeedbackAndMakesTheReviewAvailableForRetry() {
+        let app = launch("plan-error")
+        let feedback = reveal("plan-feedback", in: app, earlier: true)
+        feedback.tap(); feedback.typeText("Keep this revision feedback for retry.")
+        app.buttons["Done"].tap()
+        reveal("plan-request-changes", in: app).tap()
+        XCTAssertTrue(app.staticTexts["The preview computer is unavailable."].waitForExistence(timeout: 5))
+        XCTAssertEqual(feedback.value as? String, "Keep this revision feedback for retry.")
+        XCTAssertTrue(app.buttons["plan-request-changes"].isEnabled)
+        XCTAssertTrue(app.buttons["plan-abandon"].isEnabled)
+        XCTAssertEqual(app.textFields["chat-input"].value as? String, "Keep my separate follow-up.")
+        reveal("plan-feedback", in: app, earlier: true)
+        capture("Failed plan response retains revision feedback")
+    }
+    func testOfflineReviewCannotSubmitAnyPlanOutcome() {
+        let app = launch("plan-offline")
+        for id in ["plan-approve", "plan-abandon", "plan-request-changes", "plan-feedback"] {
+            XCTAssertFalse(app.descendants(matching: .any).matching(identifier: id).firstMatch.isEnabled)
+        }
+    }
+}
+
 @MainActor final class NativeSmokeTests: XCTestCase {
     override func setUp() { super.setUp(); continueAfterFailure = false }
     private func capture(_ name: String) {

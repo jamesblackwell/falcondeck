@@ -377,6 +377,14 @@ final class AppModel {
                 let full = JSON.object(["id": .string("review-output"), "kind": .string("tool_call"), "title": .string("Review output"), "status": .string("completed"), "output": .string("Native output search\nAll focused checks passed.\nSearch keeps the full output selectable.")])
                 chat.transcript.items = [Message(full.setting("display", .object(["output_total_bytes": .number(200)])))]
                 itemCache["\(connectionID):\(task.id):review-output"] = full
+            } else if mode?.hasPrefix("plan") == true {
+                let plan = mode == "plan-empty" ? "" : "## Implementation plan\n\n1. Add native plan review controls.\n2. Verify the existing daemon responses."
+                requests = [.object(["request_id": .string("review-plan"), "workspace_id": .string(task.projectID), "thread_id": .string(task.id),
+                    "kind": .string("plan_approval"), "title": .string("Review implementation plan"), "detail": .string(plan)])]
+                tasks[0] = AgentTask(task.raw.setting("status", .string("waiting_for_input")))
+                chat.draft = "Keep my separate follow-up."
+                if mode == "plan-error" { demo = false; hasSession = true; connected = true; hasLiveSnapshot = true; status = "Preview computer" }
+                if mode == "plan-offline" { demo = false; hasSession = true; connected = false; status = "Offline" }
             }
         }
         if let argument = ProcessInfo.processInfo.arguments.first(where: { $0.hasPrefix("--voice-preview=") }),
