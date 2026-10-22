@@ -191,7 +191,7 @@ private struct ChatContent: View {
         .sheet(item: $chat.queuedEdit) { QueuedMessageEditor(task: task, edit: $0) }
         .onAppear { visible = true; listScrolling.setActive(true); if chat.loaded { scrollToLatest(animated: false) } }
         .onDisappear { visible = false; listScrolling.setActive(false) }
-        .task(id: ConversationReadState(taskID: task.id, activitySeq: task.activitySeq, historyReady: chat.loaded && !chat.needsRefresh && !chat.loading && chat.historyError == nil, foreground: model.foreground, visible: visible)) {
+        .task(id: ConversationReadState(taskID: task.id, selectionID: model.readSelectionID, activitySeq: task.activitySeq, historyReady: chat.loaded && !chat.needsRefresh && !chat.loading && chat.historyError == nil, foreground: model.foreground, visible: visible)) {
             guard visible, chat.loaded, !chat.needsRefresh, !chat.loading, chat.historyError == nil, model.foreground else { return }
             do { try await Task.sleep(for: .milliseconds(600)) } catch { return }
             await model.markRead(task, automatic: true)
@@ -261,6 +261,7 @@ private struct TranscriptGeometry: Equatable {
 
 private struct ConversationReadState: Hashable {
     let taskID: String
+    let selectionID: UUID
     let activitySeq: Int
     let historyReady: Bool
     let foreground: Bool

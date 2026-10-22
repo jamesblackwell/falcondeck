@@ -42,7 +42,11 @@ struct TaskOptionsView: View {
                                 Button("Project root") { move(task, folder: nil) }
                                 ForEach(model.folders.filter { $0.projectID == task.projectID }) { folder in Button(folder.name) { move(task, folder: folder.id) } }
                             }
-                            if task.activitySeq > 0 { Button(task.unread ? "Mark read" : "Mark unread", systemImage: "circle") { run { await model.markRead(task, unread: !task.unread) } } }
+                            TaskReadButton(task: task) {
+                                run {
+                                    guard await model.markRead(task, unread: !task.unread) else { throw PilotError(model.error ?? "Couldn't update the task's read status.") }
+                                }
+                            }
                         }.listRowBackground(FD.surface).disabled(!canMutate)
                         Section {
                             if task.goal != .null || model.projects.first(where: { $0.id == task.projectID })?.capabilities(task.provider)["supports_goals"].bool == true || model.demo {

@@ -1,5 +1,10 @@
 import Foundation
 
+struct TaskReadSuppression {
+    let id = UUID()
+    var activitySeq: Int
+}
+
 extension AgentTask {
     var archived: Bool { raw["is_archived"].bool }
     var goal: JSON { raw["goal"] }
@@ -68,23 +73,36 @@ extension Project {
         _ = try await taskRequest(task, method: "thread.queue.\(action)", fields: fields)
     }
 
-    func markRead(_ task: AgentTask, unread: Bool = false, automatic: Bool = false) async {
-        guard !task.isDraft, task.activitySeq > 0, demo || connected else { return }
+    @discardableResult func markRead(_ task: AgentTask, unread: Bool = false, automatic: Bool = false) async -> Bool {
+        guard !task.isDraft, task.activitySeq > 0, demo || connected else { return false }
         if automatic {
-            guard chats[task.id]?.needsRefresh != true else { return }
-            guard task.unread, readSuppression[task.id] != task.activitySeq else { return }
+            guard !Task.isCancelled, foreground, selection == .task(task.id), chats[task.id]?.needsRefresh != true else { return false }
+            guard let latest = self.task(task.id), latest.activitySeq == task.activitySeq, latest.unread,
+                  readSuppression[task.id]?.activitySeq != task.activitySeq else { return false }
         }
-        if unread { readSuppression[task.id] = task.activitySeq }
-        else { readSuppression.removeValue(forKey: task.id) }
+        let current = connectionID
+        let suppression = unread ? TaskReadSuppression(activitySeq: task.activitySeq) : nil
+        readSuppression[task.id] = suppression
         do {
             if demo {
-                var attention = task.raw["attention"].setting("unread", .bool(unread))
-                if !unread { attention = attention.setting("last_read_seq", .number(Double(task.activitySeq))) }
-                upsertTask(task.raw.setting("attention", attention)); return
+                let attention = task.raw["attention"].setting("unread", .bool(unread))
+                    .setting("last_read_seq", .number(Double(unread ? task.activitySeq - 1 : task.activitySeq)))
+                upsertTask(task.raw.setting("attention", attention))
+            } else {
+                let result = try await taskRequest(task, method: unread ? "thread.mark_unread" : "thread.mark_read", fields: unread ? [:] : ["read_seq": .number(Double(task.activitySeq))])
+                let raw = result["thread"] == .null ? result : result["thread"]
+                // A reopen or another read action releases this particular
+                // suppression; a delayed reply must not recreate it.
+                if let suppression, readSuppression[task.id]?.id == suppression.id, raw["id"].string == task.id {
+                    readSuppression[task.id]?.activitySeq = raw["attention"]["last_agent_activity_seq"].int
+                }
             }
-            _ = try await taskRequest(task, method: unread ? "thread.mark_unread" : "thread.mark_read", fields: unread ? [:] : ["read_seq": .number(Double(task.activitySeq))])
+            if !automatic { error = nil }
+            return true
         } catch {
-            if !automatic { self.error = error.localizedDescription }
+            if let suppression, readSuppression[task.id]?.id == suppression.id { readSuppression.removeValue(forKey: task.id) }
+            if current == connectionID, !automatic { self.error = error.localizedDescription }
+            return false
         }
     }
 

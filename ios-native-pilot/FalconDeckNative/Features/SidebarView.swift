@@ -338,6 +338,7 @@ struct SidebarView: View {
             .accessibilityValue("\(task.provider.capitalized), \(task.awaitingInput ? "Needs input" : task.working ? "Running" : task.unread ? "Unread" : "Ready")")
             .accessibilityAddTraits(model.selection == .task(task.id) ? .isSelected : [])
             .contextMenu { TaskStageMenu(task: task); TaskActions(task: task) }
+            .swipeActions(edge: .leading) { TaskReadButton(task: task).tint(FD.accent) }
     }
     private func sidebarAction(_ title: String, symbol: String, selected: Bool = false, action: @escaping () -> Void) -> some View {
         Button(action: action) {
@@ -387,6 +388,7 @@ struct TaskActions: View {
     let task: AgentTask
     var body: some View {
         Button { model.taskOptionsID = task.id } label: { Label("Task options", systemImage: "ellipsis") }
+        TaskReadButton(task: task)
         Button { Task { await model.updateTask(task, fields: ["pinned": .bool(!task.pinned)]) } } label: { Label(task.pinned ? "Unpin" : "Pin", systemImage: "pin") }
         Button { Task { await model.updateTask(task, fields: ["pinned_in_project": .bool(!task.pinnedInProject)]) } } label: { Label(task.pinnedInProject ? "Unpin in project" : "Pin in project", systemImage: "pin.circle") }
         Menu("Move to folder", systemImage: "folder") {
@@ -403,5 +405,19 @@ struct TaskActions: View {
             do { try await model.folderMutation(projectID: task.projectID, action: "move_thread", folderID: id, taskID: task.id) }
             catch { model.error = error.localizedDescription }
         }
+    }
+}
+
+struct TaskReadButton: View {
+    @Environment(AppModel.self) private var model
+    let task: AgentTask
+    var action: (() -> Void)? = nil
+    var body: some View {
+        Button(task.unread ? "Mark read" : "Mark unread", systemImage: task.unread ? "envelope.open" : "envelope.badge") {
+            if let action { action() }
+            else { Task { await model.markRead(task, unread: !task.unread) } }
+        }
+        .disabled(task.isDraft || task.activitySeq == 0 || (!model.demo && !model.connected))
+        .accessibilityIdentifier("task-toggle-read")
     }
 }

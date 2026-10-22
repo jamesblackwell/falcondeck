@@ -264,6 +264,60 @@ import XCTest
     }
 }
 
+@MainActor final class TaskReadQATests: XCTestCase {
+    override func setUp() { super.setUp(); continueAfterFailure = false }
+    private func launch() -> XCUIApplication {
+        XCUIDevice.shared.orientation = .portrait
+        let app = XCUIApplication(); app.launchArguments = ["--demo", "--loading-preview=normal"]; app.launch()
+        sidebar(app)
+        return app
+    }
+    private func sidebar(_ app: XCUIApplication) {
+        if !app.buttons["sidebar-settings"].isHittable, app.buttons["BackButton"].isHittable { app.buttons["BackButton"].tap() }
+        XCTAssertTrue(app.buttons["sidebar-task-native"].waitForExistence(timeout: 5))
+    }
+    private func expectRead(_ read: Bool, in app: XCUIApplication) {
+        let row = app.buttons["sidebar-task-native"]
+        let state = XCTNSPredicateExpectation(predicate: NSPredicate(format: "value CONTAINS %@", read ? "Ready" : "Unread"), object: row)
+        XCTAssertEqual(XCTWaiter.wait(for: [state], timeout: 5), .completed)
+    }
+    private func capture(_ name: String) {
+        let shot = XCTAttachment(screenshot: XCUIScreen.main.screenshot())
+        shot.name = name; shot.lifetime = .keepAlways; add(shot)
+    }
+    func testSidebarMenuAndSwipeToggleReadWithoutOpeningTheTask() {
+        let app = launch(), row = app.buttons["sidebar-task-native"]
+        expectRead(false, in: app)
+        row.press(forDuration: 1)
+        let markRead = app.buttons["Mark read"]
+        XCTAssertTrue(markRead.waitForExistence(timeout: 5)); markRead.tap()
+        expectRead(true, in: app)
+        row.swipeRight()
+        if app.buttons["Mark unread"].exists { app.buttons["Mark unread"].tap() }
+        expectRead(false, in: app)
+        XCTAssertTrue(app.buttons["sidebar-settings"].isHittable)
+        capture("Sidebar task marked unread with a swipe")
+    }
+    func testUnreadStaysSetUntilTheConversationIsDeliberatelyReopened() {
+        let app = launch()
+        app.buttons["sidebar-task-native"].tap()
+        XCTAssertTrue(app.otherElements["conversation-loading"].waitForNonExistence(timeout: 10))
+        app.buttons["task-menu"].tap()
+        let markUnread = app.buttons["Mark unread"]
+        XCTAssertTrue(markUnread.waitForExistence(timeout: 5)); markUnread.tap()
+        XCTAssertTrue(app.buttons["task-menu"].waitForExistence(timeout: 5))
+        app.buttons["task-menu"].tap()
+        XCTAssertTrue(app.buttons["Mark read"].waitForExistence(timeout: 5))
+        capture("Conversation retains its explicit unread state")
+        app.buttons["Done"].tap()
+        sidebar(app)
+        expectRead(false, in: app)
+        app.buttons["sidebar-task-native"].tap()
+        app.buttons["task-menu"].tap()
+        XCTAssertTrue(app.buttons["Mark unread"].waitForExistence(timeout: 5), "Reopening the conversation must acknowledge its visible activity again")
+    }
+}
+
 // Opt-in only: a normal QA run never reads the user's pairing. The dedicated
 // device xctestrun supplies these nonsecret identifiers for a read-only check.
 @MainActor final class PairedCatalogQATests: XCTestCase {

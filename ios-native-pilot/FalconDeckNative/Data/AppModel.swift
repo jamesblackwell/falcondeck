@@ -89,6 +89,9 @@ final class AppModel {
         didSet {
             if oldValue != selection { detailContentID = UUID() }
             let selected: String? = { if case .task(let id) = selection { return id }; return nil }()
+            // Back on iPhone retains the selection. Tapping that same task
+            // again is still an explicit reopen and should acknowledge it.
+            if let selected { readSuppression.removeValue(forKey: selected); readSelectionID = UUID() }
             Task { await relay.selectThread(selected) }
             schedulePreviewSave()
             guard !demo, let store = draftStore else { return }
@@ -115,7 +118,8 @@ final class AppModel {
     var archivedTasks: [AgentTask] = [] { didSet { synchronizeTaskActivity() } }
     @ObservationIgnored var archivedLoadID: UUID?
     @ObservationIgnored var archivedTouched: Set<String> = []
-    var readSuppression: [String: Int] = [:]
+    var readSuppression: [String: TaskReadSuppression] = [:]
+    var readSelectionID = UUID()
     var taskOptionsID: String?
     var showSpeechSettings = false
     var connectionLog: [ConnectionLogEntry] = []

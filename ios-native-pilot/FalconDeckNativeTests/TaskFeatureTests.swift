@@ -241,3 +241,120 @@ private actor GoalRelay: RelayServing {
         return result
     }
 }
+
+private actor ReadStateRelay: RelayServing {
+    private var summary: JSON
+    private let failUnread: Bool
+    private let suspendUnread: Bool
+    private var pending: CheckedContinuation<Void, Never>?
+    private var calls: [(String, JSON)] = []
+    init(task: AgentTask, failUnread: Bool = false, suspendUnread: Bool = false) {
+        summary = task.raw; self.failUnread = failUnread; self.suspendUnread = suspendUnread
+    }
+    func events() -> AsyncStream<RelayUpdate> { AsyncStream { $0.finish() } }
+    func pair(_ input: PairingInput, connectionID: UUID) { }
+    func restore(connectionID: UUID) -> Bool { true }
+    func disconnect(forget: Bool) { }
+    func refresh() { }
+    func detail(task: AgentTask, before: String?) -> JSON { .null }
+    func call(_ method: String, params: JSON) async throws -> JSON {
+        calls.append((method, params))
+        if method == "thread.mark_unread" {
+            if suspendUnread { await withCheckedContinuation { pending = $0 } }
+            if failUnread { throw PilotError("Couldn't mark this task unread.") }
+        }
+        let seq = summary["attention"]["last_agent_activity_seq"].int
+        let unread = method == "thread.mark_unread"
+        let attention = summary["attention"].setting("unread", .bool(unread))
+            .setting("last_read_seq", .number(Double(unread ? seq - 1 : params["read_seq"].int)))
+        summary = summary.setting("attention", attention)
+        return summary
+    }
+    func requests() -> [(String, JSON)] { calls }
+    func waitForUnread() async { while pending == nil { await Task.yield() } }
+    func finishUnread() { pending?.resume(); pending = nil }
+}
+
+@MainActor final class TaskReadStateTests: XCTestCase {
+    private func task(seq: Int = 5, unread: Bool = false) -> AgentTask {
+        AgentTask(.object(["id": .string("read-task"), "workspace_id": .string("project"), "status": .string("idle"),
+            "attention": .object(["unread": .bool(unread), "last_agent_activity_seq": .number(Double(seq)), "last_read_seq": .number(Double(unread ? seq - 1 : seq))])]))
+    }
+    private func setup(_ task: AgentTask, relay: ReadStateRelay) -> AppModel {
+        let model = AppModel.testing(relay: relay)
+        model.connected = true; model.tasks = [task]; model.selection = .task(task.id)
+        return model
+    }
+    func testManualUnreadUsesTheDaemonContractAndSurvivesAutomaticRead() async {
+        let task = task(), relay = ReadStateRelay(task: task)
+        let model = setup(task, relay: relay)
+        await model.markRead(task, unread: true)
+        let unread = model.task(task.id)!
+        XCTAssertTrue(unread.unread)
+        XCTAssertEqual(unread.raw["attention"]["last_read_seq"].int, 4)
+        await model.markRead(unread, automatic: true)
+        let calls = await relay.requests()
+        XCTAssertEqual(calls.map(\.0), ["thread.mark_unread"])
+        XCTAssertEqual(calls[0].1, .object(["workspace_id": .string("project"), "thread_id": .string(task.id)]))
+    }
+    func testReopeningTheSameTaskAllowsAutomaticReadAgain() async {
+        let task = task(), relay = ReadStateRelay(task: task)
+        let model = setup(task, relay: relay)
+        await model.markRead(task, unread: true)
+        // On iPhone, Back hides the detail without changing the selection.
+        model.selection = .task(task.id)
+        await model.markRead(model.task(task.id)!, automatic: true)
+        XCTAssertFalse(model.task(task.id)!.unread)
+        let calls = await relay.requests()
+        XCTAssertEqual(calls.map(\.0), ["thread.mark_unread", "thread.mark_read"])
+    }
+    func testFailedUnreadDoesNotBlockLaterAutomaticReads() async {
+        let task = task(unread: true), relay = ReadStateRelay(task: task, failUnread: true)
+        let model = setup(task, relay: relay)
+        await model.markRead(task, unread: true)
+        XCTAssertEqual(model.error, "Couldn't mark this task unread.")
+        await model.markRead(task, automatic: true)
+        XCTAssertFalse(model.task(task.id)!.unread)
+        let calls = await relay.requests()
+        XCTAssertEqual(calls.map(\.0), ["thread.mark_unread", "thread.mark_read"])
+    }
+    func testUnreadSuppressionFollowsTheDaemonsSettledActivitySequence() async {
+        let task = task(), relay = ReadStateRelay(task: self.task(seq: 8))
+        let model = setup(task, relay: relay)
+        await model.markRead(task, unread: true)
+        let settled = model.task(task.id)!
+        XCTAssertEqual(settled.activitySeq, 8)
+        await model.markRead(settled, automatic: true)
+        XCTAssertTrue(model.task(task.id)!.unread)
+        let calls = await relay.requests()
+        XCTAssertEqual(calls.map(\.0), ["thread.mark_unread"])
+    }
+    func testNavigationDuringUnreadRequestDoesNotRestoreSuppression() async {
+        let task = task(), relay = ReadStateRelay(task: self.task(seq: 8), suspendUnread: true)
+        let model = setup(task, relay: relay)
+        let mark = Task { await model.markRead(task, unread: true) }
+        await relay.waitForUnread()
+        model.selection = .activity
+        model.selection = .task(task.id)
+        await relay.finishUnread()
+        let succeeded = await mark.value
+        XCTAssertTrue(succeeded)
+        await model.markRead(model.task(task.id)!, automatic: true)
+        XCTAssertFalse(model.task(task.id)!.unread)
+        let calls = await relay.requests()
+        XCTAssertEqual(calls.map(\.0), ["thread.mark_unread", "thread.mark_read"])
+    }
+    func testNewAgentActivityReleasesUnreadSuppression() async {
+        let task = task(), relay = ReadStateRelay(task: self.task(seq: 6))
+        let model = setup(task, relay: relay)
+        model.demo = true
+        await model.markRead(task, unread: true)
+        model.demo = false
+        let newer = self.task(seq: 6, unread: true)
+        model.upsertTask(newer.raw)
+        await model.markRead(newer, automatic: true)
+        XCTAssertFalse(model.task(task.id)!.unread)
+        let calls = await relay.requests()
+        XCTAssertEqual(calls.map(\.0), ["thread.mark_read"])
+    }
+}

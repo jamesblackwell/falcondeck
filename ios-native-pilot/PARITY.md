@@ -12,7 +12,7 @@ alongside the unchanged Expo route. The daemon and agent storage remain authorit
 | New task | Draft composer, provider/model selection, first-send creation, folder filing | Implemented; first-send and failed-send regression tests pass |
 | Composer | Model, effort, permissions, sandbox, collaboration, speed, skills/prompts | Capability-based models/modes/permissions/sandbox/speed plus provider-scoped skills and saved prompt shortcuts |
 | Turns | Live replies, queue/edit/remove/steer, interrupt, resume interrupted, compact | Send/interrupt, queues, shutdown-resume, edit/retry branching and cross-agent handoff implemented |
-| Task actions | Rename/suggest, read/unread, archive/unarchive, branch/retry, handoff | Rename/suggest/read/unread/pin/archive/read-archived/restore, branch/retry and cross-agent handoff implemented |
+| Task actions | Rename/suggest, read/unread, archive/unarchive, branch/retry, handoff | Rename/suggest/read/unread/pin/archive/read-archived/restore, branch/retry and cross-agent handoff implemented; read/unread is available from task options, long-press menus and a leading swipe |
 | Goals | Set objective/budget, status/usage, pause/resume/stop | Implemented; local lifecycle/budget test passes |
 | Transcript | Markdown/code/tables, reasoning/tools/groups, plans/diffs/files, images, search/artifacts/reviews/unknown fallback | All wire item kinds have a native renderer or inspectable fallback; grouping, preferences, harness projection, citations, native Mermaid flowcharts and complete-source fallback implemented |
 | Media | Library/camera/clipboard attachments, image preview/save/share, read aloud, recording/transcription | Native attachments, read aloud, on-device/computer transcription, speech Live Activity/Lock Screen controls and bounded realtime PCM implemented; physical media QA awaits device |
@@ -25,6 +25,34 @@ alongside the unchanged Expo route. The daemon and agent storage remain authorit
 
 Implementation is ready for device testing. Hardware behavior and the platform
 constraints below remain explicit gaps; this is not a claim of exhaustive parity.
+
+## Core functionality check — 22 October 2026
+
+Mark read/unread now has a shared action in task options, sidebar and Activity
+context menus, plus a leading sidebar swipe. Explicit unread survives while the
+conversation stays open; deliberately reopening it acknowledges the visible
+activity again, including tapping the same selection on iPad. Failed unread
+requests release auto-read suppression. Successful replies bind suppression to
+the daemon's returned activity sequence, while a late reply cannot reinstate
+suppression after navigation. Tasks without agent activity cannot be made unread
+under the existing daemon contract; the action is disabled for those tasks and
+while disconnected. Native tests reproduce the three prior read-state failures. All 338 native unit
+tests pass, and both read/unread UI checks pass on iPhone and iPad.
+`.agents/skills/autoreview/scripts/autoreview --mode local` is clean with native
+read-state source supplied as review context.
+
+The comparison with the existing mobile client confirmed these remaining gaps:
+
+| Gap | Evidence and user impact |
+| --- | --- |
+| Plan approval feedback and abandonment | Native `InteractiveCard` offers Approve plan and Keep planning, without a feedback field or an Abandon plan action. Expo's `PlanApprovalBanner` supports requested changes with feedback and the `abandoned` outcome. Native users must describe changes in a separate message or return to another client. |
+| Navigation between spawned tasks | The native sidebar sorts flat task lists and does not inspect `origin.kind == agent_spawn` or `origin.parent_thread_id`. Expo uses `nestSpawnedThreads` from `client-core` to group children under their parent and keep each family together when sorting and paging. Native child tasks remain accessible, but their relationship is missing. |
+| Production native push | The hosted relay's `/v1/push-capabilities` still advertises only the native sandbox topic as of this check. Native Release builds use production APNs, so TestFlight background notifications need a production configuration entry. Foreground relay operation and existing Expo notifications are independent of this gap. |
+
+This was a focused code and contract comparison around task navigation, read
+state and agent control, not an exhaustive device QA pass. The first native
+TestFlight app record and upload remain pending from the release preparation;
+the previously exported IPA predates these unread fixes and must be rebuilt.
 
 ## Earlier implementation milestones
 

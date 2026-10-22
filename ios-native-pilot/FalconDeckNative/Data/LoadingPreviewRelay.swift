@@ -108,9 +108,10 @@ actor LoadingPreviewRelay: RelayServing {
             return preferences
         }
         if method == "speech.transcribe" { return .object(["text": .string("A clear native transcript.")]) }
-        if method == "thread.mark_read" {
+        if method == "thread.mark_read" || method == "thread.mark_unread" {
             let task = ProcessInfo.processInfo.arguments.contains(where: { $0.hasPrefix("--loading-preview=harness-") }) ? HarnessPreview.task : Self.task
-            return .object(["thread": task.raw.setting("attention", .object(["unread": .bool(false), "last_agent_activity_seq": .number(1), "last_read_seq": .number(1)]))])
+            let unread = method == "thread.mark_unread"
+            return .object(["thread": task.raw.setting("attention", .object(["unread": .bool(unread), "last_agent_activity_seq": .number(1), "last_read_seq": .number(unread ? 0 : 1)]))])
         }
         return .null
     }
