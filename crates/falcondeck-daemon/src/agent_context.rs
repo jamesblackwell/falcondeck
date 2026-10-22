@@ -171,7 +171,7 @@ pub fn append_instructions(
     text.push_str("- Keep proactive notifications rare: send them only for critical issues requiring attention or when the user explicitly requests notifications. Leave child-thread `notify_parent` false for routine progress and ordinary completions; read thread summaries at natural checkpoints. Long-running work alone does not justify notifications.\n");
     if suggest_follow_ups {
         text.push_str(
-            "- Near the end of a turn, if useful next steps remain, call `falcondeck_suggest_follow_ups` once with 1–5 short actions (imperative labels, at most 30 characters). It does not block the turn. Skip it only when nothing useful is left to offer.\n",
+            "- Near the end of a turn, if useful next steps remain, call `falcondeck_suggest_follow_ups` once with 1–5 short actions (imperative labels, at most 30 characters). It does not block the turn. Skip it only when nothing useful is left to offer. The user sees them in the UI, so never mention, list, or restate them in your reply; end the turn with a normal reply.\n",
         );
     }
     text.push_str(
@@ -220,6 +220,7 @@ mod tests {
             true,
         );
         assert!(with.contains("falcondeck_suggest_follow_ups"));
+        assert!(with.contains("never mention, list, or restate them in your reply"));
         assert!(with.contains("/tmp/skills/falcondeck-mcp/SKILL.md"));
         assert!(with.contains("/tmp/skills/falcondeck-control/SKILL.md"));
         assert!(with.contains("/tmp/skills/cua-driver/SKILL.md"));

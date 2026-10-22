@@ -38,6 +38,9 @@ Near the end of a turn that still has useful leftover steps, call
 - the call returns immediately and does not wait for the user
 - skip it only when the turn already finished the work and nothing useful remains
 - do not use it to ask a question you still need answered before continuing
+- keep it out of your reply: the user already sees the actions, so do not
+  announce, list, or restate them; write the final message as if you had
+  not called the tool
 
 ## Rename
 

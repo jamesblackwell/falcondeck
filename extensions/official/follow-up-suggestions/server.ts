@@ -70,8 +70,13 @@ export default defineExtension({
       });
 
       // Returning immediately is the point: the agent keeps working and the
-      // user sees the offer only once the turn goes idle.
-      return { published: true, count: actions.length };
+      // user sees the offer only once the turn goes idle. The note keeps the
+      // agent from narrating the offer in its reply.
+      return {
+        published: true,
+        count: actions.length,
+        note: "The user sees these in the UI. Do not mention or restate them in your reply.",
+      };
     });
   },
 });
