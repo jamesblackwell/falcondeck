@@ -54,14 +54,14 @@ pub(super) fn catalog() -> Vec<ExtensionAgentTool> {
         }), vec!["since"]),
         (MESSAGE, "Message thread", "Send a message to an existing thread in this workspace, labelled with the sending thread. Defaults to steering its active turn, falling back to the queue when steering is unavailable; idle threads start a new turn. Use delivery=queue to wait for the active turn. Returns after admission, without waiting for a reply. Self-messaging is rejected; approvals remain in FalconDeck UI.", json!({
             "thread_id": {"type":"string", "minLength":1},
-            "message": {"type":"string", "minLength":1, "maxLength":24000},
+            "message": {"type":"string", "minLength":1, "maxLength":24000, "description":"Readable prose with normal spaces between words; shown to the user and the recipient."},
             "delivery": {"type":"string", "enum":["steer","queue"], "default":"steer"}
         }), vec!["thread_id", "message"]),
         (CREATE, "Create thread", "Create a sibling in this workspace and optionally send its first prompt. Returns after dispatch without waiting for completion. At most three concurrent children per parent; approvals remain in FalconDeck UI. Context defaults to none; briefing uses cached excerpts, transcript_tail uses bounded markdown.", json!({
             "provider": {"type":"string", "minLength":1},
             "isolation": {"type":"string", "enum":["project_folder","isolated"], "default":"project_folder"},
             "model": {"type":"string", "minLength":1},
-            "prompt": {"type":"string", "minLength":1, "maxLength":24000},
+            "prompt": {"type":"string", "minLength":1, "maxLength":24000, "description":"Readable prose with normal spaces between words; shown to the user and the new thread."},
             "context": {"type":"string", "enum":["none","briefing","transcript_tail"], "default":"none"},
             "title": {"type":"string", "minLength":1, "maxLength":200},
             "folder": {"type":"string", "minLength":1, "description":"Project folder id or exact name for the new thread."},
@@ -137,6 +137,38 @@ fn line(text: &str, cap: usize) -> String {
         .replace(['\n', '\r'], " ")
         .replace('|', "\\|")
 }
+/// Code-mode harnesses (Codex `exec`) sometimes emit tool strings in minified
+/// style, gluing prose words together. Normal prose averages 4–8 letters per
+/// whitespace-separated token; glued text runs 14+. Code, paths and hashes are
+/// ignored so technical messages are not mistaken for glued prose.
+fn lost_word_spaces(text: &str) -> bool {
+    let prose: String = text
+        .split("```")
+        .step_by(2)
+        .flat_map(|chunk| chunk.split('`').step_by(2))
+        .collect::<Vec<_>>()
+        .join(" ");
+    let (mut letters, mut tokens) = (0usize, 0usize);
+    for token in prose.split_whitespace() {
+        let hash_like = token.len() >= 7
+            && token.chars().any(|c| c.is_ascii_digit())
+            && token.chars().all(|c| c.is_ascii_hexdigit() || "-.,;:()".contains(c));
+        if hash_like || token.contains(['/', '\\']) {
+            continue;
+        }
+        letters += token.chars().filter(|c| c.is_alphabetic()).count();
+        tokens += 1;
+    }
+    letters >= 60 && letters as f64 / tokens as f64 >= 12.0
+}
+fn require_word_spaces(field: &str, text: &str) -> Result<(), DaemonError> {
+    if lost_word_spaces(text) {
+        return Err(DaemonError::BadRequest(format!(
+            "{field} appears to be missing the spaces between words. Resend it as normal prose with spaces between words."
+        )));
+    }
+    Ok(())
+}
 fn response(markdown: String) -> ExtensionToolResponse {
     ExtensionToolResponse {
         result: Value::String(markdown),
@@ -206,6 +238,7 @@ impl AppState {
                         "thread_id must be nonempty and message must be 1–24000 characters".into(),
                     ));
                 }
+                require_word_spaces("message", &a.message)?;
                 if a.thread_id == parent {
                     return Err(DaemonError::BadRequest(
                         "cannot message the calling thread".into(),
@@ -243,6 +276,9 @@ impl AppState {
                     return Err(DaemonError::BadRequest(
                         "prompt must be 1–24000 characters, model nonempty, and title 1–200 characters".into(),
                     ));
+                }
+                if let Some(prompt) = &a.prompt {
+                    require_word_spaces("prompt", prompt)?;
                 }
                 // Serializes admission through dispatch; a simultaneous fourth call cannot race the count.
                 let _gate = self.inner.agent_spawn_gate.lock().await;
@@ -423,6 +459,21 @@ mod tests {
     use tempfile::tempdir;
     mod digest_tests;
     mod model_settings_tests;
+
+    #[test]
+    fn detects_prose_with_dropped_word_spaces() {
+        assert!(lost_word_spaces(
+            "Reviewcleanonauth/errorfixes. ChatreviewfoundP2: jumpbuttonabsolute bottom-24relativetowholesectionoverlaps4+linedraft(composercangrow128+padding). Alsoobserveronlyinnercontentmaymissviewportshrinkfromcomposerresize. HoldingcommitwhileIverifyinbrowserwithmockednewmessage(nodatawrites). No sourceeditsyet."
+        ));
+        for ok in [
+            "Please check the sync contract.",
+            "Metadata rollout completed at 12:15:05 BST. Both read 2fbcb971bac7d718ec650b3322ebc4446f1e1b93, built on 2057025196 with only two changes.",
+            "See /Users/James/.local/share/codex-artifacts/study-groups-2026-10-22/screenshots/final for the captures, then run `cargo test --package falcondeck-daemon thread_tools::tests::detects_prose_with_dropped_word_spaces` again.",
+            "```\nconst veryLongIdentifierNameForTesting = anotherVeryLongIdentifierName();\n```\nThat is all.",
+        ] {
+            assert!(!lost_word_spaces(ok), "{ok}");
+        }
+    }
     pub(super) async fn fixture() -> (AppState, tempfile::TempDir) {
         let temp_dir = tempdir().unwrap();
         let workspace_path = temp_dir.path().join("project-a");
