@@ -76,10 +76,44 @@ struct TextDocumentView: View {
     }
 }
 
+struct MessageTextSelection: Identifiable {
+    let id = UUID()
+    let text: String
+}
+
+struct MessageTextSheet: View {
+    @Environment(\.dismiss) private var dismiss
+    let text: String
+    @State private var copied = false
+    var body: some View {
+        NavigationStack {
+            SelectableDocument(text: text, foreground: FD.foreground, findRequest: nil, messageStyle: true)
+                .background(FD.background)
+                .navigationTitle("Message")
+                .navigationBarTitleDisplayMode(.inline)
+                .toolbar {
+                    ToolbarItem(placement: .topBarLeading) {
+                        Button("Close", systemImage: "xmark") { dismiss() }
+                    }
+                    ToolbarItem(placement: .topBarTrailing) {
+                        Button(copied ? "Copied" : "Copy All", systemImage: copied ? "checkmark" : "doc.on.doc") {
+                            UIPasteboard.general.string = text
+                            copied = true
+                        }
+                    }
+                }
+        }
+        .presentationDetents([.large])
+        .presentationDragIndicator(.visible)
+    }
+}
+
 private struct SelectableDocument: UIViewControllerRepresentable {
     let text: String
     let foreground: Color
     let findRequest: UUID?
+    var messageStyle = false
+    @ScaledMetric(relativeTo: .body) private var messageFontSize: CGFloat = 17
     @ScaledMetric(relativeTo: .footnote) private var fontSize: CGFloat = 14
     final class Coordinator { var lastFindRequest: UUID? }
     func makeCoordinator() -> Coordinator { Coordinator() }
@@ -98,7 +132,10 @@ private struct SelectableDocument: UIViewControllerRepresentable {
         controller.loadViewIfNeeded()
         let view = controller.textView
         if view.text != text { view.text = text }
-        let font = UIFont.monospacedSystemFont(ofSize: fontSize, weight: .regular)
+        view.accessibilityIdentifier = messageStyle ? "message-selection-text" : "tool-output-text"
+        let font = messageStyle
+            ? UIFont.systemFont(ofSize: messageFontSize)
+            : UIFont.monospacedSystemFont(ofSize: fontSize, weight: .regular)
         if view.font != font { view.font = font }
         let color = UIColor(foreground)
         if view.textColor != color { view.textColor = color }

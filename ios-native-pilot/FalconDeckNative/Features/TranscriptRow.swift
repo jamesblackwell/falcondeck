@@ -15,6 +15,7 @@ struct TranscriptRow: View {
     @State private var fullOutput: String?
     @State private var loadingOutput = false
     @State private var showOutput = false
+    @State private var textSelection: MessageTextSelection?
     private var preferences: ConversationPreferences { ConversationPreferences(raw: model.preferences["conversation"]) }
     private var open: Binding<Bool> { Binding(get: { userToggled ? expanded : preferences.opens(message, firstDiff: firstDiff) }, set: { onInteraction(); userToggled = true; expanded = $0 }) }
     var body: some View {
@@ -68,6 +69,7 @@ struct TranscriptRow: View {
         .simultaneousGesture(TapGesture().onEnded { onInteraction() })
         // A native List creates rows lazily and recreates them after navigation.
         .onChange(of: expansion, initial: true) { _, directive in if let directive { userToggled = true; expanded = directive.expanded } }
+        .sheet(item: $textSelection) { selection in MessageTextSheet(text: selection.text) }
         .fullScreenCover(isPresented: $showOutput) { if let fullOutput { TextDocumentView(title: message.raw["title"].string.nonempty ?? "Tool output", text: fullOutput) } }
     }
     private var messageBody: some View {
@@ -111,6 +113,9 @@ struct TranscriptRow: View {
                 Button("Retry in a new branch", systemImage: "arrow.clockwise") { branch(task, retry: true) }.disabled(model.chat(for: task).sending || (!model.demo && !model.connected))
             }
             Button { UIPasteboard.general.string = message.text } label: { Label("Copy message", systemImage: "doc.on.doc") }
+            if !message.text.isEmpty {
+                Button("Select Text", systemImage: "text.cursor") { textSelection = MessageTextSelection(text: message.text) }
+            }
             if message.kind != "user_message", !message.text.isEmpty {
                 Button("Read aloud", systemImage: "speaker.wave.2") { Task { await model.readAloud.play(message.text, id: message.id, model: model) } }
                     .disabled(model.voice.starting || model.voice.recording || model.voice.transcribing)
