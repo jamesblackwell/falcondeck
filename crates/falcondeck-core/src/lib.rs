@@ -7,6 +7,9 @@
 
 /// Backup and restore protocol types.
 pub mod backup;
+/// Persistent coordinator profiles and document operations.
+pub mod bots;
+pub use bots::*;
 /// Shared wire types for the agent control interface.
 pub mod control;
 /// Cryptography helpers for pairing, key exchange, and encrypted payloads.
@@ -52,6 +55,9 @@ pub struct DaemonInfo {
 /// Feature capabilities supported by a daemon instance.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 pub struct DaemonCapabilities {
+    /// Whether this daemon supports persistent bot coordinators and spaces.
+    #[serde(default)]
+    pub bots: bool,
     /// Whether this daemon owns and executes scheduled tasks.
     #[serde(default)]
     pub scheduled_tasks: bool,
@@ -68,6 +74,9 @@ pub const DEFAULT_TITLE_SUGGESTION_PROMPT: &str = "Use 3 to 7 words.\nPrefer con
 /// Global FalconDeck preferences persisted by the daemon.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct FalconDeckPreferences {
+    /// Named coordinators outside the project hierarchy.
+    #[serde(default)]
+    pub bots: Vec<BotProfile>,
     /// Schema version for the on-disk preferences file.
     #[serde(default = "default_preferences_version")]
     pub version: u32,
@@ -115,6 +124,7 @@ pub struct FalconDeckPreferences {
 impl Default for FalconDeckPreferences {
     fn default() -> Self {
         Self {
+            bots: Vec::new(),
             version: default_preferences_version(),
             auto_resume_interrupted_sessions: true,
             workspace_order: Vec::new(),

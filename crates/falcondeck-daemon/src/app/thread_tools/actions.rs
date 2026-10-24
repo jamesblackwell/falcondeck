@@ -132,7 +132,7 @@ struct AnswerArgs {
 /// One child whose settles are reported to its parent; in memory only.
 pub(crate) struct ChildWatch {
     workspace_id: String,
-    parent_thread_id: String,
+    pub(crate) parent_thread_id: String,
     busy: bool,
     waiting_notified: bool,
 }
@@ -501,7 +501,7 @@ impl AppState {
 
     /// Registers a child before its first dispatch; the watcher subscribes
     /// synchronously so the child's first status change cannot be missed.
-    pub(super) fn watch_child(&self, workspace: &str, child: &str, parent: &str) {
+    pub(in crate::app) fn watch_child(&self, workspace: &str, child: &str, parent: &str) {
         let mut watches = self
             .inner
             .agent_spawn_watches
@@ -637,8 +637,11 @@ impl AppState {
         if self.is_shutting_down() {
             return;
         }
+        if self.bot_for_thread(parent).await.is_some() && !self.inner.agent_spawn_watches.lock().unwrap_or_else(|e| e.into_inner())
+            .as_ref().is_some_and(|watches| children.iter().any(|(child, _)| watches.contains_key(child))) { return; }
+        let Ok(parent_workspace) = self.thread_workspace(parent).await else { return; };
         if self
-            .thread_summary(workspace, parent)
+            .thread_summary(&parent_workspace, parent)
             .await
             .map_or(true, |p| p.is_archived)
         {
@@ -694,7 +697,7 @@ impl AppState {
             "FalconDeck child updates (daemon):\n\n{text}\nDetails: falcondeck_view_thread.\n"
         );
         let request = serde_json::from_value::<SendTurnRequest>(json!({
-            "workspace_id": workspace, "thread_id": parent,
+            "workspace_id": parent_workspace, "thread_id": parent,
             "inputs": [{"type":"text","text":text}], "steer": false
         }));
         let result = match request {

@@ -70,8 +70,12 @@ pub(super) fn catalog() -> Vec<ExtensionAgentTool> {
             "notify_parent": {"type":"boolean", "default":false, "description":"Leave false for routine work. Enable only for critical updates requiring attention or when the user explicitly requests notifications. When enabled, queues a daemon notice whenever the child stops running or needs input, including later turns. In memory; does not survive a daemon restart."}
         }), vec![]),
     ].into_iter().chain(actions::catalog()).map(|(name,title,description,properties,required)| ExtensionAgentTool {
-        name: name.into(), extension_id: "falcondeck".into(), tool_id: name.trim_start_matches("falcondeck_").into(), title: title.into(), description: description.into(),
-        input_schema: json!({"type":"object","additionalProperties":false,"properties":properties,"required":required}),
+        name: name.into(), extension_id: "falcondeck".into(), tool_id: name.trim_start_matches("falcondeck_").into(), title: title.into(), description: format!("{description} Bot coordinators may select another project using workspace_id; ordinary tasks remain workspace-scoped."),
+        input_schema: {
+            let mut properties = properties;
+            properties["workspace_id"] = json!({"type":"string", "description":"Target project workspace id. Bots can coordinate across projects; ordinary tasks remain workspace-scoped."});
+            json!({"type":"object","additionalProperties":false,"properties":properties,"required":required})
+        },
     }).collect()
 }
 
@@ -200,12 +204,59 @@ impl AppState {
         let parent = caller.filter(|id| !id.is_empty()).ok_or_else(|| {
             DaemonError::BadRequest("this tool requires an attached calling thread".into())
         })?;
-        let workspace = self
+        let caller_workspace = self
             .extension_call_workspace_id(Some(parent), workspace_path)
             .await
             .ok_or_else(|| DaemonError::NotFound("calling thread not found".into()))?;
         // A fallback workspace path must not authorize a missing calling thread.
-        let parent_summary = self.thread_summary(&workspace, parent).await?;
+        let parent_summary = self.thread_summary(&caller_workspace, parent).await?;
+        let bot = self.bot_for_thread(parent).await;
+        let mut arguments = arguments.clone();
+        let requested_workspace = arguments
+            .as_object_mut()
+            .and_then(|a| a.remove("workspace_id"))
+            .map(|v| {
+                v.as_str()
+                    .filter(|s| !s.is_empty())
+                    .map(str::to_string)
+                    .ok_or_else(|| DaemonError::BadRequest("workspace_id must be nonempty".into()))
+            })
+            .transpose()?;
+        let target = arguments
+            .get("thread_id")
+            .and_then(Value::as_str)
+            .or_else(|| {
+                arguments
+                    .get("thread_ids")
+                    .and_then(Value::as_array)
+                    .and_then(|ids| ids.first())
+                    .and_then(Value::as_str)
+            });
+        let workspace = if bot.is_some() {
+            if let Some(workspace) = requested_workspace {
+                workspace
+            } else if let Some(target) = target {
+                self.thread_workspace(target).await?
+            } else {
+                caller_workspace.clone()
+            }
+        } else {
+            if requested_workspace
+                .as_ref()
+                .is_some_and(|ws| ws != &caller_workspace)
+            {
+                return Err(DaemonError::BadRequest(
+                    "Only bots can coordinate across projects".into(),
+                ));
+            }
+            caller_workspace.clone()
+        };
+        let arguments = &arguments;
+        if name == CREATE && bot.as_ref().is_some_and(|bot| !bot.can_start_threads) {
+            return Err(DaemonError::BadRequest(
+                "Task creation is disabled for this bot".into(),
+            ));
+        }
         if actions::is_action(name) {
             return self
                 .invoke_thread_action(name, arguments, &workspace, parent)
@@ -287,12 +338,10 @@ impl AppState {
                 let _gate = self.inner.agent_spawn_gate.lock().await;
                 {
                     let workspaces = self.inner.workspaces.lock().await;
-                    let ws = workspaces
-                        .get(&workspace)
-                        .ok_or_else(|| DaemonError::NotFound("workspace not found".into()))?;
-                    if ws
-                        .threads
-                        .values()
+                    if !workspaces.contains_key(&workspace) {
+                        return Err(DaemonError::NotFound("workspace not found".into()));
+                    }
+                    if workspaces.values().flat_map(|ws| ws.threads.values())
                         .filter(|t| child_is_active(&t.summary, parent))
                         .count()
                         >= 3
@@ -312,7 +361,7 @@ impl AppState {
                     Context::None => None,
                     Context::Briefing => Some(self.thread_briefing(&parent_summary)),
                     Context::TranscriptTail => Some(
-                        self.thread_handoff(&workspace, parent, None, Some(40), Some(12_000))
+                        self.thread_handoff(&caller_workspace, parent, None, Some(40), Some(12_000))
                             .await?,
                     ),
                 };
@@ -326,17 +375,25 @@ impl AppState {
                         approval_policy: None,
                         sandbox_mode: None,
                         permission_mode: None,
-                        handoff_from: context.as_ref().map(|_| {
+                        handoff_from: context.as_ref().filter(|_| workspace == caller_workspace).map(|_| {
                             falcondeck_core::ThreadHandoffSource {
                                 thread_id: parent.into(),
                                 provider: parent_summary.provider,
                                 context_pending: true,
                             }
                         }),
-                        handoff_context: context,
+                        handoff_context: if workspace == caller_workspace { context.clone() } else { None },
                     })
                     .await?;
                 let id = handle.thread.id;
+                if workspace != caller_workspace {
+                    // A worker in another project carries a brief without
+                    // pretending to be a native handoff inside that project.
+                    if let Some(thread) = self.inner.workspaces.lock().await.get_mut(&workspace)
+                        .and_then(|ws| ws.threads.get_mut(&id)) {
+                        thread.pending_handoff_context = context;
+                    }
+                }
                 self.with_thread_mut(&workspace, &id, |thread| {
                     thread.origin = Some(ThreadOrigin::AgentSpawn {
                         parent_thread_id: parent.into(),
@@ -363,7 +420,7 @@ impl AppState {
                     })
                     .await?;
                 }
-                if a.notify_parent {
+                if a.notify_parent || bot.is_some() {
                     self.watch_child(&workspace, &id, parent);
                 }
                 self.persist_local_state().await?;
@@ -378,7 +435,7 @@ impl AppState {
                     line(&id, 256),
                     line(parent, 256)
                 );
-                if a.notify_parent {
+                if a.notify_parent || bot.is_some() {
                     markdown.push_str("- This thread will be notified when the child stops running or needs input.\n");
                 }
                 if let Some(prompt) = a.prompt {
@@ -463,6 +520,7 @@ mod tests {
     use tempfile::tempdir;
     mod digest_tests;
     mod model_settings_tests;
+    mod bot_tests;
 
     #[test]
     fn detects_prose_with_dropped_word_spaces() {

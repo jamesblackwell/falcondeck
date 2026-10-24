@@ -2299,6 +2299,12 @@ function RemoteApp() {
     },
     [],
   );
+  const botApi = useMemo<import('@falcondeck/client-core').BotApi>(() => ({
+    mutateBot: mutation => callRpc('bots.mutate', mutation),
+    botDocuments: id => callRpc('bots.documents', { id }),
+    readBotDocument: (id, name) => callRpc('bots.document.read', { id, name }),
+    mutateBotDocument: (id, mutation) => callRpc('bots.document.mutate', { id, mutation }),
+  }), [callRpc]);
   const readAloud = useReadAloud(
     useCallback(
       async (text: string) => {
@@ -5246,6 +5252,8 @@ function RemoteApp() {
                 </Button>
               </div>
               <WorkspaceSidebar
+                bots={snapshot?.preferences.bots}
+                botApi={snapshot?.daemon.capabilities?.bots ? botApi : undefined}
                 groups={groups}
                 selectedWorkspaceId={selectedWorkspaceId}
                 selectedThreadId={selectedThreadId}
@@ -5321,6 +5329,8 @@ function RemoteApp() {
 
       <div className="flex min-h-0 flex-1 overflow-hidden">
         <WorkspaceSidebar
+          bots={snapshot?.preferences.bots}
+          botApi={snapshot?.daemon.capabilities?.bots ? botApi : undefined}
           groups={groups}
           selectedWorkspaceId={selectedWorkspaceId}
           selectedThreadId={selectedThreadId}

@@ -1,4 +1,8 @@
 import type {
+  BotProfile,
+  BotMutation,
+  BotDocument,
+  BotDocumentMutation,
   AgentProvider,
   CollaborationModeSummary,
   CreateScheduledTaskPayload,
@@ -558,6 +562,22 @@ export function createDaemonApiClient(baseUrl: string) {
           body: "{}",
         }),
       );
+    },
+    async mutateBot(mutation: BotMutation) {
+      return parseJson<{ bot?: BotProfile }>(await fetch(`${baseUrl}/api/bots`, {
+        method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(mutation),
+      }));
+    },
+    async botDocuments(id: string) {
+      return parseJson<string[]>(await fetch(`${baseUrl}/api/bots/${encodeURIComponent(id)}/documents`));
+    },
+    async readBotDocument(id: string, name: string) {
+      return parseJson<BotDocument>(await fetch(`${baseUrl}/api/bots/${encodeURIComponent(id)}/documents/content?${new URLSearchParams({ name })}`));
+    },
+    async mutateBotDocument(id: string, mutation: BotDocumentMutation) {
+      return parseJson<unknown>(await fetch(`${baseUrl}/api/bots/${encodeURIComponent(id)}/documents`, {
+        method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(mutation),
+      }));
     },
     async removeWorkspace(workspaceId: string) {
       return parseJson<{ ok: boolean; message?: string | null }>(

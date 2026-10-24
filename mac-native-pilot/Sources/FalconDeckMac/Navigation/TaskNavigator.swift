@@ -250,6 +250,7 @@ struct TaskNavigator: View {
     }
 
     private func matches(_ task: AgentTask) -> Bool {
+        guard !store.botTaskIDs.contains(task.id) else { return false }
         guard task.raw["is_archived"].bool == archived else { return false }
         if filter == "unread" && !task.unread { return false }
         if filter == "working" && !task.running { return false }

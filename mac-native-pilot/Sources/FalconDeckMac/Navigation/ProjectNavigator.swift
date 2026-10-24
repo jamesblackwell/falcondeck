@@ -83,7 +83,7 @@ struct ProjectNavigator: View {
 
     var body: some View {
         let summary = NativeProjectNavigationSummary(projects: store.allProjects, tasks: store.tasks)
-        let pins = pinnedTasks(summary.pinCandidates)
+        let pins = pinnedTasks(summary.pinCandidates.filter { !store.botTaskIDs.contains($0.id) })
         let hidden = hiddenIDs
         let projects = orderedProjects.filter { showHidden || !hidden.contains($0.id) }
         // Streaming previews redraw rows without changing their order.
@@ -92,6 +92,7 @@ struct ProjectNavigator: View {
             taskControls
             ScrollViewReader { proxy in
             List(selection: selection) {
+                if store.snapshotRaw["daemon"]["capabilities"]["bots"].bool { NativeBotsSection(store: store) }
                 Section {
                     navigationRow("Chats", symbol: "bubble.left.and.bubble.right", section: "chats",
                                   count: summary.chatCount)

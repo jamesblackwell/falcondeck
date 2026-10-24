@@ -1041,6 +1041,15 @@ rename builtin. These require a calling thread and inherit its workspace. They
 are not extension-host APIs, control operations, or `threads:read` grants;
 `threads:read` remains summary-only with no previews or transcript access.
 
+User-created [bots](BOTS.md) can coordinate across the daemon's projects. Their
+tools accept `workspace_id`; an existing target task also resolves its workspace
+automatically. This authority comes from the daemon's registered bot profile for
+the attached caller, never from a request-body claim. Ordinary task callers
+cannot widen their workspace. A bot's `can_start_threads` restriction is checked
+before creation, and the child cap counts all projects together. Bot workers
+automatically report back to their home conversation; those watches are rebuilt
+from persisted origins after restart.
+
 List reads daemon summaries, the latest message of transcripts already in
 memory, and existing search-index opening/recent excerpts without transcript
 hydration. It defaults to unarchived threads sorted by last activity (newest
@@ -1158,9 +1167,8 @@ Subscriptions live only in memory: a daemon restart ends the child's turn and
 the parent's turn too. Notices are skipped during shutdown and for archived
 parents.
 
-Rejected: cross-project creation, because workspace scope is the authorization
-boundary for every thread tool. Also rejected: a coordinator notes store. Notes
-would be new durable conversation content that belongs neither to the daemon's
-routing state nor to native agent storage. The coordinator's own transcript
-(readable with view) and files in the repository already serve as handoff
-storage.
+Workspace scope remains the authorization boundary for ordinary task callers.
+Bots have an explicit user-created identity with broader coordination authority.
+Their space consists of user-controlled files, with history remaining in native
+agent storage; FalconDeck stores no second conversation database. Ordinary task
+handoffs continue using their transcript and repository files.

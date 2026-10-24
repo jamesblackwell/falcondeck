@@ -246,6 +246,8 @@ fn remote_rpc_is_read_only(method: &str) -> bool {
             | "preferences.read"
             | "speech.status"
             | "speech.models"
+            | "bots.documents"
+            | "bots.document.read"
             | "workspace.files"
             | "workspace.file.read"
             | "workspace.icon"
@@ -318,6 +320,10 @@ pub(super) const REMOTE_RPC_METHODS: &[&str] = &[
     "thread.queue.attachment_preview",
     "thread.queue.reorder",
     "chat.create",
+    "bots.mutate",
+    "bots.documents",
+    "bots.document.read",
+    "bots.document.mutate",
     "workspace.connect",
     "workspace.remove",
     "workspace.close",
@@ -1718,6 +1724,10 @@ impl AppState {
                         })
                         .map_err(|error| error.to_string())
                 }
+                "bots.mutate" => self.mutate_bot(serde_json::from_value(params.clone()).map_err(|e| e.to_string())?).await.map_err(|e| e.to_string()),
+                "bots.documents" => serde_json::to_value(self.bot_documents(&required(&["id"])?).await.map_err(|e| e.to_string())?).map_err(|e| e.to_string()),
+                "bots.document.read" => serde_json::to_value(self.read_bot_document(&required(&["id"])?, &required(&["name"])?).await.map_err(|e| e.to_string())?).map_err(|e| e.to_string()),
+                "bots.document.mutate" => self.mutate_bot_document(&required(&["id"])?, serde_json::from_value(params.get("mutation").cloned().unwrap_or(Value::Null)).map_err(|e| e.to_string())?).await.map_err(|e| e.to_string()),
                 "chat.create" => {
                     if params.get("create").and_then(Value::as_bool) != Some(true) {
                         return Err("invalid remote rpc payload: create must be true".to_string());

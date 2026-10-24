@@ -173,6 +173,8 @@ pub(super) async fn write_atomically(path: &PathBuf, payload: Vec<u8>) -> Result
 
 pub(super) fn merge_preferences_from_value(value: Value) -> FalconDeckPreferences {
     let mut preferences = FalconDeckPreferences::default();
+    preferences.bots = value.get("bots").cloned()
+        .and_then(|value| serde_json::from_value(value).ok()).unwrap_or_default();
     // Existing preference files retain manual recovery until the user opts in.
     preferences.auto_resume_interrupted_sessions = value
         .get("auto_resume_interrupted_sessions")

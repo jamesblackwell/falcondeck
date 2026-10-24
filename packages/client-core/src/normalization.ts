@@ -2341,6 +2341,7 @@ export function normalizePreferences(value: unknown): FalconDeckPreferences {
       : [],
     workspace_colors: normalizeWorkspaceColors(raw.workspace_colors),
     project_folders: normalizeProjectFolders(raw.project_folders),
+    bots: Array.isArray(raw.bots) ? raw.bots.filter((bot) => bot && typeof bot.id === "string" && typeof bot.thread_id === "string" && typeof bot.workspace_id === "string") : [],
     workspace_icons: normalizeWorkspaceIcons(raw.workspace_icons),
     conversation: {
       tool_details_mode: toolDetailsMode,

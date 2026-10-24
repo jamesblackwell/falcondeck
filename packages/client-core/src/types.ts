@@ -430,6 +430,8 @@ export type ProjectFolderMutation = { workspace_id: string } & (
 );
 
 export type FalconDeckPreferences = {
+  /** Persistent coordinators, independent of project folders. */
+  bots?: BotProfile[];
   /** Virtual project folders, shared through daemon preferences. */
   project_folders?: ProjectFolder[];
   version: number;
@@ -459,6 +461,35 @@ export type FalconDeckPreferences = {
   title_suggestion_prompt?: string;
   /** Older daemons omit this; `normalizePreferences` always fills it in. */
   computer_use?: ComputerUsePreferences;
+};
+
+export type BotProfile = {
+  id: string;
+  name: string;
+  workspace_id: string;
+  dedicated_workspace: boolean;
+  thread_id: string;
+  space_path: string;
+  instructions: string;
+  can_start_threads: boolean;
+};
+
+export type BotMutation =
+  | { action: "create"; name: string; instructions: string; provider?: AgentProvider; model_id?: string; thread_id?: string }
+  | { action: "update"; id: string; name: string; instructions: string; can_start_threads: boolean }
+  | { action: "stop" | "delete"; id: string };
+
+export type BotDocument = { name: string; content: string; version: string };
+export type BotDocumentMutation =
+  | { action: "write"; name: string; content: string; expected_version?: string | null }
+  | { action: "delete"; name: string; expected_version: string };
+
+/** Shared transport contract used by the bot UI on local and paired clients. */
+export type BotApi = {
+  mutateBot: (mutation: BotMutation) => Promise<{ bot?: BotProfile }>;
+  botDocuments: (id: string) => Promise<string[]>;
+  readBotDocument: (id: string, name: string) => Promise<BotDocument>;
+  mutateBotDocument: (id: string, mutation: BotDocumentMutation) => Promise<unknown>;
 };
 
 export type ComputerUsePreferences = {
@@ -1244,6 +1275,7 @@ export type DaemonSnapshot = {
     started_at: string;
     capabilities?: {
       scheduled_tasks?: boolean;
+      bots?: boolean;
       computer_use?: boolean;
     };
   };

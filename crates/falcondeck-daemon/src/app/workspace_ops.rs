@@ -1547,6 +1547,7 @@ pub(super) async fn archive_all_threads(
     app: &AppState,
     workspace_id: &str,
 ) -> Result<CommandResponse, DaemonError> {
+    let bot_homes: HashSet<_> = app.inner.preferences.lock().await.bots.iter().map(|b| b.thread_id.clone()).collect();
     let mut workspaces = app.inner.workspaces.lock().await;
     let workspace = workspaces
         .get_mut(workspace_id)
@@ -1554,7 +1555,7 @@ pub(super) async fn archive_all_threads(
     let mut changed = false;
     let mut archived_threads = Vec::new();
     for thread in workspace.threads.values_mut() {
-        if !thread.summary.is_archived
+        if !thread.summary.is_archived && !bot_homes.contains(&thread.summary.id)
             && !matches!(
                 thread.summary.status,
                 ThreadStatus::Running | ThreadStatus::WaitingForInput
@@ -3173,7 +3174,16 @@ async fn send_turn_with_startup_mode(
             handoff_context,
         )
     };
-    let harness_inputs = match handoff_context.as_deref() {
+    // Inject current bot instructions on every dispatched turn, including native
+    // resumes after compaction. Keep these out of the user's transcript bubble.
+    let bot_context = app.bot_context(&request.thread_id).await;
+    let turn_context = match (bot_context, handoff_context.as_deref()) {
+        (Some(bot), Some(handoff)) => Some(format!("{bot}\n\n{handoff}")),
+        (Some(bot), None) => Some(bot),
+        (None, Some(handoff)) => Some(handoff.to_string()),
+        (None, None) => None,
+    };
+    let harness_inputs = match turn_context.as_deref() {
         Some(context) => super::harness_user_text::with_handoff_context(&inputs, context),
         None => inputs.clone(),
     };

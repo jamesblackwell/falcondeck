@@ -1,3 +1,4 @@
+import { BotSidebar, type BotSidebarControls } from './bot-sidebar';
 import { partitionProjectFolders, projectFoldersForWorkspace } from '@falcondeck/client-core';
 import { ProjectFoldersProvider, ProjectFolderSection, useProjectFolders, useTaskDropTarget, type ProjectFolderControls } from './project-folders';
 import * as React from "react";
@@ -123,7 +124,7 @@ export type WorkspaceSidebarActivity = {
   onPopOut?: () => void;
 };
 
-export type WorkspaceSidebarProps = ProjectFolderControls & {
+export type WorkspaceSidebarProps = ProjectFolderControls & BotSidebarControls & {
   groups: ProjectGroup[];
   // Host badges for workspaces that live on enrolled remote servers,
   // keyed by workspace id.
@@ -1262,7 +1263,9 @@ export const WorkspaceSidebar = memo(function WorkspaceSidebar({
   projectFolders,
   onProjectFolderMutation,
   onNewThreadInFolder,
-  groups,
+  groups: allGroups,
+  bots,
+  botApi,
   workspaceHosts,
   selectedWorkspaceId,
   selectedThreadId,
@@ -1328,6 +1331,12 @@ export const WorkspaceSidebar = memo(function WorkspaceSidebar({
   extensionSidebarFilters = [],
   extensionSnapshot,
 }: WorkspaceSidebarProps) {
+  const groups = useMemo(() => {
+    const homeIds = new Set(bots?.map(bot => bot.thread_id));
+    const ownedWorkspaces = new Set(bots?.filter(bot => bot.dedicated_workspace).map(bot => bot.workspace_id));
+    return allGroups.filter(group => !ownedWorkspaces.has(group.workspace.id))
+      .map(group => ({ ...group, threads: group.threads.filter(thread => !homeIds.has(thread.id)) }));
+  }, [allGroups, bots]);
   const [optimisticSelection, setOptimisticSelection] = useState<{
     workspaceId: string | null;
     threadId: string | null;
@@ -3032,6 +3041,7 @@ export const WorkspaceSidebar = memo(function WorkspaceSidebar({
         ) : null}
         {/* Kept mounted while Activity is up so pagers and folds survive. */}
         <div hidden={Boolean(activity)}>
+        <BotSidebar bots={bots} botApi={botApi} groups={allGroups} selectedThreadId={selectedThreadId} onSelectThread={handleSelectThread} />
         <PinnedThreadList
           entries={pinnedThreads}
           selectedThreadId={visualSelectedThreadId}

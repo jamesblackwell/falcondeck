@@ -6068,6 +6068,8 @@ function AppInner() {
             onSelectThread={handleSelectThread}
             onNewThread={handleNewThread}
             onNewChat={handleNewChat}
+            bots={snapshot?.preferences.bots}
+            botApi={snapshot?.daemon.capabilities?.bots ? api ?? undefined : undefined}
             onArchiveThread={handleArchiveThread}
             onArchiveAllThreads={handleArchiveAllThreads}
             onUnarchiveThread={handleUnarchiveThread}

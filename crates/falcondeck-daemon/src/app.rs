@@ -59,11 +59,19 @@ fn workspace_kind_for_path(path: &str) -> falcondeck_core::WorkspaceKind {
             .and_then(|name| name.to_str())
             == Some("Documents");
 
-    if is_managed_chat {
+    let is_bot = is_bot_workspace_path(path);
+    if is_managed_chat || is_bot {
         falcondeck_core::WorkspaceKind::Casual
     } else {
         falcondeck_core::WorkspaceKind::Project
     }
+}
+
+fn is_bot_workspace_path(path: &Path) -> bool {
+    path.file_name().and_then(|name| name.to_str())
+        .and_then(|name| name.strip_prefix("bot-"))
+        .is_some_and(|id| Uuid::parse_str(id).is_ok())
+        && path.parent().and_then(Path::file_name).and_then(|name| name.to_str()) == Some("bots")
 }
 
 use crate::{
@@ -96,6 +104,7 @@ pub(crate) mod host_provisioning;
 mod notifications;
 mod opencode_threads;
 mod project_folders;
+mod bots;
 mod provider_runtime;
 mod provider_usage;
 mod remote_bridge;
@@ -355,6 +364,7 @@ struct InnerState {
     /// app crashes or is force-quit.
     desktop_active_until: StdMutex<Option<chrono::DateTime<Utc>>>,
     preferences: Mutex<FalconDeckPreferences>,
+    bot_mutations: Mutex<()>,
     /// Embedded cua-driver child. Absent binary means this host cannot run it.
     computer_use: computer_use::ComputerUseHost,
     /// Definitions and bounded run ledgers owned by this daemon.
@@ -974,6 +984,7 @@ impl AppState {
                     version,
                     started_at: Utc::now(),
                     capabilities: DaemonCapabilities {
+                        bots: true,
                         scheduled_tasks: true,
                         computer_use: computer_use_available,
                     },
@@ -1016,6 +1027,7 @@ impl AppState {
                 local_base_url: OnceLock::new(),
                 desktop_active_until: StdMutex::new(None),
                 preferences: Mutex::new(FalconDeckPreferences::default()),
+                bot_mutations: Mutex::new(()),
                 computer_use,
                 scheduled_tasks: Mutex::new(scheduled_tasks::ScheduledTaskRegistry::default()),
                 scheduled_tasks_restored: OnceCell::new(),
@@ -1632,6 +1644,7 @@ impl AppState {
         // Lazy projects never reach connect's persistence path. Save their
         // identities and interruption markers after remote state is restored.
         self.persist_local_state().await?;
+        self.restore_bot_watches().await;
         // Interrupted projects become actionable first. Unrelated harness
         // probes must not hold the recovery dialog's Continue action behind
         // every project the user has ever opened.
@@ -3760,7 +3773,9 @@ impl AppState {
     pub(super) async fn casual_chat_documents_root(&self, workspace_id: &str) -> Option<String> {
         let workspaces = self.inner.workspaces.lock().await;
         let workspace = workspaces.get(workspace_id)?;
-        if workspace.summary.kind != falcondeck_core::WorkspaceKind::Casual {
+        if workspace.summary.kind != falcondeck_core::WorkspaceKind::Casual
+            || is_bot_workspace_path(Path::new(&workspace.summary.path))
+        {
             return None;
         }
         Path::new(&workspace.summary.path)
@@ -3773,6 +3788,9 @@ impl AppState {
         &self,
         workspace_id: &str,
     ) -> Result<falcondeck_core::CommandResponse, DaemonError> {
+        if self.inner.preferences.lock().await.bots.iter().any(|bot| bot.workspace_id == workspace_id) {
+            return Err(DaemonError::Conflict("Delete this project's bots before removing the project".into()));
+        }
         workspace_ops::remove_workspace(self, workspace_id).await
     }
 
@@ -3780,6 +3798,9 @@ impl AppState {
         &self,
         workspace_id: &str,
     ) -> Result<falcondeck_core::CommandResponse, DaemonError> {
+        if self.inner.preferences.lock().await.bots.iter().any(|b| b.workspace_id == workspace_id) {
+            return Err(DaemonError::Conflict("This project hosts a bot's home conversation".into()));
+        }
         workspace_ops::close_workspace(self, workspace_id).await
     }
 
@@ -3838,6 +3859,9 @@ impl AppState {
         workspace_id: &str,
         thread_id: &str,
     ) -> Result<ThreadSummary, DaemonError> {
+        if self.bot_for_thread(thread_id).await.is_some() {
+            return Err(DaemonError::Conflict("Use Delete bot to retire its home conversation".into()));
+        }
         workspace_ops::archive_thread(self, workspace_id, thread_id).await
     }
 
@@ -3861,6 +3885,9 @@ impl AppState {
         workspace_id: &str,
         thread_id: &str,
     ) -> Result<CommandResponse, DaemonError> {
+        if self.bot_for_thread(thread_id).await.is_some() {
+            return Err(DaemonError::Conflict("Delete the bot before deleting its home conversation".into()));
+        }
         workspace_ops::delete_thread(self, workspace_id, thread_id).await?;
         Ok(CommandResponse {
             ok: true,

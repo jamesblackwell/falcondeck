@@ -168,6 +168,9 @@ pub fn router(state: AppState) -> Router {
         .route("/api/control/get", post(control_get))
         .route("/api/control/execute", post(control_execute))
         .route("/api/threads/search", post(search_thread_messages))
+        .route("/api/bots", post(mutate_bot))
+        .route("/api/bots/{bot_id}/documents", get(bot_documents).post(mutate_bot_document))
+        .route("/api/bots/{bot_id}/documents/content", get(read_bot_document))
         .route("/api/chats", post(create_chat))
         .route("/api/workspaces/connect", post(connect_workspace))
         .route("/api/workspaces/{workspace_id}", delete(remove_workspace))
@@ -379,6 +382,39 @@ pub fn router(state: AppState) -> Router {
         // must be rejected before anything else sees it.
         .layer(middleware::from_fn(require_loopback_host))
         .with_state(state)
+}
+
+async fn mutate_bot(
+    State(state): State<AppState>,
+    Json(request): Json<falcondeck_core::BotMutation>,
+) -> Result<Json<serde_json::Value>, DaemonError> {
+    state.mutate_bot(request).await.map(Json)
+}
+
+async fn bot_documents(
+    State(state): State<AppState>,
+    Path(bot): Path<String>,
+) -> Result<Json<Vec<String>>, DaemonError> {
+    state.bot_documents(&bot).await.map(Json)
+}
+
+async fn read_bot_document(
+    State(state): State<AppState>,
+    Path(bot): Path<String>,
+    Query(query): Query<std::collections::HashMap<String, String>>,
+) -> Result<Json<falcondeck_core::BotDocument>, DaemonError> {
+    let name = query
+        .get("name")
+        .ok_or_else(|| DaemonError::BadRequest("name is required".into()))?;
+    state.read_bot_document(&bot, name).await.map(Json)
+}
+
+async fn mutate_bot_document(
+    State(state): State<AppState>,
+    Path(bot): Path<String>,
+    Json(request): Json<falcondeck_core::BotDocumentMutation>,
+) -> Result<Json<serde_json::Value>, DaemonError> {
+    state.mutate_bot_document(&bot, request).await.map(Json)
 }
 
 async fn health(State(state): State<AppState>) -> Json<falcondeck_core::HealthResponse> {
