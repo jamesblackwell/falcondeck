@@ -348,7 +348,8 @@ impl ProviderRuntime {
                             codex_inputs(spec.inputs, spec.selected_skills),
                             Some(&cwd),
                             spec.requested_model_id,
-                            spec.requested_reasoning_effort,
+                            spec.requested_reasoning_effort
+                                .or(spec.thread.agent.reasoning_effort.as_deref()),
                             collaboration_mode,
                             sandbox_policy_payload(
                                 spec.thread.agent.sandbox_mode.as_deref(),

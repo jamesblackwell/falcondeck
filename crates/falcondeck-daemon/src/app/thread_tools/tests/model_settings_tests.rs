@@ -115,3 +115,94 @@ fn create_catalog_advertises_reasoning_effort() {
     assert_eq!(effort["minLength"], 1);
     assert!(effort["description"].as_str().unwrap().contains("xhigh"));
 }
+
+#[cfg(unix)]
+#[tokio::test]
+async fn create_codex_passes_reasoning_to_first_turn() {
+    use std::os::unix::fs::PermissionsExt;
+    let (app, temp) = fixture().await;
+    let script = temp.path().join("fake-codex");
+    let capture = temp.path().join("codex-turn.json");
+    let source = r#"#!/usr/bin/env python3
+import json, sys
+for line in sys.stdin:
+    request = json.loads(line)
+    if 'id' not in request:
+        continue
+    method = request['method']
+    result = {}
+    if method == 'account/read':
+        result = {'account': {'type': 'chatgpt', 'email': 'test@example.com'}}
+    elif method == 'model/list':
+        result = {'data': [{'id': 'test-model', 'isDefault': True}]}
+    elif method in ('thread/list', 'collaborationMode/list'):
+        result = {'data': []}
+    elif method in ('thread/start', 'thread/resume'):
+        result = {'thread': {'id': 'codex-child', 'name': 'New thread'}}
+    elif method == 'turn/start':
+        with open(__CAPTURE__, 'w') as capture:
+            json.dump(request['params'], capture)
+    print(json.dumps({'id': request['id'], 'result': result}), flush=True)
+"#
+    .replace("__CAPTURE__", &serde_json::to_string(&capture).unwrap());
+    std::fs::write(&script, source).unwrap();
+    std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let workspace_path = app.inner.workspaces.lock().await["workspace-1"]
+        .summary
+        .path
+        .clone();
+    let bootstrap = crate::codex::CodexSession::connect(
+        "workspace-1".into(),
+        workspace_path,
+        script.to_string_lossy().into(),
+        app.clone(),
+    )
+    .await
+    .unwrap();
+    let session = bootstrap.session.activate();
+    app.inner
+        .workspaces
+        .lock()
+        .await
+        .get_mut("workspace-1")
+        .unwrap()
+        .codex_session = Some(session.clone());
+    let result = app
+        .invoke_extension_tool(call(
+            CREATE,
+            json!({
+                "provider": "codex", "model": "test-model", "reasoning_effort": "xhigh",
+                "prompt": "do bounded work"
+            }),
+        ))
+        .await
+        .unwrap();
+    assert!(
+        result
+            .result
+            .as_str()
+            .unwrap()
+            .contains("First prompt dispatched")
+    );
+    let params: Value = serde_json::from_str(&std::fs::read_to_string(capture).unwrap()).unwrap();
+    assert_eq!(params["effort"], "xhigh");
+    app.with_thread_mut("workspace-1", "codex-child", |t| {
+        t.status = ThreadStatus::Idle
+    })
+    .await
+    .unwrap();
+    app.invoke_extension_tool(call(
+        MESSAGE,
+        json!({
+            "thread_id": "codex-child", "message": "Continue the bounded work."
+        }),
+    ))
+    .await
+    .unwrap();
+    let params: Value = serde_json::from_str(
+        &std::fs::read_to_string(temp.path().join("codex-turn.json")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(params["effort"], "xhigh");
+    session.shutdown().await.unwrap();
+}
