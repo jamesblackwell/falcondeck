@@ -95,6 +95,9 @@ private struct ChatContent: View {
             // Loaded messages stay visible and interactive even if UIKit has
             // not realized the final row or delivered a layout callback yet.
             .accessibilityIdentifier("conversation-transcript")
+            .simultaneousGesture(TapGesture().onEnded {
+                UIApplication.shared.sendAction(#selector(UIResponder.resignFirstResponder), to: nil, from: nil, for: nil)
+            })
             .onScrollGeometryChange(for: TranscriptGeometry.self) { g in
                 TranscriptGeometry(nearLatest: g.contentOffset.y + g.containerSize.height >= g.contentSize.height - 120, contentHeight: g.contentSize.height)
             } action: { previous, value in
