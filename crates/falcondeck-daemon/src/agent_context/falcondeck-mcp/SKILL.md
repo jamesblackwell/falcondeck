@@ -109,9 +109,12 @@ questions are answered only in the FalconDeck UI.
 
 Use `falcondeck_create_thread` for independent sibling work. The workspace is
 inherited. Optional arguments: `provider`, `isolation` (`project_folder`, the
-default, or `isolated`), `model`, and `prompt` (up to 24000 characters). Without
-`prompt`, the new thread stays idle. `context` defaults to `none`: no parent
-transcript is copied. Choose `briefing` for the parent's summary and cached user
+default, or `isolated`), `model`, `reasoning_effort`, and `prompt` (up to 24000
+characters). Set `reasoning_effort` (for example `high` or `xhigh`, when supported by the
+provider/model) to configure the actual harness setting before the first turn;
+a prompt asking for more reasoning does not set it. Omit it for the provider
+default. Without `prompt`, the new thread stays idle. `context` defaults to
+`none`: no parent transcript is copied. Choose `briefing` for the parent's summary and cached user
 excerpts, or `transcript_tail` for up to 40 items / 12000 characters of handoff
 markdown. Explicit context is held for the first prompt if none is supplied.
 

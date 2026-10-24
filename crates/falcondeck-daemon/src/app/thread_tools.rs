@@ -61,6 +61,7 @@ pub(super) fn catalog() -> Vec<ExtensionAgentTool> {
             "provider": {"type":"string", "minLength":1},
             "isolation": {"type":"string", "enum":["project_folder","isolated"], "default":"project_folder"},
             "model": {"type":"string", "minLength":1},
+            "reasoning_effort": {"type":"string", "minLength":1, "description":"Provider/model reasoning effort, e.g. low, medium, high, xhigh, or max when supported. Saved before the first prompt and reused for later turns. Omit for the provider default."},
             "prompt": {"type":"string", "minLength":1, "maxLength":24000, "description":"Readable prose with normal spaces between words; shown to the user and the new thread."},
             "context": {"type":"string", "enum":["none","briefing","transcript_tail"], "default":"none"},
             "title": {"type":"string", "minLength":1, "maxLength":200},
@@ -90,6 +91,7 @@ struct CreateArgs {
     #[serde(default)]
     isolation: falcondeck_core::ThreadIsolation,
     model: Option<String>,
+    reasoning_effort: Option<String>,
     prompt: Option<String>,
     #[serde(default)]
     context: Context,
@@ -271,10 +273,11 @@ impl AppState {
                     .as_ref()
                     .is_some_and(|p| p.trim().is_empty() || p.chars().count() > MAX_CHARS)
                     || a.model.as_ref().is_some_and(|m| m.trim().is_empty())
+                    || a.reasoning_effort.as_ref().is_some_and(|e| e.trim().is_empty())
                     || a.title.as_ref().is_some_and(|t| t.trim().is_empty() || t.chars().count() > 200)
                 {
                     return Err(DaemonError::BadRequest(
-                        "prompt must be 1–24000 characters, model nonempty, and title 1–200 characters".into(),
+                        "prompt must be 1–24000 characters, model and reasoning_effort nonempty, and title 1–200 characters".into(),
                     ));
                 }
                 if let Some(prompt) = &a.prompt {
@@ -337,7 +340,8 @@ impl AppState {
                 self.with_thread_mut(&workspace, &id, |thread| {
                     thread.origin = Some(ThreadOrigin::AgentSpawn {
                         parent_thread_id: parent.into(),
-                    })
+                    });
+                    thread.agent.reasoning_effort = a.reasoning_effort;
                 })
                 .await?;
                 if let Some(title) = &a.title {
@@ -1531,7 +1535,13 @@ mod tests {
         set_items(&app, vec![user("u1", "PRIVATE PARENT TRANSCRIPT")]).await;
         let script = temp.path().join("fake-claude");
         let capture = temp.path().join("captured-input");
-        std::fs::write(&script, format!("#!/bin/sh\nIFS= read -r input\nprintf '%s' \"$input\" > '{}'\nprintf '%s\\n' '{{\"type\":\"result\",\"subtype\":\"success\",\"result\":\"done\",\"session_id\":\"test-session\"}}'\n", capture.display())).unwrap();
+        let captured_args = temp.path().join("captured-args");
+        std::fs::write(&script, format!(r#"#!/bin/sh
+printf '%s\n' "$@" > '{}'
+IFS= read -r input
+printf '%s' "$input" > '{}'
+printf '%s\n' '{{"type":"result","subtype":"success","result":"done","session_id":"test-session"}}'
+"#, captured_args.display(), capture.display())).unwrap();
         std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o700)).unwrap();
         let runtime = crate::claude::ClaudeRuntime::for_test(
             temp.path().to_string_lossy().into(),
@@ -1547,7 +1557,7 @@ mod tests {
         let result = app
             .invoke_extension_tool(call(
                 CREATE,
-                json!({"provider":"claude", "prompt":"do bounded work"}),
+                json!({"provider":"claude", "reasoning_effort":"xhigh", "prompt":"do bounded work"}),
             ))
             .await
             .unwrap();
@@ -1574,6 +1584,8 @@ mod tests {
         let input = std::fs::read_to_string(capture).unwrap();
         assert!(input.contains("do bounded work"));
         assert!(!input.contains("PRIVATE PARENT TRANSCRIPT"));
+        let argv = std::fs::read_to_string(captured_args).unwrap();
+        assert!(argv.lines().collect::<Vec<_>>().windows(2).any(|args| args == ["--effort", "xhigh"]));
         let ws = app.inner.workspaces.lock().await;
         let child = &ws["workspace-1"].threads[&created_id(&result)];
         assert!(child.items.iter().any(

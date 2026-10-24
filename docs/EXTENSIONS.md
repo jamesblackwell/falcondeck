@@ -1091,7 +1091,10 @@ of available history was reached. Filtered activity still advances the cursor,
 and a character-budget boundary leaves unshown messages for the next page.
 
 Create uses normal thread start and optional first-turn dispatch with existing
-UI approvals. Optional context is `none` (default), `briefing` (summary/index),
+UI approvals. Optional `reasoning_effort` sets the provider/model effort (for
+example `high` or `xhigh` when supported) before dispatch and persists for later
+turns, snapshots, and daemon restarts. Omission preserves the provider default;
+blank values are rejected before creation. Optional context is `none` (default), `briefing` (summary/index),
 or `transcript_tail` (40 items / 12000 characters). The daemon persists
 `agent_spawn` origin with `parent_thread_id`, not a conversation database.
 Admission is serialized and capped at three concurrent children per parent;
