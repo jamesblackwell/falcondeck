@@ -1624,6 +1624,7 @@ export function normalizeDaemonSnapshot(
       version: snapshot.daemon?.version ?? "unknown",
       started_at: snapshot.daemon?.started_at ?? new Date(0).toISOString(),
       capabilities: {
+        bots: snapshot.daemon?.capabilities?.bots ?? false,
         scheduled_tasks:
           snapshot.daemon?.capabilities?.scheduled_tasks ?? false,
         computer_use: snapshot.daemon?.capabilities?.computer_use ?? false,

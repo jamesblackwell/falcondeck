@@ -607,6 +607,16 @@ describe("interactive request boundary normalization", () => {
     ).toBeUndefined();
   });
 
+  it("preserves the bot capability and defaults older daemons to unsupported", () => {
+    for (const bots of [true, false, undefined]) {
+      const snapshot = normalizeDaemonSnapshot({
+        daemon: { capabilities: { bots } },
+      });
+      expect(snapshot.daemon.capabilities?.bots).toBe(bots ?? false);
+    }
+    expect(normalizeDaemonSnapshot({}).daemon.capabilities?.bots).toBe(false);
+  });
+
   it("normalizes scheduled-task capabilities and filters malformed tasks", () => {
     const snapshot = normalizeDaemonSnapshot({
       daemon: {
