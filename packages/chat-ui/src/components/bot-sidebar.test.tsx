@@ -63,9 +63,8 @@ describe("bot sidebar", () => {
     fireEvent.change(screen.getByLabelText("Name"), {
       target: { value: "Marketing" },
     });
-    fireEvent.change(screen.getByLabelText("Home conversation"), {
-      target: { value: "pinned" },
-    });
+    fireEvent.click(screen.getByRole("radio", { name: "Promote a task" }));
+    fireEvent.click(screen.getByRole("option", { name: /pinned/ }));
     fireEvent.change(screen.getByLabelText("Your instructions"), {
       target: { value: "Look after marketing" },
     });
@@ -129,7 +128,7 @@ describe("bot sidebar", () => {
     fireEvent.change(screen.getByLabelText("Your instructions"), {
       target: { value: "Draft only" },
     });
-    fireEvent.click(screen.getByRole("checkbox", { name: /Allow this bot/ }));
+    fireEvent.click(screen.getByRole("switch", { name: /Allow this bot/ }));
     fireEvent.click(screen.getByRole("button", { name: "Save changes" }));
     await waitFor(() =>
       expect(transport.mutateBot).toHaveBeenCalledWith({

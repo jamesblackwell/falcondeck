@@ -1,16 +1,71 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useId, useMemo, useRef, useState } from "react";
+import type { ReactNode } from "react";
 import { createPortal } from "react-dom";
-import { Bot, Plus, Settings2 } from "lucide-react";
-import type {
-  BotApi,
-  BotProfile,
-  ProjectGroup,
-  ThreadSummary,
+import {
+  Bot,
+  Check,
+  ChevronRight,
+  FilePlus2,
+  FileText,
+  Plus,
+  Settings2,
+  Upload,
+  X,
+} from "lucide-react";
+import {
+  defaultProviderLabel,
+  type BotApi,
+  type BotProfile,
+  type ProjectGroup,
+  type ThreadSummary,
 } from "@falcondeck/client-core";
-import { Button, Input, Textarea, cn } from "@falcondeck/ui";
+import {
+  ActivityDiamond,
+  Button,
+  CopyButton,
+  Input,
+  SearchField,
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+  Switch,
+  Textarea,
+  cn,
+} from "@falcondeck/ui";
+import { ProviderIcon } from "./provider-icon";
 
 export type BotSidebarControls = { bots?: BotProfile[]; botApi?: BotApi };
 const EMPTY_BOTS: BotProfile[] = [];
+
+const SECTION_ICON_BUTTON_CLASS =
+  "fd-focus -my-0.5 shrink-0 rounded-[var(--fd-radius-sm)] p-0.5 text-fg-muted transition-colors duration-[var(--fd-duration-fast)] hover:bg-surface-3 hover:text-fg-secondary";
+const FIELD_LABEL_CLASS =
+  "block text-[length:var(--fd-text-sm)] font-medium text-fg-primary";
+const HINT_CLASS =
+  "text-[length:var(--fd-text-xs)] leading-relaxed text-fg-muted";
+
+function errorMessage(error: unknown) {
+  return error instanceof Error ? error.message : String(error);
+}
+
+function botActivity(bot: BotProfile, tasks: ThreadSummary[]) {
+  const related = tasks.filter(
+    (task) =>
+      task.id === bot.thread_id ||
+      (task.origin?.kind === "agent_spawn" &&
+        task.origin.parent_thread_id === bot.thread_id),
+  );
+  if (
+    related.some(
+      (task) =>
+        task.status === "waiting_for_input" || task.status === "error",
+    )
+  )
+    return "needs_input";
+  return related.some((task) => task.status === "running") ? "working" : null;
+}
 
 export function BotSidebar({
   bots = EMPTY_BOTS,
@@ -24,71 +79,109 @@ export function BotSidebar({
   onSelectThread: (workspace: string, thread: string) => void;
 }) {
   const [editor, setEditor] = useState<BotProfile | "new" | null>(null);
+  const tasks = useMemo(() => groups.flatMap((group) => group.threads), [groups]);
   if (!botApi) return null;
   return (
-    <section aria-label="Bots" className="mb-4">
-      <div className="flex items-center justify-between px-2.5 pb-1.5">
-        <h2 className="text-xs font-medium uppercase tracking-wider text-fg-muted">
+    <section aria-labelledby="fd-bots-heading" className="mb-4">
+      <div className="flex items-center justify-between pb-1.5 pl-2.5 pr-2">
+        <h2 id="fd-bots-heading" className="fd-type-eyebrow text-fg-muted">
           Bots
         </h2>
-        <Button
-          size="icon"
-          variant="ghost"
+        <button
+          type="button"
           aria-label="New bot"
+          title="New bot"
+          className={SECTION_ICON_BUTTON_CLASS}
           onClick={() => setEditor("new")}
         >
           <Plus className="h-3.5 w-3.5" />
-        </Button>
+        </button>
       </div>
       {bots.map((bot) => {
-        const related = groups
-          .flatMap((group) => group.threads)
-          .filter(
-            (task) =>
-              task.id === bot.thread_id ||
-              (task.origin?.kind === "agent_spawn" &&
-                task.origin.parent_thread_id === bot.thread_id),
-          );
-        const working = related.some((task) => task.status === "running");
-        const needsInput = related.some(
-          (task) =>
-            task.status === "waiting_for_input" || task.status === "error",
-        );
+        const activity = botActivity(bot, tasks);
+        const selected = selectedThreadId === bot.thread_id;
         return (
           <div
             key={bot.id}
             className={cn(
-              "group flex items-center rounded-[var(--fd-radius-md)] hover:bg-interactive-hover",
-              selectedThreadId === bot.thread_id && "bg-interactive-selected",
+              "group flex items-center gap-1 rounded-[var(--fd-radius-md)] pr-1.5 transition-colors duration-[var(--fd-duration-hover)]",
+              selected
+                ? "fd-row-selected"
+                : "hover:bg-interactive-hover active:bg-interactive-selected",
             )}
           >
             <button
-              className="fd-focus flex min-w-0 flex-1 items-center gap-2 px-2.5 py-2 text-left text-sm text-fg-primary"
+              type="button"
+              className="fd-focus-inset flex min-w-0 flex-1 items-center gap-2 rounded-[var(--fd-radius-sm)] py-2 pl-2.5 text-left"
               onClick={() => onSelectThread(bot.workspace_id, bot.thread_id)}
             >
-              <Bot className="h-4 w-4 shrink-0 text-fg-muted" />
-              <span className="min-w-0 flex-1 truncate">{bot.name}</span>
-              {needsInput ? (
-                <span className="text-xs text-warning">Needs you</span>
-              ) : working ? (
-                <span className="text-xs text-accent">Working</span>
+              <span
+                className={cn(
+                  "flex h-4 w-4 shrink-0 items-center justify-center",
+                  selected ? "text-accent" : "text-fg-muted",
+                )}
+              >
+                {activity === "working" ? (
+                  <ActivityDiamond />
+                ) : activity === "needs_input" ? (
+                  <span className="h-2.5 w-2.5 rounded-full bg-warning shadow-[0_0_0_3px_var(--fd-warning-muted)]" />
+                ) : (
+                  <Bot aria-hidden="true" className="h-3.5 w-3.5" />
+                )}
+              </span>
+              <span
+                className={cn(
+                  "fd-type-supporting min-w-0 flex-1 truncate transition-colors duration-[var(--fd-duration-fast)]",
+                  selected
+                    ? "text-fg-primary"
+                    : "text-fg-secondary group-hover:text-fg-primary",
+                )}
+              >
+                {bot.name}
+              </span>
+              {activity === "needs_input" ? (
+                <span className="fd-type-meta shrink-0 text-warning">
+                  Needs you
+                </span>
+              ) : activity === "working" ? (
+                <span className="fd-type-meta shrink-0 text-fg-muted">
+                  Working
+                </span>
               ) : null}
             </button>
-            <Button
-              size="icon"
-              variant="ghost"
+            <button
+              type="button"
               aria-label={`Edit ${bot.name}`}
+              title="Bot settings"
+              className={cn(
+                SECTION_ICON_BUTTON_CLASS,
+                "opacity-0 focus-visible:opacity-100 group-focus-within:opacity-100 group-hover:opacity-100",
+              )}
               onClick={() => setEditor(bot)}
             >
               <Settings2 className="h-3.5 w-3.5" />
-            </Button>
+            </button>
           </div>
         );
       })}
       {bots.length === 0 ? (
-        <p className="px-2.5 text-xs text-fg-muted">
-          A coordinator you can keep coming back to.
-        </p>
+        <button
+          type="button"
+          onClick={() => setEditor("new")}
+          className="fd-focus group flex w-full items-start gap-2 rounded-[var(--fd-radius-md)] px-2.5 py-2 text-left transition-colors duration-[var(--fd-duration-hover)] hover:bg-interactive-hover"
+        >
+          <span className="flex h-5 w-4 shrink-0 items-center justify-center text-fg-muted group-hover:text-fg-secondary">
+            <Bot aria-hidden="true" className="h-3.5 w-3.5" />
+          </span>
+          <span className="min-w-0">
+            <span className="fd-type-supporting block text-fg-secondary group-hover:text-fg-primary">
+              Create a bot
+            </span>
+            <span className="fd-type-meta block text-fg-muted">
+              A coordinator you can keep coming back to.
+            </span>
+          </span>
+        </button>
       ) : null}
       {editor ? (
         <BotEditor
@@ -96,7 +189,8 @@ export function BotSidebar({
           bot={editor === "new" ? undefined : editor}
           api={botApi}
           bots={bots}
-          tasks={groups.flatMap((group) => group.threads)}
+          groups={groups}
+          tasks={tasks}
           selectedThreadId={selectedThreadId}
           onClose={() => setEditor(null)}
           onSelectThread={onSelectThread}
@@ -110,10 +204,77 @@ export function BotSidebar({
   );
 }
 
+function Field({
+  label,
+  hint,
+  children,
+}: {
+  label: string;
+  hint?: ReactNode;
+  children: (id: string) => ReactNode;
+}) {
+  const id = useId();
+  return (
+    <div className="space-y-2">
+      <label htmlFor={id} className={FIELD_LABEL_CLASS}>
+        {label}
+      </label>
+      {children(id)}
+      {hint ? <p className={HINT_CLASS}>{hint}</p> : null}
+    </div>
+  );
+}
+
+function EditorSection({
+  title,
+  actions,
+  children,
+}: {
+  title: string;
+  actions?: ReactNode;
+  children: ReactNode;
+}) {
+  return (
+    <section className="space-y-3 border-t border-border-subtle pt-5">
+      <div className="flex min-h-7 items-center justify-between gap-3">
+        <h3 className="fd-type-eyebrow text-fg-muted">{title}</h3>
+        {actions ? <div className="flex items-center gap-1">{actions}</div> : null}
+      </div>
+      {children}
+    </section>
+  );
+}
+
+const STATUS_LABELS: Partial<Record<ThreadSummary["status"], string>> = {
+  running: "Working",
+  waiting_for_input: "Needs you",
+  error: "Error",
+  idle: "Idle",
+};
+
+function TaskStatus({ status }: { status: ThreadSummary["status"] }) {
+  return (
+    <span
+      className={cn(
+        "fd-type-meta flex shrink-0 items-center gap-1.5",
+        status === "waiting_for_input"
+          ? "text-warning"
+          : status === "error"
+            ? "text-danger"
+            : "text-fg-muted",
+      )}
+    >
+      {status === "running" ? <ActivityDiamond /> : null}
+      {STATUS_LABELS[status] ?? status.replaceAll("_", " ")}
+    </span>
+  );
+}
+
 function BotEditor({
   bot,
   api,
   bots,
+  groups,
   tasks,
   selectedThreadId,
   onClose,
@@ -123,6 +284,7 @@ function BotEditor({
   bot?: BotProfile;
   api: BotApi;
   bots: BotProfile[];
+  groups: ProjectGroup[];
   tasks: ThreadSummary[];
   selectedThreadId: string | null;
   onClose: () => void;
@@ -132,16 +294,50 @@ function BotEditor({
   const [name, setName] = useState(bot?.name ?? "");
   const [instructions, setInstructions] = useState(bot?.instructions ?? "");
   const [canStart, setCanStart] = useState(bot?.can_start_threads ?? true);
+  const [home, setHome] = useState<"new" | "existing">("new");
   const [threadId, setThreadId] = useState("");
+  const [query, setQuery] = useState("");
   const [provider, setProvider] = useState("codex");
   const [model, setModel] = useState("");
   const [pending, setPending] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [confirmDelete, setConfirmDelete] = useState(false);
-  const frame = useRef<HTMLDivElement>(null);
-  const homeIds = new Set(bots.map((bot) => bot.thread_id));
-  const candidates = tasks.filter(
-    (task) => !homeIds.has(task.id) && !task.is_archived,
+  const frame = useRef<HTMLFormElement>(null);
+  const titleId = useId();
+  const projectNames = useMemo(
+    () =>
+      new Map(
+        groups.map((group) => [
+          group.workspace.id,
+          group.workspace.path.split("/").filter(Boolean).at(-1) ?? "",
+        ]),
+      ),
+    [groups],
+  );
+  const candidates = useMemo(() => {
+    const homeIds = new Set(bots.map((bot) => bot.thread_id));
+    const needle = query.trim().toLowerCase();
+    return tasks
+      .filter((task) => !homeIds.has(task.id) && !task.is_archived)
+      .filter(
+        (task) =>
+          !needle ||
+          task.title.toLowerCase().includes(needle) ||
+          projectNames.get(task.workspace_id)?.toLowerCase().includes(needle),
+      )
+      .sort(
+        (a, b) =>
+          Number(b.id === selectedThreadId) -
+            Number(a.id === selectedThreadId) ||
+          Number(Boolean(b.is_pinned)) - Number(Boolean(a.is_pinned)),
+      );
+  }, [bots, projectNames, query, selectedThreadId, tasks]);
+  const providers = useMemo(
+    () =>
+      Array.from(
+        new Set(["codex", "claude", ...tasks.map((task) => task.provider)]),
+      ),
+    [tasks],
   );
   const children = bot
     ? tasks.filter(
@@ -150,6 +346,12 @@ function BotEditor({
           task.origin.parent_thread_id === bot.thread_id,
       )
     : [];
+  const promoting = !bot && home === "existing";
+  const canSubmit =
+    !pending && Boolean(name.trim()) && (!promoting || Boolean(threadId));
+  const close = () => {
+    if (!pending) onClose();
+  };
   const run = async (action: () => Promise<void>) => {
     if (pending) return;
     setPending(true);
@@ -157,24 +359,62 @@ function BotEditor({
     try {
       await action();
     } catch (error) {
-      setError(error instanceof Error ? error.message : String(error));
+      setError(errorMessage(error));
     } finally {
       setPending(false);
     }
   };
+  const submit = () =>
+    void run(async () => {
+      const result = await api.mutateBot(
+        bot
+          ? {
+              action: "update",
+              id: bot.id,
+              name,
+              instructions,
+              can_start_threads: canStart,
+            }
+          : {
+              action: "create",
+              name,
+              instructions,
+              ...(promoting
+                ? { thread_id: threadId }
+                : {
+                    provider,
+                    ...(model.trim() ? { model_id: model.trim() } : {}),
+                  }),
+            },
+      );
+      if (!bot && result.bot) onCreated(result.bot);
+      else onClose();
+    });
   useEffect(() => {
     const previous = document.activeElement as HTMLElement | null;
     frame.current?.querySelector<HTMLInputElement>("input")?.focus();
     return () => previous?.focus({ preventScroll: true });
   }, []);
   return createPortal(
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-[var(--fd-overlay)] p-4">
-      <div
+    <div
+      className="fixed inset-0 z-50 flex items-center justify-center bg-[var(--fd-overlay)] p-4"
+      onMouseDown={(event) => {
+        if (event.target === event.currentTarget) close();
+      }}
+    >
+      <form
         ref={frame}
         role="dialog"
         aria-modal="true"
-        aria-label={bot ? `Edit ${bot.name}` : "New bot"}
-        className="flex max-h-[90vh] w-full max-w-2xl flex-col rounded-[var(--fd-radius-xl)] border border-border-default bg-surface-1 shadow-[var(--fd-shadow-lg)]"
+        aria-labelledby={titleId}
+        className={cn(
+          "flex max-h-[min(88vh,52rem)] w-full flex-col overflow-hidden rounded-[var(--fd-radius-xl)] border border-border-default bg-surface-1 shadow-[var(--fd-shadow-lg)]",
+          bot ? "max-w-2xl" : "max-w-xl",
+        )}
+        onSubmit={(event) => {
+          event.preventDefault();
+          if (canSubmit) submit();
+        }}
         onKeyDown={(event) => {
           if (event.key === "Escape" && !pending) {
             event.stopPropagation();
@@ -183,7 +423,7 @@ function BotEditor({
           if (event.key !== "Tab") return;
           const items = Array.from(
             frame.current?.querySelectorAll<HTMLElement>(
-              "input:not(:disabled), textarea:not(:disabled), select:not(:disabled), button:not(:disabled), summary",
+              "input:not(:disabled):not([tabindex='-1']), textarea:not(:disabled), button:not(:disabled), summary",
             ) ?? [],
           );
           if (
@@ -195,101 +435,207 @@ function BotEditor({
           }
         }}
       >
-        <div className="flex items-center justify-between border-b border-border-subtle px-5 py-3">
-          <h2 className="text-lg font-semibold">
-            {bot ? bot.name : "New bot"}
-          </h2>
-          <Button variant="ghost" disabled={pending} onClick={onClose}>
-            Close
+        <header className="flex items-start gap-3 px-6 pb-5 pt-6">
+          <span className="flex h-10 w-10 shrink-0 items-center justify-center rounded-[var(--fd-radius-lg)] border border-border-subtle bg-accent-muted text-accent">
+            <Bot aria-hidden="true" className="h-5 w-5" />
+          </span>
+          <div className="min-w-0 flex-1 space-y-0.5">
+            <h2
+              id={titleId}
+              className="fd-type-heading fd-type-heading--sm truncate text-fg-primary"
+            >
+              {bot ? bot.name : "New bot"}
+            </h2>
+            <p className="fd-type-meta text-fg-muted">
+              {bot
+                ? "Bot settings"
+                : "A standing coordinator that delegates tasks and keeps notes between conversations."}
+            </p>
+          </div>
+          <Button
+            type="button"
+            size="icon"
+            variant="ghost"
+            aria-label="Close"
+            disabled={pending}
+            onClick={onClose}
+            className="-mr-2 -mt-1"
+          >
+            <X className="h-4 w-4" />
           </Button>
-        </div>
-        <div className="space-y-5 overflow-y-auto p-5">
-          <label className="block space-y-2 text-sm">
-            Name
-            <Input
-              value={name}
-              maxLength={100}
-              onChange={(event) => setName(event.target.value)}
-              placeholder="Assistant"
-            />
-          </label>
+        </header>
+        <div className="min-h-0 flex-1 space-y-5 overflow-y-auto px-6 pb-6">
+          <Field label="Name">
+            {(id) => (
+              <Input
+                id={id}
+                value={name}
+                maxLength={100}
+                onChange={(event) => setName(event.target.value)}
+                placeholder="e.g. Release captain"
+              />
+            )}
+          </Field>
           {!bot ? (
-            <>
-              <label className="block space-y-2 text-sm">
-                Home conversation
-                <select
-                  aria-label="Home conversation"
-                  className="block w-full rounded-[var(--fd-radius-md)] border border-border-default bg-surface-2 p-2"
-                  value={threadId}
-                  onChange={(event) => {
-                    setThreadId(event.target.value);
-                    if (!name)
-                      setName(
-                        candidates.find((t) => t.id === event.target.value)
-                          ?.title ?? "",
-                      );
-                  }}
-                >
-                  <option value="">Start a new conversation</option>
-                  {[...candidates]
-                    .sort(
-                      (a, b) =>
-                        Number(b.id === selectedThreadId) -
-                        Number(a.id === selectedThreadId),
-                    )
-                    .map((task) => (
-                      <option key={task.id} value={task.id}>
-                        {task.is_pinned ? "Pinned: " : ""}
-                        {task.title}
-                      </option>
-                    ))}
-                </select>
-              </label>
-              {!threadId ? (
-                <div className="flex gap-3">
-                  <label className="flex-1 space-y-2 text-sm">
-                    Harness
-                    <select
-                      aria-label="Harness"
-                      className="block w-full rounded-[var(--fd-radius-md)] border border-border-default bg-surface-2 p-2"
-                      value={provider}
-                      onChange={(event) => setProvider(event.target.value)}
-                    >
-                      {Array.from(
-                        new Set([
-                          "codex",
-                          "claude",
-                          ...tasks.map((task) => task.provider),
-                        ]),
-                      ).map((provider) => (
-                        <option key={provider}>{provider}</option>
-                      ))}
-                    </select>
-                  </label>
-                  <label className="flex-1 space-y-2 text-sm">
-                    Model
+            <div className="space-y-2">
+              <span className={FIELD_LABEL_CLASS}>Home conversation</span>
+              <div
+                role="radiogroup"
+                aria-label="Home conversation"
+                className="grid grid-cols-2 gap-1 rounded-[var(--fd-radius-lg)] border border-border-default bg-surface-2 p-1"
+              >
+                {(
+                  [
+                    ["new", "Start fresh"],
+                    ["existing", "Promote a task"],
+                  ] as const
+                ).map(([value, label]) => (
+                  <button
+                    key={value}
+                    type="button"
+                    role="radio"
+                    aria-checked={home === value}
+                    onClick={() => setHome(value)}
+                    className={cn(
+                      "fd-focus h-8 rounded-[var(--fd-radius-md)] text-[length:var(--fd-text-sm)] font-medium transition-colors duration-[var(--fd-duration-fast)]",
+                      home === value
+                        ? "bg-surface-4 text-fg-primary shadow-[var(--fd-shadow-sm)]"
+                        : "text-fg-muted hover:text-fg-secondary",
+                    )}
+                  >
+                    {label}
+                  </button>
+                ))}
+              </div>
+              {home === "new" ? (
+                <div className="grid grid-cols-2 gap-3 pt-2">
+                  <div className="space-y-2">
+                    <span className={HINT_CLASS}>Harness</span>
+                    <Select value={provider} onValueChange={setProvider}>
+                      <SelectTrigger
+                        aria-label="Harness"
+                        className="h-9 w-full rounded-[var(--fd-radius-lg)] bg-surface-2 text-[length:var(--fd-text-sm)] text-fg-primary"
+                      >
+                        <span className="flex min-w-0 items-center gap-2">
+                          <ProviderIcon provider={provider} />
+                          <SelectValue />
+                        </span>
+                      </SelectTrigger>
+                      <SelectContent>
+                        {providers.map((id) => (
+                          <SelectItem
+                            key={id}
+                            value={id}
+                            leading={<ProviderIcon provider={id} />}
+                          >
+                            {defaultProviderLabel(id)}
+                          </SelectItem>
+                        ))}
+                      </SelectContent>
+                    </Select>
+                  </div>
+                  <div className="space-y-2">
+                    <span className={HINT_CLASS}>Model</span>
                     <Input
+                      aria-label="Model"
                       value={model}
                       onChange={(event) => setModel(event.target.value)}
                       placeholder="Harness default"
                     />
-                  </label>
+                  </div>
                 </div>
-              ) : null}
-            </>
+              ) : (
+                <div className="space-y-2 pt-2">
+                  <SearchField
+                    label="Search tasks"
+                    placeholder="Search tasks"
+                    value={query}
+                    onChange={(event) => setQuery(event.target.value)}
+                  />
+                  <div
+                    role="listbox"
+                    aria-label="Task to promote"
+                    className="max-h-56 overflow-y-auto rounded-[var(--fd-radius-lg)] border border-border-subtle p-1"
+                  >
+                    {candidates.length ? (
+                      candidates.map((task) => {
+                        const picked = task.id === threadId;
+                        return (
+                          <button
+                            key={task.id}
+                            type="button"
+                            role="option"
+                            aria-selected={picked}
+                            onClick={() => {
+                              setThreadId(task.id);
+                              if (!name.trim()) setName(task.title);
+                            }}
+                            className={cn(
+                              "fd-focus flex w-full items-center gap-2.5 rounded-[var(--fd-radius-md)] px-2.5 py-2 text-left transition-colors duration-[var(--fd-duration-fast)]",
+                              picked
+                                ? "bg-interactive-selected"
+                                : "hover:bg-interactive-hover",
+                            )}
+                          >
+                            <ProviderIcon
+                              provider={task.provider}
+                              className="text-fg-muted"
+                            />
+                            <span className="fd-type-supporting min-w-0 flex-1 truncate text-fg-primary">
+                              {task.title}
+                            </span>
+                            <span className="fd-type-meta max-w-[40%] shrink-0 truncate text-fg-muted">
+                              {task.id === selectedThreadId
+                                ? "Open now"
+                                : projectNames.get(task.workspace_id)}
+                            </span>
+                            <Check
+                              aria-hidden="true"
+                              className={cn(
+                                "h-3.5 w-3.5 shrink-0 text-accent",
+                                !picked && "invisible",
+                              )}
+                            />
+                          </button>
+                        );
+                      })
+                    ) : (
+                      <p className="fd-type-meta px-2.5 py-6 text-center text-fg-muted">
+                        {query ? "No matching tasks" : "No tasks to promote yet"}
+                      </p>
+                    )}
+                  </div>
+                  <p className={HINT_CLASS}>
+                    The bot takes over this conversation and keeps its history.
+                  </p>
+                </div>
+              )}
+            </div>
           ) : null}
-          <label className="block space-y-2 text-sm">
-            Your instructions
-            <Textarea
-              rows={5}
-              value={instructions}
-              onChange={(event) => setInstructions(event.target.value)}
-              placeholder="What should this bot look after, and how should it work with you?"
-            />
-          </label>
-          <details className="text-sm text-fg-muted">
-            <summary className="cursor-pointer">FalconDeck defaults</summary>
-            <p className="mt-2">
+          <Field
+            label="Your instructions"
+            hint="Added on top of FalconDeck's built-in coordinator behaviour."
+          >
+            {(id) => (
+              <Textarea
+                id={id}
+                rows={bot ? 6 : 5}
+                className="min-h-[7.5rem] resize-y px-3 py-2.5 leading-relaxed"
+                value={instructions}
+                onChange={(event) => setInstructions(event.target.value)}
+                placeholder="What should this bot look after, and how should it work with you?"
+              />
+            )}
+          </Field>
+          <details className="group/defaults -mt-2 rounded-[var(--fd-radius-lg)] border border-border-subtle">
+            <summary className="fd-focus flex cursor-pointer list-none items-center gap-1.5 rounded-[var(--fd-radius-lg)] px-3 py-2 text-[length:var(--fd-text-xs)] text-fg-muted hover:text-fg-secondary [&::-webkit-details-marker]:hidden">
+              <ChevronRight
+                aria-hidden="true"
+                className="h-3 w-3 transition-transform duration-[var(--fd-duration-fast)] group-open/defaults:rotate-90"
+              />
+              What FalconDeck already tells every bot
+            </summary>
+            <p className="px-3 pb-3 pl-[1.875rem] text-[length:var(--fd-text-xs)] leading-relaxed text-fg-tertiary">
               Coordinate work through tasks in the appropriate project. Stay
               available for direction, follow up on delegated work, and bring
               back results or decisions. Keep durable knowledge in editable
@@ -299,127 +645,148 @@ function BotEditor({
           </details>
           {bot ? (
             <>
-              <label className="flex items-center gap-2 text-sm">
-                <input
-                  type="checkbox"
-                  checked={canStart}
-                  onChange={(event) => setCanStart(event.target.checked)}
-                />
-                Allow this bot to start tasks through FalconDeck
-              </label>
-              <BotDocuments bot={bot} api={api} />
-              <div className="space-y-2">
-                <h3 className="text-sm font-medium">Delegated tasks</h3>
-                {children.length ? (
-                  children.map((task) => (
-                    <button
-                      key={task.id}
-                      onClick={() => {
-                        onClose();
-                        onSelectThread(task.workspace_id, task.id);
-                      }}
-                      className="fd-focus flex w-full justify-between gap-3 text-left text-sm text-fg-muted hover:text-fg-primary"
+              <EditorSection title="Permissions">
+                <div
+                  className="flex cursor-pointer items-start justify-between gap-4"
+                  onClick={() => setCanStart((value) => !value)}
+                >
+                  <div className="min-w-0 space-y-1">
+                    <p className="text-[length:var(--fd-text-sm)] font-medium text-fg-primary"
                     >
-                      <span className="truncate">{task.title}</span>
-                      <span>{task.status.replaceAll("_", " ")}</span>
-                    </button>
-                  ))
+                      Allow this bot to start tasks
+                    </p>
+                    <p className={HINT_CLASS}>
+                      When off, the bot can plan and advise but asks you to
+                      start work yourself.
+                    </p>
+                  </div>
+                  <Switch
+                    checked={canStart}
+                    onCheckedChange={setCanStart}
+                    label="Allow this bot to start tasks"
+                    className="mt-0.5"
+                  />
+                </div>
+              </EditorSection>
+              <BotDocuments bot={bot} api={api} />
+              <EditorSection
+                title={`Delegated tasks${children.length ? ` · ${children.length}` : ""}`}
+              >
+                {children.length ? (
+                  <div className="-mx-2">
+                    {children.map((task) => (
+                      <button
+                        key={task.id}
+                        type="button"
+                        onClick={() => {
+                          onClose();
+                          onSelectThread(task.workspace_id, task.id);
+                        }}
+                        className="fd-focus flex w-full items-center gap-3 rounded-[var(--fd-radius-md)] px-2 py-1.5 text-left transition-colors hover:bg-interactive-hover"
+                      >
+                        <ProviderIcon
+                          provider={task.provider}
+                          className="text-fg-muted"
+                        />
+                        <span className="fd-type-supporting min-w-0 flex-1 truncate text-fg-secondary">
+                          {task.title}
+                        </span>
+                        <TaskStatus status={task.status} />
+                      </button>
+                    ))}
+                  </div>
                 ) : (
-                  <p className="text-sm text-fg-muted">
-                    Delegated work will appear here.
+                  <p className={HINT_CLASS}>
+                    Tasks this bot starts will appear here.
                   </p>
                 )}
-              </div>
+              </EditorSection>
             </>
           ) : null}
           {error ? (
-            <p role="alert" className="text-sm text-danger">
+            <p
+              role="alert"
+              className="rounded-[var(--fd-radius-md)] bg-danger-muted px-3 py-2 text-[length:var(--fd-text-sm)] text-danger"
+            >
               {error}
             </p>
           ) : null}
-          {confirmDelete ? (
-            <div className="space-y-2 text-sm">
-              <p>
-                Remove this bot? Its conversation will be archived and its
-                documents kept on disk.
+        </div>
+        <footer className="flex items-center gap-2 border-t border-border-subtle bg-surface-1 px-6 py-3.5">
+          {confirmDelete && bot ? (
+            <>
+              <p className="min-w-0 flex-1 text-[length:var(--fd-text-sm)] text-fg-secondary">
+                Remove this bot? Its conversation is archived and its documents
+                stay on disk.
               </p>
               <Button
+                type="button"
+                variant="ghost"
+                disabled={pending}
+                onClick={() => setConfirmDelete(false)}
+              >
+                Cancel
+              </Button>
+              <Button
+                type="button"
+                variant="danger"
                 disabled={pending}
                 onClick={() =>
                   void run(async () => {
-                    await api.mutateBot({ action: "delete", id: bot!.id });
+                    await api.mutateBot({ action: "delete", id: bot.id });
                     onClose();
                   })
                 }
               >
                 Remove bot
               </Button>
-              <Button variant="ghost" onClick={() => setConfirmDelete(false)}>
-                Cancel
-              </Button>
-            </div>
-          ) : null}
-        </div>
-        <div className="flex flex-wrap items-center gap-2 border-t border-border-subtle px-5 py-3">
-          {bot ? (
-            <>
-              <Button
-                variant="ghost"
-                disabled={pending}
-                onClick={() =>
-                  void run(async () => {
-                    await api.mutateBot({ action: "stop", id: bot.id });
-                  })
-                }
-              >
-                Stop work
-              </Button>
-              <Button
-                variant="ghost"
-                disabled={pending}
-                onClick={() => setConfirmDelete(true)}
-              >
-                Delete bot
-              </Button>
             </>
-          ) : null}
-          <Button
-            className="ml-auto"
-            disabled={pending || !name.trim()}
-            onClick={() =>
-              void run(async () => {
-                const result = await api.mutateBot(
-                  bot
-                    ? {
-                        action: "update",
-                        id: bot.id,
-                        name,
-                        instructions,
-                        can_start_threads: canStart,
-                      }
-                    : {
-                        action: "create",
-                        name,
-                        instructions,
-                        ...(threadId
-                          ? { thread_id: threadId }
-                          : {
-                              provider,
-                              ...(model.trim()
-                                ? { model_id: model.trim() }
-                                : {}),
-                            }),
-                      },
-                );
-                if (!bot && result.bot) onCreated(result.bot);
-                else onClose();
-              })
-            }
-          >
-            {pending ? "Saving…" : bot ? "Save changes" : "Create bot"}
-          </Button>
-        </div>
-      </div>
+          ) : (
+            <>
+              {bot ? (
+                <>
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    size="sm"
+                    disabled={pending}
+                    onClick={() =>
+                      void run(async () => {
+                        await api.mutateBot({ action: "stop", id: bot.id });
+                      })
+                    }
+                  >
+                    Stop work
+                  </Button>
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    size="sm"
+                    disabled={pending}
+                    className="text-danger hover:bg-danger-muted hover:text-danger"
+                    onClick={() => setConfirmDelete(true)}
+                  >
+                    Delete bot
+                  </Button>
+                </>
+              ) : null}
+              <div className="ml-auto flex items-center gap-2">
+                <Button
+                  type="button"
+                  variant="ghost"
+                  disabled={pending}
+                  onClick={onClose}
+                >
+                  Cancel
+                </Button>
+                <Button type="submit" disabled={!canSubmit}>
+                  {pending ? "Saving…" : bot ? "Save changes" : "Create bot"}
+                </Button>
+              </div>
+            </>
+          )}
+        </footer>
+      </form>
     </div>,
     document.body,
   );
@@ -436,6 +803,8 @@ function BotDocuments({ bot, api }: { bot: BotProfile; api: BotApi }) {
   const [pending, setPending] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [deleting, setDeleting] = useState(false);
+  const upload = useRef<HTMLInputElement>(null);
+  const editor = useRef<HTMLDivElement>(null);
   useEffect(() => {
     let active = true;
     void api.botDocuments(bot.id).then(
@@ -443,7 +812,7 @@ function BotDocuments({ bot, api }: { bot: BotProfile; api: BotApi }) {
         if (active) setFiles(files);
       },
       (error) => {
-        if (active) setError(String(error));
+        if (active) setError(errorMessage(error));
       },
     );
     return () => {
@@ -456,155 +825,220 @@ function BotDocuments({ bot, api }: { bot: BotProfile; api: BotApi }) {
     try {
       await action();
     } catch (error) {
-      setError(error instanceof Error ? error.message : String(error));
+      setError(errorMessage(error));
     } finally {
       setPending(false);
     }
   };
+  const open = (next: string, body: string, from: typeof original) => {
+    setName(next);
+    setContent(body);
+    setOriginal(from);
+    setDeleting(false);
+    requestAnimationFrame(() =>
+      editor.current?.scrollIntoView?.({ block: "nearest", behavior: "smooth" }),
+    );
+  };
   return (
-    <div className="space-y-3">
-      <div className="flex items-center justify-between">
-        <h3 className="text-sm font-medium">Documents</h3>
-        <Button
-          size="sm"
-          variant="ghost"
-          disabled={pending}
-          onClick={() => {
-            setName("Untitled.md");
-            setContent("");
-            setOriginal(null);
-            setDeleting(false);
-          }}
-        >
-          New document
-        </Button>
-      </div>
-      <label className="block text-sm text-fg-muted">
-        Add a text document
-        <input
-          aria-label="Add document"
-          type="file"
-          accept=".md,.txt,.json,.csv,.yaml,.yml"
-          disabled={pending}
-          className="mt-1 block w-full text-xs"
-          onChange={(event) => {
-            const file = event.target.files?.[0];
-            event.target.value = "";
-            if (!file) return;
-            if (file.size > 1_048_576) {
-              setError("Document must be at most 1 MB");
-              return;
-            }
-            void run(async () => {
-              setName(file.name);
-              setContent(await file.text());
-              setOriginal(null);
-              setDeleting(false);
-            });
-          }}
-        />
-      </label>
-      <p className="break-all text-xs text-fg-muted">{bot.space_path}</p>
-      <div className="flex flex-wrap gap-2">
-        {files.map((file) => (
+    <EditorSection
+      title="Documents"
+      actions={
+        <>
           <Button
-            key={file}
+            type="button"
             size="sm"
             variant="ghost"
             disabled={pending}
-            onClick={() =>
-              void run(async () => {
-                const doc = await api.readBotDocument(bot.id, file);
-                setName(doc.name);
-                setContent(doc.content);
-                setOriginal({ name: doc.name, version: doc.version });
-                setDeleting(false);
-              })
-            }
+            onClick={() => upload.current?.click()}
           >
-            {file}
+            <Upload aria-hidden="true" className="h-3.5 w-3.5" />
+            Upload
           </Button>
-        ))}
+          <Button
+            type="button"
+            size="sm"
+            variant="ghost"
+            disabled={pending}
+            onClick={() => open("Untitled.md", "", null)}
+          >
+            <FilePlus2 aria-hidden="true" className="h-3.5 w-3.5" />
+            New document
+          </Button>
+        </>
+      }
+    >
+      <input
+        ref={upload}
+        aria-label="Add document"
+        type="file"
+        accept=".md,.txt,.json,.csv,.yaml,.yml"
+        disabled={pending}
+        className="sr-only"
+        tabIndex={-1}
+        onChange={(event) => {
+          const file = event.target.files?.[0];
+          event.target.value = "";
+          if (!file) return;
+          if (file.size > 1_048_576) {
+            setError("Document must be at most 1 MB");
+            return;
+          }
+          void run(async () => open(file.name, await file.text(), null));
+        }}
+      />
+      <div className="flex items-center gap-1.5">
+        <p
+          className="fd-type-mono min-w-0 flex-1 truncate text-[length:var(--fd-text-2xs)] text-fg-muted"
+          title={bot.space_path}
+        >
+          {bot.space_path}
+        </p>
+        <CopyButton text={bot.space_path} label="Copy folder path" />
       </div>
+      {files.length ? (
+        <div className="-mx-2">
+          {files.map((file) => (
+            <button
+              key={file}
+              type="button"
+              disabled={pending}
+              onClick={() =>
+                void run(async () => {
+                  const doc = await api.readBotDocument(bot.id, file);
+                  open(doc.name, doc.content, {
+                    name: doc.name,
+                    version: doc.version,
+                  });
+                })
+              }
+              className={cn(
+                "fd-focus flex w-full items-center gap-2.5 rounded-[var(--fd-radius-md)] px-2 py-1.5 text-left transition-colors hover:bg-interactive-hover disabled:opacity-60",
+                original?.name === file && name && "bg-interactive-selected",
+              )}
+            >
+              <FileText
+                aria-hidden="true"
+                className="h-3.5 w-3.5 shrink-0 text-fg-muted"
+              />
+              <span className="fd-type-supporting min-w-0 flex-1 truncate text-fg-secondary">
+                {file}
+              </span>
+            </button>
+          ))}
+        </div>
+      ) : !name ? (
+        <p className={HINT_CLASS}>
+          Notes, priorities and reference material the bot reads and keeps up
+          to date.
+        </p>
+      ) : null}
       {name ? (
-        <div className="space-y-2">
+        <div
+          ref={editor}
+          className="overflow-hidden rounded-[var(--fd-radius-lg)] border border-border-default bg-surface-2">
           <Input
             aria-label="Document name"
             value={name}
             onChange={(event) => setName(event.target.value)}
+            className="h-10 rounded-none border-0 border-b border-border-subtle bg-transparent font-medium"
           />
           <Textarea
             aria-label="Document content"
-            rows={7}
+            rows={9}
             value={content}
             onChange={(event) => setContent(event.target.value)}
+            className="fd-type-mono resize-y rounded-none border-0 bg-transparent px-3 py-2.5 text-[length:var(--fd-text-xs)] leading-relaxed"
           />
-          <div className="flex gap-2">
-            <Button
-              size="sm"
-              disabled={pending || !name.trim()}
-              onClick={() =>
-                void run(async () => {
-                  await api.mutateBotDocument(bot.id, {
-                    action: "write",
-                    name,
-                    content,
-                    expected_version:
-                      original?.name === name ? original.version : null,
-                  });
-                  setFiles(await api.botDocuments(bot.id));
-                  setName("");
-                })
-              }
-            >
-              Save document
-            </Button>
-            <Button
-              variant="ghost"
-              size="sm"
-              disabled={pending || original?.name !== name}
-              onClick={() => setDeleting(true)}
-            >
-              Delete document
-            </Button>
+          <div className="flex items-center gap-2 border-t border-border-subtle px-2 py-2">
+            {deleting ? (
+              <>
+                <p className="min-w-0 flex-1 px-1 text-[length:var(--fd-text-xs)] text-fg-secondary">
+                  Delete {name} from disk?
+                </p>
+                <Button
+                  type="button"
+                  size="sm"
+                  variant="ghost"
+                  onClick={() => setDeleting(false)}
+                >
+                  Cancel
+                </Button>
+                <Button
+                  type="button"
+                  size="sm"
+                  variant="danger"
+                  disabled={pending}
+                  onClick={() =>
+                    void run(async () => {
+                      await api.mutateBotDocument(bot.id, {
+                        action: "delete",
+                        name,
+                        expected_version: original?.version ?? "",
+                      });
+                      setFiles(await api.botDocuments(bot.id));
+                      setName("");
+                      setDeleting(false);
+                    })
+                  }
+                >
+                  Delete
+                </Button>
+              </>
+            ) : (
+              <>
+                {original?.name === name ? (
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    size="sm"
+                    disabled={pending}
+                    className="text-danger hover:bg-danger-muted hover:text-danger"
+                    onClick={() => setDeleting(true)}
+                  >
+                    Delete document
+                  </Button>
+                ) : null}
+                <div className="ml-auto flex items-center gap-2">
+                  <Button
+                    type="button"
+                    size="sm"
+                    variant="ghost"
+                    disabled={pending}
+                    onClick={() => setName("")}
+                  >
+                    Discard
+                  </Button>
+                  <Button
+                    type="button"
+                    size="sm"
+                    disabled={pending || !name.trim()}
+                    onClick={() =>
+                      void run(async () => {
+                        await api.mutateBotDocument(bot.id, {
+                          action: "write",
+                          name,
+                          content,
+                          expected_version:
+                            original?.name === name ? original.version : null,
+                        });
+                        setFiles(await api.botDocuments(bot.id));
+                        setName("");
+                      })
+                    }
+                  >
+                    Save document
+                  </Button>
+                </div>
+              </>
+            )}
           </div>
-          {deleting ? (
-            <div className="text-sm">
-              <p>Delete {name} from disk?</p>
-              <Button
-                size="sm"
-                disabled={pending}
-                onClick={() =>
-                  void run(async () => {
-                    await api.mutateBotDocument(bot.id, {
-                      action: "delete",
-                      name,
-                      expected_version: original?.version ?? "",
-                    });
-                    setFiles(await api.botDocuments(bot.id));
-                    setName("");
-                    setDeleting(false);
-                  })
-                }
-              >
-                Delete
-              </Button>
-              <Button
-                size="sm"
-                variant="ghost"
-                onClick={() => setDeleting(false)}
-              >
-                Cancel
-              </Button>
-            </div>
-          ) : null}
         </div>
       ) : null}
       {error ? (
-        <p role="alert" className="text-sm text-danger">
+        <p role="alert" className="text-[length:var(--fd-text-sm)] text-danger">
           {error}
         </p>
       ) : null}
-    </div>
+    </EditorSection>
   );
 }
