@@ -1,4 +1,8 @@
-import { deriveThreadAttentionPresentation } from './thread-attention'
+import {
+  deriveThreadAttentionPresentation,
+  summarizeThreadAttention,
+  type ThreadAttentionSummary,
+} from './thread-attention'
 import type { ThreadSummary, WorkspaceSummary } from './types'
 
 export type ProjectGroup = {
@@ -270,7 +274,7 @@ export type ThreadNesting = {
   depth: number
   /**
    * The rungs whose upright keeps running below this row: bit `k - 1` is set
-   * when another chat at rung `k` still follows. Rungs above this row's own
+   * when another row at rung `k` still follows. Rungs above this row's own
    * belong to its ancestors, and their uprights pass straight through it, so
    * a deep spawn never breaks the line back up to its family. Packed into one
    * number rather than an array so sidebar rows stay shallow-comparable.
@@ -278,10 +282,74 @@ export type ThreadNesting = {
   trunkMask: number
 }
 
+/** One row of a nested list: a chat, or the fold that stands in for the rest. */
+export type NestedThreadEntry =
+  | ({ kind: 'thread'; thread: ThreadSummary } & ThreadNesting)
+  | ({
+      kind: 'more'
+      /** The chat whose remaining spawns this row reveals. */
+      parentId: string
+      /** Rows the fold holds back, counting their own spawns. */
+      hiddenCount: number
+      /** What the held-back rows are doing, so a fold never buries work. */
+      hiddenAttention: ThreadAttentionSummary
+    } & ThreadNesting)
+
+/** A chat that has spawned others, as the sidebar folds it. */
+export type ThreadFamily = {
+  /** Every chat descended from this one in the list. */
+  descendantCount: number
+  /** True while the whole family is folded away under this row. */
+  isCollapsed: boolean
+  /** What the folded rows are doing; all zero while the family is open. */
+  hiddenAttention: ThreadAttentionSummary
+}
+
+export type NestedThreadList = {
+  entries: readonly NestedThreadEntry[]
+  /** Keyed by the parent's id; chats without spawns in the list are absent. */
+  families: ReadonlyMap<string, ThreadFamily>
+}
+
+export type NestSpawnedThreadsOptions = {
+  /** Families the user has folded away. */
+  collapsedParentIds?: ReadonlySet<string>
+  /** Families the user has opened past the preview limit. */
+  expandedParentIds?: ReadonlySet<string>
+  /**
+   * Spawns shown under a parent before the rest fold into a "more" row.
+   * Defaults to {@link NESTED_THREAD_PREVIEW_LIMIT}.
+   */
+  childPreviewLimit?: number
+  /**
+   * A chat that must stay on screen, usually the selection: neither a fold
+   * nor the preview limit may hide it.
+   */
+  revealThreadId?: string | null
+}
+
 /** Deepest rung the sidebar indents to; deeper spawns share the last one. */
 export const MAX_THREAD_NESTING_DEPTH = 3
 
-const EMPTY_THREAD_NESTING: ReadonlyMap<string, ThreadNesting> = new Map()
+/** Spawns a family shows before the rest fold into "N more nested threads". */
+export const NESTED_THREAD_PREVIEW_LIMIT = 3
+
+const NO_ATTENTION: ThreadAttentionSummary = { running: 0, unread: 0, unreadTone: 'info' }
+const EMPTY_FAMILIES: ReadonlyMap<string, ThreadFamily> = new Map()
+const EMPTY_IDS: ReadonlySet<string> = new Set()
+
+// Nothing to nest makes the entries independent of every option, so a list
+// with no spawns hands back the same array each time it is asked about.
+const flatEntriesByList = new WeakMap<readonly ThreadSummary[], readonly NestedThreadEntry[]>()
+
+function flatEntries(threads: readonly ThreadSummary[]): readonly NestedThreadEntry[] {
+  let entries = flatEntriesByList.get(threads)
+  if (!entries) {
+    entries = threads.map((thread) => ({ kind: 'thread' as const, thread, depth: 0, trunkMask: 0 }))
+    flatEntriesByList.set(threads, entries)
+  }
+  return entries
+}
 
 /** The chat this one was spawned from, when that chat is in the same list. */
 function spawnParentId(
@@ -297,7 +365,8 @@ function spawnParentId(
 
 /**
  * Reorders an already-sorted list so agent-spawned chats follow the chat that
- * spawned them, and reports the rung each one sits on.
+ * spawned them, folds families the user has closed, and reports the rung each
+ * row sits on.
  *
  * A family keeps the place of its best-placed member rather than its parent's,
  * so the sort mode still decides where it lands: a child that just ran, or that
@@ -306,13 +375,17 @@ function spawnParentId(
  *
  * A spawned chat only nests when its parent is in the same list. In the archive
  * view, in another folder, or past the end of a window, it keeps its own place
- * at the top level rather than vanishing. Lists with nothing to nest come back
- * by identity so callers keep memoizing on the array.
+ * at the top level rather than vanishing.
  */
-export function nestSpawnedThreads(threads: readonly ThreadSummary[]): {
-  threads: readonly ThreadSummary[]
-  nesting: ReadonlyMap<string, ThreadNesting>
-} {
+export function nestSpawnedThreads(
+  threads: readonly ThreadSummary[],
+  {
+    collapsedParentIds = EMPTY_IDS,
+    expandedParentIds = EMPTY_IDS,
+    childPreviewLimit = NESTED_THREAD_PREVIEW_LIMIT,
+    revealThreadId = null,
+  }: NestSpawnedThreadsOptions = {},
+): NestedThreadList {
   const byId = new Map<string, ThreadSummary>()
   const rankById = new Map<string, number>()
   threads.forEach((thread, index) => {
@@ -321,18 +394,18 @@ export function nestSpawnedThreads(threads: readonly ThreadSummary[]): {
     rankById.set(thread.id, index)
   })
 
+  const parentById = new Map<string, string>()
   const childrenByParent = new Map<string, ThreadSummary[]>()
-  const nestedIds = new Set<string>()
   for (const thread of threads) {
     const parentId = spawnParentId(thread, byId)
-    if (parentId == null) continue
-    nestedIds.add(thread.id)
+    if (parentId == null || parentById.has(thread.id)) continue
+    parentById.set(thread.id, parentId)
     const siblings = childrenByParent.get(parentId)
     if (siblings) siblings.push(thread)
     else childrenByParent.set(parentId, [thread])
   }
   if (childrenByParent.size === 0) {
-    return { threads, nesting: EMPTY_THREAD_NESTING }
+    return { entries: flatEntries(threads), families: EMPTY_FAMILIES }
   }
 
   // Best place anything in this chat's family holds in the sorted list.
@@ -355,41 +428,140 @@ export function nestSpawnedThreads(threads: readonly ThreadSummary[]): {
     rankOfFamily(left) - rankOfFamily(right)
   for (const siblings of childrenByParent.values()) siblings.sort(byFamilyRank)
 
-  const ordered: ThreadSummary[] = []
-  const nesting = new Map<string, ThreadNesting>()
+  // Everything below a chat, cycle-safe. Only folded rows ever ask, and each
+  // fold asks once, so this stays linear in what it hides.
+  const descendantsOf = (thread: ThreadSummary): ThreadSummary[] => {
+    const found: ThreadSummary[] = []
+    const seen = new Set([thread.id])
+    const stack = [...(childrenByParent.get(thread.id) ?? [])]
+    while (stack.length > 0) {
+      const next = stack.pop() as ThreadSummary
+      if (seen.has(next.id)) continue
+      seen.add(next.id)
+      found.push(next)
+      stack.push(...(childrenByParent.get(next.id) ?? []))
+    }
+    return found
+  }
+  const descendantCount = new Map<string, number>()
+  const countDescendants = (thread: ThreadSummary): number => {
+    const cached = descendantCount.get(thread.id)
+    if (cached !== undefined) return cached
+    descendantCount.set(thread.id, 0)
+    let total = 0
+    for (const child of childrenByParent.get(thread.id) ?? []) {
+      total += 1 + countDescendants(child)
+    }
+    descendantCount.set(thread.id, total)
+    return total
+  }
+
+  // The revealed chat and every ancestor above it. A family on this line may
+  // not fold the revealed chat away, whatever the user last chose for it.
+  const revealLine = new Set<string>()
+  for (let id = revealThreadId; id != null && !revealLine.has(id); id = parentById.get(id) ?? null) {
+    if (byId.has(id)) revealLine.add(id)
+  }
+  const holdsReveal = (thread: ThreadSummary) => revealLine.has(thread.id)
+
+  const entries: NestedThreadEntry[] = []
+  const families = new Map<string, ThreadFamily>()
   const emitted = new Set<string>()
 
   const emit = (thread: ThreadSummary, depth: number, trunkMask: number) => {
     if (emitted.has(thread.id)) return
     emitted.add(thread.id)
-    ordered.push(thread)
-    if (depth > 0) nesting.set(thread.id, { depth, trunkMask })
-    const siblings = childrenByParent.get(thread.id)
-    if (!siblings) return
+    entries.push({ kind: 'thread', thread, depth, trunkMask })
+    const children = childrenByParent.get(thread.id)
+    if (!children) return
+
+    const revealBelow = revealThreadId !== thread.id && holdsReveal(thread)
+    const isCollapsed = collapsedParentIds.has(thread.id) && !revealBelow
+    families.set(thread.id, {
+      descendantCount: countDescendants(thread),
+      isCollapsed,
+      hiddenAttention: isCollapsed
+        ? summarizeThreadAttention(descendantsOf(thread))
+        : NO_ATTENTION,
+    })
+    if (isCollapsed) return
+
+    // The first few spawns, plus any later one the revealed chat sits under.
+    const limited = !expandedParentIds.has(thread.id) && children.length > childPreviewLimit
+    const shown = limited
+      ? children.filter((child, index) => index < childPreviewLimit || holdsReveal(child))
+      : children
+    const held = limited ? children.filter((child) => !shown.includes(child)) : []
+
     const childDepth = Math.min(depth + 1, MAX_THREAD_NESTING_DEPTH)
     const ownRung = 1 << (childDepth - 1)
-    siblings.forEach((child, index) =>
+    shown.forEach((child, index) =>
       // Each child inherits the uprights running past this row, and adds its
-      // own rung while a sibling of its own is still to come.
+      // own rung while a sibling, or the fold, is still to come.
       emit(
         child,
         childDepth,
-        index === siblings.length - 1 ? trunkMask : trunkMask | ownRung,
+        index === shown.length - 1 && held.length === 0 ? trunkMask : trunkMask | ownRung,
       ),
     )
+    if (held.length > 0) {
+      const hidden = held.flatMap((child) => [child, ...descendantsOf(child)])
+      // Held-back rows still count as placed, so the cycle sweep below does
+      // not resurface them at the top level.
+      for (const row of hidden) emitted.add(row.id)
+      entries.push({
+        kind: 'more',
+        parentId: thread.id,
+        hiddenCount: hidden.length,
+        hiddenAttention: summarizeThreadAttention(hidden),
+        depth: childDepth,
+        trunkMask,
+      })
+    }
   }
 
   for (const root of threads
-    .filter((thread) => !nestedIds.has(thread.id))
+    .filter((thread) => !parentById.has(thread.id))
     .sort(byFamilyRank)) {
     emit(root, 0, 0)
   }
-  if (ordered.length < threads.length) {
+  // Rows inside a folded family were never emitted, so count them as placed
+  // before looking for leftovers.
+  for (const [parentId, family] of families) {
+    if (!family.isCollapsed) continue
+    for (const row of descendantsOf(byId.get(parentId) as ThreadSummary)) emitted.add(row.id)
+  }
+  if (emitted.size < byId.size) {
     // Only a spawn cycle can be left over, since no root reaches it. Show its
     // members at the top level rather than dropping them from the sidebar.
     for (const thread of threads) emit(thread, 0, 0)
   }
 
+  return { entries, families }
+}
+
+const EMPTY_THREAD_NESTING: ReadonlyMap<string, ThreadNesting> = new Map()
+
+/**
+ * {@link nestSpawnedThreads} as a flat chat order plus per-chat rungs, with no
+ * folds or preview limit, for lists that do not render "more" rows yet. Lists
+ * with nothing to nest come back by identity so callers keep memoizing.
+ */
+export function nestSpawnedThreadsFlat(threads: readonly ThreadSummary[]): {
+  threads: readonly ThreadSummary[]
+  nesting: ReadonlyMap<string, ThreadNesting>
+} {
+  const { entries, families } = nestSpawnedThreads(threads, {
+    childPreviewLimit: Number.POSITIVE_INFINITY,
+  })
+  if (families.size === 0) return { threads, nesting: EMPTY_THREAD_NESTING }
+  const ordered: ThreadSummary[] = []
+  const nesting = new Map<string, ThreadNesting>()
+  for (const entry of entries) {
+    if (entry.kind !== 'thread') continue
+    ordered.push(entry.thread)
+    nesting.set(entry.thread.id, { depth: entry.depth, trunkMask: entry.trunkMask })
+  }
   return { threads: ordered, nesting }
 }
 

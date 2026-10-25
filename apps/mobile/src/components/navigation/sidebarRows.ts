@@ -4,7 +4,7 @@ import {
   projectFoldersForWorkspace,
   partitionProjectFolders,
   type ProjectFolder,
-  nestSpawnedThreads,
+  nestSpawnedThreadsFlat,
   partitionSidebarThreads,
   type ThreadNesting,
   summarizeThreadAttention,
@@ -59,7 +59,7 @@ function sortedProjectThreads(
     const pinnedInProject = [...derived.partitions.pinnedInProject].sort(compare)
     // Agent-spawned chats are pulled under the chat that started them before
     // the window is measured, so a family pages as the rows it shows.
-    const { threads: unpinned, nesting } = nestSpawnedThreads(
+    const { threads: unpinned, nesting } = nestSpawnedThreadsFlat(
       [...derived.partitions.unpinned].sort(compare),
     )
     const unpinnedIndexes = new Map<string, number>()
@@ -210,7 +210,7 @@ export function buildSidebarRows(
   // Chats is one flat section across the casual workspaces, so spawned chats
   // nest against the whole section rather than per workspace. The rows carry a
   // workspace id alongside the chat, so they follow the nested order by id.
-  const chatNesting = nestSpawnedThreads(sortedChats.map((entry) => entry.thread))
+  const chatNesting = nestSpawnedThreadsFlat(sortedChats.map((entry) => entry.thread))
   const chatsByThreadId = new Map(sortedChats.map((entry) => [entry.thread.id, entry]))
   const chatRows: SidebarRow[] = chatNesting.threads.flatMap((thread) => {
     const entry = chatsByThreadId.get(thread.id)

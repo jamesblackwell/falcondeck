@@ -8,6 +8,7 @@ import {
   partitionSidebarProjects,
   partitionSidebarThreads,
   sortProjectGroupThreads,
+  type NestedThreadList,
   type ProjectGroup,
 } from './grouping'
 
@@ -364,139 +365,220 @@ describe('partitionSidebarThreads', () => {
 })
 
 describe('nestSpawnedThreads', () => {
-  const spawned = (id: string, parent: string) =>
-    summary({ id, origin: { kind: 'agent_spawn', parent_thread_id: parent } })
+  const spawned = (id: string, parent: string, overrides: Partial<ThreadSummary> = {}) =>
+    summary({ id, origin: { kind: 'agent_spawn', parent_thread_id: parent }, ...overrides })
+  const running = { status: 'running' } as Partial<ThreadSummary>
 
-  it('leaves a list with nothing to nest untouched', () => {
+  // One line per row: indent per rung, then the trunk mask when any upright
+  // runs on past the row. Folds read as `+N more`.
+  const rows = (list: NestedThreadList) =>
+    list.entries.map((entry) => {
+      const indent = '  '.repeat(entry.depth)
+      const mask = entry.trunkMask ? ` |${entry.trunkMask.toString(2)}` : ''
+      return entry.kind === 'thread'
+        ? `${indent}${entry.thread.id}${mask}`
+        : `${indent}+${entry.hiddenCount} more${mask}`
+    })
+
+  it('hands back the same rows for a list with nothing to nest', () => {
     const threads = [summary({ id: 'a' }), summary({ id: 'b' })]
-    const nested = nestSpawnedThreads(threads)
-    expect(nested.threads).toBe(threads)
-    expect(nested.nesting.size).toBe(0)
+    const first = nestSpawnedThreads(threads)
+    expect(rows(first)).toEqual(['a', 'b'])
+    expect(first.families.size).toBe(0)
+    // Options cannot matter here, so neither can they cost a re-render.
+    expect(nestSpawnedThreads(threads, { revealThreadId: 'a' }).entries).toBe(first.entries)
   })
 
   it('pulls spawned chats under the chat that started them', () => {
-    const parent = summary({ id: 'parent' })
-    const other = summary({ id: 'other' })
-    const first = spawned('first', 'parent')
-    const second = spawned('second', 'parent')
-
-    const nested = nestSpawnedThreads([parent, other, first, second])
-
-    expect(nested.threads.map(({ id }) => id)).toEqual([
-      'parent',
-      'first',
-      'second',
-      'other',
+    const list = nestSpawnedThreads([
+      summary({ id: 'parent' }),
+      summary({ id: 'other' }),
+      spawned('first', 'parent'),
+      spawned('second', 'parent'),
     ])
-    expect(nested.nesting.get('first')).toEqual({ depth: 1, trunkMask: 0b1 })
-    expect(nested.nesting.get('second')).toEqual({ depth: 1, trunkMask: 0 })
-    expect(nested.nesting.has('parent')).toBe(false)
+
+    expect(rows(list)).toEqual(['parent', '  first |1', '  second', 'other'])
+    expect(list.families.get('parent')).toEqual({
+      descendantCount: 2,
+      isCollapsed: false,
+      hiddenAttention: { running: 0, unread: 0, unreadTone: 'info' },
+    })
   })
 
-  it('nests a grandchild one rung further in', () => {
-    const nested = nestSpawnedThreads([
-      summary({ id: 'root' }),
-      spawned('child', 'root'),
-      spawned('grandchild', 'child'),
-    ])
+  it('moves a family to the place its best-placed member held', () => {
+    // Sorted order: the child ran most recently, its parent has gone quiet.
+    // The parent rides up with it rather than burying it past the window.
+    expect(
+      rows(
+        nestSpawnedThreads([
+          spawned('busy-child', 'idle-parent'),
+          summary({ id: 'unrelated' }),
+          summary({ id: 'idle-parent' }),
+        ]),
+      ),
+    ).toEqual(['idle-parent', '  busy-child', 'unrelated'])
+  })
 
-    expect(nested.threads.map(({ id }) => id)).toEqual(['root', 'child', 'grandchild'])
-    expect(nested.nesting.get('grandchild')).toEqual({ depth: 2, trunkMask: 0 })
+  it('orders siblings by their own families, not just themselves', () => {
+    expect(
+      rows(
+        nestSpawnedThreads([
+          summary({ id: 'root' }),
+          spawned('busy-grandchild', 'quiet-child'),
+          spawned('loud-child', 'root'),
+          spawned('quiet-child', 'root'),
+        ]),
+      ),
+    ).toEqual(['root', '  quiet-child |1', '    busy-grandchild |1', '  loud-child'])
+  })
+
+  it("runs an ancestor's upright through the rows nested beneath it", () => {
+    // 'first' has a sibling below, so its rung keeps running, and the row
+    // between them draws that same rung straight through.
+    expect(
+      rows(
+        nestSpawnedThreads([
+          summary({ id: 'root' }),
+          spawned('first', 'root'),
+          spawned('buried', 'first'),
+          spawned('second', 'root'),
+        ]),
+      ),
+    ).toEqual(['root', '  first |1', '    buried |1', '  second'])
   })
 
   it('stops indenting past the deepest rung', () => {
-    const nested = nestSpawnedThreads([
+    const list = nestSpawnedThreads([
       summary({ id: 'g0' }),
       spawned('g1', 'g0'),
       spawned('g2', 'g1'),
       spawned('g3', 'g2'),
       spawned('g4', 'g3'),
     ])
-
-    expect(nested.nesting.get('g3')?.depth).toBe(3)
-    expect(nested.nesting.get('g4')?.depth).toBe(3)
-  })
-
-  it('moves a family to the place its best-placed member held', () => {
-    // Sorted order: the child ran most recently, its parent has gone quiet.
-    const nested = nestSpawnedThreads([
-      spawned('busy-child', 'idle-parent'),
-      summary({ id: 'unrelated' }),
-      summary({ id: 'idle-parent' }),
-    ])
-
-    // The parent rides up with its child rather than burying it at the bottom,
-    // where a short sidebar window would have cut it off.
-    expect(nested.threads.map(({ id }) => id)).toEqual([
-      'idle-parent',
-      'busy-child',
-      'unrelated',
-    ])
-  })
-
-  it('orders siblings by their own families, not just themselves', () => {
-    const nested = nestSpawnedThreads([
-      summary({ id: 'root' }),
-      spawned('busy-grandchild', 'quiet-child'),
-      spawned('loud-child', 'root'),
-      spawned('quiet-child', 'root'),
-    ])
-
-    expect(nested.threads.map(({ id }) => id)).toEqual([
-      'root',
-      'quiet-child',
-      'busy-grandchild',
-      'loud-child',
-    ])
-    expect(nested.nesting.get('quiet-child')).toEqual({ depth: 1, trunkMask: 0b1 })
-    expect(nested.nesting.get('busy-grandchild')).toEqual({ depth: 2, trunkMask: 0b1 })
-    expect(nested.nesting.get('loud-child')).toEqual({ depth: 1, trunkMask: 0 })
-  })
-
-  it("runs an ancestor's upright through the rows nested beneath it", () => {
-    const nested = nestSpawnedThreads([
-      summary({ id: 'root' }),
-      spawned('first', 'root'),
-      spawned('buried', 'first'),
-      spawned('second', 'root'),
-    ])
-
-    expect(nested.threads.map(({ id }) => id)).toEqual([
-      'root',
-      'first',
-      'buried',
-      'second',
-    ])
-    // 'first' has a sibling below, so its own rung keeps running, and the row
-    // between the two draws that same rung straight through.
-    expect(nested.nesting.get('first')).toEqual({ depth: 1, trunkMask: 0b1 })
-    expect(nested.nesting.get('buried')).toEqual({ depth: 2, trunkMask: 0b1 })
-    expect(nested.nesting.get('second')).toEqual({ depth: 1, trunkMask: 0 })
+    const depthOf = (id: string) =>
+      list.entries.find((entry) => entry.kind === 'thread' && entry.thread.id === id)?.depth
+    expect(depthOf('g3')).toBe(3)
+    expect(depthOf('g4')).toBe(3)
   })
 
   it('keeps a spawned chat at the top level when its parent is not listed', () => {
-    const orphan = spawned('orphan', 'elsewhere')
-    const nested = nestSpawnedThreads([summary({ id: 'a' }), orphan])
-
-    expect(nested.threads).toHaveLength(2)
-    expect(nested.nesting.size).toBe(0)
+    expect(rows(nestSpawnedThreads([summary({ id: 'a' }), spawned('orphan', 'elsewhere')]))).toEqual([
+      'a',
+      'orphan',
+    ])
   })
 
   it('shows every chat in a spawn cycle exactly once', () => {
-    const left = spawned('left', 'right')
-    const right = spawned('right', 'left')
-
-    const nested = nestSpawnedThreads([left, right])
-
-    expect(nested.threads.map(({ id }) => id).sort()).toEqual(['left', 'right'])
+    const list = nestSpawnedThreads([spawned('left', 'right'), spawned('right', 'left')])
+    expect(rows(list).map((row) => row.trim().split(' ')[0]).sort()).toEqual(['left', 'right'])
   })
 
   it('ignores a chat that claims itself as its parent', () => {
-    const self = spawned('self', 'self')
-    const nested = nestSpawnedThreads([self])
+    expect(rows(nestSpawnedThreads([spawned('self', 'self')]))).toEqual(['self'])
+  })
 
-    expect(nested.threads).toEqual([self])
-    expect(nested.nesting.size).toBe(0)
+  describe('folding', () => {
+    const family = [
+      summary({ id: 'parent' }),
+      spawned('c1', 'parent'),
+      spawned('c1a', 'c1'),
+      spawned('c2', 'parent'),
+      spawned('c3', 'parent', running),
+      spawned('c4', 'parent', {
+        attention: {
+          ...summary({}).attention,
+          level: 'unread',
+          unread: true,
+          last_agent_activity_seq: 2,
+          last_read_seq: 1,
+        },
+      }),
+      spawned('c5', 'parent'),
+      summary({ id: 'after' }),
+    ]
+
+    it('previews the first spawns and folds the rest into one more row', () => {
+      const list = nestSpawnedThreads(family, { childPreviewLimit: 2 })
+
+      // The fold takes the last rung, so the shown spawns keep their upright
+      // running down to it.
+      expect(rows(list)).toEqual([
+        'parent',
+        '  c1 |1',
+        '    c1a |1',
+        '  c2 |1',
+        '  +3 more',
+        'after',
+      ])
+      const more = list.entries.find((entry) => entry.kind === 'more')
+      expect(more).toMatchObject({
+        parentId: 'parent',
+        hiddenAttention: { running: 1, unread: 1, unreadTone: 'info' },
+      })
+    })
+
+    it('shows every spawn once the family is opened past the preview', () => {
+      const list = nestSpawnedThreads(family, {
+        childPreviewLimit: 2,
+        expandedParentIds: new Set(['parent']),
+      })
+      expect(rows(list)).toEqual([
+        'parent',
+        '  c1 |1',
+        '    c1a |1',
+        '  c2 |1',
+        '  c3 |1',
+        '  c4 |1',
+        '  c5',
+        'after',
+      ])
+    })
+
+    it('folds a collapsed family away and reports what it hides', () => {
+      const list = nestSpawnedThreads(family, { collapsedParentIds: new Set(['parent']) })
+
+      expect(rows(list)).toEqual(['parent', 'after'])
+      expect(list.families.get('parent')).toEqual({
+        descendantCount: 6,
+        isCollapsed: true,
+        hiddenAttention: { running: 1, unread: 1, unreadTone: 'info' },
+      })
+    })
+
+    it('never folds the revealed chat away', () => {
+      const collapsed = nestSpawnedThreads(family, {
+        collapsedParentIds: new Set(['parent']),
+        childPreviewLimit: 2,
+        revealThreadId: 'c1a',
+      })
+      expect(collapsed.families.get('parent')?.isCollapsed).toBe(false)
+      expect(rows(collapsed)).toContain('    c1a |1')
+
+      // Past the preview limit, the revealed spawn joins the preview instead.
+      const previewed = nestSpawnedThreads(family, { childPreviewLimit: 2, revealThreadId: 'c5' })
+      expect(rows(previewed)).toEqual([
+        'parent',
+        '  c1 |1',
+        '    c1a |1',
+        '  c2 |1',
+        '  c5 |1',
+        '  +2 more',
+        'after',
+      ])
+    })
+
+    it('still lets the revealed chat fold its own family', () => {
+      const list = nestSpawnedThreads(family, {
+        collapsedParentIds: new Set(['parent']),
+        revealThreadId: 'parent',
+      })
+      expect(rows(list)).toEqual(['parent', 'after'])
+    })
+
+    it('does not resurface folded rows as cycle stragglers', () => {
+      const list = nestSpawnedThreads(family, { childPreviewLimit: 1 })
+      expect(rows(list)).toEqual(['parent', '  c1 |1', '    c1a |1', '  +4 more', 'after'])
+    })
   })
 })
 

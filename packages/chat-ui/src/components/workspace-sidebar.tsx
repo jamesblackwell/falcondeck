@@ -23,7 +23,7 @@ import {
   forkProviderOptions,
   filterProjectGroupsByExtensions,
   partitionSidebarProjects,
-  nestSpawnedThreads,
+  nestSpawnedThreadsFlat,
   partitionSidebarThreads,
   summarizeThreadAttention,
   THREAD_TAGS_EXTENSION_ID,
@@ -488,7 +488,7 @@ const FlatThreadList = memo(function FlatThreadList({
   // Agent-spawned chats are pulled under the chat that started them, so the
   // window below counts a family as the rows it actually shows.
   const { threads: unpinnedThreads, nesting } = useMemo(
-    () => nestSpawnedThreads(orderedUnpinned),
+    () => nestSpawnedThreadsFlat(orderedUnpinned),
     [orderedUnpinned],
   );
 
@@ -1611,7 +1611,7 @@ export const WorkspaceSidebar = memo(function WorkspaceSidebar({
   // over the whole section rather than per workspace. The rows carry a
   // workspace id alongside the chat, so they follow the nested order by id.
   const nestedChatEntries = useMemo(() => {
-    const { threads, nesting } = nestSpawnedThreads(
+    const { threads, nesting } = nestSpawnedThreadsFlat(
       chatEntries.map((entry) => entry.thread),
     );
     if (nesting.size === 0) return { entries: chatEntries, nesting };
