@@ -16,6 +16,7 @@ const HARNESS_BLOCK_TAGS = [
 ] as const;
 
 const QUERY_TAG = "user_query";
+const HARNESS_TAGS = [...HARNESS_BLOCK_TAGS, QUERY_TAG];
 
 const HIDDEN_PREFIXES = [
   "Caveat: The messages below were generated",
@@ -227,8 +228,15 @@ function projectHarnessUserTextContent(text: string): ProjectedUserText {
     source = strippedSkills.text;
   }
 
-  const tags = [...HARNESS_BLOCK_TAGS, QUERY_TAG];
-  if (tags.some((tag) => hasIncompleteTag(source, tag))) {
+  // Ordinary prompts never contain a tag. Scanning every harness tag here
+  // walks the whole message once per tag, on every streaming frame.
+  if (!source.includes("<")) {
+    return startsWithHiddenPrefix(source)
+      ? { kind: "hidden" }
+      : { kind: "prompt", text: source };
+  }
+
+  if (HARNESS_TAGS.some((tag) => hasIncompleteTag(source, tag))) {
     return { kind: "incomplete" };
   }
 
@@ -237,10 +245,6 @@ function projectHarnessUserTextContent(text: string): ProjectedUserText {
     return query && !startsWithHiddenPrefix(query)
       ? { kind: "prompt", text: query }
       : { kind: "hidden" };
-  }
-
-  if (!source.includes("<") && !startsWithHiddenPrefix(source)) {
-    return { kind: "prompt", text: source };
   }
 
   const remainder = stripTaggedBlocks(source, HARNESS_BLOCK_TAGS).trim();
@@ -262,8 +266,15 @@ function projectHarnessUserTextContent(text: string): ProjectedUserText {
 function previousUserPrompt(
   items: readonly ConversationItem[],
 ): string | null {
-  for (let index = items.length - 1; index >= 0; index -= 1) {
-    const item = items[index];
+  return previousUserPromptBefore(items, items.length);
+}
+
+function previousUserPromptBefore(
+  items: readonly ConversationItem[],
+  index: number,
+): string | null {
+  for (let cursor = index - 1; cursor >= 0; cursor -= 1) {
+    const item = items[cursor];
     if (item?.kind === "user_message") return item.text;
     if (
       item?.kind === "service" ||
@@ -288,30 +299,38 @@ function isSkillPreambleEchoOf(previous: string, raw: string): boolean {
 export function projectHarnessUserItems(
   items: readonly ConversationItem[],
 ): ConversationItem[] {
-  let copied = false;
-  const next: ConversationItem[] = [];
-  for (const item of items) {
+  // Stay on the input array until a user row actually changes. The unchanged
+  // transcript is the streaming case, and copying it per frame is pure garbage.
+  let next: ConversationItem[] | null = null;
+  for (let index = 0; index < items.length; index += 1) {
+    const item = items[index]!;
     if (item.kind !== "user_message") {
-      next.push(item);
+      next?.push(item);
       continue;
     }
-    const previous = previousUserPrompt(next);
+    const previous = next
+      ? previousUserPrompt(next)
+      : previousUserPromptBefore(items, index);
     if (
       previous !== null &&
       item.attachments.length === 0 &&
       isSkillPreambleEchoOf(previous, item.text)
     ) {
-      copied = true;
+      next ??= items.slice(0, index);
       continue;
     }
     const projected = projectHarnessUserText(item.text);
     if (projected.kind === "prompt" && projected.text === item.text) {
-      next.push(item);
+      next?.push(item);
       continue;
     }
-    copied = true;
+    next ??= items.slice(0, index);
     if (projected.kind === "prompt") {
-      next.push({ ...item, text: projected.text, ...(projected.automated ? { automated: true as const } : {}) });
+      next.push({
+        ...item,
+        text: projected.text,
+        ...(projected.automated ? { automated: true as const } : {}),
+      });
       continue;
     }
     if (projected.kind === "service") {
@@ -328,5 +347,5 @@ export function projectHarnessUserItems(
       next.push({ ...item, text: "" });
     }
   }
-  return copied ? next : (items as ConversationItem[]);
+  return next ?? (items as ConversationItem[]);
 }

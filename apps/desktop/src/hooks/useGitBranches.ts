@@ -49,6 +49,11 @@ export function useGitBranches(
     }
   }, [api, workspaceId])
 
+  const fetchBranchesRef = useRef(fetchBranches)
+  useEffect(() => {
+    fetchBranchesRef.current = fetchBranches
+  }, [fetchBranches])
+
   useEffect(() => {
     // A stale list from the previous workspace must not stay clickable while
     // the new one loads.
@@ -59,9 +64,12 @@ export function useGitBranches(
     void fetchBranches()
   }, [fetchBranches])
 
+  // Refresh after a turn or checkout. This must not also re-run when
+  // `fetchBranches` itself changes, or a client that appears while the
+  // trigger is already armed issues a second identical git pair.
   useEffect(() => {
-    if (refreshTrigger > 0) void fetchBranches()
-  }, [fetchBranches, refreshTrigger])
+    if (refreshTrigger > 0) void fetchBranchesRef.current()
+  }, [refreshTrigger])
 
   const checkout = useCallback(
     async (branch: string, create: boolean) => {
