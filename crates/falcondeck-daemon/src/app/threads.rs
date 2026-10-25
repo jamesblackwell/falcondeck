@@ -1726,10 +1726,10 @@ impl AppState {
                             continue;
                         }
                         ClaudeStreamLine::Payload(value) => {
-                            // A background result can start another parent response
-                            // without spawn_turn. It must leave the idle state just
-                            // like a user-triggered turn, before the next idle check.
-                            if parked_between_turns && claude_parent_response_started(&value) {
+                            // A task notification wakes the parent before its first
+                            // response arrives. Clear idle state now: the expired
+                            // timer could otherwise reap it on the next loop.
+                            if parked_between_turns && claude_parent_work_resumed(&value) {
                                 if let Ok(runtime) = self.claude_runtime_for(&workspace_id).await
                                     && runtime.wake_parked_turn(&thread_id, turn_generation).await
                                 {
@@ -3598,10 +3598,11 @@ fn claude_task_holds_turn_open(task_type: Option<&str>) -> bool {
     task_type.is_some_and(|task_type| task_type.contains("agent") || task_type == "local_workflow")
 }
 
-fn claude_parent_response_started(value: &Value) -> bool {
+fn claude_parent_work_resumed(value: &Value) -> bool {
     claude_parent_tool_use_id(value).is_none()
         && (is_claude_message_start(value)
-            || value.get("type").and_then(Value::as_str) == Some("assistant"))
+            || value.get("type").and_then(Value::as_str) == Some("assistant")
+            || claude_task_finished(value).is_some())
 }
 
 /// Tasks the CLI still lists, with when each was first seen, so a parked
@@ -3770,21 +3771,22 @@ mod tests {
     use tempfile::tempdir;
 
     #[test]
-    fn background_parent_response_wakes_on_output_not_task_notifications() {
-        assert!(claude_parent_response_started(
+    fn background_parent_work_wakes_on_notification_before_response() {
+        assert!(claude_parent_work_resumed(
             &json!({"type": "stream_event", "event": {"type": "message_start"}})
         ));
-        assert!(claude_parent_response_started(
-            &json!({"type": "assistant"})
-        ));
+        assert!(claude_parent_work_resumed(&json!({"type": "assistant"})));
+        assert!(claude_parent_work_resumed(&json!({
+            "type": "system", "subtype": "task_notification",
+            "task_id": "background-1", "status": "completed"
+        })));
         for value in [
-            json!({"type": "system", "subtype": "task_notification"}),
             json!({"type": "keep_alive"}),
             json!({"type": "result"}),
             json!({"type": "assistant", "parent_tool_use_id": "agent-1"}),
             json!({"type": "stream_event", "parent_tool_use_id": "agent-1", "event": {"type": "message_start"}}),
         ] {
-            assert!(!claude_parent_response_started(&value), "{value}");
+            assert!(!claude_parent_work_resumed(&value), "{value}");
         }
     }
     #[test]
