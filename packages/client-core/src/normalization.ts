@@ -90,6 +90,9 @@ const TOOL_LIFECYCLES = new Set<ToolLifecycle>([
 // then the same envelope flows through snapshot and conversation reducers; the
 // WeakSet makes those defensive downstream calls allocation-free.
 const normalizedEventEnvelopes = new WeakSet<object>();
+// Outputs are immutable. Applying a thread event normalizes the summary once
+// in the envelope and again in the reducer.
+const normalizedThreadSummaries = new WeakSet<object>();
 
 const TASK_STATUSES = new Set(["active", "paused", "completed"]);
 const RUN_STATUSES = new Set([
@@ -659,11 +662,18 @@ function normalizeWorkspaceAgent(
 export function normalizeThreadSummary(
   value: ThreadSummary | unknown,
 ): ThreadSummary {
+  if (
+    value !== null &&
+    typeof value === "object" &&
+    normalizedThreadSummaries.has(value)
+  ) {
+    return value as ThreadSummary;
+  }
   const thread = (value ?? {}) as Partial<ThreadSummary> & {
     codex?: Partial<ThreadAgentParams> | null;
   };
 
-  return {
+  const normalized: ThreadSummary = {
     id: thread.id ?? "",
     workspace_id: thread.workspace_id ?? "",
     title: thread.title ?? "Untitled thread",
@@ -737,6 +747,8 @@ export function normalizeThreadSummary(
           }
         : null,
   };
+  normalizedThreadSummaries.add(normalized);
+  return normalized;
 }
 
 export function normalizeLibraryWorkspace(

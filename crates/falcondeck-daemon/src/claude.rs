@@ -39,6 +39,8 @@ use crate::error::DaemonError;
 
 mod auth_cache;
 mod history;
+#[cfg(test)]
+mod hotpath_bench;
 mod stream;
 #[cfg(test)]
 pub use history::discover_threads_in;
@@ -1739,6 +1741,15 @@ impl SessionFileCache {
 }
 
 static SESSION_FILE_CACHE: OnceLock<std::sync::Mutex<SessionFileCache>> = OnceLock::new();
+
+#[cfg(test)]
+pub(crate) fn clear_session_file_cache_for_test() {
+    if let Some(cache) = SESSION_FILE_CACHE.get()
+        && let Ok(mut cache) = cache.lock()
+    {
+        *cache = SessionFileCache::default();
+    }
+}
 
 fn hydrate_thread_from_file(path: &Path, workspace_path: &str) -> Option<HydratedClaudeThread> {
     let session = match fs::metadata(path) {

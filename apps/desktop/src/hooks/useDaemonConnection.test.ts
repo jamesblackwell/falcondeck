@@ -205,6 +205,31 @@ describe('useDaemonConnection thread restoration', () => {
     }
   })
 
+  it('does not poll remote status until the stream snapshot is applied', async () => {
+    mocks.autoStreamSnapshot = false
+    const { result } = renderHook(() => useDaemonConnection())
+
+    await waitFor(() => expect(mocks.sockets).toHaveLength(1))
+    await act(async () => {
+      await Promise.resolve()
+    })
+    expect(mocks.remoteStatus).not.toHaveBeenCalled()
+    expect(result.current.connectionState).toBe('connecting')
+
+    act(() => {
+      mocks.sockets[0].emit({
+        seq: 0,
+        emitted_at: '2026-08-08T12:00:00Z',
+        workspace_id: null,
+        thread_id: null,
+        event: { type: 'snapshot', snapshot: daemonSnapshot('ready') },
+      })
+    })
+
+    await waitFor(() => expect(result.current.connectionState).toBe('ready'))
+    await waitFor(() => expect(mocks.remoteStatus).toHaveBeenCalledTimes(1))
+  })
+
   it('opens the local daemon even when remote relay status is slow', async () => {
     mocks.remoteStatus.mockImplementation(() => new Promise(() => {}))
 

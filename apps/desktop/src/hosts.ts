@@ -820,29 +820,34 @@ export class HostManager {
     this.notify()
   }
 
-  start() {
+  start(): Promise<void> {
     this.startPromise ??= this.startSecureConnections()
+    return this.startPromise
   }
 
   private async startSecureConnections() {
-    for (const host of this.hosts) {
-      try {
-        if (host.session) {
-          await writeSecureHostSession(host.id, host.session)
-          host.hasStoredSession = true
-        } else if (host.hasStoredSession) {
-          host.session = await readSecureHostSession(host.id)
-          if (!host.session) host.needsRepair = true
+    // Keychain reads are independent. Awaiting them one host at a time delayed
+    // every enrolled server's relay connect by the sum of the earlier reads.
+    await Promise.all(
+      this.hosts.map(async (host) => {
+        try {
+          if (host.session) {
+            await writeSecureHostSession(host.id, host.session)
+            host.hasStoredSession = true
+          } else if (host.hasStoredSession) {
+            host.session = await readSecureHostSession(host.id)
+            if (!host.session) host.needsRepair = true
+          }
+        } catch (error) {
+          host.needsRepair = true
+          const connection = this.connectionFor(host)
+          connection.lastError =
+            error instanceof Error
+              ? error.message
+              : 'Could not load server credentials from OS storage.'
         }
-      } catch (error) {
-        host.needsRepair = true
-        const connection = this.connectionFor(host)
-        connection.lastError =
-          error instanceof Error
-            ? error.message
-            : 'Could not load server credentials from OS storage.'
-      }
-    }
+      }),
+    )
     // This also removes any successfully migrated legacy session from
     // localStorage. No secret-bearing object is serialized here.
     this.persistMetadata()
