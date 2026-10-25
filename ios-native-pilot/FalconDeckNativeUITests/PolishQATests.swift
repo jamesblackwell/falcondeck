@@ -28,6 +28,25 @@ import XCTest
         }
         XCTAssertTrue(app.buttons["sidebar-settings"].isHittable)
     }
+    func testRenameTaskSavesAndReopens() {
+        let app = launch()
+        app.buttons["sidebar-task-native"].tap()
+        app.buttons["task-menu"].tap()
+        app.buttons["Rename task"].coordinate(withNormalizedOffset: CGVector(dx: 0.15, dy: 0.5)).tap()
+        let title = app.textFields["task-title"]
+        XCTAssertTrue(title.waitForExistence(timeout: 5))
+        title.tap()
+        title.press(forDuration: 1.2)
+        if app.menuItems["Select All"].waitForExistence(timeout: 2) { app.menuItems["Select All"].tap() }
+        else { title.typeText(String(repeating: XCUIKeyboardKey.delete.rawValue, count: (title.value as? String ?? "").count)) }
+        title.typeText("Renamed from task options")
+        app.buttons["Save title"].tap()
+        XCTAssertTrue(app.navigationBars["Task options"].waitForNonExistence(timeout: 5))
+        app.buttons["task-menu"].tap()
+        app.buttons["Rename task"].tap()
+        XCTAssertTrue(title.waitForExistence(timeout: 5))
+        XCTAssertEqual(title.value as? String, "Renamed from task options")
+    }
     func testArchiveAndRestorePreserveTheComposerDraft() {
         let app = launch()
         app.buttons["sidebar-task-native"].tap()
