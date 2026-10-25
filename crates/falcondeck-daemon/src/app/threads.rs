@@ -1726,6 +1726,31 @@ impl AppState {
                             continue;
                         }
                         ClaudeStreamLine::Payload(value) => {
+                            // A background result can start another parent response
+                            // without spawn_turn. It must leave the idle state just
+                            // like a user-triggered turn, before the next idle check.
+                            if parked_between_turns && claude_parent_response_started(&value) {
+                                if let Ok(runtime) = self.claude_runtime_for(&workspace_id).await
+                                    && runtime.wake_parked_turn(&thread_id, turn_generation).await
+                                {
+                                    let _ = self
+                                        .with_thread_mut(&workspace_id, &thread_id, |thread| {
+                                            thread.status = ThreadStatus::Running;
+                                            thread.updated_at = Utc::now();
+                                        })
+                                        .await;
+                                    if let Ok(thread) =
+                                        self.thread_summary(&workspace_id, &thread_id).await
+                                    {
+                                        self.emit(
+                                            Some(workspace_id.clone()),
+                                            Some(thread_id.clone()),
+                                            UnifiedEvent::ThreadUpdated { thread },
+                                        );
+                                    }
+                                }
+                                parked_between_turns = false;
+                            }
                             if let Some(usage) = live_context_usage(&value) {
                                 last_live_usage = Some(usage);
                                 self.record_claude_live_usage(
@@ -3573,6 +3598,12 @@ fn claude_task_holds_turn_open(task_type: Option<&str>) -> bool {
     task_type.is_some_and(|task_type| task_type.contains("agent") || task_type == "local_workflow")
 }
 
+fn claude_parent_response_started(value: &Value) -> bool {
+    claude_parent_tool_use_id(value).is_none()
+        && (is_claude_message_start(value)
+            || value.get("type").and_then(Value::as_str) == Some("assistant"))
+}
+
 /// Tasks the CLI still lists, with when each was first seen, so a parked
 /// thread can stop advertising work that has plainly settled into running
 /// indefinitely (see `CLAUDE_BACKGROUND_WORK_VISIBLE_FOR`).
@@ -3738,6 +3769,24 @@ mod tests {
     use serde_json::json;
     use tempfile::tempdir;
 
+    #[test]
+    fn background_parent_response_wakes_on_output_not_task_notifications() {
+        assert!(claude_parent_response_started(
+            &json!({"type": "stream_event", "event": {"type": "message_start"}})
+        ));
+        assert!(claude_parent_response_started(
+            &json!({"type": "assistant"})
+        ));
+        for value in [
+            json!({"type": "system", "subtype": "task_notification"}),
+            json!({"type": "keep_alive"}),
+            json!({"type": "result"}),
+            json!({"type": "assistant", "parent_tool_use_id": "agent-1"}),
+            json!({"type": "stream_event", "parent_tool_use_id": "agent-1", "event": {"type": "message_start"}}),
+        ] {
+            assert!(!claude_parent_response_started(&value), "{value}");
+        }
+    }
     #[test]
     fn only_idle_codex_threads_release_native_ownership() {
         assert!(codex_thread_state_is_idle_for_release(

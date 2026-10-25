@@ -594,6 +594,23 @@ impl ClaudeRuntime {
             .is_some_and(|turn| turn.generation == generation && turn.awaiting_next_turn)
     }
 
+    /// Background-task completion can wake the parent without a new stdin prompt.
+    /// Claim that work before idle retirement or a user send can reuse its CLI.
+    pub(crate) async fn wake_parked_turn(&self, thread_id: &str, generation: u64) -> bool {
+        let turn_lock = self.turn_lock(thread_id).await;
+        let _turn_guard = turn_lock.lock().await;
+        let mut active = self.active_turns.lock().await;
+        if let Some(turn) = active.get_mut(thread_id)
+            && turn.generation == generation
+            && turn.awaiting_next_turn
+        {
+            turn.awaiting_next_turn = false;
+            turn.parked_at = None;
+            return true;
+        }
+        false
+    }
+
     /// Helpers can inherit stdout after their CLI exits, preventing pipe EOF.
     /// The existing stream-monitor wakeup also observes the process leader.
     pub(crate) async fn stop_exited_turn_helpers(&self, thread_id: &str, generation: u64) {
@@ -3285,6 +3302,28 @@ mod tests {
         })
         .await
         .expect("fixture process must be reaped");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn background_response_wakes_parked_process_before_idle_retirement() {
+        let runtime = ClaudeRuntime::for_test("/tmp/project".to_string(), "claude".to_string());
+        let pid = parked_fixture(&runtime, "cat >/dev/null").await;
+        assert!(!runtime.wake_parked_turn("thread-1", 0).await);
+        assert!(runtime.turn_is_parked("thread-1", 1).await);
+        assert!(runtime.wake_parked_turn("thread-1", 1).await);
+        assert!(!runtime.turn_is_parked("thread-1", 1).await);
+        assert!(!runtime.retire_parked_turn_if_idle("thread-1", 1).await);
+        assert!(
+            runtime.active_turns.lock().await["thread-1"]
+                .parked_at
+                .is_none()
+        );
+        assert!(!runtime.wake_parked_turn("thread-1", 1).await);
+        assert!(runtime.park_turn("thread-1", 1).await);
+        assert!(!runtime.retire_parked_turn_if_idle("thread-1", 1).await);
+        runtime.shutdown().await.unwrap();
+        fixture_process_exits(pid).await;
     }
 
     #[cfg(unix)]
