@@ -31,7 +31,7 @@ struct SidebarView: View {
     private var projects: [Project] {
         let hidden = Set(model.preferences["hidden_workspace_ids"].array.map(\.string))
         return model.sortedProjects.filter {
-            ($0.raw["kind"].string == "casual" || showHidden || !hidden.contains($0.id)) && (search.isEmpty || $0.name.localizedCaseInsensitiveContains(search) || model.tasks(in: $0).contains { $0.title.localizedCaseInsensitiveContains(search) })
+            !model.botWorkspaceIDs.contains($0.id) && ($0.raw["kind"].string == "casual" || showHidden || !hidden.contains($0.id)) && (search.isEmpty || $0.name.localizedCaseInsensitiveContains(search) || model.tasks(in: $0).contains { $0.title.localizedCaseInsensitiveContains(search) })
         }
     }
     private var pins: [AgentTask] { model.tasks.filter { $0.pinned && matches($0) }.sorted { $0.updatedAt > $1.updatedAt } }
@@ -51,6 +51,8 @@ struct SidebarView: View {
                 sidebarAction("New chat", symbol: "square.and.pencil") { Task { if await model.newChat() != nil { openDetail() } } }
                     .disabled(!model.demo && !model.connected).accessibilityIdentifier("sidebar-new-chat")
                 sidebarAction("Activity", symbol: "tray.full", selected: model.selection == .activity) { navigate(.activity) }
+                NativeBotsSection(search: search, openDetail: openDetail)
+                    .id(model.connectionID)
                 if !pins.isEmpty {
                     sectionHeading("Pinned", expanded: pinsOpen) { animate { pinsExpanded.toggle() } }
                     if pinsOpen { ForEach(pins) { taskLink($0, projectIcon: true) } }
@@ -358,7 +360,7 @@ struct SidebarView: View {
     }
     private func animate(_ changes: () -> Void) { withAnimation(motion.interactionAnimation, changes) }
     private func matches(_ task: AgentTask, project: Project? = nil) -> Bool {
-        model.extensions.matches(task) && (search.isEmpty || task.title.localizedCaseInsensitiveContains(search) || project?.name.localizedCaseInsensitiveContains(search) == true)
+        !model.botTaskIDs.contains(task.id) && model.extensions.matches(task) && (search.isEmpty || task.title.localizedCaseInsensitiveContains(search) || project?.name.localizedCaseInsensitiveContains(search) == true)
     }
     private func sorted(_ tasks: [AgentTask]) -> [AgentTask] {
         tasks.sorted { left, right in

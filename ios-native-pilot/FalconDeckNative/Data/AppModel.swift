@@ -398,6 +398,7 @@ final class AppModel {
         await ImagePreview.start(in: self)
         await NativeShortcutPreview.start(in: self)
         await SendPreview.start(in: self)
+        BotPreview.start(in: self)
         if ProcessInfo.processInfo.arguments.contains("--task-activity-preview"), let task = tasks.first {
             // Explicit local QA fixture: no relay, turn, microphone or push.
             taskActivity.restore(pairing: nil)

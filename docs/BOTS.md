@@ -58,5 +58,12 @@ Document listing, reads and mutations use `/api/bots/:id/documents` and
 Paired clients use registered encrypted RPCs `bots.mutate`, `bots.documents`,
 `bots.document.read`, and `bots.document.mutate`. Profile changes publish the
 existing `preferences-updated` event. No relay storage or replay contract changes
-are needed. Mobile clients can continue using native tasks; a dedicated mobile
-bot editor is outside this desktop V1.
+are needed.
+
+The SwiftUI iOS client includes a Bots sidebar section. Open a bot's home
+conversation or use its settings to create and promote conversations, edit
+instructions and delegation access, stop work, remove a bot, and create,
+import, edit or delete text documents with the same content-version checks.
+Dedicated bot workspaces and home conversations stay outside the ordinary
+project and pinned-task lists; promoted projects remain visible. Documents
+stay on the paired computer and require a connection to read or change.
