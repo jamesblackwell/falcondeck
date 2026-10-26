@@ -28,6 +28,17 @@ contents as needed. This context is hidden from the user message bubble and is
 supplied again after native resume or compaction. Native conversation history
 stays with the harness.
 
+Bots are encouraged to use their document space as persistent memory. A short
+root-level `MEMORY.md` (or an existing memory index) holds important facts,
+preferences, decisions, ongoing work and editable working instructions, with
+links to supporting notes. Bots can organise those notes themselves, including
+`memory/` or `docs/` subfolders. They consult the index when present and read
+supporting notes when relevant, especially after resume or compaction. They
+update useful knowledge rather than writing a log of every turn, and the user's
+current and standing instructions still take precedence. No files are created
+automatically. The built-in document editor lists top-level files; nested notes
+are accessed directly by the agent or through the filesystem.
+
 ## Coordination and control
 
 Bot calls to the built-in coordination tools can select a project using
