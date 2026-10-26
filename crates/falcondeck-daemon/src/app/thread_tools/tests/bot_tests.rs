@@ -337,3 +337,62 @@ async fn new_bot_has_a_dedicated_space_and_native_home() {
     );
     app.shutdown().await.unwrap();
 }
+
+#[tokio::test]
+async fn project_thread_can_reply_to_a_bot_in_another_workspace() {
+    let (app, _temp) = fixture().await;
+    promote(&app).await;
+    let worker = created_id(
+        &app.invoke_thread_tool(CREATE, &json!({}), Some("thread-1"), None)
+            .await
+            .unwrap(),
+    );
+    let (other, _other_temp) = fixture().await;
+    let mut project = other
+        .inner
+        .workspaces
+        .lock()
+        .await
+        .remove("workspace-1")
+        .unwrap();
+    project.summary.id = "workspace-2".into();
+    let mut thread = project.threads.remove("thread-1").unwrap();
+    thread.summary.id = "project-thread".into();
+    thread.summary.workspace_id = "workspace-2".into();
+    project.threads.insert("project-thread".into(), thread);
+    app.inner
+        .workspaces
+        .lock()
+        .await
+        .insert("workspace-2".into(), project);
+    app.with_thread_mut("workspace-1", "thread-1", |t| t.status = ThreadStatus::Running)
+        .await
+        .unwrap();
+    for arguments in [
+        json!({"thread_id":"thread-1", "message":"Done with the review.", "delivery":"queue"}),
+        json!({"workspace_id":"workspace-1", "thread_id":"thread-1", "message":"Also fixed the tests.", "delivery":"queue"}),
+    ] {
+        app.invoke_thread_tool(MESSAGE, &arguments, Some("project-thread"), None)
+            .await
+            .unwrap();
+    }
+    let queued = app.inner.workspaces.lock().await["workspace-1"].threads["thread-1"]
+        .queued_requests
+        .iter()
+        .map(|queued| queued.summary.text.clone())
+        .collect::<Vec<_>>();
+    assert_eq!(queued.len(), 2);
+    assert!(queued[0].starts_with("Message from FalconDeck thread project-thread"));
+    // Only the bot is reachable; its project-local workers and listings stay scoped.
+    for (name, arguments) in [
+        (MESSAGE, json!({"thread_id": worker, "message":"Hello there."})),
+        (LIST, json!({"workspace_id":"workspace-1"})),
+        (VIEW, json!({"thread_id":"thread-1"})),
+    ] {
+        assert!(
+            app.invoke_thread_tool(name, &arguments, Some("project-thread"), None)
+                .await
+                .is_err()
+        );
+    }
+}

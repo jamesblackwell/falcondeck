@@ -52,7 +52,7 @@ pub(super) fn catalog() -> Vec<ExtensionAgentTool> {
             "include_archived": {"type":"boolean", "default":false},
             "max_chars": {"type":"integer", "minimum":512, "maximum":24000, "default":6000}
         }), vec!["since"]),
-        (MESSAGE, "Message thread", "Send a message to an existing thread in this workspace, labelled with the sending thread. Defaults to steering its active turn, falling back to the queue when steering is unavailable; idle threads start a new turn. Use delivery=queue to wait for the active turn. Returns after admission, without waiting for a reply. Self-messaging is rejected; approvals remain in FalconDeck UI.", json!({
+        (MESSAGE, "Message thread", "Send a message to an existing thread in this workspace, or reply to a bot thread in any project, labelled with the sending thread. Defaults to steering its active turn, falling back to the queue when steering is unavailable; idle threads start a new turn. Use delivery=queue to wait for the active turn. Returns after admission, without waiting for a reply. Self-messaging is rejected; approvals remain in FalconDeck UI.", json!({
             "thread_id": {"type":"string", "minLength":1},
             "message": {"type":"string", "minLength":1, "maxLength":24000, "description":"Readable prose with normal spaces between words; shown to the user and the recipient."},
             "delivery": {"type":"string", "enum":["steer","queue"], "default":"steer"}
@@ -241,15 +241,27 @@ impl AppState {
                 caller_workspace.clone()
             }
         } else {
-            if requested_workspace
-                .as_ref()
-                .is_some_and(|ws| ws != &caller_workspace)
-            {
+            // Only bots message across projects, so a project thread can always
+            // answer its sender by messaging that bot (or its spawning parent).
+            let reply_workspace = match target {
+                Some(target)
+                    if name == MESSAGE
+                        && (self.bot_for_thread(target).await.is_some()
+                            || matches!(&parent_summary.origin,
+                                Some(ThreadOrigin::AgentSpawn { parent_thread_id }) if parent_thread_id == target)) =>
+                {
+                    Some(self.thread_workspace(target).await?)
+                }
+                _ => None,
+            };
+            if requested_workspace.as_ref().is_some_and(|ws| {
+                ws != &caller_workspace && Some(ws) != reply_workspace.as_ref()
+            }) {
                 return Err(DaemonError::BadRequest(
                     "Only bots can coordinate across projects".into(),
                 ));
             }
-            caller_workspace.clone()
+            reply_workspace.unwrap_or_else(|| caller_workspace.clone())
         };
         let arguments = &arguments;
         if name == CREATE && bot.as_ref().is_some_and(|bot| !bot.can_start_threads) {
@@ -297,7 +309,7 @@ impl AppState {
                         "cannot message the calling thread".into(),
                     ));
                 }
-                // Resolve within the caller's workspace before any send-side mutations.
+                // Resolve within the target workspace before any send-side mutations.
                 self.thread_summary(&workspace, &a.thread_id).await?;
                 let text = format!(
                     "Message from FalconDeck thread {} ({}):\n\n{}",
