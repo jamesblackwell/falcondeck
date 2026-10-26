@@ -233,6 +233,9 @@ export type WorkspaceSidebarProps = ProjectFolderControls & BotSidebarControls &
   /** When true, the Chats list is folded away. Host-owned like project collapse. */
   chatsCollapsed?: boolean;
   onChatsCollapsedChange?: (collapsed: boolean) => void;
+  /** When true, the Pinned list is folded away. Host-owned like Chats. */
+  pinnedCollapsed?: boolean;
+  onPinnedCollapsedChange?: (collapsed: boolean) => void;
   isAddingProject?: boolean;
   /** Optional chrome label. Desktop and the hosted app omit it so the
    *  titlebar is just window controls and search. */
@@ -826,6 +829,8 @@ function WorkspaceDropIndicator() {
 
 const PinnedThreadList = memo(function PinnedThreadList({
   entries,
+  collapsed,
+  onToggleCollapsed,
   selectedThreadId,
   onSelectThread,
   onArchiveThread,
@@ -838,6 +843,8 @@ const PinnedThreadList = memo(function PinnedThreadList({
   threadTagsById,
 }: {
   entries: PinnedThreadEntry[];
+  collapsed: boolean;
+  onToggleCollapsed: () => void;
   selectedThreadId: string | null;
   onSelectThread: (workspaceId: string, threadId: string) => void;
   onArchiveThread?: ThreadItemArchiveHandler;
@@ -856,37 +863,52 @@ const PinnedThreadList = memo(function PinnedThreadList({
 
   return (
     <section aria-labelledby="fd-pinned-threads-heading" className="mb-4">
-      <h2
-        id="fd-pinned-threads-heading"
-        className="px-2.5 pb-1.5 text-[length:var(--fd-text-xs)] font-medium uppercase tracking-[0.08em] text-fg-muted"
-      >
-        Pinned
-      </h2>
-      <div>
-        {entries.map(({ workspaceId, thread, providerLabel, projectMark }) => (
-          <ThreadItem
-            key={`${workspaceId}:${thread.id}`}
-            thread={thread}
-            workspaceId={workspaceId}
-            isSelected={selectedThreadId === thread.id}
-            onSelect={onSelectThread}
-            onArchive={onArchiveThread}
-            archiveConfirmPending={Boolean(
-              pendingArchive &&
-                pendingArchive.workspaceId === workspaceId &&
-                pendingArchive.threadId === thread.id,
+      <h2 id="fd-pinned-threads-heading" className="px-2.5 pb-1.5">
+        <button
+          type="button"
+          className={cn("group/pinned", SIDEBAR_SECTION_HEADING_BUTTON_CLASS)}
+          onClick={onToggleCollapsed}
+          aria-expanded={!collapsed}
+          aria-label={collapsed ? "Expand pinned" : "Collapse pinned"}
+          title={collapsed ? "Expand pinned" : "Collapse pinned"}
+        >
+          Pinned
+          <ChevronDown
+            aria-hidden="true"
+            className={cn(
+              "absolute right-0 top-1/2 h-3 w-3 -translate-y-1/2 opacity-0 transition-[transform,opacity] duration-[var(--fd-duration-fast)] group-hover/pinned:opacity-100 group-focus-visible/pinned:opacity-100",
+              collapsed && "-rotate-90",
             )}
-            onArchiveConfirm={onArchiveConfirm}
-            onArchiveCancel={onArchiveCancel}
-            onOpenContextMenu={onOpenThreadContextMenu}
-            onRequestRename={onRequestRenameThread}
-            nowTick={nowTick}
-            tags={threadTagsById?.[thread.id]}
-            providerLabel={providerLabel}
-            projectMark={projectMark}
           />
-        ))}
-      </div>
+        </button>
+      </h2>
+      <Collapsible.Root open={!collapsed}>
+        <Collapsible.Content className="fd-collapsible-content min-w-0 data-[state=closed]:animate-collapse-fast data-[state=open]:animate-expand-fast">
+            {entries.map(({ workspaceId, thread, providerLabel, projectMark }) => (
+              <ThreadItem
+                key={`${workspaceId}:${thread.id}`}
+                thread={thread}
+                workspaceId={workspaceId}
+                isSelected={selectedThreadId === thread.id}
+                onSelect={onSelectThread}
+                onArchive={onArchiveThread}
+                archiveConfirmPending={Boolean(
+                  pendingArchive &&
+                    pendingArchive.workspaceId === workspaceId &&
+                    pendingArchive.threadId === thread.id,
+                )}
+                onArchiveConfirm={onArchiveConfirm}
+                onArchiveCancel={onArchiveCancel}
+                onOpenContextMenu={onOpenThreadContextMenu}
+                onRequestRename={onRequestRenameThread}
+                nowTick={nowTick}
+                tags={threadTagsById?.[thread.id]}
+                providerLabel={providerLabel}
+                projectMark={projectMark}
+              />
+            ))}
+        </Collapsible.Content>
+      </Collapsible.Root>
     </section>
   );
 });
@@ -1309,6 +1331,8 @@ export const WorkspaceSidebar = memo(function WorkspaceSidebar({
   onWorkspaceCollapsedChange,
   chatsCollapsed: chatsCollapsedProp,
   onChatsCollapsedChange,
+  pinnedCollapsed: pinnedCollapsedProp,
+  onPinnedCollapsedChange,
   isAddingProject = false,
   title,
   errors = [],
@@ -1356,6 +1380,8 @@ export const WorkspaceSidebar = memo(function WorkspaceSidebar({
   const [projectsRevealed, setProjectsRevealed] = useState(false);
   const [showHiddenProjects, setShowHiddenProjects] = useState(false);
   const [uncontrolledChatsCollapsed, setUncontrolledChatsCollapsed] =
+    useState(false);
+  const [uncontrolledPinnedCollapsed, setUncontrolledPinnedCollapsed] =
     useState(false);
   const [viewingArchivedChats, setViewingArchivedChats] = useState(false);
   const [archivedViewWorkspaceIds, setArchivedViewWorkspaceIds] = useState(
@@ -1769,6 +1795,15 @@ export const WorkspaceSidebar = memo(function WorkspaceSidebar({
   const handleToggleChats = useCallback(() => {
     handleChatsCollapsedChange(!chatsCollapsed);
   }, [chatsCollapsed, handleChatsCollapsedChange]);
+
+  const pinnedCollapsed = onPinnedCollapsedChange
+    ? Boolean(pinnedCollapsedProp)
+    : uncontrolledPinnedCollapsed;
+
+  const handleTogglePinned = useCallback(() => {
+    if (onPinnedCollapsedChange) onPinnedCollapsedChange(!pinnedCollapsed);
+    else setUncontrolledPinnedCollapsed(!pinnedCollapsed);
+  }, [onPinnedCollapsedChange, pinnedCollapsed]);
 
   const handleWorkspaceOpenChange = useCallback(
     (workspaceId: string, open: boolean) => {
@@ -3044,6 +3079,8 @@ export const WorkspaceSidebar = memo(function WorkspaceSidebar({
         <BotSidebar bots={bots} botApi={botApi} groups={allGroups} selectedThreadId={selectedThreadId} onSelectThread={handleSelectThread} />
         <PinnedThreadList
           entries={pinnedThreads}
+          collapsed={pinnedCollapsed}
+          onToggleCollapsed={handleTogglePinned}
           selectedThreadId={visualSelectedThreadId}
           onSelectThread={handleSelectThread}
           onArchiveThread={requestArchiveConfirm}

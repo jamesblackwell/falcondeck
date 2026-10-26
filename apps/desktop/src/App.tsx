@@ -183,6 +183,7 @@ import {
   clearStoredOnboarding,
   preferencesWithThinkingDisplay,
   readStoredChatsCollapsed,
+  readStoredPinnedCollapsed,
   readStoredDismissedConditions,
   writeStoredDismissedConditions,
   readStoredCollapsedWorkspaces,
@@ -193,6 +194,7 @@ import {
   splitPreferencesUpdate,
   CURRENT_ONBOARDING_WIZARD_VERSION,
   writeStoredChatsCollapsed,
+  writeStoredPinnedCollapsed,
   writeStoredCollapsedWorkspaces,
   writeStoredOnboarding,
   writeStoredThinkingDisplay,
@@ -696,6 +698,9 @@ function AppInner() {
   );
   const [chatsCollapsed, setChatsCollapsed] = useState(
     readStoredChatsCollapsed,
+  );
+  const [pinnedCollapsed, setPinnedCollapsed] = useState(
+    readStoredPinnedCollapsed,
   );
   const selectionSeedRef = useRef<string | null>(null);
   const threadSettingsRequestRef = useRef(0);
@@ -5527,6 +5532,14 @@ function AppInner() {
     });
   }, []);
 
+  const handlePinnedCollapsedChange = useCallback((collapsed: boolean) => {
+    setPinnedCollapsed((current) => {
+      if (current === collapsed) return current;
+      writeStoredPinnedCollapsed(collapsed);
+      return collapsed;
+    });
+  }, []);
+
   // Memoized derived values
   const isThreadDetailPending = Boolean(
     selectedThreadId &&
@@ -6102,6 +6115,8 @@ function AppInner() {
             onWorkspaceCollapsedChange={handleWorkspaceCollapsedChange}
             chatsCollapsed={chatsCollapsed}
             onChatsCollapsedChange={handleChatsCollapsedChange}
+            pinnedCollapsed={pinnedCollapsed}
+            onPinnedCollapsedChange={handlePinnedCollapsedChange}
             isAddingProject={isAddingProject}
             onOpenSettings={handleOpenSettings}
             settingsOpen={isSettingsOpen}

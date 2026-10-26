@@ -510,6 +510,34 @@ describe("DesktopSidebar", () => {
     expect(onSelectThread).toHaveBeenCalledWith("workspace-1", "pinned-thread");
   });
 
+  it("collapses the pinned section and reports toggles to the host", () => {
+    const onPinnedCollapsedChange = vi.fn();
+    const groups: ProjectGroup[] = [
+      {
+        workspace: workspace(),
+        threads: [
+          thread({ id: "pinned-thread", title: "Pinned chat", is_pinned: true }),
+        ],
+      },
+    ];
+    const { rerenderSidebar } = renderSidebar({
+      groups,
+      pinnedCollapsed: false,
+      onPinnedCollapsedChange,
+    });
+
+    expect(screen.getByText("Pinned chat")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Collapse pinned" }));
+    expect(onPinnedCollapsedChange).toHaveBeenCalledWith(true);
+
+    rerenderSidebar({ groups, pinnedCollapsed: true, onPinnedCollapsedChange });
+    expect(screen.queryByText("Pinned chat")).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Expand pinned" })).toHaveAttribute(
+      "aria-expanded",
+      "false",
+    );
+  });
+
   it("shows the project icon beside each pinned thread", () => {
     renderSidebar({
       groups: [

@@ -16,6 +16,7 @@ const CLIENT_STORAGE_KEYS = {
   threadSort: 'falcondeck.desktop.thread-sort.v1',
   collapsedWorkspaces: 'falcondeck.desktop.collapsed-workspaces.v1',
   chatsCollapsed: 'falcondeck.desktop.chats-collapsed.v1',
+  pinnedCollapsed: 'falcondeck.desktop.pinned-collapsed.v1',
   projectsCollapsed: 'falcondeck.desktop.projects-collapsed.v1',
   panelVisibility: 'falcondeck.desktop.panel-visibility.v1',
 } as const
@@ -39,6 +40,7 @@ export function collectClientBackupData(): ClientBackupData {
       threadSort: window.localStorage.getItem(CLIENT_STORAGE_KEYS.threadSort),
       collapsedWorkspaces: parseJson(CLIENT_STORAGE_KEYS.collapsedWorkspaces),
       chatsCollapsed: window.localStorage.getItem(CLIENT_STORAGE_KEYS.chatsCollapsed),
+      pinnedCollapsed: window.localStorage.getItem(CLIENT_STORAGE_KEYS.pinnedCollapsed),
       projectsCollapsed: window.localStorage.getItem(CLIENT_STORAGE_KEYS.projectsCollapsed),
       panelVisibility: parseJson(CLIENT_STORAGE_KEYS.panelVisibility),
     },
@@ -73,6 +75,9 @@ export function restoreClientBackupData(client?: ClientBackupData | null): void 
     }
     if (typeof prefs.chatsCollapsed === 'string') {
       window.localStorage.setItem(CLIENT_STORAGE_KEYS.chatsCollapsed, prefs.chatsCollapsed)
+    }
+    if (typeof prefs.pinnedCollapsed === 'string') {
+      window.localStorage.setItem(CLIENT_STORAGE_KEYS.pinnedCollapsed, prefs.pinnedCollapsed)
     }
     if (typeof prefs.projectsCollapsed === 'string') {
       window.localStorage.setItem(CLIENT_STORAGE_KEYS.projectsCollapsed, prefs.projectsCollapsed)
