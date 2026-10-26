@@ -17,6 +17,7 @@ import {
   GitCommitHorizontal,
   ImageIcon,
   Info,
+  MessagesSquare,
   PanelRightOpen,
   PauseCircle,
   Radio,
@@ -60,6 +61,7 @@ import {
   mcpTextDuplicatesStructuredContent,
   providerOutputKindLabel,
   parseMcpResult,
+  parseAgentThreadMessage,
   projectHarnessUserText,
   serviceMessagePresentation,
   safeExternalUrl,
@@ -74,6 +76,7 @@ import {
   webSearchActionLabel,
   workspaceRelativeFilePath,
   type ConversationItem,
+  type AgentThreadMessage,
   type ConversationCitation,
   type ConversationLiveActivityGroup,
   type ConversationMemoryCitation,
@@ -301,6 +304,52 @@ function hoverRevealActions(group: "message" | "review") {
   return `transition-opacity [@media(pointer:fine)]:opacity-0 ${reveal}`;
 }
 
+function AgentThreadMessageRow({ message }: { message: AgentThreadMessage }) {
+  const [open, setOpen] = useState(false);
+  const label = `Agent message from ${message.threadTitle || "another task"}`;
+
+  return (
+    <Collapsible.Root
+      open={open}
+      onOpenChange={setOpen}
+      className="min-w-0 max-w-2xl"
+    >
+      <Collapsible.Trigger
+        title={`${label} · From another FalconDeck task`}
+        className="fd-focus fd-type-supporting flex max-w-full items-center gap-2 rounded-[var(--fd-radius-sm)] py-2 text-left text-fg-muted transition-colors hover:text-fg-secondary"
+      >
+        <MessagesSquare aria-hidden="true" className="h-3.5 w-3.5 shrink-0" />
+        <span className="min-w-0 truncate">{label}</span>
+        <ChevronRight
+          aria-hidden="true"
+          className={cn(
+            "h-3 w-3 shrink-0 transition-transform",
+            open && "rotate-90",
+          )}
+        />
+      </Collapsible.Trigger>
+      <Collapsible.Content>
+        <div className="group/message mb-2 ml-1.5 border-l border-border-default pl-4">
+          <div
+            data-message-selectable-content
+            className="fd-type-body min-w-0 max-w-none break-words text-fg-primary"
+          >
+            <MessageMarkdown
+              text={message.text}
+              defer={false}
+              interpretDirectives={false}
+              highlightCommands
+            />
+          </div>
+          <div className={cn("mt-2 flex", hoverRevealActions("message"))}>
+            <CopyButton text={message.text} label="Copy message" />
+          </div>
+        </div>
+      </Collapsible.Content>
+    </Collapsible.Root>
+  );
+}
+
 function UserMessage({
   item,
   collapseLongMessages = true,
@@ -384,6 +433,11 @@ function UserMessage({
     item.attachments.length === 0
   ) {
     return null;
+  }
+
+  const threadMessage = parseAgentThreadMessage(text);
+  if (threadMessage && item.attachments.length === 0) {
+    return <AgentThreadMessageRow key={item.id} message={threadMessage} />;
   }
 
   return (

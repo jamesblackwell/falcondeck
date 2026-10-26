@@ -43,6 +43,7 @@ export * from "./conversation-export";
 export * from "./handoff";
 export * from "./handoff-thread";
 export * from "./harness-user-text";
+export * from "./agent-thread-message";
 export * from "./fork-thread";
 export * from "./option-filter";
 export * from "./starred-models";

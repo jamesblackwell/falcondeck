@@ -736,6 +736,20 @@ const toolStateItems: ConversationItem[] = [
 
 const contentStateItems: ConversationItem[] = [
   {
+    kind: "user_message",
+    id: "agent-thread-message-qa",
+    text: "Message from FalconDeck thread task-quizgecko (Quizgecko):\n\nPhase 3 accepted. I will trace the home headline’s LCP critical path, implement the largest measured fixes, then restore CSP in report-only mode.\n\n- Trace what the main content waits on.\n- Fix the largest measured delays.\n- Check the result on mobile and desktop.",
+    attachments: [],
+    created_at: at(0),
+  },
+  {
+    kind: "user_message",
+    id: "agent-thread-message-long-title-qa",
+    text: "Message from FalconDeck thread task-frontend (Frontend Dependency Analysis with a deliberately long task title to check compact layouts):\n\nThe dependency analysis is ready for review.",
+    attachments: [],
+    created_at: at(1),
+  },
+  {
     kind: "assistant_message",
     id: "assistant-pending",
     text: "",
