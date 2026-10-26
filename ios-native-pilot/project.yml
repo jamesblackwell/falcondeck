@@ -8,6 +8,16 @@ settings:
   base:
     SWIFT_VERSION: "6.0"
     CODE_SIGN_STYLE: Automatic
+    FALCONDECK_APP_BUNDLE_IDENTIFIER: com.falcondeck.pilot.native
+    FALCONDECK_DISPLAY_NAME: Falcon Native
+    FALCONDECK_PAIRING_SCHEME: falcondeck-native
+    MARKETING_VERSION: "1.2"
+    CURRENT_PROJECT_VERSION: "107"
+  configs:
+    Release:
+      FALCONDECK_APP_BUNDLE_IDENTIFIER: com.falcondeck.mobile
+      FALCONDECK_DISPLAY_NAME: FalconDeck
+      FALCONDECK_PAIRING_SCHEME: falcondeck
 packages:
   MarkdownUI:
     url: https://github.com/gonzalezreal/swift-markdown-ui.git
@@ -34,14 +44,12 @@ targets:
           - $(SRCROOT)/FalconDeckNative/Assets.xcassets/AppIcon.appiconset/icon.png
     settings:
       base:
-        PRODUCT_BUNDLE_IDENTIFIER: com.falcondeck.pilot.native
+        PRODUCT_BUNDLE_IDENTIFIER: $(FALCONDECK_APP_BUNDLE_IDENTIFIER)
         CODE_SIGN_ENTITLEMENTS: FalconDeckNative/FalconDeckNative.entitlements
         TARGETED_DEVICE_FAMILY: "1,2"
         GENERATE_INFOPLIST_FILE: YES
-        INFOPLIST_KEY_CFBundleDisplayName: Falcon Native
+        INFOPLIST_KEY_CFBundleDisplayName: $(FALCONDECK_DISPLAY_NAME)
         INFOPLIST_KEY_UILaunchScreen_Generation: YES
-        MARKETING_VERSION: "0.1.0"
-        CURRENT_PROJECT_VERSION: "1"
       configs:
         Debug:
           APS_ENVIRONMENT: development
@@ -52,16 +60,17 @@ targets:
     info:
       path: FalconDeckNative/Info.plist
       properties:
-        CFBundleDisplayName: Falcon Native
+        CFBundleDisplayName: $(FALCONDECK_DISPLAY_NAME)
         CFBundleShortVersionString: $(MARKETING_VERSION)
         CFBundleVersion: $(CURRENT_PROJECT_VERSION)
+        ITSAppUsesNonExemptEncryption: false
         NSSupportsLiveActivities: true
         NativePushEnvironment: $(NATIVE_PUSH_ENVIRONMENT)
         UISupportedInterfaceOrientations: [UIInterfaceOrientationPortrait, UIInterfaceOrientationLandscapeLeft, UIInterfaceOrientationLandscapeRight]
         UISupportedInterfaceOrientations~ipad: [UIInterfaceOrientationPortrait, UIInterfaceOrientationPortraitUpsideDown, UIInterfaceOrientationLandscapeLeft, UIInterfaceOrientationLandscapeRight]
         UIRequiresFullScreen: false
         CFBundleURLTypes:
-          - CFBundleURLSchemes: [falcondeck-native]
+          - CFBundleURLSchemes: [$(FALCONDECK_PAIRING_SCHEME), falcondeck-native]
         NSCameraUsageDescription: Scan a pairing code or take photos to attach to your agent messages.
         NSPhotoLibraryAddUsageDescription: Save images from your conversations to Photos.
         NSMicrophoneUsageDescription: Record a voice message for transcription.
@@ -75,10 +84,8 @@ targets:
     sources: [SpeechWidget, Shared]
     settings:
       base:
-        PRODUCT_BUNDLE_IDENTIFIER: com.falcondeck.pilot.native.speech-activity
+        PRODUCT_BUNDLE_IDENTIFIER: $(FALCONDECK_APP_BUNDLE_IDENTIFIER).speech-activity
         TARGETED_DEVICE_FAMILY: "1,2"
-        MARKETING_VERSION: "0.1.0"
-        CURRENT_PROJECT_VERSION: "1"
         APPLICATION_EXTENSION_API_ONLY: YES
         SKIP_INSTALL: YES
     info:

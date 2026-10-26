@@ -1,11 +1,36 @@
 # Falcon Native
 
-Standalone SwiftUI development client for iPhone and iPad (iOS 26+). It uses the
-existing encrypted relay and daemon RPCs. The app and speech widget have separate
-bundle identifiers from the released app; they can be installed alongside it.
-The released clients and daemon are unchanged. The relay now supports optional
-native APNs alongside its existing Expo provider; no Expo build, OTA or
-TestFlight submission is involved.
+SwiftUI client for iPhone and iPad (iOS 26+), using the existing encrypted relay
+and daemon RPCs. Release builds update the existing **FalconDeck** app in
+TestFlight and App Store Connect (`com.falcondeck.mobile`, app `6760899257`).
+Debug builds remain **Falcon Native** (`com.falcondeck.pilot.native`) and can be
+installed alongside the released app. The relay supports native APNs alongside
+its existing Expo provider.
+
+## TestFlight
+
+Use the `FalconDeckNative` scheme's **Release** configuration. It selects the
+FalconDeck bundle ID, display name, production push environment and
+`falcondeck://` pairing links; the speech widget uses the same app ID prefix.
+Set a new marketing version/build number in `project.yml`, regenerate with
+XcodeGen, then archive and export with Xcode's App Store Connect method using
+team `YLQ57H32A4`. Submit the exported IPA from `apps/mobile`:
+
+```sh
+eas submit --platform ios --profile preview-testflight \
+  --path ../../ios-native-pilot/artifacts/<export>/FalconDeckNative.ipa \
+  --non-interactive --wait
+```
+
+This uses the existing listing and submission credentials without building the
+Expo app. Confirm processing and tester access in App Store Connect. Native
+changes require a binary build; Expo OTA updates do not update this app.
+
+When upgrading from Expo, pair the computer once and enable background
+notifications in Settings. The previous client's connection metadata and local
+drafts use a different storage format and are not imported. Native pairing uses
+its own trusted-device registration; the old mobile registration can be revoked
+from the desktop after reconnecting.
 
 ## Run locally
 
@@ -48,11 +73,12 @@ or paste the complete code/link and tap Connect. Setup remains visible until
 the encrypted workspace is ready. A self-hosted relay gets the same explicit
 server review as the Expo client; diagnostics and forgetting a saved computer
 are in Settings → Connections. The default relay is `https://connect.falcondeck.com`; a relay in the signed link
-is honored. This registers a separate trusted client named **Falcon Native
-Pilot**. It does not reuse the released mobile app's credentials.
+is honored. This registers a trusted client named after the app (**Falcon Native**
+for Debug, **FalconDeck** for Release). It does not reuse the Expo client's credentials.
 
-The app owns `falcondeck-native://` links. HTTPS pairing links can be pasted or
-scanned without intercepting the released app's links. Do not put pairing links,
+Release owns `falcondeck://` pairing links; both configurations support
+`falcondeck-native://` Live Activity links. HTTPS pairing links can be pasted or
+scanned. Do not put pairing links,
 keys, tokens, real device inventory or private screenshots in git.
 
 ## Included

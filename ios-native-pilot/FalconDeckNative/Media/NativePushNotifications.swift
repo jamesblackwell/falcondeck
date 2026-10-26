@@ -35,7 +35,7 @@ struct NotificationDestination: Equatable, Sendable {
 
     func setEnabled(_ enabled: Bool) async throws {
         if enabled {
-            guard try await UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .badge, .sound]) else { throw PilotError("Allow notifications for Falcon Native in this device’s Settings.") }
+            guard try await UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .badge, .sound]) else { throw PilotError("Allow notifications for this app in your device’s Settings.") }
         }
         self.enabled = enabled
         defaults.set(enabled, forKey: "native.notifications.push")

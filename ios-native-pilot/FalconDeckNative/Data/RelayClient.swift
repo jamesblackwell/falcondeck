@@ -64,7 +64,7 @@ extension RelayServing {
 /// anchors every connection; ordered live events follow it. No history DB or
 /// durable replay cursor is added by this client.
 actor RelayClient: RelayServing {
-    private let log = Logger(subsystem: "com.falcondeck.pilot.native", category: "relay")
+    private let log = Logger(subsystem: Bundle.main.bundleIdentifier ?? "com.falcondeck.mobile", category: "relay")
     private let http = URLSession(configuration: .ephemeral)
     private let writer = RelayWriter()
     private var socket: URLSessionWebSocketTask?
@@ -124,7 +124,7 @@ actor RelayClient: RelayServing {
         let bundle = try identity.bundle()
         let authority = try RelayIdentity(secret: input.authoritySeed)
         let claim = try await post(input.relay, path: "v1/pairings/claim", body: .object([
-            "pairing_code": .string(input.code), "label": .string("Falcon Native Pilot"), "client_bundle": bundle,
+            "pairing_code": .string(input.code), "label": .string(Bundle.main.object(forInfoDictionaryKey: "CFBundleDisplayName") as? String ?? "FalconDeck"), "client_bundle": bundle,
             "challenge_signature": .string(try identity.sign(["falcondeck-pairing-claim-v1", input.code, nonce])),
             "pairing_authority_signature": .string(try authority.sign(["falcondeck-pairing-authority-client-v1", input.code, nonce, "data_key_v1", "ed25519_v1", try identity.publicKey, try identity.identityKey]))
         ]))

@@ -64,7 +64,7 @@ struct TaskActivityRecord: Equatable {
         enqueue { for orphan in orphans { await self.client.end(orphan.id, state: nil, dismissAt: nil) } }
     }
     func start(task: AgentTask, project: String, pairing: String, now: Date = .now) throws {
-        guard enabled else { throw PilotError("Allow Live Activities for Falcon Native in iOS Settings.") }
+        guard enabled else { throw PilotError("Allow Live Activities for this app in iOS Settings.") }
         guard task.running || task.awaitingInput else { throw PilotError("Start following a task while it is working or needs your input.") }
         let attributes = NativeTaskAttributes(pairing: pairing, workspaceID: task.projectID, threadID: task.id)
         guard try JSONEncoder().encode(attributes).count <= 1400 else { throw PilotError("This task's identifiers are too long for a Live Activity.") }
