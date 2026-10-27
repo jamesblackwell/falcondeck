@@ -153,6 +153,10 @@ The flag does not filter for critical events. When notifications are warranted
 and enabled, dispatch children, then end your turn; do not poll in a loop.
 Notices do not survive a daemon restart.
 
+Bot-created tasks automatically report errors and input requests, including after
+a daemon restart. Successful turn endings stay silent unless `notify_parent` was
+explicitly enabled for that task in the current daemon session.
+
 `falcondeck_wait_thread` waits up to 25 seconds for one thread to stop running.
 It reports the status and the pending requests with the ids needed to answer.
 `falcondeck_answer_question` answers a plain question from a child this thread

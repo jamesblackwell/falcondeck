@@ -1167,6 +1167,11 @@ Subscriptions live only in memory: a daemon restart ends the child's turn and
 the parent's turn too. Notices are skipped during shutdown and for archived
 parents.
 
+Bot-created children are watched automatically for errors and input requests,
+including after daemon restart. These automatic watches do not report successful
+turn endings. Bots must explicitly enable `notify_parent` for completion notices,
+and that opt-in does not survive a restart.
+
 Workspace scope remains the authorization boundary for ordinary task callers.
 Bots have an explicit user-created identity with broader coordination authority.
 Their space consists of user-controlled files, with history remaining in native

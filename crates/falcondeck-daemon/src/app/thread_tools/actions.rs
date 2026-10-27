@@ -133,6 +133,7 @@ struct AnswerArgs {
 pub(crate) struct ChildWatch {
     workspace_id: String,
     pub(crate) parent_thread_id: String,
+    notify_on_completion: bool,
     busy: bool,
     waiting_notified: bool,
 }
@@ -501,7 +502,13 @@ impl AppState {
 
     /// Registers a child before its first dispatch; the watcher subscribes
     /// synchronously so the child's first status change cannot be missed.
-    pub(in crate::app) fn watch_child(&self, workspace: &str, child: &str, parent: &str) {
+    pub(in crate::app) fn watch_child(
+        &self,
+        workspace: &str,
+        child: &str,
+        parent: &str,
+        notify_on_completion: bool,
+    ) {
         let mut watches = self
             .inner
             .agent_spawn_watches
@@ -515,6 +522,7 @@ impl AppState {
             ChildWatch {
                 workspace_id: workspace.into(),
                 parent_thread_id: parent.into(),
+                notify_on_completion,
                 busy: false,
                 waiting_notified: false,
             },
@@ -609,7 +617,9 @@ impl AppState {
                 (!std::mem::replace(&mut watch.waiting_notified, true)).then_some(Settle::Waiting)
             } else {
                 watch.waiting_notified = false;
-                std::mem::replace(&mut watch.busy, false).then_some(Settle::Finished)
+                let was_busy = std::mem::replace(&mut watch.busy, false);
+                (was_busy && (watch.notify_on_completion || thread.status == ThreadStatus::Error))
+                    .then_some(Settle::Finished)
             };
             settle.map(|s| (s, watch.parent_thread_id.clone()))
         };
@@ -637,9 +647,9 @@ impl AppState {
         if self.is_shutting_down() {
             return;
         }
-        if self.bot_for_thread(parent).await.is_some() && !self.inner.agent_spawn_watches.lock().unwrap_or_else(|e| e.into_inner())
-            .as_ref().is_some_and(|watches| children.iter().any(|(child, _)| watches.contains_key(child))) { return; }
-        let Ok(parent_workspace) = self.thread_workspace(parent).await else { return; };
+        let Ok(parent_workspace) = self.thread_workspace(parent).await else {
+            return;
+        };
         if self
             .thread_summary(&parent_workspace, parent)
             .await
@@ -652,9 +662,22 @@ impl AppState {
             let Ok(child) = self.thread_summary(workspace, id).await else {
                 continue;
             };
+            let should_notify = self
+                .inner
+                .agent_spawn_watches
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .as_ref()
+                .and_then(|watches| watches.get(id))
+                .is_some_and(|watch| {
+                    watch.workspace_id == workspace
+                        && watch.parent_thread_id == parent
+                        && (watch.notify_on_completion || child.status != ThreadStatus::Idle)
+                });
             // A child can resume while its completion is being batched. Read the
             // latest summary for both status and preview instead of sending stale data.
-            if is_busy(&child)
+            if !should_notify
+                || is_busy(&child)
                 || (child.status == ThreadStatus::WaitingForInput)
                     != matches!(settle, Settle::Waiting)
             {
@@ -1051,6 +1074,63 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn bot_children_only_report_attention_unless_completion_is_requested() {
+        let (app, _temp) = fixture().await;
+        app.mutate_bot(falcondeck_core::BotMutation::Create {
+            name: "Coordinator".into(),
+            instructions: String::new(),
+            provider: None,
+            model_id: None,
+            thread_id: Some("thread-1".into()),
+        })
+        .await
+        .unwrap();
+        app.with_thread_mut("workspace-1", "thread-1", |t| {
+            t.status = ThreadStatus::Running
+        })
+        .await
+        .unwrap();
+        let quiet = child(&app, json!({"notify_parent":false})).await;
+        let requested = child(&app, json!({"notify_parent":true})).await;
+        for id in [&quiet, &requested] {
+            set_status(&app, id, ThreadStatus::Running).await;
+            set_status(&app, id, ThreadStatus::Idle).await;
+        }
+        let notices = wait_for_notices(&app, "thread-1", 1).await;
+        assert!(notices[0].contains(&requested), "{notices:?}");
+        assert!(!notices[0].contains(&quiet), "{notices:?}");
+
+        add_request(
+            &app,
+            &quiet,
+            "question-1",
+            InteractiveRequestKind::Question,
+            false,
+        )
+        .await;
+        set_status(&app, &quiet, ThreadStatus::WaitingForInput).await;
+        let notices = wait_for_notices(&app, "thread-1", 2).await;
+        assert!(notices[1].contains("needs input"), "{notices:?}");
+        app.inner
+            .interactive_requests
+            .lock()
+            .await
+            .remove(&("workspace-1".into(), "question-1".into()));
+        set_status(&app, &quiet, ThreadStatus::Running).await;
+        set_status(&app, &quiet, ThreadStatus::Error).await;
+        let notices = wait_for_notices(&app, "thread-1", 3).await;
+        assert!(notices[2].contains("failed (error)"), "{notices:?}");
+
+        // An error resolved during batching must not become an idle notice.
+        app.with_thread_mut("workspace-1", &quiet, |t| t.status = ThreadStatus::Idle)
+            .await
+            .unwrap();
+        app.notify_parent("workspace-1", "thread-1", &[(quiet, Settle::Finished)])
+            .await;
+        assert_eq!(queued_notices(&app, "thread-1").await.len(), 3);
+    }
+
+    #[tokio::test]
     async fn notify_parent_batches_nearby_completions_with_compact_previews() {
         let (app, _temp) = fixture().await;
         let first = child(&app, json!({"notify_parent":true,"title":"Layouts"})).await;
@@ -1284,7 +1364,7 @@ mod tests {
                 "other-parent".into(),
                 super::super::super::ManagedThread::new(other_parent),
             );
-        app.watch_child("workspace-1", &second, "other-parent");
+        app.watch_child("workspace-1", &second, "other-parent", true);
         for id in [&first, &second] {
             set_status(&app, id, ThreadStatus::Running).await;
             set_status(&app, id, ThreadStatus::Idle).await;

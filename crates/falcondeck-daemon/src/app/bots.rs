@@ -120,7 +120,7 @@ impl AppState {
             })
             .collect();
         for (workspace, child, parent) in children {
-            self.watch_child(&workspace, &child, &parent);
+            self.watch_child(&workspace, &child, &parent, false);
         }
     }
 

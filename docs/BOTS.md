@@ -50,9 +50,12 @@ Bot calls to the built-in coordination tools can select a project using
 `workspace_id`. Calls identifying an existing task resolve its owning workspace
 automatically. Ordinary tasks remain workspace-scoped. The three concurrent
 children limit counts all projects together. Bot-created tasks automatically
-report completion or requests for input to their home conversation; the bot can
-return immediately while workers run. Watches are rebuilt from persisted task
-origins on daemon restart.
+report errors or requests for input to their home conversation. Successful turn
+endings stay silent unless the bot explicitly enables `notify_parent` when
+creating the task. The bot can return immediately while workers run and read
+summaries at natural checkpoints. Watches rebuilt from persisted task origins
+on daemon restart report only errors and requests for input; completion opt-ins
+last only for the current daemon session.
 
 “Allow this bot to start tasks through FalconDeck” is enforced when its
 coordination tool is invoked. This is a FalconDeck capability restriction, not

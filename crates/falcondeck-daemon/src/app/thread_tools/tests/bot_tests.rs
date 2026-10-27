@@ -277,6 +277,24 @@ async fn bot_cross_project_delegation_retains_parent_and_counts_children_globall
             UnifiedEvent::ThreadUpdated { thread },
         );
     }
+    tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+    assert!(
+        app.inner.workspaces.lock().await["workspace-1"].threads["thread-1"]
+            .queued_requests
+            .is_empty(),
+        "Restored bot watches must not report successful turn endings"
+    );
+    app.with_thread_mut("workspace-2", &child.id, |thread| {
+        thread.status = ThreadStatus::WaitingForInput
+    })
+    .await
+    .unwrap();
+    let waiting = app.thread_summary("workspace-2", &child.id).await.unwrap();
+    app.emit(
+        Some("workspace-2".into()),
+        Some(child.id.clone()),
+        UnifiedEvent::ThreadUpdated { thread: waiting },
+    );
     tokio::time::timeout(std::time::Duration::from_secs(3), async {
         loop {
             let has_receipt = app.inner.workspaces.lock().await["workspace-1"].threads["thread-1"].queued_requests.iter()
@@ -285,7 +303,7 @@ async fn bot_cross_project_delegation_retains_parent_and_counts_children_globall
             if has_receipt { break; }
             tokio::time::sleep(std::time::Duration::from_millis(20)).await;
         }
-    }).await.expect("Cross-project workers must report back to the bot's home workspace");
+    }).await.expect("Cross-project workers needing input must notify the bot's home workspace");
 }
 
 #[tokio::test]
