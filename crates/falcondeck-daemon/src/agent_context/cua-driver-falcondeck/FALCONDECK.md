@@ -12,10 +12,17 @@ cua-driver launches it with its own debugging port, so Chrome never shows the
 "Allow remote debugging?" prompt. Use it for every browser task unless the user
 explicitly asks you to work in their own Chrome window or tab.
 
-1. Find the running Google Chrome pid with `list_apps` (bundle
-   `com.google.Chrome`). If Chrome is not running, `launch_app` it first. The
-   pid only pins which Chrome executable is used (see below); the personal
-   profile is not touched.
+1. Find the pid of the user's own Chrome: the main `Google Chrome` process
+   with no `--user-data-dir` or `--remote-debugging-port` flag
+   (`for p in $(pgrep -x 'Google Chrome'); do ps -o args= -p $p | grep -q -e --user-data-dir -e --remote-debugging || echo $p; done`).
+   Do not take the pid from `list_apps`: it can report an automation
+   instance (Playwright, another cua profile) as Google Chrome. If the user's
+   Chrome is not running, `launch_app` it first. The pid only pins which Chrome
+   executable is used (see below); the personal profile is not touched.
+   Starting the user's Chrome first also matters:
+   macOS sends Dock clicks and opened links to an already-running Chrome
+   process. If the agent browser is the only one running, the user's
+   own launches land in it. Never quit the user's Chrome.
 2. Launch the agent browser:
 
    ```text
@@ -24,27 +31,38 @@ explicitly asks you to work in their own Chrome window or tab.
        "profile":{"mode":"isolated_named","name":"falcondeck-agent"}}'
    ```
 
-3. `list_windows` with the returned `prepared_pid`, then bind its window with
+3. Check the result before binding. cua first reuses any debugging endpoint
+   already open on the pid you passed, and then ignores `profile`. Continue
+   only when `action` is `launched_isolated_browser`, or when the
+   `prepared_pid` command line contains `BrowserProfiles/falcondeck-agent`.
+   Otherwise you got a different browser: do not bind it, and tell the user.
+   `list_windows` with the returned `prepared_pid`, then bind its window with
    `get_browser_state` and use the typed browser tools. Reuse that window,
    the same MCP connection, and one session label for the whole task.
 4. End the session when the task is done. Ending it closes the agent browser
-   process. Chrome writes new cookies to disk about every 30 seconds, so
-   after a login or session refresh, keep working (or wait) briefly before
-   ending.
+   process. Chrome writes new
+   cookies to disk about every 30 seconds, so after a login or session
+   refresh, keep working (or wait) briefly before ending.
 
 Refusals and what they mean:
 
 - `browser_route_unavailable` with "exited before exposing DevTools": the
   user has the agent browser open for signing in. Ask them to quit that Chrome
   (⌘Q in its window), then retry.
-- `browser_endpoint_owner_mismatch`: another task already has the agent
-  browser running. Find its pid (`pgrep -f BrowserProfiles/falcondeck-agent`),
-  `list_windows` for it, and bind with `get_browser_state`. That browser is
-  shared: work in a tab you opened or an `about:blank` tab, never navigate
-  another task's tab, and do not end the session that launched it.
-- A site shows a login page: stop and ask the user to sign in through
-  Settings → Computer use → Open agent browser, then quit it. Do not ask for
-  or type their password, copy cookies, or switch to the personal profile.
+- `browser_endpoint_owner_mismatch`: another task is using the agent browser.
+  Do not bind to its instance: it closes, with your tabs, when that task ends
+  its session. Wait for it to exit, checking about every 30 seconds with
+  `pgrep -f 'MacOS/Google Chrome --remote-debugging-port.*BrowserProfiles/falcondeck-agent'`
+  (this skips Chrome's helper processes), then run `browser_prepare` again. If
+  it is still running after about 10 minutes, tell the user instead of waiting
+  longer.
+- A site shows a login page: end your browser session first, which closes the
+  agent browser. Then ask the user to sign in through Settings → Computer use
+  → Open agent browser and quit that Chrome (⌘Q) when done. Launch again after
+  they confirm. While an agent's instance is running, FalconDeck refuses to
+  open the sign-in window, because the user's ⌘Q would also close the agent's
+  browser. Do not ask for or type the user's password, copy cookies, or switch
+  to the personal profile.
 
 Every launch may show a small "Restore pages?" bubble because the previous run
 was closed abruptly. Ignore it; it does not block page tools.

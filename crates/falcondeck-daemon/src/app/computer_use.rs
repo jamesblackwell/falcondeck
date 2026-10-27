@@ -351,6 +351,22 @@ fn ensure_agent_browser_profile(dir: &Path) -> io::Result<()> {
     )
 }
 
+/// True when `ps -axo args=` output contains an agent-browser instance that
+/// cua-driver launched. Only cua passes a debugging port. Opening the profile
+/// again would add the user's window to that process, so quitting it would
+/// kill the agent's browser mid-task.
+fn agent_owned_browser_running(ps_args: &str, dir: &Path) -> bool {
+    let profile = format!("--user-data-dir={}", dir.display());
+    ps_args.lines().map(str::trim_end).any(|line| {
+        let names_profile =
+            line.ends_with(&profile) || line.contains(&format!("{profile} "));
+        names_profile
+            && line.contains("/Contents/MacOS/")
+            && !line.contains(" Helper")
+            && line.contains("--remote-debugging-port")
+    })
+}
+
 /// A plain Chrome window on the agent profile. No debugging port: cua-driver
 /// only attaches to instances it launched, so the user quits this window when
 /// signing in is done.
@@ -1166,6 +1182,17 @@ impl AppState {
             .ok_or_else(|| DaemonError::Process("HOME is not set".to_string()))?;
         let dir = agent_browser_profile_dir(&home);
         ensure_agent_browser_profile(&dir)?;
+        let ps = Command::new("/bin/ps")
+            .args(["-axo", "args="])
+            .stdin(Stdio::null())
+            .output()
+            .await?;
+        if agent_owned_browser_running(&String::from_utf8_lossy(&ps.stdout), &dir) {
+            return Err(DaemonError::Conflict(
+                "An agent is using the agent browser right now. Try again when its task finishes."
+                    .to_string(),
+            ));
+        }
         let output = Command::new("/usr/bin/open")
             .args(agent_browser_open_args(&dir))
             .stdin(Stdio::null())
@@ -1349,6 +1376,32 @@ else:
         assert!(args.contains(&format!("--user-data-dir={}", dir.display())));
         assert!(!args.iter().any(|arg| arg.contains("remote-debugging")));
         std::fs::remove_dir_all(&home).ok();
+    }
+
+    #[test]
+    fn only_a_cua_launched_agent_browser_blocks_the_sign_in_window() {
+        let dir = Path::new(
+            "/Users/me/Library/Application Support/CuaDriver/BrowserProfiles/falcondeck-agent",
+        );
+        let chrome = "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome";
+        let profile = format!("--user-data-dir={}", dir.display());
+        let cua = format!(
+            "{chrome} --remote-debugging-port=0 {profile} --no-first-run --disable-extensions about:blank"
+        );
+        assert!(agent_owned_browser_running(&format!("launchd\n{cua}\n"), dir));
+        // The user's own sign-in window carries no debugging port.
+        let sign_in = format!("{chrome} {profile} --no-first-run --no-default-browser-check");
+        assert!(!agent_owned_browser_running(&sign_in, dir));
+        let helper = format!(
+            "/Applications/Google Chrome.app/Contents/Frameworks/Google Chrome Framework.framework/Helpers/Google Chrome Helper.app/Contents/MacOS/Google Chrome Helper --type=gpu-process {profile} --remote-debugging-port=0"
+        );
+        assert!(!agent_owned_browser_running(&helper, dir));
+        let sibling = format!("{chrome} --remote-debugging-port=0 {profile}2 about:blank");
+        assert!(!agent_owned_browser_running(&sibling, dir));
+        assert!(agent_owned_browser_running(
+            &format!("{chrome} --remote-debugging-port=0 {profile}"),
+            dir
+        ));
     }
 
     #[test]

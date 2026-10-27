@@ -366,6 +366,28 @@ Edge.
   can be lost. Logins made through the sign-in window survive because
   quitting it exits Chrome cleanly. A second session can bind the running
   instance, but cannot `browser_prepare` it (`browser_endpoint_owner_mismatch`).
+  The guidance tells the second task to wait for the first to exit rather than
+  share it, because the owner's `end_session` kills the shared process.
+- cua 0.33.4 `prepare_browser` first calls `prepare_endpoint(pid)`. That
+  returns `AlreadyPrepared` for any loopback port on the pid that answers
+  `/json/version`, and in that case `profile` is ignored. Chrome's
+  user-enabled remote-debugging server (port 9222) answers 404, so the user's
+  own Chrome falls through to the isolated launch. An automation Chrome with
+  a legacy port (Playwright, another cua profile) does not, and `list_apps` can
+  report it as Google Chrome. Agents pick the pid with `pgrep -x 'Google Chrome'` (no
+  `--user-data-dir` or debugging flags) and check that the result is
+  `launched_isolated_browser` or the falcondeck-agent process before binding.
+- Opening the profile while a cua instance runs would add the user's window
+  to that process, and their ⌘Q would kill the agent's browser. The endpoint
+  returns 409 when it finds a non-helper process on that `--user-data-dir`
+  with a debugging port.
+- Same-bundle capture: macOS sends Dock launches and opened links to an
+  already-running `com.google.Chrome` process. A second Chrome instance on
+  another profile can therefore capture them if the user's own Chrome isn't
+  running. Agents launch the user's Chrome before the agent browser and never
+  quit it. On 2026-10-27, Playwright's headless Chrome
+  (`playwright_chromiumdev_profile-*`, launched from the system Chrome app)
+  did this for real while the user's Chrome was closed.
 - Verified on 2026-10-27 with Chrome 156 and the embedded cua driver: no
   consent prompt, and a persistent cookie survived a kill and relaunch.
 
