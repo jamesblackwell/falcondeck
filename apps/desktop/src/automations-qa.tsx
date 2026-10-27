@@ -1,4 +1,4 @@
-/* Dev-only fixture: /automations-qa.html?theme=light|dark.
+/* Dev-only fixture: /automations-qa.html?theme=light|dark&volume=210.
    All CRUD operations use in-memory records; no agent work is dispatched. */
 import { StrictMode } from "react";
 import { createRoot } from "react-dom/client";
@@ -43,6 +43,17 @@ let records: Automation[] = [
   automation("Lucidpic Bug Scan", "lucidpic", 0, { state: "paused", next_run_at: null }),
   automation("Review September migration", "falcondeck", 0, { state: "completed", next_run_at: null }),
 ];
+
+const volume = Math.min(500, Number(new URLSearchParams(window.location.search).get("volume")) || 0);
+while (records.length < volume) {
+  const index = records.length;
+  const project = ["quizgecko", "lucidpic", "falcondeck"][index % 3];
+  const completed = index % 5 === 0;
+  const paused = index % 7 === 0;
+  records.push(automation(`Scheduled ${project} check ${index + 1}`, project, index * 37, {
+    ...(completed || paused ? { state: completed ? "completed" : "paused", next_run_at: null } : {}),
+  }));
+}
 
 const snapshot = {
   daemon: { version: "qa", started_at: at(-120), capabilities: { scheduled_tasks: true } },

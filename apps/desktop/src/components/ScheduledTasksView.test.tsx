@@ -261,6 +261,72 @@ describe("ScheduledTasksView", () => {
     expect(rowNames()).toEqual(["Open Finished migration"]);
   });
 
+  it("opens dashboard counts across lifecycle states and scopes the overview to the selected project", () => {
+    const at = (hours: number) => new Date(Date.now() + hours * 3_600_000).toISOString();
+    setup({}, vi.fn(), [], vi.fn(), {
+      ...multipleProjects,
+      scheduled_tasks: [
+        { ...multipleProjects.scheduled_tasks![0], next_run_at: at(1) },
+        { ...multipleProjects.scheduled_tasks![1], last_run: { status: "failed" } },
+        { ...multipleProjects.scheduled_tasks![2], next_run_at: at(48) },
+        multipleProjects.scheduled_tasks![3],
+        { ...multipleProjects.scheduled_tasks![0], id: "queued", title: "Queued check", next_run_at: null, last_run: { status: "queued" } },
+      ],
+    } as DaemonSnapshot);
+    expect(screen.getByRole("button", { name: "Show active automations (3)" })).toHaveAttribute("aria-pressed", "true");
+    fireEvent.click(screen.getByRole("button", { name: "Show automations due in 24 hours (1)" }));
+    expect(screen.getByText("Daily briefing")).toBeInTheDocument();
+    expect(screen.queryByText("Check image generation")).not.toBeInTheDocument();
+    expect(screen.getByRole("combobox", { name: "Filter automations by next run" })).toHaveTextContent("Next 24 hours");
+
+    fireEvent.click(screen.getByRole("button", { name: "Show automations needing attention (1)" }));
+    expect(screen.getByText("Paused audit")).toBeInTheDocument();
+    expect(screen.queryByText("Daily briefing")).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "All 1" })).toHaveAttribute("aria-pressed", "true");
+    expect(screen.getByRole("combobox", { name: "Filter automations by next run" })).toHaveTextContent("Any time");
+
+    fireEvent.click(screen.getByRole("button", { name: "Show running or queued automations (1)" }));
+    expect(screen.getByText("Queued check")).toBeInTheDocument();
+    expect(screen.queryByText("Paused audit")).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "Show active automations (3)" }));
+    chooseFilter("Filter automations by project", /^lucidpic/);
+    expect(screen.getByRole("button", { name: "Show active automations (1)" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Show automations due in 24 hours (0)" })).toBeInTheDocument();
+    expect(screen.getByText("Check image generation")).toBeInTheDocument();
+  });
+
+  it("collapses time groups, reveals search matches, and switches to project or flat lists", () => {
+    setup({}, vi.fn(), [], vi.fn(), {
+      ...multipleProjects,
+      scheduled_tasks: multipleProjects.scheduled_tasks!.map((task, index) => ({
+        ...task,
+        next_run_at: new Date(Date.now() + (index === 0 ? 10 : 20) * 60_000).toISOString(),
+      })),
+    });
+    const group = screen.getByRole("button", { name: "Next hour, 2 automations" });
+    fireEvent.click(group);
+    expect(group).toHaveAttribute("aria-expanded", "false");
+    expect(screen.queryByRole("button", { name: "Open Daily briefing" })).not.toBeInTheDocument();
+    fireEvent.change(screen.getByRole("searchbox"), { target: { value: "briefing" } });
+    expect(screen.getByRole("button", { name: "Open Daily briefing" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Next hour, 1 automation" })).toHaveAttribute("aria-expanded", "true");
+
+    fireEvent.click(screen.getByRole("button", { name: "Clear search" }));
+    chooseFilter("Group automations", /^By project/);
+    expect(screen.getAllByRole("heading", { level: 2 })).toHaveLength(2);
+    expect(screen.queryByRole("button", { name: "Next hour, 2 automations" })).not.toBeInTheDocument();
+    chooseFilter("Group automations", /^No grouping/);
+    expect(screen.queryByRole("heading", { level: 2 })).not.toBeInTheDocument();
+    expect(screen.getAllByRole("button", { name: /^Open / })).toHaveLength(2);
+
+    chooseFilter("Filter automations by next run", /^Overdue/);
+    expect(screen.getByText("No matching automations")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Clear filters" }));
+    expect(screen.getAllByRole("button", { name: /^Open / })).toHaveLength(4);
+    expect(screen.getByRole("combobox", { name: "Filter automations by next run" })).toHaveTextContent("Any time");
+  });
+
   it("combines host, project and search filters without merging same-named projects", () => {
     const remoteSnapshot = {
       ...snapshot,

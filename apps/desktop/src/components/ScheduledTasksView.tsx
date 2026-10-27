@@ -1,5 +1,4 @@
 import {
-  Fragment,
   type KeyboardEvent as ReactKeyboardEvent,
   useCallback,
   useEffect,
@@ -13,6 +12,7 @@ import {
   ChevronDown,
   Folder,
   Laptop,
+  Layers3,
   MessageCircle,
   Network,
   Pencil,
@@ -77,13 +77,18 @@ import {
   automationProject,
   automationProjectOptions,
   filterAutomationEntries,
+  groupAutomationEntries,
+  summarizeAutomationEntries,
   taskEntryKey,
   type AutomationActivityFilter,
+  type AutomationGrouping,
   type AutomationSort,
   type AutomationStatusFilter,
+  type AutomationTimeFilter,
   type TaskEntry,
 } from "./automation-list-model";
 import { AutomationDeleteDialog } from "./automation-delete-dialog";
+import { AutomationGroup, AutomationOverview, type AutomationOverviewSelection } from "./automation-dashboard";
 
 type Toast = (toast: {
   variant: "default" | "success" | "danger";
@@ -1070,6 +1075,8 @@ export function ScheduledTasksView({
   const [hostFilter, setHostFilter] = useState("all");
   const [projectFilter, setProjectFilter] = useState("all");
   const [activityFilter, setActivityFilter] = useState<AutomationActivityFilter>("all");
+  const [timeFilter, setTimeFilter] = useState<AutomationTimeFilter>("all");
+  const [grouping, setGrouping] = useState<AutomationGrouping>("time");
   const [sort, setSort] = useState<AutomationSort>("next");
   const [deleteEntry, setDeleteEntry] = useState<TaskEntry | null>(null);
   const [selected, setSelected] = useState<TaskEntry | null>(null);
@@ -1271,24 +1278,38 @@ export function ScheduledTasksView({
       setProjectFilter("all");
     }
   }, [projects, projectFilter]);
-  const scopedEntries = useMemo(() => filterAutomationEntries(entries, {
+  const overviewEntries = useMemo(() => filterAutomationEntries(entries, {
     query, status: "all", host: hostFilter, project: projectFilter,
-    activity: activityFilter, sort,
-  }), [entries, query, hostFilter, projectFilter, activityFilter, sort]);
-  const visible = scopedEntries.filter((entry) => filter === "all" || entry.task.status === filter);
+    activity: "all", sort,
+  }), [entries, query, hostFilter, projectFilter, sort]);
+  const summary = useMemo(() => summarizeAutomationEntries(overviewEntries, nowMs), [overviewEntries, nowMs]);
+  const scopedEntries = useMemo(() => filterAutomationEntries(overviewEntries, {
+    query: "", status: "all", host: "all", project: "all",
+    activity: activityFilter, time: timeFilter, sort,
+  }, viewerTimeZone(), nowMs), [overviewEntries, activityFilter, timeFilter, sort, nowMs]);
+  const visible = useMemo(() => scopedEntries.filter((entry) => filter === "all" || entry.task.status === filter), [scopedEntries, filter]);
+  const groups = useMemo(() => groupAutomationEntries(visible, grouping, nowMs), [visible, grouping, nowMs]);
+  const groupResetKey = JSON.stringify([query, filter, hostFilter, projectFilter, activityFilter, timeFilter, grouping]);
+  const overviewSelection = activityFilter === "all" && filter === "active"
+    ? timeFilter === "day" ? "due" : timeFilter === "all" ? "active" : null
+    : filter === "all" && timeFilter === "all" && (activityFilter === "running" || activityFilter === "attention")
+      ? activityFilter : null;
+  const selectOverview = (selection: AutomationOverviewSelection) => {
+    setFilter(selection === "active" || selection === "due" ? "active" : "all");
+    setActivityFilter(selection === "running" || selection === "attention" ? selection : "all");
+    setTimeFilter(selection === "due" ? "day" : "all");
+  };
   const statusCount = (status: AutomationStatusFilter) =>
     status === "all" ? scopedEntries.length : scopedEntries.filter((entry) => entry.task.status === status).length;
-  const hasRefinements = Boolean(query.trim() || hostFilter !== "all" || projectFilter !== "all" || activityFilter !== "all");
+  const hasRefinements = Boolean(query.trim() || hostFilter !== "all" || projectFilter !== "all" || activityFilter !== "all" || timeFilter !== "all");
   const clearFilters = () => {
     setQuery("");
     setHostFilter("all");
     setProjectFilter("all");
     setActivityFilter("all");
+    setTimeFilter("all");
     setFilter("all");
   };
-  const firstOwnedIndex = visible.findIndex(
-    (entry) => entry.automation?.owner,
-  );
   const unsupportedHosts = hosts.filter(
     (host) =>
       host.snapshot && !host.snapshot.daemon.capabilities?.scheduled_tasks,
@@ -1565,6 +1586,7 @@ export function ScheduledTasksView({
         <MainViewLead>
           Run recurring agent work on this Mac or an enrolled server.
         </MainViewLead>
+        <AutomationOverview summary={summary} selection={overviewSelection} onSelect={selectOverview} />
         <div className="relative mt-5">
           <SearchField
             label="Search automations"
@@ -1704,21 +1726,23 @@ export function ScheduledTasksView({
               </SelectContent>
             </Select>
           ) : null}
-          <Select value={sort} onValueChange={(value) => setSort(value as AutomationSort)}>
+          <Select value={timeFilter} onValueChange={(value) => setTimeFilter(value as AutomationTimeFilter)}>
             <SelectTrigger
-              aria-label="Sort automations"
-              className="ml-auto h-9 min-w-40 bg-surface-2 px-3 text-sm"
+              aria-label="Filter automations by next run"
+              className="h-9 min-w-40 flex-1 bg-surface-2 px-3 text-sm sm:max-w-64 sm:flex-none"
             >
               <span className="flex min-w-0 items-center gap-2">
-                <ArrowDownWideNarrow aria-hidden="true" className="h-3.5 w-3.5 shrink-0 text-fg-muted" />
+                <CalendarClock aria-hidden="true" className="h-3.5 w-3.5 shrink-0 text-fg-muted" />
                 <SelectValue />
               </span>
             </SelectTrigger>
-            <SelectContent align="end" label="Sort by">
-              <SelectItem value="next" description="Running work, then the soonest scheduled run">Next up</SelectItem>
-              <SelectItem value="name">Name (A–Z)</SelectItem>
-              <SelectItem value="updated">Recently updated</SelectItem>
-              <SelectItem value="last_run">Last run</SelectItem>
+            <SelectContent label="Next scheduled run">
+              <SelectItem value="all">Any time</SelectItem>
+              <SelectItem value="hour">Next hour</SelectItem>
+              <SelectItem value="today">Today</SelectItem>
+              <SelectItem value="day">Next 24 hours</SelectItem>
+              <SelectItem value="week">Next 7 days</SelectItem>
+              <SelectItem value="overdue">Overdue</SelectItem>
             </SelectContent>
           </Select>
         </div>
@@ -1743,88 +1767,114 @@ export function ScheduledTasksView({
             Loading automations…
           </p>
         ) : null}
-        <div className="mb-2 mt-5 flex min-h-7 items-center justify-between gap-3">
-          <p role="status" className="fd-type-meta text-fg-muted">
+        <div className="mb-3 mt-6 flex flex-wrap items-center gap-2">
+          <p role="status" className="fd-type-meta mr-auto text-fg-muted">
             {visible.length} {visible.length === 1 ? "automation" : "automations"}
             {hasRefinements ? ` matching filters` : ""}
           </p>
           {hasRefinements ? <Button variant="ghost" size="sm" onClick={clearFilters}>Clear filters</Button> : null}
+          <Select value={grouping} onValueChange={(value) => setGrouping(value as AutomationGrouping)}>
+            <SelectTrigger aria-label="Group automations" variant="quiet" className="h-9 text-sm">
+              <span className="flex min-w-0 items-center gap-2">
+                <Layers3 aria-hidden="true" className="h-3.5 w-3.5 shrink-0 text-fg-muted" />
+                <SelectValue />
+              </span>
+            </SelectTrigger>
+            <SelectContent align="end" label="Group by">
+              <SelectItem value="time">By time</SelectItem>
+              <SelectItem value="project">By project</SelectItem>
+              {hosts.length ? <SelectItem value="host">By host</SelectItem> : null}
+              <SelectItem value="none">No grouping</SelectItem>
+            </SelectContent>
+          </Select>
+          <Select value={sort} onValueChange={(value) => setSort(value as AutomationSort)}>
+            <SelectTrigger aria-label="Sort automations" variant="quiet" className="h-9 text-sm">
+              <span className="flex min-w-0 items-center gap-2">
+                <ArrowDownWideNarrow aria-hidden="true" className="h-3.5 w-3.5 shrink-0 text-fg-muted" />
+                <SelectValue />
+              </span>
+            </SelectTrigger>
+            <SelectContent align="end" label={grouping === "none" ? "Sort by" : "Sort within groups"}>
+              <SelectItem value="next" description="Running work, then the soonest scheduled run">Next up</SelectItem>
+              <SelectItem value="name">Name (A–Z)</SelectItem>
+              <SelectItem value="updated">Recently updated</SelectItem>
+              <SelectItem value="last_run">Last run</SelectItem>
+            </SelectContent>
+          </Select>
         </div>
-        <div className="divide-y divide-border-subtle overflow-hidden rounded-[var(--fd-radius-xl)] border border-border-subtle bg-surface-2">
-          {visible.map((entry, index) => {
-            const key = taskEntryKey(entry);
-            const owner = entry.automation?.owner;
-            const when = whenFor(entry, nowMs);
-            const attention = attentionFor(entry);
-            const open = () => {
-              if (owner && onOpenExtensionOwner) {
-                onOpenExtensionOwner(
-                  owner.extension_id,
-                  owner.resource_id,
-                  entry.hostId,
+        <div className="space-y-4">
+          {groups.map((group) => (
+            <AutomationGroup key={`${groupResetKey}:${group.key}`} group={group}>
+              {() => group.entries.map((entry) => {
+                const key = taskEntryKey(entry);
+                const owner = entry.automation?.owner;
+                const when = whenFor(entry, nowMs);
+                const attention = attentionFor(entry);
+                const open = () => {
+                  if (owner && onOpenExtensionOwner) {
+                    onOpenExtensionOwner(
+                      owner.extension_id,
+                      owner.resource_id,
+                      entry.hostId,
+                    );
+                  } else {
+                    openDetail(entry);
+                  }
+                };
+                return (
+                  <AutomationListRow
+                    key={key}
+                    title={entry.task.title}
+                    cadence={cadenceFor(entry)}
+                    projectLabel={automationProject(entry).label}
+                    hostLabel={
+                      hosts.length > 0 && hostFilter === "all"
+                        ? entry.hostName
+                        : null
+                    }
+                    hostOffline={!entry.online}
+                    whenLabel={when.label}
+                    whenTitle={when.title}
+                    whenOverdue={when.overdue}
+                    attention={attention?.text}
+                    attentionTone={attention?.tone}
+                    tone={rowTone(entry)}
+                    extensionOwned={Boolean(owner)}
+                    elevated={Boolean(entry.automation?.elevated)}
+                    selected={
+                      selected != null && taskEntryKey(selected) === key
+                    }
+                    busy={busyKey === key}
+                    online={entry.online && entry.supported}
+                    canToggle={entry.task.status !== "completed" && entry.automation?.state !== "failed"}
+                    paused={entry.task.status === "paused"}
+                    menuOpen={menuKey === key}
+                    onOpen={open}
+                    onRun={() => void mutate(entry, "run")}
+                    onToggle={() => void mutate(entry, "toggle")}
+                    onEdit={() => void edit(entry)}
+                    onDelete={() => setDeleteEntry(entry)}
+                    onMenuOpenChange={(openMenu) => {
+                      setCursorMenu(null);
+                      setMenuKey(openMenu ? key : null);
+                    }}
+                    onContextMenu={(event) => {
+                      if (owner) return;
+                      setMenuKey(null);
+                      setCursorMenu({
+                        key,
+                        x: event.clientX,
+                        y: event.clientY,
+                      });
+                    }}
+                  />
                 );
-              } else {
-                openDetail(entry);
-              }
-            };
-            return (
-              <Fragment key={key}>
-                {index === firstOwnedIndex ? (
-                  <div className="fd-type-eyebrow bg-surface-1 px-4 py-2.5 text-fg-muted">
-                    Used by extensions
-                  </div>
-                ) : null}
-                <AutomationListRow
-                  title={entry.task.title}
-                  cadence={cadenceFor(entry)}
-                  projectLabel={automationProject(entry).label}
-                  hostLabel={
-                    hosts.length > 0 && hostFilter === "all"
-                      ? entry.hostName
-                      : null
-                  }
-                  hostOffline={!entry.online}
-                  whenLabel={when.label}
-                  whenTitle={when.title}
-                  whenOverdue={when.overdue}
-                  attention={attention?.text}
-                  attentionTone={attention?.tone}
-                  tone={rowTone(entry)}
-                  extensionOwned={Boolean(owner)}
-                  elevated={Boolean(entry.automation?.elevated)}
-                  selected={
-                    selected != null && taskEntryKey(selected) === key
-                  }
-                  busy={busyKey === key}
-                  online={entry.online && entry.supported}
-                  canToggle={entry.task.status !== "completed" && entry.automation?.state !== "failed"}
-                  paused={entry.task.status === "paused"}
-                  menuOpen={menuKey === key}
-                  onOpen={open}
-                  onRun={() => void mutate(entry, "run")}
-                  onToggle={() => void mutate(entry, "toggle")}
-                  onEdit={() => void edit(entry)}
-                  onDelete={() => setDeleteEntry(entry)}
-                  onMenuOpenChange={(openMenu) => {
-                    setCursorMenu(null);
-                    setMenuKey(openMenu ? key : null);
-                  }}
-                  onContextMenu={(event) => {
-                    if (owner) return;
-                    setMenuKey(null);
-                    setCursorMenu({
-                      key,
-                      x: event.clientX,
-                      y: event.clientY,
-                    });
-                  }}
-                />
-              </Fragment>
-            );
-          })}
+              })}
+            </AutomationGroup>
+          ))}
           {localSnapshot && visible.length === 0 ? (
             <EmptyState
-              className="py-20"
+              className="rounded-[var(--fd-radius-xl)] border border-border-subtle bg-surface-2 py-20"
               icon={<CalendarClock className="h-8 w-8" />}
               title={
                 entries.length

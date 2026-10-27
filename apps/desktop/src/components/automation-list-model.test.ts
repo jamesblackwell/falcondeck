@@ -3,6 +3,8 @@ import type { Automation } from "@falcondeck/client-core";
 import {
   automationProject,
   filterAutomationEntries,
+  groupAutomationEntries,
+  summarizeAutomationEntries,
   type AutomationListFilters,
   type TaskEntry,
 } from "./automation-list-model";
@@ -106,5 +108,89 @@ describe("automation list", () => {
     expect(titles(entries, { activity: "running" })).toEqual(["Queued"]);
     expect(titles(entries, { activity: "waiting" })).toEqual(["Waiting"]);
     expect(titles(entries, { status: "completed" })).toEqual(["Completed"]);
+  });
+
+  it("groups upcoming work by local calendar boundaries and keeps inactive schedules separate", () => {
+    const now = new Date(2026, 9, 27, 9).getTime();
+    const next = (minutes: number) => new Date(now + minutes * 60_000).toISOString();
+    const entries = [
+      entry("Next week", { next_run_at: next(8 * 1440) }),
+      entry("Tomorrow", { next_run_at: new Date(2026, 9, 28, 0).toISOString() }),
+      entry("No schedule", { next_run_at: "invalid" }),
+      entry("Paused", { status: "paused", next_run_at: next(-60) }),
+      entry("Completed", { status: "completed", next_run_at: next(10) }),
+      entry("This week", { next_run_at: next(3 * 1440) }),
+      entry("Later today", { next_run_at: next(60) }),
+      entry("Soon", { next_run_at: next(30) }),
+      entry("Due now", { next_run_at: next(0) }),
+      entry("Missed", { next_run_at: next(-1) }),
+      entry("Running", { next_run_at: next(-60), last_run: run("running") }),
+      entry("Waiting", { last_run: run("awaiting_input") }),
+    ];
+    const groups = groupAutomationEntries(entries, "time", now);
+    expect(groups.map((group) => [group.label, group.entries.map((item) => item.task.title)])).toEqual([
+      ["In progress", ["Running", "Waiting"]],
+      ["Overdue", ["Missed"]],
+      ["Next hour", ["Soon", "Due now"]],
+      ["Later today", ["Later today"]],
+      ["Tomorrow", ["Tomorrow"]],
+      ["Next 7 days", ["This week"]],
+      ["Later", ["Next week"]],
+      ["Not scheduled", ["No schedule"]],
+      ["Paused", ["Paused"]],
+      ["Completed", ["Completed"]],
+    ]);
+    expect(groups.flatMap((group) => group.entries)).toHaveLength(entries.length);
+    expect(entries[0].task.title).toBe("Next week");
+  });
+
+  it("filters upcoming windows without including stale paused dates or running work as overdue", () => {
+    const now = new Date(2026, 9, 27, 23, 30).getTime();
+    const next = (minutes: number) => new Date(now + minutes * 60_000).toISOString();
+    const entries = [
+      entry("Overdue", { next_run_at: next(-1) }),
+      entry("Soon", { next_run_at: next(10) }),
+      entry("Tomorrow", { next_run_at: next(45) }),
+      entry("In a day", { next_run_at: next(1440) }),
+      entry("Paused", { status: "paused", next_run_at: next(10) }),
+      entry("Running", { next_run_at: next(-10), last_run: run("running") }),
+      entry("Invalid", { next_run_at: "invalid" }),
+    ];
+    const matching = (time: AutomationListFilters["time"]) => filterAutomationEntries(entries, { ...filters, time, sort: "name" }, "UTC", now).map((item) => item.task.title);
+    expect(matching("hour")).toEqual(["Soon", "Tomorrow"]);
+    expect(matching("today")).toEqual(["Overdue", "Running", "Soon"]);
+    expect(matching("day")).toEqual(["Soon", "Tomorrow"]);
+    expect(matching("week")).toEqual(["In a day", "Soon", "Tomorrow"]);
+    expect(matching("overdue")).toEqual(["Overdue"]);
+  });
+
+  it("summarizes schedules and outcomes independently of lifecycle filters", () => {
+    const now = Date.parse("2026-10-27T09:00:00Z");
+    expect(summarizeAutomationEntries([
+      entry("Due", { next_run_at: "2026-10-27T10:00:00Z" }),
+      entry("Failed run", { last_run: run("failed") }),
+      entry("Waiting", { last_run: run("awaiting_input") }),
+      entry("Queued", { last_run: run("queued") }),
+      entry("Paused failure", { status: "paused" }, { automation: { state: "failed" } as Automation }),
+      entry("Completed", { status: "completed", next_run_at: "2026-10-27T10:00:00Z" }),
+    ], now)).toEqual({ active: 4, due: 1, running: 1, attention: 3 });
+  });
+
+  it("keeps projects and hosts distinct, and extension records last in every grouping", () => {
+    const local = entry("Local");
+    const remote = entry("Remote", {}, { hostId: "server", hostName: "Build server" });
+    const owned = entry("Owned", {}, { automation: { owner: { extension_id: "test", resource_id: "resource" } } as Automation });
+    const entries = [owned, local, remote];
+    const projects = groupAutomationEntries(entries, "project", Date.now());
+    expect(projects).toHaveLength(3);
+    expect(projects[0].key).not.toBe(projects[1].key);
+    expect(projects[0].description).not.toBe(projects[1].description);
+    expect(groupAutomationEntries(entries, "host", Date.now()).map((group) => group.label)).toEqual(["Build server", "This Mac", "Used by extensions"]);
+    const flat = groupAutomationEntries(entries, "none", Date.now());
+    expect(flat[0].label).toBeNull();
+    expect(flat[0].entries).toEqual([local, remote]);
+    for (const grouping of ["time", "project", "host", "none"] as const) {
+      expect(groupAutomationEntries(entries, grouping, Date.now()).at(-1)?.entries).toEqual([owned]);
+    }
   });
 });

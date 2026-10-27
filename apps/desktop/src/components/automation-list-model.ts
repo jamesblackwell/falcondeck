@@ -18,6 +18,8 @@ export type TaskEntry = {
 export type AutomationStatusFilter = "all" | ScheduledTaskSummary["status"];
 export type AutomationActivityFilter = "all" | "attention" | "running" | "failed" | "waiting";
 export type AutomationSort = "next" | "name" | "updated" | "last_run";
+export type AutomationTimeFilter = "all" | "hour" | "today" | "day" | "week" | "overdue";
+export type AutomationGrouping = "time" | "project" | "host" | "none";
 
 export type AutomationListFilters = {
   query: string;
@@ -25,6 +27,7 @@ export type AutomationListFilters = {
   host: string;
   project: string;
   activity: AutomationActivityFilter;
+  time?: AutomationTimeFilter;
   sort: AutomationSort;
 };
 
@@ -91,6 +94,107 @@ function executionRank(entry: TaskEntry) {
   return status === "running" || status === "queued" || status === "awaiting_input" ? 0 : 1;
 }
 
+export function automationIsRunning(entry: TaskEntry) {
+  return entry.task.last_run?.status === "running" || entry.task.last_run?.status === "queued";
+}
+
+function dayStart(nowMs: number, offset: number) {
+  const date = new Date(nowMs);
+  date.setHours(0, 0, 0, 0);
+  date.setDate(date.getDate() + offset);
+  return date.getTime();
+}
+
+export function automationMatchesTime(entry: TaskEntry, time: AutomationTimeFilter, nowMs: number) {
+  if (time === "all") return true;
+  const next = timestamp(entry.task.next_run_at);
+  if (entry.task.status !== "active" || next === null) return false;
+  if (time === "overdue") return next < nowMs && executionRank(entry) !== 0;
+  if (time === "today") return next >= dayStart(nowMs, 0) && next < dayStart(nowMs, 1);
+  const windowMs = time === "hour" ? 3_600_000 : time === "day" ? 86_400_000 : 7 * 86_400_000;
+  return next >= nowMs && next < nowMs + windowMs;
+}
+
+export function summarizeAutomationEntries(entries: TaskEntry[], nowMs: number) {
+  return entries.reduce((summary, entry) => {
+    if (entry.task.status === "active") summary.active += 1;
+    if (automationMatchesTime(entry, "day", nowMs)) summary.due += 1;
+    if (automationIsRunning(entry)) summary.running += 1;
+    if (automationNeedsAttention(entry)) summary.attention += 1;
+    return summary;
+  }, { active: 0, due: 0, running: 0, attention: 0 });
+}
+
+export type AutomationEntryGroup = {
+  key: string;
+  label: string | null;
+  description?: string;
+  entries: TaskEntry[];
+};
+
+const TIME_GROUPS = [
+  ["progress", "In progress"],
+  ["overdue", "Overdue"],
+  ["hour", "Next hour"],
+  ["today", "Later today"],
+  ["tomorrow", "Tomorrow"],
+  ["week", "Next 7 days"],
+  ["later", "Later"],
+  ["unscheduled", "Not scheduled"],
+  ["paused", "Paused"],
+  ["completed", "Completed"],
+] as const;
+
+function timeGroup(entry: TaskEntry, nowMs: number) {
+  if (executionRank(entry) === 0) return "progress";
+  if (entry.task.status === "paused") return "paused";
+  if (entry.task.status === "completed") return "completed";
+  const next = timestamp(entry.task.next_run_at);
+  if (next === null) return "unscheduled";
+  if (next < nowMs) return "overdue";
+  if (next < nowMs + 3_600_000) return "hour";
+  if (next < dayStart(nowMs, 1)) return "today";
+  if (next < dayStart(nowMs, 2)) return "tomorrow";
+  if (next < nowMs + 7 * 86_400_000) return "week";
+  return "later";
+}
+
+export function groupAutomationEntries(entries: TaskEntry[], grouping: AutomationGrouping, nowMs: number) {
+  const groups = new Map<string, AutomationEntryGroup>();
+  for (const entry of entries) {
+    let key = "ungrouped";
+    let label: string | null = null;
+    let description: string | undefined;
+    if (entry.automation?.owner) {
+      key = "extensions";
+      label = "Used by extensions";
+    } else if (grouping === "time") {
+      const bucket = timeGroup(entry, nowMs);
+      key = `time:${bucket}`;
+      label = TIME_GROUPS.find(([id]) => id === bucket)![1];
+    } else if (grouping === "project") {
+      const project = automationProject(entry);
+      key = `project:${project.key}`;
+      label = project.label;
+      description = `${project.hostName} · ${project.path ?? "Project is no longer connected"}`;
+    } else if (grouping === "host") {
+      key = `host:${entry.hostId ?? "local"}`;
+      label = entry.hostName;
+    }
+    const group = groups.get(key);
+    if (group) group.entries.push(entry);
+    else groups.set(key, { key, label, description, entries: [entry] });
+  }
+  const timeOrder = TIME_GROUPS.map(([id]) => `time:${id}`);
+  return [...groups.values()].sort((left, right) => {
+    if (left.key === "extensions") return 1;
+    if (right.key === "extensions") return -1;
+    if (grouping === "time") return timeOrder.indexOf(left.key) - timeOrder.indexOf(right.key);
+    return (left.label ?? "").localeCompare(right.label ?? "", undefined, { numeric: true, sensitivity: "base" }) ||
+      left.key.localeCompare(right.key);
+  });
+}
+
 function compareEntries(left: TaskEntry, right: TaskEntry, sort: AutomationSort) {
   // Extension-owned records retain their separate section in every sort order.
   const ownerOrder = Number(Boolean(left.automation?.owner)) - Number(Boolean(right.automation?.owner));
@@ -118,17 +222,19 @@ export function filterAutomationEntries(
   entries: TaskEntry[],
   filters: AutomationListFilters,
   timeZone = Intl.DateTimeFormat().resolvedOptions().timeZone ?? "UTC",
+  nowMs = Date.now(),
 ) {
   const terms = filters.query.trim().toLocaleLowerCase().split(/\s+/).filter(Boolean);
   return entries.filter((entry) => {
     if (filters.status !== "all" && entry.task.status !== filters.status) return false;
     if (filters.host !== "all" && (entry.hostId ?? "local") !== filters.host) return false;
     if (filters.project !== "all" && automationProject(entry).key !== filters.project) return false;
+    if (!automationMatchesTime(entry, filters.time ?? "all", nowMs)) return false;
     const status = entry.task.last_run?.status;
     if (filters.activity === "attention" && !automationNeedsAttention(entry)) return false;
     if (filters.activity === "failed" && !automationLastRunFailed(entry)) return false;
     if (filters.activity === "waiting" && status !== "awaiting_input") return false;
-    if (filters.activity === "running" && status !== "running" && status !== "queued") return false;
+    if (filters.activity === "running" && !automationIsRunning(entry)) return false;
     if (!terms.length) return true;
     const cadence = formatScheduleCadence({
       trigger: entry.automation?.trigger,
