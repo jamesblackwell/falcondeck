@@ -3,6 +3,8 @@ import { useCallback, useEffect, useState } from "react";
 import { createDaemonApiClient } from "@falcondeck/client-core";
 import type { ComputerUseSettingsUpdate, ComputerUseStatus } from "@falcondeck/client-core";
 import {
+  Button,
+  SettingRow,
   SettingsPage,
   SettingsPageHeader,
   SettingsSection,
@@ -54,6 +56,19 @@ export function ComputerUsePanel({ baseUrl, onToast }: ComputerUsePanelProps) {
     }
   };
 
+  const openAgentBrowser = async () => {
+    if (!baseUrl) return;
+    try {
+      await createDaemonApiClient(baseUrl).openAgentBrowser();
+    } catch (error) {
+      onToast({
+        variant: "danger",
+        title: "Could not open the agent browser",
+        description: error instanceof Error ? error.message : String(error),
+      });
+    }
+  };
+
   const unavailable = status && !status.available;
 
   return (
@@ -92,20 +107,33 @@ export function ComputerUsePanel({ baseUrl, onToast }: ComputerUsePanelProps) {
               onCheckedChange={(telemetry) => void patch({ telemetry })}
             />
           </SettingsSection>
-          <SettingsSection title="Signed-in browser access">
+          <SettingsSection title="Browser">
+            <SettingRow
+              title="Agent browser"
+              description="Agents use a separate Chrome profile that stays signed in, so Chrome never asks to allow remote debugging. Open it to sign in to the sites agents need, then quit that Chrome (⌘Q). Agents cannot launch it while you have it open."
+              control={
+                <Button
+                  variant="secondary"
+                  onClick={() => void openAgentBrowser()}
+                  disabled={!baseUrl || status?.enabled !== true}
+                >
+                  Open agent browser
+                </Button>
+              }
+            />
             <SwitchRow
-              title="Allow agents to use my signed-in browser profile"
-              description="Use existing Chrome or Edge sessions over CDP without an extension. This grants broad access to live pages, cookies, storage, and signed-in accounts on this Mac. Only enable it for trusted agents and tasks."
+              title="Allow agents to use my personal Chrome profile"
+              description="Only for tasks where you ask an agent to work in your own Chrome window. Chrome asks you to allow remote debugging each time an agent connects, and this grants broad access to live pages, cookies, and signed-in accounts."
               checked={status?.existing_profile ?? false}
               disabled={saving || !baseUrl || status?.existing_profile === undefined}
               onCheckedChange={(existing_profile) => void patch({ existing_profile })}
             />
             <p className="text-[length:var(--fd-text-sm)] text-fg-muted">
-              Computer use must also be on. Changing this setting restarts the
-              driver and disconnects active computer-use sessions. Restart
-              FalconDeck afterward to reconnect agent tools. Browser preparation may enable
-              remote debugging. Turning this off stops FalconDeck access but does
-              not switch off Chrome’s remote-debugging setting.
+              Computer use must also be on. Changing the personal-profile setting
+              restarts the driver and disconnects active computer-use sessions.
+              Restart FalconDeck afterward to reconnect agent tools. Turning it
+              off stops FalconDeck access but does not switch off Chrome’s
+              remote-debugging setting.
             </p>
           </SettingsSection>
           <ComputerUseSetup

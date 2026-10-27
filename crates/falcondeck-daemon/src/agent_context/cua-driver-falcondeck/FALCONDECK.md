@@ -3,58 +3,77 @@
 FalconDeck-authored host notes. The sibling skill files are vendored verbatim
 from the cua-driver release named in `VERSION`; this file is not.
 
-## Browser windows, cookies, and connection reuse
+## Use the agent browser by default
 
-Keep browser work in the background. Reuse the same window, MCP connection,
-and session. Prefer typed browser tools with explicit `input_route: "dom_event"`
-clicks where supported, and verify the resulting page state. If an action
-requires foreground input, report it before switching focus; do not
-automatically retry with foreground delivery.
+FalconDeck gives agents their own persistent Chrome profile, the **agent
+browser**. The user signs in to the sites agents need once, through
+Settings → Computer use → **Open agent browser**, and those logins persist.
+cua-driver launches it with its own debugging port, so Chrome never shows the
+"Allow remote debugging?" prompt. Use it for every browser task unless the user
+explicitly asks you to work in their own Chrome window or tab.
 
-For routine browser work, prefer one dedicated **normal window in the user's
-existing browser profile**, with their signed-in browser consent enabled in
-FalconDeck. A normal window shares that profile's cookies, storage, extensions,
-and site logins. An incognito window or driver-owned isolated profile does not
-share those logins. Honor the user's requested browser, profile, window, or tab;
-when they ask to act on an existing page, use that page.
+1. Find the running Google Chrome pid with `list_apps` (bundle
+   `com.google.Chrome`). If Chrome is not running, `launch_app` it first. The
+   pid only pins which Chrome executable is used (see below); the personal
+   profile is not touched.
+2. Launch the agent browser:
 
-1. Discover the requested browser and an observed window in the intended
-   profile with `list_apps`, `list_windows`, and `get_window_state`. Never
-   choose a different profile just because its window appears first.
-2. Unless the task names an existing target, create one normal window using
-   the native `invoke_menu` tool on that exact source `(pid, window_id)`, with
-   the observed File → New Window menu path. Compare `list_windows` before and
-   after, inspect the new window, and use its returned id. This is a native
-   menu action and may briefly activate Chrome; focus restoration is
-   best-effort. Do not use incognito, `creates_new_application_instance`,
-   shell launch flags, or global keyboard shortcuts to create this window.
-3. Bind the new window with `get_browser_state`. If binding requires setup or
-   consent, use `browser_prepare` with that exact pid/window and
-   `strategy: {kind: "existing_profile"}`, then bind again. Preparation belongs
-   to cua-driver's approved setup flow; do not toggle browser settings or
-   click consent UI yourself.
-4. Keep that window, the same MCP connection, and one task-specific `session`
-   label for preparation, binding, page actions, and verification. Repeat the
-   label on every tool that accepts it. Re-snapshot for fresh refs rather than
-   starting another session, preparing again, or opening another window for
-   each action. Do not end the session between actions; end it when the browser
-   task is finished and check cleanup results.
+   ```text
+   browser_prepare
+     '{"session":"<task-label>","allow_launch":true,"pid":<chrome pid>,
+       "profile":{"mode":"isolated_named","name":"falcondeck-agent"}}'
+   ```
 
-Chrome's debugging connection applies to the profile, not just this window.
-Chrome may show its control banner in other windows of the same profile, and
-a genuinely new browser-level connection can require another Chrome consent
-prompt. Window separation protects the user's tabs; retaining the connection
-reduces repeated setup and prompts. It cannot guarantee a banner-free browser.
-The five-minute idle session expiry, transport close, browser restart, or
-revocation can still require preparation and fresh binding. Do not keep a
-session alive artificially or suppress Chrome's indicators.
+3. `list_windows` with the returned `prepared_pid`, then bind its window with
+   `get_browser_state` and use the typed browser tools. Reuse that window,
+   the same MCP connection, and one session label for the whole task.
+4. End the session when the task is done. Ending it closes the agent browser
+   process. Chrome writes new cookies to disk about every 30 seconds, so
+   after a login or session refresh, keep working (or wait) briefly before
+   ending.
 
-Keep concurrent tasks on separate windows and separate MCP lifecycles. This
-does not isolate profile-wide state or global focus; avoid concurrent native
-input. Never copy personal cookies/profile files into an isolated instance.
-Use an isolated profile only when the user requests it or signed-out operation
-satisfies the task. If signed-in consent is denied, ask the user to enable it
-instead of silently changing profiles or bypassing the grant.
+Refusals and what they mean:
+
+- `browser_route_unavailable` with "exited before exposing DevTools": the
+  user has the agent browser open for signing in. Ask them to quit that Chrome
+  (⌘Q in its window), then retry.
+- `browser_endpoint_owner_mismatch`: another task already has the agent
+  browser running. Find its pid (`pgrep -f BrowserProfiles/falcondeck-agent`),
+  `list_windows` for it, and bind with `get_browser_state`. That browser is
+  shared: work in a tab you opened or an `about:blank` tab, never navigate
+  another task's tab, and do not end the session that launched it.
+- A site shows a login page: stop and ask the user to sign in through
+  Settings → Computer use → Open agent browser, then quit it. Do not ask for
+  or type their password, copy cookies, or switch to the personal profile.
+
+Every launch may show a small "Restore pages?" bubble because the previous run
+was closed abruptly. Ignore it; it does not block page tools.
+
+## The user's personal Chrome profile (opt-in only)
+
+Attach to the user's own profile (`strategy: {kind: "existing_profile"}`) only
+when they explicitly ask you to act in their own browser window or tab and
+Settings → Computer use → "Allow agents to use my personal Chrome profile" is
+on. Each new connection there makes Chrome ask the user to allow remote
+debugging, which is the prompt the agent browser exists to avoid. If the
+setting is off, tell the user rather than working around it.
+
+When you do use it, discover an observed window in the intended profile with
+`list_apps`, `list_windows`, and `get_window_state`, and use the page the user
+named. Otherwise create one normal window with the native `invoke_menu` tool on
+that exact source `(pid, window_id)` (File → New Window), compare
+`list_windows` before and after, and bind the new window with
+`get_browser_state`. Use `browser_prepare` with that exact pid/window and
+`strategy: {kind: "existing_profile"}` only if binding requires setup or
+consent; do not toggle browser settings or click consent UI yourself. Keep the
+window, MCP connection, and session label for the whole task so Chrome does
+not prompt again.
+
+Keep browser work in the background. Prefer typed browser tools with explicit
+`input_route: "dom_event"` clicks where supported, and verify the resulting
+page state. If an action requires foreground input, report it before switching
+focus; do not automatically retry with foreground delivery. Never copy personal
+cookies or profile files into another profile.
 
 ## An isolated browser launch may not use the browser the user expects
 

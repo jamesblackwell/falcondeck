@@ -169,6 +169,7 @@ pub fn append_instructions(
     );
     text.push_str("- Only inspect sibling threads when the task needs context or coordination from other threads. Do not list threads as a routine startup step or repeatedly check them during unrelated work. When needed, use `falcondeck_list_threads` and `falcondeck_view_thread` on falcondeck-extensions to inspect sibling work as bounded markdown; `falcondeck_thread_summary` and `falcondeck_thread_changes` give cheap status/outcome digests and flag threads waiting on approvals. Use `falcondeck_message_thread` to message an existing thread in this workspace. Prefer direct steering (the default) so the recipient can use the message during its current work; choose `delivery: queue` only when the message should wait until its current turn finishes. Use `falcondeck_create_thread` for independent work in this workspace; context defaults to none, with optional briefing or transcript_tail. Creation does not wait; at most three concurrent children per parent. Approvals remain in FalconDeck UI.\n");
     text.push_str("- Keep proactive notifications rare: send them only for critical issues requiring attention or when the user explicitly requests notifications. Leave child-thread `notify_parent` false for routine progress and ordinary completions; read thread summaries at natural checkpoints. Long-running work alone does not justify notifications.\n");
+    text.push_str("- When referring to another FalconDeck task, make its name clickable: `[Task name](falcondeck://thread/THREAD_ID)`. Use the exact thread_id returned by FalconDeck tools, never a title or guessed ID; the link survives renames.\n");
     if suggest_follow_ups {
         text.push_str(
             "- Near the end of a turn, if useful next steps remain, call `falcondeck_suggest_follow_ups` once with 1–5 short actions (imperative labels, at most 30 characters). It does not block the turn. Skip it only when nothing useful is left to offer. The user sees them in the UI, so never mention, list, or restate them in your reply; end the turn with a normal reply.\n",
@@ -192,7 +193,7 @@ pub fn append_instructions(
     }
     if let Some(path) = computer_use_skill {
         text.push_str(&format!(
-            "\n- The `cua-driver` MCP server can operate apps on this Mac in the background. Read {} and the sibling WORKFLOW.md and MACOS.md first. Use its MCP tools, not the cua-driver CLI. For browser tasks, read BROWSER.md and FALCONDECK.md. Unless the user specifies an existing target, prefer one dedicated normal browser window in their existing profile so cookies and logins are shared; reuse that window, MCP connection, and session label throughout the task. Bind with get_browser_state; use browser_prepare with an observed pid/window_id and existing_profile strategy only when setup or consent is required. Signed-in access requires the user's separate Settings → Computer use consent. If denied, ask the user to enable it; never change settings, launch another CDP endpoint, copy cookies, or install an extension to bypass the grant. Use an isolated profile only when signed-out operation suits the task or the user requests it.",
+            "\n- The `cua-driver` MCP server can operate apps on this Mac in the background. Read {} and the sibling WORKFLOW.md and MACOS.md first. Use its MCP tools, not the cua-driver CLI. For browser tasks, read BROWSER.md and FALCONDECK.md. Use the shared agent browser by default: browser_prepare with allow_launch true, the running Google Chrome pid, and profile {{mode: \"isolated_named\", name: \"falcondeck-agent\"}}. It keeps the user's agent logins and never triggers Chrome's remote-debugging prompt. Do not attach to the user's personal Chrome profile (existing_profile) unless they explicitly ask you to work in their own browser window or tab. If a site needs a login the agent browser lacks, ask the user to sign in via Settings → Computer use → Open agent browser and quit that Chrome when done; never type passwords yourself, copy cookies, or fall back to the personal profile. Reuse one window, MCP connection, and session label for the task, and end the session when finished.",
             path.display()
         ));
     }
@@ -212,6 +213,8 @@ mod tests {
         assert!(!without.contains("falcondeck_suggest_follow_ups"));
         assert!(!without.contains("read on demand"));
         assert!(without.contains("falcondeck_search"));
+        assert!(without.contains("[Task name](falcondeck://thread/THREAD_ID)"));
+        assert!(without.contains("never a title or guessed ID"));
 
         let with = append_instructions(
             Some(Path::new("/tmp/skills/falcondeck-control/SKILL.md")),
@@ -225,6 +228,8 @@ mod tests {
         assert!(with.contains("/tmp/skills/falcondeck-control/SKILL.md"));
         assert!(with.contains("/tmp/skills/cua-driver/SKILL.md"));
         assert!(with.contains("`cua-driver` MCP server"));
+        assert!(with.contains("name: \"falcondeck-agent\""));
+        assert!(with.contains("Open agent browser"));
         assert!(!with.contains("Only mention or use FalconDeck when the user asks"));
     }
 

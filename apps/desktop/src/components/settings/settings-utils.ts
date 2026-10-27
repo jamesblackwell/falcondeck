@@ -189,9 +189,10 @@ export const SETTINGS_GROUPS: SettingsNavGroup[] = [
         settings: [
           "Allow agents to use this Mac",
           "Show the agent cursor",
-          "Allow agents to use my signed-in browser profile",
+          "Agent browser",
+          "Allow agents to use my personal Chrome profile",
         ],
-        keywords: ["cua", "browser", "chrome", "accessibility", "screen recording"],
+        keywords: ["cua", "browser", "chrome", "sign in", "login", "accessibility", "screen recording"],
       },
     ],
   },

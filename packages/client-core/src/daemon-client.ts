@@ -393,6 +393,14 @@ export function createDaemonApiClient(baseUrl: string) {
         }),
       );
     },
+    /** Opens the agent Chrome profile in a normal window so the user can sign in. */
+    async openAgentBrowser() {
+      await parseJson<void>(
+        await fetch(`${baseUrl}/api/computer-use/agent-browser`, {
+          method: "POST",
+        }),
+      );
+    },
     async testComputerUse() {
       return parseJson<ComputerUseTestResult>(
         await fetch(`${baseUrl}/api/computer-use/test`, {

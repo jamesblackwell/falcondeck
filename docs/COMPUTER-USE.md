@@ -338,6 +338,40 @@ and reaped when their timeout expires.
   restart; if `screen_recording` is true but the test screenshot is black,
   offer "Restart FalconDeck" (`restart_app` exists).
 
+### Agent browser (default for browser tasks)
+
+Attaching to the personal profile makes Chrome 144+ show "Allow remote
+debugging?" on every new browser-level connection. Agents open one per MCP
+connection and after cua's idle expiry, so users got prompted constantly.
+Chrome only shows that prompt for the default profile, so agents now default
+to a shared persistent profile that cua-driver launches itself:
+`browser_prepare` with `profile: {mode: "isolated_named", name:
+"falcondeck-agent"}` and the running Chrome pid. The pid is needed because a
+drag-installed Chrome fails cua's attestation, and cua would otherwise pick
+Edge.
+
+- Profile: `~/Library/Application Support/CuaDriver/BrowserProfiles/falcondeck-agent`.
+  cua refuses a directory without `.cua-driver-owned-profile.json`, so
+  `POST /api/computer-use/agent-browser` writes that marker when it creates
+  the directory. It never rewrites an existing one.
+- Signing in: Settings → Computer use → **Open agent browser** runs
+  `open -n -b com.google.Chrome --args --user-data-dir=<profile>` with no
+  debugging port. cua only attaches to instances it spawned (a user-launched
+  instance with a port is refused as `consumer_profile_endpoint_requires_grant`),
+  and while that window is open a cua launch exits through Chrome's singleton
+  (`exited before exposing DevTools`). The user quits it with ⌘Q before agents
+  use the profile.
+- Lifecycle: ending the cua session that launched the browser kills it. Chrome
+  writes cookies to disk about every 30 s, so a cookie set just before a kill
+  can be lost. Logins made through the sign-in window survive because
+  quitting it exits Chrome cleanly. A second session can bind the running
+  instance, but cannot `browser_prepare` it (`browser_endpoint_owner_mismatch`).
+- Verified on 2026-10-27 with Chrome 156 and the embedded cua driver: no
+  consent prompt, and a persistent cookie survived a kill and relaunch.
+
+The personal-profile grant below stays for explicit "use my browser" tasks.
+Turning it off is the reliable way to keep agents off the main profile.
+
 ### Existing-profile CDP access (implemented)
 
 Settings → Computer use → **Allow agents to use my signed-in browser profile**

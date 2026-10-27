@@ -131,6 +131,10 @@ pub fn router(state: AppState) -> Router {
         )
         .route("/api/computer-use/restart", post(restart_computer_use))
         .route("/api/computer-use/test", post(test_computer_use))
+        .route(
+            "/api/computer-use/agent-browser",
+            post(open_agent_browser),
+        )
         .route("/api/backup", get(export_backup))
         .route("/api/backup/inspect", post(inspect_backup))
         .route("/api/backup/import", post(import_backup))
@@ -469,6 +473,11 @@ async fn test_computer_use(
     State(state): State<AppState>,
 ) -> Result<Json<falcondeck_core::ComputerUseTestResult>, DaemonError> {
     Ok(Json(state.test_computer_use().await?))
+}
+
+async fn open_agent_browser(State(state): State<AppState>) -> Result<StatusCode, DaemonError> {
+    state.open_agent_browser().await?;
+    Ok(StatusCode::NO_CONTENT)
 }
 
 async fn export_backup(

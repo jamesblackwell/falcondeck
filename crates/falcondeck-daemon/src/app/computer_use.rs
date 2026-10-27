@@ -308,6 +308,64 @@ pub fn serve_args(
     args
 }
 
+/// Name agents pass to cua-driver's `isolated_named` browser profile. The
+/// user's sign-in window opens the same directory, so logins made there are
+/// what agents see, without Chrome's remote-debugging consent prompt.
+pub const AGENT_BROWSER_PROFILE: &str = "falcondeck-agent";
+
+/// cua-driver keeps named profiles here and refuses one that lacks its
+/// ownership marker (verified against cua-driver 0.33.4).
+pub fn agent_browser_profile_dir(home: &Path) -> PathBuf {
+    home.join("Library/Application Support/CuaDriver/BrowserProfiles")
+        .join(AGENT_BROWSER_PROFILE)
+}
+
+fn agent_browser_profile_marker() -> String {
+    serde_json::json!({
+        "schema": "cua-driver-browser-profile-v1",
+        "mode": "isolated_named",
+        "name": AGENT_BROWSER_PROFILE,
+    })
+    .to_string()
+}
+
+/// Creates the profile with cua-driver's marker when neither side has made
+/// it yet. An existing directory is left alone.
+fn ensure_agent_browser_profile(dir: &Path) -> io::Result<()> {
+    if dir.exists() {
+        return Ok(());
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::DirBuilderExt;
+        std::fs::DirBuilder::new()
+            .recursive(true)
+            .mode(0o700)
+            .create(dir)?;
+    }
+    #[cfg(not(unix))]
+    std::fs::create_dir_all(dir)?;
+    std::fs::write(
+        dir.join(".cua-driver-owned-profile.json"),
+        agent_browser_profile_marker(),
+    )
+}
+
+/// A plain Chrome window on the agent profile. No debugging port: cua-driver
+/// only attaches to instances it launched, so the user quits this window when
+/// signing in is done.
+fn agent_browser_open_args(dir: &Path) -> Vec<String> {
+    vec![
+        "-n".to_string(),
+        "-b".to_string(),
+        "com.google.Chrome".to_string(),
+        "--args".to_string(),
+        format!("--user-data-dir={}", dir.display()),
+        "--no-first-run".to_string(),
+        "--no-default-browser-check".to_string(),
+    ]
+}
+
 pub fn serve_env(telemetry: bool, host_bundle_id: &str) -> BTreeMap<String, String> {
     let mut env = BTreeMap::new();
     for key in ENV_ALLOWLIST {
@@ -1097,6 +1155,32 @@ impl AppState {
             .map_err(DaemonError::Process)
     }
 
+    pub async fn open_agent_browser(&self) -> Result<(), DaemonError> {
+        if !self.inner.daemon.capabilities.computer_use {
+            return Err(DaemonError::BadRequest(
+                "The agent browser is only available in the FalconDeck Mac app.".to_string(),
+            ));
+        }
+        let home = std::env::var_os("HOME")
+            .map(PathBuf::from)
+            .ok_or_else(|| DaemonError::Process("HOME is not set".to_string()))?;
+        let dir = agent_browser_profile_dir(&home);
+        ensure_agent_browser_profile(&dir)?;
+        let output = Command::new("/usr/bin/open")
+            .args(agent_browser_open_args(&dir))
+            .stdin(Stdio::null())
+            .output()
+            .await?;
+        if output.status.success() {
+            Ok(())
+        } else {
+            Err(DaemonError::Process(format!(
+                "Could not open Google Chrome: {}",
+                String::from_utf8_lossy(&output.stderr).trim()
+            )))
+        }
+    }
+
     pub(crate) async fn builtin_computer_use_spec(
         &self,
     ) -> Option<crate::connectors::BuiltinComputerUseSpec> {
@@ -1234,6 +1318,37 @@ else:
             );
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
+    }
+
+    #[test]
+    fn agent_browser_profile_is_marked_for_cua_and_never_rewritten() {
+        let home = std::env::temp_dir().join(format!("fd-agent-browser-{}", std::process::id()));
+        let dir = agent_browser_profile_dir(&home);
+        assert!(dir.ends_with("CuaDriver/BrowserProfiles/falcondeck-agent"));
+        ensure_agent_browser_profile(&dir).expect("create profile");
+        let marker: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(dir.join(".cua-driver-owned-profile.json")).expect("marker"),
+        )
+        .expect("marker json");
+        assert_eq!(marker["mode"], "isolated_named");
+        assert_eq!(marker["name"], AGENT_BROWSER_PROFILE);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(&dir).expect("dir").permissions().mode();
+            assert_eq!(mode & 0o777, 0o700);
+        }
+        // A profile cua-driver already owns keeps its own state.
+        std::fs::write(dir.join(".cua-driver-owned-profile.json"), "cua").expect("rewrite");
+        ensure_agent_browser_profile(&dir).expect("reuse profile");
+        assert_eq!(
+            std::fs::read_to_string(dir.join(".cua-driver-owned-profile.json")).expect("marker"),
+            "cua"
+        );
+        let args = agent_browser_open_args(&dir);
+        assert!(args.contains(&format!("--user-data-dir={}", dir.display())));
+        assert!(!args.iter().any(|arg| arg.contains("remote-debugging")));
+        std::fs::remove_dir_all(&home).ok();
     }
 
     #[test]
