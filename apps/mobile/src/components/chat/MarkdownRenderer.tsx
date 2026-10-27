@@ -19,7 +19,6 @@ import {
   agentDirectiveLabel,
   isMermaidLanguage,
   parseThreadLink,
-  resolveThreadLinkTarget,
   safeExternalUrl,
   splitAgentMessageSegments,
   splitSlashCommandSegments,
@@ -28,7 +27,7 @@ import {
 } from "@falcondeck/client-core";
 
 import { Text } from "@/components/ui";
-import { useSessionStore } from "@/store/session-store";
+import { openThreadLink } from "@/lib/thread-link";
 import { createStreamingMarkdownParser } from '@/lib/streaming-markdown';
 import { CodeBlock } from "./CodeBlock";
 import { MermaidBlock } from "./MermaidBlock";
@@ -244,12 +243,9 @@ function MarkdownLink(props: {
       style={styles.link}
       accessibilityRole="link"
       accessibilityHint="Opens this task in FalconDeck"
-      onPress={() => {
-        const store = useSessionStore.getState();
-        const target = resolveThreadLinkTarget(threadId, store.snapshot?.threads ?? []);
-        if (target) store.selectThread(target.workspace_id, target.id);
-        else Alert.alert("Task unavailable", "This task is no longer available on your computer.");
-      }}
+      onPress={() => openThreadLink(threadId).catch((error: unknown) => {
+        Alert.alert("Could not open task", error instanceof Error ? error.message : "Please try again.");
+      })}
     >
       {props.children}
     </Text>

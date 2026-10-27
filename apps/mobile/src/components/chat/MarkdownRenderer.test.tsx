@@ -14,6 +14,10 @@ import {
 } from "./MarkdownRenderer";
 import { setMermaidAssetLoader } from "./mermaidEngine";
 import { useSessionStore } from "@/store/session-store";
+import { useRelayStore } from "@/store/relay-store";
+import { snapshot, thread, workspace } from "@/test/factories";
+
+const originalRpc = useRelayStore.getState()._callRpc;
 
 function instanceText(node: {
   children?: Array<string | { children?: unknown[] }>;
@@ -51,6 +55,7 @@ afterEach(() => {
   setMermaidAssetLoader(null);
   vi.restoreAllMocks();
   useSessionStore.getState().reset();
+  useRelayStore.setState({ _callRpc: originalRpc });
 });
 
 describe("normalizeMarkdownForStreaming", () => {
@@ -729,17 +734,33 @@ describe("MarkdownRenderer", () => {
     ).toHaveLength(0);
   });
 
-  it("opens task links across projects by ID after a rename", () => {
+  it("opens task links across projects by ID after a rename", async () => {
     const openUrl = vi.spyOn(Linking, "openURL").mockResolvedValue(undefined);
     useSessionStore.setState({
-      snapshot: { threads: [{ id: "task-123", workspace_id: "other-project", title: "Renamed task" }] } as never,
+      snapshot: snapshot({
+        workspaces: [workspace({ id: "other-project" })],
+        threads: [thread({ id: "task-123", workspace_id: "other-project", title: "Renamed task" })],
+      }),
     });
     const rendered = renderComponent(<MarkdownRenderer text="[Original name](falcondeck://thread/task-123)" />);
     const link = rendered.root.find((node) => node.props.accessibilityHint === "Opens this task in FalconDeck" && typeof node.props.onPress === "function");
-    act(() => link.props.onPress());
+    await act(async () => { await link.props.onPress(); });
     expect(useSessionStore.getState().selectedThreadId).toBe("task-123");
     expect(useSessionStore.getState().selectedWorkspaceId).toBe("other-project");
     expect(openUrl).not.toHaveBeenCalled();
+  });
+
+  it("resolves a valid task outside the cached task page", async () => {
+    useSessionStore.setState({ snapshot: snapshot() });
+    const rpc = vi.fn().mockResolvedValue(snapshot({
+      threads: [thread({ id: "older-task" })],
+    }));
+    useRelayStore.setState({ _callRpc: rpc });
+    const rendered = renderComponent(<MarkdownRenderer text="[Earlier work](falcondeck://thread/older-task)" />);
+    const link = rendered.root.find((node) => node.props.accessibilityHint === "Opens this task in FalconDeck" && typeof node.props.onPress === "function");
+    await act(async () => { await link.props.onPress(); });
+    expect(rpc).toHaveBeenCalled();
+    expect(useSessionStore.getState().selectedThreadId).toBe("older-task");
   });
 
   it("keeps credential-bearing HTTP links inert", () => {

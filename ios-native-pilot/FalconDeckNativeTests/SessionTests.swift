@@ -31,6 +31,56 @@ private actor ControlledRelay: RelayServing {
 }
 
 @MainActor final class SessionTests: XCTestCase {
+    func testTaskLinkLookupOpensUncachedTask() async {
+        let relay = ControlledRelay(), model = AppModel.testing(relay: relay)
+        model.connected = true
+        let opening = Task { await model.openTask("older-task") }
+        await relay.waitForRequest()
+        await relay.complete(.object(["threads": .array([.object([
+            "id": .string("older-task"), "workspace_id": .string("project"), "title": .string("Renamed task")
+        ])])]))
+        await opening.value
+        XCTAssertEqual(model.selection, .task("older-task"))
+        XCTAssertEqual(model.task("older-task")?.title, "Renamed task")
+        XCTAssertNil(model.error)
+    }
+
+    func testTaskLinkLookupRespectsLaterNavigation() async {
+        let relay = ControlledRelay(), model = AppModel.testing(relay: relay)
+        model.connected = true
+        model.selection = .task("source")
+        let opening = Task { await model.openTask("older-task") }
+        await relay.waitForRequest()
+        model.selection = .settings
+        await relay.complete(.object(["threads": .array([.object(["id": .string("older-task"), "workspace_id": .string("project")])])]))
+        await opening.value
+        XCTAssertEqual(model.selection, .settings)
+        XCTAssertNil(model.task("older-task"))
+    }
+
+    func testNewerTaskLinkSupersedesPendingLookup() async {
+        let relay = ControlledRelay(), model = AppModel.testing(relay: relay)
+        model.connected = true; model.tasks = [task]; model.selection = .task(task.id)
+        let opening = Task { await model.openTask("older-task") }
+        await relay.waitForRequest()
+        await model.openTask(task.id)
+        await relay.complete(.object(["threads": .array([task.raw.setting("id", .string("older-task"))])]))
+        await opening.value
+        XCTAssertEqual(model.selection, .task(task.id))
+        XCTAssertNil(model.task("older-task"))
+    }
+
+    func testPendingTaskLinkFailureAfterNavigationIsIgnored() async {
+        let relay = ControlledRelay(), model = AppModel.testing(relay: relay)
+        model.connected = true
+        let opening = Task { await model.openTask("older-task") }
+        await relay.waitForRequest()
+        model.selection = .settings
+        await relay.fail(PilotError("Disconnected"))
+        await opening.value
+        XCTAssertNil(model.error)
+    }
+
     private let task = AgentTask(.object(["id": .string("live-task"), "workspace_id": .string("live-project"), "title": .string("Original title"), "status": .string("running")]))
 
     private func summary(_ task: AgentTask, seq: Int = 1) -> ClientEvent {
