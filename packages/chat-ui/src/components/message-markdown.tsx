@@ -18,6 +18,7 @@ import {
   isMermaidLanguage,
   looksLikeWorkspaceFileReference,
   parseLocalFilePath,
+  parseThreadLink,
   parseWorkspaceFileReference,
   safeExternalUrl,
   splitAgentMessageSegments,
@@ -37,6 +38,7 @@ import {
 } from "../lib/file-diff-context";
 import { LocalPathLink } from "../lib/local-path-context";
 import { WebLinkAnchor } from "../lib/web-link-context";
+import { ThreadLinkAnchor } from "../lib/thread-link-context";
 import { CodeBlock } from "./code-block";
 import { MermaidBlock } from "./mermaid-block";
 const markdownProcessor = unified().use(remarkParse).use(remarkGfm);
@@ -206,6 +208,14 @@ function MarkdownAnchor({
   // [overflow-wrap:anywhere] lets bare URLs break mid-token instead of
   // stretching the message bubble past the column edge.
   const fileContext = useFileDiffContext();
+  const threadId = parseThreadLink(href);
+  if (threadId && href) {
+    return (
+      <ThreadLinkAnchor threadId={threadId} href={href} className={linkClassName}>
+        {children}
+      </ThreadLinkAnchor>
+    );
+  }
   const safeHref = safeMarkdownLinkUrl(href);
   if (safeHref) {
     return (
@@ -466,7 +476,9 @@ function safeMarkdownLinkUrl(url: string | undefined) {
 }
 
 function markdownUrlTransform(url: string) {
-  return parseLocalFilePath(url) ? url : defaultUrlTransform(url);
+  return parseThreadLink(url) || parseLocalFilePath(url)
+    ? url
+    : defaultUrlTransform(url);
 }
 
 function markdownCodeComponent(highlight: boolean) {

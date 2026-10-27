@@ -7,7 +7,7 @@ import {
   type ComponentProps,
   type ReactNode,
 } from "react";
-import { ScrollView, View } from "react-native";
+import { Alert, ScrollView, View } from "react-native";
 import { Check, GitCommitHorizontal, Split, Terminal, Upload } from "lucide-react-native";
 import { StyleSheet, useUnistyles } from "react-native-unistyles";
 import remarkGfm from "remark-gfm";
@@ -18,6 +18,8 @@ import {
   useStreamingText,
   agentDirectiveLabel,
   isMermaidLanguage,
+  parseThreadLink,
+  resolveThreadLinkTarget,
   safeExternalUrl,
   splitAgentMessageSegments,
   splitSlashCommandSegments,
@@ -26,6 +28,7 @@ import {
 } from "@falcondeck/client-core";
 
 import { Text } from "@/components/ui";
+import { useSessionStore } from "@/store/session-store";
 import { createStreamingMarkdownParser } from '@/lib/streaming-markdown';
 import { CodeBlock } from "./CodeBlock";
 import { MermaidBlock } from "./MermaidBlock";
@@ -216,6 +219,7 @@ function resolveMarkdownDefinition(
 
 function safeMarkdownUrl(url: string | undefined) {
   const normalized = url?.trim() ?? "";
+  if (parseThreadLink(normalized)) return normalized;
   if (/^https?:/i.test(normalized)) return safeExternalUrl(normalized);
   if (/^(?:mailto|tel):/i.test(normalized)) {
     const unsafe = Array.from(normalized).some((character) => {
@@ -225,6 +229,31 @@ function safeMarkdownUrl(url: string | undefined) {
     return unsafe ? null : normalized;
   }
   return null;
+}
+
+function MarkdownLink(props: {
+  url: string;
+  accessibilityLabel: string;
+  children: ReactNode;
+}) {
+  const threadId = parseThreadLink(props.url);
+  if (!threadId) return <MarkdownExternalLink {...props} />;
+  return (
+    <Text
+      color="accent"
+      style={styles.link}
+      accessibilityRole="link"
+      accessibilityHint="Opens this task in FalconDeck"
+      onPress={() => {
+        const store = useSessionStore.getState();
+        const target = resolveThreadLinkTarget(threadId, store.snapshot?.threads ?? []);
+        if (target) store.selectThread(target.workspace_id, target.id);
+        else Alert.alert("Task unavailable", "This task is no longer available on your computer.");
+      }}
+    >
+      {props.children}
+    </Text>
+  );
 }
 
 function MarkdownExternalLink({
@@ -485,13 +514,13 @@ function renderMarkdownInlineNode(
       const url = safeExternalUrl(node.url);
 
       return url ? (
-        <MarkdownExternalLink
+        <MarkdownLink
           key={key}
           url={url}
           accessibilityLabel={`Open linked image: ${node.alt || url}`}
         >
           {node.alt ? `[Image: ${node.alt}]` : (node.url ?? "")}
-        </MarkdownExternalLink>
+        </MarkdownLink>
       ) : (
         <Text key={key} color="secondary" style={styles.imageFallback}>
           {node.alt ? `[Image: ${node.alt}]` : (node.url ?? "")}
@@ -506,13 +535,13 @@ function renderMarkdownInlineNode(
       const url = safeExternalUrl(definition?.url);
 
       return url ? (
-        <MarkdownExternalLink
+        <MarkdownLink
           key={key}
           url={url}
           accessibilityLabel={`Open linked image: ${node.alt || url}`}
         >
           {node.alt ? `[Image: ${node.alt}]` : (definition?.url ?? "")}
-        </MarkdownExternalLink>
+        </MarkdownLink>
       ) : (
         <Text key={key} color="secondary" style={styles.imageFallback}>
           {node.alt ? `[Image: ${node.alt}]` : (definition?.url ?? "")}
@@ -539,13 +568,13 @@ function renderMarkdownInlineNode(
       );
 
       return url ? (
-        <MarkdownExternalLink
+        <MarkdownLink
           key={key}
           url={url}
           accessibilityLabel={`Open link: ${node.url ?? url}`}
         >
           {children.length > 0 ? children : (node.url ?? "")}
-        </MarkdownExternalLink>
+        </MarkdownLink>
       ) : (
         <Text key={key} color="primary">
           {children.length > 0 ? children : (node.url ?? "")}
@@ -565,7 +594,7 @@ function renderMarkdownInlineNode(
       );
 
       return url ? (
-        <MarkdownExternalLink
+        <MarkdownLink
           key={key}
           url={url}
           accessibilityLabel={`Open link: ${definition?.url ?? node.identifier ?? ""}`}
@@ -573,7 +602,7 @@ function renderMarkdownInlineNode(
           {children.length > 0
             ? children
             : (node.label ?? node.identifier ?? definition?.url ?? "")}
-        </MarkdownExternalLink>
+        </MarkdownLink>
       ) : (
         <Text key={key} color="primary">
           {children.length > 0

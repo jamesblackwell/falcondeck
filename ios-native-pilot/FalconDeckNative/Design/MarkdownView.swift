@@ -2,11 +2,19 @@
 import SwiftUI
 
 struct NativeMarkdown: View {
+    @Environment(AppModel.self) private var model: AppModel?
     let text: String
     var streaming = false
     @State private var display = StreamingText()
     var body: some View {
         ParsedMarkdown(text: display.displayed(text, streaming: streaming)).equatable()
+            .environment(\.openURL, OpenURLAction { url in
+                if let id = TranscriptThreadLink.parse(url.absoluteString), let model {
+                    Task { await model.openTask(id) }
+                    return .handled
+                }
+                return ["https", "http", "mailto"].contains(url.scheme?.lowercased() ?? "") ? .systemAction : .discarded
+            })
             .onChange(of: text, initial: true) { _, text in display.update(text, streaming: streaming) }
             .onChange(of: streaming) { _, streaming in display.update(text, streaming: streaming) }
             .onDisappear { display.reset() }
@@ -19,9 +27,6 @@ private struct ParsedMarkdown: View, Equatable {
     var body: some View {
         Markdown(text).markdownTheme(.falcon).markdownImageProvider(ExplicitImageProvider()).textSelection(.enabled)
             .fixedSize(horizontal: false, vertical: true)
-            .environment(\.openURL, OpenURLAction { url in
-                ["https", "http", "mailto"].contains(url.scheme?.lowercased() ?? "") ? .systemAction : .discarded
-            })
     }
 }
 

@@ -1,4 +1,6 @@
 import type { ProjectFolderMutation } from '@falcondeck/client-core';
+import { resolveThreadLinkTarget } from "@falcondeck/client-core";
+import { ThreadLinkProvider } from "@falcondeck/chat-ui";
 import { DICTIONARY_REQUEST_EVENT, DICTIONARY_REQUEST_KEY } from "./components/DictationDictionary";
 import { ExternalLinkHandler } from "./external-links";
 import {
@@ -6351,6 +6353,19 @@ function AppInner() {
             },
             activeMainViewId,
           ) ?? (
+            <ThreadLinkProvider
+              onOpenThread={(threadId) => {
+                const host = remoteHosts.hostForWorkspace(selectedWorkspaceId);
+                const source = host ? host.snapshot : snapshot;
+                const target = resolveThreadLinkTarget(threadId, source?.threads ?? []);
+                if (target) handleSelectThread(target.workspace_id, target.id);
+                else toast({
+                  title: "Task unavailable",
+                  description: "This task is no longer available on this computer.",
+                  variant: "danger",
+                });
+              }}
+            >
             <ExtensionAgentToolUiProvider
               apps={extensionApps}
               extensions={
@@ -6644,6 +6659,7 @@ function AppInner() {
               }
               />
             </ExtensionAgentToolUiProvider>
+            </ThreadLinkProvider>
           )
         }
         rail={

@@ -13,6 +13,7 @@ import {
   splitMessageSegments,
 } from "./MarkdownRenderer";
 import { setMermaidAssetLoader } from "./mermaidEngine";
+import { useSessionStore } from "@/store/session-store";
 
 function instanceText(node: {
   children?: Array<string | { children?: unknown[] }>;
@@ -49,6 +50,7 @@ afterEach(() => {
   cleanup();
   setMermaidAssetLoader(null);
   vi.restoreAllMocks();
+  useSessionStore.getState().reset();
 });
 
 describe("normalizeMarkdownForStreaming", () => {
@@ -725,6 +727,19 @@ describe("MarkdownRenderer", () => {
     expect(
       unsafe.root.findAll((node) => typeof node.props?.onPress === "function"),
     ).toHaveLength(0);
+  });
+
+  it("opens task links across projects by ID after a rename", () => {
+    const openUrl = vi.spyOn(Linking, "openURL").mockResolvedValue(undefined);
+    useSessionStore.setState({
+      snapshot: { threads: [{ id: "task-123", workspace_id: "other-project", title: "Renamed task" }] } as never,
+    });
+    const rendered = renderComponent(<MarkdownRenderer text="[Original name](falcondeck://thread/task-123)" />);
+    const link = rendered.root.find((node) => node.props.accessibilityHint === "Opens this task in FalconDeck" && typeof node.props.onPress === "function");
+    act(() => link.props.onPress());
+    expect(useSessionStore.getState().selectedThreadId).toBe("task-123");
+    expect(useSessionStore.getState().selectedWorkspaceId).toBe("other-project");
+    expect(openUrl).not.toHaveBeenCalled();
   });
 
   it("keeps credential-bearing HTTP links inert", () => {

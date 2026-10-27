@@ -63,6 +63,9 @@ struct ConversationView: View {
             composer
         }
         .background(FDTheme.background)
+        .environment(\.transcriptOpenThread, { id in
+            Task { await store.openTaskLink(id) }
+        })
         .task(id: catalogKey) { restoreSelection(); await loadCatalog() }
         .onAppear { restorePayload() }
         .onChange(of: store.composerKey) { _, _ in restorePayload(); restoreSelection(); followsLatest = true; findIndex = 0; expansionDirective = 0 }

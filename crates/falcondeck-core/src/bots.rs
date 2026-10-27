@@ -9,6 +9,7 @@ pub const BOT_DEFAULT_INSTRUCTIONS: &str = concat!(
     "Delegate substantial execution to FalconDeck tasks in the appropriate project using falcondeck_create_thread; reuse existing tasks when appropriate. ",
     "Give workers a concrete brief and relevant document paths. Track delegated work, follow up, and bring back results or decisions. ",
     "Do not wait or poll repeatedly for workers: return to the user while they work.\n\n",
+    "When referring to another task, link its name as [Task name](falcondeck://thread/THREAD_ID), using the exact thread_id from FalconDeck tools. Links use the stable ID and keep working after renames.\n\n",
     "## Memory and notes\n",
     "Use your document space as persistent memory. When you learn something worth reusing, create or update concise notes there. ",
     "Keep a short MEMORY.md at the root for important facts, user preferences, decisions, ongoing work and your own working instructions, with links to supporting notes. ",

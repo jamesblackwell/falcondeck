@@ -41,6 +41,7 @@ export * from "./components/queued-turns";
 export * from "./components/session-header";
 export * from "./components/ship-menu";
 export * from "./lib/use-ship-thread";
+export * from "./lib/thread-link-context";
 export * from "./components/thread-item";
 export * from "./components/workspace-sidebar";
 export * from "./components/workspace-group";

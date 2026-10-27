@@ -2,6 +2,15 @@ import XCTest
 @testable import FalconDeckNative
 
 final class PresentationTests: XCTestCase {
+    func testTaskLinksKeepStableIDsAndRejectOtherActions() {
+        let text = try! AttributedString(markdown: "[Renamed task](falcondeck://thread/task-123)")
+        XCTAssertEqual(String(text.characters), "Renamed task")
+        XCTAssertEqual(text.runs.first?.link.flatMap { TranscriptThreadLink.parse($0.absoluteString) }, "task-123")
+        for value in ["falcondeck://thread/", "falcondeck://pair/task", "falcondeck://thread/task?delete=true", "falcondeck://thread/%2E%2E", "falcondeck://thread/%2Fetc", "falcondeck://thread/%ZZ", "falcondeck://thread/task%0A123", "falcondeck://thread/task%0A"] {
+            XCTAssertNil(TranscriptThreadLink.parse(value), value)
+        }
+    }
+
     func testInitialHistoryMatchesExposSmallTailAndOlderPagesRemainAvailable() {
         let task = AgentTask(.object(["id": .string("t"), "workspace_id": .string("p")]))
         let tail = NativeRequest.history(task: task, before: nil)

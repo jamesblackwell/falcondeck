@@ -364,6 +364,7 @@ struct NativeMarkdownView: View {
     var fontSize: CGFloat = 16
     var foreground: Color? = nil
     @Environment(\.transcriptOpenFile) private var inheritedOpenFile
+    @Environment(\.transcriptOpenThread) private var openThread
 
     var body: some View {
         ParsedTranscriptMarkdown(text: text).equatable()
@@ -373,6 +374,10 @@ struct NativeMarkdownView: View {
             .textSelection(.enabled)
             .frame(maxWidth: .infinity, alignment: .leading)
             .environment(\.openURL, OpenURLAction { url in
+                if let id = TranscriptThreadLink.parse(url.absoluteString), let openThread {
+                    openThread(id)
+                    return .handled
+                }
                 if TranscriptPresentation.externalURL(url.absoluteString) != nil { return .systemAction(url) }
                 if let destination = TranscriptFileLink.parse(url.absoluteString), let openFile = onOpenFile ?? inheritedOpenFile {
                     openFile(destination.path, destination.line)

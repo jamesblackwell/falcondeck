@@ -117,6 +117,29 @@ private final class IntegrationObservationChanges: @unchecked Sendable {
 }
 
 final class NativeStoreIntegrationTests: XCTestCase {
+    @MainActor func testTaskLinkOpensRenamedTaskAcrossProjects() async {
+        let daemon = IntegrationDaemon(), store = AppStore(client: daemon)
+        let target = integrationTask("linked-task", project: "other").setting("title", .string("Renamed task"))
+        await daemon.setDetailThread(target)
+        store.applyEnvelope(integrationSnapshotEnvelope(integrationSnapshot(
+            projects: [integrationProject("local"), integrationProject("other")],
+            tasks: [integrationTask("task"), target]
+        )))
+        await store.selectTask("task")
+
+        await store.openTaskLink("linked-task")
+
+        XCTAssertEqual(store.selectedTaskID, "linked-task")
+        XCTAssertEqual(store.selectedProjectID, "other")
+        XCTAssertEqual(store.selectedTask?.title, "Renamed task")
+        XCTAssertEqual(store.messages.first?.text, "Local history")
+        await store.openTaskLink("missing-task")
+        XCTAssertEqual(store.selectedTaskID, "linked-task")
+        XCTAssertNotNil(store.errorMessage)
+        await store.navigateHistory(-1)
+        XCTAssertEqual(store.selectedTaskID, "task")
+    }
+
     @MainActor func testLocalThreadPatchUsesPathScopeAndPreservesExplicitNull() async throws {
         let daemon = IntegrationDaemon(), store = AppStore(client: daemon)
         let patch: JSON = .object([

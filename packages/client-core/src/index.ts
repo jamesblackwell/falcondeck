@@ -44,6 +44,7 @@ export * from "./handoff";
 export * from "./handoff-thread";
 export * from "./harness-user-text";
 export * from "./agent-thread-message";
+export * from "./thread-link";
 export * from "./fork-thread";
 export * from "./option-filter";
 export * from "./starred-models";

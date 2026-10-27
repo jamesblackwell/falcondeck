@@ -1,4 +1,6 @@
 import type { ProjectFolderMutation } from '@falcondeck/client-core';
+import { resolveThreadLinkTarget } from "@falcondeck/client-core";
+import { ThreadLinkProvider } from "@falcondeck/chat-ui";
 import { cancelRelayTransport, receiveRelayTransport } from '@falcondeck/client-core';
 import {
   Suspense,
@@ -5425,6 +5427,13 @@ function RemoteApp() {
                 />
               ) : null}
               <div className="flex min-h-0 flex-1 flex-col overflow-hidden">
+                <ThreadLinkProvider
+                  onOpenThread={(threadId) => {
+                    const target = resolveThreadLinkTarget(threadId, snapshot?.threads ?? []);
+                    if (target) handleSelectThread(target.workspace_id, target.id);
+                    else setError("This task is no longer available on your computer.");
+                  }}
+                >
                 <ExtensionAgentToolUiProvider
                   apps={extensionApps}
                   extensions={snapshot?.extensions.catalog ?? []}
@@ -5471,6 +5480,7 @@ function RemoteApp() {
                   readAloud={readAloud}
                   />
                 </ExtensionAgentToolUiProvider>
+                </ThreadLinkProvider>
               </div>
 
               <div className="shrink-0 border-t border-border-subtle bg-surface-0/95 backdrop-blur md:bg-transparent md:backdrop-blur-0">

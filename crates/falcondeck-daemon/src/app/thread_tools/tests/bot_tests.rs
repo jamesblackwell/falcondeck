@@ -32,6 +32,12 @@ async fn bot_promotion_persists_identity_and_preserves_native_history() {
         app.bot_context("thread-1")
             .await
             .unwrap()
+            .contains("[Task name](falcondeck://thread/THREAD_ID)")
+    );
+    assert!(
+        app.bot_context("thread-1")
+            .await
+            .unwrap()
             .contains("Coordinate Quizgecko work")
     );
     app.archive_all_threads("workspace-1").await.unwrap();

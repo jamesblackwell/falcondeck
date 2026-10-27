@@ -1,6 +1,17 @@
 import Foundation
 import CoreFoundation
 
+enum TranscriptThreadLink {
+    static func parse(_ value: String) -> String? {
+        let prefix = "falcondeck://thread/"
+        guard value.lowercased().hasPrefix(prefix),
+              let id = String(value.dropFirst(prefix.count)).removingPercentEncoding,
+              !id.isEmpty, id != ".", id != "..",
+              id.range(of: #"[^a-zA-Z0-9._:-]"#, options: .regularExpression) == nil else { return nil }
+        return id
+    }
+}
+
 /// Only the protocol fields this client needs. Unknown fields survive
 /// decoding at the JSON boundary without coupling the pilot to every extension.
 enum JSON: Codable, Sendable, Hashable {

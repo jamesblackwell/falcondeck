@@ -28,6 +28,11 @@ contents as needed. This context is hidden from the user message bubble and is
 supplied again after native resume or compaction. Native conversation history
 stays with the harness.
 
+Bots link to tasks using `[Task name](falcondeck://thread/THREAD_ID)`, with
+the exact `thread_id` returned by the coordination tools. Selecting the link
+opens that task in FalconDeck, including in another project on the same computer.
+The destination uses the stable ID, so renaming a task does not break old links.
+
 Bots are encouraged to use their document space as persistent memory. A short
 root-level `MEMORY.md` (or an existing memory index) holds important facts,
 preferences, decisions, ongoing work and editable working instructions, with
