@@ -62,8 +62,8 @@ export function AutomationGroup({ group, children }: {
             onClick={() => setExpanded((value) => !value)}
           >
             <ChevronDown aria-hidden="true" className={cn("h-3.5 w-3.5 shrink-0 text-fg-muted transition-transform", !expanded && "-rotate-90")} />
-            <span className="fd-type-eyebrow text-fg-secondary">{group.label}</span>
-            <span className="fd-type-meta text-fg-muted">{group.entries.length}</span>
+            <span className="fd-type-eyebrow min-w-0 truncate text-fg-secondary" title={group.label}>{group.label}</span>
+            <span className="fd-type-meta shrink-0 text-fg-muted">{group.entries.length}</span>
             {group.description ? <span className="fd-type-meta ml-auto min-w-0 truncate text-fg-muted" title={group.description}>{group.description}</span> : null}
           </button>
         </h2>

@@ -1,4 +1,5 @@
 import {
+  DUE_NOW_TOLERANCE_MS,
   formatScheduleCadence,
   type Automation,
   type ScheduledTaskSummary,
@@ -28,7 +29,8 @@ export type AutomationListFilters = {
   project: string;
   activity: AutomationActivityFilter;
   time?: AutomationTimeFilter;
-  sort: AutomationSort;
+  /** Omit when only matching/counting records, to preserve their input order. */
+  sort?: AutomationSort;
 };
 
 // Request list metadata explicitly: the daemon's default projection omits
@@ -100,19 +102,17 @@ export function automationIsRunning(entry: TaskEntry) {
 
 function dayStart(nowMs: number, offset: number) {
   const date = new Date(nowMs);
-  date.setHours(0, 0, 0, 0);
-  date.setDate(date.getDate() + offset);
-  return date.getTime();
+  return new Date(date.getFullYear(), date.getMonth(), date.getDate() + offset).getTime();
 }
 
 export function automationMatchesTime(entry: TaskEntry, time: AutomationTimeFilter, nowMs: number) {
   if (time === "all") return true;
   const next = timestamp(entry.task.next_run_at);
   if (entry.task.status !== "active" || next === null) return false;
-  if (time === "overdue") return next < nowMs && executionRank(entry) !== 0;
+  if (time === "overdue") return next < nowMs - DUE_NOW_TOLERANCE_MS && executionRank(entry) !== 0;
   if (time === "today") return next >= dayStart(nowMs, 0) && next < dayStart(nowMs, 1);
   const windowMs = time === "hour" ? 3_600_000 : time === "day" ? 86_400_000 : 7 * 86_400_000;
-  return next >= nowMs && next < nowMs + windowMs;
+  return next >= nowMs - DUE_NOW_TOLERANCE_MS && next < nowMs + windowMs;
 }
 
 export function summarizeAutomationEntries(entries: TaskEntry[], nowMs: number) {
@@ -132,26 +132,27 @@ export type AutomationEntryGroup = {
   entries: TaskEntry[];
 };
 
-const TIME_GROUPS = [
-  ["progress", "In progress"],
-  ["overdue", "Overdue"],
-  ["hour", "Next hour"],
-  ["today", "Later today"],
-  ["tomorrow", "Tomorrow"],
-  ["week", "Next 7 days"],
-  ["later", "Later"],
-  ["unscheduled", "Not scheduled"],
-  ["paused", "Paused"],
-  ["completed", "Completed"],
-] as const;
+const TIME_GROUPS = {
+  progress: "In progress",
+  overdue: "Overdue",
+  hour: "Next hour",
+  today: "Later today",
+  tomorrow: "Tomorrow",
+  week: "Next 7 days",
+  later: "Later",
+  unscheduled: "Not scheduled",
+  paused: "Paused",
+  completed: "Completed",
+} as const;
+const TIME_GROUP_ORDER = Object.keys(TIME_GROUPS).map((key) => `time:${key}`);
 
-function timeGroup(entry: TaskEntry, nowMs: number) {
+function timeGroup(entry: TaskEntry, nowMs: number): keyof typeof TIME_GROUPS {
   if (executionRank(entry) === 0) return "progress";
   if (entry.task.status === "paused") return "paused";
   if (entry.task.status === "completed") return "completed";
   const next = timestamp(entry.task.next_run_at);
   if (next === null) return "unscheduled";
-  if (next < nowMs) return "overdue";
+  if (next < nowMs - DUE_NOW_TOLERANCE_MS) return "overdue";
   if (next < nowMs + 3_600_000) return "hour";
   if (next < dayStart(nowMs, 1)) return "today";
   if (next < dayStart(nowMs, 2)) return "tomorrow";
@@ -171,7 +172,7 @@ export function groupAutomationEntries(entries: TaskEntry[], grouping: Automatio
     } else if (grouping === "time") {
       const bucket = timeGroup(entry, nowMs);
       key = `time:${bucket}`;
-      label = TIME_GROUPS.find(([id]) => id === bucket)![1];
+      label = TIME_GROUPS[bucket];
     } else if (grouping === "project") {
       const project = automationProject(entry);
       key = `project:${project.key}`;
@@ -185,11 +186,10 @@ export function groupAutomationEntries(entries: TaskEntry[], grouping: Automatio
     if (group) group.entries.push(entry);
     else groups.set(key, { key, label, description, entries: [entry] });
   }
-  const timeOrder = TIME_GROUPS.map(([id]) => `time:${id}`);
   return [...groups.values()].sort((left, right) => {
-    if (left.key === "extensions") return 1;
-    if (right.key === "extensions") return -1;
-    if (grouping === "time") return timeOrder.indexOf(left.key) - timeOrder.indexOf(right.key);
+    const ownerOrder = Number(left.key === "extensions") - Number(right.key === "extensions");
+    if (ownerOrder) return ownerOrder;
+    if (grouping === "time") return TIME_GROUP_ORDER.indexOf(left.key) - TIME_GROUP_ORDER.indexOf(right.key);
     return (left.label ?? "").localeCompare(right.label ?? "", undefined, { numeric: true, sensitivity: "base" }) ||
       left.key.localeCompare(right.key);
   });
@@ -225,7 +225,7 @@ export function filterAutomationEntries(
   nowMs = Date.now(),
 ) {
   const terms = filters.query.trim().toLocaleLowerCase().split(/\s+/).filter(Boolean);
-  return entries.filter((entry) => {
+  const matches = entries.filter((entry) => {
     if (filters.status !== "all" && entry.task.status !== filters.status) return false;
     if (filters.host !== "all" && (entry.hostId ?? "local") !== filters.host) return false;
     if (filters.project !== "all" && automationProject(entry).key !== filters.project) return false;
@@ -245,5 +245,7 @@ export function filterAutomationEntries(
     const haystack = [entry.task.title, entry.task.prompt_preview, entry.task.provider,
       entry.hostName, automationProject(entry).path, cadence].join(" ").toLocaleLowerCase();
     return terms.every((term) => haystack.includes(term));
-  }).sort((left, right) => compareEntries(left, right, filters.sort));
+  });
+  const sort = filters.sort;
+  return sort ? matches.sort((left, right) => compareEntries(left, right, sort)) : matches;
 }

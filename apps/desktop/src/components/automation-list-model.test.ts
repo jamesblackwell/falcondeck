@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import type { Automation } from "@falcondeck/client-core";
+import { formatDueAt, type Automation } from "@falcondeck/client-core";
 import {
   automationProject,
   filterAutomationEntries,
@@ -57,6 +57,7 @@ describe("automation list", () => {
     expect(titles(entries, { sort: "name" })).toEqual(["check 2", "Check 10", "Never run"]);
     expect(titles(entries, { sort: "updated" })).toEqual(["check 2", "Check 10", "Never run"]);
     expect(titles(entries, { sort: "last_run" })).toEqual(["Check 10", "check 2", "Never run"]);
+    expect(filterAutomationEntries(entries, { ...filters, sort: undefined })).toEqual(entries);
   });
 
   it("keeps extension-owned records in their section for every sort", () => {
@@ -123,7 +124,7 @@ describe("automation list", () => {
       entry("Later today", { next_run_at: next(60) }),
       entry("Soon", { next_run_at: next(30) }),
       entry("Due now", { next_run_at: next(0) }),
-      entry("Missed", { next_run_at: next(-1) }),
+      entry("Missed", { next_run_at: next(-2) }),
       entry("Running", { next_run_at: next(-60), last_run: run("running") }),
       entry("Waiting", { last_run: run("awaiting_input") }),
     ];
@@ -148,7 +149,7 @@ describe("automation list", () => {
     const now = new Date(2026, 9, 27, 23, 30).getTime();
     const next = (minutes: number) => new Date(now + minutes * 60_000).toISOString();
     const entries = [
-      entry("Overdue", { next_run_at: next(-1) }),
+      entry("Overdue", { next_run_at: next(-2) }),
       entry("Soon", { next_run_at: next(10) }),
       entry("Tomorrow", { next_run_at: next(45) }),
       entry("In a day", { next_run_at: next(1440) }),
@@ -162,6 +163,39 @@ describe("automation list", () => {
     expect(matching("day")).toEqual(["Soon", "Tomorrow"]);
     expect(matching("week")).toEqual(["In a day", "Soon", "Tomorrow"]);
     expect(matching("overdue")).toEqual(["Overdue"]);
+  });
+
+  it("keeps due-now schedules in upcoming groups and filters until their row is overdue", () => {
+    const now = Date.parse("2026-10-27T09:00:00Z");
+    const entries = [
+      entry("Overdue", { next_run_at: new Date(now - 61_000).toISOString() }),
+      entry("Due at the grace boundary", { next_run_at: new Date(now - 60_000).toISOString() }),
+      entry("Just due", { next_run_at: new Date(now - 30_000).toISOString() }),
+      entry("Future", { next_run_at: new Date(now + 60_000).toISOString() }),
+    ];
+    const groups = groupAutomationEntries(entries, "time", now);
+    expect(groups.map((group) => [group.label, group.entries.map((item) => item.task.title)])).toEqual([
+      ["Overdue", ["Overdue"]],
+      ["Next hour", ["Due at the grace boundary", "Just due", "Future"]],
+    ]);
+    for (const item of entries) {
+      const overdue = filterAutomationEntries([item], { ...filters, time: "overdue" }, "UTC", now).length > 0;
+      expect(overdue).toBe(formatDueAt(item.task.next_run_at, now)?.overdue);
+    }
+    expect(filterAutomationEntries(entries, { ...filters, time: "hour" }, "UTC", now)).toHaveLength(3);
+    expect(summarizeAutomationEntries(entries, now).due).toBe(3);
+  });
+
+  it("uses each date's own midnight for calendar groups across a midnight DST change", () => {
+    // America/Santiago skips midnight on this date. The following midnights
+    // still begin at 00:00, rather than inheriting that day's 01:00 start.
+    const now = new Date(2026, 8, 6, 12).getTime();
+    const entries = [
+      entry("Tomorrow", { next_run_at: new Date(2026, 8, 7, 0, 30).toISOString() }),
+      entry("Day after tomorrow", { next_run_at: new Date(2026, 8, 8, 0, 30).toISOString() }),
+    ];
+    expect(groupAutomationEntries(entries, "time", now).map((group) => group.label)).toEqual(["Tomorrow", "Next 7 days"]);
+    expect(filterAutomationEntries(entries, { ...filters, time: "today" }, "UTC", now)).toEqual([]);
   });
 
   it("summarizes schedules and outcomes independently of lifecycle filters", () => {

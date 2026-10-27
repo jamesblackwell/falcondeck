@@ -508,6 +508,9 @@ export type DueAtLabel = {
   title: string;
 };
 
+// Keep list grouping and time filters aligned with the row's "Now" label.
+export const DUE_NOW_TOLERANCE_MS = 60_000;
+
 export function formatDueAt(
   iso: string | null | undefined,
   nowMs: number = Date.now(),
@@ -533,10 +536,10 @@ export function formatDueAt(
   const minute = 60_000;
   const hour = 60 * minute;
   const day = 24 * hour;
-  if (delta < -minute) {
+  if (delta < -DUE_NOW_TOLERANCE_MS) {
     return { label: "Overdue", overdue: true, title };
   }
-  if (delta <= minute) return { label: "Now", overdue: false, title };
+  if (delta <= DUE_NOW_TOLERANCE_MS) return { label: "Now", overdue: false, title };
   if (delta < hour) {
     const minutes = Math.max(1, Math.round(delta / minute));
     return { label: `in ${minutes}m`, overdue: false, title };

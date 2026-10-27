@@ -1280,8 +1280,8 @@ export function ScheduledTasksView({
   }, [projects, projectFilter]);
   const overviewEntries = useMemo(() => filterAutomationEntries(entries, {
     query, status: "all", host: hostFilter, project: projectFilter,
-    activity: "all", sort,
-  }), [entries, query, hostFilter, projectFilter, sort]);
+    activity: "all",
+  }), [entries, query, hostFilter, projectFilter]);
   const summary = useMemo(() => summarizeAutomationEntries(overviewEntries, nowMs), [overviewEntries, nowMs]);
   const scopedEntries = useMemo(() => filterAutomationEntries(overviewEntries, {
     query: "", status: "all", host: "all", project: "all",
