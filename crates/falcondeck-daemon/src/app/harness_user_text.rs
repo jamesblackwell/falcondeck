@@ -422,6 +422,15 @@ pub(crate) fn visible_user_prompt(text: &str) -> Option<String> {
     }
 }
 
+/// What the user typed, without the service notices (resume and retry
+/// receipts, background command results) that share the user role.
+pub(crate) fn typed_user_prompt(text: &str) -> Option<String> {
+    match project_user_text(text) {
+        ProjectedUserText::Prompt(_) => visible_user_prompt(text),
+        _ => None,
+    }
+}
+
 /// Conversation item for a replayed or echoed ACP user payload.
 pub(crate) fn conversation_item_from_projected_user(
     id: String,

@@ -47,8 +47,11 @@ are accessed directly by the agent or through the filesystem.
 ## Coordination and control
 
 Bot calls to the built-in coordination tools can select a project using
-`workspace_id`. Calls identifying an existing task resolve its owning workspace
-automatically. Ordinary tasks remain workspace-scoped. The three concurrent
+`workspace_id`: its id, exact path, or unique folder name. Calls identifying an
+existing task resolve its owning workspace automatically. List and changes
+calls without a project span every project, so "what is going on?" takes one
+call. The per-turn context lists only the twelve most recently active projects
+(path and id), since it is repeated on every turn. Ordinary tasks remain workspace-scoped. The three concurrent
 children limit counts all projects together. Bot-created tasks automatically
 report errors or requests for input to their home conversation. Successful turn
 endings stay silent unless the bot explicitly enables `notify_parent` when

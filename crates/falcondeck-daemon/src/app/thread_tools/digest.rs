@@ -2,6 +2,7 @@
 //!
 //! Digests read the daemon summary, pending interactive requests, and items
 //! already in memory. Native transcripts load only with `hydrate: true`.
+use super::glance::{self, Glance, RowContext, ago};
 use super::*;
 use chrono::DateTime;
 use falcondeck_core::{InteractiveRequest, InteractiveRequestKind};
@@ -60,16 +61,6 @@ pub(super) fn stamp(at: DateTime<Utc>) -> String {
     at.format("%Y-%m-%dT%H:%M:%SZ").to_string()
 }
 
-fn ago(at: DateTime<Utc>, now: DateTime<Utc>) -> String {
-    let seconds = (now - at).num_seconds().max(0);
-    match seconds {
-        0..60 => format!("{seconds}s ago"),
-        60..3600 => format!("{}m ago", seconds / 60),
-        3600..86_400 => format!("{}h ago", seconds / 3600),
-        _ => format!("{}d ago", seconds / 86_400),
-    }
-}
-
 /// RFC 3339 timestamp, or a relative window such as `90s`, `15m`, `2h`, `1d`.
 fn parse_since(value: &str, now: DateTime<Utc>) -> Result<DateTime<Utc>, DaemonError> {
     let value = value.trim();
@@ -98,15 +89,6 @@ fn parse_since(value: &str, now: DateTime<Utc>) -> Result<DateTime<Utc>, DaemonE
         .filter(|s| *s <= 366 * 86_400)
         .map(|s| now - chrono::Duration::seconds(s))
         .ok_or_else(invalid)
-}
-
-fn status_name(status: &ThreadStatus) -> &'static str {
-    match status {
-        ThreadStatus::Idle => "idle",
-        ThreadStatus::Running => "running",
-        ThreadStatus::WaitingForInput => "waiting_for_input",
-        ThreadStatus::Error => "error",
-    }
 }
 
 /// One line naming what the thread is blocked on, if anything. Approvals and
@@ -204,22 +186,27 @@ impl AppState {
         by_thread
     }
 
-    /// Status and attention header lines for one thread.
+    /// Title line, state, and any attention for one thread.
     pub(super) async fn thread_status_lines(
         &self,
         workspace: &str,
         thread: &str,
     ) -> Result<String, DaemonError> {
-        let summary = self.thread_summary(workspace, thread).await?;
+        let summary = self
+            .build_thread_summary_from_clone(self.thread_summary(workspace, thread).await?)
+            .await;
         let pending = self
             .pending_requests(workspace)
             .await
             .remove(thread)
             .unwrap_or_default();
         let mut text = format!(
-            "Status: {} | Last activity: {}\n",
-            status_name(&summary.status),
-            stamp(summary.updated_at)
+            "# {} `{}`\n{} · {} · {}\n",
+            line(&summary.title, 160),
+            line(&summary.id, 128),
+            glance::state(&summary),
+            ago(summary.updated_at, Utc::now()),
+            summary.provider,
         );
         if let Some(flag) = attention(&summary, &pending) {
             text.push_str(&flag);
@@ -239,14 +226,15 @@ enum CheckKind {
 struct Check {
     command: String,
     outcome: &'static str,
-    at: DateTime<Utc>,
     runs: usize,
 }
 
 struct Message {
     id: String,
     text: String,
-    at: DateTime<Utc>,
+    /// Scan position, newest first. Codex items can share one fallback
+    /// timestamp, so order comes from the transcript, not the clock.
+    pos: usize,
 }
 
 #[derive(Default)]
@@ -268,6 +256,22 @@ struct Digest {
 
 static COMMIT_LINE: LazyLock<regex::Regex> = LazyLock::new(|| {
     regex::Regex::new(r"(?m)^\[[^\]\s]+(?: \(root-commit\))? ([0-9a-f]{7,40})\] (.+)$").unwrap()
+});
+/// Commit output from a command we cannot see (Codex code-mode `exec`): the
+/// stat line that follows rules out a quoted `[main abc1234]` in a file read.
+static COMMIT_WITH_STAT: LazyLock<regex::Regex> = LazyLock::new(|| {
+    regex::Regex::new(
+        r"(?m)^\[[^\]\s]+(?: \(root-commit\))? ([0-9a-f]{7,40})\] (.+)\n \d+ files? changed",
+    )
+    .unwrap()
+});
+/// Test runner summaries, for commands hidden inside scripts.
+static TEST_RESULT: LazyLock<regex::Regex> = LazyLock::new(|| {
+    regex::Regex::new(r"(?m)^(?:test result: (ok|FAILED)\.|\s*Test Files\s+.*?(failed|passed))")
+        .unwrap()
+});
+static SHELL_WRAPPER: LazyLock<regex::Regex> = LazyLock::new(|| {
+    regex::Regex::new(r#"(?s)^(?:\S*/)?(?:ba|z)?sh\s+-l?c\s+(?:'(.*)'|"(.*)")\s*$"#).unwrap()
 });
 static TEST_COMMAND: LazyLock<regex::Regex> = LazyLock::new(|| {
     regex::Regex::new(
@@ -317,6 +321,52 @@ fn edited_path(title: &str) -> Option<&str> {
         .filter(|path| !path.is_empty())
 }
 
+/// The command inside `zsh -lc '...'` (how Codex reports shell calls),
+/// without a leading `cd <dir> &&`.
+fn unwrap_shell(command: &str) -> &str {
+    let inner = SHELL_WRAPPER
+        .captures(command.trim())
+        .and_then(|c| c.get(1).or(c.get(2)))
+        .map_or(command, |m| m.as_str())
+        .trim_start();
+    match inner
+        .strip_prefix("cd ")
+        .and_then(|rest| rest.split_once("&& "))
+    {
+        Some((dir, rest)) if !dir.contains([';', '|', '&']) => rest.trim_start(),
+        _ => inner,
+    }
+}
+
+/// Short label for a check: the matched command when it is not near the start.
+fn check_label(command: &str, at: usize) -> String {
+    if at < 40 {
+        line(command, 80)
+    } else {
+        format!("…{}", line(&command[at..], 80))
+    }
+}
+
+/// Outputs of the scripts a Codex code-mode `exec` call ran, one per JSON
+/// line, with each script's exit code.
+fn exec_outputs(output: &str) -> Vec<(String, Option<i32>)> {
+    output
+        .lines()
+        .filter(|l| l.starts_with("{\"i\":"))
+        .filter_map(|l| serde_json::from_str::<Value>(l).ok())
+        .filter_map(|v| {
+            let value = v.get("value")?;
+            Some((
+                value.get("output")?.as_str()?.to_string(),
+                value
+                    .get("exit_code")
+                    .and_then(Value::as_i64)
+                    .and_then(|c| i32::try_from(c).ok()),
+            ))
+        })
+        .collect()
+}
+
 fn outcome(status: &str, exit_code: Option<i32>) -> &'static str {
     match exit_code {
         Some(0) => "passed",
@@ -343,13 +393,7 @@ impl Digest {
         }
     }
 
-    fn record_check(
-        &mut self,
-        kind: CheckKind,
-        command: &str,
-        outcome: &'static str,
-        at: DateTime<Utc>,
-    ) {
+    fn record_check(&mut self, kind: CheckKind, label: String, outcome: &'static str) {
         // Newest-first scan: the first sighting is the latest run.
         if let Some((_, check)) = self.checks.iter_mut().find(|(k, _)| *k == kind) {
             check.runs += 1;
@@ -357,13 +401,50 @@ impl Digest {
             self.checks.push((
                 kind,
                 Check {
-                    command: line(command, 100),
+                    command: label,
                     outcome,
-                    at,
                     runs: 1,
                 },
             ));
         }
+    }
+
+    fn record_commits(&mut self, pattern: &regex::Regex, output: &str) {
+        let mut end = output.len().min(COMMIT_SCAN_BYTES);
+        while !output.is_char_boundary(end) {
+            end -= 1;
+        }
+        for found in pattern.captures_iter(&output[..end]) {
+            let sha = found[1].to_string();
+            if !self.commits.iter().any(|(s, _)| *s == sha) {
+                self.commits.push((sha, line(&found[2], 120)));
+            }
+        }
+    }
+
+    /// Checks and commits visible only in output, for commands we cannot read.
+    fn record_from_output(&mut self, label: &str, output: &str, result: &'static str) {
+        if let Some(found) = TEST_RESULT.captures(output) {
+            let failed = found
+                .get(1)
+                .or(found.get(2))
+                .is_some_and(|m| m.as_str() != "ok" && m.as_str() != "passed");
+            let outcome = if failed || result == "failed" {
+                "failed"
+            } else {
+                "passed"
+            };
+            self.record_check(CheckKind::Tests, line(label, 80), outcome);
+        }
+        if output.contains("autoreview target:") {
+            let outcome = if output.contains("autoreview clean") {
+                "passed"
+            } else {
+                result
+            };
+            self.record_check(CheckKind::Autoreview, line(label, 80), outcome);
+        }
+        self.record_commits(&COMMIT_WITH_STAT, output);
     }
 }
 
@@ -375,8 +456,7 @@ fn digest(items: &[ConversationItem], since: Option<DateTime<Utc>>, root: &str) 
         ..Default::default()
     };
     for item in items.iter().rev() {
-        let at = item_created_at(item);
-        if since.is_some_and(|since| at <= since) {
+        if since.is_some_and(|since| item_created_at(item) <= since) {
             break;
         }
         if d.scanned == SCAN_ITEMS {
@@ -392,7 +472,7 @@ fn digest(items: &[ConversationItem], since: Option<DateTime<Utc>>, root: &str) 
                     d.last_user = Some(Message {
                         id: id.clone(),
                         text: text.clone(),
-                        at,
+                        pos: d.scanned,
                     });
                 }
             }
@@ -402,7 +482,7 @@ fn digest(items: &[ConversationItem], since: Option<DateTime<Utc>>, root: &str) 
                     d.last_assistant = Some(Message {
                         id: id.clone(),
                         text: text.clone(),
-                        at,
+                        pos: d.scanned,
                     });
                 }
             }
@@ -437,34 +517,41 @@ fn digest(items: &[ConversationItem], since: Option<DateTime<Utc>>, root: &str) 
                 {
                     d.push_file(relative(path, root).to_string());
                 }
-                if title.to_ascii_lowercase().contains("autoreview") {
-                    d.record_check(CheckKind::Autoreview, title, result, at);
-                    continue;
-                }
                 let Some(command) = command_text(title, detail) else {
+                    if title.to_ascii_lowercase().contains("autoreview") {
+                        d.record_check(CheckKind::Autoreview, line(title, 80), result);
+                    }
                     continue;
                 };
+                let command = unwrap_shell(command);
                 let lower = command.to_ascii_lowercase();
-                if lower.contains("autoreview") {
-                    d.record_check(CheckKind::Autoreview, command, result, at);
-                } else if TEST_COMMAND.is_match(&lower) {
-                    d.record_check(CheckKind::Tests, command, result, at);
-                } else if TYPECHECK_COMMAND.is_match(&lower) {
-                    d.record_check(CheckKind::Typecheck, command, result, at);
+                if let Some(at) = lower.find("autoreview") {
+                    d.record_check(CheckKind::Autoreview, check_label(command, at), result);
+                } else if let Some(found) = TEST_COMMAND.find(&lower) {
+                    d.record_check(
+                        CheckKind::Tests,
+                        check_label(command, found.start()),
+                        result,
+                    );
+                } else if let Some(found) = TYPECHECK_COMMAND.find(&lower) {
+                    d.record_check(
+                        CheckKind::Typecheck,
+                        check_label(command, found.start()),
+                        result,
+                    );
+                } else if let Some(output) = output {
+                    let scripts = exec_outputs(output);
+                    if scripts.is_empty() {
+                        d.record_from_output(command, output, result);
+                    }
+                    for (script, code) in scripts {
+                        d.record_from_output(command, &script, outcome(status, code));
+                    }
                 }
                 if lower.contains("commit")
                     && let Some(output) = output
                 {
-                    let mut end = output.len().min(COMMIT_SCAN_BYTES);
-                    while !output.is_char_boundary(end) {
-                        end -= 1;
-                    }
-                    for found in COMMIT_LINE.captures_iter(&output[..end]) {
-                        let sha = found[1].to_string();
-                        if !d.commits.iter().any(|(s, _)| *s == sha) {
-                            d.commits.push((sha, line(&found[2], 120)));
-                        }
-                    }
+                    d.record_commits(&COMMIT_LINE, output);
                 }
             }
             _ => {}
@@ -476,6 +563,7 @@ fn digest(items: &[ConversationItem], since: Option<DateTime<Utc>>, root: &str) 
 struct Snapshot {
     summary: ThreadSummary,
     root: String,
+    glance: Glance,
     digest: Option<Digest>,
     hydrate_error: Option<String>,
 }
@@ -492,6 +580,11 @@ impl AppState {
         let ws = workspaces
             .get(workspace)
             .ok_or_else(|| DaemonError::NotFound("workspace not found".into()))?;
+        let index = self
+            .inner
+            .thread_search
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         ids.iter()
             .map(|id| {
                 let thread = ws.threads.get(id).ok_or_else(|| {
@@ -501,27 +594,20 @@ impl AppState {
                     .summary
                     .working_directory(&ws.summary.path)
                     .to_string();
+                let excerpt = thread
+                    .summary
+                    .native_session_id
+                    .as_ref()
+                    .and_then(|session| index.sessions.get(session));
                 Ok(Snapshot {
                     digest: (!thread.items.is_empty()).then(|| digest(&thread.items, since, &root)),
+                    glance: Glance::of(thread, excerpt),
                     summary: thread.summary.clone(),
                     root,
                     hydrate_error: None,
                 })
             })
             .collect()
-    }
-
-    fn cached_recent_user(&self, summary: &ThreadSummary) -> Option<String> {
-        let index = self
-            .inner
-            .thread_search
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
-        summary
-            .native_session_id
-            .as_ref()
-            .and_then(|id| index.sessions.get(id))
-            .and_then(|excerpt| excerpt.recent.last().cloned())
     }
 }
 
@@ -545,6 +631,7 @@ pub(super) async fn summary(
         .max_chars
         .unwrap_or(DEFAULT_SUMMARY_CHARS)
         .clamp(512, MAX_CHARS);
+    app.refresh_excerpts().await;
     let mut snapshots = app.snapshots(workspace, &ids, None).await?;
     if args.hydrate {
         for snapshot in snapshots
@@ -581,16 +668,16 @@ pub(super) async fn summary(
     let mut pending = app.pending_requests(workspace).await;
     let now = Utc::now();
     let per_thread = (cap.saturating_sub(200) / ids.len()).max(400);
-    let mut markdown = format!("# Thread summaries\n\nNow: {}\n\n", stamp(now));
+    let mut markdown = String::new();
     let mut omitted = Vec::new();
     for snapshot in snapshots {
         let summary = app.build_thread_summary_from_clone(snapshot.summary).await;
         let requests = pending.remove(&summary.id).unwrap_or_default();
         let entry = capped(
             &render_summary(
-                app,
                 &summary,
                 &requests,
+                &snapshot.glance,
                 snapshot.digest.as_ref(),
                 snapshot.hydrate_error.as_deref(),
                 now,
@@ -602,7 +689,7 @@ pub(super) async fn summary(
             continue;
         }
         markdown.push_str(&entry);
-        markdown.push_str("\n\n");
+        markdown.push('\n');
     }
     if !omitted.is_empty() {
         markdown.push_str(&format!(
@@ -613,109 +700,101 @@ pub(super) async fn summary(
     Ok(capped(&markdown, cap))
 }
 
+/// `text` capped at `cap`, pointing at the item to expand when cut.
+fn message_line(text: &str, id: &str, cap: usize) -> String {
+    let shown = line(text, cap);
+    if text.chars().count() > cap {
+        format!("{shown} (expand: item_id={})", line(id, 128))
+    } else {
+        shown
+    }
+}
+
 fn render_summary(
-    app: &AppState,
     summary: &ThreadSummary,
     pending: &[InteractiveRequest],
+    glance: &Glance,
     digest: Option<&Digest>,
     hydrate_error: Option<&str>,
     now: DateTime<Utc>,
 ) -> String {
-    let mut text = format!(
-        "## {}\n\n- Id: {} | Provider: {}{}\n",
-        line(&summary.title, 200),
-        line(&summary.id, 128),
-        summary.provider,
-        summary
-            .agent
-            .model_id
-            .as_deref()
-            .map(|m| format!(" | Model: {}", line(m, 80)))
-            .unwrap_or_default()
-    );
-    if let Some(flag) = attention(summary, pending) {
-        text.push_str(&format!("- {flag}\n"));
-    }
     let last_activity = digest
         .and_then(|d| d.last_item_at)
         .map_or(summary.updated_at, |at| at.max(summary.updated_at));
-    text.push_str(&format!(
-        "- Status: {}{} | Last activity: {} ({})\n",
-        status_name(&summary.status),
-        summary
-            .latest_turn_id
-            .as_deref()
-            .map(|t| format!(" | Latest turn: {}", line(t, 80)))
-            .unwrap_or_default(),
-        stamp(last_activity),
-        ago(last_activity, now)
-    ));
-    let mut extras = Vec::new();
+    let mut facts = vec![
+        glance::state(summary),
+        ago(last_activity, now),
+        match summary.agent.model_id.as_deref() {
+            Some(model) => format!("{} {}", summary.provider, line(model, 60)),
+            None => summary.provider.to_string(),
+        },
+    ];
     if !summary.queued_turns.is_empty() {
-        extras.push(format!("Queued turns: {}", summary.queued_turns.len()));
+        facts.push(format!("{} queued", summary.queued_turns.len()));
     }
     if summary.attention.background_task_count > 0 {
-        extras.push(format!(
-            "Background tasks: {}",
+        facts.push(format!(
+            "{} background",
             summary.attention.background_task_count
         ));
     }
     if summary.is_archived {
-        extras.push("Archived".into());
+        facts.push("archived".into());
     }
-    if !extras.is_empty() {
-        text.push_str(&format!("- {}\n", extras.join(" | ")));
+    let mut text = format!(
+        "## {} `{}`\n- {}\n",
+        line(&summary.title, 160),
+        line(&summary.id, 128),
+        facts.join(" · ")
+    );
+    if let Some(flag) = attention(summary, pending) {
+        text.push_str(&format!("- {flag}\n"));
     }
     if let Some(goal) = &summary.goal {
         text.push_str(&format!("- Goal: {}\n", line(&goal.objective, 200)));
     }
     let Some(d) = digest else {
-        if let Some(user) = app.cached_recent_user(summary) {
-            text.push_str(&format!(
-                "- Last user request (cached): {}\n",
-                line(&user, 300)
-            ));
+        if let Some(asked) = &glance.asked {
+            text.push_str(&format!("- Asked: {}\n", line(asked, 300)));
         }
-        if let Some(preview) = &summary.last_message_preview {
-            text.push_str(&format!("- Last preview: {}\n", line(preview, 400)));
+        if let Some(latest) = &glance.latest {
+            text.push_str(&format!("- Latest: {}\n", line(latest, 600)));
         }
         if let Some(error) = &summary.last_error {
             text.push_str(&format!("- Error: {}\n", line(error, 300)));
         }
         match hydrate_error {
-            Some(error) => text.push_str(&format!("- Transcript: could not load ({error}).\n")),
-            None => text.push_str("- Transcript: not loaded; pass hydrate=true or use falcondeck_view_thread for outcome, files, commits, and checks.\n"),
+            Some(error) => text.push_str(&format!("- Transcript could not load: {error}\n")),
+            None => text.push_str(
+                "- Transcript not loaded; hydrate=true adds files, commits, and checks.\n",
+            ),
         }
         return text;
     };
     if let Some(user) = &d.last_user {
         text.push_str(&format!(
-            "- Last user request ({}, {}): {}\n",
-            stamp(user.at),
-            line(&user.id, 80),
-            line(&user.text, 300)
+            "- Asked: {}\n",
+            message_line(&user.text, &user.id, 300)
         ));
     }
     match &d.last_assistant {
         Some(reply) => {
-            let stale = d.last_user.as_ref().is_some_and(|u| u.at > reply.at);
+            let stale = d.last_user.as_ref().is_some_and(|u| u.pos < reply.pos);
             text.push_str(&format!(
-                "- Last assistant outcome ({}, {}){}: {}\n",
-                stamp(reply.at),
-                line(&reply.id, 80),
-                if stale {
-                    " [before the latest request]"
-                } else {
-                    ""
-                },
-                line(&reply.text, 600)
+                "- Latest{}: {}\n",
+                if stale { " (before that request)" } else { "" },
+                message_line(&reply.text, &reply.id, 600)
             ));
         }
-        None => text.push_str("- Last assistant outcome: none in scanned items\n"),
+        None => text.push_str("- Latest: no reply in scanned items\n"),
     }
-    text.push_str(&files_line(&d.files));
-    text.push_str(&commits_line(&d.commits));
-    text.push_str(&format!("- Checks: {}\n", checks_line(&d.checks)));
+    if d.files.is_empty() && d.commits.is_empty() && d.checks.is_empty() {
+        text.push_str("- No file edits, commits, or checks seen.\n");
+    } else {
+        text.push_str(&files_line(&d.files));
+        text.push_str(&commits_line(&d.commits));
+        text.push_str(&checks_line(&d.checks));
+    }
     let mut errors = Vec::new();
     if let Some(error) = &summary.last_error {
         errors.push(line(error, 300));
@@ -730,25 +809,19 @@ fn render_summary(
     if !errors.is_empty() {
         text.push_str(&format!("- Errors: {}\n", errors.join("; ")));
     }
-    text.push_str(&format!(
-        "- Transcript: scanned {} items ({}).\n",
-        d.scanned,
-        if d.complete {
-            "complete"
-        } else {
-            "newest only; older history not scanned"
-        }
-    ));
+    if !d.complete {
+        text.push_str(&format!("- Scanned the newest {} items only.\n", d.scanned));
+    }
     text
 }
 
 fn files_line(files: &[String]) -> String {
     if files.is_empty() {
-        return "- Files changed: none seen\n".into();
+        return String::new();
     }
     let shown: Vec<_> = files.iter().take(12).map(|f| line(f, 160)).collect();
     format!(
-        "- Files changed ({}): {}{}\n",
+        "- Files ({}): {}{}\n",
         files.len(),
         shown.join(", "),
         if files.len() > shown.len() {
@@ -761,7 +834,7 @@ fn files_line(files: &[String]) -> String {
 
 fn commits_line(commits: &[(String, String)]) -> String {
     if commits.is_empty() {
-        return "- Commits: none seen\n".into();
+        return String::new();
     }
     let shown: Vec<_> = commits
         .iter()
@@ -780,31 +853,42 @@ fn commits_line(commits: &[(String, String)]) -> String {
     )
 }
 
+fn check_name(kind: CheckKind) -> &'static str {
+    match kind {
+        CheckKind::Tests => "tests",
+        CheckKind::Typecheck => "typecheck",
+        CheckKind::Autoreview => "autoreview",
+    }
+}
+
+/// Latest outcome per check kind, in a fixed order.
 fn checks_line(checks: &[(CheckKind, Check)]) -> String {
-    [
-        (CheckKind::Tests, "tests"),
-        (CheckKind::Typecheck, "typecheck"),
-        (CheckKind::Autoreview, "autoreview"),
+    let parts: Vec<_> = [
+        CheckKind::Tests,
+        CheckKind::Typecheck,
+        CheckKind::Autoreview,
     ]
-    .iter()
-    .map(
-        |(kind, label)| match checks.iter().find(|(k, _)| k == kind) {
-            Some((_, check)) => format!(
-                "{label} {} at {} (`{}`{})",
-                check.outcome,
-                stamp(check.at),
-                check.command.replace('`', "'"),
-                if check.runs > 1 {
-                    format!(", {} runs", check.runs)
-                } else {
-                    String::new()
-                }
-            ),
-            None => format!("{label} not seen"),
-        },
-    )
-    .collect::<Vec<_>>()
-    .join("; ")
+    .into_iter()
+    .filter_map(|kind| {
+        let (_, check) = checks.iter().find(|(k, _)| *k == kind)?;
+        Some(format!(
+            "{} {}{} (`{}`)",
+            check_name(kind),
+            check.outcome,
+            if check.runs > 1 {
+                format!(", {} runs", check.runs)
+            } else {
+                String::new()
+            },
+            check.command.replace('`', "'"),
+        ))
+    })
+    .collect();
+    if parts.is_empty() {
+        String::new()
+    } else {
+        format!("- Checks: {}\n", parts.join("; "))
+    }
 }
 
 fn delta(d: &Digest) -> String {
@@ -823,32 +907,21 @@ fn delta(d: &Digest) -> String {
         }
     }
     for (kind, check) in &d.checks {
-        let label = match kind {
-            CheckKind::Tests => "tests",
-            CheckKind::Typecheck => "typecheck",
-            CheckKind::Autoreview => "autoreview",
-        };
-        parts.push(format!("{label} {}", check.outcome));
+        parts.push(format!("{} {}", check_name(*kind), check.outcome));
     }
     if d.failed_tools > 0 {
         parts.push(format!("{} failed tool(s)", d.failed_tools));
     }
-    let mut text = if parts.is_empty() {
-        "activity".to_string()
+    if parts.is_empty() {
+        "Since: activity".into()
     } else {
-        parts.join(", ")
-    };
-    if let Some(reply) = &d.last_assistant {
-        text.push_str(&format!("; last reply: {}", line(&reply.text, 160)));
-    } else if let Some(user) = &d.last_user {
-        text.push_str(&format!("; last request: {}", line(&user.text, 160)));
+        format!("Since: {}", parts.join(", "))
     }
-    text
 }
 
 pub(super) async fn changes(
     app: &AppState,
-    workspace: &str,
+    scope: &[String],
     caller: &str,
     args: &ChangesArgs,
 ) -> Result<String, DaemonError> {
@@ -859,75 +932,91 @@ pub(super) async fn changes(
         .unwrap_or(DEFAULT_CHANGES_CHARS)
         .clamp(512, MAX_CHARS);
     let limit = args.limit.unwrap_or(30).clamp(1, 100);
-    let mut pending = app.pending_requests(workspace).await;
-    let (ids, total) = {
-        let workspaces = app.inner.workspaces.lock().await;
-        let ws = workspaces
-            .get(workspace)
-            .ok_or_else(|| DaemonError::NotFound("workspace not found".into()))?;
-        let ids: Vec<String> = ws
-            .threads
-            .values()
-            .filter(|t| t.summary.id != caller && (args.include_archived || !t.summary.is_archived))
-            .filter(|t| {
-                t.summary.updated_at > since
-                    || t.items.last().is_some_and(|i| item_created_at(i) > since)
-                    || pending
-                        .get(&t.summary.id)
-                        .is_some_and(|r| r.iter().any(|r| r.created_at > since))
-            })
-            .map(|t| t.summary.id.clone())
-            .collect();
-        (ids, ws.threads.len())
-    };
-    let mut rows = Vec::new();
-    for snapshot in app.snapshots(workspace, &ids, Some(since)).await? {
-        let summary = app.build_thread_summary_from_clone(snapshot.summary).await;
-        let requests = pending.remove(&summary.id).unwrap_or_default();
-        let flag = attention(&summary, &requests);
-        let last = snapshot
-            .digest
-            .as_ref()
-            .and_then(|d| d.last_item_at)
-            .map_or(summary.updated_at, |at| at.max(summary.updated_at));
-        let change = match &snapshot.digest {
-            Some(d) if d.scanned > 0 => delta(d),
-            _ => format!(
-                "updated{}",
-                summary
-                    .last_message_preview
-                    .as_deref()
-                    .map(|p| format!("; preview: {}", line(p, 160)))
-                    .unwrap_or_default()
-            ),
+    let multi = scope.len() > 1;
+    app.refresh_excerpts().await;
+    let (mut rows, mut total) = (Vec::new(), 0);
+    for workspace in scope {
+        let mut pending = app.pending_requests(workspace).await;
+        let (project, ids, count) = {
+            let workspaces = app.inner.workspaces.lock().await;
+            let ws = workspaces
+                .get(workspace)
+                .ok_or_else(|| DaemonError::NotFound("workspace not found".into()))?;
+            let ids: Vec<String> = ws
+                .threads
+                .values()
+                .filter(|t| {
+                    t.summary.id != caller && (args.include_archived || !t.summary.is_archived)
+                })
+                .filter(|t| {
+                    t.summary.updated_at > since
+                        || t.items.last().is_some_and(|i| item_created_at(i) > since)
+                        || pending
+                            .get(&t.summary.id)
+                            .is_some_and(|r| r.iter().any(|r| r.created_at > since))
+                })
+                .map(|t| t.summary.id.clone())
+                .collect();
+            let count = ws
+                .threads
+                .values()
+                .filter(|t| {
+                    t.summary.id != caller && (args.include_archived || !t.summary.is_archived)
+                })
+                .count();
+            (
+                glance::project_name(&ws.summary.path).to_string(),
+                ids,
+                count,
+            )
         };
-        let row = format!(
-            "- {}{} (`{}`) — {}, {} ({}): {}",
-            flag.as_deref()
-                .map(|f| format!("**{}** ", line(f, 200)))
-                .unwrap_or_default(),
-            line(&summary.title, 120),
-            line(&summary.id, 128),
-            status_name(&summary.status),
-            stamp(last),
-            ago(last, now),
-            change
-        );
-        rows.push((flag.is_some(), last, row));
+        total += count;
+        for snapshot in app.snapshots(workspace, &ids, Some(since)).await? {
+            let summary = app.build_thread_summary_from_clone(snapshot.summary).await;
+            let requests = pending.remove(&summary.id).unwrap_or_default();
+            let flag = attention(&summary, &requests);
+            let last = snapshot
+                .digest
+                .as_ref()
+                .and_then(|d| d.last_item_at)
+                .map_or(summary.updated_at, |at| at.max(summary.updated_at));
+            let mut extra = Vec::new();
+            if let Some(flag) = &flag {
+                extra.push(line(flag, 300));
+            }
+            if let Some(d) = snapshot.digest.as_ref().filter(|d| d.scanned > 0) {
+                extra.push(delta(d));
+            }
+            let mut shown = summary.clone();
+            shown.updated_at = last;
+            let cx = RowContext {
+                now,
+                caller,
+                project: multi.then_some(project.as_str()),
+                folder: None,
+                excerpts: true,
+            };
+            let row = glance::row(&shown, &snapshot.glance, &cx, &extra);
+            rows.push((flag.is_some(), last, row));
+        }
     }
     // Blocked threads first, then most recent.
     rows.sort_by(|a, b| b.0.cmp(&a.0).then(b.1.cmp(&a.1)));
     let changed = rows.len();
     let mut markdown = format!(
-        "# Thread changes since {}\n\nNow: {} (pass as since next time)\nChanged: {changed} of {} threads, excluding this thread{}.\n\n",
+        "# Changes since {}\nNow: {} (pass as since next time)\n{changed} of {total} threads changed{}{}.\n\n",
         stamp(since),
         // Exact, so a follow-up window neither repeats nor skips this instant.
         now.to_rfc3339_opts(chrono::SecondsFormat::AutoSi, true),
-        total.saturating_sub(1),
-        if args.include_archived {
-            ""
+        if multi {
+            format!(" across {} projects", scope.len())
         } else {
-            " and archived threads"
+            String::new()
+        },
+        if args.include_archived {
+            ", not counting you"
+        } else {
+            ", not counting you or archived threads"
         }
     );
     let mut shown = 0;
@@ -936,17 +1025,13 @@ pub(super) async fn changes(
             break;
         }
         markdown.push_str(row);
-        markdown.push('\n');
         shown += 1;
     }
-    if changed == 0 {
-        markdown.push_str("No thread activity in this window.\n");
-    } else if shown < changed {
+    if shown < changed {
         markdown.push_str(&format!(
-            "\nShown {shown} of {changed}. Raise limit/max_chars or narrow since.\n"
+            "\nShown {shown} of {changed}. Raise limit or max_chars, or narrow since.\n"
         ));
     }
-    markdown.push_str("Use falcondeck_thread_summary for detail.\n");
     Ok(capped(&markdown, cap))
 }
 
@@ -974,6 +1059,58 @@ mod tests {
         for bad in ["", "m", "15", "15w", "-1h", "999999d", "yesterday"] {
             assert!(parse_since(bad, now).is_err(), "{bad}");
         }
+    }
+
+    #[test]
+    fn code_mode_exec_scripts_report_commits_and_tests() {
+        let script = |i: usize, code: i32, output: &str| {
+            json!({"i":i, "status":"fulfilled", "value":{"exit_code":code, "output":output}})
+                .to_string()
+        };
+        let output = format!(
+            "Script completed\nOutput:\n{}\n{}\n{}",
+            script(
+                0,
+                0,
+                "[main cb948cd1] Quiet notices\n 7 files changed, 9 insertions(+)\n"
+            ),
+            script(
+                1,
+                0,
+                "running 55 tests\ntest result: ok. 55 passed; 0 failed\n"
+            ),
+            // A file that merely quotes commit output is not a commit.
+            script(2, 0, "[main 2896d18] Add Chrome action\nfn main() {}\n"),
+        );
+        let items: Vec<ConversationItem> = vec![
+            serde_json::from_value(json!({
+                "kind":"tool_call", "id":"x1", "title":"exec", "tool_kind":"command",
+                "status":"completed", "output":output, "created_at":Utc::now()
+            }))
+            .unwrap(),
+            serde_json::from_value(json!({
+                "kind":"tool_call", "id":"x2", "title":"/bin/zsh -lc 'npx tsc --noEmit'",
+                "tool_kind":"command", "status":"completed", "exit_code":0, "created_at":Utc::now()
+            }))
+            .unwrap(),
+        ];
+        let d = digest(&items, None, "/repo");
+        assert_eq!(
+            d.commits,
+            [("cb948cd1".to_string(), "Quiet notices".to_string())]
+        );
+        let line = checks_line(&d.checks);
+        assert!(
+            line.contains("tests passed (`exec`)")
+                && line.contains("typecheck passed (`npx tsc --noEmit`)"),
+            "{line}"
+        );
+        assert_eq!(unwrap_shell("bash -c \"cargo test\""), "cargo test");
+        assert_eq!(unwrap_shell("cargo test"), "cargo test");
+        assert_eq!(
+            unwrap_shell("/bin/zsh -lc 'cd /repo && cargo test -p x'"),
+            "cargo test -p x"
+        );
     }
 
     #[test]

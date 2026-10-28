@@ -416,27 +416,45 @@ impl AppState {
     }
 
     pub(super) async fn bot_context(&self, thread: &str) -> Option<String> {
+        /// Repeated on every turn, so only the most recently active projects.
+        const LISTED_PROJECTS: usize = 12;
         let bot = self.bot_for_thread(thread).await?;
-        let projects: Vec<_> = self
+        let mut projects: Vec<_> = self
             .inner
             .workspaces
             .lock()
             .await
             .values()
             .filter(|ws| ws.summary.kind == falcondeck_core::WorkspaceKind::Project)
-            .map(|ws| json!({"workspace_id": ws.summary.id, "path": ws.summary.path}))
-            .take(100)
+            .filter(|ws| !(bot.dedicated_workspace && ws.summary.id == bot.workspace_id))
+            .map(|ws| {
+                let last = ws.threads.values().map(|t| t.summary.updated_at).max();
+                (last, ws.summary.id.clone(), ws.summary.path.clone())
+            })
             .collect();
+        projects.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.2.cmp(&b.2)));
+        let total = projects.len();
+        let mut listed: String = projects
+            .iter()
+            .take(LISTED_PROJECTS)
+            .map(|(_, id, path)| format!("\n- {path} (`{id}`)"))
+            .collect();
+        if total > LISTED_PROJECTS {
+            listed.push_str(&format!(
+                "\n- …{} older projects; workspace_id also accepts a project name or path.",
+                total - LISTED_PROJECTS
+            ));
+        }
         let documents = self.bot_documents(&bot.id).await.unwrap_or_default();
         Some(format!(
-            "# FalconDeck bot: {}\n\n{}\n\n## Your instructions\n{}\n\nDocument space: {}\nDocuments: {}\nRead relevant documents directly from this space.\nMay start tasks: {}. This restricts FalconDeck task creation; it is not an operating-system sandbox.\nUse workspace_id on coordination tools to select a project.\nProjects: {}",
+            "# FalconDeck bot: {}\n\n{}\n\n## Your instructions\n{}\n\nDocument space: {}\nDocuments: {}\nRead relevant documents directly from this space.\nMay start tasks: {}. This restricts FalconDeck task creation; it is not an operating-system sandbox.\nProjects, most recently active first:{}",
             bot.name,
             BOT_DEFAULT_INSTRUCTIONS,
             bot.instructions,
             bot.space_path,
             json!(documents),
             bot.can_start_threads,
-            json!(projects)
+            listed
         ))
     }
 }

@@ -81,9 +81,11 @@ const MAX_MESSAGE_CHARS: usize = 400;
 const SNIPPET_CHARS: usize = 180;
 /// Hard cap on matches returned regardless of the caller's limit.
 pub(crate) const MAX_MATCHES: usize = 40;
+/// Bumped when excerpts gain fields, so unchanged files are read once more.
+const EXCERPT_VERSION: u8 = 1;
 
 /// Indexed message excerpts for one provider session.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub(crate) struct SessionExcerpt {
     /// Absolute path the excerpt came from, for incremental rescans.
     pub path: PathBuf,
@@ -95,11 +97,16 @@ pub(crate) struct SessionExcerpt {
     pub opening: Vec<String>,
     /// Last user messages in the session, oldest first.
     pub recent: Vec<String>,
+    /// Assistant text after the last user message: the latest outcome.
+    #[serde(default)]
+    pub latest_reply: Option<String>,
+    #[serde(default)]
+    pub version: u8,
 }
 
 impl SessionExcerpt {
     fn is_current(&self, modified_ms: u64, size: u64) -> bool {
-        self.modified_ms == modified_ms && self.size == size
+        self.modified_ms == modified_ms && self.size == size && self.version == EXCERPT_VERSION
     }
 }
 
@@ -289,14 +296,20 @@ fn excerpt_from_file(path: &Path) -> std::io::Result<ScannedFile> {
             empty_fingerprint: None,
         });
     }
-    let (opening, recent) = {
+    let (
+        opening,
+        Tail {
+            messages: recent,
+            reply,
+        },
+    ) = {
         #[cfg(test)]
         let mut reader = CountedSource(&mut file);
         #[cfg(not(test))]
         let mut reader = &mut file;
         (
             read_opening(&mut reader, size)?,
-            read_recent(&mut reader, size)?,
+            read_tail(&mut reader, size)?,
         )
     };
     let recent = if recent.is_empty() {
@@ -321,6 +334,8 @@ fn excerpt_from_file(path: &Path) -> std::io::Result<ScannedFile> {
             size,
             opening: opening.into_iter().take(MESSAGES_PER_END).collect(),
             recent,
+            latest_reply: reply,
+            version: EXCERPT_VERSION,
         }),
         empty_fingerprint: None,
     })
@@ -353,10 +368,22 @@ fn read_opening(file: &mut (impl Read + Seek), size: u64) -> std::io::Result<Vec
     Ok(messages)
 }
 
+#[cfg(test)]
+fn read_recent(file: &mut (impl Read + Seek), size: u64) -> std::io::Result<Vec<String>> {
+    read_tail(file, size).map(|tail| tail.messages)
+}
+
+/// User messages from a slice, plus the assistant text that followed the last one.
+#[derive(Default)]
+struct Tail {
+    messages: Vec<String>,
+    reply: Option<String>,
+}
+
 /// Reads backward from EOF, doubling the window until user messages appear. A
 /// single agentic turn can bury the last prompt under megabytes of tool output,
 /// so a fixed tail is empty exactly on the busiest threads.
-fn read_recent(file: &mut (impl Read + Seek), size: u64) -> std::io::Result<Vec<String>> {
+fn read_tail(file: &mut (impl Read + Seek), size: u64) -> std::io::Result<Tail> {
     let mut window = TAIL_BYTES;
     loop {
         let start = size.saturating_sub(window);
@@ -368,8 +395,8 @@ fn read_recent(file: &mut (impl Read + Seek), size: u64) -> std::io::Result<Vec<
         file.take(window + probe).read_to_end(&mut buffer)?;
         // Empty means this window is past the current end, so widen. A short
         // read still ends at EOF: its first byte is the boundary for the rest.
-        let messages = if buffer.is_empty() {
-            Vec::new()
+        let tail = if buffer.is_empty() {
+            Tail::default()
         } else {
             let (body, skip_first_line) = if probe == 1 {
                 (&buffer[1..], buffer[0] != b'\n')
@@ -377,10 +404,13 @@ fn read_recent(file: &mut (impl Read + Seek), size: u64) -> std::io::Result<Vec<
                 (&buffer[..], false)
             };
             let text = String::from_utf8_lossy(body);
-            user_messages(&text, true, skip_first_line)
+            scan_lines(&text, true, skip_first_line)
         };
-        if !messages.is_empty() || start == 0 || window >= TAIL_BUDGET_BYTES {
-            return Ok(last_messages(&messages));
+        if !tail.messages.is_empty() || start == 0 || window >= TAIL_BUDGET_BYTES {
+            return Ok(Tail {
+                messages: last_messages(&tail.messages),
+                reply: tail.reply,
+            });
         }
         window = window.saturating_mul(2);
     }
@@ -410,7 +440,12 @@ fn user_message_text_from_line(line: &str, previous: Option<&String>) -> Option<
     Some(text)
 }
 
+#[cfg(test)]
 fn user_messages(text: &str, complete_tail: bool, skip_first_line: bool) -> Vec<String> {
+    scan_lines(text, complete_tail, skip_first_line).messages
+}
+
+fn scan_lines(text: &str, complete_tail: bool, skip_first_line: bool) -> Tail {
     let mut lines = text.lines().collect::<Vec<_>>();
     if !complete_tail {
         lines.pop();
@@ -419,13 +454,77 @@ fn user_messages(text: &str, complete_tail: bool, skip_first_line: bool) -> Vec<
         lines.remove(0);
     }
 
-    let mut messages: Vec<String> = Vec::new();
+    let mut tail = Tail::default();
     for line in lines {
-        if let Some(text) = user_message_text_from_line(line, messages.last()) {
-            messages.push(text);
+        if let Some(text) = user_message_text_from_line(line, tail.messages.last()) {
+            tail.messages.push(text);
+            tail.reply = None;
+        } else if let Some(reply) = assistant_text_from_line(line) {
+            tail.reply = Some(reply);
         }
     }
-    messages
+    tail
+}
+
+fn assistant_text_from_line(line: &str) -> Option<String> {
+    let line = line.trim();
+    // Cheap reject before parsing the many tool and event records.
+    if !line.starts_with('{') || !line.contains("assistant") && !line.contains("agent_message") {
+        return None;
+    }
+    let value = serde_json::from_str::<MessageValue>(line).ok()?;
+    assistant_message_text(&value)
+}
+
+/// Visible assistant prose from one transcript line; tool use and thinking are skipped.
+fn assistant_message_text(value: &MessageValue<'_>) -> Option<String> {
+    let blocks = |content: &MessageValue<'_>, kind: &str| -> Option<String> {
+        if let Some(text) = content.as_str() {
+            return Some(text.to_string());
+        }
+        let parts: Vec<&str> = content
+            .as_array()?
+            .iter()
+            .filter(|block| block.get("type").and_then(MessageValue::as_str) == Some(kind))
+            .filter_map(|block| block.get("text").and_then(MessageValue::as_str))
+            .collect();
+        (!parts.is_empty()).then(|| parts.join("\n"))
+    };
+    let text = match value.get("type").and_then(MessageValue::as_str)? {
+        // Claude Code and Grok transcripts share this envelope.
+        "assistant" => {
+            if value.get("isSidechain").and_then(MessageValue::as_bool) == Some(true) {
+                return None;
+            }
+            let content = value
+                .get("message")
+                .and_then(|message| message.get("content"))
+                .or_else(|| value.get("content"))?;
+            blocks(content, "text")?
+        }
+        "event_msg" => {
+            let payload = value.get("payload")?;
+            if payload.get("type").and_then(MessageValue::as_str) != Some("agent_message") {
+                return None;
+            }
+            payload
+                .get("message")
+                .and_then(MessageValue::as_str)?
+                .to_string()
+        }
+        "response_item" => {
+            let payload = value.get("payload")?;
+            if payload.get("type").and_then(MessageValue::as_str) != Some("message")
+                || payload.get("role").and_then(MessageValue::as_str) != Some("assistant")
+            {
+                return None;
+            }
+            blocks(payload.get("content")?, "output_text")?
+        }
+        _ => return None,
+    };
+    let text = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    (!text.is_empty()).then(|| truncate_chars(&text, MAX_MESSAGE_CHARS))
 }
 
 /// Pulls the operator's own words out of one transcript line, or `None` when
@@ -498,7 +597,7 @@ fn user_message_text(value: &MessageValue<'_>) -> Option<String> {
 const GROK_IGNORED_FILES: [&str; 3] = ["events.jsonl", "updates.jsonl", "rewind_points.jsonl"];
 
 fn clean_message(text: &str) -> Option<String> {
-    let text = super::harness_user_text::visible_user_prompt(text)?;
+    let text = super::harness_user_text::typed_user_prompt(text)?;
     let text = crate::codex::sanitize_codex_preview(&text)?;
     let mut cleaned = String::with_capacity(text.len().min(MAX_MESSAGE_CHARS * 2));
     let mut last_was_space = false;
@@ -761,6 +860,64 @@ mod tests {
         );
     }
 
+    #[test]
+    fn keeps_only_the_reply_that_follows_the_last_prompt() {
+        let codex_reply = |text: &str| {
+            serde_json::json!({
+                "type": "response_item",
+                "payload": { "type": "message", "role": "assistant",
+                    "content": [{ "type": "output_text", "text": text }] },
+            })
+            .to_string()
+        };
+        let claude_reply = |text: &str, sidechain: bool| {
+            serde_json::json!({
+                "type": "assistant", "isSidechain": sidechain,
+                "message": { "content": [
+                    { "type": "thinking", "thinking": "hidden" },
+                    { "type": "text", "text": text },
+                ] },
+            })
+            .to_string()
+        };
+        let transcript = [
+            claude_line("first"),
+            codex_reply("old answer"),
+            claude_line("second"),
+            claude_reply("Shipped   the\nfix.", false),
+            claude_reply("subagent chatter", true),
+            serde_json::json!({
+                "type": "assistant",
+                "message": { "content": [{ "type": "tool_use", "name": "Bash" }] },
+            })
+            .to_string(),
+        ]
+        .join("\n");
+        let tail = scan_lines(&transcript, true, false);
+        assert_eq!(tail.reply.as_deref(), Some("Shipped the fix."));
+        let event = serde_json::json!({
+            "type": "event_msg", "payload": { "type": "agent_message", "message": "codex done" },
+        });
+        let tail = scan_lines(&format!("{transcript}\n{event}"), true, false);
+        assert_eq!(tail.reply.as_deref(), Some("codex done"));
+        // FalconDeck's resume prompt is neither a request nor a reset.
+        let resume = serde_json::json!({
+            "type": "event_msg",
+            "payload": { "type": "user_message",
+                "message": super::super::harness_user_text::shutdown_resume_user_text() },
+        });
+        let tail = scan_lines(&format!("{transcript}\n{resume}\n{event}"), true, false);
+        assert_eq!(tail.messages, ["first", "second"]);
+        assert_eq!(tail.reply.as_deref(), Some("codex done"));
+        // A newer prompt without an answer yet clears the reply.
+        let tail = scan_lines(
+            &format!("{transcript}\n{}", claude_line("third")),
+            true,
+            false,
+        );
+        assert_eq!(tail.reply, None);
+    }
+
     fn assistant_line(content: &str) -> String {
         format!(
             "{}\n",
@@ -843,6 +1000,7 @@ mod tests {
                 size: 1,
                 opening: vec!["make the waveform render full width".to_string()],
                 recent: vec!["ship it".to_string()],
+                ..Default::default()
             },
         );
         sessions.insert(
@@ -853,6 +1011,7 @@ mod tests {
                 size: 1,
                 opening: vec!["unrelated opening".to_string()],
                 recent: vec!["the waveform is still clipped".to_string()],
+                ..Default::default()
             },
         );
         let index = ThreadSearchIndex {

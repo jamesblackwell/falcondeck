@@ -1,5 +1,6 @@
 //! Coordinator actions over existing daemon operations: organize, interrupt,
 //! answer a child's question, a short bounded wait, and parent notifications.
+use super::glance;
 use super::*;
 use falcondeck_core::{
     InteractiveRequest, InteractiveRequestKind, InteractiveResponsePayload, ProjectFolderAction,
@@ -33,7 +34,7 @@ pub(super) fn catalog() -> Vec<Entry> {
         (
             WAIT,
             "Wait for thread",
-            "Wait up to wait_seconds (default 20, max 25) for a thread in this workspace to stop running, then report its status, last preview/error, and pending requests with the request and question ids falcondeck_answer_question needs. For longer work, read summaries at natural checkpoints. Enable notify_parent only for critical updates or at the user's explicit request.",
+            "Wait up to wait_seconds (default 20, max 25) for a thread to stop running, then report its state, last request and reply, and pending requests with the ids falcondeck_answer_question needs. For longer work, check summaries at natural checkpoints instead of waiting repeatedly.",
             json!({
                 "thread_id": {"type":"string", "minLength":1},
                 "wait_seconds": {"type":"integer", "minimum":0, "maximum":MAX_WAIT_SECS, "default":20}
@@ -250,25 +251,38 @@ impl AppState {
                     }
                     tokio::time::sleep(WAIT_POLL).await;
                 };
+                let (thread, glance) = self.thread_glance(workspace, &thread.id).await?;
                 let mut text = format!(
-                    "# Thread status\n\n- Id: {}\n- Title: {}\n- Status: {}\n- Queued messages: {}\n- Archived: {}\n- Last preview: {}\n",
-                    line(&thread.id, 256),
-                    line(&thread.title, 256),
-                    status_name(&thread.status),
-                    thread.queued_turns.len(),
-                    thread.is_archived,
-                    line(thread.last_message_preview.as_deref().unwrap_or(""), 600)
+                    "# {} `{}`\n- {} · {}\n",
+                    line(&thread.title, 160),
+                    line(&thread.id, 128),
+                    glance::state(&thread),
+                    glance::ago(thread.updated_at, Utc::now()),
                 );
-                if let Some(error) = &thread.last_error {
-                    text.push_str(&format!("- Last error: {}\n", line(error, 600)));
+                let mut facts = Vec::new();
+                if !thread.queued_turns.is_empty() {
+                    facts.push(format!("{} queued", thread.queued_turns.len()));
+                }
+                if thread.is_archived {
+                    facts.push("archived".into());
                 }
                 if is_child_of(&thread, parent) {
-                    text.push_str("- Created by this thread\n");
+                    facts.push("your child".into());
+                }
+                if !facts.is_empty() {
+                    text.push_str(&format!("- {}\n", facts.join(" · ")));
+                }
+                if let Some(asked) = &glance.asked {
+                    text.push_str(&format!("- Asked: {}\n", line(asked, 300)));
+                }
+                if let Some(latest) = &glance.latest {
+                    text.push_str(&format!("- Latest: {}\n", line(latest, 600)));
+                }
+                if let Some(error) = &thread.last_error {
+                    text.push_str(&format!("- Error: {}\n", line(error, 600)));
                 }
                 if waited && is_busy(&thread) {
-                    text.push_str(
-                        "- Still running after the wait; read its summary at a natural checkpoint.\n",
-                    );
+                    text.push_str("- Still running; check back at a natural checkpoint.\n");
                 }
                 text.push_str(&pending_markdown(
                     &self.pending_thread_requests(workspace, &thread.id).await,
@@ -1034,7 +1048,7 @@ mod tests {
                 .unwrap(),
         );
         assert!(
-            running.contains("Status: running") && running.contains("Created by this thread"),
+            running.contains("- running · ") && running.contains("your child"),
             "{running}"
         );
         let settle = {
@@ -1053,7 +1067,7 @@ mod tests {
         );
         settle.await.unwrap();
         assert!(
-            idle.contains("Status: idle") && !idle.contains("Still running"),
+            idle.contains("- idle · ") && !idle.contains("Still running"),
             "{idle}"
         );
         assert!(started.elapsed() < std::time::Duration::from_secs(4));

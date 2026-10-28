@@ -1,14 +1,13 @@
-//! Filtered, sorted, paged workspace thread listing for in-session coordinators.
+//! Filtered, sorted, paged thread listing for in-session coordinators.
 //!
 //! Reads daemon summaries, transcript items already in memory, and the cached
 //! search-index excerpts. It never hydrates native history.
+use super::glance::{self, Glance, RowContext};
 use super::*;
 use chrono::{DateTime, Duration};
 use std::path::Path;
 
-const DEFAULT_LIMIT: usize = 30;
-const PREVIEW_CHARS: usize = 300;
-const EXCERPT_CHARS: usize = 240;
+const DEFAULT_LIMIT: usize = 20;
 
 #[derive(Deserialize, Default, Clone, Copy, PartialEq)]
 #[serde(rename_all = "snake_case")]
@@ -35,6 +34,14 @@ enum Archived {
     Exclude,
     Include,
     Only,
+}
+
+#[derive(Deserialize, Default, Clone, Copy, PartialEq)]
+#[serde(rename_all = "snake_case")]
+enum Detail {
+    Brief,
+    #[default]
+    Normal,
 }
 
 #[derive(Deserialize, Clone, Copy, PartialEq)]
@@ -66,12 +73,16 @@ pub(super) struct ListArgs {
     #[serde(default)]
     sort: Sort,
     order: Option<Order>,
+    #[serde(default)]
+    detail: Detail,
     status: Option<OneOrMany<Status>>,
     provider: Option<String>,
     folder: Option<String>,
+    parent: Option<String>,
     #[serde(default)]
     archived: Archived,
     pinned: Option<bool>,
+    /// Superseded by `status: awaiting_approval`; still accepted.
     has_pending_approval: Option<bool>,
     updated_since: Option<String>,
     updated_before: Option<String>,
@@ -82,80 +93,60 @@ pub(super) fn schema() -> Value {
     let status = json!({"type":"string", "enum":["idle","running","waiting_for_input","error","awaiting_approval"]});
     json!({
         "limit": {"type":"integer", "minimum":1, "maximum":100, "default":DEFAULT_LIMIT},
-        "max_chars": {"type":"integer", "minimum":512, "maximum":24000, "default":24000},
-        "offset": {"type":"integer", "minimum":0, "default":0, "description":"Skip this many matching threads. Follow the returned next offset; keep sort and filters unchanged."},
-        "sort": {"type":"string", "enum":["updated","created","title"], "default":"updated", "description":"updated = last activity. created = native session start, best effort; unknown sorts last."},
-        "order": {"type":"string", "enum":["asc","desc"], "description":"Defaults to desc for updated/created and asc for title."},
-        "status": {"anyOf":[status, {"type":"array", "items":status, "minItems":1}], "description":"Match any. awaiting_approval = pending approvals or questions."},
-        "provider": {"type":"string", "minLength":1, "description":"Provider id, e.g. claude or codex."},
-        "folder": {"type":"string", "minLength":1, "description":"Project folder name or id (case-insensitive)."},
-        "archived": {"type":"string", "enum":["exclude","include","only"], "default":"exclude"},
+        "offset": {"type":"integer", "minimum":0, "description":"Next page: pass the returned offset with the same filters."},
+        "detail": {"type":"string", "enum":["brief","normal"], "default":"normal", "description":"brief drops the Asked/Latest lines."},
+        "status": {"anyOf":[status, {"type":"array", "items":status, "minItems":1}], "description":"Match any. awaiting_approval = pending approval or question."},
+        "updated_since": {"type":"string", "description":"RFC 3339, YYYY-MM-DD, or an age like 30m, 24h, 7d."},
+        "updated_before": {"type":"string"},
+        "query": {"type":"string", "minLength":1, "maxLength":256, "description":"Case-insensitive literal match on title, id, and message excerpts."},
+        "parent": {"type":"string", "minLength":1, "description":"Only threads created by this thread id; \"self\" for your own."},
+        "provider": {"type":"string", "minLength":1},
+        "folder": {"type":"string", "minLength":1, "description":"Project folder name or id."},
         "pinned": {"type":"boolean"},
-        "has_pending_approval": {"type":"boolean"},
-        "updated_since": {"type":"string", "description":"RFC 3339 timestamp, YYYY-MM-DD, or relative age like 30m, 24h, 7d, 2w."},
-        "updated_before": {"type":"string", "description":"Same formats as updated_since."},
-        "query": {"type":"string", "minLength":1, "maxLength":256, "description":"Case-insensitive literal match on title, id, previews, and cached user excerpts."}
+        "archived": {"type":"string", "enum":["exclude","include","only"], "default":"exclude"},
+        "sort": {"type":"string", "enum":["updated","created","title"], "default":"updated"},
+        "order": {"type":"string", "enum":["asc","desc"]},
+        "max_chars": {"type":"integer", "minimum":512, "maximum":MAX_CHARS, "default":MAX_CHARS}
     })
 }
 
 /// Everything one entry needs, captured without holding locks across awaits.
 struct Row {
     summary: ThreadSummary,
+    project: Option<String>,
     folder: Option<String>,
-    /// Latest assistant then user text from items already in memory.
-    memory_assistant: Option<String>,
-    memory_user: Option<String>,
+    glance: Glance,
     memory_started: Option<DateTime<Utc>>,
-    opening: Option<String>,
-    recent: Option<String>,
     session_path: Option<PathBuf>,
     started: Option<DateTime<Utc>>,
 }
 
 impl Row {
-    fn preview(&self) -> (&'static str, Option<&str>) {
-        fn nonempty(text: &Option<String>) -> Option<&str> {
-            text.as_deref().filter(|text| !text.trim().is_empty())
-        }
-        if let Some(text) = nonempty(&self.summary.last_message_preview) {
-            ("Last preview", Some(text))
-        } else if let Some(text) = nonempty(&self.memory_assistant) {
-            ("Last assistant", Some(text))
-        } else if let Some(text) = nonempty(&self.memory_user) {
-            ("Last user", Some(text))
-        } else if let Some(text) = nonempty(&self.recent) {
-            ("Recent user", Some(text))
-        } else if let Some(text) = nonempty(&self.opening) {
-            ("Opening user", Some(text))
-        } else {
-            ("Last preview", None)
-        }
-    }
-
     fn matches_query(&self, needle: &str) -> bool {
         let summary = &self.summary;
         [
             Some(summary.title.as_str()),
             Some(summary.id.as_str()),
             summary.last_message_preview.as_deref(),
-            self.memory_assistant.as_deref(),
-            self.memory_user.as_deref(),
-            self.opening.as_deref(),
-            self.recent.as_deref(),
             summary.goal.as_ref().map(|g| g.objective.as_str()),
         ]
         .into_iter()
         .flatten()
         .any(|text| text.to_lowercase().contains(needle))
+            || self.glance.matches(needle)
     }
 }
 
-fn bad(message: impl Into<String>) -> DaemonError {
+pub(super) fn bad(message: impl Into<String>) -> DaemonError {
     DaemonError::BadRequest(message.into())
 }
 
 /// Accepts RFC 3339, a bare UTC date, or a relative age (`90s`, `30m`, `24h`, `7d`, `2w`).
-fn parse_time(field: &str, value: &str, now: DateTime<Utc>) -> Result<DateTime<Utc>, DaemonError> {
+pub(super) fn parse_time(
+    field: &str,
+    value: &str,
+    now: DateTime<Utc>,
+) -> Result<DateTime<Utc>, DaemonError> {
     let value = value.trim();
     if let Ok(time) = DateTime::parse_from_rfc3339(value) {
         return Ok(time.with_timezone(&Utc));
@@ -187,44 +178,14 @@ fn parse_time(field: &str, value: &str, now: DateTime<Utc>) -> Result<DateTime<U
     )))
 }
 
-fn ago(time: DateTime<Utc>, now: DateTime<Utc>) -> String {
-    let seconds = (now - time).num_seconds().max(0);
-    match seconds {
-        0..60 => format!("{seconds}s ago"),
-        60..3600 => format!("{}m ago", seconds / 60),
-        3600..86_400 => format!("{}h ago", seconds / 3600),
-        _ => format!("{}d ago", seconds / 86_400),
-    }
-}
-
-fn stamp(time: DateTime<Utc>, now: DateTime<Utc>) -> String {
-    format!(
-        "{} ({})",
-        time.to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
-        ago(time, now)
-    )
-}
-
-fn status_name(status: &ThreadStatus) -> &'static str {
-    match status {
-        ThreadStatus::Idle => "idle",
-        ThreadStatus::Running => "running",
-        ThreadStatus::WaitingForInput => "waiting_for_input",
-        ThreadStatus::Error => "error",
-    }
-}
-
-fn pending(summary: &ThreadSummary) -> bool {
-    summary.attention.pending_approval_count > 0 || summary.attention.pending_question_count > 0
-}
-
-fn status_matches(summary: &ThreadSummary, status: Status) -> bool {
+/// `pending` comes from the live request map; stored summary counts go stale.
+fn status_matches(summary: &ThreadSummary, status: Status, pending: bool) -> bool {
     match status {
         Status::Idle => summary.status == ThreadStatus::Idle,
         Status::Running => summary.status == ThreadStatus::Running,
         Status::WaitingForInput => summary.status == ThreadStatus::WaitingForInput,
         Status::Error => summary.status == ThreadStatus::Error,
-        Status::AwaitingApproval => pending(summary),
+        Status::AwaitingApproval => pending,
     }
 }
 
@@ -235,86 +196,27 @@ fn session_started(path: &Path) -> Option<DateTime<Utc>> {
         .map(DateTime::<Utc>::from)
 }
 
-fn entry(row: &Row, now: DateTime<Utc>) -> String {
-    let t = &row.summary;
-    let mut text = format!(
-        "## {}\n\n- Id: {} | Provider: {} | Status: {} | Updated: {}\n",
-        line(&t.title, 256),
-        line(&t.id, 256),
-        t.provider,
-        status_name(&t.status),
-        stamp(t.updated_at, now),
-    );
-    let attention = &t.attention;
-    let mut facts = Vec::new();
-    if let Some(started) = row.started {
-        facts.push(format!("Started: {}", stamp(started, now)));
-    }
-    if let Some(folder) = &row.folder {
-        facts.push(format!("Folder: {}", line(folder, 120)));
-    }
-    if let Some(variant) = &t.variant {
-        facts.push(format!("Isolated: {}", line(&variant.branch, 120)));
-    }
-    if t.is_pinned || t.is_pinned_in_project {
-        facts.push("Pinned".into());
-    }
-    if t.is_archived {
-        facts.push("Archived".into());
-    }
-    for (label, count) in [
-        ("Pending approvals", attention.pending_approval_count),
-        ("Pending questions", attention.pending_question_count),
-        ("Background tasks", attention.background_task_count),
-        ("Queued turns", t.queued_turns.len() as u32),
-    ] {
-        if count > 0 {
-            facts.push(format!("{label}: {count}"));
-        }
-    }
-    if attention.unread {
-        facts.push("Unread".into());
-    }
-    if let Some(ThreadOrigin::AgentSpawn { parent_thread_id }) = &t.origin {
-        facts.push(format!("Parent: {}", line(parent_thread_id, 256)));
-    }
-    if !facts.is_empty() {
-        text.push_str(&format!("- {}\n", facts.join(" | ")));
-    }
-    if let Some(goal) = &t.goal {
-        text.push_str(&format!(
-            "- Goal: {}\n",
-            line(&goal.objective, EXCERPT_CHARS)
-        ));
-    }
-    let (label, preview) = row.preview();
-    text.push_str(&format!(
-        "- {label}: {}\n",
-        preview.map_or_else(|| "(none)".into(), |p| line(p, PREVIEW_CHARS))
-    ));
-    for (label, excerpt) in [("Opening user", &row.opening), ("Recent user", &row.recent)] {
-        if let Some(excerpt) = excerpt.as_deref().filter(|e| Some(*e) != preview) {
-            text.push_str(&format!("- {label}: {}\n", line(excerpt, EXCERPT_CHARS)));
-        }
-    }
-    if t.status == ThreadStatus::Error
-        && let Some(error) = &t.last_error
-    {
-        text.push_str(&format!("- Last error: {}\n", line(error, EXCERPT_CHARS)));
-    }
-    text.push('\n');
-    text
+/// Counts over every unarchived thread in scope, independent of filters.
+#[derive(Default)]
+struct Overview {
+    total: usize,
+    running: usize,
+    needs_user: usize,
+    errored: usize,
+    recent: usize,
 }
 
 pub(super) async fn list(
     app: &AppState,
-    workspace: &str,
+    scope: &[String],
+    caller: &str,
     args: ListArgs,
 ) -> Result<String, DaemonError> {
     let now = Utc::now();
     let cap = args.max_chars.unwrap_or(MAX_CHARS).clamp(512, MAX_CHARS);
     let limit = args.limit.unwrap_or(DEFAULT_LIMIT).clamp(1, MAX_ITEMS);
     let offset = args.offset.unwrap_or(0);
+    let multi = scope.len() > 1;
     let since = args
         .updated_since
         .as_deref()
@@ -340,14 +242,23 @@ pub(super) async fn list(
         }
         Some(OneOrMany::Many(statuses)) => statuses,
     };
+    let parent = match args.parent.as_deref().map(str::trim) {
+        Some("") => return Err(bad("parent must be nonempty")),
+        Some("self") => Some(caller.to_string()),
+        Some(id) => Some(id.to_string()),
+        None => None,
+    };
     let folders: Vec<_> = app
         .preferences()
         .await
         .project_folders
         .into_iter()
-        .filter(|f| f.workspace_id == workspace)
+        .filter(|f| scope.contains(&f.workspace_id))
         .collect();
     let folder_filter = match args.folder.as_deref().map(str::trim) {
+        Some(_) if multi => {
+            return Err(bad("folder needs a single project; pass workspace_id"));
+        }
         Some("") => return Err(bad("folder must be nonempty")),
         Some(wanted) => Some(
             folders
@@ -370,51 +281,77 @@ pub(super) async fn list(
             .find(|f| f.thread_ids.iter().any(|t| t == id))
     };
 
-    let (project, total, mut rows) = {
+    app.refresh_excerpts().await;
+    let counts = app.attention_counts().await;
+    let mut overview = Overview::default();
+    let (projects, mut rows) = {
         let workspaces = app.inner.workspaces.lock().await;
-        let ws = workspaces
-            .get(workspace)
-            .ok_or_else(|| DaemonError::NotFound("workspace not found".into()))?;
-        let rows: Vec<Row> = ws
-            .threads
-            .values()
-            .filter(|thread| {
+        let index = app
+            .inner
+            .thread_search
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let mut projects = Vec::new();
+        let mut rows = Vec::new();
+        for id in scope {
+            let ws = workspaces
+                .get(id)
+                .ok_or_else(|| DaemonError::NotFound("workspace not found".into()))?;
+            let project = glance::project_name(&ws.summary.path).to_string();
+            projects.push((project.clone(), ws.summary.path.clone()));
+            for thread in ws.threads.values() {
+                if thread.summary.id == caller {
+                    continue;
+                }
                 let t = &thread.summary;
-                (match args.archived {
+                let (approvals, questions) = counts
+                    .get(&(id.clone(), t.id.clone()))
+                    .copied()
+                    .unwrap_or_default();
+                let pending = approvals + questions > 0;
+                if !t.is_archived {
+                    overview.total += 1;
+                    overview.running += usize::from(t.status == ThreadStatus::Running);
+                    overview.needs_user +=
+                        usize::from(pending || t.status == ThreadStatus::WaitingForInput);
+                    overview.errored += usize::from(t.status == ThreadStatus::Error);
+                    overview.recent += usize::from(now - t.updated_at < Duration::hours(24));
+                }
+                let keep = (match args.archived {
                     Archived::Exclude => !t.is_archived,
                     Archived::Include => true,
                     Archived::Only => t.is_archived,
                 }) && args
                     .pinned
                     .is_none_or(|p| p == (t.is_pinned || t.is_pinned_in_project))
-                    && args.has_pending_approval.is_none_or(|p| p == pending(t))
-                    && (statuses.is_empty() || statuses.iter().any(|s| status_matches(t, *s)))
+                    && args.has_pending_approval.is_none_or(|p| p == pending)
+                    && (statuses.is_empty()
+                        || statuses.iter().any(|s| status_matches(t, *s, pending)))
                     && args
                         .provider
                         .as_deref()
                         .is_none_or(|p| t.provider.as_str().eq_ignore_ascii_case(p.trim()))
                     && since.is_none_or(|since| t.updated_at >= since)
                     && before.is_none_or(|before| t.updated_at < before)
+                    && parent.as_deref().is_none_or(|parent| {
+                        matches!(&t.origin, Some(ThreadOrigin::AgentSpawn { parent_thread_id }) if parent_thread_id == parent)
+                    })
                     && folder_filter
                         .as_deref()
-                        .is_none_or(|wanted| folder_of(&t.id).is_some_and(|f| f.id == wanted))
-            })
-            .map(|thread| {
-                let text = |assistant: bool| {
-                    thread.items.iter().rev().find_map(|item| match item {
-                        ConversationItem::AssistantMessage { text, .. } if assistant => {
-                            Some(capped(text, PREVIEW_CHARS)).filter(|t| !t.trim().is_empty())
-                        }
-                        ConversationItem::UserMessage { text, .. } if !assistant => {
-                            Some(capped(text, PREVIEW_CHARS)).filter(|t| !t.trim().is_empty())
-                        }
-                        _ => None,
-                    })
-                };
-                Row {
-                    folder: folder_of(&thread.summary.id).map(|f| f.name.clone()),
-                    memory_assistant: text(true),
-                    memory_user: text(false),
+                        .is_none_or(|wanted| folder_of(&t.id).is_some_and(|f| f.id == wanted));
+                if !keep {
+                    continue;
+                }
+                let mut summary = t.clone();
+                refresh_thread_attention(&mut summary, approvals, questions);
+                let excerpt = summary
+                    .native_session_id
+                    .as_ref()
+                    .and_then(|session| index.sessions.get(session));
+                rows.push(Row {
+                    project: multi.then(|| project.clone()),
+                    folder: folder_of(&summary.id).map(|f| f.name.clone()),
+                    glance: Glance::of(thread, excerpt),
                     memory_started: thread.items.iter().find_map(|item| match item {
                         ConversationItem::UserMessage { created_at, .. }
                         | ConversationItem::AssistantMessage { created_at, .. } => {
@@ -422,47 +359,25 @@ pub(super) async fn list(
                         }
                         _ => None,
                     }),
-                    summary: thread.summary.clone(),
-                    opening: None,
-                    recent: None,
-                    session_path: None,
+                    session_path: excerpt.map(|e| e.path.clone()),
                     started: None,
-                }
-            })
-            .collect();
-        (ws.summary.path.clone(), ws.threads.len(), rows)
-    };
-    {
-        let index = app
-            .inner
-            .thread_search
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
-        for row in &mut rows {
-            if let Some(excerpt) = row
-                .summary
-                .native_session_id
-                .as_ref()
-                .and_then(|id| index.sessions.get(id))
-            {
-                row.opening = excerpt.opening.first().cloned();
-                row.recent = excerpt.recent.last().cloned();
-                row.session_path = Some(excerpt.path.clone());
+                    summary,
+                });
             }
         }
-    }
+        (projects, rows)
+    };
     if let Some(needle) = &needle {
         rows.retain(|row| row.matches_query(needle));
     }
-    let resolve_started = |row: &mut Row| {
-        row.started = row
-            .session_path
-            .as_deref()
-            .and_then(session_started)
-            .or(row.memory_started);
-    };
     if args.sort == Sort::Created {
-        rows.iter_mut().for_each(resolve_started);
+        for row in &mut rows {
+            row.started = row
+                .session_path
+                .as_deref()
+                .and_then(session_started)
+                .or(row.memory_started);
+        }
     }
     let order = args.order.unwrap_or(match args.sort {
         Sort::Title => Order::Asc,
@@ -491,25 +406,24 @@ pub(super) async fn list(
     });
 
     let matched = rows.len();
-    let mut markdown = format!(
-        "# Workspace threads\n\nProject: {}\nMatched {matched} of {total} threads; sorted by {} {}.\n\n",
-        line(&project, 160),
-        match args.sort {
-            Sort::Updated => "updated",
-            Sort::Created => "created",
-            Sort::Title => "title",
-        },
-        match order {
-            Order::Asc => "asc",
-            Order::Desc => "desc",
-        },
-    );
+    let mut markdown = match projects.as_slice() {
+        [(name, path)] => format!("# Threads in {} ({})\n", line(name, 80), line(path, 160)),
+        _ => format!("# Threads across {} projects\n", projects.len()),
+    };
+    markdown.push_str(&format!(
+        "{} unarchived (not counting you): {} running, {} need the user, {} errored; {} active in 24h.\n\n",
+        overview.total, overview.running, overview.needs_user, overview.errored, overview.recent,
+    ));
     let mut shown = 0;
-    for row in rows.iter_mut().skip(offset).take(limit) {
-        if row.started.is_none() {
-            resolve_started(row);
-        }
-        let mut text = entry(row, now);
+    for row in rows.iter().skip(offset).take(limit) {
+        let cx = RowContext {
+            now,
+            caller,
+            project: row.project.as_deref(),
+            folder: row.folder.as_deref(),
+            excerpts: args.detail == Detail::Normal,
+        };
+        let mut text = glance::row(&row.summary, &row.glance, &cx, &[]);
         // Room for the footer, which carries the next offset.
         let room = cap.saturating_sub(markdown.chars().count() + 120);
         if text.chars().count() > room {
@@ -519,12 +433,12 @@ pub(super) async fn list(
             // A lone oversized entry shrinks to its id so paging cannot stall
             // past a thread the caller never saw.
             text = format!(
-                "## {}\n\n- Id: {}\n\n",
+                "- **{}** `{}`\n",
                 line(&row.summary.title, 40),
                 line(&row.summary.id, 256)
             );
             if text.chars().count() > room {
-                text = format!("- Id: {}\n\n", line(&row.summary.id, 256));
+                text = format!("- `{}`\n", line(&row.summary.id, 256));
             }
             if text.chars().count() > room {
                 break;
@@ -535,20 +449,28 @@ pub(super) async fn list(
     }
     let start = offset.min(matched);
     let end = start + shown;
+    let sorted = match (args.sort, order) {
+        (Sort::Updated, Order::Desc) => "newest activity first",
+        (Sort::Updated, Order::Asc) => "oldest activity first",
+        (Sort::Created, Order::Desc) => "newest first",
+        (Sort::Created, Order::Asc) => "oldest first",
+        (Sort::Title, _) => "by title",
+    };
+    markdown.push('\n');
     if shown == 0 {
-        markdown.push_str(&format!("No threads in this page (offset {offset}).\n"));
+        markdown.push_str(&format!(
+            "No threads match (offset {offset}, {matched} matched).\n"
+        ));
     } else {
         markdown.push_str(&format!(
-            "Shown {}–{end} of {matched} matching threads.\n",
+            "Showing {}–{end} of {matched}, {sorted}.",
             start + 1
         ));
     }
     if end < matched {
-        markdown.push_str(&format!(
-            "Next page: offset={end} (keep sort and filters unchanged).\n"
-        ));
-    } else {
-        markdown.push_str("End of results.\n");
+        markdown.push_str(&format!(" More: offset={end}.\n"));
+    } else if shown > 0 {
+        markdown.push('\n');
     }
     Ok(capped(&markdown, cap))
 }
@@ -558,7 +480,7 @@ mod tests {
     use super::*;
 
     use super::super::tests::{call, fixture};
-    use falcondeck_core::ProjectFolder;
+    use falcondeck_core::{ProjectFolder, ThreadOrigin};
 
     /// Adds `count` threads `t00..`, each a minute older than the last.
     async fn seed(app: &AppState, count: usize, edit: impl Fn(usize, &mut ThreadSummary)) {
@@ -589,15 +511,20 @@ mod tests {
 
     fn ids(text: &str) -> Vec<String> {
         text.lines()
-            .filter_map(|l| l.strip_prefix("- Id: "))
-            .map(|l| l.split(" | ").next().unwrap().to_string())
+            .filter(|l| l.starts_with("- "))
+            .filter_map(|l| l.split('`').nth(1))
+            .map(str::to_string)
             .collect()
     }
 
     fn next_offset(text: &str) -> Option<usize> {
-        text.split("Next page: offset=")
+        text.split("More: offset=")
             .nth(1)
-            .and_then(|rest| rest.split_whitespace().next())
+            .and_then(|rest| {
+                rest.trim_end_matches(|c: char| !c.is_ascii_digit())
+                    .split('.')
+                    .next()
+            })
             .map(|n| n.parse().unwrap())
     }
 
@@ -608,24 +535,22 @@ mod tests {
         let (mut offset, mut seen) = (0, Vec::new());
         loop {
             let text = list_text(&app, json!({"limit":20, "offset":offset})).await;
-            assert!(text.contains("Matched 46 of 46"), "{text}");
-            assert!(text.contains("Updated: 20"), "{text}");
+            assert!(text.contains("of 45, newest activity first"), "{text}");
+            assert!(text.contains("45 unarchived (not counting you)"), "{text}");
+            assert!(text.contains(" · claude"), "{text}");
             seen.extend(ids(&text));
             match next_offset(&text) {
                 Some(next) => offset = next,
-                None => {
-                    assert!(text.contains("End of results"));
-                    break;
-                }
+                None => break,
             }
         }
-        let mut expected = vec!["thread-1".to_string()];
-        expected.extend((0..45).map(|i| format!("t{i:02}")));
+        // The calling thread never lists itself.
+        let expected: Vec<_> = (0..45).map(|i| format!("t{i:02}")).collect();
         assert_eq!(seen, expected);
         let oldest = list_text(&app, json!({"order":"asc","limit":1})).await;
         assert_eq!(ids(&oldest), ["t44"]);
         let titled = list_text(&app, json!({"sort":"title","limit":2})).await;
-        assert_eq!(ids(&titled), ["thread-1", "t00"]);
+        assert_eq!(ids(&titled), ["t00", "t01"]);
         // A budget too small for one entry still advances instead of stalling.
         let tight = list_text(&app, json!({"max_chars":512, "limit":100})).await;
         assert!(tight.chars().count() <= 512, "{tight}");
@@ -638,18 +563,15 @@ mod tests {
         // The edit bumped t00 to newest; its oversized entry shrinks but keeps the id.
         assert_eq!(ids(&tight), ["t00"], "{tight}");
         let tight = list_text(&app, json!({"max_chars":512, "limit":1, "offset":1})).await;
-        assert_eq!(ids(&tight), ["thread-1"], "{tight}");
+        assert_eq!(ids(&tight), ["t01"], "{tight}");
     }
 
     #[tokio::test]
     async fn filters_combine_and_reject_bad_input() {
         let (app, _temp) = fixture().await;
-        seed(&app, 6, |i, t| match i {
+        seed(&app, 7, |i, t| match i {
             0 => t.status = ThreadStatus::Running,
-            1 => {
-                t.status = ThreadStatus::WaitingForInput;
-                t.attention.pending_approval_count = 2;
-            }
+            1 => t.status = ThreadStatus::WaitingForInput,
             2 => {
                 t.status = ThreadStatus::Error;
                 t.last_error = Some("boom".into());
@@ -657,9 +579,30 @@ mod tests {
             }
             3 => t.is_archived = true,
             4 => t.is_pinned_in_project = true,
+            5 => {
+                t.origin = Some(ThreadOrigin::AgentSpawn {
+                    parent_thread_id: "thread-1".into(),
+                })
+            }
             _ => t.updated_at = Utc::now() - Duration::days(3),
         })
         .await;
+        // Pending counts come from the live request map, not the stored summary.
+        let request: falcondeck_core::InteractiveRequest = serde_json::from_value(json!({
+            "request_id":"r1", "workspace_id":"workspace-1", "thread_id":"t01",
+            "method":"item/commandExecution/requestApproval", "kind":"approval", "title":"Run",
+            "detail":null, "command":null, "path":null, "turn_id":null, "item_id":null,
+            "questions":[], "created_at":Utc::now()
+        }))
+        .unwrap();
+        app.inner.interactive_requests.lock().await.insert(
+            ("workspace-1".into(), "r1".into()),
+            super::super::super::PendingServerRequest {
+                raw_id: json!(1),
+                request,
+                params: json!({}),
+            },
+        );
         app.inner.preferences.lock().await.project_folders = vec![ProjectFolder {
             id: "f1".into(),
             workspace_id: "workspace-1".into(),
@@ -686,28 +629,34 @@ mod tests {
         )
         .await;
         check(json!({"pinned":true}), &["t04"]).await;
-        check(json!({"updated_before":"2d"}), &["t05"]).await;
+        check(json!({"parent":"self"}), &["t05"]).await;
+        check(json!({"parent":"thread-1"}), &["t05"]).await;
+        check(json!({"updated_before":"2d"}), &["t06"]).await;
         check(
-            json!({"updated_since":"4m", "status":"idle"}),
-            &["thread-1"],
+            json!({"updated_since":"7m", "status":"idle"}),
+            &["t04", "t05"],
         )
         .await;
-        let text = list_text(&app, json!({"status":"error"})).await;
-        assert!(
-            text.contains("Last error: boom") && text.contains("Provider: codex"),
-            "{text}"
-        );
-        let text = list_text(&app, json!({"folder":"f1"})).await;
-        assert!(
-            text.contains("Folder: Coordinator") && text.contains("Matched 1 of 7"),
-            "{text}"
-        );
+        let text = list_text(&app, json!({})).await;
+        for part in [
+            "6 unarchived (not counting you): 1 running, 1 need the user, 1 errored; 5 active in 24h.",
+            "`t01` — awaiting_approval (approval) · ",
+            "`t02` — error · ",
+            "  Error: boom",
+            "· codex",
+            "· your child",
+            "· folder Coordinator",
+            "· pinned",
+        ] {
+            assert!(text.contains(part), "missing {part:?} in\n{text}");
+        }
         for arguments in [
             json!({"updated_since":"yesterday"}),
             json!({"folder":"missing"}),
             json!({"status":"paused"}),
             json!({"status":[]}),
             json!({"query":" "}),
+            json!({"parent":" "}),
             json!({"thread_id":"t00"}),
         ] {
             assert!(
@@ -720,12 +669,18 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn previews_fall_back_and_query_matches_cached_excerpts() {
+    async fn rows_show_request_and_reply_without_echoing_the_prompt() {
         let (app, _temp) = fixture().await;
-        seed(&app, 3, |i, t| {
+        seed(&app, 4, |i, t| {
             t.native_session_id = Some(format!("session-{i}"));
-            if i == 2 {
-                t.last_message_preview = Some("summary preview".into());
+            match i {
+                // Codex previews are the opening prompt, not an outcome.
+                2 => {
+                    t.last_message_preview =
+                        Some("Please can we improve the automations page...".into())
+                }
+                3 => t.last_message_preview = Some("Deployed the relay.".into()),
+                _ => {}
             }
         })
         .await;
@@ -742,36 +697,55 @@ mod tests {
                 serde_json::from_value(json!({"kind":"assistant_message","id":"a","text":"Shipped the Needle fix","created_at":Utc::now()})).unwrap(),
             ];
         }
-        app.inner.thread_search.lock().unwrap().sessions.insert(
-            "session-1".into(),
-            thread_search::SessionExcerpt {
-                path: "/missing/transcript".into(),
-                modified_ms: 0,
-                size: 0,
-                opening: vec!["opening goal".into(), "second".into()],
-                recent: vec!["older".into(), "latest haystack request".into()],
-            },
-        );
+        {
+            let mut index = app.inner.thread_search.lock().unwrap();
+            index.sessions.insert(
+                "session-1".into(),
+                thread_search::SessionExcerpt {
+                    path: "/missing/transcript".into(),
+                    opening: vec!["opening goal".into(), "second".into()],
+                    recent: vec!["older".into(), "latest haystack request".into()],
+                    latest_reply: Some("Indexed reply".into()),
+                    ..Default::default()
+                },
+            );
+            index.sessions.insert(
+                "session-2".into(),
+                thread_search::SessionExcerpt {
+                    opening: vec![
+                        "Please can we improve the automations page a bit? Group it.".into(),
+                    ],
+                    recent: vec![
+                        "Please can we improve the automations page a bit? Group it.".into(),
+                    ],
+                    ..Default::default()
+                },
+            );
+        }
         let text = list_text(&app, json!({})).await;
         for part in [
-            "- Last assistant: Shipped the Needle fix",
-            "- Recent user: latest haystack request\n- Opening user: opening goal",
-            "- Last preview: summary preview",
-            "- Last preview: (none)",
+            "`t00` — idle · 1m ago · claude\n  Asked: please do it\n  Latest: Shipped the Needle fix\n",
+            "`t01` — idle · 2m ago · claude\n  Asked: latest haystack request\n  Latest: Indexed reply\n",
+            "`t02` — idle · 3m ago · claude\n  Asked: Please can we improve the automations page a bit? Group it.\n- ",
+            "`t03` — idle · 4m ago · claude\n  Latest: Deployed the relay.\n",
         ] {
-            assert!(text.contains(part), "{part}: {text}");
+            assert!(text.contains(part), "missing {part:?} in\n{text}");
         }
+        let brief = list_text(&app, json!({"detail":"brief"})).await;
+        assert!(
+            !brief.contains("Asked:") && ids(&brief).len() == 4,
+            "{brief}"
+        );
         let found = list_text(&app, json!({"query":"HAYSTACK"})).await;
+        assert_eq!(ids(&found), ["t01"]);
+        let found = list_text(&app, json!({"query":"indexed REPLY"})).await;
         assert_eq!(ids(&found), ["t01"]);
         let found = list_text(&app, json!({"query":"needle"})).await;
         assert_eq!(ids(&found), ["t00"]);
         let found = list_text(&app, json!({"query":"task 02"})).await;
         assert_eq!(ids(&found), ["t02"]);
         let started = list_text(&app, json!({"sort":"created", "limit":1})).await;
-        assert!(
-            ids(&started) == ["t00"] && started.contains("Started: "),
-            "{started}"
-        );
+        assert_eq!(ids(&started), ["t00"], "{started}");
     }
 
     #[test]

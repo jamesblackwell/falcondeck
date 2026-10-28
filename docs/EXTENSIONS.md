@@ -1042,53 +1042,78 @@ are not extension-host APIs, control operations, or `threads:read` grants;
 `threads:read` remains summary-only with no previews or transcript access.
 
 User-created [bots](BOTS.md) can coordinate across the daemon's projects. Their
-tools accept `workspace_id`; an existing target task also resolves its workspace
-automatically. This authority comes from the daemon's registered bot profile for
-the attached caller, never from a request-body claim. Ordinary task callers
-cannot widen their workspace. A bot's `can_start_threads` restriction is checked
-before creation, and the child cap counts all projects together. Bot workers
-automatically report back to their home conversation; those watches are rebuilt
-from persisted origins after restart.
+tools accept `workspace_id` as a workspace id, an exact project path, or a
+unique project folder name; an existing target task also resolves its workspace
+automatically. Bot list and changes calls without a `workspace_id` (or with
+`"all"`) span every project, and rows then name their project. This authority
+comes from the daemon's registered bot profile for the attached caller, never
+from a request-body claim. Ordinary task callers cannot widen their workspace.
+A bot's `can_start_threads` restriction is checked before creation, and the
+child cap counts all projects together. Bot workers automatically report back
+to their home conversation; those watches are rebuilt from persisted origins
+after restart.
 
-List reads daemon summaries, the latest message of transcripts already in
-memory, and existing search-index opening/recent excerpts without transcript
-hydration. It defaults to unarchived threads sorted by last activity (newest
-first), 30 entries, and 24000 characters. `sort` is `updated`, `created`
-(native session file start, best effort; unknown sorts last), or `title`, with
-optional `order`. `offset` pages; the footer names the next offset. Filters:
-`status` (one or many of idle/running/waiting_for_input/error/awaiting_approval),
-`provider`, `folder` (project folder name or id), `archived`
-(exclude/include/only), `pinned`, `has_pending_approval`, and
+Output is compact markdown built for agent context budgets. List, changes, and
+wait share one row shape:
+
+```
+- **Title** `thread-id` — running · 3m ago · codex · your child
+  Asked: the latest request
+  Latest: the reply to it
+```
+
+The state is the status, or `awaiting_approval (…)` when approvals or questions
+are pending; pending counts come from the live request map, never the stored
+summary. Facts follow only when present (project, folder, branch, child/parent,
+queued, background, pinned, archived, unread), then optional Goal, attention,
+delta, Asked, Latest, and Error lines. `Asked` and `Latest` come from loaded
+items, then the search index (which also records the assistant text after the
+last user prompt), then the summary preview unless it merely echoes a user
+message. Index entries refresh before these tools answer when the index is
+older than its 60-second TTL; a slow scan finishes behind a three-second wait.
+
+List never hydrates. It excludes the caller and defaults to unarchived threads,
+newest activity first, 20 rows, and 24000 characters. The header counts
+unarchived threads that are running, need the user, or errored, and those active
+in 24 hours, independent of filters. `sort` is `updated`, `created` (native
+session file start, best effort; unknown sorts last), or `title`, with optional
+`order`; `offset` pages. Filters: `status` (one or many of idle, running,
+waiting_for_input, error, awaiting_approval), `provider`, `folder`, `parent` (a
+thread id or `self`), `archived` (exclude/include/only), `pinned`, and
 `updated_since`/`updated_before` (RFC 3339, `YYYY-MM-DD`, or ages like `24h`).
-`query` is a case-insensitive literal match on title, id, previews, goal, and
-cached excerpts. Each entry shows last activity, folder, attention counts, and a
-labelled preview that falls back from the summary preview to the latest loaded
-assistant or user message, then cached recent/opening user excerpts. View loads a bounded native-provider tail and
-formats compact markdown in Rust. Defaults are 20 user/assistant messages and
-6000 characters (hard caps: 100 messages / 24000 characters). Tool output and
-other activity require `include_tools: true`; reasoning independently requires
-`include_reasoning: true`. Each section includes an item id and body character
-offset. Bodies preview at most 1200 characters; `item_id` expands one item,
-with `offset` / `next_offset` to retrieve the rest without rereading neighbours.
-Explicit item selection includes that kind regardless of the filters. Images
-are not inlined; diff bodies are omitted. No ConversationItem JSON is returned.
+`query` is a case-insensitive literal match on title, id, goal, preview, and
+excerpts. `detail: "brief"` drops the Asked/Latest lines.
 
-View headers carry thread status and an `ATTENTION:` line for pending
-approvals, pending questions, waiting-for-input, or error. Item headings show
-the item timestamp. `role` (`user`/`assistant`) restricts a read to that role's
-messages; `preview_chars` (200–24000, default 1200) widens body previews.
+View loads a bounded native-provider tail and formats compact markdown in Rust.
+Defaults are 20 user/assistant messages and 6000 characters (hard caps: 100
+messages / 24000 characters). Tool output and other activity require
+`include_tools: true`; reasoning independently requires `include_reasoning:
+true`. The header is the title, id, state, age, and any `ATTENTION:` line. Each
+item is a `### Kind · YYYY-MM-DD HH:MM` heading and its body (at most 1200
+characters by default). Item ids appear only where needed: a truncated item ends
+with `[item_id=… offset=… for more]`, and search hits always cite theirs.
+`item_id` expands one item, with `offset` to continue. Explicit item selection
+includes that kind regardless of the filters. Images are not inlined; diff
+bodies are omitted. `role` (`user`/`assistant`) restricts a read to that role's
+messages; `preview_chars` (200–24000) widens bodies. No ConversationItem JSON is
+returned.
 
 `falcondeck_thread_summary` digests 1–20 threads from the summary, the pending
 interactive request map, and items already in memory, scanning at most 2000
-newest items: last user request, last assistant outcome, files changed (file
-change items plus Edit/Write tools), commits (parsed from `git commit` output),
-and the latest tests/typecheck/autoreview command with its outcome. Unloaded
-threads report cached excerpts unless `hydrate: true`, which loads a 200-item
-native tail for up to five threads. `falcondeck_thread_changes` takes `since`
-(RFC 3339 or `90s`/`15m`/`2h`/`1d`), excludes the caller (and archived threads
-unless asked), and lists one delta line per thread, attention first. It never
-hydrates and returns an exact `Now` for the next window. Both are heuristics
-over the transcript, not git or CI state.
+newest items: state and age, attention, last request and reply (with an
+`item_id` when cut), files changed (file change items plus Edit/Write tools),
+commits, and the latest tests/typecheck/autoreview result with a short command.
+Empty sections collapse into one line. Shell wrappers (`zsh -lc '…'`, a leading
+`cd … &&`) are stripped from commands. Codex code-mode `exec` calls hide their
+scripts, so their JSON outputs are read for `git commit` lines followed by a
+stat line and for test-runner summaries. Unloaded threads report Asked/Latest
+unless `hydrate: true`, which loads a 200-item native tail for up to five
+threads. No per-item timestamps are shown because Codex items can share a
+fallback turn time. `falcondeck_thread_changes` takes `since` (RFC 3339 or
+`90s`/`15m`/`2h`/`1d`), excludes the caller (and archived threads unless asked),
+and lists rows for threads active since then, attention first, with a `Since:`
+delta when items are loaded. It never hydrates and returns an exact `Now` for
+the next window. Both are heuristics over the transcript, not git or CI state.
 
 `query` is case-insensitive literal text search, not a regular expression. It
 searches the original bodies of the selected kinds (including full tool output
@@ -1144,9 +1169,9 @@ Each calls an operation the UI already uses; none adds new stored state.
   in FalconDeck UI. Answers pass through `respond_to_interactive_request`, which
   validates them as it does for the UI.
 - `falcondeck_wait_thread` waits up to 25 seconds (below the bridge's 30-second
-  HTTP timeout) for a thread to stop running. It then reports status, last
-  preview or error, and pending requests with the request and question ids that
-  answering needs.
+  HTTP timeout) for a thread to stop running. It then reports its state, last
+  request and reply (or error), and pending requests with the request and
+  question ids that answering needs.
 
 `falcondeck_create_thread` also accepts `title`, `folder` / `create_folder`
 (resolved after cap admission, so a rejected call creates nothing), and

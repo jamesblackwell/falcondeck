@@ -136,16 +136,20 @@ pub(super) async fn view(
                 };
                 let at = Some(super::digest::item_created_at(item));
                 let length = if query.is_some() { 600 } else { preview };
-                let section = excerpt(&heading, id, at, &body, offset, length);
+                let cited = query.is_some();
+                let section = excerpt(&heading, id, at, &body, offset, length, cited);
                 let size = section.chars().count() + 2;
                 if used + size > budget && !sections.is_empty() {
                     has_older = true;
                     break 'pages;
                 }
                 // Keep IDs and continuation offsets intact even when the first body fills the budget.
-                let overhead = excerpt(&heading, id, at, &body, offset, 0).chars().count() + 20;
+                let overhead = excerpt(&heading, id, at, &body, offset, 0, cited)
+                    .chars()
+                    .count()
+                    + 20;
                 let length = budget.saturating_sub(used + overhead + 2).min(length);
-                sections.push(excerpt(&heading, id, at, &body, offset, length));
+                sections.push(excerpt(&heading, id, at, &body, offset, length, cited));
                 used += sections.last().map_or(0, |s| s.chars().count() + 2);
             }
             scanned += 1;
@@ -165,7 +169,7 @@ pub(super) async fn view(
     sections.reverse();
     let navigation = if has_older {
         format!(
-            "Older items: before={} (keep query/filters).",
+            "Older: before={} (keep query and filters).",
             line(before.as_deref().unwrap_or(""), 128)
         )
     } else {
@@ -191,8 +195,7 @@ pub(super) async fn view(
     };
     Ok(capped(
         &format!(
-            "# Thread {}\n\n{status}{navigation}\nScope: {scope}. Shown {}; scanned {scanned} items.\nExpand with item_id; use offset for more body text.\n\n{empty}{}",
-            line(thread, 128),
+            "{status}Scope: {scope}, newest last. Shown {}; scanned {scanned} items. {navigation}\n\n{empty}{}",
             sections.len(),
             sections.join("\n\n")
         ),
@@ -512,20 +515,21 @@ fn excerpt(
     body: &str,
     offset: usize,
     length: usize,
+    cited: bool,
 ) -> String {
     let text: String = body.chars().skip(offset).take(length).collect();
     let end = offset + text.chars().count();
     let more = body.chars().nth(end).is_some();
+    // The id is only needed to read more of this item, or to open a search hit.
+    let reference = match (more, offset > 0 || cited) {
+        (true, _) => format!("\n[item_id={} offset={end} for more]", line(id, 128)),
+        (false, true) => format!("\n[item_id={}]", line(id, 128)),
+        (false, false) => String::new(),
+    };
     format!(
-        "## {heading}\n\nId: {}{} | offset={offset}{}\n\n{}{text}{}",
-        line(id, 128),
-        at.map(|at| format!(" | {}", super::digest::stamp(at)))
+        "### {heading}{}\n{}{text}{}{reference}",
+        at.map(|at| format!(" · {}", at.format("%Y-%m-%d %H:%M")))
             .unwrap_or_default(),
-        if more {
-            format!(" | next_offset={end}")
-        } else {
-            String::new()
-        },
         if offset > 0 { "…" } else { "" },
         if more { "…" } else { "" }
     )
@@ -550,9 +554,13 @@ fn expand(
         &body,
         offset,
         cap.saturating_sub(400),
+        false,
     );
     Ok(capped(
-        &format!("# Thread {}\n\n{section}", line(thread, 128)),
+        &format!(
+            "# Item in `{}` from offset {offset}\n\n{section}",
+            line(thread, 128)
+        ),
         cap,
     ))
 }

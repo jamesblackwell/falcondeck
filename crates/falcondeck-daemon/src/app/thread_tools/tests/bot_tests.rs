@@ -389,9 +389,11 @@ async fn project_thread_can_reply_to_a_bot_in_another_workspace() {
         .lock()
         .await
         .insert("workspace-2".into(), project);
-    app.with_thread_mut("workspace-1", "thread-1", |t| t.status = ThreadStatus::Running)
-        .await
-        .unwrap();
+    app.with_thread_mut("workspace-1", "thread-1", |t| {
+        t.status = ThreadStatus::Running
+    })
+    .await
+    .unwrap();
     for arguments in [
         json!({"thread_id":"thread-1", "message":"Done with the review.", "delivery":"queue"}),
         json!({"workspace_id":"workspace-1", "thread_id":"thread-1", "message":"Also fixed the tests.", "delivery":"queue"}),
@@ -409,7 +411,10 @@ async fn project_thread_can_reply_to_a_bot_in_another_workspace() {
     assert!(queued[0].starts_with("Message from FalconDeck thread project-thread"));
     // Only the bot is reachable; its project-local workers and listings stay scoped.
     for (name, arguments) in [
-        (MESSAGE, json!({"thread_id": worker, "message":"Hello there."})),
+        (
+            MESSAGE,
+            json!({"thread_id": worker, "message":"Hello there."}),
+        ),
         (LIST, json!({"workspace_id":"workspace-1"})),
         (VIEW, json!({"thread_id":"thread-1"})),
     ] {
@@ -419,4 +424,85 @@ async fn project_thread_can_reply_to_a_bot_in_another_workspace() {
                 .is_err()
         );
     }
+}
+
+#[tokio::test]
+async fn bot_overviews_span_projects_and_accept_project_names() {
+    let (app, _temp) = fixture().await;
+    promote(&app).await;
+    {
+        let mut workspaces = app.inner.workspaces.lock().await;
+        let mut summary = workspaces["workspace-1"].summary.clone();
+        summary.id = "workspace-2".into();
+        summary.path = "/tmp/projects/Quizgecko".into();
+        summary.current_thread_id = None;
+        let mut thread = workspaces["workspace-1"].threads["thread-1"]
+            .summary
+            .clone();
+        thread.id = "q1".into();
+        thread.workspace_id = "workspace-2".into();
+        thread.title = "Grade quizzes".into();
+        thread.status = ThreadStatus::Running;
+        thread.native_session_id = None;
+        workspaces.insert(
+            summary.id.clone(),
+            super::super::ManagedWorkspace {
+                summary,
+                codex_session: None,
+                claude_runtime: None,
+                agy_runtime: None,
+                opencode_runtime: None,
+                acp_runtimes: HashMap::new(),
+                threads: [("q1".to_string(), ManagedThread::new(thread))]
+                    .into_iter()
+                    .collect(),
+            },
+        );
+    }
+    let bot = async |name: &str, arguments: Value| {
+        app.invoke_thread_tool(name, &arguments, Some("thread-1"), None)
+            .await
+            .map(|r| r.result.as_str().unwrap().to_string())
+    };
+    let all = bot(LIST, json!({})).await.unwrap();
+    assert!(
+        all.starts_with("# Threads across 2 projects\n")
+            && all.contains("`q1` — running · 0s ago · claude · project Quizgecko"),
+        "{all}"
+    );
+    let named = bot(LIST, json!({"workspace_id":"quizgecko"}))
+        .await
+        .unwrap();
+    assert!(
+        named.starts_with("# Threads in Quizgecko (/tmp/projects/Quizgecko)")
+            && named.contains("`q1`"),
+        "{named}"
+    );
+    let running = bot(LIST, json!({"workspace_id":"all", "status":"running"}))
+        .await
+        .unwrap();
+    assert!(running.contains("Showing 1–1 of 1"), "{running}");
+    let changes = bot(CHANGES, json!({"since":"1h"})).await.unwrap();
+    assert!(
+        changes.contains("across 2 projects") && changes.contains("project Quizgecko"),
+        "{changes}"
+    );
+    assert!(
+        bot(VIEW, json!({"workspace_id":"all", "thread_id":"q1"}))
+            .await
+            .is_err()
+    );
+    assert!(bot(LIST, json!({"workspace_id":"missing"})).await.is_err());
+    // Ordinary tasks cannot widen their scope.
+    let task = app
+        .invoke_thread_tool(LIST, &json!({"workspace_id":"all"}), Some("q1"), None)
+        .await;
+    assert!(task.is_err());
+    let context = app.bot_context("thread-1").await.unwrap();
+    assert!(
+        context.contains("Projects, most recently active first:\n- ")
+            && context.contains("\n- /tmp/projects/Quizgecko (`workspace-2`)"),
+        "{context}"
+    );
+    assert!(context.contains("## Coordinating work"), "{context}");
 }

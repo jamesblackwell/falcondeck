@@ -4,10 +4,11 @@ use falcondeck_core::ThreadDetailMode;
 use falcondeck_core::{ExtensionAgentTool, ExtensionToolResponse, ThreadOrigin};
 use serde::Deserialize;
 
-mod list;
-mod digest;
-mod read;
 mod actions;
+mod digest;
+mod glance;
+mod list;
+mod read;
 
 pub(super) use actions::ChildWatch;
 
@@ -26,54 +27,54 @@ pub(super) fn is_builtin(name: &str) -> bool {
 
 pub(super) fn catalog() -> Vec<ExtensionAgentTool> {
     [
-        (LIST, "List threads", "List this workspace's threads as bounded markdown: status, last activity, folder, a preview, and cached user excerpts. Defaults to unarchived threads by last activity, newest first. Filter by status, provider, folder, pinned/archived, pending approval, update time, or literal query; page with offset. Does not hydrate transcripts.", list::schema(), vec![]),
-        (VIEW, "View thread", "Read compact user/assistant text (default: 20 messages, 6000 characters). Use before for older history, query for case-insensitive literal search with excerpts, and item_id plus offset to expand a message. Tools and reasoning are opt-in. Search scans at most 1000 items per call; follow its before cursor until no older items remain. Only this workspace is accessible.", json!({
-            "thread_id": {"type":"string", "minLength":1},
-            "before": {"type":"string", "minLength":1},
-            "limit": {"type":"integer", "minimum":1, "maximum":100, "default":20},
-            "max_chars": {"type":"integer", "minimum":512, "maximum":24000, "default":6000},
-            "include_tools": {"type":"boolean", "default":false, "description":"Include tool output and other activity (files, plans, reviews)."},
-            "include_reasoning": {"type":"boolean", "default":false},
-            "query": {"type":"string", "minLength":1, "maxLength":256, "description":"Literal case-insensitive text search in selected item kinds; not a regular expression. Keep the same query and filters when paging."},
-            "item_id": {"type":"string", "minLength":1, "description":"Expand one item from a previous read; cannot combine with before or query. Explicit selection includes its kind regardless of filters."},
-            "offset": {"type":"integer", "minimum":0, "description":"Character offset within the expanded item's body; only with item_id. Follow next_offset for more."},
-            "role": {"type":"string", "enum":["user","assistant"], "description":"Only this role's messages, newest last; tools and reasoning are excluded. role=assistant with limit=1 returns the final assistant message."},
-            "preview_chars": {"type":"integer", "minimum":200, "maximum":24000, "default":1200, "description":"Body characters per item before truncation (search excerpts stay 600)."}
-        }), vec!["thread_id"]),
-        (SUMMARY, "Summarize threads", "Compact digest per thread: status, last activity, attention (pending approvals/questions), turn state, last user request, last assistant outcome, files changed, commits, tests/typecheck/autoreview runs, and errors. Reads summaries and already-loaded items; hydrate=true loads a bounded native tail for up to 5 unloaded threads. Only this workspace is accessible.", json!({
+        (LIST, "List threads", "Start here to see what is being worked on. One compact row per thread, newest activity first (default 20): status, age, provider, flags, and what it was last asked and last said. The header counts running, blocked, and recently active threads. Excludes you. Filter by status, time, query, parent, provider, folder, or pin; page with offset. Never loads transcripts.", list::schema(), vec![]),
+        (CHANGES, "Thread changes", "Threads active since a time, same rows as list plus what changed (messages, files, commits, checks) when the transcript is loaded. Blocked threads first. Pass the returned Now as since next time to poll without repeats.", json!({
+            "since": {"type":"string", "minLength":1, "description":"RFC 3339 timestamp or a window like 90s, 15m, 2h, 1d."},
+            "limit": {"type":"integer", "minimum":1, "maximum":100, "default":30},
+            "include_archived": {"type":"boolean", "default":false},
+            "max_chars": {"type":"integer", "minimum":512, "maximum":24000, "default":6000}
+        }), vec!["since"]),
+        (SUMMARY, "Summarize threads", "Outcome digest for 1–20 threads: attention, last request and reply, files changed, commits, and test/typecheck/autoreview results. Uses loaded items; hydrate=true loads a bounded tail for up to 5 unloaded threads.", json!({
             "thread_id": {"type":"string", "minLength":1},
             "thread_ids": {"type":"array", "items":{"type":"string", "minLength":1}, "maxItems":20},
             "hydrate": {"type":"boolean", "default":false},
             "max_chars": {"type":"integer", "minimum":512, "maximum":24000, "default":8000}
         }), vec![]),
-        (CHANGES, "Thread changes", "List this workspace's threads with activity since a time, one line each with a delta (messages, files, commits, checks, last reply). Threads waiting on approval or a question sort first and are flagged. Excludes the calling thread. Returns Now to pass as since next time. Does not hydrate transcripts.", json!({
-            "since": {"type":"string", "minLength":1, "description":"RFC 3339 timestamp or relative window: 90s, 15m, 2h, 1d."},
-            "limit": {"type":"integer", "minimum":1, "maximum":100, "default":30},
-            "include_archived": {"type":"boolean", "default":false},
-            "max_chars": {"type":"integer", "minimum":512, "maximum":24000, "default":6000}
-        }), vec!["since"]),
-        (MESSAGE, "Message thread", "Send a message to an existing thread in this workspace, or reply to a bot thread in any project, labelled with the sending thread. Defaults to steering its active turn, falling back to the queue when steering is unavailable; idle threads start a new turn. Use delivery=queue to wait for the active turn. Returns after admission, without waiting for a reply. Self-messaging is rejected; approvals remain in FalconDeck UI.", json!({
+        (VIEW, "View thread", "Read a thread's user/assistant messages, newest last (default 20 messages, 6000 characters). before pages older history; query searches literally; item_id with offset expands a truncated item. Tools and reasoning are opt-in.", json!({
             "thread_id": {"type":"string", "minLength":1},
-            "message": {"type":"string", "minLength":1, "maxLength":24000, "description":"Readable prose with normal spaces between words; shown to the user and the recipient."},
+            "before": {"type":"string", "minLength":1},
+            "limit": {"type":"integer", "minimum":1, "maximum":100, "default":20},
+            "max_chars": {"type":"integer", "minimum":512, "maximum":24000, "default":6000},
+            "role": {"type":"string", "enum":["user","assistant"], "description":"Only this role. role=assistant, limit=1 returns the final reply."},
+            "query": {"type":"string", "minLength":1, "maxLength":256, "description":"Literal, case-insensitive. Keep it and the filters unchanged when paging."},
+            "item_id": {"type":"string", "minLength":1, "description":"Expand one item; not combined with before or query."},
+            "offset": {"type":"integer", "minimum":0, "description":"Character offset in the expanded item; follow the returned offset."},
+            "include_tools": {"type":"boolean", "default":false, "description":"Include tool output, file edits, plans, and reviews."},
+            "include_reasoning": {"type":"boolean", "default":false},
+            "preview_chars": {"type":"integer", "minimum":200, "maximum":24000, "default":1200, "description":"Body characters per item."}
+        }), vec!["thread_id"]),
+        (MESSAGE, "Message thread", "Send a message to another thread, labelled with your id and title. Default steer reaches its active turn (falling back to the queue); queue waits for the turn to finish; an idle thread starts a turn. Returns on admission, not on reply.", json!({
+            "thread_id": {"type":"string", "minLength":1},
+            "message": {"type":"string", "minLength":1, "maxLength":24000, "description":"Readable prose with normal spaces between words."},
             "delivery": {"type":"string", "enum":["steer","queue"], "default":"steer"}
         }), vec!["thread_id", "message"]),
-        (CREATE, "Create thread", "Create a sibling in this workspace and optionally send its first prompt. Returns after dispatch without waiting for completion. At most three concurrent children per parent; approvals remain in FalconDeck UI. Context defaults to none; briefing uses cached excerpts, transcript_tail uses bounded markdown.", json!({
-            "provider": {"type":"string", "minLength":1},
-            "isolation": {"type":"string", "enum":["project_folder","isolated"], "default":"project_folder"},
-            "model": {"type":"string", "minLength":1},
-            "reasoning_effort": {"type":"string", "minLength":1, "description":"Provider/model reasoning effort, e.g. low, medium, high, xhigh, or max when supported. Saved before the first prompt and reused for later turns. Omit for the provider default."},
-            "prompt": {"type":"string", "minLength":1, "maxLength":24000, "description":"Readable prose with normal spaces between words; shown to the user and the new thread."},
-            "context": {"type":"string", "enum":["none","briefing","transcript_tail"], "default":"none"},
+        (CREATE, "Create thread", "Start a new thread and optionally send its first prompt; returns without waiting. At most three active children per parent. Context defaults to none; briefing passes your summary, transcript_tail your recent transcript.", json!({
+            "prompt": {"type":"string", "minLength":1, "maxLength":24000, "description":"A self-contained brief: goal, relevant files, constraints, and what done looks like."},
             "title": {"type":"string", "minLength":1, "maxLength":200},
-            "folder": {"type":"string", "minLength":1, "description":"Project folder id or exact name for the new thread."},
-            "create_folder": {"type":"boolean", "default":false, "description":"Create the named folder when no folder matches."},
-            "notify_parent": {"type":"boolean", "default":false, "description":"Leave false for routine work. Enable only for critical updates requiring attention or when the user explicitly requests notifications. When enabled, queues a daemon notice whenever the child stops running or needs input, including later turns. Bot-created tasks always report errors and input requests, but successful stops require this opt-in. In memory; does not survive a daemon restart."}
+            "provider": {"type":"string", "minLength":1},
+            "model": {"type":"string", "minLength":1},
+            "reasoning_effort": {"type":"string", "minLength":1, "description":"Harness setting, e.g. low, medium, high, xhigh; asking in the prompt does not set it."},
+            "isolation": {"type":"string", "enum":["project_folder","isolated"], "default":"project_folder"},
+            "context": {"type":"string", "enum":["none","briefing","transcript_tail"], "default":"none"},
+            "folder": {"type":"string", "minLength":1, "description":"Project folder id or exact name."},
+            "create_folder": {"type":"boolean", "default":false},
+            "notify_parent": {"type":"boolean", "default":false, "description":"Message you whenever it stops or needs input (lost on daemon restart). Leave false unless critical or requested; bot tasks always report errors and input requests."}
         }), vec![]),
     ].into_iter().chain(actions::catalog()).map(|(name,title,description,properties,required)| ExtensionAgentTool {
-        name: name.into(), extension_id: "falcondeck".into(), tool_id: name.trim_start_matches("falcondeck_").into(), title: title.into(), description: format!("{description} Bot coordinators may select another project using workspace_id; ordinary tasks remain workspace-scoped."),
+        name: name.into(), extension_id: "falcondeck".into(), tool_id: name.trim_start_matches("falcondeck_").into(), title: title.into(), description: description.into(),
         input_schema: {
             let mut properties = properties;
-            properties["workspace_id"] = json!({"type":"string", "description":"Target project workspace id. Bots can coordinate across projects; ordinary tasks remain workspace-scoped."});
+            properties["workspace_id"] = json!({"type":"string", "description":"Bots only: project id, name, or path. Bots list and see changes across all projects by default."});
             json!({"type":"object","additionalProperties":false,"properties":properties,"required":required})
         },
     }).collect()
@@ -138,10 +139,22 @@ fn capped(text: &str, cap: usize) -> String {
         value
     }
 }
+/// One line: whitespace runs collapse so paragraphs do not cost blank space.
 fn line(text: &str, cap: usize) -> String {
-    capped(text, cap)
-        .replace(['\n', '\r'], " ")
-        .replace('|', "\\|")
+    let mut out = String::with_capacity(text.len().min(cap * 4));
+    let mut chars = 0;
+    for word in text.split_whitespace() {
+        if chars > cap {
+            break;
+        }
+        if !out.is_empty() {
+            out.push(' ');
+            chars += 1;
+        }
+        out.push_str(word);
+        chars += word.chars().count();
+    }
+    capped(&out, cap).replace('|', "\\|")
 }
 /// Code-mode harnesses (Codex `exec`) sometimes emit tool strings in minified
 /// style, gluing prose words together. Normal prose averages 4–8 letters per
@@ -158,7 +171,9 @@ fn lost_word_spaces(text: &str) -> bool {
     for token in prose.split_whitespace() {
         let hash_like = token.len() >= 7
             && token.chars().any(|c| c.is_ascii_digit())
-            && token.chars().all(|c| c.is_ascii_hexdigit() || "-.,;:()".contains(c));
+            && token
+                .chars()
+                .all(|c| c.is_ascii_hexdigit() || "-.,;:()".contains(c));
         if hash_like || token.contains(['/', '\\']) {
             continue;
         }
@@ -232,6 +247,25 @@ impl AppState {
                     .and_then(|ids| ids.first())
                     .and_then(Value::as_str)
             });
+        let all_projects = requested_workspace.as_deref() == Some("all");
+        let requested_workspace = match requested_workspace {
+            Some(ws) if ws == "all" => None,
+            // Names and paths are a bot convenience; tasks pass their own id.
+            Some(ws) if bot.is_some() => Some(self.resolve_workspace(&ws).await?),
+            other => other,
+        };
+        if all_projects && (bot.is_none() || !matches!(name, LIST | CHANGES)) {
+            return Err(DaemonError::BadRequest(
+                "workspace_id \"all\" is for bot list and changes calls".into(),
+            ));
+        }
+        // A bot's own workspace is rarely where its work happens, so its
+        // overviews default to every project.
+        let all_projects = all_projects
+            || (bot.is_some()
+                && requested_workspace.is_none()
+                && target.is_none()
+                && matches!(name, LIST | CHANGES));
         let workspace = if bot.is_some() {
             if let Some(workspace) = requested_workspace {
                 workspace
@@ -254,9 +288,10 @@ impl AppState {
                 }
                 _ => None,
             };
-            if requested_workspace.as_ref().is_some_and(|ws| {
-                ws != &caller_workspace && Some(ws) != reply_workspace.as_ref()
-            }) {
+            if requested_workspace
+                .as_ref()
+                .is_some_and(|ws| ws != &caller_workspace && Some(ws) != reply_workspace.as_ref())
+            {
                 return Err(DaemonError::BadRequest(
                     "Only bots can coordinate across projects".into(),
                 ));
@@ -274,9 +309,14 @@ impl AppState {
                 .invoke_thread_action(name, arguments, &workspace, parent)
                 .await;
         }
+        let scope = if all_projects {
+            self.project_workspace_ids().await
+        } else {
+            vec![workspace.clone()]
+        };
         match name {
             LIST => Ok(response(
-                list::list(self, &workspace, args(arguments)?).await?,
+                list::list(self, &scope, parent, args(arguments)?).await?,
             )),
             VIEW => {
                 let a: read::ViewArgs = args(arguments)?;
@@ -291,7 +331,7 @@ impl AppState {
                 digest::summary(self, &workspace, &args(arguments)?).await?,
             )),
             CHANGES => Ok(response(
-                digest::changes(self, &workspace, parent, &args(arguments)?).await?,
+                digest::changes(self, &scope, parent, &args(arguments)?).await?,
             )),
             MESSAGE => {
                 let a: MessageArgs = args(arguments)?;
@@ -336,8 +376,12 @@ impl AppState {
                     .as_ref()
                     .is_some_and(|p| p.trim().is_empty() || p.chars().count() > MAX_CHARS)
                     || a.model.as_ref().is_some_and(|m| m.trim().is_empty())
-                    || a.reasoning_effort.as_ref().is_some_and(|e| e.trim().is_empty())
-                    || a.title.as_ref().is_some_and(|t| t.trim().is_empty() || t.chars().count() > 200)
+                    || a.reasoning_effort
+                        .as_ref()
+                        .is_some_and(|e| e.trim().is_empty())
+                    || a.title
+                        .as_ref()
+                        .is_some_and(|t| t.trim().is_empty() || t.chars().count() > 200)
                 {
                     return Err(DaemonError::BadRequest(
                         "prompt must be 1–24000 characters, model and reasoning_effort nonempty, and title 1–200 characters".into(),
@@ -353,7 +397,9 @@ impl AppState {
                     if !workspaces.contains_key(&workspace) {
                         return Err(DaemonError::NotFound("workspace not found".into()));
                     }
-                    if workspaces.values().flat_map(|ws| ws.threads.values())
+                    if workspaces
+                        .values()
+                        .flat_map(|ws| ws.threads.values())
                         .filter(|t| child_is_active(&t.summary, parent))
                         .count()
                         >= 3
@@ -371,10 +417,18 @@ impl AppState {
                 };
                 let context = match a.context {
                     Context::None => None,
-                    Context::Briefing => Some(self.thread_briefing(&parent_summary)),
+                    Context::Briefing => {
+                        Some(self.thread_briefing(&caller_workspace, parent).await?)
+                    }
                     Context::TranscriptTail => Some(
-                        self.thread_handoff(&caller_workspace, parent, None, Some(40), Some(12_000))
-                            .await?,
+                        self.thread_handoff(
+                            &caller_workspace,
+                            parent,
+                            None,
+                            Some(40),
+                            Some(12_000),
+                        )
+                        .await?,
                     ),
                 };
                 let handle = self
@@ -387,22 +441,33 @@ impl AppState {
                         approval_policy: None,
                         sandbox_mode: None,
                         permission_mode: None,
-                        handoff_from: context.as_ref().filter(|_| workspace == caller_workspace).map(|_| {
-                            falcondeck_core::ThreadHandoffSource {
+                        handoff_from: context
+                            .as_ref()
+                            .filter(|_| workspace == caller_workspace)
+                            .map(|_| falcondeck_core::ThreadHandoffSource {
                                 thread_id: parent.into(),
                                 provider: parent_summary.provider,
                                 context_pending: true,
-                            }
-                        }),
-                        handoff_context: if workspace == caller_workspace { context.clone() } else { None },
+                            }),
+                        handoff_context: if workspace == caller_workspace {
+                            context.clone()
+                        } else {
+                            None
+                        },
                     })
                     .await?;
                 let id = handle.thread.id;
                 if workspace != caller_workspace {
                     // A worker in another project carries a brief without
                     // pretending to be a native handoff inside that project.
-                    if let Some(thread) = self.inner.workspaces.lock().await.get_mut(&workspace)
-                        .and_then(|ws| ws.threads.get_mut(&id)) {
+                    if let Some(thread) = self
+                        .inner
+                        .workspaces
+                        .lock()
+                        .await
+                        .get_mut(&workspace)
+                        .and_then(|ws| ws.threads.get_mut(&id))
+                    {
                         thread.pending_handoff_context = context;
                     }
                 }
@@ -469,39 +534,89 @@ impl AppState {
         }
     }
 
-    fn thread_briefing(&self, thread: &ThreadSummary) -> String {
-        let mut text = format!(
-            "## {}\n\n- Id: {}\n- Provider: {}\n- Status: {}\n- Last preview: {}\n",
-            line(&thread.title, 256),
-            line(&thread.id, 256),
-            thread.provider,
-            serde_json::to_value(&thread.status)
-                .unwrap_or_default()
-                .as_str()
-                .unwrap_or("unknown"),
-            line(thread.last_message_preview.as_deref().unwrap_or(""), 400)
-        );
+    /// Project workspaces, most recently active first.
+    async fn project_workspace_ids(&self) -> Vec<String> {
+        let workspaces = self.inner.workspaces.lock().await;
+        let mut projects: Vec<_> = workspaces
+            .values()
+            .filter(|ws| ws.summary.kind == falcondeck_core::WorkspaceKind::Project)
+            .map(|ws| {
+                let last = ws.threads.values().map(|t| t.summary.updated_at).max();
+                (last, ws.summary.id.clone())
+            })
+            .collect();
+        projects.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.cmp(&b.1)));
+        projects.into_iter().map(|(_, id)| id).collect()
+    }
+
+    /// A workspace id, an exact project path, or a unique project folder name.
+    async fn resolve_workspace(&self, wanted: &str) -> Result<String, DaemonError> {
+        let workspaces = self.inner.workspaces.lock().await;
+        if workspaces.contains_key(wanted) {
+            return Ok(wanted.into());
+        }
+        let wanted = wanted.trim().trim_end_matches('/');
+        let named: Vec<_> = workspaces
+            .values()
+            .filter(|ws| {
+                ws.summary.path == wanted
+                    || glance::project_name(&ws.summary.path).eq_ignore_ascii_case(wanted)
+            })
+            .collect();
+        match named.as_slice() {
+            [ws] => Ok(ws.summary.id.clone()),
+            [] => Err(DaemonError::NotFound(format!(
+                "no project matches {}",
+                line(wanted, 120)
+            ))),
+            many => Err(DaemonError::BadRequest(format!(
+                "{} is ambiguous; pass one of these paths: {}",
+                line(wanted, 120),
+                many.iter()
+                    .map(|ws| line(&ws.summary.path, 160))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ))),
+        }
+    }
+
+    /// The parent's title, last request and reply, and cached user excerpts.
+    async fn thread_briefing(&self, workspace: &str, thread: &str) -> Result<String, DaemonError> {
+        let workspaces = self.inner.workspaces.lock().await;
+        let managed = workspaces
+            .get(workspace)
+            .and_then(|ws| ws.threads.get(thread))
+            .ok_or_else(|| DaemonError::NotFound("thread not found".into()))?;
         let index = self
             .inner
             .thread_search
             .lock()
             .unwrap_or_else(|e| e.into_inner());
-        if let Some(excerpt) = thread
+        let excerpt = managed
+            .summary
             .native_session_id
             .as_ref()
-            .and_then(|id| index.sessions.get(id))
-        {
-            for (label, messages) in [
-                ("Opening user", &excerpt.opening),
-                ("Recent user", &excerpt.recent),
-            ] {
-                for message in messages.iter().take(3) {
-                    text.push_str(&format!("- {label}: {}\n", line(message, 400)));
-                }
+            .and_then(|id| index.sessions.get(id));
+        let glance = glance::Glance::of(managed, excerpt);
+        let mut text = format!(
+            "## {}\n\n- Id: {}\n- Provider: {}\n",
+            line(&managed.summary.title, 256),
+            line(&managed.summary.id, 256),
+            managed.summary.provider,
+        );
+        if let Some(excerpt) = excerpt {
+            for message in excerpt.opening.iter().take(3) {
+                text.push_str(&format!("- Opening user: {}\n", line(message, 400)));
             }
         }
+        if let Some(asked) = &glance.asked {
+            text.push_str(&format!("- Latest request: {}\n", line(asked, 400)));
+        }
+        if let Some(latest) = &glance.latest {
+            text.push_str(&format!("- Latest reply: {}\n", line(latest, 400)));
+        }
         text.push('\n');
-        text
+        Ok(text)
     }
 
     async fn thread_handoff(
@@ -532,9 +647,9 @@ mod tests {
     use super::*;
     use falcondeck_core::{ThreadAgentParams, ThreadAttention};
     use tempfile::tempdir;
+    mod bot_tests;
     mod digest_tests;
     mod model_settings_tests;
-    mod bot_tests;
 
     #[test]
     fn detects_prose_with_dropped_word_spaces() {
@@ -629,10 +744,15 @@ mod tests {
                 .collect(),
             },
         );
+        // Tools refresh a stale excerpt index; tests seed theirs directly.
+        *app.inner.thread_search_scanned_at.lock().unwrap() = Some(std::time::Instant::now());
 
         (app, temp_dir)
     }
-    pub(super) fn call(name: &str, arguments: Value) -> falcondeck_core::InvokeExtensionToolRequest {
+    pub(super) fn call(
+        name: &str,
+        arguments: Value,
+    ) -> falcondeck_core::InvokeExtensionToolRequest {
         falcondeck_core::InvokeExtensionToolRequest {
             name: name.into(),
             arguments,
@@ -691,22 +811,28 @@ mod tests {
                     .any(|t| t.name == name)
             );
         }
-        set_items(
-            &app,
-            vec![
-                user("secret", "transcript must not leak"),
+        {
+            let mut workspaces = app.inner.workspaces.lock().await;
+            let ws = workspaces.get_mut("workspace-1").unwrap();
+            let mut summary = ws.threads["thread-1"].summary.clone();
+            summary.id = "sibling".into();
+            summary.native_session_id = Some("session-sibling".into());
+            let mut sibling = ManagedThread::new(summary);
+            sibling.items = vec![
+                user("old", "older request stays out"),
+                user("ask", "ship the fix"),
                 assistant("latest", "latest loaded reply"),
-            ],
-        )
-        .await;
+            ];
+            ws.threads.insert("sibling".into(), sibling);
+        }
         app.inner.thread_search.lock().unwrap().sessions.insert(
-            "session-parent".into(),
+            "session-sibling".into(),
             thread_search::SessionExcerpt {
                 path: "/missing/transcript".into(),
-                modified_ms: 0,
-                size: 0,
                 opening: vec!["opening goal".into()],
                 recent: vec!["recent change".into()],
+                latest_reply: Some("stale indexed reply".into()),
+                ..Default::default()
             },
         );
         let result = app
@@ -714,17 +840,24 @@ mod tests {
             .await
             .unwrap();
         let text = result.result.as_str().unwrap();
-        for part in [
-            "thread-1",
-            "Provider: claude",
-            "Status: idle",
-            "Last assistant: latest loaded reply",
-            "opening goal",
+        // Loaded items outrank the index; the caller never lists itself.
+        assert!(
+            text.contains("- **Auth setup** `sibling` — idle · 0s ago · claude\n  Asked: ship the fix\n  Latest: latest loaded reply\n"),
+            "{text}"
+        );
+        for absent in [
+            "`thread-1`",
+            "older request",
+            "stale indexed",
             "recent change",
         ] {
-            assert!(text.contains(part), "{text}");
+            assert!(!text.contains(absent), "{absent} in {text}");
         }
-        assert!(!text.contains("transcript must not leak"));
+        let found = app
+            .invoke_extension_tool(call(LIST, json!({"query":"opening GOAL"})))
+            .await
+            .unwrap();
+        assert!(found.result.as_str().unwrap().contains("`sibling`"));
         let bounded = app
             .invoke_extension_tool(call(LIST, json!({"max_chars":512})))
             .await
@@ -1051,15 +1184,15 @@ mod tests {
                 .unwrap();
             let text = page.result.as_str().unwrap();
             assert!(text.chars().count() <= 1500);
-            for line in text.lines().filter_map(|line| line.strip_prefix("Id: ")) {
-                let id = line.split(" | ").next().unwrap().to_string();
+            for (at, _) in text.match_indices("message-") {
+                let id = text[at..].split(':').next().unwrap().to_string();
                 assert!(!seen.contains(&id), "duplicate {id}");
                 seen.push(id);
             }
             let next = text
-                .lines()
-                .find_map(|line| line.strip_prefix("Older items: before="))
-                .map(|line| line.split_whitespace().next().unwrap().to_string());
+                .split("Older: before=")
+                .nth(1)
+                .map(|rest| rest.split_whitespace().next().unwrap().to_string());
             let Some(next) = next else {
                 break;
             };
@@ -1168,7 +1301,10 @@ mod tests {
         );
         let page = app.invoke_extension_tool(call(VIEW, json!({"thread_id":"thread-1","before":"a0","query":"needle.*","include_tools":true}))).await.unwrap();
         let text = page.result.as_str().unwrap();
-        assert!(text.contains("Id: u1") && text.contains("Id: t1"), "{text}");
+        assert!(
+            text.contains("item_id=u1") && text.contains("item_id=t1"),
+            "{text}"
+        );
         assert_eq!(text.matches("Needle.* 終").count(), 2, "{text}");
         assert!(text.contains("No older items"), "{text}");
         assert!(text.chars().count() < 2000, "{}", text.chars().count());
@@ -1267,33 +1403,33 @@ mod tests {
         };
         let shell = find("unique_shell_command", true, false).await;
         assert!(
-            shell.contains("Id: shell") && shell.contains("cargo test unique_shell_command"),
+            shell.contains("item_id=shell") && shell.contains("cargo test unique_shell_command"),
             "{shell}"
         );
         let titled = find("unique-title-token", true, false).await;
         assert!(
-            titled.contains("Id: titled") && titled.contains("unique-title-token"),
+            titled.contains("item_id=titled") && titled.contains("unique-title-token"),
             "{titled}"
         );
         let long = find("unique_long_title_token", true, false).await;
         assert!(
-            long.contains("Id: long") && long.contains("unique_long_title_token"),
+            long.contains("item_id=long") && long.contains("unique_long_title_token"),
             "{long}"
         );
         let diff = find("unique_diff_token", true, false).await;
         assert!(
-            diff.contains("Id: d1") && diff.contains("unique_diff_token"),
+            diff.contains("item_id=d1") && diff.contains("unique_diff_token"),
             "{diff}"
         );
         let patch = find("unique_patch_token", true, false).await;
         assert!(
-            patch.contains("Id: f1") && patch.contains("unique_patch_token"),
+            patch.contains("item_id=f1") && patch.contains("unique_patch_token"),
             "{patch}"
         );
 
         let summary = find("secret_summary_token", false, true).await;
         assert!(
-            summary.contains("Id: r1") && summary.contains("secret_summary_token"),
+            summary.contains("item_id=r1") && summary.contains("secret_summary_token"),
             "{summary}"
         );
 
@@ -1402,7 +1538,7 @@ mod tests {
             .unwrap();
         let found = found.result.as_str().unwrap();
         assert!(
-            found.contains("Id: patch") && found.contains("unique_hidden_patch_token"),
+            found.contains("item_id=patch") && found.contains("unique_hidden_patch_token"),
             "{found}"
         );
 
@@ -1433,12 +1569,16 @@ mod tests {
             let page = app.invoke_extension_tool(call(VIEW, json!({"thread_id":"thread-1", "item_id":"t1", "offset":offset,"max_chars":1000}))).await.unwrap();
             let text = page.result.as_str().unwrap();
             assert!(text.chars().count() <= 1000);
-            let (_, content) = text.rsplit_once("\n\n").unwrap();
+            let (_, section) = text.split_once("\n\n").unwrap();
+            let (_, content) = section.split_once('\n').unwrap();
+            let content = content
+                .rsplit_once("\n[item_id=")
+                .map_or(content, |(content, _)| content);
             rebuilt.push_str(content.trim_matches('…'));
             let next = text
-                .split("next_offset=")
+                .split("offset=")
                 .nth(1)
-                .and_then(|value| value.lines().next())
+                .and_then(|value| value.split_whitespace().next())
                 .and_then(|value| value.parse::<usize>().ok());
             let Some(next) = next else {
                 break;
@@ -1608,12 +1748,20 @@ mod tests {
         let script = temp.path().join("fake-claude");
         let capture = temp.path().join("captured-input");
         let captured_args = temp.path().join("captured-args");
-        std::fs::write(&script, format!(r#"#!/bin/sh
+        std::fs::write(
+            &script,
+            format!(
+                r#"#!/bin/sh
 printf '%s\n' "$@" > '{}'
 IFS= read -r input
 printf '%s' "$input" > '{}'
 printf '%s\n' '{{"type":"result","subtype":"success","result":"done","session_id":"test-session"}}'
-"#, captured_args.display(), capture.display())).unwrap();
+"#,
+                captured_args.display(),
+                capture.display()
+            ),
+        )
+        .unwrap();
         std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o700)).unwrap();
         let runtime = crate::claude::ClaudeRuntime::for_test(
             temp.path().to_string_lossy().into(),
@@ -1657,7 +1805,12 @@ printf '%s\n' '{{"type":"result","subtype":"success","result":"done","session_id
         assert!(input.contains("do bounded work"));
         assert!(!input.contains("PRIVATE PARENT TRANSCRIPT"));
         let argv = std::fs::read_to_string(captured_args).unwrap();
-        assert!(argv.lines().collect::<Vec<_>>().windows(2).any(|args| args == ["--effort", "xhigh"]));
+        assert!(
+            argv.lines()
+                .collect::<Vec<_>>()
+                .windows(2)
+                .any(|args| args == ["--effort", "xhigh"])
+        );
         let ws = app.inner.workspaces.lock().await;
         let child = &ws["workspace-1"].threads[&created_id(&result)];
         assert!(child.items.iter().any(

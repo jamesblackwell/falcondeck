@@ -167,19 +167,13 @@ async fn summary_digests_outcome_files_commits_checks_and_attention() {
 
     let out = text(&app, SUMMARY, json!({"thread_id":"worker"})).await;
     for part in [
-        "## Sync fix",
+        "## Sync fix `worker`\n- awaiting_approval (approval) · 20m ago · claude\n",
         "ATTENTION: waiting on approval \"Run command\" (git push origin main) — resolve in FalconDeck UI.",
-        "Status: waiting_for_input",
-        "Last user request (",
-        "Fix the sync bug and commit",
-        "Fixed the replay bug and committed 2896d18.",
-        "Files changed (3): src/lib.rs, src/old.rs -> src/new.rs, src/sync.rs",
-        "Commits (1): 2896d18 Fix sync replay",
-        "tests passed at",
-        "2 runs",
-        "typecheck passed",
-        "autoreview passed",
-        "Transcript: scanned 11 items (complete)",
+        "- Asked: Fix the sync bug and commit\n",
+        "- Latest: Fixed the replay bug and committed 2896d18.\n",
+        "- Files (3): src/lib.rs, src/old.rs -> src/new.rs, src/sync.rs\n",
+        "- Commits (1): 2896d18 Fix sync replay\n",
+        "- Checks: tests passed, 2 runs (`cargo test -p falcondeck-daemon`); typecheck passed (`npx tsc --noEmit -p apps/desktop/tsconfig.app.json`); autoreview passed (`.agents/skills/autoreview/scripts/autoreview --mode local`)\n",
     ] {
         assert!(out.contains(part), "missing {part:?} in\n{out}");
     }
@@ -216,9 +210,9 @@ async fn summary_without_loaded_items_stays_cheap_and_bounded() {
     let out = text(&app, SUMMARY, json!({"thread_ids":["thread-1"]})).await;
     for part in [
         "ATTENTION: errored: provider exited",
-        "Last preview: cached preview",
+        "Latest: cached preview",
         "Error: provider exited",
-        "Transcript: not loaded",
+        "Transcript not loaded",
     ] {
         assert!(out.contains(part), "missing {part:?} in\n{out}");
     }
@@ -239,12 +233,10 @@ async fn summary_without_loaded_items_stays_cheap_and_bounded() {
     )
     .await;
     assert!(
-        out.contains("## Auth setup")
-            && out.contains("Last assistant outcome")
-            && out.contains("done"),
+        out.contains("## Auth setup") && out.contains("- Latest: done\n"),
         "{out}"
     );
-    assert!(out.contains("- Transcript: "), "{out}");
+    assert!(out.contains("- Transcript "), "{out}");
     for i in 0..20 {
         add_thread(
             &app,
@@ -313,19 +305,21 @@ async fn changes_lists_recent_activity_with_deltas_and_flags_blocked_first() {
     let worker = out.find("Sync fix").expect(&out);
     assert!(blocked < worker, "{out}");
     assert!(
-        out.contains("**ATTENTION: waiting on approval \"Edit file\""),
+        out.contains("`blocked` — awaiting_approval (approval) · 50m ago · claude\n  ATTENTION: waiting on approval \"Edit file\""),
         "{out}"
     );
-    assert!(out.contains("(`worker`) — idle"), "{out}");
     // Only the window's items count: the old user/assistant pair is excluded.
     assert!(
-        out.contains("1 user msg, 1 assistant msg, 3 files, 1 commit, autoreview passed, typecheck passed, tests passed, 1 failed tool(s); last reply: Fixed the replay bug"),
+        out.contains("`worker` — idle · 20m ago · claude\n  Since: 1 user msg, 1 assistant msg, 3 files, 1 commit, autoreview passed, typecheck passed, tests passed, 1 failed tool(s)\n  Asked: Fix the sync bug and commit\n  Latest: Fixed the replay bug"),
         "{out}"
     );
     for absent in ["Old work", "Archived", "Auth setup"] {
         assert!(!out.contains(absent), "{absent} in\n{out}");
     }
-    assert!(out.contains("Changed: 2 of"), "{out}");
+    assert!(
+        out.contains("2 of 3 threads changed, not counting you or archived threads."),
+        "{out}"
+    );
     let now = out
         .lines()
         .find_map(|l| l.strip_prefix("Now: "))
@@ -333,10 +327,7 @@ async fn changes_lists_recent_activity_with_deltas_and_flags_blocked_first() {
         .unwrap()
         .to_string();
     let later = text(&app, CHANGES, json!({"since":now})).await;
-    assert!(
-        later.contains("Changed: 0 of") && later.contains("No thread activity"),
-        "{later}"
-    );
+    assert!(later.contains("0 of 3 threads changed"), "{later}");
     let archived = text(&app, CHANGES, json!({"since":"1h","include_archived":true})).await;
     assert!(archived.contains("Archived"), "{archived}");
     for arguments in [
@@ -374,7 +365,7 @@ async fn view_role_returns_final_assistant_message_with_timestamps_and_flags() {
     )
     .await;
     assert!(
-        out.contains("Id: a2 | 2026-10-16T09:15:00Z | offset=0"),
+        out.contains("### Assistant · 2026-10-16 09:15\nFinal outcome"),
         "{out}"
     );
     assert!(out.contains(long.trim_end()), "{out}");
@@ -383,7 +374,8 @@ async fn view_role_returns_final_assistant_message_with_timestamps_and_flags() {
         "{out}"
     );
     assert!(
-        out.contains("Scope: assistant.") && out.contains("Status: idle | Last activity:"),
+        out.starts_with("# Auth setup `thread-1`\nidle · ")
+            && out.contains("Scope: assistant, newest last. Shown 1;"),
         "{out}"
     );
     let users = text(
@@ -393,12 +385,15 @@ async fn view_role_returns_final_assistant_message_with_timestamps_and_flags() {
     )
     .await;
     assert!(
-        users.contains("question") && users.contains("follow-up") && !users.contains("Id: t1"),
+        users.contains("question") && users.contains("follow-up") && !users.contains("Tool —"),
         "{users}"
     );
     // Default reads keep the 1200-character preview and gain timestamps.
     let plain = text(&app, VIEW, json!({"thread_id":"thread-1"})).await;
-    assert!(plain.contains("next_offset=1200"), "{plain}");
+    assert!(
+        plain.contains("[item_id=a2 offset=1200 for more]"),
+        "{plain}"
+    );
     assert!(
         app.invoke_extension_tool(call(VIEW, json!({"thread_id":"thread-1","role":"tool"})))
             .await
@@ -420,7 +415,7 @@ async fn view_role_returns_final_assistant_message_with_timestamps_and_flags() {
     .await;
     let flagged = text(&app, VIEW, json!({"thread_id":"thread-1","limit":1})).await;
     assert!(
-        flagged.contains("Status: waiting_for_input")
+        flagged.contains("awaiting_approval (approval) · ")
             && flagged.contains("ATTENTION: waiting on approval \"Run command\" (rm -rf build)"),
         "{flagged}"
     );
