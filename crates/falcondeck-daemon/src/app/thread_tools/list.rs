@@ -418,10 +418,10 @@ pub(super) async fn list(
         "{} unarchived (not counting you): {} running, {} need the user, {} errored; {} active in 24h.\n\n",
         overview.total, overview.running, overview.needs_user, overview.errored, overview.recent,
     ));
-    // Only the page is rendered, so only its summaries are cloned.
-    // `consumed` also counts threads deleted since the first pass, so the
-    // next offset never repeats one.
-    let (mut shown, mut consumed) = (0, 0);
+    // Only the page is rendered, so only its summaries are cloned. A thread
+    // deleted since the first pass is skipped without counting: the next
+    // call's list no longer has it, so `offset + shown` stays aligned.
+    let mut shown = 0;
     {
         let workspaces = app.inner.workspaces.lock().await;
         let index = app
@@ -429,14 +429,16 @@ pub(super) async fn list(
             .thread_search
             .lock()
             .unwrap_or_else(|e| e.into_inner());
-        for candidate in candidates.iter().skip(offset).take(limit) {
+        for candidate in candidates.iter().skip(offset) {
+            if shown == limit {
+                break;
+            }
             let workspace = &scope[candidate.workspace];
             // A thread removed since the first pass is skipped.
             let Some(thread) = workspaces
                 .get(workspace)
                 .and_then(|ws| ws.threads.get(&candidate.id))
             else {
-                consumed += 1;
                 continue;
             };
             let mut summary = thread.summary.clone();
@@ -476,11 +478,10 @@ pub(super) async fn list(
             }
             markdown.push_str(&text);
             shown += 1;
-            consumed += 1;
         }
     }
     let start = offset.min(matched);
-    let end = start + consumed;
+    let end = (start + shown).min(matched);
     let sorted = match (args.sort, order) {
         (Sort::Updated, Order::Desc) => "newest activity first",
         (Sort::Updated, Order::Asc) => "oldest activity first",
@@ -491,7 +492,7 @@ pub(super) async fn list(
     markdown.push('\n');
     markdown.push_str(&if matched == 0 {
         "No threads match.".to_string()
-    } else if start == matched {
+    } else if shown == 0 {
         format!("No threads at offset {offset}; {matched} matched.")
     } else {
         format!("Showing {}–{end} of {matched}, {sorted}.", start + 1)
