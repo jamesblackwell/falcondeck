@@ -455,7 +455,9 @@ impl<'a> SummaryMetadata<'a> {
                 continue;
             };
             self.visit(&header.value);
-            if header.value.get("isMeta").and_then(Value::as_bool) == Some(true) {
+            if !is_claude_transcript_record(&header.value)
+                || header.value.get("isMeta").and_then(Value::as_bool) == Some(true)
+            {
                 continue;
             }
             let user = header.value.get("type").and_then(Value::as_str) == Some("user");
@@ -1209,6 +1211,7 @@ mod tests {
             json!({"type":"assistant", "uuid":"a1", "delta":{"text":" world"}, "timestamp":"2026-10-06T09:00:02Z"}),
             json!({"type":"user", "message":{"content":[{"type":"tool_result","content":"Private tool output"}]}}),
             json!({"type":"user", "isMeta":true, "message":{"content":"Internal envelope"}}),
+            json!({"type":"api-request-blob", "message":{"role":"user", "content":[{"type":"text","text":"<system-reminder>Contents of MEMORY.md</system-reminder>"}]}}),
         ]);
         let discovered = discover_threads_in(dir.path(), CWD).remove(0);
         assert_eq!(

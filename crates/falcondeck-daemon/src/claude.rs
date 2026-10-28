@@ -1891,6 +1891,18 @@ fn hydrate_thread_from_file(path: &Path, workspace_path: &str) -> Option<Hydrate
     (session.cwd == workspace_path).then_some(session.thread)
 }
 
+/// Session files interleave transcript records with bookkeeping. Newer CLIs
+/// write `api-request-blob` snapshots that replay whole system, user, and
+/// assistant turns, injected `<system-reminder>` context included, plus
+/// rendered `attachment` records. Only `user` and `assistant` records are
+/// transcript; untyped lines stay accepted for older formats.
+fn is_claude_transcript_record(value: &Value) -> bool {
+    matches!(
+        value.get("type").and_then(Value::as_str),
+        None | Some("user" | "assistant")
+    )
+}
+
 fn parse_session_file(path: &Path) -> Option<ParsedSessionFile> {
     let file = fs::File::open(path).ok()?;
     let metadata = file.metadata().ok()?;
@@ -1947,10 +1959,11 @@ fn parse_session_file(path: &Path) -> Option<ParsedSessionFile> {
         // isMeta marks Claude-internal bookkeeping (caveats, command
         // envelopes, compaction notes) recorded in the session file; it is not
         // transcript content and must not seed items, titles, or previews.
-        if value
-            .get("isMeta")
-            .and_then(Value::as_bool)
-            .unwrap_or(false)
+        if !is_claude_transcript_record(&value)
+            || value
+                .get("isMeta")
+                .and_then(Value::as_bool)
+                .unwrap_or(false)
         {
             continue;
         }
@@ -2905,6 +2918,61 @@ mod tests {
         assert_eq!(
             hydrated.summary.last_message_preview.as_deref(),
             Some("fix the login bug")
+        );
+    }
+
+    #[test]
+    fn hydration_skips_request_snapshots_and_attachments() {
+        let dir = tempfile::tempdir().unwrap();
+        let session_path = dir
+            .path()
+            .join("66666666-6666-4666-8666-666666666666.jsonl");
+        let reminder = "<system-reminder>\nContents of MEMORY.md\n</system-reminder>";
+        fs::write(
+            &session_path,
+            [
+                json!({
+                    "sessionId": "66666666-6666-4666-8666-666666666666",
+                    "cwd": "/tmp/project",
+                    "type": "user",
+                    "uuid": "u1",
+                    "message": { "role": "user", "content": "update the titles" },
+                    "timestamp": "2026-10-28T09:00:00Z"
+                }),
+                json!({
+                    "type": "attachment",
+                    "attachment": { "type": "instructions", "files": [] },
+                    "rendered": [{ "content": reminder }],
+                    "renderedRole": "user",
+                    "timestamp": "2026-10-28T09:00:01Z"
+                }),
+                json!({
+                    "type": "assistant",
+                    "message": {
+                        "id": "msg_1",
+                        "role": "assistant",
+                        "content": [{ "type": "text", "text": "Editing the titles now." }]
+                    },
+                    "timestamp": "2026-10-28T09:00:02Z"
+                }),
+                json!({ "type": "api-request-blob", "message": { "role": "user", "content": [{ "type": "text", "text": reminder }] } }),
+                json!({ "type": "api-request-blob", "message": { "role": "system", "content": "# Environment update\nThe user hasn't heard from you in a while." } }),
+                json!({ "type": "api-request-blob", "message": { "role": "assistant", "content": [{ "type": "text", "text": "Editing the titles now." }] } }),
+            ]
+            .map(|line| line.to_string())
+            .join("\n"),
+        )
+        .unwrap();
+
+        let hydrated = hydrate_thread_from_file(&session_path, "/tmp/project").unwrap();
+        assert_eq!(hydrated.items.len(), 2, "{:?}", hydrated.items);
+        assert!(matches!(
+            hydrated.items.last(),
+            Some(ConversationItem::AssistantMessage { text, .. }) if text == "Editing the titles now."
+        ));
+        assert_eq!(
+            hydrated.summary.last_message_preview.as_deref(),
+            Some("Editing the titles now.")
         );
     }
 
