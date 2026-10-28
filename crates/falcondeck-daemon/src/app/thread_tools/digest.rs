@@ -57,38 +57,8 @@ pub(super) fn item_created_at(item: &ConversationItem) -> DateTime<Utc> {
     }
 }
 
-pub(super) fn stamp(at: DateTime<Utc>) -> String {
+fn stamp(at: DateTime<Utc>) -> String {
     at.format("%Y-%m-%dT%H:%M:%SZ").to_string()
-}
-
-/// RFC 3339 timestamp, or a relative window such as `90s`, `15m`, `2h`, `1d`.
-fn parse_since(value: &str, now: DateTime<Utc>) -> Result<DateTime<Utc>, DaemonError> {
-    let value = value.trim();
-    if let Ok(at) = DateTime::parse_from_rfc3339(value) {
-        return Ok(at.with_timezone(&Utc));
-    }
-    let invalid = || {
-        DaemonError::BadRequest(
-            "since must be an RFC 3339 timestamp or a window like 90s, 15m, 2h, 1d".into(),
-        )
-    };
-    let split = value
-        .find(|c: char| !c.is_ascii_digit())
-        .ok_or_else(invalid)?;
-    let (amount, unit) = value.split_at(split);
-    let amount: i64 = amount.parse().map_err(|_| invalid())?;
-    let seconds = match unit {
-        "s" => 1,
-        "m" => 60,
-        "h" => 3600,
-        "d" => 86_400,
-        _ => return Err(invalid()),
-    };
-    amount
-        .checked_mul(seconds)
-        .filter(|s| *s <= 366 * 86_400)
-        .map(|s| now - chrono::Duration::seconds(s))
-        .ok_or_else(invalid)
 }
 
 /// One line naming what the thread is blocked on, if anything. Approvals and
@@ -137,7 +107,7 @@ pub(super) fn attention(summary: &ThreadSummary, pending: &[InteractiveRequest])
             parts.join("; ")
         ));
     }
-    // Summary counts stand in when the request map was not consulted (list).
+    // Counts stand in if the requests resolved between the two reads.
     let (approvals, questions) = (
         summary.attention.pending_approval_count,
         summary.attention.pending_question_count,
@@ -224,7 +194,8 @@ enum CheckKind {
 }
 
 struct Check {
-    command: String,
+    /// Short command, or the script that ran it.
+    label: String,
     outcome: &'static str,
     runs: usize,
 }
@@ -270,6 +241,9 @@ static TEST_RESULT: LazyLock<regex::Regex> = LazyLock::new(|| {
     regex::Regex::new(r"(?m)^(?:test result: (ok|FAILED)\.|\s*Test Files\s+.*?(failed|passed))")
         .unwrap()
 });
+/// The autoreview script itself, not a path into its skill folder.
+static AUTOREVIEW_COMMAND: LazyLock<regex::Regex> =
+    LazyLock::new(|| regex::Regex::new(r"(?:^|[\s/])autoreview(?:\s|$)").unwrap());
 /// The script's own report, not a file that quotes it.
 static AUTOREVIEW_RESULT: LazyLock<regex::Regex> =
     LazyLock::new(|| regex::Regex::new(r"(?m)^autoreview target: ").unwrap());
@@ -413,7 +387,7 @@ impl Digest {
             self.checks.push((
                 kind,
                 Check {
-                    command: label,
+                    label,
                     outcome,
                     runs: 1,
                 },
@@ -531,15 +505,18 @@ fn digest(items: &[ConversationItem], since: Option<DateTime<Utc>>, root: &str) 
                     d.push_file(relative(path, root).to_string());
                 }
                 let Some(command) = command_text(title, detail) else {
-                    if title.to_ascii_lowercase().contains("autoreview") {
-                        let outcome = autoreview_outcome(output.as_deref(), result);
+                    // Non-shell tools count only when they carry the report.
+                    if let Some(output) = output.as_deref()
+                        && AUTOREVIEW_RESULT.is_match(output)
+                    {
+                        let outcome = autoreview_outcome(Some(output), result);
                         d.record_check(CheckKind::Autoreview, line(title, 80), outcome);
                     }
                     continue;
                 };
                 let command = unwrap_shell(command);
                 let lower = command.to_ascii_lowercase();
-                if let Some(at) = lower.find("autoreview") {
+                if let Some(at) = AUTOREVIEW_COMMAND.find(&lower).map(|m| m.start()) {
                     let outcome = autoreview_outcome(output.as_deref(), result);
                     d.record_check(CheckKind::Autoreview, check_label(command, at), outcome);
                 } else if let Some(found) = TEST_COMMAND.find(&lower) {
@@ -632,6 +609,7 @@ impl AppState {
 pub(super) async fn summary(
     app: &AppState,
     workspace: &str,
+    caller: &str,
     cross_project: bool,
     args: &SummaryArgs,
 ) -> Result<String, DaemonError> {
@@ -719,7 +697,13 @@ pub(super) async fn summary(
                 &snapshot.glance,
                 snapshot.digest.as_ref(),
                 snapshot.hydrate_error.as_deref(),
-                now,
+                &RowContext {
+                    now,
+                    caller,
+                    project: None,
+                    folder: None,
+                    excerpts: true,
+                },
             ),
             per_thread,
         );
@@ -741,11 +725,9 @@ pub(super) async fn summary(
 
 /// `text` capped at `cap`, pointing at the item to expand when cut.
 fn message_line(text: &str, id: &str, cap: usize) -> String {
-    let shown = line(text, cap);
-    if text.chars().count() > cap {
-        format!("{shown} (expand: item_id={})", line(id, 128))
-    } else {
-        shown
+    match line_cut(text, cap) {
+        (shown, true) => format!("{shown} (expand: item_id={})", line(id, 128)),
+        (shown, false) => shown,
     }
 }
 
@@ -755,55 +737,37 @@ fn render_summary(
     glance: &Glance,
     digest: Option<&Digest>,
     hydrate_error: Option<&str>,
-    now: DateTime<Utc>,
+    cx: &RowContext<'_>,
 ) -> String {
-    let last_activity = digest
+    let mut shown = summary.clone();
+    shown.updated_at = digest
         .and_then(|d| d.last_item_at)
         .map_or(summary.updated_at, |at| at.max(summary.updated_at));
-    let mut facts = vec![
-        glance::state(summary),
-        ago(last_activity, now),
-        match summary.agent.model_id.as_deref() {
-            Some(model) => format!("{} {}", summary.provider, line(model, 60)),
-            None => summary.provider.to_string(),
-        },
-    ];
-    if !summary.queued_turns.is_empty() {
-        facts.push(format!("{} queued", summary.queued_turns.len()));
-    }
-    if summary.attention.background_task_count > 0 {
-        facts.push(format!(
-            "{} background",
-            summary.attention.background_task_count
-        ));
-    }
-    if summary.is_archived {
-        facts.push("archived".into());
-    }
     let mut text = format!(
         "## {} `{}`\n- {}\n",
         line(&summary.title, 160),
         line(&summary.id, 128),
-        facts.join(" · ")
+        glance::facts(&shown, cx, true)
     );
-    if let Some(flag) = attention(summary, pending) {
+    let flag = attention(summary, pending);
+    if let Some(flag) = &flag {
         text.push_str(&format!("- {flag}\n"));
     }
     if let Some(goal) = &summary.goal {
         text.push_str(&format!("- Goal: {}\n", line(&goal.objective, 200)));
     }
+    // An errored thread's flag already carries its error.
+    let error = summary
+        .last_error
+        .as_deref()
+        .filter(|_| summary.status != ThreadStatus::Error || flag.is_none());
     let Some(d) = digest else {
-        if let Some(asked) = &glance.asked {
-            text.push_str(&format!("- Asked: {}\n", line(asked, 300)));
-        }
-        if let Some(latest) = &glance.latest {
-            text.push_str(&format!("- Latest: {}\n", line(latest, 600)));
-        }
-        if let Some(error) = &summary.last_error {
+        text.push_str(&glance.lines("- ", 300, 600));
+        if let Some(error) = error {
             text.push_str(&format!("- Error: {}\n", line(error, 300)));
         }
         match hydrate_error {
-            Some(error) => text.push_str(&format!("- Transcript could not load: {error}\n")),
+            Some(failure) => text.push_str(&format!("- Transcript could not load: {failure}\n")),
             None => text.push_str(
                 "- Transcript not loaded; hydrate=true adds files, commits, and checks.\n",
             ),
@@ -835,7 +799,7 @@ fn render_summary(
         text.push_str(&checks_line(&d.checks));
     }
     let mut errors = Vec::new();
-    if let Some(error) = &summary.last_error {
+    if let Some(error) = error {
         errors.push(line(error, 300));
     }
     if d.failed_tools > 0 {
@@ -919,7 +883,7 @@ fn checks_line(checks: &[(CheckKind, Check)]) -> String {
             } else {
                 String::new()
             },
-            check.command.replace('`', "'"),
+            check.label.replace('`', "'"),
         ))
     })
     .collect();
@@ -965,7 +929,7 @@ pub(super) async fn changes(
     args: &ChangesArgs,
 ) -> Result<String, DaemonError> {
     let now = Utc::now();
-    let since = parse_since(&args.since, now)?;
+    let since = super::list::parse_time("since", &args.since, now)?;
     let cap = args
         .max_chars
         .unwrap_or(DEFAULT_CHANGES_CHARS)
@@ -981,28 +945,21 @@ pub(super) async fn changes(
             let ws = workspaces
                 .get(workspace)
                 .ok_or_else(|| DaemonError::NotFound("workspace not found".into()))?;
-            let ids: Vec<String> = ws
-                .threads
-                .values()
-                .filter(|t| {
-                    t.summary.id != caller && (args.include_archived || !t.summary.is_archived)
-                })
-                .filter(|t| {
-                    t.summary.updated_at > since
-                        || t.items.last().is_some_and(|i| item_created_at(i) > since)
-                        || pending
-                            .get(&t.summary.id)
-                            .is_some_and(|r| r.iter().any(|r| r.created_at > since))
-                })
-                .map(|t| t.summary.id.clone())
-                .collect();
-            let count = ws
-                .threads
-                .values()
-                .filter(|t| {
-                    t.summary.id != caller && (args.include_archived || !t.summary.is_archived)
-                })
-                .count();
+            let mut count = 0;
+            let mut ids = Vec::new();
+            for t in ws.threads.values().filter(|t| {
+                t.summary.id != caller && (args.include_archived || !t.summary.is_archived)
+            }) {
+                count += 1;
+                if t.summary.updated_at > since
+                    || t.items.last().is_some_and(|i| item_created_at(i) > since)
+                    || pending
+                        .get(&t.summary.id)
+                        .is_some_and(|r| r.iter().any(|r| r.created_at > since))
+                {
+                    ids.push(t.summary.id.clone());
+                }
+            }
             (
                 glance::project_name(&ws.summary.path).to_string(),
                 ids,
@@ -1020,7 +977,11 @@ pub(super) async fn changes(
                 .and_then(|d| d.last_item_at)
                 .map_or(summary.updated_at, |at| at.max(summary.updated_at));
             let mut extra = Vec::new();
-            if let Some(flag) = &flag {
+            // The row prints an errored thread's error itself.
+            if let Some(flag) = flag
+                .as_ref()
+                .filter(|_| summary.status != ThreadStatus::Error || !requests.is_empty())
+            {
                 extra.push(line(flag, 300));
             }
             if let Some(d) = snapshot.digest.as_ref().filter(|d| d.scanned > 0) {
@@ -1077,28 +1038,6 @@ pub(super) async fn changes(
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn since_accepts_rfc3339_and_relative_windows() {
-        let now = DateTime::parse_from_rfc3339("2026-10-16T12:00:00Z")
-            .unwrap()
-            .with_timezone(&Utc);
-        assert_eq!(
-            stamp(parse_since("15m", now).unwrap()),
-            "2026-10-16T11:45:00Z"
-        );
-        assert_eq!(
-            stamp(parse_since("2h", now).unwrap()),
-            "2026-10-16T10:00:00Z"
-        );
-        assert_eq!(
-            stamp(parse_since("2026-10-16T09:30:00+01:00", now).unwrap()),
-            "2026-10-16T08:30:00Z"
-        );
-        for bad in ["", "m", "15", "15w", "-1h", "999999d", "yesterday"] {
-            assert!(parse_since(bad, now).is_err(), "{bad}");
-        }
-    }
 
     #[test]
     fn code_mode_exec_scripts_report_commits_and_tests() {
@@ -1173,6 +1112,46 @@ mod tests {
             unwrap_shell("/bin/zsh -lc 'cd /repo && cargo test -p x'"),
             "cargo test -p x"
         );
+    }
+
+    #[test]
+    fn autoreview_counts_only_real_runs() {
+        let call = |id: &str, title: &str, output: &str| -> ConversationItem {
+            serde_json::from_value(json!({
+                "kind":"tool_call", "id":id, "title":title, "tool_kind":"command",
+                "status":"completed", "exit_code":0, "output":output, "created_at":Utc::now()
+            }))
+            .unwrap()
+        };
+        let reads = digest(
+            &[
+                call(
+                    "r1",
+                    "cat .agents/skills/autoreview/SKILL.md",
+                    "# Autoreview",
+                ),
+                call("r2", "Skill · autoreview", "Loaded."),
+            ],
+            None,
+            "/repo",
+        );
+        assert!(reads.checks.is_empty());
+        let run = digest(
+            &[call(
+                "r3",
+                ".agents/skills/autoreview/scripts/autoreview --mode local",
+                "autoreview target: local\nautoreview findings: 1\n",
+            )],
+            None,
+            "/repo",
+        );
+        assert!(checks_line(&run.checks).contains("autoreview found issues"));
+    }
+
+    #[test]
+    fn message_line_flags_only_real_truncation() {
+        assert_eq!(message_line("a\n\n\nb", "m1", 3), "a b");
+        assert!(message_line("abcdef", "m1", 3).ends_with("(expand: item_id=m1)"));
     }
 
     #[test]

@@ -411,22 +411,24 @@ pub(crate) fn project_user_text(text: &str) -> ProjectedUserText {
 /// Search/title text for a user-role payload, if it should be visible at all.
 pub(crate) fn visible_user_prompt(text: &str) -> Option<String> {
     match project_user_text(text) {
-        ProjectedUserText::Prompt(text) => Some(
-            text.strip_prefix(falcondeck_core::control::AUTOMATION_MESSAGE_PREFIX)
-                .unwrap_or(&text)
-                .trim()
-                .to_string(),
-        ),
+        ProjectedUserText::Prompt(text) => Some(prompt_without_automation_prefix(&text)),
         ProjectedUserText::Service { message, .. } => Some(message),
         ProjectedUserText::Hidden | ProjectedUserText::Incomplete => None,
     }
+}
+
+fn prompt_without_automation_prefix(text: &str) -> String {
+    text.strip_prefix(falcondeck_core::control::AUTOMATION_MESSAGE_PREFIX)
+        .unwrap_or(text)
+        .trim()
+        .to_string()
 }
 
 /// What the user typed, without the service notices (resume and retry
 /// receipts, background command results) that share the user role.
 pub(crate) fn typed_user_prompt(text: &str) -> Option<String> {
     match project_user_text(text) {
-        ProjectedUserText::Prompt(_) => visible_user_prompt(text),
+        ProjectedUserText::Prompt(text) => Some(prompt_without_automation_prefix(&text)),
         _ => None,
     }
 }

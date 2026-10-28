@@ -1,8 +1,9 @@
 //! One compact row per thread, shared by list, changes, and wait so agents
 //! learn a single shape. A row says what the thread was last asked and what it
 //! last said, from the cheapest source available: items in memory, then the
-//! search-index excerpts, then the summary preview when that preview is not
-//! just an echo of a user message (Codex previews are the opening prompt).
+//! search-index excerpts. Without either, the summary preview is shown as a
+//! `Preview:` because its author is unknown (Codex previews are the opening
+//! prompt, Claude's the last message of either side).
 use super::*;
 use chrono::DateTime;
 use std::path::Path;
@@ -16,7 +17,8 @@ const KEEP_CHARS: usize = 600;
 pub(super) struct Glance {
     pub asked: Option<String>,
     pub latest: Option<String>,
-    pub opening: Option<String>,
+    /// The summary preview, only when no request is known.
+    pub preview: Option<String>,
     /// Every cached user excerpt, for literal query matching.
     pub excerpts: Vec<String>,
 }
@@ -27,21 +29,6 @@ fn kept(text: &str) -> Option<String> {
         .map(|t| capped(t, KEEP_CHARS))
 }
 
-/// True when `a` and `b` are the same message, allowing for either side
-/// being a truncated preview.
-fn same_text(a: &str, b: &str) -> bool {
-    let norm = |s: &str| {
-        s.split_whitespace()
-            .collect::<Vec<_>>()
-            .join(" ")
-            .trim_end_matches(['…', '.'])
-            .to_lowercase()
-    };
-    let (a, b) = (norm(a), norm(b));
-    let (short, long) = if a.len() <= b.len() { (a, b) } else { (b, a) };
-    !short.is_empty() && long.starts_with(&short) && (short == long || short.chars().count() >= 12)
-}
-
 impl Glance {
     pub(super) fn of(
         thread: &ManagedThread,
@@ -50,12 +37,12 @@ impl Glance {
         let mut glance = Self::default();
         // Newest first: replies seen before the first user message answer it.
         // An image-only request still ends the turn, keeping the pair aligned.
-        let mut loaded_request = false;
+        let mut known_request = false;
         for item in thread.items.iter().rev() {
             match item {
                 ConversationItem::UserMessage { text, .. } => {
                     glance.asked = kept(text);
-                    loaded_request = true;
+                    known_request = true;
                     break;
                 }
                 ConversationItem::AssistantMessage { text, .. } if glance.latest.is_none() => {
@@ -65,50 +52,54 @@ impl Glance {
             }
         }
         if let Some(excerpt) = excerpt {
-            glance.opening = excerpt.opening.first().cloned();
             glance.excerpts = excerpt
                 .opening
                 .iter()
                 .chain(&excerpt.recent)
                 .cloned()
                 .collect();
-            // Loaded items are authoritative once they include a request.
-            if !loaded_request {
+            // Loaded items are authoritative once they include a request. An
+            // indexed request without a reply is simply unanswered.
+            if !known_request && !glance.excerpts.is_empty() {
+                known_request = true;
                 glance.asked = excerpt.recent.last().or(excerpt.opening.last()).cloned();
-                if glance.latest.is_none() {
-                    glance.latest = excerpt.latest_reply.clone();
-                }
+                glance.latest = glance
+                    .latest
+                    .take()
+                    .or_else(|| excerpt.latest_reply.clone());
             }
         }
-        // An indexed request without a reply is unanswered; an older preview
-        // must not stand in for its answer.
-        let indexed_request =
-            excerpt.is_some_and(|e| !e.recent.is_empty() || !e.opening.is_empty());
-        if glance.latest.is_none()
-            && !loaded_request
-            && !indexed_request
-            && let Some(preview) = thread
+        if !known_request && glance.latest.is_none() {
+            glance.preview = thread
                 .summary
                 .last_message_preview
                 .as_deref()
-                .and_then(kept)
-            && !glance
-                .asked
-                .iter()
-                .chain(&glance.excerpts)
-                .any(|user| same_text(user, &preview))
-        {
-            glance.latest = Some(preview);
+                .and_then(kept);
         }
         glance
     }
 
     pub(super) fn matches(&self, needle: &str) -> bool {
-        [&self.asked, &self.latest, &self.opening]
+        [&self.asked, &self.latest, &self.preview]
             .into_iter()
             .flatten()
             .chain(&self.excerpts)
             .any(|text| text.to_lowercase().contains(needle))
+    }
+
+    /// `Asked`/`Latest`/`Preview` lines at the given widths and indent.
+    pub(super) fn lines(&self, prefix: &str, asked: usize, latest: usize) -> String {
+        let mut text = String::new();
+        for (label, value, cap) in [
+            ("Asked", &self.asked, asked),
+            ("Latest", &self.latest, latest),
+            ("Preview", &self.preview, latest),
+        ] {
+            if let Some(value) = value {
+                text.push_str(&format!("{prefix}{label}: {}\n", line(value, cap)));
+            }
+        }
+        text
     }
 }
 
@@ -162,16 +153,13 @@ pub(super) struct RowContext<'a> {
     pub excerpts: bool,
 }
 
-/// `- **Title** `id` — state · age · provider · facts`, then indented
-/// Goal/extra/Asked/Latest/Error lines. `extra` carries attention and deltas.
-pub(super) fn row(
-    summary: &ThreadSummary,
-    glance: &Glance,
-    cx: &RowContext<'_>,
-    extra: &[String],
-) -> String {
-    let t = summary;
-    let mut facts = vec![state(t), ago(t.updated_at, cx.now), t.provider.to_string()];
+/// `state · age · provider[ model]` and whichever facts apply, in a fixed order.
+pub(super) fn facts(t: &ThreadSummary, cx: &RowContext<'_>, model: bool) -> String {
+    let provider = match t.agent.model_id.as_deref().filter(|_| model) {
+        Some(model) => format!("{} {}", t.provider, line(model, 60)),
+        None => t.provider.to_string(),
+    };
+    let mut facts = vec![state(t), ago(t.updated_at, cx.now), provider];
     if let Some(project) = cx.project {
         facts.push(format!("project {}", line(project, 60)));
     }
@@ -203,11 +191,23 @@ pub(super) fn row(
     if t.attention.unread {
         facts.push("unread".into());
     }
+    facts.join(" · ")
+}
+
+/// `- **Title** `id` — facts`, then indented Goal, `extra` (attention and
+/// deltas), Asked/Latest/Preview, and Error lines.
+pub(super) fn row(
+    summary: &ThreadSummary,
+    glance: &Glance,
+    cx: &RowContext<'_>,
+    extra: &[String],
+) -> String {
+    let t = summary;
     let mut text = format!(
         "- **{}** `{}` — {}\n",
         line(&t.title, 120),
         line(&t.id, 128),
-        facts.join(" · ")
+        facts(t, cx, false)
     );
     if let Some(goal) = &t.goal {
         text.push_str(&format!("  Goal: {}\n", line(&goal.objective, ASKED_CHARS)));
@@ -216,12 +216,7 @@ pub(super) fn row(
         text.push_str(&format!("  {extra}\n"));
     }
     if cx.excerpts {
-        if let Some(asked) = &glance.asked {
-            text.push_str(&format!("  Asked: {}\n", line(asked, ASKED_CHARS)));
-        }
-        if let Some(latest) = &glance.latest {
-            text.push_str(&format!("  Latest: {}\n", line(latest, LATEST_CHARS)));
-        }
+        text.push_str(&glance.lines("  ", ASKED_CHARS, LATEST_CHARS));
     }
     if t.status == ThreadStatus::Error
         && let Some(error) = &t.last_error
@@ -294,21 +289,5 @@ impl AppState {
         let state = self.clone();
         let scan = tokio::spawn(async move { state.refresh_thread_search_index(true).await });
         let _ = tokio::time::timeout(std::time::Duration::from_secs(3), scan).await;
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn same_text_tolerates_truncated_previews_but_not_short_prefixes() {
-        assert!(same_text(
-            "Please can we um improve the UI of the automations page a bit?",
-            "Please can we um improve the UI...",
-        ));
-        assert!(same_text("debug", "debug"));
-        assert!(!same_text("fix", "fix the login flow"));
-        assert!(!same_text("", "anything"));
     }
 }

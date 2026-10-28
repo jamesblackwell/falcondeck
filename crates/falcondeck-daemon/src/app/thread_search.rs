@@ -100,6 +100,7 @@ pub(crate) struct SessionExcerpt {
     /// Assistant text after the last user message: the latest outcome.
     #[serde(default)]
     pub latest_reply: Option<String>,
+    /// `EXCERPT_VERSION` at scan time; older entries are rescanned.
     #[serde(default)]
     pub version: u8,
 }

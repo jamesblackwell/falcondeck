@@ -87,7 +87,9 @@ The state is `running`, `idle`, `error`, `waiting_for_input`, or
 `awaiting_approval (…)`. Facts follow when present: project, folder, branch,
 `your child` or `parent <id>`, queued, background, pinned, archived, unread.
 `Asked` is the latest request; `Latest` is the reply to it (absent while a turn
-has not answered yet). Listing never loads transcripts.
+has not answered yet). Threads with no known request show the provider's
+`Preview:` instead, which may be either side's text. Listing never loads
+transcripts.
 
 Narrow with `status` (one or many, including `awaiting_approval`),
 `updated_since`/`updated_before` (RFC 3339, `YYYY-MM-DD`, or `30m`/`24h`/`7d`),
@@ -105,7 +107,7 @@ returned `offset`, keeping filters unchanged.
   loads a bounded tail for up to five unloaded threads. Long replies end with
   an `item_id` to expand in view. These are heuristics over the transcript,
   not git or CI state.
-- `falcondeck_thread_changes` with `since` (RFC 3339 or `15m`, `2h`, `1d`):
+- `falcondeck_thread_changes` with `since` (same formats as `updated_since`):
   the same rows for threads active since then, blocked threads first, with a
   `Since:` delta when the transcript is loaded. Pass the returned `Now` as the
   next `since` to check back without repeats.

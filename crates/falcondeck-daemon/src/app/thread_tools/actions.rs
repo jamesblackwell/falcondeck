@@ -1,6 +1,6 @@
 //! Coordinator actions over existing daemon operations: organize, interrupt,
 //! answer a child's question, a short bounded wait, and parent notifications.
-use super::glance;
+use super::glance::{self, status_name};
 use super::*;
 use falcondeck_core::{
     InteractiveRequest, InteractiveRequestKind, InteractiveResponsePayload, ProjectFolderAction,
@@ -152,15 +152,6 @@ struct ChildNoticeBatch {
 
 type ChildNoticeBatches = HashMap<(String, String), ChildNoticeBatch>;
 
-fn status_name(status: &ThreadStatus) -> &'static str {
-    match status {
-        ThreadStatus::Idle => "idle",
-        ThreadStatus::Running => "running",
-        ThreadStatus::WaitingForInput => "waiting_for_input",
-        ThreadStatus::Error => "error",
-    }
-}
-
 /// A question blocks the queue, so waiting for input outranks queued messages.
 fn is_busy(thread: &ThreadSummary) -> bool {
     match thread.status {
@@ -252,37 +243,16 @@ impl AppState {
                     tokio::time::sleep(WAIT_POLL).await;
                 };
                 let (thread, glance) = self.thread_glance(workspace, &thread.id).await?;
-                let mut text = format!(
-                    "# {} `{}`\n- {} · {}\n",
-                    line(&thread.title, 160),
-                    line(&thread.id, 128),
-                    glance::state(&thread),
-                    glance::ago(thread.updated_at, Utc::now()),
-                );
-                let mut facts = Vec::new();
-                if !thread.queued_turns.is_empty() {
-                    facts.push(format!("{} queued", thread.queued_turns.len()));
-                }
-                if thread.is_archived {
-                    facts.push("archived".into());
-                }
-                if is_child_of(&thread, parent) {
-                    facts.push("your child".into());
-                }
-                if !facts.is_empty() {
-                    text.push_str(&format!("- {}\n", facts.join(" · ")));
-                }
-                if let Some(asked) = &glance.asked {
-                    text.push_str(&format!("- Asked: {}\n", line(asked, 300)));
-                }
-                if let Some(latest) = &glance.latest {
-                    text.push_str(&format!("- Latest: {}\n", line(latest, 600)));
-                }
-                if let Some(error) = &thread.last_error {
-                    text.push_str(&format!("- Error: {}\n", line(error, 600)));
-                }
+                let cx = glance::RowContext {
+                    now: Utc::now(),
+                    caller: parent,
+                    project: None,
+                    folder: None,
+                    excerpts: true,
+                };
+                let mut text = glance::row(&thread, &glance, &cx, &[]);
                 if waited && is_busy(&thread) {
-                    text.push_str("- Still running; check back at a natural checkpoint.\n");
+                    text.push_str("  Still running; check back at a natural checkpoint.\n");
                 }
                 text.push_str(&pending_markdown(
                     &self.pending_thread_requests(workspace, &thread.id).await,
@@ -1048,7 +1018,7 @@ mod tests {
                 .unwrap(),
         );
         assert!(
-            running.contains("- running · ") && running.contains("your child"),
+            running.contains("— running · ") && running.contains("your child"),
             "{running}"
         );
         let settle = {
@@ -1067,7 +1037,7 @@ mod tests {
         );
         settle.await.unwrap();
         assert!(
-            idle.contains("- idle · ") && !idle.contains("Still running"),
+            idle.contains("— idle · ") && !idle.contains("Still running"),
             "{idle}"
         );
         assert!(started.elapsed() < std::time::Duration::from_secs(4));

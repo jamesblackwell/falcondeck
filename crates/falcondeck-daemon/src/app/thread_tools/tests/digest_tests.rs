@@ -210,12 +210,13 @@ async fn summary_without_loaded_items_stays_cheap_and_bounded() {
     let out = text(&app, SUMMARY, json!({"thread_ids":["thread-1"]})).await;
     for part in [
         "ATTENTION: errored: provider exited",
-        "Latest: cached preview",
-        "Error: provider exited",
+        "Preview: cached preview",
         "Transcript not loaded",
     ] {
         assert!(out.contains(part), "missing {part:?} in\n{out}");
     }
+    // The flag carries the error; it is not repeated.
+    assert_eq!(out.matches("provider exited").count(), 1, "{out}");
     // Hydrating an unreadable native session still reports every thread.
     add_thread(
         &app,
@@ -296,6 +297,12 @@ async fn changes_lists_recent_activity_with_deltas_and_flags_blocked_first() {
     add_pending(&app, "blocked", "approval", "Edit file", None).await;
     add_thread(&app, "stale", "Old work", ThreadStatus::Idle, 600, vec![item(json!({"kind":"user_message","id":"s1","text":"old stuff","attachments":[],"created_at":at(600)}))]).await;
     add_thread(&app, "archived", "Archived", ThreadStatus::Idle, 5, vec![]).await;
+    add_thread(&app, "broken", "Broken", ThreadStatus::Error, 10, vec![]).await;
+    app.with_thread_mut("workspace-1", "broken", |t| {
+        t.last_error = Some("provider crashed".into())
+    })
+    .await
+    .unwrap();
     app.with_thread_mut("workspace-1", "archived", |t| t.is_archived = true)
         .await
         .unwrap();
@@ -317,9 +324,11 @@ async fn changes_lists_recent_activity_with_deltas_and_flags_blocked_first() {
         assert!(!out.contains(absent), "{absent} in\n{out}");
     }
     assert!(
-        out.contains("2 of 3 threads changed, not counting you or archived threads."),
+        out.contains("3 of 4 threads changed, not counting you or archived threads."),
         "{out}"
     );
+    // An errored thread's error appears once, on its Error line.
+    assert_eq!(out.matches("provider crashed").count(), 1, "{out}");
     let now = out
         .lines()
         .find_map(|l| l.strip_prefix("Now: "))
@@ -327,7 +336,7 @@ async fn changes_lists_recent_activity_with_deltas_and_flags_blocked_first() {
         .unwrap()
         .to_string();
     let later = text(&app, CHANGES, json!({"since":now})).await;
-    assert!(later.contains("0 of 3 threads changed"), "{later}");
+    assert!(later.contains("0 of 4 threads changed"), "{later}");
     let archived = text(&app, CHANGES, json!({"since":"1h","include_archived":true})).await;
     assert!(archived.contains("Archived"), "{archived}");
     for arguments in [

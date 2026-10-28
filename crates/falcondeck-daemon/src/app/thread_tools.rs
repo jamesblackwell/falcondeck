@@ -29,7 +29,7 @@ pub(super) fn catalog() -> Vec<ExtensionAgentTool> {
     [
         (LIST, "List threads", "Start here to see what is being worked on. One compact row per thread, newest activity first (default 20): status, age, provider, flags, and what it was last asked and last said. The header counts running, blocked, and recently active threads. Excludes you. Filter by status, time, query, parent, provider, folder, or pin; page with offset. Never loads transcripts.", list::schema(), vec![]),
         (CHANGES, "Thread changes", "Threads active since a time, same rows as list plus what changed (messages, files, commits, checks) when the transcript is loaded. Blocked threads first. Pass the returned Now as since next time to poll without repeats.", json!({
-            "since": {"type":"string", "minLength":1, "description":"RFC 3339 timestamp or a window like 90s, 15m, 2h, 1d."},
+            "since": {"type":"string", "minLength":1, "description":"RFC 3339, YYYY-MM-DD, or an age like 15m, 2h, 1d."},
             "limit": {"type":"integer", "minimum":1, "maximum":100, "default":30},
             "include_archived": {"type":"boolean", "default":false},
             "max_chars": {"type":"integer", "minimum":512, "maximum":24000, "default":6000}
@@ -141,6 +141,10 @@ fn capped(text: &str, cap: usize) -> String {
 }
 /// One line: whitespace runs collapse so paragraphs do not cost blank space.
 fn line(text: &str, cap: usize) -> String {
+    line_cut(text, cap).0
+}
+/// `line`, plus whether the text was cut short.
+fn line_cut(text: &str, cap: usize) -> (String, bool) {
     let mut out = String::with_capacity(text.len().min(cap * 4));
     let mut chars = 0;
     for word in text.split_whitespace() {
@@ -154,7 +158,7 @@ fn line(text: &str, cap: usize) -> String {
         out.push_str(word);
         chars += word.chars().count();
     }
-    capped(&out, cap).replace('|', "\\|")
+    (capped(&out, cap).replace('|', "\\|"), chars > cap)
 }
 /// Code-mode harnesses (Codex `exec`) sometimes emit tool strings in minified
 /// style, gluing prose words together. Normal prose averages 4–8 letters per
@@ -248,21 +252,21 @@ impl AppState {
                     .and_then(Value::as_str)
             });
         let explicit_workspace = requested_workspace.is_some();
-        let all_projects = requested_workspace.as_deref() == Some("all");
+        let asked_for_all = requested_workspace.as_deref() == Some("all");
         let requested_workspace = match requested_workspace {
             Some(ws) if ws == "all" => None,
             // Names and paths are a bot convenience; tasks pass their own id.
             Some(ws) if bot.is_some() => Some(self.resolve_workspace(&ws).await?),
             other => other,
         };
-        if all_projects && (bot.is_none() || !matches!(name, LIST | CHANGES)) {
+        if asked_for_all && (bot.is_none() || !matches!(name, LIST | CHANGES)) {
             return Err(DaemonError::BadRequest(
                 "workspace_id \"all\" is for bot list and changes calls".into(),
             ));
         }
         // A bot's own workspace is rarely where its work happens, so its
         // overviews default to every project.
-        let all_projects = all_projects
+        let all_projects = asked_for_all
             || (bot.is_some()
                 && requested_workspace.is_none()
                 && target.is_none()
@@ -332,6 +336,7 @@ impl AppState {
                 digest::summary(
                     self,
                     &workspace,
+                    parent,
                     bot.is_some() && !explicit_workspace,
                     &args(arguments)?,
                 )

@@ -1066,11 +1066,15 @@ The state is the status, or `awaiting_approval (…)` when approvals or question
 are pending; pending counts come from the live request map, never the stored
 summary. Facts follow only when present (project, folder, branch, child/parent,
 queued, background, pinned, archived, unread), then optional Goal, attention,
-delta, Asked, Latest, and Error lines. `Asked` and `Latest` come from loaded
-items, then the search index (which also records the assistant text after the
-last user prompt), then the summary preview unless it merely echoes a user
-message. Index entries refresh before these tools answer when the index is
-older than its 60-second TTL; a slow scan finishes behind a three-second wait.
+delta, Asked, Latest (or Preview), and Error lines. `Asked` and `Latest` come
+from loaded items, then the search index (which also records the assistant
+text after the last user prompt). An indexed request without a reply has no
+`Latest`. Only threads with no known request fall back to the summary preview,
+labelled `Preview:` because its author is unknown (Codex previews are the
+opening prompt). An errored thread's error is printed once. Index entries
+refresh before these tools answer when the index is older than its 60-second
+TTL; a slow scan finishes behind a three-second wait. List clones summaries
+only for the rows it renders.
 
 List never hydrates. It excludes the caller and defaults to unarchived threads,
 newest activity first, 20 rows, and 24000 characters. The header counts
@@ -1106,11 +1110,14 @@ commits, and the latest tests/typecheck/autoreview result with a short command.
 Empty sections collapse into one line. Shell wrappers (`zsh -lc '…'`, a leading
 `cd … &&`) are stripped from commands. Codex code-mode `exec` calls hide their
 scripts, so their JSON outputs are read for `git commit` lines followed by a
-stat line and for test-runner summaries. Unloaded threads report Asked/Latest
+stat line and for test-runner summaries; any failing cargo binary fails the run.
+Autoreview counts only for the script itself (or a report in a tool's output),
+and a report with findings is `found issues`, since the script exits 0.
+Unloaded threads report Asked/Latest
 unless `hydrate: true`, which loads a 200-item native tail for up to five
 threads. No per-item timestamps are shown because Codex items can share a
-fallback turn time. `falcondeck_thread_changes` takes `since` (RFC 3339 or
-`90s`/`15m`/`2h`/`1d`), excludes the caller (and archived threads unless asked),
+fallback turn time. `falcondeck_thread_changes` takes `since` in the same
+formats as list's `updated_since`, excludes the caller (and archived threads unless asked),
 and lists rows for threads active since then, attention first, with a `Since:`
 delta when items are loaded. It never hydrates and returns an exact `Now` for
 the next window. Both are heuristics over the transcript, not git or CI state.

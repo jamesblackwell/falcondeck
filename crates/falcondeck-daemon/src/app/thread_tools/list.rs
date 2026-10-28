@@ -110,34 +110,31 @@ pub(super) fn schema() -> Value {
     })
 }
 
-/// Everything one entry needs, captured without holding locks across awaits.
-struct Row {
-    summary: ThreadSummary,
-    project: Option<String>,
-    folder: Option<String>,
-    glance: Glance,
-    memory_started: Option<DateTime<Utc>>,
+/// A matching thread's sort keys, gathered without cloning its summary.
+struct Candidate {
+    /// Index into the scope.
+    workspace: usize,
+    id: String,
+    title: String,
+    updated_at: DateTime<Utc>,
     session_path: Option<PathBuf>,
+    memory_started: Option<DateTime<Utc>>,
     started: Option<DateTime<Utc>>,
 }
 
-impl Row {
-    fn matches_query(&self, needle: &str) -> bool {
-        let summary = &self.summary;
-        [
-            Some(summary.title.as_str()),
-            Some(summary.id.as_str()),
-            summary.last_message_preview.as_deref(),
-            summary.goal.as_ref().map(|g| g.objective.as_str()),
-        ]
-        .into_iter()
-        .flatten()
-        .any(|text| text.to_lowercase().contains(needle))
-            || self.glance.matches(needle)
-    }
+fn matches_query(summary: &ThreadSummary, glance: &Glance, needle: &str) -> bool {
+    [
+        Some(summary.title.as_str()),
+        Some(summary.id.as_str()),
+        summary.goal.as_ref().map(|g| g.objective.as_str()),
+    ]
+    .into_iter()
+    .flatten()
+    .any(|text| text.to_lowercase().contains(needle))
+        || glance.matches(needle)
 }
 
-pub(super) fn bad(message: impl Into<String>) -> DaemonError {
+fn bad(message: impl Into<String>) -> DaemonError {
     DaemonError::BadRequest(message.into())
 }
 
@@ -283,31 +280,36 @@ pub(super) async fn list(
 
     app.refresh_excerpts().await;
     let counts = app.attention_counts().await;
+    let pending_of = |workspace: &String, id: &String| {
+        counts
+            .get(&(workspace.clone(), id.clone()))
+            .copied()
+            .unwrap_or_default()
+    };
     let mut overview = Overview::default();
-    let (projects, mut rows) = {
+    let mut projects = Vec::new();
+    let mut candidates = Vec::new();
+    {
         let workspaces = app.inner.workspaces.lock().await;
         let index = app
             .inner
             .thread_search
             .lock()
             .unwrap_or_else(|e| e.into_inner());
-        let mut projects = Vec::new();
-        let mut rows = Vec::new();
-        for id in scope {
+        for (position, id) in scope.iter().enumerate() {
             let ws = workspaces
                 .get(id)
                 .ok_or_else(|| DaemonError::NotFound("workspace not found".into()))?;
-            let project = glance::project_name(&ws.summary.path).to_string();
-            projects.push((project.clone(), ws.summary.path.clone()));
+            projects.push((
+                glance::project_name(&ws.summary.path).to_string(),
+                ws.summary.path.clone(),
+            ));
             for thread in ws.threads.values() {
-                if thread.summary.id == caller {
+                let t = &thread.summary;
+                if t.id == caller {
                     continue;
                 }
-                let t = &thread.summary;
-                let (approvals, questions) = counts
-                    .get(&(id.clone(), t.id.clone()))
-                    .copied()
-                    .unwrap_or_default();
+                let (approvals, questions) = pending_of(id, &t.id);
                 let pending = approvals + questions > 0;
                 if !t.is_archived {
                     overview.total += 1;
@@ -342,16 +344,25 @@ pub(super) async fn list(
                 if !keep {
                     continue;
                 }
-                let mut summary = t.clone();
-                refresh_thread_attention(&mut summary, approvals, questions);
-                let excerpt = summary
+                let excerpt = t
                     .native_session_id
                     .as_ref()
                     .and_then(|session| index.sessions.get(session));
-                rows.push(Row {
-                    project: multi.then(|| project.clone()),
-                    folder: folder_of(&summary.id).map(|f| f.name.clone()),
-                    glance: Glance::of(thread, excerpt),
+                if let Some(needle) = &needle
+                    && !matches_query(t, &Glance::of(thread, excerpt), needle)
+                {
+                    continue;
+                }
+                candidates.push(Candidate {
+                    workspace: position,
+                    id: t.id.clone(),
+                    title: if args.sort == Sort::Title {
+                        t.title.to_lowercase()
+                    } else {
+                        String::new()
+                    },
+                    updated_at: t.updated_at,
+                    session_path: excerpt.map(|e| e.path.clone()),
                     memory_started: thread.items.iter().find_map(|item| match item {
                         ConversationItem::UserMessage { created_at, .. }
                         | ConversationItem::AssistantMessage { created_at, .. } => {
@@ -359,38 +370,31 @@ pub(super) async fn list(
                         }
                         _ => None,
                     }),
-                    session_path: excerpt.map(|e| e.path.clone()),
                     started: None,
-                    summary,
                 });
             }
         }
-        (projects, rows)
-    };
-    if let Some(needle) = &needle {
-        rows.retain(|row| row.matches_query(needle));
     }
     if args.sort == Sort::Created {
-        for row in &mut rows {
-            row.started = row
+        for candidate in &mut candidates {
+            candidate.started = candidate
                 .session_path
                 .as_deref()
                 .and_then(session_started)
-                .or(row.memory_started);
+                .or(candidate.memory_started);
         }
     }
     let order = args.order.unwrap_or(match args.sort {
         Sort::Title => Order::Asc,
         _ => Order::Desc,
     });
-    rows.sort_by(|a, b| {
-        let (x, y) = (&a.summary, &b.summary);
+    candidates.sort_by(|a, b| {
         let primary = match args.sort {
-            Sort::Updated => x.updated_at.cmp(&y.updated_at),
-            Sort::Title => x.title.to_lowercase().cmp(&y.title.to_lowercase()),
+            Sort::Updated => a.updated_at.cmp(&b.updated_at),
+            Sort::Title => a.title.cmp(&b.title),
             // Unknown start times sort last in either direction.
             Sort::Created => match (a.started, b.started) {
-                (Some(a), Some(b)) => a.cmp(&b),
+                (Some(x), Some(y)) => x.cmp(&y),
                 (Some(_), None) => return std::cmp::Ordering::Less,
                 (None, Some(_)) => return std::cmp::Ordering::Greater,
                 (None, None) => std::cmp::Ordering::Equal,
@@ -401,11 +405,11 @@ pub(super) async fn list(
             Order::Desc => primary.reverse(),
         };
         primary
-            .then_with(|| y.updated_at.cmp(&x.updated_at))
-            .then_with(|| x.id.cmp(&y.id))
+            .then_with(|| b.updated_at.cmp(&a.updated_at))
+            .then_with(|| a.id.cmp(&b.id))
     });
 
-    let matched = rows.len();
+    let matched = candidates.len();
     let mut markdown = match projects.as_slice() {
         [(name, path)] => format!("# Threads in {} ({})\n", line(name, 80), line(path, 160)),
         _ => format!("# Threads across {} projects\n", projects.len()),
@@ -414,41 +418,69 @@ pub(super) async fn list(
         "{} unarchived (not counting you): {} running, {} need the user, {} errored; {} active in 24h.\n\n",
         overview.total, overview.running, overview.needs_user, overview.errored, overview.recent,
     ));
-    let mut shown = 0;
-    for row in rows.iter().skip(offset).take(limit) {
-        let cx = RowContext {
-            now,
-            caller,
-            project: row.project.as_deref(),
-            folder: row.folder.as_deref(),
-            excerpts: args.detail == Detail::Normal,
-        };
-        let mut text = glance::row(&row.summary, &row.glance, &cx, &[]);
-        // Room for the footer, which carries the next offset.
-        let room = cap.saturating_sub(markdown.chars().count() + 120);
-        if text.chars().count() > room {
-            if shown > 0 {
-                break;
-            }
-            // A lone oversized entry shrinks to its id so paging cannot stall
-            // past a thread the caller never saw.
-            text = format!(
-                "- **{}** `{}`\n",
-                line(&row.summary.title, 40),
-                line(&row.summary.id, 256)
-            );
+    // Only the page is rendered, so only its summaries are cloned.
+    // `consumed` also counts threads deleted since the first pass, so the
+    // next offset never repeats one.
+    let (mut shown, mut consumed) = (0, 0);
+    {
+        let workspaces = app.inner.workspaces.lock().await;
+        let index = app
+            .inner
+            .thread_search
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        for candidate in candidates.iter().skip(offset).take(limit) {
+            let workspace = &scope[candidate.workspace];
+            // A thread removed since the first pass is skipped.
+            let Some(thread) = workspaces
+                .get(workspace)
+                .and_then(|ws| ws.threads.get(&candidate.id))
+            else {
+                consumed += 1;
+                continue;
+            };
+            let mut summary = thread.summary.clone();
+            let (approvals, questions) = pending_of(workspace, &summary.id);
+            refresh_thread_attention(&mut summary, approvals, questions);
+            let excerpt = summary
+                .native_session_id
+                .as_ref()
+                .and_then(|session| index.sessions.get(session));
+            let cx = RowContext {
+                now,
+                caller,
+                project: multi.then(|| projects[candidate.workspace].0.as_str()),
+                folder: folder_of(&summary.id).map(|f| f.name.as_str()),
+                excerpts: args.detail == Detail::Normal,
+            };
+            let mut text = glance::row(&summary, &Glance::of(thread, excerpt), &cx, &[]);
+            // Room for the footer, which carries the next offset.
+            let room = cap.saturating_sub(markdown.chars().count() + 120);
             if text.chars().count() > room {
-                text = format!("- `{}`\n", line(&row.summary.id, 256));
+                if shown > 0 {
+                    break;
+                }
+                // A lone oversized entry shrinks to its id so paging cannot stall
+                // past a thread the caller never saw.
+                text = format!(
+                    "- **{}** `{}`\n",
+                    line(&summary.title, 40),
+                    line(&summary.id, 256)
+                );
+                if text.chars().count() > room {
+                    text = format!("- `{}`\n", line(&summary.id, 256));
+                }
+                if text.chars().count() > room {
+                    break;
+                }
             }
-            if text.chars().count() > room {
-                break;
-            }
+            markdown.push_str(&text);
+            shown += 1;
+            consumed += 1;
         }
-        markdown.push_str(&text);
-        shown += 1;
     }
     let start = offset.min(matched);
-    let end = start + shown;
+    let end = start + consumed;
     let sorted = match (args.sort, order) {
         (Sort::Updated, Order::Desc) => "newest activity first",
         (Sort::Updated, Order::Asc) => "oldest activity first",
@@ -457,21 +489,17 @@ pub(super) async fn list(
         (Sort::Title, _) => "by title",
     };
     markdown.push('\n');
-    if shown == 0 {
-        markdown.push_str(&format!(
-            "No threads match (offset {offset}, {matched} matched).\n"
-        ));
+    markdown.push_str(&if matched == 0 {
+        "No threads match.".to_string()
+    } else if start == matched {
+        format!("No threads at offset {offset}; {matched} matched.")
     } else {
-        markdown.push_str(&format!(
-            "Showing {}–{end} of {matched}, {sorted}.",
-            start + 1
-        ));
-    }
+        format!("Showing {}–{end} of {matched}, {sorted}.", start + 1)
+    });
     if end < matched {
-        markdown.push_str(&format!(" More: offset={end}.\n"));
-    } else if shown > 0 {
-        markdown.push('\n');
+        markdown.push_str(&format!(" More: offset={end}."));
     }
+    markdown.push('\n');
     Ok(capped(&markdown, cap))
 }
 
@@ -736,7 +764,7 @@ mod tests {
             "`t00` — idle · 1m ago · claude\n  Asked: please do it\n  Latest: Shipped the Needle fix\n",
             "`t01` — idle · 2m ago · claude\n  Asked: latest haystack request\n  Latest: Indexed reply\n",
             "`t02` — idle · 3m ago · claude\n  Asked: Please can we improve the automations page a bit? Group it.\n- ",
-            "`t03` — idle · 4m ago · claude\n  Latest: Deployed the relay.\n",
+            "`t03` — idle · 4m ago · claude\n  Preview: Deployed the relay.\n",
         ] {
             assert!(text.contains(part), "missing {part:?} in\n{text}");
         }
