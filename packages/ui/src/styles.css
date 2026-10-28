@@ -549,6 +549,162 @@
   --fd-shadow-glow: 0 0 24px rgba(53, 244, 119, 0.07);
 }
 
+/* --- True-dark themes (dark only) ---
+   Deeper than the editor-classic darks: canvases sit at or near #000 and
+   surfaces step up in small increments. They override only surfaces, text,
+   borders, accent, and scrim; semantic and categorical hues inherit from the
+   default dark scheme. */
+
+/* --- OLED Black --- */
+:root[data-palette="oled"] {
+  --fd-bg-0: #000000;
+  --fd-bg-1: #000000;
+  --fd-bg-2: #0b0b0d;
+  --fd-bg-3: #141417;
+  --fd-bg-4: #1d1d21;
+
+  --fd-fg-0: #f5f5f7;
+  --fd-fg-1: #c8c8ce;
+  --fd-fg-2: #9f9fa8;
+  --fd-fg-3: #878791;
+  --fd-fg-4: #6e6e78;
+
+  --fd-border-0: rgba(255, 255, 255, 0.07);
+  --fd-border-1: rgba(255, 255, 255, 0.11);
+  --fd-border-2: rgba(255, 255, 255, 0.17);
+  --fd-border-3: rgba(255, 255, 255, 0.25);
+
+  --fd-accent: #4ea8ff;
+  --fd-accent-muted: rgba(78, 168, 255, 0.15);
+  --fd-accent-strong: #8cc7ff;
+  --fd-accent-dim: rgba(78, 168, 255, 0.07);
+
+  --fd-overlay: rgba(0, 0, 0, 0.6);
+  --fd-overlay-strong: rgba(0, 0, 0, 0.88);
+
+  --fd-shadow-glow: 0 0 24px rgba(78, 168, 255, 0.06);
+}
+
+/* --- Midnight --- */
+:root[data-palette="midnight"] {
+  --fd-bg-0: #03050b;
+  --fd-bg-1: #070a14;
+  --fd-bg-2: #0e1322;
+  --fd-bg-3: #151b2e;
+  --fd-bg-4: #1e2640;
+
+  --fd-fg-0: #e6ebfa;
+  --fd-fg-1: #b8c1dc;
+  --fd-fg-2: #94a0c2;
+  --fd-fg-3: #7f8bad;
+  --fd-fg-4: #656f90;
+
+  --fd-border-0: rgba(148, 163, 214, 0.07);
+  --fd-border-1: rgba(148, 163, 214, 0.11);
+  --fd-border-2: rgba(148, 163, 214, 0.17);
+  --fd-border-3: rgba(148, 163, 214, 0.26);
+
+  --fd-accent: #8b9bff;
+  --fd-accent-muted: rgba(139, 155, 255, 0.15);
+  --fd-accent-strong: #aab5ff;
+  --fd-accent-dim: rgba(139, 155, 255, 0.07);
+
+  --fd-overlay: rgba(0, 0, 0, 0.55);
+  --fd-overlay-strong: rgba(3, 5, 11, 0.86);
+
+  --fd-shadow-glow: 0 0 24px rgba(139, 155, 255, 0.06);
+}
+
+/* --- Obsidian --- */
+:root[data-palette="obsidian"] {
+  --fd-bg-0: #050408;
+  --fd-bg-1: #0a0910;
+  --fd-bg-2: #131120;
+  --fd-bg-3: #1b1829;
+  --fd-bg-4: #262236;
+
+  --fd-fg-0: #ece8f7;
+  --fd-fg-1: #c3bdd6;
+  --fd-fg-2: #9d96b6;
+  --fd-fg-3: #877fa2;
+  --fd-fg-4: #6c6586;
+
+  --fd-border-0: rgba(190, 175, 235, 0.07);
+  --fd-border-1: rgba(190, 175, 235, 0.11);
+  --fd-border-2: rgba(190, 175, 235, 0.17);
+  --fd-border-3: rgba(190, 175, 235, 0.26);
+
+  --fd-accent: #b794f6;
+  --fd-accent-muted: rgba(183, 148, 246, 0.15);
+  --fd-accent-strong: #d0b8fa;
+  --fd-accent-dim: rgba(183, 148, 246, 0.07);
+
+  --fd-overlay: rgba(0, 0, 0, 0.55);
+  --fd-overlay-strong: rgba(5, 4, 8, 0.86);
+
+  --fd-shadow-glow: 0 0 24px rgba(183, 148, 246, 0.06);
+}
+
+/* --- Ember --- */
+:root[data-palette="ember"] {
+  --fd-bg-0: #070403;
+  --fd-bg-1: #0d0807;
+  --fd-bg-2: #1a1210;
+  --fd-bg-3: #251a17;
+  --fd-bg-4: #31241f;
+
+  --fd-fg-0: #f6ece6;
+  --fd-fg-1: #d2c0b6;
+  --fd-fg-2: #a8968c;
+  --fd-fg-3: #90807a;
+  --fd-fg-4: #75665f;
+
+  --fd-border-0: rgba(255, 210, 180, 0.07);
+  --fd-border-1: rgba(255, 210, 180, 0.11);
+  --fd-border-2: rgba(255, 210, 180, 0.17);
+  --fd-border-3: rgba(255, 210, 180, 0.26);
+
+  --fd-accent: #ff8a3d;
+  --fd-accent-muted: rgba(255, 138, 61, 0.15);
+  --fd-accent-strong: #ffab70;
+  --fd-accent-dim: rgba(255, 138, 61, 0.07);
+
+  --fd-overlay: rgba(0, 0, 0, 0.55);
+  --fd-overlay-strong: rgba(7, 4, 3, 0.86);
+
+  --fd-shadow-glow: 0 0 24px rgba(255, 138, 61, 0.06);
+}
+
+/* --- Abyss --- */
+:root[data-palette="abyss"] {
+  --fd-bg-0: #020708;
+  --fd-bg-1: #050d0f;
+  --fd-bg-2: #0b1719;
+  --fd-bg-3: #112124;
+  --fd-bg-4: #182d31;
+
+  --fd-fg-0: #e2f4f6;
+  --fd-fg-1: #b3d0d4;
+  --fd-fg-2: #8eacb1;
+  --fd-fg-3: #78959a;
+  --fd-fg-4: #5f7b80;
+
+  --fd-border-0: rgba(150, 220, 230, 0.07);
+  --fd-border-1: rgba(150, 220, 230, 0.11);
+  --fd-border-2: rgba(150, 220, 230, 0.17);
+  --fd-border-3: rgba(150, 220, 230, 0.26);
+
+  --fd-accent: #22d3ee;
+  --fd-accent-muted: rgba(34, 211, 238, 0.15);
+  --fd-accent-strong: #67e8f9;
+  --fd-accent-dim: rgba(34, 211, 238, 0.07);
+
+  --fd-overlay: rgba(0, 0, 0, 0.55);
+  --fd-overlay-strong: rgba(2, 7, 8, 0.86);
+
+  --fd-shadow-glow: 0 0 24px rgba(34, 211, 238, 0.06);
+}
+
 /* --- Tokyo Night-inspired --- */
 :root[data-palette="tokyo-night"] {
   --fd-bg-0: #16161e;

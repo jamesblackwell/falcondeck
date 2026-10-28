@@ -108,6 +108,18 @@ describe("color palettes", () => {
     expect(LIGHT_COLOR_THEME_OPTIONS.some((option) => option.palette === "matrix")).toBe(false);
   });
 
+  it("keeps the true-dark themes dark-only and darker than the editor classics", () => {
+    for (const value of ["oled", "midnight", "obsidian", "ember", "abyss"]) {
+      const option = DARK_COLOR_THEME_OPTIONS.find((candidate) => candidate.value === value);
+      expect(option, value).toBeDefined();
+      expect(LIGHT_COLOR_THEME_OPTIONS.some((candidate) => candidate.palette === value)).toBe(false);
+      // Falcon Dark's canvas (#111113) is the darkest existing theme.
+      expect(relativeLuminance(option!.preview.bg), value).toBeLessThan(
+        relativeLuminance("#111113"),
+      );
+    }
+  });
+
   it("migrates a legacy palette into independent light and dark preferences", () => {
     expect(normalizeAppearance({ theme: "system", palette: "dracula" })).toMatchObject({
       theme: "system",

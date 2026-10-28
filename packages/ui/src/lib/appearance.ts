@@ -20,6 +20,11 @@ export type PaletteSetting =
   | 'matrix'
   | 'nord'
   | 'one'
+  | 'oled'
+  | 'midnight'
+  | 'obsidian'
+  | 'ember'
+  | 'abyss'
   | 'rose-pine'
   | 'solarized'
   | 'tokyo-night'
@@ -44,6 +49,11 @@ export type DarkColorThemeSetting =
   | 'rose-pine'
   | 'solarized-dark'
   | 'tokyo-night'
+  | 'oled'
+  | 'midnight'
+  | 'obsidian'
+  | 'ember'
+  | 'abyss'
 export type ColorThemeSetting = LightColorThemeSetting | DarkColorThemeSetting
 export type SansFontSetting =
   | 'geist'
@@ -120,8 +130,8 @@ export const THEME_OPTIONS: Array<{ value: ThemeSetting; label: string; descript
 export type PalettePreview = { bg: string; surface: string; fg: string; accent: string }
 
 /**
- * Falcon leads as the default; the rest are alphabetical so a growing list of
- * editor classics stays scannable. Each preview quartet feeds the swatch in the
+ * Falcon leads as the default, followed by the true-dark themes; the rest are
+ * alphabetical so a growing list of editor classics stays scannable. Each preview quartet feeds the swatch in the
  * picker — canvas, raised surface, text, accent — pulled from the palette's own
  * bg-1 / bg-2 / fg-0 / accent so the chip never drifts from the real theme.
  */
@@ -222,6 +232,46 @@ export const DARK_COLOR_THEME_OPTIONS: DarkColorThemeOption[] = [
     preview: { bg: '#111113', surface: '#1a1a1f', fg: '#f4f4f6', accent: '#34d399' },
   },
   {
+    value: 'oled',
+    label: 'OLED Black',
+    description: 'Pure black canvas for OLED panels, with a sky-blue accent.',
+    appearance: 'dark',
+    palette: 'oled',
+    preview: { bg: '#000000', surface: '#0b0b0d', fg: '#f5f5f7', accent: '#4ea8ff' },
+  },
+  {
+    value: 'midnight',
+    label: 'Midnight',
+    description: 'Ink-navy night with a soft indigo accent.',
+    appearance: 'dark',
+    palette: 'midnight',
+    preview: { bg: '#070a14', surface: '#0e1322', fg: '#e6ebfa', accent: '#8b9bff' },
+  },
+  {
+    value: 'obsidian',
+    label: 'Obsidian',
+    description: 'Volcanic glass in violet-black with an amethyst accent.',
+    appearance: 'dark',
+    palette: 'obsidian',
+    preview: { bg: '#0a0910', surface: '#131120', fg: '#ece8f7', accent: '#b794f6' },
+  },
+  {
+    value: 'ember',
+    label: 'Ember',
+    description: 'Charred brown-black lit by a banked-fire orange.',
+    appearance: 'dark',
+    palette: 'ember',
+    preview: { bg: '#0d0807', surface: '#1a1210', fg: '#f6ece6', accent: '#ff8a3d' },
+  },
+  {
+    value: 'abyss',
+    label: 'Abyss',
+    description: 'Deep-sea teal-black with a bioluminescent cyan accent.',
+    appearance: 'dark',
+    palette: 'abyss',
+    preview: { bg: '#050d0f', surface: '#0b1719', fg: '#e2f4f6', accent: '#22d3ee' },
+  },
+  {
     value: 'catppuccin-mocha',
     label: 'Catppuccin Mocha',
     description: 'Soft pastel mauve on a deep blue-grey canvas.',
@@ -307,8 +357,11 @@ const DARK_COLOR_THEME_IDS = new Set<DarkColorThemeSetting>(
   DARK_COLOR_THEME_OPTIONS.map((option) => option.value),
 )
 
+/** Palettes that never existed as a legacy light/dark pair. */
+type DarkOnlyPalette = 'oled' | 'midnight' | 'obsidian' | 'ember' | 'abyss'
+
 const LEGACY_PALETTE_THEMES: Record<
-  Exclude<PaletteSetting, 'matrix'>,
+  Exclude<PaletteSetting, 'matrix' | DarkOnlyPalette>,
   { light: LightColorThemeSetting; dark: DarkColorThemeSetting }
 > = {
   falcon: { light: 'falcon-light', dark: 'falcon-dark' },
