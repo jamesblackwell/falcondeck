@@ -394,9 +394,22 @@ async fn project_thread_can_reply_to_a_bot_in_another_workspace() {
     })
     .await
     .unwrap();
+    // Project threads see bots in their overview and can address them by name.
+    let listed = app
+        .invoke_thread_tool(LIST, &json!({}), Some("project-thread"), None)
+        .await
+        .unwrap();
+    assert!(
+        listed.result.as_str().unwrap().contains(
+            "Bots (message by name or id with falcondeck_message_thread): Assistant `thread-1`"
+        ),
+        "{:?}",
+        listed.result
+    );
     for arguments in [
         json!({"thread_id":"thread-1", "message":"Done with the review.", "delivery":"queue"}),
         json!({"workspace_id":"workspace-1", "thread_id":"thread-1", "message":"Also fixed the tests.", "delivery":"queue"}),
+        json!({"thread_id":"assistant", "message":"Sent by name.", "delivery":"queue"}),
     ] {
         app.invoke_thread_tool(MESSAGE, &arguments, Some("project-thread"), None)
             .await
@@ -407,7 +420,24 @@ async fn project_thread_can_reply_to_a_bot_in_another_workspace() {
         .iter()
         .map(|queued| queued.summary.text.clone())
         .collect::<Vec<_>>();
-    assert_eq!(queued.len(), 2);
+    assert_eq!(queued.len(), 3);
+    assert!(queued[2].ends_with("Sent by name."));
+    // Reading a bot from a project explains how to reach it instead.
+    for name in [SUMMARY, VIEW] {
+        let error = app
+            .invoke_thread_tool(
+                name,
+                &json!({"thread_id":"thread-1"}),
+                Some("project-thread"),
+                None,
+            )
+            .await
+            .unwrap_err();
+        assert!(
+            error.to_string().contains("is the bot Assistant"),
+            "{error}"
+        );
+    }
     assert!(queued[0].starts_with("Message from FalconDeck thread project-thread"));
     // Only the bot is reachable; its project-local workers and listings stay scoped.
     for (name, arguments) in [

@@ -53,8 +53,8 @@ pub(super) fn catalog() -> Vec<ExtensionAgentTool> {
             "include_reasoning": {"type":"boolean", "default":false},
             "preview_chars": {"type":"integer", "minimum":200, "maximum":24000, "default":1200, "description":"Body characters per item."}
         }), vec!["thread_id"]),
-        (MESSAGE, "Message thread", "Send a message to another thread, labelled with your id and title. Default steer reaches its active turn (falling back to the queue); queue waits for the turn to finish; an idle thread starts a turn. Returns on admission, not on reply.", json!({
-            "thread_id": {"type":"string", "minLength":1},
+        (MESSAGE, "Message thread", "Send a message to another thread or a bot, labelled with your id and title. Default steer reaches its active turn (falling back to the queue); queue waits for the turn to finish; an idle thread starts a turn. Returns on admission, not on reply.", json!({
+            "thread_id": {"type":"string", "minLength":1, "description":"Thread id, or a bot's name (bots are listed in falcondeck_list_threads)."},
             "message": {"type":"string", "minLength":1, "maxLength":24000, "description":"Readable prose with normal spaces between words."},
             "delivery": {"type":"string", "enum":["steer","queue"], "default":"steer"}
         }), vec!["thread_id", "message"]),
@@ -231,6 +231,12 @@ impl AppState {
         let parent_summary = self.thread_summary(&caller_workspace, parent).await?;
         let bot = self.bot_for_thread(parent).await;
         let mut arguments = arguments.clone();
+        // Agents know bots by name ("send it to Juno"); ids are stable.
+        if let Some(named) = arguments.get("thread_id").and_then(Value::as_str)
+            && let Some(bot) = self.bot_named(named).await
+        {
+            arguments["thread_id"] = json!(bot.thread_id);
+        }
         let requested_workspace = arguments
             .as_object_mut()
             .and_then(|a| a.remove("workspace_id"))
@@ -300,6 +306,23 @@ impl AppState {
                 return Err(DaemonError::BadRequest(
                     "Only bots can coordinate across projects".into(),
                 ));
+            }
+            // Bots live outside projects; say how to reach one instead of
+            // reporting its thread as missing.
+            if reply_workspace.is_none()
+                && let Some(target) = target
+                && let Some(bot) = self.bot_for_thread(target).await
+                && self
+                    .thread_summary(&caller_workspace, target)
+                    .await
+                    .is_err()
+            {
+                return Err(DaemonError::BadRequest(format!(
+                    "{} is the bot {}, outside this project. Send it a message with falcondeck_message_thread (thread_id \"{}\"); its conversation is not readable from here.",
+                    line(target, 128),
+                    line(&bot.name, 100),
+                    line(&bot.name, 100)
+                )));
             }
             reply_workspace.unwrap_or_else(|| caller_workspace.clone())
         };
@@ -544,6 +567,21 @@ impl AppState {
             }
             _ => unreachable!(),
         }
+    }
+
+    /// A bot whose name matches, ignoring case, unless `name` is a thread id.
+    async fn bot_named(&self, name: &str) -> Option<falcondeck_core::BotProfile> {
+        let name = name.trim();
+        let bot = self
+            .inner
+            .preferences
+            .lock()
+            .await
+            .bots
+            .iter()
+            .find(|bot| bot.name.trim().eq_ignore_ascii_case(name))
+            .cloned()?;
+        self.thread_workspace(name).await.is_err().then_some(bot)
     }
 
     /// Project workspaces, most recently active first.

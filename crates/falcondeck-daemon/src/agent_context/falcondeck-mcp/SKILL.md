@@ -126,7 +126,10 @@ Approvals and questions are answered by the user in the FalconDeck UI.
 ### Messaging and delegating
 
 `falcondeck_message_thread` sends `message` (1–24000 characters) to an existing
-`thread_id`, labelled with your id and title. `delivery` defaults to `steer`
+`thread_id`, labelled with your id and title. Bots (the user's named
+coordinators, such as an assistant the user mentions by name) live outside
+projects: the list header names them, and `thread_id` accepts a bot's name.
+Project threads can message a bot but not read its conversation. `delivery` defaults to `steer`
 (reaches an active turn, else queues; an idle thread starts a turn); use
 `queue` only when it should wait for the current turn to finish. It returns
 admission status, not the reply. Send only when the user's task authorizes

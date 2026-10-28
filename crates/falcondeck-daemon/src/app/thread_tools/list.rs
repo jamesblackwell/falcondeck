@@ -415,9 +415,25 @@ pub(super) async fn list(
         _ => format!("# Threads across {} projects\n", projects.len()),
     };
     markdown.push_str(&format!(
-        "{} unarchived (not counting you): {} running, {} need the user, {} errored; {} active in 24h.\n\n",
+        "{} unarchived (not counting you): {} running, {} need the user, {} errored; {} active in 24h.\n",
         overview.total, overview.running, overview.needs_user, overview.errored, overview.recent,
     ));
+    // Bots live outside projects, so name them where agents look first.
+    let bots: Vec<_> = app
+        .preferences()
+        .await
+        .bots
+        .into_iter()
+        .filter(|bot| bot.thread_id != caller)
+        .map(|bot| format!("{} `{}`", line(&bot.name, 60), line(&bot.thread_id, 128)))
+        .collect();
+    if offset == 0 && !bots.is_empty() {
+        markdown.push_str(&format!(
+            "Bots (message by name or id with falcondeck_message_thread): {}\n",
+            bots.join(", ")
+        ));
+    }
+    markdown.push('\n');
     // Only the page is rendered, so only its summaries are cloned. A thread
     // deleted since the first pass is skipped without counting: the next
     // call's list no longer has it, so `offset + shown` stays aligned.

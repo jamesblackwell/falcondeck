@@ -46,6 +46,11 @@ are accessed directly by the agent or through the filesystem.
 
 ## Coordination and control
 
+Project threads find bots in the `falcondeck_list_threads` header (name and
+thread id) and can message one by name: any tool's `thread_id` accepts a bot's
+name, case-insensitively, when no thread has that id. They cannot read a bot's
+conversation; trying returns an error that names the bot and says to message it.
+
 Bot calls to the built-in coordination tools can select a project using
 `workspace_id`: its id, exact path, or unique folder name. Calls identifying an
 existing task resolve its owning workspace automatically. List and changes
