@@ -671,7 +671,7 @@ mod tests {
     #[tokio::test]
     async fn rows_show_request_and_reply_without_echoing_the_prompt() {
         let (app, _temp) = fixture().await;
-        seed(&app, 4, |i, t| {
+        seed(&app, 5, |i, t| {
             t.native_session_id = Some(format!("session-{i}"));
             match i {
                 // Codex previews are the opening prompt, not an outcome.
@@ -680,6 +680,7 @@ mod tests {
                         Some("Please can we improve the automations page...".into())
                 }
                 3 => t.last_message_preview = Some("Deployed the relay.".into()),
+                4 => t.last_message_preview = Some("An answer to the previous request.".into()),
                 _ => {}
             }
         })
@@ -721,6 +722,14 @@ mod tests {
                     ..Default::default()
                 },
             );
+            // A new request with no reply yet keeps the old preview out.
+            index.sessions.insert(
+                "session-4".into(),
+                thread_search::SessionExcerpt {
+                    recent: vec!["new unanswered request".into()],
+                    ..Default::default()
+                },
+            );
         }
         let text = list_text(&app, json!({})).await;
         for part in [
@@ -731,9 +740,14 @@ mod tests {
         ] {
             assert!(text.contains(part), "missing {part:?} in\n{text}");
         }
+        assert!(
+            text.contains("`t04` — idle · 5m ago · claude\n  Asked: new unanswered request\n")
+                && !text.contains("previous request"),
+            "{text}"
+        );
         let brief = list_text(&app, json!({"detail":"brief"})).await;
         assert!(
-            !brief.contains("Asked:") && ids(&brief).len() == 4,
+            !brief.contains("Asked:") && ids(&brief).len() == 5,
             "{brief}"
         );
         let found = list_text(&app, json!({"query":"HAYSTACK"})).await;

@@ -80,8 +80,13 @@ impl Glance {
                 }
             }
         }
+        // An indexed request without a reply is unanswered; an older preview
+        // must not stand in for its answer.
+        let indexed_request =
+            excerpt.is_some_and(|e| !e.recent.is_empty() || !e.opening.is_empty());
         if glance.latest.is_none()
             && !loaded_request
+            && !indexed_request
             && let Some(preview) = thread
                 .summary
                 .last_message_preview

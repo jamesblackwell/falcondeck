@@ -370,6 +370,15 @@ fn exec_outputs(output: &str) -> Vec<(String, Option<i32>)> {
         .collect()
 }
 
+/// Autoreview exits 0 with findings; its report says which.
+fn autoreview_outcome(output: Option<&str>, result: &'static str) -> &'static str {
+    match output {
+        Some(o) if o.contains("autoreview clean") => "passed",
+        Some(o) if o.contains("autoreview findings:") => "found issues",
+        _ => result,
+    }
+}
+
 fn outcome(status: &str, exit_code: Option<i32>) -> &'static str {
     match exit_code {
         Some(0) => "passed",
@@ -427,24 +436,25 @@ impl Digest {
 
     /// Checks and commits visible only in output, for commands we cannot read.
     fn record_from_output(&mut self, label: &str, output: &str, result: &'static str) {
-        if let Some(found) = TEST_RESULT.captures(output) {
-            let failed = found
-                .get(1)
-                .or(found.get(2))
-                .is_some_and(|m| m.as_str() != "ok" && m.as_str() != "passed");
-            let outcome = if failed || result == "failed" {
-                "failed"
-            } else {
-                "passed"
-            };
+        // Cargo prints one summary per test binary; any failure fails the run.
+        let summaries: Vec<_> = TEST_RESULT
+            .captures_iter(output)
+            .filter_map(|c| c.get(1).or(c.get(2)))
+            .map(|m| m.as_str())
+            .collect();
+        if !summaries.is_empty() {
+            let outcome =
+                if result == "failed" || summaries.iter().any(|s| *s != "ok" && *s != "passed") {
+                    "failed"
+                } else if result == "running" {
+                    "running"
+                } else {
+                    "passed"
+                };
             self.record_check(CheckKind::Tests, line(label, 80), outcome);
         }
         if AUTOREVIEW_RESULT.is_match(output) {
-            let outcome = if output.contains("autoreview clean") {
-                "passed"
-            } else {
-                result
-            };
+            let outcome = autoreview_outcome(Some(output), result);
             self.record_check(CheckKind::Autoreview, line(label, 80), outcome);
         }
         self.record_commits(&COMMIT_WITH_STAT, output);
@@ -522,14 +532,16 @@ fn digest(items: &[ConversationItem], since: Option<DateTime<Utc>>, root: &str) 
                 }
                 let Some(command) = command_text(title, detail) else {
                     if title.to_ascii_lowercase().contains("autoreview") {
-                        d.record_check(CheckKind::Autoreview, line(title, 80), result);
+                        let outcome = autoreview_outcome(output.as_deref(), result);
+                        d.record_check(CheckKind::Autoreview, line(title, 80), outcome);
                     }
                     continue;
                 };
                 let command = unwrap_shell(command);
                 let lower = command.to_ascii_lowercase();
                 if let Some(at) = lower.find("autoreview") {
-                    d.record_check(CheckKind::Autoreview, check_label(command, at), result);
+                    let outcome = autoreview_outcome(output.as_deref(), result);
+                    d.record_check(CheckKind::Autoreview, check_label(command, at), outcome);
                 } else if let Some(found) = TEST_COMMAND.find(&lower) {
                     d.record_check(
                         CheckKind::Tests,
@@ -547,7 +559,8 @@ fn digest(items: &[ConversationItem], since: Option<DateTime<Utc>>, root: &str) 
                     if scripts.is_empty() {
                         d.record_from_output(command, output, result);
                     }
-                    for (script, code) in scripts {
+                    // Newest first, like the item scan, so the latest script wins.
+                    for (script, code) in scripts.into_iter().rev() {
                         d.record_from_output(command, &script, outcome(status, code));
                     }
                 }
@@ -1108,6 +1121,16 @@ mod tests {
             // A file that merely quotes commit output is not a commit.
             script(2, 0, "[main 2896d18] Add Chrome action\nfn main() {}\n"),
         );
+        let rerun = format!(
+            "{}\n{}\n{}",
+            script(0, 0, "test result: ok. 3 passed\n"),
+            script(
+                1,
+                101,
+                "test result: ok. 1 passed\ntest result: FAILED. 0 passed; 1 failed\n"
+            ),
+            script(2, 0, "autoreview target: commit\nautoreview findings: 2\n"),
+        );
         let items: Vec<ConversationItem> = vec![
             serde_json::from_value(json!({
                 "kind":"tool_call", "id":"x1", "title":"exec", "tool_kind":"command",
@@ -1124,6 +1147,19 @@ mod tests {
         assert_eq!(
             d.commits,
             [("cb948cd1".to_string(), "Quiet notices".to_string())]
+        );
+        // The last script ran last; any failing binary fails the run.
+        let failing: Vec<ConversationItem> = vec![
+            serde_json::from_value(json!({
+                "kind":"tool_call", "id":"x3", "title":"exec", "tool_kind":"command",
+                "status":"completed", "output":rerun, "created_at":Utc::now()
+            }))
+            .unwrap(),
+        ];
+        let latest = checks_line(&digest(&failing, None, "/repo").checks);
+        assert!(
+            latest.contains("tests failed, 2 runs") && latest.contains("autoreview found issues"),
+            "{latest}"
         );
         let line = checks_line(&d.checks);
         assert!(
