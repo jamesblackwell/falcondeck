@@ -487,6 +487,14 @@ async fn bot_overviews_span_projects_and_accept_project_names() {
         changes.contains("across 2 projects") && changes.contains("project Quizgecko"),
         "{changes}"
     );
+    // Ids from an all-project list summarize together.
+    let summary = bot(SUMMARY, json!({"thread_ids":["q1", "thread-1"]}))
+        .await
+        .unwrap();
+    assert!(
+        summary.contains("## Grade quizzes `q1`") && summary.contains("`thread-1`"),
+        "{summary}"
+    );
     assert!(
         bot(VIEW, json!({"workspace_id":"all", "thread_id":"q1"}))
             .await

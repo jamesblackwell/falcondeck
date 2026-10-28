@@ -49,13 +49,14 @@ impl Glance {
     ) -> Self {
         let mut glance = Self::default();
         // Newest first: replies seen before the first user message answer it.
+        // An image-only request still ends the turn, keeping the pair aligned.
+        let mut loaded_request = false;
         for item in thread.items.iter().rev() {
             match item {
                 ConversationItem::UserMessage { text, .. } => {
                     glance.asked = kept(text);
-                    if glance.asked.is_some() {
-                        break;
-                    }
+                    loaded_request = true;
+                    break;
                 }
                 ConversationItem::AssistantMessage { text, .. } if glance.latest.is_none() => {
                     glance.latest = kept(text);
@@ -72,17 +73,13 @@ impl Glance {
                 .cloned()
                 .collect();
             // Loaded items are authoritative once they include a request.
-            if glance.asked.is_none() {
+            if !loaded_request {
                 glance.asked = excerpt.recent.last().or(excerpt.opening.last()).cloned();
                 if glance.latest.is_none() {
                     glance.latest = excerpt.latest_reply.clone();
                 }
             }
         }
-        let loaded_request = thread
-            .items
-            .iter()
-            .any(|i| matches!(i, ConversationItem::UserMessage { .. }));
         if glance.latest.is_none()
             && !loaded_request
             && let Some(preview) = thread

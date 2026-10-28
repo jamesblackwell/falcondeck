@@ -247,6 +247,7 @@ impl AppState {
                     .and_then(|ids| ids.first())
                     .and_then(Value::as_str)
             });
+        let explicit_workspace = requested_workspace.is_some();
         let all_projects = requested_workspace.as_deref() == Some("all");
         let requested_workspace = match requested_workspace {
             Some(ws) if ws == "all" => None,
@@ -328,7 +329,13 @@ impl AppState {
                 Ok(response(read::view(self, &workspace, target, &a).await?))
             }
             SUMMARY => Ok(response(
-                digest::summary(self, &workspace, &args(arguments)?).await?,
+                digest::summary(
+                    self,
+                    &workspace,
+                    bot.is_some() && !explicit_workspace,
+                    &args(arguments)?,
+                )
+                .await?,
             )),
             CHANGES => Ok(response(
                 digest::changes(self, &scope, parent, &args(arguments)?).await?,

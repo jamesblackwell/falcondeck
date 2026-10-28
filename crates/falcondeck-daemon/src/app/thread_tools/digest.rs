@@ -270,6 +270,9 @@ static TEST_RESULT: LazyLock<regex::Regex> = LazyLock::new(|| {
     regex::Regex::new(r"(?m)^(?:test result: (ok|FAILED)\.|\s*Test Files\s+.*?(failed|passed))")
         .unwrap()
 });
+/// The script's own report, not a file that quotes it.
+static AUTOREVIEW_RESULT: LazyLock<regex::Regex> =
+    LazyLock::new(|| regex::Regex::new(r"(?m)^autoreview target: ").unwrap());
 static SHELL_WRAPPER: LazyLock<regex::Regex> = LazyLock::new(|| {
     regex::Regex::new(r#"(?s)^(?:\S*/)?(?:ba|z)?sh\s+-l?c\s+(?:'(.*)'|"(.*)")\s*$"#).unwrap()
 });
@@ -436,7 +439,7 @@ impl Digest {
             };
             self.record_check(CheckKind::Tests, line(label, 80), outcome);
         }
-        if output.contains("autoreview target:") {
+        if AUTOREVIEW_RESULT.is_match(output) {
             let outcome = if output.contains("autoreview clean") {
                 "passed"
             } else {
@@ -611,9 +614,12 @@ impl AppState {
     }
 }
 
+/// `cross_project` resolves each id's own workspace, for bots holding ids
+/// from an all-project list.
 pub(super) async fn summary(
     app: &AppState,
     workspace: &str,
+    cross_project: bool,
     args: &SummaryArgs,
 ) -> Result<String, DaemonError> {
     let mut ids: Vec<String> = args.thread_id.iter().cloned().collect();
@@ -632,7 +638,18 @@ pub(super) async fn summary(
         .unwrap_or(DEFAULT_SUMMARY_CHARS)
         .clamp(512, MAX_CHARS);
     app.refresh_excerpts().await;
-    let mut snapshots = app.snapshots(workspace, &ids, None).await?;
+    let mut snapshots = Vec::with_capacity(ids.len());
+    for id in &ids {
+        let owner = if cross_project {
+            app.thread_workspace(id).await?
+        } else {
+            workspace.to_string()
+        };
+        snapshots.extend(
+            app.snapshots(&owner, std::slice::from_ref(id), None)
+                .await?,
+        );
+    }
     if args.hydrate {
         for snapshot in snapshots
             .iter_mut()
@@ -641,7 +658,7 @@ pub(super) async fn summary(
         {
             let detail = app
                 .thread_detail_with_request(&ThreadDetailRequest {
-                    workspace_id: workspace.into(),
+                    workspace_id: snapshot.summary.workspace_id.clone(),
                     thread_id: snapshot.summary.id.clone(),
                     mode: ThreadDetailMode::Tail,
                     limit: Some(200),
@@ -665,14 +682,23 @@ pub(super) async fn summary(
             }
         }
     }
-    let mut pending = app.pending_requests(workspace).await;
+    let mut pending = HashMap::new();
+    for snapshot in &snapshots {
+        let owner = &snapshot.summary.workspace_id;
+        if !pending.contains_key(owner) {
+            pending.insert(owner.clone(), app.pending_requests(owner).await);
+        }
+    }
     let now = Utc::now();
     let per_thread = (cap.saturating_sub(200) / ids.len()).max(400);
     let mut markdown = String::new();
     let mut omitted = Vec::new();
     for snapshot in snapshots {
         let summary = app.build_thread_summary_from_clone(snapshot.summary).await;
-        let requests = pending.remove(&summary.id).unwrap_or_default();
+        let requests = pending
+            .get_mut(&summary.workspace_id)
+            .and_then(|requests| requests.remove(&summary.id))
+            .unwrap_or_default();
         let entry = capped(
             &render_summary(
                 &summary,
