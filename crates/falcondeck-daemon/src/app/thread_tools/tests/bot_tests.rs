@@ -780,3 +780,33 @@ async fn every_bot_gets_a_distinct_icon_and_edits_are_validated() {
     };
     assert!(app.mutate_bot(update(Some(bad))).await.is_err());
 }
+
+#[tokio::test]
+async fn creating_a_bot_keeps_the_marks_older_bots_already_show() {
+    let (app, _temp) = fixture().await;
+    app.inner.preferences.lock().await.bots.push(BotProfile {
+        id: "bot-old".into(),
+        name: "Older".into(),
+        workspace_id: "workspace-1".into(),
+        dedicated_workspace: false,
+        thread_id: "thread-old".into(),
+        space_path: "/tmp/bots/bot-old/space".into(),
+        instructions: String::new(),
+        can_start_threads: true,
+        context_files: Vec::new(),
+        icon: None,
+    });
+    let bot = promote(&app).await;
+    let bots = app.preferences().await.bots;
+    // The older bot keeps the circle/cat-1 clients were already showing.
+    let older = bots[0].icon.clone().unwrap();
+    assert_eq!(
+        (older.shape.as_str(), older.color.as_str()),
+        ("circle", "cat-1")
+    );
+    let newer = bot.icon.unwrap();
+    assert_eq!(
+        (newer.shape.as_str(), newer.color.as_str()),
+        ("diamond", "cat-2")
+    );
+}

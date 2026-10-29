@@ -13,20 +13,20 @@ fn user(id: &str, text: &str) -> ConversationItem {
 }
 
 fn write_tool(id: &str, path: &str) -> ConversationItem {
-    let title = format!("Write {path}");
+    edit_tool(id, path, "completed")
+}
+
+fn edit_tool(id: &str, path: &str, status: &str) -> ConversationItem {
+    let title = format!("Edit {path}");
     ConversationItem::ToolCall {
         id: id.into(),
         title: title.clone(),
-        tool_kind: "Write".into(),
-        status: "completed".into(),
+        tool_kind: "Edit".into(),
+        status: status.into(),
         output: None,
         exit_code: None,
         display: Box::new(crate::app::conversation_helpers::tool_display_metadata(
-            &title,
-            "Write",
-            "completed",
-            None,
-            None,
+            &title, "Edit", status, None, None,
         )),
         detail: None,
         created_at: Utc::now(),
@@ -191,4 +191,62 @@ async fn settings_stop_recording_and_clearing_removes_files() {
         .await
         .unwrap();
     assert_eq!(cleared.events_bytes, 0);
+}
+
+#[tokio::test]
+async fn file_writes_count_once_when_an_edit_completes() {
+    let (app, _temp) = fixture().await;
+    let push = |item| app.push_conversation_item("workspace-1", "thread-1", item, true);
+    push(edit_tool("e1", "/repo/a.rs", "running"))
+        .await
+        .unwrap();
+    push(edit_tool("e1", "/repo/a.rs", "completed"))
+        .await
+        .unwrap();
+    push(edit_tool("e1", "/repo/a.rs", "completed"))
+        .await
+        .unwrap();
+    push(edit_tool("e2", "/repo/b.rs", "running"))
+        .await
+        .unwrap();
+    push(edit_tool("e2", "/repo/b.rs", "failed")).await.unwrap();
+    let summary = app.analytics_summary(1).await.unwrap();
+    assert_eq!(summary.totals.file_writes, 1);
+    assert_eq!(summary.files[0].path, "/repo/a.rs");
+}
+
+#[tokio::test]
+async fn a_turn_counts_only_its_own_tokens_without_an_earlier_baseline() {
+    let (app, _temp) = fixture().await;
+    let breakdown = |tokens: u64| falcondeck_core::TokenUsageBreakdown {
+        total_tokens: tokens,
+        input_tokens: tokens,
+        cached_input_tokens: 0,
+        output_tokens: 0,
+        reasoning_output_tokens: 0,
+    };
+    let usage = |total: u64, last: u64| falcondeck_core::ThreadTokenUsage {
+        total: breakdown(total),
+        last: Some(breakdown(last)),
+        model_context_window: None,
+        updated_at: None,
+    };
+    let emit = |event| app.emit(Some("workspace-1".into()), Some("thread-1".into()), event);
+    // A thread with 100k tokens of history: the first turn seen adds 10k.
+    emit(UnifiedEvent::TurnStart {
+        turn_id: "t1".into(),
+    });
+    emit(UnifiedEvent::ThreadTokenUsageUpdated {
+        usage: usage(105_000, 5_000),
+    });
+    emit(UnifiedEvent::ThreadTokenUsageUpdated {
+        usage: usage(110_000, 5_000),
+    });
+    emit(UnifiedEvent::TurnEnd {
+        turn_id: "t1".into(),
+        status: "completed".into(),
+        error: None,
+    });
+    let summary = summary_with_turn(&app).await;
+    assert_eq!(summary.providers[0].input_tokens, 10_000);
 }

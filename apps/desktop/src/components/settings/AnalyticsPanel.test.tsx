@@ -122,4 +122,20 @@ describe('AnalyticsPanel', () => {
     )
     await waitFor(() => expect(onToast).toHaveBeenCalledWith({ variant: 'success', title: 'Your messages were deleted' }))
   })
+
+  it('keeps a second quick change when saves overlap', async () => {
+    const fetch = stubDaemon()
+    render(<AnalyticsPanel baseUrl="http://daemon" onToast={vi.fn()} />)
+    fireEvent.click(await screen.findByRole('switch', { name: 'Keep your messages' }))
+    fireEvent.click(screen.getByRole('button', { name: '2 years' }))
+    await waitFor(() =>
+      expect(fetch).toHaveBeenCalledWith(
+        'http://daemon/api/analytics/settings',
+        expect.objectContaining({
+          body: JSON.stringify({ enabled: true, record_prompts: false, retention_months: 24 }),
+        }),
+      ),
+    )
+    expect(screen.getByRole('switch', { name: 'Keep your messages' })).toHaveAttribute('aria-checked', 'false')
+  })
 })

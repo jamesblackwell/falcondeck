@@ -2873,6 +2873,9 @@ impl AppState {
         if update_existing && let Some(index) = existing_index {
             let previous = thread.items[index].clone();
             thread.items[index] = item.clone();
+            if track_attention {
+                self.analytics_updated_item(thread, &previous, &item);
+            }
             let track_attention = track_attention && marks_agent_activity(&item);
             if track_attention {
                 thread.summary.attention.last_agent_activity_seq = thread

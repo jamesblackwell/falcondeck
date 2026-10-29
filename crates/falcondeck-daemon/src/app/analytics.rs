@@ -279,10 +279,23 @@ fn listen_loop(
                 None
             }
             UnifiedEvent::ThreadTokenUsageUpdated { usage } => {
-                latest.insert(
-                    thread,
-                    (usage.total.input_tokens, usage.total.output_tokens),
-                );
+                let total = (usage.total.input_tokens, usage.total.output_tokens);
+                // First report in a turn with no baseline (e.g. after a restart):
+                // the total before this request is the turn's starting point.
+                if started.contains_key(&thread) && !at_start.contains_key(&thread) {
+                    let last = usage
+                        .last
+                        .as_ref()
+                        .map_or((0, 0), |last| (last.input_tokens, last.output_tokens));
+                    at_start.insert(
+                        thread.clone(),
+                        (
+                            total.0.saturating_sub(last.0),
+                            total.1.saturating_sub(last.1),
+                        ),
+                    );
+                }
+                latest.insert(thread, total);
                 None
             }
             UnifiedEvent::TurnEnd { status, error, .. } => {
@@ -290,12 +303,11 @@ fn listen_loop(
                     .remove(&thread)
                     .map(|start| (envelope.emitted_at - start).num_milliseconds().max(0) as u64)
                     .unwrap_or(0);
-                // Without a baseline (first turn seen), the total is this turn's.
+                // No baseline means no usage was reported during this turn.
                 let (i, out) = match (latest.get(&thread), at_start.remove(&thread)) {
                     (Some(end), Some(start)) => {
                         (end.0.saturating_sub(start.0), end.1.saturating_sub(start.1))
                     }
-                    (Some(end), None) => *end,
                     _ => (0, 0),
                 };
                 Some(Record::Turn {
@@ -406,6 +418,28 @@ fn ack_like(message: &str) -> bool {
         "👍",
     ];
     words <= 3 || (words <= 20 && OPENERS.iter().any(|opener| text.starts_with(opener)))
+}
+
+/// The path of a Claude edit tool call that finished successfully.
+fn completed_edit_path(item: &ConversationItem) -> Option<String> {
+    let ConversationItem::ToolCall {
+        title,
+        tool_kind,
+        status,
+        exit_code,
+        ..
+    } = item
+    else {
+        return None;
+    };
+    if !EDIT_TOOLS.contains(&tool_kind.as_str())
+        || !status.eq_ignore_ascii_case("completed")
+        || exit_code.is_some_and(|code| code != 0)
+    {
+        return None;
+    }
+    let path = title.strip_prefix(tool_kind.as_str())?.trim();
+    (!path.is_empty()).then(|| path.to_string())
 }
 
 fn excerpt(text: &str) -> String {
@@ -753,22 +787,34 @@ impl AppState {
                     });
                 }
             }
-            ConversationItem::ToolCall {
-                title, tool_kind, ..
-            } if EDIT_TOOLS.contains(&tool_kind.as_str()) => {
-                let path = title
-                    .strip_prefix(tool_kind.as_str())
-                    .map(str::trim)
-                    .unwrap_or_default();
-                if !path.is_empty() {
+            ConversationItem::ToolCall { .. } => {
+                if let Some(path) = completed_edit_path(item) {
                     self.analytics().record(Record::File {
                         t: Utc::now(),
                         th: thread.summary.id.clone(),
-                        path: path.to_string(),
+                        path,
                     });
                 }
             }
             _ => {}
+        }
+    }
+
+    /// Called when a live item is replaced; counts a file write once it completes.
+    pub(super) fn analytics_updated_item(
+        &self,
+        thread: &ManagedThread,
+        previous: &ConversationItem,
+        item: &ConversationItem,
+    ) {
+        if completed_edit_path(previous).is_none()
+            && let Some(path) = completed_edit_path(item)
+        {
+            self.analytics().record(Record::File {
+                t: Utc::now(),
+                th: thread.summary.id.clone(),
+                path,
+            });
         }
     }
 
@@ -915,7 +961,16 @@ impl AppState {
         self.analytics().flush().await;
         let labels = self.analytics_labels().await;
         let dir = self.analytics().dir.clone();
-        let since = Utc::now() - chrono::Duration::days(i64::from(days));
+        // Start at local midnight of the first charted day, so totals and the
+        // daily buckets cover the same calendar days.
+        let first_day = Local::now().date_naive() - chrono::Duration::days(i64::from(days) - 1);
+        let since = first_day
+            .and_hms_opt(0, 0, 0)
+            .and_then(|midnight| midnight.and_local_timezone(Local).earliest())
+            .map_or_else(
+                || Utc::now() - chrono::Duration::days(i64::from(days)),
+                |start| start.with_timezone(&Utc),
+            );
         tokio::task::spawn_blocking(move || summarize(read_records(&dir, since), &labels, days))
             .await
             .map_err(|e| DaemonError::Process(e.to_string()))

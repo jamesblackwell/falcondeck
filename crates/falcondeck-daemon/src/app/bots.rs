@@ -242,6 +242,8 @@ impl AppState {
                     icon: None,
                 };
                 let mut bots = self.inner.preferences.lock().await.bots.clone();
+                // Settle older bots' marks first, as clients already display them.
+                assign_missing_icons(&mut bots);
                 let mut bot = bot;
                 bot.icon = Some(BotIcon::next_unused(
                     &bots

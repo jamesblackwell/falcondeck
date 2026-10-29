@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
   Badge,
   Button,
@@ -184,9 +184,16 @@ export function AnalyticsPanel({ baseUrl, onToast }: AnalyticsPanelProps) {
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [confirming, setConfirming] = useState<AnalyticsClearTarget | null>(null)
+  // Only the latest load may update the page; an older, slower one is discarded.
+  const loadId = useRef(0)
+  // Saves run one at a time from the latest wanted settings, so a quick second
+  // change cannot be overwritten by the first request's stale values.
+  const wanted = useRef<AnalyticsSettings | null>(null)
+  const saving = useRef<Promise<void>>(Promise.resolve())
 
   const load = useCallback(async () => {
     if (!api) return
+    const id = ++loadId.current
     setLoading(true)
     setError(null)
     try {
@@ -194,12 +201,14 @@ export function AnalyticsPanel({ baseUrl, onToast }: AnalyticsPanelProps) {
         api.analyticsSummary(Number(period)),
         api.analyticsStatus(),
       ])
+      if (id !== loadId.current) return
       setSummary(nextSummary)
       setStatus(nextStatus)
+      wanted.current ??= nextStatus.settings
     } catch (err) {
-      setError(err instanceof Error ? err.message : String(err))
+      if (id === loadId.current) setError(err instanceof Error ? err.message : String(err))
     } finally {
-      setLoading(false)
+      if (id === loadId.current) setLoading(false)
     }
   }, [api, period])
 
@@ -222,17 +231,24 @@ export function AnalyticsPanel({ baseUrl, onToast }: AnalyticsPanelProps) {
     }
   }, [api, query, status?.prompts_bytes])
 
-  const saveSettings = async (patch: Partial<AnalyticsSettings>) => {
+  const saveSettings = (patch: Partial<AnalyticsSettings>) => {
     if (!api || !status) return
-    try {
-      setStatus(await api.updateAnalyticsSettings({ ...status.settings, ...patch }))
-    } catch (err) {
-      onToast({
-        variant: 'danger',
-        title: 'Could not save analytics settings',
-        description: err instanceof Error ? err.message : String(err),
-      })
-    }
+    const next = { ...(wanted.current ?? status.settings), ...patch }
+    wanted.current = next
+    setStatus((current) => (current ? { ...current, settings: next } : current))
+    saving.current = saving.current.then(async () => {
+      try {
+        const saved = await api.updateAnalyticsSettings(next)
+        // A later change is queued behind this one; keep showing it.
+        if (wanted.current === next) setStatus(saved)
+      } catch (err) {
+        onToast({
+          variant: 'danger',
+          title: 'Could not save analytics settings',
+          description: err instanceof Error ? err.message : String(err),
+        })
+      }
+    })
   }
 
   const clear = async (target: AnalyticsClearTarget) => {
@@ -517,14 +533,14 @@ export function AnalyticsPanel({ baseUrl, onToast }: AnalyticsPanelProps) {
             description="Counts, timings and file paths. No message content except your own messages, below."
             checked={status?.settings.enabled ?? true}
             disabled={!status}
-            onCheckedChange={(enabled) => void saveSettings({ enabled })}
+            onCheckedChange={(enabled) => saveSettings({ enabled })}
           />
           <SwitchRow
             title="Keep your messages"
             description="Save the full text of what you send to agents so you can search it later."
             checked={status?.settings.record_prompts ?? true}
             disabled={!status || !status.settings.enabled}
-            onCheckedChange={(record_prompts) => void saveSettings({ record_prompts })}
+            onCheckedChange={(record_prompts) => saveSettings({ record_prompts })}
           />
           <SettingRow
             title="Keep activity for"
@@ -533,7 +549,7 @@ export function AnalyticsPanel({ baseUrl, onToast }: AnalyticsPanelProps) {
               <SegmentedControl
                 ariaLabel="Keep activity for"
                 value={String(status?.settings.retention_months ?? 12)}
-                onChange={(value) => void saveSettings({ retention_months: Number(value) })}
+                onChange={(value) => saveSettings({ retention_months: Number(value) })}
                 options={RETENTION}
               />
             }
