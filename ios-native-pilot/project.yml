@@ -12,7 +12,7 @@ settings:
     FALCONDECK_DISPLAY_NAME: Falcon Native
     FALCONDECK_PAIRING_SCHEME: falcondeck-native
     MARKETING_VERSION: "1.2"
-    CURRENT_PROJECT_VERSION: "107"
+    CURRENT_PROJECT_VERSION: "108"
   configs:
     Release:
       FALCONDECK_APP_BUNDLE_IDENTIFIER: com.falcondeck.mobile
