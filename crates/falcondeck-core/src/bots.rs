@@ -55,6 +55,9 @@ pub struct BotProfile {
     /// Whether FalconDeck's coordinator tools may create tasks.
     #[serde(default = "enabled")]
     pub can_start_threads: bool,
+    /// Absolute paths of text files read into every turn, in order.
+    #[serde(default)]
+    pub context_files: Vec<String>,
 }
 
 fn enabled() -> bool {
@@ -89,6 +92,9 @@ pub enum BotMutation {
         instructions: String,
         /// Allow creation through FalconDeck coordination tools.
         can_start_threads: bool,
+        /// Replacement context file list; absent keeps the current list.
+        #[serde(default)]
+        context_files: Option<Vec<String>>,
     },
     /// Stop the bot and its active delegated tasks.
     Stop {
@@ -133,4 +139,79 @@ pub enum BotDocumentMutation {
         /// Version being deleted; a changed file must be reloaded first.
         expected_version: String,
     },
+}
+
+/// One labelled part of the context FalconDeck adds to a bot's turns.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct BotContextSection {
+    /// Short user-facing label.
+    pub label: String,
+    /// Source file for context files.
+    #[serde(default)]
+    pub path: Option<String>,
+    /// Rough token estimate (about four characters per token).
+    pub tokens: u64,
+    /// Why a context file could not be read.
+    #[serde(default)]
+    pub error: Option<String>,
+}
+
+/// Exactly what a bot's next turn receives, with a size breakdown.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct BotContextReport {
+    /// Sections in injection order.
+    pub sections: Vec<BotContextSection>,
+    /// Sum of section estimates.
+    pub total_tokens: u64,
+    /// Full injected text.
+    pub text: String,
+}
+
+/// A text file that can be attached to bots as context.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ContextFile {
+    /// Absolute path.
+    pub path: String,
+    /// File name.
+    pub name: String,
+    /// FalconDeck's context folder, or the project folder containing it.
+    pub location: String,
+    /// Rough token estimate.
+    pub tokens: u64,
+}
+
+/// Context files found in FalconDeck's folder and at project roots.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ContextFileList {
+    /// FalconDeck's own context folder.
+    pub folder: String,
+    /// Suggested files, FalconDeck's folder first.
+    pub files: Vec<ContextFile>,
+}
+
+/// Contents of a context file, versioned like bot documents.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ContextFileContent {
+    /// Absolute path.
+    pub path: String,
+    /// UTF-8 text content.
+    pub content: String,
+    /// Content hash used to detect edits made elsewhere.
+    pub version: String,
+}
+
+/// Save a known context file, or create one in FalconDeck's folder by name.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ContextFileWrite {
+    /// Existing file to replace; requires `expected_version`.
+    #[serde(default)]
+    pub path: Option<String>,
+    /// New file name inside FalconDeck's context folder.
+    #[serde(default)]
+    pub name: Option<String>,
+    /// UTF-8 contents.
+    pub content: String,
+    /// Version being edited.
+    #[serde(default)]
+    pub expected_version: Option<String>,
 }

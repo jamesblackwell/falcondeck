@@ -1,4 +1,4 @@
-import { useEffect, useId, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useId, useMemo, useRef, useState } from "react";
 import type { ReactNode } from "react";
 import { createPortal } from "react-dom";
 import {
@@ -7,6 +7,7 @@ import {
   ChevronRight,
   FilePlus2,
   FileText,
+  FolderPlus,
   Plus,
   Settings2,
   Upload,
@@ -15,7 +16,10 @@ import {
 import {
   defaultProviderLabel,
   type BotApi,
+  type BotContextReport,
   type BotProfile,
+  type ContextFileContent,
+  type ContextFileList,
   type ProjectGroup,
   type ThreadSummary,
 } from "@falcondeck/client-core";
@@ -294,6 +298,7 @@ function BotEditor({
   const [name, setName] = useState(bot?.name ?? "");
   const [instructions, setInstructions] = useState(bot?.instructions ?? "");
   const [canStart, setCanStart] = useState(bot?.can_start_threads ?? true);
+  const [contextFiles, setContextFiles] = useState(bot?.context_files ?? []);
   const [home, setHome] = useState<"new" | "existing">("new");
   const [threadId, setThreadId] = useState("");
   const [query, setQuery] = useState("");
@@ -374,6 +379,7 @@ function BotEditor({
               name,
               instructions,
               can_start_threads: canStart,
+              ...(api.contextFiles ? { context_files: contextFiles } : {}),
             }
           : {
               action: "create",
@@ -638,9 +644,11 @@ function BotEditor({
             <p className="px-3 pb-3 pl-[1.875rem] text-[length:var(--fd-text-xs)] leading-relaxed text-fg-tertiary">
               Coordinate work through tasks in the appropriate project. Stay
               available for direction, follow up on delegated work, and bring
-              back results or decisions. Keep durable knowledge in editable
-              documents. Read relevant documents and respect your edits and
-              deletions. Existing approval rules apply.
+              back results or decisions. Message other bots and tasks only when
+              something needs action. Keep current work in STATUS.md and lasting
+              knowledge in MEMORY.md, and read other bots&apos; status instead of
+              asking. Respect your edits and deletions. Existing approval rules
+              apply.
             </p>
           </details>
           {bot ? (
@@ -668,6 +676,12 @@ function BotEditor({
                   />
                 </div>
               </EditorSection>
+              <BotContextFiles
+                bot={bot}
+                api={api}
+                files={contextFiles}
+                onChange={setContextFiles}
+              />
               <BotDocuments bot={bot} api={api} />
               <EditorSection
                 title={`Delegated tasks${children.length ? ` · ${children.length}` : ""}`}
@@ -789,6 +803,356 @@ function BotEditor({
       </form>
     </div>,
     document.body,
+  );
+}
+
+function formatTokens(tokens: number) {
+  if (tokens < 1000) return String(tokens);
+  return `${(tokens / 1000).toFixed(tokens < 10_000 ? 1 : 0)}k`;
+}
+
+function fileName(path: string) {
+  return path.split("/").filter(Boolean).at(-1) ?? path;
+}
+
+/** Text files read fresh into each of this bot's turns, with size estimates. */
+function BotContextFiles({
+  bot,
+  api,
+  files,
+  onChange,
+}: {
+  bot: BotProfile;
+  api: BotApi;
+  files: string[];
+  onChange: (files: string[]) => void;
+}) {
+  const [list, setList] = useState<ContextFileList | null>(null);
+  const [report, setReport] = useState<BotContextReport | null>(null);
+  const [unsupported, setUnsupported] = useState(false);
+  const [adding, setAdding] = useState<"new" | "path" | null>(null);
+  const [draft, setDraft] = useState("");
+  const [editing, setEditing] = useState<ContextFileContent | null>(null);
+  const [content, setContent] = useState("");
+  const [pending, setPending] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const editor = useRef<HTMLDivElement>(null);
+  const saved = bot.context_files ?? [];
+  const dirty = files.join("\n") !== saved.join("\n");
+  const load = useCallback(async () => {
+    if (!api.contextFiles || !api.botContext) throw new Error("unsupported");
+    const [nextList, nextReport] = await Promise.all([
+      api.contextFiles(),
+      api.botContext(bot.id),
+    ]);
+    setList(nextList);
+    setReport(nextReport);
+  }, [api, bot.id]);
+  useEffect(() => {
+    let active = true;
+    // Older daemons lack these endpoints; hide the section rather than erroring.
+    load().catch(() => {
+      if (active) setUnsupported(true);
+    });
+    return () => {
+      active = false;
+    };
+  }, [load]);
+  if (unsupported) return null;
+  const run = async (action: () => Promise<void>) => {
+    setPending(true);
+    setError(null);
+    try {
+      await action();
+    } catch (error) {
+      setError(errorMessage(error));
+    } finally {
+      setPending(false);
+    }
+  };
+  const open = (file: ContextFileContent) => {
+    setEditing(file);
+    setContent(file.content);
+    requestAnimationFrame(() =>
+      editor.current?.scrollIntoView?.({ block: "nearest", behavior: "smooth" }),
+    );
+  };
+  const attach = (path: string) => {
+    if (!files.includes(path)) onChange([...files, path]);
+  };
+  const submitDraft = () => {
+    const value = draft.trim();
+    if (!value || pending) return;
+    if (adding === "path") {
+      attach(value);
+      setAdding(null);
+      return;
+    }
+    void run(async () => {
+      const created = await api.writeContextFile!({
+        name: value,
+        content: `# ${value.replace(/\.[^.]+$/, "")}\n\n`,
+      });
+      attach(created.path);
+      setAdding(null);
+      open(created);
+      await load();
+    });
+  };
+  const sections = new Map(
+    report?.sections.flatMap((section) =>
+      section.path ? [[section.path, section]] : [],
+    ),
+  );
+  const known = new Map(list?.files.map((file) => [file.path, file]));
+  const suggestions = list?.files.filter((file) => !files.includes(file.path)) ?? [];
+  return (
+    <EditorSection
+      title="Context in every turn"
+      actions={
+        <>
+          <Button
+            type="button"
+            size="sm"
+            variant="ghost"
+            disabled={pending}
+            onClick={() => {
+              setAdding("path");
+              setDraft("");
+            }}
+          >
+            <FolderPlus aria-hidden="true" className="h-3.5 w-3.5" />
+            Add path
+          </Button>
+          <Button
+            type="button"
+            size="sm"
+            variant="ghost"
+            disabled={pending}
+            onClick={() => {
+              setAdding("new");
+              setDraft("COMPANY.md");
+            }}
+          >
+            <FilePlus2 aria-hidden="true" className="h-3.5 w-3.5" />
+            New file
+          </Button>
+        </>
+      }
+    >
+      <p className={HINT_CLASS}>
+        Read fresh from disk into each of this bot&apos;s turns. Tasks it starts
+        don&apos;t get them; the bot briefs them instead.
+      </p>
+      {files.length ? (
+        <div className="-mx-2">
+          {files.map((path) => {
+            const section = sections.get(path);
+            const tokens = section?.tokens ?? known.get(path)?.tokens;
+            const where = known.get(path)?.location ?? path;
+            return (
+              <div
+                key={path}
+                className={cn(
+                  "group/context flex items-center gap-2.5 rounded-[var(--fd-radius-md)] px-2 py-1.5",
+                  editing?.path === path && "bg-interactive-selected",
+                )}
+              >
+                <FileText
+                  aria-hidden="true"
+                  className="h-3.5 w-3.5 shrink-0 text-fg-muted"
+                />
+                <button
+                  type="button"
+                  disabled={pending}
+                  title={path}
+                  onClick={() =>
+                    void run(async () => open(await api.readContextFile!(path)))
+                  }
+                  className="fd-focus min-w-0 flex-1 truncate rounded-[var(--fd-radius-sm)] text-left disabled:opacity-60"
+                >
+                  <span className="fd-type-supporting text-fg-secondary">
+                    {fileName(path)}
+                  </span>
+                  <span className="ml-2 text-[length:var(--fd-text-2xs)] text-fg-muted">
+                    {where}
+                  </span>
+                </button>
+                {section?.error ? (
+                  <span className="shrink-0 text-[length:var(--fd-text-2xs)] text-danger">
+                    {section.error}
+                  </span>
+                ) : tokens !== undefined ? (
+                  <span className="fd-type-mono shrink-0 text-[length:var(--fd-text-2xs)] text-fg-muted">
+                    ≈{formatTokens(tokens)}
+                  </span>
+                ) : null}
+                <button
+                  type="button"
+                  aria-label={`Remove ${fileName(path)}`}
+                  disabled={pending}
+                  onClick={() => onChange(files.filter((file) => file !== path))}
+                  className={SECTION_ICON_BUTTON_CLASS}
+                >
+                  <X aria-hidden="true" className="h-3.5 w-3.5" />
+                </button>
+              </div>
+            );
+          })}
+        </div>
+      ) : null}
+      {suggestions.length ? (
+        <Select value="" onValueChange={attach}>
+          <SelectTrigger
+            aria-label="Add a context file"
+            className="h-9 w-full rounded-[var(--fd-radius-lg)] bg-surface-2 text-[length:var(--fd-text-sm)] text-fg-muted"
+          >
+            <span className="flex min-w-0 items-center gap-2">
+              <Plus aria-hidden="true" className="h-3.5 w-3.5" />
+              <SelectValue placeholder="Add a file from FalconDeck or a project" />
+            </span>
+          </SelectTrigger>
+          <SelectContent>
+            {suggestions.map((file) => (
+              <SelectItem key={file.path} value={file.path}>
+                {file.location} / {file.name} · ≈{formatTokens(file.tokens)}
+              </SelectItem>
+            ))}
+          </SelectContent>
+        </Select>
+      ) : null}
+      {adding ? (
+        <div className="flex items-center gap-2">
+          <Input
+            aria-label={adding === "path" ? "File path" : "New file name"}
+            autoFocus
+            value={draft}
+            onChange={(event) => setDraft(event.target.value)}
+            onKeyDown={(event) => {
+              if (event.key !== "Enter") return;
+              // Keep Enter from submitting the surrounding bot form.
+              event.preventDefault();
+              submitDraft();
+            }}
+            placeholder={
+              adding === "path" ? "/Users/you/project/METRICS.md" : "COMPANY.md"
+            }
+            className="fd-type-mono h-9 flex-1 text-[length:var(--fd-text-xs)]"
+          />
+          <Button type="button" size="sm" variant="ghost" onClick={() => setAdding(null)}>
+            Cancel
+          </Button>
+          <Button
+            type="button"
+            size="sm"
+            disabled={pending || !draft.trim()}
+            onClick={submitDraft}
+          >
+            {adding === "path" ? "Add" : "Create"}
+          </Button>
+        </div>
+      ) : null}
+      {adding === "new" && list ? (
+        <p className={HINT_CLASS}>Created in {list.folder}</p>
+      ) : null}
+      {editing ? (
+        <div
+          ref={editor}
+          className="overflow-hidden rounded-[var(--fd-radius-lg)] border border-border-default bg-surface-2"
+        >
+          <div className="flex items-center gap-2 border-b border-border-subtle px-3 py-2">
+            <span className="text-[length:var(--fd-text-sm)] font-medium text-fg-primary">
+              {fileName(editing.path)}
+            </span>
+            <span
+              className="fd-type-mono min-w-0 flex-1 truncate text-[length:var(--fd-text-2xs)] text-fg-muted"
+              title={editing.path}
+            >
+              {editing.path}
+            </span>
+            <CopyButton text={editing.path} label="Copy file path" />
+          </div>
+          <Textarea
+            aria-label="Context file content"
+            rows={10}
+            value={content}
+            onChange={(event) => setContent(event.target.value)}
+            className="fd-type-mono resize-y rounded-none border-0 bg-transparent px-3 py-2.5 text-[length:var(--fd-text-xs)] leading-relaxed"
+          />
+          <div className="flex items-center gap-2 border-t border-border-subtle px-2 py-2">
+            <span className="fd-type-mono px-1 text-[length:var(--fd-text-2xs)] text-fg-muted">
+              ≈{formatTokens(Math.ceil(content.length / 4))} tokens
+            </span>
+            <div className="ml-auto flex items-center gap-2">
+              <Button
+                type="button"
+                size="sm"
+                variant="ghost"
+                disabled={pending}
+                onClick={() => setEditing(null)}
+              >
+                Close
+              </Button>
+              <Button
+                type="button"
+                size="sm"
+                disabled={pending || content === editing.content}
+                onClick={() =>
+                  void run(async () => {
+                    setEditing(
+                      await api.writeContextFile!({
+                        path: editing.path,
+                        content,
+                        expected_version: editing.version,
+                      }),
+                    );
+                    await load();
+                  })
+                }
+              >
+                Save file
+              </Button>
+            </div>
+          </div>
+        </div>
+      ) : null}
+      {report ? (
+        <details className="group/budget rounded-[var(--fd-radius-lg)] border border-border-subtle">
+          <summary className="fd-focus flex cursor-pointer list-none items-center gap-1.5 rounded-[var(--fd-radius-lg)] px-3 py-2 text-[length:var(--fd-text-xs)] text-fg-muted hover:text-fg-secondary [&::-webkit-details-marker]:hidden">
+            <ChevronRight
+              aria-hidden="true"
+              className="h-3 w-3 transition-transform duration-[var(--fd-duration-fast)] group-open/budget:rotate-90"
+            />
+            <span className="flex-1">
+              ≈{formatTokens(report.total_tokens)} tokens added to every turn
+            </span>
+            {dirty ? <span>Save to update</span> : null}
+          </summary>
+          <div className="space-y-3 px-3 pb-3 pl-[1.875rem]">
+            <dl className="space-y-1 text-[length:var(--fd-text-xs)]">
+              {report.sections.map((section, index) => (
+                <div key={index} className="flex gap-3">
+                  <dt className="min-w-0 flex-1 truncate text-fg-secondary">
+                    {section.label}
+                  </dt>
+                  <dd className="fd-type-mono text-fg-muted">
+                    ≈{formatTokens(section.tokens)}
+                  </dd>
+                </div>
+              ))}
+            </dl>
+            <pre className="fd-type-mono max-h-64 overflow-auto whitespace-pre-wrap rounded-[var(--fd-radius-md)] bg-surface-2 p-2.5 text-[length:var(--fd-text-2xs)] leading-relaxed text-fg-tertiary">
+              {report.text}
+            </pre>
+          </div>
+        </details>
+      ) : null}
+      {error ? (
+        <p role="alert" className="text-[length:var(--fd-text-sm)] text-danger">
+          {error}
+        </p>
+      ) : null}
+    </EditorSection>
   );
 }
 

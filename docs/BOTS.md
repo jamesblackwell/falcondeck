@@ -59,6 +59,30 @@ Bots and tasks message each other only for decisions, blockers, review
 requests, results or surprises; acknowledgements and progress narration are
 discouraged.
 
+## Context files
+
+Each bot can list text files (`.md`, `.markdown`, `.txt`) that are read fresh
+from disk into every one of its turns, after its instructions and before the
+document, peer and project lists. Use them for shared standing context such as
+company goals, metrics or brand notes: a handful of short files, mixed per bot.
+Files can live anywhere. FalconDeck suggests everything in its own context folder
+(`<daemon-state-directory>/context/`, created on first use) and well-known files
+at project roots (`COMPANY`, `VISION`, `MISSION`, `GOALS`, `STRATEGY`, `METRICS`,
+`BRAND`, `ROADMAP`), so a project can keep its own version and different bots
+can share or swap files. Tasks started by bots do not receive them; bots brief
+their tasks instead. Repository instructions such as `AGENTS.md` continue to reach
+every coding thread through the harness itself.
+
+Each file is capped at 64 KB per turn; a missing or unreadable file is noted in
+the turn instead of failing it. Saving a bot validates the list (absolute paths,
+existing regular files, at most 20). Bot settings show each file's estimated size,
+the total added to every turn (about four characters per token), a per-part
+breakdown and the exact injected text. Settings can also create files in the
+FalconDeck folder and edit any suggested or attached file with the same version
+checks as bot documents; other paths are not readable or writable through this
+editor. Bots are told to suggest changes rather than edit these files unless their
+instructions say otherwise. That is guidance, not a sandbox.
+
 ## Coordination and control
 
 Project threads find bots in the `falcondeck_list_threads` header (name and
@@ -97,8 +121,17 @@ Mutations use `POST /api/bots` with `create`, `update`, `stop`, or `delete`.
 Document listing, reads and mutations use `/api/bots/:id/documents` and
 `/api/bots/:id/documents/content?name=...`.
 
+Context files use `context_files` on the profile (absent on older daemons) and an
+optional `context_files` list in `update` (absent keeps the current list).
+`GET /api/bots/:id/context` returns the injected text with a size breakdown;
+`GET /api/context-files` lists suggestions, and
+`GET /api/context-files/content?path=...` and `POST /api/context-files` read and
+save them.
+
 Paired clients use registered encrypted RPCs `bots.mutate`, `bots.documents`,
-`bots.document.read`, and `bots.document.mutate`. Profile changes publish the
+`bots.document.read`, `bots.document.mutate`, `bots.context`,
+`context_files.list`, `context_files.read` and `context_files.write`. Clients hide
+the context-file section when a daemon does not answer these. Profile changes publish the
 existing `preferences-updated` event. No relay storage or replay contract changes
 are needed.
 

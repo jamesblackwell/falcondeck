@@ -173,4 +173,71 @@ describe("bot sidebar", () => {
       expected_version: "v1",
     });
   });
+
+  it("attaches context files, shows their cost and saves the list", async () => {
+    const company = "/fd/context/COMPANY.md";
+    const transport: BotApi = {
+      ...api(),
+      contextFiles: vi.fn().mockResolvedValue({
+        folder: "/fd/context",
+        files: [{ path: company, name: "COMPANY.md", location: "FalconDeck", tokens: 300 }],
+      }),
+      botContext: vi.fn().mockResolvedValue({
+        total_tokens: 2400,
+        text: "# FalconDeck bot: Assistant",
+        sections: [
+          { label: "Built-in guidance", tokens: 900 },
+          { label: "COMPANY.md", path: company, tokens: 1500 },
+        ],
+      }),
+      readContextFile: vi.fn(),
+      writeContextFile: vi.fn().mockResolvedValue({
+        path: "/fd/context/METRICS.md",
+        content: "# METRICS\n\n",
+        version: "m1",
+      }),
+    };
+    render(
+      <BotSidebar
+        bots={[{ ...bot, context_files: [company] }]}
+        botApi={transport}
+        groups={[]}
+        selectedThreadId={null}
+        onSelectThread={vi.fn()}
+      />,
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Edit Assistant" }));
+    // The file row and the breakdown both show the file's share.
+    expect(await screen.findAllByText("≈1.5k")).toHaveLength(2);
+    expect(screen.getByText(/≈2.4k tokens added to every turn/)).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "New file" }));
+    const name = screen.getByLabelText("New file name");
+    fireEvent.change(name, { target: { value: "METRICS.md" } });
+    fireEvent.keyDown(name, { key: "Enter" });
+    await waitFor(() =>
+      expect(transport.writeContextFile).toHaveBeenCalledWith({
+        name: "METRICS.md",
+        content: "# METRICS\n\n",
+      }),
+    );
+    expect(await screen.findByLabelText("Context file content")).toHaveValue(
+      "# METRICS\n\n",
+    );
+    // Enter in the name field must not have saved the bot.
+    expect(transport.mutateBot).not.toHaveBeenCalled();
+
+    fireEvent.click(screen.getByRole("button", { name: "Remove COMPANY.md" }));
+    fireEvent.click(screen.getByRole("button", { name: "Save changes" }));
+    await waitFor(() =>
+      expect(transport.mutateBot).toHaveBeenCalledWith({
+        action: "update",
+        id: bot.id,
+        name: bot.name,
+        instructions: bot.instructions,
+        can_start_threads: true,
+        context_files: ["/fd/context/METRICS.md"],
+      }),
+    );
+  });
 });

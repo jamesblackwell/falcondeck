@@ -2306,6 +2306,10 @@ function RemoteApp() {
     botDocuments: id => callRpc('bots.documents', { id }),
     readBotDocument: (id, name) => callRpc('bots.document.read', { id, name }),
     mutateBotDocument: (id, mutation) => callRpc('bots.document.mutate', { id, mutation }),
+    botContext: id => callRpc('bots.context', { id }),
+    contextFiles: () => callRpc('context_files.list', {}),
+    readContextFile: path => callRpc('context_files.read', { path }),
+    writeContextFile: write => callRpc('context_files.write', write),
   }), [callRpc]);
   const readAloud = useReadAloud(
     useCallback(

@@ -3,6 +3,10 @@ import type {
   BotMutation,
   BotDocument,
   BotDocumentMutation,
+  BotContextReport,
+  ContextFileList,
+  ContextFileContent,
+  ContextFileWrite,
   AgentProvider,
   CollaborationModeSummary,
   CreateScheduledTaskPayload,
@@ -585,6 +589,20 @@ export function createDaemonApiClient(baseUrl: string) {
     async mutateBotDocument(id: string, mutation: BotDocumentMutation) {
       return parseJson<unknown>(await fetch(`${baseUrl}/api/bots/${encodeURIComponent(id)}/documents`, {
         method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(mutation),
+      }));
+    },
+    async botContext(id: string) {
+      return parseJson<BotContextReport>(await fetch(`${baseUrl}/api/bots/${encodeURIComponent(id)}/context`));
+    },
+    async contextFiles() {
+      return parseJson<ContextFileList>(await fetch(`${baseUrl}/api/context-files`));
+    },
+    async readContextFile(path: string) {
+      return parseJson<ContextFileContent>(await fetch(`${baseUrl}/api/context-files/content?${new URLSearchParams({ path })}`));
+    },
+    async writeContextFile(write: ContextFileWrite) {
+      return parseJson<ContextFileContent>(await fetch(`${baseUrl}/api/context-files`, {
+        method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(write),
       }));
     },
     async removeWorkspace(workspaceId: string) {

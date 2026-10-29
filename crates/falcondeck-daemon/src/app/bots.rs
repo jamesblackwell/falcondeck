@@ -1,11 +1,11 @@
 //! Bot metadata and user-owned files. Native providers remain the history store.
 use super::*;
-use falcondeck_core::{
-    BOT_DEFAULT_INSTRUCTIONS, BotDocument, BotDocumentMutation, BotMutation, BotProfile,
-};
+use falcondeck_core::{BotDocument, BotDocumentMutation, BotMutation, BotProfile};
 
 use sha2::{Digest, Sha256};
 use std::io::{Read, Seek, Write};
+
+mod context;
 
 const MAX_DOCUMENT_BYTES: usize = 1_048_576;
 
@@ -226,6 +226,7 @@ impl AppState {
                     space_path: space.to_string_lossy().into(),
                     instructions,
                     can_start_threads: true,
+                    context_files: Vec::new(),
                 };
                 let mut bots = self.inner.preferences.lock().await.bots.clone();
                 bots.push(bot.clone());
@@ -245,12 +246,20 @@ impl AppState {
                 name,
                 instructions,
                 can_start_threads,
+                context_files,
             } => {
                 validate_text(&name, &instructions)?;
+                let context_files = match context_files {
+                    Some(paths) => Some(context::validate_context_files(paths).await?),
+                    None => None,
+                };
                 let mut bot = self.bot(&id).await?;
                 bot.name = name.trim().into();
                 bot.instructions = instructions;
                 bot.can_start_threads = can_start_threads;
+                if let Some(paths) = context_files {
+                    bot.context_files = paths;
+                }
                 self.update_thread(serde_json::from_value(
                     json!({"workspace_id": bot.workspace_id,
                     "thread_id": bot.thread_id, "title": bot.name}),
@@ -413,68 +422,6 @@ impl AppState {
         .await
         .map_err(|e| DaemonError::Process(e.to_string()))??;
         Ok(json!({"ok": true}))
-    }
-
-    pub(super) async fn bot_context(&self, thread: &str) -> Option<String> {
-        /// Repeated on every turn, so only the most recently active projects.
-        const LISTED_PROJECTS: usize = 12;
-        let bot = self.bot_for_thread(thread).await?;
-        let peers: String = self
-            .inner
-            .preferences
-            .lock()
-            .await
-            .bots
-            .iter()
-            .filter(|peer| peer.id != bot.id)
-            .map(|peer| {
-                let status = Path::new(&peer.space_path).join("STATUS.md");
-                format!("\n- {}: {}", peer.name, status.display())
-            })
-            .collect();
-        let mut projects: Vec<_> = self
-            .inner
-            .workspaces
-            .lock()
-            .await
-            .values()
-            .filter(|ws| ws.summary.kind == falcondeck_core::WorkspaceKind::Project)
-            .filter(|ws| !(bot.dedicated_workspace && ws.summary.id == bot.workspace_id))
-            .map(|ws| {
-                let last = ws.threads.values().map(|t| t.summary.updated_at).max();
-                (last, ws.summary.id.clone(), ws.summary.path.clone())
-            })
-            .collect();
-        projects.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.2.cmp(&b.2)));
-        let total = projects.len();
-        let mut listed: String = projects
-            .iter()
-            .take(LISTED_PROJECTS)
-            .map(|(_, id, path)| format!("\n- {path} (`{id}`)"))
-            .collect();
-        if total > LISTED_PROJECTS {
-            listed.push_str(&format!(
-                "\n- …{} older projects; workspace_id also accepts a project name or path.",
-                total - LISTED_PROJECTS
-            ));
-        }
-        let documents = self.bot_documents(&bot.id).await.unwrap_or_default();
-        let peers = if peers.is_empty() {
-            String::new()
-        } else {
-            format!("\nOther bots (message by name; read their status before asking):{peers}")
-        };
-        Some(format!(
-            "# FalconDeck bot: {}\n\n{}\n\n## Your instructions\n{}\n\nDocument space: {}\nDocuments: {}\nRead relevant documents directly from this space.\nMay start tasks: {}. This restricts FalconDeck task creation; it is not an operating-system sandbox.{}\nProjects, most recently active first:{}",
-            bot.name,
-            BOT_DEFAULT_INSTRUCTIONS,
-            bot.instructions,
-            bot.space_path,
-            json!(documents),
-            bot.can_start_threads,
-            peers,
-            listed
-        ))
     }
 }
 

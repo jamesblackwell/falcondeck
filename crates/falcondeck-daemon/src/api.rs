@@ -175,6 +175,9 @@ pub fn router(state: AppState) -> Router {
         .route("/api/bots", post(mutate_bot))
         .route("/api/bots/{bot_id}/documents", get(bot_documents).post(mutate_bot_document))
         .route("/api/bots/{bot_id}/documents/content", get(read_bot_document))
+        .route("/api/bots/{bot_id}/context", get(bot_context))
+        .route("/api/context-files", get(context_files).post(write_context_file))
+        .route("/api/context-files/content", get(read_context_file))
         .route("/api/chats", post(create_chat))
         .route("/api/workspaces/connect", post(connect_workspace))
         .route("/api/workspaces/{workspace_id}", delete(remove_workspace))
@@ -419,6 +422,36 @@ async fn mutate_bot_document(
     Json(request): Json<falcondeck_core::BotDocumentMutation>,
 ) -> Result<Json<serde_json::Value>, DaemonError> {
     state.mutate_bot_document(&bot, request).await.map(Json)
+}
+
+async fn bot_context(
+    State(state): State<AppState>,
+    Path(bot): Path<String>,
+) -> Result<Json<falcondeck_core::BotContextReport>, DaemonError> {
+    state.bot_context_report(&bot).await.map(Json)
+}
+
+async fn context_files(
+    State(state): State<AppState>,
+) -> Result<Json<falcondeck_core::ContextFileList>, DaemonError> {
+    state.context_files().await.map(Json)
+}
+
+async fn read_context_file(
+    State(state): State<AppState>,
+    Query(query): Query<std::collections::HashMap<String, String>>,
+) -> Result<Json<falcondeck_core::ContextFileContent>, DaemonError> {
+    let path = query
+        .get("path")
+        .ok_or_else(|| DaemonError::BadRequest("path is required".into()))?;
+    state.read_context_file(path).await.map(Json)
+}
+
+async fn write_context_file(
+    State(state): State<AppState>,
+    Json(request): Json<falcondeck_core::ContextFileWrite>,
+) -> Result<Json<falcondeck_core::ContextFileContent>, DaemonError> {
+    state.write_context_file(request).await.map(Json)
 }
 
 async fn health(State(state): State<AppState>) -> Json<falcondeck_core::HealthResponse> {

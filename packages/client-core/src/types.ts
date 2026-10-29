@@ -472,11 +472,13 @@ export type BotProfile = {
   space_path: string;
   instructions: string;
   can_start_threads: boolean;
+  /** Absolute paths of text files read into every turn. Older daemons omit it. */
+  context_files?: string[];
 };
 
 export type BotMutation =
   | { action: "create"; name: string; instructions: string; provider?: AgentProvider; model_id?: string; thread_id?: string }
-  | { action: "update"; id: string; name: string; instructions: string; can_start_threads: boolean }
+  | { action: "update"; id: string; name: string; instructions: string; can_start_threads: boolean; context_files?: string[] }
   | { action: "stop" | "delete"; id: string };
 
 export type BotDocument = { name: string; content: string; version: string };
@@ -484,12 +486,27 @@ export type BotDocumentMutation =
   | { action: "write"; name: string; content: string; expected_version?: string | null }
   | { action: "delete"; name: string; expected_version: string };
 
+/** One labelled part of what a bot's turns receive; tokens are estimates. */
+export type BotContextSection = { label: string; path?: string | null; tokens: number; error?: string | null };
+export type BotContextReport = { sections: BotContextSection[]; total_tokens: number; text: string };
+/** `location` is "FalconDeck" for the shared folder, else the project folder name. */
+export type ContextFile = { path: string; name: string; location: string; tokens: number };
+export type ContextFileList = { folder: string; files: ContextFile[] };
+export type ContextFileContent = { path: string; content: string; version: string };
+/** Save an existing file (`path` + `expected_version`) or create one in FalconDeck's folder (`name`). */
+export type ContextFileWrite = { path?: string; name?: string; content: string; expected_version?: string };
+
 /** Shared transport contract used by the bot UI on local and paired clients. */
 export type BotApi = {
   mutateBot: (mutation: BotMutation) => Promise<{ bot?: BotProfile }>;
   botDocuments: (id: string) => Promise<string[]>;
   readBotDocument: (id: string, name: string) => Promise<BotDocument>;
   mutateBotDocument: (id: string, mutation: BotDocumentMutation) => Promise<unknown>;
+  /** Context files; absent on transports that predate them. */
+  botContext?: (id: string) => Promise<BotContextReport>;
+  contextFiles?: () => Promise<ContextFileList>;
+  readContextFile?: (path: string) => Promise<ContextFileContent>;
+  writeContextFile?: (write: ContextFileWrite) => Promise<ContextFileContent>;
 };
 
 export type ComputerUsePreferences = {

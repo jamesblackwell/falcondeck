@@ -165,6 +165,7 @@ async fn only_bots_can_coordinate_other_projects_and_creation_can_be_disabled() 
         name: bot.name,
         instructions: "New instructions".into(),
         can_start_threads: false,
+        context_files: None,
     })
     .await
     .unwrap();
@@ -561,6 +562,7 @@ async fn bot_context_lists_peer_status_files_but_not_its_own() {
         space_path: "/tmp/bots/bot-peer/space".into(),
         instructions: String::new(),
         can_start_threads: true,
+        context_files: Vec::new(),
     });
     let context = app.bot_context("thread-1").await.unwrap();
     assert!(
@@ -571,4 +573,156 @@ async fn bot_context_lists_peer_status_files_but_not_its_own() {
         !context.contains(&format!("{}/STATUS.md", bot.space_path)),
         "{context}"
     );
+}
+
+#[tokio::test]
+async fn context_files_are_read_fresh_into_every_turn_and_reported() {
+    let (app, temp) = fixture().await;
+    let bot = promote(&app).await;
+    let company = temp.path().join("COMPANY.md");
+    let metrics = temp.path().join("metrics.txt");
+    std::fs::write(&company, "Goal: next-day return 10% by December.").unwrap();
+    std::fs::write(&metrics, "Activation 57%").unwrap();
+    let update = |files: Option<Vec<String>>| BotMutation::Update {
+        id: bot.id.clone(),
+        name: bot.name.clone(),
+        instructions: "Coordinate Quizgecko work".into(),
+        can_start_threads: true,
+        context_files: files,
+    };
+    let paths = vec![
+        company.to_string_lossy().to_string(),
+        metrics.to_string_lossy().to_string(),
+        company.to_string_lossy().to_string(),
+    ];
+    app.mutate_bot(update(Some(paths))).await.unwrap();
+    // Duplicates collapse; an update without a list keeps it.
+    app.mutate_bot(update(None)).await.unwrap();
+    let saved = app.preferences().await.bots[0].context_files.clone();
+    assert_eq!(saved.len(), 2);
+
+    let context = app.bot_context("thread-1").await.unwrap();
+    let goal = context.find("Goal: next-day return").unwrap();
+    assert!(context.find("## Your instructions").unwrap() < goal);
+    assert!(goal < context.find("Activation 57%").unwrap());
+    assert!(goal < context.find("Document space:").unwrap());
+    assert!(context.contains(&format!("### COMPANY.md\nPath: {}", company.display())));
+
+    // Edits on disk reach the next turn; a missing file is reported, not fatal.
+    std::fs::write(&company, "Goal: activation 70%.").unwrap();
+    std::fs::remove_file(&metrics).unwrap();
+    let report = app.bot_context_report(&bot.id).await.unwrap();
+    assert!(report.text.contains("Goal: activation 70%."));
+    assert_eq!(report.text, app.bot_context("thread-1").await.unwrap());
+    let missing = report
+        .sections
+        .iter()
+        .find(|section| section.label == "metrics.txt")
+        .unwrap();
+    assert_eq!(missing.error.as_deref(), Some("file not found"));
+    assert_eq!(
+        report.total_tokens,
+        report.sections.iter().map(|s| s.tokens).sum::<u64>()
+    );
+    assert!(report.sections.iter().all(|s| s.tokens > 0));
+
+    for bad in ["relative.md", "/tmp/../etc/hosts.md", "/etc/hosts"] {
+        assert!(
+            app.mutate_bot(update(Some(vec![bad.into()])))
+                .await
+                .is_err(),
+            "{bad}"
+        );
+    }
+    let absent = temp.path().join("absent.md").to_string_lossy().to_string();
+    assert!(app.mutate_bot(update(Some(vec![absent]))).await.is_err());
+}
+
+#[tokio::test]
+async fn context_file_editor_is_limited_to_known_files() {
+    let (app, temp) = fixture().await;
+    let created = app
+        .write_context_file(falcondeck_core::ContextFileWrite {
+            path: None,
+            name: Some("COMPANY.md".into()),
+            content: "Vision".into(),
+            expected_version: None,
+        })
+        .await
+        .unwrap();
+    assert!(
+        created.path.ends_with("context/COMPANY.md"),
+        "{}",
+        created.path
+    );
+    // Creating over an existing file conflicts instead of overwriting.
+    assert!(
+        app.write_context_file(falcondeck_core::ContextFileWrite {
+            path: None,
+            name: Some("COMPANY.md".into()),
+            content: "Other".into(),
+            expected_version: None,
+        })
+        .await
+        .is_err()
+    );
+    let list = app.context_files().await.unwrap();
+    assert_eq!(list.files[0].name, "COMPANY.md");
+    assert_eq!(list.files[0].location, "FalconDeck");
+
+    let read = app.read_context_file(&created.path).await.unwrap();
+    let saved = app
+        .write_context_file(falcondeck_core::ContextFileWrite {
+            path: Some(created.path.clone()),
+            name: None,
+            content: "Vision v2".into(),
+            expected_version: Some(read.version.clone()),
+        })
+        .await
+        .unwrap();
+    assert_eq!(saved.content, "Vision v2");
+    // A stale version is rejected.
+    assert!(
+        app.write_context_file(falcondeck_core::ContextFileWrite {
+            path: Some(created.path.clone()),
+            name: None,
+            content: "Vision v3".into(),
+            expected_version: Some(read.version),
+        })
+        .await
+        .is_err()
+    );
+
+    // Arbitrary files are off limits until attached to a bot.
+    let other = temp.path().join("notes.md");
+    std::fs::write(&other, "private").unwrap();
+    let other = other.to_string_lossy().to_string();
+    assert!(app.read_context_file(&other).await.is_err());
+    let bot = promote(&app).await;
+    app.mutate_bot(BotMutation::Update {
+        id: bot.id,
+        name: bot.name,
+        instructions: String::new(),
+        can_start_threads: true,
+        context_files: Some(vec![other.clone()]),
+    })
+    .await
+    .unwrap();
+    assert_eq!(
+        app.read_context_file(&other).await.unwrap().content,
+        "private"
+    );
+    for name in ["../escape.md", "notes.json", ".hidden.md"] {
+        assert!(
+            app.write_context_file(falcondeck_core::ContextFileWrite {
+                path: None,
+                name: Some(name.into()),
+                content: String::new(),
+                expected_version: None,
+            })
+            .await
+            .is_err(),
+            "{name}"
+        );
+    }
 }
