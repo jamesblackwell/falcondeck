@@ -35,14 +35,29 @@ The destination uses the stable ID, so renaming a task does not break old links.
 
 Bots are encouraged to use their document space as persistent memory. A short
 root-level `MEMORY.md` (or an existing memory index) holds important facts,
-preferences, decisions, ongoing work and editable working instructions, with
-links to supporting notes. Bots can organise those notes themselves, including
+preferences, decisions and editable working instructions, with links to
+supporting notes. Bots can organise those notes themselves, including
 `memory/` or `docs/` subfolders. They consult the index when present and read
 supporting notes when relevant, especially after resume or compaction. They
 update useful knowledge rather than writing a log of every turn, and the user's
 current and standing instructions still take precedence. No files are created
 automatically. The built-in document editor lists top-level files; nested notes
 are accessed directly by the agent or through the filesystem.
+
+Current work lives in a root-level `STATUS.md` instead: priorities, in-flight
+tasks (linked), what waits on the user, and recently done. Bots rewrite it in
+place at checkpoints rather than appending. When a delegated task finishes, the
+bot reads its summary, records the outcome in status, moves lasting decisions or
+lessons into memory, and drops the task from in flight. Tasks record lasting
+facts about code in their project's own docs. Each layer has one job: tasks
+hold the work and its history, status holds the present, memory holds what
+stays true.
+
+Every turn's context lists the other bots by name with the path of their
+`STATUS.md`, so bots read each other's status instead of asking for updates.
+Bots and tasks message each other only for decisions, blockers, review
+requests, results or surprises; acknowledgements and progress narration are
+discouraged.
 
 ## Coordination and control
 

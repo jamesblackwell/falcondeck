@@ -419,6 +419,19 @@ impl AppState {
         /// Repeated on every turn, so only the most recently active projects.
         const LISTED_PROJECTS: usize = 12;
         let bot = self.bot_for_thread(thread).await?;
+        let peers: String = self
+            .inner
+            .preferences
+            .lock()
+            .await
+            .bots
+            .iter()
+            .filter(|peer| peer.id != bot.id)
+            .map(|peer| {
+                let status = Path::new(&peer.space_path).join("STATUS.md");
+                format!("\n- {}: {}", peer.name, status.display())
+            })
+            .collect();
         let mut projects: Vec<_> = self
             .inner
             .workspaces
@@ -446,14 +459,20 @@ impl AppState {
             ));
         }
         let documents = self.bot_documents(&bot.id).await.unwrap_or_default();
+        let peers = if peers.is_empty() {
+            String::new()
+        } else {
+            format!("\nOther bots (message by name; read their status before asking):{peers}")
+        };
         Some(format!(
-            "# FalconDeck bot: {}\n\n{}\n\n## Your instructions\n{}\n\nDocument space: {}\nDocuments: {}\nRead relevant documents directly from this space.\nMay start tasks: {}. This restricts FalconDeck task creation; it is not an operating-system sandbox.\nProjects, most recently active first:{}",
+            "# FalconDeck bot: {}\n\n{}\n\n## Your instructions\n{}\n\nDocument space: {}\nDocuments: {}\nRead relevant documents directly from this space.\nMay start tasks: {}. This restricts FalconDeck task creation; it is not an operating-system sandbox.{}\nProjects, most recently active first:{}",
             bot.name,
             BOT_DEFAULT_INSTRUCTIONS,
             bot.instructions,
             bot.space_path,
             json!(documents),
             bot.can_start_threads,
+            peers,
             listed
         ))
     }

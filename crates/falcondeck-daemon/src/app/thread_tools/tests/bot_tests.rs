@@ -544,3 +544,31 @@ async fn bot_overviews_span_projects_and_accept_project_names() {
     );
     assert!(context.contains("## Coordinating work"), "{context}");
 }
+
+#[tokio::test]
+async fn bot_context_lists_peer_status_files_but_not_its_own() {
+    let (app, _temp) = fixture().await;
+    let bot = promote(&app).await;
+    let lone = app.bot_context("thread-1").await.unwrap();
+    assert!(!lone.contains("Other bots"), "{lone}");
+    assert!(lone.contains("## Status"), "{lone}");
+    app.inner.preferences.lock().await.bots.push(BotProfile {
+        id: "bot-peer".into(),
+        name: "CMO".into(),
+        workspace_id: "workspace-peer".into(),
+        dedicated_workspace: true,
+        thread_id: "thread-peer".into(),
+        space_path: "/tmp/bots/bot-peer/space".into(),
+        instructions: String::new(),
+        can_start_threads: true,
+    });
+    let context = app.bot_context("thread-1").await.unwrap();
+    assert!(
+        context.contains("\n- CMO: /tmp/bots/bot-peer/space/STATUS.md"),
+        "{context}"
+    );
+    assert!(
+        !context.contains(&format!("{}/STATUS.md", bot.space_path)),
+        "{context}"
+    );
+}
