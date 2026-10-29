@@ -59,6 +59,16 @@ Bots and tasks message each other only for decisions, blockers, review
 requests, results or surprises; acknowledgements and progress narration are
 discouraged.
 
+## Icons
+
+Each bot has a small colored shape in the sidebar: one of eight shapes and one of
+the twelve categorical theme colors (`cat-1`…`cat-12`, stored as the token so
+it retints with the theme). New bots take the first shape and first color no
+other bot uses; profiles saved before icons existed are filled in the same way,
+in order, the next time any bot is saved (clients resolve missing icons the same
+way meanwhile with `resolveBotIcons`). Bot settings can change either part. The
+mark pulses while the bot or its tasks are working.
+
 ## Context files
 
 Each bot can list text files (`.md`, `.markdown`, `.txt`) that are read fresh

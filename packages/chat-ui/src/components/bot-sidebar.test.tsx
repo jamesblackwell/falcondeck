@@ -137,6 +137,7 @@ describe("bot sidebar", () => {
         name: bot.name,
         instructions: "Draft only",
         can_start_threads: false,
+        icon: { shape: "circle", color: "cat-1" },
       }),
     );
   });
@@ -237,7 +238,37 @@ describe("bot sidebar", () => {
         instructions: bot.instructions,
         can_start_threads: true,
         context_files: ["/fd/context/METRICS.md"],
+        icon: { shape: "circle", color: "cat-1" },
       }),
+    );
+  });
+
+  it("gives each bot a distinct mark and saves a new one", async () => {
+    const transport = api();
+    const second = { ...bot, id: "bot-2", name: "Planner", thread_id: "t2", icon: { shape: "star", color: "cat-4" } };
+    const { container } = render(
+      <BotSidebar
+        bots={[bot, second]}
+        botApi={transport}
+        groups={[]}
+        selectedThreadId={null}
+        onSelectThread={vi.fn()}
+      />,
+    );
+    // The unsaved bot takes the first shape and color the saved one leaves free.
+    const fills = Array.from(container.querySelectorAll("svg[fill^='var(--fd-cat']")).map((svg) =>
+      svg.getAttribute("fill"),
+    );
+    expect(fills).toEqual(["var(--fd-cat-1)", "var(--fd-cat-4)"]);
+
+    fireEvent.click(screen.getByRole("button", { name: "Edit Assistant" }));
+    fireEvent.click(screen.getByRole("radio", { name: "hexagon" }));
+    fireEvent.click(screen.getByRole("radio", { name: "Color 7" }));
+    fireEvent.click(screen.getByRole("button", { name: "Save changes" }));
+    await waitFor(() =>
+      expect(transport.mutateBot).toHaveBeenCalledWith(
+        expect.objectContaining({ action: "update", icon: { shape: "hexagon", color: "cat-7" } }),
+      ),
     );
   });
 });

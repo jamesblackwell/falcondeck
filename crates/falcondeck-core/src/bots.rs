@@ -58,6 +58,53 @@ pub struct BotProfile {
     /// Absolute paths of text files read into every turn, in order.
     #[serde(default)]
     pub context_files: Vec<String>,
+    /// Sidebar mark; older profiles get one assigned on the next bot change.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub icon: Option<BotIcon>,
+}
+
+/// Shapes a bot mark can take, in assignment order.
+pub const BOT_ICON_SHAPES: [&str; 8] = [
+    "circle", "diamond", "square", "triangle", "hexagon", "star", "pentagon", "cross",
+];
+
+/// Categorical color tokens (`cat-1`…`cat-12`), in assignment order.
+pub const BOT_ICON_COLORS: [&str; 12] = [
+    "cat-1", "cat-2", "cat-3", "cat-4", "cat-5", "cat-6", "cat-7", "cat-8", "cat-9", "cat-10",
+    "cat-11", "cat-12",
+];
+
+/// A small colored shape identifying a bot. Colors are theme tokens, not hex.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct BotIcon {
+    /// One of [`BOT_ICON_SHAPES`].
+    pub shape: String,
+    /// One of [`BOT_ICON_COLORS`].
+    pub color: String,
+}
+
+impl BotIcon {
+    /// Whether both parts are known values.
+    pub fn is_valid(&self) -> bool {
+        BOT_ICON_SHAPES.contains(&self.shape.as_str())
+            && BOT_ICON_COLORS.contains(&self.color.as_str())
+    }
+
+    /// First shape and first color not already used by `taken`.
+    pub fn next_unused<'a>(taken: impl IntoIterator<Item = &'a BotIcon> + Clone) -> BotIcon {
+        let unused = |options: &[&str], part: fn(&BotIcon) -> &str| {
+            options
+                .iter()
+                .copied()
+                .find(|option| !taken.clone().into_iter().any(|icon| part(icon) == *option))
+                .unwrap_or(options[taken.clone().into_iter().count() % options.len()])
+                .to_string()
+        };
+        BotIcon {
+            shape: unused(&BOT_ICON_SHAPES, |icon| icon.shape.as_str()),
+            color: unused(&BOT_ICON_COLORS, |icon| icon.color.as_str()),
+        }
+    }
 }
 
 fn enabled() -> bool {
@@ -95,6 +142,9 @@ pub enum BotMutation {
         /// Replacement context file list; absent keeps the current list.
         #[serde(default)]
         context_files: Option<Vec<String>>,
+        /// Replacement sidebar mark; absent keeps the current one.
+        #[serde(default)]
+        icon: Option<BotIcon>,
     },
     /// Stop the bot and its active delegated tasks.
     Stop {

@@ -14,9 +14,14 @@ import {
   X,
 } from "lucide-react";
 import {
+  BOT_ICON_COLORS,
+  BOT_ICON_SHAPES,
   defaultProviderLabel,
+  resolveBotIcons,
+  workspaceColorCssVar,
   type BotApi,
   type BotContextReport,
+  type BotIcon,
   type BotProfile,
   type ContextFileContent,
   type ContextFileList,
@@ -38,6 +43,7 @@ import {
   Textarea,
   cn,
 } from "@falcondeck/ui";
+import { BotMark } from "./bot-mark";
 import { ProviderIcon } from "./provider-icon";
 
 export type BotSidebarControls = { bots?: BotProfile[]; botApi?: BotApi };
@@ -83,6 +89,7 @@ export function BotSidebar({
   onSelectThread: (workspace: string, thread: string) => void;
 }) {
   const [editor, setEditor] = useState<BotProfile | "new" | null>(null);
+  const icons = useMemo(() => resolveBotIcons(bots), [bots]);
   const tasks = useMemo(() => groups.flatMap((group) => group.threads), [groups]);
   if (!botApi) return null;
   return (
@@ -103,6 +110,7 @@ export function BotSidebar({
       </div>
       {bots.map((bot) => {
         const activity = botActivity(bot, tasks);
+        const icon = icons.get(bot.id);
         const selected = selectedThreadId === bot.thread_id;
         return (
           <div
@@ -125,10 +133,10 @@ export function BotSidebar({
                   selected ? "text-accent" : "text-fg-muted",
                 )}
               >
-                {activity === "working" ? (
-                  <ActivityDiamond />
-                ) : activity === "needs_input" ? (
+                {activity === "needs_input" ? (
                   <span className="h-2.5 w-2.5 rounded-full bg-warning shadow-[0_0_0_3px_var(--fd-warning-muted)]" />
+                ) : icon ? (
+                  <BotMark icon={icon} working={activity === "working"} />
                 ) : (
                   <Bot aria-hidden="true" className="h-3.5 w-3.5" />
                 )}
@@ -299,6 +307,9 @@ function BotEditor({
   const [instructions, setInstructions] = useState(bot?.instructions ?? "");
   const [canStart, setCanStart] = useState(bot?.can_start_threads ?? true);
   const [contextFiles, setContextFiles] = useState(bot?.context_files ?? []);
+  const [icon, setIcon] = useState<BotIcon | undefined>(() =>
+    bot ? resolveBotIcons(bots).get(bot.id) : undefined,
+  );
   const [home, setHome] = useState<"new" | "existing">("new");
   const [threadId, setThreadId] = useState("");
   const [query, setQuery] = useState("");
@@ -380,6 +391,7 @@ function BotEditor({
               instructions,
               can_start_threads: canStart,
               ...(api.contextFiles ? { context_files: contextFiles } : {}),
+              ...(icon ? { icon } : {}),
             }
           : {
               action: "create",
@@ -442,8 +454,12 @@ function BotEditor({
         }}
       >
         <header className="flex items-start gap-3 px-6 pb-5 pt-6">
-          <span className="flex h-10 w-10 shrink-0 items-center justify-center rounded-[var(--fd-radius-lg)] border border-border-subtle bg-accent-muted text-accent">
-            <Bot aria-hidden="true" className="h-5 w-5" />
+          <span className="flex h-10 w-10 shrink-0 items-center justify-center rounded-[var(--fd-radius-lg)] border border-border-subtle bg-surface-2 text-accent">
+            {icon ? (
+              <BotMark icon={icon} size={20} />
+            ) : (
+              <Bot aria-hidden="true" className="h-5 w-5" />
+            )}
           </span>
           <div className="min-w-0 flex-1 space-y-0.5">
             <h2
@@ -653,6 +669,7 @@ function BotEditor({
           </details>
           {bot ? (
             <>
+              {icon ? <BotIconPicker icon={icon} onChange={setIcon} /> : null}
               <EditorSection title="Permissions">
                 <div
                   className="flex cursor-pointer items-start justify-between gap-4"
@@ -803,6 +820,62 @@ function BotEditor({
       </form>
     </div>,
     document.body,
+  );
+}
+
+/** Shape and color choice for a bot's sidebar mark. */
+function BotIconPicker({
+  icon,
+  onChange,
+}: {
+  icon: BotIcon;
+  onChange: (icon: BotIcon) => void;
+}) {
+  const option =
+    "fd-focus flex h-7 w-7 items-center justify-center rounded-[var(--fd-radius-md)] border transition-colors";
+  return (
+    <EditorSection title="Icon">
+      <div role="radiogroup" aria-label="Shape" className="flex flex-wrap gap-1.5">
+        {BOT_ICON_SHAPES.map((shape) => (
+          <button
+            key={shape}
+            type="button"
+            role="radio"
+            aria-checked={icon.shape === shape}
+            aria-label={shape}
+            title={shape}
+            onClick={() => onChange({ ...icon, shape })}
+            className={cn(
+              option,
+              icon.shape === shape
+                ? "border-border-emphasis bg-surface-3"
+                : "border-transparent hover:bg-interactive-hover",
+            )}
+          >
+            <BotMark icon={{ ...icon, shape }} size={14} />
+          </button>
+        ))}
+      </div>
+      <div role="radiogroup" aria-label="Color" className="flex flex-wrap gap-1.5">
+        {BOT_ICON_COLORS.map((color) => (
+          <button
+            key={color}
+            type="button"
+            role="radio"
+            aria-checked={icon.color === color}
+            aria-label={`Color ${color.replace("cat-", "")}`}
+            onClick={() => onChange({ ...icon, color })}
+            className={cn(
+              "fd-focus h-6 w-6 rounded-full border-2 transition-transform",
+              icon.color === color
+                ? "scale-110 border-fg-primary"
+                : "border-transparent hover:scale-105",
+            )}
+            style={{ backgroundColor: workspaceColorCssVar(color) }}
+          />
+        ))}
+      </div>
+    </EditorSection>
   );
 }
 

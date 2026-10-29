@@ -49,6 +49,7 @@ export * from "./fork-thread";
 export * from "./option-filter";
 export * from "./starred-models";
 export * from "./workspace-colors";
+export * from "./bot-icons";
 export * from "./workspace-icons";
 export * from "./extension-views";
 export * from "./composer-suggestions";

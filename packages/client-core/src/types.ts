@@ -474,11 +474,13 @@ export type BotProfile = {
   can_start_threads: boolean;
   /** Absolute paths of text files read into every turn. Older daemons omit it. */
   context_files?: string[];
+  /** Sidebar mark; resolve missing ones with `resolveBotIcons`. */
+  icon?: import("./bot-icons").BotIcon | null;
 };
 
 export type BotMutation =
   | { action: "create"; name: string; instructions: string; provider?: AgentProvider; model_id?: string; thread_id?: string }
-  | { action: "update"; id: string; name: string; instructions: string; can_start_threads: boolean; context_files?: string[] }
+  | { action: "update"; id: string; name: string; instructions: string; can_start_threads: boolean; context_files?: string[]; icon?: import("./bot-icons").BotIcon }
   | { action: "stop" | "delete"; id: string };
 
 export type BotDocument = { name: string; content: string; version: string };

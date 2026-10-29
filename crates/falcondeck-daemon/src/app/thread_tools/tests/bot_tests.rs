@@ -166,6 +166,7 @@ async fn only_bots_can_coordinate_other_projects_and_creation_can_be_disabled() 
         instructions: "New instructions".into(),
         can_start_threads: false,
         context_files: None,
+        icon: None,
     })
     .await
     .unwrap();
@@ -563,6 +564,7 @@ async fn bot_context_lists_peer_status_files_but_not_its_own() {
         instructions: String::new(),
         can_start_threads: true,
         context_files: Vec::new(),
+        icon: None,
     });
     let context = app.bot_context("thread-1").await.unwrap();
     assert!(
@@ -589,6 +591,7 @@ async fn context_files_are_read_fresh_into_every_turn_and_reported() {
         instructions: "Coordinate Quizgecko work".into(),
         can_start_threads: true,
         context_files: files,
+        icon: None,
     };
     let paths = vec![
         company.to_string_lossy().to_string(),
@@ -705,6 +708,7 @@ async fn context_file_editor_is_limited_to_known_files() {
         instructions: String::new(),
         can_start_threads: true,
         context_files: Some(vec![other.clone()]),
+        icon: None,
     })
     .await
     .unwrap();
@@ -725,4 +729,54 @@ async fn context_file_editor_is_limited_to_known_files() {
             "{name}"
         );
     }
+}
+
+#[tokio::test]
+async fn every_bot_gets_a_distinct_icon_and_edits_are_validated() {
+    let (app, _temp) = fixture().await;
+    let bot = promote(&app).await;
+    // Simulate a profile saved before icons existed alongside the new one.
+    app.inner.preferences.lock().await.bots.push(BotProfile {
+        id: "bot-old".into(),
+        name: "Older".into(),
+        workspace_id: "workspace-1".into(),
+        dedicated_workspace: false,
+        thread_id: "thread-old".into(),
+        space_path: "/tmp/bots/bot-old/space".into(),
+        instructions: String::new(),
+        can_start_threads: true,
+        context_files: Vec::new(),
+        icon: None,
+    });
+    let update = |icon| BotMutation::Update {
+        id: bot.id.clone(),
+        name: bot.name.clone(),
+        instructions: String::new(),
+        can_start_threads: true,
+        context_files: None,
+        icon,
+    };
+    app.mutate_bot(update(None)).await.unwrap();
+    let bots = app.preferences().await.bots;
+    let icons: Vec<_> = bots.iter().map(|bot| bot.icon.clone().unwrap()).collect();
+    assert_eq!(
+        (icons[0].shape.as_str(), icons[0].color.as_str()),
+        ("circle", "cat-1")
+    );
+    assert_eq!(
+        (icons[1].shape.as_str(), icons[1].color.as_str()),
+        ("diamond", "cat-2")
+    );
+
+    let chosen = falcondeck_core::BotIcon {
+        shape: "star".into(),
+        color: "cat-9".into(),
+    };
+    app.mutate_bot(update(Some(chosen.clone()))).await.unwrap();
+    assert_eq!(app.preferences().await.bots[0].icon, Some(chosen));
+    let bad = falcondeck_core::BotIcon {
+        shape: "skull".into(),
+        color: "#ff0000".into(),
+    };
+    assert!(app.mutate_bot(update(Some(bad))).await.is_err());
 }

@@ -1,6 +1,6 @@
 //! Bot metadata and user-owned files. Native providers remain the history store.
 use super::*;
-use falcondeck_core::{BotDocument, BotDocumentMutation, BotMutation, BotProfile};
+use falcondeck_core::{BotDocument, BotDocumentMutation, BotIcon, BotMutation, BotProfile};
 
 use sha2::{Digest, Sha256};
 use std::io::{Read, Seek, Write};
@@ -84,6 +84,17 @@ fn read_document(file: &mut std::fs::File) -> Result<String, DaemonError> {
     Ok(content)
 }
 
+/// Gives each bot without a mark the next unused shape and color, in order.
+fn assign_missing_icons(bots: &mut [BotProfile]) {
+    for index in 0..bots.len() {
+        if bots[index].icon.as_ref().is_some_and(BotIcon::is_valid) {
+            continue;
+        }
+        let taken: Vec<BotIcon> = bots.iter().filter_map(|bot| bot.icon.clone()).collect();
+        bots[index].icon = Some(BotIcon::next_unused(&taken));
+    }
+}
+
 fn document_version(content: &str) -> String {
     format!("{:x}", Sha256::digest(content.as_bytes()))
 }
@@ -158,7 +169,8 @@ impl AppState {
             .ok_or_else(|| DaemonError::NotFound("bot not found".into()))
     }
 
-    async fn save_bots(&self, bots: Vec<BotProfile>) -> Result<(), DaemonError> {
+    async fn save_bots(&self, mut bots: Vec<BotProfile>) -> Result<(), DaemonError> {
+        assign_missing_icons(&mut bots);
         let mut preferences = self.inner.preferences.lock().await;
         let mut next = preferences.clone();
         next.bots = bots;
@@ -227,8 +239,16 @@ impl AppState {
                     instructions,
                     can_start_threads: true,
                     context_files: Vec::new(),
+                    icon: None,
                 };
                 let mut bots = self.inner.preferences.lock().await.bots.clone();
+                let mut bot = bot;
+                bot.icon = Some(BotIcon::next_unused(
+                    &bots
+                        .iter()
+                        .filter_map(|b| b.icon.clone())
+                        .collect::<Vec<_>>(),
+                ));
                 bots.push(bot.clone());
                 self.save_bots(bots).await?;
                 self.unarchive_thread(&thread.workspace_id, &thread.id)
@@ -247,8 +267,12 @@ impl AppState {
                 instructions,
                 can_start_threads,
                 context_files,
+                icon,
             } => {
                 validate_text(&name, &instructions)?;
+                if icon.as_ref().is_some_and(|icon| !icon.is_valid()) {
+                    return Err(DaemonError::BadRequest("Unknown bot icon".into()));
+                }
                 let context_files = match context_files {
                     Some(paths) => Some(context::validate_context_files(paths).await?),
                     None => None,
@@ -259,6 +283,9 @@ impl AppState {
                 bot.can_start_threads = can_start_threads;
                 if let Some(paths) = context_files {
                     bot.context_files = paths;
+                }
+                if icon.is_some() {
+                    bot.icon = icon;
                 }
                 self.update_thread(serde_json::from_value(
                     json!({"workspace_id": bot.workspace_id,
