@@ -560,7 +560,7 @@ fn summarize(records: Vec<Record>, labels: &Labels, days: u32) -> AnalyticsSumma
     let mut recent = Vec::new();
     let mut files: HashMap<String, FileStats> = HashMap::new();
     let mut bots: HashMap<String, BotStats> = HashMap::new();
-    let mut providers: HashMap<String, (u64, u64, u64, u64, u64, u64)> = HashMap::new();
+    let mut providers: HashMap<String, (u64, u64, u64, u64, u64, u64, u64)> = HashMap::new();
     let mut projects: HashMap<String, (u64, u64)> = HashMap::new();
     for record in records {
         let date = record_time(&record).with_timezone(&Local).date_naive();
@@ -652,6 +652,8 @@ fn summarize(records: Vec<Record>, labels: &Labels, days: u32) -> AnalyticsSumma
                 stats.3 += i;
                 stats.4 += out;
                 stats.5 += ctx;
+                // Only turns with a context reading count toward its average.
+                stats.6 += u64::from(ctx > 0);
             }
             Record::File { th, path, .. } => {
                 totals.file_writes += 1;
@@ -719,14 +721,14 @@ fn summarize(records: Vec<Record>, labels: &Labels, days: u32) -> AnalyticsSumma
     let mut providers: Vec<_> = providers
         .into_iter()
         .map(
-            |(provider, (turns, failed, ms, i, out, ctx))| AnalyticsProvider {
+            |(provider, (turns, failed, ms, i, out, ctx, measured))| AnalyticsProvider {
                 provider,
                 turns,
                 failed,
                 avg_turn_ms: ms / turns.max(1),
                 input_tokens: i,
                 output_tokens: out,
-                avg_peak_context_tokens: ctx / turns.max(1),
+                avg_peak_context_tokens: ctx / measured.max(1),
             },
         )
         .collect();

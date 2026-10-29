@@ -275,9 +275,26 @@ async fn a_turn_counts_only_its_own_tokens_without_an_earlier_baseline() {
         if providers[0].turns == 2 {
             assert_eq!(providers[0].input_tokens, 10_000);
             assert_eq!(providers[0].avg_peak_context_tokens, (5_000 + 62_000) / 2);
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+    // A turn with no usage report does not dilute the average.
+    emit(UnifiedEvent::TurnStart {
+        turn_id: "t3".into(),
+    });
+    emit(UnifiedEvent::TurnEnd {
+        turn_id: "t3".into(),
+        status: "completed".into(),
+        error: None,
+    });
+    for _ in 0..100 {
+        let providers = app.analytics_summary(1).await.unwrap().providers;
+        if providers[0].turns == 3 {
+            assert_eq!(providers[0].avg_peak_context_tokens, (5_000 + 62_000) / 2);
             return;
         }
         tokio::time::sleep(std::time::Duration::from_millis(20)).await;
     }
-    panic!("second turn never recorded");
+    panic!("turns never recorded");
 }
