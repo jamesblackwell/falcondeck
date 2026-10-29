@@ -114,6 +114,8 @@ final class AppModel {
     var requests: [JSON] = [] { didSet { synchronizeTaskActivity() } }
     var serviceNotices: [JSON] = []
     var operationalConditions: [JSON] = []
+    /// Notices the user closed, by problem, until they may show again.
+    var snoozedNotices: [String: Date] = NoticeSnooze.stored()
     var tokenUsage = JSON.object([:])
     var archivedTasks: [AgentTask] = [] { didSet { synchronizeTaskActivity() } }
     @ObservationIgnored var archivedLoadID: UUID?

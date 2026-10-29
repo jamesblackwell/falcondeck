@@ -119,3 +119,50 @@ final class ProtocolTests: XCTestCase {
         XCTAssertEqual(try receiver.receive(chunk(9, 1, last)), first + last)
     }
 }
+
+@MainActor
+extension ProtocolTests {
+    func testNoticesCollapseLegacyCopiesAndStayHiddenAcrossProjectsForADay() {
+        let model = AppModel.testing(relay: UnavailablePreviewRelay())
+        let task = AgentTask(.object(["id": .string("task"), "workspace_id": .string("p")]))
+        let other = AgentTask(.object(["id": .string("other"), "workspace_id": .string("q")]))
+        func condition(_ id: String, project: String = "p", thread: String? = nil) -> JSON {
+            var raw: [String: JSON] = ["id": .string(id), "key": .string("mcp_auth:cloudflare"), "workspace_id": .string(project), "level": .string("warning"), "message": .string("Cloudflare needs to be reconnected.")]
+            if let thread { raw["thread_id"] = .string(thread) }
+            return .object(raw)
+        }
+        // The daemon mirrors each condition as a legacy notice with the same id.
+        let legacy = JSON.object(["id": .string("c1"), "workspace_id": .string("p"), "level": .string("warning"), "message": .string("Cloudflare needs to be reconnected.")])
+        model.operationalConditions = [condition("c1"), condition("c2", thread: "task"), condition("c3", project: "q")]
+        model.serviceNotices = [legacy]
+        XCTAssertEqual(model.notices(for: task).map { $0["id"].string }, ["c1"])
+        XCTAssertEqual(model.notices(for: other).map { $0["id"].string }, ["c3"])
+
+        // Closing it hides the problem everywhere until the snooze runs out.
+        let now = Date(timeIntervalSince1970: 1_000_000)
+        model.snoozedNotices = [NoticeSnooze.key(condition("c1")): now.addingTimeInterval(NoticeSnooze.duration)]
+        XCTAssertTrue(model.notices(for: task, now: now).isEmpty)
+        XCTAssertTrue(model.notices(for: other, now: now).isEmpty)
+        XCTAssertEqual(model.notices(for: task, now: now.addingTimeInterval(NoticeSnooze.duration + 1)).count, 1)
+
+        // Legacy notices still show for daemons that send no conditions.
+        model.operationalConditions = []
+        model.snoozedNotices = [:]
+        XCTAssertEqual(model.notices(for: task).map { $0["id"].string }, ["c1"])
+
+        // A cleared condition takes its legacy copy with it.
+        model.operationalConditions = [condition("c1")]
+        model.applyEnvelope(.object(["seq": .number(1), "event": .object(["type": .string("operational-condition-cleared"), "key": .string("mcp_auth:cloudflare"), "condition_id": .string("c1")])]))
+        XCTAssertTrue(model.operationalConditions.isEmpty)
+        XCTAssertTrue(model.serviceNotices.isEmpty)
+    }
+
+    func testNoticeSnoozesPersistAndExpire() {
+        let suite = "NoticeSnooze-\(UUID())"
+        let defaults = UserDefaults(suiteName: suite)!
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let now = Date(timeIntervalSince1970: 2_000_000)
+        NoticeSnooze.save(["live": now.addingTimeInterval(60), "expired": now.addingTimeInterval(-60)], defaults: defaults)
+        XCTAssertEqual(Array(NoticeSnooze.stored(now: now, defaults: defaults).keys), ["live"])
+    }
+}

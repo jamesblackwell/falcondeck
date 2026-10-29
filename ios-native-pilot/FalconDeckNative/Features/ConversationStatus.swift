@@ -3,18 +3,13 @@ import SwiftUI
 struct ConversationStatus: View {
     @Environment(AppModel.self) private var model
     let task: AgentTask
-    @State private var dismissed: Set<String> = []
-    private var notices: [JSON] {
-        (model.operationalConditions + model.serviceNotices).filter { item in
-            item["workspace_id"].string == task.projectID && (item["thread_id"] == .null || item["thread_id"].string == task.id) && item["level"].string != "info" && !dismissed.contains(item["id"].string)
-        }
-    }
+    private var notices: [JSON] { model.notices(for: task) }
     var body: some View {
         ForEach(Array(notices.suffix(3)), id: \.self) { notice in
             HStack(alignment: .top, spacing: 8) {
                 Image(systemName: "exclamationmark.circle")
                 Text(notice["message"].string).frame(maxWidth: .infinity, alignment: .leading).textSelection(.enabled)
-                Button { dismissed.insert(notice["id"].string) } label: { Image(systemName: "xmark") }.accessibilityLabel("Dismiss notice")
+                Button { model.snooze(notice) } label: { Image(systemName: "xmark") }.accessibilityLabel("Hide notice for a day")
             }.font(.footnote).foregroundStyle(.orange).padding(12).background(FD.surface, in: .rect(cornerRadius: 12))
         }
         if model.realtimeAudio.active.contains(task.id) {
@@ -22,6 +17,51 @@ struct ConversationStatus: View {
         }
         if let error = model.realtimeAudio.error {
             HStack { Text(error); Spacer(); Button { model.realtimeAudio.error = nil } label: { Image(systemName: "xmark") }.accessibilityLabel("Dismiss audio error") }.font(.footnote).foregroundStyle(.orange)
+        }
+    }
+}
+
+/// Closing a notice hides that problem (same kind, severity and wording) in
+/// every project for a day, including repeats raised under a fresh id.
+enum NoticeSnooze {
+    static let duration: TimeInterval = 24 * 60 * 60
+    private static let storageKey = "snoozedNotices.v1"
+    static func key(_ notice: JSON) -> String {
+        [notice["key"].string.nonempty ?? "notice", notice["level"].string, notice["message"].string].joined(separator: "|")
+    }
+    static func stored(now: Date = .now, defaults: UserDefaults = .standard) -> [String: Date] {
+        let raw = defaults.dictionary(forKey: storageKey) as? [String: Double] ?? [:]
+        return raw.compactMapValues { value in
+            let until = Date(timeIntervalSince1970: value)
+            return until > now ? until : nil
+        }
+    }
+    static func save(_ snoozed: [String: Date], defaults: UserDefaults = .standard) {
+        defaults.set(snoozed.mapValues(\.timeIntervalSince1970), forKey: storageKey)
+    }
+}
+
+extension AppModel {
+    func snooze(_ notice: JSON, now: Date = .now) {
+        var next = snoozedNotices.filter { $0.value > now }
+        next[NoticeSnooze.key(notice)] = now.addingTimeInterval(NoticeSnooze.duration)
+        snoozedNotices = next
+        NoticeSnooze.save(next)
+    }
+
+    /// One card per active problem for this conversation. Legacy service
+    /// notices mirror conditions, so they only count when a daemon sends none.
+    func notices(for task: AgentTask, now: Date = .now) -> [JSON] {
+        let inProject = { (item: JSON) in item["workspace_id"].string == task.projectID }
+        let current = operationalConditions.filter(inProject)
+        let candidates = current.isEmpty ? serviceNotices.filter(inProject) : current
+        var seen = Set<String>()
+        return candidates.filter { item in
+            let key = NoticeSnooze.key(item)
+            return (item["thread_id"] == .null || item["thread_id"].string == task.id)
+                && item["level"].string != "info"
+                && (snoozedNotices[key] ?? .distantPast) <= now
+                && seen.insert(key).inserted
         }
     }
 }

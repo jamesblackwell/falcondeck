@@ -134,8 +134,11 @@ struct RecentEventSequences {
             if notice != .null { serviceNotices.removeAll { $0["id"] == notice["id"] }; serviceNotices.append(notice); if serviceNotices.count > 100 { serviceNotices.removeFirst(serviceNotices.count - 100) } }
         case "operational-condition-upserted":
             let condition = event["condition"]
-            operationalConditions.removeAll { $0["key"] == condition["key"] }; operationalConditions.append(condition)
-        case "operational-condition-cleared": operationalConditions.removeAll { $0["key"] == event["key"] && $0["id"] == event["condition_id"] }
+            operationalConditions.removeAll { $0["key"] == condition["key"] && $0["workspace_id"] == condition["workspace_id"] && $0["thread_id"] == condition["thread_id"] }; operationalConditions.append(condition)
+        case "operational-condition-cleared":
+            // The daemon drops the legacy copy too; keep it from lingering as a stale card.
+            operationalConditions.removeAll { $0["key"] == event["key"] && $0["id"] == event["condition_id"] }
+            serviceNotices.removeAll { $0["id"] == event["condition_id"] }
         case "thread-token-usage-updated": if !id.isEmpty { tokenUsage = tokenUsage.setting(id, event["usage"]) }
         case "extension-catalog-updated", "extension-view-updated": extensions.apply(event)
         case "control-state-changed": automations.scheduleRefresh(model: self)
