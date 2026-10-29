@@ -159,10 +159,13 @@ pub struct AnalyticsProvider {
     pub failed: u64,
     /// Average turn duration in milliseconds.
     pub avg_turn_ms: u64,
-    /// Input tokens reported for finished turns.
+    /// Input tokens used by finished turns (providers reporting per-request usage).
     pub input_tokens: u64,
     /// Output tokens reported for finished turns.
     pub output_tokens: u64,
+    /// Average peak context size per turn, in tokens.
+    #[serde(default)]
+    pub avg_peak_context_tokens: u64,
 }
 
 /// The user's messages per project.

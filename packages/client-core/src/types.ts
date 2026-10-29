@@ -558,6 +558,7 @@ export type AnalyticsProvider = {
   avg_turn_ms: number;
   input_tokens: number;
   output_tokens: number;
+  avg_peak_context_tokens: number;
 };
 export type AnalyticsProject = { project: string; messages: number; avg_chars: number };
 export type AnalyticsSummary = {

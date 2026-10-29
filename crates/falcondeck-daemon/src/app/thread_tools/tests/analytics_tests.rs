@@ -249,4 +249,35 @@ async fn a_turn_counts_only_its_own_tokens_without_an_earlier_baseline() {
     });
     let summary = summary_with_turn(&app).await;
     assert_eq!(summary.providers[0].input_tokens, 10_000);
+    assert_eq!(summary.providers[0].avg_peak_context_tokens, 5_000);
+
+    // Claude-style reports carry only context fill: no usage, just the peak.
+    emit(UnifiedEvent::TurnStart {
+        turn_id: "t2".into(),
+    });
+    for fill in [40_000, 62_000, 51_000] {
+        emit(UnifiedEvent::ThreadTokenUsageUpdated {
+            usage: falcondeck_core::ThreadTokenUsage {
+                total: breakdown(fill),
+                last: None,
+                model_context_window: None,
+                updated_at: None,
+            },
+        });
+    }
+    emit(UnifiedEvent::TurnEnd {
+        turn_id: "t2".into(),
+        status: "completed".into(),
+        error: None,
+    });
+    for _ in 0..100 {
+        let providers = app.analytics_summary(1).await.unwrap().providers;
+        if providers[0].turns == 2 {
+            assert_eq!(providers[0].input_tokens, 10_000);
+            assert_eq!(providers[0].avg_peak_context_tokens, (5_000 + 62_000) / 2);
+            return;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+    panic!("second turn never recorded");
 }

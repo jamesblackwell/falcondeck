@@ -43,7 +43,7 @@ const summary: AnalyticsSummary = {
     { name: 'Juno - CPO', turns: 6, avg_turn_ms: 95_000, avg_context_tokens: 2400, delegations: 3, messages_sent: 8 },
   ],
   providers: [
-    { provider: 'claude', turns: 20, failed: 1, avg_turn_ms: 60_000, input_tokens: 120_000, output_tokens: 9000 },
+    { provider: 'claude', turns: 20, failed: 1, avg_turn_ms: 60_000, input_tokens: 120_000, output_tokens: 9000, avg_peak_context_tokens: 48_000 },
   ],
   projects: [{ project: 'quizgecko', messages: 12, avg_chars: 180 }],
 }
@@ -137,5 +137,22 @@ describe('AnalyticsPanel', () => {
       ),
     )
     expect(screen.getByRole('switch', { name: 'Keep your messages' })).toHaveAttribute('aria-checked', 'false')
+  })
+
+  it('shows the saved setting again when a save fails', async () => {
+    const fetch = stubDaemon()
+    const onToast = vi.fn()
+    fetch.mockImplementation(async (input: RequestInfo | URL) => {
+      const url = String(input)
+      if (url.endsWith('/api/analytics/settings')) throw new Error('daemon offline')
+      if (url.includes('/api/analytics/summary')) return jsonResponse(summary)
+      if (url.includes('/api/analytics/prompts')) return jsonResponse([])
+      return jsonResponse(status)
+    })
+    render(<AnalyticsPanel baseUrl="http://daemon" onToast={onToast} />)
+    const toggle = await screen.findByRole('switch', { name: 'Keep your messages' })
+    fireEvent.click(toggle)
+    await waitFor(() => expect(onToast).toHaveBeenCalledWith(expect.objectContaining({ variant: 'danger' })))
+    expect(screen.getByRole('switch', { name: 'Keep your messages' })).toHaveAttribute('aria-checked', 'true')
   })
 })

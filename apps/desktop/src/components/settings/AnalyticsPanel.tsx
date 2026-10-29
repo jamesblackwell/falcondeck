@@ -242,6 +242,14 @@ export function AnalyticsPanel({ baseUrl, onToast }: AnalyticsPanelProps) {
         // A later change is queued behind this one; keep showing it.
         if (wanted.current === next) setStatus(saved)
       } catch (err) {
+        // Show what the daemon actually has unless a newer change is queued.
+        if (wanted.current === next) {
+          const confirmed = await api.analyticsStatus().catch(() => null)
+          if (confirmed && wanted.current === next) {
+            wanted.current = confirmed.settings
+            setStatus(confirmed)
+          }
+        }
         onToast({
           variant: 'danger',
           title: 'Could not save analytics settings',
@@ -506,6 +514,7 @@ export function AnalyticsPanel({ baseUrl, onToast }: AnalyticsPanelProps) {
                 <th className={cn(TH, NUM)}>Turns</th>
                 <th className={cn(TH, NUM)}>Failed</th>
                 <th className={cn(TH, NUM)}>Avg turn</th>
+                <th className={cn(TH, NUM)}>Avg peak context</th>
                 <th className={cn(TH, NUM)}>Input tokens</th>
                 <th className={cn(TH, NUM)}>Output tokens</th>
               </tr>
@@ -517,8 +526,11 @@ export function AnalyticsPanel({ baseUrl, onToast }: AnalyticsPanelProps) {
                   <td className={cn(TD, NUM)}>{count(provider.turns)}</td>
                   <td className={cn(TD, NUM)}>{count(provider.failed)}</td>
                   <td className={cn(TD, NUM)}>{duration(provider.avg_turn_ms)}</td>
-                  <td className={cn(TD, NUM)}>{compact(provider.input_tokens)}</td>
-                  <td className={cn(TD, NUM)}>{compact(provider.output_tokens)}</td>
+                  <td className={cn(TD, NUM)}>
+                    {provider.avg_peak_context_tokens ? `≈${compact(provider.avg_peak_context_tokens)}` : '—'}
+                  </td>
+                  <td className={cn(TD, NUM)}>{provider.input_tokens ? compact(provider.input_tokens) : '—'}</td>
+                  <td className={cn(TD, NUM)}>{provider.output_tokens ? compact(provider.output_tokens) : '—'}</td>
                 </tr>
               ))}
             </tbody>

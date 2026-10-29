@@ -59,8 +59,12 @@ enum Record {
         th: String,
         ok: bool,
         ms: u64,
+        /// Input/output tokens used; only providers reporting per-request usage.
         i: u64,
         out: u64,
+        /// Peak context size during the turn, in tokens.
+        #[serde(default)]
+        ctx: u64,
     },
     /// An agent wrote a file.
     File {
@@ -253,9 +257,12 @@ fn listen_loop(
     tx: mpsc::Sender<Job>,
 ) {
     let mut started: HashMap<String, DateTime<Utc>> = HashMap::new();
-    // Cumulative (input, output) per thread: latest seen, and at turn start.
+    // Providers that report per-request usage (`last`, e.g. Codex) also send a
+    // cumulative total; turn usage is its change across the turn. Others (Claude,
+    // ACP) report how full the context is, which is tracked as a peak instead.
     let mut latest: HashMap<String, (u64, u64)> = HashMap::new();
     let mut at_start: HashMap<String, (u64, u64)> = HashMap::new();
+    let mut peak: HashMap<String, u64> = HashMap::new();
     loop {
         let cached = match events.blocking_recv() {
             Ok(cached) => cached,
@@ -275,27 +282,35 @@ fn listen_loop(
                     Some(total) => at_start.insert(thread.clone(), *total),
                     None => at_start.remove(&thread),
                 };
+                peak.remove(&thread);
                 started.insert(thread, envelope.emitted_at);
                 None
             }
             UnifiedEvent::ThreadTokenUsageUpdated { usage } => {
-                let total = (usage.total.input_tokens, usage.total.output_tokens);
-                // First report in a turn with no baseline (e.g. after a restart):
-                // the total before this request is the turn's starting point.
-                if started.contains_key(&thread) && !at_start.contains_key(&thread) {
-                    let last = usage
-                        .last
-                        .as_ref()
-                        .map_or((0, 0), |last| (last.input_tokens, last.output_tokens));
-                    at_start.insert(
-                        thread.clone(),
-                        (
-                            total.0.saturating_sub(last.0),
-                            total.1.saturating_sub(last.1),
-                        ),
-                    );
+                let in_turn = started.contains_key(&thread);
+                let context = match &usage.last {
+                    Some(last) => {
+                        let total = (usage.total.input_tokens, usage.total.output_tokens);
+                        // First report with no baseline (e.g. after a restart): the
+                        // total before this request is where the turn started.
+                        if in_turn && !at_start.contains_key(&thread) {
+                            at_start.insert(
+                                thread.clone(),
+                                (
+                                    total.0.saturating_sub(last.input_tokens),
+                                    total.1.saturating_sub(last.output_tokens),
+                                ),
+                            );
+                        }
+                        latest.insert(thread.clone(), total);
+                        last.input_tokens
+                    }
+                    None => usage.total.total_tokens,
+                };
+                if in_turn {
+                    let entry = peak.entry(thread).or_default();
+                    *entry = (*entry).max(context);
                 }
-                latest.insert(thread, total);
                 None
             }
             UnifiedEvent::TurnEnd { status, error, .. } => {
@@ -310,6 +325,7 @@ fn listen_loop(
                     }
                     _ => (0, 0),
                 };
+                let ctx = peak.remove(&thread).unwrap_or(0);
                 Some(Record::Turn {
                     t: envelope.emitted_at,
                     th: thread,
@@ -317,6 +333,7 @@ fn listen_loop(
                     ms,
                     i,
                     out,
+                    ctx,
                 })
             }
             UnifiedEvent::File {
@@ -543,7 +560,7 @@ fn summarize(records: Vec<Record>, labels: &Labels, days: u32) -> AnalyticsSumma
     let mut recent = Vec::new();
     let mut files: HashMap<String, FileStats> = HashMap::new();
     let mut bots: HashMap<String, BotStats> = HashMap::new();
-    let mut providers: HashMap<String, (u64, u64, u64, u64, u64)> = HashMap::new();
+    let mut providers: HashMap<String, (u64, u64, u64, u64, u64, u64)> = HashMap::new();
     let mut projects: HashMap<String, (u64, u64)> = HashMap::new();
     for record in records {
         let date = record_time(&record).with_timezone(&Local).date_naive();
@@ -605,7 +622,13 @@ fn summarize(records: Vec<Record>, labels: &Labels, days: u32) -> AnalyticsSumma
                 }
             }
             Record::Turn {
-                th, ok, ms, i, out, ..
+                th,
+                ok,
+                ms,
+                i,
+                out,
+                ctx,
+                ..
             } => {
                 totals.turns += 1;
                 totals.failed_turns += u64::from(!ok);
@@ -628,6 +651,7 @@ fn summarize(records: Vec<Record>, labels: &Labels, days: u32) -> AnalyticsSumma
                 stats.2 += ms;
                 stats.3 += i;
                 stats.4 += out;
+                stats.5 += ctx;
             }
             Record::File { th, path, .. } => {
                 totals.file_writes += 1;
@@ -695,13 +719,14 @@ fn summarize(records: Vec<Record>, labels: &Labels, days: u32) -> AnalyticsSumma
     let mut providers: Vec<_> = providers
         .into_iter()
         .map(
-            |(provider, (turns, failed, ms, i, out))| AnalyticsProvider {
+            |(provider, (turns, failed, ms, i, out, ctx))| AnalyticsProvider {
                 provider,
                 turns,
                 failed,
                 avg_turn_ms: ms / turns.max(1),
                 input_tokens: i,
                 output_tokens: out,
+                avg_peak_context_tokens: ctx / turns.max(1),
             },
         )
         .collect();
