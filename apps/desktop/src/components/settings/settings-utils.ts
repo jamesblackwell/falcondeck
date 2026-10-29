@@ -9,6 +9,7 @@ import {
   Bell,
   Blocks,
   Bot,
+  ChartColumn,
   KeyRound,
   Keyboard,
   MessagesSquare,
@@ -41,6 +42,7 @@ export type SettingsSectionId =
   | "models"
   | "remote"
   | "servers"
+  | "analytics"
   | "backup";
 
 /** DOM id of the settings search field, so ⌘F can focus it from the app. */
@@ -244,6 +246,25 @@ export const SETTINGS_GROUPS: SettingsNavGroup[] = [
         icon: Server,
         settings: [],
         keywords: ["ssh", "remote host", "daemon"],
+      },
+      {
+        id: "analytics",
+        label: "Analytics",
+        description: "Agent communication and your message history",
+        icon: ChartColumn,
+        settings: [
+          "Overview",
+          "Agent communication",
+          "Your messages",
+          "Files agents write",
+          "Turns by bot",
+          "Recording",
+          "Record activity",
+          "Keep your messages",
+          "Keep activity for",
+          "Storage",
+        ],
+        keywords: ["stats", "metrics", "prompts", "history", "log", "chatter", "tokens", "files"],
       },
       {
         id: "backup",

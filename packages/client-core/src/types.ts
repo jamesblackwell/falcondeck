@@ -509,6 +509,77 @@ export type BotApi = {
   writeContextFile?: (write: ContextFileWrite) => Promise<ContextFileContent>;
 };
 
+/** Local activity analytics (desktop only; never sent over the relay). */
+export type AnalyticsSettings = { enabled: boolean; record_prompts: boolean; retention_months: number };
+export type AnalyticsStatus = { settings: AnalyticsSettings; folder: string; events_bytes: number; prompts_bytes: number };
+export type AnalyticsTotals = {
+  user_messages: number;
+  scheduled_messages: number;
+  agent_messages: number;
+  ack_like_messages: number;
+  delegations: number;
+  turns: number;
+  failed_turns: number;
+  file_writes: number;
+};
+export type AnalyticsDay = { date: string; user_messages: number; agent_messages: number; turns: number };
+export type AnalyticsAgentPair = {
+  from: string;
+  from_title: string;
+  to: string;
+  to_title: string;
+  messages: number;
+  avg_chars: number;
+  ack_like: number;
+};
+export type AnalyticsAgentMessage = {
+  at: string;
+  from_title: string;
+  to_title: string;
+  chars: number;
+  ack_like: boolean;
+  excerpt: string;
+};
+export type AnalyticsFile = { path: string; writes: number; threads: number; contested_days: number };
+export type AnalyticsBot = {
+  name: string;
+  turns: number;
+  avg_turn_ms: number;
+  avg_context_tokens: number;
+  delegations: number;
+  messages_sent: number;
+};
+export type AnalyticsProvider = {
+  provider: string;
+  turns: number;
+  failed: number;
+  avg_turn_ms: number;
+  input_tokens: number;
+  output_tokens: number;
+};
+export type AnalyticsProject = { project: string; messages: number; avg_chars: number };
+export type AnalyticsSummary = {
+  days: number;
+  generated_at: string;
+  totals: AnalyticsTotals;
+  daily: AnalyticsDay[];
+  agent_pairs: AnalyticsAgentPair[];
+  recent_agent_messages: AnalyticsAgentMessage[];
+  files: AnalyticsFile[];
+  bots: AnalyticsBot[];
+  providers: AnalyticsProvider[];
+  projects: AnalyticsProject[];
+};
+export type AnalyticsPrompt = {
+  at: string;
+  project: string;
+  thread_id: string;
+  title: string;
+  provider: string;
+  text: string;
+};
+export type AnalyticsClearTarget = "prompts" | "events" | "all";
+
 export type ComputerUsePreferences = {
   existing_profile: boolean;
   enabled: boolean;

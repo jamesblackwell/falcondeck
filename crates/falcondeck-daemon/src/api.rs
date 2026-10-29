@@ -178,6 +178,12 @@ pub fn router(state: AppState) -> Router {
         .route("/api/bots/{bot_id}/context", get(bot_context))
         .route("/api/context-files", get(context_files).post(write_context_file))
         .route("/api/context-files/content", get(read_context_file))
+        // Local only: analytics is never registered as a remote RPC.
+        .route("/api/analytics", get(analytics_status))
+        .route("/api/analytics/settings", post(update_analytics_settings))
+        .route("/api/analytics/summary", get(analytics_summary))
+        .route("/api/analytics/prompts", get(analytics_prompts))
+        .route("/api/analytics/clear", post(clear_analytics))
         .route("/api/chats", post(create_chat))
         .route("/api/workspaces/connect", post(connect_workspace))
         .route("/api/workspaces/{workspace_id}", delete(remove_workspace))
@@ -452,6 +458,63 @@ async fn write_context_file(
     Json(request): Json<falcondeck_core::ContextFileWrite>,
 ) -> Result<Json<falcondeck_core::ContextFileContent>, DaemonError> {
     state.write_context_file(request).await.map(Json)
+}
+
+async fn analytics_status(State(state): State<AppState>) -> Json<falcondeck_core::AnalyticsStatus> {
+    Json(state.analytics_status().await)
+}
+
+async fn update_analytics_settings(
+    State(state): State<AppState>,
+    Json(settings): Json<falcondeck_core::AnalyticsSettings>,
+) -> Result<Json<falcondeck_core::AnalyticsStatus>, DaemonError> {
+    state.update_analytics_settings(settings).await.map(Json)
+}
+
+#[derive(serde::Deserialize)]
+struct AnalyticsSummaryQuery {
+    #[serde(default)]
+    days: Option<u32>,
+}
+
+async fn analytics_summary(
+    State(state): State<AppState>,
+    Query(query): Query<AnalyticsSummaryQuery>,
+) -> Result<Json<falcondeck_core::AnalyticsSummary>, DaemonError> {
+    state
+        .analytics_summary(query.days.unwrap_or(30))
+        .await
+        .map(Json)
+}
+
+#[derive(serde::Deserialize)]
+struct AnalyticsPromptsQuery {
+    #[serde(default)]
+    query: Option<String>,
+    #[serde(default)]
+    limit: Option<usize>,
+}
+
+async fn analytics_prompts(
+    State(state): State<AppState>,
+    Query(query): Query<AnalyticsPromptsQuery>,
+) -> Result<Json<Vec<falcondeck_core::AnalyticsPrompt>>, DaemonError> {
+    state
+        .analytics_prompts(query.query, query.limit.unwrap_or(100))
+        .await
+        .map(Json)
+}
+
+#[derive(serde::Deserialize)]
+struct AnalyticsClearRequest {
+    target: falcondeck_core::AnalyticsClearTarget,
+}
+
+async fn clear_analytics(
+    State(state): State<AppState>,
+    Json(request): Json<AnalyticsClearRequest>,
+) -> Result<Json<falcondeck_core::AnalyticsStatus>, DaemonError> {
+    state.clear_analytics(request.target).await.map(Json)
 }
 
 async fn health(State(state): State<AppState>) -> Json<falcondeck_core::HealthResponse> {

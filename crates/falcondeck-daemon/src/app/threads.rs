@@ -2850,6 +2850,10 @@ impl AppState {
         let workspace = workspaces
             .get_mut(workspace_id)
             .ok_or_else(|| DaemonError::NotFound("workspace not found".to_string()))?;
+        // Only user messages carry their project into the analytics log.
+        let project_path = (track_attention
+            && matches!(item, ConversationItem::UserMessage { .. }))
+        .then(|| workspace.summary.path.clone());
         let thread = workspace
             .threads
             .get_mut(thread_id)
@@ -2939,6 +2943,10 @@ impl AppState {
             }
         }
         thread.items.push(item.clone());
+        // Replays (track_attention false) are history recovery, not new activity.
+        if track_attention {
+            self.analytics_new_item(workspace_id, project_path.as_deref(), thread, &item);
+        }
         let track_attention = track_attention && marks_agent_activity(&item);
         if track_attention {
             thread.summary.attention.last_agent_activity_seq = thread

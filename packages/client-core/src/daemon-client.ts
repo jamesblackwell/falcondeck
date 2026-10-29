@@ -7,6 +7,11 @@ import type {
   ContextFileList,
   ContextFileContent,
   ContextFileWrite,
+  AnalyticsClearTarget,
+  AnalyticsPrompt,
+  AnalyticsSettings,
+  AnalyticsStatus,
+  AnalyticsSummary,
   AgentProvider,
   CollaborationModeSummary,
   CreateScheduledTaskPayload,
@@ -599,6 +604,27 @@ export function createDaemonApiClient(baseUrl: string) {
     },
     async readContextFile(path: string) {
       return parseJson<ContextFileContent>(await fetch(`${baseUrl}/api/context-files/content?${new URLSearchParams({ path })}`));
+    },
+    async analyticsStatus() {
+      return parseJson<AnalyticsStatus>(await fetch(`${baseUrl}/api/analytics`));
+    },
+    async updateAnalyticsSettings(settings: AnalyticsSettings) {
+      return parseJson<AnalyticsStatus>(await fetch(`${baseUrl}/api/analytics/settings`, {
+        method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(settings),
+      }));
+    },
+    async analyticsSummary(days: number) {
+      return parseJson<AnalyticsSummary>(await fetch(`${baseUrl}/api/analytics/summary?${new URLSearchParams({ days: String(days) })}`));
+    },
+    async analyticsPrompts(query?: string, limit = 100) {
+      const params = new URLSearchParams({ limit: String(limit) });
+      if (query?.trim()) params.set("query", query.trim());
+      return parseJson<AnalyticsPrompt[]>(await fetch(`${baseUrl}/api/analytics/prompts?${params}`));
+    },
+    async clearAnalytics(target: AnalyticsClearTarget) {
+      return parseJson<AnalyticsStatus>(await fetch(`${baseUrl}/api/analytics/clear`, {
+        method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ target }),
+      }));
     },
     async writeContextFile(write: ContextFileWrite) {
       return parseJson<ContextFileContent>(await fetch(`${baseUrl}/api/context-files`, {

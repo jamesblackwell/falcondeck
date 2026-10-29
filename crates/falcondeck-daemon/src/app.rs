@@ -89,6 +89,7 @@ use crate::{
 };
 
 mod acp_threads;
+mod analytics;
 pub(crate) mod agent_helpers;
 mod claude_history;
 #[cfg(all(test, unix))]
@@ -365,6 +366,7 @@ struct InnerState {
     desktop_active_until: StdMutex<Option<chrono::DateTime<Utc>>>,
     preferences: Mutex<FalconDeckPreferences>,
     bot_mutations: Mutex<()>,
+    analytics: analytics::Recorder,
     /// Embedded cua-driver child. Absent binary means this host cannot run it.
     computer_use: computer_use::ComputerUseHost,
     /// Definitions and bounded run ledgers owned by this daemon.
@@ -972,6 +974,7 @@ impl AppState {
         let control_store = crate::control::store::control_store_path(&state_path);
         let extension_registry = extensions::ExtensionRegistry::new(&state_path);
         let extension_hosts = extension_host::ExtensionHostPool::new(state_path.clone(), deno_bin);
+        let analytics = analytics::Recorder::new(&state_path, broadcaster.subscribe());
         let computer_use = computer_use::ComputerUseHost::new(
             computer_use_bin,
             &state_path,
@@ -1028,6 +1031,7 @@ impl AppState {
                 desktop_active_until: StdMutex::new(None),
                 preferences: Mutex::new(FalconDeckPreferences::default()),
                 bot_mutations: Mutex::new(()),
+                analytics,
                 computer_use,
                 scheduled_tasks: Mutex::new(scheduled_tasks::ScheduledTaskRegistry::default()),
                 scheduled_tasks_restored: OnceCell::new(),

@@ -399,6 +399,16 @@ impl AppState {
                     "steer": matches!(a.delivery, MessageDelivery::Steer)
                 }))?;
                 let result = self.send_turn(request).await?;
+                self.analytics_agent_message(
+                    parent,
+                    &a.thread_id,
+                    &a.message,
+                    if matches!(a.delivery, MessageDelivery::Steer) {
+                        "steer"
+                    } else {
+                        "queue"
+                    },
+                );
                 Ok(response(format!(
                     "# Message accepted\n\n- Id: {}\n- Delivery: {}\n- Check replies with falcondeck_view_thread.\n",
                     line(&a.thread_id, 256),
@@ -536,6 +546,7 @@ impl AppState {
                     self.watch_child(&workspace, &id, parent, a.notify_parent);
                 }
                 self.persist_local_state().await?;
+                self.analytics_delegation(parent, &id, a.prompt.as_deref());
                 let thread = self.thread_summary(&workspace, &id).await?;
                 self.emit(
                     Some(workspace.clone()),
@@ -697,6 +708,7 @@ mod tests {
     use super::*;
     use falcondeck_core::{ThreadAgentParams, ThreadAttention};
     use tempfile::tempdir;
+    mod analytics_tests;
     mod bot_tests;
     mod digest_tests;
     mod model_settings_tests;

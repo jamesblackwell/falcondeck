@@ -26,6 +26,7 @@ import { RemoteAccessPanel } from "./settings/RemoteAccessPanel";
 import { ServersPanel, type ServersPanelProps } from "./settings/ServersPanel";
 import { SettingsSidebar } from "./settings/SettingsSidebar";
 import { ComputerUsePanel } from "./settings/ComputerUsePanel";
+import { AnalyticsPanel } from "./settings/AnalyticsPanel";
 import { BackupPanel } from "./settings/BackupPanel";
 import { SpeechSettingsPanel } from "./settings/SpeechSettingsPanel";
 import type { SettingsSectionId } from "./settings/settings-utils";
@@ -224,6 +225,8 @@ export function SettingsView(props: SettingsViewProps) {
               baseUrl={props.baseUrl}
               onToast={props.onToast}
             />
+          ) : activeSection === "analytics" ? (
+            <AnalyticsPanel baseUrl={props.baseUrl} onToast={props.onToast} />
           ) : activeSection === "backup" ? (
             <BackupPanel baseUrl={props.baseUrl} onToast={props.onToast} />
           ) : activeSection === "general" ? (

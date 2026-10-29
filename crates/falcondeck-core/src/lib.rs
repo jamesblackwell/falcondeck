@@ -5,6 +5,9 @@
 //! It also exports the cryptography helpers used by the pairing protocol.
 #![deny(missing_docs)]
 
+/// Local activity analytics; never sent over the relay.
+pub mod analytics;
+pub use analytics::*;
 /// Backup and restore protocol types.
 pub mod backup;
 /// Persistent coordinator profiles and document operations.
