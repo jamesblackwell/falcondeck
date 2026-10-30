@@ -20,9 +20,15 @@ status window, and paste-at-cursor behavior.
   through OpenRouter (default GPT-5.6 Luna) and pastes over the selection.
   Settings loads a short fast-and-frontier model list from OpenRouter, caches
   it on this computer, and can send a reasoning effort with the rewrite.
-- Hold mode waits 180 ms before recording and cancels if another key is pressed,
-  so ordinary modifier shortcuts continue to work. Toggle mode starts and stops
-  on modifier-only presses.
+- In hold mode, triple-tapping the rewrite shortcut tidies the whole focused
+  field without recording: FalconDeck sends Command-A, captures the field with
+  Command-C (falling back to Accessibility), and runs the same silent rewrite
+  a quiet hold would. Taps must be under 180 ms each and less than 450 ms
+  apart; typing between taps resets the count. Nothing is filed to history.
+- Hold mode waits 80 ms before dictating (180 ms for rewrite, so taps never
+  open the microphone) and cancels if another key is pressed, so ordinary
+  modifier shortcuts continue to work. Toggle mode starts and stops on
+  modifier-only presses.
 - Escape cancels an active recording.
 - The overlay is a native non-activating panel. It follows the pointer's current
   display and sits at the top of its work area; its Copy, Retry, Discard, and
@@ -290,6 +296,9 @@ moving durable conversation state into the desktop shell.
     error instead of pasting the spoken instruction.
 13. Repeat the rewrite in a browser editor and in FalconDeck's own composer;
     confirm each replaces the live selection through ordinary paste / insert.
+13a. With text in a TextEdit document, a browser field, and FalconDeck's
+    composer (nothing selected), triple-tap Right Option and confirm the whole
+    field is tidied and replaced with no recording pill first.
 
 14. Exit during transcription, relaunch, and retry from the recovery card;
     confirm the text is copied, remains visible, and is not inserted into an

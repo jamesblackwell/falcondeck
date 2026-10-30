@@ -151,6 +151,13 @@ static BOOL FDChordMatches(FDHotkey hotkey, CGKeyCode keyCode,
 }
 static const CGKeyCode FDQwertyVKeyCode = 9;
 static const CGKeyCode FDQwertyCKeyCode = 8;
+static const CGKeyCode FDQwertyAKeyCode = 0;
+// Hold-to-talk dictation starts after 80 ms. Rewrite waits longer so a quick
+// tap never opens the microphone, which leaves room for the triple tap that
+// tidies the whole focused field.
+static const int64_t FDDictationHoldArmDelayNanoseconds = 80 * NSEC_PER_MSEC;
+static const int64_t FDRewriteHoldArmDelayNanoseconds = 180 * NSEC_PER_MSEC;
+static const NSTimeInterval FDRewriteTapGapSeconds = 0.45;
 static const useconds_t FDCopyPollIntervalMicros = 25 * 1000;
 static const int FDCopyPollAttempts = 16;
 static const useconds_t FDPasteboardPrepareDelayMicros = 80 * 1000;
@@ -544,6 +551,11 @@ static BOOL FDTranscriptRangeMatches(NSString *value, NSString *original, CFRang
 @property(nonatomic, strong) AVAssetExportSession *recordingExport;
 @property(nonatomic) NSUInteger modifierGeneration;
 @property(nonatomic) NSUInteger rewriteModifierGeneration;
+// Set once the hold delay has tried to start a rewrite for the current press,
+// so that press can no longer count as a tap.
+@property(nonatomic) BOOL rewriteArmFired;
+@property(nonatomic) NSUInteger rewriteTapCount;
+@property(nonatomic) NSTimeInterval rewriteLastTapTime;
 @property(nonatomic) NSUInteger speechGeneration;
 @property(nonatomic) pid_t pasteTargetProcessIdentifier;
 @property(nonatomic) pid_t pasteTargetApplicationProcessIdentifier;
@@ -606,6 +618,10 @@ static BOOL FDTranscriptRangeMatches(NSString *value, NSString *original, CFRang
 - (void)withRewriteModifierLifted:(void (^)(void))block;
 - (void)clearRewriteSession;
 - (void)primeRewriteSelectionCapture;
+- (void)registerRewriteTap;
+- (void)rewriteFocusedInput;
+- (BOOL)postSelectAllShortcut;
+- (NSString *)copySelectionTargetedFirst:(BOOL)targetedFirst;
 - (void)enableManualAccessibilityForPasteTarget;
 - (NSString *)readCopiedSelectionFromPasteboard:(NSPasteboard *)pasteboard
                                          before:(NSInteger)before
@@ -799,6 +815,7 @@ static CGEventRef FDEventTapCallback(CGEventTapProxy proxy, CGEventType type,
     self.rewriteModifierDown = NO;
     self.rewriteModifierUsedInChord = NO;
     self.rewriteModifierGeneration += 1;
+    self.rewriteTapCount = 0;
   }
   if (enabled || rewriteEnabled) {
     [self installEventTapIfNeeded];
@@ -940,10 +957,15 @@ static CGEventRef FDEventTapCallback(CGEventTapProxy proxy, CGEventType type,
 
 - (void)armHoldRecording:(BOOL)rewrite {
   if (self.activationMode != FDActivationModeHold) return;
-  if (rewrite) [self primeRewriteSelectionCapture];
+  if (rewrite) {
+    self.rewriteArmFired = NO;
+    [self primeRewriteSelectionCapture];
+  }
   NSUInteger generation =
       rewrite ? self.rewriteModifierGeneration : self.modifierGeneration;
-  dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 80 * NSEC_PER_MSEC),
+  int64_t delay = rewrite ? FDRewriteHoldArmDelayNanoseconds
+                          : FDDictationHoldArmDelayNanoseconds;
+  dispatch_after(dispatch_time(DISPATCH_TIME_NOW, delay),
                  dispatch_get_main_queue(), ^{
     BOOL stillDown =
         rewrite ? self.rewriteModifierDown : self.modifierDown;
@@ -954,9 +976,29 @@ static CGEventRef FDEventTapCallback(CGEventTapProxy proxy, CGEventType type,
                 : self.modifierGeneration == generation;
     BOOL featureOn = rewrite ? self.rewriteEnabled : self.enabled;
     if (featureOn && stillDown && unused && sameGeneration && !self.recording) {
+      if (rewrite) self.rewriteArmFired = YES;
       [self startRecordingAsRewrite:rewrite];
     }
   });
+}
+
+// Hold mode only: three quick taps of the rewrite shortcut, none long enough
+// to start recording, select the focused field and tidy all of it.
+- (void)registerRewriteTap {
+  if (self.rewriteArmFired) {
+    self.rewriteTapCount = 0;
+    return;
+  }
+  NSTimeInterval now = NSProcessInfo.processInfo.systemUptime;
+  if (self.rewriteTapCount > 0 &&
+      now - self.rewriteLastTapTime > FDRewriteTapGapSeconds) {
+    self.rewriteTapCount = 0;
+  }
+  self.rewriteTapCount += 1;
+  self.rewriteLastTapTime = now;
+  if (self.rewriteTapCount < 3) return;
+  self.rewriteTapCount = 0;
+  [self rewriteFocusedInput];
 }
 
 - (void)handleTriggerRelease:(BOOL)rewrite {
@@ -965,6 +1007,7 @@ static CGEventRef FDEventTapCallback(CGEventTapProxy proxy, CGEventType type,
     if (self.rewriteModifierUsedInChord) {
       self.pendingRewriteAxResolved = NO;
       self.pendingRewriteSelection = nil;
+      self.rewriteTapCount = 0;
       return;
     }
   } else {
@@ -972,10 +1015,13 @@ static CGEventRef FDEventTapCallback(CGEventTapProxy proxy, CGEventType type,
     if (self.modifierUsedInChord) return;
   }
   if (self.activationMode == FDActivationModeHold) {
-    if (self.recording && self.rewriteSession == rewrite) [self stopRecording];
-    else if (rewrite && !self.recording) {
+    if (self.recording && self.rewriteSession == rewrite) {
+      if (rewrite) self.rewriteTapCount = 0;
+      [self stopRecording];
+    } else if (rewrite && !self.recording) {
       self.pendingRewriteAxResolved = NO;
       self.pendingRewriteSelection = nil;
+      [self registerRewriteTap];
     }
     return;
   }
@@ -1110,6 +1156,8 @@ static CGEventRef FDEventTapCallback(CGEventTapProxy proxy, CGEventType type,
     return;
   }
   if (repeat) return;
+  // Typing between taps breaks a triple tap.
+  self.rewriteTapCount = 0;
   if (self.modifierDown) {
     self.modifierUsedInChord = YES;
     self.modifierGeneration += 1;
@@ -2019,7 +2067,12 @@ static BOOL FDRecordingIsReadable(NSURL *url) {
                 (unsigned long)axText.length);
     return axText;
   }
+  return [self copySelectionTargetedFirst:YES];
+}
 
+// Snapshot-and-restore Command-C. The targeted copy is tried first unless the
+// caller just posted through the HID stream and needs the copy ordered after it.
+- (NSString *)copySelectionTargetedFirst:(BOOL)targetedFirst {
   NSPasteboard *pasteboard = NSPasteboard.generalPasteboard;
   NSArray<NSPasteboardItem *> *previousItems = nil;
   @try {
@@ -2031,23 +2084,26 @@ static BOOL FDRecordingIsReadable(NSURL *url) {
   pid_t processIdentifier = self.pasteTargetApplicationProcessIdentifier > 0
       ? self.pasteTargetApplicationProcessIdentifier
       : self.pasteTargetProcessIdentifier;
-  BOOL targetedIsSelf =
-      processIdentifier == NSProcessInfo.processInfo.processIdentifier;
+  BOOL canTarget = processIdentifier > 0 &&
+      processIdentifier != NSProcessInfo.processInfo.processIdentifier;
   __block NSString *copied = nil;
+  BOOL (^copyTargeted)(void) = ^BOOL {
+    if (!canTarget || ![self postCopyShortcutToPid:processIdentifier]) return NO;
+    copied = [self readCopiedSelectionFromPasteboard:pasteboard
+                                              before:before
+                                       previousItems:previousItems];
+    if (!copied) before = pasteboard.changeCount;
+    return copied != nil;
+  };
   [self withRewriteModifierLifted:^{
-    if (processIdentifier > 0 && !targetedIsSelf) {
-      if ([self postCopyShortcutToPid:processIdentifier]) {
-        copied = [self readCopiedSelectionFromPasteboard:pasteboard
-                                                  before:before
-                                           previousItems:previousItems];
-        if (!copied) before = pasteboard.changeCount;
-      }
-    }
-    if (!copied && [self postCopyShortcut]) {
+    if (targetedFirst && copyTargeted()) return;
+    if ([self postCopyShortcut]) {
       copied = [self readCopiedSelectionFromPasteboard:pasteboard
                                                 before:before
                                          previousItems:previousItems];
+      if (!copied) before = pasteboard.changeCount;
     }
+    if (!copied && !targetedFirst) copyTargeted();
   }];
   if (copied) {
     os_log_info(FDPasteLog(), "rewrite selection from copy chars=%{public}lu",
@@ -2060,6 +2116,79 @@ static BOOL FDRecordingIsReadable(NSURL *url) {
   }
   os_log_info(FDPasteLog(), "rewrite selection capture found nothing");
   return nil;
+}
+
+- (BOOL)postSelectAllShortcut {
+  CGKeyCode keyCode = FDCharacterVirtualKeyCode((UniChar)'a', FDQwertyAKeyCode);
+  BOOL posted = [self postTaggedKey:FDLeftCommandKeyCode
+                               down:YES
+                              flags:kCGEventFlagMaskCommand
+                                pid:0];
+  usleep(FDPasteShortcutEventDelayMicros);
+  posted = [self postTaggedKey:keyCode
+                          down:YES
+                         flags:kCGEventFlagMaskCommand
+                           pid:0] && posted;
+  usleep(FDPasteShortcutEventDelayMicros);
+  posted = [self postTaggedKey:keyCode
+                          down:NO
+                         flags:kCGEventFlagMaskCommand
+                           pid:0] && posted;
+  usleep(FDPasteShortcutEventDelayMicros);
+  posted = [self postTaggedKey:FDLeftCommandKeyCode down:NO flags:0 pid:0] &&
+           posted;
+  return posted;
+}
+
+// The triple-tap action: select everything in the focused field and tidy it,
+// exactly as if the writer had selected it and held the rewrite shortcut in
+// silence. No recording is made, so nothing reaches dictation history.
+- (void)rewriteFocusedInput {
+  if (!self.rewriteEnabled || self.recording || self.stopping ||
+      self.recordingExport || self.shuttingDown) {
+    return;
+  }
+  [self dropCancelledRecording];
+  // A failed take still waiting for Retry owns the overlay, and completing a
+  // rewrite would delete its audio.
+  if (self.recordingURL &&
+      [NSFileManager.defaultManager fileExistsAtPath:self.recordingURL.path]) {
+    [self surfaceRetainedRecordingIfNeeded];
+    return;
+  }
+  if (!AXIsProcessTrusted()) {
+    FDEmit(FDEventFailed,
+           @"Accessibility access is required to rewrite text in other apps.");
+    return;
+  }
+  [self capturePasteTarget];
+  [self enableManualAccessibilityForPasteTarget];
+  if (![self postSelectAllShortcut]) {
+    FDEmit(FDEventFailed, @"FalconDeck could not select the text to rewrite.");
+    return;
+  }
+  // Command-C goes through the same HID stream as Command-A, so it is handled
+  // after the selection grows. By the time AX is consulted the copy has
+  // polled for long enough that its selection is the whole field too.
+  NSString *selection = [self copySelectionTargetedFirst:NO];
+  if (!selection) {
+    [self recapturePasteTarget];
+    selection = FDNonEmptyString(
+        FDCopySelectedTextNearElement(_pasteTargetElement, YES));
+  }
+  NSString *trimmed = [selection
+      stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet];
+  if (trimmed.length == 0) {
+    [self clearRewriteSession];
+    FDEmit(FDEventFailed, @"There is no text in the focused field to rewrite.");
+    return;
+  }
+  os_log_info(FDPasteLog(), "triple-tap rewrite chars=%{public}lu",
+              (unsigned long)selection.length);
+  self.retryCopiesTranscript = NO;
+  self.rewriteSession = YES;
+  self.rewriteSelection = selection;
+  FDEmit(FDEventQuickRewrite, selection);
 }
 
 - (void)finishActivePasteboardSessionIfOwned {

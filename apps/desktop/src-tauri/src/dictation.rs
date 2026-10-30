@@ -103,6 +103,7 @@ mod event_kind {
     pub const CLEANUP_TRANSCRIPT: i32 = 14;
     pub const PARAKEET_AUDIO_READY: i32 = 15;
     pub const UNREADABLE_RETAINED: i32 = 16;
+    pub const QUICK_REWRITE: i32 = 17;
 }
 
 #[derive(Clone, Copy, Debug, Default, Deserialize)]
@@ -1453,6 +1454,106 @@ fn emit_rewriting(app: &AppHandle) {
     );
 }
 
+/// Rewrites the held selection (or cleans up a transcript) and pastes the
+/// result. `recorded` is false for the triple-tap rewrite, which has no audio
+/// to retry or file into history.
+fn start_rewrite(app: AppHandle, instruction: String, cleanup: bool, recorded: bool) {
+    let generation = SESSION_GENERATION.load(Ordering::Acquire);
+    let selection = REWRITE_SELECTION
+        .read()
+        .ok()
+        .and_then(|guard| guard.clone())
+        .filter(|value| !value.trim().is_empty());
+    let selection = if cleanup {
+        Some(String::new())
+    } else {
+        selection
+    };
+    let Some(selection) = selection else {
+        emit_failure(
+            &app,
+            "Select text first, then hold the rewrite shortcut and say how to edit it."
+                .to_string(),
+            recorded,
+        );
+        return;
+    };
+    if !cleanup
+        || CONFIG
+            .read()
+            .is_ok_and(|config| config.auto_cleanup_enabled)
+    {
+        emit_rewriting(&app);
+    }
+    tauri::async_runtime::spawn(async move {
+        let config = match current_dictation_config() {
+            Ok(config) => config,
+            Err(error) => {
+                emit_failure(&app, error, recorded);
+                return;
+            }
+        };
+        let result = if cleanup {
+            Ok(cleanup_transcript(instruction, &config).await)
+        } else {
+            let Some(daemon_url) = config.daemon_url.clone() else {
+                emit_failure(&app, "FalconDeck is not connected.".to_string(), recorded);
+                return;
+            };
+            request_rewrite(
+                &daemon_url,
+                selection,
+                rewrite_instruction(&instruction, config.rewrite_prompt.as_deref()),
+                config.rewrite_model,
+                config.rewrite_prompt.clone(),
+                config.rewrite_reasoning,
+            )
+            .await
+        };
+        match result {
+            Ok(text) => {
+                let finish_app = app.clone();
+                let _ = app.run_on_main_thread(move || {
+                    if SESSION_GENERATION.load(Ordering::Acquire) != generation {
+                        return;
+                    }
+                    remember_transcript(&text);
+                    let pasted = match paste_dictation_transcript(&text) {
+                        Ok(pasted) => pasted,
+                        Err(error) => {
+                            emit_failure(&finish_app, error, recorded);
+                            return;
+                        }
+                    };
+                    if !pasted {
+                        if recorded {
+                            file_native_recording(Some(text.clone()), None);
+                        }
+                        emit_failure_with_transcript(
+                            &finish_app,
+                            "The text is ready, but FalconDeck could not paste it. Click Retry paste after focusing the destination, or copy it below."
+                                .to_string(),
+                            recorded,
+                            Some(text.clone()),
+                        );
+                        return;
+                    }
+                    if recorded {
+                        file_native_recording(Some(text.clone()), None);
+                    }
+                    unsafe {
+                        fd_dictation_mark_completed();
+                    }
+                    let mode = rewrite_mode();
+                    clear_rewrite_session();
+                    emit_completion(finish_app, text, mode);
+                });
+            }
+            Err(error) => emit_failure(&app, error, recorded),
+        }
+    });
+}
+
 fn notify_history_changed() {
     if let Some(app) = APP_HANDLE.get() {
         let _ = app.emit("falcondeck://dictation-history-changed", ());
@@ -1872,98 +1973,18 @@ pub extern "C" fn fd_dictation_emit(kind: i32, payload: *const std::ffi::c_char)
             REWRITE_ACTIVE.store(true, Ordering::Release);
         }
         event_kind::REWRITE_INSTRUCTION | event_kind::CLEANUP_TRANSCRIPT => {
-            let cleanup = kind == event_kind::CLEANUP_TRANSCRIPT;
-            let generation = SESSION_GENERATION.load(Ordering::Acquire);
-            let instruction = payload;
-            let selection = REWRITE_SELECTION
-                .read()
-                .ok()
-                .and_then(|guard| guard.clone())
-                .filter(|value| !value.trim().is_empty());
-            let selection = if cleanup {
-                Some(String::new())
-            } else {
-                selection
-            };
-            let Some(selection) = selection else {
-                emit_failure(
-                    &app,
-                    "Select text first, then hold the rewrite shortcut and say how to edit it."
-                        .to_string(),
-                    true,
-                );
-                return;
-            };
-            if !cleanup
-                || CONFIG
-                    .read()
-                    .is_ok_and(|config| config.auto_cleanup_enabled)
-            {
-                emit_rewriting(&app);
+            start_rewrite(app, payload, kind == event_kind::CLEANUP_TRANSCRIPT, true);
+        }
+        // Triple tap of the rewrite shortcut: the native side already selected
+        // the whole field, so tidy it as a silent rewrite with no recording.
+        event_kind::QUICK_REWRITE => {
+            RECOVERY_COPY.store(false, Ordering::Release);
+            if let Ok(mut selection) = REWRITE_SELECTION.write() {
+                *selection = Some(payload);
             }
-            tauri::async_runtime::spawn(async move {
-                let config = match current_dictation_config() {
-                    Ok(config) => config,
-                    Err(error) => {
-                        emit_failure(&app, error, true);
-                        return;
-                    }
-                };
-                let result = if cleanup {
-                    Ok(cleanup_transcript(instruction, &config).await)
-                } else {
-                    let Some(daemon_url) = config.daemon_url.clone() else {
-                        emit_failure(&app, "FalconDeck is not connected.".to_string(), true);
-                        return;
-                    };
-                    request_rewrite(
-                        &daemon_url,
-                        selection,
-                        rewrite_instruction(&instruction, config.rewrite_prompt.as_deref()),
-                        config.rewrite_model,
-                        config.rewrite_prompt.clone(),
-                        config.rewrite_reasoning,
-                    )
-                    .await
-                };
-                match result {
-                    Ok(text) => {
-                        let finish_app = app.clone();
-                        let _ = app.run_on_main_thread(move || {
-                            if SESSION_GENERATION.load(Ordering::Acquire) != generation {
-                                return;
-                            }
-                            remember_transcript(&text);
-                            let pasted = match paste_dictation_transcript(&text) {
-                                Ok(pasted) => pasted,
-                                Err(error) => {
-                                    emit_failure(&finish_app, error, true);
-                                    return;
-                                }
-                            };
-                            if !pasted {
-                                file_native_recording(Some(text.clone()), None);
-                                emit_failure_with_transcript(
-                                    &finish_app,
-                                    "The text is ready, but FalconDeck could not paste it. Click Retry paste after focusing the destination, or copy it below."
-                                        .to_string(),
-                                    true,
-                                    Some(text.clone()),
-                                );
-                                return;
-                            }
-                            file_native_recording(Some(text.clone()), None);
-                            unsafe {
-                                fd_dictation_mark_completed();
-                            }
-                            let mode = rewrite_mode();
-                            clear_rewrite_session();
-                            emit_completion(finish_app, text, mode);
-                        });
-                    }
-                    Err(error) => emit_failure(&app, error, true),
-                }
-            });
+            REWRITE_ACTIVE.store(true, Ordering::Release);
+            SESSION_GENERATION.fetch_add(1, Ordering::AcqRel);
+            start_rewrite(app, String::new(), false, false);
         }
         event_kind::AUDIO_READY | event_kind::PARAKEET_AUDIO_READY => {
             let provider = if kind == event_kind::PARAKEET_AUDIO_READY {
@@ -2254,6 +2275,7 @@ mod tests {
             ("RewriteInstruction", super::event_kind::REWRITE_INSTRUCTION),
             ("CleanupTranscript", super::event_kind::CLEANUP_TRANSCRIPT),
             ("UnreadableRetained", super::event_kind::UNREADABLE_RETAINED),
+            ("QuickRewrite", super::event_kind::QUICK_REWRITE),
             (
                 "ParakeetAudioReady",
                 super::event_kind::PARAKEET_AUDIO_READY,
