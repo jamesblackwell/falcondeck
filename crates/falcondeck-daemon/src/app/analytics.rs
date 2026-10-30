@@ -484,45 +484,162 @@ fn ack_like(message: &str) -> bool {
     words <= 3 || (words <= 20 && OPENERS.iter().any(|opener| text.starts_with(opener)))
 }
 
-/// Kind and title of a tool call that finished successfully.
-fn completed_tool(item: &ConversationItem) -> Option<(&str, &str)> {
+/// A tool call that reached a final state.
+struct FinishedTool<'a> {
+    kind: &'a str,
+    title: &'a str,
+    /// Full command when the provider supplies it; titles can be truncated.
+    command: &'a str,
+    output: &'a str,
+    /// Completed without a failing exit code.
+    ok: bool,
+}
+
+fn finished_tool(item: &ConversationItem) -> Option<FinishedTool<'_>> {
     let ConversationItem::ToolCall {
         title,
         tool_kind,
         status,
         exit_code,
+        output,
+        detail,
         ..
     } = item
     else {
         return None;
     };
-    (status.eq_ignore_ascii_case("completed") && !exit_code.is_some_and(|code| code != 0))
-        .then_some((tool_kind.as_str(), title.as_str()))
+    let completed = status.eq_ignore_ascii_case("completed");
+    if !completed && !status.eq_ignore_ascii_case("failed") && !status.eq_ignore_ascii_case("error")
+    {
+        return None;
+    }
+    let command = match detail.as_deref() {
+        Some(falcondeck_core::ToolCallDetail::CommandExecution { command, .. }) => command.as_str(),
+        _ => title.as_str(),
+    };
+    Some(FinishedTool {
+        kind: tool_kind.as_str(),
+        title: title.as_str(),
+        command,
+        output: output.as_deref().unwrap_or_default(),
+        ok: completed && !exit_code.is_some_and(|code| code != 0),
+    })
 }
 
-/// Whether a shell command runs `git commit` (not `commit-tree` or a dry run).
-fn is_git_commit(command: &str) -> bool {
-    if command.contains("--dry-run") {
+/// Splits a shell line into commands at unquoted `&&`, `||`, `;`, `|` and
+/// newlines, returning each command with the operator that follows it.
+fn shell_commands(line: &str) -> Vec<(String, Option<&'static str>)> {
+    let mut commands = Vec::new();
+    let mut current = String::new();
+    let mut quote: Option<char> = None;
+    let mut chars = line.chars().peekable();
+    while let Some(c) = chars.next() {
+        match (quote, c) {
+            (Some(open), c) if c == open => {
+                quote = None;
+                current.push(c);
+            }
+            (Some(_), c) => current.push(c),
+            (None, '\'' | '"') => {
+                quote = Some(c);
+                current.push(c);
+            }
+            (None, '&') if chars.peek() == Some(&'&') => {
+                chars.next();
+                commands.push((std::mem::take(&mut current), Some("&&")));
+            }
+            (None, '|') if chars.peek() == Some(&'|') => {
+                chars.next();
+                commands.push((std::mem::take(&mut current), Some("||")));
+            }
+            (None, '|') => commands.push((std::mem::take(&mut current), Some("|"))),
+            (None, ';' | '\n') => commands.push((std::mem::take(&mut current), Some(";"))),
+            (None, c) => current.push(c),
+        }
+    }
+    commands.push((current, None));
+    commands.retain(|(command, _)| !command.trim().is_empty());
+    commands
+}
+
+/// Whether one command (not a whole line) is `git … commit`, excluding dry runs.
+fn runs_git_commit(command: &str) -> bool {
+    let words: Vec<&str> = command
+        .split_whitespace()
+        // Leading `VAR=value` assignments are not the command.
+        .skip_while(|word| word.contains('=') && !word.starts_with('-'))
+        .collect();
+    let Some(program) = words.first() else {
+        return false;
+    };
+    if *program != "git" && !program.ends_with("/git") {
         return false;
     }
-    let words: Vec<&str> = command
-        .split(|c: char| c.is_whitespace() || matches!(c, ';' | '&' | '|' | '(' | ')'))
-        .filter(|word| !word.is_empty())
-        .collect();
-    words.iter().enumerate().any(|(index, word)| {
-        if *word != "git" && !word.ends_with("/git") {
-            return false;
-        }
-        let mut next = index + 1;
-        while let Some(option) = words.get(next) {
-            match *option {
-                "-C" | "-c" | "--git-dir" | "--work-tree" => next += 2,
-                flag if flag.starts_with('-') => next += 1,
-                subcommand => return subcommand == "commit",
+    let mut next = 1;
+    while let Some(word) = words.get(next) {
+        match *word {
+            "-C" | "-c" | "--git-dir" | "--work-tree" => next += 2,
+            flag if flag.starts_with('-') => next += 1,
+            subcommand => {
+                return subcommand == "commit" && !words.contains(&"--dry-run");
             }
         }
-        false
-    })
+    }
+    false
+}
+
+/// A line git prints for a new commit, such as `[main 1a2b3c4] Message`.
+fn is_commit_summary(line: &str) -> bool {
+    let Some(rest) = line.trim_start().strip_prefix('[') else {
+        return false;
+    };
+    let Some((inside, _)) = rest.split_once(']') else {
+        return false;
+    };
+    let words: Vec<&str> = inside.split_whitespace().collect();
+    words.len() >= 2
+        && words.last().is_some_and(|hash| {
+            (7..=40).contains(&hash.len()) && hash.chars().all(|c| c.is_ascii_hexdigit())
+        })
+}
+
+/// Commits a finished shell call made. Git's own summary lines are the evidence;
+/// a quiet commit counts only when the whole call succeeded with nothing after
+/// it that could have masked a failure (`||`).
+fn commits_made(tool: &FinishedTool) -> u64 {
+    let kind = tool.kind.to_ascii_lowercase();
+    if !["bash", "shell", "command", "exec"]
+        .iter()
+        .any(|shell| kind.contains(shell))
+    {
+        return 0;
+    }
+    let commands = shell_commands(tool.command);
+    let Some(first) = commands
+        .iter()
+        .position(|(command, _)| runs_git_commit(command))
+    else {
+        return 0;
+    };
+    let confirmed = tool
+        .output
+        .lines()
+        .filter(|line| is_commit_summary(line))
+        .count() as u64;
+    if confirmed > 0 {
+        return confirmed;
+    }
+    let masked = commands[first..]
+        .iter()
+        .any(|(_, operator)| *operator == Some("||"));
+    if tool.ok && !masked {
+        commands
+            .iter()
+            .filter(|(command, _)| runs_git_commit(command))
+            .count() as u64
+    } else {
+        0
+    }
 }
 
 fn excerpt(text: &str) -> String {
@@ -1066,31 +1183,37 @@ impl AppState {
         previous: &ConversationItem,
         item: &ConversationItem,
     ) {
-        if completed_tool(previous).is_none() {
+        if finished_tool(previous).is_none() {
             self.analytics_tool(thread, item);
         }
     }
 
     /// File writes and commits from a tool call that finished successfully.
     fn analytics_tool(&self, thread: &ManagedThread, item: &ConversationItem) {
-        let Some((kind, title)) = completed_tool(item) else {
+        let Some(tool) = finished_tool(item) else {
             return;
         };
         let th = thread.summary.id.clone();
-        if EDIT_TOOLS.contains(&kind) {
-            let path = title.strip_prefix(kind).map(str::trim).unwrap_or_default();
-            if !path.is_empty() {
+        if EDIT_TOOLS.contains(&tool.kind) {
+            let path = tool
+                .title
+                .strip_prefix(tool.kind)
+                .map(str::trim)
+                .unwrap_or_default();
+            if tool.ok && !path.is_empty() {
                 self.analytics().record(Record::File {
                     t: Utc::now(),
                     th,
                     path: path.to_string(),
                 });
             }
-        } else if is_git_commit(title) {
+            return;
+        }
+        for _ in 0..commits_made(&tool) {
             self.analytics().record(Record::Commit {
                 t: Utc::now(),
                 ws: thread.summary.workspace_id.clone(),
-                th,
+                th: th.clone(),
             });
         }
     }
@@ -1328,24 +1451,51 @@ mod tests {
         ));
     }
 
+    fn shell(command: &str, output: &str, ok: bool) -> u64 {
+        commits_made(&FinishedTool {
+            kind: "Bash",
+            title: command,
+            command,
+            output,
+            ok,
+        })
+    }
+
     #[test]
-    fn git_commit_detection_ignores_plumbing_and_dry_runs() {
-        for yes in [
-            "git commit -m 'Fix'",
-            "cd /repo && git commit -q -m x -- a.rs",
-            "git -C /tmp/wt commit -m x",
-            "/usr/bin/git commit --amend --no-edit",
-        ] {
-            assert!(is_git_commit(yes), "{yes}");
-        }
-        for no in [
-            "git commit-tree abc -p def -m x",
-            "git commit --dry-run",
-            "git status && echo commit",
-            "git log --grep commit",
-        ] {
-            assert!(!is_git_commit(no), "{no}");
-        }
+    fn commits_count_only_when_git_commit_runs_and_succeeds() {
+        let made = "[main 1a2b3c4] Fix the thing\n 1 file changed";
+        // Git's summary line is the evidence, even if a later command fails.
+        assert_eq!(shell("git commit -m fix && git push", made, false), 1);
+        assert_eq!(shell("cd /repo && git -C . commit -m fix", made, true), 1);
+        assert_eq!(
+            shell(
+                "/usr/bin/git commit --amend --no-edit",
+                "[detached HEAD 9f8e7d6] x",
+                true
+            ),
+            1
+        );
+        // Quiet commits count only when nothing could have masked a failure.
+        assert_eq!(shell("git add a && git commit -q -m x", "", true), 1);
+        assert_eq!(shell("git commit -q -m x || true", "", true), 0);
+        assert_eq!(shell("git commit -m x", "nothing to commit", false), 0);
+        // Text that merely mentions a commit runs none.
+        assert_eq!(shell("echo please run git commit", made, true), 0);
+        assert_eq!(shell("echo 'git commit -m x' > notes.txt", made, true), 0);
+        assert_eq!(shell("git commit-tree abc -p def -m x", "abc1234", true), 0);
+        assert_eq!(shell("git commit --dry-run", "", true), 0);
+        assert_eq!(shell("git log --grep commit", made, true), 0);
+        // Not a shell tool.
+        assert_eq!(
+            commits_made(&FinishedTool {
+                kind: "WebSearch",
+                title: "git commit",
+                command: "git commit",
+                output: made,
+                ok: true,
+            }),
+            0
+        );
     }
 
     #[test]
