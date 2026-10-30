@@ -4,6 +4,34 @@ import { describe, expect, it } from "vitest";
 import { MessageCard } from "@falcondeck/chat-ui";
 
 describe("service output severity", () => {
+  it("summarizes HTML server failures and reveals the response as inert text", () => {
+    const raw = 'openai-api-credit-promo failed to start: Send message error Transport [codex_mcp_client::worker] error: unexpected server response: HTTP 403: <html><head><style>.logo{color:red}</style></head><body><svg><path d="M0 0"/></svg><script>challenge()</script></body></html>, when send initialize request';
+    const { container } = render(
+      <MessageCard
+        item={{
+          kind: "service",
+          id: "html-response",
+          level: "warning",
+          message: raw,
+          created_at: "2026-08-09T10:00:00Z",
+        }}
+      />,
+    );
+
+    expect(screen.getByRole("alert")).toHaveTextContent(
+      "openai-api-credit-promo failed to start: Server returned HTTP 403 with an HTML page instead of the expected response.",
+    );
+    expect(screen.queryByText(raw)).toBeNull();
+    expect(
+      screen.getByText("Technical details").closest("details"),
+    ).not.toHaveAttribute("open");
+
+    fireEvent.click(screen.getByText("Technical details"));
+
+    expect(container.querySelector("pre code")).toHaveTextContent(raw);
+    expect(container.querySelector('script, style, svg path[d="M0 0"]')).toBeNull();
+  });
+
   it("renders friendly skill-icon warning copy with expandable raw detail", () => {
     const raw = JSON.stringify({
       level: "WARN",

@@ -3,7 +3,7 @@ import type { ServiceLevel } from './types'
 export type ServiceMessagePresentation = {
   message: string
   rawDetail: string | null
-  classification: 'codex_skill_icon_invalid' | null
+  classification: 'codex_skill_icon_invalid' | 'http_html_response' | null
 }
 
 const INVALID_SKILL_ICON_MESSAGE =
@@ -66,6 +66,20 @@ function parsedDiagnostic(raw: string): { target?: unknown; level?: unknown; fie
   }
 }
 
+function htmlHttpResponseSummary(message: string): string | null {
+  // HTTP error bodies can contain a whole challenge page, including SVG and scripts.
+  // Only inspect the transport prefix; page content is technical detail, not UI copy.
+  const documentStart = message.search(/<(?:!doctype\s+html|html|head|body)\b/i)
+  if (documentStart < 0) return null
+  const prefix = message.slice(0, documentStart)
+  const status = prefix.match(/\bHTTP(?:\/\d+(?:\.\d+)?)?\s+([1-5]\d{2})\b/i)?.[1]
+  if (!status) return null
+
+  const startup = prefix.match(/^\s*(\S+ failed to start:)/)?.[1]
+  const summary = `Server returned HTTP ${status} with an HTML page instead of the expected response.`
+  return startup ? `${startup} ${summary}` : summary
+}
+
 /** Converts known provider diagnostics to user copy while retaining the exact input for inspection. */
 export function serviceMessagePresentation(
   level: ServiceLevel,
@@ -79,6 +93,15 @@ export function serviceMessagePresentation(
     : prettyDiagnostic?.message ?? ''
   const readableDiagnostic = diagnosticMessage || normalizedMessage
   const rawDetail = readableDiagnostic !== rawMessage ? rawMessage : null
+
+  const httpSummary = htmlHttpResponseSummary(readableDiagnostic)
+  if (httpSummary) {
+    return {
+      message: httpSummary,
+      rawDetail: rawMessage,
+      classification: 'http_html_response',
+    }
+  }
 
   if (level !== 'warning') {
     return {

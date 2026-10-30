@@ -5,6 +5,40 @@ import { describe, expect, it, vi } from "vitest";
 import { OperationalNotice } from "@falcondeck/chat-ui";
 
 describe("operational conversation status", () => {
+  it("summarizes HTML server failures and reveals the response as inert text", () => {
+    const raw = 'openai-api-credit-promo failed to start: Send message error Transport [codex_mcp_client::worker] error: unexpected server response: HTTP 403: <html><head><style>.logo{color:red}</style></head><body><svg><path d="M0 0"/></svg><script>challenge()</script></body></html>, when send initialize request';
+    const { container } = render(
+      <OperationalNotice
+        conditions={[
+          {
+            id: "html-response",
+            key: "mcp_startup:openai-api-credit-promo",
+            workspace_id: "workspace-1",
+            level: "warning",
+            message: raw,
+            source: "mcpServer/startupStatus/updated",
+            created_at: "2026-08-09T10:00:00Z",
+            updated_at: "2026-08-09T10:00:00Z",
+          },
+        ]}
+        onDismiss={() => {}}
+      />,
+    );
+
+    expect(screen.getByRole("status")).toHaveTextContent(
+      "openai-api-credit-promo failed to start: Server returned HTTP 403 with an HTML page instead of the expected response.",
+    );
+    expect(screen.queryByText(raw)).toBeNull();
+    expect(
+      screen.getByText("Technical details").closest("details"),
+    ).not.toHaveAttribute("open");
+
+    fireEvent.click(screen.getByText("Technical details"));
+
+    expect(container.querySelector("pre code")).toHaveTextContent(raw);
+    expect(container.querySelector('script, style, svg path[d="M0 0"]')).toBeNull();
+  });
+
   it("summarizes invalid skill icons and keeps the raw diagnostic expandable", () => {
     const raw = JSON.stringify({
       level: "WARN",
