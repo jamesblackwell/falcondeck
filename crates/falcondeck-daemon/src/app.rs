@@ -4123,12 +4123,12 @@ impl AppState {
         let mut persisted_workspaces = HashMap::new();
         for workspace in saved_workspaces.into_values() {
             let mut normalized_workspace = workspace;
-            normalized_workspace.path = normalize_workspace_path(&normalized_workspace.path);
+            normalized_workspace.path = normalize_workspace_path_cached(&normalized_workspace.path);
             persisted_workspaces.insert(normalized_workspace.path.clone(), normalized_workspace);
         }
         let workspaces = self.inner.workspaces.lock().await;
         for workspace in workspaces.values() {
-            let normalized_path = normalize_workspace_path(&workspace.summary.path);
+            let normalized_path = normalize_workspace_path_cached(&workspace.summary.path);
             let archived_thread_ids = workspace
                 .threads
                 .values()

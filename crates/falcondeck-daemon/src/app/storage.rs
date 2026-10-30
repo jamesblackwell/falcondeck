@@ -87,6 +87,27 @@ pub(super) fn normalize_workspace_path(path: &str) -> String {
         .to_string()
 }
 
+/// `normalize_workspace_path` memoized for the persist loop. Persisting runs
+/// every few seconds under the workspace lock, and canonicalize is one
+/// filesystem call per path component; under disk pressure those stalled
+/// every remote RPC for minutes. Failed lookups are not cached.
+pub(super) fn normalize_workspace_path_cached(path: &str) -> String {
+    static CACHE: OnceLock<std::sync::Mutex<std::collections::HashMap<String, String>>> =
+        OnceLock::new();
+    let cache = CACHE.get_or_init(Default::default);
+    if let Some(hit) = cache.lock().ok().and_then(|cache| cache.get(path).cloned()) {
+        return hit;
+    }
+    let Ok(canonical) = PathBuf::from(path).canonicalize() else {
+        return path.to_string();
+    };
+    let canonical = canonical.to_string_lossy().to_string();
+    if let Ok(mut cache) = cache.lock() {
+        cache.insert(path.to_string(), canonical.clone());
+    }
+    canonical
+}
+
 pub(super) fn deserialize_persisted_workspaces<'de, D>(
     deserializer: D,
 ) -> Result<Vec<PersistedWorkspaceState>, D::Error>
