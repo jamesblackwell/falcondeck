@@ -648,7 +648,8 @@ fn quiet_since(
 ) -> bool {
     no_action_finished
         .get(&thread.id)
-        .is_some_and(|finished| thread.updated_at <= *finished + chrono::Duration::seconds(60))
+        // Any later update (such as the user continuing it) keeps it visible.
+        .is_some_and(|finished| thread.updated_at <= *finished)
 }
 
 async fn archive_settled_run_threads(
@@ -768,7 +769,7 @@ mod tests {
         ];
         let finished = "2026-10-30T08:00:00Z".parse().unwrap();
         let mut continued = run_thread("continued-after-quiet-run", "a", true);
-        continued.updated_at = "2026-10-30T09:00:00Z".parse().unwrap();
+        continued.updated_at = "2026-10-30T08:00:30Z".parse().unwrap();
         let mut threads = threads;
         threads.push(continued);
         let no_action = [

@@ -376,7 +376,9 @@ pub fn validate_agent_frequency(
         AutomationTrigger::Cron { .. } => {
             // Scan a week of occurrences (stopping at the first short gap), so
             // irregular expressions can't hide a short gap later in the day.
-            let horizon = now + chrono::Duration::days(8);
+            // A week from the first occurrence, so sparse schedules still get
+            // their neighbouring runs compared.
+            let mut horizon: Option<DateTime<Utc>> = None;
             let mut at = now;
             let mut shortest = i64::MAX;
             let mut previous: Option<DateTime<Utc>> = None;
@@ -387,6 +389,7 @@ pub fn validate_agent_frequency(
                 if let Some(previous) = previous {
                     shortest = shortest.min((next.at - previous).num_seconds());
                 }
+                let horizon = *horizon.get_or_insert(next.at + chrono::Duration::days(8));
                 if shortest < MIN_AGENT_REPEAT_SECONDS || next.at > horizon {
                     break;
                 }
@@ -1224,6 +1227,9 @@ mod tests {
         assert!(validate_agent_frequency(&cron("0 9 * * 1"), now).is_ok());
         // A short gap late in an irregular day is still caught.
         assert!(validate_agent_frequency(&cron("0,40 0,2,4,6,8,9 * * *"), now).is_err());
+        // Sparse schedules still have neighbouring runs compared.
+        assert!(validate_agent_frequency(&cron("0,20 0 1 * *"), now).is_err());
+        assert!(validate_agent_frequency(&cron("0 0 1 * *"), now).is_ok());
         let soon = AutomationTrigger::Once {
             run_at: now + chrono::Duration::minutes(5),
         };
