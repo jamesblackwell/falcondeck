@@ -13,6 +13,7 @@ import type {
   AnalyticsSettings,
   AnalyticsStatus,
   AnalyticsSummary,
+  AnalyticsThreadActivity,
   AgentProvider,
   CollaborationModeSummary,
   CreateScheduledTaskPayload,
@@ -641,6 +642,9 @@ export function createDaemonApiClient(baseUrl: string) {
     },
     async analyticsSummary(days: number) {
       return parseJson<AnalyticsSummary>(await fetch(`${baseUrl}/api/analytics/summary?${new URLSearchParams({ days: String(days) })}`));
+    },
+    async analyticsThread(id: string, days = 2) {
+      return parseJson<AnalyticsThreadActivity>(await fetch(`${baseUrl}/api/analytics/thread?${new URLSearchParams({ id, days: String(days) })}`));
     },
     async analyticsPrompts(query?: string, limit = 100) {
       const params = new URLSearchParams({ limit: String(limit) });

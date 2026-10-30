@@ -336,7 +336,7 @@ pub(super) async fn list(
                     && since.is_none_or(|since| t.updated_at >= since)
                     && before.is_none_or(|before| t.updated_at < before)
                     && parent.as_deref().is_none_or(|parent| {
-                        matches!(&t.origin, Some(ThreadOrigin::AgentSpawn { parent_thread_id }) if parent_thread_id == parent)
+                        matches!(&t.origin, Some(ThreadOrigin::AgentSpawn { parent_thread_id, .. }) if parent_thread_id == parent)
                     })
                     && folder_filter
                         .as_deref()
@@ -627,6 +627,7 @@ mod tests {
             5 => {
                 t.origin = Some(ThreadOrigin::AgentSpawn {
                     parent_thread_id: "thread-1".into(),
+                    dispatched_at: None,
                 })
             }
             _ => t.updated_at = Utc::now() - Duration::days(3),

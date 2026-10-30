@@ -4303,6 +4303,9 @@ pub enum ThreadOrigin {
     AgentSpawn {
         /// Calling FalconDeck thread.
         parent_thread_id: String,
+        /// Dispatch time, independent of later task activity. Older origins omit it.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        dispatched_at: Option<DateTime<Utc>>,
     },
     /// A daemon-owned scheduled task created the thread for one invocation.
     ScheduledTask {

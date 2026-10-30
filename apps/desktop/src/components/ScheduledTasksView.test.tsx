@@ -68,6 +68,7 @@ function setup(
   hosts: HostView[] = [],
   onOpenExtensionOwner = vi.fn(),
   localSnapshot = snapshot,
+  openAutomationRequest: { id: string; key: number } | null = null,
 ) {
   const runScheduledTask = vi.fn().mockResolvedValue({});
   const createScheduledTask = vi.fn().mockResolvedValue({});
@@ -103,6 +104,7 @@ function setup(
   const onToast = vi.fn();
   render(
     <ScheduledTasksView
+      openAutomationRequest={openAutomationRequest}
       localSnapshot={localSnapshot}
       localApi={localApi}
       localBaseUrl="http://daemon.test"
@@ -171,6 +173,16 @@ const multipleProjects = {
 } as DaemonSnapshot;
 
 describe("ScheduledTasksView", () => {
+  it("opens an automation requested by the bot sidebar in the existing editor", async () => {
+    const controlGet = vi.fn().mockImplementation(async (request) => ({ data:
+      request.resource === "automations" ? [conversationalAutomation] :
+      request.resource === "automation" ? { ...conversationalAutomation, task: { kind: "prompt", instruction: "Check the priorities" } } : {},
+    }));
+    setup({ controlGet }, null, [], vi.fn(), snapshot, { id: conversationalAutomation.id, key: 1 });
+    expect(await screen.findByRole("dialog", { name: `Edit ${conversationalAutomation.name}` })).toBeInTheDocument();
+    expect(controlGet).toHaveBeenCalledWith({ resource: "automation", id: conversationalAutomation.id });
+  });
+
   it("converts one-time wall clocks using the selected IANA timezone", () => {
     expect(wallTimeToUtc("2026-08-13T09:00", "Europe/London")).toBe(
       "2026-08-13T08:00:00.000Z",

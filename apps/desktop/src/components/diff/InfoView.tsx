@@ -18,7 +18,9 @@ import type {
 } from "@falcondeck/client-core";
 import { ActivityDiamond, Badge, CopyButton } from "@falcondeck/ui";
 
+import { BotInfo, type BotInfoContext } from "./BotInfo";
 import { FileTypeIcon } from "./FileTypeIcon";
+import { ThreadActivity, type ThreadActivityContext } from "./ThreadActivity";
 import {
   basePart,
   dirPart,
@@ -38,6 +40,8 @@ export type ReviewInfoContext = {
   hostName: string | null;
   hostConnected?: boolean;
   thread: ThreadSummary | null;
+  activity?: ThreadActivityContext;
+  botInfo?: BotInfoContext;
 };
 
 export type InfoViewProps = {
@@ -173,8 +177,8 @@ export const InfoView = memo(function InfoView({
   const hiddenCount = entries.length - visibleEntries.length;
   const isCasualChat = info.workspaceKind === "casual";
 
-  return (
-    <div className="pb-4 pt-3">
+  const overview = (
+    <>
       {origin ? (
         <Row
           icon={<Waypoints aria-hidden="true" className="h-3.5 w-3.5" />}
@@ -258,6 +262,10 @@ export const InfoView = memo(function InfoView({
         </Row>
       ) : null}
 
+    </>
+  );
+  const changes = (
+    <>
       {!isCasualChat ? (
         <div className="mt-3 border-t border-border-subtle pt-3">
           {isNotRepositoryError(error) ? (
@@ -358,6 +366,19 @@ export const InfoView = memo(function InfoView({
           )}
         </div>
       ) : null}
+    </>
+  );
+  const bot = info.activity?.bots.find((candidate) => candidate.thread_id === info.thread?.id);
+  if (bot && info.thread && info.activity && info.botInfo) {
+    return <BotInfo key={bot.id} bot={bot} thread={info.thread} activity={info.activity} context={info.botInfo}>
+      {overview}{changes}
+    </BotInfo>;
+  }
+  return (
+    <div className="pb-4 pt-3">
+      {overview}
+      {info.thread && info.activity ? <ThreadActivity key={info.thread.id} thread={info.thread} context={info.activity} /> : null}
+      {changes}
     </div>
   );
 });

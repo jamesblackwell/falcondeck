@@ -118,15 +118,13 @@ impl AppState {
             .values()
             .flat_map(|ws| ws.threads.values())
             .filter_map(|t| match &t.summary.origin {
-                Some(falcondeck_core::ThreadOrigin::AgentSpawn { parent_thread_id })
-                    if parents.contains(parent_thread_id) && !t.summary.is_archived =>
-                {
-                    Some((
-                        t.summary.workspace_id.clone(),
-                        t.summary.id.clone(),
-                        parent_thread_id.clone(),
-                    ))
-                }
+                Some(falcondeck_core::ThreadOrigin::AgentSpawn {
+                    parent_thread_id, ..
+                }) if parents.contains(parent_thread_id) && !t.summary.is_archived => Some((
+                    t.summary.workspace_id.clone(),
+                    t.summary.id.clone(),
+                    parent_thread_id.clone(),
+                )),
                 _ => None,
             })
             .collect();
@@ -326,7 +324,7 @@ impl AppState {
                 }
                 let threads: Vec<_> = self.inner.workspaces.lock().await.values().flat_map(|ws| ws.threads.values())
                     .filter(|t| t.summary.id == bot.thread_id || matches!(&t.summary.origin,
-                        Some(falcondeck_core::ThreadOrigin::AgentSpawn {parent_thread_id}) if parent_thread_id == &bot.thread_id))
+                        Some(falcondeck_core::ThreadOrigin::AgentSpawn { parent_thread_id, .. }) if parent_thread_id == &bot.thread_id))
                     .map(|t| t.summary.clone()).collect();
                 for thread in threads {
                     for queued in &thread.queued_turns {
@@ -348,7 +346,7 @@ impl AppState {
                     .thread_summary(&bot.workspace_id, &bot.thread_id)
                     .await?;
                 let workers_busy = self.inner.workspaces.lock().await.values().flat_map(|ws| ws.threads.values()).any(|t|
-                    matches!(&t.summary.origin, Some(falcondeck_core::ThreadOrigin::AgentSpawn { parent_thread_id }) if parent_thread_id == &bot.thread_id)
+                    matches!(&t.summary.origin, Some(falcondeck_core::ThreadOrigin::AgentSpawn { parent_thread_id, .. }) if parent_thread_id == &bot.thread_id)
                     && (matches!(t.summary.status, ThreadStatus::Running | ThreadStatus::WaitingForInput) || !t.summary.queued_turns.is_empty()));
                 if matches!(
                     summary.status,
@@ -400,10 +398,16 @@ impl AppState {
             let mut file = open_document(&path, false, false)?;
             let content = read_document(&mut file)?;
             let version = document_version(&content);
+            let modified_at = file
+                .metadata()
+                .and_then(|meta| meta.modified())
+                .ok()
+                .map(chrono::DateTime::<Utc>::from);
             Ok(BotDocument {
                 name,
                 content,
                 version,
+                modified_at,
             })
         })
         .await

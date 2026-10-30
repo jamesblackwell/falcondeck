@@ -53,6 +53,16 @@ facts about code in their project's own docs. Each layer has one job: tasks
 hold the work and its history, status holds the present, memory holds what
 stays true.
 
+The desktop Info sidebar shows a bot's name and mark, then its rendered
+`STATUS.md` (about twelve lines until expanded). The document API includes
+`modified_at` so the sidebar can flag status older than a day. Below it are
+recent dispatches and messages, open tickets owned by the bot, and schedule
+cards targeting its home or directly dispatched tasks. Schedule switches use
+the read revision and retry one stale-revision conflict. Selecting a card opens
+the existing automation editor. Environment and checkout rows sit in collapsed
+Details. Ordinary tasks retain their existing Info layout plus recent activity.
+Reads follow task updates, coalesced while streaming; there is no idle polling.
+
 Every turn's context lists the other bots by name with the path of their
 `STATUS.md`, so bots read each other's status instead of asking for updates.
 Bots and tasks message each other only for decisions, blockers, review

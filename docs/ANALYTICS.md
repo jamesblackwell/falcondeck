@@ -84,4 +84,13 @@ paired remote clients are refused, like the rest of analytics.
   agent messages, files (with days written by more than one thread), per-bot and
   per-provider turns, user messages per project.
 - `GET /api/analytics/prompts?query=&limit=`: the user's messages, newest first.
+- `GET /api/analytics/thread?id=<thread_id>&days=2`: inbound and outbound agent
+  messages for one task over a rolling window (1–366 days), newest first, with
+  sender/receiver ids, delivery mode and stored excerpts. Returns
+  `{ messages, dispatches, analytics_enabled }`; messages are empty when analytics
+  is off. Delegation timestamps fill in older spawn origins that predate the
+  snapshot's optional `dispatched_at`; new dispatches keep their timestamp in
+  the origin even with analytics off. Origins with no known dispatch time are
+  omitted from the recent list rather than using their last activity time.
+  Used by the desktop Info sidebar; local HTTP only, never a remote RPC.
 - `POST /api/analytics/clear` with `{"target": "prompts" | "events" | "all"}`.

@@ -493,6 +493,8 @@ function AppInner() {
   const resumePromptSettledRef = useRef(false);
   const [isTicketsOpen, setIsTicketsOpen] = useState(false);
   const [isScheduledOpen, setIsScheduledOpen] = useState(false);
+  const [automationOpenRequest, setAutomationOpenRequest] = useState<{ id: string; key: number } | null>(null);
+  const automationOpenKey = useRef(0);
   const [isActivityOpen, setIsActivityOpen] = useState(false);
   const [isTerminalOpen, setIsTerminalOpen] = useState(false);
   const [terminalMounted, setTerminalMounted] = useState(false);
@@ -1342,19 +1344,6 @@ function AppInner() {
     selectedThreadId,
     viewSnapshot?.extensions,
   ]);
-  // Where the selected thread's work lands, for the review rail's overview
-  // tab. Without a project there is nothing to describe, so the tab hides.
-  const reviewInfo = useMemo(() => {
-    if (!selectedWorkspace) return null;
-    const host = workspaceHostBadges[selectedWorkspace.id] ?? null;
-    return {
-      workspacePath: selectedWorkspace.path,
-      workspaceKind: selectedWorkspace.kind,
-      hostName: host?.name ?? null,
-      hostConnected: host?.connected,
-      thread: selectedThread,
-    };
-  }, [selectedThread, selectedWorkspace, workspaceHostBadges]);
   // Checkouts happen outside the daemon's event stream, so the app keeps its
   // own bump to refresh the changes rail after a branch switch.
   const [localGitBump, setLocalGitBump] = useState(0);
@@ -4102,6 +4091,41 @@ function AppInner() {
     setActiveExtensionPanelKey(null);
   }, []);
 
+  const handleOpenAutomation = useCallback((id: string) => {
+    handleOpenScheduled();
+    setAutomationOpenRequest({ id, key: ++automationOpenKey.current });
+  }, [handleOpenScheduled]);
+
+  const handleAutomationRequestHandled = useCallback((key: number) => {
+    setAutomationOpenRequest((current) => current?.key === key ? null : current);
+  }, []);
+
+  // Where the selected thread's work lands, for the review rail's overview
+  // tab. Without a project there is nothing to describe, so the tab hides.
+  const reviewInfo = useMemo(() => {
+    if (!selectedWorkspace) return null;
+    const host = workspaceHostBadges[selectedWorkspace.id] ?? null;
+    return {
+      workspacePath: selectedWorkspace.path,
+      workspaceKind: selectedWorkspace.kind,
+      hostName: host?.name ?? null,
+      hostConnected: host?.connected,
+      thread: selectedThread,
+      botInfo: !isRemoteWorkspaceSelected && api ? {
+        api,
+        onOpenTickets: handleOpenTickets,
+        onOpenAutomation: handleOpenAutomation,
+        onError: (title: string, description: string) => toast({ title, description, variant: "danger" }),
+      } : undefined,
+      activity: !isRemoteWorkspaceSelected && api ? {
+        threads: snapshot?.threads ?? [],
+        bots: snapshot?.preferences.bots ?? [],
+        loadMessages: api.analyticsThread,
+        onSelectThread: handleSelectThread,
+      } : undefined,
+    };
+  }, [api, handleOpenAutomation, handleOpenTickets, handleSelectThread, toast, isRemoteWorkspaceSelected, selectedThread, selectedWorkspace, snapshot?.preferences.bots, snapshot?.threads, workspaceHostBadges]);
+
   // Activity is a sidebar mode: the inbox replaces the project list and the
   // main pane stays the reading pane for whichever task is selected.
   const handleShowActivity = useCallback(() => {
@@ -6241,6 +6265,8 @@ function AppInner() {
               "core.scheduled": (
                 <Suspense fallback={loadingThreadState}>
                   <ScheduledTasksView
+                    openAutomationRequest={automationOpenRequest}
+                    onAutomationRequestHandled={handleAutomationRequestHandled}
                     localSnapshot={snapshot}
                     localApi={api as HostScopedApi | null}
                     localBaseUrl={baseUrl}

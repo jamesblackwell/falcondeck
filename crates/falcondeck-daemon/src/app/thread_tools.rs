@@ -202,7 +202,7 @@ fn response(markdown: String) -> ExtensionToolResponse {
     }
 }
 fn child_is_active(thread: &ThreadSummary, parent: &str) -> bool {
-    matches!(&thread.origin, Some(ThreadOrigin::AgentSpawn { parent_thread_id }) if parent_thread_id == parent)
+    matches!(&thread.origin, Some(ThreadOrigin::AgentSpawn { parent_thread_id, .. }) if parent_thread_id == parent)
         && (matches!(
             thread.status,
             ThreadStatus::Running | ThreadStatus::WaitingForInput
@@ -293,7 +293,7 @@ impl AppState {
                     if name == MESSAGE
                         && (self.bot_for_thread(target).await.is_some()
                             || matches!(&parent_summary.origin,
-                                Some(ThreadOrigin::AgentSpawn { parent_thread_id }) if parent_thread_id == target)) =>
+                                Some(ThreadOrigin::AgentSpawn { parent_thread_id, .. }) if parent_thread_id == target)) =>
                 {
                     Some(self.thread_workspace(target).await?)
                 }
@@ -519,6 +519,7 @@ impl AppState {
                 self.with_thread_mut(&workspace, &id, |thread| {
                     thread.origin = Some(ThreadOrigin::AgentSpawn {
                         parent_thread_id: parent.into(),
+                        dispatched_at: Some(Utc::now()),
                     });
                     thread.agent.reasoning_effort = a.reasoning_effort;
                 })
@@ -1686,12 +1687,11 @@ mod tests {
         assert!(child.summary.handoff_from.is_none());
         assert_eq!(child.summary.agent.model_id.as_deref(), Some("test-model"));
         assert_eq!(child.summary.workspace_id, "workspace-1");
-        assert_eq!(
-            child.summary.origin,
-            Some(ThreadOrigin::AgentSpawn {
-                parent_thread_id: "thread-1".into()
-            })
-        );
+        assert!(matches!(
+            &child.summary.origin,
+            Some(ThreadOrigin::AgentSpawn { parent_thread_id, dispatched_at: Some(_) })
+                if parent_thread_id == "thread-1"
+        ));
         drop(workspaces);
         let persisted = std::fs::read_to_string(temp.path().join("daemon-state.json")).unwrap();
         assert!(persisted.contains("agent_spawn"));

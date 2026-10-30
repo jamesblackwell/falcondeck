@@ -484,7 +484,7 @@ export type BotMutation =
   | { action: "reorder"; ids: string[] }
   | { action: "stop" | "delete"; id: string };
 
-export type BotDocument = { name: string; content: string; version: string };
+export type BotDocument = { name: string; content: string; version: string; modified_at?: string | null };
 export type BotDocumentMutation =
   | { action: "write"; name: string; content: string; expected_version?: string | null }
   | { action: "delete"; name: string; expected_version: string };
@@ -542,6 +542,19 @@ export type AnalyticsAgentMessage = {
   to_title: string;
   chars: number;
   ack_like: boolean;
+  excerpt: string;
+};
+/** Local HTTP only. Never included in snapshots or remote RPC. */
+export type AnalyticsThreadActivity = {
+  messages: AnalyticsThreadMessage[];
+  dispatches: { thread_id: string; at: string }[];
+  analytics_enabled: boolean;
+};
+export type AnalyticsThreadMessage = {
+  at: string;
+  from: string;
+  to: string;
+  delivery: string;
   excerpt: string;
 };
 export type AnalyticsFile = { path: string; writes: number; threads: number; contested_days: number };
@@ -973,7 +986,7 @@ export type ThreadSummary = {
   /** Source thread when this thread is a cross-provider continuation. */
   handoff_from?: ThreadHandoffSource | null;
   origin?:
-    | { kind: "agent_spawn"; parent_thread_id: string }
+    | { kind: "agent_spawn"; parent_thread_id: string; dispatched_at?: string | null }
     | { kind: "scheduled_task"; task_id: string; title: string }
     | { kind: "automation"; automation_id: string; name: string }
     | null;

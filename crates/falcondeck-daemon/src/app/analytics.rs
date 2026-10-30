@@ -11,7 +11,8 @@ use falcondeck_core::control::AUTOMATION_MESSAGE_PREFIX;
 use falcondeck_core::{
     AnalyticsAgentMessage, AnalyticsAgentPair, AnalyticsAutomation, AnalyticsBot,
     AnalyticsClearTarget, AnalyticsDay, AnalyticsFile, AnalyticsProject, AnalyticsPrompt,
-    AnalyticsProvider, AnalyticsSettings, AnalyticsStatus, AnalyticsSummary, AnalyticsTotals,
+    AnalyticsProvider, AnalyticsSettings, AnalyticsStatus, AnalyticsSummary,
+    AnalyticsThreadActivity, AnalyticsThreadDispatch, AnalyticsThreadMessage, AnalyticsTotals,
     AnalyticsTriggers, AnalyticsWaiting,
 };
 use serde::{Deserialize, Serialize};
@@ -697,6 +698,50 @@ fn record_time(record: &Record) -> DateTime<Utc> {
         | Record::Wait { t, .. }
         | Record::Commit { t, .. } => *t,
     }
+}
+
+fn thread_activity(
+    dir: &Path,
+    thread_id: &str,
+    since: DateTime<Utc>,
+    until: DateTime<Utc>,
+    analytics_enabled: bool,
+) -> AnalyticsThreadActivity {
+    let mut activity = AnalyticsThreadActivity {
+        messages: Vec::new(),
+        dispatches: Vec::new(),
+        analytics_enabled,
+    };
+    for record in read_records(dir, since) {
+        if record_time(&record) > until {
+            continue;
+        }
+        match record {
+            Record::Agent {
+                t, from, to, d, x, ..
+            } if analytics_enabled && (from == thread_id || to == thread_id) => {
+                activity.messages.push(AnalyticsThreadMessage {
+                    at: t,
+                    from,
+                    to,
+                    delivery: d,
+                    excerpt: x,
+                });
+            }
+            Record::Delegate {
+                t, parent, child, ..
+            } if parent == thread_id => {
+                activity.dispatches.push(AnalyticsThreadDispatch {
+                    at: t,
+                    thread_id: child,
+                });
+            }
+            _ => {}
+        }
+    }
+    activity.messages.sort_by(|a, b| b.at.cmp(&a.at));
+    activity.dispatches.sort_by(|a, b| b.at.cmp(&a.at));
+    activity
 }
 
 /// Current names for threads, bots and projects, used to label stored ids.
@@ -1432,8 +1477,9 @@ impl AppState {
                     thread.summary.id.clone(),
                     thread.summary.provider.to_string(),
                 );
-                if let Some(falcondeck_core::ThreadOrigin::AgentSpawn { parent_thread_id }) =
-                    &thread.summary.origin
+                if let Some(falcondeck_core::ThreadOrigin::AgentSpawn {
+                    parent_thread_id, ..
+                }) = &thread.summary.origin
                 {
                     parents.insert(thread.summary.id.clone(), parent_thread_id.clone());
                 }
@@ -1455,6 +1501,24 @@ impl AppState {
             bots,
             parents,
         }
+    }
+
+    pub async fn analytics_thread(
+        &self,
+        thread_id: String,
+        days: u32,
+    ) -> Result<AnalyticsThreadActivity, DaemonError> {
+        let recorder = self.analytics();
+        let analytics_enabled = recorder.settings().enabled;
+        recorder.flush().await;
+        let dir = recorder.dir.clone();
+        let until = Utc::now();
+        let since = until - chrono::Duration::days(i64::from(days.clamp(1, 366)));
+        tokio::task::spawn_blocking(move || {
+            thread_activity(&dir, &thread_id, since, until, analytics_enabled)
+        })
+        .await
+        .map_err(|e| DaemonError::Process(e.to_string()))
     }
 
     pub async fn analytics_summary(&self, days: u32) -> Result<AnalyticsSummary, DaemonError> {
@@ -1569,6 +1633,86 @@ impl AppState {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn thread_query_filters_both_directions_window_and_orders_across_months() {
+        let dir = tempfile::tempdir().unwrap();
+        let until = Utc::now();
+        // Include the previous month even when the test runs on the first day.
+        let since = until - chrono::Duration::days(35);
+        let agent = |t, from: &str, to: &str, x: &str| Record::Agent {
+            t,
+            from: from.into(),
+            to: to.into(),
+            n: 42,
+            d: "queue".into(),
+            ack: false,
+            x: x.into(),
+        };
+        let records = vec![
+            agent(since, "selected", "other", "boundary"),
+            agent(
+                until - chrono::Duration::hours(1),
+                "other",
+                "selected",
+                "inbound",
+            ),
+            agent(
+                since - chrono::Duration::seconds(1),
+                "selected",
+                "other",
+                "too old",
+            ),
+            agent(until, "selected", "other", "outbound"),
+            agent(until, "unrelated", "other", "unrelated"),
+            agent(
+                until + chrono::Duration::seconds(1),
+                "selected",
+                "other",
+                "future",
+            ),
+            Record::Delegate {
+                t: until,
+                parent: "selected".into(),
+                child: "other".into(),
+                n: 42,
+            },
+        ];
+        for record in records {
+            let path = dir
+                .path()
+                .join(format!("events-{}.jsonl", month_of(record_time(&record))));
+            let mut file = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(path)
+                .unwrap();
+            writeln!(file, "{}", serde_json::to_string(&record).unwrap()).unwrap();
+        }
+        let activity = thread_activity(dir.path(), "selected", since, until, true);
+        let messages = activity.messages;
+        assert_eq!(
+            messages
+                .iter()
+                .map(|m| m.excerpt.as_str())
+                .collect::<Vec<_>>(),
+            vec!["outbound", "inbound", "boundary"]
+        );
+        assert_eq!(messages[0].from, "selected");
+        assert_eq!(messages[1].to, "selected");
+        assert_eq!(messages[1].delivery, "queue");
+        assert_eq!(activity.dispatches[0].thread_id, "other");
+        assert!(
+            thread_activity(dir.path(), "missing", since, until, true)
+                .messages
+                .is_empty()
+        );
+        assert!(
+            thread_activity(dir.path(), "selected", since, until, false)
+                .messages
+                .is_empty()
+        );
+    }
 
     #[test]
     fn acknowledgements_are_flagged_but_substance_is_not() {

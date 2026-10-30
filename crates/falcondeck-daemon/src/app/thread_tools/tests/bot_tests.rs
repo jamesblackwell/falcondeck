@@ -79,6 +79,14 @@ async fn bot_documents_detect_external_changes_and_honour_deletion() {
         .await
         .unwrap();
     assert_eq!(first.content, "First");
+    let modified = std::fs::metadata(std::path::Path::new(&bot.space_path).join("Priorities.md"))
+        .unwrap()
+        .modified()
+        .unwrap();
+    assert_eq!(
+        first.modified_at,
+        Some(chrono::DateTime::<Utc>::from(modified))
+    );
     assert!(
         app.mutate_bot_document(&bot.id, write("Duplicate", None))
             .await
@@ -229,7 +237,7 @@ async fn bot_cross_project_delegation_retains_parent_and_counts_children_globall
         .summary
         .clone();
     assert!(
-        matches!(child.origin, Some(ThreadOrigin::AgentSpawn { ref parent_thread_id }) if parent_thread_id == "thread-1")
+        matches!(child.origin, Some(ThreadOrigin::AgentSpawn { ref parent_thread_id, .. }) if parent_thread_id == "thread-1")
     );
     assert!(
         app.inner.workspaces.lock().await["workspace-2"].threads[&child.id]

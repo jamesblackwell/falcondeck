@@ -3,6 +3,44 @@ use falcondeck_core::{
     AnalyticsClearTarget, AnalyticsSettings, ConversationItem, ThreadStatus, UnifiedEvent,
 };
 
+#[tokio::test]
+async fn thread_activity_returns_stored_excerpts_and_hides_messages_when_disabled() {
+    let (app, _temp) = fixture().await;
+    app.analytics_agent_message(
+        "thread-1",
+        "other-project-thread",
+        "Please check this",
+        "queue",
+    );
+    app.analytics_agent_message(
+        "other-project-thread",
+        "thread-1",
+        "Ready for review",
+        "steer",
+    );
+    app.analytics_agent_message(
+        "unrelated",
+        "other-project-thread",
+        "Not for this task",
+        "steer",
+    );
+    let activity = app.analytics_thread("thread-1".into(), 2).await.unwrap();
+    assert!(activity.analytics_enabled);
+    assert_eq!(activity.messages.len(), 2);
+    assert_eq!(activity.messages[0].excerpt, "Ready for review");
+    assert_eq!(activity.messages[0].delivery, "steer");
+    assert_eq!(activity.messages[1].to, "other-project-thread");
+    app.update_analytics_settings(AnalyticsSettings {
+        enabled: false,
+        ..Default::default()
+    })
+    .await
+    .unwrap();
+    let activity = app.analytics_thread("thread-1".into(), 2).await.unwrap();
+    assert!(!activity.analytics_enabled);
+    assert!(activity.messages.is_empty());
+}
+
 /// Moves thread-1 to `status`, with `approvals` pending, as the daemon reports it.
 async fn set_status(app: &AppState, status: ThreadStatus, approvals: u32) {
     // Keep the stored status in step, as later item pushes re-broadcast it.

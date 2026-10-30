@@ -185,6 +185,7 @@ pub fn router(state: AppState) -> Router {
         .route("/api/analytics", get(analytics_status))
         .route("/api/analytics/settings", post(update_analytics_settings))
         .route("/api/analytics/summary", get(analytics_summary))
+        .route("/api/analytics/thread", get(analytics_thread))
         .route("/api/analytics/prompts", get(analytics_prompts))
         .route("/api/analytics/clear", post(clear_analytics))
         .route("/api/chats", post(create_chat))
@@ -486,6 +487,22 @@ async fn analytics_summary(
 ) -> Result<Json<falcondeck_core::AnalyticsSummary>, DaemonError> {
     state
         .analytics_summary(query.days.unwrap_or(30))
+        .await
+        .map(Json)
+}
+
+#[derive(serde::Deserialize)]
+struct AnalyticsThreadQuery {
+    id: String,
+    days: Option<u32>,
+}
+
+async fn analytics_thread(
+    State(state): State<AppState>,
+    Query(query): Query<AnalyticsThreadQuery>,
+) -> Result<Json<falcondeck_core::AnalyticsThreadActivity>, DaemonError> {
+    state
+        .analytics_thread(query.id, query.days.unwrap_or(2))
         .await
         .map(Json)
 }

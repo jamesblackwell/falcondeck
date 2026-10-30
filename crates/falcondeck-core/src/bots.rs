@@ -174,6 +174,9 @@ pub struct BotDocument {
     pub content: String,
     /// Content hash used to detect edits made in Finder or by the bot.
     pub version: String,
+    /// File modification time, absent when the filesystem cannot report it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub modified_at: Option<chrono::DateTime<chrono::Utc>>,
 }
 
 /// Explicit user operation on a document. Names are confined to the bot space.

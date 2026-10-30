@@ -1044,6 +1044,8 @@ function TaskEditor({
 }
 
 export function ScheduledTasksView({
+  openAutomationRequest,
+  onAutomationRequestHandled,
   localSnapshot,
   localApi,
   localBaseUrl,
@@ -1055,6 +1057,8 @@ export function ScheduledTasksView({
   onOpenExtensionOwner,
   onToast,
 }: {
+  openAutomationRequest?: { id: string; key: number } | null;
+  onAutomationRequestHandled?: (key: number) => void;
   localSnapshot: DaemonSnapshot | null;
   localApi: HostScopedApi | null;
   localBaseUrl: string | null;
@@ -1425,7 +1429,7 @@ export function ScheduledTasksView({
     }
   };
 
-  const edit = async (entry: TaskEntry) => {
+  const edit = useCallback(async (entry: TaskEntry) => {
     const api = hostApi(entry.hostId, localApi, manager);
     if (!api) return;
     const request = editorRequest.current + 1;
@@ -1459,7 +1463,17 @@ export function ScheduledTasksView({
     } finally {
       if (editorRequest.current === request) setBusyKey(null);
     }
-  };
+  }, [localApi, manager, onToast]);
+
+  const openedAutomationRequest = useRef<number | null>(null);
+  useEffect(() => {
+    if (!openAutomationRequest || openedAutomationRequest.current === openAutomationRequest.key) return;
+    const entry = entries.find((candidate) => candidate.hostId === null && candidate.automation?.id === openAutomationRequest.id);
+    if (!entry) return;
+    openedAutomationRequest.current = openAutomationRequest.key;
+    onAutomationRequestHandled?.(openAutomationRequest.key);
+    void edit(entry);
+  }, [edit, entries, onAutomationRequestHandled, openAutomationRequest]);
 
   const openDetail = (entry: TaskEntry) => {
     const request = detailRequest.current + 1;

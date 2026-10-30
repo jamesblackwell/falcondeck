@@ -110,6 +110,41 @@ pub struct AnalyticsAgentPair {
     pub ack_like: u64,
 }
 
+/// Local HTTP response for one task's agent communication; never in snapshots or RPC.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AnalyticsThreadActivity {
+    /// Matching inbound and outbound messages, newest first.
+    pub messages: Vec<AnalyticsThreadMessage>,
+    /// Historical dispatch times for origins predating `dispatched_at`.
+    pub dispatches: Vec<AnalyticsThreadDispatch>,
+    /// Whether agent message recording is enabled.
+    pub analytics_enabled: bool,
+}
+
+/// A recorded delegation's original time.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AnalyticsThreadDispatch {
+    /// Dispatched task identifier.
+    pub thread_id: String,
+    /// When the task was dispatched.
+    pub at: DateTime<Utc>,
+}
+
+/// Local agent communication with stable navigation identifiers.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AnalyticsThreadMessage {
+    /// When the message was sent.
+    pub at: DateTime<Utc>,
+    /// Sender task identifier.
+    pub from: String,
+    /// Receiver task identifier.
+    pub to: String,
+    /// Requested steer or queue delivery.
+    pub delivery: String,
+    /// Stored, shortened message excerpt.
+    pub excerpt: String,
+}
+
 /// A recent message between agents, shortened.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct AnalyticsAgentMessage {

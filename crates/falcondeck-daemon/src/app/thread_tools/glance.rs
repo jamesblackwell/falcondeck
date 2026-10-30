@@ -169,7 +169,10 @@ pub(super) fn facts(t: &ThreadSummary, cx: &RowContext<'_>, model: bool) -> Stri
     if let Some(variant) = &t.variant {
         facts.push(format!("branch {}", line(&variant.branch, 80)));
     }
-    if let Some(ThreadOrigin::AgentSpawn { parent_thread_id }) = &t.origin {
+    if let Some(ThreadOrigin::AgentSpawn {
+        parent_thread_id, ..
+    }) = &t.origin
+    {
         facts.push(if parent_thread_id == cx.caller {
             "your child".into()
         } else {
