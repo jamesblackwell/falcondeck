@@ -1,4 +1,4 @@
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
 import type {
   BotApi,
@@ -340,5 +340,49 @@ describe("bot sidebar", () => {
     await new Promise((resolve) => setTimeout(resolve, 0));
     fireEvent.click(row("A"));
     expect(onSelect).toHaveBeenLastCalledWith("home", "t-A");
+  });
+
+  it("numbers bots while ⌘ is held and opens one with ⌘ and its number", () => {
+    vi.useFakeTimers();
+    try {
+      const onSelect = vi.fn();
+      const bots = ["A", "B"].map((name) => ({ ...bot, id: `bot-${name}`, name, thread_id: `t-${name}` }));
+      const { rerender } = render(
+        <BotSidebar bots={bots} botApi={api()} groups={[]} selectedThreadId={null} onSelectThread={onSelect} />,
+      );
+      // Off unless the host opts in (browsers use ⌘1–9 for tabs).
+      fireEvent.keyDown(window, { key: "2", metaKey: true });
+      expect(onSelect).not.toHaveBeenCalled();
+
+      rerender(
+        <BotSidebar
+          bots={bots}
+          botApi={api()}
+          botNumberShortcuts
+          groups={[]}
+          selectedThreadId={null}
+          onSelectThread={onSelect}
+        />,
+      );
+      fireEvent.keyDown(window, { key: "Meta", metaKey: true });
+      expect(screen.queryByText("⌘1")).not.toBeInTheDocument();
+      act(() => vi.advanceTimersByTime(400));
+      expect(screen.getByText("⌘1")).toBeInTheDocument();
+      expect(screen.getByText("⌘2")).toBeInTheDocument();
+      fireEvent.keyUp(window, { key: "Meta" });
+      expect(screen.queryByText("⌘1")).not.toBeInTheDocument();
+
+      fireEvent.keyDown(window, { key: "2", metaKey: true });
+      expect(onSelect).toHaveBeenCalledWith("home", "t-B");
+      // The terminal keeps ⌘1–⌘9 for its tabs.
+      const terminal = document.createElement("div");
+      terminal.className = "xterm";
+      document.body.appendChild(terminal);
+      fireEvent.keyDown(terminal, { key: "1", metaKey: true });
+      expect(onSelect).toHaveBeenCalledTimes(1);
+      terminal.remove();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

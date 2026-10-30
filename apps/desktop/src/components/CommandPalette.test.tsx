@@ -82,6 +82,41 @@ describe("CommandPalette controlled requests", () => {
     Element.prototype.scrollIntoView = vi.fn();
   });
 
+  it("shows a bot's mark and a Bot label instead of its folder id", () => {
+    const home = workspace({ id: "bot-home", path: "/Users/me/.falcondeck/bots/bot-45ccf2" });
+    const { container } = render(
+      <CommandPalette
+        groups={[
+          {
+            workspace: home,
+            threads: [thread({ id: "juno-home", workspace_id: "bot-home", title: "Juno - CPO" })],
+          } as ProjectGroup,
+        ]}
+        bots={[
+          {
+            id: "bot-45ccf2",
+            name: "Juno - CPO",
+            workspace_id: "bot-home",
+            dedicated_workspace: true,
+            thread_id: "juno-home",
+            space_path: "/Users/me/.falcondeck/bots/bot-45ccf2/space",
+            instructions: "",
+            can_start_threads: true,
+            icon: { shape: "circle", color: "cat-1" },
+          },
+        ]}
+        onSelectThread={vi.fn()}
+        openRequestKey={1}
+        requestMode="open"
+      />,
+    );
+    const row = screen.getByRole("option", { name: /Juno - CPO/ });
+    expect(within(row).getByText("Bot")).toBeInTheDocument();
+    expect(within(row).queryByText(/bot-45ccf2/)).not.toBeInTheDocument();
+    expect(row.querySelector("svg[fill='var(--fd-cat-1)']")).not.toBeNull();
+    expect(container).toBeTruthy();
+  });
+
   it("opens Activity from the Actions section", () => {
     const onOpenActivity = vi.fn();
     render(

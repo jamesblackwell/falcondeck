@@ -33,6 +33,7 @@ import {
   Button,
   CopyButton,
   Input,
+  Kbd,
   SearchField,
   Select,
   SelectContent,
@@ -46,7 +47,12 @@ import {
 import { BotMark } from "./bot-mark";
 import { ProviderIcon } from "./provider-icon";
 
-export type BotSidebarControls = { bots?: BotProfile[]; botApi?: BotApi };
+export type BotSidebarControls = {
+  bots?: BotProfile[];
+  botApi?: BotApi;
+  /** Hold ⌘ to number the bots; ⌘1–⌘9 opens one. Desktop only: browsers own ⌘1–9. */
+  botNumberShortcuts?: boolean;
+};
 const EMPTY_BOTS: BotProfile[] = [];
 
 const SECTION_ICON_BUTTON_CLASS =
@@ -80,6 +86,7 @@ function botActivity(bot: BotProfile, tasks: ThreadSummary[]) {
 export function BotSidebar({
   bots = EMPTY_BOTS,
   botApi,
+  botNumberShortcuts = false,
   groups,
   selectedThreadId,
   onSelectThread,
@@ -92,6 +99,11 @@ export function BotSidebar({
   const icons = useMemo(() => resolveBotIcons(bots), [bots]);
   const tasks = useMemo(() => groups.flatMap((group) => group.threads), [groups]);
   const reorder = useBotReorder(bots, botApi);
+  const showNumbers = useBotNumberShortcuts(
+    botNumberShortcuts && Boolean(botApi),
+    reorder.ordered,
+    onSelectThread,
+  );
   if (!botApi) return null;
   return (
     <section aria-labelledby="fd-bots-heading" className="mb-4">
@@ -178,6 +190,11 @@ export function BotSidebar({
                   <ActivityDiamond size="xs" />
                   <span className="sr-only">Working</span>
                 </>
+              ) : null}
+              {showNumbers && index < 9 ? (
+                <Kbd aria-hidden="true" className="shrink-0">
+                  ⌘{index + 1}
+                </Kbd>
               ) : null}
             </button>
             <button
@@ -897,6 +914,62 @@ function BotIconPicker({
       </div>
     </EditorSection>
   );
+}
+
+/** While ⌘ is held (briefly, so shortcuts like ⌘C don't flash numbers), show
+ * bot numbers; ⌘1–⌘9 opens that bot. The terminal keeps ⌘1–⌘9 for its tabs. */
+function useBotNumberShortcuts(
+  enabled: boolean,
+  bots: BotProfile[],
+  onSelectThread: (workspace: string, thread: string) => void,
+) {
+  const [show, setShow] = useState(false);
+  const latest = useRef({ bots, onSelectThread });
+  latest.current = { bots, onSelectThread };
+  useEffect(() => {
+    if (!enabled) return;
+    let timer: number | undefined;
+    const hide = () => {
+      window.clearTimeout(timer);
+      timer = undefined;
+      setShow(false);
+    };
+    const down = (event: KeyboardEvent) => {
+      if (event.key === "Meta") {
+        if (!event.repeat && timer === undefined) {
+          timer = window.setTimeout(() => setShow(true), 350);
+        }
+        return;
+      }
+      if (!event.metaKey || event.ctrlKey || event.altKey || event.shiftKey) {
+        hide();
+        return;
+      }
+      if (!/^[1-9]$/.test(event.key)) {
+        hide();
+        return;
+      }
+      if ((event.target as Element | null)?.closest?.(".xterm")) return;
+      const bot = latest.current.bots[Number(event.key) - 1];
+      if (!bot) return;
+      event.preventDefault();
+      hide();
+      latest.current.onSelectThread(bot.workspace_id, bot.thread_id);
+    };
+    const up = (event: KeyboardEvent) => {
+      if (event.key === "Meta" || !event.metaKey) hide();
+    };
+    window.addEventListener("keydown", down);
+    window.addEventListener("keyup", up);
+    window.addEventListener("blur", hide);
+    return () => {
+      hide();
+      window.removeEventListener("keydown", down);
+      window.removeEventListener("keyup", up);
+      window.removeEventListener("blur", hide);
+    };
+  }, [enabled]);
+  return enabled && show;
 }
 
 /**

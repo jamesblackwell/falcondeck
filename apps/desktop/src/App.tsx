@@ -6053,6 +6053,7 @@ function AppInner() {
         <Suspense fallback={null}>
           <CommandPalette
             groups={groups}
+            bots={snapshot?.preferences.bots}
             onSelectThread={handleSelectThread}
             onNewThread={handleNewThread}
             onOpenSettings={handleOpenSettings}
@@ -6085,6 +6086,7 @@ function AppInner() {
             onNewChat={handleNewChat}
             bots={snapshot?.preferences.bots}
             botApi={snapshot?.daemon.capabilities?.bots ? api ?? undefined : undefined}
+            botNumberShortcuts
             onArchiveThread={handleArchiveThread}
             onArchiveAllThreads={handleArchiveAllThreads}
             onUnarchiveThread={handleUnarchiveThread}

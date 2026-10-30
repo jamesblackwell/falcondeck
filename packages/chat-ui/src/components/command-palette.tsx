@@ -30,6 +30,9 @@ import {
   type ThreadAttentionPresentation,
   type ThreadMessageMatch,
   type ThreadSummary,
+  resolveBotIcons,
+  type BotIcon,
+  type BotProfile,
 } from '@falcondeck/client-core'
 import {
   ActivityDiamond,
@@ -45,6 +48,7 @@ import {
 } from '@falcondeck/ui'
 
 import { isComposingKeyboardEvent } from '../lib/keyboard'
+import { BotMark } from './bot-mark'
 
 type PaletteItem = {
   id: string
@@ -183,6 +187,7 @@ type FrozenThreadOrder = {
  */
 type PaletteIcon =
   | { kind: 'status'; tone: PaletteThreadStatus['tone'] }
+  | { kind: 'bot'; icon: BotIcon }
   | { kind: 'glyph'; Glyph: LucideIcon }
   | { kind: 'image'; src: string }
   | { kind: 'swatch'; preview: PalettePreview }
@@ -212,8 +217,21 @@ function highlightSnippet(
   )
 }
 
+/** A bot's mark, unless the row needs attention, which outranks identity. */
+function paletteThreadIcon(
+  botMarks: ReadonlyMap<string, BotIcon>,
+  threadId: string,
+  tone: PaletteThreadStatus['tone'],
+): PaletteIcon {
+  const mark = botMarks.get(threadId)
+  return mark && (tone === 'muted' || tone === 'unread')
+    ? { kind: 'bot', icon: mark }
+    : { kind: 'status', tone }
+}
+
 function renderPaletteIcon(icon: PaletteIcon): React.ReactNode {
   if (icon.kind === 'glyph') return <icon.Glyph className="h-3.5 w-3.5" />
+  if (icon.kind === 'bot') return <BotMark icon={icon.icon} />
   if (icon.kind === 'image') {
     return (
       <img
@@ -500,6 +518,8 @@ export type CommandPaletteProps = {
   initialProjectId?: string | null
   requestMode?: 'open' | 'toggle' | 'close'
   workspaceIconSrc?: (workspaceId: string) => string | null
+  /** Bots, so their conversations show the bot's mark and a "Bot" label. */
+  bots?: readonly BotProfile[]
 }
 
 /**
@@ -526,7 +546,15 @@ export const CommandPalette = memo(function CommandPalette({
   initialProjectId = null,
   requestMode = 'open',
   workspaceIconSrc,
+  bots,
 }: CommandPaletteProps) {
+  const botMarks = useMemo(() => {
+    const icons = resolveBotIcons(bots ?? [])
+    return new Map((bots ?? []).flatMap((bot) => {
+      const icon = icons.get(bot.id)
+      return icon ? [[bot.thread_id, icon] as const] : []
+    }))
+  }, [bots])
   const [open, setOpen] = useState(false)
   const [query, setQuery] = useState('')
   // Scope chip: while set, the list only contains this project's threads.
@@ -701,9 +729,9 @@ export const CommandPalette = memo(function CommandPalette({
           kind: 'thread',
           section: attentionRow ? 'Needs attention' : 'Recent',
           label: thread.title,
-          sublabel: label,
+          sublabel: botMarks.has(thread.id) ? 'Bot' : label,
           projectId: group.workspace.id,
-          icon: { kind: 'status', tone: status.tone },
+          icon: paletteThreadIcon(botMarks, thread.id, status.tone),
           // "Idle" said nothing the timestamp does not; quiet rows stay quiet.
           status: status.label === 'Idle' ? undefined : status,
           time: timeAgo(thread.updated_at),
@@ -1092,11 +1120,13 @@ export const CommandPalette = memo(function CommandPalette({
         kind: 'thread',
         section: 'Message matches',
         label: entry.thread.title,
-        sublabel: getProjectLabel(entry.group.workspace.path),
+        sublabel: botMarks.has(entry.thread.id)
+          ? 'Bot'
+          : getProjectLabel(entry.group.workspace.path),
         snippet: match.snippet,
         snippetTokens,
         projectId: entry.group.workspace.id,
-        icon: { kind: 'status', tone: status.tone },
+        icon: paletteThreadIcon(botMarks, entry.thread.id, status.tone),
         status: status.label === 'Idle' ? undefined : status,
         time: timeAgo(entry.thread.updated_at),
         // Ranking is the daemon's; these rows bypass the fuzzy scorer.

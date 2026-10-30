@@ -1288,6 +1288,7 @@ export const WorkspaceSidebar = memo(function WorkspaceSidebar({
   groups: allGroups,
   bots,
   botApi,
+  botNumberShortcuts,
   workspaceHosts,
   selectedWorkspaceId,
   selectedThreadId,
@@ -3076,7 +3077,7 @@ export const WorkspaceSidebar = memo(function WorkspaceSidebar({
         ) : null}
         {/* Kept mounted while Activity is up so pagers and folds survive. */}
         <div hidden={Boolean(activity)}>
-        <BotSidebar bots={bots} botApi={botApi} groups={allGroups} selectedThreadId={selectedThreadId} onSelectThread={handleSelectThread} />
+        <BotSidebar bots={bots} botApi={botApi} botNumberShortcuts={botNumberShortcuts} groups={allGroups} selectedThreadId={selectedThreadId} onSelectThread={handleSelectThread} />
         <PinnedThreadList
           entries={pinnedThreads}
           collapsed={pinnedCollapsed}
