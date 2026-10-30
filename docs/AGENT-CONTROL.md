@@ -46,6 +46,10 @@ keeps only bounded run metadata.
 - **Targets**: a canonical workspace path (never a runtime workspace id), an
   open provider id, and a thread strategy — managed (one remembered thread),
   existing, or new-per-run.
+- **Scheduled-task health**: `falcondeck_get` resource `automation.health`
+  reports runs, quiet runs, failures, agent time, threads and review flags per
+  scheduled task (see `docs/ANALYTICS.md`), so an agent such as a chief of staff
+  can prune schedules that cost more than they give.
 - **Agent frequency floor**: schedules created or edited by agents (the MCP
   origin) cannot repeat more often than every 30 minutes; one-time triggers are
   unaffected, and people can still choose any interval in the app.

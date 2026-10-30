@@ -34,11 +34,12 @@ export type AnalyticsPanelProps = {
 }
 
 type Period = '7' | '30' | '90'
-type DailyMetric = 'user_messages' | 'agent_messages' | 'turns' | 'commits'
+type DailyMetric = 'user_messages' | 'agent_messages' | 'scheduled' | 'turns' | 'commits'
 
 const DAILY_METRICS: Array<{ value: DailyMetric; label: string }> = [
   { value: 'user_messages', label: 'Your messages' },
   { value: 'agent_messages', label: 'Agent messages' },
+  { value: 'scheduled', label: 'Scheduled' },
   { value: 'turns', label: 'Turns' },
   { value: 'commits', label: 'Commits' },
 ]
@@ -49,6 +50,13 @@ const RETENTION: Array<{ value: string; label: string }> = [
   { value: '12', label: '1 year' },
   { value: '24', label: '2 years' },
 ]
+
+const AUTOMATION_FLAGS: Record<string, string> = {
+  rarely_useful: 'Rarely finds anything',
+  very_frequent: 'Very frequent',
+  failing: 'Failing',
+  thread_per_run: 'New thread each run',
+}
 
 const count = (value: number) => value.toLocaleString()
 
@@ -302,6 +310,17 @@ export function AnalyticsPanel({ baseUrl, onToast }: AnalyticsPanelProps) {
   }
 
   const totals = summary?.totals
+  const scheduledRuns = useMemo(
+    () =>
+      (summary?.automations ?? []).reduce(
+        (sum, automation) => ({
+          runs: sum.runs + automation.runs,
+          noAction: sum.noAction + automation.no_action,
+        }),
+        { runs: 0, noAction: 0 },
+      ),
+    [summary?.automations],
+  )
   const waiting = summary?.waiting
   const triggerRows = useMemo(() => {
     const triggers = summary?.triggers
@@ -367,6 +386,15 @@ export function AnalyticsPanel({ baseUrl, onToast }: AnalyticsPanelProps) {
                 : undefined
             }
           />
+          <Stat
+            label="Scheduled runs"
+            value={summary ? count(scheduledRuns.runs) : '—'}
+            detail={
+              scheduledRuns.runs
+                ? `${percent(scheduledRuns.noAction, scheduledRuns.runs)} found nothing to do`
+                : undefined
+            }
+          />
           <Stat label="Tasks agents created" value={totals ? count(totals.delegations) : '—'} />
           <Stat
             label="Turns"
@@ -382,6 +410,64 @@ export function AnalyticsPanel({ baseUrl, onToast }: AnalyticsPanelProps) {
             <DailyBars days={summary.daily} metric={metric} label={metricLabel} />
           </div>
         ) : null}
+      </SettingsSection>
+
+      <SettingsSection
+        title="Scheduled tasks"
+        description="Every scheduled task, flagged when it may cost more than it gives. A run that finds nothing to do still takes a turn; frequent runs grow a thread's context or the sidebar."
+      >
+        {summary?.automations?.length ? (
+          <table className={TABLE}>
+            <thead>
+              <tr>
+                <th className={TH}>Task</th>
+                <th className={cn(TH, NUM)}>Runs</th>
+                <th className={cn(TH, NUM)}>Nothing to do</th>
+                <th className={cn(TH, NUM)}>Failed</th>
+                <th className={cn(TH, NUM)}>Agent time</th>
+                <th className={cn(TH, NUM)}>Threads</th>
+              </tr>
+            </thead>
+            <tbody>
+              {summary.automations.map((automation) => (
+                <tr key={automation.id ?? automation.name}>
+                  <td className={TD}>
+                    <div className="space-y-1">
+                      <div className="flex flex-wrap items-center gap-1.5">
+                        <span className={automation.state === 'paused' ? 'text-fg-muted' : undefined}>
+                          {automation.name}
+                        </span>
+                        {(automation.flags ?? []).map((flag) => (
+                          <Badge key={flag} variant={flag === 'failing' ? 'danger' : 'warning'}>
+                            {AUTOMATION_FLAGS[flag] ?? flag}
+                          </Badge>
+                        ))}
+                      </div>
+                      <p className="text-[length:var(--fd-text-xs)] text-fg-muted">
+                        {[
+                          automation.schedule,
+                          automation.state && automation.state !== 'enabled' ? automation.state : null,
+                          automation.last_run_at ? `last ran ${when(automation.last_run_at)}` : null,
+                        ]
+                          .filter(Boolean)
+                          .join(' · ')}
+                      </p>
+                    </div>
+                  </td>
+                  <td className={cn(TD, NUM)}>{count(automation.runs)}</td>
+                  <td className={cn(TD, NUM)}>
+                    {automation.runs ? percent(automation.no_action, automation.runs - automation.skipped) : '—'}
+                  </td>
+                  <td className={cn(TD, NUM, automation.failed ? 'text-danger' : null)}>{count(automation.failed)}</td>
+                  <td className={cn(TD, NUM)}>{automation.agent_ms ? duration(automation.agent_ms) : '—'}</td>
+                  <td className={cn(TD, NUM)}>{count(automation.threads)}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        ) : (
+          <p className={EMPTY}>No scheduled tasks ran in this period.</p>
+        )}
       </SettingsSection>
 
       <SettingsSection
@@ -617,40 +703,6 @@ export function AnalyticsPanel({ baseUrl, onToast }: AnalyticsPanelProps) {
             </tbody>
           </table>
         ) : null}
-      </SettingsSection>
-
-      <SettingsSection
-        title="Scheduled tasks"
-        description="Runs that find nothing to do still cost a turn. A task that starts a new thread every run also clutters the sidebar."
-      >
-        {summary?.automations?.length ? (
-          <table className={TABLE}>
-            <thead>
-              <tr>
-                <th className={TH}>Task</th>
-                <th className={cn(TH, NUM)}>Runs</th>
-                <th className={cn(TH, NUM)}>Nothing to do</th>
-                <th className={cn(TH, NUM)}>Failed</th>
-                <th className={cn(TH, NUM)}>Threads</th>
-              </tr>
-            </thead>
-            <tbody>
-              {summary.automations.map((automation) => (
-                <tr key={automation.name}>
-                  <td className={TD}>{automation.name}</td>
-                  <td className={cn(TD, NUM)}>{count(automation.runs)}</td>
-                  <td className={cn(TD, NUM)}>{percent(automation.no_action, automation.runs)}</td>
-                  <td className={cn(TD, NUM, automation.failed ? 'text-danger' : null)}>{count(automation.failed)}</td>
-                  <td className={cn(TD, NUM, automation.threads > 1 ? 'text-warning' : null)}>
-                    {count(automation.threads)}
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        ) : (
-          <p className={EMPTY}>No scheduled runs in this period.</p>
-        )}
       </SettingsSection>
 
       <SettingsSection title="Recording" description="Everything is stored as plain files in FalconDeck's folder on this Mac.">

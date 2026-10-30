@@ -86,6 +86,9 @@ pub struct AnalyticsDay {
     /// Successful `git commit`s made by agents.
     #[serde(default)]
     pub commits: u64,
+    /// Messages scheduled tasks sent.
+    #[serde(default)]
+    pub scheduled: u64,
 }
 
 /// Messages from one thread or bot to another.
@@ -221,11 +224,35 @@ pub struct AnalyticsWaiting {
     pub p90_reply_ms: u64,
 }
 
-/// Runs of one scheduled task.
+/// Runs of one scheduled task, with signs it may not be earning its keep.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct AnalyticsAutomation {
+    /// Automation id, when it still exists.
+    #[serde(default)]
+    pub id: Option<String>,
     /// Automation name.
     pub name: String,
+    /// `enabled`, `paused`, `completed` or `failed`; empty if deleted.
+    #[serde(default)]
+    pub state: String,
+    /// Human-readable schedule, such as "Every 30 minutes".
+    #[serde(default)]
+    pub schedule: String,
+    /// Thread target: `existing`, `managed`, `new_each_run` or `current`.
+    #[serde(default)]
+    pub thread_mode: String,
+    /// Agent time spent across finished runs, in milliseconds.
+    #[serde(default)]
+    pub agent_ms: u64,
+    /// When the latest run in the period started.
+    #[serde(default)]
+    pub last_run_at: Option<DateTime<Utc>>,
+    /// Outcome of that run, such as `succeeded_no_action`.
+    #[serde(default)]
+    pub last_status: Option<String>,
+    /// Review prompts: `rarely_useful`, `very_frequent`, `failing`, `thread_per_run`.
+    #[serde(default)]
+    pub flags: Vec<String>,
     /// Runs in the period.
     pub runs: u64,
     /// Runs that found nothing to do.

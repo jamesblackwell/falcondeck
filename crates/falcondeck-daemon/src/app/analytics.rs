@@ -815,6 +815,9 @@ fn summarize(records: Vec<Record>, labels: &Labels, days: u32) -> AnalyticsSumma
             Record::User { t, ws, th, n, o } => {
                 if o == "scheduled" {
                     totals.scheduled_messages += 1;
+                    if let Some(day) = entry {
+                        day.scheduled += 1;
+                    }
                     cues.entry(th).or_default().push((t, "scheduled"));
                     continue;
                 }
@@ -1083,28 +1086,53 @@ fn summarize(records: Vec<Record>, labels: &Labels, days: u32) -> AnalyticsSumma
     }
 }
 
-/// Runs per scheduled task, busiest first.
+/// A unit-like enum's serialized name, such as `succeeded_no_action`.
+fn serialized_name(value: &impl Serialize) -> String {
+    serde_json::to_value(value)
+        .ok()
+        .and_then(|value| value.as_str().map(str::to_string))
+        .unwrap_or_default()
+}
+
+/// Runs per scheduled task, with review flags. Enabled tasks with no runs in
+/// the period are listed too, so nothing scheduled is invisible.
 fn summarize_automations(
     runs: Vec<falcondeck_core::control::AutomationRun>,
+    definitions: &[falcondeck_core::control::Automation],
+    days: u32,
 ) -> Vec<AnalyticsAutomation> {
-    use falcondeck_core::control::AutomationRunStatus as Status;
-    let mut by_name: BTreeMap<String, (AnalyticsAutomation, HashSet<String>)> = BTreeMap::new();
+    use falcondeck_core::control::{
+        AutomationRunStatus as Status, AutomationState, AutomationThreadTarget,
+    };
+    let blank = |name: &str| AnalyticsAutomation {
+        id: None,
+        name: name.to_string(),
+        state: String::new(),
+        schedule: String::new(),
+        thread_mode: String::new(),
+        runs: 0,
+        no_action: 0,
+        failed: 0,
+        skipped: 0,
+        threads: 0,
+        agent_ms: 0,
+        last_run_at: None,
+        last_status: None,
+        flags: Vec::new(),
+    };
+    let mut by_id: BTreeMap<String, (AnalyticsAutomation, HashSet<String>)> = BTreeMap::new();
+    for definition in definitions {
+        if definition.state == AutomationState::Enabled {
+            by_id.insert(
+                definition.id.clone(),
+                (blank(&definition.name), HashSet::new()),
+            );
+        }
+    }
     for run in runs {
-        let (summary, threads) = by_name
-            .entry(run.automation_name.clone())
-            .or_insert_with(|| {
-                (
-                    AnalyticsAutomation {
-                        name: run.automation_name.clone(),
-                        runs: 0,
-                        no_action: 0,
-                        failed: 0,
-                        skipped: 0,
-                        threads: 0,
-                    },
-                    HashSet::new(),
-                )
-            });
+        let (summary, threads) = by_id
+            .entry(run.automation_id.clone())
+            .or_insert_with(|| (blank(&run.automation_name), HashSet::new()));
         summary.runs += 1;
         match run.status {
             Status::SucceededNoAction => summary.no_action += 1,
@@ -1112,18 +1140,62 @@ fn summarize_automations(
             Status::SkippedOverlap | Status::SkippedDependency => summary.skipped += 1,
             _ => {}
         }
+        if let (Some(start), Some(end)) = (run.started_at, run.finished_at) {
+            summary.agent_ms += (end - start).num_milliseconds().max(0) as u64;
+        }
+        if summary.last_run_at.is_none_or(|last| run.queued_at > last) {
+            summary.last_run_at = Some(run.started_at.unwrap_or(run.queued_at));
+            summary.last_status = Some(serialized_name(&run.status));
+        }
         if let Some(thread) = run.thread_id {
             threads.insert(thread);
         }
     }
-    let mut automations: Vec<_> = by_name
-        .into_values()
-        .map(|(mut summary, threads)| {
+    let definitions: HashMap<&str, &falcondeck_core::control::Automation> = definitions
+        .iter()
+        .map(|definition| (definition.id.as_str(), definition))
+        .collect();
+    let mut automations: Vec<_> = by_id
+        .into_iter()
+        .map(|(id, (mut summary, threads))| {
             summary.threads = threads.len() as u64;
+            if let Some(definition) = definitions.get(id.as_str()) {
+                summary.name = definition.name.clone();
+                summary.state = serialized_name(&definition.state);
+                summary.schedule =
+                    crate::control::automations::schedule_summary(&definition.trigger);
+                summary.thread_mode = match definition.target.thread {
+                    AutomationThreadTarget::Existing { .. } => "existing",
+                    AutomationThreadTarget::Managed { .. } => "managed",
+                    AutomationThreadTarget::NewEachRun => "new_each_run",
+                    AutomationThreadTarget::Current => "current",
+                }
+                .into();
+                summary.id = Some(id);
+            }
+            let finished = summary.runs.saturating_sub(summary.skipped);
+            if finished >= 6 && summary.no_action * 10 >= finished * 8 {
+                summary.flags.push("rarely_useful".into());
+            }
+            if summary.runs >= 24 * u64::from(days.max(1)) {
+                summary.flags.push("very_frequent".into());
+            }
+            if summary.failed >= 2 && summary.failed * 10 >= summary.runs * 3 {
+                summary.flags.push("failing".into());
+            }
+            if summary.thread_mode == "new_each_run" && summary.threads > 3 {
+                summary.flags.push("thread_per_run".into());
+            }
             summary
         })
         .collect();
-    automations.sort_by(|a, b| b.runs.cmp(&a.runs).then(a.name.cmp(&b.name)));
+    automations.sort_by(|a, b| {
+        b.flags
+            .len()
+            .cmp(&a.flags.len())
+            .then(b.runs.cmp(&a.runs))
+            .then(a.name.cmp(&b.name))
+    });
     automations
 }
 
@@ -1395,13 +1467,53 @@ impl AppState {
                 |start| start.with_timezone(&Utc),
             );
         let runs = self.control().runs_since(since).await;
+        let definitions = self.control().automations_snapshot().await;
         let mut summary = tokio::task::spawn_blocking(move || {
             summarize(read_records(&dir, since), &labels, days)
         })
         .await
         .map_err(|e| DaemonError::Process(e.to_string()))?;
-        summary.automations = summarize_automations(runs);
+        summary.automations = summarize_automations(runs, &definitions, days);
         Ok(summary)
+    }
+
+    /// `falcondeck_get` resource `automation.health`: scheduled-task review data
+    /// for agents such as a chief of staff. Local only, like the rest of analytics.
+    pub(super) async fn automation_health(
+        &self,
+        request: &falcondeck_core::control::ControlGetRequest,
+        context: &falcondeck_core::control::ControlRequestContext,
+    ) -> Result<falcondeck_core::control::ControlGetResponse, crate::control::ControlError> {
+        if context.origin == falcondeck_core::control::ControlOrigin::RemoteRpc {
+            return Err(crate::control::ControlError::interface_disabled(
+                "automation.health is only available on this computer",
+            ));
+        }
+        let days = request
+            .filters
+            .get("days")
+            .and_then(Value::as_u64)
+            .unwrap_or(7)
+            .clamp(1, 90) as u32;
+        let summary = self
+            .analytics_summary(days)
+            .await
+            .map_err(|error| crate::control::ControlError::internal(error.to_string()))?;
+        Ok(falcondeck_core::control::ControlGetResponse {
+            resource: request.resource.clone(),
+            data: json!({
+                "days": days,
+                "scheduled_messages": summary.totals.scheduled_messages,
+                "flags": {
+                    "rarely_useful": "at least 80% of finished runs found nothing to do",
+                    "very_frequent": "24 or more runs a day",
+                    "failing": "30% or more of runs failed",
+                    "thread_per_run": "starts a new thread every run",
+                },
+                "automations": summary.automations,
+            }),
+            next_cursor: None,
+        })
     }
 
     /// The user's recorded messages, newest first.
@@ -1533,6 +1645,58 @@ mod tests {
             }),
             0
         );
+    }
+
+    fn run(id: &str, automation: &str, status: &str) -> falcondeck_core::control::AutomationRun {
+        serde_json::from_value(json!({
+            "id": id,
+            "automation_id": automation,
+            "automation_name": automation,
+            "automation_revision": 1,
+            "status": status,
+            "queued_at": "2026-10-30T08:00:00Z",
+            "started_at": "2026-10-30T08:00:00Z",
+            "finished_at": "2026-10-30T08:01:00Z",
+            "thread_id": format!("thread-{id}"),
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn scheduled_tasks_are_flagged_when_they_cost_more_than_they_give() {
+        let mut runs = Vec::new();
+        // A monitor that almost never finds anything, run 30 times in a day.
+        for index in 0..30 {
+            let status = if index == 0 {
+                "succeeded"
+            } else {
+                "succeeded_no_action"
+            };
+            runs.push(run(&format!("m{index}"), "Monitor", status));
+        }
+        // A task that keeps failing.
+        for (index, status) in ["failed", "failed", "succeeded", "failed"]
+            .iter()
+            .enumerate()
+        {
+            runs.push(run(&format!("f{index}"), "Flaky", status));
+        }
+        // A healthy daily task.
+        runs.push(run("d0", "Daily", "succeeded"));
+        let automations = summarize_automations(runs, &[], 1);
+        let find = |name: &str| automations.iter().find(|a| a.name == name).unwrap();
+        let monitor = find("Monitor");
+        assert_eq!(
+            (monitor.runs, monitor.no_action, monitor.threads),
+            (30, 29, 30)
+        );
+        assert_eq!(monitor.agent_ms, 30 * 60_000);
+        assert!(monitor.flags.contains(&"rarely_useful".to_string()));
+        assert!(monitor.flags.contains(&"very_frequent".to_string()));
+        assert_eq!(find("Flaky").flags, ["failing"]);
+        assert!(find("Daily").flags.is_empty());
+        // Flagged tasks sort first.
+        assert_eq!(automations[0].name, "Monitor");
     }
 
     #[test]

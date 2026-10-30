@@ -526,7 +526,7 @@ export type AnalyticsTotals = {
   file_writes: number;
   commits?: number;
 };
-export type AnalyticsDay = { date: string; user_messages: number; agent_messages: number; turns: number; commits?: number };
+export type AnalyticsDay = { date: string; user_messages: number; agent_messages: number; turns: number; commits?: number; scheduled?: number };
 export type AnalyticsAgentPair = {
   from: string;
   from_title: string;
@@ -574,7 +574,24 @@ export type AnalyticsWaiting = {
   median_reply_ms: number;
   p90_reply_ms: number;
 };
-export type AnalyticsAutomation = { name: string; runs: number; no_action: number; failed: number; skipped: number; threads: number };
+export type AnalyticsAutomation = {
+  id?: string | null;
+  name: string;
+  /** enabled, paused, completed or failed; empty when deleted. */
+  state?: string;
+  schedule?: string;
+  thread_mode?: string;
+  runs: number;
+  no_action: number;
+  failed: number;
+  skipped: number;
+  threads: number;
+  agent_ms?: number;
+  last_run_at?: string | null;
+  last_status?: string | null;
+  /** rarely_useful, very_frequent, failing, thread_per_run */
+  flags?: string[];
+};
 export type AnalyticsSummary = {
   days: number;
   generated_at: string;

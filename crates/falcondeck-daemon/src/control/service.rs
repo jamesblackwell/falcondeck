@@ -1453,6 +1453,11 @@ impl ControlService {
     }
 
     /// The earliest next run across dispatchable automations.
+    /// Every automation definition, for local analytics.
+    pub async fn automations_snapshot(&self) -> Vec<Automation> {
+        self.state.lock().await.automations.clone()
+    }
+
     /// Runs queued since `since`, for local analytics.
     pub async fn runs_since(&self, since: DateTime<Utc>) -> Vec<AutomationRun> {
         self.state

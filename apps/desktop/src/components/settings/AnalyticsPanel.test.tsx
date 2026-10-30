@@ -48,7 +48,22 @@ const summary: AnalyticsSummary = {
   projects: [{ project: 'quizgecko', messages: 12, avg_chars: 180, commits: 5 }],
   triggers: { user: 5, scheduled: 10, agent: 3, delegation: 2, other: 0 },
   waiting: { requests: 2, median_request_wait_ms: 90_000, replies: 4, median_reply_ms: 600_000, p90_reply_ms: 7_200_000 },
-  automations: [{ name: 'Fast Start Monitor', runs: 15, no_action: 12, failed: 0, skipped: 0, threads: 15 }],
+  automations: [
+    {
+      id: 'a1',
+      name: 'Fast Start Monitor',
+      state: 'enabled',
+      schedule: 'Every 30 minutes',
+      thread_mode: 'new_each_run',
+      runs: 15,
+      no_action: 12,
+      failed: 0,
+      skipped: 0,
+      threads: 15,
+      agent_ms: 900_000,
+      flags: ['rarely_useful', 'thread_per_run'],
+    },
+  ],
 }
 
 function stubDaemon() {
@@ -100,6 +115,11 @@ describe('AnalyticsPanel', () => {
     expect(screen.getByText('10m 0s')).toBeInTheDocument()
     expect(screen.getByText('Fast Start Monitor')).toBeInTheDocument()
     expect(screen.getByText('80%')).toBeInTheDocument()
+    expect(screen.getByText('80% found nothing to do')).toBeInTheDocument()
+    expect(screen.getByText('Rarely finds anything')).toBeInTheDocument()
+    expect(screen.getByText('New thread each run')).toBeInTheDocument()
+    expect(screen.getByText(/Every 30 minutes/)).toBeInTheDocument()
+    expect(screen.getByText('15m 0s')).toBeInTheDocument()
 
     fireEvent.change(screen.getByLabelText('Search your messages'), { target: { value: 'zzz' } })
     expect(await screen.findByText('No messages match.')).toBeInTheDocument()

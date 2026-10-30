@@ -358,3 +358,26 @@ async fn commits_triggers_and_waiting_on_the_user_are_measured() {
     assert_eq!(summary.waiting.requests, 1);
     assert_eq!(summary.waiting.replies, 1);
 }
+
+#[tokio::test]
+async fn automation_health_is_readable_by_agents_but_not_remote_clients() {
+    let (app, _temp) = fixture().await;
+    let request: falcondeck_core::control::ControlGetRequest = serde_json::from_value(json!({
+        "resource": "automation.health",
+        "filters": {"days": 3}
+    }))
+    .unwrap();
+    let agent = falcondeck_core::control::ControlRequestContext {
+        origin: falcondeck_core::control::ControlOrigin::Mcp,
+        ..Default::default()
+    };
+    let response = app.control_get(request.clone(), &agent).await.unwrap();
+    assert_eq!(response.data["days"], 3);
+    assert!(response.data["automations"].is_array());
+    assert!(response.data["flags"]["rarely_useful"].is_string());
+    let remote = falcondeck_core::control::ControlRequestContext {
+        origin: falcondeck_core::control::ControlOrigin::RemoteRpc,
+        ..Default::default()
+    };
+    assert!(app.control_get(request, &remote).await.is_err());
+}

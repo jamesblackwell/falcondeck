@@ -60,6 +60,22 @@ Records store thread and workspace ids; the summary labels them with current
 thread titles, bot names and project folder names, falling back to the id for
 deleted threads.
 
+## Scheduled-task health
+
+The summary lists every scheduled task with runs in the period (and every
+enabled one, even without runs): schedule, state, thread mode, runs, runs that
+found nothing to do, failures, skips, agent time, threads used and the latest
+outcome, with review flags:
+
+- `rarely_useful`: at least 80% of finished runs (six or more) found nothing to do.
+- `very_frequent`: 24 or more runs a day.
+- `failing`: two or more failures, and at least 30% of runs.
+- `thread_per_run`: a `new_each_run` task that used more than three threads.
+
+Agents read the same report with `falcondeck_get` resource `automation.health`
+(`filters.days`, default 7, at most 90). It is answered on the computer only;
+paired remote clients are refused, like the rest of analytics.
+
 ## API
 
 - `GET /api/analytics`: settings, folder, and bytes used.

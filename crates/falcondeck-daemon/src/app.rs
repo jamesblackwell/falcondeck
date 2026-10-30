@@ -1207,6 +1207,10 @@ impl AppState {
         request: ControlGetRequest,
         context: &falcondeck_core::control::ControlRequestContext,
     ) -> Result<falcondeck_core::control::ControlGetResponse, crate::control::ControlError> {
+        // Analytics-backed; the control store alone cannot answer it.
+        if request.resource == "automation.health" {
+            return self.automation_health(&request, context).await;
+        }
         self.inner.control.get(request, context).await
     }
 
