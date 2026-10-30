@@ -6,7 +6,8 @@ import { once } from 'node:events';
 import { createServer } from 'node:http';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { cleanupDesktopInstallDirectories, mainPids, restartDesktop, waitForDesktopHealth, withRestartLock } from './restart-desktop.mjs';
+import { cleanupDesktopInstallDirectories, detachRestart, hostedByApp, mainPids, restartDesktop, waitForDesktopHealth, withRestartLock } from './restart-desktop.mjs';
+import { readFileSync } from 'node:fs';
 
 const binary = '/Applications/FalconDeck.app/Contents/MacOS/falcondeck-desktop';
 function fixture({ stale = false, stubborn = false, unhealthy = false, bootoutFails = false } = {}) {
@@ -46,6 +47,30 @@ function fixture({ stale = false, stubborn = false, unhealthy = false, bootoutFa
 
 test('identifies only the installed main process, not MCP helpers or dev apps', () => {
   assert.deepEqual(mainPids(`1 ${binary}\n2 ${binary} mcp-server\n3 /tmp/FalconDeck.app/Contents/MacOS/falcondeck-desktop`), [1]);
+});
+test('detects a restart running inside an app-hosted agent turn', () => {
+  const tree = (main) => `1 0 /sbin/launchd\n10 1 ${main}\n20 10 codex app-server\n30 20 /bin/zsh -c make desktop-install\n40 30 node scripts/restart-desktop.mjs`;
+  assert.equal(hostedByApp(tree(binary), 40), true);
+  assert.equal(hostedByApp(tree('/Applications/Ghostty.app/Contents/MacOS/ghostty'), 40), false);
+  assert.equal(hostedByApp(tree('/tmp/FalconDeck.app/Contents/MacOS/falcondeck-desktop'), 40), false);
+  assert.equal(hostedByApp('5 6 a\n6 5 b\n7 5 node', 7), false, 'a ppid cycle terminates');
+  assert.equal(hostedByApp('', 40), false);
+});
+test('a detached restart starts a new session with the same arguments and logs its start', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'restart-detach-'));
+  const logPath = join(dir, 'logs', 'desktop-restart.log');
+  const spawned = [];
+  const start = (command, args, options) => { spawned.push({ command, args, options }); return { unref() {} }; };
+  assert.equal(detachRestart(['--install-from', '/tmp/FalconDeck.app'], { start, logPath }), logPath);
+  assert.equal(spawned.length, 1);
+  const [{ command, args, options }] = spawned;
+  assert.equal(command, process.execPath);
+  assert.ok(args[0].endsWith('/scripts/restart-desktop.mjs'));
+  assert.deepEqual(args.slice(1), ['--install-from', '/tmp/FalconDeck.app']);
+  assert.equal(options.detached, true);
+  assert.equal(options.env.FALCONDECK_RESTART_DETACHED, '1');
+  assert.equal(options.stdio[0], 'ignore');
+  assert.match(readFileSync(logPath, 'utf8'), /detached restart-desktop --install-from \/tmp\/FalconDeck\.app/);
 });
 test('one restart, no service created, helpers untouched', async () => {
   const f = fixture();

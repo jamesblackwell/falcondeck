@@ -1,8 +1,8 @@
-import { execFileSync, spawnSync } from 'node:child_process';
-import { closeSync, existsSync, mkdirSync, mkdtempSync, openSync, readdirSync, renameSync, rmSync } from 'node:fs';
+import { execFileSync, spawn, spawnSync } from 'node:child_process';
+import { closeSync, existsSync, mkdirSync, mkdtempSync, openSync, readdirSync, renameSync, rmSync, writeSync } from 'node:fs';
 import { homedir } from 'node:os';
-import { join, resolve } from 'node:path';
-import { pathToFileURL } from 'node:url';
+import { dirname, join, resolve } from 'node:path';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 
 const executable = '/Applications/FalconDeck.app/Contents/MacOS/falcondeck-desktop';
 const app = '/Applications/FalconDeck.app';
@@ -31,6 +31,39 @@ export function mainPids(output) {
     const match = line.trim().match(/^(\d+)\s+(.+)$/);
     return match && match[2] === executable ? [Number(match[1])] : [];
   });
+}
+
+// Agent turns run inside the app. Quitting it ends their process tree, which
+// would kill this script before it relaunches the app.
+export function hostedByApp(output, pid = process.pid) {
+  const processes = new Map();
+  for (const line of output.split('\n')) {
+    const match = line.trim().match(/^(\d+)\s+(\d+)\s+(.+)$/);
+    if (match) processes.set(Number(match[1]), { ppid: Number(match[2]), args: match[3] });
+  }
+  const seen = new Set();
+  for (let current = processes.get(pid)?.ppid; current > 1 && !seen.has(current);
+    current = processes.get(current)?.ppid) {
+    seen.add(current);
+    const args = processes.get(current)?.args;
+    if (args === executable || args?.startsWith(`${executable} `)) return true;
+  }
+  return false;
+}
+
+// Continue in a new session that outlives the app; the log is the only report.
+export function detachRestart(args, { start = spawn, logPath = join(homedir(), '.falcondeck', 'logs', 'desktop-restart.log') } = {}) {
+  mkdirSync(dirname(logPath), { recursive: true });
+  const out = openSync(logPath, 'a');
+  try {
+    writeSync(out, `\n${new Date().toISOString()} detached restart-desktop ${args.join(' ')}\n`);
+    start(process.execPath, [fileURLToPath(import.meta.url), ...args], {
+      detached: true, stdio: ['ignore', out, out], env: { ...process.env, FALCONDECK_RESTART_DETACHED: '1' },
+    }).unref();
+  } finally {
+    closeSync(out);
+  }
+  return logPath;
 }
 
 async function probeDaemonPorts(ports, health, timeoutMs) {
@@ -221,7 +254,13 @@ if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1]
     if (source && (source === app || !existsSync(join(source, 'Contents/MacOS/falcondeck-desktop')))) {
       throw new Error('Expected a separate, built FalconDeck.app bundle.');
     }
-    await withRestartLock(join(homedir(), '.falcondeck', 'desktop-restart.lock'), () => restartDesktop({ installFrom: source }));
-    console.log('FalconDeck restarted once and its daemon is healthy.');
+    if (!process.env.FALCONDECK_RESTART_DETACHED && hostedByApp(run('/bin/ps', ['-ww', '-axo', 'pid=,ppid=,args=']))) {
+      const logPath = detachRestart(source ? ['--install-from', source] : []);
+      console.log(`This shell runs inside FalconDeck, so quitting the app would end this restart.\n`
+        + `Continuing detached; this session will end when the app quits. Result: ${logPath}`);
+    } else {
+      await withRestartLock(join(homedir(), '.falcondeck', 'desktop-restart.lock'), () => restartDesktop({ installFrom: source }));
+      console.log('FalconDeck restarted once and its daemon is healthy.');
+    }
   } catch (error) { console.error(error.message); process.exitCode = 1; }
 }
