@@ -1,7 +1,9 @@
-# Example cloud worker image
+# Cloud worker image
 
-This image definition has **not** been built, published, or exercised in a paid
-sandbox. It is a starting point for qualification. It contains Node 24.22.1,
+The `with-daemon` image was built and locally qualified on 2026-10-30 from
+daemon source `6d05b821`, with the bootstrap configuration cleanup recorded in
+this change. It has **not** been published or exercised in Vercel. See the
+[qualification record](../../../docs/CLOUD-WORKER-QUALIFICATION.md). It contains Node 24.22.1,
 Codex 0.166.0, pnpm 12.16.1, PHP 8.2, Composer 2.8.12, Git, and Docker 28.5.1
 with Compose. Image references use immutable official registry digests, and apt
 uses a dated Debian package snapshot. Refresh those pins deliberately for
@@ -33,6 +35,78 @@ before execution. The `with-daemon` target instead copies the single prepared
 which is the preferred production path. Both targets contain no provider
 credential, native agent login, host identity, or connector.
 
+## Local Linux build and qualification
+
+Start from a clean checkout of the intended commit. The daemon build context
+whitelists Rust sources and embedded extension assets; it excludes local homes,
+Git metadata, dependency directories and environment files. A pinned Rust 1.98
+builder runs on the local machine's native CPU and cross-compiles the daemon
+for Linux amd64, using two Cargo jobs and the normal release profile. The final
+worker remains Linux amd64 even on an Apple Silicon Mac.
+
+Use an explicitly local Buildx builder. For example, on OrbStack:
+
+```sh
+docker buildx create --name fd-cloud-local --driver docker-container \
+  --driver-opt memory=3g --driver-opt cpu-period=100000 \
+  --driver-opt cpu-quota=200000 orbstack
+
+docker buildx build --builder fd-cloud-local --platform linux/amd64 \
+  --file packages/cloud-runtime/image/Dockerfile.daemon --target artifact \
+  --output type=local,dest=packages/cloud-runtime/image/daemon .
+
+docker buildx build --builder fd-cloud-local --platform linux/amd64 \
+  --target with-daemon --load --tag falcondeck-cloud-worker:local \
+  packages/cloud-runtime/image
+
+docker run --rm --init --platform linux/amd64 --network none \
+  --memory 2g --cpus 2 \
+  --mount "type=bind,src=$PWD/packages/cloud-runtime/src,dst=/qualification/runtime,readonly" \
+  --mount "type=bind,src=$PWD/packages/cloud-runtime/image/qualify.mjs,dst=/qualification/qualify.mjs,readonly" \
+  falcondeck-cloud-worker:local node /qualification/qualify.mjs
+```
+
+The build exports the ELF binary, SHA-256 and its ELF/library-version inventory.
+It checks the amd64 interpreter and requires GLIBC at or below Debian 12's 2.36.
+The image must still pass `ldd` and execute its version probe in the final
+runtime. The smoke script uses the real daemon and Codex executable, a placeholder
+key, and an interface check requiring Docker's network-none isolation. It tests
+actual detached processes, authenticated gateway access, an empty native thread,
+source/export hashes, binary/deleted files, index preservation and cleanup. It
+never submits a turn. Its JSON report explicitly distinguishes local checks
+from untested model, Vercel and snapshot behavior.
+
+To retain a publishable artifact without leaving Docker build caches, export
+an OCI archive using the same local builder and image target:
+
+```sh
+docker buildx build --builder fd-cloud-local --platform linux/amd64 \
+  --target with-daemon --provenance=false \
+  --output type=oci,name=falcondeck-cloud-worker:local,dest=worker-linux-amd64.oci.tar,compression=zstd,compression-level=3,force-compression=true \
+  packages/cloud-runtime/image
+```
+
+Load and qualify that exact archive before publication. Remove only the local
+builder, containers and image tags created for this work; retain the requested
+archive and its checksums/report. Leave shared images and caches alone.
+
+## Publication using an existing CLI login
+
+For local publication, the current Vercel CLI supports a project-scoped,
+12-hour OIDC registry login through the existing sign-in:
+
+```sh
+vercel vcr login docker --project PROJECT_ID --scope TEAM_SLUG
+```
+
+The CLI passes the credential directly to Docker. Do not extract a token or put
+it in argv, build arguments, layers or logs. This registry authentication does
+not configure the FalconDeck coordinator's separate sandbox/model credentials.
+Publication and live sandbox creation need an approved account and budget.
+Hobby is documented for personal, noncommercial use; choose an appropriate team
+for company work. A registry push alone does not prove VCR optimization reached
+**Ready** or that the image can boot in a Vercel microVM.
+
 ## Manual build workflow
 
 `.github/workflows/cloud-worker-image.yml` runs only through `workflow_dispatch`.
@@ -40,8 +114,10 @@ It builds the daemon with `cargo build --locked --release -p falcondeck-daemon`
 on Ubuntu 22.04, avoiding a glibc newer than the Debian 12 runtime. It builds
 the `with-daemon` image for `linux/amd64`, runs tool/version checks with network
 access disabled, and uploads the daemon, its SHA-256, linked-library inventory,
-and image build metadata as a seven-day GitHub Actions artifact. It does not
-start the daemon server, Docker services, a sandbox, or a model request.
+image build metadata and the local qualification report as a seven-day GitHub
+Actions artifact. It also runs the isolated local qualification script with the real daemon
+and an empty Codex thread. It does not start Docker services, a Vercel sandbox,
+or a model turn.
 
 To run build-only, open **Actions → Build cloud worker image → Run workflow**,
 select the intended revision, and leave `publish` unchecked. This needs no
@@ -71,7 +147,9 @@ To publish after reviewing the revision and build:
 Vercel also supports and recommends GitHub OIDC registry login for teams that
 configure it; this initial workflow uses the documented token-login path. Do
 not add any model API key or desktop signing/deployment secret to this workflow.
-Image construction and these checks still require their first manual run.
+Local construction and startup checks have passed. The GitHub workflow itself
+has not been dispatched; VCR publication, optimization and cloud boot remain
+unqualified.
 
 ## Disposable test dependencies
 
@@ -101,8 +179,11 @@ are deliberately test-only and must never be used for production services.
 The create request's deny-by-default egress policy still applies. Service image
 pulls need explicitly approved registry/auth/CDN domains or preloaded images;
 this example does not widen the firewall. Compose services are not additional
-public Vercel ports. Engine startup, pulls, service readiness, the Linux daemon,
-and a real Codex turn still need a live integration smoke test before release.
+public Vercel ports. Engine startup, pulls, service readiness and a real Codex turn still need
+qualification before release. The Linux daemon and an empty native Codex thread
+have passed the offline local image check. PHP 8.2 and the generic test-service
+recipe do not establish compatibility with Quizgecko's PHP 8.4 stack or warm
+its project dependencies/package caches.
 
 Sources checked on 2026-10-30:
 
@@ -112,3 +193,6 @@ Sources checked on 2026-10-30:
 - [Official Node image](https://github.com/nodejs/docker-node)
 - [Official Docker image definitions](https://github.com/docker-library/docker)
 - [Meilisearch releases](https://github.com/meilisearch/meilisearch/releases)
+
+- [CLI registry authentication](https://vercel.com/docs/container-registry/cli-reference)
+- [Hobby plan scope](https://vercel.com/docs/plans/hobby)

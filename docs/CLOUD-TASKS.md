@@ -17,7 +17,7 @@ The first runtime supports Codex API-key authentication. Claude/ACP cloud qualif
 ## Setup
 
 1. Install workspace dependencies with `npm install`. The adapter is `packages/cloud-runtime/src/cli.mjs`, requires Node 22+, and pins `@vercel/sandbox` 3.9.1.
-2. Build the `with-daemon` image using the [manual workflow and image instructions](../packages/cloud-runtime/image/README.md). Publish to the intended VCR project, wait for `Ready`, and retain the digest. This workflow has not been run as part of local validation.
+2. Build the `with-daemon` image using the [manual workflow and image instructions](../packages/cloud-runtime/image/README.md). Publish to the intended VCR project, wait for `Ready`, and retain the digest. The image has passed offline local qualification; the workflow has not been dispatched. See [the qualification record](CLOUD-WORKER-QUALIFICATION.md).
 3. In **Cloud tasks → Settings** (or native **Settings → Cloud execution**), enter team/project IDs, a scoped Vercel token, a separate model API key, the digest-pinned image and absolute adapter path on the coordinator. Leave worker download URL/checksum empty when the image includes the daemon. Secrets are write-only and stored in an owner-only coordinator file. Do not put them in Git or a chat.
 4. Use a supported provider runtime limit: the account's own limits still apply. The provider-side deadline is real. **A per-job model dollar cap is not implemented**: the live pilot still needs an agreed budget and an appropriately constrained model credential/broker. Usage reporting alone is not enforcement.
 5. Select a source project, capture and inspect its inclusion/exclusion list, then start the cloud task. The prepared image has test tooling and private Docker Compose services; actual Quizgecko dependencies/cache priming and test commands must be qualified against its repository.
@@ -34,10 +34,10 @@ Default egress is an explicit allowlist. Bootstrap constructs a fresh worker env
 
 Never run deploys from these workers. Production release checks, immutable release artifacts, privileged credentials and irreversible-action approvals belong to a separate release runner. The worker image workflow is not that deployment pipeline.
 
-A test-only Vercel account/project, model credential, image and cost/runtime budget are needed before live qualification. No Vercel sandbox, model request, Docker image build/publication or production deployment was started by the implementation task. Global Vercel CLI/MCP onboarding was explicitly requested and verified separately.
+A test-only Vercel account/project, model credential, image and cost/runtime budget are needed before live qualification. The initial implementation started no Vercel sandbox, cloud model request, image build/publication or production deployment. A subsequent local image build and offline qualification are recorded separately; publication and paid cloud execution remain pending. Global Vercel CLI/MCP onboarding was explicitly requested and verified separately.
 
 ## Checks and qualification
 
-Local checks cover source/index preservation, conflict handling, wire hashes, private storage, durable admission, scope pinning, native worker HTTP flow, secret redaction, gateway authentication and limits, detached fake daemons, SDK lifecycle semantics, native UI compilation and web UI/API owner routing. They do not establish real Vercel account quotas, image boot, Linux binary compatibility, real Codex authentication or cost.
+Local checks cover source/index preservation, conflict handling, wire hashes, private storage, durable admission, scope pinning, native worker HTTP flow, secret redaction, gateway authentication and limits, detached fake daemons, SDK lifecycle semantics, native UI compilation and web UI/API owner routing. The subsequent local image check establishes Linux binary compatibility and real daemon/Codex startup inside Docker. These checks do not establish real Vercel account quotas, microVM boot, model authentication or cost.
 
 Before enabling a week-long pilot, run a bounded live task, interrupt/reconnect it across a Mac restart, collect/import its changes, stop/resume its exact native session, verify denied access, and measure all-in cost and startup time. Do not substitute mocked test results for these checks.

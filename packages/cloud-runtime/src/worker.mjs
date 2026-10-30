@@ -151,7 +151,6 @@ async function writeCodexConfig(homePath, endpoint) {
   // from an earlier turn cannot redirect a newly supplied model credential.
   const contents = [
     'model_provider = "falcondeck-cloud"',
-    'preferred_auth_method = "apikey"',
     '[model_providers.falcondeck-cloud]',
     'name = "FalconDeck cloud API"',
     `base_url = ${JSON.stringify(endpoint)}`,

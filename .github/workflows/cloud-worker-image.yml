@@ -93,6 +93,18 @@ jobs:
               test "$(id -un)" = node
             '
 
+      - name: Qualify isolated worker startup without model calls
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker run --rm --init --network none --memory 2g --cpus 2 \
+            --mount "type=bind,src=${GITHUB_WORKSPACE}/packages/cloud-runtime/src,dst=/qualification/runtime,readonly" \
+            --mount "type=bind,src=${GITHUB_WORKSPACE}/packages/cloud-runtime/image/qualify.mjs,dst=/qualification/qualify.mjs,readonly" \
+            "falcondeck-cloud-worker:${GITHUB_SHA}" \
+            node /qualification/qualify.mjs \
+            > packages/cloud-runtime/image/daemon/local-qualification.json
+          cat packages/cloud-runtime/image/daemon/local-qualification.json
+
       - name: Authenticate to VCR
         if: inputs.publish
         env:
@@ -149,6 +161,7 @@ jobs:
             packages/cloud-runtime/image/daemon/falcondeck-daemon.sha256
             packages/cloud-runtime/image/daemon/falcondeck-daemon.ldd.txt
             packages/cloud-runtime/image/daemon/cloud-image-metadata.json
+            packages/cloud-runtime/image/daemon/local-qualification.json
 
       - name: Remove registry credentials
         if: always()

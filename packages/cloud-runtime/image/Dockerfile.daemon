@@ -1,0 +1,54 @@
+# Build context: the clean repository root at the revision being qualified.
+# Build on the builder's native CPU; only the output executable is Linux amd64.
+ARG RUST_IMAGE=rust:1.98.0-bookworm@sha256:82150a52ec202c1b14d7817e14516c392bb7f5cfebd88f1ed531cb37ebd39922
+FROM --platform=$BUILDPLATFORM ${RUST_IMAGE} AS build
+
+# GCC's amd64 sysroot avoids installing/running foreign-architecture packages.
+# keyring's default Linux v1 backend is zbus + Rust crypto, not libdbus/OpenSSL.
+RUN apt-get update \
+    && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+      gcc-x86-64-linux-gnu g++-x86-64-linux-gnu libc6-dev-amd64-cross \
+      binutils-x86-64-linux-gnu cmake make perl pkg-config ca-certificates file \
+    && rm -rf /var/lib/apt/lists/* \
+    && rustup target add --toolchain 1.98.0 x86_64-unknown-linux-gnu
+
+ENV RUSTUP_TOOLCHAIN=1.98.0 \
+    CARGO_BUILD_JOBS=2 \
+    CARGO_TARGET_DIR=/build/target \
+    CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_LINKER=x86_64-linux-gnu-gcc \
+    CC_x86_64_unknown_linux_gnu=x86_64-linux-gnu-gcc \
+    CXX_x86_64_unknown_linux_gnu=x86_64-linux-gnu-g++ \
+    AR_x86_64_unknown_linux_gnu=x86_64-linux-gnu-ar \
+    AWS_LC_SYS_USE_SYSTEM=0
+
+WORKDIR /src
+COPY Cargo.toml Cargo.lock ./
+COPY crates/ crates/
+# Cargo loads every workspace member's manifest, even when only daemon builds.
+COPY apps/desktop/src-tauri/Cargo.toml apps/desktop/src-tauri/Cargo.toml
+COPY apps/desktop/src-tauri/src/ apps/desktop/src-tauri/src/
+# These small source assets are embedded by daemon include_str! expressions.
+COPY assets/brand/logomark-mark-dark.svg assets/brand/logomark-mark-dark.svg
+COPY apps/extension-host/main.ts apps/extension-host/import-map.json apps/extension-host/
+COPY packages/extension-sdk/src/index.ts packages/extension-sdk/src/index.ts
+COPY extensions/ extensions/
+
+# Keep the repo's standard release profile (including thin LTO). Build caches
+# belong to the disposable local builder and are excluded from the export.
+RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
+    --mount=type=cache,target=/build/target,sharing=locked \
+    cargo +1.98.0 build --locked --release --target x86_64-unknown-linux-gnu \
+      --package falcondeck-daemon --bin falcondeck-daemon \
+    && install -D -m 0755 /build/target/x86_64-unknown-linux-gnu/release/falcondeck-daemon /out/falcondeck-daemon \
+    && file /out/falcondeck-daemon | grep -q 'ELF 64-bit LSB.*x86-64' \
+    && x86_64-linux-gnu-readelf --program-headers --wide /out/falcondeck-daemon | grep -Fq '/lib64/ld-linux-x86-64.so.2' \
+    && x86_64-linux-gnu-readelf --file-header --program-headers --dynamic --version-info --wide /out/falcondeck-daemon > /out/falcondeck-daemon.elf.txt \
+    && highest_glibc="$(grep -oE 'GLIBC_[0-9]+\.[0-9]+' /out/falcondeck-daemon.elf.txt | sort -V | tail -n 1)" \
+    && test -n "$highest_glibc" \
+    && test "$(printf '%s\n' GLIBC_2.36 "$highest_glibc" | sort -V | tail -n 1)" = GLIBC_2.36 \
+    && cd /out && sha256sum falcondeck-daemon > falcondeck-daemon.sha256
+
+# Do not execute the cross-built binary in the native-arm builder. Root must
+# check ldd and --version inside the final amd64 image with networking disabled.
+FROM scratch AS artifact
+COPY --from=build /out/ /
