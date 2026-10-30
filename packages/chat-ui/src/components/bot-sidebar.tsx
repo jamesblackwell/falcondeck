@@ -136,7 +136,7 @@ export function BotSidebar({
                 {activity === "needs_input" ? (
                   <span className="h-2.5 w-2.5 rounded-full bg-warning shadow-[0_0_0_3px_var(--fd-warning-muted)]" />
                 ) : icon ? (
-                  <BotMark icon={icon} working={activity === "working"} />
+                  <BotMark icon={icon} />
                 ) : (
                   <Bot aria-hidden="true" className="h-3.5 w-3.5" />
                 )}
@@ -156,9 +156,10 @@ export function BotSidebar({
                   Needs you
                 </span>
               ) : activity === "working" ? (
-                <span className="fd-type-meta shrink-0 text-fg-muted">
-                  Working
-                </span>
+                <>
+                  <ActivityDiamond size="xs" />
+                  <span className="sr-only">Working</span>
+                </>
               ) : null}
             </button>
             <button

@@ -18,16 +18,14 @@ const SHAPES: Record<string, ReactNode> = {
   ),
 };
 
-/** A bot's colored shape. Pulses (motion permitting) while the bot is working. */
+/** A bot's colored shape. Activity is shown beside it, not on it. */
 export function BotMark({
   icon,
   size = 14,
-  working = false,
   className,
 }: {
   icon: BotIcon;
   size?: number;
-  working?: boolean;
   className?: string;
 }) {
   const color = workspaceColorCssVar(icon.color) ?? "currentColor";
@@ -41,7 +39,7 @@ export function BotMark({
       stroke={color}
       strokeWidth={1.2}
       strokeLinejoin="round"
-      className={cn("shrink-0", working && "motion-safe:animate-pulse", className)}
+      className={cn("shrink-0", className)}
     >
       {SHAPES[icon.shape] ?? SHAPES.circle}
     </svg>
