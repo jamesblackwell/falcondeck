@@ -810,3 +810,39 @@ async fn creating_a_bot_keeps_the_marks_older_bots_already_show() {
         ("diamond", "cat-2")
     );
 }
+
+#[tokio::test]
+async fn bots_can_be_reordered_and_unlisted_ones_keep_their_place() {
+    let (app, _temp) = fixture().await;
+    let first = promote(&app).await;
+    let profile = |id: &str| BotProfile {
+        id: id.into(),
+        name: id.into(),
+        workspace_id: "workspace-1".into(),
+        dedicated_workspace: false,
+        thread_id: format!("thread-{id}"),
+        space_path: format!("/tmp/bots/{id}/space"),
+        instructions: String::new(),
+        can_start_threads: true,
+        context_files: Vec::new(),
+        icon: None,
+    };
+    {
+        let mut preferences = app.inner.preferences.lock().await;
+        preferences.bots.push(profile("b"));
+        preferences.bots.push(profile("c"));
+    }
+    app.mutate_bot(BotMutation::Reorder {
+        ids: vec!["c".into(), "missing".into()],
+    })
+    .await
+    .unwrap();
+    let order: Vec<_> = app
+        .preferences()
+        .await
+        .bots
+        .iter()
+        .map(|bot| bot.id.clone())
+        .collect();
+    assert_eq!(order, ["c".to_string(), first.id, "b".into()]);
+}

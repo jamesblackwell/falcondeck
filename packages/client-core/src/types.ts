@@ -481,6 +481,7 @@ export type BotProfile = {
 export type BotMutation =
   | { action: "create"; name: string; instructions: string; provider?: AgentProvider; model_id?: string; thread_id?: string }
   | { action: "update"; id: string; name: string; instructions: string; can_start_threads: boolean; context_files?: string[]; icon?: import("./bot-icons").BotIcon }
+  | { action: "reorder"; ids: string[] }
   | { action: "stop" | "delete"; id: string };
 
 export type BotDocument = { name: string; content: string; version: string };

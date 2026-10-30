@@ -301,6 +301,17 @@ impl AppState {
                 self.save_bots(bots).await?;
                 Ok(json!({"bot": bot}))
             }
+            BotMutation::Reorder { ids } => {
+                let mut bots = self.inner.preferences.lock().await.bots.clone();
+                // Stable sort: listed bots by their position, the rest after, as before.
+                bots.sort_by_key(|bot| {
+                    ids.iter()
+                        .position(|id| id == &bot.id)
+                        .unwrap_or(usize::MAX)
+                });
+                self.save_bots(bots).await?;
+                Ok(json!({"ok": true}))
+            }
             BotMutation::Stop { id } => {
                 let bot = self.bot(&id).await?;
                 let _spawn_gate = self.inner.agent_spawn_gate.lock().await;

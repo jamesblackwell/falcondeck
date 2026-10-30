@@ -91,6 +91,7 @@ export function BotSidebar({
   const [editor, setEditor] = useState<BotProfile | "new" | null>(null);
   const icons = useMemo(() => resolveBotIcons(bots), [bots]);
   const tasks = useMemo(() => groups.flatMap((group) => group.threads), [groups]);
+  const reorder = useBotReorder(bots, botApi);
   if (!botApi) return null;
   return (
     <section aria-labelledby="fd-bots-heading" className="mb-4">
@@ -108,24 +109,41 @@ export function BotSidebar({
           <Plus className="h-3.5 w-3.5" />
         </button>
       </div>
-      {bots.map((bot) => {
+      {reorder.ordered.map((bot, index) => {
         const activity = botActivity(bot, tasks);
         const icon = icons.get(bot.id);
         const selected = selectedThreadId === bot.thread_id;
         return (
           <div
             key={bot.id}
+            ref={(node) => reorder.register(bot.id, node)}
+            onPointerDown={(event) => reorder.start(event, bot.id)}
             className={cn(
               "group flex items-center gap-1 rounded-[var(--fd-radius-md)] pr-1.5 transition-colors duration-[var(--fd-duration-hover)]",
-              selected
-                ? "fd-row-selected"
-                : "hover:bg-interactive-hover active:bg-interactive-selected",
+              reorder.dragging === bot.id
+                ? "relative z-10 cursor-grabbing bg-interactive-selected shadow-[var(--fd-shadow-sm)]"
+                : selected
+                  ? "fd-row-selected"
+                  : "hover:bg-interactive-hover active:bg-interactive-selected",
             )}
           >
             <button
               type="button"
+              title="Drag or press Alt+↑/↓ to reorder"
               className="fd-focus-inset flex min-w-0 flex-1 items-center gap-2 rounded-[var(--fd-radius-sm)] py-2 pl-2.5 text-left"
-              onClick={() => onSelectThread(bot.workspace_id, bot.thread_id)}
+              onClick={(event) => {
+                // A drag that ends over the row is not a click.
+                if (reorder.consumeClick()) {
+                  event.preventDefault();
+                  return;
+                }
+                onSelectThread(bot.workspace_id, bot.thread_id);
+              }}
+              onKeyDown={(event) => {
+                if (!event.altKey || (event.key !== "ArrowUp" && event.key !== "ArrowDown")) return;
+                event.preventDefault();
+                reorder.move(bot.id, index + (event.key === "ArrowUp" ? -1 : 1));
+              }}
             >
               <span
                 className={cn(
@@ -166,6 +184,7 @@ export function BotSidebar({
               type="button"
               aria-label={`Edit ${bot.name}`}
               title="Bot settings"
+              data-no-drag=""
               className={cn(
                 SECTION_ICON_BUTTON_CLASS,
                 "opacity-0 focus-visible:opacity-100 group-focus-within:opacity-100 group-hover:opacity-100",
@@ -878,6 +897,93 @@ function BotIconPicker({
       </div>
     </EditorSection>
   );
+}
+
+/**
+ * Pointer-driven reordering (HTML5 drag and drop does not work in the desktop
+ * webview). A row moves once the pointer travels a few pixels, so plain clicks
+ * still open the bot. The new order is shown at once and saved on release.
+ */
+function useBotReorder(bots: BotProfile[], api: BotApi | undefined) {
+  const [order, setOrder] = useState<string[] | null>(null);
+  const [dragging, setDragging] = useState<string | null>(null);
+  const rows = useRef(new Map<string, HTMLElement>());
+  const swallowClick = useRef(false);
+  const ordered = useMemo(() => {
+    if (!order) return bots;
+    const position = new Map(order.map((id, index) => [id, index]));
+    return [...bots].sort(
+      (a, b) => (position.get(a.id) ?? Infinity) - (position.get(b.id) ?? Infinity),
+    );
+  }, [bots, order]);
+  // Drop the local order once the daemon's matches it.
+  useEffect(() => {
+    if (order && bots.map((bot) => bot.id).join() === order.join()) setOrder(null);
+  }, [bots, order]);
+  const save = (ids: string[]) => {
+    setOrder(ids);
+    void api?.mutateBot({ action: "reorder", ids }).catch(() => setOrder(null));
+  };
+  const move = (id: string, to: number) => {
+    const ids = ordered.map((bot) => bot.id);
+    const from = ids.indexOf(id);
+    const target = Math.max(0, Math.min(ids.length - 1, to));
+    if (from < 0 || from === target) return;
+    ids.splice(target, 0, ...ids.splice(from, 1));
+    save(ids);
+  };
+  const start = (event: React.PointerEvent<HTMLElement>, id: string) => {
+    if (event.button !== 0 || (event.target as HTMLElement).closest("[data-no-drag]")) return;
+    const startY = event.clientY;
+    let ids = ordered.map((bot) => bot.id);
+    let active = false;
+    const onMove = (move: PointerEvent) => {
+      if (!active) {
+        if (Math.abs(move.clientY - startY) < 5) return;
+        active = true;
+        setDragging(id);
+      }
+      // Slot under the pointer, from the rows' current positions.
+      const target = ids.findIndex((other) => {
+        const rect = rows.current.get(other)?.getBoundingClientRect();
+        return rect ? move.clientY < rect.top + rect.height / 2 : false;
+      });
+      const next = ids.filter((other) => other !== id);
+      next.splice(target < 0 ? next.length : Math.min(target, next.length), 0, id);
+      if (next.join() !== ids.join()) {
+        ids = next;
+        setOrder(next);
+      }
+    };
+    const onUp = () => {
+      window.removeEventListener("pointermove", onMove);
+      window.removeEventListener("pointerup", onUp);
+      window.removeEventListener("pointercancel", onUp);
+      if (!active) return;
+      swallowClick.current = true;
+      setDragging(null);
+      if (ids.join() !== bots.map((bot) => bot.id).join()) save(ids);
+      else setOrder(null);
+    };
+    window.addEventListener("pointermove", onMove);
+    window.addEventListener("pointerup", onUp);
+    window.addEventListener("pointercancel", onUp);
+  };
+  return {
+    ordered,
+    dragging,
+    start,
+    move,
+    register: (id: string, node: HTMLElement | null) => {
+      if (node) rows.current.set(id, node);
+      else rows.current.delete(id);
+    },
+    consumeClick: () => {
+      const swallow = swallowClick.current;
+      swallowClick.current = false;
+      return swallow;
+    },
+  };
 }
 
 function formatTokens(tokens: number) {

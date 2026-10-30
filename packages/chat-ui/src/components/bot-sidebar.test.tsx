@@ -271,4 +271,54 @@ describe("bot sidebar", () => {
       ),
     );
   });
+
+  it("reorders bots by keyboard and by dragging, without opening them", async () => {
+    const transport = api();
+    const onSelect = vi.fn();
+    const bots = ["A", "B", "C"].map((name, index) => ({
+      ...bot,
+      id: `bot-${name}`,
+      name,
+      thread_id: `t-${name}`,
+      icon: { shape: "circle", color: `cat-${index + 1}` },
+    }));
+    render(
+      <BotSidebar
+        bots={bots}
+        botApi={transport}
+        groups={[]}
+        selectedThreadId={null}
+        onSelectThread={onSelect}
+      />,
+    );
+    const row = (name: string) => screen.getByRole("button", { name: new RegExp(`^${name}`) });
+    fireEvent.keyDown(row("C"), { key: "ArrowUp", altKey: true });
+    await waitFor(() =>
+      expect(transport.mutateBot).toHaveBeenCalledWith({
+        action: "reorder",
+        ids: ["bot-A", "bot-C", "bot-B"],
+      }),
+    );
+
+    // Rows are 30px tall from y=0; drag A below C.
+    for (const [index, name] of ["A", "C", "B"].entries()) {
+      const element = row(name).parentElement!;
+      element.getBoundingClientRect = () =>
+        ({ top: index * 30, height: 30, bottom: index * 30 + 30 }) as DOMRect;
+    }
+    fireEvent.pointerDown(row("A").parentElement!, { button: 0, clientY: 10 });
+    fireEvent.pointerMove(window, { clientY: 80 });
+    fireEvent.pointerUp(window, { clientY: 80 });
+    fireEvent.click(row("A"));
+    await waitFor(() =>
+      expect(transport.mutateBot).toHaveBeenLastCalledWith({
+        action: "reorder",
+        ids: ["bot-C", "bot-B", "bot-A"],
+      }),
+    );
+    expect(onSelect).not.toHaveBeenCalled();
+    // A plain click still opens the bot.
+    fireEvent.click(row("B"));
+    expect(onSelect).toHaveBeenCalledWith("home", "t-B");
+  });
 });

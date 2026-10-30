@@ -127,7 +127,7 @@ individual archive/delete and project removal cannot strand a registered bot.
 ## Client contract
 
 Profiles are carried in `preferences.bots`; older snapshots default to no bots.
-Mutations use `POST /api/bots` with `create`, `update`, `stop`, or `delete`.
+Mutations use `POST /api/bots` with `create`, `update`, `reorder`, `stop`, or `delete`. Bots are listed in their saved order; `reorder` takes ids first to last, and bots it omits keep their relative order after those listed. Desktop reorders by dragging a row or Alt+↑/↓.
 Document listing, reads and mutations use `/api/bots/:id/documents` and
 `/api/bots/:id/documents/content?name=...`.
 

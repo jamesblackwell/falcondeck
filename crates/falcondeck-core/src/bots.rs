@@ -146,6 +146,11 @@ pub enum BotMutation {
         #[serde(default)]
         icon: Option<BotIcon>,
     },
+    /// Put bots in this order; bots not listed keep their relative order after them.
+    Reorder {
+        /// Bot identifiers, first to last.
+        ids: Vec<String>,
+    },
     /// Stop the bot and its active delegated tasks.
     Stop {
         /// Bot identifier.
