@@ -25,6 +25,7 @@ typedef NS_ENUM(int32_t, FDEventKind) {
   FDEventParakeetAudioReady = 15,
   FDEventUnreadableRetained = 16,
   FDEventQuickRewrite = 17,
+  FDEventDiscarded = 18,
 };
 
 #endif

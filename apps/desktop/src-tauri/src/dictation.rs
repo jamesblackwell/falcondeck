@@ -67,6 +67,25 @@ static LAST_TRANSCRIPT: RwLock<Option<String>> = RwLock::new(None);
 static REWRITE_SELECTION: RwLock<Option<String>> = RwLock::new(None);
 static REWRITE_ACTIVE: AtomicBool = AtomicBool::new(false);
 static RECOVERY_COPY: AtomicBool = AtomicBool::new(false);
+/// Rewrites (and cleanups) whose result has not been delivered yet.
+static REWRITES_IN_FLIGHT: AtomicU64 = AtomicU64::new(0);
+
+/// Counts one rewrite as in flight until it is dropped, on whichever path the
+/// rewrite ends.
+struct RewriteInFlight;
+
+impl RewriteInFlight {
+    fn start() -> Self {
+        REWRITES_IN_FLIGHT.fetch_add(1, Ordering::AcqRel);
+        Self
+    }
+}
+
+impl Drop for RewriteInFlight {
+    fn drop(&mut self) {
+        REWRITES_IN_FLIGHT.fetch_sub(1, Ordering::AcqRel);
+    }
+}
 
 // Timeouts are per request rather than per client: a 30-second dictation and
 // a 30-minute one deserve very different ceilings.
@@ -104,6 +123,7 @@ mod event_kind {
     pub const PARAKEET_AUDIO_READY: i32 = 15;
     pub const UNREADABLE_RETAINED: i32 = 16;
     pub const QUICK_REWRITE: i32 = 17;
+    pub const DISCARDED: i32 = 18;
 }
 
 #[derive(Clone, Copy, Debug, Default, Deserialize)]
@@ -1485,6 +1505,7 @@ fn start_rewrite(app: AppHandle, instruction: String, cleanup: bool, recorded: b
     {
         emit_rewriting(&app);
     }
+    let in_flight = RewriteInFlight::start();
     tauri::async_runtime::spawn(async move {
         let config = match current_dictation_config() {
             Ok(config) => config,
@@ -1514,6 +1535,7 @@ fn start_rewrite(app: AppHandle, instruction: String, cleanup: bool, recorded: b
             Ok(text) => {
                 let finish_app = app.clone();
                 let _ = app.run_on_main_thread(move || {
+                    let _in_flight = in_flight;
                     if SESSION_GENERATION.load(Ordering::Acquire) != generation {
                         return;
                     }
@@ -1865,6 +1887,15 @@ fn file_native_recording(text: Option<String>, error: Option<String>) {
     );
 }
 
+/// True while Rust is still producing a result for the held recording (an
+/// OpenRouter or Parakeet transcription, or a rewrite). The native side checks
+/// this before reporting a held recording as waiting for Retry.
+#[no_mangle]
+pub extern "C" fn fd_dictation_busy() -> bool {
+    ACTIVE_OPENROUTER_TRANSCRIPTION.load(Ordering::Acquire) != 0
+        || REWRITES_IN_FLIGHT.load(Ordering::Acquire) != 0
+}
+
 /// Receives lifecycle callbacks from the Objective-C bridge. Payload pointers
 /// are valid only for this synchronous call, so copy them before any async work.
 #[cfg(target_os = "macos")]
@@ -1887,10 +1918,10 @@ pub extern "C" fn fd_dictation_emit(kind: i32, payload: *const std::ffi::c_char)
             RECOVERY_COPY.store(false, Ordering::Release);
             let rewrite = payload == "rewrite";
             REWRITE_ACTIVE.store(rewrite, Ordering::Release);
-            if !rewrite {
-                if let Ok(mut selection) = REWRITE_SELECTION.write() {
-                    *selection = None;
-                }
+            // A rewrite's selection arrives when its take stops; never carry
+            // the previous take's over.
+            if let Ok(mut selection) = REWRITE_SELECTION.write() {
+                *selection = None;
             }
             SESSION_GENERATION.fetch_add(1, Ordering::AcqRel);
             if CONFIG
@@ -1949,6 +1980,25 @@ pub extern "C" fn fd_dictation_emit(kind: i32, payload: *const std::ffi::c_char)
                 },
             );
             hide_overlay_after(app, generation, Duration::from_millis(650));
+        }
+        // A tap of the rewrite shortcut: its take is gone and there is nothing
+        // to say about it, so the pill disappears at once.
+        event_kind::DISCARDED => {
+            let _ = CURRENT_RECORDING.write().map(|mut current| current.take());
+            let mode = rewrite_mode();
+            clear_rewrite_session();
+            let generation = SESSION_GENERATION.fetch_add(1, Ordering::AcqRel) + 1;
+            emit_event(
+                &app,
+                DictationEvent {
+                    state: "cancelled",
+                    text: None,
+                    error: None,
+                    retained_audio: false,
+                    mode,
+                },
+            );
+            hide_overlay_after(app, generation, Duration::ZERO);
         }
         // Esc during a take: the audio survives for the undo window, so the
         // pill stays up long enough to offer it back.
@@ -2095,6 +2145,18 @@ mod tests {
     #[test]
     fn transcript_replacement_requires_the_original_range_and_unchanged_text() {
         assert!(unsafe { super::fd_dictation_test_transcript_replacement_ranges() });
+    }
+
+    #[test]
+    fn a_rewrite_keeps_dictation_busy_until_it_ends() {
+        let before = super::REWRITES_IN_FLIGHT.load(std::sync::atomic::Ordering::Acquire);
+        let in_flight = super::RewriteInFlight::start();
+        assert!(super::fd_dictation_busy());
+        drop(in_flight);
+        assert_eq!(
+            super::REWRITES_IN_FLIGHT.load(std::sync::atomic::Ordering::Acquire),
+            before
+        );
     }
 
     #[test]
@@ -2276,6 +2338,7 @@ mod tests {
             ("CleanupTranscript", super::event_kind::CLEANUP_TRANSCRIPT),
             ("UnreadableRetained", super::event_kind::UNREADABLE_RETAINED),
             ("QuickRewrite", super::event_kind::QUICK_REWRITE),
+            ("Discarded", super::event_kind::DISCARDED),
             (
                 "ParakeetAudioReady",
                 super::event_kind::PARAKEET_AUDIO_READY,

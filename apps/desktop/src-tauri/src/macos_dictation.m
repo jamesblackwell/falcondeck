@@ -12,6 +12,7 @@
 #include <unistd.h>
 
 extern void fd_dictation_emit(int32_t kind, const char *payload);
+extern bool fd_dictation_busy(void);
 bool fd_dictation_copy_text(const char *utf8_text);
 static BOOL FDRecordingIsReadable(NSURL *url);
 
@@ -152,12 +153,13 @@ static BOOL FDChordMatches(FDHotkey hotkey, CGKeyCode keyCode,
 static const CGKeyCode FDQwertyVKeyCode = 9;
 static const CGKeyCode FDQwertyCKeyCode = 8;
 static const CGKeyCode FDQwertyAKeyCode = 0;
-// Hold-to-talk dictation starts after 80 ms. Rewrite waits longer so a quick
-// tap never opens the microphone, which leaves room for the triple tap that
-// tidies the whole focused field.
-static const int64_t FDDictationHoldArmDelayNanoseconds = 80 * NSEC_PER_MSEC;
-static const int64_t FDRewriteHoldArmDelayNanoseconds = 180 * NSEC_PER_MSEC;
-static const NSTimeInterval FDRewriteTapGapSeconds = 0.45;
+// A rewrite press this short is a tap. Its take is discarded quietly: the
+// microphone is not warm that soon, so it could never hold an instruction.
+static const NSTimeInterval FDRewriteTapMaxSeconds = 0.3;
+// Longest gap between consecutive tap releases in a triple tap.
+static const NSTimeInterval FDRewriteTapGapSeconds = 0.6;
+// A triple tap that waits for a tap's take to settle gives up after this.
+static const NSTimeInterval FDQuickRewriteWaitSeconds = 1.5;
 static const useconds_t FDCopyPollIntervalMicros = 25 * 1000;
 static const int FDCopyPollAttempts = 16;
 static const useconds_t FDPasteboardPrepareDelayMicros = 80 * 1000;
@@ -551,11 +553,19 @@ static BOOL FDTranscriptRangeMatches(NSString *value, NSString *original, CFRang
 @property(nonatomic, strong) AVAssetExportSession *recordingExport;
 @property(nonatomic) NSUInteger modifierGeneration;
 @property(nonatomic) NSUInteger rewriteModifierGeneration;
-// Set once the hold delay has tried to start a rewrite for the current press,
-// so that press can no longer count as a tap.
-@property(nonatomic) BOOL rewriteArmFired;
+// Hardware time (seconds since boot) of the event being handled, so tap
+// timing is not skewed when the main thread was busy.
+@property(nonatomic) NSTimeInterval currentEventTime;
+@property(nonatomic) NSTimeInterval rewriteKeyDownTime;
 @property(nonatomic) NSUInteger rewriteTapCount;
 @property(nonatomic) NSTimeInterval rewriteLastTapTime;
+// Uptime of a triple tap waiting for a tap's take to finish discarding; 0 when
+// none is waiting.
+@property(nonatomic) NSTimeInterval quickRewriteRequestedAt;
+// The take being cancelled is a discard: no Undo, and the outcome is either a
+// quiet Discarded event or `discardFailureMessage`.
+@property(nonatomic) BOOL discarding;
+@property(nonatomic, copy) NSString *discardFailureMessage;
 @property(nonatomic) NSUInteger speechGeneration;
 @property(nonatomic) pid_t pasteTargetProcessIdentifier;
 @property(nonatomic) pid_t pasteTargetApplicationProcessIdentifier;
@@ -619,6 +629,10 @@ static BOOL FDTranscriptRangeMatches(NSString *value, NSString *original, CFRang
 - (void)clearRewriteSession;
 - (void)primeRewriteSelectionCapture;
 - (void)registerRewriteTap;
+- (void)handleRewriteHoldRelease;
+- (BOOL)resolveRewriteSelection;
+- (void)discardRecordingWithFailure:(NSString *)message;
+- (void)finishDiscard;
 - (void)rewriteFocusedInput;
 - (BOOL)postSelectAllShortcut;
 - (NSString *)copySelectionTargetedFirst:(BOOL)targetedFirst;
@@ -673,6 +687,7 @@ static CGEventRef FDEventTapCallback(CGEventTapProxy proxy, CGEventType type,
   BOOL repeat = type == kCGEventKeyDown &&
                 CGEventGetIntegerValueField(event, kCGKeyboardEventAutorepeat) !=
                     0;
+  NSTimeInterval timestamp = [NSEvent eventWithCGEvent:event].timestamp;
   BOOL consume = NO;
   if (type == kCGEventKeyDown || type == kCGEventKeyUp) {
     if (controller.enabled &&
@@ -685,6 +700,9 @@ static CGEventRef FDEventTapCallback(CGEventTapProxy proxy, CGEventType type,
     }
   }
   dispatch_async(dispatch_get_main_queue(), ^{
+    controller.currentEventTime = timestamp > 0
+        ? timestamp
+        : NSProcessInfo.processInfo.systemUptime;
     if (type == kCGEventFlagsChanged) {
       [controller handleFlagsChanged:keyCode flags:flags];
     } else if (type == kCGEventKeyDown) {
@@ -958,14 +976,12 @@ static CGEventRef FDEventTapCallback(CGEventTapProxy proxy, CGEventType type,
 - (void)armHoldRecording:(BOOL)rewrite {
   if (self.activationMode != FDActivationModeHold) return;
   if (rewrite) {
-    self.rewriteArmFired = NO;
+    self.rewriteKeyDownTime = self.currentEventTime;
     [self primeRewriteSelectionCapture];
   }
   NSUInteger generation =
       rewrite ? self.rewriteModifierGeneration : self.modifierGeneration;
-  int64_t delay = rewrite ? FDRewriteHoldArmDelayNanoseconds
-                          : FDDictationHoldArmDelayNanoseconds;
-  dispatch_after(dispatch_time(DISPATCH_TIME_NOW, delay),
+  dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 80 * NSEC_PER_MSEC),
                  dispatch_get_main_queue(), ^{
     BOOL stillDown =
         rewrite ? self.rewriteModifierDown : self.modifierDown;
@@ -976,20 +992,36 @@ static CGEventRef FDEventTapCallback(CGEventTapProxy proxy, CGEventType type,
                 : self.modifierGeneration == generation;
     BOOL featureOn = rewrite ? self.rewriteEnabled : self.enabled;
     if (featureOn && stillDown && unused && sameGeneration && !self.recording) {
-      if (rewrite) self.rewriteArmFired = YES;
       [self startRecordingAsRewrite:rewrite];
     }
   });
 }
 
-// Hold mode only: three quick taps of the rewrite shortcut, none long enough
-// to start recording, select the focused field and tidy all of it.
-- (void)registerRewriteTap {
-  if (self.rewriteArmFired) {
-    self.rewriteTapCount = 0;
-    return;
+// Hold mode only: a rewrite press released within FDRewriteTapMaxSeconds is a
+// tap. A take it started is discarded quietly instead of failing, and a short
+// press never reads the selection, so a lone tap does nothing.
+- (void)handleRewriteHoldRelease {
+  NSTimeInterval held = self.currentEventTime - self.rewriteKeyDownTime;
+  BOOL tap = held >= 0 && held <= FDRewriteTapMaxSeconds;
+  if (self.recording && self.rewriteSession) {
+    if (tap) {
+      [self discardRecordingWithFailure:nil];
+    } else {
+      [self stopRecording];
+    }
   }
-  NSTimeInterval now = NSProcessInfo.processInfo.systemUptime;
+  self.pendingRewriteAxResolved = NO;
+  self.pendingRewriteSelection = nil;
+  if (tap) {
+    [self registerRewriteTap];
+  } else {
+    self.rewriteTapCount = 0;
+  }
+}
+
+// Three taps select the focused field and tidy all of it.
+- (void)registerRewriteTap {
+  NSTimeInterval now = self.currentEventTime;
   if (self.rewriteTapCount > 0 &&
       now - self.rewriteLastTapTime > FDRewriteTapGapSeconds) {
     self.rewriteTapCount = 0;
@@ -998,6 +1030,11 @@ static CGEventRef FDEventTapCallback(CGEventTapProxy proxy, CGEventType type,
   self.rewriteLastTapTime = now;
   if (self.rewriteTapCount < 3) return;
   self.rewriteTapCount = 0;
+  if (self.recording || self.stopping) {
+    // A tap's take is still being discarded; -finishDiscard runs this.
+    self.quickRewriteRequestedAt = NSProcessInfo.processInfo.systemUptime;
+    return;
+  }
   [self rewriteFocusedInput];
 }
 
@@ -1015,13 +1052,10 @@ static CGEventRef FDEventTapCallback(CGEventTapProxy proxy, CGEventType type,
     if (self.modifierUsedInChord) return;
   }
   if (self.activationMode == FDActivationModeHold) {
-    if (self.recording && self.rewriteSession == rewrite) {
-      if (rewrite) self.rewriteTapCount = 0;
+    if (rewrite) {
+      [self handleRewriteHoldRelease];
+    } else if (self.recording && !self.rewriteSession) {
       [self stopRecording];
-    } else if (rewrite && !self.recording) {
-      self.pendingRewriteAxResolved = NO;
-      self.pendingRewriteSelection = nil;
-      [self registerRewriteTap];
     }
     return;
   }
@@ -1303,29 +1337,25 @@ static CGEventRef FDEventTapCallback(CGEventTapProxy proxy, CGEventType type,
   // the dictation overlay must not cause a later paste to be routed back
   // through FalconDeck's global event stream or into a newly focused app.
   [self capturePasteTarget];
+  // The selection is read when the take stops (-resolveRewriteSelection), so
+  // starting stays cheap and a tap never fails for want of a selection. The
+  // AX selection primed at key-down is kept for that.
   if (rewrite) {
-    NSString *selection = nil;
-    if (self.pendingRewriteAxResolved) {
-      selection = self.pendingRewriteSelection;
-    } else {
-      selection = [self captureSelectedText];
-    }
-    self.pendingRewriteAxResolved = NO;
-    self.pendingRewriteSelection = nil;
-    NSString *trimmed = [selection
-        stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet];
-    if (trimmed.length == 0) {
+    self.rewriteSession = YES;
+    self.rewriteSelection = nil;
+    // Toggle mode has no taps, so it can still fail before the writer speaks.
+    if (self.activationMode == FDActivationModeToggle &&
+        ![self resolveRewriteSelection]) {
       [self clearRewriteSession];
-      FDEmit(FDEventRewriteSelection, @"");
       FDEmit(FDEventFailed,
-             @"Select text first, then hold the rewrite shortcut and say how to edit it.");
+             @"Select text first, then press the rewrite shortcut and say how to edit it.");
       return;
     }
-    self.rewriteSession = YES;
-    self.rewriteSelection = selection;
   } else {
     [self clearRewriteSession];
   }
+  self.discarding = NO;
+  self.discardFailureMessage = nil;
 
   self.retryCopiesTranscript = NO;
   NSString *name = [NSString stringWithFormat:@"falcondeck-dictation-%@.caf",
@@ -1389,9 +1419,6 @@ static CGEventRef FDEventTapCallback(CGEventTapProxy proxy, CGEventType type,
   self.fileOutputActive = NO;
   // Surface the overlay before the microphone is warm: -startRunning blocks
   // for hundreds of milliseconds and previously gated all recording feedback.
-  if (rewrite && self.rewriteSelection.length > 0) {
-    FDEmit(FDEventRewriteSelection, self.rewriteSelection);
-  }
   FDEmit(FDEventRecording, rewrite ? @"rewrite" : @"");
   __weak FDDictationController *weakSelf = self;
   dispatch_async(self.sessionQueue, ^{
@@ -1423,7 +1450,9 @@ static CGEventRef FDEventTapCallback(CGEventTapProxy proxy, CGEventType type,
     self.cancelling = NO;
     [[NSFileManager defaultManager] removeItemAtURL:url error:nil];
     [self setRetainedRecordingURL:nil provider:0];
-    if (wasCancelled) {
+    if (wasCancelled && self.discarding) {
+      [self finishDiscard];
+    } else if (wasCancelled) {
       FDEmit(FDEventCancelled, @"");
     } else if (wasStopped) {
       FDEmit(FDEventFailed,
@@ -1442,6 +1471,13 @@ static CGEventRef FDEventTapCallback(CGEventTapProxy proxy, CGEventType type,
 
 - (void)stopRecording {
   if (!self.recording) return;
+  if (self.rewriteSession && !self.rewriteSelection &&
+      ![self resolveRewriteSelection]) {
+    [self discardRecordingWithFailure:
+              @"Select text first, then hold the rewrite shortcut and say how to edit it."];
+    return;
+  }
+  if (self.rewriteSession) FDEmit(FDEventRewriteSelection, self.rewriteSelection);
   self.recording = NO;
   self.stopping = YES;
   [self stopAudioLevelMeter];
@@ -1452,12 +1488,63 @@ static CGEventRef FDEventTapCallback(CGEventTapProxy proxy, CGEventType type,
 
 - (void)cancelRecording {
   if (!self.recording) return;
+  // Undo retries a cancelled rewrite, so keep the selection primed at key-down
+  // (it is otherwise only read when the take stops). Never Command-C here: a
+  // typed Option chord also cancels.
+  if (!self.discarding && self.rewriteSession && !self.rewriteSelection &&
+      self.pendingRewriteAxResolved) {
+    self.rewriteSelection = self.pendingRewriteSelection;
+  }
   self.cancelling = YES;
   self.recording = NO;
   self.stopping = YES;
   [self stopAudioLevelMeter];
   if ([self finishOrphanedStop]) return;
   [self.audioFileOutput stopRecording];
+}
+
+// Reads the rewrite selection, preferring the AX text primed at key-down.
+// Returns NO when nothing is selected. Rust hears about it when the take
+// stops, after the Recording event that clears the previous selection.
+- (BOOL)resolveRewriteSelection {
+  NSString *selection = self.pendingRewriteAxResolved
+      ? self.pendingRewriteSelection
+      : [self captureSelectedText];
+  self.pendingRewriteAxResolved = NO;
+  self.pendingRewriteSelection = nil;
+  NSString *trimmed = [selection
+      stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet];
+  if (trimmed.length == 0) return NO;
+  self.rewriteSelection = selection;
+  return YES;
+}
+
+// Cancels the take without offering Undo. A nil message ends it quietly.
+- (void)discardRecordingWithFailure:(NSString *)message {
+  if (!self.recording) return;
+  self.discarding = YES;
+  self.discardFailureMessage = message;
+  [self cancelRecording];
+}
+
+// Called once a discarded take has settled and its audio is gone.
+- (void)finishDiscard {
+  NSString *message = self.discardFailureMessage;
+  self.discarding = NO;
+  self.discardFailureMessage = nil;
+  [self clearRewriteSession];
+  if (message.length > 0) {
+    FDEmit(FDEventFailed, message);
+    return;
+  }
+  FDEmit(FDEventDiscarded, @"");
+  NSTimeInterval requested = self.quickRewriteRequestedAt;
+  self.quickRewriteRequestedAt = 0;
+  if (requested > 0 &&
+      NSProcessInfo.processInfo.systemUptime - requested <
+          FDQuickRewriteWaitSeconds) {
+    [self rewriteFocusedInput];
+  }
 }
 
 // `stopping` is normally cleared by the file-output delegate, or by
@@ -1472,6 +1559,14 @@ static CGEventRef FDEventTapCallback(CGEventTapProxy proxy, CGEventType type,
   self.fileOutputActive = NO;
   self.stopping = NO;
   self.cancelling = NO;
+  if (wasCancelled && self.discarding) {
+    if (self.recordingURL) {
+      [NSFileManager.defaultManager removeItemAtURL:self.recordingURL error:nil];
+    }
+    [self setRetainedRecordingURL:nil provider:0];
+    [self finishDiscard];
+    return YES;
+  }
   // Audio already on disk stays recoverable rather than being reported lost.
   // Surfacing is silent while both features are off, so only take that branch
   // when it will actually replace the overlay's recording state.
@@ -1512,6 +1607,12 @@ static CGEventRef FDEventTapCallback(CGEventTapProxy proxy, CGEventType type,
     NSTimeInterval duration = CMTimeGetSeconds(output.recordedDuration);
     if (self.cancelling) {
       self.cancelling = NO;
+      if (self.discarding) {
+        if (url) [[NSFileManager defaultManager] removeItemAtURL:url error:nil];
+        [self setRetainedRecordingURL:nil provider:0];
+        [self finishDiscard];
+        return;
+      }
       NSNumber *cancelledSize = url
           ? [[[NSFileManager defaultManager] attributesOfItemAtPath:url.path error:nil]
                 objectForKey:NSFileSize]
@@ -1560,8 +1661,15 @@ static CGEventRef FDEventTapCallback(CGEventTapProxy proxy, CGEventType type,
       return;
     }
     [self setRecordingDurationSeconds:duration];
-    // -stopRecording announces processing; an unrequested finish has not yet.
-    if (finishedUnrequested) FDEmit(FDEventProcessing, @"");
+    // -stopRecording announces processing and reads the rewrite selection; an
+    // unrequested finish has done neither.
+    if (finishedUnrequested) {
+      if (self.rewriteSession &&
+          (self.rewriteSelection || [self resolveRewriteSelection])) {
+        FDEmit(FDEventRewriteSelection, self.rewriteSelection);
+      }
+      FDEmit(FDEventProcessing, @"");
+    }
     if (!self.shuttingDown) {
       [self prepareRecordingForTranscription:url provider:self.recordingProvider];
     }
@@ -1911,17 +2019,22 @@ static BOOL FDRecordingIsReadable(NSURL *url) {
 // we snapshot the selection. A synthetic Command-C that does not first lift
 // Option is delivered as Option-Command-C, which most editors do not copy.
 - (CGKeyCode)heldNonCommandRewriteModifierKeyCode {
-  if (!self.rewriteModifierDown) return FDUnknownKeyCode;
   FDHotkey shortcut = self.rewriteShortcut;
   if (shortcut.chord) {
-    if (shortcut.requiredFlags & kCGEventFlagMaskAlternate) {
+    // The selection is read after the chord key comes up, often while its
+    // modifiers are still physically held, so ask the hardware.
+    CGEventFlags held =
+        CGEventSourceFlagsState(kCGEventSourceStateHIDSystemState) &
+        shortcut.requiredFlags;
+    if (held & kCGEventFlagMaskAlternate) {
       return FDRightOptionKeyCode;
     }
-    if (shortcut.requiredFlags & kCGEventFlagMaskControl) {
+    if (held & kCGEventFlagMaskControl) {
       return FDRightControlKeyCode;
     }
     return FDUnknownKeyCode;
   }
+  if (!self.rewriteModifierDown) return FDUnknownKeyCode;
   if (shortcut.deviceMask == NX_DEVICERCMDKEYMASK ||
       shortcut.deviceMask == NX_DEVICELCMDKEYMASK) {
     return FDUnknownKeyCode;
@@ -2150,14 +2263,12 @@ static BOOL FDRecordingIsReadable(NSURL *url) {
     return;
   }
   [self dropCancelledRecording];
-  // A held recording is either still being transcribed (OpenRouter and
-  // Parakeet run in Rust, invisible here) or waiting for Retry. Either way it
-  // owns the overlay, and completing a rewrite would delete its audio. Do not
-  // surface it: during transcription that replaces the progress pill with a
-  // failure and files the take as failed.
+  // A held recording is still being transcribed or rewritten, or is waiting
+  // for Retry. It owns the overlay, and completing a rewrite would delete its
+  // audio. Surfacing is a no-op while it is busy.
   if (self.recordingURL &&
       [NSFileManager.defaultManager fileExistsAtPath:self.recordingURL.path]) {
-    os_log_info(FDPasteLog(), "triple-tap rewrite skipped: recording held");
+    [self surfaceRetainedRecordingIfNeeded];
     return;
   }
   if (!AXIsProcessTrusted()) {
@@ -2427,6 +2538,10 @@ static BOOL FDRecordingIsReadable(NSURL *url) {
     }
   }
   FDEmit(FDEventProcessing, @"");
+  // A rewrite cancelled before its selection was read gets one more try now.
+  if (self.rewriteSession && !self.rewriteSelection) {
+    [self resolveRewriteSelection];
+  }
   if (self.rewriteSession && self.rewriteSelection.length > 0) {
     FDEmit(FDEventRewriteSelection, self.rewriteSelection);
   }
@@ -2522,6 +2637,9 @@ static BOOL FDRecordingIsReadable(NSURL *url) {
   if (@available(macOS 10.15, *)) {
     if (self.speechTask) return;
   }
+  // Transcription and rewrite in Rust keep the recording held until they
+  // deliver; that take is busy, not stuck.
+  if (fd_dictation_busy()) return;
   NSURL *url = self.recordingURL;
   if (!url || ![[NSFileManager defaultManager] fileExistsAtPath:url.path]) return;
   if (!FDRecordingIsReadable(url)) {

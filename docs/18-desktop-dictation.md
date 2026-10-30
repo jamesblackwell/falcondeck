@@ -23,14 +23,22 @@ status window, and paste-at-cursor behavior.
 - In hold mode, triple-tapping the rewrite shortcut tidies the whole focused
   field without recording: FalconDeck sends Command-A, captures the field with
   Command-C (falling back to Accessibility), and runs the same silent rewrite
-  a quiet hold would. Taps must be under 180 ms each and less than 450 ms
-  apart; typing between taps resets the count. Nothing is filed to history.
-  While an earlier recording is still held (transcribing, or waiting for
-  Retry) the triple tap does nothing.
-- Hold mode waits 80 ms before dictating (180 ms for rewrite, so taps never
-  open the microphone) and cancels if another key is pressed, so ordinary
-  modifier shortcuts continue to work. Toggle mode starts and stops on
-  modifier-only presses.
+  a quiet hold would. A rewrite press released within 300 ms is a tap: any
+  take it started is discarded without Undo or an error, because the
+  microphone is not warm that soon. Taps must release less than 600 ms apart;
+  typing between taps resets the count. Nothing is filed to history. While an
+  earlier take is still transcribing or rewriting the triple tap does nothing;
+  a take waiting for Retry is shown again instead.
+- A held recording is reported as waiting for Retry only when Rust is not
+  still transcribing or rewriting it (`fd_dictation_busy`), so pressing a
+  shortcut mid-transcription no longer replaces the progress pill with a
+  failure.
+- In hold mode the rewrite selection is read when the shortcut is released
+  (Accessibility text primed at key-down, else Command-C), so starting a take
+  never waits on the copy. Toggle mode still reads it before recording.
+- Hold mode waits 80 ms before recording and cancels if another key is pressed,
+  so ordinary modifier shortcuts continue to work. Toggle mode starts and stops
+  on modifier-only presses.
 - Escape cancels an active recording.
 - The overlay is a native non-activating panel. It follows the pointer's current
   display and sits at the top of its work area; its Copy, Retry, Discard, and
