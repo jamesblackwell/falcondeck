@@ -9059,3 +9059,185 @@ async fn codex_retrying_error_is_a_replacing_warning_cleared_on_turn_end() {
             if message == "Unauthorized"
     )));
 }
+
+fn git_in(cwd: &std::path::Path, args: &[&str]) -> String {
+    let output = std::process::Command::new("git")
+        .args(args)
+        .current_dir(cwd)
+        .env("GIT_AUTHOR_NAME", "t")
+        .env("GIT_AUTHOR_EMAIL", "t@t")
+        .env("GIT_COMMITTER_NAME", "t")
+        .env("GIT_COMMITTER_EMAIL", "t@t")
+        .env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "git {args:?}: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    String::from_utf8_lossy(&output.stdout).trim().to_string()
+}
+
+async fn wait_until(mut condition: impl FnMut() -> bool) -> bool {
+    for _ in 0..200 {
+        if condition() {
+            return true;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    condition()
+}
+
+/// Archiving reclaims a variant that is clean and pushed, keeps one with
+/// unpushed work, and unarchiving brings a reclaimed copy back.
+#[tokio::test]
+async fn archiving_reclaims_safe_variants_and_unarchive_restores_them() {
+    let temp = tempdir().unwrap();
+    let origin = temp.path().join("origin.git");
+    let project = temp.path().join("project");
+    let variants = temp.path().join("variants");
+    std::fs::create_dir_all(&project).unwrap();
+    git_in(
+        temp.path(),
+        &["init", "--bare", "-b", "main", origin.to_str().unwrap()],
+    );
+    git_in(&project, &["init", "-b", "main"]);
+    std::fs::write(project.join("a.txt"), "one\n").unwrap();
+    git_in(&project, &["add", "."]);
+    git_in(&project, &["commit", "-m", "init"]);
+    git_in(
+        &project,
+        &["remote", "add", "origin", origin.to_str().unwrap()],
+    );
+    git_in(&project, &["push", "origin", "main"]);
+    let project_path = project.to_string_lossy().to_string();
+
+    let safe = crate::variant::create_in_root(&project_path, "safe0001", &variants)
+        .await
+        .unwrap();
+    git_in(
+        std::path::Path::new(&safe.path),
+        &["push", "origin", &safe.branch],
+    );
+    let unpushed = crate::variant::create_in_root(&project_path, "work0002", &variants)
+        .await
+        .unwrap();
+    std::fs::write(std::path::Path::new(&unpushed.path).join("w.txt"), "w\n").unwrap();
+    git_in(std::path::Path::new(&unpushed.path), &["add", "."]);
+    git_in(
+        std::path::Path::new(&unpushed.path),
+        &["commit", "-m", "local only"],
+    );
+
+    let app = AppState::new_with_state_path(
+        "test".to_string(),
+        HashMap::new(),
+        temp.path().join("state.json"),
+    );
+    let workspace_id = "workspace-reclaim".to_string();
+    let thread = |id: &str, variant: falcondeck_core::ThreadVariant| ThreadSummary {
+        id: id.to_string(),
+        workspace_id: workspace_id.clone(),
+        title: id.to_string(),
+        provider: AgentProvider::CODEX,
+        native_session_id: None,
+        provider_transport: None,
+        handoff_from: None,
+        origin: None,
+        status: ThreadStatus::Idle,
+        updated_at: Utc::now(),
+        last_message_preview: None,
+        latest_turn_id: None,
+        latest_plan: None,
+        latest_diff: None,
+        last_tool: None,
+        last_error: None,
+        agent: ThreadAgentParams::default(),
+        attention: ThreadAttention::default(),
+        is_archived: false,
+        is_pinned: false,
+        is_pinned_in_project: false,
+        goal: None,
+        queued_turns: Vec::new(),
+        variant: Some(variant),
+    };
+    app.inner.workspaces.lock().await.insert(
+        workspace_id.clone(),
+        super::ManagedWorkspace {
+            summary: WorkspaceSummary {
+                id: workspace_id.clone(),
+                path: project_path.clone(),
+                kind: falcondeck_core::WorkspaceKind::Project,
+                status: WorkspaceStatus::Ready,
+                agents: Vec::new(),
+                skills: Vec::new(),
+                default_provider: AgentProvider::CODEX,
+                models: Vec::new(),
+                collaboration_modes: Vec::new(),
+                account: falcondeck_core::AccountSummary::default(),
+                current_thread_id: None,
+                connected_at: Utc::now(),
+                updated_at: Utc::now(),
+                last_error: None,
+                icon: None,
+            },
+            codex_session: None,
+            claude_runtime: None,
+            agy_runtime: None,
+            opencode_runtime: None,
+            acp_runtimes: HashMap::new(),
+            threads: [
+                thread("thread-safe", safe.clone()),
+                thread("thread-work", unpushed.clone()),
+            ]
+            .into_iter()
+            .map(|thread| (thread.id.clone(), super::ManagedThread::new(thread)))
+            .collect(),
+        },
+    );
+
+    // Not archived yet: never eligible.
+    assert!(
+        super::workspace_ops::reclaim_archived_variant(&app, &workspace_id, "thread-safe")
+            .await
+            .is_none()
+    );
+
+    app.archive_thread(&workspace_id, "thread-safe")
+        .await
+        .unwrap();
+    app.archive_thread(&workspace_id, "thread-work")
+        .await
+        .unwrap();
+    let safe_path = std::path::PathBuf::from(&safe.path);
+    assert!(
+        wait_until(|| !safe_path.exists()).await,
+        "safe copy should be reclaimed"
+    );
+    // Give the second background task time to decide; it must keep the copy.
+    let kept = super::workspace_ops::reclaim_archived_variant(&app, &workspace_id, "thread-work")
+        .await
+        .unwrap();
+    assert!(matches!(kept, crate::variant::Reclaim::Kept(_)), "{kept:?}");
+    assert!(std::path::Path::new(&unpushed.path).exists());
+    // The branch survives reclaiming.
+    assert!(git_in(&project, &["branch", "--list", &safe.branch]).contains(&safe.branch));
+
+    app.unarchive_thread(&workspace_id, "thread-safe")
+        .await
+        .unwrap();
+    assert!(
+        safe_path.exists(),
+        "unarchive should recreate the working directory"
+    );
+    assert!(
+        !app.snapshot()
+            .await
+            .threads
+            .iter()
+            .find(|t| t.id == "thread-safe")
+            .unwrap()
+            .is_archived
+    );
+}

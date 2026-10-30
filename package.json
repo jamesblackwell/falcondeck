@@ -16,6 +16,7 @@
     "computer-use-runtime:prepare": "node ./scripts/prepare-computer-use-runtime.mjs",
     "extension:validate": "node ./scripts/validate-extensions.mjs",
     "extension:validate:test": "node --test ./scripts/validate-extensions.test.mjs",
+    "worktree-gc:test": "node --test ./scripts/worktree-gc.test.mjs",
     "extension:frontend:typecheck": "tsc -p tsconfig.extension-frontends.json",
     "state:fresh": "./scripts/state-stash.sh stash",
     "state:restore": "./scripts/state-stash.sh restore",

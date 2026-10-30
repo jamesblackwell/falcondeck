@@ -1507,6 +1507,7 @@ pub(super) async fn archive_thread(
         .get_mut(thread_id)
         .ok_or_else(|| DaemonError::NotFound("thread not found".to_string()))?;
     thread.summary.is_archived = true;
+    let has_variant = thread.summary.variant.is_some();
     if workspace.summary.current_thread_id.as_deref() == Some(thread_id) {
         workspace.summary.current_thread_id = latest_unarchived_thread_id(workspace);
     }
@@ -1530,7 +1531,68 @@ pub(super) async fn archive_thread(
         },
     );
     let _ = app.persist_local_state().await;
+    if has_variant {
+        spawn_variant_reclaim(app, workspace_id, vec![thread_id.to_string()]);
+    }
     Ok(summary)
+}
+
+/// Archiving is the signal that a thread's isolated copy is only costing
+/// disk. Reclaims it in the background when nothing would be lost; otherwise
+/// the copy stays and the reasons are logged. See docs/WORKTREE-LIFECYCLE.md.
+fn spawn_variant_reclaim(app: &AppState, workspace_id: &str, thread_ids: Vec<String>) {
+    let app = app.clone();
+    let workspace_id = workspace_id.to_string();
+    tokio::spawn(async move {
+        for thread_id in thread_ids {
+            reclaim_archived_variant(&app, &workspace_id, &thread_id).await;
+        }
+    });
+}
+
+/// Returns the outcome, or `None` when the thread has no variant or is not
+/// (or no longer) eligible: unarchived or busy since the archive call.
+pub(super) async fn reclaim_archived_variant(
+    app: &AppState,
+    workspace_id: &str,
+    thread_id: &str,
+) -> Option<crate::variant::Reclaim> {
+    let (variant, workspace_path) = {
+        let workspaces = app.inner.workspaces.lock().await;
+        let workspace = workspaces.get(workspace_id)?;
+        let thread = workspace.threads.get(thread_id)?;
+        if !thread.summary.is_archived
+            || matches!(
+                thread.summary.status,
+                ThreadStatus::Running | ThreadStatus::WaitingForInput
+            )
+            || !thread.summary.queued_turns.is_empty()
+            || !thread.queued_requests.is_empty()
+            || thread.dispatching_request.is_some()
+        {
+            return None;
+        }
+        (
+            thread.summary.variant.clone()?,
+            workspace.summary.path.clone(),
+        )
+    };
+    let outcome = crate::variant::reclaim_if_safe(&workspace_path, &variant).await;
+    match &outcome {
+        crate::variant::Reclaim::Removed => {
+            tracing::info!(thread_id, path = %variant.path, "reclaimed isolated copy of archived thread");
+        }
+        crate::variant::Reclaim::Kept(reasons) => {
+            tracing::info!(
+                thread_id,
+                path = %variant.path,
+                branch = %variant.branch,
+                reasons = %reasons.join("; "),
+                "kept isolated copy of archived thread"
+            );
+        }
+    }
+    Some(outcome)
 }
 
 pub(super) async fn archive_all_threads(
@@ -1576,6 +1638,11 @@ pub(super) async fn archive_all_threads(
     drop(workspaces);
 
     if changed {
+        let with_variants: Vec<String> = archived_threads
+            .iter()
+            .filter(|thread| thread.variant.is_some())
+            .map(|thread| thread.id.clone())
+            .collect();
         for thread in archived_threads {
             app.emit(
                 Some(workspace_id.to_string()),
@@ -1591,6 +1658,9 @@ pub(super) async fn archive_all_threads(
             },
         );
         let _ = app.persist_local_state().await;
+        if !with_variants.is_empty() {
+            spawn_variant_reclaim(app, workspace_id, with_variants);
+        }
     }
     Ok(CommandResponse {
         ok: true,
@@ -1667,7 +1737,25 @@ pub(super) async fn unarchive_thread(
         .get_mut(thread_id)
         .ok_or_else(|| DaemonError::NotFound("thread not found".to_string()))?;
     thread.summary.is_archived = false;
+    let restore_target = thread
+        .summary
+        .variant
+        .clone()
+        .map(|variant| (variant, workspace.summary.path.clone()));
     drop(workspaces);
+    // Archiving may have reclaimed the isolated copy; bring it back before
+    // anyone can send a turn into a working directory that no longer exists.
+    if let Some((variant, workspace_path)) = restore_target {
+        match crate::variant::restore(&workspace_path, &variant).await {
+            Ok(true) => {
+                tracing::info!(thread_id, path = %variant.path, "restored isolated copy for unarchived thread")
+            }
+            Ok(false) => {}
+            Err(error) => {
+                tracing::warn!(thread_id, %error, "could not restore isolated copy for unarchived thread")
+            }
+        }
+    }
     let summary = app.thread_summary(workspace_id, thread_id).await?;
     app.emit(
         Some(workspace_id.to_string()),

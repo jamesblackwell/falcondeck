@@ -18,6 +18,9 @@ use uuid::Uuid;
 
 use crate::error::DaemonError;
 
+mod reclaim;
+pub use reclaim::{Reclaim, reclaim_if_safe, restore};
+
 /// Untracked files carried into a worktree-backed variant.
 const UNTRACKED_ALLOWLIST: &[&str] = &[".env*", ".envrc", "*.local.*"];
 
