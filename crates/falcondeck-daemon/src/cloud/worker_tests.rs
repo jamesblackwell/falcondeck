@@ -629,7 +629,7 @@ async fn supervisor_keeps_compute_while_native_background_work_remains() {
         let mut record = stored_native_job(directory.path().into(), CloudJobStatus::Running);
         let id = record.job.id.clone();
         let now = Utc::now().to_rfc3339();
-        let detail = json!({"workspace":{"id":"worker-ws","path":"/workspace/project","status":"ready","connected_at":now,"updated_at":now},"thread":{"id":"native-thread","workspace_id":"worker-ws","title":"Background work remains","status":native_status,"background_task_count":1,"updated_at":now},"items":[]});
+        let detail = json!({"workspace":{"id":"worker-ws","path":"/workspace/project","status":"ready","connected_at":now,"updated_at":now},"thread":{"id":"native-thread","workspace_id":"worker-ws","title":"Background work remains","status":native_status,"attention":{"background_task_count":1},"updated_at":now},"items":[]});
         serde_json::from_value::<ThreadDetail>(detail.clone()).unwrap();
         let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();

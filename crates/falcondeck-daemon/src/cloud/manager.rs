@@ -551,7 +551,7 @@ impl CloudManager {
             if let Ok(detail) = self.detail(id).await {
                 let status = match detail.thread.status {
                     ThreadStatus::Idle | ThreadStatus::Error
-                        if detail.thread.background_task_count > 0 =>
+                        if detail.thread.attention.background_task_count > 0 =>
                     {
                         CloudJobStatus::Running
                     }
@@ -991,7 +991,7 @@ impl CloudManager {
                 if let Ok(detail) = self.detail(id).await {
                     let status = match detail.thread.status {
                         ThreadStatus::Idle | ThreadStatus::Error
-                            if detail.thread.background_task_count > 0 =>
+                            if detail.thread.attention.background_task_count > 0 =>
                         {
                             CloudJobStatus::Running
                         }
