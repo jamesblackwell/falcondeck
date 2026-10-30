@@ -1129,6 +1129,7 @@ fn summarize_automations(
             );
         }
     }
+    let mut latest_queued: HashMap<String, DateTime<Utc>> = HashMap::new();
     for run in runs {
         let (summary, threads) = by_id
             .entry(run.automation_id.clone())
@@ -1143,7 +1144,12 @@ fn summarize_automations(
         if let (Some(start), Some(end)) = (run.started_at, run.finished_at) {
             summary.agent_ms += (end - start).num_milliseconds().max(0) as u64;
         }
-        if summary.last_run_at.is_none_or(|last| run.queued_at > last) {
+        // Latest by queue order; the start time (when known) is what's shown.
+        if latest_queued
+            .get(&run.automation_id)
+            .is_none_or(|queued| run.queued_at > *queued)
+        {
+            latest_queued.insert(run.automation_id.clone(), run.queued_at);
             summary.last_run_at = Some(run.started_at.unwrap_or(run.queued_at));
             summary.last_status = Some(serialized_name(&run.status));
         }
