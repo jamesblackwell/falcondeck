@@ -564,10 +564,15 @@ fn shell_commands(line: &str) -> Vec<(String, Option<&'static str>)> {
 
 /// Whether one command (not a whole line) is `git … commit`, excluding dry runs.
 fn runs_git_commit(command: &str) -> bool {
+    // Leading `VAR=value` assignments and wrappers such as `env` are not the command.
+    const WRAPPERS: [&str; 6] = ["command", "env", "sudo", "nohup", "time", "exec"];
     let words: Vec<&str> = command
         .split_whitespace()
-        // Leading `VAR=value` assignments are not the command.
-        .skip_while(|word| word.contains('=') && !word.starts_with('-'))
+        .skip_while(|word| {
+            WRAPPERS.contains(word)
+                || word.starts_with('-')
+                || (word.contains('=') && !word.starts_with('-'))
+        })
         .collect();
     let Some(program) = words.first() else {
         return false;
@@ -604,8 +609,8 @@ fn is_commit_summary(line: &str) -> bool {
 }
 
 /// Commits a finished shell call made. Git's own summary lines are the evidence;
-/// a quiet commit counts only when the whole call succeeded with nothing after
-/// it that could have masked a failure (`||`).
+/// a quiet commit counts only when the line is a pure `&&` chain that succeeded,
+/// so every command in it must have run and succeeded.
 fn commits_made(tool: &FinishedTool) -> u64 {
     let kind = tool.kind.to_ascii_lowercase();
     if !["bash", "shell", "command", "exec"]
@@ -615,12 +620,9 @@ fn commits_made(tool: &FinishedTool) -> u64 {
         return 0;
     }
     let commands = shell_commands(tool.command);
-    let Some(first) = commands
-        .iter()
-        .position(|(command, _)| runs_git_commit(command))
-    else {
+    if !commands.iter().any(|(command, _)| runs_git_commit(command)) {
         return 0;
-    };
+    }
     let confirmed = tool
         .output
         .lines()
@@ -629,10 +631,10 @@ fn commits_made(tool: &FinishedTool) -> u64 {
     if confirmed > 0 {
         return confirmed;
     }
-    let masked = commands[first..]
+    let all_chained = commands
         .iter()
-        .any(|(_, operator)| *operator == Some("||"));
-    if tool.ok && !masked {
+        .all(|(_, operator)| matches!(*operator, None | Some("&&")));
+    if tool.ok && all_chained {
         commands
             .iter()
             .filter(|(command, _)| runs_git_commit(command))
@@ -1478,6 +1480,24 @@ mod tests {
         // Quiet commits count only when nothing could have masked a failure.
         assert_eq!(shell("git add a && git commit -q -m x", "", true), 1);
         assert_eq!(shell("git commit -q -m x || true", "", true), 0);
+        assert_eq!(
+            shell(
+                "false && git commit -q -m skipped; git commit -q --allow-empty -m real",
+                "",
+                true
+            ),
+            0
+        );
+        // Wrappers still run git.
+        assert_eq!(shell("command git commit -m fix", made, true), 1);
+        assert_eq!(
+            shell(
+                "env GIT_EDITOR=true git commit --amend --no-edit",
+                made,
+                true
+            ),
+            1
+        );
         assert_eq!(shell("git commit -m x", "nothing to commit", false), 0);
         // Text that merely mentions a commit runs none.
         assert_eq!(shell("echo please run git commit", made, true), 0);
