@@ -53,10 +53,10 @@ pub(super) fn catalog() -> Vec<ExtensionAgentTool> {
             "include_reasoning": {"type":"boolean", "default":false},
             "preview_chars": {"type":"integer", "minimum":200, "maximum":24000, "default":1200, "description":"Body characters per item."}
         }), vec!["thread_id"]),
-        (MESSAGE, "Message thread", "Send a message to another thread or a bot, labelled with your id and title. Default steer reaches its active turn (falling back to the queue); queue waits for the turn to finish; an idle thread starts a turn. Returns on admission, not on reply.", json!({
+        (MESSAGE, "Message thread", "Send a message to another thread or a bot, labelled with your id and title. Use the default steer: it reaches the receiver's active turn now (falling back to the queue) so it can act on it; an idle thread starts a turn. Choose queue only when the receiver must finish its current turn first, since queued messages pile up behind long turns. Returns on admission, not on reply.", json!({
             "thread_id": {"type":"string", "minLength":1, "description":"Thread id, or a bot's name (bots are listed in falcondeck_list_threads)."},
             "message": {"type":"string", "minLength":1, "maxLength":24000, "description":"Readable prose with normal spaces between words."},
-            "delivery": {"type":"string", "enum":["steer","queue"], "default":"steer"}
+            "delivery": {"type":"string", "enum":["steer","queue"], "default":"steer", "description":"Leave as steer unless the receiver must finish its current turn first."}
         }), vec!["thread_id", "message"]),
         (CREATE, "Create thread", "Start a new thread and optionally send its first prompt; returns without waiting. At most three active children per parent. Context defaults to none; briefing passes your summary, transcript_tail your recent transcript.", json!({
             "prompt": {"type":"string", "minLength":1, "maxLength":24000, "description":"A self-contained brief: goal, relevant files, constraints, and what done looks like."},
