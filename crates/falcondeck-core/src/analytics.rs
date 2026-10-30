@@ -67,6 +67,9 @@ pub struct AnalyticsTotals {
     pub failed_turns: u64,
     /// File writes by agents.
     pub file_writes: u64,
+    /// Successful `git commit`s made by agents.
+    #[serde(default)]
+    pub commits: u64,
 }
 
 /// One day of activity.
@@ -80,6 +83,9 @@ pub struct AnalyticsDay {
     pub agent_messages: u64,
     /// Finished agent turns.
     pub turns: u64,
+    /// Successful `git commit`s made by agents.
+    #[serde(default)]
+    pub commits: u64,
 }
 
 /// Messages from one thread or bot to another.
@@ -146,6 +152,9 @@ pub struct AnalyticsBot {
     pub delegations: u64,
     /// Messages it sent to other threads or bots.
     pub messages_sent: u64,
+    /// Commits made in its conversation or by tasks it created.
+    #[serde(default)]
+    pub commits: u64,
 }
 
 /// Turns per provider.
@@ -177,6 +186,56 @@ pub struct AnalyticsProject {
     pub messages: u64,
     /// Average length in characters.
     pub avg_chars: u64,
+    /// Commits agents made in this project.
+    #[serde(default)]
+    pub commits: u64,
+}
+
+/// What started each finished turn.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AnalyticsTriggers {
+    /// A message from the user.
+    pub user: u64,
+    /// A scheduled task.
+    pub scheduled: u64,
+    /// A message from another agent or bot.
+    pub agent: u64,
+    /// A brief from the agent that created the task.
+    pub delegation: u64,
+    /// Anything else, such as continuing queued work or resuming.
+    pub other: u64,
+}
+
+/// How long work waited on the user.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AnalyticsWaiting {
+    /// Approvals and questions the user answered.
+    pub requests: u64,
+    /// Median time an approval or question waited, in milliseconds.
+    pub median_request_wait_ms: u64,
+    /// Replies the user sent after an agent finished a turn.
+    pub replies: u64,
+    /// Median time from an agent finishing to the user's next message there.
+    pub median_reply_ms: u64,
+    /// 90th percentile of the same.
+    pub p90_reply_ms: u64,
+}
+
+/// Runs of one scheduled task.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AnalyticsAutomation {
+    /// Automation name.
+    pub name: String,
+    /// Runs in the period.
+    pub runs: u64,
+    /// Runs that found nothing to do.
+    pub no_action: u64,
+    /// Runs that failed.
+    pub failed: u64,
+    /// Runs skipped because the previous one was still going or a connector was missing.
+    pub skipped: u64,
+    /// Distinct threads its runs used.
+    pub threads: u64,
 }
 
 /// Aggregated activity for the last `days` days.
@@ -202,6 +261,15 @@ pub struct AnalyticsSummary {
     pub providers: Vec<AnalyticsProvider>,
     /// The user's messages per project.
     pub projects: Vec<AnalyticsProject>,
+    /// What started each finished turn.
+    #[serde(default)]
+    pub triggers: AnalyticsTriggers,
+    /// How long work waited on the user.
+    #[serde(default)]
+    pub waiting: AnalyticsWaiting,
+    /// Scheduled tasks, busiest first.
+    #[serde(default)]
+    pub automations: Vec<AnalyticsAutomation>,
 }
 
 /// One message the user sent, as recorded.

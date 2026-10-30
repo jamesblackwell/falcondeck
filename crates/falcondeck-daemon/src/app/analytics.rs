@@ -9,9 +9,10 @@ use super::*;
 use chrono::{DateTime, Datelike, Local, NaiveDate};
 use falcondeck_core::control::AUTOMATION_MESSAGE_PREFIX;
 use falcondeck_core::{
-    AnalyticsAgentMessage, AnalyticsAgentPair, AnalyticsBot, AnalyticsClearTarget, AnalyticsDay,
-    AnalyticsFile, AnalyticsProject, AnalyticsPrompt, AnalyticsProvider, AnalyticsSettings,
-    AnalyticsStatus, AnalyticsSummary, AnalyticsTotals,
+    AnalyticsAgentMessage, AnalyticsAgentPair, AnalyticsAutomation, AnalyticsBot,
+    AnalyticsClearTarget, AnalyticsDay, AnalyticsFile, AnalyticsProject, AnalyticsPrompt,
+    AnalyticsProvider, AnalyticsSettings, AnalyticsStatus, AnalyticsSummary, AnalyticsTotals,
+    AnalyticsTriggers, AnalyticsWaiting,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -77,6 +78,19 @@ enum Record {
         t: DateTime<Utc>,
         th: String,
         tok: u64,
+    },
+    /// An approval or question waited on the user; `k` is `approval` or `question`.
+    Wait {
+        t: DateTime<Utc>,
+        th: String,
+        ms: u64,
+        k: String,
+    },
+    /// An agent made a successful `git commit`.
+    Commit {
+        t: DateTime<Utc>,
+        ws: String,
+        th: String,
     },
 }
 
@@ -250,19 +264,29 @@ fn write_loop(
     }
 }
 
-/// Follows the event stream for turn timing, token usage and Codex file events.
+/// What the listener remembers about a thread between events.
+#[derive(Default)]
+struct ThreadTrack {
+    /// When the current turn began (status entered running).
+    started: Option<DateTime<Utc>>,
+    /// When the thread began waiting on the user, and for what.
+    waiting: Option<(DateTime<Utc>, &'static str)>,
+    /// Providers that report per-request usage (`last`, e.g. Codex) also send a
+    /// cumulative total; turn usage is its change across the turn.
+    latest: Option<(u64, u64)>,
+    at_start: Option<(u64, u64)>,
+    /// Others (Claude, ACP) report how full the context is: tracked as a peak.
+    peak: u64,
+}
+
+/// Follows the event stream. Turns are timed from thread status changes, which
+/// every provider emits, rather than provider-specific turn events.
 fn listen_loop(
     mut events: broadcast::Receiver<Arc<CachedEnvelope>>,
     settings: Arc<StdMutex<AnalyticsSettings>>,
     tx: mpsc::Sender<Job>,
 ) {
-    let mut started: HashMap<String, DateTime<Utc>> = HashMap::new();
-    // Providers that report per-request usage (`last`, e.g. Codex) also send a
-    // cumulative total; turn usage is its change across the turn. Others (Claude,
-    // ACP) report how full the context is, which is tracked as a peak instead.
-    let mut latest: HashMap<String, (u64, u64)> = HashMap::new();
-    let mut at_start: HashMap<String, (u64, u64)> = HashMap::new();
-    let mut peak: HashMap<String, u64> = HashMap::new();
+    let mut threads: HashMap<String, ThreadTrack> = HashMap::new();
     loop {
         let cached = match events.blocking_recv() {
             Ok(cached) => cached,
@@ -273,82 +297,105 @@ fn listen_loop(
             continue;
         }
         let envelope = &cached.envelope;
-        let Some(thread) = envelope.thread_id.clone() else {
-            continue;
-        };
-        let record = match &envelope.event {
-            UnifiedEvent::TurnStart { .. } => {
-                match latest.get(&thread) {
-                    Some(total) => at_start.insert(thread.clone(), *total),
-                    None => at_start.remove(&thread),
+        let now = envelope.emitted_at;
+        let mut records = Vec::new();
+        match &envelope.event {
+            UnifiedEvent::ThreadStarted { thread } | UnifiedEvent::ThreadUpdated { thread } => {
+                let track = threads.entry(thread.id.clone()).or_default();
+                let in_turn = matches!(
+                    thread.status,
+                    ThreadStatus::Running | ThreadStatus::WaitingForInput
+                );
+                if in_turn && track.started.is_none() {
+                    track.started = Some(now);
+                    track.at_start = track.latest;
+                    track.peak = 0;
+                }
+                let attention = &thread.attention;
+                let needs_user = if attention.pending_approval_count > 0 {
+                    Some("approval")
+                } else if attention.pending_question_count > 0
+                    || matches!(thread.status, ThreadStatus::WaitingForInput)
+                {
+                    Some("question")
+                } else {
+                    None
                 };
-                peak.remove(&thread);
-                started.insert(thread, envelope.emitted_at);
-                None
+                match (needs_user, track.waiting) {
+                    (Some(kind), None) => track.waiting = Some((now, kind)),
+                    (None, Some((since, kind))) => {
+                        track.waiting = None;
+                        records.push(Record::Wait {
+                            t: now,
+                            th: thread.id.clone(),
+                            ms: (now - since).num_milliseconds().max(0) as u64,
+                            k: kind.into(),
+                        });
+                    }
+                    _ => {}
+                }
+                if !in_turn && let Some(start) = track.started.take() {
+                    // No baseline means no usage was reported during the turn.
+                    let (i, out) = match (track.latest, track.at_start.take()) {
+                        (Some(end), Some(start)) => {
+                            (end.0.saturating_sub(start.0), end.1.saturating_sub(start.1))
+                        }
+                        _ => (0, 0),
+                    };
+                    records.push(Record::Turn {
+                        t: now,
+                        th: thread.id.clone(),
+                        ok: !matches!(thread.status, ThreadStatus::Error),
+                        ms: (now - start).num_milliseconds().max(0) as u64,
+                        i,
+                        out,
+                        ctx: std::mem::take(&mut track.peak),
+                    });
+                }
             }
             UnifiedEvent::ThreadTokenUsageUpdated { usage } => {
-                let in_turn = started.contains_key(&thread);
+                let Some(thread) = envelope.thread_id.clone() else {
+                    continue;
+                };
+                let track = threads.entry(thread).or_default();
+                let in_turn = track.started.is_some();
                 let context = match &usage.last {
                     Some(last) => {
                         let total = (usage.total.input_tokens, usage.total.output_tokens);
                         // First report with no baseline (e.g. after a restart): the
                         // total before this request is where the turn started.
-                        if in_turn && !at_start.contains_key(&thread) {
-                            at_start.insert(
-                                thread.clone(),
-                                (
-                                    total.0.saturating_sub(last.input_tokens),
-                                    total.1.saturating_sub(last.output_tokens),
-                                ),
-                            );
+                        if in_turn && track.at_start.is_none() {
+                            track.at_start = Some((
+                                total.0.saturating_sub(last.input_tokens),
+                                total.1.saturating_sub(last.output_tokens),
+                            ));
                         }
-                        latest.insert(thread.clone(), total);
+                        track.latest = Some(total);
                         last.input_tokens
                     }
                     None => usage.total.total_tokens,
                 };
                 if in_turn {
-                    let entry = peak.entry(thread).or_default();
-                    *entry = (*entry).max(context);
+                    track.peak = track.peak.max(context);
                 }
-                None
-            }
-            UnifiedEvent::TurnEnd { status, error, .. } => {
-                let ms = started
-                    .remove(&thread)
-                    .map(|start| (envelope.emitted_at - start).num_milliseconds().max(0) as u64)
-                    .unwrap_or(0);
-                // No baseline means no usage was reported during this turn.
-                let (i, out) = match (latest.get(&thread), at_start.remove(&thread)) {
-                    (Some(end), Some(start)) => {
-                        (end.0.saturating_sub(start.0), end.1.saturating_sub(start.1))
-                    }
-                    _ => (0, 0),
-                };
-                let ctx = peak.remove(&thread).unwrap_or(0);
-                Some(Record::Turn {
-                    t: envelope.emitted_at,
-                    th: thread,
-                    ok: error.is_none() && !matches!(status.as_str(), "failed" | "error"),
-                    ms,
-                    i,
-                    out,
-                    ctx,
-                })
             }
             UnifiedEvent::File {
                 path: Some(path), ..
-            } if !path.trim().is_empty() => Some(Record::File {
-                t: envelope.emitted_at,
-                th: thread,
-                path: path.clone(),
-            }),
-            _ => None,
-        };
-        if let Some(record) = record
-            && let Ok(line) = serde_json::to_string(&record)
-        {
-            let _ = tx.try_send(Job::Event(line));
+            } if !path.trim().is_empty() => {
+                if let Some(thread) = envelope.thread_id.clone() {
+                    records.push(Record::File {
+                        t: now,
+                        th: thread,
+                        path: path.clone(),
+                    });
+                }
+            }
+            _ => {}
+        }
+        for record in records {
+            if let Ok(line) = serde_json::to_string(&record) {
+                let _ = tx.try_send(Job::Event(line));
+            }
         }
     }
 }
@@ -437,8 +484,8 @@ fn ack_like(message: &str) -> bool {
     words <= 3 || (words <= 20 && OPENERS.iter().any(|opener| text.starts_with(opener)))
 }
 
-/// The path of a Claude edit tool call that finished successfully.
-fn completed_edit_path(item: &ConversationItem) -> Option<String> {
+/// Kind and title of a tool call that finished successfully.
+fn completed_tool(item: &ConversationItem) -> Option<(&str, &str)> {
     let ConversationItem::ToolCall {
         title,
         tool_kind,
@@ -449,14 +496,33 @@ fn completed_edit_path(item: &ConversationItem) -> Option<String> {
     else {
         return None;
     };
-    if !EDIT_TOOLS.contains(&tool_kind.as_str())
-        || !status.eq_ignore_ascii_case("completed")
-        || exit_code.is_some_and(|code| code != 0)
-    {
-        return None;
+    (status.eq_ignore_ascii_case("completed") && !exit_code.is_some_and(|code| code != 0))
+        .then_some((tool_kind.as_str(), title.as_str()))
+}
+
+/// Whether a shell command runs `git commit` (not `commit-tree` or a dry run).
+fn is_git_commit(command: &str) -> bool {
+    if command.contains("--dry-run") {
+        return false;
     }
-    let path = title.strip_prefix(tool_kind.as_str())?.trim();
-    (!path.is_empty()).then(|| path.to_string())
+    let words: Vec<&str> = command
+        .split(|c: char| c.is_whitespace() || matches!(c, ';' | '&' | '|' | '(' | ')'))
+        .filter(|word| !word.is_empty())
+        .collect();
+    words.iter().enumerate().any(|(index, word)| {
+        if *word != "git" && !word.ends_with("/git") {
+            return false;
+        }
+        let mut next = index + 1;
+        while let Some(option) = words.get(next) {
+            match *option {
+                "-C" | "-c" | "--git-dir" | "--work-tree" => next += 2,
+                flag if flag.starts_with('-') => next += 1,
+                subcommand => return subcommand == "commit",
+            }
+        }
+        false
+    })
 }
 
 fn excerpt(text: &str) -> String {
@@ -497,7 +563,9 @@ fn record_time(record: &Record) -> DateTime<Utc> {
         | Record::Delegate { t, .. }
         | Record::Turn { t, .. }
         | Record::File { t, .. }
-        | Record::Context { t, .. } => *t,
+        | Record::Context { t, .. }
+        | Record::Wait { t, .. }
+        | Record::Commit { t, .. } => *t,
     }
 }
 
@@ -507,6 +575,8 @@ struct Labels {
     providers: HashMap<String, String>,
     projects: HashMap<String, String>,
     bots: HashMap<String, String>,
+    /// Task thread to the thread that created it.
+    parents: HashMap<String, String>,
 }
 
 impl Labels {
@@ -517,6 +587,25 @@ impl Labels {
             .cloned()
             .unwrap_or_else(|| thread.to_string())
     }
+
+    /// The bot whose home this is, or whose task this is.
+    fn bot_of(&self, thread: &str) -> Option<&String> {
+        self.bots.get(thread).or_else(|| {
+            self.parents
+                .get(thread)
+                .and_then(|parent| self.bots.get(parent))
+        })
+    }
+}
+
+/// Value at quantile `q` (0–1) of `values`, or 0 when empty.
+fn quantile(values: &mut [u64], q: f64) -> u64 {
+    if values.is_empty() {
+        return 0;
+    }
+    values.sort_unstable();
+    let index = ((values.len() - 1) as f64 * q).round() as usize;
+    values[index.min(values.len() - 1)]
 }
 
 fn summarize(records: Vec<Record>, labels: &Labels, days: u32) -> AnalyticsSummary {
@@ -534,6 +623,7 @@ fn summarize(records: Vec<Record>, labels: &Labels, days: u32) -> AnalyticsSumma
         context_turns: u64,
         delegations: u64,
         messages: u64,
+        commits: u64,
     }
     #[derive(Default)]
     struct FileStats {
@@ -541,6 +631,19 @@ fn summarize(records: Vec<Record>, labels: &Labels, days: u32) -> AnalyticsSumma
         threads: HashSet<String>,
         by_day: HashMap<NaiveDate, HashSet<String>>,
     }
+    #[derive(Default)]
+    struct ProjectStats {
+        messages: u64,
+        chars: u64,
+        commits: u64,
+    }
+    /// A turn can start this long after its cue (recorded once accepted) …
+    const CUE_AFTER: i64 = 60;
+    /// … or this long before (a message queued behind a running turn).
+    const CUE_BEFORE: i64 = 300;
+    /// Replies later than this are returns to old work, not waiting.
+    const REPLY_WINDOW_DAYS: i64 = 3;
+
     let mut totals = AnalyticsTotals::default();
     let today = Local::now().date_naive();
     let first_day = today - chrono::Duration::days(i64::from(days.max(1)) - 1);
@@ -561,29 +664,39 @@ fn summarize(records: Vec<Record>, labels: &Labels, days: u32) -> AnalyticsSumma
     let mut files: HashMap<String, FileStats> = HashMap::new();
     let mut bots: HashMap<String, BotStats> = HashMap::new();
     let mut providers: HashMap<String, (u64, u64, u64, u64, u64, u64, u64)> = HashMap::new();
-    let mut projects: HashMap<String, (u64, u64)> = HashMap::new();
+    let mut projects: HashMap<String, ProjectStats> = HashMap::new();
+    let mut cues: HashMap<String, Vec<(DateTime<Utc>, &'static str)>> = HashMap::new();
+    let mut turn_starts: Vec<(String, DateTime<Utc>, DateTime<Utc>)> = Vec::new();
+    let mut turn_ends: HashMap<String, Vec<DateTime<Utc>>> = HashMap::new();
+    let mut replies: Vec<(String, DateTime<Utc>)> = Vec::new();
+    let mut request_waits = Vec::new();
+    let project_of = |ws: &str, th: &str| {
+        labels
+            .bots
+            .get(th)
+            .or_else(|| labels.projects.get(ws))
+            .cloned()
+            .unwrap_or_else(|| ws.to_string())
+    };
     for record in records {
         let date = record_time(&record).with_timezone(&Local).date_naive();
         let entry = daily.get_mut(&date);
         match record {
-            Record::User { ws, th, n, o, .. } => {
+            Record::User { t, ws, th, n, o } => {
                 if o == "scheduled" {
                     totals.scheduled_messages += 1;
+                    cues.entry(th).or_default().push((t, "scheduled"));
                     continue;
                 }
                 totals.user_messages += 1;
                 if let Some(day) = entry {
                     day.user_messages += 1;
                 }
-                let project = labels
-                    .bots
-                    .get(&th)
-                    .or_else(|| labels.projects.get(&ws))
-                    .cloned()
-                    .unwrap_or(ws);
-                let stats = projects.entry(project).or_default();
-                stats.0 += 1;
-                stats.1 += n;
+                let stats = projects.entry(project_of(&ws, &th)).or_default();
+                stats.messages += 1;
+                stats.chars += n;
+                cues.entry(th.clone()).or_default().push((t, "user"));
+                replies.push((th, t));
             }
             Record::Agent {
                 t,
@@ -602,6 +715,7 @@ fn summarize(records: Vec<Record>, labels: &Labels, days: u32) -> AnalyticsSumma
                 if let Some(bot) = labels.bots.get(&from) {
                     bots.entry(bot.clone()).or_default().messages += 1;
                 }
+                cues.entry(to.clone()).or_default().push((t, "agent"));
                 recent.push(AnalyticsAgentMessage {
                     at: t,
                     from_title: labels.title(&from),
@@ -615,20 +729,23 @@ fn summarize(records: Vec<Record>, labels: &Labels, days: u32) -> AnalyticsSumma
                 stats.chars += n;
                 stats.ack += u64::from(ack);
             }
-            Record::Delegate { parent, .. } => {
+            Record::Delegate {
+                t, parent, child, ..
+            } => {
                 totals.delegations += 1;
                 if let Some(bot) = labels.bots.get(&parent) {
                     bots.entry(bot.clone()).or_default().delegations += 1;
                 }
+                cues.entry(child).or_default().push((t, "delegation"));
             }
             Record::Turn {
+                t,
                 th,
                 ok,
                 ms,
                 i,
                 out,
                 ctx,
-                ..
             } => {
                 totals.turns += 1;
                 totals.failed_turns += u64::from(!ok);
@@ -654,6 +771,9 @@ fn summarize(records: Vec<Record>, labels: &Labels, days: u32) -> AnalyticsSumma
                 stats.5 += ctx;
                 // Only turns with a context reading count toward its average.
                 stats.6 += u64::from(ctx > 0);
+                let start = t - chrono::Duration::milliseconds(ms as i64);
+                turn_starts.push((th.clone(), start, t));
+                turn_ends.entry(th).or_default().push(t);
             }
             Record::File { th, path, .. } => {
                 totals.file_writes += 1;
@@ -669,8 +789,75 @@ fn summarize(records: Vec<Record>, labels: &Labels, days: u32) -> AnalyticsSumma
                     stats.context_turns += 1;
                 }
             }
+            Record::Wait { ms, .. } => request_waits.push(ms),
+            Record::Commit { ws, th, .. } => {
+                totals.commits += 1;
+                if let Some(day) = entry {
+                    day.commits += 1;
+                }
+                if let Some(bot) = labels.bot_of(&th) {
+                    bots.entry(bot.clone()).or_default().commits += 1;
+                }
+                projects.entry(project_of(&ws, &th)).or_default().commits += 1;
+            }
         }
     }
+
+    // What started each turn: the closest unused cue for that thread around its
+    // start. Each cue starts at most one turn; later turns are continuations.
+    let mut triggers = AnalyticsTriggers::default();
+    let mut used: HashSet<(String, usize)> = HashSet::new();
+    turn_starts.sort_by_key(|(_, start, _)| *start);
+    for (thread, start, end) in &turn_starts {
+        let cue = cues.get(thread).and_then(|cues| {
+            cues.iter()
+                .enumerate()
+                .filter(|(index, (at, _))| {
+                    // Nothing after a turn ended can have started it.
+                    let offset = (*at - *start).num_seconds();
+                    (-CUE_BEFORE..=CUE_AFTER).contains(&offset)
+                        && at <= end
+                        && !used.contains(&(thread.clone(), *index))
+                })
+                .min_by_key(|(_, (at, _))| (*at - *start).num_seconds().abs())
+                .map(|(index, (_, kind))| (index, *kind))
+        });
+        let cue = cue.map(|(index, kind)| {
+            used.insert((thread.clone(), index));
+            kind
+        });
+        match cue {
+            Some("user") => triggers.user += 1,
+            Some("scheduled") => triggers.scheduled += 1,
+            Some("agent") => triggers.agent += 1,
+            Some("delegation") => triggers.delegation += 1,
+            _ => triggers.other += 1,
+        }
+    }
+
+    // How long a finished agent waited for the user's next message there.
+    let mut reply_times = Vec::new();
+    let mut answered: HashSet<(String, DateTime<Utc>)> = HashSet::new();
+    replies.sort_by_key(|(_, at)| *at);
+    for (thread, at) in replies {
+        let finished = turn_ends
+            .get(&thread)
+            .and_then(|ends| ends.iter().filter(|end| **end <= at).max().copied());
+        if let Some(end) = finished
+            && at - end <= chrono::Duration::days(REPLY_WINDOW_DAYS)
+            && answered.insert((thread, end))
+        {
+            reply_times.push((at - end).num_milliseconds().max(0) as u64);
+        }
+    }
+    let waiting = AnalyticsWaiting {
+        requests: request_waits.len() as u64,
+        median_request_wait_ms: quantile(&mut request_waits, 0.5),
+        replies: reply_times.len() as u64,
+        median_reply_ms: quantile(&mut reply_times, 0.5),
+        p90_reply_ms: quantile(&mut reply_times, 0.9),
+    };
+
     let mut agent_pairs: Vec<_> = pairs
         .into_iter()
         .map(|((from, to), stats)| AnalyticsAgentPair {
@@ -715,6 +902,7 @@ fn summarize(records: Vec<Record>, labels: &Labels, days: u32) -> AnalyticsSumma
             avg_context_tokens: stats.context / stats.context_turns.max(1),
             delegations: stats.delegations,
             messages_sent: stats.messages,
+            commits: stats.commits,
         })
         .collect();
     bots.sort_by(|a, b| b.turns.cmp(&a.turns).then(a.name.cmp(&b.name)));
@@ -735,13 +923,18 @@ fn summarize(records: Vec<Record>, labels: &Labels, days: u32) -> AnalyticsSumma
     providers.sort_by(|a, b| b.turns.cmp(&a.turns).then(a.provider.cmp(&b.provider)));
     let mut projects: Vec<_> = projects
         .into_iter()
-        .map(|(project, (messages, chars))| AnalyticsProject {
+        .map(|(project, stats)| AnalyticsProject {
             project,
-            messages,
-            avg_chars: chars / messages.max(1),
+            messages: stats.messages,
+            avg_chars: stats.chars / stats.messages.max(1),
+            commits: stats.commits,
         })
         .collect();
-    projects.sort_by(|a, b| b.messages.cmp(&a.messages).then(a.project.cmp(&b.project)));
+    projects.sort_by(|a, b| {
+        (b.messages + b.commits)
+            .cmp(&(a.messages + a.commits))
+            .then(a.project.cmp(&b.project))
+    });
     projects.truncate(15);
     AnalyticsSummary {
         days,
@@ -754,7 +947,54 @@ fn summarize(records: Vec<Record>, labels: &Labels, days: u32) -> AnalyticsSumma
         bots,
         providers,
         projects,
+        triggers,
+        waiting,
+        automations: Vec::new(),
     }
+}
+
+/// Runs per scheduled task, busiest first.
+fn summarize_automations(
+    runs: Vec<falcondeck_core::control::AutomationRun>,
+) -> Vec<AnalyticsAutomation> {
+    use falcondeck_core::control::AutomationRunStatus as Status;
+    let mut by_name: BTreeMap<String, (AnalyticsAutomation, HashSet<String>)> = BTreeMap::new();
+    for run in runs {
+        let (summary, threads) = by_name
+            .entry(run.automation_name.clone())
+            .or_insert_with(|| {
+                (
+                    AnalyticsAutomation {
+                        name: run.automation_name.clone(),
+                        runs: 0,
+                        no_action: 0,
+                        failed: 0,
+                        skipped: 0,
+                        threads: 0,
+                    },
+                    HashSet::new(),
+                )
+            });
+        summary.runs += 1;
+        match run.status {
+            Status::SucceededNoAction => summary.no_action += 1,
+            Status::Failed => summary.failed += 1,
+            Status::SkippedOverlap | Status::SkippedDependency => summary.skipped += 1,
+            _ => {}
+        }
+        if let Some(thread) = run.thread_id {
+            threads.insert(thread);
+        }
+    }
+    let mut automations: Vec<_> = by_name
+        .into_values()
+        .map(|(mut summary, threads)| {
+            summary.threads = threads.len() as u64;
+            summary
+        })
+        .collect();
+    automations.sort_by(|a, b| b.runs.cmp(&a.runs).then(a.name.cmp(&b.name)));
+    automations
 }
 
 impl AppState {
@@ -814,33 +1054,43 @@ impl AppState {
                     });
                 }
             }
-            ConversationItem::ToolCall { .. } => {
-                if let Some(path) = completed_edit_path(item) {
-                    self.analytics().record(Record::File {
-                        t: Utc::now(),
-                        th: thread.summary.id.clone(),
-                        path,
-                    });
-                }
-            }
+            ConversationItem::ToolCall { .. } => self.analytics_tool(thread, item),
             _ => {}
         }
     }
 
-    /// Called when a live item is replaced; counts a file write once it completes.
+    /// Called when a live item is replaced; counts a tool's effect once it completes.
     pub(super) fn analytics_updated_item(
         &self,
         thread: &ManagedThread,
         previous: &ConversationItem,
         item: &ConversationItem,
     ) {
-        if completed_edit_path(previous).is_none()
-            && let Some(path) = completed_edit_path(item)
-        {
-            self.analytics().record(Record::File {
+        if completed_tool(previous).is_none() {
+            self.analytics_tool(thread, item);
+        }
+    }
+
+    /// File writes and commits from a tool call that finished successfully.
+    fn analytics_tool(&self, thread: &ManagedThread, item: &ConversationItem) {
+        let Some((kind, title)) = completed_tool(item) else {
+            return;
+        };
+        let th = thread.summary.id.clone();
+        if EDIT_TOOLS.contains(&kind) {
+            let path = title.strip_prefix(kind).map(str::trim).unwrap_or_default();
+            if !path.is_empty() {
+                self.analytics().record(Record::File {
+                    t: Utc::now(),
+                    th,
+                    path: path.to_string(),
+                });
+            }
+        } else if is_git_commit(title) {
+            self.analytics().record(Record::Commit {
                 t: Utc::now(),
-                th: thread.summary.id.clone(),
-                path,
+                ws: thread.summary.workspace_id.clone(),
+                th,
             });
         }
     }
@@ -951,8 +1201,12 @@ impl AppState {
     }
 
     async fn analytics_labels(&self) -> Labels {
-        let (mut titles, mut providers, mut projects) =
-            (HashMap::new(), HashMap::new(), HashMap::new());
+        let (mut titles, mut providers, mut projects, mut parents) = (
+            HashMap::new(),
+            HashMap::new(),
+            HashMap::new(),
+            HashMap::new(),
+        );
         for workspace in self.inner.workspaces.lock().await.values() {
             projects.insert(
                 workspace.summary.id.clone(),
@@ -964,6 +1218,11 @@ impl AppState {
                     thread.summary.id.clone(),
                     thread.summary.provider.to_string(),
                 );
+                if let Some(falcondeck_core::ThreadOrigin::AgentSpawn { parent_thread_id }) =
+                    &thread.summary.origin
+                {
+                    parents.insert(thread.summary.id.clone(), parent_thread_id.clone());
+                }
             }
         }
         let bots = self
@@ -980,6 +1239,7 @@ impl AppState {
             providers,
             projects,
             bots,
+            parents,
         }
     }
 
@@ -998,9 +1258,14 @@ impl AppState {
                 || Utc::now() - chrono::Duration::days(i64::from(days)),
                 |start| start.with_timezone(&Utc),
             );
-        tokio::task::spawn_blocking(move || summarize(read_records(&dir, since), &labels, days))
-            .await
-            .map_err(|e| DaemonError::Process(e.to_string()))
+        let runs = self.control().runs_since(since).await;
+        let mut summary = tokio::task::spawn_blocking(move || {
+            summarize(read_records(&dir, since), &labels, days)
+        })
+        .await
+        .map_err(|e| DaemonError::Process(e.to_string()))?;
+        summary.automations = summarize_automations(runs);
+        Ok(summary)
     }
 
     /// The user's recorded messages, newest first.
@@ -1061,6 +1326,26 @@ mod tests {
         assert!(!ack_like(
             "Blocked: the relay deploy needs your approval before I can continue the migration."
         ));
+    }
+
+    #[test]
+    fn git_commit_detection_ignores_plumbing_and_dry_runs() {
+        for yes in [
+            "git commit -m 'Fix'",
+            "cd /repo && git commit -q -m x -- a.rs",
+            "git -C /tmp/wt commit -m x",
+            "/usr/bin/git commit --amend --no-edit",
+        ] {
+            assert!(is_git_commit(yes), "{yes}");
+        }
+        for no in [
+            "git commit-tree abc -p def -m x",
+            "git commit --dry-run",
+            "git status && echo commit",
+            "git log --grep commit",
+        ] {
+            assert!(!is_git_commit(no), "{no}");
+        }
     }
 
     #[test]

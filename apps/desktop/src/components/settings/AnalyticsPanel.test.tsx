@@ -45,7 +45,10 @@ const summary: AnalyticsSummary = {
   providers: [
     { provider: 'claude', turns: 20, failed: 1, avg_turn_ms: 60_000, input_tokens: 120_000, output_tokens: 9000, avg_peak_context_tokens: 48_000 },
   ],
-  projects: [{ project: 'quizgecko', messages: 12, avg_chars: 180 }],
+  projects: [{ project: 'quizgecko', messages: 12, avg_chars: 180, commits: 5 }],
+  triggers: { user: 5, scheduled: 10, agent: 3, delegation: 2, other: 0 },
+  waiting: { requests: 2, median_request_wait_ms: 90_000, replies: 4, median_reply_ms: 600_000, p90_reply_ms: 7_200_000 },
+  automations: [{ name: 'Fast Start Monitor', runs: 15, no_action: 12, failed: 0, skipped: 0, threads: 15 }],
 }
 
 function stubDaemon() {
@@ -92,6 +95,11 @@ describe('AnalyticsPanel', () => {
     expect(screen.getByText('/repo/src/app.rs')).toBeInTheDocument()
     expect(screen.getByText('≈2.4k')).toBeInTheDocument()
     expect(await screen.findByText('Ship the fast-start onboarding')).toBeInTheDocument()
+    // 15 of 20 turns started without the user.
+    expect(screen.getByText('75%')).toBeInTheDocument()
+    expect(screen.getByText('10m 0s')).toBeInTheDocument()
+    expect(screen.getByText('Fast Start Monitor')).toBeInTheDocument()
+    expect(screen.getByText('80%')).toBeInTheDocument()
 
     fireEvent.change(screen.getByLabelText('Search your messages'), { target: { value: 'zzz' } })
     expect(await screen.findByText('No messages match.')).toBeInTheDocument()

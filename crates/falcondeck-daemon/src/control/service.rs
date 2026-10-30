@@ -1447,6 +1447,18 @@ impl ControlService {
     }
 
     /// The earliest next run across dispatchable automations.
+    /// Runs queued since `since`, for local analytics.
+    pub async fn runs_since(&self, since: DateTime<Utc>) -> Vec<AutomationRun> {
+        self.state
+            .lock()
+            .await
+            .runs
+            .iter()
+            .filter(|run| run.queued_at >= since)
+            .cloned()
+            .collect()
+    }
+
     pub async fn next_due_at(&self) -> Option<DateTime<Utc>> {
         let state = self.state.lock().await;
         state

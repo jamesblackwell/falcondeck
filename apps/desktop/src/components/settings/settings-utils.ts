@@ -254,10 +254,13 @@ export const SETTINGS_GROUPS: SettingsNavGroup[] = [
         icon: ChartColumn,
         settings: [
           "Overview",
+          "Who drives the work",
+          "Waiting on you",
           "Agent communication",
           "Your messages",
           "Files agents write",
           "Turns by bot",
+          "Scheduled tasks",
           "Recording",
           "Record activity",
           "Keep your messages",

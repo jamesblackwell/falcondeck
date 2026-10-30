@@ -34,12 +34,13 @@ export type AnalyticsPanelProps = {
 }
 
 type Period = '7' | '30' | '90'
-type DailyMetric = 'user_messages' | 'agent_messages' | 'turns'
+type DailyMetric = 'user_messages' | 'agent_messages' | 'turns' | 'commits'
 
 const DAILY_METRICS: Array<{ value: DailyMetric; label: string }> = [
   { value: 'user_messages', label: 'Your messages' },
   { value: 'agent_messages', label: 'Agent messages' },
   { value: 'turns', label: 'Turns' },
+  { value: 'commits', label: 'Commits' },
 ]
 
 const RETENTION: Array<{ value: string; label: string }> = [
@@ -106,7 +107,7 @@ function Stat({ label, value, detail }: { label: string; value: string; detail?:
 
 /** Single-series daily bars; each bar names its day and value on hover. */
 function DailyBars({ days, metric, label }: { days: AnalyticsDay[]; metric: DailyMetric; label: string }) {
-  const peak = Math.max(1, ...days.map((day) => day[metric]))
+  const peak = Math.max(1, ...days.map((day) => day[metric] ?? 0))
   return (
     <figure className="space-y-2">
       <div className="flex items-baseline justify-between text-[length:var(--fd-text-xs)] text-fg-muted">
@@ -115,7 +116,7 @@ function DailyBars({ days, metric, label }: { days: AnalyticsDay[]; metric: Dail
       </div>
       <div className="flex h-28 items-end gap-[2px] border-b border-border-subtle" aria-hidden="true">
         {days.map((day) => {
-          const value = day[metric]
+          const value = day[metric] ?? 0
           return (
             <div
               key={day.date}
@@ -140,12 +141,34 @@ function DailyBars({ days, metric, label }: { days: AnalyticsDay[]; metric: Dail
           {days.map((day) => (
             <tr key={day.date}>
               <th scope="row">{day.date}</th>
-              <td>{day[metric]}</td>
+              <td>{day[metric] ?? 0}</td>
             </tr>
           ))}
         </tbody>
       </table>
     </figure>
+  )
+}
+
+/** One labelled share bar per row; a single hue, so no legend is needed. */
+function ShareBars({ rows, total }: { rows: Array<{ label: string; value: number }>; total: number }) {
+  return (
+    <dl className="space-y-2">
+      {rows.map((row) => (
+        <div key={row.label} className="grid grid-cols-[9rem_1fr_4.5rem] items-center gap-3">
+          <dt className="text-[length:var(--fd-text-sm)] text-fg-secondary">{row.label}</dt>
+          <div className="h-2 rounded-full bg-surface-3" aria-hidden="true">
+            <div
+              className="h-2 rounded-full bg-accent opacity-80"
+              style={{ width: total ? `${(row.value / total) * 100}%` : 0 }}
+            />
+          </div>
+          <dd className="text-right text-[length:var(--fd-text-xs)] tabular-nums text-fg-tertiary">
+            {count(row.value)} · {percent(row.value, total)}
+          </dd>
+        </div>
+      ))}
+    </dl>
   )
 }
 
@@ -279,6 +302,18 @@ export function AnalyticsPanel({ baseUrl, onToast }: AnalyticsPanelProps) {
   }
 
   const totals = summary?.totals
+  const waiting = summary?.waiting
+  const triggerRows = useMemo(() => {
+    const triggers = summary?.triggers
+    const rows = [
+      { label: 'You', value: triggers?.user ?? 0 },
+      { label: 'Scheduled tasks', value: triggers?.scheduled ?? 0 },
+      { label: 'Other agents', value: triggers?.agent ?? 0 },
+      { label: 'Delegated briefs', value: triggers?.delegation ?? 0 },
+      { label: 'Continuing work', value: triggers?.other ?? 0 },
+    ]
+    return { rows, user: rows[0].value, total: rows.reduce((sum, row) => sum + row.value, 0) }
+  }, [summary?.triggers])
   const metricLabel = DAILY_METRICS.find((option) => option.value === metric)?.label ?? ''
 
   return (
@@ -317,7 +352,7 @@ export function AnalyticsPanel({ baseUrl, onToast }: AnalyticsPanelProps) {
       ) : null}
 
       <SettingsSection title="Overview" description="Totals for the selected period.">
-        <div className="grid grid-cols-2 gap-2.5 sm:grid-cols-3 lg:grid-cols-5">
+        <div className="grid grid-cols-2 gap-2.5 sm:grid-cols-3">
           <Stat
             label="Your messages"
             value={totals ? count(totals.user_messages) : '—'}
@@ -338,6 +373,7 @@ export function AnalyticsPanel({ baseUrl, onToast }: AnalyticsPanelProps) {
             value={totals ? count(totals.turns) : '—'}
             detail={totals?.failed_turns ? `${count(totals.failed_turns)} failed` : undefined}
           />
+          <Stat label="Commits" value={totals ? count(totals.commits ?? 0) : '—'} />
           <Stat label="File writes" value={totals ? count(totals.file_writes) : '—'} />
         </div>
         {summary ? (
@@ -346,6 +382,47 @@ export function AnalyticsPanel({ baseUrl, onToast }: AnalyticsPanelProps) {
             <DailyBars days={summary.daily} metric={metric} label={metricLabel} />
           </div>
         ) : null}
+      </SettingsSection>
+
+      <SettingsSection
+        title="Who drives the work"
+        description="What started each agent turn. The more turns start without you, the more the system runs itself."
+      >
+        {triggerRows.total ? (
+          <>
+            <p className="text-[length:var(--fd-text-sm)] text-fg-secondary">
+              <span className="fd-type-heading tabular-nums text-fg-primary">
+                {percent(triggerRows.total - triggerRows.user, triggerRows.total)}
+              </span>{' '}
+              of turns started without you
+            </p>
+            <ShareBars rows={triggerRows.rows} total={triggerRows.total} />
+          </>
+        ) : (
+          <p className={EMPTY}>No finished turns in this period.</p>
+        )}
+      </SettingsSection>
+
+      <SettingsSection
+        title="Waiting on you"
+        description="How long finished work and approvals waited for you. Replies more than three days later are left out."
+      >
+        <div className="grid grid-cols-2 gap-2.5 sm:grid-cols-3">
+          <Stat
+            label="Median time to your reply"
+            value={waiting?.replies ? duration(waiting.median_reply_ms) : '—'}
+            detail={waiting?.replies ? `${count(waiting.replies)} replies` : undefined}
+          />
+          <Stat
+            label="Slowest 10% of replies"
+            value={waiting?.replies ? `over ${duration(waiting.p90_reply_ms)}` : '—'}
+          />
+          <Stat
+            label="Approvals and questions"
+            value={waiting?.requests ? duration(waiting.median_request_wait_ms) : '—'}
+            detail={waiting?.requests ? `median wait across ${count(waiting.requests)}` : undefined}
+          />
+        </div>
       </SettingsSection>
 
       <SettingsSection
@@ -410,6 +487,7 @@ export function AnalyticsPanel({ baseUrl, onToast }: AnalyticsPanelProps) {
                 <th className={TH}>Project or bot</th>
                 <th className={cn(TH, NUM)}>Messages</th>
                 <th className={cn(TH, NUM)}>Avg length</th>
+                <th className={cn(TH, NUM)}>Commits</th>
               </tr>
             </thead>
             <tbody>
@@ -417,7 +495,8 @@ export function AnalyticsPanel({ baseUrl, onToast }: AnalyticsPanelProps) {
                 <tr key={project.project}>
                   <td className={TD}>{project.project}</td>
                   <td className={cn(TD, NUM)}>{count(project.messages)}</td>
-                  <td className={cn(TD, NUM)}>{count(project.avg_chars)} chars</td>
+                  <td className={cn(TD, NUM)}>{project.messages ? `${count(project.avg_chars)} chars` : '—'}</td>
+                  <td className={cn(TD, NUM)}>{count(project.commits ?? 0)}</td>
                 </tr>
               ))}
             </tbody>
@@ -488,6 +567,7 @@ export function AnalyticsPanel({ baseUrl, onToast }: AnalyticsPanelProps) {
                 <th className={cn(TH, NUM)}>Context per turn</th>
                 <th className={cn(TH, NUM)}>Tasks</th>
                 <th className={cn(TH, NUM)}>Messages</th>
+                <th className={cn(TH, NUM)}>Commits</th>
               </tr>
             </thead>
             <tbody>
@@ -499,6 +579,7 @@ export function AnalyticsPanel({ baseUrl, onToast }: AnalyticsPanelProps) {
                   <td className={cn(TD, NUM)}>≈{compact(bot.avg_context_tokens)}</td>
                   <td className={cn(TD, NUM)}>{count(bot.delegations)}</td>
                   <td className={cn(TD, NUM)}>{count(bot.messages_sent)}</td>
+                  <td className={cn(TD, NUM)}>{count(bot.commits ?? 0)}</td>
                 </tr>
               ))}
             </tbody>
@@ -536,6 +617,40 @@ export function AnalyticsPanel({ baseUrl, onToast }: AnalyticsPanelProps) {
             </tbody>
           </table>
         ) : null}
+      </SettingsSection>
+
+      <SettingsSection
+        title="Scheduled tasks"
+        description="Runs that find nothing to do still cost a turn. A task that starts a new thread every run also clutters the sidebar."
+      >
+        {summary?.automations?.length ? (
+          <table className={TABLE}>
+            <thead>
+              <tr>
+                <th className={TH}>Task</th>
+                <th className={cn(TH, NUM)}>Runs</th>
+                <th className={cn(TH, NUM)}>Nothing to do</th>
+                <th className={cn(TH, NUM)}>Failed</th>
+                <th className={cn(TH, NUM)}>Threads</th>
+              </tr>
+            </thead>
+            <tbody>
+              {summary.automations.map((automation) => (
+                <tr key={automation.name}>
+                  <td className={TD}>{automation.name}</td>
+                  <td className={cn(TD, NUM)}>{count(automation.runs)}</td>
+                  <td className={cn(TD, NUM)}>{percent(automation.no_action, automation.runs)}</td>
+                  <td className={cn(TD, NUM, automation.failed ? 'text-danger' : null)}>{count(automation.failed)}</td>
+                  <td className={cn(TD, NUM, automation.threads > 1 ? 'text-warning' : null)}>
+                    {count(automation.threads)}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        ) : (
+          <p className={EMPTY}>No scheduled runs in this period.</p>
+        )}
       </SettingsSection>
 
       <SettingsSection title="Recording" description="Everything is stored as plain files in FalconDeck's folder on this Mac.">

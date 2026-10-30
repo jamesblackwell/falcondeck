@@ -523,8 +523,9 @@ export type AnalyticsTotals = {
   turns: number;
   failed_turns: number;
   file_writes: number;
+  commits?: number;
 };
-export type AnalyticsDay = { date: string; user_messages: number; agent_messages: number; turns: number };
+export type AnalyticsDay = { date: string; user_messages: number; agent_messages: number; turns: number; commits?: number };
 export type AnalyticsAgentPair = {
   from: string;
   from_title: string;
@@ -550,6 +551,7 @@ export type AnalyticsBot = {
   avg_context_tokens: number;
   delegations: number;
   messages_sent: number;
+  commits?: number;
 };
 export type AnalyticsProvider = {
   provider: string;
@@ -560,7 +562,18 @@ export type AnalyticsProvider = {
   output_tokens: number;
   avg_peak_context_tokens: number;
 };
-export type AnalyticsProject = { project: string; messages: number; avg_chars: number };
+export type AnalyticsProject = { project: string; messages: number; avg_chars: number; commits?: number };
+/** What started each finished turn. */
+export type AnalyticsTriggers = { user: number; scheduled: number; agent: number; delegation: number; other: number };
+/** How long work waited on the user; times in milliseconds. */
+export type AnalyticsWaiting = {
+  requests: number;
+  median_request_wait_ms: number;
+  replies: number;
+  median_reply_ms: number;
+  p90_reply_ms: number;
+};
+export type AnalyticsAutomation = { name: string; runs: number; no_action: number; failed: number; skipped: number; threads: number };
 export type AnalyticsSummary = {
   days: number;
   generated_at: string;
@@ -572,6 +585,10 @@ export type AnalyticsSummary = {
   bots: AnalyticsBot[];
   providers: AnalyticsProvider[];
   projects: AnalyticsProject[];
+  /** Older daemons omit these. */
+  triggers?: AnalyticsTriggers;
+  waiting?: AnalyticsWaiting;
+  automations?: AnalyticsAutomation[];
 };
 export type AnalyticsPrompt = {
   at: string;

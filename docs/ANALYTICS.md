@@ -37,9 +37,24 @@ Expected size is small: an event is roughly 100–250 bytes.
 | User message (`user` or `scheduled`), length | New live `UserMessage` items in `upsert_conversation_item`. Replays, interrupted-turn resumes and transient retries are skipped. Agent messages and a delegated task's first brief are excluded here and recorded below. |
 | Agent message: from, to, length, steer/queue, acknowledgement guess, excerpt | `falcondeck_message_thread` after a successful send |
 | Delegation: parent, child, brief length | `falcondeck_create_thread` |
-| Turn: duration, success, tokens, peak context | Event stream (`TurnStart`, `TurnEnd`, `ThreadTokenUsageUpdated`), followed on its own thread. Input/output tokens come only from providers that report per-request usage (Codex): the change in the cumulative total across the turn, with a baseline taken from the first report when none is known. Claude and ACP report context fill instead, so every turn records its peak context size. |
+| Turn: duration, success, tokens, peak context | Event stream, followed on its own thread. A turn runs from a thread's status entering `running` (or `waiting_for_input`) until it returns to `idle` or `error`, which every provider reports; provider turn events are not used. Input/output tokens come only from providers that report per-request usage (Codex): the change in the cumulative total across the turn, with a baseline taken from the first report when none is known. Claude and ACP report context fill instead, so every turn records its peak context size. |
 | File write: thread, path | Claude `Edit`/`Write`/`MultiEdit`/`NotebookEdit` tool calls once they complete successfully, and Codex `File` events. Edits made through shell commands and ACP tools are not attributed yet. |
 | Bot context: estimated tokens injected per bot turn | Recomputed off the turn path when a bot's home conversation receives a message |
+| Wait: how long an approval or question waited on the user | Event stream: a thread's pending approvals or questions (or `waiting_for_input`) until they clear |
+| Commit: thread, workspace | Shell tool calls running `git commit` (not `commit-tree` or `--dry-run`) once they complete successfully |
+
+The summary also derives, without extra records:
+
+- What started each turn: the closest earlier message, scheduled message,
+  agent message or delegation brief for that thread (within five minutes
+  before the turn, or a minute after for messages recorded once accepted, and
+  never after the turn ended). Each cue starts at most one turn; the rest count
+  as continuing work.
+- Time to reply: from an agent finishing a turn to the user's next message in
+  that thread, if within three days, counted once per finished turn.
+- Scheduled tasks: runs, runs with nothing to do, failures, skips and distinct
+  threads per automation, read from the automation run history.
+- Commits per day, project and bot. A bot's count includes tasks it created.
 
 Records store thread and workspace ids; the summary labels them with current
 thread titles, bot names and project folder names, falling back to the id for
