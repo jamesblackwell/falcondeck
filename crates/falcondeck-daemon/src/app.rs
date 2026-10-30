@@ -539,6 +539,9 @@ struct ManagedThread {
     /// bubble; cleared once a turn has carried it. Persisted so a daemon
     /// restart before that first message does not lose the handoff.
     pending_handoff_context: Option<String>,
+    /// When the current turn was dispatched. In-memory only: after a daemon
+    /// restart the age of an already-running turn is unknown.
+    turn_started_at: Option<chrono::DateTime<Utc>>,
 }
 
 #[derive(Clone)]
@@ -554,6 +557,18 @@ struct QueuedTurnRequest {
     id: String,
     request: SendTurnRequest,
     summary: falcondeck_core::QueuedTurnSummary,
+    /// Set for messages another thread sent through the agent messaging tool,
+    /// so a later message from the same sender merges into this entry.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    agent_sender: Option<QueuedAgentSender>,
+}
+
+/// The agent thread behind a queued message and how many of its messages the
+/// entry holds.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+struct QueuedAgentSender {
+    thread_id: String,
+    messages: usize,
 }
 
 fn bound_extension_thread_summaries(

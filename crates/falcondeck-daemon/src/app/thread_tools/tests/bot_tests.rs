@@ -430,8 +430,18 @@ async fn project_thread_can_reply_to_a_bot_in_another_workspace() {
         .iter()
         .map(|queued| queued.summary.text.clone())
         .collect::<Vec<_>>();
-    assert_eq!(queued.len(), 3);
-    assert!(queued[2].ends_with("Sent by name."));
+    // One sender, one entry: the three messages merge in order.
+    assert_eq!(queued.len(), 1);
+    let order: Vec<_> = [
+        "Done with the review.",
+        "Also fixed the tests.",
+        "Sent by name.",
+    ]
+    .iter()
+    .map(|message| queued[0].find(message).unwrap())
+    .collect();
+    assert!(order.is_sorted());
+    assert!(queued[0].ends_with("Sent by name."));
     // Reading a bot from a project explains how to reach it instead.
     for name in [SUMMARY, VIEW] {
         let error = app

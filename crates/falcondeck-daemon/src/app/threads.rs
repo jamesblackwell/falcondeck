@@ -3085,6 +3085,7 @@ impl ManagedThread {
             transient_retry_generation: 0,
             transient_retry_in_flight: false,
             pending_handoff_context: None,
+            turn_started_at: None,
         }
     }
 
@@ -4096,6 +4097,7 @@ mod tests {
                 attachment_count: 0,
                 queued_at: Utc::now(),
             },
+            agent_sender: None,
         };
         thread.queued_requests.push(queued.clone());
         thread.summary.queued_turns.push(queued.summary.clone());

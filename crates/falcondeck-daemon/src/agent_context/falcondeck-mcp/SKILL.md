@@ -129,10 +129,12 @@ Approvals and questions are answered by the user in the FalconDeck UI.
 `thread_id`, labelled with your id and title. Bots (the user's named
 coordinators, such as an assistant the user mentions by name) live outside
 projects: the list header names them, and `thread_id` accepts a bot's name.
-Project threads can message a bot but not read its conversation. `delivery` defaults to `steer`
-(reaches an active turn, else queues; an idle thread starts a turn); use
-`queue` only when it should wait for the current turn to finish. It returns
-admission status, not the reply. Send only when the user's task authorizes
+Project threads can message a bot but not read its conversation. Messages always
+steer: they reach an active turn now, and an idle thread starts a turn. Only
+if the receiver cannot take input mid-turn does a message queue until its turn
+ends, and your queued messages to one thread merge into a single entry (newest
+last), so send a correction as a short follow-up saying what changed. The
+legacy `delivery` argument is ignored. It returns admission status, not the reply. Send only when the user's task authorizes
 contacting another agent.
 
 `falcondeck_create_thread` starts independent work in this workspace. Check

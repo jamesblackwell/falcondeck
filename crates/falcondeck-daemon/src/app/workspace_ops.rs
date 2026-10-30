@@ -2263,6 +2263,72 @@ pub(super) fn steer_error_downgrades_to_queue(error: &DaemonError) -> bool {
     }
 }
 
+/// Largest text one merged agent entry may grow to; past it the next message
+/// from that sender gets its own entry rather than an unbounded blob.
+const MAX_MERGED_AGENT_CHARS: usize = 48_000;
+
+/// A message another thread sent via the agent messaging tool, and how it
+/// ended up queued if it had to.
+pub(super) struct AgentMessage {
+    pub sender_thread_id: String,
+    /// The sender's own words, without the "Message from ..." header.
+    pub body: String,
+    pub queued: Option<QueueReport>,
+}
+
+/// What a queued agent message landed behind.
+pub(super) struct QueueReport {
+    /// Messages from the same sender already held in the merged entry.
+    pub earlier_from_sender: usize,
+    /// Age of the turn it waits on, when known.
+    pub running_for: Option<chrono::Duration>,
+}
+
+/// Appends an agent message to the same sender's queued entry on this thread,
+/// newest last, and returns how many of its messages the entry already held.
+/// `None` when the sender has no entry or the merged text would grow too large.
+fn merge_agent_message(thread: &mut super::ManagedThread, agent: &AgentMessage) -> Option<usize> {
+    let queued = thread.queued_requests.iter_mut().rev().find(|queued| {
+        queued
+            .agent_sender
+            .as_ref()
+            .is_some_and(|sender| sender.thread_id == agent.sender_thread_id)
+    })?;
+    let existing = queued.summary.text.chars().count();
+    if existing + agent.body.chars().count() > MAX_MERGED_AGENT_CHARS {
+        return None;
+    }
+    let text = format!(
+        "{}\n\n--- Later message from the same sender ({} UTC; newer than the above, so it overrides anything that conflicts) ---\n\n{}",
+        queued.summary.text,
+        Utc::now().format("%H:%M:%S"),
+        agent.body
+    );
+    let sender = queued.agent_sender.as_mut()?;
+    let earlier = sender.messages;
+    sender.messages += 1;
+    if let Some(TurnInputItem::Text { text: input, .. }) = queued
+        .request
+        .inputs
+        .iter_mut()
+        .find(|input| matches!(input, TurnInputItem::Text { .. }))
+    {
+        input.clone_from(&text);
+    }
+    queued.summary.preview = text.chars().take(140).collect();
+    queued.summary.text = text;
+    let merged = queued.summary.clone();
+    if let Some(summary) = thread
+        .summary
+        .queued_turns
+        .iter_mut()
+        .find(|summary| summary.id == merged.id)
+    {
+        *summary = merged;
+    }
+    Some(earlier)
+}
+
 /// Queues the request when the thread is busy. Returns `Ok(None)` when the
 /// thread is free (caller dispatches normally). Inputs are the normalized
 /// form so attachments are already materialized to files when queued.
@@ -2270,8 +2336,9 @@ async fn try_enqueue_turn(
     app: &AppState,
     request: &SendTurnRequest,
     normalized_inputs: &[TurnInputItem],
+    agent: Option<&mut AgentMessage>,
 ) -> Result<Option<CommandResponse>, DaemonError> {
-    let queued_summary = {
+    let (queued_summary, queue_report) = {
         let mut workspaces = app.inner.workspaces.lock().await;
         let Some(workspace) = workspaces.get_mut(&request.workspace_id) else {
             return Ok(None);
@@ -2302,43 +2369,66 @@ async fn try_enqueue_turn(
         if !thread_is_busy(&thread.summary.status) {
             return Ok(None);
         }
-        if thread.queued_requests.len() >= MAX_QUEUED_TURNS {
-            return Err(DaemonError::BadRequest(
-                "too many queued messages for this thread".to_string(),
-            ));
+        let running_for = thread.turn_started_at.map(|at| Utc::now() - at);
+        if let Some(agent) = agent.as_deref()
+            && let Some(earlier) = merge_agent_message(thread, agent)
+        {
+            thread.summary.updated_at = Utc::now();
+            let report = QueueReport {
+                earlier_from_sender: earlier,
+                running_for,
+            };
+            (thread.summary.clone(), report)
+        } else {
+            if thread.queued_requests.len() >= MAX_QUEUED_TURNS {
+                return Err(DaemonError::BadRequest(
+                    "too many queued messages for this thread".to_string(),
+                ));
+            }
+            let id = format!("queued-{}", Uuid::new_v4().simple());
+            let text = normalized_inputs
+                .iter()
+                .find_map(|input| match input {
+                    TurnInputItem::Text { text, .. } => Some(text.trim()),
+                    TurnInputItem::Image(_) => None,
+                })
+                .unwrap_or("")
+                .to_string();
+            let preview = text.chars().take(140).collect::<String>();
+            let attachment_count = normalized_inputs
+                .iter()
+                .filter(|input| matches!(input, TurnInputItem::Image(_)))
+                .count();
+            let mut stored = request.clone();
+            stored.inputs = normalized_inputs.to_vec();
+            let summary = falcondeck_core::QueuedTurnSummary {
+                id: id.clone(),
+                preview,
+                text,
+                attachment_count,
+                queued_at: Utc::now(),
+            };
+            thread.queued_requests.push(super::QueuedTurnRequest {
+                id,
+                request: stored,
+                summary: summary.clone(),
+                agent_sender: agent.as_deref().map(|agent| QueuedAgentSender {
+                    thread_id: agent.sender_thread_id.clone(),
+                    messages: 1,
+                }),
+            });
+            thread.summary.queued_turns.push(summary);
+            thread.summary.updated_at = Utc::now();
+            let report = QueueReport {
+                earlier_from_sender: 0,
+                running_for,
+            };
+            (thread.summary.clone(), report)
         }
-        let id = format!("queued-{}", Uuid::new_v4().simple());
-        let text = normalized_inputs
-            .iter()
-            .find_map(|input| match input {
-                TurnInputItem::Text { text, .. } => Some(text.trim()),
-                TurnInputItem::Image(_) => None,
-            })
-            .unwrap_or("")
-            .to_string();
-        let preview = text.chars().take(140).collect::<String>();
-        let attachment_count = normalized_inputs
-            .iter()
-            .filter(|input| matches!(input, TurnInputItem::Image(_)))
-            .count();
-        let mut stored = request.clone();
-        stored.inputs = normalized_inputs.to_vec();
-        let summary = falcondeck_core::QueuedTurnSummary {
-            id: id.clone(),
-            preview,
-            text,
-            attachment_count,
-            queued_at: Utc::now(),
-        };
-        thread.queued_requests.push(super::QueuedTurnRequest {
-            id,
-            request: stored,
-            summary: summary.clone(),
-        });
-        thread.summary.queued_turns.push(summary);
-        thread.summary.updated_at = Utc::now();
-        thread.summary.clone()
     };
+    if let Some(agent) = agent {
+        agent.queued = Some(queue_report);
+    }
     // The queue is an outbox: disk commit precedes the success response. A
     // client may safely clear its composer once this function returns.
     app.persist_local_state().await?;
@@ -2869,7 +2959,19 @@ pub(super) async fn send_turn(
     app: &AppState,
     request: SendTurnRequest,
 ) -> Result<CommandResponse, DaemonError> {
-    send_turn_with_startup_mode(app, request, false).await
+    send_turn_with_startup_mode(app, request, false, None).await
+}
+
+/// Sends a message another thread authored through the agent messaging tool.
+/// Behaves like `send_turn`, except that a message which must queue merges
+/// into that sender's existing entry on the target, and `agent.queued` reports
+/// how it queued.
+pub(super) async fn send_agent_message(
+    app: &AppState,
+    request: SendTurnRequest,
+    agent: &mut AgentMessage,
+) -> Result<CommandResponse, DaemonError> {
+    send_turn_with_startup_mode(app, request, false, Some(agent)).await
 }
 
 /// Verifies and attaches the exact provider session before an interrupted
@@ -2943,13 +3045,14 @@ async fn send_turn_waiting_for_provider_start(
     app: &AppState,
     request: SendTurnRequest,
 ) -> Result<CommandResponse, DaemonError> {
-    send_turn_with_startup_mode(app, request, true).await
+    send_turn_with_startup_mode(app, request, true, None).await
 }
 
 async fn send_turn_with_startup_mode(
     app: &AppState,
     request: SendTurnRequest,
     wait_for_startup: bool,
+    agent: Option<&mut AgentMessage>,
 ) -> Result<CommandResponse, DaemonError> {
     if app.is_shutting_down() {
         return Err(DaemonError::BadRequest(
@@ -3018,7 +3121,7 @@ async fn send_turn_with_startup_mode(
     if let Some(steered) = try_steer_turn(app, &request, &inputs).await? {
         return Ok(steered);
     }
-    if let Some(queued) = try_enqueue_turn(app, &request, &inputs).await? {
+    if let Some(queued) = try_enqueue_turn(app, &request, &inputs, agent).await? {
         return Ok(queued);
     }
 
@@ -3115,6 +3218,7 @@ async fn send_turn_with_startup_mode(
         }
         managed.summary.provider = provider.clone();
         managed.summary.status = ThreadStatus::Running;
+        managed.turn_started_at = Some(Utc::now());
         managed.summary.last_error = None;
         managed.summary.agent.model_id = request.model_id.clone().or(managed
             .summary
@@ -6234,6 +6338,7 @@ mod tests {
                 attachment_count: 0,
                 queued_at: Utc::now(),
             },
+            agent_sender: None,
         };
         let mut hydrated = HashMap::from([("grok-thread".to_string(), {
             let mut restored = managed_thread("grok-thread", ThreadStatus::WaitingForInput);
@@ -6524,6 +6629,7 @@ mod tests {
                 attachment_count: 0,
                 queued_at: Utc::now(),
             },
+            agent_sender: None,
         });
         assert!(queued_turn_is_held(&thread));
         thread.summary.last_error = None;
@@ -7043,6 +7149,7 @@ mod tests {
                         attachment_count: 1,
                         queued_at: Utc::now(),
                     },
+                    agent_sender: None,
                 });
             thread
                 .summary

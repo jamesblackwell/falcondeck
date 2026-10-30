@@ -53,10 +53,10 @@ pub(super) fn catalog() -> Vec<ExtensionAgentTool> {
             "include_reasoning": {"type":"boolean", "default":false},
             "preview_chars": {"type":"integer", "minimum":200, "maximum":24000, "default":1200, "description":"Body characters per item."}
         }), vec!["thread_id"]),
-        (MESSAGE, "Message thread", "Send a message to another thread or a bot, labelled with your id and title. Use the default steer: it reaches the receiver's active turn now (falling back to the queue) so it can act on it; an idle thread starts a turn. Choose queue only when the receiver must finish its current turn first, since queued messages pile up behind long turns. Returns on admission, not on reply.", json!({
+        (MESSAGE, "Message thread", "Send a message to another thread or a bot, labelled with your id and title. It reaches the receiver's active turn now so it can act on it; an idle thread starts a turn. Only when the receiver cannot take input mid-turn does the message wait in its queue, and your queued messages to one thread merge into a single entry (newest last), so send a correction as a short follow-up that says what changed. Returns on admission, not on reply.", json!({
             "thread_id": {"type":"string", "minLength":1, "description":"Thread id, or a bot's name (bots are listed in falcondeck_list_threads)."},
             "message": {"type":"string", "minLength":1, "maxLength":24000, "description":"Readable prose with normal spaces between words."},
-            "delivery": {"type":"string", "enum":["steer","queue"], "default":"steer", "description":"Leave as steer unless the receiver must finish its current turn first."}
+            "delivery": {"type":"string", "enum":["steer","queue"], "description":"Deprecated and ignored; messages always steer when the receiver can take them."}
         }), vec!["thread_id", "message"]),
         (CREATE, "Create thread", "Start a new thread and optionally send its first prompt; returns without waiting. At most three active children per parent. Context defaults to none; briefing passes your summary, transcript_tail your recent transcript.", json!({
             "prompt": {"type":"string", "minLength":1, "maxLength":24000, "description":"A self-contained brief: goal, relevant files, constraints, and what done looks like."},
@@ -121,10 +121,37 @@ enum MessageDelivery {
 struct MessageArgs {
     thread_id: String,
     message: String,
+    /// Accepted for compatibility with callers that still pass it. Agent
+    /// messages always steer; the queue is only the fallback.
     #[serde(default)]
+    #[allow(dead_code)]
     delivery: MessageDelivery,
 }
 
+/// What the sender is told when its message had to queue: why, how long the
+/// wait may be, and that it merged with its earlier messages.
+fn queued_delivery(queued: &workspace_ops::QueueReport) -> String {
+    let behind = match queued.running_for {
+        Some(age) => format!("a turn running for {}", duration_label(age)),
+        None => "the receiver's running turn".to_string(),
+    };
+    let merged = match queued.earlier_from_sender {
+        0 => String::new(),
+        1 => "; merged with 1 earlier message from you".to_string(),
+        n => format!("; merged with {n} earlier messages from you"),
+    };
+    format!(
+        "queued behind {behind}{merged}. It arrives when that turn ends. Further messages from you merge into this one, so make corrections as a short follow-up that says what changed"
+    )
+}
+fn duration_label(age: chrono::Duration) -> String {
+    let minutes = age.num_minutes().max(0);
+    match minutes {
+        0 => format!("{}s", age.num_seconds().max(0)),
+        1..60 => format!("{minutes}m"),
+        _ => format!("{}h {}m", minutes / 60, minutes % 60),
+    }
+}
 fn args<T: serde::de::DeserializeOwned>(value: &Value) -> Result<T, DaemonError> {
     serde_json::from_value(value.clone()).map_err(|e| DaemonError::BadRequest(e.to_string()))
 }
@@ -392,27 +419,39 @@ impl AppState {
                     line(&parent_summary.title, 256),
                     a.message
                 );
+                // Queued agent messages pile up behind long turns and arrive
+                // stale, so every agent message tries to steer. The queue is
+                // only the fallback when the provider cannot take it mid-turn.
                 let request: SendTurnRequest = serde_json::from_value(json!({
                     "workspace_id": workspace,
                     "thread_id": a.thread_id,
                     "inputs": [{"type":"text","text":text}],
-                    "steer": matches!(a.delivery, MessageDelivery::Steer)
+                    "steer": true
                 }))?;
-                let result = self.send_turn(request).await?;
+                let mut message = workspace_ops::AgentMessage {
+                    sender_thread_id: parent.to_string(),
+                    body: a.message.clone(),
+                    queued: None,
+                };
+                let result = workspace_ops::send_agent_message(self, request, &mut message).await?;
                 self.analytics_agent_message(
                     parent,
                     &a.thread_id,
                     &a.message,
-                    if matches!(a.delivery, MessageDelivery::Steer) {
-                        "steer"
-                    } else {
+                    if message.queued.is_some() {
                         "queue"
+                    } else {
+                        "steer"
                     },
                 );
+                let delivery = match &message.queued {
+                    Some(queued) => queued_delivery(queued),
+                    None => line(result.message.as_deref().unwrap_or("accepted"), 256),
+                };
                 Ok(response(format!(
                     "# Message accepted\n\n- Id: {}\n- Delivery: {}\n- Check replies with falcondeck_view_thread.\n",
                     line(&a.thread_id, 256),
-                    line(result.message.as_deref().unwrap_or("accepted"), 256)
+                    delivery
                 )))
             }
             CREATE => {
@@ -928,7 +967,7 @@ mod tests {
         assert!(bounded.result.as_str().unwrap().chars().count() <= 512);
     }
     #[tokio::test]
-    async fn message_queues_with_provenance_and_preserves_target_settings() {
+    async fn agent_messages_that_must_queue_merge_per_sender_and_preserve_target_settings() {
         let (app, _temp) = fixture().await;
         let result = app
             .invoke_extension_tool(call(CREATE, json!({"model":"target-model"})))
@@ -940,8 +979,15 @@ mod tests {
         })
         .await
         .unwrap();
-        for delivery in [None, Some("queue")] {
-            let mut arguments = json!({"thread_id":id,"message":"Please check the sync contract."});
+        // The fixture workspace advertises no steering, so every message takes
+        // the queue fallback. `delivery: queue` is accepted but changes nothing.
+        let mut deliveries = Vec::new();
+        for (message, delivery) in [
+            ("Please check the sync contract.", None),
+            ("Drop the 100-char floor.", Some("queue")),
+            ("Actually keep the floor.", Some("steer")),
+        ] {
+            let mut arguments = json!({"thread_id":id,"message":message});
             if let Some(delivery) = delivery {
                 arguments["delivery"] = json!(delivery);
             }
@@ -949,27 +995,169 @@ mod tests {
                 .invoke_extension_tool(call(MESSAGE, arguments))
                 .await
                 .unwrap();
-            assert!(result.result.as_str().unwrap().contains("Delivery: queued"));
+            deliveries.push(result.result.as_str().unwrap().to_string());
         }
+        assert!(deliveries[0].contains(
+            "Delivery: queued behind the receiver's running turn. It arrives when that turn ends."
+        ));
+        assert!(!deliveries[0].contains("merged"));
+        assert!(deliveries[1].contains("merged with 1 earlier message from you"));
+        assert!(deliveries[2].contains("merged with 2 earlier messages from you"));
         let workspaces = app.inner.workspaces.lock().await;
         let target = &workspaces["workspace-1"].threads[&id];
-        assert_eq!(target.queued_requests.len(), 2);
-        for (queued, steer) in target.queued_requests.iter().zip([true, false]) {
-            assert_eq!(queued.request.steer, steer);
-            assert_eq!(
-                queued.summary.text,
-                "Message from FalconDeck thread thread-1 (Auth setup):\n\nPlease check the sync contract."
-            );
-            assert!(queued.request.provider.is_none());
-            assert!(queued.request.model_id.is_none());
-            assert!(queued.request.approval_policy.is_none());
-            assert!(queued.request.permission_mode.is_none());
-            assert!(queued.request.sandbox_mode.is_none());
-        }
+        assert_eq!(target.queued_requests.len(), 1);
+        assert_eq!(target.summary.queued_turns.len(), 1);
+        let queued = &target.queued_requests[0];
+        assert!(queued.request.steer);
+        assert_eq!(queued.agent_sender.as_ref().unwrap().messages, 3);
+        let text = &queued.summary.text;
+        assert!(text.starts_with(
+            "Message from FalconDeck thread thread-1 (Auth setup):\n\nPlease check the sync contract."
+        ));
+        let drop = text.find("Drop the 100-char floor.").unwrap();
+        assert!(drop < text.find("Actually keep the floor.").unwrap());
+        // Later messages carry no second provenance header.
+        assert_eq!(text.matches("Message from FalconDeck thread").count(), 1);
+        assert_eq!(
+            text.matches("Later message from the same sender").count(),
+            2
+        );
+        assert_eq!(&target.summary.queued_turns[0], &queued.summary);
+        let falcondeck_core::TurnInputItem::Text { text: input, .. } = &queued.request.inputs[0]
+        else {
+            panic!("queued input should be text");
+        };
+        assert_eq!(input, text);
+        assert!(queued.request.provider.is_none());
+        assert!(queued.request.model_id.is_none());
+        assert!(queued.request.approval_policy.is_none());
+        assert!(queued.request.permission_mode.is_none());
+        assert!(queued.request.sandbox_mode.is_none());
         assert_eq!(
             target.summary.agent.model_id.as_deref(),
             Some("target-model")
         );
+    }
+
+    #[tokio::test]
+    async fn queued_agent_message_reports_how_long_the_turn_has_run() {
+        let (app, _temp) = fixture().await;
+        let id = created_id(
+            &app.invoke_extension_tool(call(CREATE, json!({})))
+                .await
+                .unwrap(),
+        );
+        app.with_thread_mut("workspace-1", &id, |t| t.status = ThreadStatus::Running)
+            .await
+            .unwrap();
+        app.inner
+            .workspaces
+            .lock()
+            .await
+            .get_mut("workspace-1")
+            .unwrap()
+            .threads
+            .get_mut(&id)
+            .unwrap()
+            .turn_started_at = Some(Utc::now() - chrono::Duration::minutes(174));
+        let result = app
+            .invoke_extension_tool(call(MESSAGE, json!({"thread_id":id,"message":"One."})))
+            .await
+            .unwrap();
+        assert!(
+            result
+                .result
+                .as_str()
+                .unwrap()
+                .contains("Delivery: queued behind a turn running for 2h 54m. It arrives"),
+            "{}",
+            result.result
+        );
+    }
+
+    #[tokio::test]
+    async fn different_senders_keep_separate_queue_entries() {
+        let (app, _temp) = fixture().await;
+        let target = created_id(
+            &app.invoke_extension_tool(call(CREATE, json!({})))
+                .await
+                .unwrap(),
+        );
+        let other = created_id(
+            &app.invoke_extension_tool(call(CREATE, json!({})))
+                .await
+                .unwrap(),
+        );
+        app.with_thread_mut("workspace-1", &target, |t| {
+            t.status = ThreadStatus::Running;
+        })
+        .await
+        .unwrap();
+        let from_other = |message: &str| {
+            let mut request = call(MESSAGE, json!({"thread_id":target,"message":message}));
+            request.thread_id = Some(other.clone());
+            request
+        };
+        for request in [
+            call(MESSAGE, json!({"thread_id":target,"message":"From one."})),
+            from_other("From two."),
+            call(MESSAGE, json!({"thread_id":target,"message":"Again one."})),
+            from_other("Again two."),
+        ] {
+            app.invoke_extension_tool(request).await.unwrap();
+        }
+        let workspaces = app.inner.workspaces.lock().await;
+        let queued = &workspaces["workspace-1"].threads[&target].queued_requests;
+        assert_eq!(queued.len(), 2);
+        let senders: Vec<_> = queued
+            .iter()
+            .map(|q| q.agent_sender.as_ref().unwrap().thread_id.as_str())
+            .collect();
+        assert_eq!(senders, ["thread-1", other.as_str()]);
+        assert!(queued[0].summary.text.contains("From one."));
+        assert!(queued[0].summary.text.contains("Again one."));
+        assert!(!queued[0].summary.text.contains("two."));
+        assert!(queued[1].summary.text.contains("From two."));
+        assert!(queued[1].summary.text.contains("Again two."));
+    }
+
+    #[tokio::test]
+    async fn agent_messages_do_not_merge_into_user_queued_turns_or_past_the_size_cap() {
+        let (app, _temp) = fixture().await;
+        let id = created_id(
+            &app.invoke_extension_tool(call(CREATE, json!({})))
+                .await
+                .unwrap(),
+        );
+        app.with_thread_mut("workspace-1", &id, |t| t.status = ThreadStatus::Running)
+            .await
+            .unwrap();
+        // A human queued message (no sender) is never extended.
+        app.send_turn(
+            serde_json::from_value(json!({
+                "workspace_id":"workspace-1","thread_id":id,
+                "inputs":[{"type":"text","text":"human follow-up"}]
+            }))
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+        let big = "x ".repeat(11_000);
+        for message in [&big, &big, &big, "tail"] {
+            app.invoke_extension_tool(call(MESSAGE, json!({"thread_id":id,"message":message})))
+                .await
+                .unwrap();
+        }
+        let workspaces = app.inner.workspaces.lock().await;
+        let queued = &workspaces["workspace-1"].threads[&id].queued_requests;
+        assert_eq!(queued[0].summary.text, "human follow-up");
+        assert!(queued[0].agent_sender.is_none());
+        // 22k + 22k fits the cap once; the third overflows into a fresh
+        // entry, which "tail" then joins.
+        assert_eq!(queued.len(), 3);
+        assert_eq!(queued[1].agent_sender.as_ref().unwrap().messages, 2);
+        assert_eq!(queued[2].agent_sender.as_ref().unwrap().messages, 2);
+        assert!(queued[2].summary.text.ends_with("tail"));
     }
 
     #[tokio::test]
@@ -1090,7 +1278,7 @@ mod tests {
         let result = app
             .invoke_extension_tool(call(
                 MESSAGE,
-                json!({"thread_id":id,"message":"Second message"}),
+                json!({"thread_id":id,"message":"Second message","delivery":"queue"}),
             ))
             .await
             .unwrap();

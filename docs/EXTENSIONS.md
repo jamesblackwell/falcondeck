@@ -1146,12 +1146,14 @@ or waiting children continue to count. Calls return after dispatch, without wait
 Message sends bounded text (1–24000 characters) to an existing thread in the
 caller's workspace through normal `send_turn`, without overriding target
 provider, model, or permission settings. The daemon prefixes the caller's id
-and title as visible provenance, not an authority signal. `delivery: steer`
-(default) steers an active turn when available and falls back to queue;
-`delivery: queue` waits behind active work. Idle targets start a normal turn.
-Agent guidance prefers direct steering for coordination, corrections, status
-requests, and results relevant to current work; queue only when a message
-should wait until the recipient's current turn finishes.
+and title as visible provenance, not an authority signal. Agent
+messages always steer an active turn when the provider can take it; the
+legacy `delivery` argument is accepted and ignored. When steering is
+unavailable the message queues, and a sender's queued messages to one target
+merge into a single entry (newest last, capped at 48,000 characters) and the
+result says how long the target's turn has run. Idle targets start a normal turn.
+Queueing is a fallback, not a choice, because messages queued behind
+hours-long turns arrive stale and contradictory.
 Self-messaging and targets outside the workspace are rejected. The tool returns
 admission status without waiting for completion; replies can be read with view.
 Existing turn approvals remain in FalconDeck UI.
