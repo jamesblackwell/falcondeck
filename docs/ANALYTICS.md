@@ -41,7 +41,7 @@ Expected size is small: an event is roughly 100–250 bytes.
 | File write: thread, path | Claude `Edit`/`Write`/`MultiEdit`/`NotebookEdit` tool calls once they complete successfully, and Codex `File` events. Edits made through shell commands and ACP tools are not attributed yet. |
 | Bot context: estimated tokens injected per bot turn | Recomputed off the turn path when a bot's home conversation receives a message |
 | Wait: how long an approval or question waited on the user | Event stream: a thread's pending approvals or questions (or `waiting_for_input`) until they clear |
-| Commit: thread, workspace | Finished shell tool calls where `git … commit` is one of the commands (not `commit-tree`, `--dry-run`, or text that merely mentions it). Each `[branch abc1234] …` summary git prints counts as a commit, even if a later command failed; a quiet commit with no output counts only when the whole line is a successful `&&` chain. Wrappers such as `env`, `command` and `sudo` are recognised |
+| Commit: thread, workspace | Finished shell tool calls where `git … commit` is one of the commands (not `commit-tree`, `--dry-run`, or text that merely mentions it). Each `[branch abc1234] …` summary git prints counts as a commit, even if a later command failed; a quiet commit with no output counts only when the whole line is a successful `&&` chain. Commands behind wrappers such as `env`, `command` or `sudo` count only with git's summary line |
 
 The summary also derives, without extra records:
 

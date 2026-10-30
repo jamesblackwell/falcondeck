@@ -563,22 +563,28 @@ fn shell_commands(line: &str) -> Vec<(String, Option<&'static str>)> {
 }
 
 /// Whether one command (not a whole line) is `git … commit`, excluding dry runs.
-fn runs_git_commit(command: &str) -> bool {
+/// `Some(wrapped)` when the command is `git … commit`; `wrapped` means it sits
+/// behind something like `env` or `sudo`, whose options might stop git running.
+fn git_commit_command(command: &str) -> Option<bool> {
     // Leading `VAR=value` assignments and wrappers such as `env` are not the command.
     const WRAPPERS: [&str; 6] = ["command", "env", "sudo", "nohup", "time", "exec"];
-    let words: Vec<&str> = command
-        .split_whitespace()
+    let all: Vec<&str> = command.split_whitespace().collect();
+    let words: Vec<&str> = all
+        .iter()
+        .copied()
         .skip_while(|word| {
             WRAPPERS.contains(word)
                 || word.starts_with('-')
                 || (word.contains('=') && !word.starts_with('-'))
         })
         .collect();
-    let Some(program) = words.first() else {
-        return false;
-    };
+    let wrapped = all
+        .iter()
+        .take(all.len() - words.len())
+        .any(|word| !(word.contains('=') && !word.starts_with('-')));
+    let program = words.first()?;
     if *program != "git" && !program.ends_with("/git") {
-        return false;
+        return None;
     }
     let mut next = 1;
     while let Some(word) = words.get(next) {
@@ -586,11 +592,12 @@ fn runs_git_commit(command: &str) -> bool {
             "-C" | "-c" | "--git-dir" | "--work-tree" => next += 2,
             flag if flag.starts_with('-') => next += 1,
             subcommand => {
-                return subcommand == "commit" && !words.contains(&"--dry-run");
+                return (subcommand == "commit" && !words.contains(&"--dry-run"))
+                    .then_some(wrapped);
             }
         }
     }
-    false
+    None
 }
 
 /// A line git prints for a new commit, such as `[main 1a2b3c4] Message`.
@@ -620,7 +627,10 @@ fn commits_made(tool: &FinishedTool) -> u64 {
         return 0;
     }
     let commands = shell_commands(tool.command);
-    if !commands.iter().any(|(command, _)| runs_git_commit(command)) {
+    if !commands
+        .iter()
+        .any(|(command, _)| git_commit_command(command).is_some())
+    {
         return 0;
     }
     let confirmed = tool
@@ -637,7 +647,8 @@ fn commits_made(tool: &FinishedTool) -> u64 {
     if tool.ok && all_chained {
         commands
             .iter()
-            .filter(|(command, _)| runs_git_commit(command))
+            // Only a bare `git commit` is trusted without git's own output.
+            .filter(|(command, _)| git_commit_command(command) == Some(false))
             .count() as u64
     } else {
         0
@@ -1498,6 +1509,12 @@ mod tests {
             ),
             1
         );
+        // A wrapper might not run git at all, so it needs git's own output.
+        assert_eq!(
+            shell("env --help git commit", "Usage: env [OPTION]...", true),
+            0
+        );
+        assert_eq!(shell("GIT_AUTHOR_NAME=x git commit -q -m y", "", true), 1);
         assert_eq!(shell("git commit -m x", "nothing to commit", false), 0);
         // Text that merely mentions a commit runs none.
         assert_eq!(shell("echo please run git commit", made, true), 0);
