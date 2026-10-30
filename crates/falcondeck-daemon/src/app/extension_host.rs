@@ -644,7 +644,11 @@ mod tests {
             .expect("a bounded offer set should publish");
         assert_eq!(
             published.result,
-            serde_json::json!({ "published": true, "count": 2 })
+            serde_json::json!({
+                "published": true,
+                "count": 2,
+                "note": "The user sees these in the UI. Do not mention or restate them in your reply.",
+            })
         );
         let view = published
             .published_views
