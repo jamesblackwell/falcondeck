@@ -948,8 +948,11 @@ function useBotReorder(bots: BotProfile[], api: BotApi | undefined) {
         const rect = rows.current.get(other)?.getBoundingClientRect();
         return rect ? move.clientY < rect.top + rect.height / 2 : false;
       });
+      // `target` counts the dragged row; account for removing it first.
+      let slot = target < 0 ? ids.length : target;
+      if (ids.indexOf(id) < slot) slot -= 1;
       const next = ids.filter((other) => other !== id);
-      next.splice(target < 0 ? next.length : Math.min(target, next.length), 0, id);
+      next.splice(slot, 0, id);
       if (next.join() !== ids.join()) {
         ids = next;
         setOrder(next);
@@ -960,7 +963,11 @@ function useBotReorder(bots: BotProfile[], api: BotApi | undefined) {
       window.removeEventListener("pointerup", onUp);
       window.removeEventListener("pointercancel", onUp);
       if (!active) return;
+      // Only the click this release produces is swallowed, wherever it lands.
       swallowClick.current = true;
+      window.setTimeout(() => {
+        swallowClick.current = false;
+      }, 0);
       setDragging(null);
       if (ids.join() !== bots.map((bot) => bot.id).join()) save(ids);
       else setOrder(null);

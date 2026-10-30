@@ -320,5 +320,25 @@ describe("bot sidebar", () => {
     // A plain click still opens the bot.
     fireEvent.click(row("B"));
     expect(onSelect).toHaveBeenCalledWith("home", "t-B");
+
+    // Dragging down one slot lands just below that row; a drag released
+    // elsewhere does not swallow the next real click.
+    for (const [index, name] of ["C", "B", "A"].entries()) {
+      const element = row(name).parentElement!;
+      element.getBoundingClientRect = () =>
+        ({ top: index * 30, height: 30, bottom: index * 30 + 30 }) as DOMRect;
+    }
+    fireEvent.pointerDown(row("C").parentElement!, { button: 0, clientY: 10 });
+    fireEvent.pointerMove(window, { clientY: 50 });
+    fireEvent.pointerUp(window, { clientY: 50 });
+    await waitFor(() =>
+      expect(transport.mutateBot).toHaveBeenLastCalledWith({
+        action: "reorder",
+        ids: ["bot-B", "bot-C", "bot-A"],
+      }),
+    );
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    fireEvent.click(row("A"));
+    expect(onSelect).toHaveBeenLastCalledWith("home", "t-A");
   });
 });
