@@ -8,5 +8,9 @@
   <string>FalconDeck uses Apple Speech to turn your dictated audio into text.</string>
   <key>NSAppleEventsUsageDescription</key>
   <string>FalconDeck talks to other Mac apps when you let agents use this computer.</string>
+  <!-- The embedded daemon serves phones and agents while the window is hidden;
+       App Nap throttled its disk I/O until remote RPCs timed out. -->
+  <key>LSAppNapIsDisabled</key>
+  <true/>
 </dict>
 </plist>
