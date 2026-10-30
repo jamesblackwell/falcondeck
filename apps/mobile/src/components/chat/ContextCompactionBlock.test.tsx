@@ -39,4 +39,10 @@ describe('ContextCompactionBlock', () => {
     expect(receipt.props.accessibilityLiveRegion).toBe('assertive')
     expect(textOf(renderer)).toContain('The provider could not finish summarizing this thread.')
   })
+
+  it('keeps a successful compaction to one visible line', () => {
+    const renderer = renderComponent(<ContextCompactionBlock item={compaction('succeeded')} />)
+
+    expect(textOf(renderer)).toBe('Context compacted')
+  })
 })

@@ -3233,6 +3233,8 @@ function ContextCompactionMessage({
 }) {
   const lifecycle = item.lifecycle ?? "unknown";
   const presentation = contextCompactionPresentation(lifecycle);
+  const showDetail =
+    presentation.tone === "danger" || presentation.tone === "warning";
   const iconClassName = "h-3.5 w-3.5 shrink-0";
   const icon =
     lifecycle === "running" || lifecycle === "queued" ? (
@@ -3264,16 +3266,14 @@ function ContextCompactionMessage({
       role={lifecycle === "failed" ? "alert" : "status"}
       aria-live={lifecycle === "failed" ? "assertive" : "polite"}
       aria-label={`${presentation.label}. ${presentation.detail}`}
-      className="fd-type-supporting flex min-w-0 max-w-2xl items-start gap-2 py-2 text-left font-sans"
+      className="fd-type-meta flex min-w-0 items-start gap-2 py-1 text-left font-sans text-fg-muted"
     >
       <span className="flex h-[1lh] shrink-0 items-center">{icon}</span>
       <span className="min-w-0">
-        <span className="block font-medium text-fg-secondary">
-          {presentation.label}
-        </span>
-        <span className="fd-type-meta mt-0.5 block text-fg-muted">
-          {presentation.detail}
-        </span>
+        <span className="block">{presentation.label}</span>
+        {showDetail ? (
+          <span className="mt-0.5 block">{presentation.detail}</span>
+        ) : null}
       </span>
     </div>
   );

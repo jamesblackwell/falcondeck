@@ -1857,7 +1857,7 @@ export function deriveConversationPresentation(
   options: ConversationPresentationOptions = {},
 ): ConversationPresentation {
   const items = settleFinishedReasoning(
-    projectHarnessUserItems(itemsInput),
+    suppressLegacyCompactionNotices(projectHarnessUserItems(itemsInput)),
     options.is_streaming === true,
   );
   const preferences = normalizePreferences(preferencesInput);
@@ -2107,6 +2107,30 @@ export function deriveConversationPresentation(
     live_activity_groups: liveActivityGroups,
     history_blocks: historyBlocks,
   };
+}
+
+/** Old Claude transcripts retain bare progress notices before the real receipt. */
+function suppressLegacyCompactionNotices(items: ConversationItem[]): ConversationItem[] {
+  let receiptFollows = false;
+  const redundant = new Set<number>();
+  for (let index = items.length - 1; index >= 0; index -= 1) {
+    const item = items[index];
+    if (item.kind === "context_compaction") {
+      receiptFollows = true;
+    } else if (
+      receiptFollows &&
+      item.kind === "service" &&
+      item.level === "info" &&
+      item.message.trim().toLowerCase() === "compacting"
+    ) {
+      redundant.add(index);
+    } else {
+      receiptFollows = false;
+    }
+  }
+  return redundant.size > 0
+    ? items.filter((_, index) => !redundant.has(index))
+    : items;
 }
 
 export function deriveConversationRenderBlocks(

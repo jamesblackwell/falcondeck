@@ -786,6 +786,11 @@ stable item ID moves from running to complete, while turn settlement closes a
 missing terminal notification as succeeded, interrupted, or failed. Current
 app-server items carry no compaction summary or token metadata, so clients do
 not invent either; they show calm provider-independent lifecycle copy.
+Claude's `compacting` status events and `compact_boundary` likewise update one
+stable receipt. Repeated statuses never add service rows; clients suppress
+legacy bare progress notices immediately before their compaction receipt.
+Normal progress and success use a single quiet line, with explanatory detail
+kept accessible and shown visibly for failed or interrupted compaction.
 Review-mode entry and result notifications replace one first-class code-review
 item keyed by the provider ID. The entry retains the requested scope and shows
 calm active progress; the result preserves that scope while rendering the full

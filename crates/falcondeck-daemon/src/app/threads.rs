@@ -1506,6 +1506,7 @@ impl AppState {
         let mut turn_error: Option<String> = None;
         let mut resume_session_confirmed = !resume_interrupted;
         let mut saw_agent_output = false;
+        let mut active_compaction = None;
         let stderr_task = stderr.map(|stderr| {
             let workspace_id = workspace_id.clone();
             let thread_id = thread_id.clone();
@@ -1953,7 +1954,8 @@ impl AppState {
                                     .push_conversation_item(&workspace_id, &thread_id, item, true)
                                     .await;
                             }
-                            let compaction_item = claude_context_compaction_item(&value);
+                            let compaction_item =
+                                claude_context_compaction_item(&value, &mut active_compaction);
                             if let Some(item) = compaction_item.clone() {
                                 // A manual `/compact` result intentionally has
                                 // no assistant prose. Treat its structured
@@ -2134,6 +2136,7 @@ impl AppState {
                                         assistant_citations.clear();
                                         reasoning_text.clear();
                                         assistant_block_break_pending = false;
+                                        active_compaction = None;
                                         tool_identity.clear();
                                         subagent_steps.clear();
                                         background_tasks.clear();
@@ -3760,18 +3763,40 @@ fn claude_init_session_id(value: &Value) -> Option<String> {
         .map(str::to_string)
 }
 
-fn claude_context_compaction_item(value: &Value) -> Option<ConversationItem> {
-    if value.get("type").and_then(Value::as_str) != Some("system")
-        || value.get("subtype").and_then(Value::as_str) != Some("compact_boundary")
-    {
+fn claude_context_compaction_item(
+    value: &Value,
+    active: &mut Option<(String, chrono::DateTime<Utc>)>,
+) -> Option<ConversationItem> {
+    let completed = value.get("type").and_then(Value::as_str) == Some("system")
+        && value.get("subtype").and_then(Value::as_str) == Some("compact_boundary");
+    let running = extract_claude_service_message(value)
+        .is_some_and(|message| message.trim().eq_ignore_ascii_case("compacting"));
+    if !completed && !running {
         return None;
     }
     let now = Utc::now();
+    let new_identity = || {
+        (
+            format!("claude-compaction-{}", Uuid::new_v4().simple()),
+            now,
+        )
+    };
+    // Repeated status events and the boundary update one receipt in place.
+    // The monitor's normal turn settlement handles a missing boundary.
+    let (id, created_at) = if completed {
+        active.take().unwrap_or_else(new_identity)
+    } else {
+        active.get_or_insert_with(new_identity).clone()
+    };
     Some(ConversationItem::ContextCompaction {
-        id: format!("claude-compaction-{}", Uuid::new_v4().simple()),
-        lifecycle: ToolLifecycle::Succeeded,
-        created_at: now,
-        completed_at: Some(now),
+        id,
+        lifecycle: if completed {
+            ToolLifecycle::Succeeded
+        } else {
+            ToolLifecycle::Running
+        },
+        created_at,
+        completed_at: completed.then_some(now),
     })
 }
 
@@ -4446,14 +4471,17 @@ mod tests {
 
     #[test]
     fn compact_boundary_becomes_a_succeeded_compaction_item() {
-        let item = claude_context_compaction_item(&json!({
-            "type": "system",
-            "subtype": "compact_boundary",
-            "compact_metadata": {
-                "trigger": "manual",
-                "pre_tokens": 42_000
-            }
-        }))
+        let item = claude_context_compaction_item(
+            &json!({
+                "type": "system",
+                "subtype": "compact_boundary",
+                "compact_metadata": {
+                    "trigger": "manual",
+                    "pre_tokens": 42_000
+                }
+            }),
+            &mut None,
+        )
         .expect("compact boundary should project");
 
         assert!(matches!(
@@ -4465,12 +4493,50 @@ mod tests {
             }
         ));
         assert!(
-            claude_context_compaction_item(&json!({
-                "type": "system",
-                "subtype": "init"
-            }))
+            claude_context_compaction_item(
+                &json!({
+                    "type": "system",
+                    "subtype": "init"
+                }),
+                &mut None
+            )
             .is_none()
         );
+    }
+
+    #[test]
+    fn compaction_status_and_boundary_replace_one_stable_receipt() {
+        let mut active = None;
+        let status = json!({"type": "system", "subtype": "status", "status": "compacting"});
+        let first = claude_context_compaction_item(&status, &mut active).unwrap();
+        let repeated = claude_context_compaction_item(&status, &mut active).unwrap();
+        assert_eq!(first, repeated);
+        let ConversationItem::ContextCompaction {
+            id,
+            created_at,
+            lifecycle,
+            completed_at,
+        } = first
+        else {
+            panic!("expected compaction")
+        };
+        assert_eq!(lifecycle, ToolLifecycle::Running);
+        assert!(completed_at.is_none());
+
+        let boundary = json!({"type": "system", "subtype": "compact_boundary"});
+        let complete = claude_context_compaction_item(&boundary, &mut active).unwrap();
+        assert!(matches!(complete, ConversationItem::ContextCompaction {
+            id: ref complete_id,
+            created_at: complete_created_at,
+            lifecycle: ToolLifecycle::Succeeded,
+            completed_at: Some(_),
+        } if complete_id == &id && complete_created_at == created_at));
+        assert!(active.is_none());
+
+        let next = claude_context_compaction_item(&status, &mut active).unwrap();
+        assert!(matches!(next, ConversationItem::ContextCompaction {
+            id: next_id, lifecycle: ToolLifecycle::Running, ..
+        } if next_id != id));
     }
 
     #[test]

@@ -20,6 +20,7 @@ export const ContextCompactionBlock = memo(function ContextCompactionBlock({
   const { theme } = useUnistyles()
   const lifecycle = item.lifecycle ?? 'unknown'
   const presentation = contextCompactionPresentation(lifecycle)
+  const showDetail = presentation.tone === 'danger' || presentation.tone === 'warning'
   const iconSize = theme.iconSize.xs
   const icon = lifecycle === 'running' || lifecycle === 'queued'
     ? <ActivityDiamond size={iconSize} color={theme.colors.accent.default} />
@@ -41,12 +42,10 @@ export const ContextCompactionBlock = memo(function ContextCompactionBlock({
     >
       <View style={styles.icon}>{icon}</View>
       <View style={styles.copy}>
-        <Text variant="supporting" color="secondary" weight="medium">
+        <Text variant="meta">
           {presentation.label}
         </Text>
-        <Text variant="meta">
-          {presentation.detail}
-        </Text>
+        {showDetail ? <Text variant="meta">{presentation.detail}</Text> : null}
       </View>
     </View>
   )
@@ -58,12 +57,12 @@ const styles = StyleSheet.create((theme) => ({
     flexDirection: 'row',
     gap: theme.spacing[2],
     marginHorizontal: theme.spacing[4],
-    paddingVertical: theme.spacing[2],
+    paddingVertical: theme.spacing[1],
   },
   icon: {
     alignItems: 'center',
     justifyContent: 'center',
-    height: theme.fontSize.sm * theme.lineHeight.normal,
+    height: theme.fontSize.xs * theme.lineHeight.normal,
   },
   copy: {
     flex: 1,
