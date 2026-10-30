@@ -142,6 +142,18 @@ describe("bot sidebar", () => {
     );
   });
 
+  it("filters documents without changing the open editor", async () => {
+    render(<BotSidebar bots={[bot]} botApi={api()} groups={[]} selectedThreadId={null} onSelectThread={vi.fn()} />);
+    fireEvent.click(screen.getByRole("button", { name: "Edit Assistant" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Priorities.md" }));
+    const editor = await screen.findByLabelText("Document content");
+    fireEvent.change(editor, { target: { value: "Draft priorities" } });
+    fireEvent.change(screen.getByRole("searchbox", { name: "Search documents" }), { target: { value: "missing" } });
+    expect(screen.queryByRole("button", { name: "Priorities.md" })).not.toBeInTheDocument();
+    expect(screen.getByText("No documents match your search.")).toBeInTheDocument();
+    expect(editor).toHaveValue("Draft priorities");
+  });
+
   it("preserves an unsaved document when an external edit prevents saving", async () => {
     const transport = api();
     vi.mocked(transport.mutateBotDocument).mockRejectedValue(
