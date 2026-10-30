@@ -525,6 +525,13 @@ mod tests {
     }
 
     #[test]
+    fn daemon_config_binds_localhost_by_default() {
+        let config = DaemonConfig::default();
+        assert_eq!(config.bind_addr.ip(), IpAddr::V4(Ipv4Addr::LOCALHOST));
+        assert!(config.background_restore);
+    }
+
+    #[test]
     fn daemon_installs_a_rustls_crypto_provider() {
         let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
         assert!(rustls::crypto::CryptoProvider::get_default().is_some());

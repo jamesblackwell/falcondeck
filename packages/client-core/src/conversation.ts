@@ -837,6 +837,82 @@ function lifecycleAfterTextDelta(
     : "streaming";
 }
 
+function conversationItemText(
+  item: ConversationItem,
+  target: TextDeltaEvent["target"],
+): string | null {
+  const resolved = target ?? "assistant_text";
+  if (item.kind === "assistant_message" && resolved === "assistant_text") {
+    return item.text;
+  }
+  if (item.kind === "reasoning" && resolved === "reasoning_summary") {
+    return item.summary ?? "";
+  }
+  if (item.kind === "reasoning" && resolved === "reasoning_content") {
+    return item.content;
+  }
+  if (item.kind === "tool_call" && resolved === "tool_output") {
+    return item.output ?? "";
+  }
+  if (item.kind === "plan" && resolved === "plan_explanation") {
+    return item.plan.explanation ?? "";
+  }
+  return null;
+}
+
+function appendConversationItemText(
+  item: ConversationItem,
+  target: TextDeltaEvent["target"],
+  delta: string,
+): ConversationItem {
+  const resolved = target ?? "assistant_text";
+  if (item.kind === "assistant_message" && resolved === "assistant_text") {
+    return {
+      ...item,
+      text: `${item.text}${delta}`,
+      lifecycle: lifecycleAfterTextDelta(item.lifecycle),
+    };
+  }
+  if (item.kind === "reasoning" && resolved === "reasoning_summary") {
+    return {
+      ...item,
+      summary: `${item.summary ?? ""}${delta}`,
+      lifecycle: lifecycleAfterTextDelta(item.lifecycle),
+    };
+  }
+  if (item.kind === "reasoning" && resolved === "reasoning_content") {
+    return {
+      ...item,
+      content: `${item.content}${delta}`,
+      lifecycle: lifecycleAfterTextDelta(item.lifecycle),
+    };
+  }
+  if (item.kind === "tool_call" && resolved === "tool_output") {
+    const lifecycle = toolLifecycle(item);
+    const terminal =
+      lifecycle === "succeeded" ||
+      lifecycle === "failed" ||
+      lifecycle === "denied" ||
+      lifecycle === "interrupted";
+    return {
+      ...item,
+      output: `${item.output ?? ""}${delta}`,
+      status: terminal ? item.status : "running",
+      display: terminal
+        ? item.display
+        : { ...item.display, lifecycle: "running" },
+    };
+  }
+  if (item.kind !== "plan" || resolved !== "plan_explanation") return item;
+  return {
+    ...item,
+    plan: {
+      ...item.plan,
+      explanation: `${item.plan.explanation ?? ""}${delta}`,
+    },
+  };
+}
+
 function applyTextDeltaToConversationItem(
   item: ConversationItem,
   event: TextDeltaEvent,
@@ -847,21 +923,8 @@ function applyTextDeltaToConversationItem(
     return item;
   }
 
-  const target = event.target ?? "assistant_text";
-  let current: string;
-  if (item.kind === "assistant_message" && target === "assistant_text") {
-    current = item.text;
-  } else if (item.kind === "reasoning" && target === "reasoning_summary") {
-    current = item.summary ?? "";
-  } else if (item.kind === "reasoning" && target === "reasoning_content") {
-    current = item.content;
-  } else if (item.kind === "tool_call" && target === "tool_output") {
-    current = item.output ?? "";
-  } else if (item.kind === "plan" && target === "plan_explanation") {
-    current = item.plan.explanation ?? "";
-  } else {
-    return item;
-  }
+  const current = conversationItemText(item, event.target);
+  if (current === null) return item;
 
   // The delta is already present, including when a newer snapshot raced ahead
   // of replay. Do not allocate or make React render the item again.
@@ -869,52 +932,7 @@ function applyTextDeltaToConversationItem(
     return item;
   }
   if (current.length !== start) return item;
-
-  if (item.kind === "assistant_message") {
-    return {
-      ...item,
-      text: `${item.text}${event.delta}`,
-      lifecycle: lifecycleAfterTextDelta(item.lifecycle),
-    };
-  }
-  if (item.kind === "reasoning" && target === "reasoning_summary") {
-    return {
-      ...item,
-      summary: `${item.summary ?? ""}${event.delta}`,
-      lifecycle: lifecycleAfterTextDelta(item.lifecycle),
-    };
-  }
-  if (item.kind === "reasoning") {
-    return {
-      ...item,
-      content: `${item.content}${event.delta}`,
-      lifecycle: lifecycleAfterTextDelta(item.lifecycle),
-    };
-  }
-  if (item.kind === "tool_call") {
-    const lifecycle = toolLifecycle(item);
-    const terminal =
-      lifecycle === "succeeded" ||
-      lifecycle === "failed" ||
-      lifecycle === "denied" ||
-      lifecycle === "interrupted";
-    return {
-      ...item,
-      output: `${item.output ?? ""}${event.delta}`,
-      status: terminal ? item.status : "running",
-      display: terminal
-        ? item.display
-        : { ...item.display, lifecycle: "running" },
-    };
-  }
-  if (item.kind !== "plan") return item;
-  return {
-    ...item,
-    plan: {
-      ...item.plan,
-      explanation: `${item.plan.explanation ?? ""}${event.delta}`,
-    },
-  };
+  return appendConversationItemText(item, event.target, event.delta);
 }
 
 function textDeltaItemKind(
@@ -965,6 +983,36 @@ export function applyConversationEventsToItems(
   let next = items;
   let ownsArray = false;
   let indexByIdentity: Map<string, number> | null = null;
+  // Adjacent appends on one item become a single string join. Copying a long
+  // tail once per token is quadratic in the frame size.
+  let pending: {
+    index: number;
+    itemId: string;
+    kind: ConversationItem["kind"];
+    target: TextDeltaEvent["target"];
+    item: ConversationItem;
+    deltas: string[];
+    length: number;
+  } | null = null;
+
+  const flushPending = () => {
+    const batch = pending;
+    pending = null;
+    if (!batch) return;
+    const delta =
+      batch.deltas.length === 1 ? batch.deltas[0]! : batch.deltas.join("");
+    const nextItem = appendConversationItemText(
+      batch.item,
+      batch.target,
+      delta,
+    );
+    if (nextItem === batch.item) return;
+    if (!ownsArray) {
+      next = next.slice();
+      ownsArray = true;
+    }
+    next[batch.index] = nextItem;
+  };
 
   const itemIndex = (id: string, kind: ConversationItem["kind"]) => {
     // Streaming frames normally touch only the last item. Building keys for
@@ -990,21 +1038,60 @@ export function applyConversationEventsToItems(
     const normalizedEvent = normalizeEventEnvelope(event);
     if (normalizedEvent.event.type === "text") {
       const textEvent = normalizedEvent.event;
-      const index = itemIndex(
-        textEvent.item_id,
-        textDeltaItemKind(textEvent.target ?? "assistant_text"),
-      );
-      if (index === -1) continue;
-      const currentItem = next[index];
-      const nextItem = applyTextDeltaToConversationItem(currentItem, textEvent);
-      if (nextItem === currentItem) continue;
-      if (!ownsArray) {
-        next = next.slice();
-        ownsArray = true;
+      const start = textEvent.start_offset;
+      const end = textEvent.end_offset;
+      if (
+        start == null ||
+        end == null ||
+        end !== start + textEvent.delta.length
+      ) {
+        flushPending();
+        continue;
       }
-      next[index] = nextItem;
+      const target = textEvent.target ?? "assistant_text";
+      const kind = textDeltaItemKind(target);
+      // Continue a burst without touching item identity. Reading `.id` on
+      // every token pulls completed rows into the lookup once the tail is copied.
+      if (
+        pending &&
+        pending.itemId === textEvent.item_id &&
+        pending.kind === kind &&
+        pending.target === target &&
+        pending.length === start
+      ) {
+        pending.deltas.push(textEvent.delta);
+        pending.length = end;
+        continue;
+      }
+      const index = itemIndex(textEvent.item_id, kind);
+      if (index === -1) {
+        flushPending();
+        continue;
+      }
+      flushPending();
+      const currentItem = next[index]!;
+      const current = conversationItemText(currentItem, target);
+      if (current === null) continue;
+      if (
+        current.length >= end &&
+        current.slice(start, end) === textEvent.delta
+      ) {
+        continue;
+      }
+      if (current.length !== start) continue;
+      pending = {
+        index,
+        itemId: textEvent.item_id,
+        kind,
+        target,
+        item: currentItem,
+        deltas: [textEvent.delta],
+        length: end,
+      };
       continue;
     }
+
+    flushPending();
 
     // Item events resolve identity through the shared map so a burst of
     // re-emitted items (Claude/ACP send the whole item per update) stays
@@ -1049,6 +1136,7 @@ export function applyConversationEventsToItems(
     }
   }
 
+  flushPending();
   return next;
 }
 
@@ -1851,6 +1939,38 @@ function settleFinishedReasoning(
   return settled ?? items;
 }
 
+const historyItemBlocks = new WeakMap<
+  ConversationItem,
+  Extract<ConversationHistoryBlock, { kind: "item" }>
+>();
+
+/** Plain rows are a pure function of the item plus two display flags. Streaming
+ * re-derives the whole transcript per frame; unchanged items keep the block
+ * object from the previous frame so the prefix is not allocated again. */
+function historyItemBlock(
+  item: ConversationItem,
+  defaultOpen: boolean,
+  suppressReadOnlyDetail: boolean,
+): Extract<ConversationHistoryBlock, { kind: "item" }> {
+  const cached = historyItemBlocks.get(item);
+  if (
+    cached &&
+    cached.default_open === defaultOpen &&
+    cached.suppress_read_only_detail === suppressReadOnlyDetail
+  ) {
+    return cached;
+  }
+  const block = {
+    kind: "item" as const,
+    id: `${item.kind}:${item.id}`,
+    item,
+    default_open: defaultOpen,
+    suppress_read_only_detail: suppressReadOnlyDetail,
+  };
+  historyItemBlocks.set(item, block);
+  return block;
+}
+
 export function deriveConversationPresentation(
   itemsInput: ConversationItem[],
   preferencesInput: FalconDeckPreferences | null | undefined,
@@ -1883,13 +2003,7 @@ export function deriveConversationPresentation(
     let buriedReceipts: ConversationItem[] = [];
     const flushReceipts = () => {
       for (const receipt of buriedReceipts) {
-        historyBlocks.push({
-          kind: "item",
-          id: `${receipt.kind}:${receipt.id}`,
-          item: receipt,
-          default_open: false,
-          suppress_read_only_detail: false,
-        });
+        historyBlocks.push(historyItemBlock(receipt, false, false));
       }
       buriedReceipts = [];
     };
@@ -1932,13 +2046,7 @@ export function deriveConversationPresentation(
           continue;
         }
         flushReceipts();
-        historyBlocks.push({
-          kind: "item",
-          id: `${item.kind}:${item.id}`,
-          item,
-          default_open: false,
-          suppress_read_only_detail: false,
-        });
+        historyBlocks.push(historyItemBlock(item, false, false));
         continue;
       }
       // Neither do the receipts that accompany work: resolved approvals and
@@ -1987,17 +2095,13 @@ export function deriveConversationPresentation(
           !seenDiff.value && preferences.conversation.auto_expand.first_diff;
         seenDiff.value = true;
       }
-      historyBlocks.push({
-        kind: "item",
-        id: `${item.kind}:${item.id}`,
-        item,
-        default_open: defaultOpen,
-        suppress_read_only_detail: shouldSuppressReadOnlyDetail(
+      historyBlocks.push(
+        historyItemBlock(
           item,
-          mode,
-          preferences,
+          defaultOpen,
+          shouldSuppressReadOnlyDetail(item, mode, preferences),
         ),
-      });
+      );
     }
     // Keep the final work session live for the whole turn, including short
     // gaps between fast tool calls and any trailing service receipts. Earlier
@@ -2091,13 +2195,9 @@ export function deriveConversationPresentation(
       preferences,
     );
 
-    historyBlocks.push({
-      kind: "item",
-      id: `${item.kind}:${item.id}`,
-      item,
-      default_open: defaultOpen,
-      suppress_read_only_detail: itemSuppressReadOnlyDetail,
-    });
+    historyBlocks.push(
+      historyItemBlock(item, defaultOpen, itemSuppressReadOnlyDetail),
+    );
   }
 
   flushSummaryBuffer();

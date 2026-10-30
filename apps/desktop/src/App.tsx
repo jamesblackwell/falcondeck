@@ -138,6 +138,7 @@ import {
   useToast,
 } from "@falcondeck/ui";
 
+import { shouldQueryNewThreadGit } from "./boot-schedule";
 import {
   markInteractiveRequestResolved,
   normalizeSendError,
@@ -1383,10 +1384,13 @@ function AppInner() {
     isCheckoutPending,
     checkout: checkoutBranch,
   } = useGitBranches(
-    !selectedThread &&
-      selectedWorkspace?.kind !== "casual" &&
-      !isRemoteWorkspaceSelected &&
-      !isSettingsOpen
+    shouldQueryNewThreadGit({
+      snapshotReady: snapshot !== null,
+      selectedThreadId,
+      workspaceKind: selectedWorkspace?.kind,
+      remoteWorkspace: isRemoteWorkspaceSelected,
+      settingsOpen: isSettingsOpen,
+    })
       ? api
       : null,
     selectedWorkspaceId,

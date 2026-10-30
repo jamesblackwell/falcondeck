@@ -617,6 +617,50 @@ fn kill_process_group(process_group_id: u32) -> std::io::Result<()> {
     }
 }
 
+pub(crate) enum CodexStdoutMessage {
+    Response {
+        id: u64,
+        body: Result<Value, String>,
+    },
+    ServerRequest {
+        id: Value,
+        method: String,
+        params: Value,
+    },
+    Notification {
+        method: String,
+        params: Value,
+    },
+}
+
+/// Split one app-server stdout object. Large `result` / `params` values are
+/// moved out of the object instead of cloned into the event path.
+pub(crate) fn take_codex_stdout_message(message: Value) -> Option<CodexStdoutMessage> {
+    let Value::Object(mut object) = message else {
+        return None;
+    };
+    if !object.contains_key("method") {
+        let Some(id) = object.get("id").and_then(Value::as_u64) else {
+            return None;
+        };
+        let body = if let Some(error) = object.remove("error") {
+            Err(error.to_string())
+        } else {
+            Ok(object.remove("result").unwrap_or(Value::Null))
+        };
+        return Some(CodexStdoutMessage::Response { id, body });
+    }
+    let Some(Value::String(method)) = object.remove("method") else {
+        return None;
+    };
+    let params = object.remove("params").unwrap_or(Value::Null);
+    if let Some(id) = object.remove("id") {
+        Some(CodexStdoutMessage::ServerRequest { id, method, params })
+    } else {
+        Some(CodexStdoutMessage::Notification { method, params })
+    }
+}
+
 impl CodexSession {
     pub async fn connect(
         workspace_id: String,
@@ -1326,43 +1370,26 @@ impl CodexSession {
             self.touch();
 
             match serde_json::from_str::<Value>(&line) {
-                Ok(message) => {
-                    if let Some(id) = message.get("id").and_then(Value::as_u64)
-                        && message.get("method").is_none()
-                    {
+                Ok(message) => match take_codex_stdout_message(message) {
+                    Some(CodexStdoutMessage::Response { id, body }) => {
                         if let Some(tx) = self.pending_responses().remove(&id) {
-                            if let Some(error) = message.get("error") {
-                                let _ = tx.send(Err(DaemonError::Rpc(error.to_string())));
-                            } else {
-                                let _ = tx.send(Ok(message
-                                    .get("result")
-                                    .cloned()
-                                    .unwrap_or(Value::Null)));
-                            }
+                            let _ = tx.send(body.map_err(DaemonError::Rpc));
                         }
-                        continue;
                     }
-
-                    if let Some(method) = message.get("method").and_then(Value::as_str) {
-                        let params = message.get("params").cloned().unwrap_or(Value::Null);
-                        if message.get("id").is_some() {
-                            if let Some(raw_id) = message.get("id").cloned()
-                                && let Err(error) = self
-                                    .state
-                                    .ingest_server_request(
-                                        &self.workspace_id,
-                                        raw_id,
-                                        method,
-                                        params,
-                                    )
-                                    .await
-                            {
-                                warn!("failed to ingest server request {method}: {error}");
-                            }
-                        } else if subagent_notifications.should_ignore(
-                            method,
+                    Some(CodexStdoutMessage::ServerRequest { id, method, params }) => {
+                        if let Err(error) = self
+                            .state
+                            .ingest_server_request(&self.workspace_id, id, &method, params)
+                            .await
+                        {
+                            warn!("failed to ingest server request {method}: {error}");
+                        }
+                    }
+                    Some(CodexStdoutMessage::Notification { method, params }) => {
+                        if subagent_notifications.should_ignore(
+                            &method,
                             &params,
-                            match subagent_notifications.thread_to_check(method, &params) {
+                            match subagent_notifications.thread_to_check(&method, &params) {
                                 Some(thread_id) => {
                                     self.state.has_thread(&self.workspace_id, &thread_id).await
                                 }
@@ -1370,15 +1397,17 @@ impl CodexSession {
                             },
                         ) {
                             continue;
-                        } else if let Err(error) = self
+                        }
+                        if let Err(error) = self
                             .state
-                            .ingest_notification(&self.workspace_id, method, params)
+                            .ingest_notification(&self.workspace_id, &method, params)
                             .await
                         {
                             warn!("failed to ingest notification {method}: {error}");
                         }
                     }
-                }
+                    None => {}
+                },
                 Err(error) => {
                     warn!("failed to parse codex message: {error}");
                 }
@@ -2319,6 +2348,45 @@ mod tests {
     use falcondeck_core::ToolHistoryMode;
     use std::io::Write;
     use tempfile::NamedTempFile;
+
+    #[test]
+    fn stdout_messages_keep_arrival_order_and_move_payloads() {
+        let lines = [
+            r#"{"jsonrpc":"2.0","id":1,"result":{"thread":{"id":"t-1"}}}"#,
+            r#"{"jsonrpc":"2.0","method":"item/agentMessage/delta","params":{"threadId":"t-1","text":"hello"}}"#,
+            r#"{"jsonrpc":"2.0","id":"req-9","method":"item/commandExecution/requestApproval","params":{"threadId":"t-1"}}"#,
+            r#"{"jsonrpc":"2.0","id":2,"error":{"code":-1,"message":"nope"}}"#,
+            r#"{"jsonrpc":"2.0","method":null,"id":3,"result":{"ignored":true}}"#,
+            r#""not-an-object""#,
+        ];
+        let mut kinds = Vec::new();
+        for line in lines {
+            let message = serde_json::from_str::<Value>(line).unwrap();
+            kinds.push(match take_codex_stdout_message(message) {
+                Some(CodexStdoutMessage::Response { id, body }) => {
+                    format!("response:{id}:{}", body.is_ok())
+                }
+                Some(CodexStdoutMessage::Notification { method, params }) => {
+                    format!("notify:{method}:{}", params["threadId"])
+                }
+                Some(CodexStdoutMessage::ServerRequest { id, method, .. }) => {
+                    format!("request:{method}:{id}")
+                }
+                None => "ignore".to_string(),
+            });
+        }
+        assert_eq!(
+            kinds,
+            vec![
+                "response:1:true".to_string(),
+                "notify:item/agentMessage/delta:\"t-1\"".to_string(),
+                "request:item/commandExecution/requestApproval:\"req-9\"".to_string(),
+                "response:2:false".to_string(),
+                "ignore".to_string(),
+                "ignore".to_string(),
+            ]
+        );
+    }
 
     #[test]
     fn thread_start_params_omit_base_instructions_and_effort() {

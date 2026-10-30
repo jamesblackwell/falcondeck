@@ -32,7 +32,7 @@ time they were written.
 - [Desktop file navigation and review](17-desktop-code-review.md).
 - [Desktop dictation](18-desktop-dictation.md).
 - [Computer use](COMPUTER-USE.md) and [in-app browser design](IN-APP-BROWSER.md).
-- [Onboarding](ONBOARDING.md), [workspaces and isolation](WORKTREES.md), and [scheduled tasks](SCHEDULED_TASKS.md).
+- [Onboarding](ONBOARDING.md), [workspaces and isolation](WORKTREES.md), [worktree lifecycle and disk cleanup](WORKTREE-LIFECYCLE.md), and [scheduled tasks](SCHEDULED_TASKS.md).
 
 ## Maintain and verify
 

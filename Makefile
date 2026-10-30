@@ -505,13 +505,16 @@ harness-conformance:
 relay:
 	FALCONDECK_RELAY_BIND=$(RELAY_BIND_HOST):$(RELAY_PORT) $(CARGO) run -p falcondeck-relay
 
-test: test-rust test-desktop
+test: test-rust test-desktop test-scripts
 
 test-rust:
 	$(CARGO) test
 
 test-desktop: desktop-prepare
 	$(NPM) test
+
+test-scripts:
+	$(NPM) run worktree-gc:test
 
 lint: desktop-prepare
 	$(NPM) run lint

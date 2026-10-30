@@ -57,59 +57,121 @@ impl ClaudeNdjsonFramer {
 
     pub(crate) fn push(&mut self, chunk: &[u8]) -> Vec<String> {
         let mut lines = Vec::new();
-        for &byte in chunk {
-            if !self.seen_start && !is_ascii_whitespace(byte) {
+        let mut index = 0;
+        while index < chunk.len() {
+            if self.in_string {
+                index = self.consume_string(chunk, index);
+            } else if !self.seen_start {
+                index = self.consume_preamble(chunk, index, &mut lines);
+            } else if self.json_candidate {
+                index = self.consume_json(chunk, index, &mut lines);
+            } else {
+                index = self.consume_raw(chunk, index, &mut lines);
+            }
+        }
+        self.enforce_limits();
+        lines
+    }
+
+    /// Leading whitespace is rare; walk it byte by byte, then hand the first
+    /// payload byte back to the bulk scanners.
+    fn consume_preamble(
+        &mut self,
+        chunk: &[u8],
+        mut index: usize,
+        lines: &mut Vec<String>,
+    ) -> usize {
+        while index < chunk.len() {
+            let byte = chunk[index];
+            if !is_ascii_whitespace(byte) {
                 self.seen_start = true;
                 self.json_candidate = byte == b'{' || byte == b'[';
                 if !self.json_candidate {
                     self.in_string = false;
                     self.escaping = false;
                 }
+                return index;
             }
-
-            let split = if self.json_candidate {
-                match byte {
-                    b'"' => {
-                        if self.in_string {
-                            if self.escaping {
-                                self.escaping = false;
-                            } else {
-                                self.in_string = false;
-                            }
-                        } else {
-                            self.in_string = true;
-                        }
-                        false
-                    }
-                    b'\\' if self.in_string => {
-                        self.escaping = !self.escaping;
-                        false
-                    }
-                    b'\n' if self.in_string => {
-                        self.escaping = false;
-                        false
-                    }
-                    b'\n' => true,
-                    _ => {
-                        if self.in_string && self.escaping {
-                            self.escaping = false;
-                        }
-                        false
-                    }
-                }
-            } else {
-                byte == b'\n'
-            };
-
-            if split {
-                lines.push(take_line(&mut self.carry));
+            index += 1;
+            if byte == b'\n' {
+                self.emit(lines, &[]);
                 self.reset_line_state();
             } else {
                 self.carry.push(byte);
             }
         }
-        self.enforce_limits();
-        lines
+        index
+    }
+
+    fn consume_json(&mut self, chunk: &[u8], index: usize, lines: &mut Vec<String>) -> usize {
+        let rest = &chunk[index..];
+        match rest.iter().position(|&byte| byte == b'"' || byte == b'\n') {
+            None => {
+                self.carry.extend_from_slice(rest);
+                chunk.len()
+            }
+            Some(relative) => {
+                if rest[relative] == b'\n' {
+                    self.emit(lines, &rest[..relative]);
+                    self.reset_line_state();
+                } else {
+                    self.carry.extend_from_slice(&rest[..=relative]);
+                    self.in_string = true;
+                }
+                index + relative + 1
+            }
+        }
+    }
+
+    fn consume_string(&mut self, chunk: &[u8], index: usize) -> usize {
+        if self.escaping {
+            self.carry.push(chunk[index]);
+            self.escaping = false;
+            return index + 1;
+        }
+        let rest = &chunk[index..];
+        match rest
+            .iter()
+            .position(|&byte| byte == b'"' || byte == b'\\' || byte == b'\n')
+        {
+            None => {
+                self.carry.extend_from_slice(rest);
+                chunk.len()
+            }
+            Some(relative) => {
+                self.carry.extend_from_slice(&rest[..=relative]);
+                match rest[relative] {
+                    b'"' => self.in_string = false,
+                    b'\\' => self.escaping = true,
+                    _ => {}
+                }
+                index + relative + 1
+            }
+        }
+    }
+
+    fn consume_raw(&mut self, chunk: &[u8], index: usize, lines: &mut Vec<String>) -> usize {
+        let rest = &chunk[index..];
+        match rest.iter().position(|&byte| byte == b'\n') {
+            None => {
+                self.carry.extend_from_slice(rest);
+                chunk.len()
+            }
+            Some(relative) => {
+                self.emit(lines, &rest[..relative]);
+                self.reset_line_state();
+                index + relative + 1
+            }
+        }
+    }
+
+    fn emit(&mut self, lines: &mut Vec<String>, extra: &[u8]) {
+        if self.carry.is_empty() {
+            lines.push(decode_line(extra));
+        } else {
+            self.carry.extend_from_slice(extra);
+            lines.push(take_line(&mut self.carry));
+        }
     }
 
     pub(crate) fn flush(&mut self) -> Option<String> {
@@ -152,6 +214,11 @@ fn take_line(carry: &mut Vec<u8>) -> String {
     let line = String::from_utf8_lossy(carry).into_owned();
     carry.clear();
     line
+}
+
+fn decode_line(bytes: &[u8]) -> String {
+    let bytes = bytes.strip_suffix(b"\r").unwrap_or(bytes);
+    String::from_utf8_lossy(bytes).into_owned()
 }
 
 fn is_ascii_whitespace(byte: u8) -> bool {
@@ -600,6 +667,122 @@ mod tests {
         assert!(framer.push(b"{\"type\":\"keep_al").is_empty());
         let lines = framer.push(b"ive\"}\n");
         assert_eq!(lines, vec!["{\"type\":\"keep_alive\"}".to_string()]);
+    }
+
+    #[test]
+    fn framer_matches_byte_scanner_on_split_chunks() {
+        let samples: &[&[u8]] = &[
+            b"{\"type\":\"keep_alive\"}\n",
+            b"{\"a\":\"hello\\nworld\"}\r\n{\"b\":1}\n",
+            b"  {\"a\":1}\n",
+            b"not json\nstill raw \"quotes\"\n",
+            b"{\"a\":\"line\nbreak\"}\n",
+            b"{\"a\":\"esc\\\"aped\"}\n",
+            b"\n\n{\"a\":1}\n",
+            b"[1,2]\n",
+        ];
+        for sample in samples {
+            for split in 0..=sample.len() {
+                let mut fast = ClaudeNdjsonFramer::new();
+                let mut slow = ReferenceFramer::new();
+                let mut fast_lines = fast.push(&sample[..split]);
+                fast_lines.extend(fast.push(&sample[split..]));
+                if let Some(tail) = fast.flush() {
+                    fast_lines.push(tail);
+                }
+                let mut slow_lines = slow.push(&sample[..split]);
+                slow_lines.extend(slow.push(&sample[split..]));
+                if let Some(tail) = slow.flush() {
+                    slow_lines.push(tail);
+                }
+                assert_eq!(fast_lines, slow_lines, "split {split} of {sample:?}");
+            }
+        }
+    }
+
+    struct ReferenceFramer {
+        carry: Vec<u8>,
+        in_string: bool,
+        escaping: bool,
+        json_candidate: bool,
+        seen_start: bool,
+    }
+
+    impl ReferenceFramer {
+        fn new() -> Self {
+            Self {
+                carry: Vec::new(),
+                in_string: false,
+                escaping: false,
+                json_candidate: false,
+                seen_start: false,
+            }
+        }
+
+        fn push(&mut self, chunk: &[u8]) -> Vec<String> {
+            let mut lines = Vec::new();
+            for &byte in chunk {
+                if !self.seen_start && !is_ascii_whitespace(byte) {
+                    self.seen_start = true;
+                    self.json_candidate = byte == b'{' || byte == b'[';
+                    if !self.json_candidate {
+                        self.in_string = false;
+                        self.escaping = false;
+                    }
+                }
+                let split = if self.json_candidate {
+                    match byte {
+                        b'"' => {
+                            if self.in_string {
+                                if self.escaping {
+                                    self.escaping = false;
+                                } else {
+                                    self.in_string = false;
+                                }
+                            } else {
+                                self.in_string = true;
+                            }
+                            false
+                        }
+                        b'\\' if self.in_string => {
+                            self.escaping = !self.escaping;
+                            false
+                        }
+                        b'\n' if self.in_string => {
+                            self.escaping = false;
+                            false
+                        }
+                        b'\n' => true,
+                        _ => {
+                            if self.in_string && self.escaping {
+                                self.escaping = false;
+                            }
+                            false
+                        }
+                    }
+                } else {
+                    byte == b'\n'
+                };
+                if split {
+                    lines.push(take_line(&mut self.carry));
+                    self.seen_start = false;
+                    self.in_string = false;
+                    self.escaping = false;
+                    self.json_candidate = false;
+                } else {
+                    self.carry.push(byte);
+                }
+            }
+            lines
+        }
+
+        fn flush(&mut self) -> Option<String> {
+            if self.carry.is_empty() {
+                return None;
+            }
+            let line = take_line(&mut self.carry);
+            (!line.is_empty()).then_some(line)
+        }
     }
 
     #[test]

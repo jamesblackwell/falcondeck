@@ -3,7 +3,10 @@
 //! Titles/previews buried between those windows are enriched on first open;
 //! sampled metadata never establishes ownership for exact history hydration.
 
-use std::io::{Read, Seek, SeekFrom};
+use std::{
+    collections::HashSet,
+    io::{Read, Seek, SeekFrom},
+};
 
 use serde::de::{Deserialize, Deserializer, IgnoredAny, MapAccess, SeqAccess, Visitor};
 
@@ -47,7 +50,7 @@ struct NativeSummary {
     thread: DiscoveredClaudeThread,
 }
 
-#[derive(Hash, PartialEq, Eq)]
+#[derive(Clone, Hash, PartialEq, Eq)]
 struct SummarySource {
     root: PathBuf,
     path: PathBuf,
@@ -65,6 +68,9 @@ struct SummaryCache {
     entries: HashMap<SummarySource, CachedSummary>,
     retained_bytes: usize,
     next_access: u64,
+    /// Files currently being parsed. Concurrent discoveries of one session
+    /// wait instead of reading it twice; distinct files parse together.
+    inflight: HashSet<SummarySource>,
 }
 
 impl SummaryCache {
@@ -182,6 +188,19 @@ fn summary_cache() -> &'static std::sync::Mutex<SummaryCache> {
     SUMMARY_CACHE.get_or_init(|| std::sync::Mutex::new(SummaryCache::default()))
 }
 
+fn summary_parse_cv() -> &'static std::sync::Condvar {
+    static CV: OnceLock<std::sync::Condvar> = OnceLock::new();
+    CV.get_or_init(std::sync::Condvar::new)
+}
+
+#[cfg(test)]
+pub(crate) fn clear_summary_cache_for_test() {
+    let mut cache = summary_cache()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    *cache = SummaryCache::default();
+}
+
 fn thread_for_workspace(
     summary: &Option<NativeSummary>,
     workspace_path: &str,
@@ -225,10 +244,10 @@ pub fn discover_threads_in(root: &Path, workspace_path: &str) -> Vec<DiscoveredC
         collect_session_files(root, &mut files);
     }
     let mut threads = HashMap::<String, DiscoveredClaudeThread>::new();
-    for path in files {
-        let Some(thread) = discover_thread_from_file(root, &path, workspace_path) else {
-            continue;
-        };
+    for thread in discover_summary_files(root, &files, workspace_path)
+        .into_iter()
+        .flatten()
+    {
         let id = thread.summary.id.clone();
         if threads
             .get(&id)
@@ -268,6 +287,108 @@ pub fn native_session_source(workspace_path: &str, session_id: &str) -> PathBuf 
     expected
 }
 
+fn discovery_workers(file_count: usize) -> usize {
+    if file_count < 2 {
+        return 1;
+    }
+    std::thread::available_parallelism()
+        .map(|count| count.get())
+        .unwrap_or(1)
+        .clamp(1, file_count)
+}
+
+/// Cache hits stay on the caller. Misses parse outside the cache lock so
+/// distinct session files use more than one core. One file stays on the
+/// caller so tests can count that parse on their own thread.
+fn discover_summary_files(
+    root: &Path,
+    files: &[PathBuf],
+    workspace_path: &str,
+) -> Vec<Option<DiscoveredClaudeThread>> {
+    let mut slots = Vec::with_capacity(files.len());
+    let mut misses = Vec::new();
+    {
+        let mut cache = summary_cache()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        for (index, path) in files.iter().enumerate() {
+            let Ok(metadata) = fs::metadata(path) else {
+                slots.push(None);
+                continue;
+            };
+            let version = SourceVersion::from_metadata(&metadata);
+            let source = SummarySource {
+                root: root.to_path_buf(),
+                path: path.clone(),
+            };
+            match cache.get_thread(&source, version, workspace_path) {
+                Some(thread) => slots.push(thread),
+                None => {
+                    slots.push(None);
+                    misses.push(index);
+                }
+            }
+        }
+    }
+    if misses.is_empty() {
+        return slots;
+    }
+    let workers = discovery_workers(misses.len());
+    if workers == 1 {
+        for index in misses {
+            slots[index] = discover_thread_from_file(root, &files[index], workspace_path);
+        }
+        return slots;
+    }
+    let parsed = std::thread::scope(|scope| {
+        let chunk_size = misses.len().div_ceil(workers);
+        let mut handles = Vec::with_capacity(workers);
+        for chunk in misses.chunks(chunk_size) {
+            handles.push(scope.spawn(move || {
+                chunk
+                    .iter()
+                    .map(|index| {
+                        (
+                            *index,
+                            discover_thread_from_file(root, &files[*index], workspace_path),
+                        )
+                    })
+                    .collect::<Vec<_>>()
+            }));
+        }
+        handles
+            .into_iter()
+            .flat_map(|handle| {
+                handle
+                    .join()
+                    .unwrap_or_else(|panic| std::panic::resume_unwind(panic))
+            })
+            .collect::<Vec<_>>()
+    });
+    for (index, thread) in parsed {
+        slots[index] = thread;
+    }
+    slots
+}
+
+struct ClearSummaryInflight {
+    source: SummarySource,
+    armed: bool,
+}
+
+impl Drop for ClearSummaryInflight {
+    fn drop(&mut self) {
+        if !self.armed {
+            return;
+        }
+        let mut cache = summary_cache()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        cache.inflight.remove(&self.source);
+        summary_parse_cv().notify_all();
+    }
+}
+
 fn discover_thread_from_file(
     root: &Path,
     path: &Path,
@@ -279,18 +400,43 @@ fn discover_thread_from_file(
         root: root.to_path_buf(),
         path: path.to_path_buf(),
     };
-    // Held through a cold parse: concurrent workspace fallbacks share one
-    // bounded read per file. Callers run discovery on a blocking worker.
-    let mut cache = summary_cache()
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
-    if let Some(thread) = cache.get_thread(&source, version, workspace_path) {
+    loop {
+        let mut cache = summary_cache()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if let Some(thread) = cache.get_thread(&source, version, workspace_path) {
+            return thread;
+        }
+        if !cache.inflight.insert(source.clone()) {
+            let _waiting = summary_parse_cv()
+                .wait(cache)
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            continue;
+        }
+        drop(cache);
+        // The lock is not held across the read. `inflight` still makes
+        // concurrent workspace fallbacks share this parse.
+        let mut guard = ClearSummaryInflight {
+            source: source.clone(),
+            armed: true,
+        };
+        let parsed = read_native_summary(path);
+        let mut cache = summary_cache()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        cache.inflight.remove(&source);
+        guard.armed = false;
+        let thread = match parsed {
+            Ok((read_version, summary)) => {
+                let thread = thread_for_workspace(&summary, workspace_path);
+                cache.insert(source, read_version, summary);
+                thread
+            }
+            Err(_) => None,
+        };
+        summary_parse_cv().notify_all();
         return thread;
     }
-    let (version, summary) = read_native_summary(path).ok()?;
-    let thread = thread_for_workspace(&summary, workspace_path);
-    cache.insert(source, version, summary);
-    thread
 }
 
 fn read_native_summary(path: &Path) -> std::io::Result<(SourceVersion, Option<NativeSummary>)> {
@@ -907,6 +1053,30 @@ mod tests {
     }
 
     #[cfg(unix)]
+    fn wait_for_ctime_change(path: &Path, before: &fs::Metadata, contents: &str) -> fs::Metadata {
+        use std::os::unix::fs::MetadataExt;
+        let deadline = std::time::Instant::now() + std::time::Duration::from_millis(200);
+        loop {
+            fs::write(path, contents.replace("First title", "Later title")).unwrap();
+            fs::File::options()
+                .write(true)
+                .open(path)
+                .unwrap()
+                .set_times(fs::FileTimes::new().set_modified(before.modified().unwrap()))
+                .unwrap();
+            let after = path.metadata().unwrap();
+            if after.ctime() != before.ctime() || after.ctime_nsec() != before.ctime_nsec() {
+                return after;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "in-place rewrite did not change ctime"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(2));
+        }
+    }
+
+    #[cfg(unix)]
     #[test]
     fn discovery_cache_detects_in_place_edit_with_preserved_size_and_mtime() {
         let (dir, path) = fixture(&[user("Opening prompt")]);
@@ -921,14 +1091,9 @@ mod tests {
             discover_threads_in(dir.path(), CWD)[0].summary.title,
             "First title"
         );
-        fs::write(&path, contents.replace("First title", "Later title")).unwrap();
-        fs::File::options()
-            .write(true)
-            .open(&path)
-            .unwrap()
-            .set_times(fs::FileTimes::new().set_modified(before.modified().unwrap()))
-            .unwrap();
-        let after = path.metadata().unwrap();
+        // ext4 stamps ctime from the coarse clock (~4ms). A rewrite that lands
+        // in that same tick keeps ctime, so the cache cannot see it.
+        let after = wait_for_ctime_change(&path, &before, &contents);
         assert_eq!(after.len(), before.len());
         assert_eq!(after.modified().unwrap(), before.modified().unwrap());
         assert_eq!(

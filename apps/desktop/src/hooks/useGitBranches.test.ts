@@ -40,6 +40,27 @@ describe('useGitBranches', () => {
     expect(result.current.branches?.current).toBe('feature')
   })
 
+  it('fetches once when the client appears after a refresh was already armed', async () => {
+    const api = {
+      gitBranches: vi.fn(async () => branches('main')),
+      gitStatus: vi.fn().mockResolvedValue({ branch: 'main', entries: [] }),
+      gitCheckout: vi.fn(),
+    }
+    const { rerender } = renderHook(
+      ({ client, refreshTrigger }: { client: typeof api | null; refreshTrigger: number }) =>
+        useGitBranches(client, 'workspace', refreshTrigger),
+      { initialProps: { client: null as typeof api | null, refreshTrigger: 1 } },
+    )
+
+    rerender({ client: api, refreshTrigger: 1 })
+    await waitFor(() => expect(api.gitBranches).toHaveBeenCalledTimes(1))
+    await act(async () => {
+      await Promise.resolve()
+    })
+    expect(api.gitBranches).toHaveBeenCalledTimes(1)
+    expect(api.gitStatus).toHaveBeenCalledTimes(1)
+  })
+
   it('does not publish a checkout from the previous workspace', async () => {
     const oldCheckout = deferred<GitBranchesResponse>()
     const api = {

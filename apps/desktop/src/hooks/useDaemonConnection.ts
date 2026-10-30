@@ -822,9 +822,12 @@ export function useDaemonConnection(options: DaemonConnectionOptions = {}) {
     return () => window.clearInterval(interval)
   }, [api, connectionState])
 
-  // Poll remote status
+  // Poll remote status only after the stream snapshot is applied. Starting
+  // it when the base URL appears issues /api/remote/status while the daemon
+  // is still building that snapshot and while the selected thread detail is
+  // the request the first paint is waiting on.
   useEffect(() => {
-    if (!api) return
+    if (!api || connectionState !== 'ready') return
     let inFlight = false
     const refresh = () => {
       if (inFlight) return
@@ -865,16 +868,7 @@ export function useDaemonConnection(options: DaemonConnectionOptions = {}) {
       document.removeEventListener('visibilitychange', handleVisibilityChange)
       stopPolling()
     }
-  }, [api])
-
-  // Refresh git on workspace change
-   
-  useEffect(() => {
-    if (selectedWorkspaceId) {
-      setGitRefreshTrigger((c) => c + 1)
-    }
-  }, [selectedWorkspaceId])
-   
+  }, [api, connectionState])
 
   return {
     api,
