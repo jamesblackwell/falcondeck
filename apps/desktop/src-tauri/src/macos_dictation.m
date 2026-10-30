@@ -2118,6 +2118,7 @@ static BOOL FDRecordingIsReadable(NSURL *url) {
   return nil;
 }
 
+// Every event is posted even after a failure so Command is never left down.
 - (BOOL)postSelectAllShortcut {
   CGKeyCode keyCode = FDCharacterVirtualKeyCode((UniChar)'a', FDQwertyAKeyCode);
   BOOL posted = [self postTaggedKey:FDLeftCommandKeyCode
@@ -2149,11 +2150,14 @@ static BOOL FDRecordingIsReadable(NSURL *url) {
     return;
   }
   [self dropCancelledRecording];
-  // A failed take still waiting for Retry owns the overlay, and completing a
-  // rewrite would delete its audio.
+  // A held recording is either still being transcribed (OpenRouter and
+  // Parakeet run in Rust, invisible here) or waiting for Retry. Either way it
+  // owns the overlay, and completing a rewrite would delete its audio. Do not
+  // surface it: during transcription that replaces the progress pill with a
+  // failure and files the take as failed.
   if (self.recordingURL &&
       [NSFileManager.defaultManager fileExistsAtPath:self.recordingURL.path]) {
-    [self surfaceRetainedRecordingIfNeeded];
+    os_log_info(FDPasteLog(), "triple-tap rewrite skipped: recording held");
     return;
   }
   if (!AXIsProcessTrusted()) {
@@ -2161,6 +2165,9 @@ static BOOL FDRecordingIsReadable(NSURL *url) {
            @"Accessibility access is required to rewrite text in other apps.");
     return;
   }
+  // Nothing is recording, so any native rewrite state is left over. This
+  // path never sets it: the selection travels to Rust in the event.
+  [self clearRewriteSession];
   [self capturePasteTarget];
   [self enableManualAccessibilityForPasteTarget];
   if (![self postSelectAllShortcut]) {
@@ -2179,15 +2186,12 @@ static BOOL FDRecordingIsReadable(NSURL *url) {
   NSString *trimmed = [selection
       stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet];
   if (trimmed.length == 0) {
-    [self clearRewriteSession];
     FDEmit(FDEventFailed, @"There is no text in the focused field to rewrite.");
     return;
   }
   os_log_info(FDPasteLog(), "triple-tap rewrite chars=%{public}lu",
               (unsigned long)selection.length);
   self.retryCopiesTranscript = NO;
-  self.rewriteSession = YES;
-  self.rewriteSelection = selection;
   FDEmit(FDEventQuickRewrite, selection);
 }
 

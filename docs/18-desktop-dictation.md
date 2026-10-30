@@ -25,6 +25,8 @@ status window, and paste-at-cursor behavior.
   Command-C (falling back to Accessibility), and runs the same silent rewrite
   a quiet hold would. Taps must be under 180 ms each and less than 450 ms
   apart; typing between taps resets the count. Nothing is filed to history.
+  While an earlier recording is still held (transcribing, or waiting for
+  Retry) the triple tap does nothing.
 - Hold mode waits 80 ms before dictating (180 ms for rewrite, so taps never
   open the microphone) and cancels if another key is pressed, so ordinary
   modifier shortcuts continue to work. Toggle mode starts and stops on
