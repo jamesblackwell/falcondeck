@@ -284,6 +284,8 @@ const DiffPanel = lazy(() =>
     default: module.DiffPanel,
   })),
 );
+const TicketsView = lazy(() => import("./components/TicketsView").then((module) => ({ default: module.TicketsView })));
+
 const CommandPalette = lazy(() =>
   import("@falcondeck/chat-ui/command-palette").then((module) => ({
     default: module.CommandPalette,
@@ -489,6 +491,7 @@ function AppInner() {
   const [isContinuingStoppedThreads, setIsContinuingStoppedThreads] =
     useState(false);
   const resumePromptSettledRef = useRef(false);
+  const [isTicketsOpen, setIsTicketsOpen] = useState(false);
   const [isScheduledOpen, setIsScheduledOpen] = useState(false);
   const [isActivityOpen, setIsActivityOpen] = useState(false);
   const [isTerminalOpen, setIsTerminalOpen] = useState(false);
@@ -510,15 +513,17 @@ function AppInner() {
   const [activeExtensionPanelKey, setActiveExtensionPanelKey] = useState<
     string | null
   >(null);
-  const activeMainViewId = isScheduledOpen
-    ? "core.scheduled"
-    : isExtensionsOpen
-      ? "core.extensions"
-      : isPluginsOpen
-        ? "core.plugins"
-        : isSettingsOpen
-          ? "core.settings"
-          : activeExtensionPanelKey;
+  const activeMainViewId = isTicketsOpen
+    ? "core.tickets"
+    : isScheduledOpen
+      ? "core.scheduled"
+      : isExtensionsOpen
+        ? "core.extensions"
+        : isPluginsOpen
+          ? "core.plugins"
+          : isSettingsOpen
+            ? "core.settings"
+            : activeExtensionPanelKey;
   const [settingsSection, setSettingsSection] =
     useState<SettingsSectionId>("general");
   const [settingsRequestKey, setSettingsRequestKey] = useState(0);
@@ -846,6 +851,7 @@ function AppInner() {
     setSettingsRequestKey((current) => current + 1);
     setIsSettingsOpen(true);
     setIsScheduledOpen(false);
+    setIsTicketsOpen(false);
     setIsExtensionsOpen(false);
   }, []);
   const openSpeechSettings = useCallback(
@@ -3224,6 +3230,7 @@ function AppInner() {
     (workspaceId: string, threadId: string | null) => {
       setIsSettingsOpen(false);
       setIsScheduledOpen(false);
+      setIsTicketsOpen(false);
       setIsExtensionsOpen(false);
       setIsPluginsOpen(false);
       setActiveExtensionPanelKey(null);
@@ -3239,6 +3246,7 @@ function AppInner() {
       pendingNewThreadFolderRef.current = null;
       setIsSettingsOpen(false);
       setIsScheduledOpen(false);
+      setIsTicketsOpen(false);
       setIsExtensionsOpen(false);
       setIsPluginsOpen(false);
       setActiveExtensionPanelKey(null);
@@ -3254,6 +3262,7 @@ function AppInner() {
       pendingNewThreadFolderRef.current = null;
       setIsSettingsOpen(false);
       setIsScheduledOpen(false);
+      setIsTicketsOpen(false);
       setIsExtensionsOpen(false);
       setIsPluginsOpen(false);
       setActiveExtensionPanelKey(null);
@@ -3327,6 +3336,7 @@ function AppInner() {
     if (selectedThreadId) return;
     setIsSettingsOpen(false);
     setIsScheduledOpen(false);
+    setIsTicketsOpen(false);
     setIsExtensionsOpen(false);
     setIsPluginsOpen(false);
     setProjectMenuRequestKey((current) => current + 1);
@@ -4018,6 +4028,7 @@ function AppInner() {
     setSettingsRequestKey((current) => current + 1);
     setIsSettingsOpen(true);
     setIsScheduledOpen(false);
+    setIsTicketsOpen(false);
     setIsExtensionsOpen(false);
     setIsPluginsOpen(false);
     setActiveExtensionPanelKey(null);
@@ -4032,6 +4043,7 @@ function AppInner() {
     setSettingsRequestKey((current) => current + 1);
     setIsSettingsOpen(true);
     setIsScheduledOpen(false);
+    setIsTicketsOpen(false);
     setIsExtensionsOpen(false);
     setIsPluginsOpen(false);
     setActiveExtensionPanelKey(null);
@@ -4042,6 +4054,7 @@ function AppInner() {
     setSettingsRequestKey((current) => current + 1);
     setIsSettingsOpen(true);
     setIsScheduledOpen(false);
+    setIsTicketsOpen(false);
     setIsExtensionsOpen(false);
     setIsPluginsOpen(false);
     setActiveExtensionPanelKey(null);
@@ -4071,9 +4084,19 @@ function AppInner() {
     };
   }, [handleOpenBackupSettings]);
 
+  const handleOpenTickets = useCallback(() => {
+    setIsSettingsOpen(false);
+    setIsScheduledOpen(false);
+    setIsTicketsOpen(true);
+    setIsExtensionsOpen(false);
+    setIsPluginsOpen(false);
+    setActiveExtensionPanelKey(null);
+  }, []);
+
   const handleOpenScheduled = useCallback(() => {
     setIsSettingsOpen(false);
     setIsScheduledOpen(true);
+    setIsTicketsOpen(false);
     setIsExtensionsOpen(false);
     setIsPluginsOpen(false);
     setActiveExtensionPanelKey(null);
@@ -4101,6 +4124,7 @@ function AppInner() {
     (workspaceId: string, threadId: string) => {
       setIsSettingsOpen(false);
       setIsScheduledOpen(false);
+      setIsTicketsOpen(false);
       setIsExtensionsOpen(false);
       setIsPluginsOpen(false);
       setActiveExtensionPanelKey(null);
@@ -4113,6 +4137,7 @@ function AppInner() {
   const handleOpenExtensions = useCallback(() => {
     setIsSettingsOpen(false);
     setIsScheduledOpen(false);
+    setIsTicketsOpen(false);
     setIsExtensionsOpen(true);
     setIsPluginsOpen(false);
     setActiveExtensionPanelKey(null);
@@ -4121,6 +4146,7 @@ function AppInner() {
   const handleOpenPlugins = useCallback(() => {
     setIsSettingsOpen(false);
     setIsScheduledOpen(false);
+    setIsTicketsOpen(false);
     setIsExtensionsOpen(false);
     setIsPluginsOpen(true);
     setActiveExtensionPanelKey(null);
@@ -4207,6 +4233,7 @@ function AppInner() {
   const handleOpenExtensionPanel = useCallback((panelKey: string) => {
     setIsSettingsOpen(false);
     setIsScheduledOpen(false);
+    setIsTicketsOpen(false);
     setIsExtensionsOpen(false);
     setIsPluginsOpen(false);
     setActiveExtensionPanelKey(panelKey);
@@ -5757,6 +5784,7 @@ function AppInner() {
       if (!next) return;
       setIsSettingsOpen(false);
       setIsScheduledOpen(false);
+      setIsTicketsOpen(false);
       setIsExtensionsOpen(false);
       setIsPluginsOpen(false);
       setSelectedWorkspaceId(next.workspace_id);
@@ -5774,6 +5802,7 @@ function AppInner() {
       selectionHistoryIndexRef.current = nextIndex;
       setIsSettingsOpen(false);
       setIsScheduledOpen(false);
+      setIsTicketsOpen(false);
       setIsExtensionsOpen(false);
       setIsPluginsOpen(false);
       setSelectedWorkspaceId(entry.workspaceId);
@@ -5831,6 +5860,7 @@ function AppInner() {
           setSettingsRequestKey((current) => current + 1);
           setIsSettingsOpen(true);
           setIsScheduledOpen(false);
+          setIsTicketsOpen(false);
           setIsExtensionsOpen(false);
           setIsPluginsOpen(false);
           break;
@@ -5917,6 +5947,7 @@ function AppInner() {
         case "focusComposer":
           setIsSettingsOpen(false);
           setIsScheduledOpen(false);
+          setIsTicketsOpen(false);
           setIsExtensionsOpen(false);
           setIsPluginsOpen(false);
           setComposerFocusRequestKey((current) => current + 1);
@@ -5938,6 +5969,7 @@ function AppInner() {
                   : ("model" as const);
           setIsSettingsOpen(false);
           setIsScheduledOpen(false);
+          setIsTicketsOpen(false);
           setIsExtensionsOpen(false);
           setIsPluginsOpen(false);
           setComposerMenuRequest((current) => ({ key: current.key + 1, menu }));
@@ -6060,6 +6092,7 @@ function AppInner() {
             onOpenBackup={handleOpenBackupSettings}
             onOpenUsage={handleOpenUsage}
             onOpenActivity={handleShowActivity}
+            onOpenTickets={handleOpenTickets}
             onOpenKeyboardShortcuts={handleOpenKeyboardShortcuts}
             onOpenPlugins={handleOpenPlugins}
             onSearchMessages={handleSearchThreadMessages}
@@ -6133,6 +6166,8 @@ function AppInner() {
                 ? updater.state.status
                 : null
             }
+            onOpenTickets={handleOpenTickets}
+            ticketsOpen={isTicketsOpen}
             onOpenScheduled={handleOpenScheduled}
             scheduledOpen={isScheduledOpen}
             onOpenActivity={handleOpenActivity}
@@ -6187,6 +6222,22 @@ function AppInner() {
         main={
           resolveMainView(
             {
+              "core.tickets": (
+                <Suspense fallback={loadingThreadState}>
+                  <TicketsView
+                    api={api}
+                    baseUrl={baseUrl}
+                    owners={snapshot?.preferences.bots?.map((bot) => bot.name)}
+                    projects={snapshot?.workspaces.map((workspace) => workspace.path)}
+                    threads={snapshot?.threads}
+                    onOpenThread={(threadId) => {
+                      const target = resolveThreadLinkTarget(threadId, snapshot?.threads ?? []);
+                      if (target) handleSelectThread(target.workspace_id, target.id);
+                      else toast({ title: "Task unavailable", description: "This task is no longer available on this computer.", variant: "danger" });
+                    }}
+                  />
+                </Suspense>
+              ),
               "core.scheduled": (
                 <Suspense fallback={loadingThreadState}>
                   <ScheduledTasksView
@@ -6206,6 +6257,7 @@ function AppInner() {
                     }
                     onOpenThread={(workspaceId, threadId) => {
                       setIsScheduledOpen(false);
+                      setIsTicketsOpen(false);
                       setIsExtensionsOpen(false);
                       setIsPluginsOpen(false);
                       setSelectedWorkspaceId(workspaceId);

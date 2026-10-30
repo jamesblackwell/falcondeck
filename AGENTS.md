@@ -58,6 +58,7 @@ FalconDeck is a monorepo for a local daemon-first agent control plane:
   - Prefer reusing existing `target/`, `DerivedData`, and `node_modules` over fresh copies; don't create extra cargo target dirs or per-worktree `npm install`s unless needed, and delete them when done.
   - Only remove artifacts you created. Never prune shared caches, other agents' worktrees, or the user's simulators/containers without asking.
 - Read `docs/` before changing protocol or architecture.
+- Tickets are for multi-hour/day/week company work; most changes should just be done. No ticket under a few hours. See `docs/TICKETS.md`.
 - Read `docs/EXTENSIONS.md` before changing extension contracts, contribution
   points, permissions, storage, or host behaviour.
 - Read `docs/HARNESSES.md` before changing harness (coding CLI) detection,

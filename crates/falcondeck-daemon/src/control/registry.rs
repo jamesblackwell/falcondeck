@@ -232,6 +232,12 @@ macro_rules! example {
 
 /// Stable operation ids used across the registry.
 pub mod ops {
+    /// Create sizeable company work.
+    pub const TICKET_CREATE: &str = "ticket.create";
+    /// Update a ticket or sub-ticket.
+    pub const TICKET_UPDATE: &str = "ticket.update";
+    /// Add a concise record note.
+    pub const TICKET_COMMENT: &str = "ticket.comment";
     /// Update agent-control settings.
     pub const SETTINGS_UPDATE: &str = "agent_control.settings.update";
     /// Create an automation.
@@ -246,6 +252,34 @@ pub mod ops {
     pub const AUTOMATION_RUN_NOW: &str = "automation.run_now";
     /// Delete an automation.
     pub const AUTOMATION_DELETE: &str = "automation.delete";
+}
+
+fn ticket_capability<T: JsonSchema>(
+    id: &'static str,
+    title: &'static str,
+    description: &'static str,
+    arguments: Value,
+) -> Capability {
+    Capability {
+        id,
+        title,
+        description,
+        domain: "ticket",
+        scopes: &[ControlScope::Host],
+        input_schema: schema::<T>(),
+        output_schema: schema::<falcondeck_core::tickets::Ticket>(),
+        behavior: CapabilityBehavior {
+            read_only: false,
+            destructive: false,
+            idempotent: false,
+            confirmation_class: ConfirmationClass::Mutation,
+        },
+        examples: vec![example!(
+            "Big-picture company work only; most changes should just be done; no ticket under a few hours",
+            arguments
+        )],
+        related_operations: &[ops::TICKET_CREATE, ops::TICKET_UPDATE, ops::TICKET_COMMENT],
+    }
 }
 
 /// All registered capabilities in a fixed, deterministic order.
@@ -489,6 +523,18 @@ pub fn capabilities() -> &'static [Capability] {
             )],
             related_operations: &[ops::AUTOMATION_PAUSE],
         },
+        ticket_capability::<falcondeck_core::tickets::CreateTicketArgs>(
+            ops::TICKET_CREATE, "Create ticket",
+            "Create big-picture work taking hours, days or weeks, or work executives need to see. Most changes should just be done; no ticket for anything under a few hours. Read tickets first to avoid duplicates. Optional parent_id creates a one-level sub-ticket; closed states require a one-line closing_note.",
+            json!({"title":"Launch company reporting", "owner":"Libra", "priority":"P1"})),
+        ticket_capability::<falcondeck_core::tickets::UpdateTicketArgs>(
+            ops::TICKET_UPDATE, "Update ticket",
+            "Keep state, owner, priority and linked_thread_ids current. Tickets are big-picture work only; most changes should just be done; no ticket for anything under a few hours. Done/dropped requires a one-line closing_note in this update. Empty owner/project/parent_id clears it. Omitted fields stay unchanged; arrays replace. Use waiting_on_james for blockers on James.",
+            json!({"ticket_id":"T-42", "state":"done", "closing_note":"Reporting is live for all executives."})),
+        ticket_capability::<falcondeck_core::tickets::CommentTicketArgs>(
+            ops::TICKET_COMMENT, "Comment on ticket",
+            "Add a concise markdown note for the record instead of messaging. Tickets are big-picture work only; most changes should just be done; no ticket for anything under a few hours. The daemon attributes author and thread; do not supply an author.",
+            json!({"ticket_id":"T-42", "body":"Waiting for James to approve the budget."})),
     ])
 }
 

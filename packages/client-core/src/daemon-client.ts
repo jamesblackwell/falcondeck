@@ -1,3 +1,4 @@
+import type { Ticket, TicketFilters, CreateTicketArgs, UpdateTicketArgs } from "./tickets";
 import type {
   BotProfile,
   BotMutation,
@@ -534,6 +535,31 @@ export function createDaemonApiClient(baseUrl: string) {
      * owns the behaviour; these mirror the three generic control routes the
      * MCP server also calls.
      */
+    async listTickets(filters: TicketFilters = {}): Promise<Ticket[]> {
+      const rows: Ticket[] = [];
+      let cursor: string | undefined;
+      do {
+        const query = new URLSearchParams(Object.entries(filters).map(([key, value]) => [key, String(value)]));
+        if (cursor) query.set("cursor", cursor);
+        const page = await parseJson<ControlGetResponse>(await fetch(`${baseUrl}/api/tickets?${query}`));
+        rows.push(...page.data as Ticket[]);
+        cursor = page.next_cursor ?? undefined;
+      } while (cursor);
+      return rows;
+    },
+    async readTicket(id: string): Promise<Ticket> {
+      const result = await parseJson<ControlGetResponse>(await fetch(`${baseUrl}/api/tickets/${encodeURIComponent(id)}`));
+      return result.data as Ticket;
+    },
+    async createTicket(args: CreateTicketArgs): Promise<Ticket> {
+      return mutateTicket(`${baseUrl}/api/tickets`, args);
+    },
+    async updateTicket({ ticket_id, ...args }: UpdateTicketArgs): Promise<Ticket> {
+      return mutateTicket(`${baseUrl}/api/tickets/${encodeURIComponent(ticket_id)}`, args);
+    },
+    async commentTicket(ticketId: string, body: string): Promise<Ticket> {
+      return mutateTicket(`${baseUrl}/api/tickets/${encodeURIComponent(ticketId)}/comments`, { body });
+    },
     async controlSearch(request: ControlSearchRequest = {}) {
       return parseJson<ControlSearchResponse>(
         await fetch(`${baseUrl}/api/control/search`, {
@@ -1169,3 +1195,11 @@ export function createDaemonApiClient(baseUrl: string) {
 
 /** The client shape produced by `createDaemonApiClient`, for prop typing. */
 export type DaemonApiClient = ReturnType<typeof createDaemonApiClient>;
+
+async function mutateTicket(url: string, args: unknown): Promise<Ticket> {
+  const result = await parseJson<ControlExecuteResponse>(await fetch(url, {
+    method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(args),
+  }));
+  if (!result.ok || !result.data) throw new Error(result.error?.message ?? "Ticket mutation failed.");
+  return result.data as Ticket;
+}

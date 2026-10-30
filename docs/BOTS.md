@@ -59,6 +59,10 @@ Bots and tasks message each other only for decisions, blockers, review
 requests, results or surprises; acknowledgements and progress narration are
 discouraged.
 
+## Tickets
+
+Tickets track big-picture work taking hours, days or weeks, or work other executives need to see. Most changes should just be done; never create a ticket for anything under a few hours. Executives keep state, owner and closing note current, link task thread ids, and leave concise comments for the record instead of messaging. Use `waiting_on_james` for blockers on James. See [TICKETS.md](TICKETS.md) for tools and the board.
+
 ## Icons
 
 Each bot has a small colored shape in the sidebar: one of eight shapes and one of

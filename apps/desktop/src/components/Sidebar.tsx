@@ -1,6 +1,7 @@
 import { memo } from "react";
 import {
   Activity,
+  Tickets,
   Blocks,
   CalendarClock,
   PanelsTopLeft,
@@ -26,6 +27,8 @@ export type DesktopSidebarProps = WorkspaceSidebarProps & {
   onOpenSpeechSettings?: () => void;
   onCheckForUpdates?: () => void;
   updateStatus?: 'available' | 'downloaded' | null;
+  onOpenTickets?: () => void;
+  ticketsOpen?: boolean;
   onOpenScheduled?: () => void;
   scheduledOpen?: boolean;
   scheduledAttention?: boolean;
@@ -52,6 +55,8 @@ export const DesktopSidebar = memo(function DesktopSidebar({
   onOpenSpeechSettings,
   onCheckForUpdates,
   updateStatus = null,
+  onOpenTickets,
+  ticketsOpen = false,
   onOpenScheduled,
   scheduledOpen = false,
   scheduledAttention = false,
@@ -88,6 +93,7 @@ export const DesktopSidebar = memo(function DesktopSidebar({
       )}
       headerClassName="h-12 justify-center gap-0 py-0 pl-20 pr-2"
       topNavigation={
+        onOpenTickets ||
         onOpenScheduled ||
         onOpenActivity ||
         onOpenExtensions ||
@@ -149,6 +155,12 @@ export const DesktopSidebar = memo(function DesktopSidebar({
                   </Tooltip>
                 ) : null}
               </div>
+            ) : null}
+            {onOpenTickets ? (
+              <button type="button" onClick={onOpenTickets} aria-current={ticketsOpen ? "page" : undefined} aria-label="Tickets"
+                className={cn("fd-focus flex w-full items-center gap-2 rounded-[var(--fd-radius-md)] px-3 py-2 text-left text-[length:var(--fd-text-sm)] transition-colors", ticketsOpen ? "bg-surface-3 text-fg-primary" : "text-fg-secondary hover:bg-surface-3 hover:text-fg-primary")}>
+                <Tickets aria-hidden="true" className="h-4 w-4 shrink-0" /><span>Tickets</span>
+              </button>
             ) : null}
             {onOpenExtensions ? (
               <Tooltip label="Extensions">

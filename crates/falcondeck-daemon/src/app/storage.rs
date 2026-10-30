@@ -134,7 +134,7 @@ pub(in crate::app) async fn persist_preferences(
 /// Persist callers run concurrently; a shared temp path would let one
 /// writer's rename publish another writer's half-written file. Each write
 /// gets its own temp file so the atomic rename is the only shared step.
-pub(super) async fn write_atomically(path: &PathBuf, payload: Vec<u8>) -> Result<(), DaemonError> {
+pub(crate) async fn write_atomically(path: &PathBuf, payload: Vec<u8>) -> Result<(), DaemonError> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent).await?;
     }

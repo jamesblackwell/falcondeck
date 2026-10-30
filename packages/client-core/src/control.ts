@@ -175,7 +175,7 @@ export type ControlErrorDetail = {
   suggested_action?: string | null;
 };
 
-export type ControlDomain = "settings" | "automations" | "runs" | "audit";
+export type ControlDomain = "settings" | "automations" | "runs" | "audit" | "tickets";
 
 export type ControlStateChanged = {
   store_revision: number;

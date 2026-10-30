@@ -168,6 +168,9 @@ pub fn router(state: AppState) -> Router {
             "/api/scheduled-tasks/{task_id}/runs",
             get(scheduled_task_runs),
         )
+        .route("/api/tickets", get(tickets_list).post(tickets_create))
+        .route("/api/tickets/{id}", get(ticket_read).post(ticket_update))
+        .route("/api/tickets/{id}/comments", post(ticket_comment))
         .route("/api/control/search", post(control_search))
         .route("/api/control/get", post(control_get))
         .route("/api/control/execute", post(control_execute))
@@ -2111,5 +2114,178 @@ mod tests {
             headers.insert(header::ORIGIN, HeaderValue::from_str(origin).unwrap());
             assert!(!has_allowed_websocket_origin(&headers), "{origin}");
         }
+    }
+}
+
+// Tickets use the same control service, provenance and events as MCP mutations.
+async fn tickets_list(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Query(mut query): Query<std::collections::HashMap<String, String>>,
+) -> Result<Json<falcondeck_core::control::ControlGetResponse>, Response> {
+    let cursor = query.remove("cursor");
+    let limit = query
+        .remove("limit")
+        .unwrap_or_else(|| "100".into())
+        .parse::<usize>()
+        .map_err(|_| {
+            control_error_response(crate::control::ControlError::field(
+                "limit",
+                "Use an integer.",
+            ))
+        })?;
+    let mut filters = serde_json::Map::new();
+    for (key, value) in query {
+        let value = if key == "include_closed" {
+            serde_json::Value::Bool(value.parse::<bool>().map_err(|_| {
+                control_error_response(crate::control::ControlError::field(
+                    "include_closed",
+                    "Use true or false.",
+                ))
+            })?)
+        } else {
+            serde_json::Value::String(value)
+        };
+        filters.insert(key, value);
+    }
+    let request = serde_json::from_value(serde_json::json!({"resource":"tickets", "filters":filters, "limit":limit, "cursor":cursor}))
+        .map_err(|error| control_error_response(crate::control::ControlError::invalid_arguments(error.to_string())))?;
+    control_get(State(state), headers, Json(request)).await
+}
+async fn ticket_read(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+) -> Result<Json<falcondeck_core::control::ControlGetResponse>, Response> {
+    let request = serde_json::from_value(serde_json::json!({"resource":"ticket", "id":id}))
+        .expect("ticket read request");
+    control_get(State(state), headers, Json(request)).await
+}
+async fn ticket_mutate(
+    state: AppState,
+    headers: HeaderMap,
+    operation: &str,
+    arguments: serde_json::Map<String, serde_json::Value>,
+) -> Result<Json<falcondeck_core::control::ControlExecuteResponse>, Response> {
+    let request =
+        serde_json::from_value(serde_json::json!({"operation":operation, "arguments":arguments}))
+            .expect("ticket mutation request");
+    control_execute(State(state), headers, Json(request)).await
+}
+async fn tickets_create(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(args): Json<serde_json::Map<String, serde_json::Value>>,
+) -> Result<Json<falcondeck_core::control::ControlExecuteResponse>, Response> {
+    ticket_mutate(state, headers, "ticket.create", args).await
+}
+async fn ticket_update(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+    Json(mut args): Json<serde_json::Map<String, serde_json::Value>>,
+) -> Result<Json<falcondeck_core::control::ControlExecuteResponse>, Response> {
+    args.insert("ticket_id".into(), serde_json::Value::String(id));
+    ticket_mutate(state, headers, "ticket.update", args).await
+}
+async fn ticket_comment(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+    Json(mut args): Json<serde_json::Map<String, serde_json::Value>>,
+) -> Result<Json<falcondeck_core::control::ControlExecuteResponse>, Response> {
+    args.insert("ticket_id".into(), serde_json::Value::String(id));
+    ticket_mutate(state, headers, "ticket.comment", args).await
+}
+
+#[cfg(test)]
+mod tickets_http_tests {
+    use super::*;
+    use serde_json::{Value, json};
+
+    #[tokio::test]
+    async fn tickets_http_routes_share_validation_authorship_and_persistence() {
+        let temp = tempfile::tempdir().unwrap();
+        let state = AppState::new_with_state_path(
+            "test".into(),
+            std::collections::HashMap::new(),
+            temp.path().join("state.json"),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server =
+            tokio::spawn(async move { axum::serve(listener, router(state)).await.unwrap() });
+        let client = reqwest::Client::new();
+        let base = format!("http://{address}/api/tickets");
+        let created: Value = client
+            .post(&base)
+            .json(&json!({"title":"Company launch"}))
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert_eq!(created["ok"], true, "{created}");
+        assert_eq!(created["data"]["created_by"]["name"], "James");
+        let id = created["data"]["id"].as_str().unwrap();
+        let updated: Value = client
+            .post(format!("{base}/{id}"))
+            .json(&json!({"state":"done"}))
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert_eq!(updated["ok"], false);
+        let commented: Value = client
+            .post(format!("{base}/{id}/comments"))
+            .json(&json!({"body":"Budget approved."}))
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert_eq!(commented["data"]["comments"][0]["author"]["name"], "James");
+        let detail: Value = client
+            .get(format!("{base}/{id}"))
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert_eq!(detail["data"]["comments"][0]["body"], "Budget approved.");
+        let updated: Value = client
+            .post(format!("{base}/{id}"))
+            .json(&json!({"state":"done", "closing_note":"Launched."}))
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert_eq!(updated["ok"], true);
+        let hidden: Value = client
+            .get(&base)
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert_eq!(hidden["data"], json!([]));
+        let included: Value = client
+            .get(format!("{base}?include_closed=true"))
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert_eq!(included["data"][0]["id"], id);
+        server.abort();
     }
 }

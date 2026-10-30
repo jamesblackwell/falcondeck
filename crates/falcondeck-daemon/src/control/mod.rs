@@ -20,6 +20,7 @@ pub mod scheduler;
 pub mod store;
 
 mod service;
+mod tickets;
 
 pub use service::{
     ControlDeps, ControlError, ControlService, LegacyImportOutcome, MAX_CONCURRENT_AUTOMATION_RUNS,

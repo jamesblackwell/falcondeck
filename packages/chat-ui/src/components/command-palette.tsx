@@ -7,6 +7,7 @@ import {
   Archive,
   FolderClosed,
   Gauge,
+  Tickets,
   Keyboard,
   MessageSquare,
   Monitor,
@@ -503,6 +504,7 @@ export type CommandPaletteProps = {
   onNewThread?: (workspaceId: string) => void
   onOpenSettings?: () => void
   onOpenBackup?: () => void
+  onOpenTickets?: () => void
   onOpenUsage?: () => void
   onOpenActivity?: () => void
   onOpenKeyboardShortcuts?: () => void
@@ -534,6 +536,7 @@ export const CommandPalette = memo(function CommandPalette({
   onNewThread,
   onOpenSettings,
   onOpenBackup,
+  onOpenTickets,
   onOpenUsage,
   onOpenActivity,
   onOpenKeyboardShortcuts,
@@ -872,6 +875,13 @@ export const CommandPalette = memo(function CommandPalette({
         run: onOpenBackup,
       })
     }
+    if (onOpenTickets) {
+      result.push({ id: 'tickets', kind: 'action', section: 'Actions', label: 'Open Tickets',
+        icon: { kind: 'glyph', Glyph: Tickets },
+        search: normalizeSearchFields({ primary: 'Open Tickets', secondary: 'Company work board', keywords: 'tickets kanban projects executives' }),
+        run: onOpenTickets,
+      })
+    }
     if (onOpenUsage) {
       result.push({
         id: 'usage',
@@ -943,7 +953,7 @@ export const CommandPalette = memo(function CommandPalette({
     }
 
     return result
-  }, [appearance.darkColorTheme, appearance.lightColorTheme, appearance.theme, groups, libraryWorkspaces, mode, onNewThread, onOpenActivity, onOpenBackup, onOpenKeyboardShortcuts, onOpenLibraryWorkspace, onOpenPlugins, onOpenSettings, onOpenUsage, onSelectThread, open, shortcutHints, workspaceIconSrc])
+  }, [appearance.darkColorTheme, appearance.lightColorTheme, appearance.theme, groups, libraryWorkspaces, mode, onNewThread, onOpenActivity, onOpenBackup, onOpenKeyboardShortcuts, onOpenLibraryWorkspace, onOpenPlugins, onOpenSettings, onOpenTickets, onOpenUsage, onSelectThread, open, shortcutHints, workspaceIconSrc])
 
   // A project that has since disappeared (removed, or a stale request) must
   // not silently hide every result, so the chip only survives while it resolves.

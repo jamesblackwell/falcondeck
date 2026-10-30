@@ -239,6 +239,8 @@ fn remote_rpc_is_read_only(method: &str) -> bool {
             | "sync.threads"
             | "sync.extensions"
             | "control.get"
+            | "tickets.list"
+            | "ticket.get"
             | "thread.search"
             | "thread.detail"
             | "thread.item"
@@ -294,6 +296,8 @@ pub(super) const REMOTE_RPC_METHODS: &[&str] = &[
     // methods beside other daemon-level state so every paired client uses the
     // same validation, revisions, audit log, and state-change events.
     "control.get",
+    "tickets.list",
+    "ticket.get",
     "control.execute",
     "speech.status",
     "speech.models",
@@ -1221,6 +1225,34 @@ impl AppState {
                             .map_err(|err| format!("failed to import backup: {err}"))?,
                     )
                     .map_err(|error| format!("failed to serialize backup import response: {error}"))
+                }
+                "tickets.list" | "ticket.get" => {
+                    let mut payload = params
+                        .as_object()
+                        .cloned()
+                        .ok_or("invalid tickets read payload")?;
+                    payload.insert(
+                        "resource".into(),
+                        serde_json::json!(if method == "tickets.list" {
+                            "tickets"
+                        } else {
+                            "ticket"
+                        }),
+                    );
+                    let request = serde_json::from_value::<ControlGetRequest>(
+                        serde_json::Value::Object(payload),
+                    )
+                    .map_err(|error| format!("invalid tickets read payload: {error}"))?;
+                    let context = ControlRequestContext {
+                        origin: ControlOrigin::RemoteRpc,
+                        ..Default::default()
+                    };
+                    serde_json::to_value(
+                        self.control_get(request, &context)
+                            .await
+                            .map_err(|error| error.0.message)?,
+                    )
+                    .map_err(|error| error.to_string())
                 }
                 "control.get" => {
                     let request = serde_json::from_value::<ControlGetRequest>(params.clone())
@@ -3296,6 +3328,34 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[tokio::test]
+    async fn tickets_rpc_reads_are_registered_and_read_only() {
+        let temp = tempfile::tempdir().unwrap();
+        let app = AppState::new_with_state_path(
+            "test".into(),
+            std::collections::HashMap::new(),
+            temp.path().join("state.json"),
+        );
+        for method in ["tickets.list", "ticket.get"] {
+            assert!(REMOTE_RPC_METHODS.contains(&method));
+            assert!(remote_rpc_is_read_only(method));
+            let result = app
+                .dispatch_remote_rpc(method, serde_json::json!({"id":"T-999"}))
+                .await;
+            assert!(
+                !result
+                    .as_ref()
+                    .err()
+                    .is_some_and(|error| error.contains("unsupported remote rpc method"))
+            );
+        }
+        assert!(
+            app.dispatch_remote_rpc("tickets.list", serde_json::json!({}))
+                .await
+                .is_ok()
+        );
     }
 
     #[test]

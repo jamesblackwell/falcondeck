@@ -26,6 +26,8 @@ pub mod relay_transport;
 pub mod sync_index;
 /// Terminal session contract for daemon-owned PTY sessions.
 pub mod terminal;
+/// Lightweight company ticket records.
+pub mod tickets;
 pub use backup::*;
 
 use std::collections::BTreeMap;

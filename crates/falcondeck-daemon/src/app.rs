@@ -117,7 +117,7 @@ mod snapshot_projection;
 mod speech;
 mod speech_audio;
 mod startup_resume;
-mod storage;
+pub(crate) mod storage;
 mod sync_index;
 mod thread_search;
 mod thread_tools;

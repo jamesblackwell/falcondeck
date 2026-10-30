@@ -674,6 +674,8 @@ pub enum ControlDomain {
     Automations,
     /// Run records changed.
     Runs,
+    /// Company tickets changed.
+    Tickets,
     /// Audit records changed.
     Audit,
 }

@@ -176,7 +176,7 @@ pub fn append_instructions(
         );
     }
     text.push_str(
-        "- Control FalconDeck itself with the `falcondeck` MCP tools: `falcondeck_search` to discover operations, `falcondeck_get` to read state, `falcondeck_execute` to run one (for example scheduled automations). Use those when the user asks about automations, schedules, or FalconDeck settings. When the user asks you to check back, follow up, or re-run something later from within a conversation, schedule it with thread kind `current` so it continues in this thread; use a managed thread only for standing schedules unrelated to this conversation.\n\
+        "- Control FalconDeck itself with the `falcondeck` MCP tools: `falcondeck_search` to discover operations, `falcondeck_get` to read state, `falcondeck_execute` to run one (for example scheduled automations). Use those when the user asks about automations, schedules, tickets, or FalconDeck settings. Tickets track big-picture work taking hours, days or weeks; most changes should just be done. Never create a ticket for anything under a few hours. When the user asks you to check back, follow up, or re-run something later from within a conversation, schedule it with thread kind `current` so it continues in this thread; use a managed thread only for standing schedules unrelated to this conversation.\n\
          - Before `falcondeck_execute`, call `falcondeck_search` with `detail: \"full\"` to get the operation's schema and worked examples.",
     );
     if let Some(path) = mcp_skill {

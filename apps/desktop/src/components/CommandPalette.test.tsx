@@ -117,6 +117,13 @@ describe("CommandPalette controlled requests", () => {
     expect(container).toBeTruthy();
   });
 
+  it("opens Tickets from the Actions section", () => {
+    const onOpenTickets = vi.fn();
+    render(<CommandPalette groups={[]} onSelectThread={vi.fn()} onOpenTickets={onOpenTickets} openRequestKey={1} requestMode="open" />);
+    fireEvent.click(screen.getByRole("option", { name: /Open Tickets/ }));
+    expect(onOpenTickets).toHaveBeenCalledOnce();
+  });
+
   it("opens Activity from the Actions section", () => {
     const onOpenActivity = vi.fn();
     render(
