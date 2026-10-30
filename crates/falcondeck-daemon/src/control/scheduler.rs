@@ -626,7 +626,7 @@ async fn resolve_thread(
 fn settled_run_threads(
     threads: &[falcondeck_core::ThreadSummary],
     automation_id: &str,
-    no_action_threads: &std::collections::HashSet<String>,
+    no_action_finished: &std::collections::HashMap<String, DateTime<Utc>>,
 ) -> Vec<(String, String)> {
     threads
         .iter()
@@ -634,27 +634,38 @@ fn settled_run_threads(
             matches!(&thread.origin, Some(ThreadOrigin::Automation { automation_id: id, .. }) if id == automation_id)
                 && !thread.is_archived
                 && thread.status == ThreadStatus::Idle
-                && (!thread.attention.unread || no_action_threads.contains(&thread.id))
+                && (!thread.attention.unread || quiet_since(no_action_finished, thread))
         })
         .map(|thread| (thread.workspace_id.clone(), thread.id.clone()))
         .collect()
+}
+
+/// Whether the thread's latest activity is its run that found nothing to do,
+/// rather than something newer (such as the user continuing it).
+fn quiet_since(
+    no_action_finished: &std::collections::HashMap<String, DateTime<Utc>>,
+    thread: &falcondeck_core::ThreadSummary,
+) -> bool {
+    no_action_finished
+        .get(&thread.id)
+        .is_some_and(|finished| thread.updated_at <= *finished + chrono::Duration::seconds(60))
 }
 
 async fn archive_settled_run_threads(
     app: &AppState,
     automation: &falcondeck_core::control::Automation,
 ) {
-    let no_action: std::collections::HashSet<String> = app
-        .control()
-        .runs_since(Utc::now() - chrono::Duration::days(30))
-        .await
-        .into_iter()
-        .filter(|run| {
-            run.automation_id == automation.id
-                && run.status == AutomationRunStatus::SucceededNoAction
-        })
-        .filter_map(|run| run.thread_id)
-        .collect();
+    // All retained history: monthly or long-paused schedules still clean up.
+    let mut no_action = std::collections::HashMap::new();
+    for run in app.control().runs_since(DateTime::<Utc>::MIN_UTC).await {
+        if run.automation_id == automation.id
+            && run.status == AutomationRunStatus::SucceededNoAction
+            && let (Some(thread), Some(finished)) = (run.thread_id, run.finished_at)
+        {
+            let latest = no_action.entry(thread).or_insert(finished);
+            *latest = (*latest).max(finished);
+        }
+    }
     let threads = app.snapshot().await.threads;
     for (workspace_id, thread_id) in settled_run_threads(&threads, &automation.id, &no_action) {
         let _ = app.archive_thread(&workspace_id, &thread_id).await;
@@ -755,7 +766,17 @@ mod tests {
             run_thread("other-automation", "b", false),
             busy,
         ];
-        let no_action = ["unread-nothing".to_string()].into_iter().collect();
+        let finished = "2026-10-30T08:00:00Z".parse().unwrap();
+        let mut continued = run_thread("continued-after-quiet-run", "a", true);
+        continued.updated_at = "2026-10-30T09:00:00Z".parse().unwrap();
+        let mut threads = threads;
+        threads.push(continued);
+        let no_action = [
+            ("unread-nothing".to_string(), finished),
+            ("continued-after-quiet-run".to_string(), finished),
+        ]
+        .into_iter()
+        .collect();
         let ids: Vec<_> = settled_run_threads(&threads, "a", &no_action)
             .into_iter()
             .map(|(_, id)| id)
