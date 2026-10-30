@@ -99,6 +99,7 @@ struct ProjectNavigator: View {
                     if store.selectedSection == "chats" { taskList }
                     navigationRow("Activity", symbol: "tray", section: "activity",
                                   count: summary.attentionCount)
+                    navigationRow("Cloud tasks", symbol: "cloud", section: "cloud", count: 0)
                 }
 
                 Section {
@@ -715,6 +716,7 @@ private struct ProjectNavigatorDestination: Identifiable {
     let symbol: String
 
     static let secondary: [Self] = [
+        .init(id: "cloud", title: "Cloud tasks", symbol: "cloud"),
         .init(id: "automations", title: "Automations", symbol: "clock.arrow.circlepath"),
         .init(id: "usage", title: "Usage", symbol: "chart.bar"),
         .init(id: "plugins", title: "Plugins", symbol: "puzzlepiece.extension"),

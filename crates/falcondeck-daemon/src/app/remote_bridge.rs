@@ -265,6 +265,10 @@ fn remote_rpc_is_read_only(method: &str) -> bool {
             | "skills.registry.search"
             | "providers.read"
             | "providers.usage"
+            | "cloud.settings.get"
+            | "cloud.jobs.list"
+            | "cloud.jobs.get"
+            | "cloud.jobs.detail"
             | "harnesses.read"
             | "harnesses.job"
             | "extensions.read"
@@ -292,6 +296,22 @@ pub(super) const REMOTE_RPC_METHODS: &[&str] = &[
     "sync.extensions",
     "preferences.read",
     "preferences.update",
+    "cloud.settings.get",
+    "cloud.settings.update",
+    "cloud.capture",
+    "cloud.jobs.list",
+    "cloud.jobs.create",
+    "cloud.jobs.get",
+    "cloud.jobs.detail",
+    "cloud.jobs.turn",
+    "cloud.jobs.interrupt",
+    "cloud.jobs.approval",
+    "cloud.jobs.interactive",
+    "cloud.jobs.collect",
+    "cloud.jobs.import",
+    "cloud.jobs.stop",
+    "cloud.jobs.resume",
+
     // The control service owns the current automations UI. Keep these generic
     // methods beside other daemon-level state so every paired client uses the
     // same validation, revisions, audit log, and state-change events.
@@ -1130,6 +1150,9 @@ impl AppState {
         // waiting out the relay's 30s RPC timeout.
         async {
             match method {
+                method if method.starts_with("cloud.") => {
+                    crate::cloud::rpc::dispatch(self, method, params.clone()).await
+                }
                 "thread.search" => {
                     let request = serde_json::from_value::<
                         falcondeck_core::ThreadMessageSearchRequest,

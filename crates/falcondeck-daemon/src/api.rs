@@ -119,6 +119,7 @@ fn has_allowed_websocket_origin(headers: &HeaderMap) -> bool {
 
 pub fn router(state: AppState) -> Router {
     Router::new()
+        .merge(crate::cloud::api::router())
         .route("/api/health", get(health))
         .route("/api/snapshot", get(snapshot))
         .route(

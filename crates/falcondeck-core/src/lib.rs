@@ -13,6 +13,9 @@ pub mod backup;
 /// Persistent coordinator profiles and document operations.
 pub mod bots;
 pub use bots::*;
+/// Isolated cloud coding task coordinator contracts.
+pub mod cloud;
+pub use cloud::*;
 /// Shared wire types for the agent control interface.
 pub mod control;
 /// Cryptography helpers for pairing, key exchange, and encrypted payloads.

@@ -295,6 +295,7 @@ struct InnerState {
     /// fall back to their id; see `AppState::provider_bin`.
     provider_bins: HashMap<AgentProvider, String>,
     state_path: PathBuf,
+    cloud: Arc<crate::cloud::manager::CloudManager>,
     /// Background tasks can still finish persistence after shutdown. Retain
     /// ownership until their AppState clones have actually been dropped.
     state_lock: StdMutex<Option<Arc<crate::state_lock::StateLock>>>,
@@ -984,6 +985,7 @@ impl AppState {
         // bounding retained memory: each slot can hold a full snapshot event
         // with plan/diff artifacts.
         let (broadcaster, _) = broadcast::channel::<Arc<CachedEnvelope>>(512);
+        let cloud = crate::cloud::manager::CloudManager::new(&state_path);
         let preferences_path = default_preferences_path(&state_path);
         let scheduled_tasks_path = scheduled_tasks::scheduled_tasks_path(&state_path);
         let control_store = crate::control::store::control_store_path(&state_path);
@@ -1011,6 +1013,7 @@ impl AppState {
                 interrupted_resume_gate: Mutex::new(()),
                 provider_bins,
                 state_path,
+                cloud,
                 state_lock: StdMutex::new(None),
                 preferences_path,
                 scheduled_tasks_path,
@@ -1096,6 +1099,10 @@ impl AppState {
                 terminals: Arc::new(crate::terminal::TerminalManager::new()),
             }),
         }
+    }
+
+    pub(crate) fn cloud_manager(&self) -> &Arc<crate::cloud::manager::CloudManager> {
+        &self.inner.cloud
     }
 
     pub fn subscribe(&self) -> broadcast::Receiver<Arc<CachedEnvelope>> {

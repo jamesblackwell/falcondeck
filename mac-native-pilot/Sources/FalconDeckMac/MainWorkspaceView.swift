@@ -24,6 +24,7 @@ struct MainWorkspaceView: View {
                 switch store.selectedSection {
                 case "activity": NativeActivityView(store: store)
                 case "automations": NativeAutomationsView(store: store)
+                case "cloud": NativeCloudTasksView(store: store)
                 case "usage": NativeUsageView(store: store)
                 case "plugins": NativePluginsView(store: store)
                 case "extensions": NativeExtensionsView(store: store).id("\(store.selectedHostID ?? "local"):extensions")

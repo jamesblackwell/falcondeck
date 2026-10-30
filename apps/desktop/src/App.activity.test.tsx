@@ -496,6 +496,33 @@ describe("Activity takeover wiring", () => {
     ).not.toBeInTheDocument();
   });
 
+  it("opens Cloud tasks as a main view and restores the selected project composer", async () => {
+    const fetch = vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+      const url = String(input);
+      return new Response(JSON.stringify(url.endsWith("/api/cloud/settings") ? {
+        enabled: false, has_provider_token: false, has_openai_api_key: false,
+        team_id: null, project_id: null, image: "node24", timeout_minutes: 15,
+        node_binary: "node", runtime_path: "", worker_daemon_url: "",
+        worker_daemon_sha256: "", allowed_domains: [],
+      } : []), { status: 200, headers: { "content-type": "application/json" } });
+    });
+    try {
+      render(<App />);
+      fireEvent.click(screen.getByRole("button", { name: "Cloud tasks" }));
+      expect(await screen.findByRole("heading", { name: "Cloud tasks" })).toBeInTheDocument();
+      expect(await screen.findByLabelText("Source project")).toHaveValue("workspace-1");
+      expect(screen.queryByText("Diff rail")).not.toBeInTheDocument();
+      fireEvent.click(screen.getAllByRole("button", { name: "New cloud task" })[0]);
+      expect(await screen.findByLabelText("Task instructions")).toBeInTheDocument();
+      fireEvent.click(screen.getByRole("button", { name: "Start new thread in falcon" }));
+      expect(await screen.findByText("Conversation pane")).toBeInTheDocument();
+      expect(screen.queryByRole("heading", { name: "Cloud tasks" })).not.toBeInTheDocument();
+      expect(await screen.findByText("Diff rail")).toBeInTheDocument();
+    } finally {
+      fetch.mockRestore();
+    }
+  });
+
   it("preserves an existing new-thread draft as scheduling notes", async () => {
     window.localStorage.setItem(
       "falcondeck.desktop.composer-drafts.v1",

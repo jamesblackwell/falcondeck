@@ -248,6 +248,7 @@ import {
 } from "./desktop-notifications";
 import { useDesktopDictation, useDictationSettings } from "./dictation";
 import { resolveMainView } from "./main-view-registry";
+import { cloudApiForConnection, createCloudHttpApi } from "./components/cloud/cloud-api";
 import { extensionFrontendLoaders } from "virtual:falcondeck-extension-frontends";
 
 // Stable empty array so conversations without attachments don't bust the
@@ -268,6 +269,8 @@ function lastAgentItemId(items: ConversationItem[]) {
   }
   return null;
 }
+
+const CloudView = lazy(() => import("./components/cloud/CloudView").then((module) => ({ default: module.CloudView })));
 
 const SettingsView = lazy(() =>
   import("./components/SettingsView").then((module) => ({
@@ -491,6 +494,7 @@ function AppInner() {
   const [isContinuingStoppedThreads, setIsContinuingStoppedThreads] =
     useState(false);
   const resumePromptSettledRef = useRef(false);
+  const [isCloudOpen, setIsCloudOpen] = useState(false);
   const [isTicketsOpen, setIsTicketsOpen] = useState(false);
   const [isScheduledOpen, setIsScheduledOpen] = useState(false);
   const [automationOpenRequest, setAutomationOpenRequest] = useState<{ id: string; key: number } | null>(null);
@@ -515,17 +519,19 @@ function AppInner() {
   const [activeExtensionPanelKey, setActiveExtensionPanelKey] = useState<
     string | null
   >(null);
-  const activeMainViewId = isTicketsOpen
-    ? "core.tickets"
-    : isScheduledOpen
-      ? "core.scheduled"
-      : isExtensionsOpen
-        ? "core.extensions"
-        : isPluginsOpen
-          ? "core.plugins"
-          : isSettingsOpen
-            ? "core.settings"
-            : activeExtensionPanelKey;
+  const activeMainViewId = isCloudOpen
+    ? "core.cloud"
+    : isTicketsOpen
+      ? "core.tickets"
+      : isScheduledOpen
+        ? "core.scheduled"
+        : isExtensionsOpen
+          ? "core.extensions"
+          : isPluginsOpen
+            ? "core.plugins"
+            : isSettingsOpen
+              ? "core.settings"
+              : activeExtensionPanelKey;
   const [settingsSection, setSettingsSection] =
     useState<SettingsSectionId>("general");
   const [settingsRequestKey, setSettingsRequestKey] = useState(0);
@@ -854,6 +860,7 @@ function AppInner() {
     setIsSettingsOpen(true);
     setIsScheduledOpen(false);
     setIsTicketsOpen(false);
+    setIsCloudOpen(false);
     setIsExtensionsOpen(false);
   }, []);
   const openSpeechSettings = useCallback(
@@ -1136,6 +1143,19 @@ function AppInner() {
     },
     [snapshot?.extensions, workspaceHostIndex],
   );
+  const localCloudApi = useMemo(() => baseUrl ? createCloudHttpApi(baseUrl) : null, [baseUrl]);
+  const cloudOwners = useMemo(() => [
+    { id: "local", label: "This Mac", workspaces: snapshot?.workspaces ?? [], api: localCloudApi },
+    ...remoteHosts.hosts.map((host) => {
+      const connection = remoteHosts.manager.connection(host.id);
+      return {
+        id: host.id,
+        label: host.name,
+        workspaces: host.snapshot?.workspaces ?? [],
+        api: connection ? cloudApiForConnection(connection) : null,
+      };
+    }),
+  ], [localCloudApi, remoteHosts.hosts, remoteHosts.manager, snapshot?.workspaces]);
   const apiFor = useCallback(
     (workspaceId: string | null | undefined) => {
       const host = remoteHosts.hostForWorkspace(workspaceId);
@@ -3220,6 +3240,7 @@ function AppInner() {
       setIsSettingsOpen(false);
       setIsScheduledOpen(false);
       setIsTicketsOpen(false);
+      setIsCloudOpen(false);
       setIsExtensionsOpen(false);
       setIsPluginsOpen(false);
       setActiveExtensionPanelKey(null);
@@ -3236,6 +3257,7 @@ function AppInner() {
       setIsSettingsOpen(false);
       setIsScheduledOpen(false);
       setIsTicketsOpen(false);
+      setIsCloudOpen(false);
       setIsExtensionsOpen(false);
       setIsPluginsOpen(false);
       setActiveExtensionPanelKey(null);
@@ -3252,6 +3274,7 @@ function AppInner() {
       setIsSettingsOpen(false);
       setIsScheduledOpen(false);
       setIsTicketsOpen(false);
+      setIsCloudOpen(false);
       setIsExtensionsOpen(false);
       setIsPluginsOpen(false);
       setActiveExtensionPanelKey(null);
@@ -3326,6 +3349,7 @@ function AppInner() {
     setIsSettingsOpen(false);
     setIsScheduledOpen(false);
     setIsTicketsOpen(false);
+    setIsCloudOpen(false);
     setIsExtensionsOpen(false);
     setIsPluginsOpen(false);
     setProjectMenuRequestKey((current) => current + 1);
@@ -4018,6 +4042,7 @@ function AppInner() {
     setIsSettingsOpen(true);
     setIsScheduledOpen(false);
     setIsTicketsOpen(false);
+    setIsCloudOpen(false);
     setIsExtensionsOpen(false);
     setIsPluginsOpen(false);
     setActiveExtensionPanelKey(null);
@@ -4033,6 +4058,7 @@ function AppInner() {
     setIsSettingsOpen(true);
     setIsScheduledOpen(false);
     setIsTicketsOpen(false);
+    setIsCloudOpen(false);
     setIsExtensionsOpen(false);
     setIsPluginsOpen(false);
     setActiveExtensionPanelKey(null);
@@ -4044,6 +4070,7 @@ function AppInner() {
     setIsSettingsOpen(true);
     setIsScheduledOpen(false);
     setIsTicketsOpen(false);
+    setIsCloudOpen(false);
     setIsExtensionsOpen(false);
     setIsPluginsOpen(false);
     setActiveExtensionPanelKey(null);
@@ -4077,15 +4104,27 @@ function AppInner() {
     setIsSettingsOpen(false);
     setIsScheduledOpen(false);
     setIsTicketsOpen(true);
+    setIsCloudOpen(false);
     setIsExtensionsOpen(false);
     setIsPluginsOpen(false);
     setActiveExtensionPanelKey(null);
+  }, []);
+
+  const handleOpenCloud = useCallback(() => {
+    setIsSettingsOpen(false);
+    setIsScheduledOpen(false);
+    setIsTicketsOpen(false);
+    setIsExtensionsOpen(false);
+    setIsPluginsOpen(false);
+    setActiveExtensionPanelKey(null);
+    setIsCloudOpen(true);
   }, []);
 
   const handleOpenScheduled = useCallback(() => {
     setIsSettingsOpen(false);
     setIsScheduledOpen(true);
     setIsTicketsOpen(false);
+    setIsCloudOpen(false);
     setIsExtensionsOpen(false);
     setIsPluginsOpen(false);
     setActiveExtensionPanelKey(null);
@@ -4149,6 +4188,7 @@ function AppInner() {
       setIsSettingsOpen(false);
       setIsScheduledOpen(false);
       setIsTicketsOpen(false);
+      setIsCloudOpen(false);
       setIsExtensionsOpen(false);
       setIsPluginsOpen(false);
       setActiveExtensionPanelKey(null);
@@ -4162,6 +4202,7 @@ function AppInner() {
     setIsSettingsOpen(false);
     setIsScheduledOpen(false);
     setIsTicketsOpen(false);
+    setIsCloudOpen(false);
     setIsExtensionsOpen(true);
     setIsPluginsOpen(false);
     setActiveExtensionPanelKey(null);
@@ -4171,6 +4212,7 @@ function AppInner() {
     setIsSettingsOpen(false);
     setIsScheduledOpen(false);
     setIsTicketsOpen(false);
+    setIsCloudOpen(false);
     setIsExtensionsOpen(false);
     setIsPluginsOpen(true);
     setActiveExtensionPanelKey(null);
@@ -4258,6 +4300,7 @@ function AppInner() {
     setIsSettingsOpen(false);
     setIsScheduledOpen(false);
     setIsTicketsOpen(false);
+    setIsCloudOpen(false);
     setIsExtensionsOpen(false);
     setIsPluginsOpen(false);
     setActiveExtensionPanelKey(panelKey);
@@ -5809,6 +5852,7 @@ function AppInner() {
       setIsSettingsOpen(false);
       setIsScheduledOpen(false);
       setIsTicketsOpen(false);
+      setIsCloudOpen(false);
       setIsExtensionsOpen(false);
       setIsPluginsOpen(false);
       setSelectedWorkspaceId(next.workspace_id);
@@ -5827,6 +5871,7 @@ function AppInner() {
       setIsSettingsOpen(false);
       setIsScheduledOpen(false);
       setIsTicketsOpen(false);
+      setIsCloudOpen(false);
       setIsExtensionsOpen(false);
       setIsPluginsOpen(false);
       setSelectedWorkspaceId(entry.workspaceId);
@@ -5885,6 +5930,7 @@ function AppInner() {
           setIsSettingsOpen(true);
           setIsScheduledOpen(false);
           setIsTicketsOpen(false);
+          setIsCloudOpen(false);
           setIsExtensionsOpen(false);
           setIsPluginsOpen(false);
           break;
@@ -5972,6 +6018,7 @@ function AppInner() {
           setIsSettingsOpen(false);
           setIsScheduledOpen(false);
           setIsTicketsOpen(false);
+          setIsCloudOpen(false);
           setIsExtensionsOpen(false);
           setIsPluginsOpen(false);
           setComposerFocusRequestKey((current) => current + 1);
@@ -5994,6 +6041,7 @@ function AppInner() {
           setIsSettingsOpen(false);
           setIsScheduledOpen(false);
           setIsTicketsOpen(false);
+          setIsCloudOpen(false);
           setIsExtensionsOpen(false);
           setIsPluginsOpen(false);
           setComposerMenuRequest((current) => ({ key: current.key + 1, menu }));
@@ -6192,6 +6240,8 @@ function AppInner() {
             }
             onOpenTickets={handleOpenTickets}
             ticketsOpen={isTicketsOpen}
+            onOpenCloud={handleOpenCloud}
+            cloudOpen={isCloudOpen}
             onOpenScheduled={handleOpenScheduled}
             scheduledOpen={isScheduledOpen}
             onOpenActivity={handleOpenActivity}
@@ -6246,6 +6296,11 @@ function AppInner() {
         main={
           resolveMainView(
             {
+              "core.cloud": (
+                <Suspense fallback={loadingThreadState}>
+                  <CloudView owners={cloudOwners} initialOwnerId={remoteHosts.hostForWorkspace(selectedWorkspaceId)?.host.id ?? "local"} initialWorkspaceId={selectedWorkspaceId} onClose={() => setIsCloudOpen(false)} />
+                </Suspense>
+              ),
               "core.tickets": (
                 <Suspense fallback={loadingThreadState}>
                   <TicketsView
@@ -6284,6 +6339,7 @@ function AppInner() {
                     onOpenThread={(workspaceId, threadId) => {
                       setIsScheduledOpen(false);
                       setIsTicketsOpen(false);
+                      setIsCloudOpen(false);
                       setIsExtensionsOpen(false);
                       setIsPluginsOpen(false);
                       setSelectedWorkspaceId(workspaceId);

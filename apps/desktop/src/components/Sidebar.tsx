@@ -4,6 +4,7 @@ import {
   Tickets,
   Blocks,
   CalendarClock,
+  Cloud,
   PanelsTopLeft,
   Puzzle,
 } from "lucide-react";
@@ -29,6 +30,8 @@ export type DesktopSidebarProps = WorkspaceSidebarProps & {
   updateStatus?: 'available' | 'downloaded' | null;
   onOpenTickets?: () => void;
   ticketsOpen?: boolean;
+  onOpenCloud?: () => void;
+  cloudOpen?: boolean;
   onOpenScheduled?: () => void;
   scheduledOpen?: boolean;
   scheduledAttention?: boolean;
@@ -57,6 +60,8 @@ export const DesktopSidebar = memo(function DesktopSidebar({
   updateStatus = null,
   onOpenTickets,
   ticketsOpen = false,
+  onOpenCloud,
+  cloudOpen = false,
   onOpenScheduled,
   scheduledOpen = false,
   scheduledAttention = false,
@@ -95,6 +100,7 @@ export const DesktopSidebar = memo(function DesktopSidebar({
       topNavigation={
         onOpenTickets ||
         onOpenScheduled ||
+        onOpenCloud ||
         onOpenActivity ||
         onOpenExtensions ||
         onOpenPlugins ||
@@ -204,6 +210,12 @@ export const DesktopSidebar = memo(function DesktopSidebar({
                   <span className="min-w-0 flex-1">Plugins</span>
                 </button>
               </Tooltip>
+            ) : null}
+            {onOpenCloud ? (
+              <button type="button" onClick={onOpenCloud} aria-current={cloudOpen ? "page" : undefined} aria-label="Cloud tasks"
+                className={cn("fd-focus flex w-full items-center gap-2 rounded-[var(--fd-radius-md)] px-3 py-2 text-left text-[length:var(--fd-text-sm)] transition-colors", cloudOpen ? "bg-surface-3 text-fg-primary" : "text-fg-secondary hover:bg-surface-3 hover:text-fg-primary")}>
+                <Cloud aria-hidden="true" className="h-4 w-4 shrink-0" /><span>Cloud tasks</span>
+              </button>
             ) : null}
             {onOpenScheduled ? (
               <Tooltip label="Automations">

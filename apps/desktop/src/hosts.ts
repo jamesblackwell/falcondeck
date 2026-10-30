@@ -598,6 +598,11 @@ export class HostConnection {
     this.onChange()
   }
 
+  cloudRpc<T = unknown>(method: string, params: Record<string, unknown>): Promise<T> {
+    if (!method.startsWith('cloud.')) return Promise.reject(new Error('Invalid cloud operation.'))
+    return this.rpc<T>(method, params)
+  }
+
   private rpc<T>(method: string, params: Record<string, unknown>): Promise<T> {
     const client = this.client
     if (!client) return Promise.reject(new Error(CONNECTION_COPY.serverNotConnected))

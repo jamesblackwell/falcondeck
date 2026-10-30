@@ -4,7 +4,7 @@ enum NativeSettingsSection: String, CaseIterable, Identifiable {
     case general, appearance, notifications, conversations, keyboard, extensions, agents, harnesses, connectors
     case agentControl = "agent-control"
     case computerUse = "computer-use"
-    case speech, models, remote, servers, backup
+    case speech, models, cloud, remote, servers, backup
     var id: String { rawValue }
     var title: String {
         switch self {
@@ -21,6 +21,7 @@ enum NativeSettingsSection: String, CaseIterable, Identifiable {
         case .computerUse: "Computer use"
         case .speech: "Voice"
         case .models: "Models & keys"
+        case .cloud: "Cloud execution"
         case .remote: "Remote access"
         case .servers: "Servers"
         case .backup: "Backup & data"
@@ -41,6 +42,7 @@ enum NativeSettingsSection: String, CaseIterable, Identifiable {
         case .computerUse: "desktopcomputer"
         case .speech: "mic"
         case .models: "key"
+        case .cloud: "cloud"
         case .remote: "wifi"
         case .servers: "server.rack"
         case .backup: "archivebox"
@@ -50,7 +52,7 @@ enum NativeSettingsSection: String, CaseIterable, Identifiable {
         switch self {
         case .general, .appearance, .notifications, .conversations, .keyboard, .extensions: "App"
         case .agents, .harnesses, .connectors, .agentControl, .computerUse, .speech, .models: "Agents"
-        case .remote, .servers, .backup: "Connection & data"
+        case .cloud, .remote, .servers, .backup: "Connection & data"
         }
     }
     var detail: String {
@@ -68,6 +70,7 @@ enum NativeSettingsSection: String, CaseIterable, Identifiable {
         case .computerUse: "Desktop control, browser access and diagnostics"
         case .speech: "Dictation, transcription and selected-text rewrite"
         case .models: "OpenRouter, task titles and utility models"
+        case .cloud: "Isolated Linux workers and cloud task credentials"
         case .remote: "Pair devices and manage trusted connections"
         case .servers: "SSH servers and remote projects"
         case .backup: "Export, inspect, restore and reset"
@@ -88,6 +91,7 @@ enum NativeSettingsSection: String, CaseIterable, Identifiable {
         case .computerUse: "accessibility screen recording consent browser signed in cursor telemetry diagnostic recovery"
         case .speech: "stt tts speech microphone parakeet apple openrouter rewrite dictionary recording retention hotkey"
         case .models: "openrouter key credentials title prompt background utility model"
+        case .cloud: "vercel sandbox cloud codex openai worker linux token image network timeout"
         case .remote: "relay device pairing trusted revoke code qr mobile"
         case .servers: "ssh provision host port credentials daemon restart remote project"
         case .backup: "data archive export import restore migration path mapping reset"
@@ -202,6 +206,7 @@ struct NativeSettingsView: View {
         case .computerUse: scrolling { NativeComputerUseSettingsView(store: store) }
         case .speech: scrolling { NativeVoiceSettingsView(store: store) }
         case .models: NativeModelsSettingsView(store: store)
+        case .cloud: NativeCloudSettingsView(store: store, hostID: store.selectedHostID)
         case .remote: NativeRemoteSettingsView(store: store)
         case .servers: NativeServersSettingsView(store: store)
         case .backup: NativeBackupSettingsView(store: store)

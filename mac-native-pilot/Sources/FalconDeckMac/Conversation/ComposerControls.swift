@@ -168,6 +168,19 @@ struct ConversationComposerControls: View {
                     Text("Isolated checkout").tag("isolated")
                 }
                 Text("An isolated task works on its own branch and checkout.").font(NativePreferences.shared.font(size: 12)).foregroundStyle(FDTheme.muted)
+                Button("Run a cloud task…", systemImage: "cloud") {
+                    if let projectID = store.selectedProjectID {
+                        let cloud = NativeCloudModel.forHost(NativeHostManager.split(projectID).hostID)
+                        cloud.selectedProjectID = projectID
+                        cloud.selectedJobID = nil
+                        var draft = cloud.drafts[projectID] ?? NativeCloudTaskDraft()
+                        if draft.prompt.isEmpty { draft.prompt = store.draft }
+                        cloud.drafts[projectID] = draft
+                    }
+                    showOptions = false
+                    store.selectSection("cloud")
+                }
+                Text("Review the current source files before starting an isolated Linux worker.").font(NativePreferences.shared.font(size: 12)).foregroundStyle(FDTheme.muted)
             }
             if capabilities["supports_steering"].bool {
                 Picker("While agent is working", selection: $selection.followUp) {

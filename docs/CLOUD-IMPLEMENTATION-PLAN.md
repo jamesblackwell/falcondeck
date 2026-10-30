@@ -4,6 +4,8 @@ Status: proposed, 2026-10-06. Based on [the harness review](CLOUD-HARNESS-REVIEW
 
 **Pilot scope updated 2026-10-30:** use [Cloud jobs: PR-only pilot](CLOUD-JOBS-PILOT.md) for the CTO's initial Quizgecko cleanup/test rollout. It starts from pushed Git revisions and ends in a reviewed PR, deferring dirty-source upload, session migration, sleep/restore and local import. The fuller experience below remains a later roadmap; it is not the minimum requirement for that pilot.
 
+**Implementation update 2026-10-30:** [Cloud tasks v1](CLOUD-TASKS.md) records the implemented prototype, setup and remaining live-qualification limits. It replaces mandatory GitHub-input/PR-output scope; production deployment and automatic landing remain disabled.
+
 ## Product outcome
 
 Add **Cloud copy** beside **Project folder** and **Isolated copy**. A user can send an expensive build, unfamiliar change, or experimental task to an isolated cloud workspace, close the laptop, continue from a phone, and bring reviewed changes back later. Follow-ups use the same saved workspace and native agent conversation, even when the underlying worker has been replaced.

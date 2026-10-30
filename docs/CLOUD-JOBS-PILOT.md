@@ -1,4 +1,6 @@
-# Cloud jobs: PR-only pilot
+# Cloud jobs: earlier PR-only pilot
+
+**Superseded:** [Cloud tasks v1](CLOUD-TASKS.md) implements current-project source capture and optional delivery policies. This earlier PR-only scope is retained as historical context, not the active product contract.
 
 Proposed 2026-10-30, following the CTO's requirements. This narrows the first delivery from [the broader cloud-copy plan](CLOUD-IMPLEMENTATION-PLAN.md). No provisioning, paid runs or deployment is authorized by this note; the CTO supplies a cost cap before launch.
 

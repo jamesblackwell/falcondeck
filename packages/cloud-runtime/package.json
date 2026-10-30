@@ -1,0 +1,11 @@
+{
+  "name": "@falcondeck/cloud-runtime",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "engines": { "node": ">=22" },
+  "exports": "./src/adapter.mjs",
+  "bin": { "falcondeck-cloud-runtime": "./src/cli.mjs" },
+  "scripts": { "test": "node --test test/*.test.mjs" },
+  "dependencies": { "@vercel/sandbox": "3.9.1" }
+}

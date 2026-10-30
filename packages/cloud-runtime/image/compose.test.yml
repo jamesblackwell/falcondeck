@@ -1,0 +1,52 @@
+# Disposable test services only. Every published port binds VM loopback.
+name: falcondeck-tests
+services:
+  postgres:
+    image: postgres:17.6-bookworm@sha256:f3bd19c606e442c3d7bdfa8002e03fe260a1023351e0ea4598032022b68dd6e3
+    profiles: [tests]
+    environment:
+      POSTGRES_DB: falcondeck_test
+      POSTGRES_USER: falcondeck_test
+      POSTGRES_PASSWORD: test-only-not-a-secret
+    ports: ["127.0.0.1:5432:5432"]
+    tmpfs: [/var/lib/postgresql/data]
+    healthcheck:
+      test: [CMD-SHELL, "pg_isready -U falcondeck_test -d falcondeck_test"]
+      interval: 2s
+      timeout: 2s
+      retries: 30
+    mem_limit: 512m
+    cpus: 0.5
+    pids_limit: 128
+    networks: [tests]
+  redis:
+    image: redis:7.4.5-bookworm@sha256:90e7a336d044f1abc9e9dbc05d65566850896d11453bbd1dd0fb7e5059f0e8fb
+    profiles: [tests]
+    command: [redis-server, --save, "", --appendonly, "no"]
+    ports: ["127.0.0.1:6379:6379"]
+    tmpfs: [/data]
+    healthcheck:
+      test: [CMD, redis-cli, ping]
+      interval: 2s
+      timeout: 2s
+      retries: 30
+    mem_limit: 128m
+    cpus: 0.25
+    pids_limit: 64
+    networks: [tests]
+  meilisearch:
+    image: getmeili/meilisearch:v1.56.0@sha256:1f578fa865f8251894b3bf38d6668d6209a3f451f8f65ab953e129d4c1db5ef4
+    profiles: [tests]
+    environment:
+      MEILI_ENV: development
+      MEILI_NO_ANALYTICS: "true"
+      MEILI_MASTER_KEY: test-only-not-a-secret
+    ports: ["127.0.0.1:7700:7700"]
+    tmpfs: [/meili_data]
+    mem_limit: 512m
+    cpus: 0.5
+    pids_limit: 128
+    networks: [tests]
+networks:
+  tests:
+    internal: true

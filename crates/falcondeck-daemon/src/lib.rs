@@ -15,6 +15,7 @@ mod agy;
 mod api;
 mod app;
 mod claude;
+mod cloud;
 mod codex;
 mod connector_catalog;
 mod connector_logos;

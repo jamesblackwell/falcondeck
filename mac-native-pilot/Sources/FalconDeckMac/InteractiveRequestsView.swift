@@ -53,14 +53,18 @@ struct InteractiveRequestsView: View {
     let store: AppStore
     var body: some View {
         ForEach(store.pendingRequests, id: \.self) { request in
-            RequestCard(store: store, request: request)
+            NativeInteractiveRequestCard(request: request, preferences: store.preferences, connected: store.isSelectedHostConnected) { response in
+                try await store.respond(request: request, response: response)
+            }
         }
     }
 }
 
-private struct RequestCard: View {
-    let store: AppStore
+struct NativeInteractiveRequestCard: View {
     let request: JSON
+    let preferences: JSON
+    let connected: Bool
+    var onRespond: (JSON) async throws -> Void
     @State private var answers: [String: String] = [:]
     @State private var sending = false
     @State private var error: String?
@@ -146,9 +150,9 @@ private struct RequestCard: View {
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(.orange.opacity(0.08), in: RoundedRectangle(cornerRadius: 12))
         .overlay { RoundedRectangle(cornerRadius: 12).strokeBorder(.orange.opacity(0.3)) }
-        .disabled(sending || !store.isSelectedHostConnected)
+        .disabled(sending || !connected)
         .onAppear {
-            let setting = store.preferences["conversation"]["auto_expand"]["approvals"]
+            let setting = preferences["conversation"]["auto_expand"]["approvals"]
             detailsExpanded = setting == .null || setting.bool
         }
     }
@@ -166,7 +170,7 @@ private struct RequestCard: View {
         Task {
             defer { sending = false }
             do {
-                try await store.respond(request: request, response: response)
+                try await onRespond(response)
                 if response["decision"].string == "allow", let signInURL { NSWorkspace.shared.open(signInURL) }
             }
             catch { self.error = error.localizedDescription }

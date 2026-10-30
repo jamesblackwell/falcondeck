@@ -96,6 +96,21 @@ enum NativeRemoteRequestRouter {
     // without an HTTP counterpart (sync.*, turn.steer) are called directly by
     // the remote transport when needed, rather than inventing HTTP endpoints.
     private static let routes: [Route] = [
+        Route("GET", "api/cloud/settings", "cloud.settings.get"),
+        Route("PUT", "api/cloud/settings", "cloud.settings.update"),
+        Route("POST", "api/cloud/capture", "cloud.capture"),
+        Route("GET", "api/cloud/jobs", "cloud.jobs.list"),
+        Route("POST", "api/cloud/jobs", "cloud.jobs.create"),
+        Route("GET", "api/cloud/jobs/:job_id", "cloud.jobs.get"),
+        Route("GET", "api/cloud/jobs/:job_id/detail", "cloud.jobs.detail"),
+        Route("POST", "api/cloud/jobs/:job_id/turns", "cloud.jobs.turn"),
+        Route("POST", "api/cloud/jobs/:job_id/interrupt", "cloud.jobs.interrupt"),
+        Route("POST", "api/cloud/jobs/:job_id/approvals/:request_id", "cloud.jobs.approval"),
+        Route("POST", "api/cloud/jobs/:job_id/interactive/:request_id", "cloud.jobs.interactive"),
+        Route("POST", "api/cloud/jobs/:job_id/collect", "cloud.jobs.collect"),
+        Route("POST", "api/cloud/jobs/:job_id/import", "cloud.jobs.import"),
+        Route("POST", "api/cloud/jobs/:job_id/stop", "cloud.jobs.stop"),
+        Route("POST", "api/cloud/jobs/:job_id/resume", "cloud.jobs.resume"),
         Route("GET", "api/snapshot", "snapshot.current"),
         Route("GET", "api/preferences", "preferences.read"),
         Route("PATCH", "api/preferences", "preferences.update"),

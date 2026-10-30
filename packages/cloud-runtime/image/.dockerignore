@@ -1,0 +1,6 @@
+*
+!Dockerfile
+!start-test-docker.sh
+!compose.test.yml
+!daemon/
+!daemon/falcondeck-daemon
