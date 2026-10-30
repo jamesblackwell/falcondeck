@@ -278,7 +278,7 @@ pub fn capabilities() -> &'static [Capability] {
         Capability {
             id: ops::AUTOMATION_CREATE,
             title: "Create automation",
-            description: "Create a recurring, interval, one-time or conditional-prompt automation that runs an agent instruction on a schedule. When the user asks for a follow-up, check-in, reminder or re-run of what this conversation is doing, target thread kind \"current\" so the run continues in this thread with its context; reserve \"managed\" for standing schedules unrelated to the conversation and \"new_each_run\" for runs that must start clean.",
+            description: "Create a recurring, interval, one-time or conditional-prompt automation that runs an agent instruction on a schedule. When the user asks for a follow-up, check-in, reminder or re-run of what this conversation is doing, target thread kind \"current\" so the run continues in this thread with its context; reserve \"managed\" for standing schedules unrelated to the conversation and \"new_each_run\" for runs that must start clean (earlier run threads are archived once read or when they found nothing to do). For monitoring, use a conditional prompt so quiet runs end with the no-action marker, give it an end (a one-time follow-up, or pause it when the work lands), and repeat no more often than every 30 minutes; agents cannot schedule anything more frequent.",
             domain: "automation",
             scopes: &[ControlScope::Host, ControlScope::Workspace],
             input_schema: schema::<CreateAutomationArgs>(),

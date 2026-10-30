@@ -25,6 +25,8 @@ use super::ControlError;
 
 /// Minimum seconds between interval runs.
 pub const MIN_INTERVAL_SECONDS: u64 = 60;
+/// Agents may not schedule repeating work more often than this; people can.
+pub const MIN_AGENT_REPEAT_SECONDS: i64 = 30 * 60;
 /// How far ahead a next occurrence may be calculated. Sparse-but-valid
 /// schedules (Feb 29) resolve within one leap cycle; anything longer is
 /// treated as uncalculable and rejected.
@@ -359,6 +361,48 @@ pub fn next_occurrence(
 }
 
 /// Validates a trigger and requires a calculable next occurrence from `now`.
+/// Rejects agent-created schedules that repeat more often than every 30 minutes.
+/// Frequent polling fills threads and context; a one-time follow-up covers
+/// "check again soon".
+pub fn validate_agent_frequency(
+    trigger: &AutomationTrigger,
+    now: DateTime<Utc>,
+) -> Result<(), ControlError> {
+    let too_frequent = match trigger {
+        AutomationTrigger::Once { .. } => false,
+        AutomationTrigger::Interval { every_seconds, .. } => {
+            (*every_seconds as i64) < MIN_AGENT_REPEAT_SECONDS
+        }
+        AutomationTrigger::Cron { .. } => {
+            // The shortest of the next few gaps.
+            let mut at = now;
+            let mut shortest = i64::MAX;
+            let mut previous: Option<DateTime<Utc>> = None;
+            for _ in 0..6 {
+                let Some(next) = next_occurrence(trigger, at)? else {
+                    break;
+                };
+                if let Some(previous) = previous {
+                    shortest = shortest.min((next.at - previous).num_seconds());
+                }
+                previous = Some(next.at);
+                at = next.at;
+            }
+            shortest < MIN_AGENT_REPEAT_SECONDS
+        }
+    };
+    if too_frequent {
+        return Err(ControlError::invalid_schedule(
+            "agents can schedule repeating work at most every 30 minutes",
+            Some("trigger"),
+        )
+        .with_suggested_action(
+            "Use a longer interval, or a one-time (\"once\") follow-up if you need to check back sooner.",
+        ));
+    }
+    Ok(())
+}
+
 pub fn validate_trigger(
     trigger: &AutomationTrigger,
     now: DateTime<Utc>,
@@ -1155,6 +1199,28 @@ mod tests {
         };
         let error = next_occurrence(&trigger, utc("2026-08-16T00:00:00Z")).unwrap_err();
         assert_eq!(error.0.code, "invalid_schedule");
+    }
+
+    #[test]
+    fn agents_cannot_schedule_repeats_more_often_than_every_half_hour() {
+        let now = Utc::now();
+        let interval = |seconds| AutomationTrigger::Interval {
+            every_seconds: seconds,
+            anchor_at: now,
+        };
+        let cron = |expression: &str| AutomationTrigger::Cron {
+            expression: expression.into(),
+            timezone: "Europe/London".into(),
+        };
+        assert!(validate_agent_frequency(&interval(900), now).is_err());
+        assert!(validate_agent_frequency(&interval(1800), now).is_ok());
+        assert!(validate_agent_frequency(&cron("*/15 9-17 * * *"), now).is_err());
+        assert!(validate_agent_frequency(&cron("0 8-22 * * *"), now).is_ok());
+        assert!(validate_agent_frequency(&cron("0 9 * * 1"), now).is_ok());
+        let soon = AutomationTrigger::Once {
+            run_at: now + chrono::Duration::minutes(5),
+        };
+        assert!(validate_agent_frequency(&soon, now).is_ok());
     }
 
     #[test]

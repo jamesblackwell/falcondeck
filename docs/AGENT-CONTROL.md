@@ -46,6 +46,12 @@ keeps only bounded run metadata.
 - **Targets**: a canonical workspace path (never a runtime workspace id), an
   open provider id, and a thread strategy — managed (one remembered thread),
   existing, or new-per-run.
+- **Agent frequency floor**: schedules created or edited by agents (the MCP
+  origin) cannot repeat more often than every 30 minutes; one-time triggers are
+  unaffected, and people can still choose any interval in the app.
+- **Fresh-thread runs stay tidy**: before a `new_each_run` automation starts a
+  run, earlier run threads that are idle and either read or finished with the
+  no-action marker are archived. Unread findings stay until seen.
 - **Policies**: concurrency (`skip` default, `queue_one`, `allow`) and
   misfire (`skip` default, `run_once`). No automatic retries: provider tasks
   can have external side effects. One-time automations become `completed`

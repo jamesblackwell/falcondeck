@@ -809,6 +809,9 @@ impl ControlService {
         )?;
         let now = Utc::now();
         let next = automations::validate_trigger(&args.trigger, now)?;
+        if context.origin == ControlOrigin::Mcp {
+            automations::validate_agent_frequency(&args.trigger, now)?;
+        }
         let elevated = automations::is_elevated_mode(
             args.target.permission_mode.as_deref(),
             args.target.sandbox_mode.as_deref(),
@@ -940,6 +943,9 @@ impl ControlService {
             automation.elevated = elevated;
             if trigger_changed {
                 let next = automations::validate_trigger(&automation.trigger, now)?;
+                if context.origin == ControlOrigin::Mcp {
+                    automations::validate_agent_frequency(&automation.trigger, now)?;
+                }
                 automation.next_run_at = Some(next.at);
                 // A completed one-time automation that is rescheduled
                 // becomes enabled again.

@@ -589,6 +589,7 @@ async fn resolve_thread(
             }
         }
         AutomationThreadTarget::NewEachRun => {
+            archive_settled_run_threads(app, automation).await;
             start_automation_thread(app, automation, workspace_id).await
         }
         // `current` is pinned to a concrete thread when the definition is
@@ -616,6 +617,47 @@ async fn resolve_thread(
                 .await;
             Ok(created)
         }
+    }
+}
+
+/// Earlier run threads of a fresh-thread-per-run automation that can leave the
+/// sidebar: idle, and either already read or finished with nothing to do.
+/// Unread findings stay until the user has seen them.
+fn settled_run_threads(
+    threads: &[falcondeck_core::ThreadSummary],
+    automation_id: &str,
+    no_action_threads: &std::collections::HashSet<String>,
+) -> Vec<(String, String)> {
+    threads
+        .iter()
+        .filter(|thread| {
+            matches!(&thread.origin, Some(ThreadOrigin::Automation { automation_id: id, .. }) if id == automation_id)
+                && !thread.is_archived
+                && thread.status == ThreadStatus::Idle
+                && (!thread.attention.unread || no_action_threads.contains(&thread.id))
+        })
+        .map(|thread| (thread.workspace_id.clone(), thread.id.clone()))
+        .collect()
+}
+
+async fn archive_settled_run_threads(
+    app: &AppState,
+    automation: &falcondeck_core::control::Automation,
+) {
+    let no_action: std::collections::HashSet<String> = app
+        .control()
+        .runs_since(Utc::now() - chrono::Duration::days(30))
+        .await
+        .into_iter()
+        .filter(|run| {
+            run.automation_id == automation.id
+                && run.status == AutomationRunStatus::SucceededNoAction
+        })
+        .filter_map(|run| run.thread_id)
+        .collect();
+    let threads = app.snapshot().await.threads;
+    for (workspace_id, thread_id) in settled_run_threads(&threads, &automation.id, &no_action) {
+        let _ = app.archive_thread(&workspace_id, &thread_id).await;
     }
 }
 
@@ -682,6 +724,44 @@ fn scheduler_context() -> ControlRequestContext {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn run_thread(id: &str, automation: &str, unread: bool) -> falcondeck_core::ThreadSummary {
+        let mut thread: falcondeck_core::ThreadSummary =
+            serde_json::from_value(serde_json::json!({
+                "id": id,
+                "workspace_id": "ws",
+                "title": "Monitor",
+                "provider": "claude",
+                "status": "idle",
+                "updated_at": "2026-10-30T08:00:00Z",
+            }))
+            .unwrap();
+        thread.origin = Some(ThreadOrigin::Automation {
+            automation_id: automation.into(),
+            name: "Monitor".into(),
+        });
+        thread.attention.unread = unread;
+        thread
+    }
+
+    #[test]
+    fn only_read_or_no_action_run_threads_are_archived() {
+        let mut busy = run_thread("busy", "a", false);
+        busy.status = ThreadStatus::Running;
+        let threads = vec![
+            run_thread("read", "a", false),
+            run_thread("unread-findings", "a", true),
+            run_thread("unread-nothing", "a", true),
+            run_thread("other-automation", "b", false),
+            busy,
+        ];
+        let no_action = ["unread-nothing".to_string()].into_iter().collect();
+        let ids: Vec<_> = settled_run_threads(&threads, "a", &no_action)
+            .into_iter()
+            .map(|(_, id)| id)
+            .collect();
+        assert_eq!(ids, ["read", "unread-nothing"]);
+    }
 
     #[test]
     fn interrupt_and_failure_statuses_are_classified() {
