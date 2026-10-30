@@ -1393,6 +1393,10 @@ export const WorkspaceSidebar = memo(function WorkspaceSidebar({
     useState<ReadonlyMap<string, ReadonlySet<string>>>(() => new Map());
   const [threadContextMenu, setThreadContextMenu] =
     useState<ThreadContextMenuState | null>(null);
+  // Bot homes are managed in bot settings, rather than as project tasks.
+  const isBotContextMenu = Boolean(
+    bots?.some((bot) => bot.thread_id === threadContextMenu?.thread.id),
+  );
   // Archive asks before it acts: the target row dims and shows a Confirm pill
   // until the user confirms, dismisses, or clicks elsewhere.
   const [pendingArchive, setPendingArchiveState] = useState<{
@@ -3077,7 +3081,15 @@ export const WorkspaceSidebar = memo(function WorkspaceSidebar({
         ) : null}
         {/* Kept mounted while Activity is up so pagers and folds survive. */}
         <div hidden={Boolean(activity)}>
-        <BotSidebar bots={bots} botApi={botApi} botNumberShortcuts={botNumberShortcuts} groups={allGroups} selectedThreadId={selectedThreadId} onSelectThread={handleSelectThread} />
+        <BotSidebar
+          bots={bots}
+          botApi={botApi}
+          botNumberShortcuts={botNumberShortcuts}
+          groups={allGroups}
+          selectedThreadId={selectedThreadId}
+          onSelectThread={handleSelectThread}
+          onOpenContextMenu={handleOpenThreadContextMenu}
+        />
         <PinnedThreadList
           entries={pinnedThreads}
           collapsed={pinnedCollapsed}
@@ -3410,18 +3422,22 @@ export const WorkspaceSidebar = memo(function WorkspaceSidebar({
             ? (workspacePathById.get(threadContextMenu.workspaceId) ?? null)
             : null
         }
-        canRename={Boolean(onRenameThread)}
-        canFork={Boolean(onForkThread)}
+        canRename={!isBotContextMenu && Boolean(onRenameThread)}
+        canFork={!isBotContextMenu && Boolean(onForkThread)}
         canArchive={
-          Boolean(onArchiveThread) && !threadContextMenu?.thread.is_archived
+          !isBotContextMenu &&
+          Boolean(onArchiveThread) &&
+          !threadContextMenu?.thread.is_archived
         }
         canUnarchive={
+          !isBotContextMenu &&
           Boolean(onUnarchiveThread) &&
           Boolean(threadContextMenu?.thread.is_archived)
         }
-        canDelete={Boolean(onDeleteThread)}
-        canPin={Boolean(onTogglePinThread)}
+        canDelete={!isBotContextMenu && Boolean(onDeleteThread)}
+        canPin={!isBotContextMenu && Boolean(onTogglePinThread)}
         canPinInProject={
+          !isBotContextMenu &&
           Boolean(onTogglePinThreadInProject) &&
           threadContextMenu != null &&
           groups.find(
@@ -3430,7 +3446,9 @@ export const WorkspaceSidebar = memo(function WorkspaceSidebar({
         }
         canMarkRead={Boolean(onMarkThreadRead)}
         canMarkUnread={Boolean(onMarkThreadUnread)}
+        canMoveToFolder={!isBotContextMenu}
         stageOptions={
+          !isBotContextMenu &&
           onSetThreadStage &&
           threadContextMenu &&
           (!canSetThreadStage ||

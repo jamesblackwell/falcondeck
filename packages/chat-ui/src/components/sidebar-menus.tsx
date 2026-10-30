@@ -145,6 +145,7 @@ export const ThreadContextMenu = memo(function ThreadContextMenu({
   canPinInProject,
   canMarkRead,
   canMarkUnread,
+  canMoveToFolder = true,
   stageOptions,
   selectedStage,
   onClose,
@@ -173,6 +174,7 @@ export const ThreadContextMenu = memo(function ThreadContextMenu({
   canPinInProject: boolean
   canMarkRead: boolean
   canMarkUnread: boolean
+  canMoveToFolder?: boolean
   stageOptions: ThreadTag[]
   selectedStage: ThreadTag | null
   onClose: () => void
@@ -274,8 +276,14 @@ export const ThreadContextMenu = memo(function ThreadContextMenu({
   const sessionId = target.thread.native_session_id
   const iconClassName = 'h-3.5 w-3.5 text-fg-muted'
   const canSetStage = stageOptions.length > 0
+  const showMoveToFolder =
+    canMoveToFolder &&
+    Boolean(
+      folderControls.onProjectFolderMutation &&
+      folderControls.folders.some((folder) => folder.workspace_id === target.workspaceId),
+    )
   const rowCount =
-    Number(Boolean(folderControls.onProjectFolderMutation && folderControls.folders.some((folder) => folder.workspace_id === target.workspaceId))) +
+    Number(showMoveToFolder) +
     Number(canPin) +
     Number(canPinInProject) +
     Number(canRename) +
@@ -592,7 +600,13 @@ export const ThreadContextMenu = memo(function ThreadContextMenu({
           ) : null}
         </div>
       ) : null}
-      <ProjectFolderMoveMenuItem workspaceId={target.workspaceId} threadId={target.thread.id} onClose={onClose} />
+      {showMoveToFolder ? (
+        <ProjectFolderMoveMenuItem
+          workspaceId={target.workspaceId}
+          threadId={target.thread.id}
+          onClose={onClose}
+        />
+      ) : null}
       {workspacePath || sessionId ? (
         <div
           role="separator"

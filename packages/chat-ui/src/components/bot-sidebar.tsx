@@ -46,6 +46,7 @@ import {
 } from "@falcondeck/ui";
 import { BotMark } from "./bot-mark";
 import { ProviderIcon } from "./provider-icon";
+import type { ThreadContextMenuState } from "./sidebar-menus";
 
 export type BotSidebarControls = {
   bots?: BotProfile[];
@@ -90,10 +91,12 @@ export function BotSidebar({
   groups,
   selectedThreadId,
   onSelectThread,
+  onOpenContextMenu,
 }: BotSidebarControls & {
   groups: ProjectGroup[];
   selectedThreadId: string | null;
   onSelectThread: (workspace: string, thread: string) => void;
+  onOpenContextMenu?: (target: ThreadContextMenuState) => void;
 }) {
   const [editor, setEditor] = useState<BotProfile | "new" | null>(null);
   const icons = useMemo(() => resolveBotIcons(bots), [bots]);
@@ -123,6 +126,10 @@ export function BotSidebar({
       </div>
       {reorder.ordered.map((bot, index) => {
         const activity = botActivity(bot, tasks);
+        const home = tasks.find(
+          (task) =>
+            task.id === bot.thread_id && task.workspace_id === bot.workspace_id,
+        );
         const icon = icons.get(bot.id);
         const selected = selectedThreadId === bot.thread_id;
         return (
@@ -130,6 +137,16 @@ export function BotSidebar({
             key={bot.id}
             ref={(node) => reorder.register(bot.id, node)}
             onPointerDown={(event) => reorder.start(event, bot.id)}
+            onContextMenu={(event) => {
+              if (!home || !onOpenContextMenu) return;
+              event.preventDefault();
+              onOpenContextMenu({
+                workspaceId: bot.workspace_id,
+                thread: home,
+                x: event.clientX,
+                y: event.clientY,
+              });
+            }}
             className={cn(
               "group flex items-center gap-1 rounded-[var(--fd-radius-md)] pr-1.5 transition-colors duration-[var(--fd-duration-hover)]",
               reorder.dragging === bot.id
@@ -190,6 +207,12 @@ export function BotSidebar({
                   <ActivityDiamond size="xs" />
                   <span className="sr-only">Working</span>
                 </>
+              ) : home?.attention.unread ? (
+                <span
+                  role="img"
+                  aria-label="Unread"
+                  className="h-2 w-2 shrink-0 rounded-full bg-unread"
+                />
               ) : null}
               {showNumbers && index < 9 ? (
                 <Kbd aria-hidden="true" className="shrink-0">
