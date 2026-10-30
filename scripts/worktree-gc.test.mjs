@@ -3,7 +3,8 @@ import { after, before, test } from 'node:test';
 import { execFileSync } from 'node:child_process';
 import { existsSync, mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import {
   DEFAULTS,
   GENERATED_PRESET,
@@ -277,4 +278,11 @@ test('--apply re-checks state: a worktree dirtied after the scan is not removed'
   } finally {
     process.env.HOME = savedHome;
   }
+});
+
+test('runs when invoked through a symlinked path', () => {
+  const link = join(sandbox, 'link');
+  execFileSync('ln', ['-s', dirname(fileURLToPath(import.meta.url)), link]);
+  const out = execFileSync('node', [join(link, 'worktree-gc.mjs'), '--help'], { encoding: 'utf8' });
+  assert.match(out, /Usage: worktree-gc/);
 });

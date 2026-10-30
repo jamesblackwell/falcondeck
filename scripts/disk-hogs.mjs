@@ -6,7 +6,7 @@
 //   node scripts/disk-hogs.mjs [--top 10] [--format text|markdown|json]
 
 import { execFile } from 'node:child_process';
-import { existsSync, readdirSync } from 'node:fs';
+import { existsSync, readdirSync, realpathSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -115,7 +115,7 @@ export function render(result, { top = 10, format = 'text' } = {}) {
   return lines.join('\n');
 }
 
-if (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]) {
+if (process.argv[1] && fileURLToPath(import.meta.url) === realpathSync(process.argv[1])) {
   const args = process.argv.slice(2);
   const arg = (name, fallback) => (args.includes(name) ? args[args.indexOf(name) + 1] : fallback);
   collect().then((result) => {
