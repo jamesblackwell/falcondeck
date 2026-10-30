@@ -130,6 +130,10 @@ pub struct SpeechTranscriptionRequest {
     /// timeout and the ordering of duration-capped models.
     #[serde(default)]
     pub duration_seconds: Option<f64>,
+    /// Manual retries must report the chosen model's result, not silently
+    /// substitute a model whose transcript the user is trying to replace.
+    #[serde(default)]
+    pub no_fallback: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -290,11 +294,7 @@ impl AppState {
         let (audio, format, duration_seconds) =
             compact_speech_audio(audio, &request.format, request.duration_seconds).await;
         let audio_duration = estimated_audio_duration(duration_seconds, audio.len(), &format);
-        let models = fallback_models(
-            &request.model,
-            request.fallback_model.as_deref(),
-            audio_duration,
-        );
+        let models = transcription_models(&request, audio_duration);
         let request_timeout = transcription_timeout(audio_duration);
         // The extension tells OpenRouter the container format.
         let file_name = format!("audio.{}", format);
@@ -608,6 +608,21 @@ fn base_model(model: &str) -> &str {
 /// Whether the model refuses audio longer than [`MODEL_AUDIO_LIMIT`].
 fn rejects_long_audio(model: &str) -> bool {
     DURATION_CAPPED_MODELS.contains(&base_model(model))
+}
+
+fn transcription_models(
+    request: &SpeechTranscriptionRequest,
+    audio_duration: Duration,
+) -> Vec<String> {
+    if request.no_fallback {
+        vec![request.model.trim().to_string()]
+    } else {
+        fallback_models(
+            &request.model,
+            request.fallback_model.as_deref(),
+            audio_duration,
+        )
+    }
 }
 
 fn fallback_models(
@@ -1096,6 +1111,23 @@ mod tests {
             .get_or_init(|| tokio::sync::Mutex::new(()))
             .lock()
             .await
+    }
+
+    #[test]
+    fn manual_retry_honors_the_exact_model_and_legacy_requests_keep_fallbacks() {
+        let mut request: SpeechTranscriptionRequest = serde_json::from_value(json!({
+            "audio_base64": "AAAA", "format": "m4a",
+            "model": "nvidia/parakeet-tdt-0.6b-v3",
+            "fallback_model": "openai/whisper-large-v3-turbo"
+        }))
+        .unwrap();
+        assert!(!request.no_fallback);
+        assert!(transcription_models(&request, SHORT_AUDIO).len() > 1);
+        request.no_fallback = true;
+        assert_eq!(
+            transcription_models(&request, SHORT_AUDIO),
+            vec![request.model]
+        );
     }
 
     #[test]

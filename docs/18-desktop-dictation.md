@@ -317,3 +317,14 @@ moving durable conversation state into the desktop shell.
     export it again. An older incomplete M4A should offer Discard without Retry.
 16. Deny a clipboard write after a successful retry; confirm the transcript
     stays visible with a working Copy action rather than reporting ASR failure.
+
+## History retry model selection
+
+Recording history retries start with the configured preferred cloud model,
+not the fallback model that may have produced the bad transcript. Local
+Parakeet entries continue to retry locally unless a cloud model is selected.
+Cloud history retries send `no_fallback: true` to `/api/speech/transcribe`
+(and the equivalent `speech.transcribe` RPC). The daemon uses exactly the
+requested model and returns its error or empty-transcription failure rather
+than silently substituting another model. Omitted or false `no_fallback`
+preserves the automatic fallback chain for ordinary dictation and older clients.

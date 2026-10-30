@@ -267,6 +267,7 @@ struct TranscriptionRequest {
     #[serde(skip_serializing_if = "Option::is_none")]
     fallback_model: Option<String>,
     duration_seconds: f64,
+    no_fallback: bool,
 }
 
 #[derive(Serialize)]
@@ -957,6 +958,7 @@ pub async fn dictation_history_retry(
             model.clone(),
             config.fallback_model.clone(),
             measured_recording_duration(entry.duration_seconds),
+            true,
         )
         .await
     };
@@ -1322,6 +1324,7 @@ async fn request_transcription(
     model: String,
     fallback_model: Option<String>,
     measured_duration_seconds: Option<f64>,
+    no_fallback: bool,
 ) -> Result<Transcription, String> {
     let duration_seconds = measured_duration_seconds
         .unwrap_or_else(|| audio.len() as f64 / RECORDING_BYTES_PER_SECOND);
@@ -1334,6 +1337,7 @@ async fn request_transcription(
             model: model.clone(),
             fallback_model,
             duration_seconds,
+            no_fallback,
         })
         .send()
         .await
@@ -1711,6 +1715,7 @@ async fn transcribe_recording(
             config.model.clone(),
             config.fallback_model.clone(),
             duration_seconds,
+            false,
         )
         .await
     };

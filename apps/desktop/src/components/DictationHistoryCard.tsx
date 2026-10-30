@@ -109,7 +109,7 @@ export function DictationHistoryCard({
   const retry = async (entry: DictationHistoryEntry) => {
     setBusyId(entry.id);
     try {
-      const updated = await retryDictationHistoryEntry(entry.id, retryModel || (entry.provider === "parakeet" ? undefined : settings.fallbackModel ?? settings.model));
+      const updated = await retryDictationHistoryEntry(entry.id, retryModel || (entry.provider === "parakeet" ? undefined : settings.model));
       setEntries((current) =>
         current.map((item) => (item.id === updated.id ? updated : item)),
       );
@@ -220,7 +220,7 @@ export function DictationHistoryCard({
           <Field
             label="Retry using"
             htmlFor="dictation-retry-model"
-            hint="Parakeet recordings retry locally by default. Choosing an OpenRouter model sends the kept audio to that cloud model."
+            hint="Retries use the preferred model without automatic fallback. Parakeet recordings stay local unless you choose an OpenRouter model."
           >
             <select
               id="dictation-retry-model"

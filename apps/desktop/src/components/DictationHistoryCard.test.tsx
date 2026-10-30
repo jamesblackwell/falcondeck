@@ -85,6 +85,14 @@ describe("DictationHistoryCard", () => {
     fireEvent.click(retry);
     await waitFor(() => expect(invocations.find(call => call.command === "dictation_history_retry")).toEqual({ command: "dictation_history_retry", args: { id: history[0].id, model: null } }));
   });
+  it("retries a Whisper fallback with the preferred cloud model", async () => {
+    history = [entry({ model: "openai/whisper-large-v3-turbo:nitro", text: "So" })];
+    writeDictationSettings({ ...DEFAULT_DICTATION_SETTINGS, model: "nvidia/parakeet-tdt-0.6b-v3", fallbackModel: "openai/whisper-large-v3-turbo" });
+    render(<DictationHistoryCard baseUrl="http://127.0.0.1:4123" onToast={() => {}} />);
+    fireEvent.click(await screen.findByRole("button", { name: "Retry" }));
+    await waitFor(() => expect(invocations.find(call => call.command === "dictation_history_retry")).toEqual({ command: "dictation_history_retry", args: { id: history[0].id, model: "nvidia/parakeet-tdt-0.6b-v3" } }));
+  });
+
   it("says how long recordings are kept, and says so plainly when they are not", () => {
     expect(retentionSummary(6)).toContain("6 hours");
     expect(retentionSummary(1)).toContain("an hour");
@@ -125,8 +133,8 @@ describe("DictationHistoryCard", () => {
       command: "dictation_history_retry",
       args: {
         id: "falcondeck-dictation-abc",
-        // Retrying defaults to the fallback model, not the one that just failed.
-        model: DEFAULT_DICTATION_SETTINGS.fallbackModel,
+        // Retry starts over with the preferred model, even after a fallback.
+        model: DEFAULT_DICTATION_SETTINGS.model,
       },
     });
   });
