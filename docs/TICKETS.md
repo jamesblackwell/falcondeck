@@ -1,9 +1,10 @@
 # Tickets
 
-Tickets track the bigger picture: work taking hours, days or weeks, or work
-other executives need to see. **Most changes should just be done. Never create
-a ticket for anything under a few hours.** This is a lightweight company work
-board for James and executive bots, not a checklist of coding changes.
+A lightweight shared work board for James and the executive bots. Since 30 Oct
+2026 agents are only told the board exists and left to decide whether and how
+to use it; the one hard guardrail is that each agent (a bot, or one provider's
+task threads together) may create at most five tickets in 24 hours
+(`ticket_limit`). James is not limited.
 
 Open **Tickets** in the desktop sidebar, or choose **Open Tickets** in the
 command palette. The board groups cards by state, filters by owner, project
@@ -52,9 +53,7 @@ are added. Tickets are not currently included in FalconDeck backup exports.
 
 ## Control tools
 
-Tickets track big-picture work taking hours, days or weeks. Most changes should
-just be done; no ticket for anything under a few hours. Search existing tickets
-before creating one, and keep state, owner and outcomes current.
+Search existing tickets before creating one.
 
 Use the existing three control tools; no per-thread tool catalogue is added:
 

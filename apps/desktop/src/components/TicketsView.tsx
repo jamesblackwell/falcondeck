@@ -93,7 +93,7 @@ export function TicketsView({ api, baseUrl, owners = [], projects = [], threads 
     return true;
   };
   return <div className="flex h-full min-h-0 flex-col bg-surface-1 p-5">
-    <SettingsPageHeader title="Tickets" description="Big-picture work taking hours, days or weeks. Most changes should just be done; no ticket for anything under a few hours."
+    <SettingsPageHeader title="Tickets" description="A shared board you and the bots can see. Agents can create up to five tickets a day each."
       actions={<><Button variant="ghost" size="sm" onClick={() => void refresh()} aria-label="Refresh tickets"><RefreshCw className="h-4 w-4" /></Button>
         <Button size="sm" disabled={!api} onClick={() => setCreating({})}><Plus className="h-4 w-4" />New ticket</Button></>} />
     <div className="flex flex-wrap items-center gap-2 py-4" aria-label="Ticket filters">

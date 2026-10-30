@@ -230,16 +230,6 @@ async fn tickets_control_get_execute_discovery_filters_pagination_and_idempotenc
         .await
         .unwrap();
     assert_eq!(search.results.len(), 3);
-    for capability in search.results {
-        assert!(
-            capability
-                .description
-                .contains("Most changes should just be done")
-                || capability
-                    .description
-                    .contains("most changes should just be done")
-        );
-    }
     let execute = |operation: &str, arguments: Value| -> ControlExecuteRequest {
         serde_json::from_value(json!({"operation":operation, "arguments":arguments, "idempotency_key":format!("test-{operation}")})).unwrap()
     };
@@ -333,4 +323,20 @@ async fn tickets_control_get_execute_discovery_filters_pagination_and_idempotenc
         .await
         .unwrap();
     assert_eq!(page.data[0]["id"], "T-2");
+}
+
+#[tokio::test]
+async fn tickets_cap_agent_creations_per_day_but_not_james() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = TicketStore::new(dir.path().join("tickets.json"));
+    for index in 0..AGENT_TICKETS_PER_DAY {
+        store.create(create(&format!("Work {index}")), actor()).await.unwrap();
+    }
+    let error = store.create(create("One too many"), actor()).await.unwrap_err();
+    assert_eq!(error.0.code, "ticket_limit");
+    let james = TicketActor {
+        name: "James".into(),
+        context: ControlRequestContext::default(),
+    };
+    store.create(create("James adds one"), james).await.unwrap();
 }

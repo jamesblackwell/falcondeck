@@ -61,7 +61,7 @@ discouraged.
 
 ## Tickets
 
-Tickets track big-picture work taking hours, days or weeks, or work other executives need to see. Most changes should just be done; never create a ticket for anything under a few hours. Executives keep state, owner and closing note current, link task thread ids, and leave concise comments for the record instead of messaging. Use `waiting_on_james` for blockers on James. See [TICKETS.md](TICKETS.md) for tools and the board.
+Bots are told the shared ticket board exists and how to reach it, and left to decide whether and how to use it (an experiment from 30 Oct 2026). Agents may create at most five tickets a day each. See [TICKETS.md](TICKETS.md) for tools and the board.
 
 ## Icons
 

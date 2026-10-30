@@ -2,13 +2,16 @@
 use std::path::PathBuf;
 
 use chrono::Utc;
-use falcondeck_core::control::{ControlGetRequest, ControlGetResponse};
+use falcondeck_core::control::{ControlGetRequest, ControlGetResponse, ControlOrigin};
 use falcondeck_core::tickets::*;
 use serde::{Deserialize, Serialize};
 use tokio::sync::Mutex;
 use uuid::Uuid;
 
 use super::ControlError;
+
+/// Tickets one agent (a bot, or a provider's task threads) may create in 24 hours.
+const AGENT_TICKETS_PER_DAY: usize = 5;
 
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -150,6 +153,31 @@ impl TicketStore {
         let _guard = self.transaction.lock().await;
         let mut records = self.load().await?;
         let now = Utc::now();
+        // Agents (not James on desktop or mobile) get a daily creation cap.
+        if !matches!(
+            actor.context.origin,
+            ControlOrigin::DesktopUi | ControlOrigin::RemoteRpc
+        ) {
+            let since = now - chrono::Duration::hours(24);
+            let recent = records
+                .tickets
+                .iter()
+                .filter(|ticket| ticket.created_by.name == actor.name && ticket.created_at > since)
+                .count();
+            if recent >= AGENT_TICKETS_PER_DAY {
+                return Err(ControlError::new(
+                    "ticket_limit",
+                    format!(
+                        "{} has created {recent} tickets in the last 24 hours, the most an agent may create in a day.",
+                        actor.name
+                    ),
+                    false,
+                )
+                .with_suggested_action(
+                    "Comment on or update an existing ticket instead, or ask James to add this one.",
+                ));
+            }
+        }
         let ticket = Ticket {
             id: format!("T-{}", records.next_id),
             title: args.title.trim().into(),

@@ -1995,6 +1995,7 @@ fn control_error_status(code: &str) -> StatusCode {
         | "revision_required"
         | "idempotency_conflict" => StatusCode::BAD_REQUEST,
         "revision_conflict" => StatusCode::CONFLICT,
+        "ticket_limit" => StatusCode::TOO_MANY_REQUESTS,
         "resource_not_found" => StatusCode::NOT_FOUND,
         "storage_unavailable" => StatusCode::SERVICE_UNAVAILABLE,
         _ => StatusCode::INTERNAL_SERVER_ERROR,

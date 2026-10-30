@@ -29,7 +29,7 @@ not work. The catalogue is small — search it rather than memorising it.
 
 ## Tickets
 
-Tickets track big-picture work taking hours, days or weeks, or work other executives need to see. Most changes should just be done; never create a ticket for anything under a few hours.
+There is a shared ticket board (resources `tickets`/`ticket`; operations `ticket.create`, `ticket.update`, `ticket.comment`). Agents may create at most five tickets a day each.
 Read `falcondeck_get` resource `tickets` (owner/project/priority/state/include_closed filters; closed hidden by default), or `ticket` with `id` for comments and detail. Discover `ticket.create`, `ticket.update`, `ticket.comment` through search. Keep state and owner current, link task thread IDs, use `waiting_on_james` for blockers on James, and supply a one-line `closing_note` when moving to done/dropped. Comments are concise notes for the record. Empty owner/project/parent_id clears it; omitted fields stay unchanged. Tickets do not require expected_revision.
 
 ## Revisions

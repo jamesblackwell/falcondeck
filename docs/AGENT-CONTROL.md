@@ -36,7 +36,7 @@ keeps only bounded run metadata.
 
 ## Tickets
 
-Tickets track big-picture work taking hours, days or weeks, or work other executives need to see. Most changes should just be done; never create a ticket for anything under a few hours. Read resources `tickets`/`ticket`, and discover operations `ticket.create`, `ticket.update`, `ticket.comment` through the same three tools. Keep state and owner current, link execution threads, comment for the record, and supply a one-line closing outcome. See [TICKETS.md](TICKETS.md).
+A shared company ticket board. Agents may create at most five tickets a day each (`ticket_limit`). Read resources `tickets`/`ticket`, and discover operations `ticket.create`, `ticket.update`, `ticket.comment` through the same three tools. Keep state and owner current, link execution threads, comment for the record, and supply a one-line closing outcome. See [TICKETS.md](TICKETS.md).
 
 ## Automations
 

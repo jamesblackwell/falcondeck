@@ -275,7 +275,7 @@ fn ticket_capability<T: JsonSchema>(
             confirmation_class: ConfirmationClass::Mutation,
         },
         examples: vec![example!(
-            "Big-picture company work only; most changes should just be done; no ticket under a few hours",
+            "Shared company ticket board",
             arguments
         )],
         related_operations: &[ops::TICKET_CREATE, ops::TICKET_UPDATE, ops::TICKET_COMMENT],
@@ -525,15 +525,15 @@ pub fn capabilities() -> &'static [Capability] {
         },
         ticket_capability::<falcondeck_core::tickets::CreateTicketArgs>(
             ops::TICKET_CREATE, "Create ticket",
-            "Create big-picture work taking hours, days or weeks, or work executives need to see. Most changes should just be done; no ticket for anything under a few hours. Read tickets first to avoid duplicates. Optional parent_id creates a one-level sub-ticket; closed states require a one-line closing_note.",
+            "Create a ticket on the shared board. Read tickets first to avoid duplicates. Agents may create at most five tickets a day each. Optional parent_id creates a one-level sub-ticket; closed states require a one-line closing_note.",
             json!({"title":"Launch company reporting", "owner":"Libra", "priority":"P1"})),
         ticket_capability::<falcondeck_core::tickets::UpdateTicketArgs>(
             ops::TICKET_UPDATE, "Update ticket",
-            "Keep state, owner, priority and linked_thread_ids current. Tickets are big-picture work only; most changes should just be done; no ticket for anything under a few hours. Done/dropped requires a one-line closing_note in this update. Empty owner/project/parent_id clears it. Omitted fields stay unchanged; arrays replace. Use waiting_on_james for blockers on James.",
+            "Keep state, owner, priority and linked_thread_ids current. Done/dropped requires a one-line closing_note in this update. Empty owner/project/parent_id clears it. Omitted fields stay unchanged; arrays replace. Use waiting_on_james for blockers on James.",
             json!({"ticket_id":"T-42", "state":"done", "closing_note":"Reporting is live for all executives."})),
         ticket_capability::<falcondeck_core::tickets::CommentTicketArgs>(
             ops::TICKET_COMMENT, "Comment on ticket",
-            "Add a concise markdown note for the record instead of messaging. Tickets are big-picture work only; most changes should just be done; no ticket for anything under a few hours. The daemon attributes author and thread; do not supply an author.",
+            "Add a concise markdown note for the record instead of messaging. The daemon attributes author and thread; do not supply an author.",
             json!({"ticket_id":"T-42", "body":"Waiting for James to approve the budget."})),
     ])
 }
