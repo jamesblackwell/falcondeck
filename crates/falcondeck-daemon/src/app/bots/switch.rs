@@ -1,8 +1,9 @@
 use super::*;
 
 impl AppState {
-    // Caller holds bot_mutations, also held by local turn admission. No turn can
-    // slip between the idle check and publishing the replacement home.
+    // Caller holds bot_mutations. Bot-thread sends hold a read guard on
+    // bot_turn_admission; the write guard below keeps any turn from slipping
+    // between the final idle check and publishing the replacement home.
     pub(super) async fn switch_bot_conversation(
         &self,
         id: &str,
@@ -20,22 +21,41 @@ impl AppState {
             ));
         }
         let mut bot = self.bot(id).await?;
+        let busy = |thread: &falcondeck_core::ThreadSummary| {
+            matches!(
+                thread.status,
+                ThreadStatus::Running | ThreadStatus::WaitingForInput
+            ) || !thread.queued_turns.is_empty()
+                || thread.attention.background_task_count > 0
+        };
+        let refuse = || {
+            DaemonError::Conflict(
+                "Stop or let the turn finish first before switching this bot".into(),
+            )
+        };
+        let first = self
+            .thread_summary(&bot.workspace_id, &bot.thread_id)
+            .await?;
+        if busy(&first) {
+            return Err(refuse());
+        }
+        // The briefing can page through a long history, so build it before
+        // excluding sends; rebuild under the guard only if a turn ran meanwhile.
+        let mut briefing = self
+            .continuity_briefing(&bot.workspace_id, &bot.thread_id)
+            .await?;
+        let _admission = self.inner.bot_turn_admission.write().await;
         let old = self
             .thread_summary(&bot.workspace_id, &bot.thread_id)
             .await?;
-        if matches!(
-            old.status,
-            ThreadStatus::Running | ThreadStatus::WaitingForInput
-        ) || !old.queued_turns.is_empty()
-            || old.attention.background_task_count > 0
-        {
-            return Err(DaemonError::Conflict(
-                "Stop or let the turn finish first before switching this bot".into(),
-            ));
+        if busy(&old) {
+            return Err(refuse());
         }
-        let briefing = self
-            .continuity_briefing(&bot.workspace_id, &bot.thread_id)
-            .await?;
+        if old.latest_turn_id != first.latest_turn_id {
+            briefing = self
+                .continuity_briefing(&bot.workspace_id, &bot.thread_id)
+                .await?;
+        }
         let same_provider = provider == old.provider;
         let permissions = switched_permissions(&old.agent, &provider, same_provider);
         let handle = self.start_thread(serde_json::from_value(json!({

@@ -295,18 +295,6 @@ pub fn capabilities() -> &'static [Capability] {
     static REGISTRY: OnceLock<Vec<Capability>> = OnceLock::new();
     REGISTRY.get_or_init(|| vec![
         Capability {
-            id: ops::BOT_SWITCH,
-            title: "Switch bot harness",
-            description: "User-only: move a bot to a fresh conversation on a chosen harness and model. The same harness gives a fresh start. Preserves the bot identity, archives the old home, and defers continuity context until the next message. Stop or let the turn finish first.",
-            domain: "agent_control",
-            scopes: &[ControlScope::Host],
-            input_schema: schema::<SwitchBotArgs>(),
-            output_schema: json!({"type":"object"}),
-            behavior: CapabilityBehavior { read_only: false, destructive: false, idempotent: false, confirmation_class: ConfirmationClass::Sensitive },
-            examples: vec![example!("Move Juno to Codex", json!({"id":"bot-id", "provider":"codex", "model_id":"gpt-6.1-sol"}))],
-            related_operations: &[],
-        },
-        Capability {
             id: ops::SETTINGS_UPDATE,
             title: "Update agent control settings",
             description: "Update global and per-provider agent-control settings such as the enabled flag, default timezone or elevated-automation permission.",
@@ -555,6 +543,18 @@ pub fn capabilities() -> &'static [Capability] {
             ops::TICKET_COMMENT, "Comment on ticket",
             "Add a concise markdown note for the record instead of messaging. The daemon attributes author and thread; do not supply an author.",
             json!({"ticket_id":"T-42", "body":"Waiting for James to approve the budget."})),
+        Capability {
+            id: ops::BOT_SWITCH,
+            title: "Switch bot harness",
+            description: "User-only: move a bot to a fresh conversation on a chosen harness and model. The same harness gives a fresh start. Preserves the bot identity, archives the old home, and defers continuity context until the next message. Stop or let the turn finish first.",
+            domain: "bot",
+            scopes: &[ControlScope::Host],
+            input_schema: schema::<SwitchBotArgs>(),
+            output_schema: json!({"type":"object"}),
+            behavior: CapabilityBehavior { read_only: false, destructive: false, idempotent: false, confirmation_class: ConfirmationClass::Sensitive },
+            examples: vec![example!("Move Juno to Codex", json!({"id":"bot-id", "provider":"codex", "model_id":"gpt-6.1-sol"}))],
+            related_operations: &[],
+        },
     ])
 }
 

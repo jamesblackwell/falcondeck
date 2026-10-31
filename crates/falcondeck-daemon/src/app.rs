@@ -370,6 +370,9 @@ struct InnerState {
     desktop_active_until: StdMutex<Option<chrono::DateTime<Utc>>>,
     preferences: Mutex<FalconDeckPreferences>,
     bot_mutations: Mutex<()>,
+    /// Bot-thread sends hold a read guard; a harness switch takes the write
+    /// guard so no turn is admitted to the retiring home mid-switch.
+    bot_turn_admission: tokio::sync::RwLock<()>,
     analytics: analytics::Recorder,
     /// Embedded cua-driver child. Absent binary means this host cannot run it.
     computer_use: computer_use::ComputerUseHost,
@@ -1053,6 +1056,7 @@ impl AppState {
                 desktop_active_until: StdMutex::new(None),
                 preferences: Mutex::new(FalconDeckPreferences::default()),
                 bot_mutations: Mutex::new(()),
+                bot_turn_admission: tokio::sync::RwLock::new(()),
                 analytics,
                 computer_use,
                 scheduled_tasks: Mutex::new(scheduled_tasks::ScheduledTaskRegistry::default()),

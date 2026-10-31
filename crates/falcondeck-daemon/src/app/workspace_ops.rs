@@ -3199,8 +3199,10 @@ async fn send_turn_with_startup_mode(
     wait_for_startup: bool,
     agent: Option<&mut AgentMessage>,
 ) -> Result<CommandResponse, DaemonError> {
+    // Shared, so sends to different bots (and slow provider starts) never
+    // serialize behind each other; only a harness switch excludes them.
     let _bot_gate = if app.bot_for_thread(&request.thread_id).await.is_some() {
-        Some(app.inner.bot_mutations.lock().await)
+        Some(app.inner.bot_turn_admission.read().await)
     } else {
         None
     };

@@ -1171,3 +1171,26 @@ for line in sys.stdin:
     drop(workspaces);
     session.shutdown().await.unwrap();
 }
+
+#[tokio::test]
+async fn bot_sends_do_not_wait_on_bot_mutations() {
+    let (app, _temp) = fixture().await;
+    promote(&app).await;
+    app.with_thread_mut("workspace-1", "thread-1", |t| {
+        t.status = ThreadStatus::Running
+    })
+    .await
+    .unwrap();
+    // A slow bot edit or briefing must not hold up messages to any bot.
+    let _held = app.inner.bot_mutations.lock().await;
+    let request: falcondeck_core::SendTurnRequest = serde_json::from_value(json!({
+        "workspace_id": "workspace-1", "thread_id": "thread-1",
+        "inputs": [{"type":"text","text":"A result for the bot"}], "steer": false
+    }))
+    .unwrap();
+    let sent = tokio::time::timeout(std::time::Duration::from_secs(5), app.send_turn(request))
+        .await
+        .expect("send blocked on bot_mutations")
+        .unwrap();
+    assert_eq!(sent.message.as_deref(), Some("queued"));
+}
