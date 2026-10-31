@@ -101,6 +101,11 @@ enum NativeRecoveryCrypto {
         do {
             let snapshot = try await store.request("/api/recovery")
                 .setting("client", NativeArchivePreferences.clientBackup(NativePreferences.shared.exportSettings()))
+            let destinationFolder = URL(fileURLWithPath: folder, isDirectory: true).resolvingSymlinksInPath().path
+            let source = URL(fileURLWithPath: snapshot["source_state"].string, isDirectory: true).resolvingSymlinksInPath().path
+            guard destinationFolder != source, !destinationFolder.hasPrefix(source + "/") else {
+                throw PilotError("Choose a backup folder outside FalconDeck’s own data directory.")
+            }
             let data = try JSONEncoder().encode(snapshot)
             let destination = URL(fileURLWithPath: folder, isDirectory: true).appendingPathComponent("falcondeck-recovery-\(UUID().uuidString).fdbackup")
             try await Task.detached(priority: .utility) {

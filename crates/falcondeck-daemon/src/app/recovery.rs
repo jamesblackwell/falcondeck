@@ -225,12 +225,13 @@ fn build_at(
         }
     }
     state["remote"] = Value::Null;
+    let state_bytes = serde_json::to_vec(&state)?;
+    let mut total = state_bytes.len();
     let mut files = vec![RecoveryFile {
         scope: "state".into(),
         path: "daemon-state.json".into(),
-        data: STANDARD.encode(serde_json::to_vec(&state)?),
+        data: STANDARD.encode(state_bytes),
     }];
-    let mut total = 0;
     for name in CONFIGS
         .iter()
         .filter(|n| **n != "daemon-state.json")
@@ -481,7 +482,7 @@ fn prepare_at(
         .iter()
         .find(|f| f.scope == "state" && f.path == "falcondeck.json")
         .ok_or_else(|| bad("Missing bot preferences"))?;
-    let state: Value = serde_json::from_slice(
+    let mut state: Value = serde_json::from_slice(
         &STANDARD
             .decode(&state_file.data)
             .map_err(|_| bad("Invalid state data"))?,
@@ -492,6 +493,7 @@ fn prepare_at(
             .map_err(|_| bad("Invalid preference data"))?,
     )?;
     let _: falcondeck_core::FalconDeckPreferences = serde_json::from_value(preferences.clone())?;
+    state["remote"] = Value::Null;
     let _: PersistedAppState = serde_json::from_value(state.clone())?;
     if preferences["bots"].as_array().map_or(0, Vec::len) != archive.bot_count {
         return Err(bad("Recovery bot count does not match its manifest"));

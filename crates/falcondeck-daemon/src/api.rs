@@ -2311,8 +2311,8 @@ mod tickets_http_tests {
     }
 }
 
-async fn export_recovery(State(state): State<AppState>) -> Result<Json<falcondeck_core::RecoveryArchive>, DaemonError> {
-    Ok(Json(state.export_recovery().await?))
+async fn export_recovery(State(state): State<AppState>) -> Result<impl IntoResponse, DaemonError> {
+    Ok(([(header::CACHE_CONTROL, "no-store")], Json(state.export_recovery().await?)))
 }
 async fn stage_recovery(State(state): State<AppState>, Json(archive): Json<falcondeck_core::RecoveryArchive>) -> Result<Json<serde_json::Value>, DaemonError> {
     state.stage_recovery(archive).await?;
