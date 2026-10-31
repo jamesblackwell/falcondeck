@@ -20,6 +20,8 @@ const SUMMARY: &str = "falcondeck_thread_summary";
 const CHANGES: &str = "falcondeck_thread_changes";
 const MAX_CHARS: usize = 24_000;
 const MAX_ITEMS: usize = 100;
+/// Active (running, waiting or unused idle) children one parent may have at once.
+const MAX_ACTIVE_CHILDREN: usize = 5;
 
 pub(super) fn is_builtin(name: &str) -> bool {
     actions::is_action(name) || matches!(name, LIST | VIEW | CREATE | MESSAGE | SUMMARY | CHANGES)
@@ -58,7 +60,7 @@ pub(super) fn catalog() -> Vec<ExtensionAgentTool> {
             "message": {"type":"string", "minLength":1, "maxLength":24000, "description":"Readable prose with normal spaces between words."},
             "delivery": {"type":"string", "enum":["steer","queue"], "description":"Deprecated and ignored; messages always steer when the receiver can take them."}
         }), vec!["thread_id", "message"]),
-        (CREATE, "Create thread", "Start a local or cloud thread and optionally send its first prompt; returns without waiting. execution_target=cloud uses the configured sandbox with the project's current files. At most three active children per parent. Context defaults to none; briefing passes your summary, transcript_tail your recent transcript.", json!({
+        (CREATE, "Create thread", "Start a local or cloud thread and optionally send its first prompt; returns without waiting. execution_target=cloud uses the configured sandbox with the project's current files. At most five active children per parent. Context defaults to none; briefing passes your summary, transcript_tail your recent transcript.", json!({
             "prompt": {"type":"string", "minLength":1, "maxLength":24000, "description":"A self-contained brief: goal, relevant files, constraints, and what done looks like."},
             "title": {"type":"string", "minLength":1, "maxLength":200},
             "provider": {"type":"string", "minLength":1},
@@ -526,8 +528,8 @@ impl AppState {
                         .iter()
                         .filter(|t| child_is_active(t, parent))
                         .count();
-                    if retry.is_none() && local_children + cloud_children >= 3 {
-                        return Err(DaemonError::BadRequest("parent already has 3 concurrent children; finish a child or archive an unused idle child first".into()));
+                    if retry.is_none() && local_children + cloud_children >= MAX_ACTIVE_CHILDREN {
+                        return Err(DaemonError::BadRequest(format!("parent already has {MAX_ACTIVE_CHILDREN} concurrent children; finish a child or archive an unused idle child first")));
                     }
                 }
                 // Resolved after admission so a rejected call never creates a folder.
@@ -870,7 +872,7 @@ mod tests {
             .unwrap();
         let id = created_id(&created);
         assert!(id.starts_with("cloud-"));
-        for key in ["agent-cloud-retry-002", "agent-cloud-retry-003"] {
+        for key in ["agent-cloud-retry-002", "agent-cloud-retry-003", "agent-cloud-retry-004", "agent-cloud-retry-005"] {
             let mut another = arguments.clone();
             another["idempotency_key"] = json!(key);
             app.invoke_thread_tool(CREATE, &another, Some("thread-1"), None)
@@ -886,7 +888,7 @@ mod tests {
             )
             .await
             .unwrap_err();
-        assert!(full.to_string().contains("3 concurrent children"));
+        assert!(full.to_string().contains("5 concurrent children"));
         let repeated = app
             .invoke_thread_tool(CREATE, &arguments, Some("thread-1"), None)
             .await
@@ -895,7 +897,7 @@ mod tests {
         assert!(repeated.result.as_str().unwrap().contains("not replayed"));
         assert_eq!(
             app.cloud_manager().thread_summaries().await.unwrap().len(),
-            3
+            5
         );
         let list = app
             .invoke_thread_tool(LIST, &json!({}), Some("thread-1"), None)
@@ -917,7 +919,7 @@ mod tests {
         );
         // Draft creation, listing and summary reads never start the fake adapter.
         let jobs = app.cloud_manager().list().await.unwrap();
-        assert_eq!(jobs.len(), 3);
+        assert_eq!(jobs.len(), 5);
         assert!(
             jobs.iter()
                 .all(|job| job.worker.is_none() && job.expires_at.is_none())
@@ -2092,10 +2094,10 @@ mod tests {
         );
     }
     #[tokio::test]
-    async fn concurrent_creation_admits_only_three_children_and_completion_releases_slot() {
+    async fn concurrent_creation_admits_only_five_children_and_completion_releases_slot() {
         let (app, _temp) = fixture().await;
         let mut calls = tokio::task::JoinSet::new();
-        for _ in 0..6 {
+        for _ in 0..8 {
             let app = app.clone();
             calls.spawn(async move { app.invoke_extension_tool(call(CREATE, json!({}))).await });
         }
@@ -2105,12 +2107,12 @@ mod tests {
             match result.unwrap() {
                 Ok(result) => ids.push(created_id(&result)),
                 Err(error) => {
-                    assert!(error.to_string().contains("3 concurrent children"));
+                    assert!(error.to_string().contains("5 concurrent children"));
                     rejected += 1;
                 }
             }
         }
-        assert_eq!(ids.len(), 3);
+        assert_eq!(ids.len(), 5);
         assert_eq!(rejected, 3);
         app.with_thread_mut("workspace-1", &ids[0], |t| {
             t.latest_turn_id = Some("finished".into());
@@ -2245,7 +2247,7 @@ printf '%s\n' '{{"type":"result","subtype":"success","result":"done","session_id
     #[tokio::test]
     async fn archiving_a_running_child_does_not_release_its_slot() {
         let (app, _temp) = fixture().await;
-        for _ in 0..3 {
+        for _ in 0..5 {
             let result = app
                 .invoke_extension_tool(call(CREATE, json!({})))
                 .await
@@ -2262,7 +2264,7 @@ printf '%s\n' '{{"type":"result","subtype":"success","result":"done","session_id
                 .await
                 .unwrap_err()
                 .to_string()
-                .contains("3 concurrent children")
+                .contains("5 concurrent children")
         );
     }
 }

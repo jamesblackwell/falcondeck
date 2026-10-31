@@ -255,12 +255,12 @@ async fn bot_cross_project_delegation_retains_parent_and_counts_children_globall
         )
         .await;
     assert!(read.is_ok());
-    for _ in 0..2 {
+    for _ in 0..4 {
         app.invoke_thread_tool(CREATE, &json!({}), Some("thread-1"), None)
             .await
             .unwrap();
     }
-    let fourth = app
+    let sixth = app
         .invoke_thread_tool(
             CREATE,
             &json!({"workspace_id":"workspace-2"}),
@@ -269,7 +269,7 @@ async fn bot_cross_project_delegation_retains_parent_and_counts_children_globall
         )
         .await
         .unwrap_err();
-    assert!(fourth.to_string().contains("3 concurrent children"));
+    assert!(sixth.to_string().contains("5 concurrent children"));
 
     app.with_thread_mut("workspace-1", "thread-1", |thread| {
         thread.status = ThreadStatus::Running

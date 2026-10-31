@@ -149,7 +149,7 @@ requests and latest reply; `transcript_tail` up to 40 items / 12000
 characters). Creation returns after dispatch without waiting. If dispatch
 fails, the thread still exists; do not create a duplicate.
 
-At most three children per parent are active at once: running, waiting,
+At most five children per parent are active at once: running, waiting,
 queued, and unused idle children count; finished or errored ones do not.
 Archiving releases an unused idle child but not a running one.
 
