@@ -210,7 +210,16 @@ export async function restartDesktop({ installFrom, io = run, delay = sleep, hea
       }
     }
     // One launch only. Failure reports an error, never reschedules another restart.
-    io('/usr/bin/open', ['-g', app]);
+    // LaunchServices can briefly fail (-600) on a just-replaced bundle; retry
+    // only while no instance exists, so a retry can never start a second app.
+    for (let attempt = 1; ; attempt++) {
+      try { io('/usr/bin/open', ['-g', app]); break; } catch (error) {
+        if (attempt === 3) throw error;
+        log(`open failed (${String(error.message).trim().split('\n').pop()}); retrying`);
+        await delay(2000);
+        if (pids().length) break;
+      }
+    }
     await waitForDesktopHealth({ io, delay, health, now, log });
     // The CLI holds the restart lock, so other install runs cannot be staging here.
     try { cleanupDesktopInstallDirectories(files); }

@@ -78,6 +78,26 @@ test('one restart, no service created, helpers untouched', async () => {
   assert.equal(f.calls.filter(([c]) => c.endsWith('/open')).length, 1);
   assert.equal(f.calls.filter(([c]) => c.endsWith('/kill')).length, 1);
 });
+test('retries a transient LaunchServices open failure without a second launch', async () => {
+  const f = fixture();
+  let failures = 1;
+  await restartDesktop({ ...f, io: (command, args) => {
+    if (command.endsWith('/open') && failures-- > 0) {
+      f.calls.push([command, ...args]);
+      throw new Error('_LSOpenURLsWithCompletionHandler() failed with error -600.');
+    }
+    return f.io(command, args);
+  } });
+  assert.equal(f.calls.filter(([c]) => c.endsWith('/open')).length, 2);
+});
+test('gives up after three failed opens', async () => {
+  const f = fixture();
+  await assert.rejects(restartDesktop({ ...f, io: (command, args) => {
+    if (command.endsWith('/open')) { f.calls.push([command, ...args]); throw new Error('error -600'); }
+    return f.io(command, args);
+  } }), /-600/);
+  assert.equal(f.calls.filter(([c]) => c.endsWith('/open')).length, 3);
+});
 test('removes the known keep-alive job before quitting the app', async () => {
   const f = fixture({ stale: true });
   await restartDesktop(f);
