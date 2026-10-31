@@ -1,4 +1,4 @@
-//! Embedded cua-driver supervisor.
+//! Desktop-local computer-use backends.
 //!
 //! The packaged desktop app runs this daemon in-process, so a child spawned
 //! here is a direct child of FalconDeck.app and inherits its Accessibility
@@ -14,8 +14,8 @@ use std::{
 };
 
 use falcondeck_core::{
-    ComputerUseHealth, ComputerUseHealthCheck, ComputerUsePermissions, ComputerUsePreferences,
-    ComputerUseSettingsUpdate, ComputerUseStatus, ComputerUseTestResult,
+    ComputerUseBackend, ComputerUseHealth, ComputerUseHealthCheck, ComputerUsePermissions,
+    ComputerUsePreferences, ComputerUseSettingsUpdate, ComputerUseStatus, ComputerUseTestResult,
 };
 use tokio::{
     io::{AsyncBufReadExt, BufReader},
@@ -25,6 +25,8 @@ use tokio::{
 
 use super::AppState;
 use crate::error::DaemonError;
+
+mod agent_desktop;
 
 /// Default identity for existing desktop embedders. Native hosts supply their
 /// own application identity through `DaemonConfig`.
@@ -91,11 +93,35 @@ impl ComputerUseHost {
     }
 
     pub fn available(&self) -> bool {
-        macos_ok() && self.binary_present()
+        // Only the desktop embedding supplies this path. Availability describes
+        // the host; the selected backend's installation is reported separately.
+        macos_ok() && self.binary.is_some()
     }
 
     pub fn binary_present(&self) -> bool {
         self.binary.as_ref().is_some_and(|path| path.is_file())
+    }
+
+    pub fn agent_desktop_binary(&self) -> Option<PathBuf> {
+        agent_desktop::resolve_binary()
+    }
+
+    /// A usable CLI for the selected backend, for agent instruction injection.
+    pub async fn agent_desktop_ready(&self, prefs: &ComputerUsePreferences) -> Option<PathBuf> {
+        if !prefs.enabled || prefs.backend != ComputerUseBackend::AgentDesktop || !self.available()
+        {
+            return None;
+        }
+        self.stop().await;
+        let binary = self.agent_desktop_binary()?;
+        match agent_desktop::probe_health(&binary).await {
+            Ok(health) if tcc_grants_ok(&health) => Some(binary),
+            Ok(_) => None,
+            Err(error) => {
+                tracing::warn!(%error, "agent-desktop context not injected");
+                None
+            }
+        }
     }
 
     pub async fn stop(&self) {
@@ -134,8 +160,19 @@ impl ComputerUseHost {
         &self,
         prefs: &ComputerUsePreferences,
     ) -> Result<Option<ComputerUseConnector>, String> {
+        if prefs.backend == ComputerUseBackend::AgentDesktop {
+            self.stop().await;
+            return Ok(None);
+        }
         if !self.available() {
             return Ok(None);
+        }
+        if !self.binary_present() {
+            let mut inner = self.inner.lock().await;
+            stop_locked(&mut inner).await;
+            let error = "The bundled cua-driver binary is missing. Reinstall FalconDeck or select agent-desktop.".to_string();
+            inner.last_error = Some(error.clone());
+            return Err(error);
         }
         let mut inner = self.inner.lock().await;
         let binary = self.binary.as_ref().ok_or("cua-driver binary missing")?;
@@ -168,14 +205,19 @@ impl ComputerUseHost {
         } else if inner.child.is_some() {
             stop_locked(&mut inner).await;
         }
-        start_locked(
+        if let Err(error) = start_locked(
             &mut inner,
             binary,
             &self.state_dir,
             &self.host_bundle_id,
             prefs,
         )
-        .await?;
+        .await
+        {
+            inner.last_health = None;
+            inner.last_error = Some(error.clone());
+            return Err(error);
+        }
         if inner.last_health.as_ref().is_some_and(tcc_grants_ok) {
             Ok(connector_from(&inner, binary, &self.host_bundle_id))
         } else {
@@ -194,10 +236,15 @@ impl ComputerUseHost {
         prefs: &ComputerUsePreferences,
         available: bool,
     ) -> ComputerUseStatus {
+        if prefs.backend == ComputerUseBackend::AgentDesktop {
+            return self.agent_desktop_snapshot(prefs, available).await;
+        }
         let mut inner = self.inner.lock().await;
         reap_dead_child(&mut inner);
         let health = inner.last_health.clone();
         ComputerUseStatus {
+            backend: prefs.backend,
+            agent_desktop_binary_present: self.agent_desktop_binary().is_some(),
             existing_profile: prefs.existing_profile,
             available,
             enabled: prefs.enabled,
@@ -226,6 +273,9 @@ impl ComputerUseHost {
     ) -> Result<ComputerUseTestResult, String> {
         if !prefs.enabled {
             return Err("Turn on computer use before testing it.".to_string());
+        }
+        if prefs.backend == ComputerUseBackend::AgentDesktop {
+            return self.test_agent_desktop().await;
         }
         let connector = self
             .start_if_needed(prefs)
@@ -256,6 +306,80 @@ impl ComputerUseHost {
             health: Some(health),
             thumbnail_data_url,
             error: capture_error,
+            black_frame,
+        })
+    }
+
+    async fn agent_desktop_snapshot(
+        &self,
+        prefs: &ComputerUsePreferences,
+        available: bool,
+    ) -> ComputerUseStatus {
+        let binary = self.agent_desktop_binary();
+        let (health, last_error) = if available && prefs.enabled {
+            match &binary {
+                Some(binary) => match agent_desktop::probe_health(binary).await {
+                    Ok(health) => (Some(health), None),
+                    Err(error) => (None, Some(error)),
+                },
+                None => (None, Some(agent_desktop::INSTALL_HINT.to_string())),
+            }
+        } else {
+            (
+                None,
+                (available && binary.is_none()).then(|| agent_desktop::INSTALL_HINT.to_string()),
+            )
+        };
+        ComputerUseStatus {
+            backend: prefs.backend,
+            agent_desktop_binary_present: binary.is_some(),
+            existing_profile: prefs.existing_profile,
+            available,
+            enabled: prefs.enabled,
+            macos_ok: macos_ok(),
+            binary_present: binary.is_some(),
+            permissions: current_permissions(),
+            driver_version: health
+                .as_ref()
+                .and_then(|health| health.driver_version.clone()),
+            generation: None,
+            running: prefs.enabled && available && health.as_ref().is_some_and(tcc_grants_ok),
+            health,
+            telemetry: prefs.telemetry,
+            overlay: prefs.overlay,
+            last_error,
+        }
+    }
+
+    async fn test_agent_desktop(&self) -> Result<ComputerUseTestResult, String> {
+        if !self.available() {
+            return Err(missing_test_reason());
+        }
+        let binary = self
+            .agent_desktop_binary()
+            .ok_or(agent_desktop::INSTALL_HINT)?;
+        let health = agent_desktop::probe_health(&binary).await?;
+        if !tcc_grants_ok(&health) {
+            return Ok(ComputerUseTestResult {
+                ok: false,
+                health: Some(health),
+                thumbnail_data_url: None,
+                error: Some("Grant Accessibility and Screen Recording to FalconDeck first.".into()),
+                black_frame: false,
+            });
+        }
+        let capture =
+            agent_desktop::capture_test_thumbnail(&binary, &self.state_dir.join("computer-use"))
+                .await;
+        let (thumbnail_data_url, black_frame, error) = match capture {
+            Ok(shot) => (shot.thumbnail_data_url, shot.black_frame, None),
+            Err(error) => (None, false, Some(error)),
+        };
+        Ok(ComputerUseTestResult {
+            ok: thumbnail_data_url.is_some() && !black_frame,
+            health: Some(health),
+            thumbnail_data_url,
+            error,
             black_frame,
         })
     }
@@ -589,6 +713,8 @@ async fn stop_locked(inner: &mut HostInner) {
     if let Some(socket) = inner.socket_path.take() {
         let _ = tokio::fs::remove_file(socket).await;
     }
+    inner.last_health = None;
+    inner.last_error = None;
 }
 
 async fn wait_until_ready(
@@ -1102,6 +1228,9 @@ impl AppState {
         let (prefs, restart, updated) = {
             let previous = preferences.computer_use.clone();
             let mut next = preferences.clone();
+            if let Some(backend) = update.backend {
+                next.computer_use.backend = backend;
+            }
             if let Some(enabled) = update.enabled {
                 next.computer_use.enabled = enabled;
             }
@@ -1115,7 +1244,8 @@ impl AppState {
                 next.computer_use.existing_profile = existing_profile;
             }
             let prefs = next.computer_use.clone();
-            let restart = previous.telemetry != prefs.telemetry
+            let restart = previous.backend != prefs.backend
+                || previous.telemetry != prefs.telemetry
                 || previous.overlay != prefs.overlay
                 || previous.existing_profile != prefs.existing_profile
                 || (previous.enabled && !prefs.enabled);
@@ -1177,6 +1307,12 @@ impl AppState {
                 "The agent browser is only available in the FalconDeck Mac app.".to_string(),
             ));
         }
+        if self.inner.preferences.lock().await.computer_use.backend != ComputerUseBackend::CuaDriver
+        {
+            return Err(DaemonError::BadRequest(
+                "The shared agent browser is available with cua-driver. Agent-desktop controls native apps.".to_string(),
+            ));
+        }
         let home = std::env::var_os("HOME")
             .map(PathBuf::from)
             .ok_or_else(|| DaemonError::Process("HOME is not set".to_string()))?;
@@ -1234,6 +1370,156 @@ impl AppState {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn selecting_agent_desktop_stops_cua_and_does_not_launch_it_again() {
+        let temp = tempfile::tempdir().unwrap();
+        let app = AppState::new_with_state_path(
+            "test".into(),
+            Default::default(),
+            temp.path().join("state.json"),
+        );
+        {
+            let mut preferences = app.inner.preferences.lock().await;
+            preferences.computer_use.enabled = true;
+            preferences.computer_use.telemetry = true;
+            preferences.computer_use.existing_profile = true;
+        }
+        let socket = temp.path().join("old.sock");
+        let _listener = std::os::unix::net::UnixListener::bind(&socket).unwrap();
+        {
+            let mut inner = app.inner.computer_use.inner.lock().await;
+            inner.child = Some(
+                Command::new("/bin/sleep")
+                    .arg("30")
+                    .kill_on_drop(true)
+                    .spawn()
+                    .unwrap(),
+            );
+            inner.socket_path = Some(socket.clone());
+        }
+        let status = app
+            .update_computer_use(ComputerUseSettingsUpdate {
+                backend: Some(ComputerUseBackend::AgentDesktop),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        assert_eq!(status.backend, ComputerUseBackend::AgentDesktop);
+        assert!(!socket.exists());
+        assert!(app.inner.computer_use.inner.lock().await.child.is_none());
+        let prefs = app.preferences().await.computer_use;
+        assert!(
+            app.inner
+                .computer_use
+                .ensure_ready(&prefs)
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert!(prefs.telemetry && prefs.existing_profile);
+        assert!(
+            app.inner
+                .computer_use
+                .agent_desktop_ready(&prefs)
+                .await
+                .is_none(),
+            "unsupported host must not inject a local CLI"
+        );
+        let saved = super::super::storage::load_preferences(&app.inner.preferences_path)
+            .await
+            .unwrap();
+        assert_eq!(saved.computer_use.backend, ComputerUseBackend::AgentDesktop);
+    }
+
+    #[tokio::test]
+    async fn a_failed_settings_save_does_not_switch_backends() {
+        let temp = tempfile::tempdir().unwrap();
+        let blocker = temp.path().join("not-a-directory");
+        tokio::fs::write(&blocker, b"block").await.unwrap();
+        let app = AppState::new_with_state_path(
+            "test".into(),
+            Default::default(),
+            blocker.join("state.json"),
+        );
+        assert!(
+            app.update_computer_use(ComputerUseSettingsUpdate {
+                backend: Some(ComputerUseBackend::AgentDesktop),
+                ..Default::default()
+            })
+            .await
+            .is_err()
+        );
+        assert_eq!(
+            app.preferences().await.computer_use.backend,
+            ComputerUseBackend::CuaDriver
+        );
+    }
+
+    #[tokio::test]
+    async fn agent_desktop_status_does_not_reuse_cua_health() {
+        let temp = tempfile::tempdir().unwrap();
+        let host = ComputerUseHost::new(None, &temp.path().join("state.json"), None);
+        {
+            let mut inner = host.inner.lock().await;
+            inner.generation = 7;
+            inner.last_health = Some(ComputerUseHealth {
+                overall: "ok".into(),
+                driver_version: Some(PINNED_DRIVER_VERSION.into()),
+                checks: vec![],
+            });
+            inner.last_error = Some("old Cua error".into());
+        }
+        let status = host
+            .snapshot(
+                &ComputerUsePreferences {
+                    backend: ComputerUseBackend::AgentDesktop,
+                    ..Default::default()
+                },
+                false,
+            )
+            .await;
+        assert!(status.health.is_none());
+        assert!(status.driver_version.is_none());
+        assert!(status.generation.is_none());
+        assert!(status.last_error.is_none());
+        assert!(!status.running);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[tokio::test]
+    async fn switching_back_to_a_missing_cua_binary_reports_failure_without_stale_health() {
+        let temp = tempfile::tempdir().unwrap();
+        let host = ComputerUseHost::new(
+            Some(temp.path().join("missing-cua-driver").display().to_string()),
+            &temp.path().join("state.json"),
+            None,
+        );
+        {
+            let mut inner = host.inner.lock().await;
+            inner.last_health = Some(ComputerUseHealth {
+                overall: "ok".into(),
+                driver_version: Some(PINNED_DRIVER_VERSION.into()),
+                checks: vec![],
+            });
+        }
+        let prefs = ComputerUsePreferences {
+            enabled: true,
+            ..Default::default()
+        };
+        assert!(
+            host.restart(&prefs)
+                .await
+                .unwrap_err()
+                .contains("binary is missing")
+        );
+        let status = host.snapshot(&prefs, true).await;
+        assert!(status.health.is_none());
+        assert!(status.driver_version.is_none());
+        assert!(!status.running);
+        assert!(status.last_error.unwrap().contains("binary is missing"));
+    }
 
     #[cfg(target_os = "macos")]
     #[tokio::test]

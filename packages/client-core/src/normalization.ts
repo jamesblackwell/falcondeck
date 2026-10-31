@@ -2427,6 +2427,7 @@ function normalizeComputerUsePreferences(
     NonNullable<FalconDeckPreferences["computer_use"]>
   >;
   return {
+    backend: raw.backend === "agent_desktop" ? "agent_desktop" : "cua_driver",
     existing_profile: raw.existing_profile === true,
     enabled: raw.enabled ?? false,
     telemetry: raw.telemetry ?? false,

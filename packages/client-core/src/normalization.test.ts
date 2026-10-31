@@ -64,6 +64,14 @@ describe("rename suggestion model preferences", () => {
 });
 
 describe("existing-profile consent normalization", () => {
+  it("preserves the selected backend and defaults older daemons to Cua Driver", () => {
+    expect(normalizePreferences({ computer_use: { backend: "agent_desktop" } })
+      .computer_use?.backend).toBe("agent_desktop");
+    for (const backend of [undefined, null, "unknown", false]) {
+      expect(normalizePreferences({ computer_use: { backend } })
+        .computer_use?.backend).toBe("cua_driver");
+    }
+  });
   it("defaults missing and malformed grants to off", () => {
     for (const existing_profile of [undefined, null, "true", 1, false]) {
       expect(normalizePreferences({ computer_use: { existing_profile } }).computer_use?.existing_profile).toBe(false);

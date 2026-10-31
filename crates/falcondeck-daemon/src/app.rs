@@ -1349,9 +1349,11 @@ impl AppState {
     /// currently published.
     pub async fn agent_context_instructions(&self, provider: &AgentProvider) -> Option<String> {
         self.agent_context_enabled(provider).await?;
-        let computer_use_ready = self.builtin_computer_use_spec().await.is_some();
-        let staged =
-            crate::agent_context::stage_bundled_skills(&self.inner.state_path, computer_use_ready);
+        let computer_use_context = self.computer_use_context().await;
+        let staged = crate::agent_context::stage_bundled_skills(
+            &self.inner.state_path,
+            computer_use_context.as_ref(),
+        );
         if let Err(error) = &staged {
             tracing::warn!(%error, "failed to stage bundled FalconDeck skills");
         }
@@ -1374,7 +1376,7 @@ impl AppState {
         Some(crate::agent_context::append_instructions(
             control,
             mcp,
-            computer_use,
+            computer_use_context.as_ref().zip(computer_use),
             suggest_follow_ups,
         ))
     }
@@ -1383,14 +1385,43 @@ impl AppState {
     /// skill directories natively (Codex `skills/extraRoots`).
     pub async fn agent_skill_root(&self, provider: &AgentProvider) -> Option<std::path::PathBuf> {
         self.agent_context_enabled(provider).await?;
-        let computer_use_ready = self.builtin_computer_use_spec().await.is_some();
-        match crate::agent_context::stage_bundled_skills(&self.inner.state_path, computer_use_ready)
-        {
+        let computer_use_context = self.computer_use_context().await;
+        match crate::agent_context::stage_bundled_skills(
+            &self.inner.state_path,
+            computer_use_context.as_ref(),
+        ) {
             Ok(_) => Some(crate::agent_context::skills_root(&self.inner.state_path)),
             Err(error) => {
                 tracing::warn!(%error, "failed to stage bundled FalconDeck skills");
                 None
             }
+        }
+    }
+
+    async fn computer_use_context(&self) -> Option<crate::agent_context::ComputerUseContext> {
+        use crate::agent_context::ComputerUseContext;
+        use falcondeck_core::ComputerUseBackend;
+
+        let preferences = self.inner.preferences.lock().await;
+        let prefs = &preferences.computer_use;
+        if !prefs.enabled || !self.inner.daemon.capabilities.computer_use {
+            return None;
+        }
+        match prefs.backend {
+            ComputerUseBackend::CuaDriver => match self.inner.computer_use.ensure_ready(prefs).await {
+                Ok(Some(_)) => Some(ComputerUseContext::CuaDriver),
+                Ok(None) => None,
+                Err(error) => {
+                    tracing::warn!(%error, "computer-use context not injected");
+                    None
+                }
+            },
+            ComputerUseBackend::AgentDesktop => self
+                .inner
+                .computer_use
+                .agent_desktop_ready(prefs)
+                .await
+                .map(|binary| ComputerUseContext::AgentDesktop { binary }),
         }
     }
 

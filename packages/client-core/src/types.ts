@@ -635,7 +635,11 @@ export type AnalyticsPrompt = {
 };
 export type AnalyticsClearTarget = "prompts" | "events" | "all";
 
+export type ComputerUseBackend = "cua_driver" | "agent_desktop";
+
 export type ComputerUsePreferences = {
+  /** Omitted by older daemons; defaults to cua_driver. */
+  backend?: ComputerUseBackend;
   existing_profile: boolean;
   enabled: boolean;
   telemetry: boolean;
@@ -643,6 +647,7 @@ export type ComputerUsePreferences = {
 };
 
 export type ComputerUseSettingsUpdate = {
+  backend?: ComputerUseBackend | null;
   existing_profile?: boolean | null;
   enabled?: boolean | null;
   telemetry?: boolean | null;
@@ -668,6 +673,9 @@ export type ComputerUseHealth = {
 };
 
 export type ComputerUseStatus = {
+  /** Older daemons omit this and do not support backend selection. */
+  backend?: ComputerUseBackend;
+  agent_desktop_binary_present?: boolean;
   /** Older daemons omit this and do not support existing-profile consent. */
   existing_profile?: boolean;
   available: boolean;

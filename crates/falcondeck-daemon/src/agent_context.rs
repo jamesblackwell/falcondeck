@@ -30,6 +30,7 @@ const CUA_SKILL_VERSION: &str = include_str!("agent_context/cua-driver/VERSION")
 /// FalconDeck-authored host notes staged alongside the vendored cua-driver skill.
 const CUA_SKILL_FALCONDECK: &str =
     include_str!("agent_context/cua-driver-falcondeck/FALCONDECK.md");
+const AGENT_DESKTOP_SKILL_BODY: &str = include_str!("agent_context/agent-desktop/SKILL.md");
 
 /// Directory (under the daemon state dir) holding staged bundled skills.
 pub const SKILLS_DIR_NAME: &str = "skills";
@@ -42,6 +43,15 @@ pub const MCP_SKILL_NAME: &str = "falcondeck-mcp";
 
 /// Name of the bundled cua-driver computer-use skill.
 pub const COMPUTER_USE_SKILL_NAME: &str = "cua-driver";
+/// Name of the optional agent-desktop CLI skill.
+pub const AGENT_DESKTOP_SKILL_NAME: &str = "agent-desktop";
+
+/// Computer-use backend that is ready for this provider spawn.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ComputerUseContext {
+    CuaDriver,
+    AgentDesktop { binary: PathBuf },
+}
 
 /// Published follow-up tool on the `falcondeck-extensions` MCP bridge.
 pub const SUGGEST_FOLLOW_UPS_TOOL: &str = "falcondeck_suggest_follow_ups";
@@ -67,19 +77,13 @@ pub fn skills_root(state_path: &Path) -> PathBuf {
 /// is refreshed atomically so daemon upgrades pick up new content.
 pub fn stage_bundled_skills(
     state_path: &Path,
-    computer_use: bool,
+    computer_use: Option<&ComputerUseContext>,
 ) -> io::Result<BundledSkillPaths> {
     let _ = stage_pi_extension();
     Ok(BundledSkillPaths {
         control: stage_skill_file(state_path, SKILL_NAME, CONTROL_SKILL_BODY)?,
         mcp: stage_skill_file(state_path, MCP_SKILL_NAME, MCP_SKILL_BODY)?,
-        computer_use: if computer_use {
-            Some(stage_computer_use_skill(state_path)?)
-        } else {
-            let stale = skills_root(state_path).join(COMPUTER_USE_SKILL_NAME);
-            let _ = std::fs::remove_dir_all(stale);
-            None
-        },
+        computer_use: stage_computer_use_skill(state_path, computer_use)?,
     })
 }
 
@@ -124,7 +128,54 @@ fn stage_skill_file(state_path: &Path, name: &str, body: &str) -> io::Result<Pat
     stage_named_file(&skill_dir, "SKILL.md", body)
 }
 
-fn stage_computer_use_skill(state_path: &Path) -> io::Result<PathBuf> {
+fn remove_staged_skill(state_path: &Path, name: &str) -> io::Result<()> {
+    match std::fs::remove_dir_all(skills_root(state_path).join(name)) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error),
+    }
+}
+
+fn stage_computer_use_skill(
+    state_path: &Path,
+    computer_use: Option<&ComputerUseContext>,
+) -> io::Result<Option<PathBuf>> {
+    match computer_use {
+        Some(ComputerUseContext::CuaDriver) => {
+            remove_staged_skill(state_path, AGENT_DESKTOP_SKILL_NAME)?;
+            stage_cua_skill(state_path).map(Some)
+        }
+        Some(ComputerUseContext::AgentDesktop { binary }) => {
+            remove_staged_skill(state_path, COMPUTER_USE_SKILL_NAME)?;
+            if !binary.is_absolute() {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "agent-desktop needs an absolute executable path",
+                ));
+            }
+            let binary = binary.to_str().ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "agent-desktop path is not UTF-8",
+                )
+            })?;
+            let body =
+                AGENT_DESKTOP_SKILL_BODY.replace("{{AGENT_DESKTOP_COMMAND}}", &shell_quote(binary));
+            stage_skill_file(state_path, AGENT_DESKTOP_SKILL_NAME, &body).map(Some)
+        }
+        None => {
+            remove_staged_skill(state_path, COMPUTER_USE_SKILL_NAME)?;
+            remove_staged_skill(state_path, AGENT_DESKTOP_SKILL_NAME)?;
+            Ok(None)
+        }
+    }
+}
+
+fn shell_quote(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "'\\''"))
+}
+
+fn stage_cua_skill(state_path: &Path) -> io::Result<PathBuf> {
     let skill_dir = skills_root(state_path).join(COMPUTER_USE_SKILL_NAME);
     stage_named_file(&skill_dir, "SKILL.md", CUA_SKILL_BODY)?;
     stage_named_file(&skill_dir, "WORKFLOW.md", CUA_SKILL_WORKFLOW)?;
@@ -160,7 +211,7 @@ fn stage_named_file(dir: &Path, name: &str, body: &str) -> io::Result<PathBuf> {
 pub fn append_instructions(
     control_skill: Option<&Path>,
     mcp_skill: Option<&Path>,
-    computer_use_skill: Option<&Path>,
+    computer_use_skill: Option<(&ComputerUseContext, &Path)>,
     suggest_follow_ups: bool,
 ) -> String {
     let mut text = String::from(
@@ -191,11 +242,18 @@ pub fn append_instructions(
             path.display()
         ));
     }
-    if let Some(path) = computer_use_skill {
-        text.push_str(&format!(
+    if let Some((backend, path)) = computer_use_skill {
+        match backend {
+            ComputerUseContext::CuaDriver => text.push_str(&format!(
             "\n- The `cua-driver` MCP server can operate apps on this Mac in the background. Read {} and the sibling WORKFLOW.md and MACOS.md first. Use its MCP tools, not the cua-driver CLI. For browser tasks, read BROWSER.md and FALCONDECK.md. Use the shared agent browser by default: browser_prepare with allow_launch true, the pid of the user's own Chrome (pick it as FALCONDECK.md says, not from list_apps), and profile {{mode: \"isolated_named\", name: \"falcondeck-agent\"}}. It keeps the user's agent logins and never triggers Chrome's remote-debugging prompt. Do not attach to the user's personal Chrome profile (existing_profile) unless they explicitly ask you to work in their own browser window or tab. If a site needs a login the agent browser lacks, end your browser session, then ask the user to sign in via Settings → Computer use → Open agent browser and quit that Chrome when done; never type passwords yourself, copy cookies, or fall back to the personal profile. Reuse one window, MCP connection, and session label for the task, and end the session when finished.",
             path.display()
-        ));
+            )),
+            ComputerUseContext::AgentDesktop { binary } => text.push_str(&format!(
+                "\n- Computer use is configured for agent-desktop. Read {} first, then use the selected CLI directly: {}. Read its version-matched guides with `skills get desktop` and `skills get platform` before acting. Use background semantic actions by default and verify each result from fresh UI state; use visible foreground input only when the user's task authorizes it. Do not use cua-driver MCP for computer use while this backend is selected. agent-browser is a separate tool for web pages; this setting does not configure a browser connection or authorize access to personal browser profiles or cookies.",
+                path.display(),
+                shell_quote(&binary.to_string_lossy()),
+            )),
+        }
     }
     text.push_str("\n- Do not narrate FalconDeck internals unless the user asks.");
     text
@@ -219,7 +277,10 @@ mod tests {
         let with = append_instructions(
             Some(Path::new("/tmp/skills/falcondeck-control/SKILL.md")),
             Some(Path::new("/tmp/skills/falcondeck-mcp/SKILL.md")),
-            Some(Path::new("/tmp/skills/cua-driver/SKILL.md")),
+            Some((
+                &ComputerUseContext::CuaDriver,
+                Path::new("/tmp/skills/cua-driver/SKILL.md"),
+            )),
             true,
         );
         assert!(with.contains("falcondeck_suggest_follow_ups"));
@@ -234,10 +295,94 @@ mod tests {
     }
 
     #[test]
+    fn agent_desktop_context_uses_the_selected_cli_without_cua_browser_guidance() {
+        let backend = ComputerUseContext::AgentDesktop {
+            binary: PathBuf::from("/opt/homebrew/bin/agent-desktop"),
+        };
+        let instructions = append_instructions(
+            None,
+            None,
+            Some((&backend, Path::new("/tmp/skills/agent-desktop/SKILL.md"))),
+            false,
+        );
+        assert!(instructions.contains("Computer use is configured for agent-desktop"));
+        assert!(instructions.contains("'/opt/homebrew/bin/agent-desktop'"));
+        assert!(instructions.contains("skills get platform"));
+        assert!(instructions.contains("Do not use cua-driver MCP"));
+        assert!(!instructions.contains("`cua-driver` MCP server"));
+        assert!(!instructions.contains("browser_prepare"));
+        assert!(!instructions.contains("Open agent browser"));
+    }
+
+    #[test]
+    fn switching_computer_use_backends_replaces_the_staged_skill() {
+        let dir = tempfile::tempdir().expect("temporary state");
+        let state_path = dir.path().join("state.json");
+        let desktop = ComputerUseContext::AgentDesktop {
+            binary: PathBuf::from("/Applications/Agent Tools/agent-desktop"),
+        };
+        let cua_path = stage_computer_use_skill(&state_path, Some(&ComputerUseContext::CuaDriver))
+            .expect("stage cua")
+            .expect("cua path");
+        let desktop_path = stage_computer_use_skill(&state_path, Some(&desktop))
+            .expect("stage agent-desktop")
+            .expect("agent-desktop path");
+        assert!(!cua_path.exists());
+        let body = std::fs::read_to_string(&desktop_path).expect("read agent-desktop skill");
+        assert!(body.contains("'/Applications/Agent Tools/agent-desktop' skills get desktop"));
+        assert!(body.contains("'/Applications/Agent Tools/agent-desktop' skills get platform"));
+        assert!(!body.contains("{{AGENT_DESKTOP_COMMAND}}"));
+
+        let moved = ComputerUseContext::AgentDesktop {
+            binary: PathBuf::from("/opt/homebrew/bin/agent-desktop"),
+        };
+        stage_computer_use_skill(&state_path, Some(&moved)).expect("refresh executable");
+        let body = std::fs::read_to_string(&desktop_path).expect("read refreshed skill");
+        assert!(body.contains("'/opt/homebrew/bin/agent-desktop' status"));
+        assert!(!body.contains("/Applications/Agent Tools"));
+
+        stage_computer_use_skill(&state_path, Some(&ComputerUseContext::CuaDriver))
+            .expect("switch back to cua");
+        assert!(cua_path.is_file());
+        assert!(!desktop_path.exists());
+
+        stage_computer_use_skill(&state_path, Some(&desktop)).expect("select desktop again");
+        stage_computer_use_skill(&state_path, None).expect("disable computer use");
+        assert!(!cua_path.exists());
+        assert!(!desktop_path.exists());
+    }
+
+    #[test]
+    fn agent_desktop_skill_rejects_relative_executable_paths() {
+        let dir = tempfile::tempdir().expect("temporary state");
+        let backend = ComputerUseContext::AgentDesktop {
+            binary: PathBuf::from("agent-desktop"),
+        };
+        let error = stage_computer_use_skill(&dir.path().join("state.json"), Some(&backend))
+            .expect_err("relative executable must not depend on the agent working directory");
+        assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn selected_executable_shell_quoting_preserves_special_characters() {
+        let binary = "/tmp/agent's $(printf injected) `printf injected`/agent-desktop";
+        let output = std::process::Command::new("/bin/sh")
+            .args(["-c", &format!("printf '%s' {}", shell_quote(binary))])
+            .output()
+            .expect("run quoted shell argument");
+        assert!(output.status.success());
+        assert_eq!(
+            String::from_utf8(output.stdout).expect("UTF-8 output"),
+            binary
+        );
+    }
+
+    #[test]
     fn staging_writes_both_skills_and_is_upgrade_aware() {
         let dir = std::env::temp_dir().join(format!("fd-skill-test-{}", std::process::id()));
         let state_path = dir.join("state.json");
-        let staged = stage_bundled_skills(&state_path, false).expect("stage");
+        let staged = stage_bundled_skills(&state_path, None).expect("stage");
         assert!(staged.control.is_file());
         assert!(staged.mcp.is_file());
         assert!(staged.computer_use.is_none());
@@ -249,20 +394,21 @@ mod tests {
             .and_then(|meta| meta.modified())
             .ok();
         std::thread::sleep(std::time::Duration::from_millis(10));
-        let again = stage_bundled_skills(&state_path, false).expect("stage again");
+        let again = stage_bundled_skills(&state_path, None).expect("stage again");
         assert_eq!(staged.control, again.control);
         let second = std::fs::metadata(&staged.control)
             .and_then(|meta| meta.modified())
             .ok();
         assert_eq!(first, second, "identical content is not rewritten");
         std::fs::write(&staged.mcp, "stale").expect("simulate old version");
-        stage_bundled_skills(&state_path, false).expect("restage");
+        stage_bundled_skills(&state_path, None).expect("restage");
         assert_eq!(
             std::fs::read_to_string(&staged.mcp).expect("read").as_str(),
             MCP_SKILL_BODY,
             "differing content is refreshed"
         );
-        let cua = stage_bundled_skills(&state_path, true).expect("stage cua");
+        let cua = stage_bundled_skills(&state_path, Some(&ComputerUseContext::CuaDriver))
+            .expect("stage cua");
         let cua_path = cua.computer_use.expect("cua skill");
         assert!(cua_path.is_file());
         assert_eq!(
@@ -294,7 +440,7 @@ mod tests {
                 }
             }
         }
-        stage_bundled_skills(&state_path, false).expect("disable cua");
+        stage_bundled_skills(&state_path, None).expect("disable cua");
         assert!(!cua_path.exists());
         std::fs::remove_dir_all(&dir).ok();
     }

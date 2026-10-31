@@ -31,6 +31,8 @@ export type ComputerUseSetupToast = {
 type ComputerUseSetupProps = {
   baseUrl: string | null;
   onToast: (toast: ComputerUseSetupToast) => void;
+  /** Settings owns the current status so backend changes apply immediately. */
+  status?: ComputerUseStatus | null;
   compact?: boolean;
   onStatusChange?: (status: ComputerUseStatus | null) => void;
   onPermissionsChange?: (permissions: ComputerUsePermissionStatus) => void;
@@ -55,36 +57,48 @@ const PERMISSION_COPY: Record<
 export function ComputerUseSetup({
   baseUrl,
   onToast,
+  status: suppliedStatus,
   compact = false,
   onStatusChange,
   onPermissionsChange,
   onBeforeAppRestart,
 }: ComputerUseSetupProps) {
   const [permissions, setPermissions] = useState<ComputerUsePermissionStatus | null>(null);
-  const [status, setStatus] = useState<ComputerUseStatus | null>(null);
+  const [localStatus, setLocalStatus] = useState<ComputerUseStatus | null>(null);
+  const status = suppliedStatus === undefined ? localStatus : suppliedStatus;
+  const agentDesktop = status?.backend === "agent_desktop";
   const [test, setTest] = useState<ComputerUseTestResult | null>(null);
   const [busy, setBusy] = useState<"grant" | "test" | "restart" | "app-restart" | null>(
     null,
   );
+  const mounted = useRef(false);
+
+  useEffect(() => {
+    mounted.current = true;
+    return () => { mounted.current = false; };
+  }, []);
 
   const refreshPermissions = useCallback(async () => {
     const next = await readComputerUsePermissions();
+    if (!mounted.current) return;
     setPermissions(next);
     onPermissionsChange?.(next);
   }, [onPermissionsChange]);
 
   const refreshStatus = useCallback(async () => {
     if (!baseUrl) {
-      setStatus(null);
+      setLocalStatus(null);
       onStatusChange?.(null);
       return;
     }
     try {
       const next = await createDaemonApiClient(baseUrl).computerUse();
-      setStatus(next);
+      if (!mounted.current) return;
+      setLocalStatus(next);
       onStatusChange?.(next);
     } catch {
-      setStatus(null);
+      if (!mounted.current) return;
+      setLocalStatus(null);
       onStatusChange?.(null);
     }
   }, [baseUrl, onStatusChange]);
@@ -124,7 +138,8 @@ export function ComputerUseSetup({
     void createDaemonApiClient(baseUrl)
       .restartComputerUse()
       .then((next) => {
-        setStatus(next);
+        if (!mounted.current) return;
+        setLocalStatus(next);
         onStatusChange?.(next);
       })
       .catch(() => {});
@@ -155,6 +170,7 @@ export function ComputerUseSetup({
     setTest(null);
     try {
       const result = await createDaemonApiClient(baseUrl).testComputerUse();
+      if (!mounted.current) return;
       setTest(result);
       await refreshStatus();
       if (result.ok) {
@@ -191,13 +207,22 @@ export function ComputerUseSetup({
     if (!baseUrl) return;
     setBusy("restart");
     try {
-      await createDaemonApiClient(baseUrl).restartComputerUse();
-      await refreshStatus();
-      onToast({ variant: "success", title: "Computer-use driver restarted" });
+      const next = await createDaemonApiClient(baseUrl).restartComputerUse();
+      if (!mounted.current) return;
+      setLocalStatus(next);
+      onStatusChange?.(next);
+      onToast(next.last_error ? {
+        variant: "danger",
+        title: agentDesktop ? "Could not refresh agent-desktop" : "Could not restart the driver",
+        description: next.last_error,
+      } : {
+        variant: "success",
+        title: agentDesktop ? "agent-desktop refreshed" : "Computer-use driver restarted",
+      });
     } catch (error) {
       onToast({
         variant: "danger",
-        title: "Could not restart the driver",
+        title: agentDesktop ? "Could not refresh agent-desktop" : "Could not restart the driver",
         description: error instanceof Error ? error.message : String(error),
       });
     } finally {
@@ -225,6 +250,14 @@ export function ComputerUseSetup({
   const accessibility = permissions?.accessibility ?? status?.permissions.accessibility ?? false;
   const screenRecording =
     permissions?.screenRecording ?? status?.permissions.screen_recording ?? false;
+  const testUnavailableReason = !status?.enabled
+    ? "Turn on computer use before testing it."
+    : !status.binary_present
+      ? `Install ${agentDesktop ? "agent-desktop" : "the driver"} before testing it.`
+      : !accessibility || !screenRecording
+        ? "Grant both permissions before testing computer use."
+        : undefined;
+  const testDisabled = busy !== null || !baseUrl || testUnavailableReason !== undefined;
 
   if (!supported) {
     return (
@@ -293,7 +326,11 @@ export function ComputerUseSetup({
         <SettingsSection
           title="Driver"
           description={
-            status?.driver_version
+            agentDesktop
+              ? status?.driver_version
+                ? `agent-desktop ${status.driver_version}`
+                : "agent-desktop runs when an agent calls it."
+              : status?.driver_version
               ? `Bundled cua-driver ${status.driver_version}`
               : "The driver starts the first time an agent needs it."
           }
@@ -302,8 +339,8 @@ export function ComputerUseSetup({
             <Button
               size="sm"
               variant="secondary"
-              disabled={busy === "test" || !baseUrl || !status?.enabled}
-              title={status?.enabled ? undefined : "Turn on computer use before testing it."}
+              disabled={testDisabled}
+              title={testUnavailableReason}
               onClick={() => void runTest()}
             >
               {busy === "test" ? <ActivityDiamond size="md" tone="current" /> : null}
@@ -312,11 +349,11 @@ export function ComputerUseSetup({
             <Button
               size="sm"
               variant="ghost"
-              disabled={busy === "restart" || !baseUrl}
+              disabled={busy !== null || !baseUrl}
               onClick={() => void restartDriver()}
             >
               <RefreshCw className="h-3.5 w-3.5" />
-              Restart driver
+              {agentDesktop ? "Refresh agent-desktop" : "Restart driver"}
             </Button>
             {test?.black_frame ? (
               <Button
@@ -348,8 +385,8 @@ export function ComputerUseSetup({
             <Button
               size="sm"
               variant="secondary"
-              disabled={busy === "test" || !baseUrl || !status?.enabled}
-              title={status?.enabled ? undefined : "Turn on computer use before testing it."}
+              disabled={testDisabled}
+              title={testUnavailableReason}
               onClick={() => void runTest()}
             >
               {busy === "test" ? <ActivityDiamond size="md" tone="current" /> : null}

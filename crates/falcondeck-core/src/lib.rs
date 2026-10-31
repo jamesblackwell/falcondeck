@@ -173,9 +173,23 @@ fn default_title_suggestion_prompt() -> String {
     DEFAULT_TITLE_SUGGESTION_PROMPT.to_string()
 }
 
+/// Computer-use implementation selected on this host.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum ComputerUseBackend {
+    /// Bundled Cua Driver exposed through MCP.
+    #[default]
+    CuaDriver,
+    /// Optional agent-desktop CLI used by the harness directly.
+    AgentDesktop,
+}
+
 /// Host-local computer-use settings persisted with other preferences.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ComputerUsePreferences {
+    /// Computer-use implementation selected on this host.
+    #[serde(default)]
+    pub backend: ComputerUseBackend,
     /// Allow the daemon-owned driver to attach to signed-in Chromium profiles.
     #[serde(default)]
     pub existing_profile: bool,
@@ -193,6 +207,7 @@ pub struct ComputerUsePreferences {
 impl Default for ComputerUsePreferences {
     fn default() -> Self {
         Self {
+            backend: ComputerUseBackend::default(),
             existing_profile: false,
             enabled: false,
             telemetry: false,
@@ -204,6 +219,9 @@ impl Default for ComputerUsePreferences {
 /// Partial update for host-local computer-use settings.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 pub struct ComputerUseSettingsUpdate {
+    /// Select the host's computer-use implementation.
+    #[serde(default)]
+    pub backend: Option<ComputerUseBackend>,
     /// Explicit host-local consent for signed-in Chromium profile access.
     #[serde(default)]
     pub existing_profile: Option<bool>,
@@ -260,16 +278,22 @@ pub struct ComputerUseHealth {
 /// Live computer-use status for Settings and onboarding.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ComputerUseStatus {
+    /// Computer-use implementation selected on this host.
+    #[serde(default)]
+    pub backend: ComputerUseBackend,
+    /// Whether the optional agent-desktop CLI is installed on this host.
+    #[serde(default)]
+    pub agent_desktop_binary_present: bool,
     /// Requested existing-profile launch grant; effective only while running.
     #[serde(default)]
     pub existing_profile: bool,
-    /// Desktop embedding, macOS 14+, and a bundled driver binary.
+    /// Desktop embedding on macOS 14 or later.
     pub available: bool,
     /// User switched computer use on.
     pub enabled: bool,
     /// macOS 14 or newer (or not macOS — then false).
     pub macos_ok: bool,
-    /// Bundled or configured `cua-driver` binary exists.
+    /// The selected backend's executable exists.
     pub binary_present: bool,
     /// Current TCC preflight results for this process.
     pub permissions: ComputerUsePermissions,
@@ -286,7 +310,7 @@ pub struct ComputerUseStatus {
     pub telemetry: bool,
     /// Agent-cursor overlay setting.
     pub overlay: bool,
-    /// Whether `cua-driver serve --embedded` is currently a child.
+    /// Whether the Cua child is running or the selected CLI is ready.
     pub running: bool,
     /// Last start/stop/probe error, when the driver is unhealthy.
     #[serde(default, skip_serializing_if = "Option::is_none")]

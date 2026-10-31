@@ -1,4 +1,42 @@
-# Computer use: embedding cua-driver in FalconDeck
+# Computer use in FalconDeck
+
+## Optional agent-desktop backend
+
+Settings → Computer use → **Backend** can select **agent-desktop (Experimental)**
+instead of the bundled **Cua Driver**. Existing preferences default to Cua
+Driver. The selection is host-local and does not change the other computer-use
+preferences or macOS grants.
+
+Install the optional CLI with `npm install -g agent-desktop`, then refresh its
+status in Settings. FalconDeck discovers it on the host's absolute PATH entries
+and standard local install locations; `FALCONDECK_AGENT_DESKTOP_BIN` can name an
+explicit executable. It is not downloaded or upgraded by a Settings read, and
+is not part of the signed FalconDeck bundle. The initial integration was tested
+with agent-desktop 1.0.2.
+
+When selected, FalconDeck stops its Cua child and stops injecting the Cua MCP
+connector. Agents receive the resolved agent-desktop executable and a small
+host skill that loads the installed CLI's version-matched guides. They invoke
+the CLI directly; no MCP translation layer is added. Instructions are only
+injected when computer use is enabled, this is a supported desktop host, and
+the selected CLI reports the required permissions. Restart FalconDeck after
+switching to refresh existing harness processes and their tools/instructions.
+
+The existing status, restart, and test endpoints follow the selected backend.
+For agent-desktop, `running` means the CLI is ready, rather than that a Cua
+server is supervised. **Test it** probes that CLI and captures only an accessible
+window belonging to the FalconDeck host process. A missing binary, permission,
+or host window is reported as a failure.
+
+Cua's telemetry, cursor overlay, agent Chrome profile, and personal-profile
+grant remain Cua-only settings and are hidden for agent-desktop. This option
+adds native desktop automation; the related agent-browser project is separate
+and is not wired into the shared Cua browser profile. Turning computer use off
+removes future agent guidance and Cua connectors; it does not uninstall the
+agent-desktop CLI, revoke macOS grants, or terminate CLI commands an agent
+already launched.
+
+## Bundled Cua Driver
 
 Status: Phase 1 implemented, 2026-09-03. Phase 2–3 remain planned.
 

@@ -396,6 +396,11 @@ pub(super) fn merge_preferences_from_value(value: Value) -> FalconDeckPreference
     }
 
     if let Some(computer_use) = value.get("computer_use") {
+        if let Some(backend) = computer_use.get("backend") {
+            if let Ok(backend) = serde_json::from_value(backend.clone()) {
+                preferences.computer_use.backend = backend;
+            }
+        }
         if let Some(existing_profile) = computer_use
             .get("existing_profile")
             .and_then(Value::as_bool)
@@ -1398,6 +1403,31 @@ mod tests {
         assert!(!preferences.computer_use.overlay);
         assert!(!FalconDeckPreferences::default().computer_use.enabled);
         assert!(FalconDeckPreferences::default().computer_use.overlay);
+    }
+
+    #[test]
+    fn loads_computer_use_backend_and_defaults_legacy_preferences() {
+        use falcondeck_core::ComputerUseBackend;
+
+        let preferences = merge_preferences_from_value(json!({
+            "computer_use": { "backend": "agent_desktop", "enabled": true }
+        }));
+        assert_eq!(
+            preferences.computer_use.backend,
+            ComputerUseBackend::AgentDesktop
+        );
+        assert!(preferences.computer_use.enabled);
+        for value in [
+            json!({}),
+            json!({"backend": "unknown"}),
+            json!({"backend": null}),
+        ] {
+            let preferences = merge_preferences_from_value(json!({"computer_use": value}));
+            assert_eq!(
+                preferences.computer_use.backend,
+                ComputerUseBackend::CuaDriver
+            );
+        }
     }
 
     #[test]
