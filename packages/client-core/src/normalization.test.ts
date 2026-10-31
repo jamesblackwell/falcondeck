@@ -1284,3 +1284,16 @@ describe("automatic session recovery preferences", () => {
     }
   });
 });
+
+describe("agent child limit preference", () => {
+  it("defaults to five and ignores values the daemon would reject", () => {
+    expect(normalizePreferences({}).max_agent_children).toBe(5);
+    expect(normalizePreferences({ max_agent_children: 2 }).max_agent_children).toBe(2);
+    expect(normalizePreferences({ max_agent_children: 20 }).max_agent_children).toBe(20);
+    for (const value of [0, 21, -1, 2.5, "3", null, Number.NaN]) {
+      expect(
+        normalizePreferences({ max_agent_children: value }).max_agent_children,
+      ).toBe(5);
+    }
+  });
+});

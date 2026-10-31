@@ -201,6 +201,14 @@ pub(super) fn merge_preferences_from_value(value: Value) -> FalconDeckPreference
         .get("auto_resume_interrupted_sessions")
         .and_then(Value::as_bool)
         .unwrap_or(false);
+    if let Some(limit) = value
+        .get("max_agent_children")
+        .and_then(Value::as_u64)
+        .and_then(|limit| u32::try_from(limit).ok())
+        .filter(|limit| max_agent_children_in_range(*limit))
+    {
+        preferences.max_agent_children = limit;
+    }
     if let Some(version) = value.get("version").and_then(Value::as_u64) {
         preferences.version = version as u32;
     }
@@ -408,12 +416,31 @@ pub(super) fn merge_preferences_from_value(value: Value) -> FalconDeckPreference
     preferences
 }
 
+fn max_agent_children_in_range(limit: u32) -> bool {
+    (falcondeck_core::MIN_MAX_AGENT_CHILDREN..=falcondeck_core::MAX_MAX_AGENT_CHILDREN)
+        .contains(&limit)
+}
+
+pub(super) fn validate_max_agent_children(limit: u32) -> Result<(), DaemonError> {
+    if max_agent_children_in_range(limit) {
+        return Ok(());
+    }
+    Err(DaemonError::BadRequest(format!(
+        "max_agent_children must be between {} and {}",
+        falcondeck_core::MIN_MAX_AGENT_CHILDREN,
+        falcondeck_core::MAX_MAX_AGENT_CHILDREN
+    )))
+}
+
 pub(super) fn apply_preferences_patch(
     preferences: &mut FalconDeckPreferences,
     request: UpdatePreferencesRequest,
 ) {
     if let Some(enabled) = request.auto_resume_interrupted_sessions {
         preferences.auto_resume_interrupted_sessions = enabled;
+    }
+    if let Some(limit) = request.max_agent_children.filter(|l| max_agent_children_in_range(*l)) {
+        preferences.max_agent_children = limit;
     }
     if let Some(model) = request.title_suggestion_model {
         preferences.title_suggestion_model = normalize_title_suggestion_model(&model);
@@ -1179,6 +1206,55 @@ mod tests {
                 .unwrap()
                 .auto_resume_interrupted_sessions
         );
+    }
+
+    #[tokio::test]
+    async fn agent_child_limit_defaults_to_five_and_round_trips() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("falcondeck.json");
+        let mut preferences = load_preferences(&path).await.unwrap();
+        assert_eq!(preferences.max_agent_children, 5);
+        assert_eq!(merge_preferences_from_value(json!({"version": 1})).max_agent_children, 5);
+        assert_eq!(
+            serde_json::from_value::<FalconDeckPreferences>(json!({})).unwrap().max_agent_children,
+            5
+        );
+        apply_preferences_patch(
+            &mut preferences,
+            UpdatePreferencesRequest { max_agent_children: Some(2), ..Default::default() },
+        );
+        persist_preferences(&path, &preferences).await.unwrap();
+        assert_eq!(load_preferences(&path).await.unwrap().max_agent_children, 2);
+        // An update that omits the field leaves it alone.
+        apply_preferences_patch(&mut preferences, UpdatePreferencesRequest::default());
+        assert_eq!(preferences.max_agent_children, 2);
+    }
+
+    #[test]
+    fn agent_child_limit_accepts_one_to_twenty_and_ignores_stored_junk() {
+        assert!(validate_max_agent_children(1).is_ok());
+        assert!(validate_max_agent_children(20).is_ok());
+        for bad in [0, 21, u32::MAX] {
+            let error = validate_max_agent_children(bad).unwrap_err();
+            assert!(matches!(error, DaemonError::BadRequest(_)));
+            assert!(error.to_string().contains("between 1 and 20"));
+        }
+        for stored in [json!(0), json!(21), json!(-1), json!(2.5), json!("3"), json!(u64::MAX)] {
+            assert_eq!(
+                merge_preferences_from_value(json!({"max_agent_children": stored})).max_agent_children,
+                5
+            );
+        }
+        assert_eq!(
+            merge_preferences_from_value(json!({"max_agent_children": 12})).max_agent_children,
+            12
+        );
+        let mut preferences = FalconDeckPreferences::default();
+        apply_preferences_patch(
+            &mut preferences,
+            UpdatePreferencesRequest { max_agent_children: Some(99), ..Default::default() },
+        );
+        assert_eq!(preferences.max_agent_children, 5);
     }
 
     #[test]

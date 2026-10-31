@@ -437,6 +437,8 @@ export type FalconDeckPreferences = {
   version: number;
   /** Daemon resumes shutdown-interrupted sessions on startup. Older daemons omit this. */
   auto_resume_interrupted_sessions?: boolean;
+  /** Active child threads one agent or bot may have at once (1–20). Older daemons omit this. */
+  max_agent_children?: number;
   /** Older daemons omit this until project order has been saved. */
   workspace_order?: string[];
   /** Project ids hidden from the sidebar by default. */
@@ -710,6 +712,8 @@ export type UpdateUtilityModelPreferences = {
 export type UpdatePreferencesPayload = {
   project_folder?: ProjectFolderMutation;
   auto_resume_interrupted_sessions?: boolean;
+  /** Integer 1–20; the daemon rejects other values. */
+  max_agent_children?: number;
   workspace_order?: string[] | null;
   hidden_workspace_ids?: string[] | null;
   workspace_colors?: Record<string, string> | null;

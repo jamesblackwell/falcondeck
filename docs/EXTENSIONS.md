@@ -1138,7 +1138,7 @@ turns, snapshots, and daemon restarts. Omission preserves the provider default;
 blank values are rejected before creation. Optional context is `none` (default), `briefing` (summary/index),
 or `transcript_tail` (40 items / 12000 characters). The daemon persists
 `agent_spawn` origin with `parent_thread_id`, not a conversation database.
-Admission is serialized and capped at five concurrent children per parent;
+Admission is serialized and capped at the `max_agent_children` preference (default five, 1–20, Settings → General → Parallel tasks per agent) concurrent children per parent;
 running, waiting, queued, and unused idle children count until completed,
 or errored. Archiving an unused idle child releases its slot; archived running
 or waiting children continue to count. Calls return after dispatch, without waiting for a turn.

@@ -2962,7 +2962,8 @@ impl AppState {
     /// tools for renaming, inspecting, and creating sibling threads.
     pub async fn extension_agent_tools(&self) -> falcondeck_core::ExtensionAgentToolList {
         let mut tools = vec![builtin_rename_thread_tool()];
-        tools.extend(thread_tools::catalog());
+        let max_children = self.inner.preferences.lock().await.max_agent_children;
+        tools.extend(thread_tools::catalog(max_children));
         tools.extend(self.inner.extensions.lock().await.agent_tools());
         tools.sort_by(|left, right| left.name.cmp(&right.name));
         falcondeck_core::ExtensionAgentToolList { tools }
@@ -3458,6 +3459,9 @@ impl AppState {
         } else {
             None
         };
+        if let Some(limit) = request.max_agent_children {
+            validate_max_agent_children(limit)?;
+        }
         let mut preferences = self.inner.preferences.lock().await;
         let icons_changed = request.workspace_icons.is_some();
         let updated = {

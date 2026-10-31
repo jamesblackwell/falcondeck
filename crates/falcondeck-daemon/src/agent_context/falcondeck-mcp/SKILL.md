@@ -149,9 +149,12 @@ requests and latest reply; `transcript_tail` up to 40 items / 12000
 characters). Creation returns after dispatch without waiting. If dispatch
 fails, the thread still exists; do not create a duplicate.
 
-At most five children per parent are active at once: running, waiting,
-queued, and unused idle children count; finished or errored ones do not.
-Archiving releases an unused idle child but not a running one.
+A limited number of children per parent are active at once (a user setting,
+Settings → General → Parallel tasks per agent; default five, 1–20). The
+`falcondeck_create_thread` description states the current limit, and a refused
+create names it. Running, waiting, queued, and unused idle children count;
+finished or errored ones do not. Archiving releases an unused idle child but
+not a running one.
 
 ### Following up
 

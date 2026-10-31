@@ -1,10 +1,16 @@
 import type { FalconDeckPreferences, UpdatePreferencesPayload } from '@falcondeck/client-core'
-import { normalizePreferences } from '@falcondeck/client-core'
+import {
+  MAX_MAX_AGENT_CHILDREN,
+  MIN_MAX_AGENT_CHILDREN,
+  normalizePreferences,
+} from '@falcondeck/client-core'
 import {
   ActivityDiamond,
   Badge,
   Button,
+  Input,
   SettingList,
+  SettingRow,
   SettingsPage,
   SettingsPageHeader,
   SettingsSection,
@@ -12,6 +18,7 @@ import {
 } from '@falcondeck/ui'
 
 import { Download, FolderSync, RotateCcw } from 'lucide-react'
+import { useEffect, useState } from 'react'
 
 import type { AppUpdaterState } from '../../hooks/useAppUpdater'
 import {
@@ -20,6 +27,50 @@ import {
   updateBadgeVariant,
   updateStatusLabel,
 } from './settings-utils'
+
+/** Commits on blur or Enter so a half-typed value never reaches the daemon. */
+function AgentChildLimitInput({
+  value,
+  onCommit,
+}: {
+  value: number
+  onCommit: (value: number) => void
+}) {
+  const [draft, setDraft] = useState(String(value))
+  useEffect(() => setDraft(String(value)), [value])
+
+  const commit = () => {
+    const parsed = Number(draft)
+    const valid =
+      draft.trim() !== '' &&
+      Number.isInteger(parsed) &&
+      parsed >= MIN_MAX_AGENT_CHILDREN &&
+      parsed <= MAX_MAX_AGENT_CHILDREN
+    if (!valid) {
+      setDraft(String(value))
+      return
+    }
+    if (parsed !== value) onCommit(parsed)
+  }
+
+  return (
+    <Input
+      type="number"
+      inputMode="numeric"
+      aria-label="Parallel tasks per agent"
+      min={MIN_MAX_AGENT_CHILDREN}
+      max={MAX_MAX_AGENT_CHILDREN}
+      step={1}
+      value={draft}
+      onChange={(event) => setDraft(event.target.value)}
+      onBlur={commit}
+      onKeyDown={(event) => {
+        if (event.key === 'Enter') event.currentTarget.blur()
+      }}
+      className="w-20 text-center tabular-nums"
+    />
+  )
+}
 
 type GeneralSettingsPanelProps = {
   preferences: FalconDeckPreferences | null
@@ -83,6 +134,24 @@ export function GeneralSettingsPanel({
             checked={current.auto_resume_interrupted_sessions === true}
             onCheckedChange={(enabled) =>
               onUpdatePreferences({ auto_resume_interrupted_sessions: enabled })
+            }
+          />
+        </SettingList>
+      </SettingsSection>
+
+      <SettingsSection
+        title="Agents"
+        description="Limits for agents and bots that start their own tasks."
+      >
+        <SettingList>
+          <SettingRow
+            title="Parallel tasks per agent"
+            description={`How many tasks one agent or bot can run at once. Default 5, from ${MIN_MAX_AGENT_CHILDREN} to ${MAX_MAX_AGENT_CHILDREN}.`}
+            control={
+              <AgentChildLimitInput
+                value={current.max_agent_children ?? 5}
+                onCommit={(max_agent_children) => onUpdatePreferences({ max_agent_children })}
+              />
             }
           />
         </SettingList>

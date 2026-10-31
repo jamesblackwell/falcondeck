@@ -70,6 +70,31 @@ describe('SettingsView deep links', () => {
     expect(onUpdatePreferences).toHaveBeenCalledWith({ auto_resume_interrupted_sessions: false })
   })
 
+  it('sets the parallel task limit from General, committing only valid integers', () => {
+    const onUpdatePreferences = vi.fn()
+    render(
+      <SettingsView
+        {...props}
+        initialSection="general"
+        preferences={{ max_agent_children: 5 } as SettingsViewProps['preferences']}
+        onUpdatePreferences={onUpdatePreferences}
+      />,
+    )
+    const input = screen.getByRole('spinbutton', { name: 'Parallel tasks per agent' })
+    expect(input).toHaveValue(5)
+    fireEvent.change(input, { target: { value: '2' } })
+    fireEvent.blur(input)
+    expect(onUpdatePreferences).toHaveBeenCalledWith({ max_agent_children: 2 })
+
+    onUpdatePreferences.mockClear()
+    for (const bad of ['0', '21', '', '2.5']) {
+      fireEvent.change(input, { target: { value: bad } })
+      fireEvent.blur(input)
+    }
+    expect(onUpdatePreferences).not.toHaveBeenCalled()
+    expect(input).toHaveValue(5)
+  })
+
   it('does not expose a second settings-only automation manager', () => {
     render(<SettingsView {...props} />)
     expect(screen.queryByRole('button', { name: /Automations/ })).not.toBeInTheDocument()

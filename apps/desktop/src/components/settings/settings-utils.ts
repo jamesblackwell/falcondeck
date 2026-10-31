@@ -78,10 +78,11 @@ export const SETTINGS_GROUPS: SettingsNavGroup[] = [
         icon: Settings,
         settings: [
           "Automatically continue stopped sessions",
+          "Parallel tasks per agent",
           "Updates",
           "First-run onboarding",
         ],
-        keywords: ["version", "release", "resume", "restart", "welcome"],
+        keywords: ["version", "release", "resume", "restart", "welcome", "children", "limit", "bots", "agents"],
       },
       {
         id: "appearance",

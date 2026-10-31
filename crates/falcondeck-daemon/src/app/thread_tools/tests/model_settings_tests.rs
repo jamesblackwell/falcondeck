@@ -109,7 +109,7 @@ async fn create_rejects_blank_reasoning_before_creating_thread() {
 
 #[test]
 fn create_catalog_advertises_reasoning_effort() {
-    let tool = catalog().into_iter().find(|t| t.name == CREATE).unwrap();
+    let tool = catalog(5).into_iter().find(|t| t.name == CREATE).unwrap();
     let effort = &tool.input_schema["properties"]["reasoning_effort"];
     assert_eq!(effort["type"], "string");
     assert_eq!(effort["minLength"], 1);

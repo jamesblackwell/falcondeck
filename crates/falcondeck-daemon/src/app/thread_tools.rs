@@ -20,14 +20,14 @@ const SUMMARY: &str = "falcondeck_thread_summary";
 const CHANGES: &str = "falcondeck_thread_changes";
 const MAX_CHARS: usize = 24_000;
 const MAX_ITEMS: usize = 100;
-/// Active (running, waiting or unused idle) children one parent may have at once.
-const MAX_ACTIVE_CHILDREN: usize = 5;
 
 pub(super) fn is_builtin(name: &str) -> bool {
     actions::is_action(name) || matches!(name, LIST | VIEW | CREATE | MESSAGE | SUMMARY | CHANGES)
 }
 
-pub(super) fn catalog() -> Vec<ExtensionAgentTool> {
+/// `max_children` is the configured per-parent child limit, stated in the create tool's description.
+pub(super) fn catalog(max_children: u32) -> Vec<ExtensionAgentTool> {
+    let create_description = format!("Start a local or cloud thread and optionally send its first prompt; returns without waiting. execution_target=cloud uses the configured sandbox with the project's current files. At most {max_children} active {} per parent (a user setting). Context defaults to none; briefing passes your summary, transcript_tail your recent transcript.", if max_children == 1 { "child" } else { "children" });
     [
         (LIST, "List threads", "Start here to see what is being worked on. One compact row per thread, newest activity first (default 20): status, age, provider, flags, and what it was last asked and last said. The header counts running, blocked, and recently active threads. Excludes you. Filter by status, time, query, parent, provider, folder, or pin; page with offset. Never loads transcripts.", list::schema(), vec![]),
         (CHANGES, "Thread changes", "Threads active since a time, same rows as list plus what changed (messages, files, commits, checks) when the transcript is loaded. Blocked threads first. Pass the returned Now as since next time to poll without repeats.", json!({
@@ -60,7 +60,7 @@ pub(super) fn catalog() -> Vec<ExtensionAgentTool> {
             "message": {"type":"string", "minLength":1, "maxLength":24000, "description":"Readable prose with normal spaces between words."},
             "delivery": {"type":"string", "enum":["steer","queue"], "description":"Deprecated and ignored; messages always steer when the receiver can take them."}
         }), vec!["thread_id", "message"]),
-        (CREATE, "Create thread", "Start a local or cloud thread and optionally send its first prompt; returns without waiting. execution_target=cloud uses the configured sandbox with the project's current files. At most five active children per parent. Context defaults to none; briefing passes your summary, transcript_tail your recent transcript.", json!({
+        (CREATE, "Create thread", create_description.as_str(), json!({
             "prompt": {"type":"string", "minLength":1, "maxLength":24000, "description":"A self-contained brief: goal, relevant files, constraints, and what done looks like."},
             "title": {"type":"string", "minLength":1, "maxLength":200},
             "provider": {"type":"string", "minLength":1},
@@ -496,6 +496,7 @@ impl AppState {
                 }
                 // Serializes admission through dispatch; a simultaneous fourth call cannot race the count.
                 let _gate = self.inner.agent_spawn_gate.lock().await;
+                let max_children = self.preferences().await.max_agent_children as usize;
                 let retry = if a.execution_target == falcondeck_core::ThreadExecutionTarget::Cloud
                     && let Some(key) = a.idempotency_key.as_deref()
                 {
@@ -528,8 +529,8 @@ impl AppState {
                         .iter()
                         .filter(|t| child_is_active(t, parent))
                         .count();
-                    if retry.is_none() && local_children + cloud_children >= MAX_ACTIVE_CHILDREN {
-                        return Err(DaemonError::BadRequest(format!("parent already has {MAX_ACTIVE_CHILDREN} concurrent children; finish a child or archive an unused idle child first")));
+                    if retry.is_none() && local_children + cloud_children >= max_children {
+                        return Err(DaemonError::BadRequest(format!("parent already has {max_children} concurrent children (the limit set in Settings → General → Parallel tasks per agent); finish a child or archive an unused idle child first")));
                     }
                 }
                 // Resolved after admission so a rejected call never creates a folder.
@@ -812,7 +813,7 @@ mod tests {
 
     #[test]
     fn agent_creation_exposes_cloud_and_keeps_local_as_default() {
-        let create = catalog().into_iter().find(|t| t.name == CREATE).unwrap();
+        let create = catalog(5).into_iter().find(|t| t.name == CREATE).unwrap();
         assert_eq!(
             create.input_schema["properties"]["execution_target"]["enum"],
             json!(["local", "cloud"])
@@ -2266,5 +2267,68 @@ printf '%s\n' '{{"type":"result","subtype":"success","result":"done","session_id
                 .to_string()
                 .contains("5 concurrent children")
         );
+    }
+    async fn set_child_limit(app: &AppState, limit: u32) -> Result<(), DaemonError> {
+        app.update_preferences(falcondeck_core::UpdatePreferencesRequest {
+            max_agent_children: Some(limit),
+            ..Default::default()
+        })
+        .await
+        .map(|_| ())
+    }
+    #[tokio::test]
+    async fn creation_admits_up_to_the_configured_child_limit() {
+        let (app, _temp) = fixture().await;
+        set_child_limit(&app, 2).await.unwrap();
+        for _ in 0..2 {
+            app.invoke_extension_tool(call(CREATE, json!({})))
+                .await
+                .unwrap();
+        }
+        let full = app
+            .invoke_extension_tool(call(CREATE, json!({})))
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(full.contains("2 concurrent children"), "{full}");
+        assert!(full.contains("Parallel tasks per agent"), "{full}");
+        // Raising the limit takes effect on the next call without a restart.
+        set_child_limit(&app, 3).await.unwrap();
+        app.invoke_extension_tool(call(CREATE, json!({})))
+            .await
+            .unwrap();
+        assert!(
+            app.invoke_extension_tool(call(CREATE, json!({})))
+                .await
+                .unwrap_err()
+                .to_string()
+                .contains("3 concurrent children")
+        );
+    }
+    #[tokio::test]
+    async fn child_limit_update_rejects_out_of_range_and_names_the_limit_in_the_tool() {
+        let (app, _temp) = fixture().await;
+        for bad in [0, 21] {
+            let error = set_child_limit(&app, bad).await.unwrap_err();
+            assert!(matches!(error, DaemonError::BadRequest(_)), "{error}");
+        }
+        assert_eq!(app.preferences().await.max_agent_children, 5);
+        let description = |app: &AppState| {
+            let app = app.clone();
+            async move {
+                app.extension_agent_tools()
+                    .await
+                    .tools
+                    .into_iter()
+                    .find(|tool| tool.name == CREATE)
+                    .unwrap()
+                    .description
+            }
+        };
+        assert!(description(&app).await.contains("At most 5 active children"));
+        set_child_limit(&app, 1).await.unwrap();
+        assert!(description(&app).await.contains("At most 1 active child per parent"));
+        set_child_limit(&app, 20).await.unwrap();
+        assert!(description(&app).await.contains("At most 20 active children"));
     }
 }

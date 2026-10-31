@@ -44,6 +44,17 @@ pub const DEFAULT_DAEMON_PORT: u16 = 4123;
 /// Default port for the `FalconDeck` relay HTTP and websocket server.
 pub const DEFAULT_RELAY_PORT: u16 = 8787;
 
+/// Default for `FalconDeckPreferences::max_agent_children`.
+pub const DEFAULT_MAX_AGENT_CHILDREN: u32 = 5;
+/// Smallest accepted `max_agent_children`.
+pub const MIN_MAX_AGENT_CHILDREN: u32 = 1;
+/// Largest accepted `max_agent_children`.
+pub const MAX_MAX_AGENT_CHILDREN: u32 = 20;
+
+fn default_max_agent_children() -> u32 {
+    DEFAULT_MAX_AGENT_CHILDREN
+}
+
 fn default_true() -> bool {
     true
 }
@@ -92,6 +103,9 @@ pub struct FalconDeckPreferences {
     /// Missing in old preference files retains manual recovery.
     #[serde(default)]
     pub auto_resume_interrupted_sessions: bool,
+    /// Active child threads one agent or bot may have at once.
+    #[serde(default = "default_max_agent_children")]
+    pub max_agent_children: u32,
     /// User-defined order for workspaces in project navigation.
     #[serde(default)]
     pub workspace_order: Vec<String>,
@@ -135,6 +149,7 @@ impl Default for FalconDeckPreferences {
             bots: Vec::new(),
             version: default_preferences_version(),
             auto_resume_interrupted_sessions: true,
+            max_agent_children: DEFAULT_MAX_AGENT_CHILDREN,
             workspace_order: Vec::new(),
             hidden_workspace_ids: Vec::new(),
             workspace_colors: BTreeMap::new(),
@@ -646,6 +661,10 @@ pub struct UpdatePreferencesRequest {
     /// Optional startup recovery policy update.
     #[serde(default)]
     pub auto_resume_interrupted_sessions: Option<bool>,
+    /// Optional active child thread limit per agent; accepted range is
+    /// `MIN_MAX_AGENT_CHILDREN..=MAX_MAX_AGENT_CHILDREN`.
+    #[serde(default)]
+    pub max_agent_children: Option<u32>,
     /// Optional workspace order update for project navigation.
     #[serde(default)]
     pub workspace_order: Option<Vec<String>>,
