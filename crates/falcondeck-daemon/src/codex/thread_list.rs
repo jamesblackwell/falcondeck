@@ -280,6 +280,8 @@ pub(super) fn parse_threads(
             let provider_title = extract_thread_title(entry);
             Some(HydratedThread {
                 summary: ThreadSummary {
+                    execution_target: Default::default(),
+                    cloud: None,
                     id: id.clone(),
                     workspace_id: workspace_id.to_string(),
                     title: provider_title

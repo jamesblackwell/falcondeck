@@ -412,6 +412,16 @@ impl AppState {
         workspace: &str,
         thread: &str,
     ) -> Vec<InteractiveRequest> {
+        if let Ok(summary) = self.thread_summary(workspace, thread).await
+            && summary.execution_target == falcondeck_core::ThreadExecutionTarget::Cloud
+        {
+            return self
+                .cloud_manager()
+                .thread_detail(thread)
+                .await
+                .map(|detail| detail.interactive_requests)
+                .unwrap_or_default();
+        }
         let mut requests: Vec<_> = self
             .inner
             .interactive_requests

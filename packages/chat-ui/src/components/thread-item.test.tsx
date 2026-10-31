@@ -229,3 +229,18 @@ describe('ThreadItem background activity', () => {
     expect(container.querySelector('.bg-unread')).toBeNull()
   })
 })
+
+
+describe('ThreadItem cloud location', () => {
+  it('opens cloud work through the normal task row and updates its location marker', () => {
+    const onSelect = vi.fn()
+    const local = thread('2026-08-31T14:08:59Z')
+    const renderRow = (value: ThreadSummary) => <ThreadItem thread={value} workspaceId="workspace-1" isSelected={false} onSelect={onSelect} />
+    const { rerender } = render(renderRow(local))
+    expect(screen.queryByRole('img', { name: 'Cloud' })).not.toBeInTheDocument()
+    rerender(renderRow({ ...local, execution_target: 'cloud' }))
+    expect(screen.getByRole('img', { name: 'Cloud' })).toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: /Timestamped task/ }))
+    expect(onSelect).toHaveBeenCalledWith('workspace-1', 'thread-1')
+  })
+})

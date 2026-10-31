@@ -33,6 +33,9 @@ enum NativeHostProjection {
 
     static func task(_ value: JSON, host: String) -> JSON {
         var result = ids(value, keys: ["id", "workspace_id"], host: host).setting("host_id", .string(host))
+        if value["cloud"] != .null {
+            result = result.setting("cloud", ids(value["cloud"], keys: ["job_id"], host: host))
+        }
         if result["handoff_from"] != .null {
             result = result.setting("handoff_from", ids(result["handoff_from"], keys: ["thread_id"], host: host))
         }

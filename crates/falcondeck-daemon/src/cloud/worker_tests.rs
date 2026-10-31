@@ -136,11 +136,18 @@ print(json.dumps(response))
         idempotency_key: "worker-launch-retry-0001".into(),
         model_id: Some("native-test-model".into()),
     };
+    let allocation_gate = manager.execution.lock().await;
     let admitted = manager
         .create(request.clone(), project.clone())
         .await
         .unwrap();
     assert_eq!(admitted.status, CloudJobStatus::Provisioning);
+    // Creating a thread/draft earlier must not consume the runtime budget
+    // before its eventual first Send starts provider compute.
+    let mut registry = manager.registry().unwrap();
+    registry.jobs.get_mut(&admitted.id).unwrap().job.created_at = Utc::now() - chrono::Duration::hours(3);
+    manager.save(&registry).unwrap();
+    drop(allocation_gate);
     let running = tokio::time::timeout(Duration::from_secs(10), async {
         loop {
             let job = manager.list().await.unwrap().remove(0);
@@ -162,6 +169,7 @@ print(json.dumps(response))
     assert_eq!(native.workspace_id, "worker-ws");
     assert_eq!(native.thread_id, "native-thread");
     assert_eq!(native.provider, "codex");
+    assert!(running.expires_at.unwrap() > Utc::now() + chrono::Duration::minutes(4));
 
     let input: Value = serde_json::from_slice(&fs::read(&input_path).unwrap()).unwrap();
     assert_eq!(input["operation"], "create");
@@ -251,6 +259,14 @@ fn stored_native_job(root: PathBuf, status: CloudJobStatus) -> JobRecord {
         gateway_token: None,
         provider_scope: Some(("original-team".into(), "original-project".into())),
         awaiting_user_after_resume: false,
+        thread_summary: None,
+        thread_request: None,
+        deferred_launch: false,
+        pending_turn: None,
+        custom_title: None,
+        turn_receipts: BTreeMap::new(),
+        cancel_requested: false,
+        allocation_started: false,
     }
 }
 

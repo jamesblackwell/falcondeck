@@ -126,6 +126,33 @@ test('proxies method, body and API path while stripping bearer and proxy identit
   assert.equal(response.headers['cache-control'], 'no-store');
 });
 
+test('ordinary cloud settings and queued followups keep their HTTP methods and bodies', async (t) => {
+  const received = [];
+  const { port } = await fixture(t, async (req, res) => {
+    const chunks = [];
+    for await (const chunk of req) chunks.push(chunk);
+    received.push({ method: req.method, path: req.url, body: Buffer.concat(chunks).toString() });
+    assert.equal(req.headers.authorization, undefined);
+    res.setHeader('content-type', 'application/json');
+    res.end('{"ok":true}');
+  });
+  const base = '/api/workspaces/native-workspace/threads/native-thread';
+  const operations = [
+    { method: 'PATCH', path: base, body: '{"model_id":"test-model","approval_policy":"on-request"}' },
+    { method: 'PATCH', path: `${base}/queue/queued-turn`, body: '{"text":"Revised followup"}' },
+    { method: 'DELETE', path: `${base}/queue/queued-turn` },
+    { method: 'POST', path: `${base}/queue/reorder`, body: '{"queued_ids":["second","first"]}' },
+    { method: 'POST', path: `${base}/queue/queued-turn/steer`, body: '{}' },
+  ];
+  for (const operation of operations) {
+    const response = await request(port, {
+      ...operation, headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' },
+    });
+    assert.equal(response.status, 200);
+  }
+  assert.deepEqual(received, operations.map((operation) => ({ ...operation, body: operation.body ?? '' })));
+});
+
 test('rejects non-API, absolute and ambiguous paths without changing the fixed upstream', async (t) => {
   let hits = 0;
   const { port } = await fixture(t, (_req, res) => { hits += 1; res.end(); });

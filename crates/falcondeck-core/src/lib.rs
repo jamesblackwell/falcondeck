@@ -2333,6 +2333,14 @@ pub struct ThreadMessageSearchResponse {
 pub struct StartThreadRequest {
     /// Workspace identifier that will own the thread.
     pub workspace_id: String,
+    /// Execution location. Cloud captures this project's current source;
+    /// omission preserves the local workflow.
+    #[serde(default)]
+    pub execution_target: ThreadExecutionTarget,
+    /// Stable retry key for cloud creation. Callers should retain it until
+    /// creation returns a handle instead of allocating a second worker.
+    #[serde(default)]
+    pub idempotency_key: Option<String>,
     /// Optional provider override for the new thread.
     #[serde(default)]
     pub provider: Option<AgentProvider>,
@@ -4229,6 +4237,12 @@ pub struct ThreadSummary {
     pub id: String,
     /// Workspace identifier that owns the thread.
     pub workspace_id: String,
+    /// Execution location, fixed when this thread was created.
+    #[serde(default)]
+    pub execution_target: ThreadExecutionTarget,
+    /// Cloud lifecycle metadata; native conversation content stays on the worker.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cloud: Option<CloudThreadMetadata>,
     /// User-visible thread title.
     pub title: String,
     /// Provider backing the thread.

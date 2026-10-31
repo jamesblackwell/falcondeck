@@ -30,6 +30,7 @@ import { AnalyticsPanel } from "./settings/AnalyticsPanel";
 import { BackupPanel } from "./settings/BackupPanel";
 import { SpeechSettingsPanel } from "./settings/SpeechSettingsPanel";
 import type { SettingsSectionId } from "./settings/settings-utils";
+import { CloudSettingsPanel, type CloudSettingsOwner } from "./cloud/CloudSettingsPanel";
 
 /** Finds the element whose own text is exactly `title` (a section or row
  * heading) and returns the row or card around it. */
@@ -55,6 +56,8 @@ export type SettingsViewProps = {
   baseUrl: string | null;
   hostManager: HostManager;
   hosts: HostView[];
+  cloudOwners?: readonly CloudSettingsOwner[];
+  initialCloudOwnerId?: string | null;
   onToast: ServersPanelProps["onToast"];
   preferences: FalconDeckPreferences | null;
   remoteStatus: RemoteStatusResponse | null;
@@ -197,6 +200,11 @@ export function SettingsView(props: SettingsViewProps) {
               baseUrl={props.baseUrl}
               hosts={props.hosts}
               onToast={props.onToast}
+            />
+          ) : activeSection === "cloud" ? (
+            <CloudSettingsPanel
+              owners={props.cloudOwners ?? []}
+              initialOwnerId={props.initialCloudOwnerId}
             />
           ) : activeSection === "connectors" ? (
             <ConnectorsPanel

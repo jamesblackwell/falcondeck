@@ -56,6 +56,7 @@ struct ConversationView: View {
                 else { transcript }
             }
             VStack(spacing: 10) {
+                if let task = store.selectedTask, task.isCloud { NativeCloudConversationPanel(store: store, task: task).id(task.id) }
                 if let task = store.selectedTask { ConversationTaskPanels(store: store, task: task, capabilities: capabilities).id(task.id) }
                 InteractiveRequestsView(store: store)
             }.frame(maxWidth: 900).padding(.horizontal, 28)
@@ -109,6 +110,7 @@ struct ConversationView: View {
                 .lineLimit(1).accessibilityIdentifier("conversation-title")
             HStack(spacing: 5) {
                 Text(store.selectedProject?.name ?? "Select a project to get started")
+                if store.selectedTask?.isCloud == true { Label("Cloud", systemImage: "cloud") }
                 if let task = store.selectedTask, !task.raw["variant"]["path"].string.isEmpty {
                     Image(systemName: "arrow.triangle.branch")
                     Text(URL(fileURLWithPath: workingDirectory).lastPathComponent)
@@ -236,6 +238,9 @@ struct ConversationView: View {
     var composer: some View {
         let composerKey = store.composerKey
         return VStack(spacing: 8) {
+            if store.selectedTask == nil, selection.effectiveExecutionTarget(task: nil) == "cloud" {
+                NativeCloudNewTaskNote(store: store).id(store.selectedProjectID)
+            }
             if !store.isInputReady {
                 HStack(spacing: 8) {
                     Image(systemName: "lock")
@@ -253,6 +258,7 @@ struct ConversationView: View {
                 ConversationSlashSuggestions(items: slashItems) { item in store.draft = ConversationSlash.insert(item, into: store.draft) }
             }
             VStack(alignment: .leading, spacing: 0) {
+                NativeConversationLocation(store: store, selection: $selection)
                 if !quote.isEmpty {
                     HStack(alignment: .top) {
                         Image(systemName: "text.quote").foregroundStyle(FDTheme.accent)

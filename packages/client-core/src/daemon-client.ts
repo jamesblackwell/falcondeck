@@ -148,6 +148,8 @@ export type SendTurnPayload = {
 
 export type StartThreadPayload = {
   workspace_id: string;
+  execution_target?: "local" | "cloud";
+  idempotency_key?: string | null;
   provider?: AgentProvider | null;
   model_id?: string | null;
   collaboration_mode_id?: string | null;

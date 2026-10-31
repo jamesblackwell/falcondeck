@@ -69,6 +69,7 @@ import SwiftUI
     /// providers receive the retained text as daemon-owned first-turn context.
     /// Reading the source never starts a turn or consumes model tokens.
     nonisolated static func forkBlockedReason(_ task: AgentTask, provider: String, project: Project?) -> String? {
+        if task.isCloud { return "Forking cloud conversations is not supported yet. Continue in this conversation or start another cloud task." }
         guard provider == task.provider else { return nil }
         if task.raw["variant"] != .null {
             return "Forking an isolated task onto the same agent is not supported. Continue with another agent instead."
@@ -218,8 +219,10 @@ struct NativeTaskContextMenu: View {
         }
         if let path = store.allProjects.first(where: { $0.id == task.projectID })?.path {
             Button("Copy project path") { FDTheme.copy(path) }
-            let working = task.raw["variant"]["path"].string
-            Button("Copy working directory") { FDTheme.copy(working.isEmpty ? path : working) }
+            if !task.isCloud {
+                let working = task.raw["variant"]["path"].string
+                Button("Copy working directory") { FDTheme.copy(working.isEmpty ? path : working) }
+            }
         }
         Menu("Fork task", systemImage: "arrow.triangle.branch") {
             let project = store.allProjects.first { $0.id == task.projectID }

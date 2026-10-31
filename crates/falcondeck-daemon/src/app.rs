@@ -94,6 +94,7 @@ pub(crate) mod agent_helpers;
 mod claude_history;
 #[cfg(all(test, unix))]
 mod claude_startup_measurement;
+mod cloud_threads;
 mod computer_use;
 pub(crate) mod conversation_helpers;
 mod extension_events;
@@ -297,6 +298,7 @@ struct InnerState {
     provider_bins: HashMap<AgentProvider, String>,
     state_path: PathBuf,
     cloud: Arc<crate::cloud::manager::CloudManager>,
+    cloud_projection: cloud_threads::CloudProjection,
     /// Background tasks can still finish persistence after shutdown. Retain
     /// ownership until their AppState clones have actually been dropped.
     state_lock: StdMutex<Option<Arc<crate::state_lock::StateLock>>>,
@@ -1015,6 +1017,7 @@ impl AppState {
                 provider_bins,
                 state_path,
                 cloud,
+                cloud_projection: cloud_threads::CloudProjection::default(),
                 state_lock: StdMutex::new(None),
                 preferences_path,
                 scheduled_tasks_path,
@@ -1529,6 +1532,7 @@ impl AppState {
     }
 
     pub async fn restore_local_state(&self) -> Result<(), DaemonError> {
+        self.start_cloud_observer();
         self.inner.extensions.lock().await.restore().await?;
         if let Err(error) = self
             .control()
@@ -1774,6 +1778,8 @@ impl AppState {
                 .clone()
                 .or_else(|| shutdown_error_for_cut_off_status(state.status.as_ref()));
             let summary = ThreadSummary {
+                execution_target: Default::default(),
+                cloud: None,
                 id: state.thread_id.clone(),
                 workspace_id: workspace_id.clone(),
                 title: state
@@ -2441,6 +2447,15 @@ impl AppState {
     }
 
     async fn snapshot_projection(&self, compact: bool) -> DaemonSnapshot {
+        self.start_cloud_observer();
+        let cloud_threads = self
+            .cloud_manager()
+            .thread_summaries()
+            .await
+            .unwrap_or_default();
+        for thread in &cloud_threads {
+            self.seed_cloud_sequence(thread);
+        }
         // Reading providers.json resolves each configured binary, and a
         // missing binary falls through to a blocking login-shell probe —
         // never do that while holding the global workspaces lock, which
@@ -2487,6 +2502,7 @@ impl AppState {
             .values()
             .map(|request| request.request.clone())
             .collect::<Vec<_>>();
+        interactive_request_list.extend(self.cloud_interactive_requests().await);
         interactive_request_list.sort_by_key(|request| std::cmp::Reverse(request.created_at));
         // Keyed by workspace and thread. Thread ids are only unique inside a
         // workspace, and a shared id would otherwise light the wrong row.
@@ -2593,6 +2609,24 @@ impl AppState {
                     })
             })
             .collect::<Vec<_>>();
+        threads.extend(
+            cloud_threads
+                .into_iter()
+                .filter(|thread| live_ids.contains(&thread.workspace_id))
+                .filter(|thread| !compact || !thread.is_archived)
+                .map(|mut thread| {
+                    let (approvals, questions) = request_counts
+                        .get(&(thread.workspace_id.as_str(), thread.id.as_str()))
+                        .copied()
+                        .unwrap_or_default();
+                    refresh_thread_attention(&mut thread, approvals, questions);
+                    if compact {
+                        sync_index::row(&thread)
+                    } else {
+                        thread
+                    }
+                }),
+        );
         threads.sort_by_key(|thread| std::cmp::Reverse(thread.updated_at));
 
         DaemonSnapshot {
@@ -3875,6 +3909,9 @@ impl AppState {
         &self,
         request: StartThreadRequest,
     ) -> Result<ThreadHandle, DaemonError> {
+        if request.execution_target == falcondeck_core::ThreadExecutionTarget::Cloud {
+            return self.start_cloud_thread(request).await;
+        }
         workspace_ops::start_thread(self, request).await
     }
 
@@ -3890,6 +3927,11 @@ impl AppState {
         workspace_id: &str,
         thread_id: &str,
     ) -> Result<ThreadSummary, DaemonError> {
+        if self.is_cloud_thread(thread_id) {
+            return self
+                .mutate_cloud_thread(workspace_id, thread_id, |thread| thread.is_archived = true)
+                .await;
+        }
         if self.bot_for_thread(thread_id).await.is_some() {
             return Err(DaemonError::Conflict("Use Delete bot to retire its home conversation".into()));
         }
@@ -3900,7 +3942,16 @@ impl AppState {
         &self,
         workspace_id: &str,
     ) -> Result<CommandResponse, DaemonError> {
-        workspace_ops::archive_all_threads(self, workspace_id).await
+        let result = workspace_ops::archive_all_threads(self, workspace_id).await?;
+        for thread in self.cloud_manager().thread_summaries().await? {
+            if thread.workspace_id == workspace_id && !thread.is_archived {
+                self.mutate_cloud_thread(workspace_id, &thread.id, |thread| {
+                    thread.is_archived = true
+                })
+                .await?;
+            }
+        }
+        Ok(result)
     }
 
     pub async fn unarchive_thread(
@@ -3908,6 +3959,11 @@ impl AppState {
         workspace_id: &str,
         thread_id: &str,
     ) -> Result<ThreadSummary, DaemonError> {
+        if self.is_cloud_thread(thread_id) {
+            return self
+                .mutate_cloud_thread(workspace_id, thread_id, |thread| thread.is_archived = false)
+                .await;
+        }
         workspace_ops::unarchive_thread(self, workspace_id, thread_id).await
     }
 
@@ -3916,6 +3972,9 @@ impl AppState {
         workspace_id: &str,
         thread_id: &str,
     ) -> Result<CommandResponse, DaemonError> {
+        if self.is_cloud_thread(thread_id) {
+            return Err(DaemonError::BadRequest("Archive this cloud task to keep its saved conversation and changes. Cloud environment deletion is not available here.".into()));
+        }
         if self.bot_for_thread(thread_id).await.is_some() {
             return Err(DaemonError::Conflict("Delete the bot before deleting its home conversation".into()));
         }
@@ -3930,6 +3989,18 @@ impl AppState {
         &self,
         request: SendTurnRequest,
     ) -> Result<CommandResponse, DaemonError> {
+        if self.is_cloud_thread(&request.thread_id) {
+            self.require_cloud_thread(&request.workspace_id, &request.thread_id)
+                .await?;
+            let thread_id = request.thread_id.clone();
+            let result = self
+                .cloud_manager()
+                .send_thread_turn(&thread_id, request)
+                .await;
+            self.publish_cloud_summary(&thread_id).await;
+            self.start_cloud_observer();
+            return result;
+        }
         workspace_ops::send_turn(self, request).await
     }
 
@@ -3937,6 +4008,15 @@ impl AppState {
         &self,
         request: UpdateThreadRequest,
     ) -> Result<ThreadHandle, DaemonError> {
+        if self.is_cloud_thread(&request.thread_id) {
+            let workspace = self
+                .cloud_source_workspace(&request.workspace_id, &request.thread_id)
+                .await?;
+            let id = request.thread_id.clone();
+            let thread = self.cloud_manager().update_thread(&id, request).await?;
+            self.publish_cloud_summary(&id).await;
+            return Ok(ThreadHandle { workspace, thread });
+        }
         workspace_ops::update_thread(self, request).await
     }
 
@@ -3999,6 +4079,24 @@ impl AppState {
         workspace_id: String,
         thread_id: String,
     ) -> Result<CommandResponse, DaemonError> {
+        if self.is_cloud_thread(&thread_id) {
+            let thread = self.require_cloud_thread(&workspace_id, &thread_id).await?;
+            let job_id = crate::cloud::manager::job_id(&thread_id).unwrap();
+            if thread.cloud.as_ref().is_some_and(|cloud| {
+                matches!(
+                    cloud.status,
+                    falcondeck_core::CloudJobStatus::Provisioning
+                        | falcondeck_core::CloudJobStatus::Stopping
+                )
+            }) {
+                let result = self.cloud_manager().cancel_preparing(job_id).await;
+                self.publish_cloud_summary(&thread_id).await;
+                return result;
+            }
+            let result = self.cloud_manager().interrupt(job_id).await;
+            self.publish_cloud_summary(&thread_id).await;
+            return result;
+        }
         workspace_ops::interrupt_turn(self, workspace_id, thread_id).await
     }
 
@@ -4015,6 +4113,13 @@ impl AppState {
         request_id: String,
         response: InteractiveResponsePayload,
     ) -> Result<CommandResponse, DaemonError> {
+        if let Some((thread_id, native_request_id)) = request_id.split_once('/')
+            && self.is_cloud_thread(thread_id)
+        {
+            return self
+                .respond_to_cloud_request(&workspace_id, thread_id, native_request_id, response)
+                .await;
+        }
         workspace_ops::respond_to_interactive_request(self, workspace_id, request_id, response)
             .await
     }
@@ -4046,6 +4151,22 @@ impl AppState {
         workspace_id: &str,
         thread_id: &str,
     ) -> Result<ThreadDetail, DaemonError> {
+        if self.is_cloud_thread(thread_id) {
+            return self
+                .cloud_thread_detail(&ThreadDetailRequest {
+                    workspace_id: workspace_id.into(),
+                    thread_id: thread_id.into(),
+                    mode: falcondeck_core::ThreadDetailMode::Full,
+                    limit: None,
+                    before_item_id: None,
+                    inline_images: None,
+                    tool_output_bytes: None,
+                    strict_limit: None,
+                    compact_workspace: None,
+                    refresh_native: None,
+                })
+                .await;
+        }
         workspace_ops::thread_detail(
             self,
             &ThreadDetailRequest {
@@ -4068,6 +4189,9 @@ impl AppState {
         &self,
         request: &ThreadDetailRequest,
     ) -> Result<ThreadDetail, DaemonError> {
+        if self.is_cloud_thread(&request.thread_id) {
+            return self.cloud_thread_detail(request).await;
+        }
         workspace_ops::thread_detail(self, request).await
     }
 
@@ -4079,6 +4203,15 @@ impl AppState {
         thread_id: &str,
         item_id: &str,
     ) -> Result<ConversationItem, DaemonError> {
+        if self.is_cloud_thread(thread_id) {
+            return self
+                .thread_detail(workspace_id, thread_id)
+                .await?
+                .items
+                .into_iter()
+                .find(|item| workspace_ops::conversation_item_id(item) == item_id)
+                .ok_or_else(|| DaemonError::NotFound("conversation item not found".into()));
+        }
         workspace_ops::thread_item(self, workspace_id, thread_id, item_id).await
     }
 
@@ -4103,6 +4236,13 @@ impl AppState {
         thread_id: &str,
         read_seq: u64,
     ) -> Result<ThreadSummary, DaemonError> {
+        if self.is_cloud_thread(thread_id) {
+            return self
+                .mutate_cloud_thread(workspace_id, thread_id, |thread| {
+                    thread.attention.last_read_seq = thread.attention.last_read_seq.max(read_seq);
+                })
+                .await;
+        }
         workspace_ops::mark_thread_read(self, workspace_id, thread_id, read_seq).await
     }
 
@@ -4111,6 +4251,14 @@ impl AppState {
         workspace_id: &str,
         thread_id: &str,
     ) -> Result<ThreadSummary, DaemonError> {
+        if self.is_cloud_thread(thread_id) {
+            return self
+                .mutate_cloud_thread(workspace_id, thread_id, |thread| {
+                    thread.attention.last_read_seq =
+                        thread.attention.last_agent_activity_seq.saturating_sub(1);
+                })
+                .await;
+        }
         workspace_ops::mark_thread_unread(self, workspace_id, thread_id).await
     }
 
@@ -4761,6 +4909,9 @@ impl AppState {
         workspace_id: &str,
         thread_id: Option<&str>,
     ) -> Result<String, DaemonError> {
+        if thread_id.is_some_and(|id| id.starts_with("cloud-")) {
+            return Err(DaemonError::BadRequest("This task's files are in its cloud environment. Collect and import its changes before using local files, Git or terminals.".into()));
+        }
         let workspaces = self.inner.workspaces.lock().await;
         let workspace = workspaces
             .get(workspace_id)

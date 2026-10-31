@@ -17,6 +17,12 @@ impl AppState {
             return Err(DaemonError::BadRequest("Folders belong to projects".into()));
         }
         if let ProjectFolderAction::MoveThread { thread_id, .. } = &mutation.action {
+            if self.is_cloud_thread(thread_id) {
+                drop(workspaces);
+                self.require_cloud_thread(&mutation.workspace_id, thread_id)
+                    .await?;
+                return Ok(());
+            }
             if !workspace.threads.contains_key(thread_id) {
                 return Err(DaemonError::NotFound(
                     "Task not found in this project".into(),

@@ -5,6 +5,19 @@ struct NativeComposerSelection: Codable, Equatable {
     var fields: [String: JSON] = [:]
     var isolation = "project_folder"
     var followUp = "queue"
+    // Optional so composer preferences saved before Cloud existed still decode.
+    var executionTarget: String?
+
+    func effectiveExecutionTarget(task: AgentTask?) -> String {
+        task.map { $0.isCloud ? "cloud" : "local" } ?? (executionTarget == "cloud" ? "cloud" : "local")
+    }
+
+    func submissionSettings(project: Project?, provider: String, task: AgentTask?) -> [String: JSON] {
+        var values = validated(project: project, provider: provider, task: task).fields
+        values["execution_target"] = .string(effectiveExecutionTarget(task: task))
+        values["isolation"] = .string(effectiveExecutionTarget(task: task) == "cloud" ? "project_folder" : isolation)
+        return values
+    }
 
     func value(_ key: String, task: AgentTask?) -> String {
         (fields[key] ?? task?.raw["agent"][key] ?? .null).string

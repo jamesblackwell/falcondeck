@@ -311,7 +311,6 @@ pub(super) const REMOTE_RPC_METHODS: &[&str] = &[
     "cloud.jobs.import",
     "cloud.jobs.stop",
     "cloud.jobs.resume",
-
     // The control service owns the current automations UI. Keep these generic
     // methods beside other daemon-level state so every paired client uses the
     // same validation, revisions, audit log, and state-change events.
@@ -1610,35 +1609,8 @@ impl AppState {
                         .map(|()| serde_json::json!({ "ok": true }))
                 }
                 "thread.start" => {
-                    let request = StartThreadRequest {
-                        workspace_id: required(&["workspaceId", "workspace_id"])?,
-                        provider: extract_string(&params, &["provider"])
-                            .and_then(parse_agent_provider),
-                        model_id: extract_string(&params, &["modelId", "model_id"]),
-                        collaboration_mode_id: extract_string(
-                            &params,
-                            &["collaborationModeId", "collaboration_mode_id"],
-                        ),
-                        approval_policy: extract_string(
-                            &params,
-                            &["approvalPolicy", "approval_policy"],
-                        ),
-                        sandbox_mode: extract_string(&params, &["sandboxMode", "sandbox_mode"]),
-                        permission_mode: extract_string(
-                            &params,
-                            &["permissionMode", "permission_mode"],
-                        ),
-                        isolation: parse_thread_isolation(&params),
-                        handoff_from: params
-                            .get("handoffFrom")
-                            .or_else(|| params.get("handoff_from"))
-                            .cloned()
-                            .and_then(|value| serde_json::from_value(value).ok()),
-                        handoff_context: extract_string(
-                            &params,
-                            &["handoffContext", "handoff_context"],
-                        ),
-                    };
+                    let request =
+                        parse_start_thread_request(&params).map_err(|error| error.to_string())?;
                     self.start_thread(request)
                         .await
                         .and_then(|handle| serde_json::to_value(handle).map_err(DaemonError::from))
@@ -2342,46 +2314,13 @@ impl AppState {
                     )),
                 }
             }
-            "thread.start" => {
-                if let Some(workspace_id) = required(&["workspaceId", "workspace_id"]) {
-                    let request = StartThreadRequest {
-                        workspace_id,
-                        provider: extract_string(&params, &["provider"])
-                            .and_then(parse_agent_provider),
-                        model_id: extract_string(&params, &["modelId", "model_id"]),
-                        collaboration_mode_id: extract_string(
-                            &params,
-                            &["collaborationModeId", "collaboration_mode_id"],
-                        ),
-                        approval_policy: extract_string(
-                            &params,
-                            &["approvalPolicy", "approval_policy"],
-                        ),
-                        sandbox_mode: extract_string(&params, &["sandboxMode", "sandbox_mode"]),
-                        permission_mode: extract_string(
-                            &params,
-                            &["permissionMode", "permission_mode"],
-                        ),
-                        isolation: parse_thread_isolation(&params),
-                        handoff_from: params
-                            .get("handoffFrom")
-                            .or_else(|| params.get("handoff_from"))
-                            .cloned()
-                            .and_then(|value| serde_json::from_value(value).ok()),
-                        handoff_context: extract_string(
-                            &params,
-                            &["handoffContext", "handoff_context"],
-                        ),
-                    };
-                    self.start_thread(request)
-                        .await
-                        .and_then(|handle| serde_json::to_value(handle).map_err(DaemonError::from))
-                } else {
-                    Err(DaemonError::BadRequest(
-                        "invalid queued action payload".to_string(),
-                    ))
-                }
-            }
+            "thread.start" => match parse_start_thread_request(&params) {
+                Ok(request) => self
+                    .start_thread(request)
+                    .await
+                    .and_then(|handle| serde_json::to_value(handle).map_err(DaemonError::from)),
+                Err(error) => Err(error),
+            },
             "thread.update" => {
                 if let (Some(workspace_id), Some(thread_id)) = (
                     required(&["workspaceId", "workspace_id"]),
@@ -2695,6 +2634,42 @@ impl AppState {
     }
 }
 
+// Live RPC and queued actions must preserve the same execution owner. A
+// misspelled target must never fall back to running on the coordinator.
+fn parse_start_thread_request(params: &Value) -> Result<StartThreadRequest, DaemonError> {
+    let execution_target = match params
+        .get("execution_target")
+        .or_else(|| params.get("executionTarget"))
+    {
+        None => Default::default(),
+        Some(value) => serde_json::from_value(value.clone()).map_err(|_| {
+            DaemonError::BadRequest("execution_target must be local or cloud".into())
+        })?,
+    };
+    Ok(StartThreadRequest {
+        workspace_id: extract_string(params, &["workspaceId", "workspace_id"])
+            .ok_or_else(|| DaemonError::BadRequest("workspace_id is required".into()))?,
+        provider: extract_string(params, &["provider"]).and_then(parse_agent_provider),
+        model_id: extract_string(params, &["modelId", "model_id"]),
+        collaboration_mode_id: extract_string(
+            params,
+            &["collaborationModeId", "collaboration_mode_id"],
+        ),
+        approval_policy: extract_string(params, &["approvalPolicy", "approval_policy"]),
+        sandbox_mode: extract_string(params, &["sandboxMode", "sandbox_mode"]),
+        permission_mode: extract_string(params, &["permissionMode", "permission_mode"]),
+        isolation: parse_thread_isolation(params),
+        execution_target,
+        idempotency_key: extract_string(params, &["idempotencyKey", "idempotency_key"]),
+        handoff_from: params
+            .get("handoffFrom")
+            .or_else(|| params.get("handoff_from"))
+            .cloned()
+            .and_then(|value| serde_json::from_value(value).ok()),
+        handoff_context: extract_string(params, &["handoffContext", "handoff_context"]),
+    })
+}
+
 fn notification_thread_title(title: &str) -> Option<String> {
     const MAX_TITLE_CHARS: usize = 256;
 
@@ -2973,6 +2948,8 @@ mod tests {
         title: &str,
     ) -> falcondeck_core::ThreadSummary {
         falcondeck_core::ThreadSummary {
+            execution_target: Default::default(),
+            cloud: None,
             id: "thread-1".to_string(),
             workspace_id: "workspace-1".to_string(),
             title: title.to_string(),
@@ -3672,5 +3649,41 @@ mod tests {
     fn snapshot_remote_rpc_remains_read_only() {
         assert!(remote_rpc_is_read_only("snapshot.current"));
         assert!(remote_rpc_is_read_only("control.get"));
+    }
+
+    #[test]
+    fn remote_cloud_creation_preserves_location_and_retry_identity_for_both_wire_styles() {
+        for params in [
+            json!({"workspace_id":"source","execution_target":"cloud","idempotency_key":"stable-cloud-retry"}),
+            json!({"workspaceId":"source","executionTarget":"cloud","idempotencyKey":"stable-cloud-retry"}),
+        ] {
+            let request = parse_start_thread_request(&params).unwrap();
+            assert_eq!(request.workspace_id, "source");
+            assert_eq!(
+                request.execution_target,
+                falcondeck_core::ThreadExecutionTarget::Cloud
+            );
+            assert_eq!(
+                request.idempotency_key.as_deref(),
+                Some("stable-cloud-retry")
+            );
+        }
+        let legacy = parse_start_thread_request(&json!({"workspaceId":"source"})).unwrap();
+        assert_eq!(
+            legacy.execution_target,
+            falcondeck_core::ThreadExecutionTarget::Local
+        );
+    }
+
+    #[test]
+    fn invalid_remote_execution_location_never_falls_back_to_local() {
+        for target in [json!("cluod"), json!(true), json!({"type":"cloud"})] {
+            assert!(
+                parse_start_thread_request(&json!({
+                    "workspaceId":"source","executionTarget":target,
+                }))
+                .is_err()
+            );
+        }
     }
 }

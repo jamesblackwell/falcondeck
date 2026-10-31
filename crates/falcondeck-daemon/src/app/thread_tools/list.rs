@@ -279,6 +279,7 @@ pub(super) async fn list(
     };
 
     app.refresh_excerpts().await;
+    let cloud_threads = app.cloud_manager().thread_summaries().await?;
     let counts = app.attention_counts().await;
     let pending_of = |workspace: &String, id: &String| {
         counts
@@ -304,12 +305,31 @@ pub(super) async fn list(
                 glance::project_name(&ws.summary.path).to_string(),
                 ws.summary.path.clone(),
             ));
-            for thread in ws.threads.values() {
-                let t = &thread.summary;
+            let local_rows = ws.threads.values().map(|thread| {
+                let excerpt = thread
+                    .summary
+                    .native_session_id
+                    .as_ref()
+                    .and_then(|session| index.sessions.get(session));
+                (&thread.summary, Some(thread), excerpt)
+            });
+            let cloud_rows = cloud_threads
+                .iter()
+                .filter(|t| &t.workspace_id == id)
+                .map(|t| (t, None, None));
+            for (t, managed, excerpt) in local_rows.chain(cloud_rows) {
                 if t.id == caller {
                     continue;
                 }
-                let (approvals, questions) = pending_of(id, &t.id);
+                let (approvals, questions) =
+                    if t.execution_target == falcondeck_core::ThreadExecutionTarget::Cloud {
+                        (
+                            t.attention.pending_approval_count,
+                            t.attention.pending_question_count,
+                        )
+                    } else {
+                        pending_of(id, &t.id)
+                    };
                 let pending = approvals + questions > 0;
                 if !t.is_archived {
                     overview.total += 1;
@@ -344,14 +364,13 @@ pub(super) async fn list(
                 if !keep {
                     continue;
                 }
-                let excerpt = t
-                    .native_session_id
-                    .as_ref()
-                    .and_then(|session| index.sessions.get(session));
-                if let Some(needle) = &needle
-                    && !matches_query(t, &Glance::of(thread, excerpt), needle)
-                {
-                    continue;
+                if let Some(needle) = &needle {
+                    let glance = managed
+                        .map(|thread| Glance::of(thread, excerpt))
+                        .unwrap_or_else(|| Glance::from_summary(t));
+                    if !matches_query(t, &glance, needle) {
+                        continue;
+                    }
                 }
                 candidates.push(Candidate {
                     workspace: position,
@@ -363,12 +382,14 @@ pub(super) async fn list(
                     },
                     updated_at: t.updated_at,
                     session_path: excerpt.map(|e| e.path.clone()),
-                    memory_started: thread.items.iter().find_map(|item| match item {
-                        ConversationItem::UserMessage { created_at, .. }
-                        | ConversationItem::AssistantMessage { created_at, .. } => {
-                            Some(*created_at)
-                        }
-                        _ => None,
+                    memory_started: managed.and_then(|thread| {
+                        thread.items.iter().find_map(|item| match item {
+                            ConversationItem::UserMessage { created_at, .. }
+                            | ConversationItem::AssistantMessage { created_at, .. } => {
+                                Some(*created_at)
+                            }
+                            _ => None,
+                        })
                     }),
                     started: None,
                 });
@@ -451,19 +472,34 @@ pub(super) async fn list(
             }
             let workspace = &scope[candidate.workspace];
             // A thread removed since the first pass is skipped.
-            let Some(thread) = workspaces
+            let thread = workspaces
                 .get(workspace)
-                .and_then(|ws| ws.threads.get(&candidate.id))
-            else {
+                .and_then(|ws| ws.threads.get(&candidate.id));
+            let (mut summary, glance) = if let Some(thread) = thread {
+                let excerpt = thread
+                    .summary
+                    .native_session_id
+                    .as_ref()
+                    .and_then(|session| index.sessions.get(session));
+                (thread.summary.clone(), Glance::of(thread, excerpt))
+            } else if let Some(thread) = cloud_threads
+                .iter()
+                .find(|t| t.id == candidate.id && &t.workspace_id == workspace)
+            {
+                (thread.clone(), Glance::from_summary(thread))
+            } else {
                 continue;
             };
-            let mut summary = thread.summary.clone();
-            let (approvals, questions) = pending_of(workspace, &summary.id);
+            let (approvals, questions) =
+                if summary.execution_target == falcondeck_core::ThreadExecutionTarget::Cloud {
+                    (
+                        summary.attention.pending_approval_count,
+                        summary.attention.pending_question_count,
+                    )
+                } else {
+                    pending_of(workspace, &summary.id)
+                };
             refresh_thread_attention(&mut summary, approvals, questions);
-            let excerpt = summary
-                .native_session_id
-                .as_ref()
-                .and_then(|session| index.sessions.get(session));
             let cx = RowContext {
                 now,
                 caller,
@@ -471,7 +507,7 @@ pub(super) async fn list(
                 folder: folder_of(&summary.id).map(|f| f.name.as_str()),
                 excerpts: args.detail == Detail::Normal,
             };
-            let mut text = glance::row(&summary, &Glance::of(thread, excerpt), &cx, &[]);
+            let mut text = glance::row(&summary, &glance, &cx, &[]);
             // Room for the footer, which carries the next offset.
             let room = cap.saturating_sub(markdown.chars().count() + 120);
             if text.chars().count() > room {

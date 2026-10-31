@@ -81,6 +81,8 @@ pub(super) struct SyncIndexCache {
 pub(super) fn row(thread: &ThreadSummary) -> ThreadSummary {
     // Project directly: large artifacts and queued prompts are never cloned.
     ThreadSummary {
+        execution_target: thread.execution_target,
+        cloud: thread.cloud.clone(),
         id: thread.id.clone(),
         workspace_id: thread.workspace_id.clone(),
         title: thread.title.chars().take(512).collect(),

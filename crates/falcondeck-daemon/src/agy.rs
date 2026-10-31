@@ -1081,6 +1081,8 @@ pub fn parse_hydrated_threads(
             .is_none_or(|value| value.is_empty());
         threads.push(HydratedAgyThread {
             summary: ThreadSummary {
+                execution_target: Default::default(),
+                cloud: None,
                 id: id.clone(),
                 workspace_id: String::new(),
                 title: if title.is_empty() {

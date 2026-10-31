@@ -1,6 +1,6 @@
 import { memo } from 'react'
 import * as React from 'react'
-import { Archive, Split, SquarePen } from 'lucide-react'
+import { Archive, Cloud, Split, SquarePen } from 'lucide-react'
 
 import { isThreadWorking, type ThreadSummary, type WorkspaceSummary } from '@falcondeck/client-core'
 import { ActivityDiamond, Badge, Button, StatusIndicator, Toolbar, ToolbarGroup, cn } from '@falcondeck/ui'
@@ -89,6 +89,11 @@ export const SessionHeader = memo(function SessionHeader({
               >
                 <ProviderIcon provider={thread.provider} className="h-3 w-3" />
                 {thread.provider}
+              </Badge>
+            ) : null}
+            {thread?.execution_target === 'cloud' ? (
+              <Badge variant="default" className="h-5 gap-1 px-1.5 text-[length:var(--fd-text-2xs)] uppercase tracking-[0.08em]">
+                <Cloud aria-hidden="true" className="h-3 w-3" />Cloud
               </Badge>
             ) : null}
             {thread?.variant ? (

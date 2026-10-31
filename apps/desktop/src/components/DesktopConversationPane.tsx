@@ -100,6 +100,7 @@ type DesktopConversationPaneProps = {
   /** Opens external links in the system browser (desktop only). */
   onOpenExternalLink?: WebLinkOpener | null;
   headerControls?: ReactNode;
+  environmentStatus?: ReactNode;
   /** Sits at the head of the header's trailing group, before New. */
   headerLeadingControls?: ReactNode;
   onNewThread?: () => void;
@@ -166,6 +167,7 @@ export function DesktopConversationPane({
   describeLocalPath,
   onOpenExternalLink,
   headerControls,
+  environmentStatus,
   onNewThread,
   onArchiveThread,
   onRetryResponse,
@@ -215,6 +217,7 @@ export function DesktopConversationPane({
         />
         {headerControls}
       </SessionHeader>
+      {environmentStatus}
       <CollapseRegion open={operationalConditions.length > 0}>
         {lastOperationalConditions?.length ? (
           <OperationalNotice

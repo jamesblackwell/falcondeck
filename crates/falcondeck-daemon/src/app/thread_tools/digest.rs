@@ -569,6 +569,7 @@ impl AppState {
         ids: &[String],
         since: Option<DateTime<Utc>>,
     ) -> Result<Vec<Snapshot>, DaemonError> {
+        let cloud = self.cloud_manager().thread_summaries().await?;
         let workspaces = self.inner.workspaces.lock().await;
         let ws = workspaces
             .get(workspace)
@@ -580,6 +581,18 @@ impl AppState {
             .unwrap_or_else(|e| e.into_inner());
         ids.iter()
             .map(|id| {
+                if let Some(summary) = cloud
+                    .iter()
+                    .find(|t| t.id == *id && t.workspace_id == workspace)
+                {
+                    return Ok(Snapshot {
+                        summary: summary.clone(),
+                        root: "/workspace/project".into(),
+                        glance: Glance::from_summary(summary),
+                        digest: None,
+                        hydrate_error: None,
+                    });
+                }
                 let thread = ws.threads.get(id).ok_or_else(|| {
                     DaemonError::NotFound(format!("thread not found: {}", line(id, 128)))
                 })?;
@@ -644,7 +657,12 @@ pub(super) async fn summary(
     if args.hydrate {
         for snapshot in snapshots
             .iter_mut()
-            .filter(|s| s.digest.is_none() && s.summary.native_session_id.is_some())
+            .filter(|s| {
+                s.digest.is_none()
+                    && (s.summary.native_session_id.is_some()
+                        || s.summary.execution_target
+                            == falcondeck_core::ThreadExecutionTarget::Cloud)
+            })
             .take(HYDRATE_THREADS)
         {
             let detail = app
@@ -937,6 +955,7 @@ pub(super) async fn changes(
     let limit = args.limit.unwrap_or(30).clamp(1, 100);
     let multi = scope.len() > 1;
     app.refresh_excerpts().await;
+    let cloud = app.cloud_manager().thread_summaries().await?;
     let (mut rows, mut total) = (Vec::new(), 0);
     for workspace in scope {
         let mut pending = app.pending_requests(workspace).await;
@@ -958,6 +977,16 @@ pub(super) async fn changes(
                         .is_some_and(|r| r.iter().any(|r| r.created_at > since))
                 {
                     ids.push(t.summary.id.clone());
+                }
+            }
+            for t in cloud.iter().filter(|t| {
+                &t.workspace_id == workspace
+                    && t.id != caller
+                    && (args.include_archived || !t.is_archived)
+            }) {
+                count += 1;
+                if t.updated_at > since {
+                    ids.push(t.id.clone());
                 }
             }
             (

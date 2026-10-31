@@ -20,6 +20,10 @@ struct NativeInspectorPathRequest: Equatable {
     static let shared = NativeInspectorNavigation()
     var pending: NativeInspectorPathRequest?
     static func open(store: AppStore, path: String, line: Int? = nil) {
+        guard store.selectedTask?.isCloud != true else {
+            store.errorMessage = "This file is in the cloud environment. Review and import its changes from this conversation."
+            return
+        }
         guard let workspaceID = store.selectedProject?.id else { return }
         let route = NativeInspectorPathRequest(workspaceID: workspaceID, threadID: store.selectedTask?.id, path: path, line: line)
         shared.pending = route

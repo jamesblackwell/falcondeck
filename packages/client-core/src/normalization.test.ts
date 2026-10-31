@@ -13,11 +13,29 @@ import {
   normalizeInteractiveRequest,
   normalizePreferences,
   normalizeThreadDetail,
+  normalizeThreadSummary,
   normalizeToolCallDisplay,
   normalizeWorkspaceSummary,
 } from "./normalization";
 import type { ConversationItem } from "./types";
 import { providerOutputKindLabel } from "./conversation";
+
+describe("ordinary cloud thread location", () => {
+  it("keeps older threads local and preserves cloud lifecycle metadata", () => {
+    expect(normalizeThreadSummary({ id: "old" }).execution_target).toBe("local");
+    expect(normalizeThreadSummary({ id: "old" }).cloud).toBeNull();
+    const value = normalizeThreadSummary({
+      id: "cloud-one", workspace_id: "source-project", execution_target: "cloud",
+      cloud: { job_id: "one", status: "provisioning", has_result: false },
+    });
+    expect(value.execution_target).toBe("cloud");
+    expect(value.cloud).toEqual({ job_id: "one", status: "provisioning", error: null, has_result: false });
+    const detail = normalizeThreadDetail({ workspace: {}, thread: value, items: [] });
+    expect(detail.thread).toBe(value);
+    expect(detail.thread.workspace_id).toBe("source-project");
+    expect(normalizeThreadSummary(value)).toBe(value);
+  });
+});
 
 describe("rename suggestion model preferences", () => {
   it("defaults older daemons and bounds custom title prompts", () => {

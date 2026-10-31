@@ -117,6 +117,10 @@ import SwiftUI
         case "navigateForward": Task { await store.navigateHistory(1) }
         case "previousThread": Task { await store.navigateTask(-1) }
         case "nextThread": Task { await store.navigateTask(1) }
+        case "toggleChanges" where store.selectedTask?.isCloud == true:
+            store.errorMessage = "Review the cloud environment’s collected changes from this conversation."
+        case let value where ["toggleTerminal", "newTerminal"].contains(value) && store.selectedTask?.isCloud == true:
+            store.errorMessage = "An interactive terminal for cloud environments is not available yet."
         case "toggleChanges": store.showInspector.toggle()
         case "toggleTerminal": store.showTerminal.toggle()
         case "newTerminal": store.showTerminal = true; store.terminalCreationRequest = UUID()

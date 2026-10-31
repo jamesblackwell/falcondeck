@@ -30,6 +30,15 @@ fn kept(text: &str) -> Option<String> {
 }
 
 impl Glance {
+    /// Cloud list rows use the coordinator's summary without hydrating the
+    /// worker's transcript. Detailed reads still go through thread.detail.
+    pub(super) fn from_summary(summary: &ThreadSummary) -> Self {
+        Self {
+            preview: summary.last_message_preview.as_deref().and_then(kept),
+            ..Self::default()
+        }
+    }
+
     pub(super) fn of(
         thread: &ManagedThread,
         excerpt: Option<&thread_search::SessionExcerpt>,
@@ -160,6 +169,9 @@ pub(super) fn facts(t: &ThreadSummary, cx: &RowContext<'_>, model: bool) -> Stri
         None => t.provider.to_string(),
     };
     let mut facts = vec![state(t), ago(t.updated_at, cx.now), provider];
+    if t.execution_target == falcondeck_core::ThreadExecutionTarget::Cloud {
+        facts.push("cloud".into());
+    }
     if let Some(project) = cx.project {
         facts.push(format!("project {}", line(project, 60)));
     }
@@ -262,6 +274,10 @@ impl AppState {
         workspace: &str,
         thread: &str,
     ) -> Result<(ThreadSummary, Glance), DaemonError> {
+        let summary = self.thread_summary(workspace, thread).await?;
+        if summary.execution_target == falcondeck_core::ThreadExecutionTarget::Cloud {
+            return Ok((summary.clone(), Glance::from_summary(&summary)));
+        }
         let (summary, glance) = {
             let workspaces = self.inner.workspaces.lock().await;
             let managed = workspaces

@@ -7,6 +7,7 @@ import { shortcutHintTokens, useShortcutSettings } from '../shortcuts'
 type PanelTogglesProps = {
   sidebarVisible: boolean
   railVisible: boolean
+  showRailToggle?: boolean
   onToggleSidebar: () => void
   onToggleRail: () => void
 }
@@ -14,6 +15,7 @@ type PanelTogglesProps = {
 export function PanelToggles({
   sidebarVisible,
   railVisible,
+  showRailToggle = true,
   onToggleSidebar,
   onToggleRail,
 }: PanelTogglesProps) {
@@ -37,7 +39,7 @@ export function PanelToggles({
           <PanelLeft className="h-4 w-4" />
         </Button>
       </Tooltip>
-      <Tooltip
+      {showRailToggle ? <Tooltip
         label="Toggle side panel"
         shortcut={shortcutHintTokens('toggleChanges', shortcutSettings)}
       >
@@ -52,7 +54,7 @@ export function PanelToggles({
         >
           <PanelRight className="h-4 w-4" />
         </Button>
-      </Tooltip>
+      </Tooltip> : null}
     </div>
   )
 }

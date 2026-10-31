@@ -18,6 +18,7 @@ struct ConversationComposerControls: View {
     private var modelID: String { selection.value("model_id", task: store.selectedTask) }
     private var activeModel: JSON { models.first { $0["id"].string == modelID } ?? models.first { $0["is_default"].bool } ?? .null }
     private var starred: Set<String> { Set(favorites.split(separator: "\n").map(String.init)) }
+    private var isCloud: Bool { selection.effectiveExecutionTarget(task: store.selectedTask) == "cloud" }
     private var offeredModels: [JSON] {
         models.filter { modelSearch.isEmpty || $0["label"].string.localizedCaseInsensitiveContains(modelSearch) || $0["id"].string.localizedCaseInsensitiveContains(modelSearch) }
             .sorted { starred.contains($0["id"].string) && !starred.contains($1["id"].string) }
@@ -26,7 +27,8 @@ struct ConversationComposerControls: View {
     var body: some View {
         HStack(spacing: 8) {
             Button(action: attach) { Image(systemName: "paperclip").frame(width: 24, height: 28) }
-                .help("Attach images or text files")
+                .help(isCloud ? "Cloud currently accepts text instructions" : "Attach images or text files")
+                .disabled(isCloud)
                 .accessibilityLabel("Attach files")
             Button { showAgents.toggle() } label: {
                 HStack(spacing: 4) {
@@ -35,6 +37,7 @@ struct ConversationComposerControls: View {
                 }
             }.accessibilityIdentifier("agent-picker").help("Choose agent")
                 .popover(isPresented: $showAgents, arrowEdge: .bottom) { agentPicker }
+                .disabled(isCloud)
             Button { showModels.toggle() } label: {
                 HStack(spacing: 4) {
                     Text(modelID.isEmpty ? (activeModel["label"].string.isEmpty ? "Default model" : activeModel["label"].string) : models.first { $0["id"].string == modelID }?["label"].string ?? modelID)
@@ -88,7 +91,7 @@ struct ConversationComposerControls: View {
                         Spacer()
                     }.font(NativePreferences.shared.font(size: 13)).padding(8).contentShape(.rect)
                 }.buttonStyle(.plain)
-                    .disabled(store.selectedTaskID != nil && (store.isRunning || offered == provider))
+                    .disabled(isCloud || store.selectedTaskID != nil && (store.isRunning || offered == provider))
             }
             if store.isRunning {
                 Text("Stop the response before switching agents.")
@@ -162,25 +165,12 @@ struct ConversationComposerControls: View {
                     }
                 }
             }
-            if store.selectedTaskID == nil && store.selectedProject?.raw["kind"].string != "casual" {
+            if !isCloud && store.selectedTaskID == nil && store.selectedProject?.raw["kind"].string != "casual" {
                 Picker("Location", selection: $selection.isolation) {
                     Text("Project folder").tag("project_folder")
                     Text("Isolated checkout").tag("isolated")
                 }
                 Text("An isolated task works on its own branch and checkout.").font(NativePreferences.shared.font(size: 12)).foregroundStyle(FDTheme.muted)
-                Button("Run a cloud task…", systemImage: "cloud") {
-                    if let projectID = store.selectedProjectID {
-                        let cloud = NativeCloudModel.forHost(NativeHostManager.split(projectID).hostID)
-                        cloud.selectedProjectID = projectID
-                        cloud.selectedJobID = nil
-                        var draft = cloud.drafts[projectID] ?? NativeCloudTaskDraft()
-                        if draft.prompt.isEmpty { draft.prompt = store.draft }
-                        cloud.drafts[projectID] = draft
-                    }
-                    showOptions = false
-                    store.selectSection("cloud")
-                }
-                Text("Review the current source files before starting an isolated Linux worker.").font(NativePreferences.shared.font(size: 12)).foregroundStyle(FDTheme.muted)
             }
             if capabilities["supports_steering"].bool {
                 Picker("While agent is working", selection: $selection.followUp) {

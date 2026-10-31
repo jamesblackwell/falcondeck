@@ -2107,6 +2107,8 @@ fn claude_thread_summary(
     last_message_preview: Option<String>,
 ) -> ThreadSummary {
     ThreadSummary {
+        execution_target: Default::default(),
+        cloud: None,
         id: session_id.clone(),
         workspace_id: String::new(),
         title,

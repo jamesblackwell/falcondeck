@@ -94,6 +94,8 @@ struct AgentTask: Identifiable, Hashable, Sendable {
         return title.isEmpty || title == "Untitled thread" ? "New conversation" : title
     }
     var provider: String { raw["provider"].string }
+    var isCloud: Bool { raw["execution_target"].string == "cloud" }
+    var cloudStatus: String { raw["cloud"]["status"].string }
     var status: String { raw["status"].string }
     var preview: String { raw["last_message_preview"].string }
     /// What lists should show: one line, no markdown punctuation, no scheduler

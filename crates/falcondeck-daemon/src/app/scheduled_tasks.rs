@@ -1016,6 +1016,8 @@ async fn execute_run(app: AppState, task_id: String, run_id: String) {
     }
     let started = app
         .start_thread(StartThreadRequest {
+            execution_target: Default::default(),
+            idempotency_key: None,
             workspace_id: task.summary.workspace_id.clone(),
             provider: Some(task.summary.provider.clone()),
             model_id: task.model_id.clone(),

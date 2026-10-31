@@ -137,7 +137,7 @@ extension DaemonClient: DaemonServing {}
             projectOrderSlots = UserDefaults.standard.stringArray(forKey: "falcondeck.native.projectOrderSlots") ?? []
             selectedProjectID = UserDefaults.standard.string(forKey: "falcondeck.native.selectedProject")
             selectedTaskID = UserDefaults.standard.string(forKey: "falcondeck.native.selectedTask")
-            selectedSection = UserDefaults.standard.string(forKey: "falcondeck.native.selectedSection") ?? "project"
+            selectedSection = Self.restoredSection(UserDefaults.standard.string(forKey: "falcondeck.native.selectedSection"))
         }
     }
 
@@ -550,7 +550,12 @@ extension DaemonClient: DaemonServing {}
         if selectedTask?.raw != selected?.raw { selectedTask = selected }
     }
 
+    nonisolated static func restoredSection(_ section: String?) -> String {
+        section == "cloud" ? "project" : section ?? "project"
+    }
+
     func selectSection(_ section: String) {
+        let section = Self.restoredSection(section)
         navigationID = UUID()
         selectedSection = section
         if section == "chats" || section == "pins" {
@@ -825,8 +830,9 @@ extension DaemonClient: DaemonServing {}
             // The recovery identity exists on disk before any mutation can reach the daemon.
             try await persistInputState()
             if submission.threadID == nil {
-                var fields = submission.settings.filter { ["model_id", "permission_mode", "approval_policy", "sandbox_mode", "collaboration_mode_id", "isolation"].contains($0.key) }
+                var fields = submission.settings.filter { ["model_id", "permission_mode", "approval_policy", "sandbox_mode", "collaboration_mode_id", "isolation", "execution_target"].contains($0.key) }
                 fields["workspace_id"] = .string(submission.projectID); fields["provider"] = .string(submission.provider)
+                fields["idempotency_key"] = .string(submission.id)
                 creationWasPosted = true
                 let result = try await request(["api", "workspaces", submission.projectID, "threads"], method: "POST", body: .object(fields))
                 let created = AgentTask(result["thread"] == .null ? result : result["thread"])

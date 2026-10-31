@@ -2,6 +2,30 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
+/// Where a normal FalconDeck thread executes.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ThreadExecutionTarget {
+    /// Existing local or enrolled-host execution.
+    #[default]
+    Local,
+    /// Private provider sandbox, managed by the project-owning daemon.
+    Cloud,
+}
+
+/// Operational cloud metadata attached to an ordinary thread summary.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct CloudThreadMetadata {
+    /// Cloud coordinator job identifier for lifecycle and result operations.
+    pub job_id: String,
+    /// Provisioning/compute state independent of native turn state.
+    pub status: CloudJobStatus,
+    /// Sanitized provider or recovery error.
+    pub error: Option<String>,
+    /// Whether source results have been collected for review/import.
+    pub has_result: bool,
+}
+
 /// Sanitized cloud configuration. Credentials are only accepted on writes.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct CloudSettings {

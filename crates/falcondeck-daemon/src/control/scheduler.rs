@@ -680,6 +680,8 @@ async fn start_automation_thread(
 ) -> Result<String, String> {
     let started = app
         .start_thread(falcondeck_core::StartThreadRequest {
+            execution_target: Default::default(),
+            idempotency_key: None,
             workspace_id: workspace_id.to_string(),
             provider: Some(automation.target.provider.clone()),
             model_id: automation.target.model_id.clone(),

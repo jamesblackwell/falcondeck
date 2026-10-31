@@ -88,11 +88,11 @@ export function CloudSettingsForm({
   return (
     <form onSubmit={(event) => void save(event)} className="space-y-5">
       <SettingsSection
-        title="Cloud tasks"
+        title="Cloud execution"
         description="Run a native Codex task in an isolated Vercel sandbox. Credentials stay on the selected host. Saving settings does not start compute."
       >
         <SwitchRow
-          title="Enable cloud tasks"
+          title="Enable cloud execution"
           checked={draft.enabled}
           onCheckedChange={(value) => field("enabled", value)}
         />

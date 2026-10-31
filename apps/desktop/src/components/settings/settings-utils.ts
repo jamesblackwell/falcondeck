@@ -10,6 +10,7 @@ import {
   Blocks,
   Bot,
   ChartColumn,
+  Cloud,
   KeyRound,
   Keyboard,
   MessagesSquare,
@@ -35,6 +36,7 @@ export type SettingsSectionId =
   | "extensions"
   | "agents"
   | "harnesses"
+  | "cloud"
   | "connectors"
   | "agent-control"
   | "computer-use"
@@ -159,6 +161,14 @@ export const SETTINGS_GROUPS: SettingsNavGroup[] = [
         icon: Terminal,
         settings: [],
         keywords: ["cli", "upgrade", "install", "version"],
+      },
+      {
+        id: "cloud",
+        label: "Cloud execution",
+        description: "Run conversations in isolated cloud environments",
+        icon: Cloud,
+        settings: ["Cloud execution"],
+        keywords: ["vercel", "sandbox", "api key", "worker", "environment"],
       },
       {
         id: "connectors",

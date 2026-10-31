@@ -3423,7 +3423,7 @@ export const WorkspaceSidebar = memo(function WorkspaceSidebar({
             : null
         }
         canRename={!isBotContextMenu && Boolean(onRenameThread)}
-        canFork={!isBotContextMenu && Boolean(onForkThread)}
+        canFork={!isBotContextMenu && threadContextMenu?.thread.execution_target !== "cloud" && Boolean(onForkThread)}
         canArchive={
           !isBotContextMenu &&
           Boolean(onArchiveThread) &&

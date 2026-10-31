@@ -145,6 +145,16 @@ impl AppState {
     }
 
     pub(super) async fn thread_workspace(&self, thread: &str) -> Result<String, DaemonError> {
+        if self.is_cloud_thread(thread) {
+            return self
+                .cloud_manager()
+                .thread_summaries()
+                .await?
+                .into_iter()
+                .find(|summary| summary.id == thread)
+                .map(|summary| summary.workspace_id)
+                .ok_or_else(|| DaemonError::NotFound("cloud task not found".into()));
+        }
         self.inner
             .workspaces
             .lock()

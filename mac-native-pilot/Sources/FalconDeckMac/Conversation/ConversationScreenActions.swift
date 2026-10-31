@@ -9,10 +9,10 @@ extension ConversationView {
         Menu {
             Button("Rename…") { activeSheet = .rename }
             Button(task.pinned ? "Unpin globally" : "Pin globally") { action { _ = try await ConversationActions.request(store, task: task, method: "PATCH", body: .object(["pinned": .bool(!task.pinned)])) } }
-            if capabilities["supports_goals"].bool { Button(task.raw["goal"] == .null ? "Set goal…" : "Edit goal…") { activeSheet = .goal } }
+            if !task.isCloud && capabilities["supports_goals"].bool { Button(task.raw["goal"] == .null ? "Set goal…" : "Edit goal…") { activeSheet = .goal } }
             Divider()
-            if capabilities["supports_compaction"].bool { Button("Compact context…") { activeSheet = .compact }.disabled(task.running) }
-            if capabilities["supports_review"].bool {
+            if !task.isCloud && capabilities["supports_compaction"].bool { Button("Compact context…") { activeSheet = .compact }.disabled(task.running) }
+            if !task.isCloud && capabilities["supports_review"].bool {
                 Button("Review uncommitted changes") {
                     action { _ = try await ConversationActions.request(store, task: task, suffix: "/review", body: .object(["target": .object(["type": .string("uncommittedChanges")])])) }
                 }.disabled(task.running)
@@ -24,12 +24,12 @@ extension ConversationView {
                 ForEach(store.availableProviders.filter { $0 != provider }, id: \.self) { destination in
                     Button(FDTheme.providerName(destination)) { action { try await handoff(task, provider: destination) } }
                 }
-            }.disabled(task.running || store.availableProviders.count < 2)
+            }.disabled(task.isCloud || task.running || store.availableProviders.count < 2)
             Divider()
-            Button("Copy working directory") { FDTheme.copy(workingDirectory) }
+            if !task.isCloud { Button("Copy working directory") { FDTheme.copy(workingDirectory) } }
             if !task.raw["native_session_id"].string.isEmpty { Button("Copy session ID") { FDTheme.copy(task.raw["native_session_id"].string) } }
             Button("Show project in Finder") { NSWorkspace.shared.selectFile(nil, inFileViewerRootedAtPath: workingDirectory) }
-                .disabled(store.selectedHostID != nil)
+                .disabled(task.isCloud || store.selectedHostID != nil)
             Menu("Export conversation") {
                 Button("Save loaded messages as Markdown…") { saveExport(partial: store.hasOlder) }
                 Button("Load complete history and save…") { action { try await loadAll(task); saveExport(partial: false) } }
@@ -43,9 +43,13 @@ extension ConversationView {
     func sendAlternate() { submit(alternate: true) }
     func submit(alternate: Bool) {
         guard canSend else { return }
+        let target = selection.effectiveExecutionTarget(task: store.selectedTask)
+        if let issue = NativeCloudConversation.validationError(target: target, provider: provider, project: store.selectedProject, hasAttachments: !attachments.isEmpty) {
+            store.errorMessage = issue; return
+        }
         let text = store.draft.trimmingCharacters(in: .whitespacesAndNewlines)
         if text == "/compact" || text.hasPrefix("/compact ") {
-            guard let task = store.selectedTask, capabilities["supports_compaction"].bool, !task.running, attachments.isEmpty, quote.isEmpty else {
+            guard let task = store.selectedTask, !task.isCloud, capabilities["supports_compaction"].bool, !task.running, attachments.isEmpty, quote.isEmpty else {
                 store.errorMessage = "Compaction needs an idle conversation without attachments or quotes."; return
             }
             let key = store.composerKey
@@ -64,11 +68,10 @@ extension ConversationView {
         let prompt = quote.isEmpty ? text : quoted + "\n\n" + text
         if !prompt.isEmpty { inputs.append(.object(["type": .string("text"), "text": .string(prompt)])) }
         inputs += attachments.map(\.input)
-        var fields = selection.validated(project: store.selectedProject, provider: provider, task: store.selectedTask).fields
-        fields["isolation"] = .string(selection.isolation)
+        var fields = selection.submissionSettings(project: store.selectedProject, provider: provider, task: store.selectedTask)
         let steer = alternate ? selection.followUp != "steer" : selection.followUp == "steer"
         fields["steer"] = .bool(steer && capabilities["supports_steering"].bool)
-        fields["selected_skills"] = .array(ConversationCatalog.selectedSkills(text, skills: skills))
+        if target != "cloud" { fields["selected_skills"] = .array(ConversationCatalog.selectedSkills(text, skills: skills)) }
         followsLatest = true
         Task { await store.sendInputs(inputs, settings: fields) }
     }

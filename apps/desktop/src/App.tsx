@@ -100,6 +100,7 @@ import {
   type ThinkingDisplay,
   type ThreadSortMode,
   type ThreadSummary,
+  type CloudSettings,
   type ThreadTag,
   type TurnInputItem,
   type UpdatePreferencesPayload,
@@ -250,6 +251,8 @@ import {
 import { useDesktopDictation, useDictationSettings } from "./dictation";
 import { resolveMainView } from "./main-view-registry";
 import { cloudApiForConnection, createCloudHttpApi } from "./components/cloud/cloud-api";
+import { CloudConversationStatus } from "./components/cloud/CloudConversationStatus";
+import { cloudConversationCapabilities, cloudLaunchBlockReason } from "./components/cloud/cloud-conversation";
 import { extensionFrontendLoaders } from "virtual:falcondeck-extension-frontends";
 
 // Stable empty array so conversations without attachments don't bust the
@@ -270,8 +273,6 @@ function lastAgentItemId(items: ConversationItem[]) {
   }
   return null;
 }
-
-const CloudView = lazy(() => import("./components/cloud/CloudView").then((module) => ({ default: module.CloudView })));
 
 const SettingsView = lazy(() =>
   import("./components/SettingsView").then((module) => ({
@@ -479,6 +480,9 @@ function AppInner() {
   // working directory cannot change after it exists.
   const [selectedIsolation, setSelectedIsolation] =
     useState<ThreadIsolation>("project_folder");
+  const [selectedExecutionTarget, setSelectedExecutionTarget] = useState<"local" | "cloud">("local");
+  const cloudStartKeys = useRef(new Map<string, string>());
+  const [cloudConfiguration, setCloudConfiguration] = useState<{ api: unknown; settings: CloudSettings | null; error: string | null } | null>(null);
   const [persistedComposerSelections, setPersistedComposerSelections] =
     useState<PersistedComposerState>(() => readPersistedComposerState());
   const [isAddingProject, setIsAddingProject] = useState(false);
@@ -495,7 +499,6 @@ function AppInner() {
   const [isContinuingStoppedThreads, setIsContinuingStoppedThreads] =
     useState(false);
   const resumePromptSettledRef = useRef(false);
-  const [isCloudOpen, setIsCloudOpen] = useState(false);
   const [isTicketsOpen, setIsTicketsOpen] = useState(false);
   const [isScheduledOpen, setIsScheduledOpen] = useState(false);
   const [automationOpenRequest, setAutomationOpenRequest] = useState<{ id: string; key: number } | null>(null);
@@ -520,19 +523,17 @@ function AppInner() {
   const [activeExtensionPanelKey, setActiveExtensionPanelKey] = useState<
     string | null
   >(null);
-  const activeMainViewId = isCloudOpen
-    ? "core.cloud"
-    : isTicketsOpen
-      ? "core.tickets"
-      : isScheduledOpen
-        ? "core.scheduled"
-        : isExtensionsOpen
-          ? "core.extensions"
-          : isPluginsOpen
-            ? "core.plugins"
-            : isSettingsOpen
-              ? "core.settings"
-              : activeExtensionPanelKey;
+  const activeMainViewId = isTicketsOpen
+    ? "core.tickets"
+    : isScheduledOpen
+      ? "core.scheduled"
+      : isExtensionsOpen
+        ? "core.extensions"
+        : isPluginsOpen
+          ? "core.plugins"
+          : isSettingsOpen
+            ? "core.settings"
+            : activeExtensionPanelKey;
   const [settingsSection, setSettingsSection] =
     useState<SettingsSectionId>("general");
   const [settingsRequestKey, setSettingsRequestKey] = useState(0);
@@ -861,7 +862,6 @@ function AppInner() {
     setIsSettingsOpen(true);
     setIsScheduledOpen(false);
     setIsTicketsOpen(false);
-    setIsCloudOpen(false);
     setIsExtensionsOpen(false);
   }, []);
   const openSpeechSettings = useCallback(
@@ -1157,6 +1157,23 @@ function AppInner() {
       };
     }),
   ], [localCloudApi, remoteHosts.hosts, remoteHosts.manager, snapshot?.workspaces]);
+  const selectedCloudOwnerId = remoteHosts.hostForWorkspace(selectedWorkspaceId)?.host.id ?? "local";
+  const selectedCloudApi = cloudOwners.find((owner) => owner.id === selectedCloudOwnerId)?.api ?? null;
+  useEffect(() => {
+    if (selectedExecutionTarget !== "cloud" || selectedThreadId || isSettingsOpen) return;
+    let active = true;
+    setCloudConfiguration(null);
+    if (!selectedCloudApi) {
+      setCloudConfiguration({ api: null, settings: null, error: "The project host is offline. Reconnect it to use cloud execution." });
+      return;
+    }
+    void selectedCloudApi.settings().then((settings) => {
+      if (active) setCloudConfiguration({ api: selectedCloudApi, settings, error: null });
+    }).catch((reason: unknown) => {
+      if (active) setCloudConfiguration({ api: selectedCloudApi, settings: null, error: reason instanceof Error ? reason.message : "Cloud settings could not be loaded." });
+    });
+    return () => { active = false; };
+  }, [isSettingsOpen, selectedCloudApi, selectedExecutionTarget, selectedThreadId]);
   const apiFor = useCallback(
     (workspaceId: string | null | undefined) => {
       const host = remoteHosts.hostForWorkspace(workspaceId);
@@ -1351,6 +1368,15 @@ function AppInner() {
       ),
     [selectedThreadId, selectedWorkspaceId, viewSnapshot?.threads],
   );
+  const isCloudThread = selectedThread?.execution_target === "cloud";
+  const isCloudExecutionSelected = selectedThread ? isCloudThread : selectedExecutionTarget === "cloud";
+  const cloudBlockReason = isCloudExecutionSelected && !selectedThread ? cloudLaunchBlockReason({
+    workspace: selectedWorkspace, provider: selectedProvider,
+    settings: cloudConfiguration?.api === selectedCloudApi ? cloudConfiguration.settings : null,
+    settingsError: cloudConfiguration?.api === selectedCloudApi ? cloudConfiguration.error : null,
+    loading: !cloudConfiguration || cloudConfiguration.api !== selectedCloudApi,
+    attachmentCount: attachments.length,
+  }) : null;
   const composerSuggestionOffer = useMemo(() => {
     const offer = deriveComposerSuggestions(
       viewSnapshot?.extensions,
@@ -1371,7 +1397,7 @@ function AppInner() {
   const combinedGitRefreshTrigger = gitRefreshTrigger + localGitBump;
   // Lets transcript paths like `src/app.ts:12` link only to files that exist.
   const workspaceFileIndex = useWorkspaceFileIndex(
-    isRemoteWorkspaceSelected ? null : apiFor(selectedWorkspaceId),
+    isRemoteWorkspaceSelected || isCloudThread ? null : apiFor(selectedWorkspaceId),
     selectedWorkspaceId,
     selectedThread?.id ?? null,
     combinedGitRefreshTrigger,
@@ -1407,7 +1433,7 @@ function AppInner() {
   } = useShipThread({
     api: apiFor(selectedWorkspaceId),
     workspaceId: selectedWorkspaceId,
-    thread: selectedThread,
+    thread: isCloudThread ? null : selectedThread,
     toast,
     openUrl: openExternalUrl,
     onShipped: () => setLocalGitBump((bump) => bump + 1),
@@ -1553,7 +1579,7 @@ function AppInner() {
       persistedComposerSelections,
       selectedWorkspace.path,
     );
-    const nextProvider =
+    const nextProvider = !selectedThread && selectedExecutionTarget === "cloud" ? "codex" :
       !selectedThread &&
       stickyProvider &&
       workspaceProviderOptions(selectedWorkspace).some(
@@ -1628,7 +1654,7 @@ function AppInner() {
             capabilities.sandbox_modes,
           ),
     );
-  }, [persistedComposerSelections, selectedThread, selectedWorkspace]);
+  }, [persistedComposerSelections, selectedExecutionTarget, selectedThread, selectedWorkspace]);
 
   useEffect(() => {
     if (!selectedWorkspace) return;
@@ -2306,7 +2332,7 @@ function AppInner() {
       }
       let activeThreadId = selectedThreadId;
       if (!activeThreadId) {
-        if (selectedIsolation === "isolated") {
+        if (selectedExecutionTarget !== "cloud" && selectedIsolation === "isolated") {
           setIsPreparingIsolation(true);
         }
         let handle: ThreadHandle;
@@ -2322,7 +2348,8 @@ function AppInner() {
             ),
             permission_mode: selectedPermissionMode,
             sandbox_mode: selectedSandboxMode,
-            isolation: selectedIsolation,
+            isolation: selectedExecutionTarget === "cloud" ? "project_folder" : selectedIsolation,
+            execution_target: selectedExecutionTarget,
           });
         } finally {
           setIsPreparingIsolation(false);
@@ -2500,7 +2527,7 @@ function AppInner() {
   const composerCatalogEmpty =
     workspaceModels(selectedWorkspace, composerProvider).length === 0;
   useEffect(() => {
-    if (!selectedWorkspace || !composerProvider) return;
+    if (!selectedWorkspace || !composerProvider || isCloudExecutionSelected) return;
     if (selectedThread && !composerCatalogEmpty) return;
     const key = `${selectedWorkspace.id}:${composerProvider}`;
     if (hydratedProvidersRef.current.has(key)) return;
@@ -2512,6 +2539,7 @@ function AppInner() {
     apiFor,
     composerCatalogEmpty,
     composerProvider,
+    isCloudExecutionSelected,
     selectedThread,
     selectedWorkspace,
   ]);
@@ -2815,6 +2843,10 @@ function AppInner() {
         (override ? 0 : attachments.length) === 0)
     )
       return;
+    if (compactCommand && isCloudExecutionSelected) {
+      setActionError("Compaction is not available for cloud tasks yet.");
+      return;
+    }
     if (compactCommand) {
       if (!selectedThreadId || !selectedThread) {
         setActionError("Start a conversation before compacting it.");
@@ -2867,9 +2899,9 @@ function AppInner() {
       workspaceAgentCapabilities(selectedWorkspace, activeProvider),
       submittedAttachments,
     );
-    const blockReason =
-      workspaceSendBlockReason(selectedWorkspace, activeProvider) ??
-      imageBlockReason;
+    const blockReason = isCloudExecutionSelected
+      ? cloudBlockReason ?? (submittedAttachments.length > 0 ? "Cloud execution currently accepts text. Remove attachments to continue." : null)
+      : workspaceSendBlockReason(selectedWorkspace, activeProvider) ?? imageBlockReason;
     if (blockReason) {
       setActionError(blockReason);
       toast({
@@ -2931,7 +2963,7 @@ function AppInner() {
     let activeThreadId = selectedThreadId;
     try {
       if (!activeThreadId) {
-        if (selectedIsolation === "isolated") {
+        if (selectedExecutionTarget !== "cloud" && selectedIsolation === "isolated") {
           setIsPreparingIsolation(true);
         }
         const handle = await client.startThread({
@@ -2945,8 +2977,17 @@ function AppInner() {
           ),
           permission_mode: selectedPermissionMode,
           sandbox_mode: selectedSandboxMode,
-          isolation: selectedIsolation,
+          isolation: selectedExecutionTarget === "cloud" ? "project_folder" : selectedIsolation,
+          execution_target: selectedExecutionTarget,
+          ...(selectedExecutionTarget === "cloud" ? { idempotency_key: (() => {
+            const existing = cloudStartKeys.current.get(submittedKey);
+            if (existing) return existing;
+            const key = crypto.randomUUID();
+            cloudStartKeys.current.set(submittedKey, key);
+            return key;
+          })() } : {}),
         });
+        cloudStartKeys.current.delete(submittedKey);
         setIsPreparingIsolation(false);
         activeThreadId = handle.thread.id;
         fileNewThreadIntoPendingFolder(selectedWorkspace.id, activeThreadId);
@@ -3069,7 +3110,7 @@ function AppInner() {
         workspace_id: selectedWorkspace.id,
         thread_id: activeThreadId,
         inputs,
-        selected_skills: submittedSkills,
+        selected_skills: isCloudExecutionSelected ? [] : submittedSkills,
         provider: activeProvider,
         model_id: selectedModel,
         reasoning_effort: selectedEffort,
@@ -3244,7 +3285,6 @@ function AppInner() {
       setIsSettingsOpen(false);
       setIsScheduledOpen(false);
       setIsTicketsOpen(false);
-      setIsCloudOpen(false);
       setIsExtensionsOpen(false);
       setIsPluginsOpen(false);
       setActiveExtensionPanelKey(null);
@@ -3261,7 +3301,6 @@ function AppInner() {
       setIsSettingsOpen(false);
       setIsScheduledOpen(false);
       setIsTicketsOpen(false);
-      setIsCloudOpen(false);
       setIsExtensionsOpen(false);
       setIsPluginsOpen(false);
       setActiveExtensionPanelKey(null);
@@ -3278,7 +3317,6 @@ function AppInner() {
       setIsSettingsOpen(false);
       setIsScheduledOpen(false);
       setIsTicketsOpen(false);
-      setIsCloudOpen(false);
       setIsExtensionsOpen(false);
       setIsPluginsOpen(false);
       setActiveExtensionPanelKey(null);
@@ -3353,7 +3391,6 @@ function AppInner() {
     setIsSettingsOpen(false);
     setIsScheduledOpen(false);
     setIsTicketsOpen(false);
-    setIsCloudOpen(false);
     setIsExtensionsOpen(false);
     setIsPluginsOpen(false);
     setProjectMenuRequestKey((current) => current + 1);
@@ -3387,6 +3424,7 @@ function AppInner() {
       permissionMode: selectedPermissionMode,
       sandboxMode: selectedSandboxMode,
     });
+    setSelectedExecutionTarget(selectedThread.execution_target === "cloud" ? "cloud" : "local");
     handleNewThread(selectedWorkspace.id);
   }, [
     handleNewThread,
@@ -4046,7 +4084,6 @@ function AppInner() {
     setIsSettingsOpen(true);
     setIsScheduledOpen(false);
     setIsTicketsOpen(false);
-    setIsCloudOpen(false);
     setIsExtensionsOpen(false);
     setIsPluginsOpen(false);
     setActiveExtensionPanelKey(null);
@@ -4062,7 +4099,6 @@ function AppInner() {
     setIsSettingsOpen(true);
     setIsScheduledOpen(false);
     setIsTicketsOpen(false);
-    setIsCloudOpen(false);
     setIsExtensionsOpen(false);
     setIsPluginsOpen(false);
     setActiveExtensionPanelKey(null);
@@ -4074,7 +4110,6 @@ function AppInner() {
     setIsSettingsOpen(true);
     setIsScheduledOpen(false);
     setIsTicketsOpen(false);
-    setIsCloudOpen(false);
     setIsExtensionsOpen(false);
     setIsPluginsOpen(false);
     setActiveExtensionPanelKey(null);
@@ -4108,27 +4143,15 @@ function AppInner() {
     setIsSettingsOpen(false);
     setIsScheduledOpen(false);
     setIsTicketsOpen(true);
-    setIsCloudOpen(false);
     setIsExtensionsOpen(false);
     setIsPluginsOpen(false);
     setActiveExtensionPanelKey(null);
-  }, []);
-
-  const handleOpenCloud = useCallback(() => {
-    setIsSettingsOpen(false);
-    setIsScheduledOpen(false);
-    setIsTicketsOpen(false);
-    setIsExtensionsOpen(false);
-    setIsPluginsOpen(false);
-    setActiveExtensionPanelKey(null);
-    setIsCloudOpen(true);
   }, []);
 
   const handleOpenScheduled = useCallback(() => {
     setIsSettingsOpen(false);
     setIsScheduledOpen(true);
     setIsTicketsOpen(false);
-    setIsCloudOpen(false);
     setIsExtensionsOpen(false);
     setIsPluginsOpen(false);
     setActiveExtensionPanelKey(null);
@@ -4192,7 +4215,6 @@ function AppInner() {
       setIsSettingsOpen(false);
       setIsScheduledOpen(false);
       setIsTicketsOpen(false);
-      setIsCloudOpen(false);
       setIsExtensionsOpen(false);
       setIsPluginsOpen(false);
       setActiveExtensionPanelKey(null);
@@ -4206,7 +4228,6 @@ function AppInner() {
     setIsSettingsOpen(false);
     setIsScheduledOpen(false);
     setIsTicketsOpen(false);
-    setIsCloudOpen(false);
     setIsExtensionsOpen(true);
     setIsPluginsOpen(false);
     setActiveExtensionPanelKey(null);
@@ -4216,7 +4237,6 @@ function AppInner() {
     setIsSettingsOpen(false);
     setIsScheduledOpen(false);
     setIsTicketsOpen(false);
-    setIsCloudOpen(false);
     setIsExtensionsOpen(false);
     setIsPluginsOpen(true);
     setActiveExtensionPanelKey(null);
@@ -4304,7 +4324,6 @@ function AppInner() {
     setIsSettingsOpen(false);
     setIsScheduledOpen(false);
     setIsTicketsOpen(false);
-    setIsCloudOpen(false);
     setIsExtensionsOpen(false);
     setIsPluginsOpen(false);
     setActiveExtensionPanelKey(panelKey);
@@ -4784,6 +4803,7 @@ function AppInner() {
       if (!thread || !workspace) {
         throw new Error("Thread not found");
       }
+      if (thread.execution_target === "cloud") throw new Error("Forking cloud tasks is not available yet. Start a new cloud task instead.");
       const target = provider ?? thread.provider;
       const crossHarness = target !== thread.provider;
       const targetLabel = workspaceProviderLabel(workspace, target);
@@ -5736,17 +5756,17 @@ function AppInner() {
   const modelsLoading =
     workspaceAgent(selectedWorkspace, activeProvider)?.models_loading === true;
   const providerOptions = useMemo(
-    () => workspaceProviderOptions(selectedWorkspace),
-    [selectedWorkspace],
+    () => isCloudExecutionSelected ? [{ provider: "codex", label: "Codex" }] : workspaceProviderOptions(selectedWorkspace),
+    [isCloudExecutionSelected, selectedWorkspace],
   );
   const handoffProviderOptions = useMemo(
     () =>
-      selectedThread
+      selectedThread && !isCloudThread
         ? providerOptions.filter(
             (option) => option.provider !== selectedThread.provider,
           )
         : [],
-    [providerOptions, selectedThread],
+    [isCloudThread, providerOptions, selectedThread],
   );
   const handoffDisabledReason = handoffBlockedReason(selectedThread, {
     pending: Boolean(handoffPendingProvider),
@@ -5757,22 +5777,14 @@ function AppInner() {
       )?.title ?? null)
     : null;
   const activeCapabilities = useMemo(
-    () =>
-      threadAgentCapabilities(
-        selectedWorkspace,
-        activeProvider,
-        selectedThread,
-      ),
-    [activeProvider, selectedThread, selectedWorkspace],
+    () => {
+      const capabilities = threadAgentCapabilities(selectedWorkspace, activeProvider, selectedThread);
+      return isCloudExecutionSelected ? cloudConversationCapabilities(capabilities) : capabilities;
+    },
+    [activeProvider, isCloudExecutionSelected, selectedThread, selectedWorkspace],
   );
-  const sendBlockReason = workspaceSendBlockReason(
-    selectedWorkspace,
-    activeProvider,
-  );
-  const attachmentSendBlockReason = imageAttachmentSendBlockReason(
-    activeCapabilities,
-    attachments,
-  );
+  const sendBlockReason = isCloudExecutionSelected ? cloudBlockReason : workspaceSendBlockReason(selectedWorkspace, activeProvider);
+  const attachmentSendBlockReason = isCloudExecutionSelected && attachments.length ? "Cloud execution currently accepts text. Remove attachments to continue." : imageAttachmentSendBlockReason(activeCapabilities, attachments);
   const isComposerDisabled = workspaceComposerDisabled(selectedWorkspace);
 
   // Project readiness belongs to the app-level notification system, not the
@@ -5856,7 +5868,6 @@ function AppInner() {
       setIsSettingsOpen(false);
       setIsScheduledOpen(false);
       setIsTicketsOpen(false);
-      setIsCloudOpen(false);
       setIsExtensionsOpen(false);
       setIsPluginsOpen(false);
       setSelectedWorkspaceId(next.workspace_id);
@@ -5875,7 +5886,6 @@ function AppInner() {
       setIsSettingsOpen(false);
       setIsScheduledOpen(false);
       setIsTicketsOpen(false);
-      setIsCloudOpen(false);
       setIsExtensionsOpen(false);
       setIsPluginsOpen(false);
       setSelectedWorkspaceId(entry.workspaceId);
@@ -5934,7 +5944,6 @@ function AppInner() {
           setIsSettingsOpen(true);
           setIsScheduledOpen(false);
           setIsTicketsOpen(false);
-          setIsCloudOpen(false);
           setIsExtensionsOpen(false);
           setIsPluginsOpen(false);
           break;
@@ -6022,7 +6031,6 @@ function AppInner() {
           setIsSettingsOpen(false);
           setIsScheduledOpen(false);
           setIsTicketsOpen(false);
-          setIsCloudOpen(false);
           setIsExtensionsOpen(false);
           setIsPluginsOpen(false);
           setComposerFocusRequestKey((current) => current + 1);
@@ -6045,7 +6053,6 @@ function AppInner() {
           setIsSettingsOpen(false);
           setIsScheduledOpen(false);
           setIsTicketsOpen(false);
-          setIsCloudOpen(false);
           setIsExtensionsOpen(false);
           setIsPluginsOpen(false);
           setComposerMenuRequest((current) => ({ key: current.key + 1, menu }));
@@ -6244,8 +6251,6 @@ function AppInner() {
             }
             onOpenTickets={handleOpenTickets}
             ticketsOpen={isTicketsOpen}
-            onOpenCloud={handleOpenCloud}
-            cloudOpen={isCloudOpen}
             onOpenScheduled={handleOpenScheduled}
             scheduledOpen={isScheduledOpen}
             onOpenActivity={handleOpenActivity}
@@ -6300,11 +6305,6 @@ function AppInner() {
         main={
           resolveMainView(
             {
-              "core.cloud": (
-                <Suspense fallback={loadingThreadState}>
-                  <CloudView owners={cloudOwners} initialOwnerId={remoteHosts.hostForWorkspace(selectedWorkspaceId)?.host.id ?? "local"} initialWorkspaceId={selectedWorkspaceId} onClose={() => setIsCloudOpen(false)} />
-                </Suspense>
-              ),
               "core.tickets": (
                 <Suspense fallback={loadingThreadState}>
                   <TicketsView
@@ -6343,7 +6343,6 @@ function AppInner() {
                     onOpenThread={(workspaceId, threadId) => {
                       setIsScheduledOpen(false);
                       setIsTicketsOpen(false);
-                      setIsCloudOpen(false);
                       setIsExtensionsOpen(false);
                       setIsPluginsOpen(false);
                       setSelectedWorkspaceId(workspaceId);
@@ -6377,6 +6376,8 @@ function AppInner() {
               "core.settings": (
                 <Suspense fallback={loadingThreadState}>
                   <SettingsView
+                    cloudOwners={cloudOwners}
+                    initialCloudOwnerId={selectedCloudOwnerId}
                     initialSection={settingsSection}
                     sectionRequestKey={settingsRequestKey}
                     workspace={selectedWorkspace}
@@ -6537,11 +6538,17 @@ function AppInner() {
               onRevokeDevice={handleRevokeDevice}
               revokingDeviceId={revokingDeviceId}
               conversationItems={conversationItems}
+              environmentStatus={isCloudThread && selectedThread ? <CloudConversationStatus key={`${selectedCloudOwnerId}:${selectedThread.id}`} thread={selectedThread} api={selectedCloudApi} onChanged={() => {
+                const host = remoteHosts.hostForWorkspace(selectedWorkspaceId);
+                const refresh = host ? host.refresh() : api?.snapshot().then(setSnapshot);
+                void refresh?.catch((reason: unknown) => toast({ title: "Could not refresh task", description: reason instanceof Error ? reason.message : "Reconnect the project host.", variant: "danger" }));
+                setLocalGitBump((current) => current + 1);
+              }} /> : undefined}
               preferences={effectivePreferences}
               conversationEmptyState={conversationEmptyState}
               isSending={isSending}
               sendingLabel={
-                isPreparingIsolation ? "Setting up isolated copy…" : null
+                isCloudThread && selectedThread?.cloud?.status === "provisioning" ? "Preparing cloud environment…" : isPreparingIsolation ? "Setting up isolated copy…" : null
               }
               isThreadDetailPending={isThreadDetailPending}
               hasOlderMessages={Boolean(
@@ -6571,24 +6578,24 @@ function AppInner() {
               canSteerQueuedTurn={activeCapabilities.supports_steering}
               // Remote-host workspaces have no local checkout, so the rail has
               // no diff to show and file paths stay plain text there.
-              onOpenFile={isRemoteWorkspaceSelected ? null : handleOpenFileDiff}
+              onOpenFile={isRemoteWorkspaceSelected || isCloudThread ? null : handleOpenFileDiff}
               workspaceRoot={
-                isRemoteWorkspaceSelected ? null : selectedWorkspace?.path ?? null
+                isRemoteWorkspaceSelected || isCloudThread ? null : selectedWorkspace?.path ?? null
               }
               resolveWorkspaceFile={workspaceFileIndex.resolve}
               workspaceFilesVersion={workspaceFileIndex.version}
               onLocalPath={
-                isTauriDesktop() && !isRemoteWorkspaceSelected
+                isTauriDesktop() && !isRemoteWorkspaceSelected && !isCloudThread
                   ? handleLocalPath
                   : null
               }
               localPathEditors={
-                isTauriDesktop() && !isRemoteWorkspaceSelected
+                isTauriDesktop() && !isRemoteWorkspaceSelected && !isCloudThread
                   ? desktopEditors
                   : null
               }
               describeLocalPath={
-                isTauriDesktop() && !isRemoteWorkspaceSelected
+                isTauriDesktop() && !isRemoteWorkspaceSelected && !isCloudThread
                   ? describeLocalPath
                   : null
               }
@@ -6665,7 +6672,7 @@ function AppInner() {
                 onRemoveAttachment: handleRemoveAttachment,
                 attachments,
                 preparingAttachmentCount,
-                skills: selectedWorkspace?.skills ?? [],
+                skills: isCloudExecutionSelected ? [] : selectedWorkspace?.skills ?? [],
                 loadSkills,
                 loadPrompts,
                 selectedProvider,
@@ -6684,10 +6691,7 @@ function AppInner() {
                   ? handleHandoffProviderSelect
                   : undefined,
                 handoffDisabledReason,
-                contextNotice: pendingHandoffContextNotice(
-                  selectedThread,
-                  handoffSourceTitle,
-                ),
+                contextNotice: isCloudExecutionSelected && !selectedThread ? "FalconDeck copies eligible current project files, including uncommitted changes, into a private cloud environment." : pendingHandoffContextNotice(selectedThread, handoffSourceTitle),
                 models,
                 modelsLoading,
                 selectedModelId: selectedModel,
@@ -6719,6 +6723,11 @@ function AppInner() {
                       "openProjectMenu",
                       shortcutSettings,
                     )}
+                    executionTarget={selectedExecutionTarget}
+                    onExecutionTargetChange={(target) => {
+                      setSelectedExecutionTarget(target);
+                      if (target === "cloud") handleProviderChange("codex");
+                    }}
                     selectedIsolation={selectedIsolation}
                     onIsolationChange={setSelectedIsolation}
                     branches={branches}
@@ -6747,7 +6756,7 @@ function AppInner() {
                 sendDisabledReason: selectedWorkspace
                   ? (attachmentSendBlockReason ?? sendBlockReason ?? undefined)
                   : undefined,
-                sendDisabledAction: sendBlockReason && !attachmentSendBlockReason &&
+                sendDisabledAction: isCloudExecutionSelected && cloudBlockReason && !attachmentSendBlockReason ? { label: "Cloud settings", onClick: () => { handleOpenSettings(); setSettingsSection("cloud"); } } : sendBlockReason && !attachmentSendBlockReason &&
                   (activeProvider === "codex" || activeProvider === "claude") && selectedWorkspace?.status !== "connecting"
                   ? { label: "Set up agent", onClick: () => {
                       handleOpenSettings();
@@ -6781,7 +6790,7 @@ function AppInner() {
               }}
               headerLeadingControls={
                 <ShipMenu
-                  thread={selectedThread}
+                  thread={isCloudThread ? null : selectedThread}
                   onShip={shipThread}
                   pending={isShipPending}
                   projectFolderDirty={projectFolderDirty}
@@ -6792,9 +6801,10 @@ function AppInner() {
               headerControls={
                 <PanelToggles
                   sidebarVisible={sidebarVisible}
-                  railVisible={railVisible}
+                  railVisible={railVisible && !isCloudThread}
                   onToggleSidebar={toggleSidebar}
                   onToggleRail={toggleRail}
+                  showRailToggle={!isCloudThread}
                 />
               }
               />
@@ -6803,7 +6813,7 @@ function AppInner() {
           )
         }
         rail={
-          activeMainViewId ? undefined : (
+          activeMainViewId || isCloudThread ? undefined : (
             extensionToolDetail ? (
               <ExtensionAgentToolUiProvider
                 apps={extensionApps}
@@ -6842,14 +6852,14 @@ function AppInner() {
                   onSelectionChange={setDiffSelection}
                   info={reviewInfo}
                   localRoot={
-                    isTauriDesktop() && !isRemoteWorkspaceSelected
+                    isTauriDesktop() && !isRemoteWorkspaceSelected && !isCloudThread
                       ? selectedThread?.variant?.path ??
                         selectedWorkspace?.path ??
                         null
                       : null
                   }
                   onLocalPath={
-                    isTauriDesktop() && !isRemoteWorkspaceSelected
+                    isTauriDesktop() && !isRemoteWorkspaceSelected && !isCloudThread
                       ? handleLocalPath
                       : null
                   }
@@ -6863,11 +6873,11 @@ function AppInner() {
         // its own nav owns the left edge, and comes back on "Back to app".
         sidebarVisible={sidebarVisible && !isSettingsOpen}
         sidebarPeekEnabled={!isSettingsOpen}
-        railVisible={railVisible}
+        railVisible={railVisible && !isCloudThread}
         onSidebarCollapsedByDrag={hideSidebar}
         onRailCollapsedByDrag={hideRail}
         bottom={
-          terminalMounted && baseUrl ? (
+          terminalMounted && baseUrl && !isCloudThread ? (
             <Suspense fallback={null}>
               <TerminalPanel
                 baseUrl={baseUrl}
@@ -6880,7 +6890,7 @@ function AppInner() {
             </Suspense>
           ) : undefined
         }
-        bottomVisible={isTerminalOpen}
+        bottomVisible={isTerminalOpen && !isCloudThread}
       />
       {snapshot?.restore_phase === "loading_persisted_state" ? (
         <StartupRestoreOverlay />

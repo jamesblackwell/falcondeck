@@ -58,13 +58,15 @@ pub(super) fn catalog() -> Vec<ExtensionAgentTool> {
             "message": {"type":"string", "minLength":1, "maxLength":24000, "description":"Readable prose with normal spaces between words."},
             "delivery": {"type":"string", "enum":["steer","queue"], "description":"Deprecated and ignored; messages always steer when the receiver can take them."}
         }), vec!["thread_id", "message"]),
-        (CREATE, "Create thread", "Start a new thread and optionally send its first prompt; returns without waiting. At most three active children per parent. Context defaults to none; briefing passes your summary, transcript_tail your recent transcript.", json!({
+        (CREATE, "Create thread", "Start a local or cloud thread and optionally send its first prompt; returns without waiting. execution_target=cloud uses the configured sandbox with the project's current files. At most three active children per parent. Context defaults to none; briefing passes your summary, transcript_tail your recent transcript.", json!({
             "prompt": {"type":"string", "minLength":1, "maxLength":24000, "description":"A self-contained brief: goal, relevant files, constraints, and what done looks like."},
             "title": {"type":"string", "minLength":1, "maxLength":200},
             "provider": {"type":"string", "minLength":1},
             "model": {"type":"string", "minLength":1},
             "reasoning_effort": {"type":"string", "minLength":1, "description":"Harness setting, e.g. low, medium, high, xhigh; asking in the prompt does not set it."},
             "isolation": {"type":"string", "enum":["project_folder","isolated"], "default":"project_folder"},
+            "execution_target": {"type":"string", "enum":["local","cloud"], "default":"local", "description":"Where the new thread runs. Cloud uses the configured provider and copies eligible current project files; no GitHub push is required."},
+            "idempotency_key": {"type":"string", "minLength":8, "maxLength":128, "description":"Reuse this key when retrying a cloud creation whose outcome is unknown."},
             "context": {"type":"string", "enum":["none","briefing","transcript_tail"], "default":"none"},
             "folder": {"type":"string", "minLength":1, "description":"Project folder id or exact name."},
             "create_folder": {"type":"boolean", "default":false},
@@ -95,6 +97,9 @@ struct CreateArgs {
     provider: Option<AgentProvider>,
     #[serde(default)]
     isolation: falcondeck_core::ThreadIsolation,
+    #[serde(default)]
+    execution_target: falcondeck_core::ThreadExecutionTarget,
+    idempotency_key: Option<String>,
     model: Option<String>,
     reasoning_effort: Option<String>,
     prompt: Option<String>,
@@ -412,7 +417,7 @@ impl AppState {
                     ));
                 }
                 // Resolve within the target workspace before any send-side mutations.
-                self.thread_summary(&workspace, &a.thread_id).await?;
+                let target_summary = self.thread_summary(&workspace, &a.thread_id).await?;
                 let text = format!(
                     "Message from FalconDeck thread {} ({}):\n\n{}",
                     line(parent, 256),
@@ -433,7 +438,13 @@ impl AppState {
                     body: a.message.clone(),
                     queued: None,
                 };
-                let result = workspace_ops::send_agent_message(self, request, &mut message).await?;
+                let result = if target_summary.execution_target
+                    == falcondeck_core::ThreadExecutionTarget::Cloud
+                {
+                    self.send_turn(request).await?
+                } else {
+                    workspace_ops::send_agent_message(self, request, &mut message).await?
+                };
                 self.analytics_agent_message(
                     parent,
                     &a.thread_id,
@@ -474,20 +485,48 @@ impl AppState {
                 if let Some(prompt) = &a.prompt {
                     require_word_spaces("prompt", prompt)?;
                 }
+                if a.execution_target == falcondeck_core::ThreadExecutionTarget::Cloud
+                    && !matches!(&a.context, Context::None)
+                {
+                    return Err(DaemonError::BadRequest(
+                        "Cloud threads currently accept a self-contained prompt; context handoff is not supported. Include the needed context in prompt.".into(),
+                    ));
+                }
                 // Serializes admission through dispatch; a simultaneous fourth call cannot race the count.
                 let _gate = self.inner.agent_spawn_gate.lock().await;
+                let retry = if a.execution_target == falcondeck_core::ThreadExecutionTarget::Cloud
+                    && let Some(key) = a.idempotency_key.as_deref()
+                {
+                    self.cloud_manager()
+                        .thread_for_retry_key(&workspace, key)
+                        .await?
+                } else {
+                    None
+                };
+                if retry.as_ref().is_some_and(|thread| !matches!(&thread.origin,
+                    Some(ThreadOrigin::AgentSpawn { parent_thread_id, .. }) if parent_thread_id == parent))
+                {
+                    return Err(DaemonError::Conflict("Cloud retry key belongs to another task creator".into()));
+                }
                 {
                     let workspaces = self.inner.workspaces.lock().await;
                     if !workspaces.contains_key(&workspace) {
                         return Err(DaemonError::NotFound("workspace not found".into()));
                     }
-                    if workspaces
+                    let local_children = workspaces
                         .values()
                         .flat_map(|ws| ws.threads.values())
                         .filter(|t| child_is_active(&t.summary, parent))
-                        .count()
-                        >= 3
-                    {
+                        .count();
+                    drop(workspaces);
+                    let cloud_children = self
+                        .cloud_manager()
+                        .thread_summaries()
+                        .await?
+                        .iter()
+                        .filter(|t| child_is_active(t, parent))
+                        .count();
+                    if retry.is_none() && local_children + cloud_children >= 3 {
                         return Err(DaemonError::BadRequest("parent already has 3 concurrent children; finish a child or archive an unused idle child first".into()));
                     }
                 }
@@ -521,6 +560,8 @@ impl AppState {
                         provider: a.provider,
                         model_id: a.model,
                         isolation: a.isolation,
+                        execution_target: a.execution_target,
+                        idempotency_key: a.idempotency_key,
                         collaboration_mode_id: None,
                         approval_policy: None,
                         sandbox_mode: None,
@@ -556,10 +597,12 @@ impl AppState {
                     }
                 }
                 self.with_thread_mut(&workspace, &id, |thread| {
-                    thread.origin = Some(ThreadOrigin::AgentSpawn {
-                        parent_thread_id: parent.into(),
-                        dispatched_at: Some(Utc::now()),
-                    });
+                    if retry.is_none() {
+                        thread.origin = Some(ThreadOrigin::AgentSpawn {
+                            parent_thread_id: parent.into(),
+                            dispatched_at: Some(Utc::now()),
+                        });
+                    }
                     thread.agent.reasoning_effort = a.reasoning_effort;
                 })
                 .await?;
@@ -603,7 +646,9 @@ impl AppState {
                 } else if bot.is_some() {
                     markdown.push_str("- This thread will be notified only if the child fails or needs input; successful stops stay silent.\n");
                 }
-                if let Some(prompt) = a.prompt {
+                if retry.is_some() {
+                    markdown.push_str("- Existing cloud thread returned for this retry key. The first prompt was not replayed; inspect its state before sending another message.\n");
+                } else if let Some(prompt) = a.prompt {
                     let request: SendTurnRequest = serde_json::from_value(
                         json!({"workspace_id": workspace, "thread_id": id, "inputs":[{"type":"text","text":prompt}]}),
                     )?;
@@ -683,6 +728,16 @@ impl AppState {
 
     /// The parent's title, last request and reply, and cached user excerpts.
     async fn thread_briefing(&self, workspace: &str, thread: &str) -> Result<String, DaemonError> {
+        let summary = self.thread_summary(workspace, thread).await?;
+        if summary.execution_target == falcondeck_core::ThreadExecutionTarget::Cloud {
+            return Ok(format!(
+                "## {}\n\n- Id: {}\n- Provider: {}\n- Execution: cloud\n{}\n",
+                line(&summary.title, 256),
+                line(&summary.id, 256),
+                summary.provider,
+                glance::Glance::from_summary(&summary).lines("- ", 400, 400),
+            ));
+        }
         let workspaces = self.inner.workspaces.lock().await;
         let managed = workspaces
             .get(workspace)
@@ -754,6 +809,122 @@ mod tests {
     mod model_settings_tests;
 
     #[test]
+    fn agent_creation_exposes_cloud_and_keeps_local_as_default() {
+        let create = catalog().into_iter().find(|t| t.name == CREATE).unwrap();
+        assert_eq!(
+            create.input_schema["properties"]["execution_target"]["enum"],
+            json!(["local", "cloud"])
+        );
+        let local: CreateArgs = args(&json!({})).unwrap();
+        assert_eq!(
+            local.execution_target,
+            falcondeck_core::ThreadExecutionTarget::Local
+        );
+        let cloud: CreateArgs =
+            args(&json!({"execution_target":"cloud", "idempotency_key":"cloud-retry-001"}))
+                .unwrap();
+        assert_eq!(
+            cloud.execution_target,
+            falcondeck_core::ThreadExecutionTarget::Cloud
+        );
+        assert_eq!(cloud.idempotency_key.as_deref(), Some("cloud-retry-001"));
+        assert!(args::<CreateArgs>(&json!({"execution_target":"other"})).is_err());
+    }
+
+    #[tokio::test]
+    async fn agent_cloud_creation_uses_configured_cloud_path_without_local_fallback() {
+        let (app, _temp) = fixture().await;
+        let error = app.invoke_thread_tool(
+            CREATE, &json!({"execution_target":"cloud", "provider":"codex", "prompt":"Run the tests in the cloud."}),
+            Some("thread-1"), None,
+        ).await.unwrap_err().to_string();
+        assert!(error.to_lowercase().contains("cloud"), "{error}");
+        let workspaces = app.inner.workspaces.lock().await;
+        assert_eq!(workspaces["workspace-1"].threads.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn agent_cloud_threads_are_created_listed_and_summarized_through_normal_tools() {
+        let (app, _temp) = fixture().await;
+        let root = app.workspace_path("workspace-1").await.unwrap();
+        let init = std::process::Command::new("git")
+            .args(["init", "-q"])
+            .current_dir(&root)
+            .output()
+            .unwrap();
+        assert!(init.status.success());
+        std::fs::write(
+            Path::new(&root).join("example.txt"),
+            "current dirty source\n",
+        )
+        .unwrap();
+        app.cloud_manager().update_settings(serde_json::from_value(json!({
+            "enabled":true, "provider_token":"test-provider-token", "openai_api_key":"test-model-key",
+            "team_id":"team-test", "project_id":"project-test", "runtime_path":"/nonexistent/cloud-test.mjs",
+            "image":format!("node@sha256:{}", "b".repeat(64))
+        })).unwrap()).await.unwrap();
+        let arguments = json!({"execution_target":"cloud", "provider":"codex", "title":"Cloud cleanup", "idempotency_key":"agent-cloud-retry-001"});
+        let created = app
+            .invoke_thread_tool(CREATE, &arguments, Some("thread-1"), None)
+            .await
+            .unwrap();
+        let id = created_id(&created);
+        assert!(id.starts_with("cloud-"));
+        for key in ["agent-cloud-retry-002", "agent-cloud-retry-003"] {
+            let mut another = arguments.clone();
+            another["idempotency_key"] = json!(key);
+            app.invoke_thread_tool(CREATE, &another, Some("thread-1"), None)
+                .await
+                .unwrap();
+        }
+        let full = app
+            .invoke_thread_tool(
+                CREATE,
+                &json!({"execution_target":"cloud", "provider":"codex"}),
+                Some("thread-1"),
+                None,
+            )
+            .await
+            .unwrap_err();
+        assert!(full.to_string().contains("3 concurrent children"));
+        let repeated = app
+            .invoke_thread_tool(CREATE, &arguments, Some("thread-1"), None)
+            .await
+            .unwrap();
+        assert_eq!(created_id(&repeated), id);
+        assert!(repeated.result.as_str().unwrap().contains("not replayed"));
+        assert_eq!(
+            app.cloud_manager().thread_summaries().await.unwrap().len(),
+            3
+        );
+        let list = app
+            .invoke_thread_tool(LIST, &json!({}), Some("thread-1"), None)
+            .await
+            .unwrap();
+        let text = list.result.as_str().unwrap();
+        assert!(
+            text.contains(&id) && text.contains("Cloud cleanup") && text.contains("cloud"),
+            "{text}"
+        );
+        let summarized = app
+            .invoke_thread_tool(SUMMARY, &json!({"thread_id":id}), Some("thread-1"), None)
+            .await
+            .unwrap();
+        let text = summarized.result.as_str().unwrap();
+        assert!(
+            text.contains(&id) && text.contains("Cloud cleanup"),
+            "{text}"
+        );
+        // Draft creation, listing and summary reads never start the fake adapter.
+        let jobs = app.cloud_manager().list().await.unwrap();
+        assert_eq!(jobs.len(), 3);
+        assert!(
+            jobs.iter()
+                .all(|job| job.worker.is_none() && job.expires_at.is_none())
+        );
+    }
+
+    #[test]
     fn detects_prose_with_dropped_word_spaces() {
         assert!(lost_word_spaces(
             "Reviewcleanonauth/errorfixes. ChatreviewfoundP2: jumpbuttonabsolute bottom-24relativetowholesectionoverlaps4+linedraft(composercangrow128+padding). Alsoobserveronlyinnercontentmaymissviewportshrinkfromcomposerresize. HoldingcommitwhileIverifyinbrowserwithmockednewmessage(nodatawrites). No sourceeditsyet."
@@ -818,6 +989,8 @@ mod tests {
                     super::ManagedThread::new(ThreadSummary {
                         id: thread_id.clone(),
                         workspace_id: workspace_id.clone(),
+                        execution_target: falcondeck_core::ThreadExecutionTarget::Local,
+                        cloud: None,
                         title: "Auth setup".to_string(),
                         provider: AgentProvider::CLAUDE,
                         native_session_id: Some("session-parent".into()),

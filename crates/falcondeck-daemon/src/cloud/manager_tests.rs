@@ -56,6 +56,14 @@ fn record(root: PathBuf, source: CloudSourcePreview, status: CloudJobStatus) -> 
         gateway_token: Some("private-worker-token-never-public".into()),
         provider_scope: None,
         awaiting_user_after_resume: false,
+        thread_summary: None,
+        thread_request: None,
+        deferred_launch: false,
+        pending_turn: None,
+        custom_title: None,
+        turn_receipts: BTreeMap::new(),
+        cancel_requested: false,
+        allocation_started: false,
     }
 }
 
@@ -109,6 +117,197 @@ fn configured_settings() -> Settings {
     settings.public.worker_daemon_url = "https://downloads.example.invalid/worker".into();
     settings.public.worker_daemon_sha256 = "a".repeat(64);
     settings
+}
+
+fn cloud_thread_request() -> StartThreadRequest {
+    serde_json::from_value(json!({
+        "workspace_id":"local-workspace", "execution_target":"cloud", "provider":"codex",
+        "idempotency_key":"unified-cloud-thread-0001", "model_id":"test-model",
+        "approval_policy":"on-request", "sandbox_mode":"workspace-write"
+    })).unwrap()
+}
+
+#[tokio::test]
+async fn ordinary_cloud_creation_is_lazy_durable_and_idempotent() {
+    let (directory, manager) = manager();
+    let repository = repository();
+    store::write_json(&manager.path("settings.json"), &configured_settings()).unwrap();
+    let request = cloud_thread_request();
+    let first = manager.start_thread(request.clone(), repository.path().to_path_buf()).await.unwrap();
+    assert_eq!(first.execution_target, ThreadExecutionTarget::Cloud);
+    assert_eq!(first.status, ThreadStatus::Idle);
+    assert!(job_id(&first.id).is_some());
+    let record = manager.record(job_id(&first.id).unwrap()).await.unwrap();
+    assert!(record.deferred_launch);
+    assert!(record.job.worker.is_none());
+    assert!(record.gateway_url.is_none());
+    // Retry after edits still refers to the original source and thread.
+    fs::write(repository.path().join("tracked.txt"), "changed after create").unwrap();
+    let retry = manager.start_thread(request.clone(), repository.path().to_path_buf()).await.unwrap();
+    assert_eq!(retry.id, first.id);
+    assert_eq!(manager.registry().unwrap().jobs.len(), 1);
+    let reopened = CloudManager::new(&directory.path().join("daemon.json"));
+    assert_eq!(reopened.thread_summaries().await.unwrap()[0].status, ThreadStatus::Idle);
+    assert!(reopened.record(job_id(&first.id).unwrap()).await.unwrap().deferred_launch);
+    let mut other = request;
+    other.model_id = Some("another-model".into());
+    assert!(matches!(manager.start_thread(other, repository.path().to_path_buf()).await, Err(DaemonError::Conflict(_))));
+}
+
+#[tokio::test]
+async fn ordinary_cloud_settings_keep_creation_retry_identity_and_metadata() {
+    let (_directory, manager) = manager();
+    let repository = repository();
+    store::write_json(&manager.path("settings.json"), &configured_settings()).unwrap();
+    let request = cloud_thread_request();
+    let thread = manager.start_thread(request.clone(), repository.path().to_path_buf()).await.unwrap();
+    let changed = manager.update_thread(&thread.id, serde_json::from_value(json!({
+        "workspace_id":thread.workspace_id,"thread_id":thread.id,"title":"Cloud cleanup",
+        "reasoning_effort":"high","approval_policy":"never","sandbox_mode":"danger-full-access",
+        "pinned":true
+    })).unwrap()).await.unwrap();
+    assert_eq!(changed.title, "Cloud cleanup");
+    assert_eq!(changed.agent.reasoning_effort.as_deref(), Some("high"));
+    assert!(changed.is_pinned);
+    // Changing settings must not invalidate the original creation retry key.
+    assert_eq!(manager.start_thread(request, repository.path().to_path_buf()).await.unwrap().id, thread.id);
+    let stable = manager.thread_summaries().await.unwrap()[0].clone();
+    manager.mutate_summary(&thread.id, |_| {}).await.unwrap();
+    assert_eq!(manager.thread_summaries().await.unwrap()[0], stable);
+    let record = manager.record(job_id(&thread.id).unwrap()).await.unwrap();
+    assert_eq!(record.custom_title.as_deref(), Some("Cloud cleanup"));
+    assert!(record.deferred_launch);
+}
+
+#[tokio::test]
+async fn ordinary_cloud_first_send_is_journaled_before_allocation_and_deduplicated() {
+    let (_directory, manager) = manager();
+    let repository = repository();
+    store::write_json(&manager.path("settings.json"), &configured_settings()).unwrap();
+    let thread = manager.start_thread(cloud_thread_request(), repository.path().to_path_buf()).await.unwrap();
+    // Hold allocation behind this gate. The adapter fixture path does not
+    // exist, and no provider or model requests are made in this test.
+    let allocation_gate = manager.execution.lock().await;
+    let request: SendTurnRequest = serde_json::from_value(json!({
+        "workspace_id":thread.workspace_id,"thread_id":thread.id,
+        "inputs":[{"type":"text","text":"Preserve my current working files"}],
+        "model_id":"test-model","reasoning_effort":"high","approval_policy":"never",
+        "sandbox_mode":"danger-full-access","user_item_id":"user-stable-cloud-0001"
+    })).unwrap();
+    assert!(manager.send_thread_turn(&thread.id, request.clone()).await.unwrap().ok);
+    assert!(manager.send_thread_turn(&thread.id, request.clone()).await.unwrap().ok);
+    let record = manager.record(job_id(&thread.id).unwrap()).await.unwrap();
+    assert_eq!(record.pending_turn, Some(request.clone()));
+    assert!(!record.deferred_launch);
+    assert!(record.job.worker.is_none());
+    assert_eq!(record.job.prompt, "Preserve my current working files");
+    assert_eq!(manager.registry().unwrap().jobs.len(), 1);
+    // The receipt still prevents replay after the native launch has moved
+    // beyond the pending-turn stage, including an ambiguous restart.
+    let mut registry = manager.registry().unwrap();
+    let stored = registry.jobs.get_mut(job_id(&thread.id).unwrap()).unwrap();
+    stored.pending_turn = None;
+    stored.job.status = CloudJobStatus::Unknown;
+    manager.save(&registry).unwrap();
+    assert!(manager.send_thread_turn(&thread.id, request.clone()).await.unwrap().ok);
+    let mut changed = request;
+    changed.inputs = vec![TurnInputItem::Text { id:None, text:"Different turn using the same id".into() }];
+    assert!(matches!(manager.send_thread_turn(&thread.id, changed).await, Err(DaemonError::Conflict(_))));
+    drop(allocation_gate);
+}
+
+#[tokio::test]
+async fn ordinary_cloud_rejects_unqualified_harness_and_cross_owner_source() {
+    let (_directory, manager) = manager();
+    let repository = repository();
+    store::write_json(&manager.path("settings.json"), &configured_settings()).unwrap();
+    let mut request = cloud_thread_request();
+    request.provider = Some(AgentProvider::CLAUDE);
+    assert!(manager.start_thread(request, repository.path().to_path_buf()).await.unwrap_err().to_string().contains("Codex"));
+    assert!(manager.registry().unwrap().jobs.is_empty());
+    assert!(job_id("cloud-not-an-id").is_none());
+}
+
+#[tokio::test]
+async fn ordinary_cloud_cancel_before_allocation_is_immediate_durable_and_never_launches() {
+    let (directory, manager) = manager();
+    let repository = repository();
+    store::write_json(&manager.path("settings.json"), &configured_settings()).unwrap();
+    let thread = manager.start_thread(cloud_thread_request(), repository.path().to_path_buf()).await.unwrap();
+    let request: SendTurnRequest = serde_json::from_value(json!({
+        "workspace_id":thread.workspace_id,"thread_id":thread.id,
+        "inputs":[{"type":"text","text":"Do not dispatch after I stop setup"}],
+        "user_item_id":"user-cancel-cloud-0001"
+    })).unwrap();
+    let allocation_gate = manager.execution.lock().await;
+    manager.send_thread_turn(&thread.id, request).await.unwrap();
+    let raw_id = job_id(&thread.id).unwrap();
+    assert!(tokio::time::timeout(Duration::from_millis(200), manager.cancel_preparing(raw_id)).await.unwrap().unwrap().ok);
+    let pending = manager.record(raw_id).await.unwrap();
+    assert!(pending.cancel_requested);
+    assert!(!pending.allocation_started);
+    assert_eq!(pending.job.status, CloudJobStatus::Stopping);
+    assert!(pending.job.worker.is_none());
+    // Reopening the journal and reconciling it must preserve the cancellation,
+    // even before the original process gets a chance to run its cleanup task.
+    let reopened = CloudManager::new(&directory.path().join("daemon.json"));
+    reopened.supervise_tick().await.unwrap();
+    assert_eq!(reopened.record(raw_id).await.unwrap().job.status, CloudJobStatus::Stopped);
+    let source = manager.capture_record(&pending.job.source.id).unwrap().source;
+    manager.launch_inner(raw_id, &configured_settings(), source).await.unwrap();
+    drop(allocation_gate);
+    tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            let record = manager.record(raw_id).await.unwrap();
+            if record.job.status == CloudJobStatus::Stopped {
+                assert!(!record.allocation_started);
+                assert!(record.job.worker.is_none());
+                assert!(record.gateway_url.is_none());
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    }).await.unwrap();
+}
+
+#[tokio::test]
+async fn ordinary_cloud_cancel_after_allocation_stops_only_the_existing_identity() {
+    let (directory, manager) = manager();
+    let repository = repository();
+    let operations = directory.path().join("cancel-operations.json");
+    let adapter = directory.path().join("cancel-adapter.py");
+    fs::write(&adapter, format!(r#"import json, sys
+request = json.load(sys.stdin)
+assert request['operation'] == 'stop'
+with open({}, 'w') as output:
+    json.dump({{'operation':request['operation'], 'sandbox_id':request['sandbox_id']}}, output)
+print(json.dumps({{'status':'stopped'}}))
+"#, serde_json::to_string(operations.to_str().unwrap()).unwrap())).unwrap();
+    let mut settings = configured_settings();
+    settings.public.node_binary = "/usr/bin/python3".into();
+    settings.public.runtime_path = adapter.to_str().unwrap().into();
+    store::write_json(&manager.path("settings.json"), &settings).unwrap();
+    let thread = manager.start_thread(cloud_thread_request(), repository.path().to_path_buf()).await.unwrap();
+    let raw_id = job_id(&thread.id).unwrap();
+    let allocation_gate = manager.execution.lock().await;
+    let mut registry = manager.registry().unwrap();
+    let stored = registry.jobs.get_mut(raw_id).unwrap();
+    stored.deferred_launch = false;
+    stored.allocation_started = true;
+    let sandbox_id = stored.sandbox_id.clone();
+    manager.save(&registry).unwrap();
+    assert!(tokio::time::timeout(Duration::from_millis(200), manager.cancel_preparing(raw_id)).await.unwrap().unwrap().ok);
+    assert!(!operations.exists());
+    drop(allocation_gate);
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if manager.record(raw_id).await.unwrap().job.status == CloudJobStatus::Stopped { break; }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    }).await.unwrap();
+    let operation: Value = serde_json::from_slice(&fs::read(operations).unwrap()).unwrap();
+    assert_eq!(operation, json!({"operation":"stop","sandbox_id":sandbox_id}));
+    assert!(manager.record(raw_id).await.unwrap().job.worker.is_none());
 }
 
 #[tokio::test]

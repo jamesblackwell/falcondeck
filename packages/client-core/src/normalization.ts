@@ -712,6 +712,15 @@ export function normalizeThreadSummary(
   const normalized: ThreadSummary = {
     id: thread.id ?? "",
     workspace_id: thread.workspace_id ?? "",
+    execution_target: thread.execution_target === "cloud" ? "cloud" : "local",
+    cloud: thread.execution_target === "cloud" && typeof thread.cloud?.job_id === "string"
+      ? {
+          job_id: thread.cloud.job_id,
+          status: thread.cloud.status,
+          error: typeof thread.cloud.error === "string" ? thread.cloud.error : null,
+          has_result: thread.cloud.has_result === true,
+        }
+      : null,
     title: thread.title ?? "Untitled thread",
     provider: normalizeProvider(thread.provider),
     native_session_id: thread.native_session_id ?? null,

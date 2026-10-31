@@ -4428,6 +4428,8 @@ mod tests {
         });
         let summary = hydrate_thread_summary(
             ThreadSummary {
+                execution_target: Default::default(),
+                cloud: None,
                 id: "thread-1".to_string(),
                 workspace_id: "workspace-1".to_string(),
                 title: "Restored".to_string(),
@@ -4507,6 +4509,8 @@ mod tests {
     fn falls_back_to_latest_item_timestamp_when_turn_timestamp_is_missing() {
         let summary = hydrate_thread_summary(
             ThreadSummary {
+                execution_target: Default::default(),
+                cloud: None,
                 id: "thread-1".to_string(),
                 workspace_id: "workspace-1".to_string(),
                 title: "Restored".to_string(),
@@ -4556,6 +4560,8 @@ mod tests {
     fn ignores_non_error_service_items_when_deriving_last_error() {
         let summary = hydrate_thread_summary(
             ThreadSummary {
+                execution_target: Default::default(),
+                cloud: None,
                 id: "thread-1".to_string(),
                 workspace_id: "workspace-1".to_string(),
                 title: "Restored".to_string(),

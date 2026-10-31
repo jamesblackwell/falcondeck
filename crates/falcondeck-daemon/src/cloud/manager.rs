@@ -66,6 +66,25 @@ struct JobRecord {
     provider_scope: Option<(String, String)>,
     #[serde(default)]
     awaiting_user_after_resume: bool,
+    /// Normal-thread metadata, never native conversation contents.
+    #[serde(default)]
+    thread_summary: Option<ThreadSummary>,
+    #[serde(default)]
+    thread_request: Option<StartThreadRequest>,
+    /// A cloud thread is created without compute; its first Send starts it.
+    #[serde(default)]
+    deferred_launch: bool,
+    #[serde(default)]
+    pending_turn: Option<SendTurnRequest>,
+    #[serde(default)]
+    custom_title: Option<String>,
+    /// Per-message admission receipts contain hashes, never duplicate transcripts.
+    #[serde(default)]
+    turn_receipts: BTreeMap<String, String>,
+    #[serde(default)]
+    cancel_requested: bool,
+    #[serde(default)]
+    allocation_started: bool,
 }
 #[derive(Default, Serialize, Deserialize)]
 struct Registry {
@@ -98,7 +117,7 @@ impl CloudManager {
         if let Ok(Some(mut registry)) = store::read_json::<Registry>(&root.join("jobs.json")) {
             let mut changed = false;
             for record in registry.jobs.values_mut() {
-                if matches!(
+                if !record.deferred_launch && matches!(
                     record.job.status,
                     CloudJobStatus::Provisioning | CloudJobStatus::Stopping
                 ) {
@@ -154,6 +173,11 @@ impl CloudManager {
             return Ok(());
         };
         for job in self.list_stored().await? {
+            let record = self.record(&job.id).await?;
+            if record.cancel_requested && !matches!(job.status, CloudJobStatus::Stopped | CloudJobStatus::Expired) {
+                self.stop_inner(&job.id).await?;
+                continue;
+            }
             if matches!(
                 job.status,
                 CloudJobStatus::Provisioning | CloudJobStatus::Stopped | CloudJobStatus::Expired
@@ -349,7 +373,7 @@ impl CloudManager {
         if let Some(job) = existing_request(&registry, &r)? {
             return Ok(job);
         }
-        if registry.jobs.values().any(|j| holds_slot(j.job.status)) {
+        if registry.jobs.values().any(|j| !j.deferred_launch && holds_slot(j.job.status)) {
             return Err(DaemonError::Conflict(
                 "Another cloud job is active or needs reconciliation".into(),
             ));
@@ -387,6 +411,14 @@ impl CloudManager {
                 gateway_url: None,
                 gateway_token: None,
                 awaiting_user_after_resume: false,
+                thread_summary: None,
+                thread_request: None,
+                deferred_launch: false,
+                pending_turn: None,
+                custom_title: None,
+                turn_receipts: BTreeMap::new(),
+                cancel_requested: false,
+                allocation_started: false,
                 provider_scope: Some((
                     settings.public.team_id.clone().unwrap_or_default(),
                     settings.public.project_id.clone().unwrap_or_default(),
@@ -408,8 +440,8 @@ impl CloudManager {
             if let Ok(mut r) = self.registry() {
                 if let Some(j) = r.jobs.get_mut(&id) {
                     // A killed coordinator or a timed-out SDK call may already have allocated.
-                    j.job.status = CloudJobStatus::Unknown;
-                    j.job.error=Some("Cloud launch outcome is unknown. Inspect or stop this job before starting another.".into());
+                    j.job.status = if j.cancel_requested { CloudJobStatus::Stopping } else { CloudJobStatus::Unknown };
+                    j.job.error = if j.cancel_requested { None } else { Some("Cloud launch outcome is unknown. Inspect or stop this job before starting another.".into()) };
                     j.job.updated_at = Utc::now();
                     let _ = self.save(&r);
                 }
@@ -422,7 +454,19 @@ impl CloudManager {
         s: &Settings,
         source: SourceCapture,
     ) -> Result<(), DaemonError> {
+        // Journal possible allocation before invoking the provider. A cancel
+        // before this point can finish locally; a cancel afterwards must stop
+        // this exact provider identity even when create's outcome is unknown.
+        {
+            let _gate = self.mutation.lock().await;
+            let mut registry = self.registry()?;
+            let record = registry.jobs.get_mut(id).ok_or_else(not_found)?;
+            if record.cancel_requested { return Ok(()); }
+            record.allocation_started = true;
+            self.save(&registry)?;
+        }
         let record = self.record(id).await?;
+        let launched_at = Utc::now();
         let created=self.runtime(s,json!({"operation":"create","name":record.sandbox_id,"image":s.public.image,"timeout_ms":u64::from(s.public.timeout_minutes)*60_000,"cpus":2,"allowed_domains":s.public.allowed_domains,"worker_daemon_url":s.public.worker_daemon_url,"worker_daemon_sha256":s.public.worker_daemon_sha256,"openai_api_key":s.openai_api_key,"source":source})).await?;
         let gateway_url = required_str(&created, "gateway_url")?;
         validate_gateway(&gateway_url)?;
@@ -435,7 +479,7 @@ impl CloudManager {
             return Err(bad("Runtime returned a different sandbox identity"));
         }
         let max_expiry =
-            record.job.created_at + chrono::Duration::minutes(i64::from(s.public.timeout_minutes));
+            launched_at + chrono::Duration::minutes(i64::from(s.public.timeout_minutes));
         let expiry = created
             .get("expires_at")
             .and_then(Value::as_str)
@@ -452,6 +496,7 @@ impl CloudManager {
             j.job.expires_at = Some(expiry);
             self.save(&r)?;
         }
+        if self.record(id).await?.cancel_requested { return Ok(()); }
         let mut record = self.record(id).await?;
         let workspace = self
             .worker(
@@ -463,7 +508,17 @@ impl CloudManager {
             .await?;
         let wid = required_str(&workspace, "id")?;
         validate_segment(&wid)?;
-        let thread=self.worker(&record,"POST",&format!("/api/workspaces/{wid}/threads"),Some(json!({"workspace_id":wid,"provider":"codex","model_id":record.job.model_id,"approval_policy":"on-request","sandbox_mode":"workspace-write"}))).await?;
+        let mut start = record.thread_request.as_ref().map(serde_json::to_value).transpose()?.unwrap_or_else(|| json!({"provider":"codex","model_id":record.job.model_id,"approval_policy":"on-request","sandbox_mode":"workspace-write"}));
+        start["workspace_id"] = json!(wid);
+        start["execution_target"] = json!("local");
+        start["isolation"] = json!("project_folder");
+        if let Some(summary) = &record.thread_summary {
+            let agent = serde_json::to_value(&summary.agent)?;
+            for (key, value) in agent.as_object().into_iter().flatten() {
+                if !value.is_null() { start[key] = value.clone(); }
+            }
+        }
+        let thread=self.worker(&record,"POST",&format!("/api/workspaces/{wid}/threads"),Some(start)).await?;
         let tid = required_str(
             thread
                 .get("thread")
@@ -483,12 +538,23 @@ impl CloudManager {
             r.jobs.get_mut(id).ok_or_else(not_found)?.job.worker = record.job.worker.clone();
             self.save(&r)?;
         }
+        if self.record(id).await?.cancel_requested { return Ok(()); }
         // Persist the locator before admission. A lost response must never resend this first prompt.
-        self.worker(&record,"POST",&format!("/api/workspaces/{wid}/threads/{tid}/turns"),Some(json!({"workspace_id":wid,"thread_id":tid,"inputs":[{"type":"text","text":record.job.prompt}],"model_id":record.job.model_id,"user_item_id":format!("user-cloud-{id}")}))).await?;
+        let mut first_turn = record.pending_turn.as_ref().map(serde_json::to_value).transpose()?.unwrap_or_else(|| json!({"inputs":[{"type":"text","text":record.job.prompt}],"model_id":record.job.model_id,"user_item_id":format!("user-cloud-{id}")}));
+        first_turn["workspace_id"] = json!(wid);
+        first_turn["thread_id"] = json!(tid);
+        if let Some(summary) = &record.thread_summary {
+            let agent = serde_json::to_value(&summary.agent)?;
+            for (key, value) in agent.as_object().into_iter().flatten() {
+                if first_turn.get(key).is_none_or(Value::is_null) && !value.is_null() { first_turn[key] = value.clone(); }
+            }
+        }
+        self.worker(&record,"POST",&format!("/api/workspaces/{wid}/threads/{tid}/turns"),Some(first_turn)).await?;
         let _gate = self.mutation.lock().await;
         let mut r = self.registry()?;
         let j = r.jobs.get_mut(id).ok_or_else(not_found)?;
-        j.job.status = CloudJobStatus::Running;
+        j.job.status = if j.cancel_requested { CloudJobStatus::Stopping } else { CloudJobStatus::Running };
+        j.pending_turn = None;
         j.job.updated_at = Utc::now();
         self.save(&r)
     }
@@ -535,6 +601,7 @@ impl CloudManager {
     }
     async fn get_inner(&self, id: &str) -> Result<CloudJob, DaemonError> {
         let record = self.record(id).await?;
+        if record.cancel_requested { return Ok(record.job); }
         if matches!(
             record.job.status,
             CloudJobStatus::Stopped | CloudJobStatus::Expired
@@ -603,6 +670,7 @@ impl CloudManager {
         let _gate = self.mutation.lock().await;
         let mut r = self.registry()?;
         let j = r.jobs.get_mut(id).ok_or_else(not_found)?;
+        if j.job.status == status && j.job.error == error { return Ok(j.job.clone()); }
         j.job.status = status;
         j.job.error = error;
         j.job.updated_at = Utc::now();
@@ -697,11 +765,12 @@ impl CloudManager {
         if registry
             .jobs
             .iter()
-            .any(|(other, r)| other != id && holds_slot(r.job.status))
+            .any(|(other, r)| other != id && !r.deferred_launch && holds_slot(r.job.status))
         {
             return Err(DaemonError::Conflict("Another cloud job is active".into()));
         }
         let record = registry.jobs.get_mut(id).ok_or_else(not_found)?;
+        if let Some(response) = threads::turn_receipt(record, &request)? { return Ok(response); }
         if !matches!(
             record.job.status,
             CloudJobStatus::Running | CloudJobStatus::AwaitingInput | CloudJobStatus::Completed
@@ -710,6 +779,7 @@ impl CloudManager {
                 "Cloud job cannot accept another turn in its current state".into(),
             ));
         }
+        threads::remember_turn(record, &request)?;
         let w = record.job.worker.clone().ok_or_else(not_found)?;
         request.workspace_id = w.workspace_id.clone();
         request.thread_id = w.thread_id.clone();
@@ -723,6 +793,7 @@ impl CloudManager {
         // A restart after native admission must retain the active slot and never resend.
         registry.collection_attempts.remove(id);
         self.save(&registry)?;
+        drop(_gate);
         let response = self
             .worker(
                 &worker_record,
@@ -734,6 +805,8 @@ impl CloudManager {
                 Some(body),
             )
             .await;
+        let _gate = self.mutation.lock().await;
+        let mut registry = self.registry()?;
         let record = registry.jobs.get_mut(id).ok_or_else(not_found)?;
         record.job.status = if response.is_ok() {
             CloudJobStatus::Running
@@ -924,7 +997,7 @@ impl CloudManager {
             if registry
                 .jobs
                 .iter()
-                .any(|(other, r)| other != id && holds_slot(r.job.status))
+                .any(|(other, r)| other != id && !r.deferred_launch && holds_slot(r.job.status))
             {
                 return Err(DaemonError::Conflict("Another cloud job is active".into()));
             }
@@ -946,6 +1019,7 @@ impl CloudManager {
                 ));
             }
             record.awaiting_user_after_resume = true;
+            record.cancel_requested = false;
             record.job.status = CloudJobStatus::Provisioning;
             record.job.error = None;
             record.job.result = None;
@@ -1016,6 +1090,30 @@ impl CloudManager {
         let _execution = self.execution.lock().await;
         self.stop_inner(id).await
     }
+    /// Cancel setup without waiting for a provider call or the execution lock.
+    /// Cleanup is durable and always addresses the already-journaled identity.
+    pub(crate) async fn cancel_preparing(self: &Arc<Self>, id: &str) -> Result<CommandResponse, DaemonError> {
+        {
+            let _gate = self.mutation.lock().await;
+            let mut registry = self.registry()?;
+            let record = registry.jobs.get_mut(id).ok_or_else(not_found)?;
+            if !matches!(record.job.status, CloudJobStatus::Provisioning | CloudJobStatus::Stopping) {
+                return Err(DaemonError::Conflict("Cloud setup is no longer preparing; refresh before stopping the active turn".into()));
+            }
+            record.cancel_requested = true;
+            record.job.status = CloudJobStatus::Stopping;
+            record.job.error = None;
+            record.job.updated_at = Utc::now();
+            self.save(&registry)?;
+        }
+        let manager = self.clone();
+        let id = id.to_string();
+        tokio::spawn(async move {
+            let _execution = manager.execution.lock().await;
+            let _ = manager.stop_inner(&id).await;
+        });
+        Ok(CommandResponse { ok:true, message:Some("Stopping cloud setup".into()) })
+    }
     async fn stop_inner(&self, id: &str) -> Result<CloudJob, DaemonError> {
         let _gate = self.mutation.lock().await;
         let mut registry = self.registry()?;
@@ -1026,17 +1124,28 @@ impl CloudManager {
         ) {
             return Ok(record.job.clone());
         }
+        if record.cancel_requested && record.thread_request.is_some() && !record.allocation_started && record.job.worker.is_none() && record.gateway_url.is_none() {
+            record.job.status = CloudJobStatus::Stopped;
+            record.job.error = Some("Cloud setup was canceled before starting. Start a new cloud task to try again.".into());
+            record.job.updated_at = Utc::now();
+            let job = record.job.clone();
+            self.save(&registry)?;
+            return Ok(job);
+        }
         record.job.status = CloudJobStatus::Stopping;
         record.job.updated_at = Utc::now();
         let snapshot = record.clone();
         self.save(&registry)?;
         let settings = self.settings_for_job(&snapshot)?;
+        drop(_gate);
         let outcome = self
             .runtime(
                 &settings,
                 json!({"operation":"stop","sandbox_id":snapshot.sandbox_id}),
             )
             .await;
+        let _gate = self.mutation.lock().await;
+        let mut registry = self.registry()?;
         let record = registry.jobs.get_mut(id).ok_or_else(not_found)?;
         let confirmed = outcome
             .as_ref()
@@ -1050,7 +1159,9 @@ impl CloudManager {
             CloudJobStatus::Unknown
         };
         record.job.error = if confirmed {
-            None
+            if record.cancel_requested && record.job.worker.is_none() {
+                Some("Cloud setup was canceled before starting a conversation. Start a new cloud task to try again.".into())
+            } else { None }
         } else {
             Some(
                 "Stop outcome is unknown. Inspect this sandbox before launching another job."
@@ -1391,3 +1502,7 @@ mod tests;
 #[cfg(test)]
 #[path = "worker_tests.rs"]
 mod worker_tests;
+
+#[path = "threads.rs"]
+mod threads;
+pub(crate) use threads::job_id;

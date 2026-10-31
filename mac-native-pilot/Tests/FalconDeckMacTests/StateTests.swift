@@ -131,6 +131,14 @@ private actor SuspendedInputStore: NativeInputStoring {
 }
 
 final class StateTests: XCTestCase {
+    @MainActor func testRetiredCloudNavigationUsesTheOrdinaryTaskDestination() {
+        let store = AppStore(client: TestDaemon())
+        store.selectSection("cloud")
+        XCTAssertEqual(store.selectedSection, "project")
+        store.selectSection("settings")
+        XCTAssertEqual(store.selectedSection, "settings")
+    }
+
     @MainActor func testDeferredNewTaskFocusIsCancelledBySettingsNavigation() async {
         let store = AppStore(client: TestDaemon())
         store.applyEnvelope(snapshot)
@@ -373,6 +381,59 @@ final class StateTests: XCTestCase {
         XCTAssertNil(store.pendingSubmission)
         XCTAssertEqual(store.draft, "New text while creating")
         XCTAssertEqual(store.composerPayload(key: store.composerKey), changedPayload)
+    }
+
+    @MainActor func testCloudSelectionUsesNormalCreationAndTurnRoutesWithDurableIdentity() async {
+        let client = TestDaemon(), store = AppStore(client: client)
+        await store.reconnect()
+        for _ in 0..<1000 where !store.isConnected { await Task.yield() }
+        guard store.isConnected else { return XCTFail("Test stream failed to connect") }
+        store.draft = "Check the failing tests in the cloud"
+        var selection = NativeComposerSelection()
+        selection.executionTarget = "cloud"
+        let settings = selection.submissionSettings(project: store.selectedProject, provider: "codex", task: nil)
+        let sending = Task { await store.sendInputs([.object(["type": .string("text"), "text": .string(store.draft)])], settings: settings) }
+        await client.waitForSend()
+        let mutations = await client.recordedMutations()
+        let create = mutations.first { $0.method == "POST" && $0.path.last == "threads" }
+        XCTAssertEqual(create?.path, ["api", "workspaces", "p1", "threads"])
+        XCTAssertEqual(create?.body["execution_target"], .string("cloud"))
+        XCTAssertEqual(create?.body["idempotency_key"].string, store.pendingSubmission?.id)
+        XCTAssertFalse(create?.body["idempotency_key"].string.isEmpty ?? true)
+        XCTAssertFalse(mutations.contains { $0.path.contains("cloud") }, "Capture and cloud lifecycle are daemon-owned, not a second UI workflow")
+        let turn = mutations.last
+        XCTAssertEqual(turn?.path, ["api", "workspaces", "p1", "threads", "created", "turns"])
+        XCTAssertEqual(turn?.body["user_item_id"].string, store.pendingSubmission?.userItemID)
+        XCTAssertNil(turn?.body.fields["execution_target"], "A follow-up cannot move its existing conversation")
+        await client.finishSend()
+        await sending.value
+        XCTAssertNil(store.pendingSubmission)
+        await store.prepareForQuit()
+    }
+
+    @MainActor func testCloudFileAndTerminalActionsNeverTargetTheLocalProject() async {
+        let client = TestDaemon(), store = AppStore(client: client)
+        let inspectorWasVisible = store.showInspector, terminalWasVisible = store.showTerminal
+        defer { store.showInspector = inspectorWasVisible; store.showTerminal = terminalWasVisible }
+        store.applyEnvelope(snapshot)
+        store.tasks = [AgentTask(task("cloud-test").setting("execution_target", .string("cloud")))]
+        let opening = Task { await store.selectTask("cloud-test") }
+        await client.waitForDetail("cloud-test")
+        store.showInspector = false
+        store.showTerminal = false
+        NativeInspectorNavigation.open(store: store, path: "src/app.ts")
+        XCTAssertFalse(store.showInspector)
+        XCTAssertTrue(store.errorMessage?.contains("cloud environment") == true)
+        let commands = NativeCommandDispatcher()
+        commands.execute("toggleChanges", store: store)
+        commands.execute("toggleTerminal", store: store)
+        commands.execute("newTerminal", store: store)
+        XCTAssertFalse(store.showInspector)
+        XCTAssertFalse(store.showTerminal)
+        XCTAssertNil(store.terminalCreationRequest, "A cloud keyboard command cannot leave a deferred local shell creation")
+        await client.finishDetail("cloud-test", text: "")
+        await opening.value
+        await store.prepareForQuit()
     }
 
     @MainActor func testUncertainDeliveryBlocksResendAndExactHistoryIdentityConfirmsIt() async {

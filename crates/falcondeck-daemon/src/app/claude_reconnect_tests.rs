@@ -25,6 +25,8 @@ fn history(source: &str, version: (u64, Option<SystemTime>)) -> Arc<ClaudeHistor
 
 fn thread(title: &str, history: Arc<ClaudeHistoryState>) -> ManagedThread {
     let mut thread = ManagedThread::new(ThreadSummary {
+        execution_target: Default::default(),
+        cloud: None,
         id: THREAD_ID.to_string(),
         workspace_id: "workspace-1".to_string(),
         title: title.to_string(),

@@ -19,7 +19,7 @@ struct NativeCloudSettingsView: View {
         Form {
             Section {
                 Toggle("Enable Cloud execution", isOn: $draft.enabled)
-                Text("Cloud tasks run Codex in a Vercel Linux sandbox from a reviewed copy of your project's current files. Other agents and macOS tools are not supported in this runtime.")
+                Text("Choose Cloud in a new conversation to run Codex in a Vercel Linux environment with a copy of your project's current files. Other agents and macOS tools are not supported in this runtime.")
                     .font(NativePreferences.shared.font(size: 12)).foregroundStyle(FDTheme.muted)
                 Text("A started worker runs independently of this Mac until it stops or reaches its time limit. Launching and collecting results require the coordinator daemon to be available.")
                     .font(NativePreferences.shared.font(size: 12)).foregroundStyle(FDTheme.muted)

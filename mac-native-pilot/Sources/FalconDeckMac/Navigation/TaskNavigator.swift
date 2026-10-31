@@ -391,6 +391,9 @@ struct TaskNavigationRow: View {
                 }
                 if let project { Text(project.name).lineLimit(1); Text("·") }
                 Text(FDTheme.providerName(task.provider))
+                if task.isCloud {
+                    Image(systemName: "cloud").accessibilityLabel("Cloud")
+                }
                 if task.running {
                     Text("·"); Text("Working").foregroundStyle(FDTheme.accent)
                 } else if task.awaitingInput {

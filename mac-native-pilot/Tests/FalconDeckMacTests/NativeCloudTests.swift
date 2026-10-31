@@ -15,6 +15,62 @@ private actor CloudRequestRecorder {
 }
 
 final class NativeCloudTests: XCTestCase {
+    @MainActor func testRetiredCloudDestinationRestoresTheOrdinaryConversationView() {
+        XCTAssertEqual(AppStore.restoredSection("cloud"), "project")
+        XCTAssertEqual(AppStore.restoredSection(nil), "project")
+        XCTAssertEqual(AppStore.restoredSection("settings"), "settings")
+    }
+
+    func testOlderComposerPreferencesDecodeAsLocal() throws {
+        let data = Data(#"{"fields":{},"isolation":"isolated","followUp":"queue"}"#.utf8)
+        let selection = try JSONDecoder().decode(NativeComposerSelection.self, from: data)
+        XCTAssertEqual(selection.effectiveExecutionTarget(task: nil), "local")
+        XCTAssertEqual(selection.isolation, "isolated")
+    }
+
+    func testCloudComposerCreatesAnOrdinaryCloudThreadAndKeepsLocalIsolationPreference() throws {
+        let project = Project(.object(["id": .string("project")]))
+        var selection = NativeComposerSelection(isolation: "isolated")
+        selection.executionTarget = "cloud"
+        let settings = selection.submissionSettings(project: project, provider: "codex", task: nil)
+        XCTAssertEqual(settings["execution_target"], .string("cloud"))
+        XCTAssertEqual(settings["isolation"], .string("project_folder"), "Cloud already owns its own isolated filesystem")
+        XCTAssertEqual(selection.isolation, "isolated", "Returning to Local preserves the user's working-copy preference")
+        let restored = try JSONDecoder().decode(NativeComposerSelection.self, from: JSONEncoder().encode(selection))
+        XCTAssertEqual(restored.executionTarget, "cloud")
+    }
+
+    func testExistingConversationOwnsItsExecutionLocation() {
+        var selection = NativeComposerSelection()
+        selection.executionTarget = "cloud"
+        let local = AgentTask(.object(["id": .string("local-task")]))
+        let cloud = AgentTask(.object(["id": .string("cloud-task"), "execution_target": .string("cloud")]))
+        XCTAssertEqual(selection.effectiveExecutionTarget(task: local), "local")
+        selection.executionTarget = "local"
+        XCTAssertEqual(selection.effectiveExecutionTarget(task: cloud), "cloud")
+        XCTAssertFalse(ConversationActionSemantics.canBranch(task: cloud, capabilities: .object(["supports_forking": .bool(true)])))
+        XCTAssertNotNil(NativeTaskActions.forkBlockedReason(cloud, provider: "claude", project: nil))
+    }
+
+    func testCloudPreflightRejectsUnqualifiedInputsWithoutFallingBackToLocal() {
+        let project = Project(.object(["id": .string("p")]))
+        XCTAssertNil(NativeCloudConversation.validationError(target: "cloud", provider: "codex", project: project, hasAttachments: false))
+        XCTAssertNotNil(NativeCloudConversation.validationError(target: "cloud", provider: "claude", project: project, hasAttachments: false))
+        XCTAssertNotNil(NativeCloudConversation.validationError(target: "cloud", provider: "codex", project: project, hasAttachments: true))
+        XCTAssertNotNil(NativeCloudConversation.validationError(target: "cloud", provider: "codex", project: nil, hasAttachments: false))
+        XCTAssertNil(NativeCloudConversation.validationError(target: "local", provider: "claude", project: project, hasAttachments: true))
+    }
+
+    func testCloudSummaryScopesOnlyCoordinatorRelationshipsForPairedHosts() {
+        let raw: JSON = .object(["id": .string("cloud-job"), "workspace_id": .string("project"), "execution_target": .string("cloud"),
+            "cloud": .object(["job_id": .string("cloud-job"), "status": .string("stopped"), "has_result": .bool(true)]), "native_session_id": .string("native-session")])
+        let projected = NativeHostProjection.task(raw, host: "server")
+        XCTAssertEqual(projected["cloud"]["job_id"].string, NativeHostManager.namespace(hostID: "server", id: "cloud-job"))
+        XCTAssertEqual(projected["native_session_id"].string, "native-session")
+        XCTAssertTrue(AgentTask(projected).isCloud)
+        XCTAssertEqual(AgentTask(projected).cloudStatus, "stopped")
+    }
+
     func testSettingsDraftDoesNotReplayCredentialsFromResponse() {
         let settings = cloudSettings
             .setting("provider_token", .string("unexpected-provider-secret"))

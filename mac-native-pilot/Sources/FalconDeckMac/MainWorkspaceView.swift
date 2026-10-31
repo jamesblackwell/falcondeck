@@ -11,11 +11,11 @@ struct MainWorkspaceView: View {
                 VSplitView {
                     HSplitView {
                         ConversationView(store: store).frame(minWidth: 440)
-                        if store.showInspector {
+                        if store.showInspector && store.selectedTask?.isCloud != true {
                             NativeInspectorView(store: store).frame(minWidth: 300, idealWidth: 380, maxWidth: 650)
                         }
                     }
-                    if store.showTerminal {
+                    if store.showTerminal && store.selectedTask?.isCloud != true {
                         NativeTerminalPanel(store: store, onHide: { store.showTerminal = false })
                             .frame(minHeight: 180, idealHeight: 250)
                     }
@@ -24,7 +24,6 @@ struct MainWorkspaceView: View {
                 switch store.selectedSection {
                 case "activity": NativeActivityView(store: store)
                 case "automations": NativeAutomationsView(store: store)
-                case "cloud": NativeCloudTasksView(store: store)
                 case "usage": NativeUsageView(store: store)
                 case "plugins": NativePluginsView(store: store)
                 case "extensions": NativeExtensionsView(store: store).id("\(store.selectedHostID ?? "local"):extensions")
@@ -40,7 +39,7 @@ struct MainWorkspaceView: View {
         }
         .background(FDTheme.background)
         .toolbar {
-            if conversation {
+            if conversation && store.selectedTask?.isCloud != true {
                 ToolbarItemGroup(placement: .primaryAction) {
                     Button { store.showInspector.toggle() } label: { Image(systemName: "sidebar.right") }
                         .help("Info, changes and files")

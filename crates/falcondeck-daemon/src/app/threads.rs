@@ -722,6 +722,8 @@ impl AppState {
             .entry(thread_id.to_string())
             .or_insert_with(|| {
                 ManagedThread::new(ThreadSummary {
+                    execution_target: Default::default(),
+                    cloud: None,
                     id: thread_id.to_string(),
                     workspace_id: workspace_id.to_string(),
                     title: "Untitled thread".to_string(),
@@ -782,6 +784,11 @@ impl AppState {
     where
         F: FnOnce(&mut ThreadSummary),
     {
+        if self.is_cloud_thread(thread_id) {
+            self.mutate_cloud_thread(workspace_id, thread_id, updater)
+                .await?;
+            return Ok(());
+        }
         self.upsert_thread(workspace_id, thread_id, updater).await?;
         Ok(())
     }
@@ -793,6 +800,12 @@ impl AppState {
         workspace_id: &str,
         thread_id: &str,
     ) -> bool {
+        if self.is_cloud_thread(thread_id) {
+            return self
+                .require_cloud_thread(workspace_id, thread_id)
+                .await
+                .is_ok_and(|thread| thread.status == ThreadStatus::WaitingForInput);
+        }
         let workspaces = self.inner.workspaces.lock().await;
         workspaces
             .get(workspace_id)
@@ -832,6 +845,9 @@ impl AppState {
         workspace_id: &str,
         thread_id: &str,
     ) -> Result<ThreadSummary, DaemonError> {
+        if self.is_cloud_thread(thread_id) {
+            return self.require_cloud_thread(workspace_id, thread_id).await;
+        }
         let workspaces = self.inner.workspaces.lock().await;
         let workspace = workspaces
             .get(workspace_id)
@@ -846,6 +862,12 @@ impl AppState {
     }
 
     pub(crate) async fn has_thread(&self, workspace_id: &str, thread_id: &str) -> bool {
+        if self.is_cloud_thread(thread_id) {
+            return self
+                .require_cloud_thread(workspace_id, thread_id)
+                .await
+                .is_ok();
+        }
         self.inner
             .workspaces
             .lock()
@@ -3873,6 +3895,8 @@ mod tests {
 
     fn isolated_codex_thread() -> ManagedThread {
         ManagedThread::new(ThreadSummary {
+            execution_target: Default::default(),
+            cloud: None,
             id: "thread-isolated".to_string(),
             workspace_id: "workspace-1".to_string(),
             title: "Persisted title".to_string(),

@@ -1,7 +1,7 @@
 import { useProjectFolders } from './project-folders'
 import * as React from 'react'
 import { memo, useId, useMemo } from 'react'
-import { Archive, ArchiveRestore, Bot, CalendarClock, CircleStop, Pin, Split } from 'lucide-react'
+import { Archive, ArchiveRestore, Bot, CalendarClock, CircleStop, Cloud, Pin, Split } from 'lucide-react'
 
 import {
   deriveThreadAttentionPresentation,
@@ -345,6 +345,11 @@ export const ThreadItem = memo(
               </span>
             )
           ) : null}
+          {thread.execution_target === 'cloud' ? (
+            <span role="img" aria-label="Cloud" title="Runs in a cloud sandbox" className="flex shrink-0 items-center text-fg-muted">
+              <Cloud aria-hidden="true" className="h-3 w-3" />
+            </span>
+          ) : null}
           {thread.variant ? (
             // The same Split icon the composer uses for "Isolated copy", so
             // the sidebar marker reads as that choice rather than git detail.
@@ -541,6 +546,7 @@ function threadRenderEqual(a: ThreadSummary, b: ThreadSummary) {
     a.id === b.id &&
     a.title === b.title &&
     a.provider === b.provider &&
+    a.execution_target === b.execution_target &&
     a.updated_at === b.updated_at &&
     a.status === b.status &&
     a.last_error === b.last_error &&

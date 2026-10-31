@@ -1102,6 +1102,8 @@ pub(super) fn merge_hydrated_threads_with_persisted_state(
         }
         threads_out.push(crate::codex::HydratedThread {
             summary: ThreadSummary {
+                execution_target: Default::default(),
+                cloud: None,
                 id: state.thread_id.clone(),
                 workspace_id: workspace_id.to_string(),
                 title: state
@@ -1335,6 +1337,8 @@ async fn start_thread_internal(
         .get_mut(&request.workspace_id)
         .ok_or_else(|| DaemonError::NotFound("workspace not found".to_string()))?;
     let thread = ThreadSummary {
+        execution_target: Default::default(),
+        cloud: None,
         id: thread_id.clone(),
         workspace_id: request.workspace_id.clone(),
         title,
@@ -1609,7 +1613,15 @@ pub(super) async fn archive_all_threads(
     app: &AppState,
     workspace_id: &str,
 ) -> Result<CommandResponse, DaemonError> {
-    let bot_homes: HashSet<_> = app.inner.preferences.lock().await.bots.iter().map(|b| b.thread_id.clone()).collect();
+    let bot_homes: HashSet<_> = app
+        .inner
+        .preferences
+        .lock()
+        .await
+        .bots
+        .iter()
+        .map(|b| b.thread_id.clone())
+        .collect();
     let mut workspaces = app.inner.workspaces.lock().await;
     let workspace = workspaces
         .get_mut(workspace_id)
@@ -1617,7 +1629,8 @@ pub(super) async fn archive_all_threads(
     let mut changed = false;
     let mut archived_threads = Vec::new();
     for thread in workspace.threads.values_mut() {
-        if !thread.summary.is_archived && !bot_homes.contains(&thread.summary.id)
+        if !thread.summary.is_archived
+            && !bot_homes.contains(&thread.summary.id)
             && !matches!(
                 thread.summary.status,
                 ThreadStatus::Running | ThreadStatus::WaitingForInput
@@ -2860,6 +2873,17 @@ impl AppState {
         thread_id: &str,
         queued_id: &str,
     ) -> Result<CommandResponse, DaemonError> {
+        if self.is_cloud_thread(thread_id) {
+            self.require_cloud_thread(workspace_id, thread_id).await?;
+            return self
+                .cloud_manager()
+                .thread_queue_command(
+                    thread_id,
+                    "remove",
+                    &serde_json::json!({"queued_id": queued_id}),
+                )
+                .await;
+        }
         remove_queued_turn(self, workspace_id, thread_id, queued_id).await
     }
 
@@ -2870,6 +2894,17 @@ impl AppState {
         thread_id: &str,
         queued_id: &str,
     ) -> Result<CommandResponse, DaemonError> {
+        if self.is_cloud_thread(thread_id) {
+            self.require_cloud_thread(workspace_id, thread_id).await?;
+            return self
+                .cloud_manager()
+                .thread_queue_command(
+                    thread_id,
+                    "steer",
+                    &serde_json::json!({"queued_id": queued_id}),
+                )
+                .await;
+        }
         steer_queued_turn(self, workspace_id, thread_id, queued_id).await
     }
 
@@ -2882,6 +2917,17 @@ impl AppState {
         queued_id: &str,
         text: &str,
     ) -> Result<CommandResponse, DaemonError> {
+        if self.is_cloud_thread(thread_id) {
+            self.require_cloud_thread(workspace_id, thread_id).await?;
+            return self
+                .cloud_manager()
+                .thread_queue_command(
+                    thread_id,
+                    "edit",
+                    &serde_json::json!({"queued_id": queued_id, "text": text}),
+                )
+                .await;
+        }
         edit_queued_turn(self, workspace_id, thread_id, queued_id, text).await
     }
 
@@ -2891,6 +2937,17 @@ impl AppState {
         thread_id: &str,
         queued_ids: &[String],
     ) -> Result<CommandResponse, DaemonError> {
+        if self.is_cloud_thread(thread_id) {
+            self.require_cloud_thread(workspace_id, thread_id).await?;
+            return self
+                .cloud_manager()
+                .thread_queue_command(
+                    thread_id,
+                    "reorder",
+                    &serde_json::json!({"queued_ids": queued_ids}),
+                )
+                .await;
+        }
         reorder_queued_turns(self, workspace_id, thread_id, queued_ids).await
     }
 
@@ -3246,6 +3303,8 @@ async fn send_turn_with_startup_mode(
                 .entry(request.thread_id.clone())
                 .or_insert_with(|| {
                     ManagedThread::new(ThreadSummary {
+                        execution_target: Default::default(),
+                        cloud: None,
                         id: request.thread_id.clone(),
                         workspace_id: request.workspace_id.clone(),
                         title: "Untitled thread".to_string(),
@@ -5724,15 +5783,15 @@ fn settle_thread_detail_items(
     settle_tool_call_items(items, settled_at, settlement);
 }
 
-struct ThreadDetailWindow {
-    items: Vec<ConversationItem>,
-    has_older: bool,
-    oldest_item_id: Option<String>,
-    newest_item_id: Option<String>,
-    is_partial: bool,
+pub(super) struct ThreadDetailWindow {
+    pub(super) items: Vec<ConversationItem>,
+    pub(super) has_older: bool,
+    pub(super) oldest_item_id: Option<String>,
+    pub(super) newest_item_id: Option<String>,
+    pub(super) is_partial: bool,
 }
 
-fn thread_detail_window(
+pub(super) fn thread_detail_window(
     items: &[ConversationItem],
     request: &ThreadDetailRequest,
 ) -> Result<ThreadDetailWindow, DaemonError> {
@@ -6252,6 +6311,8 @@ mod tests {
     fn hydrated_thread(session_id: &str, preview: &str) -> crate::codex::HydratedThread {
         crate::codex::HydratedThread {
             summary: ThreadSummary {
+                execution_target: Default::default(),
+                cloud: None,
                 id: session_id.to_string(),
                 workspace_id: "workspace-1".to_string(),
                 title: format!("Hydrated {session_id}"),
@@ -6982,6 +7043,8 @@ mod tests {
     async fn seed_workspace_with_thread(app: &AppState, workspace_id: &str, thread_id: &str) {
         let now = Utc::now();
         let thread = ThreadSummary {
+            execution_target: Default::default(),
+            cloud: None,
             id: thread_id.to_string(),
             workspace_id: workspace_id.to_string(),
             title: "Thread".to_string(),

@@ -975,9 +975,19 @@ export type QueuedTurnSummary = {
   queued_at: string;
 };
 
+/** Execution location is fixed when a task is created. */
+export type ThreadExecutionTarget = "local" | "cloud";
+
 export type ThreadSummary = {
   id: string;
   workspace_id: string;
+  execution_target?: ThreadExecutionTarget;
+  cloud?: {
+    job_id: string;
+    status: import("./cloud").CloudJobStatus;
+    error: string | null;
+    has_result: boolean;
+  } | null;
   title: string;
   provider: AgentProvider;
   native_session_id?: string | null;

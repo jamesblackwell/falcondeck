@@ -2,6 +2,8 @@
 
 Researched 2026-10-05. This extends [the provider and integration research](CLOUD-SANDBOXES.md) with a source review of the adjacent `../bb` checkout and three public implementations. It is a design proposal; no cloud service was deployed or tested. UI recommendations below are proposed behavior, not existing FalconDeck features. Product copy uses “task”; “thread” describes internal ownership.
 
+Implementation update, 2026-10-31: the prototype now uses **Local / Cloud** in the ordinary new-task composer, regular sidebar rows and the same thread APIs for humans and agents. It has no permanent Cloud tasks navigation item. Setup stays in Settings; source capture and worker lifecycle belong to the daemon. See [the current implementation and limitations](CLOUD-TASKS.md); the provider comparison and later UX below remain research, not additional shipped capabilities.
+
 ## Recommended direction
 
 Add **Cloud copy** to the existing **Project folder / Isolated copy** menu. Configure one cloud provider in Settings. Create an environment for each new cloud task and keep that environment for its follow-up prompts, suspending compute between sessions. Review and bring back its changes through the normal task experience.

@@ -14,7 +14,7 @@ enum ConversationActionSemantics {
     }
 
     static func canBranch(task: AgentTask, capabilities: JSON) -> Bool {
-        capabilities["supports_forking"].bool && task.raw["variant"] == .null && !task.running && !task.awaitingInput
+        !task.isCloud && capabilities["supports_forking"].bool && task.raw["variant"] == .null && !task.running && !task.awaitingInput
     }
 
     static func canSetGoalStatus(_ task: AgentTask) -> Bool {

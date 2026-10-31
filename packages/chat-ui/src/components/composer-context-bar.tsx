@@ -10,6 +10,7 @@ import {
 import * as Popover from '@radix-ui/react-popover'
 import {
   Check,
+  Cloud,
   FolderClosed,
   GitBranch,
   Globe,
@@ -47,6 +48,9 @@ export type ComposerContextBarProps = {
   projectMenuRequestKey?: number
   /** Binding tokens ("⌃", "⇧", "L") rendered as keycaps in the project chip tooltip. */
   projectShortcut?: string[]
+  /** Cloud uses a private copy of the selected project on the configured provider. */
+  executionTarget?: 'local' | 'cloud'
+  onExecutionTargetChange?: (value: 'local' | 'cloud') => void
   selectedIsolation: ThreadIsolation
   onIsolationChange: (value: ThreadIsolation) => void
   /** Branch state of the project folder; null hides the chip (remote host, not a repo). */
@@ -99,6 +103,8 @@ export const ComposerContextBar = memo(function ComposerContextBar({
   onSelectWorkspace,
   projectMenuRequestKey = 0,
   projectShortcut,
+  executionTarget = 'local',
+  onExecutionTargetChange,
   selectedIsolation,
   onIsolationChange,
   branches = null,
@@ -144,38 +150,30 @@ export const ComposerContextBar = memo(function ComposerContextBar({
         workspaceIconSrc={workspaceIconSrc}
       />
 
-      {/* Location chip: Local vs the remote host name (ChatGPT-style). */}
-      <span
-        className={cn(
-          CHIP_CLASS,
-          'max-w-40 cursor-default hover:bg-transparent hover:text-fg-secondary',
-        )}
-        title={
-          selectedHost
-            ? selectedHost.connected
-              ? `Runs on ${selectedHost.name}`
-              : `${selectedHost.name} is offline`
-            : 'Runs on this Mac'
-        }
-      >
-        {selectedHost ? (
-          <Globe aria-hidden="true" className="h-3.5 w-3.5 shrink-0 text-fg-muted" />
-        ) : (
-          <Laptop aria-hidden="true" className="h-3.5 w-3.5 shrink-0 text-fg-muted" />
-        )}
-        <span className="truncate">{selectedHost ? selectedHost.name : 'Local'}</span>
-        {selectedHost ? (
-          <span
-            aria-hidden="true"
-            className={cn(
-              'ml-0.5 h-1.5 w-1.5 shrink-0 rounded-full',
-              selectedHost.connected ? 'bg-success' : 'bg-fg-muted',
-            )}
-          />
-        ) : null}
-      </span>
+      {onExecutionTargetChange ? (
+        <Select value={executionTarget} onValueChange={(next) => onExecutionTargetChange(next as 'local' | 'cloud')} disabled={disabled}>
+          <SelectTrigger variant="quiet" aria-label="Run in" className={CHIP_CLASS}>
+            {executionTarget === 'cloud' ? <Cloud aria-hidden="true" className="h-3.5 w-3.5 shrink-0 text-fg-muted" /> : selectedHost ? <Globe aria-hidden="true" className="h-3.5 w-3.5 shrink-0 text-fg-muted" /> : <Laptop aria-hidden="true" className="h-3.5 w-3.5 shrink-0 text-fg-muted" />}
+            <span className="truncate">{executionTarget === 'cloud' ? 'Cloud' : selectedHost?.name ?? 'Local'}</span>
+          </SelectTrigger>
+          <SelectContent align="start">
+            <SelectItem value="local">{selectedHost?.name ?? 'Local'}</SelectItem>
+            <SelectItem value="cloud">Cloud</SelectItem>
+          </SelectContent>
+        </Select>
+      ) : (
+        <span className={cn(CHIP_CLASS, 'max-w-40 cursor-default hover:bg-transparent hover:text-fg-secondary')} title={selectedHost ? selectedHost.connected ? `Runs on ${selectedHost.name}` : `${selectedHost.name} is offline` : 'Runs on this Mac'}>
+          {selectedHost ? <Globe aria-hidden="true" className="h-3.5 w-3.5 shrink-0 text-fg-muted" /> : <Laptop aria-hidden="true" className="h-3.5 w-3.5 shrink-0 text-fg-muted" />}
+          <span className="truncate">{selectedHost?.name ?? 'Local'}</span>
+        </span>
+      )}
 
-      {isCasualChat ? (
+      {executionTarget === 'cloud' ? (
+        <span className={cn(CHIP_CLASS, 'cursor-default hover:bg-transparent')} title="Copies eligible current files, including uncommitted changes. Your local project stays separate.">
+          <FolderClosed aria-hidden="true" className="h-3.5 w-3.5 shrink-0 text-fg-muted" />
+          <span>Cloud copy</span>
+        </span>
+      ) : isCasualChat ? (
         <span className={cn(CHIP_CLASS, 'cursor-default hover:bg-transparent')}>
           <FolderClosed aria-hidden="true" className="h-3.5 w-3.5 shrink-0 text-fg-muted" />
           <span>Chat folder</span>
@@ -203,7 +201,7 @@ export const ComposerContextBar = memo(function ComposerContextBar({
         </Select>
       )}
 
-      {!isCasualChat && branches && onCheckoutBranch ? (
+      {executionTarget !== 'cloud' && !isCasualChat && branches && onCheckoutBranch ? (
         <BranchMenu
           branches={branches}
           uncommittedCount={uncommittedCount}

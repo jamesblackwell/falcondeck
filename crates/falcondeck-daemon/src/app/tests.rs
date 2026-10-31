@@ -316,6 +316,8 @@ for line in sys.stdin:
         send_app
             .start_thread(falcondeck_core::StartThreadRequest {
                 workspace_id,
+                execution_target: Default::default(),
+                idempotency_key: None,
                 provider: Some(AgentProvider::CODEX),
                 model_id: None,
                 collaboration_mode_id: None,
@@ -403,6 +405,8 @@ async fn restoring_a_partly_live_workspace_attaches_claude_without_losing_new_th
         .unwrap();
     let new_thread = app
         .start_thread(falcondeck_core::StartThreadRequest {
+            execution_target: Default::default(),
+            idempotency_key: None,
             workspace_id: placeholder.id.clone(),
             provider: Some(AgentProvider::CLAUDE),
             model_id: None,
@@ -2906,6 +2910,8 @@ fn persisted_state_reads_workspace_thread_selection() {
 #[test]
 fn restored_threads_require_resume_but_new_threads_do_not() {
     let summary = ThreadSummary {
+        execution_target: Default::default(),
+        cloud: None,
         id: "thread-1".to_string(),
         workspace_id: "workspace-1".to_string(),
         title: "Thread".to_string(),
@@ -3079,6 +3085,8 @@ async fn suggest_thread_title_rejects_an_empty_conversation() {
             threads: [(
                 thread_id.clone(),
                 super::ManagedThread::new(ThreadSummary {
+                    execution_target: Default::default(),
+                    cloud: None,
                     id: thread_id.clone(),
                     workspace_id: workspace_id.clone(),
                     title: "Untitled thread".to_string(),
@@ -3160,6 +3168,8 @@ async fn builtin_rename_thread_tool_applies_the_agent_supplied_title() {
             threads: [(
                 thread_id.clone(),
                 super::ManagedThread::new(ThreadSummary {
+                    execution_target: Default::default(),
+                    cloud: None,
                     id: thread_id.clone(),
                     workspace_id: workspace_id.clone(),
                     title: "Auth setup".to_string(),
@@ -3332,6 +3342,8 @@ async fn extension_bridge_capability_is_opaque_task_bound_and_expires() {
 #[test]
 fn workspace_bridge_binds_only_one_running_task_for_the_same_provider() {
     let make_thread = |id: &str, provider: AgentProvider, status: ThreadStatus| ThreadSummary {
+        execution_target: Default::default(),
+        cloud: None,
         id: id.to_string(),
         workspace_id: "workspace-1".to_string(),
         title: id.to_string(),
@@ -3378,6 +3390,8 @@ fn workspace_bridge_binds_only_one_running_task_for_the_same_provider() {
 #[test]
 fn workspace_bridge_binds_the_thread_executing_the_matching_mcp_call() {
     let make_thread = |id: &str, status: ThreadStatus| ThreadSummary {
+        execution_target: Default::default(),
+        cloud: None,
         id: id.to_string(),
         workspace_id: "workspace-1".to_string(),
         title: id.to_string(),
@@ -3557,6 +3571,8 @@ async fn workspace_bridge_rename_binds_the_calling_thread_among_concurrent_codex
     let workspace_id = "workspace-1".to_string();
     let make_thread = |id: &str| {
         super::ManagedThread::new(ThreadSummary {
+            execution_target: Default::default(),
+            cloud: None,
             id: id.to_string(),
             workspace_id: workspace_id.clone(),
             title: id.to_string(),
@@ -3735,6 +3751,8 @@ fn a_running_turn_is_titleable_before_the_agent_produces_anything() {
     // Native OpenCode projects its whole transcript once the turn goes idle,
     // so the opening-prompt preview would otherwise stand for the entire turn.
     let mut thread = super::ManagedThread::new(ThreadSummary {
+        execution_target: Default::default(),
+        cloud: None,
         id: "thread-1".to_string(),
         workspace_id: "workspace-1".to_string(),
         title: "Can we tidy up...".to_string(),
@@ -3819,6 +3837,8 @@ async fn update_thread_title_marks_thread_as_manual() {
             threads: [(
                 thread_id.clone(),
                 super::ManagedThread::new(ThreadSummary {
+                    execution_target: Default::default(),
+                    cloud: None,
                     id: thread_id.clone(),
                     workspace_id: workspace_id.clone(),
                     title: "Untitled thread".to_string(),
@@ -5254,6 +5274,8 @@ async fn persist_local_state_merges_saved_workspaces_with_live_workspaces() {
 
     let live_workspace_id = "workspace-a".to_string();
     let live_thread = ThreadSummary {
+        execution_target: Default::default(),
+        cloud: None,
         id: "thread-a".to_string(),
         workspace_id: live_workspace_id.clone(),
         title: "Thread A renamed".to_string(),
@@ -5371,6 +5393,8 @@ async fn close_workspace_keeps_persist_and_lists_it_in_the_library() {
     let workspace_id = "workspace-1".to_string();
     let path_string = workspace_path.to_string_lossy().to_string();
     let thread = ThreadSummary {
+        execution_target: Default::default(),
+        cloud: None,
         id: "thread-1".to_string(),
         workspace_id: workspace_id.clone(),
         title: "Idle thread".to_string(),
@@ -5473,6 +5497,8 @@ async fn shutdown_marks_running_threads_as_error_and_persists_them() {
 
     let workspace_id = "workspace-1".to_string();
     let thread = ThreadSummary {
+        execution_target: Default::default(),
+        cloud: None,
         id: "thread-1".to_string(),
         workspace_id: workspace_id.clone(),
         title: "Running thread".to_string(),
@@ -5595,6 +5621,8 @@ async fn shutdown_marks_waiting_threads_as_error_and_persists_them() {
 
     let workspace_id = "workspace-1".to_string();
     let mut thread = ThreadSummary {
+        execution_target: Default::default(),
+        cloud: None,
         id: "thread-1".to_string(),
         workspace_id: workspace_id.clone(),
         title: "Waiting thread".to_string(),
@@ -5674,6 +5702,8 @@ async fn provider_disconnect_fails_only_that_providers_active_threads() {
     );
     let workspace_id = "workspace-1".to_string();
     let make_thread = |id: &str, provider: AgentProvider| ThreadSummary {
+        execution_target: Default::default(),
+        cloud: None,
         id: id.to_string(),
         workspace_id: workspace_id.clone(),
         title: id.to_string(),
@@ -6249,6 +6279,8 @@ async fn insert_claude_workspace_with_session(
             threads: [(
                 thread_id.to_string(),
                 super::ManagedThread::new(ThreadSummary {
+                    execution_target: Default::default(),
+                    cloud: None,
                     id: thread_id.to_string(),
                     workspace_id: workspace_id.to_string(),
                     title: "Claude thread".to_string(),
@@ -7103,6 +7135,8 @@ async fn snapshot_with_request_excludes_archived_threads_for_mobile_clients() {
 
     let workspace_id = "workspace-1".to_string();
     let active_thread = ThreadSummary {
+        execution_target: Default::default(),
+        cloud: None,
         id: "thread-active".to_string(),
         workspace_id: workspace_id.clone(),
         title: "Active thread".to_string(),
@@ -7129,6 +7163,8 @@ async fn snapshot_with_request_excludes_archived_threads_for_mobile_clients() {
         variant: None,
     };
     let archived_thread = ThreadSummary {
+        execution_target: Default::default(),
+        cloud: None,
         id: "thread-archived".to_string(),
         workspace_id: workspace_id.clone(),
         title: "Archived thread".to_string(),
@@ -7282,6 +7318,8 @@ async fn archive_all_threads_updates_once_and_is_idempotent() {
     );
     let workspace_id = "workspace-archive-all".to_string();
     let active_thread = ThreadSummary {
+        execution_target: Default::default(),
+        cloud: None,
         id: "thread-active".to_string(),
         workspace_id: workspace_id.clone(),
         title: "Active thread".to_string(),
@@ -7531,6 +7569,8 @@ async fn snapshot_with_request_strips_thread_plans_and_diffs_for_remote_clients(
 
     let workspace_id = "workspace-1".to_string();
     let thread = ThreadSummary {
+        execution_target: Default::default(),
+        cloud: None,
         id: "thread-active".to_string(),
         workspace_id: workspace_id.clone(),
         title: "Active thread".to_string(),
@@ -7687,6 +7727,8 @@ async fn dispatched_send_echoes_the_client_supplied_user_item_id() {
 
     let workspace_id = "workspace-e".to_string();
     let thread = ThreadSummary {
+        execution_target: Default::default(),
+        cloud: None,
         id: "thread-e".to_string(),
         workspace_id: workspace_id.clone(),
         title: "Idle thread".to_string(),
@@ -7799,6 +7841,8 @@ async fn sends_against_a_running_thread_queue_can_be_reordered_and_removed() {
 
     let workspace_id = "workspace-q".to_string();
     let thread = ThreadSummary {
+        execution_target: Default::default(),
+        cloud: None,
         id: "thread-q".to_string(),
         workspace_id: workspace_id.clone(),
         title: "Running thread".to_string(),
@@ -8019,6 +8063,8 @@ async fn busy_thread_app(
     );
     let workspace_id = "workspace-steer".to_string();
     let thread = ThreadSummary {
+        execution_target: Default::default(),
+        cloud: None,
         id: "thread-steer".to_string(),
         workspace_id: workspace_id.clone(),
         title: "Running thread".to_string(),
@@ -8622,6 +8668,8 @@ async fn pre_tool_use_honours_live_permission_mode_and_read_only_tools() {
     );
     let workspace_id = "workspace-hook".to_string();
     let mut thread = ThreadSummary {
+        execution_target: Default::default(),
+        cloud: None,
         id: "thread-hook".to_string(),
         workspace_id: workspace_id.clone(),
         title: "t".to_string(),
@@ -8899,6 +8947,8 @@ async fn control_current_thread_target_pins_the_calling_thread() {
     let workspace_id = "workspace-1".to_string();
     let make_thread = |id: &str, status: ThreadStatus| {
         super::ManagedThread::new(ThreadSummary {
+            execution_target: Default::default(),
+            cloud: None,
             id: id.to_string(),
             workspace_id: workspace_id.clone(),
             title: id.to_string(),
@@ -9321,6 +9371,8 @@ async fn archiving_reclaims_safe_variants_and_unarchive_restores_them() {
     );
     let workspace_id = "workspace-reclaim".to_string();
     let thread = |id: &str, variant: falcondeck_core::ThreadVariant| ThreadSummary {
+        execution_target: Default::default(),
+        cloud: None,
         id: id.to_string(),
         workspace_id: workspace_id.clone(),
         title: id.to_string(),

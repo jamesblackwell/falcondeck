@@ -53,6 +53,11 @@ describe('searchSettings', () => {
     expect(ids('openrouter')).toEqual(['speech', 'models'])
   })
 
+  it('finds Cloud execution settings by provider and environment terms', () => {
+    expect(ids('vercel')).toEqual(['cloud'])
+    expect(ids('sandbox')).toEqual(['cloud'])
+  })
+
   it('treats regex characters literally and returns nothing for blank queries', () => {
     expect(ids('(')).toEqual([])
     expect(ids('   ')).toEqual([])
