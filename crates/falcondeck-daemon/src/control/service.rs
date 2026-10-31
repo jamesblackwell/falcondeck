@@ -731,11 +731,12 @@ impl ControlService {
                 });
             if let Some(app) = deps.app {
                 let preferences = app.preferences().await;
-                if let Some(bot) = preferences
-                    .bots
-                    .iter()
-                    .find(|bot| Some(&bot.thread_id) == context.thread_id.as_ref())
-                {
+                if let Some(bot) = preferences.bots.iter().find(|bot| {
+                    context
+                        .thread_id
+                        .as_deref()
+                        .is_some_and(|id| bot.owns_thread(id))
+                }) {
                     name = bot.name.clone();
                 }
             }
@@ -768,6 +769,34 @@ impl ControlService {
             ));
         }
         match capability.id {
+            ops::BOT_SWITCH => {
+                let app = deps
+                    .app
+                    .ok_or_else(|| ControlError::internal("daemon unavailable"))?;
+                // Fail closed for unbound harness MCP calls too: a workspace bridge
+                // without an attributable thread cannot establish a user caller.
+                let bot_caller = if let Some(thread) = context.thread_id.as_deref() {
+                    app.bot_for_thread(thread).await.is_some()
+                } else {
+                    context.provider.is_some()
+                };
+                if bot_caller {
+                    return Err(ControlError::invalid_arguments(
+                        "Bots cannot switch bot harnesses; James must change bot settings",
+                    ));
+                }
+                let args: registry::SwitchBotArgs = decode_arguments(&request.arguments)?;
+                let result = app
+                    .mutate_bot(falcondeck_core::BotMutation::SwitchConversation {
+                        id: args.id,
+                        provider: falcondeck_core::AgentProvider::from(args.provider.as_str()),
+                        model_id: args.model_id,
+                        reasoning_effort: args.reasoning_effort,
+                    })
+                    .await
+                    .map_err(|e| ControlError::invalid_arguments(e.to_string()))?;
+                Ok((result, vec![]))
+            }
             ops::SETTINGS_UPDATE => self.update_settings(&request.arguments).await,
             ops::AUTOMATION_CREATE => {
                 self.create_automation(&request.arguments, context, deps, settings, None)
@@ -1270,6 +1299,43 @@ impl ControlService {
         *self.state.lock().await = next;
         self.scheduler_notify.notify_one();
         Ok(LegacyImportOutcome::Imported)
+    }
+
+    /// Keep explicit and already-created managed targets attached to a bot's home.
+    pub(crate) async fn repoint_bot_automations(
+        &self,
+        old: &str,
+        new: &str,
+        provider: &falcondeck_core::AgentProvider,
+        agent: &falcondeck_core::ThreadAgentParams,
+    ) -> Result<(), ControlError> {
+        self.mutate(|state, now| {
+            use falcondeck_core::control::AutomationThreadTarget;
+            for automation in &mut state.automations {
+                let target = match &mut automation.target.thread {
+                    AutomationThreadTarget::Existing { thread_id } => Some(thread_id),
+                    AutomationThreadTarget::Managed { thread_id } => thread_id.as_mut(),
+                    _ => None, // Current is resolved to Existing on creation.
+                };
+                if let Some(target) = target
+                    && target == old
+                {
+                    *target = new.into();
+                    automation.target.provider = provider.clone();
+                    automation.target.model_id = agent.model_id.clone();
+                    automation.target.reasoning_effort = agent.reasoning_effort.clone();
+                    automation.target.sandbox_mode = agent.sandbox_mode.clone();
+                    automation.target.permission_mode = agent.permission_mode.clone();
+                    automation.target.approval_policy = agent.approval_policy.clone();
+                    automation.target.collaboration_mode_id = agent.collaboration_mode_id.clone();
+                    automation.revision += 1;
+                    automation.updated_at = now;
+                }
+            }
+            Ok(((), vec![ControlDomain::Automations]))
+        })
+        .await
+        .map(|_| ())
     }
 
     /// Queues a run for an automation, respecting its concurrency policy.

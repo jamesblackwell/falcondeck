@@ -573,6 +573,7 @@ async fn bot_context_lists_peer_status_files_but_not_its_own() {
     assert!(!lone.contains("Other bots"), "{lone}");
     assert!(lone.contains("## Status"), "{lone}");
     app.inner.preferences.lock().await.bots.push(BotProfile {
+        previous_thread_ids: Vec::new(),
         id: "bot-peer".into(),
         name: "CMO".into(),
         workspace_id: "workspace-peer".into(),
@@ -755,6 +756,7 @@ async fn every_bot_gets_a_distinct_icon_and_edits_are_validated() {
     let bot = promote(&app).await;
     // Simulate a profile saved before icons existed alongside the new one.
     app.inner.preferences.lock().await.bots.push(BotProfile {
+        previous_thread_ids: Vec::new(),
         id: "bot-old".into(),
         name: "Older".into(),
         workspace_id: "workspace-1".into(),
@@ -803,6 +805,7 @@ async fn every_bot_gets_a_distinct_icon_and_edits_are_validated() {
 async fn creating_a_bot_keeps_the_marks_older_bots_already_show() {
     let (app, _temp) = fixture().await;
     app.inner.preferences.lock().await.bots.push(BotProfile {
+        previous_thread_ids: Vec::new(),
         id: "bot-old".into(),
         name: "Older".into(),
         workspace_id: "workspace-1".into(),
@@ -834,6 +837,7 @@ async fn bots_can_be_reordered_and_unlisted_ones_keep_their_place() {
     let (app, _temp) = fixture().await;
     let first = promote(&app).await;
     let profile = |id: &str| BotProfile {
+        previous_thread_ids: Vec::new(),
         id: id.into(),
         name: id.into(),
         workspace_id: "workspace-1".into(),
@@ -863,4 +867,307 @@ async fn bots_can_be_reordered_and_unlisted_ones_keep_their_place() {
         .map(|bot| bot.id.clone())
         .collect();
     assert_eq!(order, ["c".to_string(), first.id, "b".into()]);
+}
+
+#[tokio::test]
+async fn switch_refuses_busy_or_queued_home() {
+    let (app, _temp) = fixture().await;
+    let bot = promote(&app).await;
+    for status in [ThreadStatus::Running, ThreadStatus::WaitingForInput] {
+        app.inner
+            .workspaces
+            .lock()
+            .await
+            .get_mut("workspace-1")
+            .unwrap()
+            .threads
+            .get_mut("thread-1")
+            .unwrap()
+            .summary
+            .status = status;
+        let error = app
+            .mutate_bot(BotMutation::SwitchConversation {
+                id: bot.id.clone(),
+                provider: AgentProvider::CLAUDE,
+                model_id: None,
+                reasoning_effort: None,
+            })
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("let the turn finish first"));
+        assert_eq!(app.preferences().await.bots[0].thread_id, "thread-1");
+    }
+}
+
+#[tokio::test]
+async fn same_harness_switch_preserves_identity_aliases_and_deferred_context() {
+    let (app, _temp) = fixture().await;
+    let bot = promote(&app).await;
+    set_items(
+        &app,
+        vec![
+            user("promise", "Please ask James for a decision tomorrow"),
+            assistant("reply", "I will follow up with James tomorrow"),
+        ],
+    )
+    .await;
+    let switched = app
+        .mutate_bot(BotMutation::SwitchConversation {
+            id: bot.id.clone(),
+            provider: AgentProvider::CLAUDE,
+            model_id: Some("sonnet".into()),
+            reasoning_effort: Some("high".into()),
+        })
+        .await
+        .unwrap();
+    let next: BotProfile = serde_json::from_value(switched["bot"].clone()).unwrap();
+    assert_eq!(next.id, bot.id);
+    assert_eq!(next.space_path, bot.space_path);
+    assert_ne!(next.thread_id, bot.thread_id);
+    assert_eq!(next.previous_thread_ids, [bot.thread_id.clone()]);
+    assert_eq!(
+        app.bot_for_thread(&bot.thread_id).await.unwrap().thread_id,
+        next.thread_id
+    );
+    assert!(
+        app.thread_summary("workspace-1", "thread-1")
+            .await
+            .unwrap()
+            .is_archived
+    );
+    let workspaces = app.inner.workspaces.lock().await;
+    let home = &workspaces["workspace-1"].threads[&next.thread_id];
+    assert!(home.items.is_empty());
+    assert_eq!(home.summary.agent.reasoning_effort.as_deref(), Some("high"));
+    let briefing = home.pending_handoff_context.as_ref().unwrap();
+    for section in [
+        "Standing state",
+        "Delegated tasks",
+        "Older history",
+        "Harness-native memory",
+        "Recent conversation",
+        "follow up with James",
+    ] {
+        assert!(briefing.contains(section), "missing {section}");
+    }
+    assert!(briefing.len() <= 64_000);
+}
+
+// Opt-in local measurement: input files are read-only exports, never committed.
+#[tokio::test]
+async fn measure_real_bot_briefings() {
+    let Ok(paths) = std::env::var("FALCONDECK_MEASURE_HANDOFF") else {
+        return;
+    };
+    let snapshot: Value = serde_json::from_slice(
+        &std::fs::read(std::env::var("FALCONDECK_MEASURE_SNAPSHOT").unwrap()).unwrap(),
+    )
+    .unwrap();
+    for path in paths.split(':') {
+        let data: Value = serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
+        let (app, _temp) = fixture().await;
+        let source = data["thread"]["id"].as_str().unwrap();
+        let workspace = data["workspace"]["id"].as_str().unwrap();
+        let bot: BotProfile = serde_json::from_value(
+            snapshot["preferences"]["bots"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|b| b["thread_id"] == source)
+                .unwrap()
+                .clone(),
+        )
+        .unwrap();
+        app.inner.preferences.lock().await.bots = vec![bot];
+        let items: Vec<ConversationItem> = serde_json::from_value(data["items"].clone()).unwrap();
+        let count = items.len();
+        {
+            let mut workspaces = app.inner.workspaces.lock().await;
+            let mut ws = workspaces.remove("workspace-1").unwrap();
+            ws.summary = serde_json::from_value(data["workspace"].clone()).unwrap();
+            ws.threads.clear();
+            let mut summary: ThreadSummary =
+                serde_json::from_value(data["thread"].clone()).unwrap();
+            summary.native_session_id = None; // Replay captured history; never resume a live native session.
+            let mut managed = crate::app::ManagedThread::new(summary);
+            managed.items = items;
+            ws.threads.insert(source.into(), managed);
+            for value in snapshot["threads"].as_array().unwrap() {
+                if value["origin"]["parent_thread_id"].as_str() == Some(source) {
+                    let summary: ThreadSummary = serde_json::from_value(value.clone()).unwrap();
+                    ws.threads
+                        .insert(summary.id.clone(), crate::app::ManagedThread::new(summary));
+                }
+            }
+            workspaces.insert(workspace.into(), ws);
+        }
+        let before = app
+            .thread_handoff(workspace, source, None, Some(40), Some(12_000))
+            .await
+            .unwrap();
+        let after = app.continuity_briefing(workspace, source).await.unwrap();
+        println!(
+            "MEASURE {path}: items={count} before={} after={}",
+            before.len(),
+            after.len()
+        );
+        std::fs::write(format!("{path}.before"), before).unwrap();
+        std::fs::write(format!("{path}.briefing"), after).unwrap();
+    }
+}
+
+#[tokio::test]
+async fn bot_switch_repoints_existing_current_and_managed_schedules() {
+    use falcondeck_core::control::{ControlExecuteRequest, ControlOrigin, ControlRequestContext};
+    let (app, _temp) = fixture().await;
+    let bot = promote(&app).await;
+    set_items(&app, vec![user("schedule-source", "Keep my schedules")]).await;
+    let path = app.inner.workspaces.lock().await["workspace-1"]
+        .summary
+        .path
+        .clone();
+    for kind in ["existing", "current", "managed"] {
+        let target = if kind == "current" {
+            json!({"kind": kind})
+        } else {
+            json!({"kind":kind,"thread_id":"thread-1"})
+        };
+        let request: ControlExecuteRequest = serde_json::from_value(json!({"operation":"automation.create", "arguments":{
+            "name":kind,"trigger":{"kind":"cron","expression":"0 8 * * 1-5","timezone":"Europe/London"},
+            "task":{"kind":"prompt","instruction":"Review status"},
+            "target":{"workspace_path":path,"provider":"claude","thread":target}
+        }})).unwrap();
+        let response = app
+            .control_execute(
+                request,
+                &ControlRequestContext {
+                    origin: ControlOrigin::DesktopUi,
+                    thread_id: Some("thread-1".into()),
+                    workspace_path: Some(path.clone()),
+                    ..Default::default()
+                },
+            )
+            .await;
+        assert!(response.ok, "{:?}", response.error);
+    }
+    let result = app
+        .mutate_bot(BotMutation::SwitchConversation {
+            id: bot.id,
+            provider: AgentProvider::CLAUDE,
+            model_id: Some("sonnet".into()),
+            reasoning_effort: Some("high".into()),
+        })
+        .await
+        .unwrap();
+    let home = result["bot"]["thread_id"].as_str().unwrap();
+    for schedule in app.control().automations_snapshot().await {
+        let target = serde_json::to_value(schedule.target).unwrap();
+        assert_eq!(target["thread"]["thread_id"], home);
+        assert_eq!(target["model_id"], "sonnet");
+        assert_eq!(target["reasoning_effort"], "high");
+    }
+}
+
+#[tokio::test]
+async fn bots_cannot_switch_themselves_or_peers_through_control() {
+    use falcondeck_core::control::{ControlExecuteRequest, ControlOrigin, ControlRequestContext};
+    let (app, _temp) = fixture().await;
+    let bot = promote(&app).await;
+    let request: ControlExecuteRequest = serde_json::from_value(json!({"operation":"bot.switch_conversation", "arguments":{"id":bot.id,"provider":"claude"}})).unwrap();
+    let response = app
+        .control_execute(
+            request,
+            &ControlRequestContext {
+                origin: ControlOrigin::Mcp,
+                thread_id: Some("thread-1".into()),
+                provider: Some(AgentProvider::CLAUDE),
+                ..Default::default()
+            },
+        )
+        .await;
+    assert!(!response.ok);
+    assert!(
+        response
+            .error
+            .unwrap()
+            .message
+            .contains("Bots cannot switch")
+    );
+    assert_eq!(app.preferences().await.bots[0].thread_id, "thread-1");
+}
+
+#[tokio::test]
+async fn repeated_cross_harness_switch_keeps_unconsumed_briefing() {
+    let (app, _temp) = fixture().await;
+    use std::os::unix::fs::PermissionsExt;
+    let script = _temp.path().join("fake-switch-codex");
+    std::fs::write(&script, r#"#!/usr/bin/env python3
+import json, sys
+for line in sys.stdin:
+    request = json.loads(line)
+    if 'id' not in request: continue
+    method = request['method']
+    result = {}
+    if method == 'account/read': result = {'account': {'type': 'chatgpt', 'email': 'test@example.com'}}
+    elif method == 'model/list': result = {'data': [{'id': 'test-model', 'isDefault': True}]}
+    elif method in ('thread/list', 'collaborationMode/list'): result = {'data': []}
+    elif method in ('thread/start', 'thread/resume'): result = {'thread': {'id': 'codex-switch-home', 'name': 'New thread'}}
+    print(json.dumps({'id': request['id'], 'result': result}), flush=True)
+"#).unwrap();
+    std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let path = app.inner.workspaces.lock().await["workspace-1"]
+        .summary
+        .path
+        .clone();
+    let bootstrap = crate::codex::CodexSession::connect(
+        "workspace-1".into(),
+        path,
+        script.to_string_lossy().into(),
+        app.clone(),
+    )
+    .await
+    .unwrap();
+    let session = bootstrap.session.activate();
+    app.inner
+        .workspaces
+        .lock()
+        .await
+        .get_mut("workspace-1")
+        .unwrap()
+        .codex_session = Some(session.clone());
+    let bot = promote(&app).await;
+    set_items(&app, vec![user("u1", "Do not drop this promise to James")]).await;
+    app.mutate_bot(BotMutation::SwitchConversation {
+        id: bot.id.clone(),
+        provider: AgentProvider::CLAUDE,
+        model_id: None,
+        reasoning_effort: None,
+    })
+    .await
+    .unwrap();
+    let result = app
+        .mutate_bot(BotMutation::SwitchConversation {
+            id: bot.id.clone(),
+            provider: AgentProvider::CODEX,
+            model_id: Some("gpt-6.1-sol".into()),
+            reasoning_effort: None,
+        })
+        .await
+        .unwrap();
+    let home = result["bot"]["thread_id"].as_str().unwrap();
+    assert_eq!(app.preferences().await.bots[0].previous_thread_ids.len(), 2);
+    let workspaces = app.inner.workspaces.lock().await;
+    assert!(
+        workspaces["workspace-1"].threads[home]
+            .pending_handoff_context
+            .as_ref()
+            .unwrap()
+            .contains("Do not drop this promise")
+    );
+    assert_eq!(
+        workspaces["workspace-1"].threads[home].summary.provider,
+        AgentProvider::CODEX
+    );
+    drop(workspaces);
+    session.shutdown().await.unwrap();
 }

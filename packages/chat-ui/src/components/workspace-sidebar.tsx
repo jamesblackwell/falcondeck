@@ -1395,7 +1395,7 @@ export const WorkspaceSidebar = memo(function WorkspaceSidebar({
     useState<ThreadContextMenuState | null>(null);
   // Bot homes are managed in bot settings, rather than as project tasks.
   const isBotContextMenu = Boolean(
-    bots?.some((bot) => bot.thread_id === threadContextMenu?.thread.id),
+    bots?.some((bot) => bot.thread_id === threadContextMenu?.thread.id || bot.previous_thread_ids?.includes(threadContextMenu?.thread.id ?? "")),
   );
   // Archive asks before it acts: the target row dims and shows a Confirm pill
   // until the user confirms, dismisses, or clicks elsewhere.

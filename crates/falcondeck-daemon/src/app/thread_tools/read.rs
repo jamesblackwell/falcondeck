@@ -221,7 +221,7 @@ fn selected(item: &ConversationItem, args: &ViewArgs) -> bool {
 // Search and expansion use original text, not the capped handoff preview.
 // `detailed` includes patch bodies; a plain read lists the paths only, so one
 // diff cannot crowd the other files out of the excerpt or copy a whole patch.
-fn item_parts(item: &ConversationItem, detailed: bool) -> (String, Cow<'_, str>) {
+pub(crate) fn item_parts(item: &ConversationItem, detailed: bool) -> (String, Cow<'_, str>) {
     let (heading, text) = match item {
         ConversationItem::UserMessage {
             text, attachments, ..

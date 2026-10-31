@@ -6,6 +6,8 @@ use sha2::{Digest, Sha256};
 use std::io::{Read, Seek, Write};
 
 mod context;
+mod handoff;
+mod switch;
 
 const MAX_DOCUMENT_BYTES: usize = 1_048_576;
 
@@ -101,6 +103,22 @@ fn document_version(content: &str) -> String {
 
 impl AppState {
     pub(super) async fn restore_bot_watches(&self) {
+        // Finish secondary-store updates if a process stopped after the atomic
+        // preference publication. Repeated reconciliation is idempotent.
+        for bot in self.preferences().await.bots {
+            if let Ok(home) = self.thread_summary(&bot.workspace_id, &bot.thread_id).await {
+                for old in &bot.previous_thread_ids {
+                    if let Err(error) = self
+                        .control()
+                        .repoint_bot_automations(old, &bot.thread_id, &home.provider, &home.agent)
+                        .await
+                    {
+                        tracing::warn!(error = %error.0.message, "failed to reconcile switched bot schedules");
+                    }
+                    let _ = workspace_ops::archive_thread(self, &bot.workspace_id, old).await;
+                }
+            }
+        }
         let parents: HashSet<_> = self
             .inner
             .preferences
@@ -108,7 +126,7 @@ impl AppState {
             .await
             .bots
             .iter()
-            .map(|b| b.thread_id.clone())
+            .flat_map(|b| std::iter::once(b.thread_id.clone()).chain(b.previous_thread_ids.clone()))
             .collect();
         let children: Vec<_> = self
             .inner
@@ -133,14 +151,14 @@ impl AppState {
         }
     }
 
-    pub(super) async fn bot_for_thread(&self, thread: &str) -> Option<BotProfile> {
+    pub(crate) async fn bot_for_thread(&self, thread: &str) -> Option<BotProfile> {
         self.inner
             .preferences
             .lock()
             .await
             .bots
             .iter()
-            .find(|bot| bot.thread_id == thread)
+            .find(|bot| bot.owns_thread(thread))
             .cloned()
     }
 
@@ -243,6 +261,7 @@ impl AppState {
                     workspace_id: thread.workspace_id.clone(),
                     dedicated_workspace,
                     thread_id: thread.id.clone(),
+                    previous_thread_ids: Vec::new(),
                     space_path: space.to_string_lossy().into(),
                     instructions,
                     can_start_threads: true,
@@ -309,6 +328,15 @@ impl AppState {
                 self.save_bots(bots).await?;
                 Ok(json!({"bot": bot}))
             }
+            BotMutation::SwitchConversation {
+                id,
+                provider,
+                model_id,
+                reasoning_effort,
+            } => {
+                self.switch_bot_conversation(&id, provider, model_id, reasoning_effort)
+                    .await
+            }
             BotMutation::Reorder { ids } => {
                 let mut bots = self.inner.preferences.lock().await.bots.clone();
                 // Stable sort: listed bots by their position, the rest after, as before.
@@ -330,11 +358,11 @@ impl AppState {
                     .unwrap_or_else(|e| e.into_inner())
                     .as_mut()
                 {
-                    watches.retain(|_, watch| watch.parent_thread_id != bot.thread_id);
+                    watches.retain(|_, watch| !bot.owns_thread(&watch.parent_thread_id));
                 }
                 let threads: Vec<_> = self.inner.workspaces.lock().await.values().flat_map(|ws| ws.threads.values())
                     .filter(|t| t.summary.id == bot.thread_id || matches!(&t.summary.origin,
-                        Some(falcondeck_core::ThreadOrigin::AgentSpawn { parent_thread_id, .. }) if parent_thread_id == &bot.thread_id))
+                        Some(falcondeck_core::ThreadOrigin::AgentSpawn { parent_thread_id, .. }) if bot.owns_thread(parent_thread_id)))
                     .map(|t| t.summary.clone()).collect();
                 for thread in threads {
                     for queued in &thread.queued_turns {
@@ -356,7 +384,7 @@ impl AppState {
                     .thread_summary(&bot.workspace_id, &bot.thread_id)
                     .await?;
                 let workers_busy = self.inner.workspaces.lock().await.values().flat_map(|ws| ws.threads.values()).any(|t|
-                    matches!(&t.summary.origin, Some(falcondeck_core::ThreadOrigin::AgentSpawn { parent_thread_id, .. }) if parent_thread_id == &bot.thread_id)
+                    matches!(&t.summary.origin, Some(falcondeck_core::ThreadOrigin::AgentSpawn { parent_thread_id, .. }) if bot.owns_thread(parent_thread_id))
                     && (matches!(t.summary.status, ThreadStatus::Running | ThreadStatus::WaitingForInput) || !t.summary.queued_turns.is_empty()));
                 if matches!(
                     summary.status,

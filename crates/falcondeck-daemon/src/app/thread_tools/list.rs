@@ -245,6 +245,12 @@ pub(super) async fn list(
         Some(id) => Some(id.to_string()),
         None => None,
     };
+    let parent_bot = if let Some(parent) = &parent {
+        app.bot_for_thread(parent).await
+    } else {
+        None
+    };
+
     let folders: Vec<_> = app
         .preferences()
         .await
@@ -356,7 +362,7 @@ pub(super) async fn list(
                     && since.is_none_or(|since| t.updated_at >= since)
                     && before.is_none_or(|before| t.updated_at < before)
                     && parent.as_deref().is_none_or(|parent| {
-                        matches!(&t.origin, Some(ThreadOrigin::AgentSpawn { parent_thread_id, .. }) if parent_thread_id == parent)
+                        matches!(&t.origin, Some(ThreadOrigin::AgentSpawn { parent_thread_id, .. }) if parent_thread_id == parent || parent_bot.as_ref().is_some_and(|bot| bot.owns_thread(parent_thread_id)))
                     })
                     && folder_filter
                         .as_deref()
@@ -445,7 +451,7 @@ pub(super) async fn list(
         .await
         .bots
         .into_iter()
-        .filter(|bot| bot.thread_id != caller)
+        .filter(|bot| !bot.owns_thread(caller))
         .map(|bot| format!("{} `{}`", line(&bot.name, 60), line(&bot.thread_id, 128)))
         .collect();
     if offset == 0 && !bots.is_empty() {

@@ -466,6 +466,7 @@ export type FalconDeckPreferences = {
 };
 
 export type BotProfile = {
+  previous_thread_ids?: string[];
   id: string;
   name: string;
   workspace_id: string;
@@ -481,6 +482,7 @@ export type BotProfile = {
 };
 
 export type BotMutation =
+  | { action: "switch_conversation"; id: string; provider: AgentProvider; model_id?: string; reasoning_effort?: string }
   | { action: "create"; name: string; instructions: string; provider?: AgentProvider; model_id?: string; thread_id?: string }
   | { action: "update"; id: string; name: string; instructions: string; can_start_threads: boolean; context_files?: string[]; icon?: import("./bot-icons").BotIcon }
   | { action: "reorder"; ids: string[] }

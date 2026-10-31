@@ -179,6 +179,16 @@ pub struct AutomationRefArgs {
     pub automation_id: String,
 }
 
+/// User-only bot harness switch arguments.
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct SwitchBotArgs {
+    pub id: String,
+    pub provider: String,
+    pub model_id: Option<String>,
+    pub reasoning_effort: Option<String>,
+}
+
 /// Arguments for `agent_control.settings.update`. Absent fields keep their
 /// current values.
 #[derive(Debug, Clone, Default, Deserialize, JsonSchema)]
@@ -239,6 +249,7 @@ pub mod ops {
     /// Add a concise record note.
     pub const TICKET_COMMENT: &str = "ticket.comment";
     /// Update agent-control settings.
+    pub const BOT_SWITCH: &str = "bot.switch_conversation";
     pub const SETTINGS_UPDATE: &str = "agent_control.settings.update";
     /// Create an automation.
     pub const AUTOMATION_CREATE: &str = "automation.create";
@@ -274,10 +285,7 @@ fn ticket_capability<T: JsonSchema>(
             idempotent: false,
             confirmation_class: ConfirmationClass::Mutation,
         },
-        examples: vec![example!(
-            "Shared company ticket board",
-            arguments
-        )],
+        examples: vec![example!("Shared company ticket board", arguments)],
         related_operations: &[ops::TICKET_CREATE, ops::TICKET_UPDATE, ops::TICKET_COMMENT],
     }
 }
@@ -286,6 +294,18 @@ fn ticket_capability<T: JsonSchema>(
 pub fn capabilities() -> &'static [Capability] {
     static REGISTRY: OnceLock<Vec<Capability>> = OnceLock::new();
     REGISTRY.get_or_init(|| vec![
+        Capability {
+            id: ops::BOT_SWITCH,
+            title: "Switch bot harness",
+            description: "User-only: move a bot to a fresh conversation on a chosen harness and model. The same harness gives a fresh start. Preserves the bot identity, archives the old home, and defers continuity context until the next message. Stop or let the turn finish first.",
+            domain: "agent_control",
+            scopes: &[ControlScope::Host],
+            input_schema: schema::<SwitchBotArgs>(),
+            output_schema: json!({"type":"object"}),
+            behavior: CapabilityBehavior { read_only: false, destructive: false, idempotent: false, confirmation_class: ConfirmationClass::Sensitive },
+            examples: vec![example!("Move Juno to Codex", json!({"id":"bot-id", "provider":"codex", "model_id":"gpt-6.1-sol"}))],
+            related_operations: &[],
+        },
         Capability {
             id: ops::SETTINGS_UPDATE,
             title: "Update agent control settings",

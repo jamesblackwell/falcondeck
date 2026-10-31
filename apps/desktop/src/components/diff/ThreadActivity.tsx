@@ -47,12 +47,12 @@ export function ThreadActivity({ thread, context }: { thread: ThreadSummary; con
   const [expandedDispatches, setExpandedDispatches] = useState(false)
   const [expandedMessages, setExpandedMessages] = useState(false)
   const threads = useMemo(() => new Map(context.threads.map((task) => [task.id, task])), [context.threads])
-  const bots = useMemo(() => new Map(context.bots.map((bot) => [bot.thread_id, bot])), [context.bots])
+  const bots = useMemo(() => new Map(context.bots.flatMap((bot) => [bot.thread_id, ...(bot.previous_thread_ids ?? [])].map(id => [id, bot] as const))), [context.bots])
   const icons = useMemo(() => resolveBotIcons(context.bots), [context.bots])
   const now = result.observedAt
   const dispatchTimes = new Map(result?.data?.dispatches.map((dispatch) => [dispatch.thread_id, dispatch.at]))
   const dispatched = context.threads.flatMap((task) => {
-    if (task.origin?.kind !== 'agent_spawn' || task.origin.parent_thread_id !== thread.id) return []
+    if (task.origin?.kind !== 'agent_spawn' || (task.origin.parent_thread_id !== thread.id && !bots.get(thread.id)?.previous_thread_ids?.includes(task.origin.parent_thread_id))) return []
     const at = task.origin.dispatched_at ?? dispatchTimes.get(task.id)
     const time = at ? Date.parse(at) : NaN
     return at && time >= now - WINDOW_MS && time <= now ? [{ task, at, time }] : []

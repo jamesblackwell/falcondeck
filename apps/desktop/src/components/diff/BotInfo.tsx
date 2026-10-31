@@ -50,7 +50,7 @@ export function BotInfo({ bot, thread, activity, context, children }: {
     return () => observer.disconnect()
   }, [data?.status?.content, statusExpanded])
   const icon = useMemo(() => resolveBotIcons(activity.bots).get(bot.id), [activity.bots, bot.id])
-  const targetIds = new Set([bot.thread_id, ...activity.threads.filter((task) => task.origin?.kind === 'agent_spawn' && task.origin.parent_thread_id === bot.thread_id).map((task) => task.id)])
+  const targetIds = new Set([bot.thread_id, ...(bot.previous_thread_ids ?? []), ...activity.threads.filter((task) => task.origin?.kind === 'agent_spawn' && (task.origin.parent_thread_id === bot.thread_id || bot.previous_thread_ids?.includes(task.origin.parent_thread_id))).map((task) => task.id)])
   const schedules = (data?.schedules ?? []).map((schedule) => {
     const override = overrides[schedule.id]
     return override && override.revision > schedule.revision ? override : schedule

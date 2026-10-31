@@ -3199,6 +3199,27 @@ async fn send_turn_with_startup_mode(
     wait_for_startup: bool,
     agent: Option<&mut AgentMessage>,
 ) -> Result<CommandResponse, DaemonError> {
+    let _bot_gate = if app.bot_for_thread(&request.thread_id).await.is_some() {
+        Some(app.inner.bot_mutations.lock().await)
+    } else {
+        None
+    };
+    let mut request = request;
+    if let Some(bot) = app.bot_for_thread(&request.thread_id).await {
+        if request.thread_id != bot.thread_id {
+            // An automation or queued peer may still carry source-harness settings.
+            // An alias addresses the current bot, never the retired provider.
+            request.provider = None;
+            request.model_id = None;
+            request.reasoning_effort = None;
+            request.approval_policy = None;
+            request.permission_mode = None;
+            request.sandbox_mode = None;
+            request.service_tier = None;
+        }
+        request.thread_id = bot.thread_id;
+        request.workspace_id = bot.workspace_id;
+    }
     if app.is_shutting_down() {
         return Err(DaemonError::BadRequest(
             "daemon is shutting down".to_string(),

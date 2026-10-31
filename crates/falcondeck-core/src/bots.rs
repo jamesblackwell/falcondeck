@@ -26,6 +26,7 @@ pub const BOT_DEFAULT_INSTRUCTIONS: &str = concat!(
     "Rewrite it in place at checkpoints; never append a log. The user and other bots read it instead of asking you for updates, and you can read theirs. ",
     "When a task finishes, read its summary: record the outcome in STATUS.md, move lasting decisions or lessons into memory, and drop the task from in flight.\n\n",
     "## Memory and notes\n",
+    "Harness-native memory does not move with you: keep durable memory in your document space (MEMORY.md). ",
     "Use your document space as persistent memory. When you learn something worth reusing, create or update concise notes there. ",
     "Keep a short MEMORY.md at the root for important facts, user preferences, decisions and your own working instructions, with links to supporting notes. ",
     "Current and recent work belongs in STATUS.md, not memory. ",
@@ -49,6 +50,9 @@ pub struct BotProfile {
     pub dedicated_workspace: bool,
     /// Canonical native home conversation.
     pub thread_id: String,
+    /// Former homes, retained for messages, task origins and analytics.
+    #[serde(default)]
+    pub previous_thread_ids: Vec<String>,
     /// Absolute path to the bot's user-controlled document space.
     pub space_path: String,
     /// Editable role and standing instructions.
@@ -147,6 +151,17 @@ pub enum BotMutation {
         /// Replacement sidebar mark; absent keeps the current one.
         #[serde(default)]
         icon: Option<BotIcon>,
+    },
+    /// Move the existing identity to a fresh native conversation (also on the same provider).
+    SwitchConversation {
+        /// Stable bot identifier.
+        id: String,
+        /// Destination harness.
+        provider: AgentProvider,
+        /// Destination model; absent uses the harness default.
+        model_id: Option<String>,
+        /// Destination reasoning effort.
+        reasoning_effort: Option<String>,
     },
     /// Put bots in this order; bots not listed keep their relative order after them.
     Reorder {
@@ -274,4 +289,11 @@ pub struct ContextFileWrite {
     /// Version being edited.
     #[serde(default)]
     pub expected_version: Option<String>,
+}
+
+impl BotProfile {
+    /// Resolve both the active home and its historical aliases.
+    pub fn owns_thread(&self, thread: &str) -> bool {
+        self.thread_id == thread || self.previous_thread_ids.iter().any(|id| id == thread)
+    }
 }

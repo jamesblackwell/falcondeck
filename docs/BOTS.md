@@ -166,3 +166,52 @@ import, edit or delete text documents with the same content-version checks.
 Dedicated bot workspaces and home conversations stay outside the ordinary
 project and pinned-task lists; promoted projects remain visible. Documents
 stay on the paired computer and require a connection to read or change.
+
+## Switch harness / fresh start
+
+Bot settings → Switch harness chooses a provider and model, then confirms a
+fresh home conversation. Choosing the current harness also gives a fresh start.
+`POST /api/bots` accepts `{"action":"switch_conversation","id":"bot-id",
+"provider":"codex","model_id":"model-id","reasoning_effort":"high"}`.
+James can use control MCP operation `bot.switch_conversation` with the same
+arguments except `action`. Bot callers are refused. A running, waiting, queued
+or background-active home must finish or be stopped first. No seed turn runs:
+the continuity briefing accompanies the next actual message.
+
+The profile keeps `previous_thread_ids`; old addresses deliver to the current
+home, and old task origins still identify their coordinator. Old conversations
+are archived. Explicit/current and already-created managed automation targets,
+model/permission settings, folder membership, pins and unread state follow the
+home. Tickets retain their bot-name owners; historical analytics and source
+thread links retain their original ids. Watches keep their original parent id
+and resolve the current destination when delivering. Startup reconciles archive
+and automation writes after a crash between the separate durable stores.
+
+Continuity briefings are capped at 64,000 UTF-8 bytes: document-space references
+(standing state is read fresh), delegated tasks (8 KB), recent complete items
+(40 items / 28 KB, oversized final items visibly truncated), older-history
+commitment/decision/pending-ask evidence (up to 1,200 items, 4.5 KB/category),
+and harness memory (8 KB). Claude project memory files and Codex's shared memory
+indexes are bounded exports, not a transfer of native memory storage. Keep
+lasting facts in the bot's harness-neutral `MEMORY.md`.
+
+### Long-thread measurement (31 Oct 2026)
+
+Read-only exports from the live loopback daemon (29–31 Oct history), replayed
+through the old 40-item/12,000-character tail generator and the new briefing:
+
+| Bot | Source items | Before, bytes | After, bytes | Older items scanned |
+| --- | ---: | ---: | ---: | ---: |
+| Atlas | 381 | 11,594 | 38,194 | 341 |
+| Iris | 343 | 11,258 | 37,944 | 303 |
+| Libra | 760 | 11,601 | 42,888 | 725 |
+
+All three older scans reached the start of available history. Atlas's earlier
+design-instruction decision and Libra's day-23 follow-up commitment were absent
+from the old tail and present in the new evidence. Iris's SEO ownership and
+landing-event coordination survived both. Raw tool output/diffs, older prose
+beyond the category budgets, and some details of long messages are omitted;
+source item ids and document references provide recovery. These snapshots had
+no directly attributed child origins or native-memory files: task links in
+STATUS.md remain authoritative, and fixture tests cover child reports and
+memory-section budgets. No live bot was switched and no daemon was restarted.

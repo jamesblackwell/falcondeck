@@ -555,7 +555,7 @@ export const CommandPalette = memo(function CommandPalette({
     const icons = resolveBotIcons(bots ?? [])
     return new Map((bots ?? []).flatMap((bot) => {
       const icon = icons.get(bot.id)
-      return icon ? [[bot.thread_id, icon] as const] : []
+      return icon ? [bot.thread_id, ...(bot.previous_thread_ids ?? [])].map(id => [id, icon] as const) : []
     }))
   }, [bots])
   const [open, setOpen] = useState(false)

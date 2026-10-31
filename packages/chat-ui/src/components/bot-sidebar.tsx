@@ -72,7 +72,7 @@ function botActivity(bot: BotProfile, tasks: ThreadSummary[]) {
     (task) =>
       task.id === bot.thread_id ||
       (task.origin?.kind === "agent_spawn" &&
-        task.origin.parent_thread_id === bot.thread_id),
+        (task.origin.parent_thread_id === bot.thread_id || bot.previous_thread_ids?.includes(task.origin.parent_thread_id))),
   );
   if (
     related.some(
@@ -419,7 +419,7 @@ function BotEditor({
     ? tasks.filter(
         (task) =>
           task.origin?.kind === "agent_spawn" &&
-          task.origin.parent_thread_id === bot.thread_id,
+          (task.origin.parent_thread_id === bot.thread_id || bot.previous_thread_ids?.includes(task.origin.parent_thread_id)),
       )
     : [];
   const promoting = !bot && home === "existing";
@@ -559,6 +559,26 @@ function BotEditor({
               />
             )}
           </Field>
+          {bot ? (
+            <div className="space-y-2">
+              <span className={FIELD_LABEL_CLASS}>Switch harness</span>
+              <div className="flex gap-2">
+                <Select value={provider} onValueChange={setProvider}>
+                  <SelectTrigger aria-label="Switch harness"><SelectValue /></SelectTrigger>
+                  <SelectContent>{providers.map(id => <SelectItem key={id} value={id}>{defaultProviderLabel(id)}</SelectItem>)}</SelectContent>
+                </Select>
+                <Input aria-label="Switch model" value={model} onChange={e => setModel(e.target.value)} placeholder="Harness default" />
+                <Button type="button" disabled={pending} onClick={() => {
+                  if (!window.confirm("Start a fresh bot conversation and archive the old home?")) return;
+                  void run(async () => {
+                    const result = await api.mutateBot({ action: "switch_conversation", id: bot.id, provider, model_id: model.trim() || undefined });
+                    if (result.bot) { onCreated(result.bot); onSelectThread(result.bot.workspace_id, result.bot.thread_id); onClose(); }
+                  });
+                }}>Switch</Button>
+              </div>
+              <p className={HINT_CLASS}>Keeps this bot and its notes; the same harness gives a fresh start with a continuity briefing.</p>
+            </div>
+          ) : null}
           {!bot ? (
             <div className="space-y-2">
               <span className={FIELD_LABEL_CLASS}>Home conversation</span>

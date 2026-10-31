@@ -354,7 +354,13 @@ impl AppState {
             ANSWER => {
                 let a: AnswerArgs = args(arguments)?;
                 let thread = self.thread_summary(workspace, &a.thread_id).await?;
-                if !is_child_of(&thread, parent) {
+                if !is_child_of(&thread, parent)
+                    && !self.bot_for_thread(parent).await.is_some_and(|bot| {
+                        bot.previous_thread_ids
+                            .iter()
+                            .any(|id| is_child_of(&thread, id))
+                    })
+                {
                     return Err(DaemonError::BadRequest(
                         "only threads created by this thread can be answered; other questions stay with the user in FalconDeck UI".into(),
                     ));
@@ -641,11 +647,13 @@ impl AppState {
         if self.is_shutting_down() {
             return;
         }
-        let Ok(parent_workspace) = self.thread_workspace(parent).await else {
+        let home = self.bot_for_thread(parent).await.map(|bot| bot.thread_id);
+        let destination = home.as_deref().unwrap_or(parent);
+        let Ok(parent_workspace) = self.thread_workspace(destination).await else {
             return;
         };
         if self
-            .thread_summary(&parent_workspace, parent)
+            .thread_summary(&parent_workspace, destination)
             .await
             .map_or(true, |p| p.is_archived)
         {
@@ -714,7 +722,7 @@ impl AppState {
             "FalconDeck child updates (daemon):\n\n{text}\nDetails: falcondeck_view_thread.\n"
         );
         let request = serde_json::from_value::<SendTurnRequest>(json!({
-            "workspace_id": parent_workspace, "thread_id": parent,
+            "workspace_id": parent_workspace, "thread_id": destination,
             "inputs": [{"type":"text","text":text}], "steer": false
         }));
         let result = match request {
@@ -1436,5 +1444,77 @@ mod tests {
         app.notify_parent("workspace-1", "thread-1", &[(watched, Settle::Finished)])
             .await;
         assert!(queued_notices(&app, "thread-1").await.is_empty());
+    }
+}
+
+#[cfg(test)]
+mod switch_tests {
+    use super::super::tests::{call, created_id, fixture};
+    use super::*;
+    #[tokio::test]
+    async fn old_parent_notices_and_peer_messages_reach_new_bot_home() {
+        let (app, _temp) = fixture().await;
+        let value = app
+            .mutate_bot(falcondeck_core::BotMutation::Create {
+                name: "Coordinator".into(),
+                instructions: String::new(),
+                provider: None,
+                model_id: None,
+                thread_id: Some("thread-1".into()),
+            })
+            .await
+            .unwrap();
+        let bot: falcondeck_core::BotProfile =
+            serde_json::from_value(value["bot"].clone()).unwrap();
+        app.with_thread_mut("workspace-1", "thread-1", |t| t.native_session_id = None)
+            .await
+            .unwrap();
+        let worker = created_id(
+            &app.invoke_extension_tool(call(super::super::CREATE, json!({"notify_parent": true})))
+                .await
+                .unwrap(),
+        );
+        let value = app
+            .mutate_bot(falcondeck_core::BotMutation::SwitchConversation {
+                id: bot.id,
+                provider: AgentProvider::CLAUDE,
+                model_id: None,
+                reasoning_effort: None,
+            })
+            .await
+            .unwrap();
+        let home = value["bot"]["thread_id"].as_str().unwrap();
+        app.with_thread_mut("workspace-1", home, |t| t.status = ThreadStatus::Running)
+            .await
+            .unwrap();
+        app.notify_parent(
+            "workspace-1",
+            "thread-1",
+            &[(worker.clone(), Settle::Finished)],
+        )
+        .await;
+        let mut message = call(
+            super::super::MESSAGE,
+            json!({"thread_id":"thread-1", "message":"A decision for the coordinator"}),
+        );
+        message.thread_id = Some(worker);
+        app.invoke_extension_tool(message).await.unwrap();
+        let workspaces = app.inner.workspaces.lock().await;
+        let queued = &workspaces["workspace-1"].threads[home].queued_requests;
+        assert!(
+            queued
+                .iter()
+                .any(|q| q.summary.text.contains("child updates"))
+        );
+        assert!(
+            queued
+                .iter()
+                .any(|q| q.summary.text.contains("decision for the coordinator"))
+        );
+        assert!(
+            workspaces["workspace-1"].threads["thread-1"]
+                .queued_requests
+                .is_empty()
+        );
     }
 }

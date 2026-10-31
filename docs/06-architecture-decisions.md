@@ -233,3 +233,26 @@ on-device transcription option.
 ## Open Questions
 
 See [08-open-questions.md](08-open-questions.md) for the current list of open questions and their status.
+
+### Bot continuity briefings (Oct 2026)
+
+Bot harness switches and coordination `context: briefing` use daemon-generated
+continuity evidence rather than only the latest glance. Recent history has
+separate item and UTF-8 byte budgets; strict tail reads discard the prepended
+prompt outside the contiguous window, and older scans use `before` (ordinary
+`tail` limits can widen to a whole turn). Source item ids remain available for
+recovery. Older evidence is grouped into commitments, decisions/reasons and
+pending asks; it explicitly does not infer whether a historical promise remains
+open. We chose deterministic evidence instead of utility-model inference here:
+no added model dependency, hallucinated resolutions or inference delay while
+turn admission is held. Document state remains authoritative after compaction.
+Native tools, skills and project instructions use the normal destination-harness
+startup/turn path; same-provider permissions/effort persist, and full access is
+translated across Codex, Claude and ACP vocabularies. Harness-specific native
+collaboration modes and unsupported provider capabilities are not transferable.
+
+See [bot measurements](BOTS.md#long-thread-measurement-31-oct-2026) for the three
+live-history replays and the coverage/omission limits. Provider-specific
+sandboxing still depends on the destination: Codex read-only maps to Claude
+plan mode; restricted ACP destinations use their approval mode rather than
+claiming a native Codex sandbox.

@@ -8,7 +8,7 @@ mod actions;
 mod digest;
 mod glance;
 mod list;
-mod read;
+pub(super) mod read;
 
 pub(super) use actions::ChildWatch;
 
@@ -265,11 +265,20 @@ impl AppState {
         let parent_summary = self.thread_summary(&caller_workspace, parent).await?;
         let bot = self.bot_for_thread(parent).await;
         let mut arguments = arguments.clone();
-        // Agents know bots by name ("send it to Juno"); ids are stable.
-        if let Some(named) = arguments.get("thread_id").and_then(Value::as_str)
-            && let Some(bot) = self.bot_named(named).await
-        {
-            arguments["thread_id"] = json!(bot.thread_id);
+        // Names address the active home. Historical ids remain readable for
+        // continuity recovery; only messages addressed to them are redirected.
+        if let Some(named) = arguments.get("thread_id").and_then(Value::as_str) {
+            let recipient = if name == MESSAGE {
+                self.bot_for_thread(named).await
+            } else {
+                None
+            };
+            if let Some(bot) = match recipient {
+                Some(bot) => Some(bot),
+                None => self.bot_named(named).await,
+            } {
+                arguments["thread_id"] = json!(bot.thread_id);
+            }
         }
         let requested_workspace = arguments
             .as_object_mut()
@@ -519,7 +528,14 @@ impl AppState {
                     let local_children = workspaces
                         .values()
                         .flat_map(|ws| ws.threads.values())
-                        .filter(|t| child_is_active(&t.summary, parent))
+                        .filter(|t| {
+                            child_is_active(&t.summary, parent)
+                                || bot.as_ref().is_some_and(|b| {
+                                    b.previous_thread_ids
+                                        .iter()
+                                        .any(|id| child_is_active(&t.summary, id))
+                                })
+                        })
                         .count();
                     drop(workspaces);
                     let cloud_children = self
@@ -527,7 +543,14 @@ impl AppState {
                         .thread_summaries()
                         .await?
                         .iter()
-                        .filter(|t| child_is_active(t, parent))
+                        .filter(|t| {
+                            child_is_active(t, parent)
+                                || bot.as_ref().is_some_and(|b| {
+                                    b.previous_thread_ids
+                                        .iter()
+                                        .any(|id| child_is_active(t, id))
+                                })
+                        })
                         .count();
                     if retry.is_none() && local_children + cloud_children >= max_children {
                         return Err(DaemonError::BadRequest(format!("parent already has {max_children} concurrent children (the limit set in Settings → General → Parallel tasks per agent); finish a child or archive an unused idle child first")));
@@ -741,44 +764,22 @@ impl AppState {
                 glance::Glance::from_summary(&summary).lines("- ", 400, 400),
             ));
         }
-        let workspaces = self.inner.workspaces.lock().await;
-        let managed = workspaces
-            .get(workspace)
-            .and_then(|ws| ws.threads.get(thread))
-            .ok_or_else(|| DaemonError::NotFound("thread not found".into()))?;
-        let index = self
-            .inner
-            .thread_search
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
-        let excerpt = managed
-            .summary
-            .native_session_id
-            .as_ref()
-            .and_then(|id| index.sessions.get(id));
-        let glance = glance::Glance::of(managed, excerpt);
-        let mut text = format!(
-            "## {}\n\n- Id: {}\n- Provider: {}\n",
-            line(&managed.summary.title, 256),
-            line(&managed.summary.id, 256),
-            managed.summary.provider,
-        );
-        if let Some(excerpt) = excerpt {
-            for message in excerpt.opening.iter().take(3) {
-                text.push_str(&format!("- Opening user: {}\n", line(message, 400)));
-            }
+        match self.continuity_briefing(workspace, thread).await {
+            Ok(briefing) => Ok(briefing),
+            // Coordination briefs historically worked from summary metadata even
+            // if the native session had disappeared. Bot switches call continuity
+            // directly and refuse that loss rather than retire the source home.
+            Err(DaemonError::NotFound(_)) => Ok(format!(
+                "## {}\nSource: {}\nLatest: {}\nNative history unavailable; consult project and bot documents.\n",
+                summary.title,
+                summary.id,
+                summary.last_message_preview.as_deref().unwrap_or("")
+            )),
+            Err(error) => Err(error),
         }
-        if let Some(asked) = &glance.asked {
-            text.push_str(&format!("- Latest request: {}\n", line(asked, 400)));
-        }
-        if let Some(latest) = &glance.latest {
-            text.push_str(&format!("- Latest reply: {}\n", line(latest, 400)));
-        }
-        text.push('\n');
-        Ok(text)
     }
 
-    async fn thread_handoff(
+    pub(super) async fn thread_handoff(
         &self,
         workspace: &str,
         thread: &str,
@@ -873,7 +874,12 @@ mod tests {
             .unwrap();
         let id = created_id(&created);
         assert!(id.starts_with("cloud-"));
-        for key in ["agent-cloud-retry-002", "agent-cloud-retry-003", "agent-cloud-retry-004", "agent-cloud-retry-005"] {
+        for key in [
+            "agent-cloud-retry-002",
+            "agent-cloud-retry-003",
+            "agent-cloud-retry-004",
+            "agent-cloud-retry-005",
+        ] {
             let mut another = arguments.clone();
             another["idempotency_key"] = json!(key);
             app.invoke_thread_tool(CREATE, &another, Some("thread-1"), None)

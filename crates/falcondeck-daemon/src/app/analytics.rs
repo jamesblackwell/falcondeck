@@ -1492,7 +1492,11 @@ impl AppState {
             .await
             .bots
             .iter()
-            .map(|bot| (bot.thread_id.clone(), bot.name.clone()))
+            .flat_map(|bot| {
+                std::iter::once(&bot.thread_id)
+                    .chain(bot.previous_thread_ids.iter())
+                    .map(|id| (id.clone(), bot.name.clone()))
+            })
             .collect();
         Labels {
             titles,
