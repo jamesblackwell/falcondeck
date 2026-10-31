@@ -217,6 +217,7 @@ pub async fn spawn_embedded(config: DaemonConfig) -> Result<EmbeddedDaemonHandle
     // Installed here rather than in `run`: the desktop app embeds the daemon
     // and never goes through that path, so every diagnostic it logged used to
     // be dropped on the floor.
+    app::recovery::apply_pending(&state_path)?;
     logging::init(&state_path);
     #[cfg(unix)]
     if let Err(error) = process_limits::prepare_file_descriptor_limit() {

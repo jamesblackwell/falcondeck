@@ -278,3 +278,35 @@ pub struct ImportBackupResponse {
     /// Whether preferences were updated from the backup.
     pub preferences_restored: bool,
 }
+
+/// Plaintext recovery payload. Clients must encrypt this before saving it off-host.
+/// Native session files remain owned by their harness; this is a transport archive.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RecoveryArchive {
+    /// Recovery format version.
+    pub version: u32,
+    /// Capture time.
+    pub created_at: DateTime<Utc>,
+    /// Original home directory for relocation.
+    pub source_home: String,
+    /// Original daemon directory for relocation.
+    pub source_state: String,
+    /// Number of captured bots.
+    pub bot_count: usize,
+    /// Managed files and selected native sessions.
+    pub files: Vec<RecoveryFile>,
+    #[serde(default)]
+    /// Optional client preferences.
+    pub client: Option<Value>,
+}
+
+/// A regular file in the recovery payload.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RecoveryFile {
+    /// One of state, claude, codex. Never an arbitrary destination path.
+    pub scope: String,
+    /// Relative path within the scope.
+    pub path: String,
+    /// Base64 encoded file contents.
+    pub data: String,
+}

@@ -22,6 +22,7 @@ struct FalconDeckMacApp: App {
                         await store.selectTask(id)
                         NSApp.activate(ignoringOtherApps: true)
                     })
+                    NativeRecovery.shared.attach(store: store)
                     await store.reconnect()
                 }
                 .sheet(isPresented: $showWelcome) { NativeWelcomeSetupView(store: store, onComplete: { showWelcome = false }) }

@@ -137,6 +137,8 @@ pub fn router(state: AppState) -> Router {
             post(open_agent_browser),
         )
         .route("/api/backup", get(export_backup))
+        .route("/api/recovery", get(export_recovery))
+        .route("/api/recovery/stage", post(stage_recovery).layer(DefaultBodyLimit::max(384 << 20)))
         .route("/api/backup/inspect", post(inspect_backup))
         .route("/api/backup/import", post(import_backup))
         .route("/api/client-activity", post(client_activity))
@@ -2307,4 +2309,12 @@ mod tickets_http_tests {
         assert_eq!(included["data"][0]["id"], id);
         server.abort();
     }
+}
+
+async fn export_recovery(State(state): State<AppState>) -> Result<Json<falcondeck_core::RecoveryArchive>, DaemonError> {
+    Ok(Json(state.export_recovery().await?))
+}
+async fn stage_recovery(State(state): State<AppState>, Json(archive): Json<falcondeck_core::RecoveryArchive>) -> Result<Json<serde_json::Value>, DaemonError> {
+    state.stage_recovery(archive).await?;
+    Ok(Json(serde_json::json!({"restart_required": true})))
 }

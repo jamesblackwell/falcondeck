@@ -2500,3 +2500,14 @@ export type ImportBackupResponse = {
   providers_imported: number;
   preferences_restored: boolean;
 };
+
+/** Sensitive plaintext transport; encrypt before writing a recovery backup. */
+export type RecoveryArchive = {
+  version: number;
+  created_at: string;
+  source_home: string;
+  source_state: string;
+  bot_count: number;
+  files: { scope: "state" | "claude" | "codex"; path: string; data: string }[];
+  client?: unknown;
+};

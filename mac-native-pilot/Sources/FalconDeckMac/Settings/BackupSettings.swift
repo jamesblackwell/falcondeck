@@ -17,8 +17,9 @@ struct NativeBackupSettingsView: View {
 
     var body: some View {
         Form {
+            NativeRecoverySettings(store: store)
             Section {
-                LabeledContent("Full FalconDeck archive") {
+                LabeledContent("Settings archive") {
                     Button("Export backup…", systemImage: "square.and.arrow.up") { Task { await export() } }
                         .disabled(busy || !store.isConnected)
                 }

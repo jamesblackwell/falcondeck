@@ -106,6 +106,7 @@ mod notifications;
 mod opencode_threads;
 mod project_folders;
 mod bots;
+pub(crate) mod recovery;
 mod provider_runtime;
 mod provider_usage;
 mod remote_bridge;
