@@ -98,13 +98,15 @@ struct NativeCloudNewTaskNote: View {
 
     var body: some View {
         HStack(alignment: .top, spacing: 9) {
-            Image(systemName: "cloud").foregroundStyle(FDTheme.muted)
-            Text(issue ?? "FalconDeck copies your current project files, including eligible local changes, into an isolated cloud environment. Known credential files and dependency folders are excluded.")
-                .foregroundStyle(issue == nil ? FDTheme.muted : FDTheme.warning)
-                .fixedSize(horizontal: false, vertical: true)
-            Spacer(minLength: 0)
-            Button(issue == nil ? "Settings" : "Set up Cloud") { NativeCloudConversation.openSettings(store) }
-                .buttonStyle(.plain).foregroundStyle(FDTheme.accent).fixedSize()
+            if let issue {
+                Image(systemName: "cloud").foregroundStyle(FDTheme.muted)
+                Text(issue)
+                    .foregroundStyle(FDTheme.warning)
+                    .fixedSize(horizontal: false, vertical: true)
+                Spacer(minLength: 0)
+                Button("Set up Cloud") { NativeCloudConversation.openSettings(store) }
+                    .buttonStyle(.plain).foregroundStyle(FDTheme.accent).fixedSize()
+            }
         }
         .font(NativePreferences.shared.font(size: 12))
         .task(id: hostID ?? "local") {

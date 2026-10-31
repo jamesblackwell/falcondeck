@@ -6691,7 +6691,7 @@ function AppInner() {
                   ? handleHandoffProviderSelect
                   : undefined,
                 handoffDisabledReason,
-                contextNotice: isCloudExecutionSelected && !selectedThread ? "FalconDeck copies eligible current project files, including uncommitted changes, into a private cloud environment." : pendingHandoffContextNotice(selectedThread, handoffSourceTitle),
+                contextNotice: pendingHandoffContextNotice(selectedThread, handoffSourceTitle),
                 models,
                 modelsLoading,
                 selectedModelId: selectedModel,
