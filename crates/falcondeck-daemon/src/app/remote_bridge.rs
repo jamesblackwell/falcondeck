@@ -1310,8 +1310,17 @@ impl AppState {
                 )
                 .map_err(|e| e.to_string()),
                 "sync.extensions" => {
-                    serde_json::to_value(self.sync_index_extensions(&required(&["token"])?).await?)
-                        .map_err(|e| e.to_string())
+                    let thread_ids = params.get("thread_ids").and_then(Value::as_array).map(|ids| {
+                        ids.iter()
+                            .filter_map(Value::as_str)
+                            .map(str::to_owned)
+                            .collect::<Vec<_>>()
+                    });
+                    serde_json::to_value(
+                        self.sync_index_extensions(&required(&["token"])?, thread_ids.as_deref())
+                            .await?,
+                    )
+                    .map_err(|e| e.to_string())
                 }
                 "snapshot.current" => {
                     let rpc_bool = |camel: &str, snake: &str| {

@@ -139,6 +139,34 @@ fn priority(thread: &ThreadSummary, selected: Option<&str>) -> u8 {
     }
 }
 
+const EXTENSION_THREAD_IDS_MAX: usize = 400;
+
+fn scope_extensions(
+    extensions: &ExtensionSnapshot,
+    thread_ids: Option<&[String]>,
+) -> ExtensionSnapshot {
+    let Some(thread_ids) = thread_ids else {
+        return extensions.clone();
+    };
+    let wanted: HashSet<&str> = thread_ids
+        .iter()
+        .take(EXTENSION_THREAD_IDS_MAX)
+        .map(String::as_str)
+        .collect();
+    ExtensionSnapshot {
+        catalog: extensions.catalog.clone(),
+        views: extensions
+            .views
+            .iter()
+            .filter(|view| match &view.scope {
+                Some(scope) if scope.kind == "thread" => wanted.contains(scope.id.as_str()),
+                _ => true,
+            })
+            .cloned()
+            .collect(),
+    }
+}
+
 fn recency(a: &ThreadSummary, b: &ThreadSummary) -> std::cmp::Ordering {
     b.updated_at
         .cmp(&a.updated_at)
@@ -242,10 +270,14 @@ fn plan_rows<'a>(
         } else if visible(thread) {
             if thread.status == ThreadStatus::Running || attention.background_task_count > 0 {
                 picked.insert(thread.id.as_str());
-            } else if thread.status == ThreadStatus::Error {
-                failed.push(thread);
-            } else if attention.unread {
-                unread.push(thread);
+            } else {
+                // Independent buckets: a failed thread can also be unread.
+                if thread.status == ThreadStatus::Error {
+                    failed.push(thread);
+                }
+                if attention.unread {
+                    unread.push(thread);
+                }
             }
         }
     }
@@ -537,17 +569,21 @@ impl AppState {
         Ok(page)
     }
 
+    /// The frozen extension projection. With `thread_ids`, thread-scoped views
+    /// are limited to those threads: a library of thousands of threads carries
+    /// one follow-up view each, and a phone shows only the ones it lists.
     pub(super) async fn sync_index_extensions(
         &self,
         token: &str,
+        thread_ids: Option<&[String]>,
     ) -> Result<ExtensionSnapshot, String> {
         let cache = self.inner.sync_indexes.lock().await;
-        cache
+        let view = cache
             .entries
             .iter()
             .find(|v| v.token == token && v.created.elapsed() < CACHE_TTL)
-            .map(|v| v.extensions.clone())
-            .ok_or_else(|| "sync_index_expired".into())
+            .ok_or("sync_index_expired")?;
+        Ok(scope_extensions(&view.extensions, thread_ids))
     }
 }
 
@@ -963,6 +999,59 @@ mod tests {
     }
 
     #[test]
+    fn failed_threads_do_not_hide_older_unread_ones() {
+        let mut source = fixture();
+        // Eleven failed rows, the newest ten read, the oldest also unread.
+        for (n, thread) in source.threads.iter_mut().skip(1600).take(11).enumerate() {
+            thread.status = ThreadStatus::Error;
+            thread.updated_at += chrono::Duration::seconds(100 - n as i64);
+        }
+        source.threads[1610].attention.unread = true;
+        let request = SyncIndexRequest {
+            recent_per_workspace: Some(5),
+            ..Default::default()
+        };
+        let (index, _) = planned(source, request);
+        assert!(ids(&index).contains(&"thread-1610"));
+    }
+
+    #[test]
+    fn extension_views_can_be_limited_to_the_threads_a_client_lists() {
+        let view = |scope: Option<(&str, &str)>| falcondeck_core::ExtensionView {
+            extension_id: "x".into(),
+            view_id: "v".into(),
+            scope: scope.map(|(kind, id)| falcondeck_core::ExtensionViewScope {
+                kind: kind.into(),
+                id: id.into(),
+            }),
+            value: json!({}),
+            updated_at: chrono::Utc::now(),
+        };
+        let all = ExtensionSnapshot {
+            catalog: Vec::new(),
+            views: vec![
+                view(None),
+                view(Some(("workspace", "w"))),
+                view(Some(("thread", "a"))),
+                view(Some(("thread", "b"))),
+            ],
+        };
+        assert_eq!(
+            scope_extensions(&all, None).views.len(),
+            4,
+            "no list means all"
+        );
+        let only_a = scope_extensions(&all, Some(&["a".to_string()]));
+        assert_eq!(only_a.views.len(), 3);
+        assert!(only_a.views.iter().all(|v| {
+            v.scope
+                .as_ref()
+                .is_none_or(|s| s.kind != "thread" || s.id == "a")
+        }));
+        assert_eq!(scope_extensions(&all, Some(&[])).views.len(), 2);
+    }
+
+    #[test]
     fn small_workspaces_report_an_exhausted_cursor() {
         let mut source = fixture();
         source
@@ -1022,6 +1111,21 @@ mod tests {
             ..Default::default()
         };
         let (planned, _) = freeze_with(source.clone(), &request);
+        let listed: Vec<String> = planned
+            .snapshot
+            .threads
+            .iter()
+            .map(|t| t.id.clone())
+            .collect();
+        let extensions_full = serde_json::to_vec(&source.extensions).unwrap().len();
+        let extensions_listed =
+            serde_json::to_vec(&scope_extensions(&source.extensions, Some(&listed)))
+                .unwrap()
+                .len();
+        eprintln!(
+            "sync.extensions: {extensions_full} bytes unscoped, {extensions_listed} bytes for the {} listed threads",
+            listed.len()
+        );
         let rows_bytes = serde_json::to_vec(&planned.snapshot.threads).unwrap().len();
         let page_calls_before = source
             .workspaces
