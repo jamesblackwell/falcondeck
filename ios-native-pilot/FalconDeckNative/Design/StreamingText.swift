@@ -21,6 +21,11 @@ import UIKit
     @ObservationIgnored private var lastFrame: CFTimeInterval = 0
     @ObservationIgnored private var clock: FrameClock?
 
+    /// Whether motion preferences still allow a paced reveal; tests replace it.
+    @ObservationIgnored var allowsPacing: () -> Bool = {
+        !UIAccessibility.isReduceMotionEnabled && !ProcessInfo.processInfo.isLowPowerModeEnabled
+    }
+
     /// Seconds for the backlog to drain; also the most the display trails the wire.
     static let latency = 0.18
     /// Even a tiny backlog drains at a readable pace instead of one stray letter per frame.
@@ -32,7 +37,7 @@ import UIKit
         paced = paced && !StreamMetrics.unpaced
         #endif
         // Reduce Motion and Low Power paint every delta on arrival, whatever the caller asks.
-        paced = paced && !UIAccessibility.isReduceMotionEnabled && !ProcessInfo.processInfo.isLowPowerModeEnabled
+        paced = paced && allowsPacing()
         guard streaming, paced, let value, text.utf16.starts(with: value.utf16) else {
             // Completion, replacement, Reduce Motion and the first sight of a
             // message all show the real text now. Final text is never delayed.
@@ -42,9 +47,16 @@ import UIKit
             // Retracted to exactly what is painted: nothing is left to reveal.
             stop(); target = text; shown = text.endIndex; return
         }
-        target = text
         // The old index is valid in the longer string: it is a prefix of it.
-        shown = text.utf8.index(text.utf8.startIndex, offsetBy: value.utf8.count)
+        let boundary = text.utf8.index(text.utf8.startIndex, offsetBy: value.utf8.count)
+        // A combining mark, joiner or flag half can extend the last painted
+        // character. Segment the whole target, not the suffix: if its first
+        // `value.count` characters are longer than what is painted, the painted
+        // end is not a character boundary there.
+        if text.prefix(value.count).utf8.count != value.utf8.count {
+            publish(text); return
+        }
+        target = text; shown = boundary
         guard clock == nil else { return }
         lastFrame = 0
         clock = FrameClock { [weak self] timestamp in
@@ -65,8 +77,11 @@ import UIKit
     private func advance(to timestamp: CFTimeInterval) {
         defer { lastFrame = timestamp }
         guard lastFrame > 0 else { return }
+        // Preferences can change mid-drain (Control Center, Low Power): stop pacing now.
+        guard allowsPacing() else { publish(target); return }
         let elapsed = min(timestamp - lastFrame, 0.1)
-        let backlog = target.utf8.distance(from: shown, to: target.endIndex)
+        // Backlog and the spend below are both in characters.
+        let backlog = target.distance(from: shown, to: target.endIndex)
         guard backlog > 0 else { stop(); return }
         credit += max(Self.minimumRate, Double(backlog) / Self.latency) * elapsed
         let count = Int(credit)
