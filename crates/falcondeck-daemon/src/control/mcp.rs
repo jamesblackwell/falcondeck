@@ -322,7 +322,9 @@ fn tool_definition(name: &str, _compatibility: &CompatibilityState) -> Value {
                         "control.audit",
                         "automation.health",
                         "tickets",
-                        "ticket"
+                        "ticket",
+                        "reviews",
+                        "review"
                     ]
                 },
                 "id": { "type": "string" },
@@ -388,10 +390,10 @@ fn tool_description(name: &str) -> &'static str {
             "Discover FalconDeck control capabilities before acting: returns operation ids, domains, schemas, constraints and related operations. Call this first with a natural-language query such as \"automation create\", then again with operation and detail=full to see the complete schema and worked examples before executing through falcondeck_execute."
         }
         "falcondeck_get" => {
-            "Read FalconDeck control state: tickets (filters owner/project/priority/state/include_closed; closed hidden by default), ticket (id required; includes comments), agent-control settings, automations (list or single by id), automation run history, recent control changes, and automation.health (per scheduled task over filters.days, default 7: runs, runs that found nothing to do, failures, agent time, threads used and review flags; use it to spot schedules that cost more than they give). Read a single automation before mutating it — mutations executed through falcondeck_execute require the revision you read (expected_revision), and stale revisions fail with revision_conflict."
+            "Read FalconDeck control state: tickets (filters owner/project/priority/state/include_closed; closed hidden by default), ticket (id required; includes comments), reviews (James's decision inbox; filters status/bot/include_closed; open only by default), review (id required; shows his decisions and feedback), agent-control settings, automations (list or single by id), automation run history, recent control changes, and automation.health (per scheduled task over filters.days, default 7: runs, runs that found nothing to do, failures, agent time, threads used and review flags; use it to spot schedules that cost more than they give). Read a single automation before mutating it — mutations executed through falcondeck_execute require the revision you read (expected_revision), and stale revisions fail with revision_conflict."
         }
         "falcondeck_execute" => {
-            "Execute one registered FalconDeck control operation discovered via falcondeck_search, such as ticket.create, ticket.update, ticket.comment, automation.create, automation.update or automation.run_now. Arguments are validated against the operation schema. Automation definition mutations require expected_revision from a prior falcondeck_get; automation.run_now never does. Pass an idempotency_key (8-128 chars) so identical retries replay the original result instead of duplicating the effect."
+            "Execute one registered FalconDeck control operation discovered via falcondeck_search, such as ticket.create, ticket.update, ticket.comment, review.create (ask James for a decision with your recommendation and evidence; also review.update and review.withdraw), automation.create, automation.update or automation.run_now. Arguments are validated against the operation schema. Automation definition mutations require expected_revision from a prior falcondeck_get; automation.run_now never does. Pass an idempotency_key (8-128 chars) so identical retries replay the original result instead of duplicating the effect."
         }
         _ => "FalconDeck control tool.",
     }

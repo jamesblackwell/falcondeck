@@ -206,10 +206,23 @@ impl AppState {
         workspace_id: &str,
         thread_id: Option<String>,
     ) {
+        self.notify_remote_attention_with_preview(kind, workspace_id, thread_id, None)
+            .await;
+    }
+
+    /// As [`Self::notify_remote_attention`], with a caller-supplied body for
+    /// kinds that carry their own text (a review's "needs a decision" line).
+    pub(super) async fn notify_remote_attention_with_preview(
+        &self,
+        kind: &str,
+        workspace_id: &str,
+        thread_id: Option<String>,
+        preview: Option<String>,
+    ) {
         let preferences = self.preferences().await.notifications;
         let enabled_for_kind = match kind {
             "turn-complete" => preferences.notify_on_turn_complete,
-            "approval" | "question" => preferences.notify_on_input_required,
+            "approval" | "question" | "review" => preferences.notify_on_input_required,
             "turn-error" => preferences.notify_on_error,
             _ => preferences.enabled,
         };
@@ -223,7 +236,9 @@ impl AppState {
         if let Some(command_tx) = command_tx {
             // Capture before enqueueing: the bridge may process this after
             // another turn has started. Never hydrate native history for a push.
-            let message_preview = if kind == "turn-complete" {
+            let message_preview = if preview.is_some() {
+                preview
+            } else if kind == "turn-complete" {
                 let workspaces = self.inner.workspaces.lock().await;
                 thread_id
                     .as_deref()

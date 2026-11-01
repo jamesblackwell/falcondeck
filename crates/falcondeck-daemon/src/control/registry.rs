@@ -248,6 +248,14 @@ pub mod ops {
     pub const TICKET_UPDATE: &str = "ticket.update";
     /// Add a concise record note.
     pub const TICKET_COMMENT: &str = "ticket.comment";
+    /// Publish one decision for James, with evidence.
+    pub const REVIEW_CREATE: &str = "review.create";
+    /// Change your own open review.
+    pub const REVIEW_UPDATE: &str = "review.update";
+    /// Withdraw your own open review.
+    pub const REVIEW_WITHDRAW: &str = "review.withdraw";
+    /// James's response (user-only).
+    pub const REVIEW_RESPOND: &str = "review.respond";
     /// Update agent-control settings.
     pub const BOT_SWITCH: &str = "bot.switch_conversation";
     pub const SETTINGS_UPDATE: &str = "agent_control.settings.update";
@@ -287,6 +295,36 @@ fn ticket_capability<T: JsonSchema>(
         },
         examples: vec![example!("Shared company ticket board", arguments)],
         related_operations: &[ops::TICKET_CREATE, ops::TICKET_UPDATE, ops::TICKET_COMMENT],
+    }
+}
+
+fn review_capability<T: JsonSchema>(
+    id: &'static str,
+    title: &'static str,
+    description: &'static str,
+    arguments: Value,
+) -> Capability {
+    Capability {
+        id,
+        title,
+        description,
+        domain: "review",
+        scopes: &[ControlScope::Host],
+        input_schema: schema::<T>(),
+        output_schema: schema::<falcondeck_core::reviews::Review>(),
+        behavior: CapabilityBehavior {
+            read_only: false,
+            destructive: false,
+            idempotent: false,
+            confirmation_class: ConfirmationClass::Mutation,
+        },
+        examples: vec![example!("Review inbox", arguments)],
+        related_operations: &[
+            ops::REVIEW_CREATE,
+            ops::REVIEW_UPDATE,
+            ops::REVIEW_WITHDRAW,
+            ops::REVIEW_RESPOND,
+        ],
     }
 }
 
@@ -543,6 +581,22 @@ pub fn capabilities() -> &'static [Capability] {
             ops::TICKET_COMMENT, "Comment on ticket",
             "Add a concise markdown note for the record instead of messaging. The daemon attributes author and thread; do not supply an author.",
             json!({"ticket_id":"T-42", "body":"Waiting for James to approve the budget."})),
+        review_capability::<falcondeck_core::reviews::CreateReviewArgs>(
+            ops::REVIEW_CREATE, "Create review",
+            "Publish one decision for James in his review inbox, with your recommendation (required) and evidence he can open from his phone: link files by absolute path (a copy is frozen at publish time, so prefer self-contained PNG/PDF/Markdown/single-file HTML) or http(s) URLs. One decision per review; use items only for parts he should rule on separately. Optionally set going_ahead_at if you will proceed unless he says no. You cannot answer it yourself: James's decision and per-item feedback arrive as a message in your thread. Use this instead of sending links.",
+            json!({"title":"Pricing page hero", "ask":"Ship the new hero on Monday?", "recommendation":"Ship variant B: it tested 12% better and matches the new brand.", "items":[{"title":"Variant B hero", "note":"Mobile and desktop captures.", "evidence":[{"path":"/Users/James/.falcondeck/artifacts/hero-b-mobile.png", "caption":"Mobile"}]}]})),
+        review_capability::<falcondeck_core::reviews::UpdateReviewArgs>(
+            ops::REVIEW_UPDATE, "Update review",
+            "Change your own open review: title, ask, recommendation, body, going_ahead_at (empty string clears), or append items with add_items. Existing items and their frozen evidence are untouched.",
+            json!({"review_id":"R-12", "recommendation":"Ship variant B, but with the old headline."})),
+        review_capability::<falcondeck_core::reviews::WithdrawReviewArgs>(
+            ops::REVIEW_WITHDRAW, "Withdraw review",
+            "Withdraw your own open review when the decision is no longer needed (for example you found the answer or the work changed). Optional one-line reason.",
+            json!({"review_id":"R-12", "reason":"Superseded by R-14."})),
+        review_capability::<falcondeck_core::reviews::RespondReviewArgs>(
+            ops::REVIEW_RESPOND, "Respond to review",
+            "User-only: James responds with a decision per item (approve, request_changes, reject, each with optional feedback) or one overall decision and note. Agents are refused. The daemon then messages the source thread with the decisions and feedback verbatim.",
+            json!({"review_id":"R-12", "items":[{"item_id":"i1", "decision":"request_changes", "feedback":"Tighten the headline."}]})),
         Capability {
             id: ops::BOT_SWITCH,
             title: "Switch bot harness",

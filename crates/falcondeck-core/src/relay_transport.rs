@@ -26,7 +26,9 @@ const URGENT_BYTES: usize = 512 * 1024;
 // still share one FIFO urgent queue and its original total byte/count limits.
 const CONTROL_BYTES: usize = 64 * 1024;
 const RPC_BYTES: usize = URGENT_BYTES - CONTROL_BYTES;
-const URGENT_MESSAGES: usize = 128;
+// Bootstrap registers one control message per RPC method (about 110 today), so
+// the count limit needs headroom for the methods still to come. Bytes stay bounded.
+const URGENT_MESSAGES: usize = 192;
 const RPC_MESSAGES: usize = 16;
 const CONTROL_MESSAGES: usize = URGENT_MESSAGES - RPC_MESSAGES;
 // Compact index and thread-page replies exceed one fragment after encryption.

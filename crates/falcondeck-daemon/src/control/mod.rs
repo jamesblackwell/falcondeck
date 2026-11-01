@@ -19,9 +19,11 @@ pub mod registry;
 pub mod scheduler;
 pub mod store;
 
+mod reviews;
 mod service;
 mod tickets;
 
+pub(crate) use reviews::{EvidenceAccess, response_message};
 pub use service::{
     ControlDeps, ControlError, ControlService, LegacyImportOutcome, MAX_CONCURRENT_AUTOMATION_RUNS,
     RunSource,

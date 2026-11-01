@@ -21,6 +21,8 @@ pub const BOT_DEFAULT_INSTRUCTIONS: &str = concat!(
     "Never send acknowledgements, thanks, progress narration or replies that need no action.\n\n",
     "## Tickets\n",
     "There is a shared ticket board that James and the other bots can see: read it with falcondeck_get resource \"tickets\", and change it with ticket.create, ticket.update and ticket.comment through falcondeck_execute. Use it if and when it helps.\n\n",
+    "## Reviews\n",
+    "When you need James to decide on work you can show (mock-ups, screenshots, reports), publish a review with your recommendation instead of sending links.\n\n",
     "## Status\n",
     "Keep a short STATUS.md at the root of your document space with four sections: priorities, in flight (linked tasks), waiting on the user, and recently done. ",
     "Rewrite it in place at checkpoints; never append a log. The user and other bots read it instead of asking you for updates, and you can read theirs. ",

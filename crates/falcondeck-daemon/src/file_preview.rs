@@ -116,6 +116,23 @@ pub async fn stat(
         .map_err(|error| DaemonError::Rpc(format!("file preview failed: {error}")))?
 }
 
+/// The whole file (at most [`MAX_FILE_BYTES`]) for a client on this computer,
+/// such as the desktop app, where the relay's range limits do not apply. The
+/// access policy is the same one phones use.
+pub async fn read_all(
+    policy: &FileAccessPolicy,
+    target: FileTarget<'_>,
+) -> Result<(FilePreviewMeta, Vec<u8>), DaemonError> {
+    let path = resolve(policy, target).await?;
+    let metadata = regular_file_metadata(&path).await?;
+    let sniff_path = path.clone();
+    let meta = task::spawn_blocking(move || describe(&sniff_path, &metadata, true))
+        .await
+        .map_err(|error| DaemonError::Rpc(format!("file preview failed: {error}")))??;
+    let bytes = tokio::fs::read(&path).await.map_err(|_| not_found())?;
+    Ok((meta, bytes))
+}
+
 pub async fn read_range(
     policy: &FileAccessPolicy,
     target: FileTarget<'_>,

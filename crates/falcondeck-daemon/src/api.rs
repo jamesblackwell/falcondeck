@@ -174,6 +174,12 @@ pub fn router(state: AppState) -> Router {
         .route("/api/tickets", get(tickets_list).post(tickets_create))
         .route("/api/tickets/{id}", get(ticket_read).post(ticket_update))
         .route("/api/tickets/{id}/comments", post(ticket_comment))
+        .route("/api/files/stat", post(file_stat))
+        .route("/api/files/read", post(file_read))
+        .route("/api/reviews", get(reviews_list))
+        .route("/api/reviews/{id}", get(review_read))
+        .route("/api/reviews/{id}/respond", post(review_respond))
+        .route("/api/reviews/{id}/withdraw", post(review_withdraw))
         .route("/api/control/search", post(control_search))
         .route("/api/control/get", post(control_get))
         .route("/api/control/execute", post(control_execute))
@@ -2015,7 +2021,9 @@ fn control_error_status(code: &str) -> StatusCode {
         | "revision_required"
         | "idempotency_conflict" => StatusCode::BAD_REQUEST,
         "revision_conflict" => StatusCode::CONFLICT,
-        "ticket_limit" => StatusCode::TOO_MANY_REQUESTS,
+        "ticket_limit" | "review_limit" => StatusCode::TOO_MANY_REQUESTS,
+        "review_forbidden" => StatusCode::FORBIDDEN,
+        "review_closed" => StatusCode::CONFLICT,
         "resource_not_found" => StatusCode::NOT_FOUND,
         "storage_unavailable" => StatusCode::SERVICE_UNAVAILABLE,
         _ => StatusCode::INTERNAL_SERVER_ERROR,
@@ -2217,6 +2225,153 @@ async fn ticket_comment(
 ) -> Result<Json<falcondeck_core::control::ControlExecuteResponse>, Response> {
     args.insert("ticket_id".into(), serde_json::Value::String(id));
     ticket_mutate(state, headers, "ticket.comment", args).await
+}
+
+/// A local file to preview: the same naming as `file.stat`/`file.read_range`.
+#[derive(serde::Deserialize)]
+struct FilePreviewRequest {
+    path: String,
+    #[serde(default)]
+    base_dir: Option<String>,
+    #[serde(default)]
+    workspace_id: Option<String>,
+    #[serde(default)]
+    thread_id: Option<String>,
+}
+
+async fn file_preview_target(
+    state: &AppState,
+    request: &FilePreviewRequest,
+) -> (
+    crate::file_preview::FileAccessPolicy,
+    Option<std::path::PathBuf>,
+    Option<std::path::PathBuf>,
+) {
+    state
+        .file_preview_parts(&serde_json::json!({
+            "workspace_id": request.workspace_id,
+            "thread_id": request.thread_id,
+        }))
+        .await
+}
+
+async fn file_stat(
+    State(state): State<AppState>,
+    Json(request): Json<FilePreviewRequest>,
+) -> Result<Json<falcondeck_core::FilePreviewMeta>, DaemonError> {
+    let (policy, home, workspace_dir) = file_preview_target(&state, &request).await;
+    let base_dir = request.base_dir.as_deref().map(std::path::Path::new);
+    let target = crate::file_preview::FileTarget {
+        path: &request.path,
+        base_dir,
+        workspace_dir: workspace_dir.as_deref(),
+        home: home.as_deref(),
+    };
+    Ok(Json(crate::file_preview::stat(&policy, target).await?))
+}
+
+/// Raw bytes with the file's content type, for the desktop preview pane.
+async fn file_read(
+    State(state): State<AppState>,
+    Json(request): Json<FilePreviewRequest>,
+) -> Result<Response, DaemonError> {
+    let (policy, home, workspace_dir) = file_preview_target(&state, &request).await;
+    let base_dir = request.base_dir.as_deref().map(std::path::Path::new);
+    let target = crate::file_preview::FileTarget {
+        path: &request.path,
+        base_dir,
+        workspace_dir: workspace_dir.as_deref(),
+        home: home.as_deref(),
+    };
+    let (meta, bytes) = crate::file_preview::read_all(&policy, target).await?;
+    let mut response = bytes.into_response();
+    let headers = response.headers_mut();
+    if let Ok(value) = meta.content_type.parse() {
+        headers.insert(axum::http::header::CONTENT_TYPE, value);
+    }
+    if let Ok(value) = meta.version.parse() {
+        headers.insert("X-FalconDeck-File-Version", value);
+    }
+    // Served as data to the app, never navigated to or sniffed as a page.
+    headers.insert(
+        axum::http::header::X_CONTENT_TYPE_OPTIONS,
+        axum::http::HeaderValue::from_static("nosniff"),
+    );
+    Ok(response)
+}
+
+// Reviews share the control service, provenance and events with MCP.
+async fn reviews_list(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Query(mut query): Query<std::collections::HashMap<String, String>>,
+) -> Result<Json<falcondeck_core::control::ControlGetResponse>, Response> {
+    let cursor = query.remove("cursor");
+    let limit = query
+        .remove("limit")
+        .unwrap_or_else(|| "100".into())
+        .parse::<usize>()
+        .map_err(|_| {
+            control_error_response(crate::control::ControlError::field(
+                "limit",
+                "Use an integer.",
+            ))
+        })?;
+    let mut filters = serde_json::Map::new();
+    for (key, value) in query {
+        let value = if key == "include_closed" {
+            serde_json::Value::Bool(value.parse::<bool>().map_err(|_| {
+                control_error_response(crate::control::ControlError::field(
+                    "include_closed",
+                    "Use true or false.",
+                ))
+            })?)
+        } else {
+            serde_json::Value::String(value)
+        };
+        filters.insert(key, value);
+    }
+    let request = serde_json::from_value(serde_json::json!({"resource":"reviews", "filters":filters, "limit":limit, "cursor":cursor}))
+        .map_err(|error| control_error_response(crate::control::ControlError::invalid_arguments(error.to_string())))?;
+    control_get(State(state), headers, Json(request)).await
+}
+async fn review_read(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+) -> Result<Json<falcondeck_core::control::ControlGetResponse>, Response> {
+    let request = serde_json::from_value(serde_json::json!({"resource":"review", "id":id}))
+        .expect("review read request");
+    control_get(State(state), headers, Json(request)).await
+}
+async fn review_mutate(
+    state: AppState,
+    headers: HeaderMap,
+    operation: &str,
+    id: String,
+    mut arguments: serde_json::Map<String, serde_json::Value>,
+) -> Result<Json<falcondeck_core::control::ControlExecuteResponse>, Response> {
+    arguments.insert("review_id".into(), serde_json::Value::String(id));
+    let request =
+        serde_json::from_value(serde_json::json!({"operation":operation, "arguments":arguments}))
+            .expect("review mutation request");
+    control_execute(State(state), headers, Json(request)).await
+}
+async fn review_respond(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+    Json(args): Json<serde_json::Map<String, serde_json::Value>>,
+) -> Result<Json<falcondeck_core::control::ControlExecuteResponse>, Response> {
+    review_mutate(state, headers, "review.respond", id, args).await
+}
+async fn review_withdraw(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+    Json(args): Json<serde_json::Map<String, serde_json::Value>>,
+) -> Result<Json<falcondeck_core::control::ControlExecuteResponse>, Response> {
+    review_mutate(state, headers, "review.withdraw", id, args).await
 }
 
 #[cfg(test)]

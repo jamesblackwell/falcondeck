@@ -214,6 +214,9 @@ pub(super) fn merge_preferences_from_value(value: Value) -> FalconDeckPreference
     }
     preferences.codex_autocompact_tokens =
         autocompact_tokens_from_value(value.get("codex_autocompact_tokens"));
+    if let Some(enabled) = value.get("review_inbox_enabled").and_then(Value::as_bool) {
+        preferences.review_inbox_enabled = enabled;
+    }
     if let Some(version) = value.get("version").and_then(Value::as_u64) {
         preferences.version = version as u32;
     }
@@ -473,6 +476,9 @@ pub(super) fn apply_preferences_patch(
 ) {
     if let Some(enabled) = request.auto_resume_interrupted_sessions {
         preferences.auto_resume_interrupted_sessions = enabled;
+    }
+    if let Some(enabled) = request.review_inbox_enabled {
+        preferences.review_inbox_enabled = enabled;
     }
     if let Some(limit) = request.max_agent_children.filter(|l| max_agent_children_in_range(*l)) {
         preferences.max_agent_children = limit;

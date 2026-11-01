@@ -29,6 +29,8 @@ pub mod relay_transport;
 pub mod sync_index;
 /// Terminal session contract for daemon-owned PTY sessions.
 pub mod terminal;
+/// Review inbox: decisions agents need from James, with evidence.
+pub mod reviews;
 /// Lightweight company ticket records.
 pub mod tickets;
 pub use backup::*;
@@ -160,6 +162,14 @@ pub struct FalconDeckPreferences {
     /// Host-local computer-use settings. Older daemons omit this.
     #[serde(default)]
     pub computer_use: ComputerUsePreferences,
+    /// Show the review inbox and let agents publish reviews. When off,
+    /// `review.create` falls back to a plain message.
+    #[serde(default = "default_review_inbox_enabled")]
+    pub review_inbox_enabled: bool,
+}
+
+fn default_review_inbox_enabled() -> bool {
+    true
 }
 
 impl Default for FalconDeckPreferences {
@@ -182,6 +192,7 @@ impl Default for FalconDeckPreferences {
             title_suggestion_model: default_title_suggestion_model(),
             title_suggestion_prompt: default_title_suggestion_prompt(),
             computer_use: ComputerUsePreferences::default(),
+            review_inbox_enabled: true,
         }
     }
 }
@@ -745,6 +756,9 @@ pub struct UpdatePreferencesRequest {
     /// Optional title style instructions. Empty text restores the default prompt.
     #[serde(default)]
     pub title_suggestion_prompt: Option<String>,
+    /// Optional review inbox switch.
+    #[serde(default)]
+    pub review_inbox_enabled: Option<bool>,
 }
 
 /// Partial update payload for background utility model preferences.

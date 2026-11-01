@@ -249,6 +249,17 @@ pub(super) struct FilePreviewAccess {
 }
 
 impl FilePreviewAccess {
+    /// The policy plus the home and thread folders path resolution needs.
+    pub(super) fn into_parts(
+        self,
+    ) -> (
+        crate::file_preview::FileAccessPolicy,
+        Option<PathBuf>,
+        Option<PathBuf>,
+    ) {
+        (self.policy, self.home, self.workspace_dir)
+    }
+
     fn target<'a>(&'a self, path: &'a str) -> crate::file_preview::FileTarget<'a> {
         crate::file_preview::FileTarget {
             path,
@@ -260,6 +271,19 @@ impl FilePreviewAccess {
 }
 
 impl AppState {
+    /// The file-preview policy and path bases for a local client such as the
+    /// desktop app, built from the same roots as phone previews.
+    pub(crate) async fn file_preview_parts(
+        &self,
+        params: &Value,
+    ) -> (
+        crate::file_preview::FileAccessPolicy,
+        Option<PathBuf>,
+        Option<PathBuf>,
+    ) {
+        self.file_preview_access(params).await.into_parts()
+    }
+
     /// Allowed roots for phone file previews: project folders and the working
     /// directories of their threads (isolated copies included), bot document
     /// spaces, and the places agents publish work to review, namely the
@@ -284,7 +308,7 @@ impl AppState {
             roots.push(PathBuf::from(&bot.space_path));
         }
         if let Some(state_dir) = self.inner.state_path.parent() {
-            for folder in ["artifacts", "context", "variants", "worktrees"] {
+            for folder in ["artifacts", "context", "variants", "worktrees", "reviews"] {
                 roots.push(state_dir.join(folder));
             }
         }
@@ -324,6 +348,8 @@ fn remote_rpc_is_read_only(method: &str) -> bool {
             | "control.get"
             | "tickets.list"
             | "ticket.get"
+            | "reviews.list"
+            | "review.get"
             | "thread.search"
             | "thread.detail"
             | "thread.item"
@@ -402,6 +428,9 @@ pub(super) const REMOTE_RPC_METHODS: &[&str] = &[
     "control.get",
     "tickets.list",
     "ticket.get",
+    "reviews.list",
+    "review.get",
+    "review.respond",
     "control.execute",
     "speech.status",
     "speech.models",
@@ -1371,6 +1400,52 @@ impl AppState {
                             .map_err(|error| error.0.message)?,
                     )
                     .map_err(|error| error.to_string())
+                }
+                "reviews.list" | "review.get" => {
+                    let mut payload = params
+                        .as_object()
+                        .cloned()
+                        .ok_or("invalid reviews read payload")?;
+                    payload.insert(
+                        "resource".into(),
+                        serde_json::json!(if method == "reviews.list" {
+                            "reviews"
+                        } else {
+                            "review"
+                        }),
+                    );
+                    let request = serde_json::from_value::<ControlGetRequest>(
+                        serde_json::Value::Object(payload),
+                    )
+                    .map_err(|error| format!("invalid reviews read payload: {error}"))?;
+                    let context = ControlRequestContext {
+                        origin: ControlOrigin::RemoteRpc,
+                        ..Default::default()
+                    };
+                    serde_json::to_value(
+                        self.control_get(request, &context)
+                            .await
+                            .map_err(|error| error.0.message)?,
+                    )
+                    .map_err(|error| error.to_string())
+                }
+                // James answers a review from a paired phone. The origin is
+                // fixed here, so an agent can never reach this path.
+                "review.respond" => {
+                    let arguments = params
+                        .as_object()
+                        .cloned()
+                        .ok_or("invalid review response payload")?;
+                    let request = serde_json::from_value::<ControlExecuteRequest>(
+                        serde_json::json!({"operation": "review.respond", "arguments": arguments}),
+                    )
+                    .map_err(|error| format!("invalid review response payload: {error}"))?;
+                    let context = ControlRequestContext {
+                        origin: ControlOrigin::RemoteRpc,
+                        ..Default::default()
+                    };
+                    serde_json::to_value(self.control_execute(request, &context).await)
+                        .map_err(|error| error.to_string())
                 }
                 "control.get" => {
                     let request = serde_json::from_value::<ControlGetRequest>(params.clone())
@@ -3691,6 +3766,14 @@ mod tests {
                 .await
                 .is_err()
         );
+    }
+
+    #[test]
+    fn review_rpc_reads_are_read_only_and_the_response_is_not() {
+        for method in ["reviews.list", "review.get"] {
+            assert!(remote_rpc_is_read_only(method), "{method}");
+        }
+        assert!(!remote_rpc_is_read_only("review.respond"));
     }
 
     #[tokio::test]

@@ -120,7 +120,7 @@ impl ControlError {
             false,
         )
         .with_suggested_action(
-            "Use one of: agent_control.settings, automations, automation, automation.runs, control.audit, tickets, ticket.",
+            "Use one of: agent_control.settings, automations, automation, automation.runs, control.audit, tickets, ticket, reviews, review.",
         )
     }
 
@@ -295,6 +295,7 @@ pub enum LegacyImportOutcome {
 /// The daemon-owned control service.
 pub struct ControlService {
     tickets: super::tickets::TicketStore,
+    pub(super) reviews: super::reviews::ReviewStore,
     path: PathBuf,
     state: Mutex<store::PersistedControlState>,
     mutation: Mutex<()>,
@@ -318,6 +319,11 @@ impl ControlService {
                 path.parent()
                     .unwrap_or(std::path::Path::new("."))
                     .join("tickets/tickets.json"),
+            ),
+            reviews: super::reviews::ReviewStore::new(
+                path.parent()
+                    .unwrap_or(std::path::Path::new("."))
+                    .join("reviews"),
             ),
             path,
             state: Mutex::new(store::PersistedControlState::default()),
@@ -506,6 +512,7 @@ impl ControlService {
             .clamp(1, falcondeck_core::control::CONTROL_PAGE_LIMIT_MAX);
         match request.resource.as_str() {
             "tickets" | "ticket" => self.tickets.get(&request).await,
+            "reviews" | "review" => self.reviews.get(&request).await,
             "agent_control.settings" => Ok(ControlGetResponse {
                 resource: request.resource.clone(),
                 data: redaction::redacted(
@@ -716,30 +723,14 @@ impl ControlService {
         deps: &ControlDeps<'_>,
         settings: &AgentControlSettings,
     ) -> Result<(Value, Vec<ControlDomain>), ControlError> {
+        if capability.domain == "review" {
+            return self
+                .execute_review(capability, request, context, deps)
+                .await;
+        }
         if capability.domain == "ticket" {
             use falcondeck_core::tickets::TicketActor;
-            let mut name = context
-                .thread_id
-                .clone()
-                .unwrap_or_else(|| match context.origin {
-                    ControlOrigin::DesktopUi | ControlOrigin::RemoteRpc => "James".into(),
-                    _ => context
-                        .provider
-                        .as_ref()
-                        .map(ToString::to_string)
-                        .unwrap_or_else(|| "system".into()),
-                });
-            if let Some(app) = deps.app {
-                let preferences = app.preferences().await;
-                if let Some(bot) = preferences.bots.iter().find(|bot| {
-                    context
-                        .thread_id
-                        .as_deref()
-                        .is_some_and(|id| bot.owns_thread(id))
-                }) {
-                    name = bot.name.clone();
-                }
-            }
+            let name = actor_name(context, deps).await;
             let actor = TicketActor {
                 name,
                 context: context.clone(),
@@ -2419,7 +2410,35 @@ fn automation_value(automation: &Automation) -> Value {
     value
 }
 
-fn decode_arguments<T: serde::de::DeserializeOwned>(
+/// Who a control mutation is attributed to: James for the apps, a bot by name,
+/// else the calling thread id or provider.
+pub(super) async fn actor_name(context: &ControlRequestContext, deps: &ControlDeps<'_>) -> String {
+    let mut name = context
+        .thread_id
+        .clone()
+        .unwrap_or_else(|| match context.origin {
+            ControlOrigin::DesktopUi | ControlOrigin::RemoteRpc => "James".into(),
+            _ => context
+                .provider
+                .as_ref()
+                .map(ToString::to_string)
+                .unwrap_or_else(|| "system".into()),
+        });
+    if let Some(app) = deps.app {
+        let preferences = app.preferences().await;
+        if let Some(bot) = preferences.bots.iter().find(|bot| {
+            context
+                .thread_id
+                .as_deref()
+                .is_some_and(|id| bot.owns_thread(id))
+        }) {
+            name = bot.name.clone();
+        }
+    }
+    name
+}
+
+pub(super) fn decode_arguments<T: serde::de::DeserializeOwned>(
     arguments: &serde_json::Map<String, Value>,
 ) -> Result<T, ControlError> {
     serde_json::from_value(Value::Object(arguments.clone())).map_err(|error| {
@@ -2487,6 +2506,8 @@ fn resource_type(operation: &str) -> &'static str {
         "automation"
     } else if operation.starts_with("ticket.") {
         "ticket"
+    } else if operation.starts_with("review.") {
+        "review"
     } else if operation.starts_with("agent_control.") {
         "agent_control"
     } else {

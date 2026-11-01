@@ -803,7 +803,7 @@ impl AppState {
 }
 
 #[cfg(test)]
-mod tests {
+pub(in crate::app) mod tests {
     use super::*;
     use falcondeck_core::{ThreadAgentParams, ThreadAttention};
     use tempfile::tempdir;
@@ -947,7 +947,7 @@ mod tests {
             assert!(!lost_word_spaces(ok), "{ok}");
         }
     }
-    pub(super) async fn fixture() -> (AppState, tempfile::TempDir) {
+    pub(in crate::app) async fn fixture() -> (AppState, tempfile::TempDir) {
         let temp_dir = tempdir().unwrap();
         let workspace_path = temp_dir.path().join("project-a");
         std::fs::create_dir_all(&workspace_path).unwrap();

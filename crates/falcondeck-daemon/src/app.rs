@@ -112,6 +112,7 @@ mod provider_runtime;
 mod provider_usage;
 mod remote_bridge;
 mod remote_lifecycle;
+mod reviews;
 mod rewrite_models;
 mod runtime_health;
 mod scheduled_tasks;
