@@ -129,6 +129,19 @@ import SwiftUI
         }
         return scheduled
     }
+    /// Where `row` sits in `view`. While a collection view is mid-layout (rows
+    /// inserted above, a history replacement) a cell can still hold its pre-update
+    /// frame although its index path and layout attributes are already current;
+    /// measuring that frame reports "no move needed" and strands the reading position.
+    private func minY(of row: UIView, in view: UIScrollView) -> CGFloat {
+        let measured = row.convert(row.bounds, to: view).minY
+        guard let list = view as? UICollectionView else { return measured }
+        var ancestor: UIView? = row
+        while let current = ancestor, !(current is UICollectionViewCell) { ancestor = current.superview }
+        guard let cell = ancestor as? UICollectionViewCell, let path = list.indexPath(for: cell),
+              let attributes = list.layoutAttributesForItem(at: path) else { return measured }
+        return attributes.frame.minY + row.convert(row.bounds, to: cell).minY
+    }
     private func alignReading(_ anchor: ReadingAnchor, in view: UIScrollView) {
         guard ObjectIdentifier(view) == anchor.view else { return }
         var realizedIDs: Set<String>?
@@ -170,7 +183,7 @@ import SwiftUI
         let target = anchor.rows.first { rows[$0.id]?.view?.window != nil && realizedIDs?.contains($0.id) != false }
         guard let target, let row = rows[target.id]?.view else { return }
         let top = -view.adjustedContentInset.top
-        let y = min(bottomOffset(view), max(top, row.convert(row.bounds, to: view).minY - target.relativeY))
+        let y = min(bottomOffset(view), max(top, minY(of: row, in: view) - target.relativeY))
         guard abs(view.contentOffset.y - y) > 0.5 else { return }
         UIView.performWithoutAnimation { view.setContentOffset(CGPoint(x: view.contentOffset.x, y: y), animated: false) }
     }
