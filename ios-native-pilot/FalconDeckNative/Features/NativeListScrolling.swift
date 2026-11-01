@@ -64,6 +64,9 @@ import SwiftUI
         guard !adjusting, active, let view, view.window != nil,
               !view.isTracking, !view.isDragging, !view.isDecelerating else { return }
         adjusting = true; defer { adjusting = false }
+        #if DEBUG
+        StreamMetrics.shared.contentHeight(view.contentSize.height)
+        #endif
         if let restoration, restoration.revision == positionRevision {
             alignReading(restoration.anchor, in: view)
         } else if followsBottom {

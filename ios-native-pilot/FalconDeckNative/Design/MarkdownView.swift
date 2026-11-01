@@ -391,11 +391,20 @@ private struct TranscriptMarkdownBlocks: View {
     let referenceDefinitions: String
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
-            ForEach(Array(blocks.enumerated()), id: \.offset) { _, block in blockView(block) }
+            // A live reply only changes its last block; settled ones skip their body.
+            ForEach(Array(blocks.enumerated()), id: \.offset) { _, block in
+                TranscriptMarkdownBlockView(block: block, referenceDefinitions: referenceDefinitions).equatable()
+            }
         }
         .fixedSize(horizontal: false, vertical: true)
         .frame(maxWidth: .infinity, alignment: .leading)
     }
+}
+
+private struct TranscriptMarkdownBlockView: View, Equatable {
+    let block: TranscriptMarkdownBlock
+    let referenceDefinitions: String
+    var body: some View { blockView(block) }
 
     @ViewBuilder private func blockView(_ block: TranscriptMarkdownBlock) -> some View {
         switch block {

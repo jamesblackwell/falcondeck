@@ -533,3 +533,61 @@ Repository Autoreview (`.agents/skills/autoreview/scripts/autoreview --mode loca
 --prompt-file ios-native-pilot/artifacts/performance-review-context.md`) found
 no actionable findings at its default P0 threshold, with adjacent transcript,
 projection and motion contracts supplied as context.
+
+## Smooth streaming — 1 November 2026
+
+**Why it looked jerky.** The daemon merges text deltas into ~100 ms batches before
+they reach the phone, so a reply arrives as a burst of a few dozen characters
+roughly seven times a second. The previous `StreamingText` only rate-limited
+paints to 50 ms, which a 100 ms cadence never triggered, so every burst was
+painted whole: text advanced in steps, the live row grew in lumps and the
+bottom-follow re-aligned once per step. The old local fixture (4 characters every
+20 ms) hid this because it was already smooth. `--streaming-preview-bursty` now
+reproduces the real cadence: deterministic 12–59 character batches every 100 ms,
+with occasional 30 ms double bursts and 260 ms stalls. Whole-message markdown
+parsing was not the bottleneck (0.55 ms for 1.2 KB in Debug); SwiftUI layout of
+the growing row was.
+
+**What changed.**
+
+- `StreamingText` paces the buffered tail on a display link (60 Hz) instead of
+  painting bursts. The drain rate follows the backlog (`backlog / 0.18 s`, never
+  below 45 characters/s), so a burst spreads over the next frames and the painted
+  text never trails the wire by more than about 180 ms. Reveal advances by
+  grapheme, so an emoji or combining mark is never split.
+- Completion, replacement, the first sight of a message, Reduce Motion and Low
+  Power Mode paint the real text immediately. The final text is never delayed.
+  The transcript still receives every delta; only presentation is paced.
+- Only the live message's view re-renders per frame: `ChatContent` still updates
+  at the wire cadence. Markdown blocks are `Equatable`, so settled blocks skip
+  their body while the last block grows.
+- Debug-only `--stream-metrics` samples frame cadence, characters painted per
+  frame, content-height movement and main-thread busy time per run-loop turn
+  and writes `Documents/stream-metrics.json`. `--stream-unpaced` restores the old
+  paint-on-arrival behaviour for A/B runs.
+
+**Measured** (iPhone 17 Pro simulator, Debug, `--demo --streaming-preview
+--streaming-preview-bursty --stream-metrics`, 1,238 characters over about 5 s,
+three runs each; the unpaced path paints every 100 ms batch on arrival, as the
+old 50 ms coalescer did for this cadence):
+
+| | Unpaced (before) | Paced (after) |
+| --- | ---: | ---: |
+| Paints per second | 6.9 | 51–54 |
+| Mean / max characters per paint | 35.4 / 59 | 4.5–4.7 / 28 |
+| Largest single-frame height change | 110 pt | 55–86 pt |
+| Frames over 25 ms (6 runs, mean) | 5.0 | 2.3 |
+| Main-thread busy time | ~150 ms/s | ~245 ms/s |
+| p95 run-loop turn | 5.4–5.9 ms | 5.6–5.7 ms |
+
+Paint cadence and step size are deterministic. Frame hitches are noisy in the
+simulator (paced runs ranged 0–8) and the paced path does about eight times as
+many paints, so it uses more main-thread time overall at the same per-paint cost;
+the saving is that no single frame absorbs a 35–59 character reflow. These are
+Debug-simulator numbers, not device frame rates. The remaining large height
+steps are new blocks (a fenced code block or table) appearing whole.
+
+Validation: 378 unit tests, including paced-reveal regressions (prefix-only
+output, bursts spread over several frames, completion mid-drain, retraction,
+Reduce Motion). Before/after recordings and screenshots are not committed.
+

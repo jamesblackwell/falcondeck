@@ -115,6 +115,7 @@
 		99F19EBC1720806CE7CE359E /* GoalView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 44020FC42CAAC84CB02D0394 /* GoalView.swift */; };
 		9AE1323145C9FAADF111C8D1 /* FlowDiagram.swift in Sources */ = {isa = PBXBuildFile; fileRef = 18DFD2747139D1577D3F56B0 /* FlowDiagram.swift */; };
 		9B7F9E6873A82916588E4DC8 /* NativeShortcutTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 936A3C250B315F7EDC66B525 /* NativeShortcutTests.swift */; };
+		9C1F825D590D57874A4B6D90 /* StreamMetrics.swift in Sources */ = {isa = PBXBuildFile; fileRef = CD3CBA6719F524DE808A494E /* StreamMetrics.swift */; };
 		9C8F54D285C47D159D1CF07E /* ActivityView.swift in Sources */ = {isa = PBXBuildFile; fileRef = FD587F0C60D26CB61A64907F /* ActivityView.swift */; };
 		9D8C9169119EC8F25D404084 /* BackgroundReliabilityTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 53289CAC934EA9148E9744C8 /* BackgroundReliabilityTests.swift */; };
 		9F0067443F373DAE2A2B4211 /* FalconSpeechWidget.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4167888E636209E4D499BDFE /* FalconSpeechWidget.swift */; };
@@ -373,6 +374,7 @@
 		CBF5784E24A143B520CB7169 /* MediaTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MediaTests.swift; sourceTree = "<group>"; };
 		CC6D94FB3D7FD1F6FD729E8C /* OutgoingMessageArrival.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OutgoingMessageArrival.swift; sourceTree = "<group>"; };
 		CCC6B2903671BC7B6C4D7ABC /* VoiceRecorder.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VoiceRecorder.swift; sourceTree = "<group>"; };
+		CD3CBA6719F524DE808A494E /* StreamMetrics.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = StreamMetrics.swift; sourceTree = "<group>"; };
 		CD69D55F6038EDBC496674AF /* SendPreview.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SendPreview.swift; sourceTree = "<group>"; };
 		CEECDD653CB6C9377BB2BABF /* AutomationEditorView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AutomationEditorView.swift; sourceTree = "<group>"; };
 		CF8AD4FE8CDCE78BDA2E5F54 /* SidebarView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SidebarView.swift; sourceTree = "<group>"; };
@@ -512,6 +514,7 @@
 				1518FBBC59AA5C636477C648 /* SessionVault.swift */,
 				527FD0065A368AA01C3A6CF0 /* SpawnNesting.swift */,
 				8A0D5CD325038CEECD14804A /* StreamingPreview.swift */,
+				CD3CBA6719F524DE808A494E /* StreamMetrics.swift */,
 				1D59FE5987F6028D64C28AB4 /* TaskBranching.swift */,
 				32661F59A33239F777AA82B5 /* TaskFeatures.swift */,
 				38846D332C62A868BD4EF15C /* TaskSummaryOrder.swift */,
@@ -1038,6 +1041,7 @@
 				AE041B8DB912027EB22CEA19 /* SpeechSettingsView.swift in Sources */,
 				5ECD4DE03F2467B76ADEA115 /* SpeechTranscription.swift in Sources */,
 				D9C134583231C86FCE924647 /* StartView.swift in Sources */,
+				9C1F825D590D57874A4B6D90 /* StreamMetrics.swift in Sources */,
 				E0B86642E8F647EEAA489B0D /* StreamingPreview.swift in Sources */,
 				AB64B12B1FF3329CE10D58F2 /* StreamingText.swift in Sources */,
 				6D6640740F3071ED0354A0E4 /* TaskActivity.swift in Sources */,

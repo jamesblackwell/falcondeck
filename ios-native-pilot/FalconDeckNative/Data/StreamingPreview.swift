@@ -50,18 +50,47 @@ import Foundation
                 }
                 try await Task.sleep(for: .seconds(1))
                 // Hardware UI automation needs enough delivery time to inspect a reading anchor.
-                let interval: Duration = ProcessInfo.processInfo.arguments.contains("--streaming-preview-slow")
+                let arguments = ProcessInfo.processInfo.arguments
+                let interval: Duration = arguments.contains("--streaming-preview-slow")
                     ? .milliseconds(50) : .milliseconds(20)
-                for chunk in chunks(reply) {
+                // The daemon merges deltas into ~100 ms batches before they reach
+                // the phone, so real replies arrive in uneven bursts, not 4-char ticks.
+                let bursty = arguments.contains("--streaming-preview-bursty")
+                let answer = bursty ? longReply : reply
+                StreamMetrics.shared.begin()
+                var seed: UInt64 = 0x9E3779B97F4A7C15
+                for chunk in bursty ? burstChunks(answer, seed: &seed) : chunks(answer).map({ ($0, interval) }) {
                     guard model.demo, model.sessionScope == scope else { return }
-                    chat.transcript.apply(.object(["type": .string("text"), "item_id": .string("preview-answer"), "target": .string("assistant_message"), "delta": .string(chunk)]))
-                    try await Task.sleep(for: interval)
+                    chat.transcript.apply(.object(["type": .string("text"), "item_id": .string("preview-answer"), "target": .string("assistant_message"), "delta": .string(chunk.0)]))
+                    try await Task.sleep(for: chunk.1)
                 }
                 guard model.demo, model.sessionScope == scope else { return }
+                try? await Task.sleep(for: .milliseconds(600))
+                StreamMetrics.shared.end()
                 chat.transcript.apply(.object(["type": .string("turn-end")]))
                 model.upsertTask(task.raw.setting("status", .string("idle")))
             } catch { }
         }
+    }
+
+    static var longReply: String {
+        let tail = "The response is complete. All streamed text has arrived."
+        let body = reply.replacingOccurrences(of: "\n\n" + tail, with: "")
+        return [body, "## A second section\n\nStreaming a longer answer exercises row growth, because every new line makes the live row taller and the list has to keep the newest words above the composer without any visible jump.\n\n1. Measure the cadence of what arrives.\n2. Pace what is painted.\n3. Keep the bottom steady.\n\n" + tail].joined(separator: "\n\n")
+    }
+
+    /// Deterministic ~100 ms batches of uneven size with occasional stalls and doubled bursts.
+    private static func burstChunks(_ text: String, seed: inout UInt64) -> [(String, Duration)] {
+        func next(_ seed: inout UInt64) -> Int { seed = seed &* 6364136223846793005 &+ 1442695040888963407; return Int(seed >> 33) }
+        var result: [(String, Duration)] = [], start = text.startIndex
+        while start < text.endIndex {
+            let size = 12 + next(&seed) % 48
+            let end = text.index(start, offsetBy: size, limitedBy: text.endIndex) ?? text.endIndex
+            let roll = next(&seed) % 10
+            result.append((String(text[start..<end]), .milliseconds(roll == 0 ? 260 : roll == 1 ? 30 : 100)))
+            start = end
+        }
+        return result
     }
 
     private static func chunks(_ text: String) -> [String] {
