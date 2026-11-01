@@ -439,6 +439,10 @@ export type FalconDeckPreferences = {
   auto_resume_interrupted_sessions?: boolean;
   /** Active child threads one agent or bot may have at once (1–20). Older daemons omit this. */
   max_agent_children?: number;
+  /** Context size at which Claude conversations compact (100K–1M). Older daemons omit this. */
+  claude_autocompact_tokens?: number;
+  /** Context size at which Codex conversations compact; null or absent uses Codex's own default. */
+  codex_autocompact_tokens?: number | null;
   /** Older daemons omit this until project order has been saved. */
   workspace_order?: string[];
   /** Project ids hidden from the sidebar by default. */
@@ -724,6 +728,10 @@ export type UpdatePreferencesPayload = {
   auto_resume_interrupted_sessions?: boolean;
   /** Integer 1–20; the daemon rejects other values. */
   max_agent_children?: number;
+  /** Integer 100000–1000000; the daemon rejects other values. */
+  claude_autocompact_tokens?: number;
+  /** Integer 100000–1000000, or null to restore Codex's own default. */
+  codex_autocompact_tokens?: number | null;
   workspace_order?: string[] | null;
   hidden_workspace_ids?: string[] | null;
   workspace_colors?: Record<string, string> | null;

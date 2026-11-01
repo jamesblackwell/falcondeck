@@ -3497,6 +3497,12 @@ impl AppState {
         if let Some(limit) = request.max_agent_children {
             validate_max_agent_children(limit)?;
         }
+        if let Some(tokens) = request.claude_autocompact_tokens {
+            validate_autocompact_tokens("claude_autocompact_tokens", tokens)?;
+        }
+        if let Some(Some(tokens)) = request.codex_autocompact_tokens {
+            validate_autocompact_tokens("codex_autocompact_tokens", tokens)?;
+        }
         let mut preferences = self.inner.preferences.lock().await;
         let icons_changed = request.workspace_icons.is_some();
         let updated = {

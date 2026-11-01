@@ -190,6 +190,21 @@ pub(crate) fn conversation_items_from_read(
     items
 }
 
+/// Per-thread config override carrying the user's auto-compact point.
+///
+/// `thread/start` and `thread/resume` take a `config` bag with the same keys
+/// as `-c`, so the setting applies to each thread as it loads instead of
+/// needing an app-server relaunch. `None` sends nothing and leaves Codex's own
+/// default for the model.
+fn autocompact_config(autocompact_tokens: Option<u32>) -> Value {
+    autocompact_tokens.map_or(
+        Value::Null,
+        |tokens| json!({ AUTOCOMPACT_CONFIG_KEY: tokens }),
+    )
+}
+
+const AUTOCOMPACT_CONFIG_KEY: &str = "model_auto_compact_token_limit";
+
 /// Build `thread/start` params for current Codex app-server (0.150.x).
 ///
 /// `effort` is not a `ThreadStartParams` field — turn-level effort is the
@@ -203,11 +218,17 @@ pub(crate) fn thread_start_params(
     sandbox_mode: Option<&str>,
     approval_policy: &str,
     developer_instructions: Option<&str>,
+    autocompact_tokens: Option<u32>,
 ) -> Value {
     let mut params = json!({
         "cwd": cwd,
         "approvalPolicy": app_server_approval_policy(approval_policy),
     });
+    insert_optional_value(
+        &mut params,
+        "config",
+        autocompact_config(autocompact_tokens),
+    );
     insert_optional_str(&mut params, "model", model);
     if let Some(sandbox) = sandbox_mode
         .map(str::trim)
@@ -231,6 +252,7 @@ pub(crate) fn thread_resume_params(
     thread_id: &str,
     cwd: &str,
     developer_instructions: Option<&str>,
+    autocompact_tokens: Option<u32>,
 ) -> Value {
     let mut params = json!({
         "threadId": thread_id,
@@ -247,6 +269,11 @@ pub(crate) fn thread_resume_params(
         }
     });
     insert_optional_str(&mut params, "developerInstructions", developer_instructions);
+    insert_optional_value(
+        &mut params,
+        "config",
+        autocompact_config(autocompact_tokens),
+    );
     params
 }
 
@@ -1164,10 +1191,11 @@ impl CodexSession {
             .state
             .agent_context_instructions(&AgentProvider::CODEX)
             .await;
+        let autocompact_tokens = self.state.preferences().await.codex_autocompact_tokens;
         let response = self
             .send_control_request(
                 "thread/resume",
-                thread_resume_params(thread_id, cwd, instructions.as_deref()),
+                thread_resume_params(thread_id, cwd, instructions.as_deref(), autocompact_tokens),
             )
             .await?;
 
@@ -2396,6 +2424,7 @@ mod tests {
             Some("workspace-write"),
             "on-request",
             Some("keep FalconDeck control short"),
+            None,
         );
         assert!(params.get("baseInstructions").is_none());
         assert!(params.get("effort").is_none());
@@ -2414,6 +2443,7 @@ mod tests {
             "thread-1",
             "/tmp/project",
             Some("keep FalconDeck control short"),
+            None,
         );
         assert!(params.get("baseInstructions").is_none());
         assert!(params.get("effort").is_none());
@@ -2427,6 +2457,28 @@ mod tests {
         assert_eq!(params["initialTurnsPage"]["limit"], CODEX_TURN_PAGE_SIZE);
         assert_eq!(params["initialTurnsPage"]["sortDirection"], "desc");
         assert_eq!(params["initialTurnsPage"]["itemsView"], "full");
+    }
+
+    #[test]
+    fn codex_autocompact_limit_rides_on_thread_config_only_when_set() {
+        let start = thread_start_params("/tmp/p", None, None, "never", None, Some(250_000));
+        assert_eq!(
+            start["config"],
+            json!({"model_auto_compact_token_limit": 250_000})
+        );
+        let resume = thread_resume_params("thread-1", "/tmp/p", None, Some(250_000));
+        assert_eq!(
+            resume["config"],
+            json!({"model_auto_compact_token_limit": 250_000})
+        );
+        // "Codex default" sends no config at all, not a null that could clear
+        // a limit set in the user's own config.toml.
+        assert!(thread_start_params("/tmp/p", None, None, "never", None, None)
+            .get("config")
+            .is_none());
+        assert!(thread_resume_params("thread-1", "/tmp/p", None, None)
+            .get("config")
+            .is_none());
     }
 
     #[test]

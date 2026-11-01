@@ -55,6 +55,17 @@ fn default_max_agent_children() -> u32 {
     DEFAULT_MAX_AGENT_CHILDREN
 }
 
+/// Default for `FalconDeckPreferences::claude_autocompact_tokens`.
+pub const DEFAULT_CLAUDE_AUTOCOMPACT_TOKENS: u32 = 200_000;
+/// Smallest accepted auto-compact point (Claude Code's own floor).
+pub const MIN_AUTOCOMPACT_TOKENS: u32 = 100_000;
+/// Largest accepted auto-compact point.
+pub const MAX_AUTOCOMPACT_TOKENS: u32 = 1_000_000;
+
+fn default_claude_autocompact_tokens() -> u32 {
+    DEFAULT_CLAUDE_AUTOCOMPACT_TOKENS
+}
+
 fn default_true() -> bool {
     true
 }
@@ -106,6 +117,14 @@ pub struct FalconDeckPreferences {
     /// Active child threads one agent or bot may have at once.
     #[serde(default = "default_max_agent_children")]
     pub max_agent_children: u32,
+    /// Context size at which Claude conversations compact. Explicit `[1m]`
+    /// model choices ignore it and keep the full window.
+    #[serde(default = "default_claude_autocompact_tokens")]
+    pub claude_autocompact_tokens: u32,
+    /// Context size at which Codex conversations compact; `None` leaves
+    /// Codex's own default for the model.
+    #[serde(default)]
+    pub codex_autocompact_tokens: Option<u32>,
     /// User-defined order for workspaces in project navigation.
     #[serde(default)]
     pub workspace_order: Vec<String>,
@@ -150,6 +169,8 @@ impl Default for FalconDeckPreferences {
             version: default_preferences_version(),
             auto_resume_interrupted_sessions: true,
             max_agent_children: DEFAULT_MAX_AGENT_CHILDREN,
+            claude_autocompact_tokens: DEFAULT_CLAUDE_AUTOCOMPACT_TOKENS,
+            codex_autocompact_tokens: None,
             workspace_order: Vec::new(),
             hidden_workspace_ids: Vec::new(),
             workspace_colors: BTreeMap::new(),
@@ -689,6 +710,14 @@ pub struct UpdatePreferencesRequest {
     /// `MIN_MAX_AGENT_CHILDREN..=MAX_MAX_AGENT_CHILDREN`.
     #[serde(default)]
     pub max_agent_children: Option<u32>,
+    /// Optional Claude auto-compact point; accepted range is
+    /// `MIN_AUTOCOMPACT_TOKENS..=MAX_AUTOCOMPACT_TOKENS`.
+    #[serde(default)]
+    pub claude_autocompact_tokens: Option<u32>,
+    /// Optional Codex auto-compact point, same range; an explicit `null`
+    /// restores Codex's own default.
+    #[serde(default, deserialize_with = "deserialize_present_option")]
+    pub codex_autocompact_tokens: Option<Option<u32>>,
     /// Optional workspace order update for project navigation.
     #[serde(default)]
     pub workspace_order: Option<Vec<String>>,

@@ -158,6 +158,7 @@ impl ProviderRuntime {
             Self::Codex => {
                 let session = app.session_for(spec.workspace_id).await?;
                 let instructions = app.agent_context_instructions(&AgentProvider::CODEX).await;
+                let autocompact_tokens = app.preferences().await.codex_autocompact_tokens;
                 let result = session
                     .send_request(
                         "thread/start",
@@ -167,6 +168,7 @@ impl ProviderRuntime {
                             spec.sandbox_mode,
                             spec.approval_policy,
                             instructions.as_deref(),
+                            autocompact_tokens,
                         ),
                     )
                     .await?;
@@ -415,6 +417,7 @@ impl ProviderRuntime {
                     )
                     .await;
                 let agent_context = app.agent_context_instructions(&AgentProvider::CLAUDE).await;
+                let autocompact_tokens = app.preferences().await.claude_autocompact_tokens;
                 let spawn = runtime
                     .spawn_turn(
                         spec.thread_id,
@@ -430,6 +433,7 @@ impl ProviderRuntime {
                         spec.thread.working_directory(runtime.workspace_path()),
                         &builtin,
                         agent_context.as_deref(),
+                        autocompact_tokens,
                     )
                     .await;
                 let spawn = match spawn {

@@ -79,10 +79,12 @@ export const SETTINGS_GROUPS: SettingsNavGroup[] = [
         settings: [
           "Automatically continue stopped sessions",
           "Parallel tasks per agent",
+          "Compact Claude conversations at",
+          "Compact Codex conversations at",
           "Updates",
           "First-run onboarding",
         ],
-        keywords: ["version", "release", "resume", "restart", "welcome", "children", "limit", "bots", "agents"],
+        keywords: ["version", "release", "resume", "restart", "welcome", "children", "limit", "bots", "agents", "compact", "compaction", "context", "tokens", "cost"],
       },
       {
         id: "appearance",

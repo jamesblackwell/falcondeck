@@ -1,5 +1,6 @@
 import type { FalconDeckPreferences, UpdatePreferencesPayload } from '@falcondeck/client-core'
 import {
+  DEFAULT_CLAUDE_AUTOCOMPACT_TOKENS,
   MAX_MAX_AGENT_CHILDREN,
   MIN_MAX_AGENT_CHILDREN,
   normalizePreferences,
@@ -9,6 +10,11 @@ import {
   Badge,
   Button,
   Input,
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
   SettingList,
   SettingRow,
   SettingsPage,
@@ -69,6 +75,52 @@ function AgentChildLimitInput({
       }}
       className="w-20 text-center tabular-nums"
     />
+  )
+}
+
+const AUTOCOMPACT_PRESETS = [
+  100_000, 150_000, 200_000, 250_000, 300_000, 400_000, 500_000, 750_000, 1_000_000,
+]
+const CODEX_DEFAULT = 'default'
+
+function formatTokens(tokens: number) {
+  return tokens >= 1_000_000 ? `${tokens / 1_000_000}M` : `${Math.round(tokens / 1000)}K`
+}
+
+/** Presets cover the range; a value set elsewhere (API, file) still shows as itself. */
+function AutocompactSelect({
+  label,
+  value,
+  allowDefault,
+  onChange,
+}: {
+  label: string
+  value: number | null
+  allowDefault?: boolean
+  onChange: (value: number | null) => void
+}) {
+  const options =
+    value !== null && !AUTOCOMPACT_PRESETS.includes(value)
+      ? [...AUTOCOMPACT_PRESETS, value].sort((a, b) => a - b)
+      : AUTOCOMPACT_PRESETS
+  return (
+    <Select
+      value={value === null ? CODEX_DEFAULT : String(value)}
+      onValueChange={(next) => onChange(next === CODEX_DEFAULT ? null : Number(next))}
+    >
+      <SelectTrigger aria-label={label} className="h-8 w-[10.5rem] text-fg-primary">
+        <SelectValue />
+      </SelectTrigger>
+      <SelectContent>
+        {allowDefault ? <SelectItem value={CODEX_DEFAULT}>Codex default</SelectItem> : null}
+        {options.map((tokens) => (
+          <SelectItem key={tokens} value={String(tokens)}>
+            {formatTokens(tokens)} tokens
+            {tokens === DEFAULT_CLAUDE_AUTOCOMPACT_TOKENS && !allowDefault ? ' (default)' : ''}
+          </SelectItem>
+        ))}
+      </SelectContent>
+    </Select>
   )
 }
 
@@ -141,7 +193,7 @@ export function GeneralSettingsPanel({
 
       <SettingsSection
         title="Agents"
-        description="Limits for agents and bots that start their own tasks."
+        description="Limits and context size for agents and bots."
       >
         <SettingList>
           <SettingRow
@@ -151,6 +203,31 @@ export function GeneralSettingsPanel({
               <AgentChildLimitInput
                 value={current.max_agent_children ?? 5}
                 onCommit={(max_agent_children) => onUpdatePreferences({ max_agent_children })}
+              />
+            }
+          />
+          <SettingRow
+            title="Compact Claude conversations at"
+            description="Smaller is cheaper on long threads; the 1M model options keep the full window."
+            control={
+              <AutocompactSelect
+                label="Compact Claude conversations at"
+                value={current.claude_autocompact_tokens ?? DEFAULT_CLAUDE_AUTOCOMPACT_TOKENS}
+                onChange={(tokens) =>
+                  tokens !== null && onUpdatePreferences({ claude_autocompact_tokens: tokens })
+                }
+              />
+            }
+          />
+          <SettingRow
+            title="Compact Codex conversations at"
+            description="Smaller is cheaper on long threads; Codex default leaves the point to Codex."
+            control={
+              <AutocompactSelect
+                label="Compact Codex conversations at"
+                allowDefault
+                value={current.codex_autocompact_tokens ?? null}
+                onChange={(tokens) => onUpdatePreferences({ codex_autocompact_tokens: tokens })}
               />
             }
           />

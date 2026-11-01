@@ -95,6 +95,51 @@ describe('SettingsView deep links', () => {
     expect(input).toHaveValue(5)
   })
 
+  it('sets the Claude and Codex compact points from General', () => {
+    const onUpdatePreferences = vi.fn()
+    render(
+      <SettingsView
+        {...props}
+        initialSection="general"
+        preferences={
+          { claude_autocompact_tokens: 200_000 } as SettingsViewProps['preferences']
+        }
+        onUpdatePreferences={onUpdatePreferences}
+      />,
+    )
+    const claude = screen.getByRole('combobox', { name: 'Compact Claude conversations at' })
+    const codex = screen.getByRole('combobox', { name: 'Compact Codex conversations at' })
+    expect(claude).toHaveTextContent('200K tokens (default)')
+    expect(codex).toHaveTextContent('Codex default')
+
+    fireEvent.click(claude)
+    fireEvent.click(screen.getByRole('option', { name: '300K tokens' }))
+    expect(onUpdatePreferences).toHaveBeenCalledWith({ claude_autocompact_tokens: 300_000 })
+
+    fireEvent.click(codex)
+    fireEvent.click(screen.getByRole('option', { name: '250K tokens' }))
+    expect(onUpdatePreferences).toHaveBeenCalledWith({ codex_autocompact_tokens: 250_000 })
+  })
+
+  it('shows a stored Codex compact point and can restore the Codex default', () => {
+    const onUpdatePreferences = vi.fn()
+    render(
+      <SettingsView
+        {...props}
+        initialSection="general"
+        preferences={
+          { codex_autocompact_tokens: 225_000 } as SettingsViewProps['preferences']
+        }
+        onUpdatePreferences={onUpdatePreferences}
+      />,
+    )
+    const codex = screen.getByRole('combobox', { name: 'Compact Codex conversations at' })
+    expect(codex).toHaveTextContent('225K tokens')
+    fireEvent.click(codex)
+    fireEvent.click(screen.getByRole('option', { name: 'Codex default' }))
+    expect(onUpdatePreferences).toHaveBeenCalledWith({ codex_autocompact_tokens: null })
+  })
+
   it('does not expose a second settings-only automation manager', () => {
     render(<SettingsView {...props} />)
     expect(screen.queryByRole('button', { name: /Automations/ })).not.toBeInTheDocument()

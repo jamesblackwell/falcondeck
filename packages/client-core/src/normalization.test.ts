@@ -1293,6 +1293,43 @@ describe("automatic session recovery preferences", () => {
   });
 });
 
+describe("auto-compact preferences", () => {
+  it("defaults Claude to 200K and Codex to its own default", () => {
+    const preferences = normalizePreferences({});
+    expect(preferences.claude_autocompact_tokens).toBe(200_000);
+    expect(preferences.codex_autocompact_tokens).toBeNull();
+  });
+
+  it("keeps in-range values", () => {
+    const preferences = normalizePreferences({
+      claude_autocompact_tokens: 350_000,
+      codex_autocompact_tokens: 250_000,
+    });
+    expect(preferences.claude_autocompact_tokens).toBe(350_000);
+    expect(preferences.codex_autocompact_tokens).toBe(250_000);
+    expect(
+      normalizePreferences({
+        claude_autocompact_tokens: 100_000,
+        codex_autocompact_tokens: 1_000_000,
+      }),
+    ).toMatchObject({
+      claude_autocompact_tokens: 100_000,
+      codex_autocompact_tokens: 1_000_000,
+    });
+  });
+
+  it("ignores values the daemon would reject", () => {
+    for (const value of [0, 99_999, 1_000_001, -1, 250_000.5, "250000", null, Number.NaN]) {
+      const preferences = normalizePreferences({
+        claude_autocompact_tokens: value,
+        codex_autocompact_tokens: value,
+      });
+      expect(preferences.claude_autocompact_tokens).toBe(200_000);
+      expect(preferences.codex_autocompact_tokens).toBeNull();
+    }
+  });
+});
+
 describe("agent child limit preference", () => {
   it("defaults to five and ignores values the daemon would reject", () => {
     expect(normalizePreferences({}).max_agent_children).toBe(5);

@@ -540,6 +540,7 @@ async fn probe_codex_live(
         Some("danger-full-access"),
         "never",
         None,
+        None,
     );
     start_params["ephemeral"] = json!(true);
     let started = session.send_request("thread/start", start_params).await;

@@ -154,6 +154,9 @@ struct TurnConstruction {
     hooks_enabled: bool,
     control_mcp: bool,
     extensions_mcp: bool,
+    /// Compaction window the CLI was launched with; a changed setting must not
+    /// reuse a parked process that still has the old one.
+    autocompact_tokens: Option<u32>,
 }
 
 struct ActiveTurn {
@@ -301,6 +304,7 @@ impl ClaudeRuntime {
         cwd: &str,
         builtin: &crate::connectors::BuiltinConnectors,
         agent_context: Option<&str>,
+        autocompact_tokens: u32,
     ) -> Result<ClaudeTurnSpawn, DaemonError> {
         // Serialize the whole remove-kill-spawn-insert sequence per thread so
         // concurrent spawns cannot run two CLI processes on one session.
@@ -328,6 +332,7 @@ impl ClaudeRuntime {
             hooks_enabled,
             control_mcp: builtin.control.is_some(),
             extensions_mcp: builtin.extensions.is_some(),
+            autocompact_tokens: autocompact_window(model_id, autocompact_tokens),
         };
         // Clear any interrupt aimed at earlier turns; interrupts arriving from
         // here on target this spawn and are re-checked after insertion below.
@@ -423,11 +428,11 @@ impl ClaudeRuntime {
         }
         // Current Claude models have a native 1M window and the CLI only
         // compacts near 967K, so a long thread re-reads up to ~1M cached tokens
-        // every turn. Compact at a smaller window unless the user picked an
+        // every turn. Compact at the user's chosen window unless they picked an
         // explicit 1M model. The environment variable outranks settings files,
         // and older CLIs that don't know it simply ignore it.
-        match autocompact_window(model_id) {
-            Some(window) => command.env(AUTOCOMPACT_ENV, window),
+        match construction.autocompact_tokens {
+            Some(window) => command.env(AUTOCOMPACT_ENV, window.to_string()),
             None => command.env_remove(AUTOCOMPACT_ENV),
         };
         if let Some(effort) = effort {
@@ -1380,9 +1385,6 @@ fn claude_model(
     }
 }
 
-/// Tokens at which FalconDeck-run Claude sessions compact unless a `[1m]`
-/// model was chosen. Claude Code accepts 100K to 1M.
-pub const DEFAULT_AUTOCOMPACT_WINDOW: &str = "200000";
 const AUTOCOMPACT_ENV: &str = "CLAUDE_CODE_AUTO_COMPACT_WINDOW";
 
 /// Whether the model id asks for the full context window (`opus[1m]`).
@@ -1390,13 +1392,14 @@ pub fn is_full_context_model(model_id: &str) -> bool {
     model_id.trim().to_ascii_lowercase().ends_with("[1m]")
 }
 
-/// The compaction window to impose, or `None` to leave the CLI's own
-/// near-1M default for an explicit `[1m]` model.
-fn autocompact_window(model_id: Option<&str>) -> Option<&'static str> {
+/// The compaction window to impose (the `claude_autocompact_tokens`
+/// preference, which Claude Code accepts from 100K to 1M), or `None` to leave
+/// the CLI's own near-1M default for an explicit `[1m]` model.
+fn autocompact_window(model_id: Option<&str>, tokens: u32) -> Option<u32> {
     if model_id.is_some_and(is_full_context_model) {
         None
     } else {
-        Some(DEFAULT_AUTOCOMPACT_WINDOW)
+        Some(tokens)
     }
 }
 
@@ -2412,17 +2415,20 @@ mod tests {
 
     #[test]
     fn sessions_compact_early_unless_a_1m_model_is_chosen() {
-        assert_eq!(autocompact_window(None), Some(DEFAULT_AUTOCOMPACT_WINDOW));
+        let default = falcondeck_core::DEFAULT_CLAUDE_AUTOCOMPACT_TOKENS;
+        assert_eq!(autocompact_window(None, default), Some(200_000));
+        assert_eq!(autocompact_window(Some("opus"), default), Some(200_000));
         assert_eq!(
-            autocompact_window(Some("opus")),
-            Some(DEFAULT_AUTOCOMPACT_WINDOW)
+            autocompact_window(Some("claude-opus-5-5"), default),
+            Some(200_000)
         );
+        // The window follows the preference rather than a constant.
+        assert_eq!(autocompact_window(Some("opus"), 350_000), Some(350_000));
+        assert_eq!(autocompact_window(Some("opus[1m]"), 350_000), None);
         assert_eq!(
-            autocompact_window(Some("claude-opus-5-5")),
-            Some(DEFAULT_AUTOCOMPACT_WINDOW)
+            autocompact_window(Some(" Claude-Fable-5-1[1M] "), default),
+            None
         );
-        assert_eq!(autocompact_window(Some("opus[1m]")), None);
-        assert_eq!(autocompact_window(Some(" Claude-Fable-5-1[1M] ")), None);
     }
 
     #[test]
@@ -3426,6 +3432,7 @@ mod tests {
                     hooks_enabled: false,
                     control_mcp: false,
                     extensions_mcp: false,
+                    autocompact_tokens: Some(200_000),
                 },
                 awaiting_next_turn: true,
                 parked_at: Some(tokio::time::Instant::now() - WARM_IDLE_GRACE),
@@ -3519,12 +3526,47 @@ mod tests {
                 "/tmp/project",
                 &Default::default(),
                 None,
+                200_000,
             )
             .await
             .unwrap();
         assert_eq!(spawn.generation, 1);
         assert!(spawn.stdout.is_none(), "a warm turn must reuse its reader");
         assert!(!runtime.retire_parked_turn_if_idle("thread-1", 1).await);
+        runtime.shutdown().await.unwrap();
+        fixture_process_exits(pid).await;
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn changed_autocompact_setting_does_not_reuse_a_parked_process() {
+        // The binary does not exist, so any path that falls through to a fresh
+        // spawn fails; only warm reuse of the parked fixture can succeed.
+        let runtime = ClaudeRuntime::for_test(
+            "/tmp/project".to_string(),
+            "/nonexistent/fd-test-claude".to_string(),
+        );
+        let pid = parked_fixture(&runtime, "cat >/dev/null").await;
+        let settings = tempfile::tempdir().unwrap();
+        let result = runtime
+            .spawn_turn(
+                "thread-1",
+                Some("native-session"),
+                None,
+                "continue",
+                &[],
+                None,
+                None,
+                None,
+                None,
+                settings.path(),
+                "/tmp/project",
+                &Default::default(),
+                None,
+                300_000,
+            )
+            .await;
+        assert!(result.is_err(), "a new window needs a new CLI process");
         runtime.shutdown().await.unwrap();
         fixture_process_exits(pid).await;
     }

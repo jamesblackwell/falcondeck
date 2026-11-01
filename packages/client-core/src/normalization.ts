@@ -386,11 +386,25 @@ const DEFAULT_COMPUTER_USE_PREFERENCES: NonNullable<
 export const DEFAULT_MAX_AGENT_CHILDREN = 5;
 export const MIN_MAX_AGENT_CHILDREN = 1;
 export const MAX_MAX_AGENT_CHILDREN = 20;
+export const DEFAULT_CLAUDE_AUTOCOMPACT_TOKENS = 200_000;
+export const MIN_AUTOCOMPACT_TOKENS = 100_000;
+export const MAX_AUTOCOMPACT_TOKENS = 1_000_000;
+
+function isAutocompactTokens(value: unknown): value is number {
+  return (
+    typeof value === "number" &&
+    Number.isInteger(value) &&
+    value >= MIN_AUTOCOMPACT_TOKENS &&
+    value <= MAX_AUTOCOMPACT_TOKENS
+  );
+}
 
 const DEFAULT_PREFERENCES: FalconDeckPreferences = {
   version: 1,
   auto_resume_interrupted_sessions: false,
   max_agent_children: DEFAULT_MAX_AGENT_CHILDREN,
+  claude_autocompact_tokens: DEFAULT_CLAUDE_AUTOCOMPACT_TOKENS,
+  codex_autocompact_tokens: null,
   workspace_order: [],
   hidden_workspace_ids: [],
   workspace_colors: {},
@@ -2362,6 +2376,12 @@ export function normalizePreferences(value: unknown): FalconDeckPreferences {
       raw.max_agent_children <= MAX_MAX_AGENT_CHILDREN
         ? raw.max_agent_children
         : DEFAULT_MAX_AGENT_CHILDREN,
+    claude_autocompact_tokens: isAutocompactTokens(raw.claude_autocompact_tokens)
+      ? raw.claude_autocompact_tokens
+      : DEFAULT_CLAUDE_AUTOCOMPACT_TOKENS,
+    codex_autocompact_tokens: isAutocompactTokens(raw.codex_autocompact_tokens)
+      ? raw.codex_autocompact_tokens
+      : null,
     workspace_order: workspaceOrder,
     hidden_workspace_ids: Array.isArray(raw.hidden_workspace_ids)
       ? [

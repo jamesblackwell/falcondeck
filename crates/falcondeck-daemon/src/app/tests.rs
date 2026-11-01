@@ -8838,6 +8838,51 @@ fn codex_turn_failures_keep_provider_detail() {
 }
 
 #[tokio::test]
+async fn update_preferences_validates_and_applies_autocompact_points() {
+    let temp = tempdir().unwrap();
+    let app = AppState::new_with_state_path(
+        "test-version".to_string(),
+        HashMap::new(),
+        temp.path().join("state.json"),
+    );
+    for request in [
+        falcondeck_core::UpdatePreferencesRequest {
+            claude_autocompact_tokens: Some(99_999),
+            ..Default::default()
+        },
+        falcondeck_core::UpdatePreferencesRequest {
+            codex_autocompact_tokens: Some(Some(1_000_001)),
+            ..Default::default()
+        },
+    ] {
+        let error = app.update_preferences(request).await.unwrap_err();
+        assert!(matches!(error, crate::DaemonError::BadRequest(_)));
+    }
+    assert_eq!(app.preferences().await.claude_autocompact_tokens, 200_000);
+    assert_eq!(app.preferences().await.codex_autocompact_tokens, None);
+
+    let updated = app
+        .update_preferences(falcondeck_core::UpdatePreferencesRequest {
+            claude_autocompact_tokens: Some(300_000),
+            codex_autocompact_tokens: Some(Some(250_000)),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    assert_eq!(updated.claude_autocompact_tokens, 300_000);
+    assert_eq!(updated.codex_autocompact_tokens, Some(250_000));
+    let cleared = app
+        .update_preferences(falcondeck_core::UpdatePreferencesRequest {
+            codex_autocompact_tokens: Some(None),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    assert_eq!(cleared.claude_autocompact_tokens, 300_000);
+    assert_eq!(cleared.codex_autocompact_tokens, None);
+}
+
+#[tokio::test]
 async fn backup_and_restore_cycle_restores_preferences_workspaces_and_extensions() {
     let temp = tempdir().unwrap();
     let state_path = temp.path().join("state.json");

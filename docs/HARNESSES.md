@@ -86,6 +86,31 @@ enrichment only queries threads already loaded by this daemon; it must not
 resume an idle thread to inspect it. Completed turns still unsubscribe to
 release native ownership.
 
+## Compaction point
+
+Long threads re-read their whole history every turn, and a check-in that misses
+the prompt cache pays full input price for all of it, so compaction happens
+earlier than the harnesses default to. Settings → General → Agents exposes two
+preferences (100K–1M tokens, validated by the daemon; out-of-range stored
+values fall back to the default):
+
+- `claude_autocompact_tokens`, default 200K. Passed to each Claude CLI as
+  `CLAUDE_CODE_AUTO_COMPACT_WINDOW`. The explicit `opus[1m]` and `fable[1m]`
+  model rows ignore it and keep Claude Code's own near-1M default. The value
+  is part of the warm-process identity, so the next turn after a change
+  respawns the CLI; a turn already running keeps its old window.
+- `codex_autocompact_tokens`, default unset ("Codex default"). Sent as
+  `config: {model_auto_compact_token_limit}` on `thread/start` and
+  `thread/resume`, not as a `-c` launch flag, so the persistent app-server
+  never needs a relaunch. Unset sends no `config` at all. A change reaches a
+  thread the next time it is loaded into the app-server: new threads
+  immediately, existing ones on the first send after they unload (idle
+  threads unload about a second after a turn ends). A turn in flight is
+  unaffected. Codex compacts before the next sampling request once the active
+  context passes the limit, so the first turn after a thread grows past it is
+  the one that compacts. If `~/.codex/config.toml` sets its own limit, the
+  FalconDeck setting overrides it only while a value is set.
+
 ## Subscription usage
 
 `GET /api/provider-usage` (and relay RPC `providers.usage`) returns live

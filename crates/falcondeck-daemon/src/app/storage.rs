@@ -209,6 +209,11 @@ pub(super) fn merge_preferences_from_value(value: Value) -> FalconDeckPreference
     {
         preferences.max_agent_children = limit;
     }
+    if let Some(tokens) = autocompact_tokens_from_value(value.get("claude_autocompact_tokens")) {
+        preferences.claude_autocompact_tokens = tokens;
+    }
+    preferences.codex_autocompact_tokens =
+        autocompact_tokens_from_value(value.get("codex_autocompact_tokens"));
     if let Some(version) = value.get("version").and_then(Value::as_u64) {
         preferences.version = version as u32;
     }
@@ -426,6 +431,31 @@ fn max_agent_children_in_range(limit: u32) -> bool {
         .contains(&limit)
 }
 
+fn autocompact_tokens_in_range(tokens: u32) -> bool {
+    (falcondeck_core::MIN_AUTOCOMPACT_TOKENS..=falcondeck_core::MAX_AUTOCOMPACT_TOKENS)
+        .contains(&tokens)
+}
+
+/// A stored auto-compact point, or `None` for anything missing or outside the
+/// range the daemon would accept, so junk in the file falls back to defaults.
+fn autocompact_tokens_from_value(value: Option<&Value>) -> Option<u32> {
+    value
+        .and_then(Value::as_u64)
+        .and_then(|tokens| u32::try_from(tokens).ok())
+        .filter(|tokens| autocompact_tokens_in_range(*tokens))
+}
+
+pub(super) fn validate_autocompact_tokens(field: &str, tokens: u32) -> Result<(), DaemonError> {
+    if autocompact_tokens_in_range(tokens) {
+        return Ok(());
+    }
+    Err(DaemonError::BadRequest(format!(
+        "{field} must be between {} and {}",
+        falcondeck_core::MIN_AUTOCOMPACT_TOKENS,
+        falcondeck_core::MAX_AUTOCOMPACT_TOKENS
+    )))
+}
+
 pub(super) fn validate_max_agent_children(limit: u32) -> Result<(), DaemonError> {
     if max_agent_children_in_range(limit) {
         return Ok(());
@@ -446,6 +476,19 @@ pub(super) fn apply_preferences_patch(
     }
     if let Some(limit) = request.max_agent_children.filter(|l| max_agent_children_in_range(*l)) {
         preferences.max_agent_children = limit;
+    }
+    if let Some(tokens) = request
+        .claude_autocompact_tokens
+        .filter(|tokens| autocompact_tokens_in_range(*tokens))
+    {
+        preferences.claude_autocompact_tokens = tokens;
+    }
+    match request.codex_autocompact_tokens {
+        Some(Some(tokens)) if autocompact_tokens_in_range(tokens) => {
+            preferences.codex_autocompact_tokens = Some(tokens);
+        }
+        Some(None) => preferences.codex_autocompact_tokens = None,
+        _ => {}
     }
     if let Some(model) = request.title_suggestion_model {
         preferences.title_suggestion_model = normalize_title_suggestion_model(&model);
@@ -1260,6 +1303,93 @@ mod tests {
             UpdatePreferencesRequest { max_agent_children: Some(99), ..Default::default() },
         );
         assert_eq!(preferences.max_agent_children, 5);
+    }
+
+    #[tokio::test]
+    async fn autocompact_preferences_default_and_round_trip() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("falcondeck.json");
+        let mut preferences = load_preferences(&path).await.unwrap();
+        assert_eq!(preferences.claude_autocompact_tokens, 200_000);
+        assert_eq!(preferences.codex_autocompact_tokens, None);
+        let empty = serde_json::from_value::<FalconDeckPreferences>(json!({})).unwrap();
+        assert_eq!(empty.claude_autocompact_tokens, 200_000);
+        assert_eq!(empty.codex_autocompact_tokens, None);
+
+        apply_preferences_patch(
+            &mut preferences,
+            UpdatePreferencesRequest {
+                claude_autocompact_tokens: Some(350_000),
+                codex_autocompact_tokens: Some(Some(250_000)),
+                ..Default::default()
+            },
+        );
+        persist_preferences(&path, &preferences).await.unwrap();
+        let loaded = load_preferences(&path).await.unwrap();
+        assert_eq!(loaded.claude_autocompact_tokens, 350_000);
+        assert_eq!(loaded.codex_autocompact_tokens, Some(250_000));
+
+        // Omitting either field leaves it alone; an explicit null restores
+        // Codex's own default.
+        apply_preferences_patch(&mut preferences, UpdatePreferencesRequest::default());
+        assert_eq!(preferences.claude_autocompact_tokens, 350_000);
+        assert_eq!(preferences.codex_autocompact_tokens, Some(250_000));
+        let reset: UpdatePreferencesRequest =
+            serde_json::from_value(json!({"codex_autocompact_tokens": null})).unwrap();
+        assert_eq!(reset.codex_autocompact_tokens, Some(None));
+        apply_preferences_patch(&mut preferences, reset);
+        assert_eq!(preferences.codex_autocompact_tokens, None);
+        let absent: UpdatePreferencesRequest = serde_json::from_value(json!({})).unwrap();
+        assert_eq!(absent.codex_autocompact_tokens, None);
+    }
+
+    #[test]
+    fn autocompact_preferences_accept_100k_to_1m_and_ignore_junk() {
+        for ok in [100_000, 200_000, 1_000_000] {
+            assert!(validate_autocompact_tokens("claude_autocompact_tokens", ok).is_ok());
+        }
+        for bad in [0, 99_999, 1_000_001, u32::MAX] {
+            let error = validate_autocompact_tokens("codex_autocompact_tokens", bad).unwrap_err();
+            assert!(matches!(error, DaemonError::BadRequest(_)));
+            let message = error.to_string();
+            assert!(message.contains("codex_autocompact_tokens"));
+            assert!(message.contains("between 100000 and 1000000"));
+        }
+        for stored in [
+            json!(0),
+            json!(99_999),
+            json!(1_000_001),
+            json!(-1),
+            json!(250_000.5),
+            json!("250000"),
+            json!(null),
+            json!(u64::MAX),
+        ] {
+            let merged = merge_preferences_from_value(json!({
+                "claude_autocompact_tokens": stored,
+                "codex_autocompact_tokens": stored,
+            }));
+            assert_eq!(merged.claude_autocompact_tokens, 200_000, "{stored}");
+            assert_eq!(merged.codex_autocompact_tokens, None, "{stored}");
+        }
+        let merged = merge_preferences_from_value(json!({
+            "claude_autocompact_tokens": 400_000,
+            "codex_autocompact_tokens": 300_000,
+        }));
+        assert_eq!(merged.claude_autocompact_tokens, 400_000);
+        assert_eq!(merged.codex_autocompact_tokens, Some(300_000));
+        // An out-of-range patch is ignored rather than stored.
+        let mut preferences = FalconDeckPreferences::default();
+        apply_preferences_patch(
+            &mut preferences,
+            UpdatePreferencesRequest {
+                claude_autocompact_tokens: Some(5),
+                codex_autocompact_tokens: Some(Some(5_000_000)),
+                ..Default::default()
+            },
+        );
+        assert_eq!(preferences.claude_autocompact_tokens, 200_000);
+        assert_eq!(preferences.codex_autocompact_tokens, None);
     }
 
     #[test]
