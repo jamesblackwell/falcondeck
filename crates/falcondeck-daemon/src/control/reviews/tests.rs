@@ -116,7 +116,15 @@ async fn create_freezes_small_evidence_and_references_large_files() {
     assert_eq!(evidence[0].kind, ReviewEvidenceKind::Image);
     assert!(evidence[0].snapshotted);
     let copy = PathBuf::from(evidence[0].open_path.as_deref().unwrap());
-    assert!(copy.starts_with(f.root.path().canonicalize().unwrap().join("state/reviews/R-1")));
+    assert!(
+        copy.starts_with(
+            f.root
+                .path()
+                .canonicalize()
+                .unwrap()
+                .join("state/reviews/R-1")
+        )
+    );
     assert_eq!(std::fs::read(&copy).unwrap(), b"\x89PNG-original");
     // What James approves cannot change underneath him.
     std::fs::write(&small, b"changed later").unwrap();
@@ -157,7 +165,11 @@ async fn evidence_outside_the_preview_policy_is_refused_and_leaves_nothing_behin
     }
     // The first, valid file was copied before the second failed: cleaned up.
     assert!(!dir.join("state/reviews/R-1").exists());
-    let listing = f.store.get(&read("reviews", json!({"include_closed":true}))).await.unwrap();
+    let listing = f
+        .store
+        .get(&read("reviews", json!({"include_closed":true})))
+        .await
+        .unwrap();
     assert_eq!(listing.data, json!([]));
 }
 
@@ -466,7 +478,12 @@ async fn an_agent_may_have_five_open_reviews_and_closing_one_frees_a_slot() {
     }
     let error = f
         .store
-        .create(args(vec![item("Hero", vec![])]), actor("Juno"), source(), &f.access)
+        .create(
+            args(vec![item("Hero", vec![])]),
+            actor("Juno"),
+            source(),
+            &f.access,
+        )
         .await
         .unwrap_err();
     assert_eq!(error.0.code, "review_limit");
@@ -488,7 +505,12 @@ async fn an_agent_may_have_five_open_reviews_and_closing_one_frees_a_slot() {
         .await
         .unwrap();
     f.store
-        .create(args(vec![item("Hero", vec![])]), actor("Juno"), source(), &f.access)
+        .create(
+            args(vec![item("Hero", vec![])]),
+            actor("Juno"),
+            source(),
+            &f.access,
+        )
         .await
         .unwrap();
 }
@@ -498,12 +520,22 @@ async fn reviews_survive_reload_list_newest_first_and_hide_closed_by_default() {
     let f = fixture().await;
     let first = f
         .store
-        .create(args(vec![item("A", vec![])]), actor("Juno"), source(), &f.access)
+        .create(
+            args(vec![item("A", vec![])]),
+            actor("Juno"),
+            source(),
+            &f.access,
+        )
         .await
         .unwrap();
     let second = f
         .store
-        .create(args(vec![item("B", vec![])]), actor("Juno"), source(), &f.access)
+        .create(
+            args(vec![item("B", vec![])]),
+            actor("Juno"),
+            source(),
+            &f.access,
+        )
         .await
         .unwrap();
     f.store
@@ -537,7 +569,12 @@ async fn reviews_survive_reload_list_newest_first_and_hide_closed_by_default() {
         .unwrap();
     assert_eq!(one.data["items"][0]["title"], "B");
     let third = store
-        .create(args(vec![item("C", vec![])]), actor("Juno"), source(), &f.access)
+        .create(
+            args(vec![item("C", vec![])]),
+            actor("Juno"),
+            source(),
+            &f.access,
+        )
         .await
         .unwrap();
     assert_eq!(third.id, "R-3");
@@ -562,7 +599,12 @@ async fn an_unreadable_or_future_file_is_left_untouched() {
     std::fs::write(&path, future).unwrap();
     let error = f
         .store
-        .create(args(vec![item("A", vec![])]), actor("Juno"), source(), &f.access)
+        .create(
+            args(vec![item("A", vec![])]),
+            actor("Juno"),
+            source(),
+            &f.access,
+        )
         .await
         .unwrap_err();
     assert_eq!(error.0.code, "storage_unavailable");
@@ -579,7 +621,11 @@ async fn response_message_quotes_feedback_verbatim_per_item() {
                 title: "Pricing page".into(),
                 ask: "Ship the new hero?".into(),
                 recommendation: "Ship B.".into(),
-                items: vec![item("Hero", vec![]), item("Pricing table", vec![]), item("Footer", vec![])],
+                items: vec![
+                    item("Hero", vec![]),
+                    item("Pricing table", vec![]),
+                    item("Footer", vec![]),
+                ],
                 ..Default::default()
             },
             actor("Juno"),

@@ -16,9 +16,9 @@ use falcondeck_core::reviews::*;
 use serde::{Deserialize, Serialize};
 use tokio::sync::Mutex;
 
+use super::ControlError;
 use super::registry::{Capability, ops};
 use super::service::{ControlDeps, ControlService, actor_name, decode_arguments};
-use super::ControlError;
 use crate::file_preview::{self, FileAccessPolicy, FileTarget};
 
 /// Open reviews one agent (a bot, or a provider's task threads) may have at once.
@@ -240,7 +240,9 @@ impl ReviewStore {
             created_by: actor,
             created_at: now,
             updated_at: now,
-            folder: folder.exists().then(|| folder.to_string_lossy().into_owned()),
+            folder: folder
+                .exists()
+                .then(|| folder.to_string_lossy().into_owned()),
             responded_at: None,
             overall_decision: None,
             overall_note: None,
@@ -381,7 +383,9 @@ impl ReviewStore {
                 "Only James can respond to a review.",
                 false,
             )
-            .with_suggested_action("Wait for James; his decision arrives as a message in your thread."));
+            .with_suggested_action(
+                "Wait for James; his decision arrives as a message in your thread.",
+            ));
         }
         if let Some(note) = &args.note {
             text_field("note", note.trim(), MAX_FEEDBACK_CHARS, false)?;
@@ -421,7 +425,10 @@ impl ReviewStore {
             }
         }
         for item in &mut review.items {
-            let own = args.items.iter().find(|response| response.item_id == item.id);
+            let own = args
+                .items
+                .iter()
+                .find(|response| response.item_id == item.id);
             item.decision = own.map(|response| response.decision).or(args.decision);
             item.feedback = own.and_then(|response| nonempty(response.feedback.clone()));
             if item.decision.is_none() {
@@ -634,7 +641,10 @@ pub(crate) fn response_message(review: &Review) -> String {
         }
     );
     if let Some(decision) = review.overall_decision {
-        out.push_str(&format!("Whole-review decision: {}\n", label(Some(decision))));
+        out.push_str(&format!(
+            "Whole-review decision: {}\n",
+            label(Some(decision))
+        ));
     }
     let total = review.items.len();
     for (index, item) in review.items.iter().enumerate() {
@@ -650,7 +660,10 @@ pub(crate) fn response_message(review: &Review) -> String {
         }
     }
     if let Some(note) = &review.overall_note {
-        out.push_str(&format!("\nNote from James on the whole review:\n{}\n", quote(note)));
+        out.push_str(&format!(
+            "\nNote from James on the whole review:\n{}\n",
+            quote(note)
+        ));
     }
     out.push_str(
         "\nThis review is closed. Act on the decisions above; publish a new review if you need another decision.",
@@ -794,10 +807,10 @@ async fn build_evidence(
                         "evidence.path",
                         format!(
                             "{path}: {}",
-                            error.to_string().split_once(": ").map_or_else(
-                                || error.to_string(),
-                                |(_, rest)| rest.to_string()
-                            )
+                            error
+                                .to_string()
+                                .split_once(": ")
+                                .map_or_else(|| error.to_string(), |(_, rest)| rest.to_string())
                         ),
                     )
                 })?;
@@ -820,11 +833,9 @@ async fn build_evidence(
                 #[cfg(unix)]
                 {
                     use std::os::unix::fs::PermissionsExt;
-                    let _ = tokio::fs::set_permissions(
-                        &dest,
-                        std::fs::Permissions::from_mode(0o600),
-                    )
-                    .await;
+                    let _ =
+                        tokio::fs::set_permissions(&dest, std::fs::Permissions::from_mode(0o600))
+                            .await;
                 }
                 *budget -= meta.size_bytes;
                 open_path = dest.to_string_lossy().into_owned();
@@ -884,7 +895,10 @@ fn require_open_and_owned(review: &Review, actor: &ReviewActor) -> Result<(), Co
     if !is_james(actor) && review.created_by.name != actor.name {
         return Err(ControlError::new(
             "review_forbidden",
-            format!("{} belongs to {}; you can only change your own reviews.", review.id, review.created_by.name),
+            format!(
+                "{} belongs to {}; you can only change your own reviews.",
+                review.id, review.created_by.name
+            ),
             false,
         ));
     }

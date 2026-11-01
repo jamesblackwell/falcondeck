@@ -259,11 +259,25 @@ mod tests {
         // An agent, including the author, cannot answer its own review.
         let answer = json!({"review_id": "R-1", "decision": "approve"});
         for thread in [Some("thread-1"), None] {
-            let refused = execute(&app, ControlOrigin::Mcp, thread, "review.respond", answer.clone()).await;
+            let refused = execute(
+                &app,
+                ControlOrigin::Mcp,
+                thread,
+                "review.respond",
+                answer.clone(),
+            )
+            .await;
             assert_eq!(refused["ok"], false);
             assert_eq!(refused["error"]["code"], "review_forbidden", "{refused}");
         }
-        let scheduler = execute(&app, ControlOrigin::Scheduler, None, "review.respond", answer.clone()).await;
+        let scheduler = execute(
+            &app,
+            ControlOrigin::Scheduler,
+            None,
+            "review.respond",
+            answer.clone(),
+        )
+        .await;
         assert_eq!(scheduler["error"]["code"], "review_forbidden");
         assert!(!capture.exists(), "nothing reached the agent");
 
@@ -299,7 +313,14 @@ mod tests {
             assert!(seen.contains(needle), "{needle}\n{seen}");
         }
         // The decision is final.
-        let again = execute(&app, ControlOrigin::DesktopUi, None, "review.respond", answer).await;
+        let again = execute(
+            &app,
+            ControlOrigin::DesktopUi,
+            None,
+            "review.respond",
+            answer,
+        )
+        .await;
         assert_eq!(again["error"]["code"], "review_closed");
     }
 
@@ -342,7 +363,10 @@ mod tests {
             json!({"review_id": "R-1", "decision": "approve"}),
         )
         .await;
-        assert_eq!(responded["data"]["delivery"]["state"], "delivered", "{responded}");
+        assert_eq!(
+            responded["data"]["delivery"]["state"], "delivered",
+            "{responded}"
+        );
         captured(&capture, "James responded to your review R-1").await;
     }
 
@@ -440,7 +464,14 @@ mod tests {
         }
 
         // No source thread: the response is recorded without starting a turn.
-        execute(&app, ControlOrigin::Mcp, None, "review.create", publish(json!([]))).await;
+        execute(
+            &app,
+            ControlOrigin::Mcp,
+            None,
+            "review.create",
+            publish(json!([])),
+        )
+        .await;
         let listed = app
             .dispatch_remote_rpc("reviews.list", json!({}))
             .await
@@ -475,7 +506,10 @@ mod tests {
             "overall_note": null, "delivery": null
         }))
         .unwrap();
-        assert_eq!(review_push_line(&review), "Juno needs a decision: Pricing page");
+        assert_eq!(
+            review_push_line(&review),
+            "Juno needs a decision: Pricing page"
+        );
         review.bot = None;
         review.title = "  Long ".repeat(80);
         let line = review_push_line(&review);
