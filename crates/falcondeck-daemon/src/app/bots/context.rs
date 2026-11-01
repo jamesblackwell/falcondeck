@@ -14,6 +14,69 @@ const PROJECT_CONTEXT_STEMS: [&str; 8] = [
     "COMPANY", "VISION", "MISSION", "GOALS", "STRATEGY", "METRICS", "BRAND", "ROADMAP",
 ];
 
+/// Upkeep limits for a bot's own files and shared team indexes; a note appears from 80%.
+const STATUS_LIMIT: u64 = 4 * 1024;
+const MEMORY_LIMIT: u64 = 8 * 1024;
+const SHARED_LIMIT: u64 = 6 * 1024;
+const SHARED_FILE: &str = "SHARED.md";
+/// STATUS.md older than this gets a refresh reminder.
+const STATUS_STALE: std::time::Duration = std::time::Duration::from_secs(24 * 60 * 60);
+
+/// One-line size reminder, or nothing while comfortably under the limit.
+fn size_note(name: &str, bytes: u64, limit: u64, fix: &str) -> Option<String> {
+    let kb = |n: u64| format!("{:.1} KB", n as f64 / 1024.0);
+    if bytes > limit {
+        Some(format!(
+            "{name} is {} (limit {}): {fix} now.",
+            kb(bytes),
+            kb(limit)
+        ))
+    } else if bytes * 5 >= limit * 4 {
+        Some(format!(
+            "{name} is {} (limit {}): {fix} before adding more.",
+            kb(bytes),
+            kb(limit)
+        ))
+    } else {
+        None
+    }
+}
+
+/// Reminders about the bot's own STATUS.md and MEMORY.md, read from disk each turn.
+fn upkeep_notes(space: &Path, now: std::time::SystemTime) -> Vec<String> {
+    let mut notes = Vec::new();
+    match std::fs::metadata(space.join("STATUS.md")) {
+        Ok(meta) => {
+            notes.extend(size_note(
+                "STATUS.md",
+                meta.len(),
+                STATUS_LIMIT,
+                "rewrite it shorter, one line per item with links",
+            ));
+            let age = meta
+                .modified()
+                .ok()
+                .and_then(|at| now.duration_since(at).ok());
+            if let Some(age) = age.filter(|age| *age > STATUS_STALE) {
+                notes.push(format!(
+                    "STATUS.md was last updated {} days ago: refresh it if anything has changed.",
+                    age.as_secs().div_ceil(24 * 60 * 60).max(1)
+                ));
+            }
+        }
+        Err(_) => notes.push("STATUS.md is missing: create it.".into()),
+    }
+    if let Ok(meta) = std::fs::metadata(space.join("MEMORY.md")) {
+        notes.extend(size_note(
+            "MEMORY.md",
+            meta.len(),
+            MEMORY_LIMIT,
+            "move detail into linked notes and drop stale entries",
+        ));
+    }
+    notes
+}
+
 /// Rough token estimate: about four characters per token.
 fn estimate_tokens(text: &str) -> u64 {
     (text.chars().count() as u64).div_ceil(4)
@@ -169,6 +232,17 @@ impl AppState {
                 ""
             };
             let (body, error) = match read {
+                Ok(text) if name.eq_ignore_ascii_case(SHARED_FILE) => {
+                    let note = size_note(
+                        &name,
+                        text.len() as u64,
+                        SHARED_LIMIT,
+                        "prune stale or long lines",
+                    )
+                    .map(|note| format!("\n\n[FalconDeck: {note}]"))
+                    .unwrap_or_default();
+                    (format!("{text}{note}"), None)
+                }
                 Ok(text) => (text, None),
                 Err(error) => (format!("(Unavailable: {error})"), Some(error)),
             };
@@ -216,6 +290,18 @@ impl AppState {
             listed.push_str(&format!(
                 "\n- …{} older projects; workspace_id also accepts a project name or path.",
                 total - LISTED_PROJECTS
+            ));
+        }
+        let space = PathBuf::from(&bot.space_path);
+        let upkeep =
+            tokio::task::spawn_blocking(move || upkeep_notes(&space, std::time::SystemTime::now()))
+                .await
+                .unwrap_or_default();
+        if !upkeep.is_empty() {
+            let lines: String = upkeep.iter().map(|note| format!("\n- {note}")).collect();
+            parts.push(part(
+                "Upkeep",
+                format!("\n\n## Upkeep (from FalconDeck, checked each turn)\nFix these during this turn:{lines}"),
             ));
         }
         let documents = self.bot_documents(&bot.id).await.unwrap_or_default();
@@ -440,4 +526,48 @@ fn text_files_in(dir: &Path, location: &str, keep: impl Fn(&str) -> bool) -> Vec
         .collect();
     files.sort_by(|a, b| a.name.cmp(&b.name));
     files
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::{Duration, SystemTime};
+
+    #[test]
+    fn size_note_starts_at_eighty_percent() {
+        assert_eq!(size_note("X", 799, 1000, "trim"), None);
+        assert!(
+            size_note("X", 800, 1000, "trim")
+                .unwrap()
+                .contains("before adding more")
+        );
+        assert!(
+            size_note("X", 1001, 1000, "trim")
+                .unwrap()
+                .ends_with("trim now.")
+        );
+    }
+
+    #[test]
+    fn upkeep_flags_missing_large_and_stale_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let now = SystemTime::now();
+        assert_eq!(
+            upkeep_notes(dir.path(), now),
+            ["STATUS.md is missing: create it."]
+        );
+
+        std::fs::write(dir.path().join("STATUS.md"), "ok").unwrap();
+        std::fs::write(dir.path().join("MEMORY.md"), "x".repeat(9 * 1024)).unwrap();
+        let notes = upkeep_notes(dir.path(), now);
+        assert_eq!(notes.len(), 1);
+        assert!(notes[0].starts_with("MEMORY.md is 9.0 KB (limit 8.0 KB)"));
+
+        let later = now + Duration::from_secs(50 * 60 * 60);
+        assert!(
+            upkeep_notes(dir.path(), later)
+                .iter()
+                .any(|note| note.contains("last updated 3 days ago"))
+        );
+    }
 }
