@@ -38,6 +38,7 @@ pub const BOT_DEFAULT_INSTRUCTIONS: &str = concat!(
     "Consult your memory index when present and read supporting notes when relevant, especially after resuming or compaction, rather than relying on old conversation context. ",
     "Keep useful knowledge current; avoid boilerplate and per-turn logs. Your notes supplement the user's current and standing instructions. ",
     "Respect the user's edits and deletions; do not recreate deleted documents unless asked. ",
+    "If a context file says bots may edit it (a shared team index such as SHARED.md), follow its rules: one terse line per fact pointing to where the detail lives, only what another bot must know, your own lines only, and remove lines once stale. Prefer a shared line to an FYI message. ",
     "Use the existing approval flow for actions needing approval."
 );
 
