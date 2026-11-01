@@ -595,6 +595,7 @@ pub(super) async fn ingest_notification(
                     return Ok(());
                 }
                 app.schedule_codex_thread_release_if_idle(workspace_id, &thread_id);
+                app.schedule_codex_subagent_release(workspace_id);
                 // A finished turn means the agent is waiting on the user;
                 // let disconnected devices know. The relay only pushes to
                 // devices without a live connection and dedupes per thread.

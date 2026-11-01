@@ -10,7 +10,7 @@ use falcondeck_core::{
     TextDeltaTarget, ThreadAgentParams, ThreadAttention, ThreadAttentionLevel, ThreadStatus,
     ThreadSummary, ToolLifecycle, TurnInputItem, UnifiedEvent, merge_conversation_citations,
 };
-use serde_json::Value;
+use serde_json::{Value, json};
 use tokio::{
     io::{AsyncBufReadExt, AsyncReadExt},
     time::{Duration, timeout},
@@ -90,6 +90,14 @@ fn codex_thread_is_idle_for_release(thread: &ManagedThread) -> bool {
             thread.dispatching_request.is_some(),
             thread.transient_retry_in_flight,
         )
+}
+
+/// A `thread/read` response for a sub-agent that has finished its work.
+/// Only Codex sets `parentThreadId`, and only on `spawn_agent` children.
+fn is_idle_codex_subagent(read: &Value) -> bool {
+    let thread = &read["thread"];
+    thread["parentThreadId"].as_str().is_some_and(|id| !id.is_empty())
+        && thread["status"]["type"] == "idle"
 }
 
 /// How long a running Claude turn may stay silent — no stream traffic at all,
@@ -534,6 +542,68 @@ impl AppState {
                     thread.requires_resume = true;
                 })
                 .await;
+        });
+    }
+
+    /// Unload idle Codex-native sub-agents (`spawn_agent` children).
+    ///
+    /// The app-server never reports them to FalconDeck, so the per-thread
+    /// release above never sees them, and Codex keeps each one loaded, with
+    /// its own MCP server processes, for the life of the app-server, even
+    /// after its parent unloads. A parent that messages an unloaded child
+    /// later gets it reloaded transparently, so only active children stay.
+    pub(super) fn schedule_codex_subagent_release(&self, workspace_id: &str) {
+        let app = self.clone();
+        let workspace_id = workspace_id.to_string();
+        self.spawn_background_task(async move {
+            let _operation = app.codex_runtime_operation_guard(&workspace_id).await;
+            let session = {
+                let workspaces = app.inner.workspaces.lock().await;
+                workspaces
+                    .get(&workspace_id)
+                    .and_then(|workspace| workspace.codex_session.as_ref().map(Arc::clone))
+            };
+            let Some(session) = session else {
+                return;
+            };
+            let Some(lease) = session.lease().await else {
+                return;
+            };
+            let loaded = match lease.send_control_request("thread/loaded/list", json!({})).await {
+                Ok(response) => response,
+                Err(error) => {
+                    tracing::debug!(workspace_id = %workspace_id, %error, "could not list loaded Codex threads");
+                    return;
+                }
+            };
+            let thread_ids = loaded
+                .get("data")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+                .filter_map(Value::as_str);
+            for thread_id in thread_ids {
+                let Ok(read) = lease
+                    .send_control_request(
+                        "thread/read",
+                        json!({ "threadId": thread_id, "includeTurns": false }),
+                    )
+                    .await
+                else {
+                    continue;
+                };
+                if !is_idle_codex_subagent(&read) {
+                    continue;
+                }
+                if let Err(error) = lease.unsubscribe_thread(thread_id).await {
+                    tracing::debug!(
+                        workspace_id = %workspace_id,
+                        thread_id = %thread_id,
+                        %error,
+                        "could not release idle Codex sub-agent"
+                    );
+                }
+            }
         });
     }
 
@@ -3828,6 +3898,18 @@ mod tests {
     use super::*;
     use serde_json::json;
     use tempfile::tempdir;
+
+    #[test]
+    fn releases_only_idle_codex_subagents() {
+        let read = |parent: Value, status: &str| {
+            json!({"thread": {"id": "t", "parentThreadId": parent, "status": {"type": status}}})
+        };
+        assert!(is_idle_codex_subagent(&read(json!("p"), "idle")));
+        assert!(!is_idle_codex_subagent(&read(json!("p"), "active")));
+        assert!(!is_idle_codex_subagent(&read(Value::Null, "idle")));
+        assert!(!is_idle_codex_subagent(&read(json!(""), "idle")));
+        assert!(!is_idle_codex_subagent(&json!({})));
+    }
 
     #[test]
     fn background_parent_work_wakes_on_notification_before_response() {
