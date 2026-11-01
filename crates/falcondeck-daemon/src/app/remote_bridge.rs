@@ -1120,6 +1120,7 @@ impl AppState {
             Ok(params) => params,
             Err(error) => {
                 tracing::warn!("failed to decrypt remote rpc payload: {error}");
+                self.republish_bootstrap_for_stale_key().await;
                 let message = self.remote_rpc_result_message(
                     data_key,
                     request_id,

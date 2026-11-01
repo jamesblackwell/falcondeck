@@ -1337,6 +1337,58 @@ impl AppState {
     }
 }
 
+/// Minimum gap between stale-key bootstrap republishes, so a client looping
+/// on undecryptable requests cannot make the daemon flood the relay.
+const STALE_KEY_REPUBLISH_INTERVAL: Duration = Duration::from_secs(10);
+
+impl AppState {
+    /// Re-send the current data key to every trusted device after a client
+    /// sent a request this daemon cannot decrypt.
+    ///
+    /// That client holds a key from before a rotation (a revoke elsewhere).
+    /// Clients skip relay history on reconnect, so the bootstrap published at
+    /// rotation time never reaches one that was offline. Only still-trusted
+    /// bundles receive it, each wrapped to its own public key.
+    pub(super) async fn republish_bootstrap_for_stale_key(&self) {
+        static LAST: std::sync::Mutex<Option<tokio::time::Instant>> = std::sync::Mutex::new(None);
+        {
+            let mut last = LAST.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+            let now = tokio::time::Instant::now();
+            if last.is_some_and(|at| now.duration_since(at) < STALE_KEY_REPUBLISH_INTERVAL) {
+                return;
+            }
+            *last = Some(now);
+        }
+        let commands = {
+            let remote = self.inner.remote.lock().await;
+            let (Some(pairing), Some(command_tx)) = (remote.pairing.clone(), remote.command_tx.clone())
+            else {
+                return;
+            };
+            remote
+                .trusted_client_devices
+                .values()
+                .map(|bundle| {
+                    (
+                        command_tx.clone(),
+                        RemoteBridgeCommand::PublishBootstrap {
+                            pairing: Box::new(pairing.clone()),
+                            client_bundle: Box::new(bundle.clone()),
+                        },
+                    )
+                })
+                .collect::<Vec<_>>()
+        };
+        tracing::info!(
+            devices = commands.len(),
+            "republishing session bootstrap for a client with a stale key"
+        );
+        for (command_tx, command) in commands {
+            let _ = command_tx.send(command);
+        }
+    }
+}
+
 /// Removes every bootstrap route to a revoked device and rotates the shared
 /// data key. This is kept as one synchronous state transition so callers can
 /// persist and publish only internally consistent state.
