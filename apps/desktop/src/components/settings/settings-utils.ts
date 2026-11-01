@@ -81,10 +81,11 @@ export const SETTINGS_GROUPS: SettingsNavGroup[] = [
           "Parallel tasks per agent",
           "Compact Claude conversations at",
           "Compact Codex conversations at",
+          "Review inbox",
           "Updates",
           "First-run onboarding",
         ],
-        keywords: ["version", "release", "resume", "restart", "welcome", "children", "limit", "bots", "agents", "compact", "compaction", "context", "tokens", "cost"],
+        keywords: ["version", "release", "resume", "restart", "welcome", "children", "limit", "bots", "agents", "compact", "compaction", "context", "tokens", "cost", "reviews", "decisions", "approve"],
       },
       {
         id: "appearance",

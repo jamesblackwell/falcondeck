@@ -231,6 +231,12 @@ export function GeneralSettingsPanel({
               />
             }
           />
+          <SwitchRow
+            title="Review inbox"
+            description="Let agents and bots send you decisions to review, with their files. Off hides Reviews, and they reply in the conversation instead."
+            checked={current.review_inbox_enabled === true}
+            onCheckedChange={(enabled) => onUpdatePreferences({ review_inbox_enabled: enabled })}
+          />
         </SettingList>
       </SettingsSection>
 

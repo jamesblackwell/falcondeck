@@ -2,7 +2,8 @@
    Renders the settings shell with stubbed props so page layout, hierarchy and
    spacing can be checked without launching the app or a daemon.
    `?section=<SettingsSectionId>` picks the panel,
-   `?theme=light|dark` the mode, `?baseUrl=` points panels at a live daemon. */
+   `?theme=light|dark` the mode, `?baseUrl=` points panels at a live daemon,
+   `?reviews=1` turns the Review inbox switch on. */
 import { StrictMode } from "react";
 import { createRoot } from "react-dom/client";
 
@@ -78,7 +79,11 @@ export function Fixture() {
         hostManager={{} as HostManager}
         hosts={[]}
         onToast={noop}
-        preferences={null}
+        preferences={
+          params.get("reviews") === "1"
+            ? ({ review_inbox_enabled: true } as never)
+            : null
+        }
         remoteStatus={null}
         pairingLink={null}
         relayUrl=""
