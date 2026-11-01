@@ -4976,6 +4976,11 @@ fn push_notification_content<'a>(
             .filter(|preview| !preview.is_empty())
             .unwrap_or("An agent finished its turn"),
         "turn-error" => "An agent turn failed",
+        // The daemon writes the whole line ("Juno needs a decision: Pricing page").
+        "review" => message_preview
+            .map(str::trim)
+            .filter(|preview| !preview.is_empty())
+            .unwrap_or("An agent needs a decision from you"),
         _ => "An agent needs your attention",
     };
     (title, body)
@@ -5471,6 +5476,23 @@ mod tests {
         assert_eq!(
             push_notification_content("question", None, None),
             ("FalconDeck", "An agent asked you a question")
+        );
+    }
+
+    #[test]
+    fn review_pushes_carry_the_daemons_decision_line() {
+        assert_eq!(
+            push_notification_content(
+                "review",
+                Some("Juno"),
+                Some("  Juno needs a decision: Pricing page ")
+            ),
+            ("Juno", "Juno needs a decision: Pricing page")
+        );
+        // An older daemon sends no line: fall back, never the generic copy.
+        assert_eq!(
+            push_notification_content("review", None, Some("  ")),
+            ("FalconDeck", "An agent needs a decision from you")
         );
     }
 
