@@ -319,16 +319,50 @@ impl AppState {
         roots.push(PathBuf::from("/tmp"));
         roots.push(PathBuf::from("/private/tmp"));
 
-        let workspace_dir = match extract_string(params, &["workspaceId", "workspace_id"]) {
+        let workspace_id = extract_string(params, &["workspaceId", "workspace_id"]);
+        let mut workspace_dir = match &workspace_id {
             Some(workspace_id) => {
                 let thread_id = extract_string(params, &["threadId", "thread_id"]);
-                self.git_root(&workspace_id, thread_id.as_deref())
+                self.git_root(workspace_id, thread_id.as_deref())
                     .await
                     .ok()
                     .map(PathBuf::from)
             }
             None => None,
         };
+        // Bots write paths relative to their document space (`STATUS.md`), which
+        // sits inside their workspace; use it when the file is only found there.
+        let space = match &workspace_id {
+            Some(id) => self
+                .inner
+                .preferences
+                .lock()
+                .await
+                .bots
+                .iter()
+                .find(|bot| bot.workspace_id == *id)
+                .map(|bot| PathBuf::from(&bot.space_path)),
+            None => None,
+        };
+        // Plain relative names only, so the probe never looks outside the space.
+        let relative = extract_string(params, &["path"])
+            .map(|path| path.trim().to_string())
+            .filter(|path| {
+                let path = std::path::Path::new(path);
+                !path.as_os_str().is_empty()
+                    && path
+                        .components()
+                        .all(|part| matches!(part, std::path::Component::Normal(_)))
+                    && !path.to_string_lossy().contains("://")
+            });
+        if let (Some(space), Some(relative)) = (space, relative) {
+            let in_workspace = workspace_dir
+                .as_ref()
+                .is_some_and(|dir| dir.join(&relative).exists());
+            if !in_workspace && space.join(&relative).exists() {
+                workspace_dir = Some(space);
+            }
+        }
         FilePreviewAccess {
             policy: crate::file_preview::FileAccessPolicy::build(roots, home.as_deref()).await,
             base_dir: extract_string(params, &["baseDir", "base_dir"]).map(PathBuf::from),
@@ -3776,6 +3810,56 @@ mod tests {
                 .await
                 .is_err()
         );
+    }
+
+    /// Bots link their files relative to their document space (`STATUS.md`),
+    /// which sits below the bot workspace root.
+    #[tokio::test]
+    async fn bot_relative_links_resolve_in_the_bot_space() {
+        let temp = tempfile::tempdir().unwrap();
+        let missing = temp.path().join("missing").to_string_lossy().to_string();
+        let app = AppState::new_with_state_path(
+            "test".into(),
+            std::collections::HashMap::from([
+                (falcondeck_core::AgentProvider::CODEX, missing.clone()),
+                (falcondeck_core::AgentProvider::CLAUDE, missing),
+            ]),
+            temp.path().join("daemon-state.json"),
+        );
+        let result = app
+            .mutate_bot(falcondeck_core::BotMutation::Create {
+                name: "Planner".into(),
+                instructions: "Plan".into(),
+                provider: Some(falcondeck_core::AgentProvider::CLAUDE),
+                model_id: None,
+                thread_id: None,
+            })
+            .await
+            .unwrap();
+        let bot: falcondeck_core::BotProfile =
+            serde_json::from_value(result["bot"].clone()).unwrap();
+        let space = std::path::PathBuf::from(&bot.space_path);
+        std::fs::create_dir_all(space.join("finance")).unwrap();
+        std::fs::write(space.join("STATUS.md"), "# Status").unwrap();
+        std::fs::write(space.join("finance/daily.md"), "ok").unwrap();
+        for path in ["STATUS.md", "finance/daily.md"] {
+            let stat = app
+                .dispatch_remote_rpc(
+                    "file.stat",
+                    json!({"path": path, "workspace_id": bot.workspace_id}),
+                )
+                .await
+                .unwrap_or_else(|error| panic!("{path}: {error}"));
+            assert_eq!(stat["kind"], "markdown", "{path}");
+        }
+        let error = app
+            .dispatch_remote_rpc(
+                "file.stat",
+                json!({"path": "missing.md", "workspace_id": bot.workspace_id}),
+            )
+            .await
+            .unwrap_err();
+        assert!(error.starts_with("file_not_found"), "{error}");
     }
 
     #[test]

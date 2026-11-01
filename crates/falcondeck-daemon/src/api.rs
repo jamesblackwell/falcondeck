@@ -2249,6 +2249,7 @@ async fn file_preview_target(
 ) {
     state
         .file_preview_parts(&serde_json::json!({
+            "path": request.path,
             "workspace_id": request.workspace_id,
             "thread_id": request.thread_id,
         }))
