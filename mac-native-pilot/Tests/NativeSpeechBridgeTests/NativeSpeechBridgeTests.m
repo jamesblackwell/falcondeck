@@ -388,6 +388,35 @@ static void TestCancelledExportCannotDeleteRetryOutput(void) {
   testExports = nil;
 }
 
+@interface FDTailOutput : NSObject
+@property(nonatomic) NSUInteger stops;
+@end
+@implementation FDTailOutput
+- (void)stopRecording { self.stops += 1; }
+@end
+
+static void TestReleaseTail(void) {
+  for (NSUInteger replace = 0; replace < 2; replace++) {
+    FDDictationController *controller = [FDDictationController alloc];
+    FDTailOutput *output = [FDTailOutput new];
+    FDTailOutput *next = [FDTailOutput new];
+    controller.captureSession = [AVCaptureSession new];
+    controller.audioFileOutput = (id)output;
+    controller.recording = YES;
+    [controller stopRecording];
+    Check(output.stops == 0 && controller.stopping && !controller.recording,
+          "release announces processing while retaining the audio tail");
+    if (replace) controller.audioFileOutput = (id)next;
+    NSDate *deadline = [NSDate dateWithTimeIntervalSinceNow:0.3];
+    while (deadline.timeIntervalSinceNow > 0)
+      CFRunLoopRunInMode(kCFRunLoopDefaultMode, 0.01, true);
+    Check(output.stops == (replace ? 0 : 1) && next.stops == 0,
+          "tail stops only the capture that scheduled it");
+    controller.captureSession = nil;
+    controller.audioFileOutput = nil;
+  }
+}
+
 static void TestSpeechCompletionCanOnlyBeClaimedOnce(void) {
   FDDictationController *controller = [FDDictationController alloc];
   controller.speechGeneration = 7;
@@ -409,6 +438,7 @@ int main(void) {
     TestCancelWhileCaptureIsFinalizing();
     TestCancelledExportCannotDeleteRetryOutput();
     TestSpeechCompletionCanOnlyBeClaimedOnce();
+    TestReleaseTail();
     method_setImplementation(shared, originalShared);
     testSharedController = nil;
     CFRelease(testFocusedElement);

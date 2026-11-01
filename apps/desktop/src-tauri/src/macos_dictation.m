@@ -1483,7 +1483,13 @@ static CGEventRef FDEventTapCallback(CGEventTapProxy proxy, CGEventType type,
   [self stopAudioLevelMeter];
   FDEmit(FDEventProcessing, @"");
   if ([self finishOrphanedStop]) return;
-  [self.audioFileOutput stopRecording];
+  // Keep the final syllable when the shortcut is released just before speech ends.
+  // Capture ownership prevents this delayed stop from touching a later take.
+  AVCaptureAudioFileOutput *output = self.audioFileOutput;
+  dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 200 * NSEC_PER_MSEC),
+                 dispatch_get_main_queue(), ^{
+    if (self.stopping && self.audioFileOutput == output) [output stopRecording];
+  });
 }
 
 - (void)cancelRecording {
