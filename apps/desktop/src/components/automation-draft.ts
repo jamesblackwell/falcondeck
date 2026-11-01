@@ -21,6 +21,8 @@ export type AutomationDraft = {
   threadKind: "managed" | "existing" | "new_each_run";
   /** Preserved managed/existing thread id so edits never reset the thread. */
   threadId: string;
+  runAsBot: string;
+  onlyWhenChanged: boolean;
   modelId: string;
   permissionMode: string;
   sandboxMode: string;
@@ -72,6 +74,8 @@ export function emptyAutomationDraft(
     provider: "codex",
     threadKind: "managed",
     threadId: "",
+    runAsBot: "",
+    onlyWhenChanged: false,
     modelId: "",
     permissionMode: "",
     sandboxMode: "",
@@ -118,6 +122,8 @@ export function automationDraftFrom(automation: Automation): AutomationDraft {
       thread.kind === "managed" || thread.kind === "existing"
         ? (thread.thread_id ?? "")
         : "",
+    runAsBot: automation.target.run_as_bot ?? "",
+    onlyWhenChanged: automation.target.only_when_changed ?? false,
     modelId: automation.target.model_id ?? "",
     permissionMode: automation.target.permission_mode ?? "",
     sandboxMode: automation.target.sandbox_mode ?? "",
@@ -203,6 +209,8 @@ export function automationDraftArguments(
           : draft.threadKind === "existing"
             ? { kind: "existing", thread_id: draft.threadId.trim() }
             : { kind: "new_each_run" },
+      run_as_bot: draft.threadKind === "new_each_run" ? draft.runAsBot.trim() || null : null,
+      only_when_changed: draft.threadKind === "new_each_run" && !!draft.runAsBot.trim() && draft.onlyWhenChanged,
       ...(draft.modelId.trim() ? { model_id: draft.modelId.trim() } : {}),
       ...(draft.permissionMode.trim()
         ? { permission_mode: draft.permissionMode.trim() }

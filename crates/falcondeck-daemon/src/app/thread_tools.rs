@@ -264,6 +264,7 @@ impl AppState {
         // A fallback workspace path must not authorize a missing calling thread.
         let parent_summary = self.thread_summary(&caller_workspace, parent).await?;
         let bot = self.bot_for_thread(parent).await;
+        let coordinator = bot.as_ref().map_or(parent, |b| b.thread_id.as_str());
         let mut arguments = arguments.clone();
         // Names address the active home. Historical ids remain readable for
         // continuity recovery; only messages addressed to them are redirected.
@@ -432,7 +433,11 @@ impl AppState {
                 let text = format!(
                     "Message from FalconDeck thread {} ({}):\n\n{}",
                     line(parent, 256),
-                    line(&parent_summary.title, 256),
+                    line(
+                        bot.as_ref()
+                            .map_or(parent_summary.title.as_str(), |b| b.name.as_str()),
+                        256
+                    ),
                     a.message
                 );
                 // Queued agent messages pile up behind long turns and arrive
@@ -516,7 +521,7 @@ impl AppState {
                     None
                 };
                 if retry.as_ref().is_some_and(|thread| !matches!(&thread.origin,
-                    Some(ThreadOrigin::AgentSpawn { parent_thread_id, .. }) if parent_thread_id == parent))
+                    Some(ThreadOrigin::AgentSpawn { parent_thread_id, .. }) if parent_thread_id == coordinator))
                 {
                     return Err(DaemonError::Conflict("Cloud retry key belongs to another task creator".into()));
                 }
@@ -529,7 +534,7 @@ impl AppState {
                         .values()
                         .flat_map(|ws| ws.threads.values())
                         .filter(|t| {
-                            child_is_active(&t.summary, parent)
+                            child_is_active(&t.summary, coordinator)
                                 || bot.as_ref().is_some_and(|b| {
                                     b.previous_thread_ids
                                         .iter()
@@ -544,7 +549,7 @@ impl AppState {
                         .await?
                         .iter()
                         .filter(|t| {
-                            child_is_active(t, parent)
+                            child_is_active(t, coordinator)
                                 || bot.as_ref().is_some_and(|b| {
                                     b.previous_thread_ids
                                         .iter()
@@ -625,7 +630,7 @@ impl AppState {
                 self.with_thread_mut(&workspace, &id, |thread| {
                     if retry.is_none() {
                         thread.origin = Some(ThreadOrigin::AgentSpawn {
-                            parent_thread_id: parent.into(),
+                            parent_thread_id: coordinator.into(),
                             dispatched_at: Some(Utc::now()),
                         });
                     }
@@ -652,7 +657,7 @@ impl AppState {
                     .await?;
                 }
                 if a.notify_parent || bot.is_some() {
-                    self.watch_child(&workspace, &id, parent, a.notify_parent);
+                    self.watch_child(&workspace, &id, coordinator, a.notify_parent);
                 }
                 self.persist_local_state().await?;
                 self.analytics_delegation(parent, &id, a.prompt.as_deref());

@@ -75,3 +75,14 @@ describe("draftIsSubmittable", () => {
     ).toBe("An existing thread id is required.");
   });
 });
+
+it("preserves per-schedule bot identity and clears it when choosing an existing thread", () => {
+  const draft = { ...emptyAutomationDraft(null, "/tmp"), threadKind: "new_each_run" as const,
+    runAsBot: "bot-atlas", onlyWhenChanged: true };
+  expect(automationDraftArguments(draft)).toMatchObject({target: {
+    thread: {kind: "new_each_run"}, run_as_bot: "bot-atlas", only_when_changed: true
+  }});
+  expect(automationDraftArguments({...draft, threadKind: "existing", threadId:"home"})).toMatchObject({target: {
+    thread: {kind:"existing", thread_id:"home"}, run_as_bot:null, only_when_changed:false
+  }});
+});

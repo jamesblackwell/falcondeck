@@ -181,7 +181,7 @@ fn is_failed_turn_status(status: &str) -> bool {
 }
 
 #[allow(clippy::too_many_lines)]
-async fn execute_run(app: &AppState, run_id: &str) {
+pub(crate) async fn execute_run(app: &AppState, run_id: &str) {
     // The permit is held for the lifetime of the dispatch, bounding daemon
     // wide concurrent automation runs.
     let _permit = match app.control().run_slots().acquire().await {
@@ -209,7 +209,7 @@ async fn execute_run(app: &AppState, run_id: &str) {
         emit_runs_changed(app).await;
         return;
     }
-    let Some(automation) = app.control().automation(&run.automation_id).await else {
+    let Some(mut automation) = app.control().automation(&run.automation_id).await else {
         let _ = app
             .control()
             .fail_run(run_id, "automation definition was deleted before dispatch")
@@ -217,6 +217,132 @@ async fn execute_run(app: &AppState, run_id: &str) {
         emit_runs_changed(app).await;
         return;
     };
+
+    let mut bot_digest = None;
+    if let Some(id) = automation.target.run_as_bot.clone() {
+        let Some(bot) = app
+            .preferences()
+            .await
+            .bots
+            .into_iter()
+            .find(|b| b.id == id)
+        else {
+            let _ = app
+                .control()
+                .fail_run(run_id, "Scheduled bot no longer exists")
+                .await;
+            emit_runs_changed(app).await;
+            return;
+        };
+        let home = match app
+            .automation_target_from_thread(&bot.workspace_id, &bot.thread_id)
+            .await
+        {
+            Ok(home) => home,
+            Err(error) => {
+                let _ = app.control().fail_run(run_id, &error.0.message).await;
+                emit_runs_changed(app).await;
+                return;
+            }
+        };
+        automation.target.workspace_path = home.workspace_path;
+        automation.target.provider = home.provider;
+        automation.target.model_id = automation.target.model_id.or(home.model_id);
+        automation.target.reasoning_effort =
+            automation.target.reasoning_effort.or(home.reasoning_effort);
+        // Authority always comes from the bot, never from an unattended schedule.
+        automation.target.approval_policy = home.approval_policy;
+        automation.target.sandbox_mode = home.sandbox_mode;
+        automation.target.permission_mode = home.permission_mode;
+        automation.target.isolation = Some(falcondeck_core::ThreadIsolation::ProjectFolder);
+        let previous = app
+            .control()
+            .runs_since(DateTime::<Utc>::MIN_UTC)
+            .await
+            .into_iter()
+            .filter(|r| {
+                r.automation_id == automation.id
+                    && matches!(
+                        r.status,
+                        AutomationRunStatus::Succeeded | AutomationRunStatus::SucceededNoAction
+                    )
+            })
+            // Start watermark: changes arriving during the last execution must survive.
+            .map(|r| r.queued_at)
+            .max();
+        let since = previous.unwrap_or(DateTime::<Utc>::MIN_UTC);
+        let (mut digest, mut changed) = app.scheduled_bot_digest(&bot, since).await;
+        // Include closed tickets and page fully so closures cannot disappear.
+        let mut cursor = None;
+        loop {
+            let request = falcondeck_core::control::ControlGetRequest {
+                resource: "tickets".into(),
+                id: None,
+                filters: serde_json::Map::from_iter([
+                    ("owner".into(), serde_json::json!(bot.name)),
+                    ("include_closed".into(), serde_json::json!(true)),
+                ]),
+                fields: vec![],
+                cursor,
+                limit: 100,
+            };
+            match app.control().get(request, &scheduler_context()).await {
+                Ok(page) => {
+                    for ticket in page.data.as_array().into_iter().flatten() {
+                        let updated = ticket
+                            .get("updated_at")
+                            .and_then(|v| v.as_str())
+                            .and_then(|s| DateTime::parse_from_rfc3339(s).ok())
+                            .map(|t| t.with_timezone(&Utc));
+                        if updated.is_some_and(|t| t > since) {
+                            changed = true;
+                            if digest.len() < 11_000 {
+                                digest.push_str(&format!(
+                                    "\nTicket {}: {} ({})",
+                                    ticket["id"], ticket["title"], ticket["state"]
+                                ));
+                            }
+                        }
+                    }
+                    cursor = page.next_cursor;
+                    if cursor.is_none() {
+                        break;
+                    }
+                }
+                Err(error) => {
+                    // An unreadable source cannot prove that nothing changed.
+                    changed = true;
+                    digest.push_str(&format!(
+                        "\nTicket changes unavailable: {}",
+                        error.0.message
+                    ));
+                    break;
+                }
+            }
+        }
+        if previous.is_some() && automation.target.only_when_changed && !changed {
+            let _ = app
+                .control()
+                .finish_run(
+                    run_id,
+                    AutomationRunStatus::SkippedUnchanged,
+                    Some(
+                        "No local home, delegated task, message or ticket changes; no model called"
+                            .into(),
+                    ),
+                    None,
+                )
+                .await;
+            emit_runs_changed(app).await;
+            return;
+        }
+        let digest = bounded_bot_digest(&digest);
+        bot_digest = Some(format!(
+            "You are {} running an isolated schedule. Home conversation: {}. Since last successful run ({}):\n{}\nFor anything needing full conversation context or a decision, send ONE message to your home by bot name ({}), only when the schedule's escalation criteria are met. Otherwise update STATUS.md or other static files and finish. No-action runs must not message anyone.\n\n",
+            bot.name, bot.thread_id, since, digest, bot.name
+        ));
+        automation.name = format!("{} · {}", bot.name, automation.name);
+    }
 
     // Required connectors are re-checked at execution time.
     for connector in &automation.required_connectors {
@@ -278,9 +404,20 @@ async fn execute_run(app: &AppState, run_id: &str) {
     // Subscribe before dispatch: turn events emitted between subscribe and
     // send_turn must be observed.
     let mut events = app.subscribe();
+    let usage_before = app
+        .snapshot()
+        .await
+        .thread_token_usage
+        .get(&thread_id)
+        .map(|u| (u.total.input_tokens, u.total.cached_input_tokens))
+        .unwrap_or_default();
     let expects_turn_end = automation.target.provider == falcondeck_core::AgentProvider::CODEX;
     let dispatch_started_at = Utc::now();
-    let instruction = falcondeck_core::control::automation_user_text(automation.task.instruction());
+    let instruction = format!(
+        "{}{}",
+        bot_digest.unwrap_or_default(),
+        falcondeck_core::control::automation_user_text(automation.task.instruction())
+    );
     let response = app
         .send_turn(falcondeck_core::SendTurnRequest {
             workspace_id: workspace.id.clone(),
@@ -361,6 +498,21 @@ async fn execute_run(app: &AppState, run_id: &str) {
                     && envelope.thread_id.as_deref() == Some(thread_id.as_str()) =>
             {
                 match envelope.event.clone() {
+                    UnifiedEvent::ThreadTokenUsageUpdated { usage, .. } => {
+                        // Provider totals accumulate across calls. Record the delta
+                        // from the context present before this run.
+                        if automation.target.provider == falcondeck_core::AgentProvider::CODEX {
+                            let total = usage.total.input_tokens.saturating_sub(usage_before.0);
+                            let cached = usage
+                                .total
+                                .cached_input_tokens
+                                .saturating_sub(usage_before.1);
+                            let _ = app
+                                .control()
+                                .record_run_usage(run_id, total.saturating_sub(cached), cached)
+                                .await;
+                        }
+                    }
                     UnifiedEvent::TurnStart { turn_id } => {
                         // The first turn start after dispatch is the
                         // automation's own turn: turns are serialized per
@@ -480,6 +632,21 @@ async fn execute_run(app: &AppState, run_id: &str) {
     }
 }
 
+fn bounded_bot_digest(text: &str) -> String {
+    const LIMIT: usize = 12_000;
+    if text.len() <= LIMIT {
+        return text.to_string();
+    }
+    let mut end = LIMIT - 64;
+    while !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    format!(
+        "{}\n[Digest truncated; read task summaries for more.]\n",
+        &text[..end]
+    )
+}
+
 /// Applies the conditional no-action classification before persisting the
 /// terminal state.
 async fn finish_with_classification(
@@ -502,6 +669,11 @@ async fn finish_with_classification(
         .control()
         .finish_run(run_id, status, preview, error_detail)
         .await;
+    if let Some(automation) = app.control().automation(automation_id).await
+        && automation.target.run_as_bot.is_some()
+    {
+        archive_settled_run_threads(app, &automation).await;
+    }
 }
 
 /// The final assistant message text, used for previews and the no-action
@@ -660,7 +832,9 @@ async fn archive_settled_run_threads(
     let mut no_action = std::collections::HashMap::new();
     for run in app.control().runs_since(DateTime::<Utc>::MIN_UTC).await {
         if run.automation_id == automation.id
-            && run.status == AutomationRunStatus::SucceededNoAction
+            && (run.status == AutomationRunStatus::SucceededNoAction
+                || (automation.target.run_as_bot.is_some()
+                    && run.status == AutomationRunStatus::Succeeded))
             && let (Some(thread), Some(finished)) = (run.thread_id, run.finished_at)
         {
             let latest = no_action.entry(thread).or_insert(finished);
@@ -709,13 +883,16 @@ async fn start_automation_thread(
     // Provenance: the thread's origin shows which automation created it.
     let origin = ThreadOrigin::Automation {
         automation_id: automation.id.clone(),
+        bot_id: automation.target.run_as_bot.clone(),
         name: automation.name.clone(),
     };
     let _ = app
         .with_thread_mut(workspace_id, &thread_id, |thread| {
-            thread.origin = Some(origin)
+            thread.origin = Some(origin);
+            thread.title = automation.name.clone();
         })
         .await;
+    app.schedule_persist();
     if let Ok(thread) = app.thread_summary(workspace_id, &thread_id).await {
         app.emit_event(
             Some(workspace_id.to_string()),
@@ -752,6 +929,7 @@ mod tests {
             .unwrap();
         thread.origin = Some(ThreadOrigin::Automation {
             automation_id: automation.into(),
+            bot_id: None,
             name: "Monitor".into(),
         });
         thread.attention.unread = unread;
@@ -785,6 +963,16 @@ mod tests {
             .map(|(_, id)| id)
             .collect();
         assert_eq!(ids, ["read", "unread-nothing"]);
+    }
+
+    #[test]
+    fn scheduled_digest_is_bounded_and_utf8_safe() {
+        for text in ["large change ".repeat(4000), "🦅".repeat(8000)] {
+            let bounded = bounded_bot_digest(&text);
+            assert!(bounded.len() <= 12_000);
+            assert!(bounded.contains("truncated"));
+        }
+        assert_eq!(bounded_bot_digest("small delta"), "small delta");
     }
 
     #[test]

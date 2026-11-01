@@ -353,6 +353,8 @@ fn legacy_automation(
             collaboration_mode_id: detail.collaboration_mode_id.clone(),
             approval_policy: detail.approval_policy.clone(),
             isolation: Some(detail.isolation),
+            run_as_bot: None,
+            only_when_changed: false,
             selected_skills: detail
                 .selected_skills
                 .iter()
@@ -456,6 +458,7 @@ fn legacy_run(
         automation_id: detail.summary.id.clone(),
         automation_name: detail.summary.title.clone(),
         automation_revision: 1,
+        run_as_bot: None,
         status,
         trigger,
         scheduled_for: Some(run.scheduled_for),
@@ -465,6 +468,8 @@ fn legacy_run(
         runtime_workspace_id: Some(run.workspace_id.clone()),
         thread_id: run.thread_id.clone(),
         turn_id: None,
+        input_tokens: None,
+        cached_input_tokens: None,
         outcome_preview: run.preview.clone(),
         error: None,
     }

@@ -3207,7 +3207,9 @@ async fn send_turn_with_startup_mode(
         None
     };
     let mut request = request;
-    if let Some(bot) = app.bot_for_thread(&request.thread_id).await {
+    if let Some(bot) = app.bot_for_thread(&request.thread_id).await
+        && bot.owns_thread(&request.thread_id)
+    {
         if request.thread_id != bot.thread_id {
             // An automation or queued peer may still carry source-harness settings.
             // An alias addresses the current bot, never the retired provider.

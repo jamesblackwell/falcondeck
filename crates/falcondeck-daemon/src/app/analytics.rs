@@ -1183,7 +1183,9 @@ fn summarize_automations(
         match run.status {
             Status::SucceededNoAction => summary.no_action += 1,
             Status::Failed => summary.failed += 1,
-            Status::SkippedOverlap | Status::SkippedDependency => summary.skipped += 1,
+            Status::SkippedOverlap | Status::SkippedDependency | Status::SkippedUnchanged => {
+                summary.skipped += 1
+            }
             _ => {}
         }
         if let (Some(start), Some(end)) = (run.started_at, run.finished_at) {

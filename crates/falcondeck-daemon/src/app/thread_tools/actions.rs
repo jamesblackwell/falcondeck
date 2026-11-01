@@ -356,8 +356,8 @@ impl AppState {
                 let thread = self.thread_summary(workspace, &a.thread_id).await?;
                 if !is_child_of(&thread, parent)
                     && !self.bot_for_thread(parent).await.is_some_and(|bot| {
-                        bot.previous_thread_ids
-                            .iter()
+                        std::iter::once(&bot.thread_id)
+                            .chain(bot.previous_thread_ids.iter())
                             .any(|id| is_child_of(&thread, id))
                     })
                 {

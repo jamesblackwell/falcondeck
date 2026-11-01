@@ -53,6 +53,8 @@ export type AutomationTarget = {
   provider: string;
   /** Omitted from automation list rows; present on single reads. */
   thread?: AutomationThreadTarget;
+  run_as_bot?: string | null;
+  only_when_changed?: boolean;
   model_id?: string | null;
   permission_mode?: string | null;
   sandbox_mode?: string | null;
@@ -72,6 +74,7 @@ export type AutomationRunStatus =
   | "succeeded_no_action"
   | "failed"
   | "skipped_overlap"
+  | "skipped_unchanged"
   | "skipped_dependency"
   | "cancelled";
 
@@ -120,6 +123,7 @@ export type AutomationRun = {
   automation_id: string;
   automation_name: string;
   automation_revision: number;
+  run_as_bot?: string | null;
   status: AutomationRunStatus;
   trigger: AutomationRunTrigger;
   scheduled_for?: string | null;
@@ -129,6 +133,8 @@ export type AutomationRun = {
   runtime_workspace_id?: string | null;
   thread_id?: string | null;
   turn_id?: string | null;
+  input_tokens?: number | null;
+  cached_input_tokens?: number | null;
   outcome_preview?: string | null;
   error?: ControlErrorDetail | null;
 };
@@ -302,6 +308,7 @@ const RUN_STATUSES: ReadonlySet<string> = new Set([
   "succeeded_no_action",
   "failed",
   "skipped_overlap",
+  "skipped_unchanged",
   "skipped_dependency",
   "cancelled",
 ]);

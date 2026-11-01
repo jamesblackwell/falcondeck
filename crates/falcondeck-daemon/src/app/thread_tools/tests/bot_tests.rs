@@ -1194,3 +1194,134 @@ async fn bot_sends_do_not_wait_on_bot_mutations() {
         .unwrap();
     assert_eq!(sent.message.as_deref(), Some("queued"));
 }
+
+#[tokio::test]
+async fn fresh_schedule_keeps_bot_context_identity_escalation_and_archive() {
+    let (app, _temp) = fixture().await;
+    let bot = promote(&app).await;
+    let fresh = created_id(
+        &app.invoke_thread_tool(CREATE, &json!({}), Some("thread-1"), None)
+            .await
+            .unwrap(),
+    );
+    app.with_thread_mut("workspace-1", &fresh, |t| {
+        t.origin = Some(ThreadOrigin::Automation {
+            automation_id: "check".into(),
+            name: "hourly".into(),
+            bot_id: Some(bot.id.clone()),
+        });
+    })
+    .await
+    .unwrap();
+    assert_eq!(app.bot_for_thread(&fresh).await.unwrap().id, bot.id);
+    assert_eq!(
+        app.bot_context(&fresh).await,
+        app.bot_context("thread-1").await
+    );
+    let context = falcondeck_core::control::ControlRequestContext {
+        thread_id: Some(fresh.clone()),
+        ..Default::default()
+    };
+    let (ticket, _) = app
+        .control()
+        .execute(
+            serde_json::from_value(
+                json!({"operation":"ticket.create","arguments":{"title":"Schedule identity test"}}),
+            )
+            .unwrap(),
+            &context,
+            &crate::control::ControlDeps { app: Some(&app) },
+        )
+        .await;
+    assert!(ticket.ok, "{:?}", ticket.error);
+    assert_eq!(ticket.data.unwrap()["created_by"]["name"], bot.name);
+    app.with_thread_mut("workspace-1", "thread-1", |t| {
+        t.status = ThreadStatus::Running
+    })
+    .await
+    .unwrap();
+    app.invoke_thread_tool(
+        MESSAGE,
+        &json!({"thread_id":"Assistant","message":"Decision needed: the release failed."}),
+        Some(&fresh),
+        None,
+    )
+    .await
+    .unwrap();
+    let workspaces = app.inner.workspaces.lock().await;
+    let queued = &workspaces["workspace-1"].threads["thread-1"].queued_requests;
+    assert!(queued.iter().flat_map(|q| &q.request.inputs).any(|i|
+        matches!(i, falcondeck_core::TurnInputItem::Text { text, .. } if text.contains("(Assistant)") && text.contains("Decision needed"))));
+    assert!(
+        workspaces["workspace-1"].threads[&fresh]
+            .queued_requests
+            .is_empty()
+    );
+    drop(workspaces);
+    // Retirement protection applies to home/aliases, not fresh run threads.
+    assert!(app.archive_thread("workspace-1", &fresh).await.is_ok());
+    assert!(app.archive_thread("workspace-1", "thread-1").await.is_err());
+    let (delta, changed) = app
+        .scheduled_bot_digest(&bot, Utc::now() - chrono::Duration::hours(1))
+        .await;
+    assert!(changed && delta.contains("Assistant"));
+    let (_, unchanged) = app
+        .scheduled_bot_digest(&bot, Utc::now() + chrono::Duration::seconds(1))
+        .await;
+    assert!(!unchanged);
+    app.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn unchanged_fresh_schedule_finishes_without_a_thread_or_model() {
+    use falcondeck_core::control::*;
+    let (app, _temp) = fixture().await;
+    let bot = promote(&app).await;
+    let workspace_path = app.workspace_path("workspace-1").await.unwrap();
+    let (created, _) = app.control().execute(
+        serde_json::from_value(json!({"operation":"automation.create","arguments":{
+            "name":"Quiet check", "trigger":{"kind":"interval","every_seconds":3600,"anchor_at":Utc::now()},
+            "task":{"kind":"prompt","instruction":"Check local work"},
+            "target":{"workspace_path":workspace_path,"provider":"claude","thread":{"kind":"new_each_run"},
+                "run_as_bot":bot.id,"only_when_changed":true}
+        }})).unwrap(), &ControlRequestContext::default(), &crate::control::ControlDeps::none()).await;
+    assert!(created.ok, "{:?}", created.error);
+    let id = created.data.unwrap()["id"].as_str().unwrap().to_string();
+    let previous = app
+        .control()
+        .enqueue_run(
+            &id,
+            None,
+            crate::control::RunSource::Manual {
+                origin: ControlOrigin::DesktopUi,
+            },
+        )
+        .await
+        .unwrap();
+    app.control()
+        .mark_run_running(&previous.id, "workspace-1", "old-run")
+        .await
+        .unwrap();
+    app.control()
+        .finish_run(&previous.id, AutomationRunStatus::Succeeded, None, None)
+        .await
+        .unwrap();
+    let run = app
+        .control()
+        .enqueue_run(
+            &id,
+            None,
+            crate::control::RunSource::Manual {
+                origin: ControlOrigin::DesktopUi,
+            },
+        )
+        .await
+        .unwrap();
+    assert!(app.control().claim_run_if_automation_free(&run.id).await);
+    crate::control::scheduler::execute_run(&app, &run.id).await;
+    let saved = app.control().run(&run.id).await.unwrap();
+    assert_eq!(saved.status, AutomationRunStatus::SkippedUnchanged);
+    assert!(saved.thread_id.is_none() && saved.input_tokens.is_none());
+    assert_eq!(app.snapshot().await.threads.len(), 1);
+    app.shutdown().await.unwrap();
+}

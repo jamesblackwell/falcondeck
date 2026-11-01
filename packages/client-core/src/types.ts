@@ -1023,7 +1023,7 @@ export type ThreadSummary = {
   origin?:
     | { kind: "agent_spawn"; parent_thread_id: string; dispatched_at?: string | null }
     | { kind: "scheduled_task"; task_id: string; title: string }
-    | { kind: "automation"; automation_id: string; name: string }
+    | { kind: "automation"; automation_id: string; name: string; bot_id?: string | null }
     | null;
   status: ThreadStatus;
   updated_at: string;

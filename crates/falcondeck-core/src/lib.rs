@@ -4421,6 +4421,9 @@ pub enum ThreadOrigin {
     Automation {
         /// Owning automation identifier.
         automation_id: String,
+        /// Identity of a bot executing in a fresh scheduled thread.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        bot_id: Option<String>,
         /// Automation name captured when the invocation started.
         name: String,
     },

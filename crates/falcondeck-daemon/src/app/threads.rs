@@ -1844,6 +1844,23 @@ impl AppState {
                                 }
                                 parked_between_turns = false;
                             }
+                            if value.get("type").and_then(Value::as_str) == Some("result")
+                                && let Some(usage) = value.get("usage")
+                            {
+                                let count = |key: &str| usage.get(key).and_then(Value::as_u64);
+                                if let Some(input) = count("input_tokens") {
+                                    self.control()
+                                        .record_claude_run_usage(
+                                            &workspace_id,
+                                            &thread_id,
+                                            input.saturating_add(
+                                                count("cache_creation_input_tokens").unwrap_or(0),
+                                            ),
+                                            count("cache_read_input_tokens").unwrap_or(0),
+                                        )
+                                        .await;
+                                }
+                            }
                             if let Some(usage) = live_context_usage(&value) {
                                 last_live_usage = Some(usage);
                                 self.record_claude_live_usage(

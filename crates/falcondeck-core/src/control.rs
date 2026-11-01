@@ -350,6 +350,14 @@ pub struct AutomationTarget {
     /// Which native thread the work runs in.
     pub thread: AutomationThreadTarget,
 
+    /// Bot identity for a fresh run. Only valid with new_each_run.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub run_as_bot: Option<String>,
+    /// Skip inference when local home/task/ticket state has not changed.
+    /// External checks must leave this disabled.
+    #[serde(default)]
+    pub only_when_changed: bool,
+
     /// Optional current-provider-default model resolution.
     #[serde(default)]
     pub model_id: Option<String>,
@@ -468,6 +476,9 @@ pub struct AutomationRun {
     pub automation_name: String,
     /// Definition revision at dispatch time.
     pub automation_revision: u64,
+    /// Bot identity captured for this execution, independent of later edits.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub run_as_bot: Option<String>,
 
     /// Lifecycle status of the run.
     pub status: AutomationRunStatus,
@@ -500,6 +511,12 @@ pub struct AutomationRun {
     /// Bounded outcome preview; the full reply stays in the native thread.
     #[serde(default)]
     pub outcome_preview: Option<String>,
+    /// Provider-reported non-cached and cache-read prompt tokens for this run.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub input_tokens: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    /// Provider-reported cached prompt tokens, when available.
+    pub cached_input_tokens: Option<u64>,
     /// Structured failure detail.
     #[serde(default)]
     pub error: Option<ControlErrorDetail>,
@@ -536,6 +553,8 @@ pub enum AutomationRunStatus {
     SkippedOverlap,
     /// Skipped because a required connector was unavailable.
     SkippedDependency,
+    /// No relevant local state changed; no model called.
+    SkippedUnchanged,
     /// Cancelled before execution.
     Cancelled,
 }
@@ -549,6 +568,7 @@ impl AutomationRunStatus {
                 | AutomationRunStatus::SucceededNoAction
                 | AutomationRunStatus::Failed
                 | AutomationRunStatus::SkippedOverlap
+                | AutomationRunStatus::SkippedUnchanged
                 | AutomationRunStatus::SkippedDependency
                 | AutomationRunStatus::Cancelled
         )

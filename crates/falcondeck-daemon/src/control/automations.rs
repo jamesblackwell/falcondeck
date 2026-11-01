@@ -453,6 +453,20 @@ pub fn validate_definition(
     target: &AutomationTarget,
     required_connectors: &[String],
 ) -> Result<(), ControlError> {
+    if target.run_as_bot.is_some()
+        && target.thread != falcondeck_core::control::AutomationThreadTarget::NewEachRun
+    {
+        return Err(ControlError::field(
+            "target.run_as_bot",
+            "Run as bot requires new_each_run",
+        ));
+    }
+    if target.only_when_changed && target.run_as_bot.is_none() {
+        return Err(ControlError::field(
+            "target.only_when_changed",
+            "Requires run_as_bot",
+        ));
+    }
     let char_len = |text: &str| text.chars().count();
     if name.trim().is_empty() || char_len(name) > MAX_NAME_CHARS {
         return Err(ControlError::field(

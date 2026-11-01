@@ -174,3 +174,5 @@ the user, so tell them when one is blocking.
 `falcondeck_organize_thread` archives, pins (`global`/`project`/`none`), or
 moves a thread to a folder. Interrupt or archive only work you started or the
 user asked you to manage.
+
+For bot schedules: Choose the home/current thread only when a run needs conversation context (such as a launch discussed at length). Otherwise use new_each_run with target.run_as_bot set to the bot id; write explicit criteria for sending one message home, otherwise update STATUS.md and finish silently.

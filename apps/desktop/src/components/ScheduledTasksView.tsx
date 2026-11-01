@@ -286,7 +286,8 @@ function automationAsScheduledTask(
             automation.latest_outcome.status === "succeeded_no_action"
               ? "succeeded"
               : automation.latest_outcome.status === "skipped_overlap" ||
-                  automation.latest_outcome.status === "skipped_dependency"
+                  automation.latest_outcome.status === "skipped_dependency" ||
+                  automation.latest_outcome.status === "skipped_unchanged"
                 ? "skipped"
                 : automation.latest_outcome.status === "cancelled"
                   ? "interrupted"

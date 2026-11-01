@@ -72,6 +72,7 @@ const RUN_BADGE: Record<AutomationRun["status"], "success" | "warning" | "defaul
   failed: "danger",
   skipped_overlap: "default",
   skipped_dependency: "warning",
+  skipped_unchanged: "default",
   cancelled: "default",
 };
 
@@ -652,6 +653,21 @@ export function AutomationEditor({
               <option value="new_each_run">New thread each run</option>
             </select>
           </label>
+          {draft.threadKind === "new_each_run" ? (
+            <label className="space-y-1">
+              <span className="text-[length:var(--fd-text-xs)] text-fg-muted">Run as bot (optional bot id)</span>
+              <Input aria-label="Run as bot" value={draft.runAsBot}
+                onChange={(event) => set("runAsBot", event.target.value)} placeholder="bot-…" />
+              <span className="text-[length:var(--fd-text-xs)] text-fg-muted">
+                Uses the bot’s identity and standing context. Keep an existing home thread when its conversation history is needed.
+              </span>
+              <span className="flex gap-2">
+                <input type="checkbox" checked={draft.onlyWhenChanged} disabled={!draft.runAsBot.trim()}
+                  onChange={(event) => set("onlyWhenChanged", event.target.checked)} />
+                Only when local state changed (leave off for external monitors)
+              </span>
+            </label>
+          ) : null}
           {draft.threadKind !== "new_each_run" ? (
             <label className="space-y-1">
               <span className="text-[length:var(--fd-text-xs)] text-fg-muted">

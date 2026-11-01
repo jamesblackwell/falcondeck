@@ -1215,6 +1215,14 @@ impl ControlService {
         let Some(app) = deps.app else {
             return Ok(());
         };
+        if let Some(id) = &target.run_as_bot
+            && !app.preferences().await.bots.iter().any(|b| &b.id == id)
+        {
+            return Err(ControlError::field(
+                "target.run_as_bot",
+                "Choose an existing bot id",
+            ));
+        }
         if !std::path::Path::new(&target.workspace_path).is_dir() {
             return Err(ControlError::workspace_unavailable(&target.workspace_path));
         }
@@ -1375,13 +1383,21 @@ impl ControlService {
                     run.automation_id == automation.id && run.status == AutomationRunStatus::Queued
                 })
                 .count();
-            let disposition =
-                automations::overlap_disposition(active, queued, automation.concurrency_policy);
+            let disposition = automations::overlap_disposition(
+                active,
+                queued,
+                if automation.target.run_as_bot.is_some() {
+                    falcondeck_core::control::AutomationConcurrencyPolicy::Skip
+                } else {
+                    automation.concurrency_policy
+                },
+            );
             let mut run = AutomationRun {
                 id: format!("run-{}", Uuid::new_v4().simple()),
                 automation_id: automation.id.clone(),
                 automation_name: automation.name.clone(),
                 automation_revision: automation.revision,
+                run_as_bot: automation.target.run_as_bot.clone(),
                 status: AutomationRunStatus::Queued,
                 trigger,
                 scheduled_for,
@@ -1391,6 +1407,8 @@ impl ControlService {
                 runtime_workspace_id: None,
                 thread_id: None,
                 turn_id: None,
+                input_tokens: None,
+                cached_input_tokens: None,
                 outcome_preview: None,
                 error: None,
             };
@@ -1532,6 +1550,49 @@ impl ControlService {
         .map(|((), _)| ())
     }
 
+    pub(crate) async fn record_claude_run_usage(
+        &self,
+        workspace: &str,
+        thread: &str,
+        input: u64,
+        cached: u64,
+    ) {
+        let ids: Vec<_> = self
+            .state
+            .lock()
+            .await
+            .runs
+            .iter()
+            .filter(|r| {
+                r.status == AutomationRunStatus::Running
+                    && r.runtime_workspace_id.as_deref() == Some(workspace)
+                    && r.thread_id.as_deref() == Some(thread)
+            })
+            .map(|r| r.id.clone())
+            .collect();
+        for id in ids {
+            let _ = self.record_run_usage(&id, input, cached).await;
+        }
+    }
+
+    pub(crate) async fn record_run_usage(
+        &self,
+        id: &str,
+        input: u64,
+        cached: u64,
+    ) -> Result<(), ControlError> {
+        let id = id.to_string();
+        self.mutate(move |state, _| {
+            if let Some(run) = state.runs.iter_mut().find(|r| r.id == id) {
+                run.input_tokens = Some(input);
+                run.cached_input_tokens = Some(cached);
+            }
+            Ok(((), vec![ControlDomain::Runs]))
+        })
+        .await
+        .map(|_| ())
+    }
+
     /// Marks a run skipped because a required dependency was unavailable at
     /// execution time.
     pub async fn skip_run_dependency(
@@ -1616,8 +1677,9 @@ impl ControlService {
                 .iter()
                 .find(|automation| automation.id == automation_id)
                 .is_some_and(|automation| {
-                    automation.concurrency_policy
-                        == falcondeck_core::control::AutomationConcurrencyPolicy::Allow
+                    automation.target.run_as_bot.is_none()
+                        && automation.concurrency_policy
+                            == falcondeck_core::control::AutomationConcurrencyPolicy::Allow
                 });
             let busy = !allows_overlap
                 && state.runs.iter().any(|other| {
@@ -2425,13 +2487,9 @@ pub(super) async fn actor_name(context: &ControlRequestContext, deps: &ControlDe
                 .unwrap_or_else(|| "system".into()),
         });
     if let Some(app) = deps.app {
-        let preferences = app.preferences().await;
-        if let Some(bot) = preferences.bots.iter().find(|bot| {
-            context
-                .thread_id
-                .as_deref()
-                .is_some_and(|id| bot.owns_thread(id))
-        }) {
+        if let Some(id) = context.thread_id.as_deref()
+            && let Some(bot) = app.bot_for_thread(id).await
+        {
             name = bot.name.clone();
         }
     }

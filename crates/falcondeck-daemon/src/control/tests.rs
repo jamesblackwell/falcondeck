@@ -1708,3 +1708,74 @@ fn control_error_constructors_carry_codes_and_actions() {
     );
     assert_eq!(ControlError::internal("x").0.code, "internal_error");
 }
+
+#[tokio::test]
+async fn bot_fresh_skips_overlap_even_when_allow_was_selected_and_records_usage() {
+    let (_dir, service) = service().await;
+    let mut args = create_arguments();
+    args["target"]["thread"] = json!({"kind":"new_each_run"});
+    args["target"]["run_as_bot"] = json!("bot-test");
+    args["concurrency_policy"] = json!("allow");
+    let (response, _) = service
+        .execute(
+            execute_request(registry::ops::AUTOMATION_CREATE, args, None),
+            &desktop(),
+            &ControlDeps::none(),
+        )
+        .await;
+    assert!(response.ok, "{:?}", response.error);
+    let id = response.data.unwrap()["id"].as_str().unwrap().to_string();
+    let first = service
+        .enqueue_run(
+            &id,
+            None,
+            super::service::RunSource::Manual {
+                origin: ControlOrigin::DesktopUi,
+            },
+        )
+        .await
+        .unwrap();
+    assert!(service.claim_run_if_automation_free(&first.id).await);
+    let second = service
+        .enqueue_run(
+            &id,
+            None,
+            super::service::RunSource::Manual {
+                origin: ControlOrigin::DesktopUi,
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(second.status, AutomationRunStatus::SkippedOverlap);
+    service
+        .record_run_usage(&first.id, 1200, 300)
+        .await
+        .unwrap();
+    service
+        .finish_run(
+            &first.id,
+            AutomationRunStatus::SkippedUnchanged,
+            Some("No changes".into()),
+            None,
+        )
+        .await
+        .unwrap();
+    let saved = service.run(&first.id).await.unwrap();
+    assert_eq!(
+        (saved.input_tokens, saved.cached_input_tokens),
+        (Some(1200), Some(300))
+    );
+    assert!(saved.status.is_terminal());
+}
+
+#[test]
+fn legacy_target_defaults_remain_unchanged() {
+    let target: falcondeck_core::control::AutomationTarget =
+        serde_json::from_value(create_arguments()["target"].clone()).unwrap();
+    assert!(target.run_as_bot.is_none());
+    assert!(!target.only_when_changed);
+    assert!(matches!(
+        target.thread,
+        falcondeck_core::control::AutomationThreadTarget::Managed { .. }
+    ));
+}

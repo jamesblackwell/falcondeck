@@ -1210,3 +1210,80 @@ mod tests {
         );
     }
 }
+
+impl AppState {
+    /// Bounded local delta for isolated bot schedules. Never hydrates full homes.
+    pub(crate) async fn scheduled_bot_digest(
+        &self,
+        bot: &falcondeck_core::BotProfile,
+        since: DateTime<Utc>,
+    ) -> (String, bool) {
+        let summaries = self.snapshot().await.threads;
+        let mut related = Vec::new();
+        for t in &summaries {
+            let parent = match &t.origin {
+                Some(falcondeck_core::ThreadOrigin::AgentSpawn {
+                    parent_thread_id, ..
+                }) => Some(parent_thread_id),
+                _ => None,
+            };
+            let owned_child = if let Some(parent) = parent {
+                self.bot_for_thread(parent)
+                    .await
+                    .is_some_and(|b| b.id == bot.id)
+            } else {
+                false
+            };
+            if bot.owns_thread(&t.id) || owned_child {
+                if t.updated_at > since {
+                    related.push(t.clone());
+                }
+            }
+        }
+        related.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
+        let changed = !related.is_empty();
+        let mut text = String::new();
+        for t in related {
+            if text.len() >= 10_000 {
+                text.push_str("\n[More changed tasks omitted]");
+                break;
+            }
+            if let Ok(rows) = self
+                .snapshots(&t.workspace_id, &[t.id.clone()], Some(since))
+                .await
+            {
+                for row in rows {
+                    text.push_str(&format!(
+                        "\n{} [{}] {:?}: {}\n",
+                        line(&t.title, 120),
+                        t.id,
+                        t.status,
+                        row.glance.lines("", 300, 600)
+                    ));
+                    if let Some(d) = row.digest {
+                        text.push_str(&delta(&d));
+                        if let Some(reply) = d.last_assistant {
+                            text.push_str(&message_line(&reply.text, &reply.id, 700));
+                        }
+                        if let Some(user) = d.last_user {
+                            text.push_str(&message_line(&user.text, &user.id, 700));
+                        }
+                    }
+                }
+            } else {
+                text.push_str(&format!(
+                    "\n{} [{}]: {}\n",
+                    line(&t.title, 120),
+                    t.id,
+                    line(
+                        t.last_message_preview
+                            .as_deref()
+                            .unwrap_or("Activity; read summary"),
+                        600
+                    )
+                ));
+            }
+        }
+        (text, changed)
+    }
+}

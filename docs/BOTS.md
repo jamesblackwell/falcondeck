@@ -215,3 +215,26 @@ source item ids and document references provide recovery. These snapshots had
 no directly attributed child origins or native-memory files: task links in
 STATUS.md remain authoritative, and fixture tests cover child reports and
 memory-section budgets. No live bot was switched and no daemon was restarted.
+
+## Fresh scheduled bot runs
+
+This is a per-schedule choice. Keep `existing` / `current` for work needing the
+home conversation's history. For routine checks use `thread: {"kind":"new_each_run"}`
+and `target.run_as_bot: "<bot-id>"`. Existing schedules keep their targets.
+
+Fresh runs receive the bot's current standing context, identity, harness and
+permissions. An explicit schedule model overrides its home model. The first
+prompt includes a bounded local delta since the previous successful run:
+home messages, delegated tasks and owned tickets (including closures).
+Write escalation criteria in the schedule: send one message home by bot name
+when those criteria are met; otherwise update STATUS.md and finish silently.
+The run title names the bot and schedule. Successful settled bot runs are archived automatically;
+errors and input requests remain visible. Ordinary fresh schedules retain unread findings.
+
+Bot runs skip overlaps regardless of the schedule's overlap setting; missed
+occurrences follow the existing skip/run_once policy and never replay a backlog.
+`target.only_when_changed` opts into a recorded `skipped_unchanged` outcome
+without inference when local home/task/ticket state is unchanged. Leave it off
+for external monitors: a website, metric or disk can change independently.
+Run history includes provider input/cache token counts when reported; missing
+counts mean unavailable, not zero.

@@ -1162,6 +1162,8 @@ impl AppState {
             collaboration_mode_id: agent.collaboration_mode_id.clone(),
             approval_policy: agent.approval_policy.clone(),
             isolation: Some(falcondeck_core::ThreadIsolation::ProjectFolder),
+            run_as_bot: None,
+            only_when_changed: false,
             selected_skills: Vec::new(),
         })
     }
@@ -3978,8 +3980,14 @@ impl AppState {
                 .mutate_cloud_thread(workspace_id, thread_id, |thread| thread.is_archived = true)
                 .await;
         }
-        if self.bot_for_thread(thread_id).await.is_some() {
-            return Err(DaemonError::Conflict("Use Delete bot to retire its home conversation".into()));
+        if self
+            .bot_for_thread(thread_id)
+            .await
+            .is_some_and(|bot| bot.owns_thread(thread_id))
+        {
+            return Err(DaemonError::Conflict(
+                "Use Delete bot to retire its home conversation".into(),
+            ));
         }
         workspace_ops::archive_thread(self, workspace_id, thread_id).await
     }
@@ -4021,8 +4029,14 @@ impl AppState {
         if self.is_cloud_thread(thread_id) {
             return Err(DaemonError::BadRequest("Archive this cloud task to keep its saved conversation and changes. Cloud environment deletion is not available here.".into()));
         }
-        if self.bot_for_thread(thread_id).await.is_some() {
-            return Err(DaemonError::Conflict("Delete the bot before deleting its home conversation".into()));
+        if self
+            .bot_for_thread(thread_id)
+            .await
+            .is_some_and(|bot| bot.owns_thread(thread_id))
+        {
+            return Err(DaemonError::Conflict(
+                "Delete the bot before deleting its home conversation".into(),
+            ));
         }
         workspace_ops::delete_thread(self, workspace_id, thread_id).await?;
         Ok(CommandResponse {

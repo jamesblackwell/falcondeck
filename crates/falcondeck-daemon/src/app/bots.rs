@@ -152,13 +152,24 @@ impl AppState {
     }
 
     pub(crate) async fn bot_for_thread(&self, thread: &str) -> Option<BotProfile> {
+        let bot_id = self
+            .inner
+            .workspaces
+            .lock()
+            .await
+            .values()
+            .find_map(|ws| ws.threads.get(thread))
+            .and_then(|t| match &t.summary.origin {
+                Some(falcondeck_core::ThreadOrigin::Automation { bot_id, .. }) => bot_id.clone(),
+                _ => None,
+            });
         self.inner
             .preferences
             .lock()
             .await
             .bots
             .iter()
-            .find(|bot| bot.owns_thread(thread))
+            .find(|bot| bot.owns_thread(thread) || bot_id.as_deref() == Some(bot.id.as_str()))
             .cloned()
     }
 
@@ -361,7 +372,9 @@ impl AppState {
                     watches.retain(|_, watch| !bot.owns_thread(&watch.parent_thread_id));
                 }
                 let threads: Vec<_> = self.inner.workspaces.lock().await.values().flat_map(|ws| ws.threads.values())
-                    .filter(|t| t.summary.id == bot.thread_id || matches!(&t.summary.origin,
+                    .filter(|t| t.summary.id == bot.thread_id
+                        || matches!(&t.summary.origin, Some(falcondeck_core::ThreadOrigin::Automation { bot_id: Some(id), .. }) if id == &bot.id)
+                        || matches!(&t.summary.origin,
                         Some(falcondeck_core::ThreadOrigin::AgentSpawn { parent_thread_id, .. }) if bot.owns_thread(parent_thread_id)))
                     .map(|t| t.summary.clone()).collect();
                 for thread in threads {
@@ -384,7 +397,8 @@ impl AppState {
                     .thread_summary(&bot.workspace_id, &bot.thread_id)
                     .await?;
                 let workers_busy = self.inner.workspaces.lock().await.values().flat_map(|ws| ws.threads.values()).any(|t|
-                    matches!(&t.summary.origin, Some(falcondeck_core::ThreadOrigin::AgentSpawn { parent_thread_id, .. }) if bot.owns_thread(parent_thread_id))
+                    (matches!(&t.summary.origin, Some(falcondeck_core::ThreadOrigin::AgentSpawn { parent_thread_id, .. }) if bot.owns_thread(parent_thread_id))
+                    || matches!(&t.summary.origin, Some(falcondeck_core::ThreadOrigin::Automation { bot_id: Some(id), .. }) if id == &bot.id))
                     && (matches!(t.summary.status, ThreadStatus::Running | ThreadStatus::WaitingForInput) || !t.summary.queued_turns.is_empty()));
                 if matches!(
                     summary.status,
