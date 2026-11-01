@@ -255,6 +255,7 @@ pub fn append_instructions(
             )),
         }
     }
+    text.push_str("\n- In an isolated copy (a worktree under ~/.falcondeck/variants), `node_modules` may be a symlink to the project folder's install. Installing through it, pnpm especially, modifies the project folder. Before an install that changes dependencies or a lockfile, run `rm node_modules` (removes only the link) in that package directory, then install.");
     text.push_str("\n- Do not narrate FalconDeck internals unless the user asks.");
     text
 }
@@ -273,6 +274,7 @@ mod tests {
         assert!(without.contains("falcondeck_search"));
         assert!(without.contains("[Task name](falcondeck://thread/THREAD_ID)"));
         assert!(without.contains("never a title or guessed ID"));
+        assert!(without.contains("`rm node_modules` (removes only the link)"));
 
         let with = append_instructions(
             Some(Path::new("/tmp/skills/falcondeck-control/SKILL.md")),

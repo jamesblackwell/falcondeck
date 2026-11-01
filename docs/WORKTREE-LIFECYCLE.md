@@ -6,8 +6,12 @@ Status: shipped 2026-10-30. Design background is in `WORKTREES.md`.
 
 An isolated thread gets a variant: a `git worktree` under
 `~/.falcondeck/variants/<project>/<slug>/` on branch `falcondeck/<slug>`
-(`crates/falcondeck-daemon/src/variant.rs`). A Quizgecko worktree is about
-2 GB once dependencies are installed. On 30 Oct 2026 the variants directory
+(`crates/falcondeck-daemon/src/variant.rs`). A Quizgecko worktree was 2–5 GB
+once its agent installed dependencies (~1 GB of tracked source plus
+`frontend/node_modules` and `mobile-expo/node_modules`). New variants now share
+those from the project folder, so they cost about the tracked source (see
+"Dependencies are shared" in `WORKTREES.md`). Variants made before that keep
+their installs until archived and reclaimed. On 30 Oct 2026 the variants directory
 held 91 GB across 55 checkouts and the Mac had 11 GB free.
 
 The leak had one cause: **archiving a thread only set `is_archived`**.
@@ -48,7 +52,9 @@ the same rules; change them together.
    copies count; squash merges do not, and are kept).
 3. Ignored files are limited to rebuildable directories (`node_modules`,
    `vendor`, `target`, `.next`, `dist`) and allowlisted env-file copies (the
-   daemon put them there; the original is in the project folder).
+   daemon put them there; the original is in the project folder). A `node_modules` symlink into the project folder counts
+   as rebuildable too: the daemon excludes it from git status, and removing
+   the checkout removes only the link.
 4. `git worktree remove` is run without `--force`, so git re-checks
    cleanliness itself. The script additionally requires the checkout to be
    older than 3 days and its owner thread not running.

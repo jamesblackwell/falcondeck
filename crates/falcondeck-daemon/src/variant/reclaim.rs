@@ -1,7 +1,8 @@
 //! Lifecycle cleanup for worktree variants.
 //!
 //! A variant is plumbing for a thread. Once the thread is archived, its
-//! checkout only costs disk (a Quizgecko worktree is ~2 GB with dependencies),
+//! checkout only costs disk (a Quizgecko worktree was ~2 GB with its own
+//! dependencies; dependencies are now shared, see `setup.rs`),
 //! so archiving tries to reclaim it, but only when nothing would be lost:
 //! the tree is clean, every commit is on `origin` (by patch-id, so
 //! rebased/cherry-picked copies count), and the only ignored files are
@@ -75,6 +76,7 @@ pub async fn restore(project_path: &str, variant: &ThreadVariant) -> Result<bool
     .await
     .map_err(|error| format!("could not recreate {}: {error}", variant.path))?;
     copy_untracked_allowlist(project_path, Path::new(&variant.path)).await;
+    super::setup::prepare(project_path, Path::new(&variant.path), &variant.slug).await;
     Ok(true)
 }
 
@@ -622,5 +624,31 @@ mod tests {
         assert!(Path::new(&v.path).join(".env").exists());
         // Already present: nothing to do.
         assert_eq!(restore(f.project_str(), &v).await, Ok(false));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn shared_dependency_links_do_not_block_reclaim_and_come_back_on_restore() {
+        let f = Fixture::new();
+        // The fixture ignores `node_modules/` with a trailing slash, which
+        // does not match a symlink.
+        std::fs::write(f.project.join("package.json"), "{\"name\":\"app\"}\n").unwrap();
+        git_sync(&f.project, &["add", "."]);
+        git_sync(&f.project, &["commit", "-m", "package"]);
+        git_sync(&f.project, &["push", "origin", "main"]);
+        std::fs::create_dir_all(f.project.join("node_modules/dep")).unwrap();
+        std::fs::write(f.project.join("node_modules/dep/index.js"), "1\n").unwrap();
+
+        let v = f.variant("deps");
+        super::super::setup::prepare(f.project_str(), Path::new(&v.path), &v.slug).await;
+        let link = Path::new(&v.path).join("node_modules");
+        assert!(link.symlink_metadata().unwrap().file_type().is_symlink());
+
+        assert_eq!(reclaim_if_safe(f.project_str(), &v).await, Reclaim::Removed);
+        assert!(f.project.join("node_modules/dep/index.js").is_file());
+
+        assert_eq!(restore(f.project_str(), &v).await, Ok(true));
+        assert!(link.symlink_metadata().unwrap().file_type().is_symlink());
+        assert!(link.join("dep/index.js").is_file());
     }
 }

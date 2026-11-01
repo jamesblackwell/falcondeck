@@ -9,6 +9,8 @@
 //! filesystem entry; large Cargo, Xcode, and dependency trees made creation,
 //! deletion, and disk accounting prohibitively expensive. A small allowlist of
 //! environment files is copied into the otherwise tracked-only worktree.
+//!
+//! Dependencies are shared rather than installed per variant: see [`setup`].
 
 use std::path::{Path, PathBuf};
 
@@ -19,6 +21,7 @@ use uuid::Uuid;
 use crate::error::DaemonError;
 
 mod reclaim;
+mod setup;
 pub use reclaim::{Reclaim, reclaim_if_safe, restore};
 
 /// Untracked files carried into a worktree-backed variant.
@@ -104,6 +107,7 @@ pub(crate) async fn create_in_root(
 
     add_worktree(project_path, &destination, &branch).await?;
     copy_untracked_allowlist(project_path, &destination).await;
+    setup::prepare(project_path, &destination, slug).await;
 
     Ok(ThreadVariant {
         slug: slug.to_string(),
