@@ -421,6 +421,15 @@ impl ClaudeRuntime {
         if let Some(model_id) = model_id {
             command.arg("--model").arg(model_id);
         }
+        // Current Claude models have a native 1M window and the CLI only
+        // compacts near 967K, so a long thread re-reads up to ~1M cached tokens
+        // every turn. Compact at a smaller window unless the user picked an
+        // explicit 1M model. The environment variable outranks settings files,
+        // and older CLIs that don't know it simply ignore it.
+        match autocompact_window(model_id) {
+            Some(window) => command.env(AUTOCOMPACT_ENV, window),
+            None => command.env_remove(AUTOCOMPACT_ENV),
+        };
         if let Some(effort) = effort {
             command.arg("--effort").arg(effort);
         }
@@ -1371,12 +1380,32 @@ fn claude_model(
     }
 }
 
+/// Tokens at which FalconDeck-run Claude sessions compact unless a `[1m]`
+/// model was chosen. Claude Code accepts 100K to 1M.
+pub const DEFAULT_AUTOCOMPACT_WINDOW: &str = "200000";
+const AUTOCOMPACT_ENV: &str = "CLAUDE_CODE_AUTO_COMPACT_WINDOW";
+
+/// Whether the model id asks for the full context window (`opus[1m]`).
+pub fn is_full_context_model(model_id: &str) -> bool {
+    model_id.trim().to_ascii_lowercase().ends_with("[1m]")
+}
+
+/// The compaction window to impose, or `None` to leave the CLI's own
+/// near-1M default for an explicit `[1m]` model.
+fn autocompact_window(model_id: Option<&str>) -> Option<&'static str> {
+    if model_id.is_some_and(is_full_context_model) {
+        None
+    } else {
+        Some(DEFAULT_AUTOCOMPACT_WINDOW)
+    }
+}
+
 /// The ids are CLI aliases that always run the newest model in each family;
 /// only the labels are ours. Re-check them when the CLI moves an alias
 /// (`claude -p --model <alias> --output-format json` reports `modelUsage`).
 pub fn curated_models() -> Vec<ModelSummary> {
     vec![
-        claude_model("haiku", "Haiku 4.5", false, "medium", claude_base_efforts()),
+        claude_model("haiku", "Haiku 5.5", false, "medium", claude_base_efforts()),
         claude_model(
             "sonnet",
             "Sonnet 5.5",
@@ -1385,7 +1414,23 @@ pub fn curated_models() -> Vec<ModelSummary> {
             claude_base_efforts(),
         ),
         claude_model("opus", "Opus 5.5", false, "high", claude_max_efforts()),
+        // Same model, compacting only near the full 1M window. Costs more per
+        // turn on long threads; pick it when a task needs the whole history.
+        claude_model(
+            "opus[1m]",
+            "Opus 5.5 1M",
+            false,
+            "high",
+            claude_max_efforts(),
+        ),
         claude_model("fable", "Fable 5.1", false, "high", claude_max_efforts()),
+        claude_model(
+            "fable[1m]",
+            "Fable 5.1 1M",
+            false,
+            "high",
+            claude_max_efforts(),
+        ),
     ]
 }
 
@@ -2347,16 +2392,37 @@ mod tests {
     #[test]
     fn exposes_curated_claude_models_with_versioned_labels() {
         let models = curated_models();
-        assert_eq!(models.len(), 4);
-        assert_eq!(models[0].id, "haiku");
-        assert_eq!(models[0].label, "Haiku 4.5");
-        assert_eq!(models[1].id, "sonnet");
-        assert_eq!(models[1].label, "Sonnet 5.5");
+        let rows: Vec<_> = models
+            .iter()
+            .map(|model| (model.id.as_str(), model.label.as_str()))
+            .collect();
+        assert_eq!(
+            rows,
+            [
+                ("haiku", "Haiku 5.5"),
+                ("sonnet", "Sonnet 5.5"),
+                ("opus", "Opus 5.5"),
+                ("opus[1m]", "Opus 5.5 1M"),
+                ("fable", "Fable 5.1"),
+                ("fable[1m]", "Fable 5.1 1M"),
+            ]
+        );
         assert!(models[1].is_default);
-        assert_eq!(models[2].id, "opus");
-        assert_eq!(models[2].label, "Opus 5.5");
-        assert_eq!(models[3].id, "fable");
-        assert_eq!(models[3].label, "Fable 5.1");
+    }
+
+    #[test]
+    fn sessions_compact_early_unless_a_1m_model_is_chosen() {
+        assert_eq!(autocompact_window(None), Some(DEFAULT_AUTOCOMPACT_WINDOW));
+        assert_eq!(
+            autocompact_window(Some("opus")),
+            Some(DEFAULT_AUTOCOMPACT_WINDOW)
+        );
+        assert_eq!(
+            autocompact_window(Some("claude-opus-5-5")),
+            Some(DEFAULT_AUTOCOMPACT_WINDOW)
+        );
+        assert_eq!(autocompact_window(Some("opus[1m]")), None);
+        assert_eq!(autocompact_window(Some(" Claude-Fable-5-1[1M] ")), None);
     }
 
     #[test]
@@ -2378,7 +2444,7 @@ mod tests {
             },
         ];
         let merged = merge_claude_models(curated_models(), &extras);
-        assert_eq!(merged.len(), 5);
+        assert_eq!(merged.len(), curated_models().len() + 1);
         assert_eq!(merged[1].label, "Sonnet 5.5");
         assert!(merged[1].is_default);
         let extra = merged.last().unwrap();
