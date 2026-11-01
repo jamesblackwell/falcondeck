@@ -102,7 +102,7 @@ struct SidebarView: View {
                         ForEach(Array(messageMatches.enumerated()), id: \.offset) { _, match in
                             Button {
                                 Task {
-                                    await model.openTask(match["thread_id"].string)
+                                    await model.openTask(match["thread_id"].string, workspaceID: match["workspace_id"].string.nonempty)
                                     if model.selection == .task(match["thread_id"].string) { openDetail() }
                                 }
                             } label: {
@@ -140,6 +140,8 @@ struct SidebarView: View {
         .task(id: plan) { await model.loadInitialTaskPages(plan) }
         .task(id: "\(model.connectionID):\(model.connected):\(search)") { await searchMessages() }
         .onChange(of: model.connectionID) { _, _ in disclosures.reset() }
+        .onChange(of: expanded) { _, open in model.noteExpanded(open) }
+        .onChange(of: sort) { _, _ in model.noteExpanded(expanded) }
         .onAppear { MinuteClock.shared.start() }
         .sensoryFeedback(.selection, trigger: showOptions) { _, open in open && motion.active }
         .toolbar {
@@ -185,6 +187,7 @@ struct SidebarView: View {
         .onAppear {
             if case .task(let id) = model.selection, let task = model.tasks.first(where: { $0.id == id }) { expanded.insert(task.projectID) }
             else if expanded.isEmpty, let project = projects.first(where: { $0.raw["kind"].string != "casual" }) { expanded.insert(project.id) }
+            model.noteExpanded(expanded)
         }
         .onChange(of: model.selection) { _, destination in
             guard case .task(let id) = destination, let task = model.task(id), !task.pinned else { return }
@@ -268,8 +271,9 @@ struct SidebarView: View {
         let limit = search.isEmpty ? limits[key, default: 5] : tasks.count
         let family = SpawnNesting.nest(sorted(tasks))
         let ordered = family.tasks
-        ForEach(ordered.prefix(limit)) { taskLink($0, indent: indent, spawnDepth: family.depth[$0.id] ?? 0) }
-        if case .task(let selectedID) = model.selection, let selected = ordered.dropFirst(limit).first(where: { $0.id == selectedID }) {
+        let rows = SidebarRows.visible(ordered, limit: limit)
+        ForEach(rows) { taskLink($0, indent: indent, spawnDepth: family.depth[$0.id] ?? 0) }
+        if case .task(let selectedID) = model.selection, !rows.contains(where: { $0.id == selectedID }), let selected = ordered.dropFirst(limit).first(where: { $0.id == selectedID }) {
             taskLink(selected, indent: indent, spawnDepth: family.depth[selected.id] ?? 0)
         }
         let projectID = folder?.projectID ?? key
@@ -301,8 +305,9 @@ struct SidebarView: View {
         let limit = search.isEmpty ? limits["chats", default: 10] : tasks.count
         let next = projects.first { model.hasMoreTasks($0.id, sort: sort) }
         let loading = projects.contains { model.taskPageLoads.contains(CompactSync.key(project: $0.id, folder: nil, sort: sort)) }
-        ForEach(tasks.prefix(limit)) { taskLink($0, spawnDepth: family.depth[$0.id] ?? 0) }
-        if case .task(let selectedID) = model.selection, let selected = tasks.dropFirst(limit).first(where: { $0.id == selectedID }) { taskLink(selected, spawnDepth: family.depth[selected.id] ?? 0) }
+        let rows = SidebarRows.visible(tasks, limit: limit)
+        ForEach(rows) { taskLink($0, spawnDepth: family.depth[$0.id] ?? 0) }
+        if case .task(let selectedID) = model.selection, !rows.contains(where: { $0.id == selectedID }), let selected = tasks.dropFirst(limit).first(where: { $0.id == selectedID }) { taskLink(selected, spawnDepth: family.depth[selected.id] ?? 0) }
         if tasks.isEmpty && loading {
             HStack(spacing: 8) { ActivityDiamond(); Text("Loading chats…").font(.caption).foregroundStyle(FD.secondary) }
                 .frame(maxWidth: .infinity, minHeight: 64).accessibilityIdentifier("sidebar-chats-loading")

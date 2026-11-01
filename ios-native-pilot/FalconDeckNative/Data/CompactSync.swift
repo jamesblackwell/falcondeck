@@ -31,7 +31,7 @@ struct CompactSync {
             let model = index["workspace_models"][id].optionalInt
             return workspace.setting("agents", .array(catalogs)).setting("models", model.flatMap { models.indices.contains($0) ? models[$0] : nil } ?? .array([]))
         }
-        return index["snapshot"].setting("workspaces", .array(workspaces)).setting("native_sync", .object(["token": index["token"], "counts": index["counts"]]))
+        return index["snapshot"].setting("workspaces", .array(workspaces)).setting("native_sync", .object(["token": index["token"], "counts": index["counts"], "initial_cursors": index["initial_cursors"]]))
     }
     mutating func retain(_ incoming: [AgentTask], previous: [AgentTask], projectIDs: Set<String>, hidden: Set<String>, selected: String?) -> [AgentTask] {
         let ids = Set(incoming.map(\.id))
@@ -52,6 +52,12 @@ struct CompactSync {
             if row.raw[key] == .null || row.raw[key] == .array([]) { raw = raw.setting(key, previous.raw[key]) }
         }
         return AgentTask(raw)
+    }
+    /// Lists whose newest rows already arrived in the index start past them
+    /// (`null` = nothing left), in the order the sidebar defaults to.
+    static func initialCursors(_ raw: JSON) -> [String: JSON] {
+        guard case .object(let values) = raw else { return [:] }
+        return Dictionary(uniqueKeysWithValues: values.map { (key(project: $0.key, folder: nil), $0.value) })
     }
     static func key(project: String, folder: String?, sort: String = "last_updated") -> String { project + ":" + (folder.map { "folder:\($0):" } ?? "") + sort }
 }
@@ -88,6 +94,7 @@ struct CompactSync {
             guard page["workspace_id"].string == projectID, rows.allSatisfy({ $0.projectID == projectID }) else { throw PilotError("Project page scope did not match.") }
             let accepted = rows.filter { !index.touched.contains($0.id) && (task($0.id) == nil || index.carried.contains($0.id)) }
             upsertTasks(accepted.map(\.raw))
+            extensions.ensureThreads(accepted.map(\.id), model: self)
             for row in rows {
                 index.carried.remove(row.id)
             }

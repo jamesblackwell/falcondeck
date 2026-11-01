@@ -167,3 +167,12 @@ Daemon policy and contract: [docs/FILE-PREVIEW.md](../docs/FILE-PREVIEW.md). QA 
 `--open-file=<path>` drive a simulator paired to a smoke daemon. `FileViewerQATests`
 covers markdown + relative image, HTML + CSS/JS/JSON, PDF, wide screenshot, denied
 file and progress. Not done: `http://localhost:PORT` / `*.ts.net` links (see the doc).
+
+## Lighter sync — 1 November 2026
+
+Lists load the newest five rows per project (twenty chats) plus bots, pins and
+rows needing attention; "Show more" and search reach everything. Live events are
+scoped to recently opened threads, the socket closes after ten idle seconds in the
+background, and refreshes are one index request. Measurements and the deploy order
+are in [PERFORMANCE.md](PERFORMANCE.md). Unread, notifications, bot marks, paced
+streaming and the file viewer are unchanged.

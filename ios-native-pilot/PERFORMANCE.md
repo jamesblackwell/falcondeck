@@ -592,3 +592,78 @@ Validation: 378 unit tests, including paced-reveal regressions (prefix-only
 output, bursts spread over several frames, completion mid-drain, retraction,
 Reduce Motion). Before/after recordings and screenshots are not committed.
 
+
+## Lighter sync — 1 November 2026
+
+James works mostly through the six bots and opens ordinary task threads less, so
+the phone now loads what is on screen and treats the rest as summaries. Expo's
+`snapshot.current` and the desktop are unchanged; every protocol addition is
+optional and ignored by older daemons and relays.
+
+**What was costing the most** (live daemon, 3,387 live threads, 108 workspaces;
+`FD_SNAPSHOT`/`FD_CAPTURE` fixtures from `/api/snapshot` and `/api/events`):
+
+| Cost | Before |
+| --- | ---: |
+| `sync.index` (no thread rows: the metadata alone exceeds its 64 KiB target) | 159.9 KB |
+| `sync.threads` pages after every index (one per Chats workspace + the open project) | 19 requests |
+| `sync.extensions` after every index (a follow-up view for every thread) | 398 KB (530 KB on the wire) |
+| Live stream, five active threads, daemon JSON before encryption | 194 events and 337 KB per minute |
+| `thread-updated`, share of those bytes (2.2 KB of each 3.5 KB is a `latest_diff` the app never reads) | 58% |
+| Foreground idle on the simulator, 60 s | 1.76 MB, 472 events, 9.1 s CPU |
+| Backgrounded on the simulator, 60 s (iOS would suspend; the simulator does not) | 1.69 MB, 649 events, 23.6 s CPU |
+| Foreground resume | full index + extensions + pages, every time |
+| Safety refresh | every 5 minutes |
+
+**What changed**
+
+- `sync.index` accepts `recent_per_workspace`, `recent_workspace_ids` and
+  `recent_chats` and ships the newest five rows of the open projects and twenty
+  chats, plus pins, bot homes, anything running or waiting for input, and the ten
+  newest unread and failed rows. `initial_cursors` says where each list resumes,
+  so the sidebar makes no page calls; "Show more" pages the rest. Search still
+  asks the daemon; opening a hit uses a one-item `thread.detail`.
+- `sync.extensions` accepts `thread_ids`; the phone asks for the threads it lists
+  and fetches views for later rows, once, in one coalesced call.
+- Scoped events (relay + daemon, see the protocol plan): live text, items and tool
+  events arrive only for the three most recently opened threads and any thread
+  with a send or history read in flight. Summaries still reach everything. When
+  every connected client opts in, summaries drop `latest_diff`/`latest_plan`.
+  A transcript that falls out of scope is marked stale by its next summary and
+  reloads when reopened.
+- Entering the background closes the socket after ten seconds unless a request,
+  dictation or read-aloud is in flight; foregrounding reconnects. A return inside
+  twenty seconds keeps the connection and skips the refresh. The safety refresh is
+  twenty minutes. No timer runs while backgrounded.
+- Older rows that need you (running, waiting, failed, unread) stay listed beyond
+  the five.
+
+**Measured** (all against the live daemon unless noted)
+
+| | Before | After |
+| --- | ---: | ---: |
+| Requests per refresh (index + pages + extensions) | 21 | 2 |
+| Bytes per refresh, daemon JSON | 159.9 + ~60 + 398 KB | 221.0 + 10.2 KB |
+| Live stream, one busy thread open, captured 2 min (relay `lean`+`scoped`) | 392 events, 690 KB | 218 events, 256 KB (37%) |
+| Live stream, no thread open | 392 events, 690 KB | 115 events, 187 KB (27%) |
+| Simulator, backgrounded 60 s | 1.69 MB, 649 events, 23.6 s CPU | socket closed after ~10 s: 84 KB, 37 events, 2.2 s CPU |
+
+The simulator rows ran on a heavily loaded Mac (load average 300–900), against the
+production daemon and relay, which have neither the new index options nor scoped
+events yet, so they show only the client-side change (the background pause).
+CPU seconds are process CPU time over the window and are noisy under that load;
+bytes, events and requests are not. Foreground idle events differ between runs
+because the live daemon's agents were busier in one than the other (342 versus 472
+events in 60 s); the capture replay above is the controlled comparison for event
+volume. The 2 MB per minute a foreground phone received is why scoping matters:
+the relay carries about 70 KB/s.
+
+Reproduce: Developer settings shows bytes, events and requests since connecting;
+`--sync-meter` writes `Documents/sync-meter.json` every few seconds and
+`--sync-legacy` restores the previous behaviour (no index options, no scope, no
+pause, refresh on every foreground) for an A/B on the same build. Daemon sizes:
+`FD_SNAPSHOT=snapshot.json cargo test -p falcondeck-daemon measure_real_snapshot_index -- --ignored --nocapture`.
+
+**Needs deploying to take effect:** relay first, then a desktop install (scoped
+events, lean summaries, the index options and `thread_ids`), then a native build.
+An old daemon or relay simply ignores the new fields.

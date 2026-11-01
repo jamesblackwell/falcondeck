@@ -6,16 +6,23 @@ import Foundation
         foreground = active
         Task { await relay.setForeground(active) }
         if active {
+            syncScope.pause?.cancel(); syncScope.pause = nil
+            // A short trip away kept its live socket, so nothing was missed.
+            let away = syncScope.backgroundedAt.map { Date.now.timeIntervalSince($0) } ?? .infinity
+            syncScope.backgroundedAt = nil; syncScope.paused = false
             synchronizePush()
             taskActivity.reconcileDismissal()
             synchronizeTaskActivity()
-            if hasSession && !demo && !restoringSession, foregroundRefresh == nil {
+            if hasSession && !demo && !restoringSession, foregroundRefresh == nil, SyncScopeState.legacy || !(connected && away < SyncScopeState.quickReturn) {
                 foregroundRefresh = Task {
                     defer { self.foregroundRefresh = nil }
                     if self.connected { await self.refresh() } else { await self.reconnect() }
                 }
             }
-        } else { reconnectTask?.cancel(); reconnectTask = nil }
+        } else {
+            reconnectTask?.cancel(); reconnectTask = nil
+            syncScope.backgroundedAt = .now
+        }
     }
 
     /// Capture input before yielding to another scene, connection or edit.

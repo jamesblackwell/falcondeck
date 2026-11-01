@@ -83,6 +83,7 @@ enum NativeRelayEndpoint {
         guard var parts = URLComponents(url: relay.appending(path: "v1/updates/ws"), resolvingAgainstBaseURL: false) else { throw PilotError("Invalid relay address.") }
         parts.scheme = relay.scheme == "https" ? "wss" : "ws"
         parts.queryItems = [URLQueryItem(name: "session_id", value: sessionID), URLQueryItem(name: "ticket", value: ticket), URLQueryItem(name: "transport", value: "chunks-v1"), URLQueryItem(name: "compact_index", value: "true")]
+        if !SyncScopeState.legacy { parts.queryItems?.append(URLQueryItem(name: "scoped_events", value: "true")) }
         guard let url = parts.url else { throw PilotError("Invalid relay address.") }
         return url
     }

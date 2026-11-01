@@ -2,9 +2,20 @@ import SwiftUI
 
 struct DeveloperSettingsView: View {
     @AppStorage("native.debug.overlay") private var overlay = false
+    @Environment(AppModel.self) private var model
     @State private var sample = PerformanceSample.current()
+    @State private var meter: SyncMeter.Report?
     var body: some View {
         Form {
+            if let meter {
+                Section("Sync since connecting") {
+                    LabeledContent("Received", value: ByteCountFormatter.string(fromByteCount: Int64(meter.totalBytes), countStyle: .file))
+                    LabeledContent("Live events", value: String(meter.entries.filter { $0.key.hasPrefix("event.") }.values.reduce(0) { $0 + $1.count }))
+                    LabeledContent("Requests", value: String(meter.entries.filter { $0.key.hasPrefix("rpc.") && $0.key != "rpc.out" }.values.reduce(0) { $0 + $1.count }))
+                    LabeledContent("Index refreshes", value: String(meter.entries["rpc.sync.index"]?.count ?? 0))
+                    LabeledContent("Connected for", value: Duration.seconds(meter.seconds).formatted(.units(allowed: [.hours, .minutes, .seconds], width: .narrow)))
+                }.listRowBackground(FD.surface)
+            }
             Section("Performance") {
                 LabeledContent("CPU", value: String(format: "%.1f%%", sample.cpu))
                 LabeledContent("Resident memory", value: ByteCountFormatter.string(fromByteCount: Int64(sample.memory), countStyle: .memory))
@@ -16,6 +27,7 @@ struct DeveloperSettingsView: View {
             .task {
                 while !Task.isCancelled {
                     sample = PerformanceSample.current()
+                    meter = await model.relay.syncMeter()
                     do { try await Task.sleep(for: .seconds(1)) } catch { return }
                 }
             }

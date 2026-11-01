@@ -89,7 +89,7 @@ struct FalconDeckNativeApp: App {
         // mark an actively used second window as backgrounded.
         .onChange(of: scenePhase) { _, phase in
             model.setForeground(phase == .active)
-            if phase == .background { model.saveBeforeSuspension() }
+            if phase == .background { model.saveBeforeSuspension(); model.scheduleBackgroundPause() }
         }
     }
 }

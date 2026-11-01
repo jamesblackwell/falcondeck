@@ -16,7 +16,7 @@ enum TaskSummaryOrder {
         if let index = taskPositions[id], tasks.indices.contains(index), tasks[index].id == id { return tasks[index] }
         return tasks.first { $0.id == id } ?? archivedTasks.first { $0.id == id }
     }
-    func openTask(_ id: String) async {
+    func openTask(_ id: String, workspaceID: String? = nil) async {
         // A cached destination also supersedes an older lookup still in flight.
         let request = UUID()
         detailRequestID = request
@@ -24,6 +24,16 @@ enum TaskSummaryOrder {
         guard connected, !demo else { error = "Connect to your computer to open this task."; return }
         let current = connectionID, content = detailContentID
         do {
+            // With the owning project known, a one-item read resolves the
+            // summary; the whole-library snapshot is for links that carry only an id.
+            if let workspaceID, !workspaceID.isEmpty {
+                var params = NativeRequest.history(task: AgentTask(.object(["workspace_id": .string(workspaceID), "id": .string(id)])), before: nil)
+                params = params.setting("limit", .number(1))
+                let raw = try await relay.call("thread.detail", params: params)["thread"]
+                guard current == connectionID, request == detailRequestID, content == detailContentID else { return }
+                guard raw["id"].string == id else { throw PilotError("This task is no longer available on your computer.") }
+                upsertTask(raw); selection = .task(id); return
+            }
             let snapshot = try await relay.call("snapshot.current", params: .object(["include_archived_threads": .bool(true), "include_thread_plans": .bool(false), "include_thread_diffs": .bool(false), "include_agent_skills": .bool(false), "include_workspace_skills": .bool(false)]))
             guard current == connectionID, request == detailRequestID, content == detailContentID else { return }
             guard let raw = snapshot["threads"].array.first(where: { $0["id"].string == id }) else { throw PilotError("This task is no longer available on your computer.") }

@@ -198,9 +198,21 @@ draft store before their source audio is deleted. These are finite operations,
 not a persistent background socket, polling loop or silent-audio keepalive.
 
 Connections bootstrap through `sync.index`, expand shared catalogs once, and
-page project/folder lists with `sync.threads`. A legacy snapshot fallback is used
-only when compact sync is unavailable. Live events stream immediately; sidebar
-metadata is coalesced. Fresh snapshots, connection identities, touched-row/view
+page project/folder lists with `sync.threads`. The index request asks for the
+newest five rows of the open projects and twenty chats; the daemon adds pins, bot
+homes and rows that need attention, and returns where each list's paging resumes,
+so a refresh is one request. Older rows load on "Show more". A legacy snapshot
+fallback is used only when compact sync is unavailable. Live text, item and tool
+events arrive only for the threads opened recently (a `scope` subscription, when
+the relay supports it); every thread still gets coalesced summary updates for
+lists, unread state and notifications. Entering the background closes the socket
+after ten seconds if nothing is in flight; returning reconnects and refreshes
+(a return within twenty seconds keeps the live connection and skips the refresh).
+There is no polling while backgrounded and the foreground safety refresh is twenty
+minutes. Developer settings shows bytes, events and requests since connecting;
+`--sync-meter` also writes them to `Documents/sync-meter.json` and `--sync-legacy`
+restores the previous behaviour for before/after runs. Live events stream
+immediately; sidebar metadata is coalesced. Fresh snapshots, connection identities, touched-row/view
 tracking and UTF-16 offsets protect reconnects and paged history. Network retry
 uses bounded backoff. Mutations and uncertain sends are never retried automatically.
 Search covers loaded tasks and explicitly offers loading more.

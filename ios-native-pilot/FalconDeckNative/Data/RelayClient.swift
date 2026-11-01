@@ -35,6 +35,8 @@ enum ClientEvent: Sendable {
     case snapshot(JSON)
     case events([JSON])
     case rebase([JSON])
+    /// The relay accepts event scopes on this connection (`scope` messages).
+    case capabilities(scoped: Bool)
     case error(String)
 }
 
@@ -51,6 +53,13 @@ protocol RelayServing: Sendable {
     func refresh() async
     func selectThread(_ id: String?) async
     func setForeground(_ active: Bool) async
+    /// Project lists the next index should ship rows for.
+    func setIndexScope(_ scope: SyncIndexScope?) async
+    /// Threads whose live text/items/tool events this client wants.
+    func setInterest(_ threads: Set<String>) async
+    /// Closes the socket for a backgrounded app; false while a request is in flight.
+    func pauseIfIdle() async -> Bool
+    func syncMeter() async -> SyncMeter.Report?
     func detail(task: AgentTask, before: String?) async throws -> JSON
     func call(_ method: String, params: JSON) async throws -> JSON
 }
@@ -58,6 +67,10 @@ protocol RelayServing: Sendable {
 extension RelayServing {
     func selectThread(_ id: String?) async { }
     func setForeground(_ active: Bool) async { }
+    func setIndexScope(_ scope: SyncIndexScope?) async { }
+    func setInterest(_ threads: Set<String>) async { }
+    func pauseIfIdle() async -> Bool { false }
+    func syncMeter() async -> SyncMeter.Report? { nil }
 }
 
 /// Owns networking and cryptography off the UI actor. A fresh daemon snapshot
@@ -89,8 +102,46 @@ actor RelayClient: RelayServing {
     private var upload: (id: Int, transfer: RelayUpload)?
     private var refreshTask: Task<Void, Never>?
     private var refreshSchedule = RelayRefreshSchedule()
+    private var meter = SyncMeter()
+    private var lastMeterDump = Date.distantPast
+    private var indexScope: SyncIndexScope?
+    private var scopedEvents = false
+    private var interest: Set<String> = []
+    private var sentScope: [String]?
+    private var pendingMethods: [String: String] = [:]
 
     func selectThread(_ id: String?) { selectedThread = id }
+    func setIndexScope(_ scope: SyncIndexScope?) { indexScope = SyncScopeState.legacy ? nil : scope }
+    func setInterest(_ threads: Set<String>) async {
+        guard threads != interest else { return }
+        interest = threads
+        await syncScope()
+    }
+    func syncMeter() -> SyncMeter.Report? { meter.report() }
+    func resetMeter() { meter.reset() }
+    private func dumpMeter(force: Bool = false) {
+        guard SyncMeter.dumpEnabled, force || Date.now.timeIntervalSince(lastMeterDump) > 4, let url = SyncMeter.dumpURL else { return }
+        lastMeterDump = .now; meter.dump(to: url)
+    }
+    /// Tells the relay which threads' stream events to deliver. Without a data
+    /// key no tag can be derived; the relay then sends none, and nothing could
+    /// be decrypted anyway. Resent after every key change and reconnect.
+    private func syncScope() async {
+        guard scopedEvents, socket != nil, let key = session?.dataKey else { return }
+        let tags = EventScope.tags(for: interest, key: key)
+        guard tags != sentScope else { return }
+        sentScope = tags
+        try? await send(.object(["type": .string("scope"), "tags": .array(tags.map(JSON.string))]))
+    }
+    /// A backgrounded app has nothing to show for live events and iOS may
+    /// suspend it with a buffered socket. Closing it lets the relay push
+    /// instead; foregrounding reconnects and rebuilds from a fresh index.
+    func pauseIfIdle() async -> Bool {
+        guard socket != nil, pending.isEmpty, upload == nil, !refreshInFlight, !bulkSending else { return false }
+        meter.record("pause"); dumpMeter(force: true)
+        try? disconnect()
+        return true
+    }
     func setForeground(_ active: Bool) async {
         foreground = active
         guard supportsClientActivity, socket != nil else { return }
@@ -151,7 +202,7 @@ actor RelayClient: RelayServing {
         reader?.cancel(); heartbeat?.cancel()
         socket?.cancel(with: .goingAway, reason: nil)
         socket = nil; session = nil; rpcReady = nil; refreshInFlight = false; bulkSending = false
-        supportsClientActivity = false
+        supportsClientActivity = false; scopedEvents = false; sentScope = nil
         bufferedEvents = []
         failPending(PilotError("The connection closed."))
         if forget { try SessionVault.clear() }
@@ -175,11 +226,13 @@ actor RelayClient: RelayServing {
                 do {
                     try await Task.sleep(for: .seconds(10))
                     guard current == self.generation else { return }
+                    self.dumpMeter()
                     if Date.now.timeIntervalSince(self.lastReceived) > 45 { throw PilotError("Relay stopped responding. Reconnect to try again.") }
                     try await self.send(.object(["type": .string("ping")]))
+                    self.meter.record("ping")
                     guard current == self.generation else { return }
                     if self.session?.dataKey == nil { try await self.requestBootstrap() }
-                    else if Date.now.timeIntervalSince(self.refreshed) > 300 { self.scheduleRefresh() }
+                    else if Date.now.timeIntervalSince(self.refreshed) > 1200 { self.scheduleRefresh() }
                 } catch is CancellationError { return }
                 catch { self.connectionFailed(error, generation: current); return }
             }
@@ -200,6 +253,7 @@ actor RelayClient: RelayServing {
                 @unknown default: continue
                 }
                 let frame = try JSON.decode(data)
+                meter.record("wire.in", bytes: data.count)
                 switch frame["type"].string {
                 case "transport-ready":
                     guard frame["version"].string == "chunks-v1" else { throw PilotError("Unsupported relay transport.") }
@@ -229,10 +283,14 @@ actor RelayClient: RelayServing {
             log.info("Relay ready; saved content key: \(self.session?.dataKey != nil)")
             guard frame["session_id"].string == session?.sessionID, frame["role"].string == "client" else { throw PilotError("Unexpected relay session.") }
             supportsClientActivity = frame["client_activity_supported"].bool
+            scopedEvents = frame["scoped_events_supported"].bool && !SyncScopeState.legacy; sentScope = nil
+            emit(.capabilities(scoped: scopedEvents))
             await setForeground(foreground)
             emit(.status("Securing connection…", connected: false))
             // Fresh snapshots are our source of truth; skip old ciphertext and
             // request a signed bootstrap addressed to this independent client.
+            // The scope goes first, so replay already honours it.
+            await syncScope()
             try await send(.object(["type": .string("sync"), "after_seq": .number(Double(max(0, frame["next_seq"].int - 1)))]))
             guard current == generation else { return }
             if session?.dataKey == nil { try await requestBootstrap() }
@@ -250,6 +308,7 @@ actor RelayClient: RelayServing {
             log.info("RPC response received; success: \(frame["ok"].bool)")
             let id = frame["request_id"].string
             guard let continuation = pending.removeValue(forKey: id) else { return }
+            meter.record("rpc." + (pendingMethods.removeValue(forKey: id) ?? "?"), bytes: frame["result"]["ciphertext"].string.utf8.count + frame["error"]["ciphertext"].string.utf8.count)
             requestTasks.removeValue(forKey: id)?.cancel()
             do {
                 guard let key = session?.dataKey else { throw PilotError("The encrypted session is not ready.") }
@@ -271,10 +330,12 @@ actor RelayClient: RelayServing {
            body["material"]["client_public_key"].string == (try RelayIdentity(secret: saved.secret).publicKey) {
             saved.dataKey = try RelayCrypto.bootstrap(body["material"], session: saved)
             try SessionVault.save(saved); session = saved
+            Task { await self.syncScope() }
             scheduleRefresh(urgent: true)
         } else if body["t"].string == "presence" { applyPresence(body["presence"]) }
-        else if body["t"].string == "snapshot-invalidated" { scheduleRefresh() }
+        else if body["t"].string == "snapshot-invalidated" { meter.record("invalidated"); scheduleRefresh() }
         else if body["t"].string == "encrypted", let key = session?.dataKey {
+            meter.record("update", bytes: body["envelope"]["ciphertext"].string.utf8.count)
             publish(NativeRequest.events(try RelayCrypto.decrypt(body["envelope"], key: key)))
         }
     }
@@ -284,6 +345,7 @@ actor RelayClient: RelayServing {
         // Treat those as invalidations too, so legacy metadata stays fresh.
         if events.contains(where: { $0["event"]["type"].string == "snapshot" }) { scheduleRefresh() }
         let live = events.filter { $0["event"]["type"].string != "snapshot" }
+        for event in live { meter.record("event." + event["event"]["type"].string) }
         if refreshInFlight {
             bufferedEvents.append(contentsOf: live)
             if bufferedEvents.count > 2048 {
@@ -347,7 +409,7 @@ actor RelayClient: RelayServing {
         do {
             let result: JSON
             do {
-                let index = try await call("sync.index", params: .object(["selected_thread_id": selectedThread.map(JSON.string) ?? .null]))
+                let index = try await call("sync.index", params: indexScope?.params(selected: selectedThread) ?? .object(["selected_thread_id": selectedThread.map(JSON.string) ?? .null]))
                 result = try CompactSync.expand(index)
             } catch {
                 // Compatibility only: a timeout must not start a larger fetch.
@@ -386,8 +448,9 @@ actor RelayClient: RelayServing {
         let frame = JSON.object(["type": .string("rpc-call"), "request_id": .string(id), "method": .string(method), "params": try RelayCrypto.encrypt(params, key: key)])
         let responseTimeout = method == "speech.transcribe" ? NativeSpeechSettings.responseTimeout(params: params)
             : Duration.seconds(["speech.synthesize", "turn.start", "thread.item"].contains(method) ? 120 : 35)
+        meter.record("rpc.out", bytes: frame["params"]["ciphertext"].string.utf8.count)
         return try await withCheckedThrowingContinuation { continuation in
-            pending[id] = continuation
+            pending[id] = continuation; pendingMethods[id] = method
             requestTasks[id] = Task {
                 do {
                     guard current == self.generation else { throw CancellationError() }
@@ -404,11 +467,11 @@ actor RelayClient: RelayServing {
         }
     }
     private func finish(_ id: String, error: Error) {
-        requestTasks.removeValue(forKey: id)?.cancel()
+        requestTasks.removeValue(forKey: id)?.cancel(); pendingMethods.removeValue(forKey: id)
         pending.removeValue(forKey: id)?.resume(throwing: error)
     }
     private func failPending(_ error: Error) {
-        let continuations = pending.values; pending.removeAll()
+        let continuations = pending.values; pending.removeAll(); pendingMethods = [:]
         for task in requestTasks.values { task.cancel() }; requestTasks = [:]
         for c in continuations { c.resume(throwing: error) }
         if let upload { Task { await upload.transfer.cancel(error) } }; upload = nil

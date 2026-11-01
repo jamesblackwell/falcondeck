@@ -36,10 +36,17 @@ struct NativeSuggestionOffer {
     private var loadingID: UUID?
     private var touched: Set<JSON> = []
     private var catalogTouched = false
+    /// Threads whose views were requested under this index token. The daemon
+    /// holds one follow-up view per thread (about 0.4 MB for a large library),
+    /// so a refresh asks only for the threads the phone lists.
+    private var requested: Set<String> = []
+    private var wanted: Set<String> = []
+    private var ensureTask: Task<Void, Never>?
+    static let threadLimit = 400
     static let stagesID = "falcondeck.thread-tags"
-    func reset() { catalog = []; views = []; selections = [:]; dismissed = [:]; token = nil; loaded = false; loadingID = nil; touched = []; catalogTouched = false; error = nil }
+    func reset() { catalog = []; views = []; selections = [:]; dismissed = [:]; token = nil; loaded = false; loadingID = nil; touched = []; catalogTouched = false; error = nil; requested = []; wanted = []; ensureTask?.cancel(); ensureTask = nil }
     func setBase(_ value: JSON, token: String?) {
-        self.token = token; loadingID = nil; touched = []; catalogTouched = false
+        self.token = token; loadingID = nil; touched = []; catalogTouched = false; requested = []; wanted = []; ensureTask?.cancel(); ensureTask = nil
         loaded = token == nil
         if token == nil { catalog = value["catalog"].array; views = value["views"].array }
     }
@@ -61,15 +68,49 @@ struct NativeSuggestionOffer {
         loadingID = load; error = nil
         defer { if loadingID == load { loadingID = nil } }
         do {
-            let value = try await model.relay.call(currentToken == nil ? "extensions.read" : "sync.extensions", params: currentToken.map { .object(["token": .string($0)]) } ?? .object([:]))
+            let ids = Self.listedThreads(model)
+            let value = try await model.relay.call(currentToken == nil ? "extensions.read" : "sync.extensions", params: currentToken.map { .object(["token": .string($0), "thread_ids": .array(ids.map(JSON.string))]) } ?? .object([:]))
             guard current == model.connectionID, loadingID == load, currentToken == token else { return }
+            requested = Set(ids)
             if !catalogTouched { catalog = value["catalog"].array }
             var merged = Dictionary(value["views"].array.map { (Self.key($0), $0) }, uniquingKeysWith: { _, new in new })
             // A complete replacement proves absent views were removed. Only
             // events newer than the frozen index may override that snapshot.
             for key in touched { merged[key] = viewIndex[key] }
             views = Array(merged.values); loaded = true
+            // Rows that arrived while this read was in flight.
+            ensureThreads(Self.listedThreads(model), model: model)
         } catch { if current == model.connectionID, loadingID == load { self.error = error.localizedDescription } }
+    }
+    static func listedThreads(_ model: AppModel) -> [String] {
+        var ids = model.tasks.prefix(threadLimit).map(\.id)
+        if case .task(let id) = model.selection, !ids.contains(id) { ids.append(id) }
+        return ids
+    }
+    /// Views for threads that became visible after the index was read: older
+    /// rows from "Show more", the open task. Coalesced into one request.
+    func ensureThreads(_ ids: [String], model: AppModel) {
+        guard let token, loaded else { return }
+        wanted.formUnion(ids.filter { !requested.contains($0) })
+        guard !wanted.isEmpty, ensureTask == nil else { return }
+        ensureTask = Task {
+            do { try await Task.sleep(for: .milliseconds(200)) } catch { return }
+            let batch = Array(wanted.prefix(Self.threadLimit)); wanted.subtract(batch); ensureTask = nil
+            guard token == self.token, model.connected, !model.demo, !batch.isEmpty else { return }
+            let current = model.connectionID
+            requested.formUnion(batch)
+            do {
+                let value = try await model.relay.call("sync.extensions", params: .object(["token": .string(token), "thread_ids": .array(batch.map(JSON.string))]))
+                guard current == model.connectionID, token == self.token else { return }
+                let fetched = Set(batch)
+                var merged = Dictionary(views.map { (Self.key($0), $0) }, uniquingKeysWith: { _, new in new })
+                for view in value["views"].array where view["scope"]["kind"].string == "thread" && fetched.contains(view["scope"]["id"].string) && !touched.contains(Self.key(view)) {
+                    merged[Self.key(view)] = view
+                }
+                views = Array(merged.values)
+            } catch { requested.subtract(batch) }
+            if !wanted.isEmpty { ensureThreads([], model: model) }
+        }
     }
     var enabled: [JSON] { catalog.filter { $0["enabled"].bool } }
     func document(extensionID: String, contribution: JSON) -> JSON {

@@ -31,7 +31,7 @@ struct RecentEventSequences {
             // Do not leave a failed request latched across a daemon reconnect.
             if reconnected { for catalog in composerCatalogs.values { catalog.modelsError = nil } }
             if connectionLog.last?.message != text { connectionLog.append(ConnectionLogEntry(message: text)); if connectionLog.count > 100 { connectionLog.removeFirst(connectionLog.count - 100) } }
-            if online { reconnectAttempt = 0; reconnectTask?.cancel(); reconnectTask = nil; automations.scheduleRefresh(model: self); synchronizePush(); Task { await self.extensions.load(model: self); await self.openPendingNotification() } }
+            if online { reconnectAttempt = 0; reconnectTask?.cancel(); reconnectTask = nil; seedIndexScope(); automations.scheduleRefresh(model: self); synchronizePush(); Task { await self.extensions.load(model: self); await self.openPendingNotification() } }
             if text == "Connecting…" { receivedEventSequences = RecentEventSequences() }
             synchronizeTaskActivity()
         case .snapshot(let value):
@@ -43,6 +43,7 @@ struct RecentEventSequences {
             let selected: String? = { if case .task(let id) = selection { return id }; return nil }()
             if !value["native_sync"]["token"].string.isEmpty {
                 var index = CompactSync(token: value["native_sync"]["token"].string, counts: value["native_sync"]["counts"])
+                index.cursors = CompactSync.initialCursors(value["native_sync"]["initial_cursors"])
                 // A disk preview cannot overrule authoritative incoming rows,
                 // even if its cached sequence belongs to an older daemon run.
                 let liveIDs = Set(incoming.map(\.id))
@@ -71,6 +72,9 @@ struct RecentEventSequences {
                 }
             }
             synchronizeTaskActivity()
+        case .capabilities(let scoped):
+            syncScope.scopedEvents = scoped
+            if scoped { updateEventInterest() }
         case .events(let events):
             for event in events { applyEnvelope(event) }
         case .rebase(let events):
@@ -129,6 +133,9 @@ struct RecentEventSequences {
                 }
             }
             stageSummary(raw)
+            // Its text and tool events no longer reach this phone, so a loaded
+            // transcript that fell out of scope is behind until reopened.
+            if !rebase, syncScope.scopedEvents, !pushedInterest.contains(id), let chat = chats[id], chat.loaded { chat.needsRefresh = true }
         case "service":
             let notice = event["notice"]
             if notice != .null { serviceNotices.removeAll { $0["id"] == notice["id"] }; serviceNotices.append(notice); if serviceNotices.count > 100 { serviceNotices.removeFirst(serviceNotices.count - 100) } }

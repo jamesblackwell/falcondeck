@@ -99,6 +99,7 @@ final class AppModel {
             // again is still an explicit reopen and should acknowledge it.
             if let selected { readSuppression.removeValue(forKey: selected); readSelectionID = UUID() }
             Task { await relay.selectThread(selected) }
+            if let selected { noteOpened(selected) }
             schedulePreviewSave()
             guard !demo, let store = draftStore else { return }
             switch selection { case .task, .draft, .projects: break; default: return }
@@ -147,6 +148,10 @@ final class AppModel {
     @ObservationIgnored var foregroundRefresh: Task<Void, Never>?
     @ObservationIgnored var backgroundSave: Task<Void, Never>?
     @ObservationIgnored var backgroundSaveID = UUID()
+    @ObservationIgnored var syncScope = SyncScopeState()
+    /// Most recently opened threads, newest first; their live stream stays on.
+    @ObservationIgnored var recentlyOpen: [String] = []
+    @ObservationIgnored var pushedInterest: Set<String> = []
 
     func start() async {
         guard observation == nil, !startupInFlight else { return }

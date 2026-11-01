@@ -54,8 +54,13 @@ import XCTest
         model.hasSession = true; model.connected = true; model.restoringSession = false
         model.setForeground(false); model.setForeground(false)
         XCTAssertEqual(provider.next, 0)
+        // A short trip away kept its live socket: nothing was missed.
         model.setForeground(true); model.setForeground(true)
-        model.setForeground(false); model.setForeground(true)
+        await Task.yield()
+        let quick = await relay.refreshes; XCTAssertEqual(quick, 0)
+        model.setForeground(false)
+        model.syncScope.backgroundedAt = Date.now.addingTimeInterval(-60)
+        model.setForeground(true); model.setForeground(false); model.setForeground(true)
         for _ in 0..<100 { if await relay.refreshes == 1 { break }; await Task.yield() }
         let count = await relay.refreshes; XCTAssertEqual(count, 1)
         await relay.release(); await model.foregroundRefresh?.value
