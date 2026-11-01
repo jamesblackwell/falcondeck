@@ -2067,6 +2067,65 @@ export type WorkspaceFileResponse = {
   size_bytes?: number | null;
 };
 
+export type FilePreviewKind =
+  | 'markdown'
+  | 'html'
+  | 'pdf'
+  | 'image'
+  | 'video'
+  | 'audio'
+  | 'code'
+  | 'text'
+  | 'binary';
+
+/** `file.stat` result; also carried on every `file.read_range` reply. */
+export type FilePreviewMeta = {
+  /** Canonical absolute path on the computer. Resolve relative links against it. */
+  path: string;
+  name: string;
+  size_bytes: number;
+  /** Milliseconds since the Unix epoch. */
+  modified_ms: number;
+  /** Opaque `mtime:size` token: cache key with `path`, and pin for ranged reads. */
+  version: string;
+  content_type: string;
+  kind: FilePreviewKind;
+  /** Largest `length` one `file.read_range` call honours. */
+  max_range_bytes: number;
+};
+
+/** `file.read_range` result. */
+export type FileRangeResponse = FilePreviewMeta & {
+  offset: number;
+  /** Raw file bytes covered, before compression. Next range = offset + length. */
+  length: number;
+  eof: boolean;
+  /** `deflate` is raw RFC 1951 over this range only. */
+  encoding: 'identity' | 'deflate';
+  data_base64: string;
+};
+
+/**
+ * Params shared by `file.stat` and `file.read_range`. `path` may be absolute,
+ * `~/…`, a `file://` URL, or relative to `base_dir` (a document's directory)
+ * or to the workspace/thread working directory.
+ */
+export type FileAccessParams = {
+  path: string;
+  base_dir?: string;
+  workspace_id?: string;
+  thread_id?: string;
+};
+
+export type FileReadRangeParams = FileAccessParams & {
+  offset: number;
+  length: number;
+  /** Reject with `file_changed` when the file no longer has this version. */
+  version?: string;
+  /** Ask for `deflate` when the payload is compressible. */
+  compress?: boolean;
+};
+
 export type WriteWorkspaceFilePayload = {
   content: string;
   expected_version: string | null;

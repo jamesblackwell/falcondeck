@@ -1375,6 +1375,7 @@ dependencies = [
  "chrono-tz",
  "falcondeck-core",
  "falcondeck-relay",
+ "flate2",
  "futures-util",
  "iana-time-zone",
  "keyring",

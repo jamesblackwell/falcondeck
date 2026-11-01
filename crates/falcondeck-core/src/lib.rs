@@ -6175,6 +6175,74 @@ pub struct WorkspaceFileResponse {
     pub size_bytes: Option<u64>,
 }
 
+/// How a client should present a previewed file.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum FilePreviewKind {
+    /// Rendered with the client's Markdown renderer.
+    Markdown,
+    /// Rendered in a sandboxed web view.
+    Html,
+    /// Rendered with the platform PDF viewer.
+    Pdf,
+    /// Shown as an image, including SVG.
+    Image,
+    /// Played with the platform video player.
+    Video,
+    /// Played with the platform audio player.
+    Audio,
+    /// Source or structured text, shown monospaced.
+    Code,
+    /// Plain text.
+    Text,
+    /// Opaque bytes; offer a system preview or share sheet.
+    Binary,
+}
+
+/// Metadata for one previewable file, returned by `file.stat` and carried on
+/// every `file.read_range` reply so a small file needs a single round trip.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct FilePreviewMeta {
+    /// Canonical absolute path on the computer, after `~`, `file://`, relative
+    /// resolution and symlinks. Clients resolve relative links against it.
+    pub path: String,
+    /// File name without directories.
+    pub name: String,
+    /// On-disk size in bytes.
+    pub size_bytes: u64,
+    /// Modification time, milliseconds since the Unix epoch.
+    pub modified_ms: i64,
+    /// Opaque `mtime:size` token. Changes whenever the file does; clients key
+    /// caches on `path` + `version` and pin ranged reads to it.
+    pub version: String,
+    /// Best-effort MIME type.
+    pub content_type: String,
+    /// Suggested presentation.
+    pub kind: FilePreviewKind,
+    /// Largest `length` one `file.read_range` call will honour.
+    pub max_range_bytes: u64,
+}
+
+/// One byte range of a previewed file.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct FileRangeResponse {
+    /// Metadata for the whole file, repeated on every range.
+    #[serde(flatten)]
+    pub meta: FilePreviewMeta,
+    /// Where this range starts, clamped to the file size.
+    pub offset: u64,
+    /// Bytes of the file this reply covers, before any compression. The next
+    /// range starts at `offset + length`.
+    pub length: u64,
+    /// True when `offset + length` reaches the end of the file.
+    pub eof: bool,
+    /// `identity` (plain bytes) or `deflate` (raw RFC 1951, applied to this
+    /// range only and only when it made the payload smaller).
+    pub encoding: String,
+    /// The range's bytes, base64-encoded after any compression.
+    pub data_base64: String,
+}
+
 /// Conflict-aware request to replace an existing workspace file.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct WriteWorkspaceFileRequest {

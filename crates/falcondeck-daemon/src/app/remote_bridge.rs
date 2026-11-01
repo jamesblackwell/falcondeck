@@ -1,6 +1,7 @@
 use std::{
     collections::HashMap,
     future::Future,
+    path::PathBuf,
     sync::{Arc, Mutex, MutexGuard, atomic::Ordering},
 };
 
@@ -231,6 +232,82 @@ fn remote_rpc_outcome_size(outcome: &RemoteRpcOutcome) -> usize {
     }
 }
 
+/// What one `file.stat` / `file.read_range` call may read. The roots are
+/// rebuilt per call so a newly registered project or bot space is readable at
+/// once and a removed one stops being.
+pub(super) struct FilePreviewAccess {
+    policy: crate::file_preview::FileAccessPolicy,
+    home: Option<PathBuf>,
+    base_dir: Option<PathBuf>,
+    workspace_dir: Option<PathBuf>,
+}
+
+impl FilePreviewAccess {
+    fn target<'a>(&'a self, path: &'a str) -> crate::file_preview::FileTarget<'a> {
+        crate::file_preview::FileTarget {
+            path,
+            base_dir: self.base_dir.as_deref(),
+            workspace_dir: self.workspace_dir.as_deref(),
+            home: self.home.as_deref(),
+        }
+    }
+}
+
+impl AppState {
+    /// Allowed roots for phone file previews: project folders and the working
+    /// directories of their threads (isolated copies included), bot document
+    /// spaces, and the places agents publish work to review, namely the
+    /// FalconDeck `artifacts`, `context`, `variants` and `worktrees` folders,
+    /// Codex's artifacts folder and the system temp directories. See
+    /// `file_preview` for the rest of the policy.
+    pub(super) async fn file_preview_access(&self, params: &Value) -> FilePreviewAccess {
+        let home = std::env::var_os("HOME").map(PathBuf::from);
+        let mut roots: Vec<PathBuf> = Vec::new();
+        {
+            let workspaces = self.inner.workspaces.lock().await;
+            for workspace in workspaces.values() {
+                roots.push(PathBuf::from(&workspace.summary.path));
+                for thread in workspace.threads.values() {
+                    roots.push(PathBuf::from(
+                        thread.summary.working_directory(&workspace.summary.path),
+                    ));
+                }
+            }
+        }
+        for bot in &self.inner.preferences.lock().await.bots {
+            roots.push(PathBuf::from(&bot.space_path));
+        }
+        if let Some(state_dir) = self.inner.state_path.parent() {
+            for folder in ["artifacts", "context", "variants", "worktrees"] {
+                roots.push(state_dir.join(folder));
+            }
+        }
+        if let Some(home) = &home {
+            roots.push(home.join(".local/share/codex-artifacts"));
+        }
+        roots.push(std::env::temp_dir());
+        roots.push(PathBuf::from("/tmp"));
+        roots.push(PathBuf::from("/private/tmp"));
+
+        let workspace_dir = match extract_string(params, &["workspaceId", "workspace_id"]) {
+            Some(workspace_id) => {
+                let thread_id = extract_string(params, &["threadId", "thread_id"]);
+                self.git_root(&workspace_id, thread_id.as_deref())
+                    .await
+                    .ok()
+                    .map(PathBuf::from)
+            }
+            None => None,
+        };
+        FilePreviewAccess {
+            policy: crate::file_preview::FileAccessPolicy::build(roots, home.as_deref()).await,
+            base_dir: extract_string(params, &["baseDir", "base_dir"]).map(PathBuf::from),
+            workspace_dir,
+            home,
+        }
+    }
+}
+
 fn remote_rpc_is_read_only(method: &str) -> bool {
     matches!(
         method,
@@ -255,6 +332,8 @@ fn remote_rpc_is_read_only(method: &str) -> bool {
             | "context_files.read"
             | "workspace.files"
             | "workspace.file.read"
+            | "file.stat"
+            | "file.read_range"
             | "workspace.icon"
             | "workspace.skills"
             | "workspace.prompts"
@@ -363,6 +442,8 @@ pub(super) const REMOTE_RPC_METHODS: &[&str] = &[
     "workspace.files",
     "workspace.file.read",
     "workspace.file.write",
+    "file.stat",
+    "file.read_range",
     "workspace.icon",
     "git.status",
     "git.diff",
@@ -1890,6 +1971,36 @@ impl AppState {
                         .and_then(|file| serde_json::to_value(file).map_err(DaemonError::from))
                         .map_err(|error| error.to_string())
                 }
+                "file.stat" => {
+                    let path = required(&["path"])?;
+                    let access = self.file_preview_access(&params).await;
+                    crate::file_preview::stat(&access.policy, access.target(&path))
+                        .await
+                        .and_then(|meta| serde_json::to_value(meta).map_err(DaemonError::from))
+                        .map_err(|error| error.to_string())
+                }
+                "file.read_range" => {
+                    let path = required(&["path"])?;
+                    let access = self.file_preview_access(&params).await;
+                    let offset = params.get("offset").and_then(Value::as_u64).unwrap_or(0);
+                    let length = params
+                        .get("length")
+                        .and_then(Value::as_u64)
+                        .unwrap_or(crate::file_preview::MAX_RANGE_BYTES);
+                    let version = extract_string(&params, &["version"]);
+                    let compress = params.get("compress").and_then(Value::as_bool) == Some(true);
+                    crate::file_preview::read_range(
+                        &access.policy,
+                        access.target(&path),
+                        offset,
+                        length,
+                        version.as_deref(),
+                        compress,
+                    )
+                    .await
+                    .and_then(|range| serde_json::to_value(range).map_err(DaemonError::from))
+                    .map_err(|error| error.to_string())
+                }
                 "workspace.icon" => {
                     let workspace_id = required(&["workspaceId", "workspace_id"])?;
                     let icon = self
@@ -3328,6 +3439,62 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// Phones open files agents link to through `file.stat`/`file.read_range`.
+    /// The roots come from daemon state, so check them end to end.
+    #[tokio::test]
+    async fn file_preview_rpcs_enforce_the_access_policy() {
+        let temp = tempfile::tempdir().unwrap();
+        let state_dir = std::fs::canonicalize(temp.path()).unwrap().join("fd-home");
+        let artifacts = state_dir.join("artifacts/report");
+        std::fs::create_dir_all(&artifacts).unwrap();
+        std::fs::write(artifacts.join("index.html"), "<link href=\"app.css\">").unwrap();
+        std::fs::write(artifacts.join("app.css"), "body{}").unwrap();
+        std::fs::write(artifacts.join(".env"), "TOKEN=1").unwrap();
+        let app = AppState::new_with_state_path(
+            "test".into(),
+            std::collections::HashMap::new(),
+            state_dir.join("daemon-state.json"),
+        );
+        for method in ["file.stat", "file.read_range"] {
+            assert!(REMOTE_RPC_METHODS.contains(&method), "{method} must be registered");
+            assert!(remote_rpc_is_read_only(method));
+        }
+        let page = artifacts.join("index.html");
+        let stat = app
+            .dispatch_remote_rpc("file.stat", json!({"path": page}))
+            .await
+            .unwrap();
+        assert_eq!(stat["kind"], "html");
+        assert_eq!(stat["size_bytes"], 21);
+        // A relative asset resolves against the document's folder.
+        let range = app
+            .dispatch_remote_rpc(
+                "file.read_range",
+                json!({"path": "app.css", "base_dir": artifacts, "offset": 0, "length": 100}),
+            )
+            .await
+            .unwrap();
+        assert_eq!(range["data_base64"], "Ym9keXt9");
+        assert_eq!(range["eof"], true);
+        for denied in [
+            artifacts.join(".env").to_string_lossy().into_owned(),
+            "/etc/hosts".to_string(),
+            "~/.ssh/id_ed25519".to_string(),
+            format!("{}/../../daemon-state.json", artifacts.display()),
+        ] {
+            let error = app
+                .dispatch_remote_rpc("file.stat", json!({"path": denied}))
+                .await
+                .unwrap_err();
+            assert!(error.starts_with("file_denied:"), "{denied}: {error}");
+        }
+        assert!(
+            app.dispatch_remote_rpc("file.stat", json!({}))
+                .await
+                .is_err()
+        );
     }
 
     #[tokio::test]

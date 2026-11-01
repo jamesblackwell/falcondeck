@@ -27,6 +27,7 @@ pub mod desktop_presence;
 mod error;
 pub mod extension_mcp;
 mod git;
+mod file_preview;
 pub mod harness_conformance;
 pub mod logging;
 pub(crate) mod opencode;

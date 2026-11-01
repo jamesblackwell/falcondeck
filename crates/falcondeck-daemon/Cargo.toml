@@ -9,6 +9,7 @@ base64 = "0.22.1"
 chrono.workspace = true
 chrono-tz.workspace = true
 falcondeck-core = { path = "../falcondeck-core" }
+flate2 = "1.1"
 futures-util.workspace = true
 iana-time-zone = "0.1.65"
 keyring = "4.1.6"
