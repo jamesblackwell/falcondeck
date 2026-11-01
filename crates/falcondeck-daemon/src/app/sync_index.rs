@@ -144,16 +144,19 @@ const EXTENSION_THREAD_IDS_MAX: usize = 400;
 fn scope_extensions(
     extensions: &ExtensionSnapshot,
     thread_ids: Option<&[String]>,
-) -> ExtensionSnapshot {
+) -> Result<ExtensionSnapshot, String> {
     let Some(thread_ids) = thread_ids else {
-        return extensions.clone();
+        return Ok(extensions.clone());
     };
-    let wanted: HashSet<&str> = thread_ids
-        .iter()
-        .take(EXTENSION_THREAD_IDS_MAX)
-        .map(String::as_str)
-        .collect();
-    ExtensionSnapshot {
+    let wanted: HashSet<&str> = thread_ids.iter().map(String::as_str).collect();
+    // Rejecting beats truncating: a client cannot tell an omitted view from an
+    // absent one.
+    if wanted.len() > EXTENSION_THREAD_IDS_MAX {
+        return Err(format!(
+            "thread_ids_too_many: at most {EXTENSION_THREAD_IDS_MAX} distinct threads"
+        ));
+    }
+    Ok(ExtensionSnapshot {
         catalog: extensions.catalog.clone(),
         views: extensions
             .views
@@ -164,7 +167,7 @@ fn scope_extensions(
             })
             .cloned()
             .collect(),
-    }
+    })
 }
 
 fn recency(a: &ThreadSummary, b: &ThreadSummary) -> std::cmp::Ordering {
@@ -583,7 +586,7 @@ impl AppState {
             .iter()
             .find(|v| v.token == token && v.created.elapsed() < CACHE_TTL)
             .ok_or("sync_index_expired")?;
-        Ok(scope_extensions(&view.extensions, thread_ids))
+        scope_extensions(&view.extensions, thread_ids)
     }
 }
 
@@ -1037,18 +1040,27 @@ mod tests {
             ],
         };
         assert_eq!(
-            scope_extensions(&all, None).views.len(),
+            scope_extensions(&all, None).unwrap().views.len(),
             4,
             "no list means all"
         );
-        let only_a = scope_extensions(&all, Some(&["a".to_string()]));
+        let only_a = scope_extensions(&all, Some(&["a".to_string()])).unwrap();
         assert_eq!(only_a.views.len(), 3);
         assert!(only_a.views.iter().all(|v| {
             v.scope
                 .as_ref()
                 .is_none_or(|s| s.kind != "thread" || s.id == "a")
         }));
-        assert_eq!(scope_extensions(&all, Some(&[])).views.len(), 2);
+        assert_eq!(scope_extensions(&all, Some(&[])).unwrap().views.len(), 2);
+        let too_many: Vec<String> = (0..=EXTENSION_THREAD_IDS_MAX)
+            .map(|i| i.to_string())
+            .collect();
+        assert!(scope_extensions(&all, Some(&too_many)).is_err());
+        let repeated = vec!["a".to_string(); EXTENSION_THREAD_IDS_MAX + 10];
+        assert!(
+            scope_extensions(&all, Some(&repeated)).is_ok(),
+            "duplicates collapse"
+        );
     }
 
     #[test]
@@ -1119,7 +1131,7 @@ mod tests {
             .collect();
         let extensions_full = serde_json::to_vec(&source.extensions).unwrap().len();
         let extensions_listed =
-            serde_json::to_vec(&scope_extensions(&source.extensions, Some(&listed)))
+            serde_json::to_vec(&scope_extensions(&source.extensions, Some(&listed)).unwrap())
                 .unwrap()
                 .len();
         eprintln!(
