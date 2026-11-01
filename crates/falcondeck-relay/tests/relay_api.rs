@@ -805,6 +805,496 @@ async fn compact_replay_projects_large_snapshots_without_discarding_small_live_e
     assert_eq!(updates[0].id, history.updates[0].id);
 }
 
+fn tagged_envelope(marker: &str, tag: Option<&str>) -> EncryptedEnvelope {
+    let mut envelope = test_envelope(marker);
+    envelope.scope_hint = tag.map(str::to_string);
+    envelope
+}
+
+async fn publish_encrypted(
+    server: &TestServer,
+    session_id: &str,
+    daemon_id: &str,
+    envelope: EncryptedEnvelope,
+) {
+    server
+        .state
+        .handle_message(
+            session_id,
+            daemon_id,
+            RelayPeerRole::Daemon,
+            RelayClientMessage::Update {
+                body: RelayUpdateBody::Encrypted { envelope },
+            },
+        )
+        .await
+        .unwrap();
+}
+
+fn drain_markers(
+    rx: &mut tokio::sync::mpsc::Receiver<falcondeck_relay::BudgetedRelayMessage>,
+) -> Vec<String> {
+    let mut markers = Vec::new();
+    while let Ok(message) = rx.try_recv() {
+        if let RelayServerMessage::Update { update } = message.message()
+            && let RelayUpdateBody::Encrypted { envelope } = &update.body
+        {
+            markers.push(envelope.ciphertext.clone());
+        }
+    }
+    markers
+}
+
+async fn set_scope(
+    server: &TestServer,
+    session_id: &str,
+    peer_id: &str,
+    tags: &[&str],
+) -> Result<(), falcondeck_relay::error::RelayError> {
+    server
+        .state
+        .handle_message(
+            session_id,
+            peer_id,
+            RelayPeerRole::Client,
+            RelayClientMessage::Scope {
+                tags: tags.iter().map(|tag| tag.to_string()).collect(),
+            },
+        )
+        .await
+}
+
+#[tokio::test]
+async fn scoped_peer_receives_only_subscribed_stream_events_live_and_in_replay() {
+    let server = spawn_server().await;
+    let client = reqwest::Client::new();
+    let (pairing, claim) = create_claimed_session(&client, &server.http_base).await;
+    let (daemon_id, _daemon_rx, _) = server
+        .state
+        .register_peer(&claim.session_id, RelayPeerRole::Daemon, None)
+        .await
+        .unwrap();
+    let register_client = || async {
+        server
+            .state
+            .register_peer(
+                &claim.session_id,
+                RelayPeerRole::Client,
+                Some(claim.device_id.clone()),
+            )
+            .await
+            .unwrap()
+    };
+    let (scoped_id, mut scoped_rx, _) = register_client().await;
+    server
+        .state
+        .set_peer_scoped(&claim.session_id, &scoped_id)
+        .await;
+    let (_, mut legacy_rx, _) = register_client().await;
+
+    // Initial interest is empty: tagged events are withheld, untagged pass.
+    for (marker, tag) in [
+        ("a1", Some("tag-a")),
+        ("plain1", None),
+        ("b1", Some("tag-b")),
+    ] {
+        publish_encrypted(
+            &server,
+            &claim.session_id,
+            &daemon_id,
+            tagged_envelope(marker, tag),
+        )
+        .await;
+    }
+    assert_eq!(drain_markers(&mut scoped_rx), ["opaque-plain1"]);
+    assert_eq!(
+        drain_markers(&mut legacy_rx),
+        ["opaque-a1", "opaque-plain1", "opaque-b1"]
+    );
+
+    set_scope(&server, &claim.session_id, &scoped_id, &["tag-a"])
+        .await
+        .unwrap();
+    for (marker, tag) in [("a2", Some("tag-a")), ("b2", Some("tag-b"))] {
+        publish_encrypted(
+            &server,
+            &claim.session_id,
+            &daemon_id,
+            tagged_envelope(marker, tag),
+        )
+        .await;
+    }
+    assert_eq!(drain_markers(&mut scoped_rx), ["opaque-a2"]);
+
+    // Replace semantics: the new set supersedes the old one entirely.
+    set_scope(&server, &claim.session_id, &scoped_id, &["tag-b"])
+        .await
+        .unwrap();
+    for (marker, tag) in [("a3", Some("tag-a")), ("b3", Some("tag-b"))] {
+        publish_encrypted(
+            &server,
+            &claim.session_id,
+            &daemon_id,
+            tagged_envelope(marker, tag),
+        )
+        .await;
+    }
+    assert_eq!(drain_markers(&mut scoped_rx), ["opaque-b3"]);
+    drain_markers(&mut legacy_rx);
+
+    // Replay applies the same filter; seq numbers keep their gaps.
+    for peer_id in [&scoped_id] {
+        server
+            .state
+            .handle_message(
+                &claim.session_id,
+                peer_id,
+                RelayPeerRole::Client,
+                RelayClientMessage::Sync { after_seq: Some(0) },
+            )
+            .await
+            .unwrap();
+    }
+    let replay = scoped_rx.recv().await.unwrap();
+    let RelayServerMessage::Sync {
+        updates,
+        history_truncated,
+        ..
+    } = replay.message()
+    else {
+        panic!("expected replay");
+    };
+    assert!(!history_truncated);
+    let replayed: Vec<_> = updates
+        .iter()
+        .filter_map(|update| match &update.body {
+            RelayUpdateBody::Encrypted { envelope } => {
+                Some((update.seq, envelope.ciphertext.as_str()))
+            }
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        replayed
+            .iter()
+            .map(|(_, marker)| *marker)
+            .collect::<Vec<_>>(),
+        ["opaque-plain1", "opaque-b1", "opaque-b2", "opaque-b3"]
+    );
+    let history = server
+        .state
+        .session_updates(&claim.session_id, &pairing.daemon_token, 0, None)
+        .await
+        .unwrap();
+    let all_encrypted = history
+        .updates
+        .iter()
+        .filter(|update| matches!(update.body, RelayUpdateBody::Encrypted { .. }))
+        .count();
+    assert_eq!(all_encrypted, 7, "relay log keeps every update");
+    for (seq, marker) in &replayed {
+        let stored = history
+            .updates
+            .iter()
+            .find(|update| update.seq == *seq)
+            .unwrap();
+        assert!(
+            matches!(&stored.body, RelayUpdateBody::Encrypted { envelope } if envelope.ciphertext == *marker)
+        );
+    }
+}
+
+#[tokio::test]
+async fn scoped_replay_budget_ignores_unsubscribed_updates() {
+    let server = spawn_server().await;
+    let client = reqwest::Client::new();
+    let (_, claim) = create_claimed_session(&client, &server.http_base).await;
+    let (daemon_id, _daemon_rx, _) = server
+        .state
+        .register_peer(&claim.session_id, RelayPeerRole::Daemon, None)
+        .await
+        .unwrap();
+    // 3 MiB of unsubscribed stream traffic would overflow a replay window.
+    publish_encrypted(
+        &server,
+        &claim.session_id,
+        &daemon_id,
+        tagged_envelope(&"x".repeat(3 * 1024 * 1024), Some("other-thread")),
+    )
+    .await;
+    publish_encrypted(
+        &server,
+        &claim.session_id,
+        &daemon_id,
+        tagged_envelope("kept", None),
+    )
+    .await;
+    let register_client = |scoped: bool| {
+        let server = &server;
+        let claim = &claim;
+        async move {
+            let (id, rx, _) = server
+                .state
+                .register_peer(
+                    &claim.session_id,
+                    RelayPeerRole::Client,
+                    Some(claim.device_id.clone()),
+                )
+                .await
+                .unwrap();
+            if scoped {
+                server.state.set_peer_scoped(&claim.session_id, &id).await;
+            }
+            (id, rx)
+        }
+    };
+    for (scoped, expect_truncated) in [(true, false), (false, true)] {
+        let (peer_id, mut rx) = register_client(scoped).await;
+        server
+            .state
+            .handle_message(
+                &claim.session_id,
+                &peer_id,
+                RelayPeerRole::Client,
+                RelayClientMessage::Sync { after_seq: Some(0) },
+            )
+            .await
+            .unwrap();
+        let replay = loop {
+            let message = rx.recv().await.unwrap();
+            if matches!(message.message(), RelayServerMessage::Sync { .. }) {
+                break message;
+            }
+        };
+        let RelayServerMessage::Sync {
+            updates,
+            history_truncated,
+            ..
+        } = replay.message()
+        else {
+            unreachable!()
+        };
+        assert_eq!(*history_truncated, expect_truncated, "scoped={scoped}");
+        if !expect_truncated {
+            assert!(updates.iter().any(|update| matches!(
+                &update.body,
+                RelayUpdateBody::Encrypted { envelope } if envelope.ciphertext == "opaque-kept"
+            )));
+        }
+    }
+}
+
+#[tokio::test]
+async fn scope_rejects_oversized_sets_and_unnegotiated_peers() {
+    let server = spawn_server().await;
+    let client = reqwest::Client::new();
+    let (_, claim) = create_claimed_session(&client, &server.http_base).await;
+    let (daemon_id, _daemon_rx, _) = server
+        .state
+        .register_peer(&claim.session_id, RelayPeerRole::Daemon, None)
+        .await
+        .unwrap();
+    let register_client = || async {
+        server
+            .state
+            .register_peer(
+                &claim.session_id,
+                RelayPeerRole::Client,
+                Some(claim.device_id.clone()),
+            )
+            .await
+            .unwrap()
+    };
+    let (scoped_id, mut scoped_rx, _) = register_client().await;
+    server
+        .state
+        .set_peer_scoped(&claim.session_id, &scoped_id)
+        .await;
+    let (legacy_id, _legacy_rx, _) = register_client().await;
+
+    set_scope(&server, &claim.session_id, &scoped_id, &["keep"])
+        .await
+        .unwrap();
+    let too_many: Vec<String> = (0..65).map(|index| format!("t{index}")).collect();
+    let too_many_refs: Vec<&str> = too_many.iter().map(String::as_str).collect();
+    assert!(
+        set_scope(&server, &claim.session_id, &scoped_id, &too_many_refs)
+            .await
+            .is_err()
+    );
+    let long = "x".repeat(65);
+    assert!(
+        set_scope(&server, &claim.session_id, &scoped_id, &[long.as_str()])
+            .await
+            .is_err()
+    );
+    // Rejection leaves the previous interest in force.
+    publish_encrypted(
+        &server,
+        &claim.session_id,
+        &daemon_id,
+        tagged_envelope("k", Some("keep")),
+    )
+    .await;
+    publish_encrypted(
+        &server,
+        &claim.session_id,
+        &daemon_id,
+        tagged_envelope("t0", Some("t0")),
+    )
+    .await;
+    assert_eq!(drain_markers(&mut scoped_rx), ["opaque-k"]);
+
+    // Exactly at the caps is accepted.
+    let max_tags: Vec<String> = (0..64).map(|index| format!("{index:0>64}")).collect();
+    let max_refs: Vec<&str> = max_tags.iter().map(String::as_str).collect();
+    set_scope(&server, &claim.session_id, &scoped_id, &max_refs)
+        .await
+        .unwrap();
+
+    // A peer that did not negotiate scoped events cannot set one.
+    assert!(
+        set_scope(&server, &claim.session_id, &legacy_id, &["a"])
+            .await
+            .is_err()
+    );
+}
+
+async fn latest_lean_events(
+    rx: &mut tokio::sync::mpsc::Receiver<falcondeck_relay::BudgetedRelayMessage>,
+) -> Option<bool> {
+    let mut latest = None;
+    while let Ok(message) = rx.try_recv() {
+        if let RelayServerMessage::SyncProfile { lean_events, .. } = message.message() {
+            latest = Some(*lean_events);
+        }
+    }
+    latest
+}
+
+#[tokio::test]
+async fn sync_profile_lean_events_tracks_connected_clients() {
+    let server = spawn_server().await;
+    let client = reqwest::Client::new();
+    let (_, claim) = create_claimed_session(&client, &server.http_base).await;
+    let (_daemon_id, mut daemon_rx, _) = server
+        .state
+        .register_peer(&claim.session_id, RelayPeerRole::Daemon, None)
+        .await
+        .unwrap();
+    server
+        .state
+        .after_peer_ready(&claim.session_id, RelayPeerRole::Daemon)
+        .await;
+    // No clients at all is never lean.
+    assert_eq!(latest_lean_events(&mut daemon_rx).await, Some(false));
+
+    let join = |scoped: bool| {
+        let server = &server;
+        let claim = &claim;
+        async move {
+            let (id, _rx, _) = server
+                .state
+                .register_peer(
+                    &claim.session_id,
+                    RelayPeerRole::Client,
+                    Some(claim.device_id.clone()),
+                )
+                .await
+                .unwrap();
+            if scoped {
+                server.state.set_peer_scoped(&claim.session_id, &id).await;
+            }
+            server
+                .state
+                .after_peer_ready(&claim.session_id, RelayPeerRole::Client)
+                .await;
+            (id, _rx)
+        }
+    };
+    let (scoped_id, _scoped_rx) = join(true).await;
+    assert_eq!(latest_lean_events(&mut daemon_rx).await, Some(true));
+    let (legacy_id, _legacy_rx) = join(false).await;
+    assert_eq!(latest_lean_events(&mut daemon_rx).await, Some(false));
+    server
+        .state
+        .unregister_peer(&claim.session_id, &legacy_id)
+        .await;
+    assert_eq!(latest_lean_events(&mut daemon_rx).await, Some(true));
+    server
+        .state
+        .unregister_peer(&claim.session_id, &scoped_id)
+        .await;
+    assert_eq!(latest_lean_events(&mut daemon_rx).await, Some(false));
+}
+
+#[tokio::test]
+async fn scoped_events_websocket_negotiation_and_scope_message() {
+    let server = spawn_server().await;
+    let client = reqwest::Client::new();
+    let (_, claim) = create_claimed_session(&client, &server.http_base).await;
+    let client_url = ws_url_for(
+        &client,
+        &server.http_base,
+        &server.ws_base,
+        &claim.session_id,
+        &claim.client_token,
+    )
+    .await;
+    let (mut phone, _) = connect_async(format!("{client_url}&scoped_events=true"))
+        .await
+        .unwrap();
+    let RelayServerMessage::Ready {
+        scoped_events_supported,
+        ..
+    } = recv_server_message(&mut phone).await
+    else {
+        panic!("expected ready");
+    };
+    assert!(scoped_events_supported);
+    send_client_message(
+        &mut phone,
+        &RelayClientMessage::Scope {
+            tags: vec!["tag-a".into()],
+        },
+    )
+    .await;
+    send_client_message(
+        &mut phone,
+        &RelayClientMessage::Scope {
+            tags: vec!["x".repeat(65)],
+        },
+    )
+    .await;
+    let RelayServerMessage::Error { message } = recv_server_message(&mut phone).await else {
+        panic!("expected an error for the oversized tag, not for the valid scope");
+    };
+    assert!(message.contains("at most"), "{message}");
+
+    // Without the query parameter the peer is legacy and Scope is refused.
+    let legacy_url = ws_url_for(
+        &client,
+        &server.http_base,
+        &server.ws_base,
+        &claim.session_id,
+        &claim.client_token,
+    )
+    .await;
+    let (mut legacy, _) = connect_async(legacy_url).await.unwrap();
+    let _ = recv_server_message(&mut legacy).await;
+    send_client_message(
+        &mut legacy,
+        &RelayClientMessage::Scope {
+            tags: vec!["tag-a".into()],
+        },
+    )
+    .await;
+    let RelayServerMessage::Error { message } = recv_server_message(&mut legacy).await else {
+        panic!("expected scope refusal");
+    };
+    assert!(message.contains("not negotiated"), "{message}");
+}
+
 #[tokio::test]
 async fn multi_megabyte_replay_does_not_queue_ahead_of_initial_sync_rpc() {
     let server = spawn_server().await;
@@ -4291,5 +4781,6 @@ fn test_envelope(marker: &str) -> EncryptedEnvelope {
         snapshot_hint: false,
         encryption_variant: EncryptionVariant::DataKeyV1,
         ciphertext: format!("opaque-{marker}"),
+        scope_hint: None,
     }
 }

@@ -5372,6 +5372,11 @@ pub struct EncryptedEnvelope {
     pub encryption_variant: EncryptionVariant,
     /// Base64-encoded ciphertext bundle.
     pub ciphertext: String,
+    /// Plaintext, opaque routing tag (never a raw thread id). A relay peer
+    /// that opted into scoped events receives this update only while the tag
+    /// is in its `Scope` set; untagged updates always reach every peer.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scope_hint: Option<String>,
 }
 
 /// Relay update payload body.
@@ -5805,6 +5810,13 @@ pub enum RelayClientMessage {
         /// False permits push delivery while the socket remains connected.
         foreground: bool,
     },
+    /// Replace this peer's scoped-event subscription set. Only send after
+    /// Ready advertises scoped_events_supported on a `scoped_events=true`
+    /// connection. Tags are opaque `scope_hint` values.
+    Scope {
+        /// Complete replacement set of subscribed tags.
+        tags: Vec<String>,
+    },
     /// Request replay updates after an optional sequence.
     Sync {
         /// Highest acknowledged sequence number to resume after.
@@ -5953,6 +5965,11 @@ pub enum RelayServerMessage {
     SyncProfile {
         /// At least one client still requires legacy full snapshot pushes.
         full_snapshots_required: bool,
+        /// Every connected client opted into scoped events, so thread
+        /// summaries may omit bulky `latest_diff` / `latest_plan` fields.
+        /// Older relays omit it (false).
+        #[serde(default)]
+        lean_events: bool,
     },
     /// Initial ready message returned after websocket authentication.
     Ready {
@@ -5966,6 +5983,10 @@ pub enum RelayServerMessage {
         /// Older relays omit this flag and must not receive ClientActivity frames.
         #[serde(default)]
         client_activity_supported: bool,
+        /// Whether `scoped_events=true` and `Scope` are honoured. Older
+        /// relays omit this flag; peers must then not send `Scope`.
+        #[serde(default)]
+        scoped_events_supported: bool,
     },
     /// Keepalive pong.
     Pong,
@@ -6364,19 +6385,68 @@ mod tests {
             role: RelayPeerRole::Daemon,
             next_seq: 3,
             client_activity_supported: true,
+            scoped_events_supported: true,
         };
 
         let json = serde_json::to_value(message).unwrap();
         assert_eq!(json["type"], "ready");
         assert_eq!(json["role"], "daemon");
+        assert_eq!(json["scoped_events_supported"], true);
         let legacy: RelayServerMessage = serde_json::from_value(serde_json::json!({"type":"ready","session_id":"session-1","role":"client","next_seq":3})).unwrap();
         assert!(matches!(
             legacy,
             RelayServerMessage::Ready {
                 client_activity_supported: false,
+                scoped_events_supported: false,
                 ..
             }
         ));
+    }
+
+    #[test]
+    fn scoped_event_fields_are_optional_on_the_wire() {
+        // Old JSON without the new fields still parses.
+        let envelope: EncryptedEnvelope =
+            serde_json::from_str(r#"{"encryption_variant":"data_key_v1","ciphertext":"abc"}"#)
+                .unwrap();
+        assert_eq!(envelope.scope_hint, None);
+        // An absent hint is omitted (legacy peers see identical bytes).
+        let json = serde_json::to_value(&envelope).unwrap();
+        assert!(json.get("scope_hint").is_none(), "{json}");
+        let tagged = EncryptedEnvelope {
+            scope_hint: Some("tag".into()),
+            ..envelope
+        };
+        let json = serde_json::to_value(&tagged).unwrap();
+        assert_eq!(json["scope_hint"], "tag");
+        let back: EncryptedEnvelope = serde_json::from_value(json).unwrap();
+        assert_eq!(back, tagged);
+
+        let profile: RelayServerMessage = serde_json::from_value(
+            serde_json::json!({"type":"sync-profile","full_snapshots_required":false}),
+        )
+        .unwrap();
+        assert_eq!(
+            profile,
+            RelayServerMessage::SyncProfile {
+                full_snapshots_required: false,
+                lean_events: false
+            }
+        );
+        let lean = serde_json::to_value(RelayServerMessage::SyncProfile {
+            full_snapshots_required: false,
+            lean_events: true,
+        })
+        .unwrap();
+        assert_eq!(lean["lean_events"], true);
+
+        let scope = serde_json::to_value(RelayClientMessage::Scope {
+            tags: vec!["a".into(), "b".into()],
+        })
+        .unwrap();
+        assert_eq!(scope, serde_json::json!({"type":"scope","tags":["a","b"]}));
+        let parsed: RelayClientMessage = serde_json::from_value(scope).unwrap();
+        assert!(matches!(parsed, RelayClientMessage::Scope { tags } if tags.len() == 2));
     }
 
     #[test]

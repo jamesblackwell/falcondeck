@@ -35,10 +35,16 @@ use super::{
 };
 use crate::error::DaemonError;
 
+#[path = "remote_scope.rs"]
+mod scope;
+
 #[derive(Clone)]
 struct RelayWriter {
     transport: falcondeck_core::relay_transport::TransportSender,
     full_snapshots_required: bool,
+    /// Every connected client opted into scoped events, so thread summaries
+    /// may drop `latest_diff` / `latest_plan`. Never set by older relays.
+    lean_events: bool,
 }
 impl std::ops::Deref for RelayWriter {
     type Target = falcondeck_core::relay_transport::TransportSender;
@@ -521,6 +527,7 @@ impl AppState {
         let mut writer = RelayWriter {
             transport,
             full_snapshots_required: true,
+            lean_events: false,
         };
 
         // Detect silently-dead connections: outbound sends can keep buffering
@@ -757,9 +764,10 @@ impl AppState {
                                 }
                             };
                             match parsed {
-                                RelayServerMessage::SyncProfile { full_snapshots_required } => {
+                                RelayServerMessage::SyncProfile { full_snapshots_required, lean_events } => {
                                     let was_required = writer.full_snapshots_required;
                                     writer.full_snapshots_required = full_snapshots_required;
+                                    writer.lean_events = lean_events;
                                     if !full_snapshots_required && initial_snapshot_pending {
                                         initial_snapshot_pending = false;
                                         // A new bridge may represent a restarted daemon. Repair cached
@@ -2927,6 +2935,7 @@ pub(super) fn encrypt_remote_daemon_event(
     )
     .map_err(|error| format!("failed to encrypt relay update: {error}"))?;
     envelope.snapshot_hint = matches!(event.event, UnifiedEvent::Snapshot { .. });
+    envelope.scope_hint = scope::scope_hint(data_key, event);
     Ok(envelope)
 }
 
@@ -2945,11 +2954,20 @@ fn remote_event_message(
     data_key: &[u8; 32],
     event: &EventEnvelope,
     full_snapshots_required: bool,
+    lean_events: bool,
 ) -> Result<RelayClientMessage, String> {
     if !full_snapshots_required && matches!(event.event, UnifiedEvent::Snapshot { .. }) {
         return snapshot_invalidation(data_key);
     }
-    let envelope = encrypt_remote_daemon_event(data_key, event)?;
+    // Lean summaries are durable in relay replay, but a legacy client joining
+    // flips `full_snapshots_required`, which pushes a fresh full snapshot
+    // after (higher seq than) every stripped summary, so replay still ends
+    // in complete state. Do not weaken that transition without revisiting this.
+    // Copy only the rare thread summary that still carries a diff or plan.
+    let lean = lean_events
+        .then(|| scope::lean_thread_event(event))
+        .flatten();
+    let envelope = encrypt_remote_daemon_event(data_key, lean.as_ref().unwrap_or(event))?;
     if matches!(
         event.event,
         UnifiedEvent::RealtimeAudioStarted { .. }
@@ -2989,7 +3007,12 @@ async fn send_remote_events(
     events: Vec<Arc<CachedEnvelope>>,
 ) -> Result<(), String> {
     for event in events {
-        let message = remote_event_message(&data_key, &event, writer.full_snapshots_required)?;
+        let message = remote_event_message(
+            &data_key,
+            &event,
+            writer.full_snapshots_required,
+            writer.lean_events,
+        )?;
         send_ordered_relay_message(&writer, &message, key_generation).await?;
     }
     Ok(())
@@ -3305,6 +3328,172 @@ mod tests {
         );
     }
 
+    fn scoped_test_envelope(event: UnifiedEvent) -> EventEnvelope {
+        EventEnvelope {
+            seq: 11,
+            emitted_at: Utc::now(),
+            workspace_id: Some("workspace-1".to_string()),
+            thread_id: Some("thread-1".to_string()),
+            event,
+        }
+    }
+
+    fn remote_update_envelope(message: RelayClientMessage) -> EncryptedEnvelope {
+        let RelayClientMessage::Update {
+            body: RelayUpdateBody::Encrypted { envelope },
+        } = message
+        else {
+            panic!("expected a durable encrypted update");
+        };
+        envelope
+    }
+
+    #[test]
+    fn stream_events_carry_the_thread_scope_tag_and_others_stay_untagged() {
+        let key = [5u8; 32];
+        let stream = scoped_test_envelope(UnifiedEvent::ToolCallStart {
+            item_id: "item-1".to_string(),
+            title: "ls".to_string(),
+            kind: "command".to_string(),
+        });
+        let envelope = remote_update_envelope(
+            remote_event_message(&key, &stream, false, false).expect("encrypted event"),
+        );
+        assert_eq!(
+            envelope.scope_hint,
+            Some(scope::scope_tag(&key, "thread-1"))
+        );
+
+        let summary = scoped_test_envelope(UnifiedEvent::ThreadUpdated {
+            thread: coalescer_thread_summary(ThreadStatus::Running, "t"),
+        });
+        let envelope = remote_update_envelope(
+            remote_event_message(&key, &summary, false, false).expect("encrypted event"),
+        );
+        assert_eq!(envelope.scope_hint, None);
+        // Legacy wire shape: no new key appears when there is no hint.
+        let json = serde_json::to_value(&envelope).unwrap();
+        let mut keys: Vec<_> = json.as_object().unwrap().keys().cloned().collect();
+        keys.sort();
+        assert_eq!(keys, ["ciphertext", "encryption_variant"]);
+    }
+
+    #[test]
+    fn lean_events_strip_diff_and_plan_and_non_lean_output_is_unchanged() {
+        let key = [4u8; 32];
+        let mut thread = coalescer_thread_summary(ThreadStatus::Running, "t");
+        thread.latest_diff = Some("diff --git a/x b/x\n+bulky".to_string());
+        let event = scoped_test_envelope(UnifiedEvent::ThreadUpdated {
+            thread: thread.clone(),
+        });
+
+        let decrypted = |lean: bool| -> Vec<u8> {
+            let envelope = remote_update_envelope(
+                remote_event_message(&key, &event, false, lean).expect("encrypted event"),
+            );
+            decrypt_bytes(&key, &envelope).expect("decrypt event")
+        };
+        // Non-lean plaintext is exactly the pre-change daemon-event encoding.
+        let expected = serde_json::to_vec(&serde_json::json!({
+            "kind": "daemon-event",
+            "event": &event,
+        }))
+        .unwrap();
+        let full: Value = serde_json::from_slice(&decrypted(false)).unwrap();
+        assert_eq!(full, serde_json::from_slice::<Value>(&expected).unwrap());
+        assert_eq!(
+            decrypted(false).starts_with(br#"{"kind":"daemon-event","event":"#),
+            true
+        );
+
+        let lean: Value = serde_json::from_slice(&decrypted(true)).unwrap();
+        assert!(lean["event"]["event"]["thread"]["latest_diff"].is_null());
+        assert!(lean["event"]["event"]["thread"]["latest_plan"].is_null());
+        assert_eq!(lean["event"]["event"]["thread"]["title"], "t");
+        assert_eq!(lean["event"]["seq"], 11);
+        // The shared original is untouched by the lean projection.
+        assert!(matches!(
+            &event.event,
+            UnifiedEvent::ThreadUpdated { thread } if thread.latest_diff.is_some()
+        ));
+        // Flipping back restores full summaries immediately.
+        let full_again: Value = serde_json::from_slice(&decrypted(false)).unwrap();
+        assert!(full_again["event"]["event"]["thread"]["latest_diff"].is_string());
+    }
+
+    /// Offline measurement against a real capture of `/api/events`
+    /// (`FD_CAPTURE=/path/cap.json`, a JSON array of `{t, e}` where `e` is an
+    /// EventEnvelope). Events are pre-coalescer. Sizes are the serialized
+    /// daemon->relay messages; the relay adds a ~150 byte update wrapper.
+    #[test]
+    #[ignore = "needs FD_CAPTURE"]
+    fn measure_scoped_lean_projection_on_capture() {
+        let path = std::env::var("FD_CAPTURE").expect("set FD_CAPTURE to a capture file");
+        let capture: Vec<Value> =
+            serde_json::from_slice(&std::fs::read(path).expect("read capture")).expect("json");
+        let events: Vec<EventEnvelope> = capture
+            .iter()
+            .filter_map(|entry| serde_json::from_value(entry["e"].clone()).ok())
+            .collect();
+        let key = [1u8; 32];
+        let mut per_thread = std::collections::HashMap::<String, usize>::new();
+        for event in &events {
+            if let (true, Some(thread)) = (
+                scope::is_stream_class(&event.event),
+                event.thread_id.as_ref(),
+            ) {
+                *per_thread.entry(thread.clone()).or_default() += 1;
+            }
+        }
+        let (open_thread, _) = per_thread
+            .iter()
+            .max_by_key(|(_, count)| **count)
+            .expect("capture has stream events");
+        let open_tag = scope::scope_tag(&key, open_thread);
+
+        let measure = |lean: bool, scoped: bool| -> (usize, usize) {
+            let (mut count, mut bytes) = (0, 0);
+            for event in &events {
+                let message =
+                    remote_event_message(&key, event, false, lean).expect("encrypted event");
+                if let RelayClientMessage::Update {
+                    body: RelayUpdateBody::Encrypted { envelope },
+                } = &message
+                    && scoped
+                    && envelope
+                        .scope_hint
+                        .as_ref()
+                        .is_some_and(|tag| *tag != open_tag)
+                {
+                    continue;
+                }
+                count += 1;
+                bytes += serde_json::to_string(&message).expect("serialize").len();
+            }
+            (count, bytes)
+        };
+        let (base_count, base_bytes) = measure(false, false);
+        println!(
+            "captured={} parsed={} open_thread={open_thread} stream_events_for_it={}",
+            capture.len(),
+            events.len(),
+            per_thread[open_thread]
+        );
+        for (label, lean, scoped) in [
+            ("baseline (legacy)", false, false),
+            ("scoped only", false, true),
+            ("lean only", true, false),
+            ("lean + scoped", true, true),
+        ] {
+            let (count, bytes) = measure(lean, scoped);
+            println!(
+                "{label:<18} events={count:>4} bytes={bytes:>8} ({:.0}% of baseline events, {:.0}% of bytes)",
+                100.0 * count as f64 / base_count as f64,
+                100.0 * bytes as f64 / base_bytes as f64
+            );
+        }
+    }
+
     #[test]
     fn durable_events_keep_the_legacy_single_event_envelope() {
         let event = EventEnvelope {
@@ -3314,7 +3503,7 @@ mod tests {
             thread_id: Some("thread-1".to_string()),
             event: UnifiedEvent::Stop { reason: None },
         };
-        let message = remote_event_message(&[6; 32], &event, true).expect("encrypted event");
+        let message = remote_event_message(&[6; 32], &event, true, false).expect("encrypted event");
         let RelayClientMessage::Update {
             body: RelayUpdateBody::Encrypted { envelope },
         } = message
@@ -3365,7 +3554,7 @@ mod tests {
             },
         };
 
-        let message = remote_event_message(&[7; 32], &event, true).expect("encrypted event");
+        let message = remote_event_message(&[7; 32], &event, true, false).expect("encrypted event");
         assert!(matches!(
             message,
             RelayClientMessage::Ephemeral { body }
@@ -3394,7 +3583,7 @@ mod tests {
         };
 
         assert!(matches!(
-            remote_event_message(&[9; 32], &event, true).expect("encrypted event"),
+            remote_event_message(&[9; 32], &event, true, false).expect("encrypted event"),
             RelayClientMessage::Ephemeral { .. }
         ));
     }
@@ -3410,7 +3599,7 @@ mod tests {
         };
 
         assert!(matches!(
-            remote_event_message(&[8; 32], &event, true).expect("encrypted event"),
+            remote_event_message(&[8; 32], &event, true, false).expect("encrypted event"),
             RelayClientMessage::Update {
                 body: RelayUpdateBody::Encrypted { .. }
             }

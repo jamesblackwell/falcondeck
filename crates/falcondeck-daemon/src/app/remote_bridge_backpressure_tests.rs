@@ -94,6 +94,7 @@ async fn saturated_event_queue_keeps_encrypted_rpc_and_heartbeats_alive() {
                             .send(ws::Message::Text(
                                 serde_json::to_string(&RelayServerMessage::SyncProfile {
                                     full_snapshots_required: false,
+                                    lean_events: false,
                                 })
                                 .unwrap()
                                 .into(),

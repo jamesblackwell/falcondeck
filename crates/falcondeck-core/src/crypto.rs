@@ -621,6 +621,7 @@ pub fn encrypt_bytes(
         snapshot_hint: false,
         encryption_variant: EncryptionVariant::DataKeyV1,
         ciphertext: BASE64.encode(bundle),
+        scope_hint: None,
     })
 }
 

@@ -343,3 +343,66 @@ client timeout discards remaining queued chunks and cancels any partial transfer
 it cannot revoke a request whose final chunk already reached the relay. Such a
 timeout still has an unknown execution outcome and must not trigger a blind
 mutation retry.
+
+## Scoped events (optional)
+
+An opt-in capability that stops the relay from forwarding every thread's live
+stream to a phone that has one thread open. Everything is additive; peers that
+do not opt in (Expo mobile, remote web, desktop over relay) see identical bytes.
+
+**Negotiation.** Connect to `/v1/updates/ws` with `scoped_events=true` (beside
+`compact_index`). `Ready` carries `scoped_events_supported: true` on relays that
+honour it (older relays omit it; do not send `Scope` then). Only client peers
+can be scoped. A scoped peer starts with an empty subscription set.
+
+**Subscribing.** Client message `{"type":"scope","tags":["<tag>", ...]}` replaces
+the whole set. At most 64 tags of at most 64 characters; a larger message is
+rejected with an `error` and the previous set stays in force. A peer that did
+not opt in gets an `error` ("scoped events were not negotiated"). Send `Scope`
+before `Sync` on connect, otherwise replay is filtered with an empty set. After
+adding a tag, fetch the thread's current detail: stream events that arrived
+while it was unsubscribed were not delivered (their `seq` still exists in the
+relay log, so cursors and `history_truncated` behave as before).
+
+**Tags.** Stream-class envelopes carry a plaintext `scope_hint` in
+`EncryptedEnvelope` (omitted when absent). It is opaque and never a thread id:
+
+```text
+mac = HMAC-SHA256(key = 32-byte session data key,
+                  message = "falcondeck-scope-v1" || 0x00 || utf8(thread_id))
+tag = base64url_no_padding(mac[0..12])            // 16 characters
+```
+
+Known answer: key = bytes `0x00 0x01 ... 0x1f`, thread id `thread-1` yields
+`aoXdKz1fn4Xc6qk6`. Swift: `HMAC<SHA256>.authenticationCode(for:using:)`, first
+12 bytes, URL-safe base64 without padding.
+
+**Filtering.** For a scoped peer the relay drops an `Update` (live and inside
+`Sync` replay, including the replay budget) whose envelope has a `scope_hint` not
+in its set. Envelopes without a hint are always delivered.
+
+**Which events are scoped.** Only `text`, `conversation-item-added`,
+`conversation-item-updated`, `tool-call-start`, `tool-call-end`, `file` and
+`thread-token-usage-updated`, when the event has a thread id. Thread
+started/updated, turn start/end, `start`/`stop`, interactive requests, service
+notices, operational conditions, workspace/preferences/extension/scheduled/
+control events, snapshots and invalidations, and realtime audio are never scoped.
+
+**Lean events.** The relay sends the daemon `sync-profile` with
+`lean_events: true` exactly when at least one client is connected and every
+client is scoped. While true, the daemon strips `latest_diff` and `latest_plan`
+from forwarded `thread-started`/`thread-updated` summaries (full snapshots are
+unchanged). It reverts to full summaries as soon as the flag turns false, e.g.
+when a legacy client joins. Scoped clients must fetch diffs and plans on demand.
+Stripped summaries are retained in relay replay; a legacy client joining raises
+`full_snapshots_required`, so the daemon pushes a full snapshot that supersedes
+them (higher `seq`) before the legacy client's state matters.
+
+**Rollout.** Deploy the relay before the daemon (same rule as the compact index):
+an old relay ignores `scope_hint` and never sends `lean_events`, so a new daemon
+behind an old relay degrades to today's behaviour. Mac restart is separate.
+
+**Measurement.** Replaying a 120 s capture of the live `/api/events` stream
+(before the 100 ms coalescer) through the daemon projection: see the ignored test
+`measure_scoped_lean_projection_on_capture` (`FD_CAPTURE=cap.json cargo test -p
+falcondeck-daemon measure_scoped -- --ignored --nocapture`).

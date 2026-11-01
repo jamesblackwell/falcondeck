@@ -2295,6 +2295,8 @@ export type EncryptedEnvelope = {
   snapshot_hint?: boolean;
   encryption_variant: EncryptionVariant;
   ciphertext: string;
+  /** Opaque per-thread routing tag for scoped events; absent when unscoped. */
+  scope_hint?: string;
 };
 
 export type RelayUpdateBody =

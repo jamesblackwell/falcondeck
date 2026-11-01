@@ -120,6 +120,7 @@ struct WebSocketQuery {
     ticket: String,
     transport: Option<String>,
     compact_index: Option<bool>,
+    scoped_events: Option<bool>,
 }
 
 #[derive(Serialize)]
@@ -313,6 +314,7 @@ async fn updates_ws(
                         query.transport.as_deref()
                             == Some(falcondeck_core::relay_transport::TRANSPORT_VERSION),
                         query.compact_index.unwrap_or(false),
+                        query.scoped_events.unwrap_or(false),
                     )
                     .await
                 }
@@ -329,6 +331,7 @@ async fn socket_loop(
     auth: SessionAuth,
     chunks: bool,
     compact_index: bool,
+    scoped_events: bool,
 ) {
     let (peer_id, mut rx, ready) = match state
         .register_peer(&auth.session_id, auth.role.clone(), auth.device_id.clone())
@@ -342,11 +345,14 @@ async fn socket_loop(
     };
 
     let opened_at = tokio::time::Instant::now();
-    tracing::info!(session_id = %auth.session_id, %peer_id, role = ?auth.role, chunks, compact_index, "relay peer opened");
+    tracing::info!(session_id = %auth.session_id, %peer_id, role = ?auth.role, chunks, compact_index, scoped_events, "relay peer opened");
     if compact_index {
         state
             .set_peer_compact_index(&auth.session_id, &peer_id)
             .await;
+    }
+    if scoped_events {
+        state.set_peer_scoped(&auth.session_id, &peer_id).await;
     }
     let (sink, stream) = socket.split();
     let sink = sink.with(|text: String| {

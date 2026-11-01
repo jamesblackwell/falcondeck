@@ -1,5 +1,5 @@
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     net::IpAddr,
     path::PathBuf,
     sync::Arc,
@@ -759,9 +759,51 @@ struct PeerQueue {
     tx: mpsc::Sender<BudgetedRelayMessage>,
     available_bytes: Arc<Semaphore>,
     compact_index: Arc<std::sync::atomic::AtomicBool>,
+    /// `None` for legacy peers. Opted-in peers hold their interest set; it
+    /// starts empty, so tagged stream events are withheld until `Scope`.
+    scope: Arc<std::sync::Mutex<Option<HashSet<String>>>>,
+}
+
+/// Bounds on one `Scope` replacement so a peer cannot grow relay memory.
+const MAX_SCOPE_TAGS: usize = 64;
+const MAX_SCOPE_TAG_CHARS: usize = 64;
+
+/// A tagged update is delivered only while its tag is in `interest`. Updates
+/// without a tag (and every peer that never opted in) are always delivered.
+fn scope_allows(interest: Option<&HashSet<String>>, update: &RelayUpdate) -> bool {
+    let (Some(interest), RelayUpdateBody::Encrypted { envelope }) = (interest, &update.body) else {
+        return true;
+    };
+    envelope
+        .scope_hint
+        .as_ref()
+        .is_none_or(|tag| interest.contains(tag))
 }
 
 impl PeerQueue {
+    fn scope_guard(&self) -> std::sync::MutexGuard<'_, Option<HashSet<String>>> {
+        self.scope.lock().unwrap_or_else(|error| error.into_inner())
+    }
+
+    fn is_scoped(&self) -> bool {
+        self.scope_guard().is_some()
+    }
+
+    fn enable_scope(&self) {
+        self.scope_guard().get_or_insert_with(HashSet::new);
+    }
+
+    /// Replaces the whole interest set; false when this peer never opted in.
+    fn replace_scope(&self, tags: Vec<String>) -> bool {
+        match self.scope_guard().as_mut() {
+            Some(interest) => {
+                *interest = tags.into_iter().collect();
+                true
+            }
+            None => false,
+        }
+    }
+
     fn new(capacity: usize) -> (Self, mpsc::Receiver<BudgetedRelayMessage>) {
         Self::new_with_byte_budget(capacity, PEER_QUEUE_MAX_BYTES)
     }
@@ -777,12 +819,20 @@ impl PeerQueue {
                 tx,
                 available_bytes: Arc::new(Semaphore::new(max_bytes)),
                 compact_index: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+                scope: Arc::new(std::sync::Mutex::new(None)),
             },
             rx,
         )
     }
 
     fn try_send(&self, mut message: RelayServerMessage) -> Result<(), ()> {
+        if let RelayServerMessage::Update { update } = &message
+            && !scope_allows(self.scope_guard().as_ref(), update)
+        {
+            // Not delivered: the seq stays in the replay log untouched.
+            tracing::debug!(seq = update.seq, "scoped peer skipped unsubscribed update");
+            return Ok(());
+        }
         if self
             .compact_index
             .load(std::sync::atomic::Ordering::Acquire)
@@ -1873,8 +1923,21 @@ impl AppState {
                 role,
                 next_seq,
                 client_activity_supported: true,
+                scoped_events_supported: true,
             },
         ))
+    }
+
+    pub async fn set_peer_scoped(&self, session_id: &str, peer_id: &str) {
+        let store = self.inner.store.lock().await;
+        if let Some(peer) = store
+            .live_sessions
+            .get(session_id)
+            .and_then(|live| live.peers.get(peer_id))
+            .filter(|peer| matches!(peer.role, RelayPeerRole::Client))
+        {
+            peer.tx.enable_scope();
+        }
     }
 
     pub async fn set_peer_compact_index(&self, session_id: &str, peer_id: &str) {
@@ -2156,6 +2219,34 @@ impl AppState {
                     .await;
                 self.send_to_peer(session_id, peer_id, RelayServerMessage::Pong)
                     .await;
+            }
+            RelayClientMessage::Scope { tags } => {
+                if tags.len() > MAX_SCOPE_TAGS
+                    || tags
+                        .iter()
+                        .any(|tag| tag.chars().count() > MAX_SCOPE_TAG_CHARS)
+                {
+                    warn!(
+                        session_id,
+                        peer_id,
+                        tags = tags.len(),
+                        "rejecting oversized scope set; previous interest kept"
+                    );
+                    return Err(RelayError::BadRequest(format!(
+                        "scope accepts at most {MAX_SCOPE_TAGS} tags of {MAX_SCOPE_TAG_CHARS} characters"
+                    )));
+                }
+                let store = self.inner.store.lock().await;
+                let applied = store
+                    .live_sessions
+                    .get(session_id)
+                    .and_then(|live| live.peers.get(peer_id))
+                    .is_some_and(|peer| peer.tx.replace_scope(tags));
+                if !applied {
+                    return Err(RelayError::BadRequest(
+                        "scoped events were not negotiated for this connection".to_string(),
+                    ));
+                }
             }
             RelayClientMessage::Sync { after_seq } => {
                 self.send_sync_to_peer(session_id, peer_id, after_seq.unwrap_or(0))
@@ -3722,6 +3813,13 @@ impl AppState {
                             .compact_index
                             .load(std::sync::atomic::Ordering::Acquire)
                 });
+                let mut clients = live
+                    .peers
+                    .values()
+                    .filter(|peer| matches!(peer.role, RelayPeerRole::Client))
+                    .peekable();
+                let lean_events =
+                    clients.peek().is_some() && clients.all(|peer| peer.tx.is_scoped());
                 for (peer_id, peer) in &live.peers {
                     if matches!(peer.role, RelayPeerRole::Daemon) {
                         self.queue_message(
@@ -3730,6 +3828,7 @@ impl AppState {
                             &peer.tx,
                             RelayServerMessage::SyncProfile {
                                 full_snapshots_required,
+                                lean_events,
                             },
                         );
                     }
@@ -3856,8 +3955,12 @@ impl AppState {
         store: &Store,
         session_id: &str,
         after_seq: u64,
-        compact_index: bool,
+        peer: &PeerQueue,
     ) -> Result<RelayUpdatesResponse, RelayError> {
+        let compact_index = peer
+            .compact_index
+            .load(std::sync::atomic::Ordering::Acquire);
+        let interest = peer.scope_guard().clone();
         let session = store
             .data
             .sessions
@@ -3866,7 +3969,9 @@ impl AppState {
         let candidates = session
             .updates
             .iter()
-            .filter(|update| update.seq > after_seq);
+            .filter(|update| update.seq > after_seq)
+            // Budget and replay see only what this peer would receive.
+            .filter(|update| scope_allows(interest.as_ref(), update));
         let history_truncated = session.history_truncated(after_seq)
             || !replay_fits_budget(candidates.clone(), compact_index);
         let updates = if history_truncated {
@@ -3910,12 +4015,7 @@ impl AppState {
         else {
             return Ok(());
         };
-        let response = self.session_updates_for_ws_locked(
-            &store,
-            session_id,
-            after_seq,
-            tx.compact_index.load(std::sync::atomic::Ordering::Acquire),
-        )?;
+        let response = self.session_updates_for_ws_locked(&store, session_id, after_seq, &tx)?;
         for message in sync_messages(response) {
             self.queue_message(session_id, peer_id, &tx, message);
         }
@@ -5044,6 +5144,7 @@ mod tests {
             encryption_variant: EncryptionVariant::DataKeyV1,
             ciphertext: "x".repeat(bytes),
             snapshot_hint: false,
+            scope_hint: None,
         }
     }
 
@@ -5246,6 +5347,7 @@ mod tests {
                         encryption_variant: EncryptionVariant::DataKeyV1,
                         ciphertext: "params".into(),
                         snapshot_hint: false,
+                        scope_hint: None,
                     },
                 )
                 .await;
@@ -5289,6 +5391,7 @@ mod tests {
                     encryption_variant: EncryptionVariant::DataKeyV1,
                     ciphertext: "x".repeat(1024 * 1024),
                     snapshot_hint: true,
+                    scope_hint: None,
                 },
             },
         };
@@ -5513,6 +5616,7 @@ mod tests {
                     snapshot_hint: false,
                     encryption_variant: EncryptionVariant::DataKeyV1,
                     ciphertext: "ciphertext".to_string(),
+                    scope_hint: None,
                 },
             },
             created_at: Utc::now(),
@@ -5890,6 +5994,7 @@ mod tests {
                         snapshot_hint: false,
                         encryption_variant: EncryptionVariant::DataKeyV1,
                         ciphertext: "x".repeat(450 * 1024),
+                        scope_hint: None,
                     },
                 },
                 created_at: now,
