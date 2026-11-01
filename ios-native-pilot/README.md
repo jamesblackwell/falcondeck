@@ -129,6 +129,16 @@ keys, tokens, real device inventory or private screenshots in git.
   256 KiB ranges with progress; copies are cached by path and modification time.
   Share and Save to Files use the cached original. The computer decides what is
   readable (see [FILE-PREVIEW](../docs/FILE-PREVIEW.md)); denied files say so.
+- Review inbox: bots send decisions to review (reports, mock-ups, screenshots). The sidebar's
+  **Reviews** row shows the open count and opens the list; each review shows the ask and
+  recommendation, then items as cards with evidence (swipeable image gallery, files and links),
+  Approve / Request changes / Reject chips and typed or dictated feedback, plus an optional
+  one-answer-for-everything path and a sticky submit bar (`review.respond`). Evidence opens in the
+  file viewer. Notes survive leaving the screen and relaunching (encrypted per pairing); a review
+  withdrawn meanwhile keeps your notes. Hidden unless the daemon reports
+  `preferences.review_inbox_enabled`; refreshes on connect and on `control-state-changed` for
+  `reviews`. The demo includes sample reviews with generated mock-ups. See
+  [REVIEWS](../docs/REVIEWS.md).
 - Settings: all 19 shared theme palettes, text size/Dynamic Type, conversation,
   connected alerts, speech, connection diagnostics, about and developer tools.
 - Extension stages, declarative filters/panels and follow-up suggestions. Buttons

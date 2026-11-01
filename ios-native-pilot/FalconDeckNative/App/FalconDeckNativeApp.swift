@@ -215,6 +215,7 @@ struct RootView: View {
         case .archived: "Archived tasks"
         case .settings: "Settings"
         case .automations: "Automations"
+        case .reviews: "Reviews"
         case .projects, nil: projectTitle(model.sortedProjects.first { $0.raw["kind"].string == "casual" } ?? model.sortedProjects.first)
         }
     }
@@ -230,6 +231,7 @@ struct RootView: View {
             case .archived: ArchivedTasksView()
             case .settings: SettingsView()
             case .automations: AutomationsView()
+            case .reviews: ReviewsView()
             default: StartView()
             }
         }

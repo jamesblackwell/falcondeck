@@ -51,6 +51,7 @@ struct SidebarView: View {
                 sidebarAction("New chat", symbol: "square.and.pencil") { Task { if await model.newChat() != nil { openDetail() } } }
                     .disabled(!model.demo && !model.connected).accessibilityIdentifier("sidebar-new-chat")
                 sidebarAction("Activity", symbol: "tray.full", selected: model.selection == .activity) { navigate(.activity) }
+                ReviewsSidebarRow(selected: model.selection == .reviews) { navigate(.reviews) }
                 NativeBotsSection(search: search, openDetail: openDetail)
                     .id(model.connectionID)
                 if !pins.isEmpty {

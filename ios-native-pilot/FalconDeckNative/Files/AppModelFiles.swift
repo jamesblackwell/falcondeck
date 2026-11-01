@@ -18,7 +18,9 @@ extension AppModel {
         } else {
             root = FileDiskCache.defaultRoot(namespace: namespace)
         }
-        let store = RemoteFileStore(relay: relay, cache: FileDiskCache(root: root))
+        // The demo has no computer; its review evidence is served from the device.
+        let source: any RelayServing = demo ? ReviewDemoFileRelay(base: relay, root: ReviewDemo.root) : relay
+        let store = RemoteFileStore(relay: source, cache: FileDiskCache(root: root))
         fileStoreBox = (sessionScope, store)
         return store
     }

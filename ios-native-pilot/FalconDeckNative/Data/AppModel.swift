@@ -2,7 +2,7 @@ import Foundation
 import Observation
 
 enum Destination: Hashable, Codable {
-    case projects, activity, settings, automations, archived, task(String), draft(String, String?)
+    case projects, activity, settings, automations, reviews, archived, task(String), draft(String, String?)
 }
 
 @MainActor @Observable
@@ -17,6 +17,7 @@ final class AppModel {
     var composerCatalogs: [String: ComposerCatalog] = [:]
     let extensions = NativeExtensions()
     let automations = AutomationStore()
+    let reviews = ReviewStore()
     let notifications: LocalNotifications
     let push: NativePushNotifications
     let taskActivity: TaskLiveActivity
@@ -216,6 +217,7 @@ final class AppModel {
             voice.cancelTranscription(); readAloud.stop()
         }
         realtimeAudio.reset(); automations.reset(); extensions.reset(); composerCatalogs = [:]
+        reviews.reset(clearData: clearData, forgotten: clearData && !hasSession)
         connectionID = UUID(); receivedEventSequences = RecentEventSequences(); connected = false; syncIndex = nil; taskPageLoads = []; pairingNeedsReconnect = false
         preferenceWrite = nil; archivedLoadID = nil; archivedTouched = []
         itemCache = [:]; itemCacheOrder = []; itemLoads = [:]; mediaGate = MediaTransferGate()

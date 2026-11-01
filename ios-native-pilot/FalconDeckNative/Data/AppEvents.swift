@@ -148,7 +148,7 @@ struct RecentEventSequences {
             serviceNotices.removeAll { $0["id"] == event["condition_id"] }
         case "thread-token-usage-updated": if !id.isEmpty { tokenUsage = tokenUsage.setting(id, event["usage"]) }
         case "extension-catalog-updated", "extension-view-updated": extensions.apply(event)
-        case "control-state-changed": automations.scheduleRefresh(model: self)
+        case "control-state-changed": automations.scheduleRefresh(model: self); reviews.controlStateChanged(event, model: self)
         case "workspace-updated":
             let project = Project(event["workspace"])
             if let index = projects.firstIndex(where: { $0.id == project.id }) { projects[index] = project }
