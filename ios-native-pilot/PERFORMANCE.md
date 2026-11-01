@@ -567,21 +567,22 @@ the growing row was.
   paint-on-arrival behaviour for A/B runs.
 
 **Measured** (iPhone 17 Pro simulator, Debug, `--demo --streaming-preview
---streaming-preview-bursty --stream-metrics`, 1,238 characters over about 5 s,
-three runs each; the unpaced path paints every 100 ms batch on arrival, as the
-old 50 ms coalescer did for this cadence):
+--streaming-preview-bursty --stream-metrics`, 1,238 characters over about 5 s;
+nine runs each across three sessions while other agents loaded the host; the
+unpaced path paints every 100 ms batch on arrival, as the old 50 ms coalescer
+did for this cadence):
 
 | | Unpaced (before) | Paced (after) |
 | --- | ---: | ---: |
-| Paints per second | 6.9 | 51–54 |
+| Paints per second | 6.9–7.0 | 51–54 |
 | Mean / max characters per paint | 35.4 / 59 | 4.5–4.7 / 28 |
-| Largest single-frame height change | 110 pt | 55–86 pt |
-| Frames over 25 ms (6 runs, mean) | 5.0 | 2.3 |
-| Main-thread busy time | ~150 ms/s | ~245 ms/s |
-| p95 run-loop turn | 5.4–5.9 ms | 5.6–5.7 ms |
+| Largest single-frame height change | 110 pt | 54–86 pt |
+| Frames over 25 ms, mean (range) | 5.3 (3–9) | 1.9 (0–8) |
+| Main-thread busy time | ~145 ms/s | ~250 ms/s |
+| p95 run-loop turn | 4.0–5.9 ms | 5.6–5.8 ms |
 
 Paint cadence and step size are deterministic. Frame hitches are noisy in the
-simulator (paced runs ranged 0–8) and the paced path does about eight times as
+simulator (paced runs ranged 0–8, unpaced 3–9) and the paced path does about eight times as
 many paints, so it uses more main-thread time overall at the same per-paint cost;
 the saving is that no single frame absorbs a 35–59 character reflow. These are
 Debug-simulator numbers, not device frame rates. The remaining large height
