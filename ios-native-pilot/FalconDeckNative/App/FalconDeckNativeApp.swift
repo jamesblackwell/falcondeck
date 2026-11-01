@@ -92,6 +92,7 @@ struct RootView: View {
     @State private var compactColumn: NavigationSplitViewColumn = .sidebar
     @State private var columnVisibility: NavigationSplitViewVisibility = .all
     @State private var detailPath: [DetailDestination] = []
+    @State private var botInfoID: String?
     var body: some View {
         @Bindable var model = model
         Group {
@@ -117,6 +118,7 @@ struct RootView: View {
         .animation(motion.interactionAnimation, value: model.error)
         .sheet(item: Binding(get: { model.taskOptionsID.map { TaskOptionsTarget(id: $0) } }, set: { model.taskOptionsID = $0?.id })) { target in TaskOptionsView(taskID: target.id) }
         .sensoryFeedback(.selection, trigger: model.taskOptionsID) { _, id in id != nil && motion.active }
+        .sheet(item: Binding(get: { botInfoID.map { BotInfoTarget(id: $0) } }, set: { botInfoID = $0?.id })) { BotInfoView(botID: $0.id) }
         // Keep presented sheets on the same appearance and menu policy.
         .menuOrder(.fixed)
         .dynamicTypeSize(NativeAppearance.shared.textSize(relativeTo: textSize))
@@ -144,8 +146,7 @@ struct RootView: View {
                                 if model.isNewConversation {
                                     DraftProjectPicker(title: detailTitle)
                                 } else {
-                                    ConversationTitleLabel(title: detailTitle)
-                                        .accessibilityIdentifier("conversation-title")
+                                    conversationTitle
                                 }
                             }.sharedBackgroundVisibility(.hidden)
                         }
@@ -173,6 +174,17 @@ struct RootView: View {
             var reset = Transaction(); reset.disablesAnimations = true
             withTransaction(reset) { detailPath.removeAll() }
             if sizeClass == .compact { compactColumn = .detail }
+        }
+    }
+    /// A bot's title carries its mark and opens its status sheet.
+    @ViewBuilder private var conversationTitle: some View {
+        if case .task(let id) = model.selection, let bot = model.bot(owningTask: id) {
+            Button { botInfoID = bot.id } label: {
+                ConversationTitleLabel(title: detailTitle, icon: model.botIcons[bot.id], interactive: true)
+            }
+            .buttonStyle(.plain).accessibilityLabel("\(detailTitle), bot details").accessibilityIdentifier("conversation-title")
+        } else {
+            ConversationTitleLabel(title: detailTitle).accessibilityIdentifier("conversation-title")
         }
     }
     private var floatingConversationHeader: Bool {
@@ -212,6 +224,7 @@ struct RootView: View {
 }
 
 private struct TaskOptionsTarget: Identifiable { let id: String }
+private struct BotInfoTarget: Identifiable { let id: String }
 
 private struct NativeErrorBanner: View {
     let message: String

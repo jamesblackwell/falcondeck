@@ -333,6 +333,8 @@ struct SidebarView: View {
                 }.frame(width: 12, height: 14)
                 Text(task.title.nonempty ?? "New task").font(.subheadline.weight(task.unread ? .medium : .regular)).lineLimit(1)
                     .foregroundStyle(model.selection == .task(task.id) || task.unread ? FD.foreground : FD.secondary)
+                // Work a bot dispatched carries that bot's mark.
+                if let bot = model.dispatchingBot(of: task), let icon = model.botIcons[bot.id] { BotMark(icon: icon, size: 11).accessibilityHidden(true) }
                 Spacer(minLength: 4)
                 TaskStageMark(task: task).font(.caption2)
                 if let stamp = RelativeStamp.short(task.updatedAt, now: MinuteClock.shared.now) {

@@ -40,12 +40,19 @@ struct NativeBotsSection: View {
                         Task { defer { opening = nil }; if await model.openBot(bot) { openDetail() } }
                     } label: {
                         HStack(spacing: 8) {
-                            Image(systemName: "person.crop.square").foregroundStyle(FD.muted).frame(width: 18)
+                            let related = model.delegatedTasks(for: bot) + [model.task(bot.taskID)].compactMap { $0 }
+                            let needsYou = related.contains(where: \.needsAttention)
+                            Group {
+                                if needsYou {
+                                    Circle().fill(FD.warning).frame(width: 10, height: 10)
+                                        .background(Circle().fill(FD.warning.opacity(0.22)).frame(width: 16, height: 16))
+                                } else if let icon = model.botIcons[bot.id] { BotMark(icon: icon, size: 16) }
+                                else { Image(systemName: "person.crop.square").foregroundStyle(FD.muted) }
+                            }.frame(width: 18)
                             Text(bot.name).font(.subheadline).lineLimit(1)
                             Spacer(minLength: 4)
-                            let related = model.delegatedTasks(for: bot) + [model.task(bot.taskID)].compactMap { $0 }
-                            if related.contains(where: \.needsAttention) {
-                                Image(systemName: "exclamationmark.circle").foregroundStyle(FD.warning)
+                            if needsYou {
+                                Text("Needs you").font(.caption).foregroundStyle(FD.warning)
                             } else if opening == bot.id || related.contains(where: \.working) { ActivityDiamond() }
                             else if model.task(bot.taskID)?.unread == true { Circle().fill(FD.unread).frame(width: 6, height: 6) }
                         }.padding(.leading, 12).frame(minHeight: 44).contentShape(.rect)

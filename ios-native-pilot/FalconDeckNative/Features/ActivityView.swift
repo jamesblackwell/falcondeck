@@ -140,6 +140,7 @@ private struct ActivityRow: View {
                 }.frame(width: 12, height: 20)
                 VStack(alignment: .leading, spacing: 3) {
                     HStack(alignment: .firstTextBaseline, spacing: 8) {
+                        if let icon = model.botIcon(forTask: task.id) { BotMark(icon: icon, size: 13).alignmentGuide(.firstTextBaseline) { $0[.bottom] - 1 } }
                         Text(task.title.nonempty ?? "New task").font(.subheadline.weight(task.unread || section != .recent ? .semibold : .regular))
                             .foregroundStyle(FD.foreground).lineLimit(1)
                         Spacer(minLength: 4)
@@ -148,8 +149,15 @@ private struct ActivityRow: View {
                     if !task.preview.isEmpty {
                         Text(task.preview).font(.footnote).foregroundStyle(FD.secondary).lineLimit(2)
                     }
-                    Text([project, task.provider.capitalized.nonempty].compactMap { $0 }.joined(separator: " · "))
-                        .font(.caption).foregroundStyle(FD.muted).lineLimit(1)
+                    HStack(spacing: 5) {
+                        Text([project, task.provider.capitalized.nonempty].compactMap { $0 }.joined(separator: " · ")).lineLimit(1)
+                        // Dispatched work names the bot it came from, with its mark.
+                        if let bot = model.dispatchingBot(of: task), let icon = model.botIcons[bot.id] {
+                            Text("·")
+                            BotMark(icon: icon, size: 11)
+                            Text(bot.name).lineLimit(1)
+                        }
+                    }.font(.caption).foregroundStyle(FD.muted)
                 }
             }
             .padding(.vertical, 10).contentShape(.rect)

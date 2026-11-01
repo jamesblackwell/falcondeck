@@ -460,10 +460,12 @@ private struct TranscriptMarkdownBlockView: View, Equatable {
 }
 
 private struct TranscriptInlineText: View {
+    @Environment(AppModel.self) private var model: AppModel?
+    @Environment(\.colorScheme) private var scheme
     let text: String
     let referenceDefinitions: String
     var body: some View {
-        Text(TranscriptMarkdownInline.styled(text, referenceDefinitions: referenceDefinitions))
+        BotLinkText.text(TranscriptMarkdownInline.styled(text, referenceDefinitions: referenceDefinitions), model: model, scheme: scheme)
             .tint(FD.accent)
             .fixedSize(horizontal: false, vertical: true)
             .frame(maxWidth: .infinity, alignment: .leading)

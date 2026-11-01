@@ -116,7 +116,7 @@ keys, tokens, real device inventory or private screenshots in git.
   playback controls; bounded native realtime PCM audio.
 - Automations: list/create/edit/pause/resume/delete/run/history using control RPC,
   revision checks and idempotency keys. Demo actions never start a real agent.
-- Bots: dedicated sidebar access to home conversations, create or promote a
+- Bots: each bot's colored mark (as on the web) in the sidebar, header, Activity and links; a bot sheet with STATUS.md, tickets, schedules and recent dispatches; dedicated sidebar access to home conversations, create or promote a
   task, edit instructions and delegation access, inspect delegated tasks, stop
   work and remove bots. Text documents support import, editing and deletion
   through the paired computer with content-version conflict checks.

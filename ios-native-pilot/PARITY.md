@@ -125,3 +125,27 @@ Earlier UI regression: the original composer failed to focus when its blank inpu
 Native push milestone: optional APNs is live alongside Expo, with provider-tagged registration, capability discovery, foreground activity negotiation, generation-safe persistence and token cleanup. Existing active trusted credentials and Expo tokens survived the relay upgrade unchanged. Real Apple sandbox authentication and native simulator registration pass. A physical-device background banner remains unverified. No released app build or OTA was pushed.
 
 Connection UX milestone: 102 unit tests pass, including seven new scan/link, duplicate-consumption, startup, relay-review and retry regressions. Pairing follows Expo’s scan-or-enter layout, automatically claims valid scans/links, and waits for the encrypted workspace before dismissing setup. Diagnostics and Forget live in Settings → Connections.
+
+## Bot marks and bot sheet — 1 November 2026
+
+Bots now carry their web mark everywhere they appear. `BotMark` ports
+`packages/chat-ui/src/components/bot-mark.tsx` shape for shape (circle, diamond,
+square, triangle, hexagon, star, pentagon, cross in the same 16×16 box, 1.2 pt
+rounded stroke) and maps `cat-1`…`cat-12` onto the active palette's categorical
+colors. Bots saved before icons existed get the daemon's next unused shape and
+color, resolved exactly like `resolveBotIcons`.
+
+| Surface | Behaviour |
+| --- | --- |
+| Sidebar bots | Mark in place of the generic glyph; a bot needing you shows the warning dot and "Needs you", working shows the activity diamond |
+| Conversation header | Bot title shows its mark and a chevron; tapping opens the bot sheet |
+| Bot sheet | STATUS.md with its age (warning tint after 24 h), owned open tickets, schedules with an enable switch, and work dispatched in the last two days; "Show all" past eight rows; Bot settings opens the editor |
+| Activity and sidebar rows | Bot home tasks show the mark; dispatched work names its bot |
+| Replies and STATUS.md | Links to a bot's conversation carry its mark inline |
+
+The sheet reads existing daemon data only (`bots.documents`, `control.get` for
+`tickets` and `automations`, `control.execute` pause/resume); no protocol change.
+Schedules match on the bot's home task, including earlier home tasks after a
+harness switch. `--demo --bots-preview` seeds three bots (one without a stored
+mark), STATUS.md, tickets, schedules and dispatches for QA.
+

@@ -5,6 +5,8 @@ struct NativeBot: Identifiable, Hashable, Sendable {
     var id: String { raw["id"].string }
     var name: String { raw["name"].string }
     var taskID: String { raw["thread_id"].string }
+    /// Earlier home tasks, kept when a bot switches conversation or harness.
+    var previousTaskIDs: [String] { raw["previous_thread_ids"].array.map(\.string) }
     var projectID: String { raw["workspace_id"].string }
     var instructions: String { raw["instructions"].string }
     var canStartThreads: Bool { raw["can_start_threads"] != .bool(false) }
@@ -47,8 +49,11 @@ struct NativeBotDocument: Hashable, Sendable {
     let name: String
     let content: String
     let version: String
+    /// When the file last changed; STATUS.md's age comes from this.
+    let modifiedAt: String
     init(raw: JSON) {
         name = raw["name"].string; content = raw["content"].string; version = raw["version"].string
+        modifiedAt = raw["modified_at"].string
     }
     var raw: JSON { .object(["name": .string(name), "content": .string(content), "version": .string(version)]) }
     static func validate(name: String, content: String? = nil) throws {
