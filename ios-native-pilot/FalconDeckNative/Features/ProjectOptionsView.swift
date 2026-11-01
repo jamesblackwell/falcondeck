@@ -18,7 +18,7 @@ struct ProjectOptionsView: View {
                 }.listRowBackground(FD.surface)
                 Section { Toggle("Hide project", isOn: $hidden) } footer: { Text("Hidden projects remain available from Show hidden projects in the sidebar.") }.listRowBackground(FD.surface)
                 Section { Text(project.path).font(.footnote.monospaced()).textSelection(.enabled) }.listRowBackground(FD.surface)
-                if let error { Text(error).foregroundStyle(.orange) }
+                if let error { Text(error).foregroundStyle(FD.danger) }
             }.scrollContentBackground(.hidden).background(FD.background).navigationTitle(project.name).navigationBarTitleDisplayMode(.inline).disabled(pending)
                 .toolbar {
                     ToolbarItem(placement: .cancellationAction) { Button("Cancel") { dismiss() }.disabled(pending) }
@@ -67,7 +67,7 @@ struct ProjectOrderView: View {
     var body: some View {
         NavigationStack {
             List {
-                if let error { Text(error).foregroundStyle(.orange) }
+                if let error { Text(error).foregroundStyle(FD.danger) }
                 ForEach(projects) { project in Text(project.name) }.onMove { projects.move(fromOffsets: $0, toOffset: $1) }
             }.environment(\.editMode, .constant(.active)).navigationTitle("Project order")
                 .toolbar {

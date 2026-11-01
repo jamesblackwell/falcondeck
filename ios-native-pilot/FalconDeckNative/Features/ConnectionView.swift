@@ -100,7 +100,7 @@ struct ConnectionView: View {
                     .accessibilityIdentifier("pair-connect")
             }
             if let error = model.error {
-                Text(error).font(.subheadline).foregroundStyle(.orange).multilineTextAlignment(.center)
+                Text(error).font(.subheadline).foregroundStyle(FD.danger).multilineTextAlignment(.center)
                     .accessibilityIdentifier("pairing-error")
             }
         }
@@ -113,7 +113,7 @@ struct ConnectionView: View {
             Text("Keep FalconDeck open on your computer while we secure your connection.")
                 .font(.subheadline).foregroundStyle(FD.secondary).multilineTextAlignment(.center)
             if let error = model.error {
-                Text(error).font(.subheadline).foregroundStyle(.orange).multilineTextAlignment(.center)
+                Text(error).font(.subheadline).foregroundStyle(FD.danger).multilineTextAlignment(.center)
                 if model.hasSession {
                     Button("Try again") { Task { await model.reconnect() } }.buttonStyle(.borderedProminent).disabled(model.busy)
                 }

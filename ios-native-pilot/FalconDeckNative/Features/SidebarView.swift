@@ -113,16 +113,12 @@ struct SidebarView: View {
                             }.buttonStyle(.plain)
                         }
                         if let messageSearchError {
-                            Text(messageSearchError).font(.caption).foregroundStyle(.orange)
+                            Text(messageSearchError).font(.caption).foregroundStyle(FD.danger)
                             Button("Retry search") { Task { await searchMessages() } }
                         } else if !searchingMessages && messageMatches.isEmpty {
                             Text("No matching messages").font(.caption).foregroundStyle(FD.secondary)
                         }
                     }.padding(12)
-                }
-                if let error = model.error {
-                    Label(error, systemImage: "exclamationmark.circle").font(.caption).foregroundStyle(.orange).padding(12)
-                    Button("Dismiss error") { model.error = nil }.font(.caption).padding(.horizontal, 12)
                 }
             }
             .listRowInsets(EdgeInsets(top: 0, leading: 10, bottom: 0, trailing: 10))
@@ -144,6 +140,7 @@ struct SidebarView: View {
         .task(id: plan) { await model.loadInitialTaskPages(plan) }
         .task(id: "\(model.connectionID):\(model.connected):\(search)") { await searchMessages() }
         .onChange(of: model.connectionID) { _, _ in disclosures.reset() }
+        .onAppear { MinuteClock.shared.start() }
         .sensoryFeedback(.selection, trigger: showOptions) { _, open in open && motion.active }
         .toolbar {
             ToolbarItem(placement: .bottomBar) {
@@ -269,10 +266,11 @@ struct SidebarView: View {
     }
     @ViewBuilder private func taskPage(_ tasks: [AgentTask], key: String, indent: CGFloat, folder: ProjectFolder? = nil) -> some View {
         let limit = search.isEmpty ? limits[key, default: 5] : tasks.count
-        let ordered = sorted(tasks)
-        ForEach(ordered.prefix(limit)) { taskLink($0, indent: indent) }
+        let family = SpawnNesting.nest(sorted(tasks))
+        let ordered = family.tasks
+        ForEach(ordered.prefix(limit)) { taskLink($0, indent: indent, spawnDepth: family.depth[$0.id] ?? 0) }
         if case .task(let selectedID) = model.selection, let selected = ordered.dropFirst(limit).first(where: { $0.id == selectedID }) {
-            taskLink(selected, indent: indent)
+            taskLink(selected, indent: indent, spawnDepth: family.depth[selected.id] ?? 0)
         }
         let projectID = folder?.projectID ?? key
         let loading = model.taskPageLoads.contains(CompactSync.key(project: projectID, folder: folder?.id, sort: sort))
@@ -298,12 +296,13 @@ struct SidebarView: View {
 
     @ViewBuilder private func chatContents(_ projects: [Project]) -> some View {
         let all = projects.flatMap { model.tasks(in: $0) }.filter { !$0.pinned && matches($0) }
-        let tasks = sorted(all.filter(\.pinnedInProject)) + sorted(all.filter { !$0.pinnedInProject })
+        let family = SpawnNesting.nest(sorted(all.filter(\.pinnedInProject)) + sorted(all.filter { !$0.pinnedInProject }))
+        let tasks = family.tasks
         let limit = search.isEmpty ? limits["chats", default: 10] : tasks.count
         let next = projects.first { model.hasMoreTasks($0.id, sort: sort) }
         let loading = projects.contains { model.taskPageLoads.contains(CompactSync.key(project: $0.id, folder: nil, sort: sort)) }
-        ForEach(tasks.prefix(limit)) { taskLink($0) }
-        if case .task(let selectedID) = model.selection, let selected = tasks.dropFirst(limit).first(where: { $0.id == selectedID }) { taskLink(selected) }
+        ForEach(tasks.prefix(limit)) { taskLink($0, spawnDepth: family.depth[$0.id] ?? 0) }
+        if case .task(let selectedID) = model.selection, let selected = tasks.dropFirst(limit).first(where: { $0.id == selectedID }) { taskLink(selected, spawnDepth: family.depth[selected.id] ?? 0) }
         if tasks.isEmpty && loading {
             HStack(spacing: 8) { ActivityDiamond(); Text("Loading chats…").font(.caption).foregroundStyle(FD.secondary) }
                 .frame(maxWidth: .infinity, minHeight: 64).accessibilityIdentifier("sidebar-chats-loading")
@@ -316,31 +315,45 @@ struct SidebarView: View {
                 .disabled(loading).accessibilityIdentifier("sidebar-chats-more")
         }
     }
-    private func taskLink(_ task: AgentTask, indent: CGFloat = 0, projectIcon: Bool = false) -> some View {
+    private func taskLink(_ task: AgentTask, indent: CGFloat = 0, projectIcon: Bool = false, spawnDepth: Int = 0) -> some View {
         Button { navigate(.task(task.id)) } label: {
             HStack(spacing: 8) {
+                if spawnDepth > 0 {
+                    Image(systemName: "arrow.turn.down.right").font(.caption2.weight(.medium)).foregroundStyle(FD.muted)
+                        .padding(.leading, CGFloat(spawnDepth - 1) * 14).accessibilityHidden(true)
+                }
                 if projectIcon, let project = model.projects.first(where: { $0.id == task.projectID }) {
                     WorkspaceGlyph(project: project).font(.subheadline).frame(width: 18, height: 20)
                 }
                 Group {
                     if task.working { ActivityDiamond() }
-                    else if task.needsAttention { Circle().fill(.orange).frame(width: 6, height: 6) }
-                    else if task.unread { Circle().fill(NativeAppearance.shared.color("unread")).frame(width: 6, height: 6) }
+                    else if task.needsAttention { Circle().fill(FD.warning).frame(width: 6, height: 6) }
+                    else if task.unread { Circle().fill(FD.unread).frame(width: 6, height: 6) }
                     else { Color.clear }
                 }.frame(width: 12, height: 14)
-                Text(task.title.nonempty ?? "New task").font(.subheadline).lineLimit(1)
-                    .foregroundStyle(model.selection == .task(task.id) ? FD.foreground : FD.secondary)
+                Text(task.title.nonempty ?? "New task").font(.subheadline.weight(task.unread ? .medium : .regular)).lineLimit(1)
+                    .foregroundStyle(model.selection == .task(task.id) || task.unread ? FD.foreground : FD.secondary)
                 Spacer(minLength: 4)
                 TaskStageMark(task: task).font(.caption2)
+                if let stamp = RelativeStamp.short(task.updatedAt, now: MinuteClock.shared.now) {
+                    Text(stamp).font(.caption2.monospacedDigit()).foregroundStyle(FD.muted).fixedSize()
+                }
             }
             .padding(.leading, indent + 10).padding(.trailing, 12).frame(minHeight: 44)
             .background(model.selection == .task(task.id) ? FD.raised : .clear, in: .rect(cornerRadius: 8))
             .contentShape(.rect)
         }.buttonStyle(.plain).accessibilityIdentifier("sidebar-task-\(task.id)")
-            .accessibilityValue("\(task.provider.capitalized), \(task.awaitingInput ? "Needs input" : task.working ? "Running" : task.unread ? "Unread" : "Ready")")
+            .accessibilityValue("\(spawnDepth > 0 ? "Spawned task, " : "")\(task.provider.capitalized), \(task.awaitingInput ? "Needs input" : task.working ? "Running" : task.unread ? "Unread" : "Ready")")
             .accessibilityAddTraits(model.selection == .task(task.id) ? .isSelected : [])
             .contextMenu { TaskStageMenu(task: task); TaskActions(task: task) }
             .swipeActions(edge: .leading) { TaskReadButton(task: task).tint(FD.accent) }
+            .swipeActions(edge: .trailing) {
+                Button("Archive", systemImage: "archivebox", role: .destructive) { Task { await model.archive(task) } }
+                    .disabled(task.isDraft || (!model.demo && !model.connected))
+                Button(task.pinned ? "Unpin" : "Pin", systemImage: task.pinned ? "pin.slash" : "pin") {
+                    Task { await model.updateTask(task, fields: ["pinned": .bool(!task.pinned)]) }
+                }.tint(FD.warning).disabled(task.isDraft || (!model.demo && !model.connected))
+            }
     }
     private func sidebarAction(_ title: String, symbol: String, selected: Bool = false, action: @escaping () -> Void) -> some View {
         Button(action: action) {
@@ -397,8 +410,6 @@ struct TaskActions: View {
             Button("Project root") { move(nil) }
             ForEach(model.folders.filter { $0.projectID == task.projectID }) { folder in Button(folder.name) { move(folder.id) } }
         }
-        Divider()
-        ShareLink(item: task.title) { Label("Share task title", systemImage: "square.and.arrow.up") }
         Divider()
         Button("Archive task", systemImage: "archivebox", role: .destructive) { Task { await model.archive(task) } }
     }

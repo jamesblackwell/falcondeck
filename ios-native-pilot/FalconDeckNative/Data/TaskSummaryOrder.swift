@@ -10,7 +10,12 @@ enum TaskSummaryOrder {
 }
 
 @MainActor extension AppModel {
-    func task(_ id: String) -> AgentTask? { tasks.first { $0.id == id } ?? archivedTasks.first { $0.id == id } }
+    func task(_ id: String) -> AgentTask? {
+        // Reading `tasks` keeps callers observing it; the index only skips the scan.
+        let tasks = tasks
+        if let index = taskPositions[id], tasks.indices.contains(index), tasks[index].id == id { return tasks[index] }
+        return tasks.first { $0.id == id } ?? archivedTasks.first { $0.id == id }
+    }
     func openTask(_ id: String) async {
         // A cached destination also supersedes an older lookup still in flight.
         let request = UUID()

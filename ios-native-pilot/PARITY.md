@@ -50,18 +50,45 @@ retry. Actions are disabled while sending or disconnected. All 346 unit tests
 and the five plan-review UI checks on both iPhone and iPad pass; repo-local
 Autoreview is clean.
 
-The comparison with the existing mobile client confirmed these remaining gaps:
+The comparison with the existing mobile client found two gaps, both since closed:
 
-| Gap | Evidence and user impact |
+| Gap | Resolution (22 October 2026) |
 | --- | --- |
-| Navigation between spawned tasks | The native sidebar sorts flat task lists and does not inspect `origin.kind == agent_spawn` or `origin.parent_thread_id`. Expo uses `nestSpawnedThreads` from `client-core` to group children under their parent and keep each family together when sorting and paging. Native child tasks remain accessible, but their relationship is missing. |
-| Production native push | The hosted relay's `/v1/push-capabilities` still advertises only the native sandbox topic as of this check. Native Release builds use production APNs, so TestFlight background notifications need a production configuration entry. Foreground relay operation and existing Expo notifications are independent of this gap. |
+| Navigation between spawned tasks | `SpawnNesting` ports client-core's `nestSpawnedThreads`: agent-spawned tasks follow their parent in project, folder and chat lists, a family keeps its best-placed member's rank, orphans and cycles stay visible, and depth caps at three. |
+| Production native push | The hosted relay now advertises `com.falcondeck.pilot.native` for both `sandbox` and `production`, reusing the existing signing key. The prior config is kept beside it as a timestamped backup. Delivery to a production token is unverified until a TestFlight build registers one. |
 
 This was a focused code and contract comparison around task navigation, read
 state and agent control, not an exhaustive device QA pass. The first native
 TestFlight app record and upload remain pending from the release preparation;
 the signed TestFlight candidate includes the unread fixes and needs another
 rebuild to include the plan-review actions.
+
+## Visual and performance pass — 22 October 2026
+
+The native Mac client is the visual baseline. Changes:
+
+- Theme tokens resolve to one cached `Color` per palette pair. A fresh dynamic
+  `UIColor` per read never compared equal, so every themed view counted as
+  changed on each render. The activity diamond pulses in Core Animation rather
+  than a repeating symbol effect. With running tasks on screen, idle app CPU in
+  the simulator fell from about 3% to about 0% (CPU-time delta over 20 s).
+- MarkdownUI is replaced by the Mac client's block parser with Dynamic Type
+  fonts: tighter lists, Grid tables, Mac-style code blocks and diff colouring.
+- Transcript rows use one full-width disclosure with a leading chevron. Thoughts
+  read "Thinking · 0:12" live and "Thought for 12s" (or the time) when settled,
+  and expand only when there is text beyond the label. Tools show duration, exit
+  code, test results and failure tint. Plans show progress and in-progress steps.
+  Read-aloud and voice state are observed only by the reply's own controls.
+- Plan reviews are a compact card with Review plan and Approve; the full plan,
+  feedback and all three outcomes live in a review sheet. Approvals and
+  questions share the card. Requests get more tray height than notices.
+- App-wide errors appear in one auto-dismissing banner instead of inside every
+  conversation; system orange is replaced by palette warning/danger/success.
+- Activity has section icons, relative times, previews and project/provider.
+  Sidebar rows show relative times and have Archive/Pin trailing swipes.
+- New tasks show a project prompt and a single-line Work-in pill. Projects
+  without an icon get a stable monogram. Appearance shows palette swatches.
+  Images zoom with a native scroll view (pinch anchoring, double-tap).
 
 ## Earlier implementation milestones
 

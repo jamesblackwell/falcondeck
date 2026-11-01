@@ -7,7 +7,7 @@ struct ConversationSettingsView: View {
     private var preferences: JSON { model.preferences["conversation"] }
     var body: some View {
         Form {
-            if let error { Text(error).foregroundStyle(.orange) }
+            if let error { Text(error).foregroundStyle(FD.danger) }
             Section("Tool activity") {
                 Picker("Details", selection: choice("tool_details_mode", fallback: "collapsed")) {
                     Text("Hidden").tag("collapsed"); Text("Auto").tag("auto"); Text("Compact").tag("compact"); Text("Expanded").tag("expanded"); Text("Hide read-only details").tag("hide_read_only_details")
@@ -68,7 +68,7 @@ struct NotificationSettingsView: View {
                 Toggle("Failed turns", isOn: preference("notify_on_error"))
             } header: { Text("Notify me about") } footer: { Text("These event preferences are stored on your computer and apply to all paired clients. Connected native alerts cannot detect desktop activity.") }.listRowBackground(FD.surface)
                 .disabled(pending || (!model.demo && !model.connected))
-            if let error { Text(error).foregroundStyle(.orange) }
+            if let error { Text(error).foregroundStyle(FD.danger) }
         }.scrollContentBackground(.hidden).background(FD.background).navigationTitle("Notifications")
             .onAppear { model.synchronizePush() }
     }

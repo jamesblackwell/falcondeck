@@ -29,17 +29,60 @@ struct AppearanceSettingsView: View {
         Form {
             Section {
                 Picker("Appearance", selection: $appearance.mode) { Text("System").tag("system"); Text("Light").tag("light"); Text("Dark").tag("dark") }.pickerStyle(.segmented)
-                Picker("Light theme", selection: $appearance.lightID) { ForEach(NativeAppearance.palettes.filter { !$0.dark }) { Text($0.label).tag($0.id) } }
-                Picker("Dark theme", selection: $appearance.darkID) { ForEach(NativeAppearance.palettes.filter(\.dark)) { Text($0.label).tag($0.id) } }
                 Picker("Text size", selection: $appearance.textScale) { Text("Small").tag(0.87); Text("Default").tag(1.0); Text("Large").tag(1.13); Text("Larger").tag(1.28) }
             } footer: { Text("Stored on this device. System follows the device's appearance and text size.") }
             .listRowBackground(FD.surface)
-            Section("Preview") {
-                Text("Your agents, in focus.").font(.headline)
-                Text("A native place for your conversations.").foregroundStyle(FD.secondary)
-                HStack { ForEach(0..<6) { index in Circle().fill(NativeAppearance.shared.color("cat", String(index + 1))).frame(width: 24, height: 24) } }
-            }.listRowBackground(FD.surface)
+            Section("Light theme") {
+                PaletteGrid(palettes: NativeAppearance.palettes.filter { !$0.dark }, selection: $appearance.lightID)
+            }.listRowBackground(Color.clear).listRowInsets(EdgeInsets())
+            Section("Dark theme") {
+                PaletteGrid(palettes: NativeAppearance.palettes.filter(\.dark), selection: $appearance.darkID)
+            }.listRowBackground(Color.clear).listRowInsets(EdgeInsets())
         }.scrollContentBackground(.hidden).background(FD.background).navigationTitle("Appearance")
+    }
+}
+
+/// Each swatch draws its own palette with fixed colours, so a theme can be
+/// judged before it is chosen.
+private struct PaletteGrid: View {
+    let palettes: [NativePalette]
+    @Binding var selection: String
+    var body: some View {
+        LazyVGrid(columns: [GridItem(.adaptive(minimum: 104), spacing: 10)], spacing: 10) {
+            ForEach(palettes) { palette in
+                let selected = palette.id == selection
+                Button { selection = palette.id } label: {
+                    VStack(alignment: .leading, spacing: 8) {
+                        VStack(alignment: .leading, spacing: 5) {
+                            Capsule().fill(swatch(palette, "fg", "primary")).frame(width: 46, height: 5)
+                            Capsule().fill(swatch(palette, "fg", "muted")).frame(width: 64, height: 5)
+                            HStack(spacing: 4) {
+                                RoundedRectangle(cornerRadius: 4).fill(swatch(palette, "surface", "2")).frame(height: 14)
+                                Circle().fill(swatch(palette, "accent")).frame(width: 14, height: 14)
+                            }
+                        }
+                        .padding(10).frame(maxWidth: .infinity, alignment: .leading)
+                        .background(swatch(palette, "surface", "0"), in: .rect(cornerRadius: 10, style: .continuous))
+                        .overlay { RoundedRectangle(cornerRadius: 10, style: .continuous).strokeBorder(swatch(palette, "border")) }
+                        HStack(spacing: 4) {
+                            Text(palette.label).font(.caption.weight(selected ? .semibold : .regular)).foregroundStyle(FD.foreground).lineLimit(1)
+                            Spacer(minLength: 0)
+                            if selected { Image(systemName: "checkmark.circle.fill").font(.caption).foregroundStyle(FD.accent) }
+                        }
+                    }
+                    .padding(6)
+                    .background(selected ? FD.accent.opacity(0.1) : Color.clear, in: .rect(cornerRadius: 14, style: .continuous))
+                    .overlay { RoundedRectangle(cornerRadius: 14, style: .continuous).strokeBorder(selected ? FD.accent : Color.clear, lineWidth: 1.5) }
+                    .contentShape(.rect)
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel(palette.label).accessibilityAddTraits(selected ? .isSelected : [])
+                .sensoryFeedback(.selection, trigger: selected) { _, now in now }
+            }
+        }.padding(.vertical, 4)
+    }
+    private func swatch(_ palette: NativePalette, _ group: String, _ key: String = "default") -> Color {
+        Color(NativeAppearance.uiColor(palette.value(group, key) ?? "#888888"))
     }
 }
 

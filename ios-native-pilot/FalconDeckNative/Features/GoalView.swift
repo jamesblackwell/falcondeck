@@ -42,7 +42,7 @@ struct GoalView: View {
                         }.listRowBackground(FD.surface)
                     }
                 }
-                if let error { Text(error).foregroundStyle(.orange).listRowBackground(FD.surface) }
+                if let error { Text(error).foregroundStyle(FD.danger).listRowBackground(FD.surface) }
             }
             .disabled(pending || (!model.connected && !model.demo))
             .scrollContentBackground(.hidden).background(FD.background)

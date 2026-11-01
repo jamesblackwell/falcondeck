@@ -64,7 +64,7 @@ struct SpeechSettingsView: View {
                         .disabled(model.voice.acceptingTranscript || inserting)
                 } header: { Text("Saved recording") }.listRowBackground(FD.surface)
             }
-            if let error = error ?? model.voice.error { Text(error).font(.footnote).foregroundStyle(.orange) }
+            if let error = error ?? model.voice.error { Text(error).font(.footnote).foregroundStyle(FD.danger) }
         }.scrollContentBackground(.hidden).background(FD.background).navigationTitle("Speech")
             .task(id: model.connected) { if provider == "openrouter", model.connected { await refresh() } }
             .onChange(of: provider) { _, value in error = nil; if value == "openrouter", model.connected { Task { await refresh() } } }

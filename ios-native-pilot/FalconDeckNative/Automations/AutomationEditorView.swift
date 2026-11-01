@@ -60,9 +60,9 @@ struct AutomationEditorView: View {
                     TextField("Skills, comma separated", text: $draft.skills).textInputAutocapitalization(.never).autocorrectionDisabled()
                     Picker("If already running", selection: $draft.concurrency) { Text("Skip").tag("skip"); Text("Queue one").tag("queue_one"); Text("Allow overlap").tag("allow") }
                     Picker("If a run is missed", selection: $draft.misfire) { Text("Skip").tag("skip"); Text("Run once").tag("run_once") }
-                    if draft.elevated { Text(elevatedBlocked ? "Elevated automations are disabled on your computer." : "This automation runs with elevated permissions.").font(.footnote).foregroundStyle(.orange) }
+                    if draft.elevated { Text(elevatedBlocked ? "Elevated automations are disabled on your computer." : "This automation runs with elevated permissions.").font(.footnote).foregroundStyle(FD.warning) }
                 }.listRowBackground(FD.surface)
-                if let error { Text(error).foregroundStyle(.orange).listRowBackground(FD.surface) }
+                if let error { Text(error).foregroundStyle(FD.danger).listRowBackground(FD.surface) }
                 if let validation = draft.validationError { Text(validation).font(.footnote).foregroundStyle(FD.secondary).listRowBackground(FD.surface) }
             }.disabled(pending)
             .scrollContentBackground(.hidden).background(FD.background).navigationTitle(definition == nil ? "New automation" : "Edit automation").navigationBarTitleDisplayMode(.inline)

@@ -60,7 +60,7 @@ struct TaskOptionsView: View {
                                 Label(chat.loading ? "Loading conversation…" : chat.hasOlder ? "Share loaded conversation" : "Share conversation", systemImage: "square.and.arrow.up")
                             }.disabled(!chat.loaded || chat.loading || chat.transcript.items.isEmpty).accessibilityIdentifier("share-conversation")
                             if let error = chat.historyError {
-                                Text(error).font(.footnote).foregroundStyle(.orange)
+                                Text(error).font(.footnote).foregroundStyle(FD.danger)
                                 Button("Retry loading conversation") { Task { await model.loadChat(task) } }.disabled(!canMutate)
                             }
 
@@ -102,7 +102,7 @@ struct TaskOptionsView: View {
                     }
                     TaskUsageView(usage: model.tokenUsage[task.id])
                 }
-                if let error { Text(error).foregroundStyle(.orange).listRowBackground(FD.surface) }
+                if let error { Text(error).foregroundStyle(FD.danger).listRowBackground(FD.surface) }
             }
             .disabled(pending)
             .scrollContentBackground(.hidden).background(FD.background).navigationTitle("Task options").navigationBarTitleDisplayMode(.inline)
@@ -145,7 +145,7 @@ struct ArchivedTasksView: View {
     private var filtered: [AgentTask] { model.archivedTasks.filter { search.isEmpty || $0.title.localizedCaseInsensitiveContains(search) } }
     var body: some View {
         List {
-            if let error, !model.archivedTasks.isEmpty { Text(error).font(.footnote).foregroundStyle(.orange) }
+            if let error, !model.archivedTasks.isEmpty { Text(error).font(.footnote).foregroundStyle(FD.danger) }
             ForEach(filtered) { task in
                 HStack {
                     Button { model.selection = .task(task.id) } label: { VStack(alignment: .leading) { Text(task.title); Text(task.provider.capitalized).font(.caption).foregroundStyle(FD.secondary) }.frame(maxWidth: .infinity, alignment: .leading) }.buttonStyle(.plain)

@@ -106,6 +106,15 @@ struct RootView: View {
         .sheet(isPresented: Binding(get: { model.showConnection && !model.pairingPending && (model.hasSession || model.demo) }, set: { model.showConnection = $0 })) { ConnectionView() }
         .sheet(isPresented: $model.showSpeechSettings) { NavigationStack { SpeechSettingsView(modal: true) } }
         .overlay(alignment: .topTrailing) { if showPerformance { PerformanceOverlay() } }
+        .overlay(alignment: .top) {
+            // Workspace-wide failures (archive, folders, navigation) surface once
+            // here instead of inside whichever conversation happens to be open.
+            if let error = model.error, !model.restoringSession, model.hasSession || model.demo, !model.pairingPending {
+                NativeErrorBanner(message: error) { model.error = nil }
+                    .transition(.move(edge: .top).combined(with: .opacity))
+            }
+        }
+        .animation(motion.interactionAnimation, value: model.error)
         .sheet(item: Binding(get: { model.taskOptionsID.map { TaskOptionsTarget(id: $0) } }, set: { model.taskOptionsID = $0?.id })) { target in TaskOptionsView(taskID: target.id) }
         .sensoryFeedback(.selection, trigger: model.taskOptionsID) { _, id in id != nil && motion.active }
         // Keep presented sheets on the same appearance and menu policy.
@@ -203,3 +212,25 @@ struct RootView: View {
 }
 
 private struct TaskOptionsTarget: Identifiable { let id: String }
+
+private struct NativeErrorBanner: View {
+    let message: String
+    let dismiss: () -> Void
+    var body: some View {
+        HStack(alignment: .top, spacing: 10) {
+            Image(systemName: "exclamationmark.circle.fill").foregroundStyle(FD.danger)
+            Text(message).font(.footnote).foregroundStyle(FD.foreground).frame(maxWidth: .infinity, alignment: .leading).lineLimit(4)
+            Button(action: dismiss) { Image(systemName: "xmark").font(.footnote.weight(.semibold)).foregroundStyle(FD.muted).frame(width: 28, height: 28).contentShape(.rect) }
+                .accessibilityLabel("Dismiss error")
+        }
+        .padding(.leading, 14).padding(.trailing, 6).padding(.vertical, 8)
+        .glassEffect(.regular, in: .rect(cornerRadius: 18))
+        .padding(.horizontal, 16).padding(.top, 4)
+        .frame(maxWidth: 520)
+        .accessibilityElement(children: .combine).accessibilityIdentifier("app-error-banner")
+        .task(id: message) {
+            try? await Task.sleep(for: .seconds(6))
+            if !Task.isCancelled { dismiss() }
+        }
+    }
+}

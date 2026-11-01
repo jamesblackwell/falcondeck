@@ -15,7 +15,7 @@ struct AutomationsView: View {
     private var store: AutomationStore { model.automations }
     var body: some View {
         List {
-            if let error = error ?? store.error { Text(error).foregroundStyle(.orange) }
+            if let error = error ?? store.error { Text(error).foregroundStyle(FD.danger) }
             if store.loading && store.rows.isEmpty { HStack { ActivityDiamond(); Text("Loading automations…") } }
             ForEach(store.rows) { row in
                 VStack(alignment: .leading, spacing: 8) {
@@ -93,7 +93,7 @@ struct AutomationHistoryView: View {
     var body: some View {
         NavigationStack {
             List {
-                if let error { Text(error).foregroundStyle(.orange) }
+                if let error { Text(error).foregroundStyle(FD.danger) }
                 if loading { HStack { ActivityDiamond(); Text("Loading run history…") } }
                 ForEach(model.automations.runs[automation.id] ?? [], id: \.self) { run in
                     VStack(alignment: .leading, spacing: 8) {

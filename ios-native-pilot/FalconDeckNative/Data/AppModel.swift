@@ -50,6 +50,7 @@ final class AppModel {
     var composerPreferences: [String: WorkspaceComposerPreferences] = [:]
     var tasks: [AgentTask] = [] {
         didSet {
+            taskPositions = Dictionary(tasks.enumerated().map { ($0.element.id, $0.offset) }, uniquingKeysWith: { first, _ in first })
             taskGroups = Dictionary(grouping: tasks, by: \.projectID).mapValues { values in
                 values.sorted { $0.pinned != $1.pinned ? $0.pinned : $0.updatedAt > $1.updatedAt }
             }
@@ -63,6 +64,9 @@ final class AppModel {
         }
     }
     private var taskGroups: [String: [AgentTask]] = [:]
+    /// Views look tasks up by ID on every render; avoid a linear scan.
+    @ObservationIgnored var taskPositions: [String: Int] = [:]
+    @ObservationIgnored private var folderCache: (revision: Int, folders: [ProjectFolder])?
     @ObservationIgnored var pendingSummaries: [String: JSON] = [:]
     @ObservationIgnored var summaryFlush: Task<Void, Never>?
     var connected = false
@@ -427,7 +431,13 @@ final class AppModel {
         }
     }
 
-    var folders: [ProjectFolder] { preferences["project_folders"].array.map { ProjectFolder(raw: $0) } }
+    var folders: [ProjectFolder] {
+        let raw = preferences["project_folders"]
+        if let folderCache, folderCache.revision == preferencesRevision { return folderCache.folders }
+        let folders = raw.array.map { ProjectFolder(raw: $0) }
+        folderCache = (preferencesRevision, folders)
+        return folders
+    }
     func chat(for task: AgentTask) -> ChatSession {
         if let value = chats[task.id] { return value }
         let value = ChatSession(); value.modelID = task.modelID; value.effort = task.effort; value.provider = task.provider

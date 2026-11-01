@@ -1,6 +1,6 @@
 import Foundation
 
-struct ConversationPreferences {
+struct ConversationPreferences: Equatable {
     let raw: JSON
     var tools: String { raw["tool_details_mode"].string.nonempty ?? "collapsed" }
     var thinking: String { raw["thinking_display"].string.nonempty ?? "auto" }
@@ -100,8 +100,33 @@ enum ConversationActivity {
         if item.streaming { return "Thinking…" }
         if item.raw["lifecycle"].string == "interrupted" { return "Thought interrupted" }
         if item.raw["lifecycle"].string == "error" { return "Thought failed" }
-        return item.raw["summary"].string.components(separatedBy: .newlines)
-            .map { $0.trimmingCharacters(in: .whitespaces) }.first { !$0.isEmpty } ?? "Thought process"
+        let summary = summaryLines(item).first
+        guard let elapsed = notableDuration(item.raw["duration_ms"]) else { return summary ?? "Thought" }
+        return summary.map { $0 + " · " + elapsed } ?? "Thought for " + elapsed
+    }
+    /// Expandable reasoning text beyond what the label already says. Providers
+    /// often send only a one-line summary, or nothing; such rows do not expand.
+    static func reasoningBody(_ item: Message) -> String {
+        let content = item.raw["content"].string.trimmingCharacters(in: .whitespacesAndNewlines)
+        let lines = summaryLines(item)
+        if !content.isEmpty, content != lines.first { return content }
+        return lines.dropFirst().joined(separator: "\n")
+    }
+    private static func summaryLines(_ item: Message) -> [String] {
+        item.raw["summary"].string.components(separatedBy: .newlines).map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty }
+    }
+    /// Elapsed time is shown only when it is worth noticing.
+    static func notableDuration(_ milliseconds: JSON) -> String? {
+        guard case .number(let value) = milliseconds, value >= 1000 else { return nil }
+        let seconds = Int((value / 1000).rounded())
+        return seconds < 60 ? "\(seconds)s" : "\(seconds / 60)m \(seconds % 60)s"
+    }
+    nonisolated(unsafe) private static let timestampParser: ISO8601DateFormatter = {
+        let parser = ISO8601DateFormatter(); parser.formatOptions = [.withInternetDateTime, .withFractionalSeconds]; return parser
+    }()
+    nonisolated(unsafe) private static let wholeSecondParser = ISO8601DateFormatter()
+    static func date(_ value: String) -> Date? {
+        value.isEmpty ? nil : timestampParser.date(from: value) ?? wholeSecondParser.date(from: value)
     }
     /// Match Expo's fallback: live reasoning and tool activity own their status.
     static func label(blocks: [TranscriptBlock], running: Bool, submitting: Bool, accepted: Bool = false) -> String? {

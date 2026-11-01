@@ -19,9 +19,6 @@ settings:
       FALCONDECK_DISPLAY_NAME: FalconDeck
       FALCONDECK_PAIRING_SCHEME: falcondeck
 packages:
-  MarkdownUI:
-    url: https://github.com/gonzalezreal/swift-markdown-ui.git
-    exactVersion: 2.4.1
   Sodium:
     url: https://github.com/jedisct1/swift-sodium.git
     exactVersion: 0.11.0
@@ -33,7 +30,6 @@ targets:
     dependencies:
       - target: FalconSpeechActivity
       - package: Sodium
-      - package: MarkdownUI
     preBuildScripts:
       - name: Generate native pilot icon
         script: xcrun --sdk macosx swift -sdk "$(xcrun --sdk macosx --show-sdk-path)" "$SRCROOT/scripts/generate-icon.swift" "$SRCROOT/FalconDeckNative/Assets.xcassets/FalconMark.imageset/mark.svg" "$SRCROOT/FalconDeckNative/Assets.xcassets/AppIcon.appiconset/icon.png"

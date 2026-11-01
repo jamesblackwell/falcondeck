@@ -3,11 +3,11 @@ import SwiftUI
 @MainActor enum ExtensionTone {
     static func color(_ tone: String) -> Color {
         switch tone {
-        case "red", "danger": .red
-        case "orange", "warning": .orange
+        case "red", "danger": FD.danger
+        case "orange", "warning": FD.warning
         case "yellow": .yellow
-        case "green", "success": .green
-        case "blue", "info": .blue
+        case "green", "success": FD.success
+        case "blue", "info": FD.info
         case "purple": .purple
         case "pink": .pink
         case "accent": FD.accent
@@ -102,7 +102,7 @@ struct ExtensionPanelsView: View {
                     if extensionItem["contributes"]["panels"].array.isEmpty { Text("Connected extension").font(.footnote).foregroundStyle(FD.secondary) }
                 }.listRowBackground(FD.surface)
             }
-            if let error = model.extensions.error { Text(error).foregroundStyle(.orange); Button("Retry") { Task { await model.extensions.load(model: model, force: true) } } }
+            if let error = model.extensions.error { Text(error).foregroundStyle(FD.danger); Button("Retry") { Task { await model.extensions.load(model: model, force: true) } } }
         }.scrollContentBackground(.hidden).background(FD.background).navigationTitle("Extensions")
             .overlay { if model.extensions.enabled.isEmpty && model.extensions.error == nil { ContentUnavailableView("No active extensions", systemImage: "puzzlepiece.extension").allowsHitTesting(false) } }
             .task { await model.extensions.load(model: model) }
@@ -121,7 +121,7 @@ struct ExtensionPanelView: View {
             VStack(alignment: .leading, spacing: 16) {
                 if document["version"].int == 1, ExtensionDocument.valid(document["root"]) { node(document["root"]) }
                 else { ContentUnavailableView("Open this panel on desktop", systemImage: "macwindow", description: Text("This extension has not published a supported mobile panel.")) }
-                if let error { Text(error).font(.footnote).foregroundStyle(.orange) }
+                if let error { Text(error).font(.footnote).foregroundStyle(FD.danger) }
             }.padding(20).frame(maxWidth: 720).frame(maxWidth: .infinity)
         }.background(FD.background).navigationTitle(contribution["title"].string).disabled(busy)
     }

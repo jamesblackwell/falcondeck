@@ -88,15 +88,19 @@ import XCTest
         if !app.buttons["sidebar-task-native"].isHittable, app.buttons["BackButton"].isHittable { app.buttons["BackButton"].tap() }
         let task = app.buttons["sidebar-task-native"]
         XCTAssertTrue(task.waitForExistence(timeout: 5)); task.tap()
-        XCTAssertTrue(app.buttons["plan-abandon"].waitForExistence(timeout: 5))
+        openReview(app)
         return app
+    }
+    /// The conversation shows a compact card; the full plan and every
+    /// response live in the review sheet.
+    private func openReview(_ app: XCUIApplication) {
+        let review = app.buttons["plan-review"]
+        XCTAssertTrue(review.waitForExistence(timeout: 5)); review.tap()
+        XCTAssertTrue(app.buttons["plan-abandon"].waitForExistence(timeout: 5))
     }
     @discardableResult private func reveal(_ id: String, in app: XCUIApplication, earlier: Bool = false) -> XCUIElement {
         let element = app.descendants(matching: .any).matching(identifier: id).firstMatch
-        let context = app.scrollViews["conversation-context"]
-        for _ in 0..<5 where !element.isHittable {
-            if earlier { context.swipeDown() } else { context.swipeUp() }
-        }
+        XCTAssertTrue(element.waitForExistence(timeout: 5))
         XCTAssertTrue(element.isHittable, "Plan control \(id) must be reachable")
         return element
     }
@@ -124,6 +128,7 @@ import XCTest
             let app = launch()
             reveal(id, in: app).tap()
             XCTAssertTrue(app.buttons[id].waitForNonExistence(timeout: 5))
+            XCTAssertFalse(app.buttons["plan-review"].exists)
             XCTAssertEqual(app.textFields["chat-input"].value as? String, "Keep my separate follow-up.")
             app.terminate()
         }
@@ -134,6 +139,14 @@ import XCTest
         XCTAssertTrue(app.staticTexts["This provider did not supply a plan to review."].exists)
         reveal("plan-abandon", in: app).tap()
         XCTAssertTrue(app.buttons["plan-abandon"].waitForNonExistence(timeout: 5))
+    }
+    func testQuickApproveResolvesFromTheConversation() {
+        let app = launch()
+        app.buttons["Close"].tap()
+        let approve = app.buttons["plan-quick-approve"]
+        XCTAssertTrue(approve.waitForExistence(timeout: 5)); approve.tap()
+        XCTAssertTrue(app.buttons["plan-review"].waitForNonExistence(timeout: 5))
+        XCTAssertEqual(app.textFields["chat-input"].value as? String, "Keep my separate follow-up.")
     }
     func testFailureKeepsFeedbackAndMakesTheReviewAvailableForRetry() {
         let app = launch("plan-error")
@@ -151,7 +164,7 @@ import XCTest
     }
     func testOfflineReviewCannotSubmitAnyPlanOutcome() {
         let app = launch("plan-offline")
-        for id in ["plan-approve", "plan-abandon", "plan-request-changes", "plan-feedback"] {
+        for id in ["plan-approve", "plan-abandon", "plan-request-changes"] {
             XCTAssertFalse(app.descendants(matching: .any).matching(identifier: id).firstMatch.isEnabled)
         }
     }

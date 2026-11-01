@@ -38,7 +38,7 @@ struct QueuedMessagesView: View {
                     }
                 }.padding(10).background(FD.surface, in: .rect(cornerRadius: 12))
             }
-            if let error { Text(error).font(.footnote).foregroundStyle(.orange) }
+            if let error { Text(error).font(.footnote).foregroundStyle(FD.danger) }
         }.disabled(pending || (!model.demo && !model.connected))
     }
     private func run(_ queued: JSON, action: String) {
@@ -74,7 +74,7 @@ struct QueuedMessageEditor: View {
                         Button("Copy edited message", systemImage: "doc.on.doc") { UIPasteboard.general.string = text }
                     }.padding(.bottom, 8)
                 }
-                if let error { Text(error).font(.footnote).foregroundStyle(.orange).padding(.bottom, 8) }
+                if let error { Text(error).font(.footnote).foregroundStyle(FD.danger).padding(.bottom, 8) }
             }.disabled(pending).scrollDismissesKeyboard(.interactively)
                 .padding(.horizontal, FD.inset).padding(.top, 8).background(FD.background)
                 .navigationTitle("Edit message").navigationBarTitleDisplayMode(.inline)

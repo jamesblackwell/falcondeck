@@ -10,13 +10,13 @@ struct ConversationStatus: View {
                 Image(systemName: "exclamationmark.circle")
                 Text(notice["message"].string).frame(maxWidth: .infinity, alignment: .leading).textSelection(.enabled)
                 Button { model.snooze(notice) } label: { Image(systemName: "xmark") }.accessibilityLabel("Hide notice for a day")
-            }.font(.footnote).foregroundStyle(.orange).padding(12).background(FD.surface, in: .rect(cornerRadius: 12))
+            }.font(.footnote).foregroundStyle(FD.warning).padding(12).background(FD.surface, in: .rect(cornerRadius: 12))
         }
         if model.realtimeAudio.active.contains(task.id) {
             HStack { Label("Playing realtime audio", systemImage: "waveform"); Spacer(); Button("Stop audio") { model.realtimeAudio.stop(task.id) } }.font(.caption).padding(10)
         }
         if let error = model.realtimeAudio.error {
-            HStack { Text(error); Spacer(); Button { model.realtimeAudio.error = nil } label: { Image(systemName: "xmark") }.accessibilityLabel("Dismiss audio error") }.font(.footnote).foregroundStyle(.orange)
+            HStack { Text(error); Spacer(); Button { model.realtimeAudio.error = nil } label: { Image(systemName: "xmark") }.accessibilityLabel("Dismiss audio error") }.font(.footnote).foregroundStyle(FD.danger)
         }
     }
 }
@@ -68,25 +68,35 @@ extension AppModel {
 
 struct AssistantSources: View {
     let message: Message
+    @State private var expanded = false
+    @State private var memoryExpanded = false
     var body: some View {
         let citations = message.raw["citations"].array
         if !citations.isEmpty {
-            DisclosureGroup("\(citations.count) sources") {
-                ForEach(Array(citations.enumerated()), id: \.offset) { index, citation in
-                    VStack(alignment: .leading, spacing: 5) {
-                        let title = citation["title"].string.nonempty ?? citation["source"].string.nonempty ?? "Source \(index + 1)"
-                        if let url = MediaURL.external(citation["url"].string) { Link(title, destination: url).font(.footnote.weight(.medium)) }
-                        else { Text(title).font(.footnote.weight(.medium)) }
-                        if !citation["cited_text"].string.isEmpty { Text(citation["cited_text"].string).font(.caption).foregroundStyle(FD.secondary).textSelection(.enabled) }
-                        if citation["locator"]["kind"].string == "page" { Text("Page \(citation["locator"]["start_page_number"].int)").font(.caption2).foregroundStyle(FD.muted) }
-                    }.padding(.vertical, 6)
-                }
-            }.font(.caption).foregroundStyle(FD.secondary)
+            TranscriptDisclosure(expanded: $expanded) {
+                Label("\(citations.count) \(citations.count == 1 ? "source" : "sources")", systemImage: "link").font(.footnote).foregroundStyle(FD.secondary)
+            } content: {
+                VStack(alignment: .leading, spacing: 4) {
+                    ForEach(Array(citations.enumerated()), id: \.offset) { index, citation in
+                        VStack(alignment: .leading, spacing: 5) {
+                            let title = citation["title"].string.nonempty ?? citation["source"].string.nonempty ?? "Source \(index + 1)"
+                            if let url = MediaURL.external(citation["url"].string) { Link(title, destination: url).font(.footnote.weight(.medium)) }
+                            else { Text(title).font(.footnote.weight(.medium)).foregroundStyle(FD.secondary) }
+                            if !citation["cited_text"].string.isEmpty { Text(citation["cited_text"].string).font(.caption).foregroundStyle(FD.secondary).textSelection(.enabled) }
+                            if citation["locator"]["kind"].string == "page" { Text("Page \(citation["locator"]["start_page_number"].int)").font(.caption2).foregroundStyle(FD.muted) }
+                        }.padding(.vertical, 6)
+                    }
+                }.padding(.leading, 18)
+            }
         }
         if message.raw["memory_citation"] != .null {
-            DisclosureGroup("Memory sources") { NativeCodeBlock(content: (try? message.raw["memory_citation"].wireText()) ?? "", language: "Citations") }.font(.caption).foregroundStyle(FD.secondary)
+            TranscriptDisclosure(expanded: $memoryExpanded) {
+                Label("Memory sources", systemImage: "brain").font(.footnote).foregroundStyle(FD.secondary)
+            } content: {
+                NativeCodeBlock(content: (try? message.raw["memory_citation"].wireText()) ?? "", language: "json").padding(.top, 6)
+            }
         }
-        if let error = message.raw["error"].string.nonempty { Label(error, systemImage: "exclamationmark.circle").font(.footnote).foregroundStyle(.orange) }
+        if let error = message.raw["error"].string.nonempty { Label(error, systemImage: "exclamationmark.circle").font(.footnote).foregroundStyle(FD.danger) }
     }
 }
 

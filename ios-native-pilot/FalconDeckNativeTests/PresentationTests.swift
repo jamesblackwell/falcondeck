@@ -74,11 +74,48 @@ final class PresentationTests: XCTestCase {
     }
     func testReasoningHeaderFollowsLifecycleAndUsesOneSummaryLine() {
         let thought = message("thought", kind: "reasoning")
-        XCTAssertEqual(ConversationActivity.reasoningLabel(thought), "Thought process")
+        XCTAssertEqual(ConversationActivity.reasoningLabel(thought), "Thought")
         XCTAssertEqual(ConversationActivity.reasoningLabel(Message(thought.raw.setting("lifecycle", .string("streaming")))), "Thinking…")
         XCTAssertEqual(ConversationActivity.reasoningLabel(Message(thought.raw.setting("lifecycle", .string("interrupted")))), "Thought interrupted")
         XCTAssertEqual(ConversationActivity.reasoningLabel(Message(thought.raw.setting("lifecycle", .string("error")))), "Thought failed")
         XCTAssertEqual(ConversationActivity.reasoningLabel(Message(thought.raw.setting("summary", .string("\n  A short summary  \nA longer explanation")))), "A short summary")
+    }
+    func testSettledThoughtsShowElapsedTimeAndOnlyExpandWithNewText() {
+        let thought = message("thought", kind: "reasoning")
+        XCTAssertEqual(ConversationActivity.reasoningLabel(Message(thought.raw.setting("duration_ms", .number(12_400)))), "Thought for 12s")
+        XCTAssertEqual(ConversationActivity.reasoningLabel(Message(thought.raw.setting("duration_ms", .number(400)))), "Thought")
+        XCTAssertEqual(ConversationActivity.reasoningLabel(Message(thought.raw.setting("summary", .string("Planning")).setting("duration_ms", .number(75_000)))), "Planning · 1m 15s")
+        // A thought with nothing beyond its label has nothing to expand.
+        XCTAssertEqual(ConversationActivity.reasoningBody(thought), "")
+        XCTAssertEqual(ConversationActivity.reasoningBody(Message(thought.raw.setting("summary", .string("Planning")))), "")
+        XCTAssertEqual(ConversationActivity.reasoningBody(Message(thought.raw.setting("summary", .string("Planning")).setting("content", .string("Planning")))), "")
+        XCTAssertEqual(ConversationActivity.reasoningBody(Message(thought.raw.setting("summary", .string("Planning\nCheck the relay first")))), "Check the relay first")
+        XCTAssertEqual(ConversationActivity.reasoningBody(Message(thought.raw.setting("content", .string("Full reasoning")))), "Full reasoning")
+    }
+    func testImageSyntaxWithManyBackslashesParsesPromptly() {
+        let hostile = "![" + String(repeating: "\\", count: 60) + "](https://example.com)x"
+        let start = Date()
+        XCTAssertEqual(TranscriptMarkdownParser.parse(hostile).count, 1)
+        XCTAssertLessThan(Date().timeIntervalSince(start), 1)
+        XCTAssertEqual(TranscriptMarkdownParser.parse("![A \\] chart](https://example.com/c.png)"), [.image(alt: "A \\] chart", destination: "https://example.com/c.png")])
+    }
+    func testSpawnedTasksFollowTheirParentAndPullTheFamilyUp() {
+        func task(_ id: String, parent: String? = nil) -> AgentTask {
+            var raw = JSON.object(["id": .string(id), "workspace_id": .string("p")])
+            if let parent { raw = raw.setting("origin", .object(["kind": .string("agent_spawn"), "parent_thread_id": .string(parent)])) }
+            return AgentTask(raw)
+        }
+        // Sorted input: the child ran most recently, so its family leads.
+        let nested = SpawnNesting.nest([task("child", parent: "parent"), task("other"), task("parent"), task("grandchild", parent: "child"), task("orphan", parent: "missing")])
+        XCTAssertEqual(nested.tasks.map(\.id), ["parent", "child", "grandchild", "other", "orphan"])
+        XCTAssertEqual(nested.depth, ["child": 1, "grandchild": 2])
+        // Several siblings exercise the family-rank sort.
+        let siblings = SpawnNesting.nest([task("late", parent: "root"), task("root"), task("early", parent: "root"), task("middle", parent: "root")])
+        XCTAssertEqual(siblings.tasks.map(\.id), ["root", "late", "early", "middle"])
+        let cycle = SpawnNesting.nest([task("a", parent: "b"), task("b", parent: "a")])
+        XCTAssertEqual(Set(cycle.tasks.map(\.id)), ["a", "b"])
+        let flat = [task("x"), task("y")]
+        XCTAssertEqual(SpawnNesting.nest(flat).tasks.map(\.id), ["x", "y"])
     }
     func testLiveReasoningAndToolsDoNotGetADuplicateThinkingIndicator() {
         let thought = Message(message("thought", kind: "reasoning").raw.setting("lifecycle", .string("streaming")))

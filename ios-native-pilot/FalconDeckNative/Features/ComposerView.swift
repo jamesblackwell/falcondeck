@@ -36,21 +36,31 @@ struct ComposerView: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
             if task.isDraft, let project = model.projects.first(where: { $0.id == task.projectID }) ?? project, project.raw["kind"].string != "casual" {
-                HStack(spacing: 6) {
-                    Text("Work in").foregroundStyle(FD.secondary)
+                let isolated = chat.isolation == "isolated"
+                Menu {
                     Picker("Work in", selection: $chat.isolation) {
                         Label("Project folder", systemImage: "folder").tag("project_folder")
                         Label("Isolated copy", systemImage: "arrow.triangle.branch").tag("isolated")
                     }
-                    .pickerStyle(.menu).labelsHidden().tint(FD.foreground)
-                    .frame(minHeight: 44)
-                    .accessibilityLabel("Work in")
-                    .accessibilityValue(chat.isolation == "isolated" ? "Isolated copy" : "Project folder")
-                    .accessibilityHint("An isolated copy has its own branch and checkout.")
-                    .accessibilityIdentifier("composer-isolation")
-                    .disabled(chat.sending)
-                    Spacer(minLength: 0)
-                }.font(.subheadline).padding(.horizontal, 8)
+                } label: {
+                    HStack(spacing: 5) {
+                        Image(systemName: isolated ? "arrow.triangle.branch" : "folder").font(.caption.weight(.medium))
+                        Text(isolated ? "Isolated copy" : "Project folder").lineLimit(1)
+                        Image(systemName: "chevron.up.chevron.down").font(.system(size: 9, weight: .semibold)).foregroundStyle(FD.muted)
+                    }
+                    .font(.footnote.weight(.medium)).foregroundStyle(isolated ? FD.accent : FD.secondary)
+                    .padding(.horizontal, 10).frame(height: 30)
+                    .background(isolated ? FD.accent.opacity(0.12) : FD.raised.opacity(0.7), in: .capsule)
+                    .fixedSize()
+                    .frame(minHeight: 44).contentShape(.rect)
+                }
+                .menuOrder(.fixed)
+                .accessibilityLabel("Work in")
+                .accessibilityValue(isolated ? "Isolated copy" : "Project folder")
+                .accessibilityHint("An isolated copy has its own branch and checkout.")
+                .accessibilityIdentifier("composer-isolation")
+                .disabled(chat.sending)
+                .padding(.horizontal, 6).padding(.bottom, -6)
             }
             if !chat.attachments.isEmpty { AttachmentStrip(chat: chat) }
             if voiceActive {

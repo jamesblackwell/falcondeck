@@ -41,25 +41,15 @@ private struct ImageDetailView: View {
     let data: Data
     let image: UIImage
     let title: String
-    @State private var scale: CGFloat = 1
-    @GestureState private var magnification: CGFloat = 1
     @State private var saving = false
     @State private var saved = false
     @State private var error: String?
     var body: some View {
         NavigationStack {
-            GeometryReader { geometry in
-                let width = min(geometry.size.width - 32, image.size.width)
-                let zoom = max(1, min(scale * magnification, 8))
-                ScrollView([.horizontal, .vertical]) {
-                    Image(uiImage: image).resizable().scaledToFit()
-                        .frame(width: width * zoom, height: width * zoom * image.size.height / max(1, image.size.width))
-                        .frame(minWidth: geometry.size.width, minHeight: geometry.size.height)
-                        .gesture(MagnifyGesture().updating($magnification) { value, state, _ in state = value.magnification }.onEnded { value in scale = max(1, min(scale * value.magnification, 8)) })
-                        .onTapGesture(count: 2) { withAnimation { scale = scale > 1 ? 1 : 2 } }
-                }
-            }.background(FD.background).navigationTitle(title).navigationBarTitleDisplayMode(.inline)
-                .safeAreaInset(edge: .bottom) { if let error { Text(error).font(.footnote).foregroundStyle(.orange).padding() } }
+            ZoomableImage(image: image)
+                .ignoresSafeArea(edges: .bottom)
+                .background(FD.background).navigationTitle(title).navigationBarTitleDisplayMode(.inline)
+                .safeAreaInset(edge: .bottom) { if let error { Text(error).font(.footnote).foregroundStyle(FD.danger).padding() } }
                 .toolbar {
                     ToolbarItem(placement: .confirmationAction) { Button("Done") { dismiss() } }
                     ToolbarItemGroup(placement: .bottomBar) {
@@ -78,5 +68,64 @@ private struct ImageDetailView: View {
             try await PHPhotoLibrary.shared().performChanges { PHAssetCreationRequest.forAsset().addResource(with: .photo, data: data, options: nil) }
             saved = true
         } catch { self.error = error.localizedDescription }
+    }
+}
+
+/// UIKit zooming anchors the pinch under the fingers, bounces at the limits and
+/// supports double-tap to zoom, which a SwiftUI magnify gesture does not.
+private struct ZoomableImage: UIViewRepresentable {
+    let image: UIImage
+    func makeUIView(context: Context) -> ZoomView { ZoomView(image: image) }
+    func updateUIView(_ view: ZoomView, context: Context) { view.setImage(image) }
+
+    final class ZoomView: UIScrollView, UIScrollViewDelegate {
+        private let imageView = UIImageView()
+        init(image: UIImage) {
+            super.init(frame: .zero)
+            delegate = self
+            showsHorizontalScrollIndicator = false; showsVerticalScrollIndicator = false
+            decelerationRate = .fast; contentInsetAdjustmentBehavior = .never
+            imageView.contentMode = .scaleAspectFit; imageView.isUserInteractionEnabled = true
+            imageView.accessibilityIgnoresInvertColors = true
+            addSubview(imageView)
+            let doubleTap = UITapGestureRecognizer(target: self, action: #selector(toggleZoom(_:)))
+            doubleTap.numberOfTapsRequired = 2
+            addGestureRecognizer(doubleTap)
+            setImage(image)
+        }
+        @available(*, unavailable) required init?(coder: NSCoder) { fatalError("init(coder:) is unused") }
+        func setImage(_ image: UIImage) {
+            guard imageView.image !== image else { return }
+            imageView.image = image
+            setNeedsLayout()
+        }
+        private var fittedSize: CGSize = .zero
+        override func layoutSubviews() {
+            super.layoutSubviews()
+            guard let image = imageView.image, bounds.width > 0, bounds.height > 0, image.size.width > 0, image.size.height > 0 else { return }
+            let fit = min(bounds.width / image.size.width, bounds.height / image.size.height, 1)
+            let size = CGSize(width: image.size.width * fit, height: image.size.height * fit)
+            if size != fittedSize {
+                fittedSize = size
+                zoomScale = 1
+                imageView.frame = CGRect(origin: .zero, size: size)
+                contentSize = size
+                minimumZoomScale = 1
+                maximumZoomScale = max(4, 1 / fit * 2)
+            }
+            centre()
+        }
+        private func centre() {
+            let x = max(0, (bounds.width - contentSize.width) / 2), y = max(0, (bounds.height - contentSize.height) / 2)
+            contentInset = UIEdgeInsets(top: y, left: x, bottom: y, right: x)
+        }
+        func viewForZooming(in scrollView: UIScrollView) -> UIView? { imageView }
+        func scrollViewDidZoom(_ scrollView: UIScrollView) { centre() }
+        @objc private func toggleZoom(_ recognizer: UITapGestureRecognizer) {
+            if zoomScale > minimumZoomScale * 1.05 { setZoomScale(minimumZoomScale, animated: true); return }
+            let point = recognizer.location(in: imageView), scale = min(maximumZoomScale, 2.5)
+            let size = CGSize(width: bounds.width / scale, height: bounds.height / scale)
+            zoom(to: CGRect(x: point.x - size.width / 2, y: point.y - size.height / 2, width: size.width, height: size.height), animated: true)
+        }
     }
 }

@@ -64,9 +64,9 @@ private struct ChatContent: View {
                     }
                     ForEach(blocks) { block in
                         Group {
-                            if block.grouped { TranscriptGroup(block: block, task: task, expansion: expansion, onInteraction: stopFollowing).id(block.id) }
+                            if block.grouped { TranscriptGroup(block: block, task: task, preferences: preferences, expansion: expansion, onInteraction: stopFollowing).id(block.id) }
                             else if let item = block.items.first {
-                                TranscriptRow(message: item, task: task, firstDiff: block.firstDiff, showsActions: actions.contains(item.id), expansion: expansion, onInteraction: stopFollowing)
+                                TranscriptRow(message: item, task: task, preferences: preferences, firstDiff: block.firstDiff, showsActions: actions.contains(item.id), expansion: expansion, onInteraction: stopFollowing)
                                     .modifier(OutgoingMessageArrival(delivery: chat.outgoingMessage.flatMap { $0.id == item.id ? $0 : nil })).id(item.id)
                             }
                         }.frame(maxWidth: 820).frame(maxWidth: .infinity)
@@ -153,6 +153,16 @@ private struct ChatContent: View {
                             Text(error).font(.subheadline).foregroundStyle(FD.secondary).multilineTextAlignment(.center)
                             Button("Try again") { Task { await model.loadChat(task) } }
                                 .buttonStyle(.glass).accessibilityIdentifier("conversation-retry")
+                        } else if chat.loaded && task.isDraft {
+                            if project?.raw["kind"].string == "casual" {
+                                Image(systemName: "bubble.left.and.text.bubble.right").font(.system(size: 30, weight: .regular)).foregroundStyle(FD.accent)
+                                    .frame(width: 56, height: 56).background(FD.accent.opacity(0.12), in: .rect(cornerRadius: 16, style: .continuous))
+                            } else if let project {
+                                WorkspaceGlyph(project: project, size: 44).font(.largeTitle).foregroundStyle(FD.muted)
+                            }
+                            Text(project?.raw["kind"].string == "casual" ? "What’s on your mind?" : "What should we work on?").font(.title3.weight(.semibold)).foregroundStyle(FD.foreground)
+                            Text([project?.raw["kind"].string == "casual" ? nil : project?.name, project?.providerLabel(task.provider)].compactMap { $0 }.joined(separator: " · "))
+                                .font(.subheadline).foregroundStyle(FD.secondary)
                         } else if chat.loaded {
                             Text(chat.hasOlder ? "No recent messages" : "No messages yet").font(.headline)
                             Text(chat.hasOlder ? "Load earlier messages to see this conversation." : "Send a message to get started")
@@ -224,7 +234,8 @@ private struct ChatContent: View {
                         Spacer()
                         Button("Continue") { Task { await model.resumeInterrupted(task) } }.disabled(chat.sending || (!model.demo && !model.connected))
                         Button { Task { await model.updateTask(task, fields: ["acknowledge_interruption": .bool(true)]) } } label: { Image(systemName: "xmark") }.accessibilityLabel("Dismiss interrupted turn")
-                    }.padding(12).background(FD.surface, in: .rect(cornerRadius: 12))
+                    }.padding(12).background(FD.surface, in: .rect(cornerRadius: 14, style: .continuous))
+                    .overlay { RoundedRectangle(cornerRadius: 14, style: .continuous).strokeBorder(FD.hairline) }
                 }
                 if task.raw["handoff_from"]["context_pending"].bool { Text("The previous conversation is sent with your first message.").font(.footnote).foregroundStyle(FD.secondary) }
                 if task.goal != .null {
@@ -232,18 +243,20 @@ private struct ChatContent: View {
                 }
                 if !task.queued.isEmpty || !chat.pendingQueue.isEmpty { QueuedMessagesView(task: task) }
                 ForEach(requests, id: \.self) { request in InteractiveCard(request: request) }
-                if let error = chat.error ?? (!chat.transcript.items.isEmpty ? chat.historyError : nil) ?? chat.olderHistoryError ?? model.error {
-                    HStack(alignment: .top) {
-                        Image(systemName: "exclamationmark.circle")
-                        Text(error).frame(maxWidth: .infinity, alignment: .leading)
-                        Button { chat.error = nil; chat.historyError = nil; chat.olderHistoryError = nil; model.error = nil } label: { Image(systemName: "xmark") }.accessibilityLabel("Dismiss error")
-                    }.font(.footnote).foregroundStyle(.orange).padding(12).background(FD.surface, in: .rect(cornerRadius: 12))
+                // App-wide errors use the root banner; this tray belongs to one task.
+                if let error = chat.error ?? (!chat.transcript.items.isEmpty ? chat.historyError : nil) ?? chat.olderHistoryError {
+                    HStack(alignment: .top, spacing: 10) {
+                        Image(systemName: "exclamationmark.circle.fill").foregroundStyle(FD.danger)
+                        Text(error).foregroundStyle(FD.foreground).frame(maxWidth: .infinity, alignment: .leading)
+                        Button { chat.error = nil; chat.historyError = nil; chat.olderHistoryError = nil } label: { Image(systemName: "xmark").foregroundStyle(FD.muted).frame(width: 28, height: 28).contentShape(.rect) }.accessibilityLabel("Dismiss error")
+                    }.font(.footnote).padding(12).background(FD.danger.opacity(0.08), in: .rect(cornerRadius: 14, style: .continuous))
+                    .overlay { RoundedRectangle(cornerRadius: 14, style: .continuous).strokeBorder(FD.danger.opacity(0.25)) }
                 }
                 if let notice = chat.notice { Text(notice).font(.footnote).foregroundStyle(FD.secondary).onTapGesture { chat.notice = nil } }
             }.frame(maxWidth: .infinity, alignment: .leading)
                 .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { contextHeight = $0 }
         }.defaultScrollAnchor(.bottom)
-            .accessibilityIdentifier("conversation-context").frame(height: min(contextHeight, max(0, min(200, min(viewportHeight * 0.28, viewportHeight - 180)))))
+            .accessibilityIdentifier("conversation-context").frame(height: min(contextHeight, max(0, min(requests.isEmpty ? 200 : 360, min(viewportHeight * (requests.isEmpty ? 0.28 : 0.45), viewportHeight - 180)))))
     }
     private func scrollToLatest(animated: Bool) {
         guard visible, !scroll.userScrolling, scroll.followLatest || chat.sending else { return }

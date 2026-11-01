@@ -47,13 +47,25 @@ final class NativeAppearance {
         textScale = scale >= 0.8 && scale <= 1.5 ? scale : 1
     }
     var colorScheme: ColorScheme? { mode == "light" ? .light : mode == "dark" ? .dark : nil }
+    /// Each token resolves to one stable `Color` per palette pair. A fresh
+    /// dynamic `UIColor` never compares equal to the previous read, which made
+    /// SwiftUI treat every themed view as changed on each render pass.
+    @ObservationIgnored private var resolved: [String: Color] = [:]
+    private static let paletteIndex = Dictionary(palettes.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
     func color(_ group: String, _ key: String = "default") -> Color {
-        let light = Self.palettes.first { $0.id == lightID } ?? Self.palettes.first { !$0.dark }
-        let dark = Self.palettes.first { $0.id == darkID } ?? Self.palettes.first { $0.dark }
-        return Color(Self.dynamicColor(
+        // Reading both IDs keeps palette changes observable through the cache.
+        let lightID = lightID, darkID = darkID
+        let cacheKey = lightID + "|" + darkID + "|" + group + "." + key
+        if let color = resolved[cacheKey] { return color }
+        let light = Self.paletteIndex[lightID] ?? Self.palettes.first { !$0.dark }
+        let dark = Self.paletteIndex[darkID] ?? Self.palettes.first { $0.dark }
+        let color = Color(Self.dynamicColor(
             light: light?.value(group, key) ?? "#17171c", dark: dark?.value(group, key) ?? "#f4f4f6",
             increasedLight: light?.value(group, key, increasedContrast: true),
             increasedDark: dark?.value(group, key, increasedContrast: true)))
+        if resolved.count > 512 { resolved.removeAll() }
+        resolved[cacheKey] = color
+        return color
     }
     nonisolated static func dynamicColor(light: String, dark: String, increasedLight: String? = nil, increasedDark: String? = nil) -> UIColor {
         // UIKit resolves traits on background render queues as well as main.

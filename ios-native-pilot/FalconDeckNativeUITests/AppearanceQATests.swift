@@ -64,7 +64,8 @@ import XCTest
         XCTAssertTrue(app.navigationBars["Appearance"].waitForExistence(timeout: 5))
         for mode in ["Dark", "Light", "System", "Light"] {
             app.segmentedControls.buttons[mode].tap()
-            XCTAssertTrue(app.staticTexts["Your agents, in focus."].isHittable)
+            XCTAssertTrue(app.segmentedControls.buttons[mode].isSelected)
+            XCTAssertTrue(app.navigationBars["Appearance"].exists)
             capture("Appearance changed to " + mode)
         }
         app.navigationBars["Appearance"].buttons.element(boundBy: 0).tap()

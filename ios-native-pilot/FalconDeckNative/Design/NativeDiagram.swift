@@ -1,5 +1,4 @@
 import SwiftUI
-@preconcurrency import MarkdownUI
 
 struct NativeFencedBlock: View {
     let content: String
@@ -51,7 +50,7 @@ struct NativeDiagram: View {
                     }.frame(width: layout.size.width, height: layout.size.height)
                 }.frame(height: min(layout.size.height, 500))
             }
-        }.padding(12).background(FD.surface, in: .rect(cornerRadius: 14)).overlay { RoundedRectangle(cornerRadius: 14).strokeBorder(FD.line) }.markdownMargin(top: 8, bottom: 16)
+        }.padding(12).background(FD.surface, in: .rect(cornerRadius: 14)).overlay { RoundedRectangle(cornerRadius: 14).strokeBorder(FD.line) }
     }
 }
 
