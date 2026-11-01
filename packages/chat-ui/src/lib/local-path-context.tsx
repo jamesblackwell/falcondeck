@@ -12,6 +12,7 @@ import {
   ArrowUpRight,
   ClipboardCopy,
   Copy,
+  Eye,
   FolderOpen,
   Globe,
   Save,
@@ -23,6 +24,8 @@ import { cn } from '@falcondeck/ui'
 import { MenuRow, MenuSurface, type MenuPosition } from './menu-surface'
 
 export type LocalPathAction =
+  /** Clicking a link: the host decides whether to preview in-app or hand off to the OS. */
+  | 'preview'
   | 'open'
   | 'open-default-editor'
   | 'reveal'
@@ -181,7 +184,7 @@ export function LocalPathLink({
   const { onLocalPath, openMenu } = context
 
   const handleOpen = () => {
-    void onLocalPath('open', path)
+    void onLocalPath('preview', path)
   }
 
   return (
@@ -251,10 +254,17 @@ function LocalPathMenu({
   return (
     <MenuSurface
       position={{ x: menu.x, y: menu.y }}
-      itemCount={3 + editors.length + (isFile ? 2 : 0) + Number(showDefaultEditor) + Number(showChrome)}
+      itemCount={3 + editors.length + (isFile ? 3 : 0) + Number(showDefaultEditor) + Number(showChrome)}
       ariaLabel={`Actions for ${menu.path}`}
       onClose={onClose}
     >
+      {isFile ? (
+        <MenuRow
+          icon={<Eye className={iconClassName} />}
+          label="Preview"
+          onClick={() => runAction('preview')}
+        />
+      ) : null}
       <MenuRow
         icon={<ArrowUpRight className={iconClassName} />}
         label="Open"

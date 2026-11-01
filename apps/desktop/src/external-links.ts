@@ -1,6 +1,7 @@
-import { useEffect } from 'react'
+import { useEffect, useRef } from 'react'
 import { useToast } from '@falcondeck/ui'
 import { openExternalUrl } from './api'
+import { localFileFromHref } from './local-file-links'
 
 /** Schemes that should leave the app and open in the OS default handler. */
 const EXTERNAL_SCHEMES = new Set(['http:', 'https:', 'mailto:', 'tel:'])
@@ -64,16 +65,37 @@ function shouldHandleClick(event: MouseEvent): boolean {
   return true
 }
 
-/** Own link feedback outside the message markup. */
-export function ExternalLinkHandler() {
+/**
+ * Own link feedback outside the message markup. `onOpenLocalFile` receives
+ * `file://`, `~/` and absolute-path links; without it they are left alone.
+ */
+export function ExternalLinkHandler({
+  onOpenLocalFile,
+}: {
+  onOpenLocalFile?: (path: string) => void
+} = {}) {
   const { toast } = useToast()
-  useEffect(() => installExternalLinkHandler(openExternalUrl, () => {
-    toast({
-      variant: 'danger',
-      title: 'Couldn’t open link',
-      description: 'Try again or copy the link into your browser.',
-    })
-  }), [toast])
+  // The callback closes over the selected thread, so it changes often; the
+  // listener is installed once and reads the latest through the ref.
+  const localFileRef = useRef(onOpenLocalFile)
+  useEffect(() => {
+    localFileRef.current = onOpenLocalFile
+  }, [onOpenLocalFile])
+  useEffect(
+    () =>
+      installExternalLinkHandler(
+        openExternalUrl,
+        () => {
+          toast({
+            variant: 'danger',
+            title: 'Couldn’t open link',
+            description: 'Try again or copy the link into your browser.',
+          })
+        },
+        (path) => localFileRef.current?.(path),
+      ),
+    [toast],
+  )
   return null
 }
 
@@ -89,6 +111,7 @@ export function ExternalLinkHandler() {
 export function installExternalLinkHandler(
   openUrl: (url: string) => Promise<void> = openExternalUrl,
   onError: () => void = () => {},
+  openLocalFile?: (path: string) => void,
 ): () => void {
   let installed = true
   const requestVersions = new WeakMap<HTMLAnchorElement, number>()
@@ -101,6 +124,18 @@ export function installExternalLinkHandler(
 
     // Explicit opt-out for rare in-app anchors that should navigate normally.
     if (anchor.dataset.external === 'false') return
+
+    // A link to a file on this computer opens the in-app preview. The host may
+    // decline by not providing a handler, in which case the click is untouched.
+    const localFile = openLocalFile
+      ? localFileFromHref(anchor.getAttribute('href'))
+      : null
+    if (localFile && openLocalFile) {
+      event.preventDefault()
+      event.stopPropagation()
+      openLocalFile(localFile)
+      return
+    }
 
     const external = resolveExternalHref(anchor.getAttribute('href'))
     if (!external) return

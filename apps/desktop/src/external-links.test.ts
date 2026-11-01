@@ -166,3 +166,77 @@ describe('installExternalLinkHandler', () => {
     expect(onError).not.toHaveBeenCalled()
   })
 })
+
+describe('local file links', () => {
+  afterEach(() => {
+    document.body.innerHTML = ''
+  })
+
+  const click = (anchor: Element) =>
+    !anchor.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true, button: 0 }))
+
+  it('hands file://, ~/ and absolute-path links to the preview, not the OS browser', () => {
+    const openUrl = vi.fn().mockResolvedValue(undefined)
+    const openLocalFile = vi.fn()
+    const uninstall = installExternalLinkHandler(openUrl, () => {}, openLocalFile)
+    document.body.innerHTML = [
+      '<a id="a" href="file:///Users/me/report.html">a</a>',
+      '<a id="b" href="~/Desktop/shot.png">b</a>',
+      '<a id="c" href="/tmp/out/report.md#top">c</a>',
+    ].join('')
+    expect(click(document.getElementById('a')!)).toBe(true)
+    expect(click(document.getElementById('b')!)).toBe(true)
+    expect(click(document.getElementById('c')!)).toBe(true)
+    expect(openLocalFile.mock.calls.map((call) => call[0])).toEqual([
+      '/Users/me/report.html',
+      '~/Desktop/shot.png',
+      '/tmp/out/report.md',
+    ])
+    expect(openUrl).not.toHaveBeenCalled()
+    uninstall()
+  })
+
+  it('does not hijack ordinary relative text links, anchors, or http(s)', () => {
+    const openUrl = vi.fn().mockResolvedValue(undefined)
+    const openLocalFile = vi.fn()
+    const uninstall = installExternalLinkHandler(openUrl, () => {}, openLocalFile)
+    document.body.innerHTML = [
+      '<a id="rel" href="src/app.ts">rel</a>',
+      '<a id="route" href="/settings">route</a>',
+      '<a id="web" href="https://example.com/Users/me/a.md">web</a>',
+    ].join('')
+    // Keep jsdom from attempting its own navigation for the untouched links.
+    for (const id of ['rel', 'route']) {
+      document.getElementById(id)!.addEventListener('click', (event) => event.preventDefault())
+      click(document.getElementById(id)!)
+    }
+    click(document.getElementById('web')!)
+    expect(openLocalFile).not.toHaveBeenCalled()
+    expect(openUrl).toHaveBeenCalledWith('https://example.com/Users/me/a.md')
+    uninstall()
+  })
+
+  it('leaves file links untouched when the host gives no preview handler', () => {
+    const openUrl = vi.fn().mockResolvedValue(undefined)
+    const uninstall = installExternalLinkHandler(openUrl)
+    document.body.innerHTML = '<a id="a" href="file:///Users/me/report.html">a</a>'
+    const anchor = document.getElementById('a')!
+    anchor.addEventListener('click', (event) => event.preventDefault())
+    click(anchor)
+    expect(openUrl).not.toHaveBeenCalled()
+    uninstall()
+  })
+
+  it('wires the component callback through ExternalLinkHandler', () => {
+    const onOpenLocalFile = vi.fn()
+    render(
+      createElement(ToastProvider, null,
+        createElement(ExternalLinkHandler, { onOpenLocalFile }),
+        createElement('a', { href: 'file:///tmp/report.md' }, 'Open report'),
+      ),
+    )
+    fireEvent.click(screen.getByText('Open report'))
+    expect(onOpenLocalFile).toHaveBeenCalledWith('/tmp/report.md')
+  })
+})
+

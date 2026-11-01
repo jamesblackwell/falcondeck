@@ -522,7 +522,7 @@ describe("local file paths", () => {
     );
 
     fireEvent.click(screen.getByRole("link", { name: `Open ${directory}` }));
-    expect(onLocalPath).toHaveBeenCalledWith("open", directory);
+    expect(onLocalPath).toHaveBeenCalledWith("preview", directory);
   });
 
   it("offers Finder actions from the path context menu", () => {
@@ -585,7 +585,7 @@ describe("local file paths", () => {
     );
 
     fireEvent.click(screen.getByRole("link", { name: "Open /Users/James/clip.mp4" }));
-    expect(onLocalPath).toHaveBeenCalledWith("open", "/Users/James/clip.mp4");
+    expect(onLocalPath).toHaveBeenCalledWith("preview", "/Users/James/clip.mp4");
   });
 
   it("opens an agent-linked workspace file in the file browser", () => {
@@ -681,7 +681,7 @@ describe("local file paths", () => {
       screen.getByRole("link", { name: `Open ${localPath}` }),
     );
 
-    expect(onLocalPath).toHaveBeenCalledWith("open", localPath);
+    expect(onLocalPath).toHaveBeenCalledWith("preview", localPath);
     expect(onOpenFile).not.toHaveBeenCalled();
   });
 });
@@ -811,7 +811,7 @@ describe("workspace file references", () => {
     fireEvent.click(screen.getByText(`${root}/README.md`));
     expect(onOpenFile).toHaveBeenCalledWith("README.md", "files", null);
     fireEvent.click(screen.getByRole("link", { name: "Open /tmp/out.log" }));
-    expect(onLocalPath).toHaveBeenCalledWith("open", "/tmp/out.log");
+    expect(onLocalPath).toHaveBeenCalledWith("preview", "/tmp/out.log");
     expect(onLocalPath).toHaveBeenCalledTimes(1);
   });
 

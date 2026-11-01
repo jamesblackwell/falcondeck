@@ -271,17 +271,20 @@ function ImageFilePreview({
 
 function PdfFileView({
   contentBase64,
+  contentBytes,
   fileName,
   sizeBytes,
 }: {
   contentBase64: string | null
+  contentBytes?: Uint8Array | null
   fileName: string
   sizeBytes: number | null
 }) {
-  const bytes = useMemo(
+  const decoded = useMemo(
     () => (contentBase64 ? (base64ToBytes(contentBase64) as Uint8Array) : null),
     [contentBase64],
   )
+  const bytes = contentBytes ?? decoded
   return (
     <PdfFilePreview
       bytes={bytes}
@@ -306,6 +309,7 @@ export function MediaFilePreview({
   fileName,
   sizeBytes = null,
   contentBase64 = null,
+  contentBytes = null,
 }: {
   kind: FileMediaKind
   src: string
@@ -313,6 +317,8 @@ export function MediaFilePreview({
   sizeBytes?: number | null
   /** Raw bytes, needed by formats we decode ourselves rather than hand to the webview. */
   contentBase64?: string | null
+  /** The same bytes already decoded, for callers that read a file as a blob. */
+  contentBytes?: Uint8Array | null
 }) {
   const [failed, setFailed] = useState(false)
   const [videoSize, setVideoSize] = useState<{ width: number; height: number } | null>(null)
@@ -329,7 +335,12 @@ export function MediaFilePreview({
 
   if (kind === 'pdf') {
     return (
-      <PdfFileView contentBase64={contentBase64} fileName={fileName} sizeBytes={sizeBytes} />
+      <PdfFileView
+        contentBase64={contentBase64}
+        contentBytes={contentBytes}
+        fileName={fileName}
+        sizeBytes={sizeBytes}
+      />
     )
   }
 

@@ -3,6 +3,7 @@ import { resolveThreadLinkTarget } from "@falcondeck/client-core";
 import { ThreadLinkProvider } from "@falcondeck/chat-ui";
 import { DICTIONARY_REQUEST_EVENT, DICTIONARY_REQUEST_KEY } from "./components/DictationDictionary";
 import { ExternalLinkHandler } from "./external-links";
+import type { FilePreviewTarget } from "./local-file-links";
 import {
   lazy,
   Suspense,
@@ -289,6 +290,9 @@ const DiffPanel = lazy(() =>
     default: module.DiffPanel,
   })),
 );
+const FilePreviewDialog = lazy(() =>
+  import("./components/FilePreviewDialog").then((module) => ({ default: module.FilePreviewDialog })),
+);
 const TicketsView = lazy(() => import("./components/TicketsView").then((module) => ({ default: module.TicketsView })));
 
 const CommandPalette = lazy(() =>
@@ -321,7 +325,6 @@ function prefetchTerminalChrome() {
 export default function App() {
   return (
     <ToastProvider>
-      <ExternalLinkHandler />
       <TooltipProvider>
         <AppInner />
       </TooltipProvider>
@@ -500,6 +503,7 @@ function AppInner() {
     useState(false);
   const resumePromptSettledRef = useRef(false);
   const [isTicketsOpen, setIsTicketsOpen] = useState(false);
+  const [filePreview, setFilePreview] = useState<FilePreviewTarget | null>(null);
   const [isScheduledOpen, setIsScheduledOpen] = useState(false);
   const [automationOpenRequest, setAutomationOpenRequest] = useState<{ id: string; key: number } | null>(null);
   const automationOpenKey = useRef(0);
@@ -1311,6 +1315,37 @@ function AppInner() {
     (path: string) => localPathKind(path).catch(() => null),
     [],
   );
+  // Links to files open an in-app preview. A folder has nothing to preview, so
+  // it goes straight to the OS.
+  const requestFilePreview = useCallback(
+    (target: FilePreviewTarget) => {
+      const show = () => setFilePreview(target);
+      if (!isTauriDesktop()) return show();
+      void localPathKind(target.path)
+        .then((kind) =>
+          kind === "directory"
+            ? openLocalPath(target.path).catch((error: unknown) =>
+                toast({
+                  variant: "danger",
+                  title: "Could not open path",
+                  description: error instanceof Error ? error.message : String(error),
+                }),
+              )
+            : show(),
+        )
+        .catch(show);
+    },
+    [toast],
+  );
+  const openLinkedFile = useCallback(
+    (path: string) =>
+      requestFilePreview({
+        path,
+        workspaceId: selectedWorkspaceId ?? undefined,
+        threadId: selectedThreadId ?? undefined,
+      }),
+    [requestFilePreview, selectedThreadId, selectedWorkspaceId],
+  );
   const handleLocalPath = useCallback(
     (action: LocalPathAction, path: string, editorId?: string) => {
       const report = (title: string) => (error: unknown) => {
@@ -1321,6 +1356,9 @@ function AppInner() {
         });
       };
       switch (action) {
+        case "preview":
+          openLinkedFile(path);
+          break;
         case "open":
           void openLocalPath(path).catch(report("Could not open path"));
           break;
@@ -1357,7 +1395,7 @@ function AppInner() {
           break;
       }
     },
-    [toast],
+    [openLinkedFile, toast],
   );
   const selectedThread = useMemo(
     () =>
@@ -6164,6 +6202,11 @@ function AppInner() {
   }, []);
   return (
     <>
+      <ExternalLinkHandler
+        onOpenLocalFile={
+          isRemoteWorkspaceSelected || isCloudThread ? undefined : openLinkedFile
+        }
+      />
       {paletteRequest.key > 0 ? (
         <Suspense fallback={null}>
           <CommandPalette
@@ -6919,6 +6962,15 @@ function AppInner() {
           isPreparing={!areStoppedThreadTargetsReady}
           isContinuing={isContinuingStoppedThreads}
         />
+      ) : null}
+      {filePreview ? (
+        <Suspense fallback={null}>
+          <FilePreviewDialog
+            target={filePreview}
+            api={api}
+            onClose={() => setFilePreview(null)}
+          />
+        </Suspense>
       ) : null}
       {isUsageOpen ? (
         <UsageDialog
