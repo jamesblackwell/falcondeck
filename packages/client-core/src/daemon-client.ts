@@ -1,4 +1,5 @@
 import type { Ticket, TicketFilters, CreateTicketArgs, UpdateTicketArgs } from "./tickets";
+import type { Review, ReviewFilters, RespondReviewArgs } from "./reviews";
 import type {
   BotProfile,
   BotMutation,
@@ -22,6 +23,7 @@ import type {
   ExtensionActionResponse,
   ExtensionSnapshot,
   ExtensionSummary,
+  FilePreviewMeta,
   GitBranchesResponse,
   GitCommitResponse,
   GitDiffResponse,
@@ -562,6 +564,48 @@ export function createDaemonApiClient(baseUrl: string) {
     },
     async commentTicket(ticketId: string, body: string): Promise<Ticket> {
       return mutateTicket(`${baseUrl}/api/tickets/${encodeURIComponent(ticketId)}/comments`, { body });
+    },
+    /** Review inbox. Open reviews by default; `include_closed` adds answered ones. */
+    async listReviews(filters: ReviewFilters = {}): Promise<Review[]> {
+      const rows: Review[] = [];
+      let cursor: string | undefined;
+      do {
+        const query = new URLSearchParams(Object.entries(filters).map(([key, value]) => [key, String(value)]));
+        if (cursor) query.set("cursor", cursor);
+        const page = await parseJson<ControlGetResponse>(await fetch(`${baseUrl}/api/reviews?${query}`));
+        rows.push(...page.data as Review[]);
+        cursor = page.next_cursor ?? undefined;
+      } while (cursor);
+      return rows;
+    },
+    async readReview(id: string): Promise<Review> {
+      const result = await parseJson<ControlGetResponse>(await fetch(`${baseUrl}/api/reviews/${encodeURIComponent(id)}`));
+      return result.data as Review;
+    },
+    /** James's decision. The daemon records it and messages the source thread. */
+    async respondReview({ review_id, ...args }: RespondReviewArgs): Promise<Review> {
+      return mutateReview(`${baseUrl}/api/reviews/${encodeURIComponent(review_id)}/respond`, args);
+    },
+    /** Dismiss a review nobody needs to answer any more. */
+    async withdrawReview(id: string, reason?: string): Promise<Review> {
+      return mutateReview(`${baseUrl}/api/reviews/${encodeURIComponent(id)}/withdraw`, reason ? { reason } : {});
+    },
+    /** Metadata for a file on this computer, under the same policy phones use. */
+    async statFile(request: LocalFileRequest): Promise<FilePreviewMeta> {
+      return parseJson<FilePreviewMeta>(await fetch(`${baseUrl}/api/files/stat`, {
+        method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(request),
+      }));
+    },
+    /** The whole file (up to 25 MB) as a typed blob, for in-app preview. */
+    async readFile(request: LocalFileRequest): Promise<{ blob: Blob; version: string | null }> {
+      const response = await fetch(`${baseUrl}/api/files/read`, {
+        method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(request),
+      });
+      if (!response.ok) {
+        const body = await response.json().catch(() => null) as { error?: string } | null;
+        throw new Error(body?.error ?? `Could not read the file (${response.status}).`);
+      }
+      return { blob: await response.blob(), version: response.headers.get("X-FalconDeck-File-Version") };
     },
     async controlSearch(request: ControlSearchRequest = {}) {
       return parseJson<ControlSearchResponse>(
@@ -1201,6 +1245,17 @@ export function createDaemonApiClient(baseUrl: string) {
 
 /** The client shape produced by `createDaemonApiClient`, for prop typing. */
 export type DaemonApiClient = ReturnType<typeof createDaemonApiClient>;
+
+/** A local file named as `file.stat` names it. */
+export type LocalFileRequest = { path: string; base_dir?: string; workspace_id?: string; thread_id?: string };
+
+async function mutateReview(url: string, args: unknown): Promise<Review> {
+  const result = await parseJson<ControlExecuteResponse>(await fetch(url, {
+    method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(args),
+  }));
+  if (!result.ok || !result.data) throw new Error(result.error?.message ?? "Review update failed.");
+  return result.data as Review;
+}
 
 async function mutateTicket(url: string, args: unknown): Promise<Ticket> {
   const result = await parseJson<ControlExecuteResponse>(await fetch(url, {

@@ -61,6 +61,7 @@ export { useStreamingText } from "./streaming-text";
 export * from './project-folders'
 export * from "./model-selection";
 
+export * from "./reviews";
 export * from "./tickets";
 
 export * from "./cloud";

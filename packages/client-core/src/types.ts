@@ -443,6 +443,8 @@ export type FalconDeckPreferences = {
   claude_autocompact_tokens?: number;
   /** Context size at which Codex conversations compact; null or absent uses Codex's own default. */
   codex_autocompact_tokens?: number | null;
+  /** Review inbox switch. Older daemons omit it, which clients treat as unsupported. */
+  review_inbox_enabled?: boolean;
   /** Older daemons omit this until project order has been saved. */
   workspace_order?: string[];
   /** Project ids hidden from the sidebar by default. */
@@ -732,6 +734,7 @@ export type UpdatePreferencesPayload = {
   claude_autocompact_tokens?: number;
   /** Integer 100000–1000000, or null to restore Codex's own default. */
   codex_autocompact_tokens?: number | null;
+  review_inbox_enabled?: boolean;
   workspace_order?: string[] | null;
   hidden_workspace_ids?: string[] | null;
   workspace_colors?: Record<string, string> | null;

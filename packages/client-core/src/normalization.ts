@@ -405,6 +405,7 @@ const DEFAULT_PREFERENCES: FalconDeckPreferences = {
   max_agent_children: DEFAULT_MAX_AGENT_CHILDREN,
   claude_autocompact_tokens: DEFAULT_CLAUDE_AUTOCOMPACT_TOKENS,
   codex_autocompact_tokens: null,
+  review_inbox_enabled: false,
   workspace_order: [],
   hidden_workspace_ids: [],
   workspace_colors: {},
@@ -2382,6 +2383,7 @@ export function normalizePreferences(value: unknown): FalconDeckPreferences {
     codex_autocompact_tokens: isAutocompactTokens(raw.codex_autocompact_tokens)
       ? raw.codex_autocompact_tokens
       : null,
+    review_inbox_enabled: raw.review_inbox_enabled === true,
     workspace_order: workspaceOrder,
     hidden_workspace_ids: Array.isArray(raw.hidden_workspace_ids)
       ? [
