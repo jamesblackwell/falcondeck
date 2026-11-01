@@ -2,6 +2,7 @@ import { memo } from "react";
 import {
   Activity,
   Tickets,
+  Inbox,
   Blocks,
   CalendarClock,
   PanelsTopLeft,
@@ -15,6 +16,7 @@ import {
 } from "@falcondeck/chat-ui";
 import type { ExtensionPanelDefinition } from "@falcondeck/client-core";
 import { cn, Tooltip } from "@falcondeck/ui";
+import { reviewBadgeLabel } from "../review-inbox";
 
 import { shortcutHintTokens, useShortcutSettings } from "../shortcuts";
 import { SidebarOptionsMenu } from "./SidebarOptionsMenu";
@@ -29,6 +31,10 @@ export type DesktopSidebarProps = WorkspaceSidebarProps & {
   updateStatus?: 'available' | 'downloaded' | null;
   onOpenTickets?: () => void;
   ticketsOpen?: boolean;
+  /** Present only when the review inbox is on; `reviewCount` is the open ones. */
+  onOpenReviews?: () => void;
+  reviewsOpen?: boolean;
+  reviewCount?: number;
   onOpenScheduled?: () => void;
   scheduledOpen?: boolean;
   scheduledAttention?: boolean;
@@ -57,6 +63,9 @@ export const DesktopSidebar = memo(function DesktopSidebar({
   updateStatus = null,
   onOpenTickets,
   ticketsOpen = false,
+  onOpenReviews,
+  reviewsOpen = false,
+  reviewCount = 0,
   onOpenScheduled,
   scheduledOpen = false,
   scheduledAttention = false,
@@ -94,6 +103,7 @@ export const DesktopSidebar = memo(function DesktopSidebar({
       headerClassName="h-12 justify-center gap-0 py-0 pl-20 pr-2"
       topNavigation={
         onOpenTickets ||
+        onOpenReviews ||
         onOpenScheduled ||
         onOpenActivity ||
         onOpenExtensions ||
@@ -160,6 +170,19 @@ export const DesktopSidebar = memo(function DesktopSidebar({
               <button type="button" onClick={onOpenTickets} aria-current={ticketsOpen ? "page" : undefined} aria-label="Tickets"
                 className={cn("fd-focus flex w-full items-center gap-2 rounded-[var(--fd-radius-md)] px-3 py-2 text-left text-[length:var(--fd-text-sm)] transition-colors", ticketsOpen ? "bg-surface-3 text-fg-primary" : "text-fg-secondary hover:bg-surface-3 hover:text-fg-primary")}>
                 <Tickets aria-hidden="true" className="h-4 w-4 shrink-0" /><span>Tickets</span>
+              </button>
+            ) : null}
+            {onOpenReviews ? (
+              <button type="button" onClick={onOpenReviews} aria-current={reviewsOpen ? "page" : undefined}
+                aria-label={reviewCount > 0 ? `Reviews, ${reviewCount} open` : "Reviews"}
+                className={cn("fd-focus flex w-full items-center gap-2 rounded-[var(--fd-radius-md)] px-3 py-2 text-left text-[length:var(--fd-text-sm)] transition-colors", reviewsOpen ? "bg-surface-3 text-fg-primary" : "text-fg-secondary hover:bg-surface-3 hover:text-fg-primary")}>
+                <Inbox aria-hidden="true" className="h-4 w-4 shrink-0" />
+                <span className="min-w-0 flex-1">Reviews</span>
+                {reviewBadgeLabel(reviewCount) ? (
+                  <span aria-hidden="true" className="rounded-full bg-warning-muted px-1.5 py-0.5 text-[length:var(--fd-text-2xs)] font-semibold tabular-nums text-warning">
+                    {reviewBadgeLabel(reviewCount)}
+                  </span>
+                ) : null}
               </button>
             ) : null}
             {onOpenExtensions ? (

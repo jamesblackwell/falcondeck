@@ -194,6 +194,30 @@ describe("DesktopSidebar", () => {
     expect(onOpenExtensions).toHaveBeenCalledOnce();
   });
 
+  it("shows Reviews with an open-count badge only when the inbox is on", () => {
+    const onOpenReviews = vi.fn();
+    const { rerenderSidebar } = renderSidebar({
+      onOpenTickets: vi.fn(),
+      onOpenReviews,
+      reviewCount: 3,
+    });
+    const reviews = screen.getByRole("button", { name: "Reviews, 3 open" });
+    expect(reviews).toHaveTextContent("3");
+    expect(
+      screen.getByRole("button", { name: "Tickets" }).compareDocumentPosition(reviews),
+    ).toBe(Node.DOCUMENT_POSITION_FOLLOWING);
+    fireEvent.click(reviews);
+    expect(onOpenReviews).toHaveBeenCalledOnce();
+
+    rerenderSidebar({ onOpenReviews, reviewCount: 0, reviewsOpen: true });
+    const quiet = screen.getByRole("button", { name: "Reviews" });
+    expect(quiet).toHaveAttribute("aria-current", "page");
+    expect(quiet).not.toHaveTextContent(/\d/);
+
+    rerenderSidebar({ onOpenReviews: undefined, reviewCount: 4 });
+    expect(screen.queryByRole("button", { name: /^Reviews/ })).toBeNull();
+  });
+
   it("detaches Activity from the row without opening the takeover", () => {
     const onOpenActivity = vi.fn();
     const onPopOutActivity = vi.fn();

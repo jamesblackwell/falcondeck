@@ -1,9 +1,11 @@
-import type { ProjectFolderMutation } from '@falcondeck/client-core';
-import { resolveThreadLinkTarget } from "@falcondeck/client-core";
+import type { ProjectFolderMutation, Review } from '@falcondeck/client-core';
+import { resolveThreadLinkTarget, reviewInboxEnabled } from "@falcondeck/client-core";
 import { ThreadLinkProvider } from "@falcondeck/chat-ui";
 import { DICTIONARY_REQUEST_EVENT, DICTIONARY_REQUEST_KEY } from "./components/DictationDictionary";
 import { ExternalLinkHandler } from "./external-links";
 import type { FilePreviewTarget } from "./local-file-links";
+import { useReviewInbox } from "./hooks/useReviewInbox";
+import { reviewNotification } from "./review-inbox";
 import {
   lazy,
   Suspense,
@@ -290,6 +292,9 @@ const DiffPanel = lazy(() =>
     default: module.DiffPanel,
   })),
 );
+/** How soon after a "needs a decision" notification a returning focus counts as its click. */
+const REVIEW_FOCUS_WINDOW_MS = 5 * 60_000;
+const ReviewsView = lazy(() => import("./components/ReviewsView").then((module) => ({ default: module.ReviewsView })));
 const FilePreviewDialog = lazy(() =>
   import("./components/FilePreviewDialog").then((module) => ({ default: module.FilePreviewDialog })),
 );
@@ -502,7 +507,13 @@ function AppInner() {
   const [isContinuingStoppedThreads, setIsContinuingStoppedThreads] =
     useState(false);
   const resumePromptSettledRef = useRef(false);
+  // One flag keeps every "close the board" call site working: it means the
+  // Tickets/Reviews slot is open, and `isReviewsActive` says which of the two.
   const [isTicketsOpen, setIsTicketsOpen] = useState(false);
+  const [isReviewsActive, setIsReviewsActive] = useState(false);
+  const [reviewOpenRequest, setReviewOpenRequest] = useState<{ id: string; key: number } | null>(null);
+  const reviewOpenKey = useRef(0);
+  const pendingReviewFocusRef = useRef<{ id: string; at: number } | null>(null);
   const [filePreview, setFilePreview] = useState<FilePreviewTarget | null>(null);
   const [isScheduledOpen, setIsScheduledOpen] = useState(false);
   const [automationOpenRequest, setAutomationOpenRequest] = useState<{ id: string; key: number } | null>(null);
@@ -528,7 +539,9 @@ function AppInner() {
     string | null
   >(null);
   const activeMainViewId = isTicketsOpen
-    ? "core.tickets"
+    ? isReviewsActive
+      ? "core.reviews"
+      : "core.tickets"
     : isScheduledOpen
       ? "core.scheduled"
       : isExtensionsOpen
@@ -4180,11 +4193,71 @@ function AppInner() {
   const handleOpenTickets = useCallback(() => {
     setIsSettingsOpen(false);
     setIsScheduledOpen(false);
+    setIsReviewsActive(false);
     setIsTicketsOpen(true);
     setIsExtensionsOpen(false);
     setIsPluginsOpen(false);
     setActiveExtensionPanelKey(null);
   }, []);
+
+  const handleOpenReviews = useCallback((id?: string) => {
+    setIsSettingsOpen(false);
+    setIsScheduledOpen(false);
+    setIsReviewsActive(true);
+    setIsTicketsOpen(true);
+    setIsExtensionsOpen(false);
+    setIsPluginsOpen(false);
+    setActiveExtensionPanelKey(null);
+    if (id) setReviewOpenRequest({ id, key: ++reviewOpenKey.current });
+  }, []);
+
+  // Review inbox. `reviewInboxEnabled` is false on older daemons, which hides
+  // the whole feature rather than showing a view that cannot load.
+  const reviewsEnabled = reviewInboxEnabled(snapshot?.preferences);
+  const reviewNotificationPrefs = snapshot?.preferences.notifications;
+  const handleNewReviews = useCallback(
+    (fresh: Review[]) => {
+      for (const review of fresh) {
+        const notification = reviewNotification(review, reviewNotificationPrefs);
+        if (!notification) continue;
+        const reading = document.hasFocus() && isReviewsActive && isTicketsOpen;
+        if (reading) continue;
+        // The native notification has no click callback, so remember what it was
+        // about: coming back to the window soon after is almost always the click.
+        if (!document.hasFocus()) {
+          pendingReviewFocusRef.current = { id: review.id, at: Date.now() };
+        }
+        void sendDesktopAttentionNotification({
+          title: notification.title,
+          body: notification.body,
+        });
+      }
+    },
+    [isReviewsActive, isTicketsOpen, reviewNotificationPrefs],
+  );
+  const reviewInbox = useReviewInbox({
+    api,
+    baseUrl,
+    enabled: reviewsEnabled && !isOnboardingActive,
+    onNewReviews: handleNewReviews,
+  });
+  useEffect(() => {
+    const onFocus = () => {
+      const pending = pendingReviewFocusRef.current;
+      pendingReviewFocusRef.current = null;
+      if (!pending || Date.now() - pending.at > REVIEW_FOCUS_WINDOW_MS) return;
+      handleOpenReviews(pending.id);
+    };
+    window.addEventListener("focus", onFocus);
+    return () => window.removeEventListener("focus", onFocus);
+  }, [handleOpenReviews]);
+  // Turning the inbox off while it is showing must not strand an empty view.
+  useEffect(() => {
+    if (!reviewsEnabled && isReviewsActive) {
+      setIsReviewsActive(false);
+      setIsTicketsOpen(false);
+    }
+  }, [isReviewsActive, reviewsEnabled]);
 
   const handleOpenScheduled = useCallback(() => {
     setIsSettingsOpen(false);
@@ -6293,7 +6366,10 @@ function AppInner() {
                 : null
             }
             onOpenTickets={handleOpenTickets}
-            ticketsOpen={isTicketsOpen}
+            ticketsOpen={isTicketsOpen && !isReviewsActive}
+            onOpenReviews={reviewsEnabled ? () => handleOpenReviews() : undefined}
+            reviewsOpen={isTicketsOpen && isReviewsActive}
+            reviewCount={reviewInbox.openCount}
             onOpenScheduled={handleOpenScheduled}
             scheduledOpen={isScheduledOpen}
             onOpenActivity={handleOpenActivity}
@@ -6361,6 +6437,25 @@ function AppInner() {
                       if (target) handleSelectThread(target.workspace_id, target.id);
                       else toast({ title: "Task unavailable", description: "This task is no longer available on this computer.", variant: "danger" });
                     }}
+                  />
+                </Suspense>
+              ),
+              "core.reviews": (
+                <Suspense fallback={loadingThreadState}>
+                  <ReviewsView
+                    inbox={reviewInbox}
+                    api={api}
+                    bots={snapshot?.preferences.bots}
+                    openRequest={reviewOpenRequest}
+                    onPreview={requestFilePreview}
+                    onOpenThread={(_workspaceId, threadId) => {
+                      const target = resolveThreadLinkTarget(threadId, snapshot?.threads ?? []);
+                      if (target) handleSelectThread(target.workspace_id, target.id);
+                      else toast({ title: "Task unavailable", description: "This task is no longer available on this computer.", variant: "danger" });
+                    }}
+                    onLocalPath={isTauriDesktop() ? handleLocalPath : null}
+                    localPathEditors={desktopEditors}
+                    describeLocalPath={isTauriDesktop() ? describeLocalPath : null}
                   />
                 </Suspense>
               ),
