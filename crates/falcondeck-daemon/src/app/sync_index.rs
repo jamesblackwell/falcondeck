@@ -1,7 +1,7 @@
 use super::AppState;
 use falcondeck_core::{
     DaemonSnapshot, ExtensionSnapshot, ThreadStatus, ThreadSummary, WorkspaceKind,
-    sync_index::{SyncIndex, SyncThreadPage, WorkspaceIndexCount},
+    sync_index::{SyncIndex, SyncIndexRequest, SyncThreadPage, WorkspaceIndexCount},
 };
 use std::{
     collections::{BTreeMap, HashSet, VecDeque},
@@ -12,6 +12,14 @@ const PAGE_BYTES: usize = 48 * 1024;
 const INDEX_BYTES: usize = 64 * 1024;
 const CACHE_BYTES: usize = 32 * 1024 * 1024;
 const CACHE_TTL: Duration = Duration::from_secs(600);
+/// Bounds on the opt-in first page; a request cannot widen them.
+const PLAN_MAX_PER_WORKSPACE: usize = 20;
+const PLAN_MAX_WORKSPACES: usize = 16;
+const PLAN_MAX_CHATS: usize = 50;
+/// Most recent unread and failed rows shipped on top of the recent ones, so a
+/// long tail of old unread threads cannot inflate every refresh.
+const PLAN_UNREAD_ROWS: usize = 10;
+const PLAN_ERROR_ROWS: usize = 10;
 
 struct FrozenIndex {
     token: String,
@@ -131,7 +139,149 @@ fn priority(thread: &ThreadSummary, selected: Option<&str>) -> u8 {
     }
 }
 
-fn freeze(mut snapshot: DaemonSnapshot, selected: Option<&str>) -> (SyncIndex, FrozenIndex) {
+fn recency(a: &ThreadSummary, b: &ThreadSummary) -> std::cmp::Ordering {
+    b.updated_at
+        .cmp(&a.updated_at)
+        .then_with(|| a.id.cmp(&b.id))
+}
+
+/// The rows a phone renders without asking again: the newest rows of the
+/// lists it shows now, and everything that must stay visible regardless of
+/// age. Returns the rows (most important first) and, for each workspace whose
+/// newest rows were delivered as an unbroken prefix, the cursor after it.
+fn plan_rows<'a>(
+    threads: &'a [ThreadSummary],
+    snapshot: &DaemonSnapshot,
+    hidden: &HashSet<&String>,
+    request: &SyncIndexRequest,
+) -> (Vec<&'a ThreadSummary>, BTreeMap<String, Option<usize>>) {
+    let selected = request.selected_thread_id.as_deref();
+    let per_workspace = request
+        .recent_per_workspace
+        .unwrap_or(0)
+        .clamp(1, PLAN_MAX_PER_WORKSPACE);
+    let chats = request.recent_chats.unwrap_or(0).min(PLAN_MAX_CHATS);
+    let casual: HashSet<&String> = snapshot
+        .workspaces
+        .iter()
+        .filter(|workspace| workspace.kind == WorkspaceKind::Casual)
+        .map(|workspace| &workspace.id)
+        .collect();
+    let bot_homes: HashSet<&str> = snapshot
+        .preferences
+        .bots
+        .iter()
+        .map(|bot| bot.thread_id.as_str())
+        .collect();
+
+    let mut by_workspace = BTreeMap::<&str, Vec<&ThreadSummary>>::new();
+    for thread in threads {
+        by_workspace
+            .entry(thread.workspace_id.as_str())
+            .or_default()
+            .push(thread);
+    }
+    for rows in by_workspace.values_mut() {
+        rows.sort_by(|a, b| recency(a, b));
+    }
+
+    let mut picked = HashSet::<&str>::new();
+    let mut cursors = BTreeMap::new();
+    let mut prefix = |workspace: &str, delivered: usize, total: usize| {
+        cursors.insert(
+            workspace.to_owned(),
+            (delivered < total).then_some(delivered),
+        );
+    };
+    for workspace in request
+        .recent_workspace_ids
+        .iter()
+        .take(PLAN_MAX_WORKSPACES)
+    {
+        if casual.contains(workspace) || hidden.contains(workspace) {
+            continue;
+        }
+        let rows = by_workspace
+            .get(workspace.as_str())
+            .map_or(&[][..], Vec::as_slice);
+        for thread in rows.iter().take(per_workspace) {
+            picked.insert(thread.id.as_str());
+        }
+        prefix(workspace, rows.len().min(per_workspace), rows.len());
+    }
+    // Casual chats are one short list across many one-thread workspaces. The
+    // newest rows overall are a prefix of each workspace's own order.
+    let mut recent_chats: Vec<&ThreadSummary> = threads
+        .iter()
+        .filter(|thread| casual.contains(&thread.workspace_id))
+        .collect();
+    recent_chats.sort_by(|a, b| recency(a, b));
+    let mut delivered = BTreeMap::<&str, usize>::new();
+    for thread in recent_chats.into_iter().take(chats) {
+        picked.insert(thread.id.as_str());
+        *delivered.entry(thread.workspace_id.as_str()).or_default() += 1;
+    }
+    for (workspace, count) in delivered {
+        let total = by_workspace.get(workspace).map_or(0, Vec::len);
+        prefix(workspace, count, total);
+    }
+
+    let visible = |thread: &ThreadSummary| !hidden.contains(&thread.workspace_id);
+    let mut unread: Vec<&ThreadSummary> = Vec::new();
+    let mut failed: Vec<&ThreadSummary> = Vec::new();
+    for thread in threads {
+        let attention = &thread.attention;
+        if selected == Some(thread.id.as_str())
+            || bot_homes.contains(thread.id.as_str())
+            || thread.is_pinned
+            || thread.is_pinned_in_project
+            || attention.pending_approval_count + attention.pending_question_count > 0
+            || thread.status == ThreadStatus::WaitingForInput
+        {
+            picked.insert(thread.id.as_str());
+        } else if visible(thread) {
+            if thread.status == ThreadStatus::Running || attention.background_task_count > 0 {
+                picked.insert(thread.id.as_str());
+            } else if thread.status == ThreadStatus::Error {
+                failed.push(thread);
+            } else if attention.unread {
+                unread.push(thread);
+            }
+        }
+    }
+    unread.sort_by(|a, b| recency(a, b));
+    failed.sort_by(|a, b| recency(a, b));
+    picked.extend(unread.iter().take(PLAN_UNREAD_ROWS).map(|t| t.id.as_str()));
+    picked.extend(failed.iter().take(PLAN_ERROR_ROWS).map(|t| t.id.as_str()));
+
+    let mut rows: Vec<&ThreadSummary> = threads
+        .iter()
+        .filter(|thread| picked.contains(thread.id.as_str()))
+        .collect();
+    rows.sort_by(|a, b| {
+        priority(a, selected)
+            .cmp(&priority(b, selected))
+            .then_with(|| recency(a, b))
+    });
+    (rows, cursors)
+}
+
+#[cfg(test)]
+fn freeze(snapshot: DaemonSnapshot, selected: Option<&str>) -> (SyncIndex, FrozenIndex) {
+    freeze_with(
+        snapshot,
+        &SyncIndexRequest {
+            selected_thread_id: selected.map(str::to_owned),
+            ..Default::default()
+        },
+    )
+}
+
+fn freeze_with(
+    mut snapshot: DaemonSnapshot,
+    request: &SyncIndexRequest,
+) -> (SyncIndex, FrozenIndex) {
+    let selected = request.selected_thread_id.as_deref();
     let token = uuid::Uuid::new_v4().to_string();
     // snapshot_projection(true) already filtered and projected these rows.
     // Transfer its buffer instead of copying every row a second time.
@@ -145,6 +295,7 @@ fn freeze(mut snapshot: DaemonSnapshot, selected: Option<&str>) -> (SyncIndex, F
         model_catalogs: Vec::new(),
         workspace_models: BTreeMap::new(),
         counts: BTreeMap::new(),
+        initial_cursors: BTreeMap::new(),
     };
     for workspace in &mut index.snapshot.workspaces {
         let mut references = Vec::new();
@@ -204,26 +355,41 @@ fn freeze(mut snapshot: DaemonSnapshot, selected: Option<&str>) -> (SyncIndex, F
         .collect();
     // Keep hidden rows in the frozen view for paging when a project is shown.
     // The open thread remains eligible for the bounded bootstrap page.
-    let mut initial: Vec<_> = threads
-        .iter()
-        .filter(|thread| {
-            selected == Some(thread.id.as_str()) || !hidden.contains(&thread.workspace_id)
-        })
-        .collect();
-    initial.sort_by(|a, b| {
-        priority(a, selected)
-            .cmp(&priority(b, selected))
-            .then_with(|| b.updated_at.cmp(&a.updated_at))
-            .then_with(|| a.id.cmp(&b.id))
-    });
-    let mut bytes = serde_json::to_vec(&index).map_or(INDEX_BYTES, |s| s.len());
-    for thread in initial.into_iter().take(50) {
-        let size = serde_json::to_vec(thread).map_or(PAGE_BYTES, |s| s.len());
-        if bytes + size + 1 > INDEX_BYTES {
-            break;
+    if request.recent_per_workspace.is_some() {
+        let (rows, cursors) = plan_rows(&threads, &index.snapshot, &hidden, request);
+        let mut bytes = serde_json::to_vec(&index).map_or(INDEX_BYTES, |s| s.len());
+        for thread in rows {
+            bytes += serde_json::to_vec(thread).map_or(PAGE_BYTES, |s| s.len()) + 1;
+            index.snapshot.threads.push(thread.clone());
         }
-        index.snapshot.threads.push(thread.clone());
-        bytes += size + 1;
+        index.initial_cursors = cursors;
+        tracing::debug!(
+            rows = index.snapshot.threads.len(),
+            bytes,
+            "planned initial rows"
+        );
+    } else {
+        let mut initial: Vec<_> = threads
+            .iter()
+            .filter(|thread| {
+                selected == Some(thread.id.as_str()) || !hidden.contains(&thread.workspace_id)
+            })
+            .collect();
+        initial.sort_by(|a, b| {
+            priority(a, selected)
+                .cmp(&priority(b, selected))
+                .then_with(|| b.updated_at.cmp(&a.updated_at))
+                .then_with(|| a.id.cmp(&b.id))
+        });
+        let mut bytes = serde_json::to_vec(&index).map_or(INDEX_BYTES, |s| s.len());
+        for thread in initial.into_iter().take(50) {
+            let size = serde_json::to_vec(thread).map_or(PAGE_BYTES, |s| s.len());
+            if bytes + size + 1 > INDEX_BYTES {
+                break;
+            }
+            index.snapshot.threads.push(thread.clone());
+            bytes += size + 1;
+        }
     }
     let mut workspaces = BTreeMap::<String, FrozenWorkspace>::new();
     for (i, thread) in threads.iter().enumerate() {
@@ -263,9 +429,21 @@ fn freeze(mut snapshot: DaemonSnapshot, selected: Option<&str>) -> (SyncIndex, F
 }
 
 impl AppState {
+    #[cfg(test)]
     pub(super) async fn sync_index_open(
         &self,
         selected: Option<&str>,
+    ) -> Result<SyncIndex, String> {
+        self.sync_index_open_with(&SyncIndexRequest {
+            selected_thread_id: selected.map(str::to_owned),
+            ..Default::default()
+        })
+        .await
+    }
+
+    pub(super) async fn sync_index_open_with(
+        &self,
+        request: &SyncIndexRequest,
     ) -> Result<SyncIndex, String> {
         let mut snapshot = self.snapshot_projection(true).await;
         for workspace in &mut snapshot.workspaces {
@@ -274,7 +452,7 @@ impl AppState {
                 agent.skills.clear();
             }
         }
-        let (index, frozen) = freeze(snapshot, selected);
+        let (index, frozen) = freeze_with(snapshot, request);
         if frozen.bytes > CACHE_BYTES {
             return Err("Remote index exceeds cache budget".into());
         }
@@ -619,6 +797,268 @@ mod tests {
             .await
             .unwrap();
         assert!(foreign.threads.is_empty());
+    }
+
+    fn planned(source: DaemonSnapshot, request: SyncIndexRequest) -> (SyncIndex, FrozenIndex) {
+        let mut source = source;
+        source.threads = source
+            .threads
+            .iter()
+            .filter(|thread| !thread.is_archived)
+            .map(row)
+            .collect();
+        freeze_with(source, &request)
+    }
+
+    fn ids(index: &SyncIndex) -> Vec<&str> {
+        index
+            .snapshot
+            .threads
+            .iter()
+            .map(|t| t.id.as_str())
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn planned_first_page_ships_the_newest_rows_and_a_matching_cursor() {
+        let request = SyncIndexRequest {
+            recent_per_workspace: Some(5),
+            recent_workspace_ids: vec!["workspace-0".into(), "workspace-1".into()],
+            ..Default::default()
+        };
+        let (index, frozen) = planned(fixture(), request);
+        assert_eq!(
+            ids(&index).len(),
+            10,
+            "only the two listed workspaces ship rows: {:?}",
+            ids(&index)
+        );
+        assert_eq!(index.initial_cursors["workspace-0"], Some(5));
+        assert_eq!(index.initial_cursors["workspace-1"], Some(5));
+        assert_eq!(index.initial_cursors.len(), 2);
+        assert_eq!(
+            index.counts["workspace-0"].total, 50,
+            "counts stay complete"
+        );
+
+        // The cursor continues exactly where the prefix ended.
+        let temp = tempfile::tempdir().unwrap();
+        let app = AppState::new_with_state_path(
+            "test".into(),
+            Default::default(),
+            temp.path().join("state.json"),
+        );
+        app.inner
+            .sync_indexes
+            .lock()
+            .await
+            .entries
+            .push_back(frozen);
+        let next = app
+            .sync_index_threads(&index.token, "workspace-0", 5, "last_updated", 10, None)
+            .await
+            .unwrap();
+        let shipped: HashSet<_> = index
+            .snapshot
+            .threads
+            .iter()
+            .filter(|t| t.workspace_id == "workspace-0")
+            .map(|t| t.id.clone())
+            .collect();
+        assert_eq!(shipped.len(), 5);
+        assert!(next.threads.iter().all(|t| !shipped.contains(&t.id)));
+        assert_eq!(next.threads.len(), 10);
+    }
+
+    #[test]
+    fn planned_first_page_keeps_chats_pins_bots_and_attention_but_bounds_the_tail() {
+        let mut source = fixture();
+        // workspaces 2..=4 are casual chats with 50 rows each; 5 is hidden.
+        for n in 2..=4 {
+            source.workspaces[n].kind = WorkspaceKind::Casual;
+        }
+        source.preferences.hidden_workspace_ids = vec!["workspace-5".into()];
+        source.threads[149].is_pinned = true; // workspace-2, older than the newest chats
+        source.threads[1500].is_pinned_in_project = true; // workspace-30, not listed
+        source.threads[1501].status = ThreadStatus::Running;
+        source.threads[1502].attention.pending_question_count = 1;
+        source.threads[250].status = ThreadStatus::Running; // workspace-5, hidden: skipped
+        for thread in source.threads.iter_mut().skip(1600).take(40) {
+            thread.attention.unread = true; // 40 unread in workspaces 32..=39
+        }
+        for thread in source.threads.iter_mut().skip(1700).take(30) {
+            thread.status = ThreadStatus::Error;
+        }
+        source.preferences.bots.push(
+            serde_json::from_value(json!({
+                "id": "bot-1", "name": "Atlas", "workspace_id": "workspace-39",
+                "dedicated_workspace": true, "thread_id": "thread-1999",
+                "space_path": "/bots/atlas"
+            }))
+            .unwrap(),
+        );
+        let request = SyncIndexRequest {
+            selected_thread_id: Some("thread-1250".into()),
+            recent_per_workspace: Some(5),
+            recent_workspace_ids: vec!["workspace-0".into(), "workspace-5".into()],
+            recent_chats: Some(12),
+        };
+        let (index, _) = planned(source, request);
+        let shipped = ids(&index);
+        assert_eq!(shipped[0], "thread-1250", "the open thread leads");
+        let has = |id: &str| shipped.contains(&id);
+        assert!(has("thread-1999"), "bot home");
+        assert!(has("thread-149"), "pinned chat");
+        assert!(
+            has("thread-1500"),
+            "pinned in project, even when not listed"
+        );
+        assert!(has("thread-1501") && has("thread-1502"), "running, waiting");
+        assert!(
+            !has("thread-250"),
+            "hidden project's running row waits for paging"
+        );
+        // 5 recent for workspace-0 only (workspace-5 is hidden), 12 chats,
+        // and bounded unread/failed tails rather than all 40 + 30.
+        let in_ws = |ws: &str| {
+            index
+                .snapshot
+                .threads
+                .iter()
+                .filter(|t| t.workspace_id == ws)
+                .count()
+        };
+        assert_eq!(in_ws("workspace-0"), 5);
+        assert_eq!(in_ws("workspace-5"), 0);
+        let unread = index
+            .snapshot
+            .threads
+            .iter()
+            .filter(|t| t.attention.unread)
+            .count();
+        let failed = index
+            .snapshot
+            .threads
+            .iter()
+            .filter(|t| t.status == ThreadStatus::Error)
+            .count();
+        assert_eq!((unread, failed), (PLAN_UNREAD_ROWS, PLAN_ERROR_ROWS));
+        let chat_rows = ["workspace-2", "workspace-3", "workspace-4"].map(in_ws);
+        assert_eq!(
+            chat_rows.iter().sum::<usize>(),
+            12 + 1,
+            "12 newest chats plus the pin"
+        );
+        // Chat cursors claim only the unbroken newest prefix: the pin does
+        // not extend it, and workspaces that shipped nothing still need a page.
+        assert_eq!(index.initial_cursors["workspace-2"], Some(12));
+        assert!(!index.initial_cursors.contains_key("workspace-3"));
+        assert!(!index.initial_cursors.contains_key("workspace-4"));
+        assert!(!index.initial_cursors.contains_key("workspace-5"));
+        assert_eq!(index.initial_cursors["workspace-0"], Some(5));
+        assert!(
+            serde_json::to_vec(&index.snapshot.threads).unwrap().len() < 64 * 1024,
+            "the planned rows stay small"
+        );
+    }
+
+    #[test]
+    fn small_workspaces_report_an_exhausted_cursor() {
+        let mut source = fixture();
+        source
+            .threads
+            .retain(|t| t.workspace_id != "workspace-1" || t.id.ends_with('0'));
+        let request = SyncIndexRequest {
+            recent_per_workspace: Some(5),
+            recent_workspace_ids: vec!["workspace-1".into(), "workspace-missing".into()],
+            ..Default::default()
+        };
+        let (index, _) = planned(source, request);
+        assert_eq!(
+            index.initial_cursors["workspace-1"], None,
+            "nothing left to page"
+        );
+        assert_eq!(index.initial_cursors["workspace-missing"], None);
+        let json = serde_json::to_value(&index).unwrap();
+        assert!(json["initial_cursors"]["workspace-1"].is_null());
+    }
+
+    /// `FD_SNAPSHOT=/path/to/snapshot.json cargo test -p falcondeck-daemon \
+    ///   measure_real_snapshot_index -- --ignored --nocapture`
+    /// reads a real `/api/snapshot` body and prints what each index costs.
+    #[test]
+    #[ignore = "measurement against a captured snapshot"]
+    fn measure_real_snapshot_index() {
+        let path = std::env::var("FD_SNAPSHOT").expect("FD_SNAPSHOT");
+        let mut source: DaemonSnapshot =
+            serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
+        source.threads = source
+            .threads
+            .iter()
+            .filter(|thread| !thread.is_archived)
+            .map(row)
+            .collect();
+        for workspace in &mut source.workspaces {
+            workspace.skills.clear();
+            for agent in &mut workspace.agents {
+                agent.skills.clear();
+            }
+        }
+        let first_project = source
+            .workspaces
+            .iter()
+            .find(|w| {
+                w.kind != WorkspaceKind::Casual
+                    && source.threads.iter().any(|t| t.workspace_id == w.id)
+            })
+            .map(|w| w.id.clone())
+            .unwrap();
+        let size = |index: &SyncIndex| serde_json::to_vec(index).unwrap().len();
+        let (legacy, _) = freeze(source.clone(), None);
+        let request = SyncIndexRequest {
+            recent_per_workspace: Some(5),
+            recent_workspace_ids: vec![first_project],
+            recent_chats: Some(20),
+            ..Default::default()
+        };
+        let (planned, _) = freeze_with(source.clone(), &request);
+        let rows_bytes = serde_json::to_vec(&planned.snapshot.threads).unwrap().len();
+        let page_calls_before = source
+            .workspaces
+            .iter()
+            .filter(|w| {
+                w.kind == WorkspaceKind::Casual
+                    && source.threads.iter().any(|t| t.workspace_id == w.id)
+            })
+            .count()
+            + 1;
+        eprintln!(
+            "legacy index: {} bytes, {} rows | planned index: {} bytes, {} rows ({} bytes of rows), {} initial cursors | first-sync page calls before: {} after: 0",
+            size(&legacy),
+            legacy.snapshot.threads.len(),
+            size(&planned),
+            planned.snapshot.threads.len(),
+            rows_bytes,
+            planned.initial_cursors.len(),
+            page_calls_before,
+        );
+    }
+
+    #[test]
+    fn requests_without_options_are_unchanged() {
+        let (index, _) = freeze_fixture(fixture(), Some("thread-1999"));
+        assert!(index.initial_cursors.is_empty());
+        let json = serde_json::to_value(&index).unwrap();
+        assert!(
+            json.get("initial_cursors").is_none(),
+            "legacy wire shape is identical"
+        );
+        assert!(
+            serde_json::from_value::<SyncIndexRequest>(
+                json!({"selected_thread_id": "x", "future": 1})
+            )
+            .is_ok()
+        );
     }
 
     #[tokio::test]

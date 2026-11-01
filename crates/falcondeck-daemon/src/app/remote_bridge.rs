@@ -1250,8 +1250,15 @@ impl AppState {
                         .map_err(|e| e.to_string())
                 }
                 "sync.index" => serde_json::to_value(
-                    self.sync_index_open(params.get("selected_thread_id").and_then(Value::as_str))
-                        .await?,
+                    self.sync_index_open_with(
+                        // Unknown or malformed options mean the original,
+                        // option-free index rather than a failed bootstrap.
+                        &serde_json::from_value::<falcondeck_core::sync_index::SyncIndexRequest>(
+                            params.clone(),
+                        )
+                        .unwrap_or_default(),
+                    )
+                    .await?,
                 )
                 .map_err(|e| e.to_string()),
                 "sync.threads" => serde_json::to_value(

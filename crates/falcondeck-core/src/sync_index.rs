@@ -16,6 +16,27 @@ pub struct WorkspaceIndexCount {
     pub awaiting: usize,
 }
 
+/// Parameters of `sync.index`. Every field is optional: an empty request keeps
+/// the original behaviour (a byte-bounded bootstrap page, usually empty).
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct SyncIndexRequest {
+    /// Thread the client has open; its row always ships.
+    #[serde(default)]
+    pub selected_thread_id: Option<String>,
+    /// Opt in to a ready-to-render first page: this many most-recent rows for
+    /// each of `recent_workspace_ids`, plus the rows a client always shows
+    /// (see `recent_chats`, pinned, bots, needs-attention). Clients that send
+    /// it use `SyncIndex::initial_cursors` instead of one page call per list.
+    #[serde(default)]
+    pub recent_per_workspace: Option<usize>,
+    /// Project workspaces whose recent rows the client will render now.
+    #[serde(default)]
+    pub recent_workspace_ids: Vec<String>,
+    /// Most recent casual-chat rows across every casual workspace.
+    #[serde(default)]
+    pub recent_chats: Option<usize>,
+}
+
 /// Initial compact view. Repeated catalogs are reconstructed by shared clients.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct SyncIndex {
@@ -33,6 +54,12 @@ pub struct SyncIndex {
     pub workspace_models: BTreeMap<String, usize>,
     /// Complete counts, not counts of the initial page.
     pub counts: BTreeMap<String, WorkspaceIndexCount>,
+    /// Only for requests that set `recent_per_workspace`: per workspace, the
+    /// `sync.threads` cursor (last-updated order) after the prefix this index
+    /// already carries, or `None` when that prefix is the whole workspace.
+    /// Workspaces absent here still need their first page.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub initial_cursors: BTreeMap<String, Option<usize>>,
 }
 
 /// An independently consumable, byte-bounded page from an immutable index.
