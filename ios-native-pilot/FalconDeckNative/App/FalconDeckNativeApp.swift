@@ -47,6 +47,9 @@ struct FalconDeckNativeApp: App {
         if ProcessInfo.processInfo.arguments.contains("--demo") {
             let suite = "NativeDemoPreview", defaults = UserDefaults(suiteName: suite)!
             defaults.removePersistentDomain(forName: suite)
+            if let root = FilePreviewPreview.rootArgument {
+                return AppModel(relay: FilePreviewRelay(root: root, delay: FilePreviewPreview.delay), voice: VoiceRecorder(defaults: defaults), push: NativePushNotifications(defaults: defaults), notifications: LocalNotifications(defaults: defaults), sessionLoader: { nil }, sessionCacheRoot: FileManager.default.temporaryDirectory.appending(path: "FilePreviewQA-\(UUID())", directoryHint: .isDirectory))
+            }
             if ProcessInfo.processInfo.arguments.contains(where: { $0.hasPrefix("--image-preview=") }) {
                 return AppModel(relay: ImagePreviewRelay(), voice: VoiceRecorder(defaults: defaults), push: NativePushNotifications(defaults: defaults), notifications: LocalNotifications(defaults: defaults), sessionLoader: { nil })
             }
@@ -65,6 +68,14 @@ struct FalconDeckNativeApp: App {
                 .task {
                     if !Self.isUnitTestHost {
                         await model.start()
+                        #if DEBUG
+                        // QA: pair a simulator against a smoke daemon without the system "Open in…" prompt.
+                        if let link = ProcessInfo.processInfo.arguments.first(where: { $0.hasPrefix("--pair-link=") }) {
+                            await model.receivePairingPayload(String(link.dropFirst("--pair-link=".count)))
+                            // The smoke relay is a self-hosted one; approve its review as a tester would.
+                            if model.pairingRelayReview != nil { await model.acceptPairingRelay() }
+                        }
+                        #endif
                         if !model.demo { FalconNativeShortcuts.updateAppShortcutParameters() }
                     }
                 }
@@ -119,6 +130,8 @@ struct RootView: View {
         .sheet(item: Binding(get: { model.taskOptionsID.map { TaskOptionsTarget(id: $0) } }, set: { model.taskOptionsID = $0?.id })) { target in TaskOptionsView(taskID: target.id) }
         .sensoryFeedback(.selection, trigger: model.taskOptionsID) { _, id in id != nil && motion.active }
         .sheet(item: Binding(get: { botInfoID.map { BotInfoTarget(id: $0) } }, set: { botInfoID = $0?.id })) { BotInfoView(botID: $0.id) }
+        // Links to files on the computer open full screen from anywhere in the workspace.
+        .fileViewerPresenter()
         // Keep presented sheets on the same appearance and menu policy.
         .menuOrder(.fixed)
         .dynamicTypeSize(NativeAppearance.shared.textSize(relativeTo: textSize))

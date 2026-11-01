@@ -352,6 +352,8 @@ enum TranscriptMarkdownParser {
 /// every wire delta for copy, speech and export.
 struct NativeMarkdown: View {
     @Environment(AppModel.self) private var model: AppModel?
+    @Environment(\.fileContext) private var fileContext
+    @Environment(\.openFile) private var openFile
     let text: String
     var streaming = false
     var font: Font = .body
@@ -367,6 +369,14 @@ struct NativeMarkdown: View {
             .environment(\.openURL, OpenURLAction { url in
                 if let id = TranscriptThreadLink.parse(url.absoluteString), let model {
                     Task { await model.openTask(id) }
+                    return .handled
+                }
+                if let reference = FileLink.reference(from: url, context: fileContext) {
+                    openFile(reference)
+                    return .handled
+                }
+                if FileLink.isLoopback(url) {
+                    model?.error = "That link points at localhost on your Mac, which this phone can't reach. Ask the agent for a file instead."
                     return .handled
                 }
                 return ["https", "http", "mailto"].contains(url.scheme?.lowercased() ?? "") ? .systemAction : .discarded
@@ -445,6 +455,8 @@ private struct TranscriptMarkdownBlockView: View, Equatable {
             }
         case .table(let headers, let alignments, let rows):
             TranscriptMarkdownTable(headers: headers, alignments: alignments, rows: rows, referenceDefinitions: referenceDefinitions)
+        case .image(let alt, let destination) where FileLink.isLocalImage(destination):
+            LocalFileImage(path: destination, alt: alt)
         case .image(let alt, let destination):
             MediaImageView(reference: .object(["url": .string(destination), "name": .string(alt.nonempty ?? URL(string: destination)?.lastPathComponent ?? "Image"), "alt_text": .string(alt)]))
         }
@@ -497,7 +509,8 @@ enum TranscriptMarkdownInline {
     }
 
     @MainActor static func styled(_ text: String, referenceDefinitions: String = "") -> AttributedString {
-        var value = attributed(text, referenceDefinitions: referenceDefinitions)
+        // Paths to files on the computer become tappable.
+        var value = FileLink.linkify(attributed(text, referenceDefinitions: referenceDefinitions))
         for run in value.runs where run.inlinePresentationIntent?.contains(.code) == true {
             value[run.range].font = .system(.callout, design: .monospaced)
             value[run.range].foregroundColor = FD.accentStrong

@@ -73,14 +73,19 @@ private struct ImageDetailView: View {
 
 /// UIKit zooming anchors the pinch under the fingers, bounces at the limits and
 /// supports double-tap to zoom, which a SwiftUI magnify gesture does not.
-private struct ZoomableImage: UIViewRepresentable {
+struct ZoomableImage: UIViewRepresentable {
     let image: UIImage
-    func makeUIView(context: Context) -> ZoomView { ZoomView(image: image) }
+    /// Fit the image's width to the screen and scroll the rest, as wide desktop
+    /// screenshots need; otherwise the whole image fits on screen.
+    var fitWidth = false
+    func makeUIView(context: Context) -> ZoomView { ZoomView(image: image, fitWidth: fitWidth) }
     func updateUIView(_ view: ZoomView, context: Context) { view.setImage(image) }
 
     final class ZoomView: UIScrollView, UIScrollViewDelegate {
         private let imageView = UIImageView()
-        init(image: UIImage) {
+        private let fitWidth: Bool
+        init(image: UIImage, fitWidth: Bool = false) {
+            self.fitWidth = fitWidth
             super.init(frame: .zero)
             delegate = self
             showsHorizontalScrollIndicator = false; showsVerticalScrollIndicator = false
@@ -100,10 +105,11 @@ private struct ZoomableImage: UIViewRepresentable {
             setNeedsLayout()
         }
         private var fittedSize: CGSize = .zero
+        private var pixelZoom: CGFloat = 1
         override func layoutSubviews() {
             super.layoutSubviews()
             guard let image = imageView.image, bounds.width > 0, bounds.height > 0, image.size.width > 0, image.size.height > 0 else { return }
-            let fit = min(bounds.width / image.size.width, bounds.height / image.size.height, 1)
+            let fit = fitWidth ? min(bounds.width / image.size.width, 1) : min(bounds.width / image.size.width, bounds.height / image.size.height, 1)
             let size = CGSize(width: image.size.width * fit, height: image.size.height * fit)
             if size != fittedSize {
                 fittedSize = size
@@ -111,7 +117,9 @@ private struct ZoomableImage: UIViewRepresentable {
                 imageView.frame = CGRect(origin: .zero, size: size)
                 contentSize = size
                 minimumZoomScale = 1
-                maximumZoomScale = max(4, 1 / fit * 2)
+                // One image pixel per screen pixel, and twice that on top.
+                pixelZoom = image.size.width / max(1, size.width * UIScreen.main.scale)
+                maximumZoomScale = max(4, 1 / fit * 2, pixelZoom * 2)
             }
             centre()
         }
@@ -123,7 +131,7 @@ private struct ZoomableImage: UIViewRepresentable {
         func scrollViewDidZoom(_ scrollView: UIScrollView) { centre() }
         @objc private func toggleZoom(_ recognizer: UITapGestureRecognizer) {
             if zoomScale > minimumZoomScale * 1.05 { setZoomScale(minimumZoomScale, animated: true); return }
-            let point = recognizer.location(in: imageView), scale = min(maximumZoomScale, 2.5)
+            let point = recognizer.location(in: imageView), scale = min(maximumZoomScale, fitWidth ? max(2.5, pixelZoom) : 2.5)
             let size = CGSize(width: bounds.width / scale, height: bounds.height / scale)
             zoom(to: CGRect(x: point.x - size.width / 2, y: point.y - size.height / 2, width: size.width, height: size.height), animated: true)
         }

@@ -12,6 +12,8 @@ struct ConversationView: View {
             if let session = (sessionTaskID == task.id ? chat : nil) ?? model.chats[task.id] { ChatContent(task: current, chat: session) }
             else { ActivityDiamond().frame(maxWidth: .infinity, maxHeight: .infinity).background(FD.background) }
         }
+        // Relative paths in a reply resolve against this task's working folder.
+        .environment(\.fileContext, FileContext(workspaceID: task.projectID, threadID: task.isDraft ? nil : task.id))
         .task(id: task.id) {
             let session = model.chat(for: task); chat = session; sessionTaskID = task.id
             if task.isDraft { session.loaded = true }

@@ -120,6 +120,15 @@ keys, tokens, real device inventory or private screenshots in git.
   task, edit instructions and delegation access, inspect delegated tasks, stop
   work and remove bots. Text documents support import, editing and deletion
   through the paired computer with content-version conflict checks.
+- Files on the computer: paths, `file://` and markdown links to files in a reply
+  (absolute, `~/`, or relative to the task's folder) are tappable and open a
+  full-screen viewer. Markdown uses the native renderer, HTML runs in a sandboxed
+  web view whose relative CSS/JS/JSON/images are read through the encrypted relay,
+  PDFs use PDFKit, images fit the screen width and zoom to pixels, and text, media,
+  Office files and archives open natively or in Quick Look. Large files stream in
+  256 KiB ranges with progress; copies are cached by path and modification time.
+  Share and Save to Files use the cached original. The computer decides what is
+  readable (see [FILE-PREVIEW](../docs/FILE-PREVIEW.md)); denied files say so.
 - Settings: all 19 shared theme palettes, text size/Dynamic Type, conversation,
   connected alerts, speech, connection diagnostics, about and developer tools.
 - Extension stages, declarative filters/panels and follow-up suggestions. Buttons
@@ -128,8 +137,9 @@ keys, tokens, real device inventory or private screenshots in git.
 SwiftUI/UIKit/ActivityKit render the interface. CryptoKit and
 [Swift-Sodium 0.11.0](https://github.com/jedisct1/swift-sodium) implement the existing
 crypto protocol. [MarkdownUI 2.4.1](https://github.com/gonzalezreal/swift-markdown-ui)
-renders Markdown. No JavaScript runtime, React Native bridge or webview ships in
-the app. `scripts/sync-palettes.mjs` reads the existing mobile theme source to
+renders Markdown. No React Native bridge ships in the app. The only web view is the
+file viewer's sandboxed HTML page (no persistent storage, https and computer files
+only, no navigation away). `scripts/sync-palettes.mjs` reads the existing mobile theme source to
 refresh the checked-in native palette catalog.
 
 Voice capture allows up to 30 minutes of 16 kHz mono/32 kbps AAC. At the limit,

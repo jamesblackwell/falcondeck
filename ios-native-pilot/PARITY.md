@@ -149,3 +149,21 @@ Schedules match on the bot's home task, including earlier home tasks after a
 harness switch. `--demo --bots-preview` seeds three bots (one without a stored
 mark), STATUS.md, tickets, schedules and dispatches for QA.
 
+
+## Local file links and viewer — 1 November 2026
+
+Agents hand over reports, dashboards, PDFs and screenshots as paths on the Mac.
+The native app opens them, which Expo and the transcript did not.
+
+| Surface | Behaviour |
+| --- | --- |
+| Link recognition | Markdown links, `file://`, absolute and `~/` paths, task-relative paths with a slash, and code spans such as `report.md` are tappable. URLs, emails, directories and unknown extensions are left alone. Thread and web links are unchanged. |
+| Viewer | Full-screen, reusable (`FileViewer(reference:)`): markdown, sandboxed HTML (`fdfile://` scheme handler over the RPC), PDF, fit-to-width zoomable images, text/code, media, Quick Look. Links inside a document push onto the viewer. |
+| Transfer | `file.stat` + `file.read_range` in 256 KiB ranges, two in flight, deflate for text, progress with time left, disk cache by path + version (256 MiB LRU), saved copy when the Mac is unreachable. |
+| Errors | "This file isn't shareable from your Mac", not found, too large (25 MB), changed while loading, Mac not connected. |
+
+Daemon policy and contract: [docs/FILE-PREVIEW.md](../docs/FILE-PREVIEW.md). QA fixtures:
+`--demo --file-preview=<dir>` (and `--file-preview-delay=<ms>`); `--pair-link=` and
+`--open-file=<path>` drive a simulator paired to a smoke daemon. `FileViewerQATests`
+covers markdown + relative image, HTML + CSS/JS/JSON, PDF, wide screenshot, denied
+file and progress. Not done: `http://localhost:PORT` / `*.ts.net` links (see the doc).

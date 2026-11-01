@@ -12,6 +12,8 @@ final class AppModel {
     let readAloud = ReadAloud()
     let realtimeAudio = RealtimeAudio()
     @ObservationIgnored let workspaceIcons = WorkspaceIconCache()
+    /// Files read from the computer; rebuilt when the pairing changes (see Files/AppModelFiles.swift).
+    @ObservationIgnored var fileStoreBox: (scope: UUID, store: RemoteFileStore)?
     var composerCatalogs: [String: ComposerCatalog] = [:]
     let extensions = NativeExtensions()
     let automations = AutomationStore()
@@ -405,6 +407,7 @@ final class AppModel {
         await NativeShortcutPreview.start(in: self)
         await SendPreview.start(in: self)
         BotPreview.start(in: self)
+        FilePreviewPreview.start(in: self)
         if ProcessInfo.processInfo.arguments.contains("--task-activity-preview"), let task = tasks.first {
             // Explicit local QA fixture: no relay, turn, microphone or push.
             taskActivity.restore(pairing: nil)

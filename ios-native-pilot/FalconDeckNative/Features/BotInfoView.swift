@@ -118,6 +118,9 @@ struct BotInfoView: View {
             }
         }
         .nativeOptionsSheet().accessibilityIdentifier("bot-info")
+        // A bot's documents link to each other and to its reports by relative path.
+        .environment(\.fileContext, FileContext(workspaceID: bot?.projectID, baseDir: bot.map(\.spacePath).flatMap { $0.hasPrefix("/") ? $0 : nil }))
+        .fileViewerPresenter()
     }
 
     private func header(_ bot: NativeBot) -> some View {

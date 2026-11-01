@@ -66,7 +66,19 @@ Not allowed on purpose: `$HOME` at large, `~/.cache`, `~/.claude`, `~/.config`,
 `~/Downloads` and the rest of the state dir (`daemon-state.json`, secrets,
 `attachments`). Adding a root means editing `file_preview_access`.
 
+## Clients
+
+`ios-native-pilot/FalconDeckNative/Files/`: `FileLink` (recognition),
+`RemoteFileStore` (ranged transfer, cache), `FileViewer` and friends (viewer),
+`FileHTMLView` (sandboxed web view + `fdfile://` handler). The viewer takes a
+`FileReference` only, so a transcript link, a bot sheet or a future review inbox
+can open it. Remote web and Expo do not use these RPCs yet.
+
 ## Follow-ups
 
-- `http://localhost:PORT` and `*.ts.net` links are not proxied. A daemon HTTP
-  proxy over the relay (ranged GET, streaming) is roughly two days with tests.
+- `http://localhost:PORT` links show "the phone can't reach localhost" instead of
+  failing in Safari. `*.ts.net` links open normally (works when the phone is on the
+  tailnet). Making localhost pages open needs a daemon HTTP proxy over the relay
+  (ranged GET, streaming, WebSocket for dev servers): roughly two days with tests,
+  and it widens the access policy to anything listening on the Mac, so it wants its
+  own allow-list.
