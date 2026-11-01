@@ -23,7 +23,10 @@ for line in sys.stdin:
     elif method in ('model/list', 'collaborationMode/list', 'skills/list'): result = {'data': []}
     elif method == 'thread/list':
         (root / ('started-' + pathlib.Path.cwd().name)).write_text('started')
-        while not (root / 'release').exists(): time.sleep(0.01)
+        # Exit once the test's temp dir is gone, or this spins forever.
+        while not (root / 'release').exists():
+            if not root.exists(): sys.exit(0)
+            time.sleep(0.01)
         result = {'data': []}
     print(json.dumps({'id': request['id'], 'result': result}), flush=True)
 "#

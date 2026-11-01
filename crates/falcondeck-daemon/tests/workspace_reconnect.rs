@@ -41,7 +41,10 @@ def respond(request):
             with (root / ('started-' + pathlib.Path.cwd().name)).open('w') as log:
                 log.write('started')
             if barrier:
-                while not (root / 'release').exists(): time.sleep(0.01)
+                # Exit once the test's temp dir is gone, or this spins forever.
+                while not (root / 'release').exists():
+                    if not root.exists(): sys.exit(0)
+                    time.sleep(0.01)
             else:
                 time.sleep(0.25)
         result = {'data': []}

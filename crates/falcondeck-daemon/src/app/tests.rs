@@ -255,10 +255,12 @@ def handle(request):
     if method == 'initialize':
         (root / 'initializing').touch()
         while not (root / 'initialized').exists():
+            if not root.exists(): sys.exit(0)
             time.sleep(0.01)
     if method in ('thread/list', 'skills/list'):
         (root / 'discovering').touch()
         while not (root / 'discovered').exists():
+            if not root.exists(): sys.exit(0)
             time.sleep(0.01)
     result = {}
     if method == 'account/read':
