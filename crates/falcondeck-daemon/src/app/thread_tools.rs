@@ -707,17 +707,24 @@ impl AppState {
     }
 
     /// A bot whose name matches, ignoring case, unless `name` is a thread id.
+    /// Bots address each other by short name ("Juno" for "Juno - CPO"), so an
+    /// unambiguous short-name match counts too.
     async fn bot_named(&self, name: &str) -> Option<falcondeck_core::BotProfile> {
         let name = name.trim();
-        let bot = self
-            .inner
-            .preferences
-            .lock()
-            .await
-            .bots
-            .iter()
-            .find(|bot| bot.name.trim().eq_ignore_ascii_case(name))
-            .cloned()?;
+        let bot = {
+            let preferences = self.inner.preferences.lock().await;
+            let bots = &preferences.bots;
+            bots.iter()
+                .find(|bot| bot.name.trim().eq_ignore_ascii_case(name))
+                .or_else(|| {
+                    let mut short = bots.iter().filter(|bot| {
+                        bot_short_name(&bot.name).eq_ignore_ascii_case(name)
+                    });
+                    let first = short.next()?;
+                    short.next().is_none().then_some(first)
+                })
+                .cloned()?
+        };
         self.thread_workspace(name).await.is_err().then_some(bot)
     }
 
@@ -815,6 +822,14 @@ impl AppState {
         )
         .await
     }
+}
+
+/// "Juno - CPO" -> "Juno": the name before a role suffix.
+fn bot_short_name(name: &str) -> &str {
+    let name = name.trim();
+    name.split([' ', '-', '\u{2013}', '\u{2014}', ':', ','])
+        .next()
+        .unwrap_or(name)
 }
 
 #[cfg(test)]
@@ -2351,5 +2366,12 @@ printf '%s\n' '{{"type":"result","subtype":"success","result":"done","session_id
         assert!(description(&app).await.contains("At most 1 active child per parent"));
         set_child_limit(&app, 20).await.unwrap();
         assert!(description(&app).await.contains("At most 20 active children"));
+    }
+
+    #[test]
+    fn bot_short_name_drops_the_role_suffix() {
+        assert_eq!(super::bot_short_name("Juno - CPO"), "Juno");
+        assert_eq!(super::bot_short_name("Atlas \u{2013} Chief of Staff"), "Atlas");
+        assert_eq!(super::bot_short_name("Libra"), "Libra");
     }
 }
