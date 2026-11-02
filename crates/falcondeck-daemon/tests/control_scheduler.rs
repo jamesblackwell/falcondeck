@@ -13,6 +13,7 @@ fn config_with_state_path(path: PathBuf) -> DaemonConfig {
     DaemonConfig {
         bind_addr: "127.0.0.1:0".parse().unwrap(),
         state_path: Some(path),
+        background_restore: false,
         // A missing provider binary makes thread creation fail fast, which
         // exercises the failure paths without a live provider.
         provider_bins: [
@@ -594,4 +595,193 @@ async fn overlap_policy_records_one_skip_while_running() {
         serde_json::to_value(&second).unwrap()["status"],
         json!("skipped_overlap")
     );
+}
+
+#[cfg(unix)]
+async fn precheck_fixture() -> (
+    falcondeck_daemon::EmbeddedDaemonHandle,
+    tempfile::TempDir,
+    String,
+) {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = tempfile::tempdir().unwrap();
+    let workspace = dir.path().join("repo");
+    std::fs::create_dir(&workspace).unwrap();
+    let bin = dir.path().join("codex-fixture");
+    let script = r#"#!/usr/bin/env python3
+import json, pathlib, subprocess, sys
+root = pathlib.Path(__ROOT__)
+if 'app-server' not in sys.argv:
+    print('codex-cli 0.200.0'); sys.exit(0)
+for line in sys.stdin:
+    req = json.loads(line)
+    if 'id' not in req: continue
+    method = req['method']
+    with (root / 'rpc.jsonl').open('a') as log:
+        log.write(json.dumps(req) + '\n')
+    result = {}
+    if method == 'model/list': result = {'data': [{'id':'test-model', 'isDefault':True}]}
+    elif method in ('thread/list', 'skills/list', 'collaborationMode/list'): result = {'data':[]}
+    elif method == 'thread/start': result = {'thread': {'id':'precheck-thread', 'name':'Gate'}}
+    elif method == 'command/exec':
+        p = req['params']
+        try:
+            done = subprocess.run(p['command'], cwd=p['cwd'], capture_output=True, timeout=p['timeoutMs']/1000)
+            result = {'exitCode': done.returncode, 'stdout': done.stdout[:p['outputBytesCap']].decode('utf8', errors='replace'), 'stderr': done.stderr[:p['outputBytesCap']].decode('utf8', errors='replace')}
+        except subprocess.TimeoutExpired:
+            result = {'exitCode':124,'stdout':'','stderr':'deadline'}
+    if method == 'turn/start':
+        print(json.dumps({'id':req['id'], 'error':{'code':-32000, 'message':'intentional fixture turn failure'}}), flush=True)
+    else:
+        print(json.dumps({'id':req['id'], 'result':result}), flush=True)
+"#.replace("__ROOT__", &serde_json::to_string(&dir.path().to_string_lossy()).unwrap());
+    std::fs::write(&bin, script).unwrap();
+    std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let mut config = config_with_state_path(dir.path().join("daemon-state.json"));
+    config
+        .provider_bins
+        .insert("codex".into(), bin.to_string_lossy().into_owned());
+    let mut daemon = spawn_embedded(config).await.unwrap();
+    daemon.wait_until_restored().await.unwrap();
+    (daemon, dir, workspace.to_string_lossy().into_owned())
+}
+
+#[cfg(unix)]
+async fn run_gate(client: &Client, base: &str, id: &str, count: usize) -> Vec<Value> {
+    let response: Value = client
+        .post(format!("{base}/api/control/execute"))
+        .json(&json!({"operation":"automation.run_now", "arguments":{"automation_id":id}}))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(response["ok"], true, "{response}");
+    let runs = wait_for_runs(client, base, id, count).await;
+    assert_eq!(runs.len(), count);
+    assert!(
+        runs.iter()
+            .all(|run| !matches!(run["status"].as_str(), Some("running" | "queued")))
+    );
+    runs
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn precheck_noop_fire_failure_and_health_use_no_inference_until_needed() {
+    let (daemon, dir, workspace) = precheck_fixture().await;
+    let client = Client::new();
+    let base = daemon.base_url();
+    // This command executes an argv vector. Shell punctuation is literal data.
+    let code = "import pathlib,sys; print('literal ; $(echo injected)'); sys.exit(int(pathlib.Path('code').read_text()))";
+    std::fs::write(std::path::Path::new(&workspace).join("code"), "0").unwrap();
+    let automation = create_automation(&client, &base, &workspace, json!({
+        "target": {"workspace_path":workspace,"provider":"codex","thread":{"kind":"new_each_run"},"sandbox_mode":"read-only"},
+        "precheck":{"argv":["/usr/bin/python3","-c",code],"cwd":workspace,"timeout_seconds":5}
+    })).await;
+    let id = automation["id"].as_str().unwrap();
+    let runs = run_gate(&client, &base, id, 1).await;
+    assert_eq!(runs[0]["status"], "skipped_unchanged");
+    assert!(runs[0]["thread_id"].is_null());
+    assert!(runs[0]["input_tokens"].is_null());
+    let log = std::fs::read_to_string(dir.path().join("rpc.jsonl")).unwrap();
+    assert!(!log.contains("thread/start"));
+    assert!(!log.contains("turn/start"));
+    let request: Value = log
+        .lines()
+        .map(|line| serde_json::from_str::<Value>(line).unwrap())
+        .find(|request| request["method"] == "command/exec")
+        .unwrap();
+    assert_eq!(request["params"]["sandboxPolicy"]["type"], "readOnly");
+    assert_eq!(request["params"]["outputBytesCap"], 8192);
+    assert!(
+        request["params"].get("env").is_none(),
+        "no additional secrets or overrides"
+    );
+
+    std::fs::write(std::path::Path::new(&workspace).join("code"), "3").unwrap();
+    run_gate(&client, &base, id, 2).await;
+    let log = std::fs::read_to_string(dir.path().join("rpc.jsonl")).unwrap();
+    let turn: Value = log
+        .lines()
+        .map(|line| serde_json::from_str::<Value>(line).unwrap())
+        .find(|request| request["method"] == "turn/start")
+        .expect("fire code dispatches");
+    let text = turn.to_string();
+    assert!(text.contains("untrusted data"));
+    assert!(text.contains("literal ; $(echo injected)"));
+
+    std::fs::write(std::path::Path::new(&workspace).join("code"), "2").unwrap();
+    run_gate(&client, &base, id, 3).await;
+    let turns_before = std::fs::read_to_string(dir.path().join("rpc.jsonl"))
+        .unwrap()
+        .matches("turn/start")
+        .count();
+    let runs = run_gate(&client, &base, id, 4).await;
+    assert_eq!(
+        std::fs::read_to_string(dir.path().join("rpc.jsonl"))
+            .unwrap()
+            .matches("turn/start")
+            .count(),
+        turns_before
+    );
+    assert_eq!(
+        runs.iter()
+            .filter(|r| r["precheck"]["failure_dispatched"] == true)
+            .count(),
+        1
+    );
+    assert!(
+        runs.iter()
+            .filter(|r| r["precheck"]["exit_code"] == 2)
+            .all(|r| r["precheck"]["error"].is_string())
+    );
+    let health: Value = client
+        .post(format!("{base}/api/control/get"))
+        .json(&json!({"resource":"automation.health"}))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let row = health["data"]["automations"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|a| a["id"] == id)
+        .unwrap();
+    assert_eq!(row["precheck"]["fire_codes"], json!([3]));
+    assert_eq!(row["last_precheck"]["exit_code"], 2);
+    daemon.shutdown().await.unwrap();
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn precheck_timeout_is_a_recorded_rate_limited_failure() {
+    let (daemon, _dir, workspace) = precheck_fixture().await;
+    let client = Client::new();
+    let base = daemon.base_url();
+    let automation = create_automation(&client, &base, &workspace, json!({
+        "target":{"workspace_path":workspace,"provider":"codex","thread":{"kind":"new_each_run"},"sandbox_mode":"read-only"},
+        "precheck":{"argv":["/usr/bin/python3","-c","import time; time.sleep(20)"],"cwd":workspace,"timeout_seconds":1}
+    })).await;
+    let id = automation["id"].as_str().unwrap();
+    run_gate(&client, &base, id, 1).await;
+    let runs = run_gate(&client, &base, id, 2).await;
+    assert!(runs.iter().all(|r| {
+        r["precheck"]["error"]
+            .as_str()
+            .unwrap()
+            .contains("timed out")
+    }));
+    assert_eq!(
+        runs.iter()
+            .filter(|r| r["precheck"]["failure_dispatched"] == true)
+            .count(),
+        1
+    );
+    assert!(runs.iter().any(|r| r["thread_id"].is_null()));
+    daemon.shutdown().await.unwrap();
 }

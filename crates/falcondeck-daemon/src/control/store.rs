@@ -302,6 +302,36 @@ pub fn compact(state: &mut PersistedControlState, now: DateTime<Utc>) {
         runs.retain(|run| keep.contains(&run.id));
         state.runs = runs;
     }
+    // Evidence must not make the store exceed its 8 MiB restore limit.
+    // Reserve at most 512 KiB of raw text (JSON escaping can expand it 6x),
+    // prioritizing definition health, then newest run evidence. Keep codes,
+    // timestamps and the cooldown even after output is removed.
+    let mut budget = 512 * 1024;
+    let mut results: Vec<_> = state
+        .automations
+        .iter_mut()
+        .filter_map(|a| a.last_precheck.as_mut())
+        .collect();
+    results.sort_by_key(|r| std::cmp::Reverse(r.checked_at));
+    let mut history: Vec<_> = state
+        .runs
+        .iter_mut()
+        .filter_map(|r| r.precheck.as_mut())
+        .collect();
+    history.sort_by_key(|r| std::cmp::Reverse(r.checked_at));
+    results.extend(history);
+    for result in results {
+        for text in result
+            .error
+            .iter_mut()
+            .chain([&mut result.stdout, &mut result.stderr])
+        {
+            let keep = super::precheck::bounded(text, budget);
+            result.output_truncated |= keep.len() != text.len();
+            budget -= keep.len();
+            *text = keep;
+        }
+    }
     if state.audit.len() > AUDIT_LIMIT {
         let mut audit = std::mem::take(&mut state.audit);
         audit.sort_by(|a, b| b.occurred_at.cmp(&a.occurred_at).then(b.id.cmp(&a.id)));
@@ -657,6 +687,44 @@ mod tests {
         assert_eq!(state.runs.len(), RUNS_PER_AUTOMATION);
         assert_eq!(state.audit.len(), AUDIT_LIMIT);
         assert_eq!(state.idempotency_records.len(), IDEMPOTENCY_LIMIT);
+    }
+
+    #[test]
+    fn precheck_evidence_compaction_keeps_the_store_restorable() {
+        let now = Utc::now();
+        let mut state = PersistedControlState::default();
+        for index in 0..TOTAL_RUNS {
+            let mut row = run(
+                &format!("run-{index}"),
+                &format!("automation-{index}"),
+                "2026-11-02T10:00:00Z",
+            );
+            row.precheck = Some(falcondeck_core::control::AutomationPrecheckResult {
+                checked_at: now,
+                exit_code: Some(3),
+                stdout: "\0".repeat(8192),
+                stderr: "\0".repeat(8192),
+                error: None,
+                output_truncated: false,
+                failure_dispatched: false,
+            });
+            state.runs.push(row);
+        }
+        compact(&mut state, now);
+        assert_eq!(state.runs.len(), TOTAL_RUNS);
+        assert!(serde_json::to_vec_pretty(&state).unwrap().len() < MAX_STORE_BYTES as usize);
+        assert!(
+            state
+                .runs
+                .iter()
+                .any(|r| r.precheck.as_ref().unwrap().output_truncated)
+        );
+        assert!(
+            state
+                .runs
+                .iter()
+                .all(|r| r.precheck.as_ref().unwrap().exit_code == Some(3))
+        );
     }
 
     #[test]

@@ -32,6 +32,7 @@ fn automation_payload() -> serde_json::Value {
             "permission_mode": null,
             "sandbox_mode": "workspace-write",
             "selected_skills": [],
+            "only_when_changed": false,
         },
         "state": "enabled",
         "concurrency_policy": "skip",

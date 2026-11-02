@@ -87,6 +87,10 @@ manual follow-ups remain unlabelled. Runs predating the envelope are not
 retroactively labelled. The marker is display provenance, not an authority or
 permission signal.
 
+Optional deterministic [prechecks](AUTOMATION-PRECHECKS.md) can skip quiet runs
+before creating a thread or paying for inference. See that design note for the
+argv schema, exit codes, failure cooldown and provider sandbox constraints.
+
 ## Agent context injection
 
 So agents know they are running inside FalconDeck and how to use the control

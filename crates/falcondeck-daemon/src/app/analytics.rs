@@ -1188,7 +1188,8 @@ fn summarize_automations(
             }
             _ => {}
         }
-        if let (Some(start), Some(end)) = (run.started_at, run.finished_at) {
+        if let (Some(_), Some(start), Some(end)) = (&run.thread_id, run.started_at, run.finished_at)
+        {
             summary.agent_ms += (end - start).num_milliseconds().max(0) as u64;
         }
         // Latest by queue order; the start time (when known) is what's shown.
@@ -1575,6 +1576,31 @@ impl AppState {
             .analytics_summary(days)
             .await
             .map_err(|error| crate::control::ControlError::internal(error.to_string()))?;
+        let definitions = self.control().automations_snapshot().await;
+        let mut automations = serde_json::to_value(&summary.automations)
+            .map_err(|e| crate::control::ControlError::internal(e.to_string()))?;
+        let runs = self
+            .control()
+            .runs_since(Utc::now() - chrono::Duration::days(i64::from(days)))
+            .await;
+        for row in automations.as_array_mut().into_iter().flatten() {
+            if let Some(definition) = definitions
+                .iter()
+                .find(|a| Some(a.id.as_str()) == row["id"].as_str())
+            {
+                row["precheck"] = json!(definition.precheck);
+                row["last_precheck"] = json!(definition.last_precheck);
+                row["precheck_failures"] = json!(
+                    runs.iter()
+                        .filter(|run| run.automation_id == definition.id
+                            && run
+                                .precheck
+                                .as_ref()
+                                .is_some_and(|check| check.error.is_some()))
+                        .count()
+                );
+            }
+        }
         Ok(falcondeck_core::control::ControlGetResponse {
             resource: request.resource.clone(),
             data: json!({
@@ -1586,7 +1612,7 @@ impl AppState {
                     "failing": "30% or more of runs failed",
                     "thread_per_run": "starts a new thread every run",
                 },
-                "automations": summary.automations,
+                "automations": automations,
             }),
             next_cursor: None,
         })

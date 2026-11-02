@@ -1813,3 +1813,123 @@ async fn update_accepts_expected_revision_nested_in_arguments() {
         .await;
     assert_eq!(response.error.unwrap().code, "invalid_arguments");
 }
+
+#[tokio::test]
+async fn precheck_update_can_replace_remove_and_preserve_the_gate() {
+    let (_dir, service) = service().await;
+    let created = create_valid_automation(&service).await;
+    let id = created["id"].as_str().unwrap();
+    let check = json!({"argv": ["/usr/bin/true"], "cwd": "/tmp"});
+    let (response, _) = service.execute(execute_request("automation.update", json!({
+        "automation_id": id, "precheck": check,
+        "target": {"workspace_path": "/tmp", "provider": "codex", "thread": {"kind": "managed"}, "sandbox_mode": "read-only"}
+    }), Some(1)), &desktop(), &ControlDeps::none()).await;
+    assert!(response.ok, "{:?}", response.error);
+    let value = response.data.unwrap();
+    assert_eq!(value["precheck"]["fire_codes"], json!([3]));
+    assert_eq!(value["precheck"]["timeout_seconds"], 60);
+    let (response, _) = service
+        .execute(
+            execute_request(
+                "automation.update",
+                json!({
+                    "automation_id": id, "name": "Renamed"
+                }),
+                Some(2),
+            ),
+            &desktop(),
+            &ControlDeps::none(),
+        )
+        .await;
+    assert!(response.ok);
+    assert!(response.data.unwrap()["precheck"].is_object());
+    let (response, _) = service
+        .execute(
+            execute_request(
+                "automation.update",
+                json!({
+                    "automation_id": id, "precheck": null
+                }),
+                Some(3),
+            ),
+            &desktop(),
+            &ControlDeps::none(),
+        )
+        .await;
+    assert!(response.ok);
+    assert!(response.data.unwrap()["precheck"].is_null());
+}
+
+#[tokio::test]
+async fn precheck_failure_escalation_is_atomic_and_survives_restart_and_history_pruning() {
+    use falcondeck_core::control::AutomationPrecheckResult;
+    let (dir, service) = service().await;
+    let created = create_valid_automation(&service).await;
+    let id = created["id"].as_str().unwrap();
+    let first = service
+        .enqueue_run(id, None, super::RunSource::Scheduled)
+        .await
+        .unwrap();
+    assert!(service.claim_run_if_automation_free(&first.id).await);
+    let result = AutomationPrecheckResult {
+        checked_at: Utc::now(),
+        exit_code: Some(2),
+        stdout: "probe".into(),
+        stderr: "broken".into(),
+        error: Some("exit 2".into()),
+        output_truncated: false,
+        failure_dispatched: false,
+    };
+    let (a, b) = tokio::join!(
+        service.record_precheck(&first.id, result.clone()),
+        service.record_precheck(&first.id, result.clone())
+    );
+    assert_ne!(
+        a.unwrap(),
+        b.unwrap(),
+        "only one concurrent failure can reserve escalation"
+    );
+    service
+        .finish_run(&first.id, AutomationRunStatus::Failed, None, None)
+        .await
+        .unwrap();
+    // Remove the ledger entry, retaining the definition-owned cooldown.
+    let path = dir.path().join("agent-control.json");
+    let mut state = store::load(&path).await.unwrap();
+    state.runs.clear();
+    store::persist(&path, &state).await.unwrap();
+    let restored = ControlService::new(dir.path().join("agent-control.json"));
+    restored.restore().await.unwrap();
+    let second = restored
+        .enqueue_run(id, None, super::RunSource::Scheduled)
+        .await
+        .unwrap();
+    assert!(restored.claim_run_if_automation_free(&second.id).await);
+    assert!(
+        !restored
+            .record_precheck(&second.id, result.clone())
+            .await
+            .unwrap()
+    );
+    let mut state = store::load(&path).await.unwrap();
+    state.automations[0].precheck_failure_dispatched_at = Some(Utc::now() - Duration::hours(6));
+    store::persist(&path, &state).await.unwrap();
+    let restored = ControlService::new(path);
+    restored.restore().await.unwrap();
+    // Restore settles abandoned runs; claim a new occurrence for this check.
+    let second = restored
+        .enqueue_run(id, None, super::RunSource::Scheduled)
+        .await
+        .unwrap();
+    assert!(restored.claim_run_if_automation_free(&second.id).await);
+    assert!(restored.record_precheck(&second.id, result).await.unwrap());
+    assert!(
+        restored
+            .run(&second.id)
+            .await
+            .unwrap()
+            .precheck
+            .unwrap()
+            .failure_dispatched
+    );
+}

@@ -113,6 +113,12 @@ pub struct CreateAutomationArgs {
     pub task: AutomationTask,
     /// Where and with which provider the work runs.
     pub target: AutomationTarget,
+    /// Optional deterministic argv gate: 0 skips inference, fire_codes (default [3])
+    /// dispatch with untrusted stdout, other exits/timeouts escalate once per 6h.
+    /// Codex only, explicit sandbox mode; cwd inside workspace, timeout <=60s,
+    /// combined capture <=16 KiB. No shell or extra secrets.
+    #[serde(default)]
+    pub precheck: Option<falcondeck_core::control::AutomationPrecheck>,
     /// Connector names the automation depends on.
     #[serde(default)]
     pub required_connectors: Vec<String>,
@@ -146,6 +152,9 @@ pub struct UpdateAutomationArgs {
     /// New target.
     #[serde(default)]
     pub target: Option<AutomationTarget>,
+    /// Replace the precheck; null removes it, omission preserves it.
+    #[serde(default, deserialize_with = "deserialize_precheck_patch")]
+    pub precheck: Option<Option<falcondeck_core::control::AutomationPrecheck>>,
     /// New required connectors.
     #[serde(default)]
     pub required_connectors: Option<Vec<String>>,
@@ -157,6 +166,12 @@ pub struct UpdateAutomationArgs {
     pub misfire_policy: Option<AutomationMisfirePolicy>,
 }
 
+fn deserialize_precheck_patch<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<Option<falcondeck_core::control::AutomationPrecheck>>, D::Error> {
+    Option::deserialize(deserializer).map(Some)
+}
+
 impl UpdateAutomationArgs {
     /// Whether any field was supplied.
     pub fn is_empty(&self) -> bool {
@@ -165,6 +180,7 @@ impl UpdateAutomationArgs {
             && self.trigger.is_none()
             && self.task.is_none()
             && self.target.is_none()
+            && self.precheck.is_none()
             && self.required_connectors.is_none()
             && self.concurrency_policy.is_none()
             && self.misfire_policy.is_none()
@@ -358,7 +374,7 @@ pub fn capabilities() -> &'static [Capability] {
         Capability {
             id: ops::AUTOMATION_CREATE,
             title: "Create automation",
-            description: "Create a recurring, interval, one-time or conditional-prompt automation that runs an agent instruction on a schedule. Choose the home/current thread only when a run needs conversation context (such as a launch discussed at length). Otherwise use new_each_run with target.run_as_bot set to the bot id; write explicit criteria for sending one message home, otherwise update STATUS.md and finish silently. When the user asks for a follow-up, check-in, reminder or re-run of what this conversation is doing, target thread kind \"current\" so the run continues in this thread with its context; reserve \"managed\" for standing schedules unrelated to the conversation and \"new_each_run\" for runs that must start clean (earlier run threads are archived once read or when they found nothing to do). For monitoring, use a conditional prompt so quiet runs end with the no-action marker, give it an end (a one-time follow-up, or pause it when the work lands), and repeat no more often than every 30 minutes; agents cannot schedule anything more frequent.",
+            description: "Create a recurring, interval, one-time or conditional-prompt automation that runs an agent instruction on a schedule. Choose the home/current thread only when a run needs conversation context (such as a launch discussed at length). Otherwise use new_each_run with target.run_as_bot set to the bot id; write explicit criteria for sending one message home, otherwise update STATUS.md and finish silently. When the user asks for a follow-up, check-in, reminder or re-run of what this conversation is doing, target thread kind \"current\" so the run continues in this thread with its context; reserve \"managed\" for standing schedules unrelated to the conversation and \"new_each_run\" for runs that must start clean (earlier run threads are archived once read or when they found nothing to do). Optional precheck runs argv without a shell before any thread or inference: exit 0 is skipped_unchanged, fire_codes (default [3]) dispatch with stdout as untrusted data, other exits/timeouts are recorded and escalated once per six hours. Codex with explicit sandbox_mode and project_folder isolation only; per-command trust approval policies are unsupported; cwd inside workspace, timeout_seconds 1..60, capture <=16 KiB. For monitoring without a precheck, use a conditional prompt so quiet runs end with the no-action marker, give it an end (a one-time follow-up, or pause it when the work lands), and repeat no more often than every 30 minutes; agents cannot schedule anything more frequent.",
             domain: "automation",
             scopes: &[ControlScope::Host, ControlScope::Workspace],
             input_schema: schema::<CreateAutomationArgs>(),
@@ -435,7 +451,7 @@ pub fn capabilities() -> &'static [Capability] {
                     })
                 ),
                 example!(
-                    "Poll every 30 minutes for failed deployments",
+                    "Check every 30 minutes for failed deployments; exit 0 skips inference, exit 3 dispatches",
                     json!({
                         "name": "Deployment watchdog",
                         "trigger": {
@@ -451,7 +467,15 @@ pub fn capabilities() -> &'static [Capability] {
                         "target": {
                             "workspace_path": "/Users/james/Code/ops",
                             "provider": "codex",
+                            "sandbox_mode": "read-only",
+                            "isolation": "project_folder",
                             "thread": { "kind": "managed", "thread_id": null }
+                        },
+                        "precheck": {
+                            "argv": ["/usr/local/bin/check-deployments"],
+                            "cwd": "/Users/james/Code/ops",
+                            "timeout_seconds": 30,
+                            "fire_codes": [3]
                         }
                     })
                 ),
@@ -465,7 +489,7 @@ pub fn capabilities() -> &'static [Capability] {
         Capability {
             id: ops::AUTOMATION_UPDATE,
             title: "Update automation",
-            description: "Change an automation definition. Choose the home/current thread only when a run needs conversation context (such as a launch discussed at length). Otherwise use new_each_run with target.run_as_bot set to the bot id; write explicit criteria for sending one message home, otherwise update STATUS.md and finish silently. Requires the revision that was read; a stale revision is rejected with revision_conflict.",
+            description: "Change an automation definition. Optional precheck replaces the deterministic argv gate; null removes it, omission keeps it. Exit 0 skips inference; fire_codes (default [3]) dispatch; failures/timeouts escalate at most once per six hours. Codex with explicit sandbox_mode and project_folder isolation only, cwd inside workspace, timeout_seconds <=60, capture <=16 KiB. Choose the home/current thread only when a run needs conversation context (such as a launch discussed at length). Otherwise use new_each_run with target.run_as_bot set to the bot id; write explicit criteria for sending one message home, otherwise update STATUS.md and finish silently. Requires the revision that was read; a stale revision is rejected with revision_conflict.",
             domain: "automation",
             scopes: &[ControlScope::Host, ControlScope::Workspace],
             input_schema: schema::<UpdateAutomationArgs>(),
@@ -477,6 +501,15 @@ pub fn capabilities() -> &'static [Capability] {
                 confirmation_class: ConfirmationClass::Mutation,
             },
             examples: vec![example!(
+                "Gate inference on an issue-check exit code (use the revision from falcondeck_get)",
+                json!({
+                    "automation_id": "automation-9fc78b39",
+                    "precheck": {
+                        "argv": ["/usr/local/bin/check-issues", "--format", "text"],
+                        "cwd": "/Users/james/Code/ops", "timeout_seconds": 30, "fire_codes": [3]
+                    }
+                })
+            ), example!(
                 "Move a schedule to 09:30 using the revision from falcondeck_get",
                 json!({
                     "automation_id": "automation-9fc78b39",

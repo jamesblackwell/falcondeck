@@ -348,7 +348,11 @@ pub(crate) async fn execute_run(app: &AppState, run_id: &str) {
                 }
             }
         }
-        if previous.is_some() && automation.target.only_when_changed && !changed {
+        if previous.is_some()
+            && automation.precheck.is_none()
+            && automation.target.only_when_changed
+            && !changed
+        {
             let _ = app
                 .control()
                 .finish_run(
@@ -409,6 +413,49 @@ pub(crate) async fn execute_run(app: &AppState, run_id: &str) {
         }
     };
 
+    let mut precheck_evidence = String::new();
+    if let Some(check) = &automation.precheck {
+        let result = app
+            .automation_precheck(&workspace.id, check, &automation.target)
+            .await;
+        let dispatch = match app.control().record_precheck(run_id, result.clone()).await {
+            Ok(dispatch) => dispatch,
+            Err(error) => {
+                let _ = app.control().fail_run(run_id, &error.0.message).await;
+                emit_runs_changed(app).await;
+                return;
+            }
+        };
+        if app
+            .control()
+            .run(run_id)
+            .await
+            .is_none_or(|run| run.status != AutomationRunStatus::Running)
+        {
+            return;
+        }
+        if !dispatch {
+            let (status, preview) = if result.error.is_some() {
+                (
+                    AutomationRunStatus::Failed,
+                    "Precheck failed; escalation suppressed by six-hour cooldown",
+                )
+            } else {
+                (
+                    AutomationRunStatus::SkippedUnchanged,
+                    "Precheck returned 0; no action, no thread and no model called",
+                )
+            };
+            let _ = app
+                .control()
+                .finish_run(run_id, status, Some(preview.into()), None)
+                .await;
+            emit_runs_changed(app).await;
+            return;
+        }
+        precheck_evidence = super::precheck::evidence(&result);
+    }
+
     // Thread resolution per the automation's thread strategy.
     let thread_id = match resolve_thread(app, &automation, &workspace.id).await {
         Ok(thread_id) => thread_id,
@@ -442,9 +489,10 @@ pub(crate) async fn execute_run(app: &AppState, run_id: &str) {
     let expects_turn_end = automation.target.provider == falcondeck_core::AgentProvider::CODEX;
     let dispatch_started_at = Utc::now();
     let instruction = format!(
-        "{}{}",
+        "{}{}{}",
         bot_digest.unwrap_or_default(),
-        falcondeck_core::control::automation_user_text(automation.task.instruction())
+        falcondeck_core::control::automation_user_text(automation.task.instruction()),
+        precheck_evidence
     );
     let response = app
         .send_turn(falcondeck_core::SendTurnRequest {

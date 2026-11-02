@@ -129,6 +129,16 @@ pub struct Automation {
     /// Where and with which provider the work runs.
     pub target: AutomationTarget,
 
+    /// Optional deterministic gate before creating a thread or turn.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub precheck: Option<AutomationPrecheck>,
+    /// Most recent check, independent of run-history retention.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_precheck: Option<AutomationPrecheckResult>,
+    /// Durable failure escalation reservation; at most once per six hours.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub precheck_failure_dispatched_at: Option<DateTime<Utc>>,
+
     /// Lifecycle state.
     pub state: AutomationState,
     /// Behaviour when a due occurrence overlaps a running one.
@@ -157,6 +167,48 @@ pub struct Automation {
     /// Bounded summary of the latest run.
     #[serde(default)]
     pub latest_outcome: Option<AutomationOutcomeSummary>,
+}
+
+/// Deterministic command gate. No implicit shell or additional environment secrets.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct AutomationPrecheck {
+    /// Executable followed by literal arguments; never a shell command string.
+    pub argv: Vec<String>,
+    /// Absolute directory inside the target workspace.
+    pub cwd: String,
+    /// Hard execution deadline, 1..=60 seconds (default 60).
+    #[serde(default = "precheck_timeout")]
+    pub timeout_seconds: u32,
+    /// Exit codes that request inference. Zero is always no-action. Default [3].
+    #[serde(default = "precheck_fire_codes")]
+    pub fire_codes: Vec<i32>,
+}
+fn precheck_timeout() -> u32 {
+    60
+}
+fn precheck_fire_codes() -> Vec<i32> {
+    vec![3]
+}
+
+/// Bounded check evidence stored on the run and automation health.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, JsonSchema)]
+pub struct AutomationPrecheckResult {
+    /// When the check finished.
+    pub checked_at: DateTime<Utc>,
+    /// Process exit code, absent on startup/transport failure.
+    pub exit_code: Option<i32>,
+    /// Captured stdout, bounded with stderr to 16 KiB.
+    pub stdout: String,
+    /// Captured stderr.
+    pub stderr: String,
+    /// Capture or retention omitted output bytes.
+    #[serde(default)]
+    pub output_truncated: bool,
+    /// Startup, timeout or unexpected exit detail; present only on failure.
+    pub error: Option<String>,
+    /// This run reserved the failure escalation, even if agent startup failed.
+    pub failure_dispatched: bool,
 }
 
 /// Opaque relationship between an Automation and an extension-owned resource.
@@ -517,6 +569,9 @@ pub struct AutomationRun {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     /// Provider-reported cached prompt tokens, when available.
     pub cached_input_tokens: Option<u64>,
+    /// Deterministic gate result, even when no agent was started.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub precheck: Option<AutomationPrecheckResult>,
     /// Structured failure detail.
     #[serde(default)]
     pub error: Option<ControlErrorDetail>,

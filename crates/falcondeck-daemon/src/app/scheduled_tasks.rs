@@ -342,6 +342,9 @@ fn legacy_automation(
         task: AutomationTask::Prompt {
             instruction: detail.prompt.clone(),
         },
+        precheck: None,
+        last_precheck: None,
+        precheck_failure_dispatched_at: None,
         target: AutomationTarget {
             workspace_path: workspace_path.to_string(),
             provider: detail.summary.provider.clone(),
@@ -458,6 +461,7 @@ fn legacy_run(
         automation_id: detail.summary.id.clone(),
         automation_name: detail.summary.title.clone(),
         automation_revision: 1,
+        precheck: None,
         run_as_bot: None,
         status,
         trigger,

@@ -35,6 +35,23 @@ export type AutomationTrigger =
   | { kind: "cron"; expression: string; timezone: string }
   | { kind: "interval"; every_seconds: number; anchor_at: string };
 
+export type AutomationPrecheck = {
+  argv: string[];
+  cwd: string;
+  timeout_seconds?: number;
+  fire_codes?: number[];
+};
+
+export type AutomationPrecheckResult = {
+  checked_at: string;
+  exit_code: number | null;
+  stdout: string;
+  stderr: string;
+  error: string | null;
+  failure_dispatched: boolean;
+  output_truncated: boolean;
+};
+
 export type AutomationTask =
   | { kind: "prompt"; instruction: string }
   | {
@@ -103,6 +120,9 @@ export type Automation = {
   description?: string | null;
   trigger: AutomationTrigger;
   task?: AutomationTask;
+  precheck?: AutomationPrecheck | null;
+  last_precheck?: AutomationPrecheckResult | null;
+  precheck_failure_dispatched_at?: string | null;
   target: AutomationTarget;
   state: AutomationState;
   concurrency_policy: AutomationConcurrencyPolicy;
@@ -135,6 +155,7 @@ export type AutomationRun = {
   turn_id?: string | null;
   input_tokens?: number | null;
   cached_input_tokens?: number | null;
+  precheck?: AutomationPrecheckResult | null;
   outcome_preview?: string | null;
   error?: ControlErrorDetail | null;
 };

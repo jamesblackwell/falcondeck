@@ -889,6 +889,7 @@ impl ControlService {
             &args.target,
             &args.required_connectors,
         )?;
+        super::precheck::validate(args.precheck.as_ref(), &args.target)?;
         let now = Utc::now();
         let next = automations::validate_trigger(&args.trigger, now)?;
         if context.origin == ControlOrigin::Mcp {
@@ -914,6 +915,9 @@ impl ControlService {
             trigger: args.trigger,
             task: args.task,
             target: args.target,
+            precheck: args.precheck,
+            last_precheck: None,
+            precheck_failure_dispatched_at: None,
             state: AutomationState::Enabled,
             concurrency_policy: args.concurrency_policy,
             misfire_policy: args.misfire_policy,
@@ -999,6 +1003,10 @@ impl ControlService {
             if let Some(target) = &args.target {
                 automation.target = target.clone();
             }
+            if let Some(precheck) = &args.precheck {
+                automation.precheck = precheck.clone();
+            }
+            super::precheck::validate(automation.precheck.as_ref(), &automation.target)?;
             if let Some(connectors) = &args.required_connectors {
                 automation.required_connectors = connectors.clone();
             }
@@ -1402,6 +1410,7 @@ impl ControlService {
                 automation_name: automation.name.clone(),
                 automation_revision: automation.revision,
                 run_as_bot: automation.target.run_as_bot.clone(),
+                precheck: None,
                 status: AutomationRunStatus::Queued,
                 trigger,
                 scheduled_for,
@@ -1526,8 +1535,58 @@ impl ControlService {
         .map(|((), _)| ())
     }
 
-    /// Finishes a run, updates the automation's latest outcome and completes
-    /// one-time automations after their execution attempt.
+    /// Persists check evidence and atomically reserves a failure escalation.
+    pub(crate) async fn record_precheck(
+        &self,
+        run_id: &str,
+        mut result: falcondeck_core::control::AutomationPrecheckResult,
+    ) -> Result<bool, ControlError> {
+        let run_id = run_id.to_owned();
+        self.mutate(move |state, now| {
+            let run = state
+                .runs
+                .iter_mut()
+                .find(|r| r.id == run_id)
+                .ok_or_else(|| ControlError::resource_not_found("run", &run_id))?;
+            if run.status != AutomationRunStatus::Running {
+                return Ok((false, vec![]));
+            }
+            if run.precheck.is_some() {
+                return Ok((false, vec![]));
+            }
+            let automation = state
+                .automations
+                .iter_mut()
+                .find(|a| a.id == run.automation_id)
+                .ok_or_else(|| {
+                    ControlError::resource_not_found("automation", &run.automation_id)
+                })?;
+            let dispatch = if result.error.is_some() {
+                let allowed = automation
+                    .precheck_failure_dispatched_at
+                    .is_none_or(|last| {
+                        now.signed_duration_since(last) >= chrono::Duration::hours(6)
+                    });
+                if allowed {
+                    automation.precheck_failure_dispatched_at = Some(now);
+                    result.failure_dispatched = true;
+                }
+                allowed
+            } else {
+                result.exit_code != Some(0)
+            };
+            run.precheck = Some(result.clone());
+            automation.last_precheck = Some(result);
+            Ok((
+                dispatch,
+                vec![ControlDomain::Runs, ControlDomain::Automations],
+            ))
+        })
+        .await
+        .map(|(dispatch, _)| dispatch)
+    }
+
+    /// Finishes a run, updates its outcome and completes one-time automations.
     pub async fn finish_run(
         &self,
         run_id: &str,

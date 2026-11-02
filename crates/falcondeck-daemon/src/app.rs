@@ -90,6 +90,7 @@ use crate::{
 
 mod acp_threads;
 mod analytics;
+mod precheck;
 pub(crate) mod agent_helpers;
 mod claude_history;
 #[cfg(all(test, unix))]
