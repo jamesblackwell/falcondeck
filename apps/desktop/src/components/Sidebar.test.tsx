@@ -178,6 +178,7 @@ describe("DesktopSidebar", () => {
     renderSidebar({
       layoutMode: "bots",
       onSelectThread,
+      onNewChat: vi.fn(),
       bots: [
         {
           id: "bot-1",
@@ -214,12 +215,14 @@ describe("DesktopSidebar", () => {
     expect(screen.getByText("Deploy is green.")).toBeInTheDocument();
     // Projects and chats wait behind Sessions.
     expect(screen.queryByText("Main thread")).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "New chat" })).not.toBeInTheDocument();
     // Pinned sessions stay on the bot home.
     expect(screen.getByText("Pinned thread")).toBeInTheDocument();
 
     fireEvent.click(screen.getByRole("tab", { name: "Sessions" }));
     expect(screen.getByText("Main thread")).toBeInTheDocument();
     expect(screen.getAllByText("Pinned thread")).toHaveLength(1);
+    expect(screen.getByRole("button", { name: "New chat" })).toBeInTheDocument();
   });
 
   it("shows Reviews with an open-count badge only when the inbox is on", () => {

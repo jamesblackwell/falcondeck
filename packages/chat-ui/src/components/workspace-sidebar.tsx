@@ -2953,6 +2953,12 @@ export const WorkspaceSidebar = memo(function WorkspaceSidebar({
     };
   }, [closeCreateStageDialog, createStageTarget, isCreatingStage]);
 
+  // The bot home starts work by messaging a bot; ⌘⇧N still opens a chat.
+  const showNewThreadRow =
+    newThreadRow && !(layoutMode === "bots" && botTab === "bots")
+      ? newThreadRow
+      : null;
+
   const pinnedList = (
     <PinnedThreadList
       entries={pinnedThreads}
@@ -3050,9 +3056,9 @@ export const WorkspaceSidebar = memo(function WorkspaceSidebar({
             ))}
           </div>
         ) : null}
-        {newThreadRow || topNavigation ? (
+        {showNewThreadRow || topNavigation ? (
           <nav className="mb-4">
-            {newThreadRow}
+            {showNewThreadRow ? newThreadRow : null}
             {topNavigation}
           </nav>
         ) : null}
