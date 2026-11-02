@@ -12,12 +12,10 @@ export default defineConfig({
     // largest payloads are currently only about 61 KB and 143 KB gzipped.
     chunkSizeWarningLimit: 850,
     rollupOptions: {
-      // The detached Activity window is a second Tauri window, so its entry has
-      // to ship in the bundle Tauri serves. (The *-qa.html fixtures stay
-      // dev-only on purpose.)
+      // Second Tauri windows need their entries in the bundle Tauri serves.
+      // (The *-qa.html fixtures stay dev-only on purpose.)
       input: {
         main: 'index.html',
-        activity: 'activity-window.html',
         dictation: 'dictation-window.html',
       },
     },

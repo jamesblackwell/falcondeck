@@ -88,13 +88,6 @@ private actor ExtensionRelay: RelayServing {
         for _ in 0..<13 { node = .object(["type": .string("stack"), "children": .array([node])]) }
         XCTAssertFalse(ExtensionDocument.valid(node))
     }
-    func testBackgroundWorkIsRunningBeforeUnreadIsReadyForReview() {
-        let working = AgentTask(task.raw.setting("attention", .object(["background_task_count": .number(1), "unread": .bool(true)])))
-        XCTAssertEqual(ActivitySection.section(working, requests: []), .running)
-        XCTAssertEqual(ActivitySection.section(working, requests: [.object(["thread_id": .string(task.id)])]), .blocked)
-        let failed = AgentTask(working.raw.setting("status", .string("error")))
-        XCTAssertEqual(ActivitySection.section(failed, requests: []), .failed)
-    }
     func testProjectDomainAcceptsURLsAndRejectsInvalidHosts() {
         XCTAssertEqual(ProjectDomain.normalize("https://Example.COM/path"), "example.com")
         XCTAssertNil(ProjectDomain.normalize(".example.com"))

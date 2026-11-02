@@ -34,18 +34,4 @@ describe("typography system", () => {
       expect(STYLES).toContain(`.fd-type-${role}`);
     }
   });
-
-  it("keeps Activity in the same voice as the rest of the UI", () => {
-    const activity = readFileSync(
-      resolve(
-        process.cwd(),
-        "../../packages/chat-ui/src/components/activity-view.tsx",
-      ),
-      "utf8",
-    );
-
-    for (const adHoc of ["font-mono", "fd-type-mono", "fd-readout", "fd-microlabel"]) {
-      expect(activity).not.toContain(adHoc);
-    }
-  });
 });

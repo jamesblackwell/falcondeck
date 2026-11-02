@@ -105,6 +105,95 @@ struct NativeBotsSection: View {
     }
 }
 
+/// Bot-focused home: large iMessage-style rows with the last message from
+/// each bot's home conversation (or its latest delegated work).
+struct NativeBotHomeRows: View {
+    @Environment(AppModel.self) private var model
+    let search: String
+    let openDetail: () -> Void
+    @State private var editor: BotEditorTarget?
+    @State private var opening: String?
+    private var bots: [NativeBot] {
+        model.bots.filter {
+            $0.availability != "archived" && (search.isEmpty || $0.name.localizedCaseInsensitiveContains(search))
+        }
+    }
+    var body: some View {
+        ForEach(bots) { bot in
+            let home = model.task(bot.taskID)
+            let delegated = model.delegatedTasks(for: bot)
+            let related = delegated + [home].compactMap { $0 }
+            let needsYou = related.contains(where: \.needsAttention)
+            let working = related.contains(where: \.working)
+            let latest = related.sorted { $0.updatedAt > $1.updatedAt }.first
+            HStack(spacing: 0) {
+                Button {
+                    guard opening == nil else { return }; opening = bot.id
+                    Task { defer { opening = nil }; if await model.openBot(bot) { openDetail() } }
+                } label: {
+                    HStack(spacing: 12) {
+                        ZStack(alignment: .topTrailing) {
+                            Circle().fill(FD.raised).frame(width: 52, height: 52)
+                            if let icon = model.botIcons[bot.id] {
+                                BotMark(icon: icon, size: 28).frame(width: 52, height: 52)
+                            } else {
+                                Image(systemName: "person.crop.square").foregroundStyle(FD.muted).frame(width: 52, height: 52)
+                            }
+                            if needsYou {
+                                Circle().fill(FD.warning).frame(width: 12, height: 12)
+                                    .overlay(Circle().stroke(FD.background, lineWidth: 2))
+                                    .offset(x: 2, y: -2)
+                            }
+                        }.frame(width: 52, height: 52)
+                        VStack(alignment: .leading, spacing: 3) {
+                            HStack(alignment: .firstTextBaseline, spacing: 8) {
+                                Text(bot.name).font(.body.weight(home?.unread == true ? .semibold : .medium)).lineLimit(1)
+                                    .foregroundStyle(bot.availability == "paused" ? FD.muted : FD.foreground)
+                                Spacer(minLength: 4)
+                                if let latest, let stamp = RelativeStamp.short(latest.updatedAt, now: MinuteClock.shared.now) {
+                                    Text(stamp).font(.caption.monospacedDigit()).foregroundStyle(FD.muted).fixedSize()
+                                }
+                            }
+                            Text(preview(needsYou: needsYou, working: working, bot: bot, latest: latest))
+                                .font(.subheadline).foregroundStyle(FD.secondary).lineLimit(2)
+                        }
+                        if opening == bot.id || working { ActivityDiamond() }
+                        else if home?.unread == true { Circle().fill(FD.unread).frame(width: 8, height: 8) }
+                    }.padding(.horizontal, 10).padding(.vertical, 8).frame(minHeight: 68).contentShape(.rect)
+                }.buttonStyle(.plain).accessibilityIdentifier("bot-home-\(bot.id)")
+                    .accessibilityAddTraits(model.selection == .task(bot.taskID) ? .isSelected : [])
+                Button { editor = BotEditorTarget(bot: bot) } label: {
+                    Image(systemName: "slider.horizontal.3").font(.caption).foregroundStyle(FD.muted)
+                        .frame(width: 44, height: 44).contentShape(.rect)
+                }.buttonStyle(.plain).accessibilityLabel("Settings for \(bot.name)")
+            }
+            .background(model.selection == .task(bot.taskID) ? FD.raised : .clear, in: .rect(cornerRadius: 12))
+        }
+        if bots.isEmpty && search.isEmpty {
+            VStack(alignment: .leading, spacing: 8) {
+                Text("No bots yet").font(.subheadline.weight(.medium))
+                Text("Create a bot to coordinate work across your projects.")
+                    .font(.caption).foregroundStyle(FD.secondary)
+                Button("New bot", systemImage: "plus") { editor = BotEditorTarget(bot: nil) }
+                    .disabled(!model.demo && !model.connected)
+            }.padding(12)
+        } else if !search.isEmpty {
+            Button("New bot", systemImage: "plus") { editor = BotEditorTarget(bot: nil) }
+                .font(.subheadline).padding(.horizontal, 12).frame(minHeight: 44)
+                .disabled(!model.demo && !model.connected).accessibilityIdentifier("bot-home-new")
+        }
+        Color.clear.frame(height: 0)
+            .sheet(item: $editor) { target in NativeBotEditor(bot: target.bot, openDetail: openDetail) }
+    }
+    private func preview(needsYou: Bool, working: Bool, bot: NativeBot, latest: AgentTask?) -> String {
+        if needsYou { return "Needs you" }
+        if bot.availability == "paused" { return "Paused" }
+        if let preview = latest?.preview.nonempty { return preview }
+        if working { return "Working…" }
+        return "No messages yet"
+    }
+}
+
 struct NativeBotEditor: View {
     @Environment(AppModel.self) private var model
     @Environment(\.dismiss) private var dismiss

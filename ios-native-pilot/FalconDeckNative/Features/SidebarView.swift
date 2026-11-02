@@ -17,6 +17,10 @@ struct SidebarView: View {
     @State private var reorder = false
     @State private var filters = false
     @AppStorage("native.sidebar.sort") private var sort = "last_updated"
+    @AppStorage("native.sidebar.layout") private var layout = "classic"
+    @State private var botTab = "bots"
+    private var botLayout: Bool { layout == "bots" }
+    private var showingBotHome: Bool { botLayout && botTab == "bots" }
     @State private var expanded: Set<String> = []
     @State private var limits: [String: Int] = [:]
     @State private var showHidden = false
@@ -45,19 +49,25 @@ struct SidebarView: View {
         let chatsOpen = chatsExpanded || !search.isEmpty
         let casual = projects.filter { $0.raw["kind"].string == "casual" }
         let plan = TaskPagePlan(connectionID: model.connectionID, token: model.syncIndex?.token, connected: model.connected, sort: sort,
-            scopes: initialScopes(projectGroups, casual: chatsOpen ? casual : [], folders: folders))
+            scopes: showingBotHome ? [] : initialScopes(projectGroups, casual: chatsOpen ? casual : [], folders: folders))
         List {
             Group {
                 sidebarAction("New chat", symbol: "square.and.pencil") { Task { if await model.newChat() != nil { openDetail() } } }
                     .disabled(!model.demo && !model.connected).accessibilityIdentifier("sidebar-new-chat")
-                sidebarAction("Activity", symbol: "tray.full", selected: model.selection == .activity) { navigate(.activity) }
                 ReviewsSidebarRow(selected: model.selection == .reviews) { navigate(.reviews) }
-                NativeBotsSection(search: search, openDetail: openDetail)
-                    .id(model.connectionID)
-                if !pins.isEmpty {
+                sidebarAction("Automations", symbol: "calendar.badge.clock", selected: model.selection == .automations) { navigate(.automations) }
+                if showingBotHome {
+                    NativeBotHomeRows(search: search, openDetail: openDetail)
+                        .id(model.connectionID)
+                } else if !botLayout {
+                    NativeBotsSection(search: search, openDetail: openDetail)
+                        .id(model.connectionID)
+                }
+                if !showingBotHome && !pins.isEmpty {
                     sectionHeading("Pinned", expanded: pinsOpen) { animate { pinsExpanded.toggle() } }
                     if pinsOpen { ForEach(pins) { taskLink($0, projectIcon: true) } }
                 }
+                if !showingBotHome {
                 sectionHeading("Projects", expanded: projectsOpen) {
                     animate { if projectsOpen { expanded.subtract(projectGroups.map(\.id)) } else { expanded.formUnion(projectGroups.map(\.id)) } }
                 }
@@ -93,6 +103,7 @@ struct SidebarView: View {
                 if !casual.isEmpty {
                     sectionHeading("Chats", expanded: chatsOpen) { animate { chatsExpanded.toggle() } }
                     if chatsOpen { chatContents(casual) }
+                }
                 }
                 if !search.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                     VStack(alignment: .leading, spacing: 8) {
@@ -131,6 +142,23 @@ struct SidebarView: View {
         .background(FD.background).navigationTitle("Tasks").navigationBarTitleDisplayMode(.inline)
         .searchable(text: $search, placement: .navigationBarDrawer(displayMode: .always), prompt: "Search tasks")
         .safeAreaInset(edge: .top, spacing: 0) { NativeSyncBanner() }
+        .safeAreaInset(edge: .bottom, spacing: 0) {
+            if botLayout {
+                HStack(spacing: 4) {
+                    ForEach([("bots", "Bots", "person.2"), ("sessions", "Sessions", "folder")], id: \.0) { tab, label, symbol in
+                        Button { botTab = tab } label: {
+                            Label(label, systemImage: symbol).font(.subheadline.weight(.medium))
+                                .frame(maxWidth: .infinity, minHeight: 44)
+                                .background(botTab == tab ? FD.raised : .clear, in: .rect(cornerRadius: 10))
+                                .contentShape(.rect)
+                        }.buttonStyle(.plain).foregroundStyle(botTab == tab ? FD.foreground : FD.muted)
+                            .accessibilityAddTraits(botTab == tab ? .isSelected : [])
+                            .accessibilityIdentifier("sidebar-tab-\(tab)")
+                    }
+                }.padding(6).background(FD.background)
+            }
+        }
+        .onChange(of: layout) { _, _ in botTab = "bots" }
         .overlay {
             if model.projects.isEmpty && model.tasks.isEmpty && model.hasSession && !model.hasLiveSnapshot {
                 NativeLoadingState(label: model.networkAvailable ? "Loading tasks…" : "Waiting for a connection")
@@ -162,6 +190,11 @@ struct SidebarView: View {
         }) {
             NavigationStack {
                 Form {
+                    Section("Layout") {
+                        Picker("Sidebar layout", selection: $layout) {
+                            Text("Classic").tag("classic"); Text("Bot focused").tag("bots")
+                        }.pickerStyle(.inline).labelsHidden()
+                    }.listRowBackground(FD.surface)
                     Section("Task order") {
                         Picker("Sort tasks", selection: $sort) {
                             Text("Last updated").tag("last_updated"); Text("Priority").tag("priority"); Text("Name").tag("alphabetical")

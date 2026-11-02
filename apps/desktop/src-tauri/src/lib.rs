@@ -27,8 +27,6 @@ mod dictation_dictionary;
 mod parakeet;
 mod sounds;
 
-/// Kept in sync with ACTIVITY_WINDOW_LABEL in src/activity-window-bridge.ts.
-const ACTIVITY_WINDOW_LABEL: &str = "activity";
 const HOST_SESSION_KEYRING_SERVICE: &str = "com.falcondeck.desktop.remote-host";
 const MAX_HOST_SESSION_SECRET_BYTES: usize = 128 * 1024;
 /// Matches the daemon's document attachment ceiling. Larger drops are rejected
@@ -1406,49 +1404,6 @@ async fn save_local_file_as(
         .map_err(|error| error.to_string())
 }
 
-/// Open (or re-focus) the detached Activity window.
-///
-/// Built here rather than from JS so the label, chrome, and size stay in one
-/// place with the main window's, and so the capability list — which is keyed
-/// by label — is the only thing gating it.
-#[tauri::command]
-fn open_activity_window(app: AppHandle) -> Result<(), String> {
-    if let Some(window) = app.get_webview_window(ACTIVITY_WINDOW_LABEL) {
-        // Already popped out, on whichever display the user left it.
-        window.unminimize().ok();
-        window.show().map_err(|error| error.to_string())?;
-        return window.set_focus().map_err(|error| error.to_string());
-    }
-
-    tauri::WebviewWindowBuilder::new(
-        &app,
-        ACTIVITY_WINDOW_LABEL,
-        tauri::WebviewUrl::App("activity-window.html".into()),
-    )
-    .title("FalconDeck Activity")
-    .title_bar_style(tauri::TitleBarStyle::Overlay)
-    .hidden_title(true)
-    .background_color(tauri::window::Color(9, 9, 11, 255))
-    .inner_size(1080.0, 900.0)
-    .min_inner_size(560.0, 420.0)
-    .build()
-    .map(|_| ())
-    .map_err(|error| error.to_string())
-}
-
-/// Raise the main window. The Activity window hands threads off to it, so the
-/// handoff has to bring the window forward too — otherwise the thread opens
-/// behind whatever the user is looking at.
-#[tauri::command]
-fn focus_main_window(app: AppHandle) -> Result<(), String> {
-    let Some(window) = app.get_webview_window("main") else {
-        return Err("FalconDeck's main window is not open.".to_string());
-    };
-    window.unminimize().ok();
-    window.show().map_err(|error| error.to_string())?;
-    window.set_focus().map_err(|error| error.to_string())
-}
-
 fn setup_menu(app: &tauri::App) -> Result<(), Box<dyn std::error::Error>> {
     use tauri::menu::{MenuBuilder, MenuItemBuilder, SubmenuBuilder};
 
@@ -1626,8 +1581,6 @@ pub fn run() {
             read_local_text_file,
             read_dropped_attachments,
             save_local_file_as,
-            open_activity_window,
-            focus_main_window,
             desktop_notifications::macos_notification_permission_state,
             desktop_notifications::desktop_user_present,
             desktop_notifications::request_macos_notification_permission,

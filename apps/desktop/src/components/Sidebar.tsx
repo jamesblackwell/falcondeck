@@ -1,12 +1,7 @@
 import { memo } from "react";
 import {
-  Activity,
-  Tickets,
   Inbox,
-  Blocks,
   CalendarClock,
-  PanelsTopLeft,
-  Puzzle,
 } from "lucide-react";
 
 import {
@@ -19,6 +14,7 @@ import { cn, Tooltip } from "@falcondeck/ui";
 import { reviewBadgeLabel } from "../review-inbox";
 
 import { shortcutHintTokens, useShortcutSettings } from "../shortcuts";
+import { useSidebarLayout, type SidebarLayoutMode } from "../sidebar-layout";
 import { SidebarOptionsMenu } from "./SidebarOptionsMenu";
 
 export type DesktopSidebarProps = WorkspaceSidebarProps & {
@@ -38,11 +34,6 @@ export type DesktopSidebarProps = WorkspaceSidebarProps & {
   onOpenScheduled?: () => void;
   scheduledOpen?: boolean;
   scheduledAttention?: boolean;
-  onOpenActivity?: () => void;
-  onPopOutActivity?: () => void;
-  activityOpen?: boolean;
-  activityCount?: number;
-  activityHasFailure?: boolean;
   onOpenExtensions?: () => void;
   extensionsOpen?: boolean;
   enabledExtensionCount?: number;
@@ -69,11 +60,6 @@ export const DesktopSidebar = memo(function DesktopSidebar({
   onOpenScheduled,
   scheduledOpen = false,
   scheduledAttention = false,
-  onOpenActivity,
-  onPopOutActivity,
-  activityOpen = false,
-  activityCount = 0,
-  activityHasFailure = false,
   onOpenExtensions,
   extensionsOpen = false,
   enabledExtensionCount = 0,
@@ -82,12 +68,20 @@ export const DesktopSidebar = memo(function DesktopSidebar({
   extensionPanels = [],
   activeExtensionPanelKey = null,
   onOpenExtensionPanel,
+  layoutMode: layoutModeProp,
+  onLayoutModeChange,
   ...props
-}: DesktopSidebarProps) {
+}: DesktopSidebarProps & {
+  onLayoutModeChange?: (mode: SidebarLayoutMode) => void;
+}) {
   const shortcutSettings = useShortcutSettings();
+  const [localLayoutMode, setLocalLayoutMode] = useSidebarLayout();
+  const layoutMode = layoutModeProp ?? localLayoutMode;
+  const handleLayoutModeChange = onLayoutModeChange ?? setLocalLayoutMode;
   return (
     <WorkspaceSidebar
       {...props}
+      layoutMode={layoutMode}
       newThreadShortcut={shortcutHintTokens(
         props.onNewChat ? "newChat" : "newThread",
         shortcutSettings,
@@ -102,76 +96,10 @@ export const DesktopSidebar = memo(function DesktopSidebar({
       )}
       headerClassName="h-12 justify-center gap-0 py-0 pl-20 pr-2"
       topNavigation={
-        onOpenTickets ||
         onOpenReviews ||
         onOpenScheduled ||
-        onOpenActivity ||
-        onOpenExtensions ||
-        onOpenPlugins ||
         extensionPanels.length > 0 ? (
           <>
-            {onOpenActivity ? (
-              // The detach action rides on the row rather than taking a line
-              // of its own: it swaps in for the count on hover, the way a
-              // native list reveals row actions.
-              <div className="group relative">
-                <Tooltip
-                  label="Activity"
-                  shortcut={shortcutHintTokens(
-                    "openActivity",
-                    shortcutSettings,
-                  )}
-                >
-                  <button
-                    type="button"
-                    onClick={onOpenActivity}
-                    className={cn(
-                      "fd-focus flex w-full items-center gap-2 rounded-[var(--fd-radius-md)] px-3 py-2 text-left text-[length:var(--fd-text-sm)] transition-colors",
-                      activityOpen
-                        ? "bg-surface-3 text-fg-primary"
-                        : "text-fg-secondary hover:bg-surface-3 hover:text-fg-primary",
-                    )}
-                    aria-current={activityOpen ? "page" : undefined}
-                    aria-label="Activity"
-                  >
-                  <Activity aria-hidden="true" className="h-4 w-4 shrink-0" />
-                  <span className="min-w-0 flex-1">Activity</span>
-                  {activityCount > 0 ? (
-                    <span
-                      className={cn(
-                        "rounded-full px-1.5 py-0.5 text-[length:var(--fd-text-2xs)] font-semibold",
-                        activityHasFailure
-                          ? "bg-danger-muted text-danger"
-                          : "bg-warning-muted text-warning",
-                        onPopOutActivity &&
-                          "transition-opacity group-hover:opacity-0 group-focus-within:opacity-0",
-                      )}
-                    >
-                      {activityCount}
-                    </span>
-                  ) : null}
-                  </button>
-                </Tooltip>
-                {onPopOutActivity ? (
-                  <Tooltip label="Open in a new window">
-                    <button
-                      type="button"
-                      onClick={onPopOutActivity}
-                      className="fd-focus absolute right-1.5 top-1/2 flex h-6 w-6 -translate-y-1/2 items-center justify-center rounded-[var(--fd-radius-sm)] text-fg-muted opacity-0 transition-opacity hover:bg-surface-4 hover:text-fg-primary focus-visible:opacity-100 group-hover:opacity-100"
-                      aria-label="Open Activity in a new window"
-                    >
-                      <PanelsTopLeft aria-hidden="true" className="h-3.5 w-3.5" />
-                    </button>
-                  </Tooltip>
-                ) : null}
-              </div>
-            ) : null}
-            {onOpenTickets ? (
-              <button type="button" onClick={onOpenTickets} aria-current={ticketsOpen ? "page" : undefined} aria-label="Tickets"
-                className={cn("fd-focus flex w-full items-center gap-2 rounded-[var(--fd-radius-md)] px-3 py-2 text-left text-[length:var(--fd-text-sm)] transition-colors", ticketsOpen ? "bg-surface-3 text-fg-primary" : "text-fg-secondary hover:bg-surface-3 hover:text-fg-primary")}>
-                <Tickets aria-hidden="true" className="h-4 w-4 shrink-0" /><span>Tickets</span>
-              </button>
-            ) : null}
             {onOpenReviews ? (
               <button type="button" onClick={onOpenReviews} aria-current={reviewsOpen ? "page" : undefined}
                 aria-label={reviewCount > 0 ? `Reviews, ${reviewCount} open` : "Reviews"}
@@ -184,49 +112,6 @@ export const DesktopSidebar = memo(function DesktopSidebar({
                   </span>
                 ) : null}
               </button>
-            ) : null}
-            {onOpenExtensions ? (
-              <Tooltip label="Extensions">
-                <button
-                  type="button"
-                  onClick={onOpenExtensions}
-                  className={cn(
-                    "fd-focus flex w-full items-center gap-2 rounded-[var(--fd-radius-md)] px-3 py-2 text-left text-[length:var(--fd-text-sm)] transition-colors",
-                    extensionsOpen
-                      ? "bg-surface-3 text-fg-primary"
-                      : "text-fg-secondary hover:bg-surface-3 hover:text-fg-primary",
-                  )}
-                  aria-current={extensionsOpen ? "page" : undefined}
-                  aria-label="Extensions"
-                >
-                  <Blocks aria-hidden="true" className="h-4 w-4 shrink-0" />
-                  <span className="min-w-0 flex-1">Extensions</span>
-                  {enabledExtensionCount > 0 ? (
-                    <span className="text-[length:var(--fd-text-2xs)] tabular-nums text-fg-muted">
-                      {enabledExtensionCount}
-                    </span>
-                  ) : null}
-                </button>
-              </Tooltip>
-            ) : null}
-            {onOpenPlugins ? (
-              <Tooltip label="Plugins">
-                <button
-                  type="button"
-                  onClick={onOpenPlugins}
-                  className={cn(
-                    "fd-focus flex w-full items-center gap-2 rounded-[var(--fd-radius-md)] px-3 py-2 text-left text-[length:var(--fd-text-sm)] transition-colors",
-                    pluginsOpen
-                      ? "bg-surface-3 text-fg-primary"
-                      : "text-fg-secondary hover:bg-surface-3 hover:text-fg-primary",
-                  )}
-                  aria-current={pluginsOpen ? "page" : undefined}
-                  aria-label="Plugins"
-                >
-                  <Puzzle aria-hidden="true" className="h-4 w-4 shrink-0" />
-                  <span className="min-w-0 flex-1">Plugins</span>
-                </button>
-              </Tooltip>
             ) : null}
             {onOpenScheduled ? (
               <Tooltip label="Automations">
@@ -265,17 +150,24 @@ export const DesktopSidebar = memo(function DesktopSidebar({
         ) : null
       }
       footer={
-        onOpenSettings || onOpenUsage || onOpenKeyboardShortcuts || onCheckForUpdates ? (
-          <SidebarOptionsMenu
-            onOpenSettings={onOpenSettings}
-            settingsOpen={settingsOpen}
-            onOpenUsage={onOpenUsage}
-            onOpenKeyboardShortcuts={onOpenKeyboardShortcuts}
-            onOpenSpeechSettings={onOpenSpeechSettings}
-            onCheckForUpdates={onCheckForUpdates}
-            updateStatus={updateStatus}
-          />
-        ) : null
+        <SidebarOptionsMenu
+          onOpenSettings={onOpenSettings}
+          settingsOpen={settingsOpen}
+          onOpenUsage={onOpenUsage}
+          onOpenKeyboardShortcuts={onOpenKeyboardShortcuts}
+          onOpenSpeechSettings={onOpenSpeechSettings}
+          onCheckForUpdates={onCheckForUpdates}
+          updateStatus={updateStatus}
+          layoutMode={layoutMode}
+          onLayoutModeChange={handleLayoutModeChange}
+          onOpenExtensions={onOpenExtensions}
+          extensionsOpen={extensionsOpen}
+          enabledExtensionCount={enabledExtensionCount}
+          onOpenPlugins={onOpenPlugins}
+          pluginsOpen={pluginsOpen}
+          onOpenTickets={onOpenTickets}
+          ticketsOpen={ticketsOpen}
+        />
       }
     />
   );

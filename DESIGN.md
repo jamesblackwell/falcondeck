@@ -221,7 +221,7 @@ When adding a new shared pattern:
 
 ## Main views
 
-Every surface that replaces the conversation column is a **main view**: Activity,
+Every surface that replaces the conversation column is a **main view**:
 Extensions, Plugins, Automations, Settings, and every extension `panels`
 contribution (Notes, Kanban, and later packages).
 
@@ -266,7 +266,7 @@ third max-width.
 - Search: `SearchField`, full measure of the column, not a compact chip in the
   heading
 - Section labels: `MainViewSection` (`fd-type-eyebrow`, not a second `h1`)
-- Used by: Activity, Extensions, Plugins, Automations, and declarative
+- Used by: Extensions, Plugins, Automations, and declarative
   extension panels (the host wraps those automatically)
 
 **Workspace** — spatial tools that need the whole frame.
@@ -386,25 +386,6 @@ Every interactive element must show a visible keyboard focus indicator.
 - Never use `outline-none` without providing a replacement indicator.
 - An action that is only revealed on hover must also reveal itself on `focus-visible`, or keyboard users can tab to an invisible control.
 - Icon-only controls need an `aria-label` on web and an `accessibilityLabel` plus `accessibilityRole="button"` on mobile. A `title` alone is not sufficient.
-
-### Activity inbox (desktop sidebar)
-
-- Activity is a sidebar mode, not a main view: the inbox replaces the project list and the main pane stays the reading pane for the selected task.
-- One dense, hairline-divided list. "Needs you" (blocked, failed) is pinned above a newest-first feed grouped by day. Unread rows are bold; reading a task un-bolds it in place rather than moving it.
-- The header is one row: back, title, pop-out, and new chat. All / Unread / Running are compact pills beneath it. Rows read title and time, then project · preview.
-- All / Unread / Running filters. The open task stays visible where it was until the selection moves, even if it no longer matches.
-- Rows hold still. A task moves up only when an agent finishes work the user has not watched (a turn ending, or new activity on an idle task); streaming, retitles, and activity on the open task leave it in place. While the pointer is over the list nothing reflows: read and answered rows stay, new ones wait, and it all settles when the pointer leaves.
-- Click or ↑↓/J/K previews a task without moving focus; Enter opens it into the composer; E archives and advances to the next task; Escape returns to projects.
-- Archive is one click from the inbox row and the task header, so every archive offers Undo in a toast instead of a confirm step.
-
-### Activity previews (detached window)
-
-- Click a task to select it; Enter, Space, or double-click opens a modal preview.
-- Arrow keys and J/K move through the activity list. R marks the selected task read.
-- The preview uses the conversation renderer and loads recent history without changing the selected task in the main app.
-- Successfully loaded messages are marked read up to the loaded activity sequence while the window is focused; partial or failed loads stay unread.
-- Enter sends a quick reply, Shift+Enter inserts a newline, and Escape returns to Activity. Unsent drafts survive closing a preview while Activity stays mounted.
-- “Open task” opens the full conversation. The detached Activity window uses the same preview through the main window's connection.
 
 ### Shortcut tooltips
 

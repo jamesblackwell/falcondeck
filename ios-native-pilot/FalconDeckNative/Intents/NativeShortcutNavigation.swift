@@ -1,7 +1,7 @@
 import Foundation
 
 struct NativeShortcutNavigation: Sendable {
-    enum Destination: Sendable { case newTask(projectID: String?, prompt: String), activity }
+    enum Destination: Sendable { case newTask(projectID: String?, prompt: String) }
     let pairing: String
     let destination: Destination
 }
@@ -10,7 +10,7 @@ struct NativeShortcutNavigation: Sendable {
     func applyPendingShortcut() {
         guard !restoringSession, !pendingShortcuts.isEmpty else { return }
         // Shortcuts can finish parameter resolution before startup restores local
-        // input. Keep every accepted prompt in order, even if Activity follows it.
+        // input. Keep every accepted prompt in order.
         let requests = pendingShortcuts
         pendingShortcuts.removeAll(); pendingSelection = nil
         for request in requests { applyShortcut(request) }
@@ -22,7 +22,6 @@ struct NativeShortcutNavigation: Sendable {
             return
         }
         switch request.destination {
-        case .activity: revealDetail(.activity)
         case .newTask(let projectID, let prompt):
             let currentProject: Project? = {
                 if case .task(let id) = selection { return projects.first { $0.id == task(id)?.projectID } }

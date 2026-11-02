@@ -29,7 +29,6 @@ import {
   composerProviderFor,
   composerSelectionFor,
   countAwaitingResponseThreads,
-  countActivityEntries,
   conversationItemsForSelection,
   deriveExtensionPanels,
   deriveExtensionSidebarFilters,
@@ -155,7 +154,6 @@ import {
   isTauriDesktop,
   listDesktopEditors,
   localPathKind,
-  openActivityWindow,
   openExternalUrl,
   openLocalPath,
   openLocalPathInDefaultEditor,
@@ -167,17 +165,6 @@ import {
 } from "./api";
 import { CONNECTION_COPY } from "./connection-copy";
 import { useNativeFileDrop } from "./native-file-drop";
-import {
-  ACTIVITY_WINDOW_EVENTS,
-  ACTIVITY_WINDOW_LABEL,
-  activityStateChanged,
-  projectActivityWindowState,
-  type ActivityPreviewMessage,
-  type ActivityRespondMessage,
-  type ActivityStartTaskMessage,
-  type ActivityThreadRef,
-  type ActivityWindowState,
-} from "./activity-window-bridge";
 import {
   readPersistedComposerState,
   readStoredDrafts,
@@ -430,7 +417,6 @@ function AppInner() {
   // renders from the live keymap rather than a hardcoded string.
   const paletteShortcutHints = useMemo(
     () => ({
-      activity: shortcutHintTokens("openActivity", shortcutSettings),
       settings: shortcutHintTokens("openSettings", shortcutSettings),
       usage: shortcutHintTokens("openUsage", shortcutSettings),
       keyboardShortcuts: shortcutHintTokens(
@@ -518,7 +504,6 @@ function AppInner() {
   const [isScheduledOpen, setIsScheduledOpen] = useState(false);
   const [automationOpenRequest, setAutomationOpenRequest] = useState<{ id: string; key: number } | null>(null);
   const automationOpenKey = useRef(0);
-  const [isActivityOpen, setIsActivityOpen] = useState(false);
   const [isTerminalOpen, setIsTerminalOpen] = useState(false);
   const [terminalMounted, setTerminalMounted] = useState(false);
   const [terminalCreateKey, setTerminalCreateKey] = useState(0);
@@ -1511,11 +1496,6 @@ function AppInner() {
     viewSnapshot?.workspaces,
   ]);
   /* eslint-enable react-hooks/refs */
-  const activityCounts = useMemo(
-    () =>
-      countActivityEntries(groups, viewSnapshot?.interactive_requests ?? []),
-    [groups, viewSnapshot?.interactive_requests],
-  );
   const conversationItems: ConversationItem[] = useMemo(() => {
     const selectedItems = conversationItemsForSelection(
       selectedWorkspaceId,
@@ -4292,38 +4272,6 @@ function AppInner() {
     };
   }, [api, handleOpenAutomation, handleSelectThread, toast, isRemoteWorkspaceSelected, selectedThread, selectedWorkspace, snapshot?.preferences.bots, snapshot?.threads, workspaceHostBadges]);
 
-  // Activity is a sidebar mode: the inbox replaces the project list and the
-  // main pane stays the reading pane for whichever task is selected.
-  const handleShowActivity = useCallback(() => {
-    if (!sidebarVisible) toggleSidebar();
-    setIsActivityOpen(true);
-    window.requestAnimationFrame(() => {
-      document
-        .querySelector<HTMLElement>("[data-activity-inbox]")
-        ?.focus({ preventScroll: true });
-    });
-  }, [sidebarVisible, toggleSidebar]);
-  const handleOpenActivity = useCallback(() => {
-    if (isActivityOpen && sidebarVisible) setIsActivityOpen(false);
-    else handleShowActivity();
-  }, [handleShowActivity, isActivityOpen, sidebarVisible]);
-
-  // Arrowing through the inbox previews each task without pulling focus
-  // into its composer; Enter in the inbox opens it properly.
-  const handlePreviewActivityThread = useCallback(
-    (workspaceId: string, threadId: string) => {
-      setIsSettingsOpen(false);
-      setIsScheduledOpen(false);
-      setIsTicketsOpen(false);
-      setIsExtensionsOpen(false);
-      setIsPluginsOpen(false);
-      setActiveExtensionPanelKey(null);
-      setSelectedWorkspaceId(workspaceId);
-      setSelectedThreadId(threadId);
-    },
-    [setSelectedWorkspaceId, setSelectedThreadId],
-  );
-
   const handleOpenExtensions = useCallback(() => {
     setIsSettingsOpen(false);
     setIsScheduledOpen(false);
@@ -4341,39 +4289,6 @@ function AppInner() {
     setIsPluginsOpen(true);
     setActiveExtensionPanelKey(null);
   }, []);
-
-  // Detaching gives Activity its own screen, so the sidebar goes back to
-  // projects.
-  const handlePopOutActivity = useCallback(() => {
-    setIsActivityOpen(false);
-    void openActivityWindow().catch((error) => {
-      setIsActivityOpen(true);
-      toast({
-        title: "Couldn’t open the Activity window",
-        description:
-          error instanceof Error ? error.message : "Unknown window error",
-        variant: "danger",
-      });
-    });
-  }, [toast]);
-
-  const sidebarActivity = useMemo(
-    () =>
-      isActivityOpen
-        ? {
-            interactiveRequests: viewSnapshot?.interactive_requests ?? [],
-            onPreviewThread: handlePreviewActivityThread,
-            onClose: () => setIsActivityOpen(false),
-            onPopOut: isTauriDesktop() ? handlePopOutActivity : undefined,
-          }
-        : null,
-    [
-      handlePopOutActivity,
-      handlePreviewActivityThread,
-      isActivityOpen,
-      viewSnapshot?.interactive_requests,
-    ],
-  );
 
   // Same entry point as the keyboard binding, so the sidebar's search button
   // toggles the palette rather than stacking opens.
@@ -4750,8 +4665,6 @@ function AppInner() {
     ],
   );
 
-  // The Activity inbox moves the reading pane on to the next task once the
-  // open one leaves the list, so the header only has to archive.
   const handleArchiveOpenThread = useCallback(() => {
     if (!selectedWorkspaceId || !selectedThreadId) return;
     void handleArchiveThread(selectedWorkspaceId, selectedThreadId).catch(
@@ -5265,393 +5178,6 @@ function AppInner() {
     [apiFor, setActionError, setSnapshot, viewSnapshot?.threads],
   );
 
-  const handleLoadActivityPreview = useCallback(
-    async (workspaceId: string, threadId: string) => {
-      const client = apiFor(workspaceId);
-      if (!client) throw new Error(CONNECTION_COPY.notConnected);
-      return client.threadDetail(workspaceId, threadId, {
-        mode: "tail",
-        limit: 60,
-      });
-    },
-    [apiFor],
-  );
-
-  const activitySendingRef = useRef(new Set<string>());
-  const handleSendActivityPreview = useCallback(
-    async (workspaceId: string, threadId: string, text: string) => {
-      const client = apiFor(workspaceId);
-      if (!client) throw new Error(CONNECTION_COPY.notConnected);
-      const key = `${workspaceId}:${threadId}`;
-      if (activitySendingRef.current.has(key))
-        throw new Error("A reply is already being sent to this task.");
-      activitySendingRef.current.add(key);
-      try {
-        const { workspace, thread, is_partial } = await client.threadDetail(
-          workspaceId,
-          threadId,
-          { mode: "tail", limit: 1 },
-        );
-        if (is_partial)
-          throw new Error("Task is still loading. Try again shortly.");
-        await client.sendTurn({
-          workspace_id: workspaceId,
-          thread_id: threadId,
-          inputs: [{ type: "text", text }],
-          selected_skills: selectedSkillsFromText(
-            text,
-            composerSkillCatalog(
-              liveSkillsRef.current,
-              workspace,
-              thread.provider,
-            ),
-          ),
-          provider: thread.provider,
-          model_id: thread.agent.model_id,
-          reasoning_effort: thread.agent.reasoning_effort,
-          approval_policy: thread.agent.approval_policy,
-          service_tier: thread.agent.service_tier,
-          permission_mode: thread.agent.permission_mode,
-          sandbox_mode: thread.agent.sandbox_mode,
-          steer: false,
-          user_item_id: generateUserItemId(),
-        });
-      } finally {
-        activitySendingRef.current.delete(key);
-      }
-    },
-    [apiFor],
-  );
-
-  /* ================================================================
-     Detached Activity window.
-
-     It renders Activity on another screen but holds no client of its
-     own, so this window answers for it: push the projection whenever
-     it changes, and perform the actions it asks for. Nothing here runs
-     until the window announces itself.
-     ================================================================ */
-  const [activityWindowOpen, setActivityWindowOpen] = useState(false);
-  const [activityClockMs, setActivityClockMs] = useState(() => Date.now());
-  const lastActivityStateRef = useRef<ActivityWindowState | null>(null);
-
-  // The recently-finished trail ages out, so the projection needs a clock —
-  // but a coarse one, or every tick would re-push an identical queue.
-  useEffect(() => {
-    if (!activityWindowOpen) return;
-    const timer = window.setInterval(
-      () => setActivityClockMs(Date.now()),
-      60_000,
-    );
-    return () => window.clearInterval(timer);
-  }, [activityWindowOpen]);
-
-  const activityWindowState = useMemo(
-    () =>
-      projectActivityWindowState(
-        groups,
-        viewSnapshot?.interactive_requests ?? [],
-        workspaceHostBadges,
-        Boolean(selectedWorkspaceId),
-        activityClockMs,
-        selectedWorkspaceId,
-      ),
-    [
-      activityClockMs,
-      groups,
-      selectedWorkspaceId,
-      viewSnapshot?.interactive_requests,
-      workspaceHostBadges,
-    ],
-  );
-
-  const handleActivityStartTask = useCallback(
-    async ({
-      workspaceId,
-      prompt,
-    }: Omit<ActivityStartTaskMessage, "callId">) => {
-      const workspace = groups.find(
-        (group) => group.workspace.id === workspaceId,
-      )?.workspace;
-      const client = apiFor(workspaceId);
-      if (!workspace || !client)
-        throw new Error("That project is unavailable.");
-      const blockReason = workspaceSendBlockReason(
-        workspace,
-        providerForThread(null, workspace),
-      );
-      if (blockReason) throw new Error(blockReason);
-
-      const stickyProvider = composerProviderFor(
-        persistedComposerSelections,
-        workspace.path,
-      );
-      const provider =
-        stickyProvider &&
-        workspaceProviderOptions(workspace).some(
-          (option) => option.provider === stickyProvider,
-        )
-          ? stickyProvider
-          : providerForThread(null, workspace);
-      const preferred = composerSelectionFor(
-        persistedComposerSelections,
-        workspace.path,
-        provider,
-      );
-      const modelId = resolveThreadModelId(
-        null,
-        workspace,
-        preferred?.modelId,
-        provider,
-      );
-      const capabilities = workspaceAgentCapabilities(workspace, provider);
-      const permissionMode = resolvePermissionMode(
-        preferred?.permissionMode,
-        capabilities.permission_modes,
-      );
-      const sandboxMode = resolvePersistedMode(
-        preferred?.sandboxMode,
-        capabilities.sandbox_modes,
-      );
-      const collaborationModes = workspaceCollaborationModes(
-        workspace,
-        provider,
-      );
-      const collaborationModeId =
-        collaborationModes.find((mode) => mode.mode === "default")?.id ??
-        collaborationModes[0]?.id ??
-        null;
-      const effort =
-        resolveReasoningEffort(
-          null,
-          workspace,
-          modelId,
-          preferred?.effort,
-          provider,
-        ) ?? "medium";
-      const model =
-        workspaceModels(workspace, provider).find(
-          (entry) => entry.id === modelId,
-        ) ?? null;
-      const serviceTier = resolveServiceTier(
-        preferred?.serviceTier ?? model?.default_service_tier,
-        model,
-      );
-
-      const handle = await client.startThread({
-        workspace_id: workspaceId,
-        provider,
-        model_id: modelId,
-        collaboration_mode_id: collaborationModeId,
-        approval_policy: approvalPolicyForProvider(provider, permissionMode),
-        permission_mode: permissionMode,
-        sandbox_mode: sandboxMode,
-        isolation: "project_folder",
-      });
-      setSnapshot((current) =>
-        current
-          ? {
-              ...current,
-              workspaces: current.workspaces.map((entry) =>
-                entry.id === handle.workspace.id ? handle.workspace : entry,
-              ),
-              threads: [
-                handle.thread,
-                ...current.threads.filter(
-                  (entry) => entry.id !== handle.thread.id,
-                ),
-              ],
-            }
-          : current,
-      );
-      await client.sendTurn({
-        workspace_id: workspaceId,
-        thread_id: handle.thread.id,
-        inputs: [{ type: "text", text: prompt.trim() }],
-        selected_skills: selectedSkillsFromText(
-          prompt,
-          composerSkillCatalog(liveSkillsRef.current, workspace, provider),
-        ),
-        provider,
-        model_id: modelId,
-        reasoning_effort: effort,
-        approval_policy: approvalPolicyForProvider(provider, permissionMode),
-        service_tier: serviceTierForTurn(serviceTier, model),
-        permission_mode: permissionMode,
-        sandbox_mode: sandboxMode,
-        steer: false,
-        user_item_id: generateUserItemId(),
-      });
-    },
-    [
-      apiFor,
-      groups,
-      persistedComposerSelections,
-      setSnapshot,
-    ],
-  );
-
-  useEffect(() => {
-    if (!isTauriDesktop()) return;
-    let disposed = false;
-    const unlisteners: (() => void)[] = [];
-    const track = (pending: Promise<() => void>) => {
-      void pending.then((off) => {
-        if (disposed) off();
-        else unlisteners.push(off);
-      });
-    };
-
-    void import("@tauri-apps/api/event").then(({ emit, listen }) => {
-      if (disposed) return;
-
-      track(
-        listen(ACTIVITY_WINDOW_EVENTS.ready, () => {
-          // A reload leaves the window with no state and us none the wiser,
-          // so treat every announcement as "send everything again".
-          lastActivityStateRef.current = null;
-          setActivityWindowOpen(true);
-        }),
-      );
-      track(
-        listen(ACTIVITY_WINDOW_EVENTS.closed, () =>
-          setActivityWindowOpen(false),
-        ),
-      );
-      track(
-        listen<ActivityThreadRef>(ACTIVITY_WINDOW_EVENTS.openThread, (event) =>
-          handleSelectThread(event.payload.workspaceId, event.payload.threadId),
-        ),
-      );
-      track(
-        listen<ActivityThreadRef>(ACTIVITY_WINDOW_EVENTS.markRead, (event) => {
-          void handleMarkThreadRead(
-            event.payload.workspaceId,
-            event.payload.threadId,
-            event.payload.readSeq,
-          );
-        }),
-      );
-      track(
-        listen(ACTIVITY_WINDOW_EVENTS.newThread, () => {
-          if (selectedWorkspaceId) handleNewThread(selectedWorkspaceId);
-        }),
-      );
-      track(
-        listen<ActivityPreviewMessage>(
-          ACTIVITY_WINDOW_EVENTS.preview,
-          (event) => {
-            const { callId, workspaceId, threadId, text } = event.payload;
-            void (
-              text === undefined
-                ? handleLoadActivityPreview(workspaceId, threadId)
-                : handleSendActivityPreview(workspaceId, threadId, text)
-            )
-              .then((detail) =>
-                emit(ACTIVITY_WINDOW_EVENTS.previewResult, { callId, detail }),
-              )
-              .catch((error: unknown) =>
-                emit(ACTIVITY_WINDOW_EVENTS.previewResult, {
-                  callId,
-                  error:
-                    error instanceof Error
-                      ? error.message
-                      : "Activity action failed",
-                }),
-              );
-          },
-        ),
-      );
-      track(
-        listen<ActivityStartTaskMessage>(
-          ACTIVITY_WINDOW_EVENTS.startTask,
-          (event) => {
-            const { callId, workspaceId, prompt } = event.payload;
-            void handleActivityStartTask({ workspaceId, prompt })
-              .then(() =>
-                emit(ACTIVITY_WINDOW_EVENTS.startTaskResult, { callId }),
-              )
-              .catch((error: unknown) =>
-                emit(ACTIVITY_WINDOW_EVENTS.startTaskResult, {
-                  callId,
-                  error:
-                    error instanceof Error
-                      ? error.message
-                      : "Failed to start task",
-                }),
-              );
-          },
-        ),
-      );
-      track(
-        listen<ActivityRespondMessage>(
-          ACTIVITY_WINDOW_EVENTS.respond,
-          (event) => {
-            const { callId, request, response } = event.payload;
-            void handleInteractiveResponseCallback(request, response)
-              .then(() =>
-                emit(ACTIVITY_WINDOW_EVENTS.respondResult, { callId }),
-              )
-              .catch((error: unknown) =>
-                emit(ACTIVITY_WINDOW_EVENTS.respondResult, {
-                  callId,
-                  error:
-                    error instanceof Error
-                      ? error.message
-                      : "Failed to send your response",
-                }),
-              );
-          },
-        ),
-      );
-    });
-
-    return () => {
-      disposed = true;
-      for (const off of unlisteners) off();
-    };
-  }, [
-    handleInteractiveResponseCallback,
-    handleActivityStartTask,
-    handleLoadActivityPreview,
-    handleSendActivityPreview,
-    handleMarkThreadRead,
-    handleNewThread,
-    handleSelectThread,
-    selectedWorkspaceId,
-  ]);
-
-  // Reloading the main window (an update, dev HMR) loses the fact that the
-  // Activity window is out there; it does not re-announce, so ask the frame.
-  useEffect(() => {
-    if (!isTauriDesktop()) return;
-    let disposed = false;
-    void import("@tauri-apps/api/webviewWindow").then(
-      async ({ getAllWebviewWindows }) => {
-        const windows = await getAllWebviewWindows();
-        if (disposed) return;
-        if (windows.some((window) => window.label === ACTIVITY_WINDOW_LABEL)) {
-          setActivityWindowOpen(true);
-        }
-      },
-    );
-    return () => {
-      disposed = true;
-    };
-  }, []);
-
-  useEffect(() => {
-    if (!activityWindowOpen || !isTauriDesktop()) return;
-    if (
-      !activityStateChanged(lastActivityStateRef.current, activityWindowState)
-    )
-      return;
-    lastActivityStateRef.current = activityWindowState;
-    void import("@tauri-apps/api/event").then(({ emit }) =>
-      emit(ACTIVITY_WINDOW_EVENTS.state, activityWindowState),
-    );
-  }, [activityWindowOpen, activityWindowState]);
-
   const handleMarkThreadUnread = useCallback(
     async (workspaceId: string, threadId: string) => {
       const client = apiFor(workspaceId);
@@ -6047,9 +5573,6 @@ function AppInner() {
           setIsExtensionsOpen(false);
           setIsPluginsOpen(false);
           break;
-        case "openActivity":
-          handleOpenActivity();
-          break;
         case "openUsage":
           handleOpenUsage();
           break;
@@ -6173,7 +5696,6 @@ function AppInner() {
     handleAddProject,
     handleNewChat,
     handleNewThread,
-    handleOpenActivity,
     handleOpenKeyboardShortcuts,
     handleOpenProjectMenu,
     handleOpenUsage,
@@ -6279,7 +5801,6 @@ function AppInner() {
             onOpenSettings={handleOpenSettings}
             onOpenBackup={handleOpenBackupSettings}
             onOpenUsage={handleOpenUsage}
-            onOpenActivity={handleShowActivity}
             onOpenKeyboardShortcuts={handleOpenKeyboardShortcuts}
             onOpenPlugins={handleOpenPlugins}
             onSearchMessages={handleSearchThreadMessages}
@@ -6358,18 +5879,6 @@ function AppInner() {
             reviewCount={reviewInbox.openCount}
             onOpenScheduled={handleOpenScheduled}
             scheduledOpen={isScheduledOpen}
-            onOpenActivity={handleOpenActivity}
-            onPopOutActivity={
-              isTauriDesktop() ? handlePopOutActivity : undefined
-            }
-            activityOpen={isActivityOpen}
-            activity={sidebarActivity}
-            activityCount={
-              activityCounts.blocked +
-              activityCounts.failed +
-              activityCounts.ready
-            }
-            activityHasFailure={activityCounts.failed > 0}
             onOpenExtensions={handleOpenExtensions}
             extensionsOpen={isExtensionsOpen}
             onOpenPlugins={handleOpenPlugins}

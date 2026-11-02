@@ -334,7 +334,7 @@ private actor ReadStateRelay: RelayServing {
         let model = setup(task, relay: relay)
         let mark = Task { await model.markRead(task, unread: true) }
         await relay.waitForUnread()
-        model.selection = .activity
+        model.selection = .reviews
         model.selection = .task(task.id)
         await relay.finishUnread()
         let succeeded = await mark.value

@@ -84,10 +84,46 @@ function botActivity(bot: BotProfile, tasks: ThreadSummary[]) {
   return related.some((task) => task.status === "running") ? "working" : null;
 }
 
+function botPreview(bot: BotProfile, tasks: ThreadSummary[]) {
+  const related = tasks
+    .filter(
+      (task) =>
+        task.id === bot.thread_id ||
+        (task.origin?.kind === "agent_spawn" &&
+          (task.origin.parent_thread_id === bot.thread_id ||
+            bot.previous_thread_ids?.includes(task.origin.parent_thread_id))),
+    )
+    .sort((a, b) => b.updated_at.localeCompare(a.updated_at));
+  const latest = related[0];
+  return {
+    latest,
+    text:
+      latest?.last_message_preview ??
+      (latest?.status === "running"
+        ? "Working…"
+        : latest?.status === "waiting_for_input"
+          ? "Waiting for you"
+          : "No messages yet"),
+  };
+}
+
+function botTimeAgo(dateStr: string | undefined) {
+  if (!dateStr) return null;
+  const seconds = Math.floor((Date.now() - new Date(dateStr).getTime()) / 1000);
+  if (Number.isNaN(seconds)) return null;
+  if (seconds < 60) return "now";
+  const minutes = Math.floor(seconds / 60);
+  if (minutes < 60) return `${minutes}m`;
+  const hours = Math.floor(minutes / 60);
+  if (hours < 24) return `${hours}h`;
+  return `${Math.floor(hours / 24)}d`;
+}
+
 export function BotSidebar({
   bots = EMPTY_BOTS,
   botApi,
   botNumberShortcuts = false,
+  focused = false,
   groups,
   selectedThreadId,
   onSelectThread,
@@ -97,6 +133,8 @@ export function BotSidebar({
   selectedThreadId: string | null;
   onSelectThread: (workspace: string, thread: string) => void;
   onOpenContextMenu?: (target: ThreadContextMenuState) => void;
+  /** Large iMessage-style rows with a last-message preview (bot layout). */
+  focused?: boolean;
 }) {
   const [editor, setEditor] = useState<BotProfile | "new" | null>(null);
   const icons = useMemo(() => resolveBotIcons(bots), [bots]);
@@ -150,6 +188,7 @@ export function BotSidebar({
         );
         const icon = icons.get(bot.id);
         const selected = selectedThreadId === bot.thread_id;
+        const preview = focused ? botPreview(bot, tasks) : null;
         return (
           <div
             key={bot.id}
@@ -177,7 +216,10 @@ export function BotSidebar({
             <button
               type="button"
               title="Drag or press Alt+↑/↓ to reorder"
-              className="fd-focus-inset flex min-w-0 flex-1 items-center gap-2 rounded-[var(--fd-radius-sm)] py-2 pl-2.5 text-left"
+              className={cn(
+                "fd-focus-inset flex min-w-0 flex-1 items-center rounded-[var(--fd-radius-sm)] text-left",
+                focused ? "gap-3 py-2.5 pl-2" : "gap-2 py-2 pl-2.5",
+              )}
               onClick={(event) => {
                 // A drag that ends over the row is not a click.
                 if (reorder.consumeClick()) {
@@ -192,6 +234,45 @@ export function BotSidebar({
                 reorder.move(bot.id, index + (event.key === "ArrowUp" ? -1 : 1));
               }}
             >
+              {focused ? (
+                <>
+                  <span className="relative flex h-11 w-11 shrink-0 items-center justify-center rounded-full bg-surface-3">
+                    {icon ? (
+                      <BotMark icon={icon} size={26} />
+                    ) : (
+                      <Bot aria-hidden="true" className="h-6 w-6 text-fg-muted" />
+                    )}
+                    {activity === "needs_input" ? (
+                      <span className="absolute -right-0.5 -top-0.5 h-3 w-3 rounded-full border-2 border-surface-1 bg-warning" />
+                    ) : null}
+                  </span>
+                  <span className="min-w-0 flex-1">
+                    <span className="flex items-baseline gap-2">
+                      <span
+                        className={cn(
+                          "min-w-0 flex-1 truncate text-[length:var(--fd-text-md)] font-medium",
+                          selected || home?.attention.unread
+                            ? "text-fg-primary"
+                            : (bot.status ?? "active") === "paused"
+                              ? "text-fg-muted"
+                              : "text-fg-primary",
+                        )}
+                      >
+                        {bot.name}
+                      </span>
+                      {botTimeAgo(preview?.latest?.updated_at) ? (
+                        <span className="fd-type-meta shrink-0 tabular-nums text-fg-muted">
+                          {botTimeAgo(preview?.latest?.updated_at)}
+                        </span>
+                      ) : null}
+                    </span>
+                    <span className="fd-type-supporting block truncate text-fg-muted">
+                      {preview?.text}
+                    </span>
+                  </span>
+                </>
+              ) : (
+                <>
               <span
                 className={cn(
                   "flex h-4 w-4 shrink-0 items-center justify-center",
@@ -218,6 +299,8 @@ export function BotSidebar({
               >
                 {bot.name}
               </span>
+                </>
+              )}
               {activity === "needs_input" ? (
                 <span className="fd-type-meta shrink-0 text-warning">
                   Needs you

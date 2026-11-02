@@ -272,7 +272,7 @@ vi.mock("./components/DiffPanel", () => ({
 import App from "./App";
 import { sendDesktopAttentionNotification } from "./desktop-notifications";
 
-describe("Activity takeover wiring", () => {
+describe("App main-view wiring", () => {
   beforeEach(() => {
     window.localStorage.clear();
     testApi.current = null;
@@ -328,37 +328,6 @@ describe("Activity takeover wiring", () => {
     },
   );
 
-  it("does not read or suppress a new request behind Activity", async () => {
-    testConnection.loaded = true;
-    testSnapshot.preferences.notifications.enabled = true;
-    testApi.current = {
-      createChat: vi.fn(), snapshot: vi.fn(), setClientActivity: vi.fn(),
-      markThreadRead: vi.fn().mockResolvedValue({
-        ...testSnapshot.threads[0],
-        attention: { ...testSnapshot.threads[0].attention, last_read_seq: 2 },
-      }),
-    };
-    render(<App />);
-    await act(async () => {});
-    expect(testApi.current.markThreadRead).toHaveBeenCalled();
-    expect(sendDesktopAttentionNotification).not.toHaveBeenCalled();
-    fireEvent.click(screen.getByRole("button", { name: "Activity" }));
-    await screen.findByRole("heading", { name: "Activity" });
-    testApi.current.markThreadRead.mockClear();
-    act(() => testConnection.setSnapshot?.((current) => ({
-      ...current,
-      threads: current.threads.map((thread) => ({
-        ...thread,
-        attention: { ...thread.attention, last_agent_activity_seq: 3 },
-      })),
-      interactive_requests: current.interactive_requests.map((request) => ({
-        ...request, request_id: "request-2",
-      })),
-    })));
-    await waitFor(() => expect(sendDesktopAttentionNotification).toHaveBeenCalledOnce());
-    expect(testApi.current.markThreadRead).not.toHaveBeenCalled();
-  });
-
   it.each(["Chats plus", "Command-Shift-N"])(
     "opens a fresh no-project chat from %s while a panel is open",
     async (trigger) => {
@@ -401,31 +370,6 @@ describe("Activity takeover wiring", () => {
       expect(screen.queryByText("One thing at a time")).not.toBeInTheDocument();
     },
   );
-
-  it("suppresses the rail and closes the takeover when a task is opened", async () => {
-    render(<App />);
-    expect(await screen.findByText("Diff rail")).toBeInTheDocument();
-
-    fireEvent.click(screen.getByRole("button", { name: "Activity" }));
-    expect(
-      await screen.findByRole("heading", { name: "Activity" }),
-    ).toBeInTheDocument();
-    expect(screen.queryByText("Diff rail")).not.toBeInTheDocument();
-
-    fireEvent.doubleClick(
-      within(screen.getByRole("main")).getByRole("button", {
-        name: /Needs a decision/,
-      }),
-    );
-    fireEvent.click(await screen.findByRole("button", { name: "Open task" }));
-    await waitFor(() => {
-      expect(
-        screen.queryByRole("heading", { name: "Activity" }),
-      ).not.toBeInTheDocument();
-    });
-    expect(screen.getByText("Conversation pane")).toBeInTheDocument();
-    expect(await screen.findByText("Diff rail")).toBeInTheDocument();
-  });
 
   it("gives settings the whole window and restores the sidebar on close", async () => {
     render(<App />);

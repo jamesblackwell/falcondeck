@@ -145,53 +145,77 @@ function renderSidebar(
 }
 
 describe("DesktopSidebar", () => {
-  it("renders Activity above Automations with a failure-toned numeric badge", () => {
-    const onOpenActivity = vi.fn();
-    renderSidebar({
-      onOpenActivity,
-      activityOpen: true,
-      activityCount: 3,
-      activityHasFailure: true,
-      onOpenScheduled: vi.fn(),
-    });
-
-    const activity = screen.getByRole("button", { name: "Activity" });
-    const scheduled = screen.getByRole("button", { name: "Automations" });
-    expect(activity.getAttribute("aria-current")).toBe("page");
-    expect(activity).toHaveTextContent("3");
-    expect(activity.querySelector(".text-danger")).not.toBeNull();
-    expect(activity.compareDocumentPosition(scheduled)).toBe(
-      Node.DOCUMENT_POSITION_FOLLOWING,
-    );
-
-    fireEvent.click(activity);
-    expect(onOpenActivity).toHaveBeenCalledOnce();
-  });
-
-  it("renders Extensions directly beneath Activity", () => {
+  it("keeps Extensions and Plugins out of the top nav and in the Options menu", () => {
     const onOpenExtensions = vi.fn();
+    const onOpenPlugins = vi.fn();
     renderSidebar({
-      onOpenActivity: vi.fn(),
       onOpenExtensions,
       extensionsOpen: true,
       enabledExtensionCount: 2,
+      onOpenPlugins,
       onOpenScheduled: vi.fn(),
     });
 
-    const activity = screen.getByRole("button", { name: "Activity" });
-    const extensions = screen.getByRole("button", { name: "Extensions" });
-    const scheduled = screen.getByRole("button", { name: "Automations" });
-    expect(activity.compareDocumentPosition(extensions)).toBe(
-      Node.DOCUMENT_POSITION_FOLLOWING,
-    );
-    expect(extensions.compareDocumentPosition(scheduled)).toBe(
-      Node.DOCUMENT_POSITION_FOLLOWING,
-    );
+    // Top nav is Reviews and Automations only.
+    expect(screen.queryByRole("button", { name: "Extensions" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Plugins" })).toBeNull();
+    expect(screen.getByRole("button", { name: "Automations" })).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "Options" }));
+    const extensions = screen.getByRole("menuitem", { name: /Extensions/ });
     expect(extensions).toHaveAttribute("aria-current", "page");
     expect(extensions).toHaveTextContent("2");
-
     fireEvent.click(extensions);
     expect(onOpenExtensions).toHaveBeenCalledOnce();
+
+    fireEvent.click(screen.getByRole("button", { name: "Options" }));
+    fireEvent.click(screen.getByRole("menuitem", { name: /Plugins/ }));
+    expect(onOpenPlugins).toHaveBeenCalledOnce();
+  });
+
+  it("shows bot-focused layout with large bot rows behind a Sessions tab", () => {
+    const onSelectThread = vi.fn();
+    renderSidebar({
+      layoutMode: "bots",
+      onSelectThread,
+      bots: [
+        {
+          id: "bot-1",
+          name: "Atlas",
+          workspace_id: "workspace-1",
+          thread_id: "bot-thread",
+          instructions: "",
+          can_start_threads: true,
+          dedicated_workspace: false,
+          space_path: "/tmp/atlas",
+        },
+      ] as never,
+      botApi: {} as never,
+      groups: [
+        {
+          workspace: workspace(),
+          threads: [
+            thread({
+              id: "bot-thread",
+              title: "Atlas home",
+              last_message_preview: "Deploy is green.",
+            }),
+            thread({ id: "thread-1", title: "Main thread" }),
+          ],
+        },
+      ],
+    });
+
+    expect(screen.getByRole("tab", { name: "Bots" })).toHaveAttribute(
+      "aria-selected",
+      "true",
+    );
+    expect(screen.getByText("Deploy is green.")).toBeInTheDocument();
+    // Projects and chats wait behind Sessions.
+    expect(screen.queryByText("Main thread")).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("tab", { name: "Sessions" }));
+    expect(screen.getByText("Main thread")).toBeInTheDocument();
   });
 
   it("shows Reviews with an open-count badge only when the inbox is on", () => {
@@ -203,9 +227,8 @@ describe("DesktopSidebar", () => {
     });
     const reviews = screen.getByRole("button", { name: "Reviews, 3 open" });
     expect(reviews).toHaveTextContent("3");
-    expect(
-      screen.getByRole("button", { name: "Tickets" }).compareDocumentPosition(reviews),
-    ).toBe(Node.DOCUMENT_POSITION_FOLLOWING);
+    // Tickets moved into the Options menu; it is no longer top navigation.
+    expect(screen.queryByRole("button", { name: "Tickets" })).toBeNull();
     fireEvent.click(reviews);
     expect(onOpenReviews).toHaveBeenCalledOnce();
 
@@ -216,26 +239,6 @@ describe("DesktopSidebar", () => {
 
     rerenderSidebar({ onOpenReviews: undefined, reviewCount: 4 });
     expect(screen.queryByRole("button", { name: /^Reviews/ })).toBeNull();
-  });
-
-  it("detaches Activity from the row without opening the takeover", () => {
-    const onOpenActivity = vi.fn();
-    const onPopOutActivity = vi.fn();
-    renderSidebar({ onOpenActivity, onPopOutActivity, activityCount: 2 });
-
-    fireEvent.click(
-      screen.getByRole("button", { name: "Open Activity in a new window" }),
-    );
-    expect(onPopOutActivity).toHaveBeenCalledOnce();
-    expect(onOpenActivity).not.toHaveBeenCalled();
-  });
-
-  it("offers no detach affordance outside the desktop app", () => {
-    renderSidebar({ onOpenActivity: vi.fn(), activityCount: 2 });
-
-    expect(
-      screen.queryByRole("button", { name: "Open Activity in a new window" }),
-    ).not.toBeInTheDocument();
   });
 
   it("opens search from the header and adds projects from the Projects heading", () => {
@@ -416,11 +419,11 @@ describe("DesktopSidebar", () => {
 
   it("starts a thread from a row above every other navigation", () => {
     const onNewThread = vi.fn();
-    renderSidebar({ onNewThread, onOpenActivity: vi.fn() });
+    renderSidebar({ onNewThread, onOpenScheduled: vi.fn() });
 
     const newThread = screen.getByRole("button", { name: "New thread" });
-    const activity = screen.getByRole("button", { name: "Activity" });
-    expect(newThread.compareDocumentPosition(activity)).toBe(
+    const scheduled = screen.getByRole("button", { name: "Automations" });
+    expect(newThread.compareDocumentPosition(scheduled)).toBe(
       Node.DOCUMENT_POSITION_FOLLOWING,
     );
 

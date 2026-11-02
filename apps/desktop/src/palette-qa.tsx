@@ -170,7 +170,6 @@ createRoot(document.getElementById("root")!).render(
         onNewThread={() => {}}
         onOpenSettings={() => {}}
         onOpenUsage={() => {}}
-        onOpenActivity={() => {}}
         onOpenKeyboardShortcuts={() => {}}
         onOpenPlugins={() => {}}
         openRequestKey={1}

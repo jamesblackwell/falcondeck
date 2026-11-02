@@ -29,23 +29,10 @@ struct OpenNativeProjectIntent: AppIntent {
     }
 }
 
-struct OpenNativeActivityIntent: AppIntent {
-    static var title: LocalizedStringResource { "View activity" }
-    static var description: IntentDescription { "Open your agents' activity in Falcon Native." }
-    static var supportedModes: IntentModes { .foreground(.immediate) }
-    static var authenticationPolicy: IntentAuthenticationPolicy { .requiresAuthentication }
-    @Dependency var context: NativeIntentContext
-    func perform() async throws -> some IntentResult {
-        try await context.open(.activity)
-        return .result()
-    }
-}
-
 struct FalconNativeShortcuts: AppShortcutsProvider {
     static var shortcutTileColor: ShortcutTileColor { .teal }
     static var appShortcuts: [AppShortcut] {
         AppShortcut(intent: NewNativeTaskIntent(), phrases: ["New task in \(.applicationName)", "Start a task in \(.applicationName)"], shortTitle: "New task", systemImageName: "square.and.pencil")
         AppShortcut(intent: OpenNativeProjectIntent(), phrases: ["Open \(\.$project) in \(.applicationName)"], shortTitle: "Open project", systemImageName: "folder")
-        AppShortcut(intent: OpenNativeActivityIntent(), phrases: ["Show activity in \(.applicationName)"], shortTitle: "View activity", systemImageName: "tray.full")
     }
 }

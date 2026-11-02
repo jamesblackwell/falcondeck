@@ -5,8 +5,7 @@
   "type": "module",
   "exports": {
     ".": "./src/index.ts",
-    "./command-palette": "./src/components/command-palette.tsx",
-    "./activity-view": "./src/components/activity-view.tsx"
+    "./command-palette": "./src/components/command-palette.tsx"
   },
   "scripts": {
     "typecheck": "tsc --noEmit",

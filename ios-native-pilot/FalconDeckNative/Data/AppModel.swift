@@ -2,7 +2,7 @@ import Foundation
 import Observation
 
 enum Destination: Hashable, Codable {
-    case projects, activity, settings, automations, reviews, archived, task(String), draft(String, String?)
+    case projects, settings, automations, reviews, archived, task(String), draft(String, String?)
 }
 
 @MainActor @Observable

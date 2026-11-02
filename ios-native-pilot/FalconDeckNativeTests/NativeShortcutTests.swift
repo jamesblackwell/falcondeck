@@ -53,7 +53,7 @@ import XCTest
         XCTAssertEqual(model.selection, .draft(project.id, nil)); XCTAssertTrue(model.tasks.isEmpty)
         XCTAssertNil(chat.submission); XCTAssertFalse(chat.sending)
     }
-    func testOpenProjectAndActivityIntentsRevealEvenAnUnchangedSelection() async throws {
+    func testOpenProjectIntentRevealsEvenAnUnchangedSelection() async throws {
         let model = demo(), project = Demo.projects[0]
         let open = OpenNativeProjectIntent(); open.context = NativeIntentContext(model: model)
         open.project = NativeProjectEntity(project: project, pairing: NativeIntentContext.demoPairing)
@@ -62,9 +62,6 @@ import XCTest
         _ = try await open.perform()
         XCTAssertNotEqual(model.detailRequestID, before)
         XCTAssertEqual(model.selection, .draft(project.id, nil))
-        let activity = OpenNativeActivityIntent(); activity.context = NativeIntentContext(model: model)
-        _ = try await activity.perform()
-        XCTAssertEqual(model.selection, .activity)
     }
     func testColdIntentWaitsForInputRecoveryAndWinsOverTheSavedNavigation() async throws {
         let (model, session, root) = try fixture(), project = Demo.projects[0]
@@ -84,17 +81,16 @@ import XCTest
         XCTAssertEqual(model.selection, .draft(project.id, nil))
         XCTAssertEqual(model.chat(for: model.draftTask(project: project, folderID: nil)).draft, "Recovered draft\n\nNew prompt")
     }
-    func testColdShortcutsKeepEveryPromptWhenActivityOpensAfterThem() async throws {
+    func testColdShortcutsKeepEveryPromptInOrder() async throws {
         let model = demo(), project = Demo.projects[0]
         model.restoringSession = true
         let context = NativeIntentContext(model: model)
         let entity = NativeProjectEntity(project: project, pairing: NativeIntentContext.demoPairing)
         try await context.open(.newTask(projectID: project.id, prompt: "First prompt"), project: entity)
         try await context.open(.newTask(projectID: project.id, prompt: "Second prompt"), project: entity)
-        try await context.open(.activity)
-        XCTAssertEqual(model.pendingShortcuts.count, 3); XCTAssertTrue(model.chats.isEmpty)
+        XCTAssertEqual(model.pendingShortcuts.count, 2); XCTAssertTrue(model.chats.isEmpty)
         model.restoringSession = false; model.applyPendingShortcut()
-        XCTAssertEqual(model.selection, .activity)
+        XCTAssertEqual(model.selection, .draft(project.id, nil))
         XCTAssertEqual(model.chat(for: model.draftTask(project: project, folderID: nil)).draft, "First prompt\n\nSecond prompt")
         XCTAssertTrue(model.pendingShortcuts.isEmpty); XCTAssertTrue(model.tasks.isEmpty)
         model.applyPendingShortcut()
@@ -104,11 +100,15 @@ import XCTest
         let model = demo(); model.restoringSession = true
         let context = NativeIntentContext(model: model)
         try await context.open(.newTask(projectID: Demo.projects[0].id, prompt: "Keep this"))
-        for _ in 0..<15 { try await context.open(.activity) }
-        do { try await context.open(.activity); XCTFail("Expected an explicit queue limit") } catch { }
+        for _ in 0..<15 { try await context.open(.newTask(projectID: Demo.projects[0].id, prompt: "Queued")) }
+        do { try await context.open(.newTask(projectID: Demo.projects[0].id, prompt: "Queued")); XCTFail("Expected an explicit queue limit") } catch { }
         XCTAssertEqual(model.pendingShortcuts.count, 16)
         model.restoringSession = false; model.applyPendingShortcut()
-        XCTAssertEqual(model.chat(for: model.draftTask(project: Demo.projects[0], folderID: nil)).draft, "Keep this")
+        // Every accepted request is applied; the rejected one added nothing.
+        let draft = model.chat(for: model.draftTask(project: Demo.projects[0], folderID: nil)).draft
+        XCTAssertTrue(draft.hasPrefix("Keep this"))
+        XCTAssertEqual(draft.components(separatedBy: "Queued").count - 1, 15)
+        XCTAssertTrue(model.pendingShortcuts.isEmpty)
     }
     func testProjectQueriesUseTheCurrentPairingAndLiveCatalog() async throws {
         let model = demo()

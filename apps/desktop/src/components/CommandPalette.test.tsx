@@ -124,22 +124,6 @@ describe("CommandPalette controlled requests", () => {
     expect(onOpenTickets).toHaveBeenCalledOnce();
   });
 
-  it("opens Activity from the Actions section", () => {
-    const onOpenActivity = vi.fn();
-    render(
-      <CommandPalette
-        groups={[]}
-        onSelectThread={vi.fn()}
-        onOpenActivity={onOpenActivity}
-        openRequestKey={1}
-        requestMode="open"
-      />,
-    );
-
-    fireEvent.click(screen.getByRole("option", { name: /Open Activity/i }));
-    expect(onOpenActivity).toHaveBeenCalledOnce();
-  });
-
   it("opens Usage from the Actions section", () => {
     const onOpenUsage = vi.fn();
     render(
@@ -162,11 +146,9 @@ describe("CommandPalette controlled requests", () => {
       <CommandPalette
         groups={[]}
         onSelectThread={vi.fn()}
-        onOpenActivity={vi.fn()}
         onOpenUsage={vi.fn()}
         onOpenKeyboardShortcuts={onOpenKeyboardShortcuts}
         shortcutHints={{
-          activity: ["⌘", "U"],
           usage: ["⌘", "⇧", "U"],
           keyboardShortcuts: ["⇧", "/"],
         }}
@@ -175,9 +157,6 @@ describe("CommandPalette controlled requests", () => {
       />,
     );
 
-    expect(
-      within(screen.getByRole("option", { name: /Open Activity/i })).getByText("⌘"),
-    ).toBeInTheDocument();
     expect(
       within(screen.getByRole("option", { name: /Subscription usage & limits/i })).getByText("⇧"),
     ).toBeInTheDocument();

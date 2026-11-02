@@ -135,7 +135,7 @@
 		9AE1323145C9FAADF111C8D1 /* FlowDiagram.swift in Sources */ = {isa = PBXBuildFile; fileRef = 18DFD2747139D1577D3F56B0 /* FlowDiagram.swift */; };
 		9B7F9E6873A82916588E4DC8 /* NativeShortcutTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 936A3C250B315F7EDC66B525 /* NativeShortcutTests.swift */; };
 		9C1F825D590D57874A4B6D90 /* StreamMetrics.swift in Sources */ = {isa = PBXBuildFile; fileRef = CD3CBA6719F524DE808A494E /* StreamMetrics.swift */; };
-		9C8F54D285C47D159D1CF07E /* ActivityView.swift in Sources */ = {isa = PBXBuildFile; fileRef = FD587F0C60D26CB61A64907F /* ActivityView.swift */; };
+		9C8F54D285C47D159D1CF07E /* RelativeStamp.swift in Sources */ = {isa = PBXBuildFile; fileRef = FD587F0C60D26CB61A64907F /* RelativeStamp.swift */; };
 		9D8C9169119EC8F25D404084 /* BackgroundReliabilityTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 53289CAC934EA9148E9744C8 /* BackgroundReliabilityTests.swift */; };
 		9F0067443F373DAE2A2B4211 /* FalconSpeechWidget.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4167888E636209E4D499BDFE /* FalconSpeechWidget.swift */; };
 		A0050E138E773AFE70EA415B /* BotMark.swift in Sources */ = {isa = PBXBuildFile; fileRef = BCD34A5D1B4C969B9854795F /* BotMark.swift */; };
@@ -463,7 +463,7 @@
 		FBB7687883749DC8810BB064 /* DraftProjectPicker.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DraftProjectPicker.swift; sourceTree = "<group>"; };
 		FC70CFF8596DFF6AB20F3D5E /* TranscriptExport.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TranscriptExport.swift; sourceTree = "<group>"; };
 		FD070ACEBACCCA0695B0A219 /* StartView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = StartView.swift; sourceTree = "<group>"; };
-		FD587F0C60D26CB61A64907F /* ActivityView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ActivityView.swift; sourceTree = "<group>"; };
+		FD587F0C60D26CB61A64907F /* RelativeStamp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RelativeStamp.swift; sourceTree = "<group>"; };
 		FDB95178D19ED70FD635FC5F /* ChatTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChatTests.swift; sourceTree = "<group>"; };
 		FDCB9918283A06B69FB81311 /* AppModelFiles.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppModelFiles.swift; sourceTree = "<group>"; };
 		FFEF03D303D8B76B687E7BE3 /* FalconDeckNative.app */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.application; path = FalconDeckNative.app; sourceTree = BUILT_PRODUCTS_DIR; };
@@ -732,7 +732,7 @@
 		E1031B3F2BB9C37EA151A6A9 /* Features */ = {
 			isa = PBXGroup;
 			children = (
-				FD587F0C60D26CB61A64907F /* ActivityView.swift */,
+				FD587F0C60D26CB61A64907F /* RelativeStamp.swift */,
 				332A0C48BED91B877BE9018B /* AttachmentPicker.swift */,
 				DB72514D56E3DD394D303A37 /* BotInfoView.swift */,
 				6830D7DB22D1599DEC402852 /* BotViews.swift */,
@@ -1046,7 +1046,7 @@
 			buildActionMask = 2147483647;
 			files = (
 				10B0796B616F4AC9118BFEFC /* ActivitySweep.metal in Sources */,
-				9C8F54D285C47D159D1CF07E /* ActivityView.swift in Sources */,
+				9C8F54D285C47D159D1CF07E /* RelativeStamp.swift in Sources */,
 				F27E639A8EB26288E5078949 /* AppEvents.swift in Sources */,
 				3F60571032B128CFC6A3E5ED /* AppModel.swift in Sources */,
 				0864CBCD23905BD2ADB9AE50 /* AppModelFiles.swift in Sources */,
@@ -1378,7 +1378,7 @@
 				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
 				CODE_SIGN_STYLE = Automatic;
 				COPY_PHASE_STRIP = NO;
-				CURRENT_PROJECT_VERSION = 109;
+				CURRENT_PROJECT_VERSION = 110;
 				DEBUG_INFORMATION_FORMAT = dwarf;
 				ENABLE_STRICT_OBJC_MSGSEND = YES;
 				ENABLE_TESTABILITY = YES;
@@ -1469,7 +1469,7 @@
 				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
 				CODE_SIGN_STYLE = Automatic;
 				COPY_PHASE_STRIP = NO;
-				CURRENT_PROJECT_VERSION = 109;
+				CURRENT_PROJECT_VERSION = 110;
 				DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym";
 				ENABLE_NS_ASSERTIONS = NO;
 				ENABLE_STRICT_OBJC_MSGSEND = YES;

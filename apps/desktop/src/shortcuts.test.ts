@@ -42,7 +42,7 @@ describe('keyboard shortcuts', () => {
     expect(commandForEvent('global', key('k', { metaKey: true }))).toBe('commandPalette')
     expect(commandForEvent('global', key('n', { metaKey: true, shiftKey: true }))).toBe('newChat')
     expect(commandForEvent('global', key('n', { metaKey: true }))).toBe('newThread')
-    expect(commandForEvent('global', key('u', { metaKey: true }))).toBe('openActivity')
+    expect(commandForEvent('global', key('u', { metaKey: true }))).toBeNull()
     expect(commandForEvent('global', key('u', { metaKey: true, shiftKey: true }))).toBe('openUsage')
     expect(commandForEvent('global', key('j', { metaKey: true }))).toBe('toggleTerminal')
     expect(
@@ -80,18 +80,18 @@ describe('keyboard shortcuts', () => {
   })
 
   it('renders hints for the primary binding of a command', () => {
-    expect(shortcutHint('openActivity')).toBe('⌘U')
-    expect(shortcutHintTokens('openActivity')).toEqual(['⌘', 'U'])
-    expect(shortcutTitle('Activity', 'openActivity')).toBe('Activity (⌘U)')
+    expect(shortcutHint('openSettings')).toBe('⌘,')
+    expect(shortcutHintTokens('openSettings')).toEqual(['⌘', ','])
+    expect(shortcutTitle('Settings', 'openSettings')).toBe('Settings (⌘,)')
     expect(shortcutHint('openUsage')).toBe('⌘⇧U')
     expect(shortcutHintTokens('openUsage')).toEqual(['⌘', '⇧', 'U'])
     expect(shortcutHint('newChat')).toBe('⌘⇧N')
 
-    setShortcutBindings('openActivity', [])
-    expect(shortcutHint('openActivity')).toBeNull()
-    expect(shortcutHintTokens('openActivity')).toBeUndefined()
+    setShortcutBindings('openSettings', [])
+    expect(shortcutHint('openSettings')).toBeNull()
+    expect(shortcutHintTokens('openSettings')).toBeUndefined()
     // An unbound command falls back to a plain label rather than "(  )".
-    expect(shortcutTitle('Activity', 'openActivity')).toBe('Activity')
+    expect(shortcutTitle('Settings', 'openSettings')).toBe('Settings')
   })
 
   it('persists explicit unbinding and supports reset', () => {

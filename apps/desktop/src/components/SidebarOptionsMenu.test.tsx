@@ -167,6 +167,37 @@ describe('SidebarOptionsMenu', () => {
     expect(screen.queryByRole('menu', { name: 'App theme options' })).not.toBeInTheDocument()
   })
 
+  it('switches sidebar layout from the layout submenu', () => {
+    const onLayoutModeChange = vi.fn()
+    render(
+      <SidebarOptionsMenu
+        onOpenSettings={vi.fn()}
+        layoutMode="classic"
+        onLayoutModeChange={onLayoutModeChange}
+      />,
+    )
+
+    fireEvent.click(screen.getByRole('button', { name: 'Options' }))
+    fireEvent.click(screen.getByRole('menuitem', { name: /Layout/i }))
+
+    expect(screen.getByRole('menu', { name: 'Layout options' })).toBeInTheDocument()
+    expect(screen.getByRole('menuitemradio', { name: 'Classic' })).toHaveAttribute('aria-checked', 'true')
+
+    fireEvent.click(screen.getByRole('menuitemradio', { name: 'Bot focused' }))
+    expect(onLayoutModeChange).toHaveBeenCalledWith('bots')
+  })
+
+  it('opens Tickets from the menu instead of the top nav', () => {
+    const onOpenTickets = vi.fn()
+    render(<SidebarOptionsMenu onOpenSettings={vi.fn()} onOpenTickets={onOpenTickets} ticketsOpen />)
+
+    fireEvent.click(screen.getByRole('button', { name: 'Options' }))
+    const tickets = screen.getByRole('menuitem', { name: /Tickets/ })
+    expect(tickets).toHaveAttribute('aria-current', 'page')
+    fireEvent.click(tickets)
+    expect(onOpenTickets).toHaveBeenCalledOnce()
+  })
+
   it('switches app theme from the theme submenu', () => {
     render(<SidebarOptionsMenu onOpenSettings={vi.fn()} />)
 

@@ -3,7 +3,6 @@ import { memo, useCallback, useEffect, useId, useMemo, useRef, useState } from '
 import { createPortal } from 'react-dom'
 import {
   Check,
-  Activity,
   Archive,
   FolderClosed,
   Gauge,
@@ -265,7 +264,6 @@ function renderPaletteIcon(icon: PaletteIcon): React.ReactNode {
  * which owns the (customizable) keymap.
  */
 export type PaletteShortcutHints = {
-  activity?: readonly string[]
   settings?: readonly string[]
   usage?: readonly string[]
   keyboardShortcuts?: readonly string[]
@@ -506,7 +504,6 @@ export type CommandPaletteProps = {
   onOpenBackup?: () => void
   onOpenTickets?: () => void
   onOpenUsage?: () => void
-  onOpenActivity?: () => void
   onOpenKeyboardShortcuts?: () => void
   onOpenPlugins?: () => void
   /** Searches indexed user messages; omit to keep the palette title-only. */
@@ -538,7 +535,6 @@ export const CommandPalette = memo(function CommandPalette({
   onOpenBackup,
   onOpenTickets,
   onOpenUsage,
-  onOpenActivity,
   onOpenKeyboardShortcuts,
   onOpenPlugins,
   onSearchMessages,
@@ -813,18 +809,6 @@ export const CommandPalette = memo(function CommandPalette({
         run: () => {},
       })
     }
-    if (onOpenActivity) {
-      result.push({
-        id: 'activity',
-        kind: 'action',
-        section: 'Actions',
-        label: 'Open Activity',
-        icon: { kind: 'glyph', Glyph: Activity },
-        shortcut: shortcutHints.activity,
-        search: normalizeSearchFields({ primary: 'Open Activity', secondary: '', keywords: 'attention queue blocked failed unread running' }),
-        run: onOpenActivity,
-      })
-    }
     if (onOpenPlugins) {
       result.push({
         id: 'plugins',
@@ -953,7 +937,7 @@ export const CommandPalette = memo(function CommandPalette({
     }
 
     return result
-  }, [appearance.darkColorTheme, appearance.lightColorTheme, appearance.theme, groups, libraryWorkspaces, mode, onNewThread, onOpenActivity, onOpenBackup, onOpenKeyboardShortcuts, onOpenLibraryWorkspace, onOpenPlugins, onOpenSettings, onOpenTickets, onOpenUsage, onSelectThread, open, shortcutHints, workspaceIconSrc])
+  }, [appearance.darkColorTheme, appearance.lightColorTheme, appearance.theme, groups, libraryWorkspaces, mode, onNewThread, onOpenBackup, onOpenKeyboardShortcuts, onOpenLibraryWorkspace, onOpenPlugins, onOpenSettings, onOpenTickets, onOpenUsage, onSelectThread, open, shortcutHints, workspaceIconSrc])
 
   // A project that has since disappeared (removed, or a stale request) must
   // not silently hide every result, so the chip only survives while it resolves.

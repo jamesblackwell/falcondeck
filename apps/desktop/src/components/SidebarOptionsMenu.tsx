@@ -2,15 +2,19 @@ import * as React from 'react'
 import { memo, useRef, useState } from 'react'
 import * as Popover from '@radix-ui/react-popover'
 import {
+  Blocks,
   Check,
   ChevronRight,
   Gauge,
   Keyboard,
+  LayoutList,
   Mic,
   Palette,
+  Puzzle,
   RefreshCw,
   Settings,
   SlidersHorizontal,
+  Tickets,
 } from 'lucide-react'
 
 import {
@@ -40,9 +44,23 @@ export type SidebarOptionsMenuProps = {
   onOpenSpeechSettings?: () => void
   onCheckForUpdates?: () => void
   updateStatus?: 'available' | 'downloaded' | null
+  layoutMode?: import('../sidebar-layout').SidebarLayoutMode
+  onLayoutModeChange?: (mode: import('../sidebar-layout').SidebarLayoutMode) => void
+  onOpenExtensions?: () => void
+  extensionsOpen?: boolean
+  enabledExtensionCount?: number
+  onOpenPlugins?: () => void
+  pluginsOpen?: boolean
+  onOpenTickets?: () => void
+  ticketsOpen?: boolean
 }
 
-type Submenu = 'theme' | 'speech'
+type Submenu = 'theme' | 'speech' | 'layout'
+
+const LAYOUTS: Array<{ id: import('../sidebar-layout').SidebarLayoutMode; label: string }> = [
+  { id: 'classic', label: 'Classic' },
+  { id: 'bots', label: 'Bot focused' },
+]
 
 const THEMES: Array<{ id: ThemeSetting; label: string }> = [
   { id: 'system', label: 'System default' },
@@ -63,6 +81,9 @@ const ENGINES: Array<{ id: DictationProvider; label: string }> = [
 const SUBMENU_ITEM_CLASS =
   'fd-focus flex w-full items-center justify-between gap-2 rounded-[var(--fd-radius-md)] px-2.5 py-1.5 text-left text-[length:var(--fd-text-sm)] text-fg-primary hover:bg-surface-3'
 
+const MENU_ITEM_CLASS =
+  'fd-focus flex w-full items-center gap-2.5 rounded-[var(--fd-radius-md)] px-2.5 py-1.5 text-left text-[length:var(--fd-text-sm)] text-fg-primary hover:bg-surface-3'
+
 export const SidebarOptionsMenu = memo(function SidebarOptionsMenu({
   onOpenSettings,
   settingsOpen = false,
@@ -71,6 +92,15 @@ export const SidebarOptionsMenu = memo(function SidebarOptionsMenu({
   onOpenSpeechSettings,
   onCheckForUpdates,
   updateStatus = null,
+  layoutMode,
+  onLayoutModeChange,
+  onOpenExtensions,
+  extensionsOpen = false,
+  enabledExtensionCount = 0,
+  onOpenPlugins,
+  pluginsOpen = false,
+  onOpenTickets,
+  ticketsOpen = false,
 }: SidebarOptionsMenuProps) {
   const updateAvailable = updateStatus !== null
   const [open, setOpen] = useState(false)
@@ -98,6 +128,12 @@ export const SidebarOptionsMenu = memo(function SidebarOptionsMenu({
     submenuTimeoutRef.current = setTimeout(() => {
       setOpenSubmenu(null)
     }, 150)
+  }
+
+  const handleSelectLayout = (mode: import('../sidebar-layout').SidebarLayoutMode) => {
+    onLayoutModeChange?.(mode)
+    setOpen(false)
+    setOpenSubmenu(null)
   }
 
   const handleSelectTheme = (theme: ThemeSetting) => {
@@ -195,6 +231,61 @@ export const SidebarOptionsMenu = memo(function SidebarOptionsMenu({
                 </div>
                 {usageShortcut ? <Kbd>{usageShortcut}</Kbd> : null}
               </button>
+            ) : null}
+
+            {onLayoutModeChange ? (
+            <div
+              className="relative"
+              onMouseEnter={() => handleOpenSubmenu('layout')}
+              onMouseLeave={handleCloseSubmenu}
+            >
+              <button
+                type="button"
+                role="menuitem"
+                aria-haspopup="menu"
+                aria-expanded={openSubmenu === 'layout'}
+                onClick={() =>
+                  setOpenSubmenu((prev) => (prev === 'layout' ? null : 'layout'))
+                }
+                className={cn(
+                  'fd-focus flex w-full items-center gap-2.5 rounded-[var(--fd-radius-md)] px-2.5 py-1.5 text-left text-[length:var(--fd-text-sm)] transition-colors',
+                  openSubmenu === 'layout'
+                    ? 'bg-surface-3 text-fg-primary'
+                    : 'text-fg-primary hover:bg-surface-3',
+                )}
+              >
+                <LayoutList aria-hidden="true" className="h-4 w-4 shrink-0 text-fg-muted" />
+                <span className="flex-1">Layout</span>
+                <ChevronRight aria-hidden="true" className="h-3.5 w-3.5 shrink-0 text-fg-muted" />
+              </button>
+
+              {openSubmenu === 'layout' ? (
+                <div
+                  role="menu"
+                  aria-label="Layout options"
+                  className="absolute left-full top-0 ml-1.5 w-44 rounded-[var(--fd-radius-lg)] border border-border-subtle bg-surface-1 p-1 shadow-[var(--fd-shadow-lg)]"
+                >
+                  {LAYOUTS.map((layout) => {
+                    const isSelected = (layoutMode ?? 'classic') === layout.id
+                    return (
+                      <button
+                        key={layout.id}
+                        type="button"
+                        role="menuitemradio"
+                        aria-checked={isSelected}
+                        onClick={() => handleSelectLayout(layout.id)}
+                        className="fd-focus flex w-full items-center justify-between rounded-[var(--fd-radius-md)] px-2.5 py-1.5 text-left text-[length:var(--fd-text-sm)] text-fg-primary hover:bg-surface-3"
+                      >
+                        <span>{layout.label}</span>
+                        {isSelected ? (
+                          <Check aria-hidden="true" className="h-3.5 w-3.5 shrink-0 text-accent" />
+                        ) : null}
+                      </button>
+                    )
+                  })}
+                </div>
+              ) : null}
+            </div>
             ) : null}
 
             <div
@@ -348,6 +439,48 @@ export const SidebarOptionsMenu = memo(function SidebarOptionsMenu({
                 </div>
               ) : null}
             </div>
+
+            {onOpenExtensions ? (
+              <button
+                type="button"
+                role="menuitem"
+                aria-current={extensionsOpen ? 'page' : undefined}
+                onClick={() => { setOpen(false); onOpenExtensions() }}
+                className={MENU_ITEM_CLASS}
+              >
+                <Blocks aria-hidden="true" className="h-4 w-4 shrink-0 text-fg-muted" />
+                <span className="min-w-0 flex-1">Extensions</span>
+                {enabledExtensionCount > 0 ? (
+                  <span className="text-[length:var(--fd-text-2xs)] tabular-nums text-fg-muted">{enabledExtensionCount}</span>
+                ) : null}
+              </button>
+            ) : null}
+
+            {onOpenPlugins ? (
+              <button
+                type="button"
+                role="menuitem"
+                aria-current={pluginsOpen ? 'page' : undefined}
+                onClick={() => { setOpen(false); onOpenPlugins() }}
+                className={MENU_ITEM_CLASS}
+              >
+                <Puzzle aria-hidden="true" className="h-4 w-4 shrink-0 text-fg-muted" />
+                <span className="flex-1">Plugins</span>
+              </button>
+            ) : null}
+
+            {onOpenTickets ? (
+              <button
+                type="button"
+                role="menuitem"
+                aria-current={ticketsOpen ? 'page' : undefined}
+                onClick={() => { setOpen(false); onOpenTickets() }}
+                className={MENU_ITEM_CLASS}
+              >
+                <Tickets aria-hidden="true" className="h-4 w-4 shrink-0 text-fg-muted" />
+                <span className="flex-1">Tickets</span>
+              </button>
+            ) : null}
 
             {onOpenKeyboardShortcuts ? (
               <button

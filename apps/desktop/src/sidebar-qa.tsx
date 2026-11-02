@@ -6,8 +6,7 @@
    `?collapsed=workspace-1,workspace-2` folds projects shut to check the
    inline running/unread rollup on their rows. `?projects=12` pads the list
    with stale filler projects (plus one used an hour ago) to exercise the
-   project fold and its Show more row. `?activity=1` swaps in the Activity
-   inbox with a pending approval on the first running task.
+   project fold and its Show more row.
    `?folders=1` enables an interactive project-folder fixture.
    The first project also carries agent-spawned threads (one with a spawn of
    its own) so the nesting elbow and its middle-child upright are covered. */
@@ -33,7 +32,6 @@ if (theme === "light" || theme === "dark") {
   updateAppearance({ theme });
 }
 const width = Number(params.get("width")) || 280;
-const activityMode = params.get("activity") === "1";
 const extraProjectCount = Math.max(0, Number(params.get("projects")) || 0);
 const collapsedWorkspaceIds = (params.get("collapsed") ?? "")
   .split(",")
@@ -302,36 +300,6 @@ for (let index = 0; index < extraProjectCount; index += 1) {
   });
 }
 
-function activityFixture() {
-  const running = groups
-    .flatMap((group) => group.threads)
-    .find((candidate) => candidate.status === "running");
-  return {
-    interactiveRequests: running
-      ? [
-          {
-            request_id: "qa-request",
-            workspace_id: running.workspace_id,
-            thread_id: running.id,
-            method: "command",
-            kind: "approval" as const,
-            title: "Run command",
-            detail: null,
-            command: "npm run test -- --watch=false",
-            path: null,
-            turn_id: null,
-            item_id: null,
-            questions: [],
-            created_at: minutesAgo(2),
-          },
-        ]
-      : [],
-    onPreviewThread: () => {},
-    onClose: () => {},
-    onPopOut: () => {},
-  };
-}
-
 function SidebarFixture() {
   const [folders, setFolders] = useState<ProjectFolder[]>(() => params.get('folders') === '1' ? [{
     id: 'chores', workspace_id: 'workspace-1', name: 'Chores', collapsed: true,
@@ -382,9 +350,6 @@ function SidebarFixture() {
           onDeleteThread={async () => {}}
           onTogglePinThread={async () => {}}
           onTogglePinThreadInProject={async () => {}}
-          {...(activityMode
-            ? { activity: activityFixture(), onNewChat: () => {} }
-            : {})}
         />
       </div>
     </div>

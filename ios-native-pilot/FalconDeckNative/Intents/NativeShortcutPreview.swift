@@ -9,10 +9,7 @@ import Foundation
         let mode = String(argument.dropFirst("--shortcut-preview=".count))
         let context = NativeIntentContext(model: model)
         do {
-            if mode == "activity" {
-                let intent = OpenNativeActivityIntent(); intent.context = context
-                _ = try await intent.perform()
-            } else if let project = model.projects.first(where: { $0.id == "falcondeck" }) {
+            if let project = model.projects.first(where: { $0.id == "falcondeck" }) {
                 let entity = NativeProjectEntity(project: project, pairing: NativeIntentContext.demoPairing)
                 if mode == "project" {
                     let intent = OpenNativeProjectIntent(); intent.context = context; intent.project = entity

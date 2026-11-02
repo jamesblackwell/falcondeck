@@ -211,7 +211,6 @@ struct RootView: View {
         switch model.selection {
         case .task(let id): model.task(id)?.title.nonempty ?? "New task"
         case .draft(let projectID, _): projectTitle(model.projects.first { $0.id == projectID })
-        case .activity: "Activity"
         case .archived: "Archived tasks"
         case .settings: "Settings"
         case .automations: "Automations"
@@ -227,7 +226,6 @@ struct RootView: View {
         if let task = model.selectedConversation { ConversationView(task: task) }
         else {
             switch model.selection {
-            case .activity: ActivityView()
             case .archived: ArchivedTasksView()
             case .settings: SettingsView()
             case .automations: AutomationsView()
