@@ -2291,6 +2291,9 @@ fn merged_models(
     existing: &[ModelSummary],
     discovered: Vec<ModelSummary>,
 ) -> Vec<ModelSummary> {
+    if provider.as_str().eq_ignore_ascii_case("grok") {
+        return crate::acp::grok_model_defaults(discovered);
+    }
     if !provider.as_str().eq_ignore_ascii_case("opencode") {
         return discovered;
     }
@@ -3671,6 +3674,33 @@ mod tests {
             acp_metadata_updated_at(activity, false, false, relaunched),
             activity
         );
+    }
+
+    #[test]
+    fn grok_catalog_refresh_keeps_47_xhigh_as_new_thread_default() {
+        let mut discovered = crate::acp::grok_placeholder_models();
+        for model in &mut discovered {
+            model.is_default = model.id == "grok-4.6";
+            model.default_reasoning_effort = Some("medium".to_string());
+        }
+        let merged = super::merged_models(&AgentProvider::new("grok"), &[], discovered);
+        assert_eq!(
+            merged.iter().find(|model| model.is_default).unwrap().id,
+            "grok-4.7"
+        );
+        assert_eq!(merged[0].default_reasoning_effort.as_deref(), Some("xhigh"));
+
+        let older = merged
+            .into_iter()
+            .filter(|model| model.id == "grok-4.6")
+            .map(|mut model| {
+                model.is_default = true;
+                model
+            })
+            .collect();
+        let merged = super::merged_models(&AgentProvider::new("grok"), &[], older);
+        assert_eq!(merged.len(), 1);
+        assert!(merged[0].is_default);
     }
 
     #[tokio::test]

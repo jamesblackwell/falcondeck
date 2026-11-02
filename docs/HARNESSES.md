@@ -274,6 +274,11 @@ the daemon implementation is `crates/falcondeck-daemon/src/app/provider_usage.rs
 
 ## Client notes
 
+- **Grok:** New threads default to Grok 4.7 with xhigh reasoning when the
+  adapter offers it. Discovery and existing-session catalogs cannot change
+  that default. Explicit model and effort selections still take precedence;
+  adapters without 4.7 retain their advertised model default.
+
 - **Hermes:** Settings → Agents offers its native `hermes acp` command.
   Configure the model/provider in a terminal with `hermes model`, using the
   same profile/environment as the agent. Existing custom `hermes` entries

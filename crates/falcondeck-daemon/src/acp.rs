@@ -176,12 +176,50 @@ pub fn grok_placeholder_models() -> Vec<ModelSummary> {
             effort("low", "Quick, fast implementations"),
         ]
     };
-    let mut grok_46_efforts = vec![effort("xhigh", "Highest effort and reasoning level")];
-    grok_46_efforts.extend(high_medium_low());
+    let mut frontier_efforts = vec![effort("xhigh", "Highest effort and reasoning level")];
+    frontier_efforts.extend(high_medium_low());
     vec![
-        model("grok-4.6", "Grok 4.6", true, "high", grok_46_efforts),
+        model(
+            "grok-4.7",
+            "Grok 4.7",
+            true,
+            "xhigh",
+            frontier_efforts.clone(),
+        ),
+        model(
+            "grok-4.7-build-fast",
+            "Grok 4.7 Fast",
+            false,
+            "xhigh",
+            frontier_efforts.clone(),
+        ),
+        model("grok-4.6", "Grok 4.6", false, "high", frontier_efforts),
         model("grok-4.5", "Grok 4.5", false, "high", high_medium_low()),
     ]
+}
+
+/// Keep new-thread defaults stable when a discovery or existing session
+/// advertises its current model/effort as the catalog default.
+pub(crate) fn grok_model_defaults(mut models: Vec<ModelSummary>) -> Vec<ModelSummary> {
+    let has_preferred = models.iter().any(|model| model.id == "grok-4.7");
+    for model in &mut models {
+        if has_preferred {
+            model.is_default = model.id == "grok-4.7";
+        }
+        if grok_default_effort(&model.id).is_some()
+            && model
+                .supported_reasoning_efforts
+                .iter()
+                .any(|effort| effort.reasoning_effort == "xhigh")
+        {
+            model.default_reasoning_effort = Some("xhigh".to_string());
+        }
+    }
+    models
+}
+
+fn grok_default_effort(model_id: &str) -> Option<&'static str> {
+    matches!(model_id, "grok-4.7" | "grok-4.7-build-fast").then_some("xhigh")
 }
 
 /// Whether a provider is known to have builds with a vendor interjection
@@ -3174,6 +3212,14 @@ impl AcpRuntime {
             .get(session_id)
             .cloned()
             .unwrap_or(configuration);
+        let session_model = self.session_model_id(session_id).await;
+        let reasoning_effort = reasoning_effort.or_else(|| {
+            self.provider
+                .as_str()
+                .eq_ignore_ascii_case("grok")
+                .then(|| session_model.as_deref().and_then(grok_default_effort))
+                .flatten()
+        });
         if let Some(reasoning_effort) = reasoning_effort
             && let Some(config_id) = configuration.reasoning_config_id.as_deref()
         {
@@ -5214,7 +5260,9 @@ require('node:readline').createInterface({{ input: process.stdin }}).on('line', 
         let fixture =
             Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/acp_conformance_agent.mjs");
         let config = AcpProviderConfig {
-            id: if scenario.starts_with("hermes-") {
+            id: if scenario == "grok-defaults" {
+                "grok".to_string()
+            } else if scenario.starts_with("hermes-") {
                 "hermes".to_string()
             } else {
                 format!("{scenario}-fixture")
@@ -6735,12 +6783,38 @@ require('node:readline').createInterface({{ input: process.stdin }}).on('line', 
         );
     }
 
+    #[tokio::test]
+    async fn grok_47_applies_xhigh_unless_effort_is_explicit() {
+        let (runtime, _events) = fixture_runtime("grok-defaults").await;
+        let session = runtime
+            .ensure_session(
+                "grok-defaults",
+                None,
+                env!("CARGO_MANIFEST_DIR"),
+                None,
+                &Default::default(),
+                None,
+                None,
+            )
+            .await
+            .unwrap();
+        for (requested, expected) in [(None, "xhigh"), (Some("medium"), "medium")] {
+            runtime
+                .apply_session_preferences(&session, None, requested, None, None)
+                .await
+                .unwrap();
+            let state = runtime.request("probe/effort", json!({})).await.unwrap();
+            assert_eq!(state["effort"], expected);
+        }
+        runtime.shutdown().await;
+    }
+
     #[test]
     fn grok_placeholder_catalog_is_selectable_before_acp_connects() {
         let models = grok_placeholder_models();
-        assert_eq!(models[0].id, "grok-4.6");
+        assert_eq!(models[0].id, "grok-4.7");
         assert!(models[0].is_default);
-        assert_eq!(models[0].default_reasoning_effort.as_deref(), Some("high"));
+        assert_eq!(models[0].default_reasoning_effort.as_deref(), Some("xhigh"));
         assert_eq!(
             models[0]
                 .supported_reasoning_efforts
@@ -6749,7 +6823,10 @@ require('node:readline').createInterface({{ input: process.stdin }}).on('line', 
                 .collect::<Vec<_>>(),
             vec!["xhigh", "high", "medium", "low"]
         );
-        assert_eq!(models[1].id, "grok-4.5");
+        assert_eq!(models[1].id, "grok-4.7-build-fast");
+        assert_eq!(models[2].id, "grok-4.6");
+        assert_eq!(models[3].id, "grok-4.5");
+        assert!(models[1..].iter().all(|model| !model.is_default));
         let capabilities = grok_placeholder_capabilities();
         assert!(capabilities.supports_images);
         assert_eq!(

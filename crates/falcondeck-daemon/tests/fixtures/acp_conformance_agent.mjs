@@ -8,6 +8,7 @@ let permissionPromptId = null
 let planPromptId = null
 let cancelPromptId = null
 let modelSelected = false
+let selectedEffort = null
 
 function send(message) {
   process.stdout.write(`${JSON.stringify(message)}\n`)
@@ -113,11 +114,26 @@ input.on('line', (line) => {
     return
   }
 
+  if (scenario === 'grok-defaults' && message.method === 'session/set_config_option') {
+    selectedEffort = message.params.value
+    result(message.id, {})
+    return
+  }
+  if (scenario === 'grok-defaults' && message.method === 'probe/effort') {
+    result(message.id, { effort: selectedEffort })
+    return
+  }
+
   if (message.method === 'session/new') {
     if (scenario === 'session-new-timeout') return
     process.stderr.write('fixture adapter diagnostic\n')
     result(message.id, {
       sessionId,
+      ...(scenario === 'grok-defaults' ? {
+        models: { currentModelId: 'grok-4.7', availableModels: [{ modelId: 'grok-4.7' }] },
+        configOptions: [{ id: 'reasoning', category: 'thought_level', currentValue: 'high',
+          options: ['xhigh', 'high', 'medium', 'low'].map(value => ({ value, name: value })) }],
+      } : {}),
       ...(scenario === 'legacy-model' ? {
         models: {
           currentModelId: 'retired-default',
