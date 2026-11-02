@@ -38,6 +38,8 @@ describe('mode labels', () => {
     expect(humanizeModeId('plan-only')).toBe('Plan only')
     expect(humanizeModeId('read_write')).toBe('Read write')
     expect(permissionModeLabel('someNewMode')).toBe('SomeNewMode')
+    expect(permissionModeLabel('allowAll')).toBe('Allow all')
+    expect(permissionModeLabel('onRequest')).toBe('Ask on request')
     expect(sandboxModeLabel('brand-new')).toBe('Brand new')
   })
 })

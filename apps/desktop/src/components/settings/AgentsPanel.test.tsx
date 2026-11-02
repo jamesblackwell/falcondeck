@@ -364,7 +364,40 @@ describe('AgentsPanel recommended agents', () => {
     })
   })
 
-  it.each(['codex', 'claude', 'agy', 'cursor', 'opencode', 'pi', 'hermes'])(
+  it('configures Muse Code with the experimental ACP gate', async () => {
+    const muse = {
+      label: 'Muse Code',
+      command: ['muse', 'acp', '--trust-workspace'],
+      env: { MUSE_EXPERIMENTAL_ACP: 'on' },
+    }
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(new Response(JSON.stringify(emptyOverview), { status: 200 }))
+      .mockResolvedValueOnce(new Response(null, { status: 204 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({
+        revision: 'revision-1',
+        providers: { muse },
+        resolved: [{ id: 'muse', ...muse, binary_found: true, reserved: false }],
+      }), { status: 200 }))
+    vi.stubGlobal('fetch', fetchMock)
+    const onToast = vi.fn()
+
+    render(<AgentsPanel baseUrl="http://127.0.0.1:4317" onToast={onToast} />)
+    fireEvent.click(await screen.findByRole('button', { name: 'Configure Muse Code' }))
+
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(3))
+    const [, request] = fetchMock.mock.calls[1] as [string, RequestInit]
+    expect(JSON.parse(request.body as string)).toEqual({
+      providers: { muse },
+      expected_revision: 'revision-0',
+    })
+    expect(onToast).toHaveBeenCalledWith({
+      variant: 'success',
+      title: 'Muse Code configured',
+      description: 'FalconDeck will run muse acp --trust-workspace on this host.',
+    })
+  })
+
+  it.each(['codex', 'claude', 'agy', 'cursor', 'opencode', 'pi', 'hermes', 'muse'])(
     'does not let the generic form shadow the %s integration',
     async (reservedId) => {
       vi.stubGlobal(

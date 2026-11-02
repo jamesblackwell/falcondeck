@@ -1,7 +1,7 @@
 import { providerMark } from '@falcondeck/client-core/provider-marks'
 
-/* The same vendor marks the app shows next to each harness. Hermes has no
-   mark in the app yet, so it is listed by name only. */
+/* The same vendor marks the app shows next to each harness. Hermes and
+   Muse Code have no mark in the app yet, so they are listed by name only. */
 const HARNESSES = [
   { id: 'claude', label: 'Claude Code' },
   { id: 'codex', label: 'Codex' },
@@ -11,6 +11,7 @@ const HARNESSES = [
   { id: 'grok', label: 'Grok' },
   { id: 'pi', label: 'Pi' },
   { id: 'hermes', label: 'Hermes' },
+  { id: 'muse', label: 'Muse Code' },
 ]
 
 function Mark({ id }: { id: string }) {

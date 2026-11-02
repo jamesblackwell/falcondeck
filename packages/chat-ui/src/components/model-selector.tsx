@@ -853,10 +853,16 @@ const PERMISSION_MODE_LABELS: Record<string, string> = {
   "on-failure": "Ask on failure",
   "on-request": "Ask when needed",
   never: "Never ask",
+  allowAll: "Allow all",
+  promptUnmatched: "Ask before unmatched actions",
+  onRequest: "Ask on request",
+  denyUnmatched: "Deny unmatched actions",
 };
 
 const PERMISSION_MODE_TRIGGER_LABELS: Record<string, string> = {
   bypassPermissions: "Bypass",
+  promptUnmatched: "Ask unmatched",
+  denyUnmatched: "Deny unmatched",
 };
 
 const SANDBOX_MODE_LABELS: Record<string, string> = {

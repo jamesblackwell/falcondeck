@@ -145,6 +145,17 @@ const KNOWN_HARNESSES: &[KnownHarness] = &[
         builtin: false,
     },
     KnownHarness {
+        id: "muse",
+        label: "Muse Code",
+        bin: "muse",
+        // Meta's launcher script, not an npm package. The binary self-updates;
+        // this command is the documented install and repair path.
+        npm_package: None,
+        upgrade_command: Some("curl -fsSL https://dev.meta.ai/install.sh | bash"),
+        auth_probe: None,
+        builtin: false,
+    },
+    KnownHarness {
         id: "cursor",
         label: "Cursor",
         bin: "cursor-agent",

@@ -1630,6 +1630,22 @@ fn is_reasoning_id(value: &str) -> bool {
     )
 }
 
+/// Muse Code publishes its four approval modes on the ACP mode selector.
+/// They are permissions, not plan/build collaboration modes.
+fn is_approval_mode_id(value: &str) -> bool {
+    matches!(
+        value
+            .replace(['-', '_', ' '], "")
+            .to_ascii_lowercase()
+            .as_str(),
+        "allowall" | "promptunmatched" | "onrequest" | "denyunmatched"
+    )
+}
+
+pub(crate) fn is_approval_mode_set(ids: &[String]) -> bool {
+    !ids.is_empty() && ids.iter().all(|id| is_approval_mode_id(id))
+}
+
 fn looks_like_reasoning(options: &[ReasoningEffortSummary]) -> bool {
     !options.is_empty()
         && options.iter().all(|option| {
@@ -1813,6 +1829,11 @@ pub(crate) fn parse_session_metadata(result: &Value) -> ParsedSessionMetadata {
                 }
                 "mode" => {
                     let modes = choices.iter().filter_map(option_value).collect::<Vec<_>>();
+                    if is_approval_mode_set(&modes) {
+                        parsed.permission_modes.extend(modes);
+                        parsed.configuration.permission_config_id = option_id;
+                        continue;
+                    }
                     let effort_options = modes
                         .iter()
                         .map(|mode| Value::String(mode.clone()))
@@ -1905,7 +1926,15 @@ pub(crate) fn parse_session_metadata(result: &Value) -> ParsedSessionMetadata {
                 })
             })
             .collect::<Vec<_>>();
-        if looks_like_reasoning(&effort_options) {
+        let approval_ids = effort_options
+            .iter()
+            .map(|option| option.reasoning_effort.clone())
+            .collect::<Vec<_>>();
+        if is_approval_mode_set(&approval_ids) {
+            if parsed.permission_modes.is_empty() {
+                parsed.permission_modes.extend(approval_ids);
+            }
+        } else if looks_like_reasoning(&effort_options) {
             if parsed.default_reasoning_effort.is_none() {
                 parsed.default_reasoning_effort = current.map(ToOwned::to_owned);
             }
@@ -1932,8 +1961,14 @@ pub(crate) fn parse_session_metadata(result: &Value) -> ParsedSessionMetadata {
     }
 
     parsed.reasoning_efforts = dedupe_reasoning_efforts(parsed.reasoning_efforts);
-    parsed.permission_modes.sort();
-    parsed.permission_modes.dedup();
+    // Keep the agent's advertised order. Sorting put Muse's deny mode ahead
+    // of its ask modes.
+    {
+        let mut seen = HashSet::new();
+        parsed
+            .permission_modes
+            .retain(|mode| seen.insert(mode.clone()));
+    }
     {
         let mut seen = HashSet::new();
         parsed
@@ -3182,6 +3217,7 @@ impl AcpRuntime {
                 self.set_config_option(session_id, config_id, collaboration_mode)
                     .await?;
             } else if let Some(state) = self.session_mode_state(session_id).await
+                && !is_approval_mode_set(&state.available)
                 && state
                     .available
                     .iter()
@@ -3193,7 +3229,16 @@ impl AcpRuntime {
             }
         }
         if let Some(permission_mode) = permission_mode {
-            if let Some(config_id) = configuration.permission_config_id.as_deref() {
+            // A placeholder id from before this session advertised its catalog
+            // is not a legal config value. Skip it so this call still succeeds.
+            let known = self.discovered_permission_modes.lock().await.clone();
+            if !known.is_empty() && !known.iter().any(|mode| mode == permission_mode) {
+                tracing::info!(
+                    provider = %self.config.id,
+                    %permission_mode,
+                    "session does not offer this permission mode; keeping its current mode"
+                );
+            } else if let Some(config_id) = configuration.permission_config_id.as_deref() {
                 self.set_config_option(session_id, config_id, permission_mode)
                     .await?;
             } else if !self.is_hermes()
@@ -6580,6 +6625,61 @@ require('node:readline').createInterface({{ input: process.stdin }}).on('line', 
             parsed.configuration.collaboration_config_id.as_deref(),
             Some("mode")
         );
+    }
+
+    #[test]
+    fn muse_approval_modes_are_permissions_not_collaboration_modes() {
+        let parsed = parse_session_metadata(&json!({
+            "sessionId": "muse-session",
+            "modes": {
+                "currentModeId": "onRequest",
+                "availableModes": [
+                    { "id": "allowAll", "name": "Allow all" },
+                    { "id": "promptUnmatched", "name": "Ask before unmatched actions" },
+                    { "id": "onRequest", "name": "Ask on request" },
+                    { "id": "denyUnmatched", "name": "Deny unmatched actions" }
+                ]
+            },
+            "configOptions": [
+                {
+                    "id": "mode",
+                    "category": "mode",
+                    "currentValue": "onRequest",
+                    "options": [
+                        { "value": "allowAll", "name": "Allow all" },
+                        { "value": "promptUnmatched", "name": "Ask before unmatched actions" },
+                        { "value": "onRequest", "name": "Ask on request" },
+                        { "value": "denyUnmatched", "name": "Deny unmatched actions" }
+                    ]
+                },
+                {
+                    "id": "model",
+                    "category": "model",
+                    "currentValue": "muse-spark-1.3-contributor",
+                    "options": [
+                        { "value": "muse-spark-1.3-contributor", "name": "muse-spark-1.3-contributor" }
+                    ]
+                }
+            ]
+        }));
+
+        assert!(parsed.collaboration_modes.is_empty());
+        assert_eq!(
+            parsed.permission_modes,
+            vec![
+                "allowAll".to_string(),
+                "promptUnmatched".to_string(),
+                "onRequest".to_string(),
+                "denyUnmatched".to_string(),
+            ]
+        );
+        assert_eq!(
+            parsed.configuration.permission_config_id.as_deref(),
+            Some("mode")
+        );
+        assert_eq!(parsed.models.len(), 1);
+        assert_eq!(parsed.models[0].id, "muse-spark-1.3-contributor");
+        assert!(parsed.models[0].is_default);
     }
 
     #[test]

@@ -63,7 +63,19 @@ const BUILT_IN_AGENTS = [
   },
 ]
 
-const RECOMMENDED_AGENTS = [
+type RecommendedAgent = {
+  id: string
+  label: string
+  detail: string
+  command: string[]
+  transport?: 'auto' | 'native' | 'acp'
+  env?: Record<string, string>
+  installCommand: string
+  setupCommand?: string
+  setupHint?: string
+}
+
+const RECOMMENDED_AGENTS: RecommendedAgent[] = [
   {
     id: 'cursor',
     label: 'Cursor',
@@ -105,6 +117,18 @@ const RECOMMENDED_AGENTS = [
     command: ['falcondeck-unreal-agent-acp'],
     transport: undefined,
     installCommand: 'go install github.com/unreallabsai/unreal-agent/cmd/unreal-agent-runner@latest',
+  },
+  {
+    id: 'muse',
+    label: 'Muse Code',
+    detail:
+      'Meta Muse Code through its experimental ACP server. Turns spend a Muse Code subscription.',
+    command: ['muse', 'acp', '--trust-workspace'],
+    transport: undefined,
+    env: { MUSE_EXPERIMENTAL_ACP: 'on' },
+    installCommand: 'curl -fsSL https://dev.meta.ai/install.sh | bash',
+    setupCommand: 'muse login',
+    setupHint: 'Sign in once in a terminal:',
   },
 ]
 
@@ -308,7 +332,9 @@ export function AgentsPanel({ baseUrl, workspace, onToast }: AgentsPanelProps) {
                   ) : null}
                   {agent.setupCommand ? (
                     <p className="mt-1 text-[length:var(--fd-text-xs)] text-fg-muted">
-                      Set up your model in a terminal using the same profile: <code>{agent.setupCommand}</code>
+                      {agent.setupHint ??
+                        'Set up your model in a terminal using the same profile:'}{' '}
+                      <code>{agent.setupCommand}</code>
                     </p>
                   ) : null}
                 </div>
@@ -323,6 +349,7 @@ export function AgentsPanel({ baseUrl, workspace, onToast }: AgentsPanelProps) {
                         label: agent.label,
                         command: agent.command,
                         ...(agent.transport ? { transport: agent.transport } : {}),
+                        ...(agent.env ? { env: agent.env } : {}),
                       },
                     })).then((ok) => {
                       if (ok) {

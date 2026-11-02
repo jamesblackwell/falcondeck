@@ -2526,6 +2526,43 @@ pub(super) async fn set_acp_thread_permission_mode(
     )))
 }
 
+/// Session `modes` that are plan/build choices, not an approval catalog.
+fn project_session_modes_as_collaboration(available: &[String]) -> bool {
+    !available.is_empty() && !crate::acp::is_approval_mode_set(available)
+}
+
+/// Maps a stored permission mode onto the ids this session advertised.
+///
+/// Before `session/new`, the composer only has the placeholder catalog
+/// (`always-approve`, `default`). Sending either string to an agent that
+/// publishes its own ids makes `session/set_config_option` fail.
+fn reconcile_permission_mode(
+    requested: Option<&str>,
+    available: &[String],
+    current: Option<&str>,
+) -> Option<String> {
+    if available.is_empty() {
+        return requested
+            .filter(|mode| !mode.is_empty())
+            .map(str::to_owned);
+    }
+    let Some(requested) = requested.filter(|mode| !mode.is_empty()) else {
+        return default_acp_mode(available).map(str::to_owned);
+    };
+    if available.iter().any(|mode| mode == requested) {
+        return Some(requested.to_string());
+    }
+    if crate::acp::is_blanket_approval_mode(requested)
+        && let Some(mapped) = default_acp_mode(available)
+        && crate::acp::is_blanket_approval_mode(mapped)
+    {
+        return Some(mapped.to_string());
+    }
+    current
+        .filter(|mode| available.iter().any(|candidate| candidate == *mode))
+        .map(str::to_owned)
+}
+
 fn default_acp_mode(available_modes: &[String]) -> Option<&str> {
     const PERMISSIVE_MODES: &[&str] = &[
         "bypasspermissions",
@@ -2979,9 +3016,15 @@ async fn run_acp_turn_startup(
     let discovered_models = runtime.advertised_models().await;
     let discovered_collaboration_modes = runtime.advertised_collaboration_modes().await;
     let discovered_capabilities = runtime.capability_summary().await;
-    let effective_permission_mode = requested_permission_mode
-        .clone()
-        .or_else(|| default_acp_mode(&discovered_capabilities.permission_modes).map(str::to_owned));
+    let current_session_mode = runtime
+        .session_mode_state(&session_id)
+        .await
+        .and_then(|state| state.current);
+    let effective_permission_mode = reconcile_permission_mode(
+        requested_permission_mode.as_deref(),
+        &discovered_capabilities.permission_modes,
+        current_session_mode.as_deref(),
+    );
     let metadata_changed = {
         let mut workspaces = app.inner.workspaces.lock().await;
         workspaces
@@ -3025,7 +3068,7 @@ async fn run_acp_turn_startup(
         );
     }
 
-    if requested_permission_mode.is_none()
+    if effective_permission_mode.as_deref() != requested_permission_mode.as_deref()
         && let Some(permission_mode) = effective_permission_mode.clone()
     {
         app.with_thread_mut(workspace_id, thread_id, |thread| {
@@ -3036,9 +3079,11 @@ async fn run_acp_turn_startup(
 
     // Keep the legacy mode projection for other adapters. Hermes labels
     // come from captured metadata; projecting bare ids here would erase them.
+    // Muse publishes approval ids on this same block; those belong in
+    // Permissions, which parse_session_metadata already filled.
     if !runtime.is_hermes()
         && let Some(mode_state) = runtime.session_mode_state(&session_id).await
-        && !mode_state.available.is_empty()
+        && project_session_modes_as_collaboration(&mode_state.available)
     {
         let modes_changed = {
             let mut workspaces = app.inner.workspaces.lock().await;
@@ -3328,6 +3373,7 @@ mod tests {
     use super::{
         acp_empty_turn_stop_reason, acp_metadata_updated_at, conversation_item_from_projected_user,
         default_acp_mode, falcondeck_skill_path_preamble, latest_user_message_contains_echo,
+        project_session_modes_as_collaboration, reconcile_permission_mode,
     };
     use falcondeck_core::{
         AgentProvider, ContentLifecycle, ConversationItem, ThreadStatus, WorkspaceStatus,
@@ -3855,6 +3901,64 @@ mod tests {
     fn cursor_permission_modes_default_to_always_approve() {
         let modes = crate::acp::cursor_placeholder_permission_modes();
         assert_eq!(default_acp_mode(&modes), Some("always-approve"));
+    }
+
+    #[test]
+    fn muse_approval_modes_default_to_allow_all_and_stay_out_of_collaboration() {
+        let modes = vec![
+            "promptUnmatched".to_string(),
+            "onRequest".to_string(),
+            "allowAll".to_string(),
+            "denyUnmatched".to_string(),
+        ];
+        assert_eq!(default_acp_mode(&modes), Some("allowAll"));
+        assert!(!project_session_modes_as_collaboration(&modes));
+        assert!(project_session_modes_as_collaboration(&[
+            "plan".to_string(),
+            "build".to_string(),
+        ]));
+    }
+
+    #[test]
+    fn muse_placeholder_permission_modes_map_onto_the_live_catalog() {
+        let available = vec![
+            "allowAll".to_string(),
+            "promptUnmatched".to_string(),
+            "onRequest".to_string(),
+            "denyUnmatched".to_string(),
+        ];
+        assert_eq!(
+            reconcile_permission_mode(Some("always-approve"), &available, Some("promptUnmatched"))
+                .as_deref(),
+            Some("allowAll")
+        );
+        assert_eq!(
+            reconcile_permission_mode(Some("default"), &available, Some("promptUnmatched"))
+                .as_deref(),
+            Some("promptUnmatched")
+        );
+        assert_eq!(
+            reconcile_permission_mode(Some("allowAll"), &available, Some("onRequest")).as_deref(),
+            Some("allowAll")
+        );
+        assert_eq!(
+            reconcile_permission_mode(None, &available, Some("onRequest")).as_deref(),
+            Some("allowAll")
+        );
+        assert_eq!(
+            reconcile_permission_mode(
+                Some("always-approve"),
+                &["promptUnmatched".to_string()],
+                Some("promptUnmatched"),
+            )
+            .as_deref(),
+            Some("promptUnmatched")
+        );
+        assert_eq!(
+            reconcile_permission_mode(Some("always-approve"), &["promptUnmatched".to_string()], None)
+                .as_deref(),
+            None
+        );
     }
 
     #[test]

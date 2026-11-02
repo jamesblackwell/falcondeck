@@ -156,7 +156,7 @@ export const SETTINGS_GROUPS: SettingsNavGroup[] = [
         description: "Status, built-in, and custom ACP agents",
         icon: Bot,
         settings: ["Status on this computer", "Built in", "Recommended"],
-        keywords: ["acp", "claude", "codex", "opencode", "grok", "cursor", "provider"],
+        keywords: ["acp", "claude", "codex", "opencode", "grok", "cursor", "muse", "provider"],
       },
       {
         id: "harnesses",

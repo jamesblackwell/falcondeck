@@ -32,7 +32,7 @@ An overview is a list of `HarnessSummary` entries for one host:
 Entries come from two sources, merged by id:
 
 1. **Curated registry** (`KNOWN_HARNESSES` in `harness_manager.rs`): codex,
-   claude, agy, opencode, pi, grok, cursor, hermes, and unreal. Each entry declares its npm
+   claude, agy, opencode, pi, grok, muse, cursor, hermes, and unreal. Each entry declares its npm
    package (for latest-version lookups), upgrade command, and optional auth
    probe. Adding a harness means adding one struct — the panel, RPC, and
    per-host probing pick it up automatically. Cursor, Antigravity, and Grok ship via
@@ -287,6 +287,20 @@ the daemon implementation is `crates/falcondeck-daemon/src/app/provider_usage.rs
   **Add to prompt → Mode** on mobile. They are session choices, separate from
   FalconDeck's **Permissions** control. No separate reasoning or sandbox
   inventory is advertised by the qualified Hermes build.
+
+- **Muse Code:** Settings → Agents offers `muse acp --trust-workspace` with
+  `MUSE_EXPERIMENTAL_ACP=on`. The `acp` command is experimental and hidden
+  unless that variable is set on the process FalconDeck spawns. Sessions,
+  prompts, cancellation, `session/load`, images, and HTTP MCP match the
+  other ACP harnesses. Model and approval catalogs come from `session/new`:
+  approval modes are `allowAll`, `promptUnmatched`, `onRequest`, and
+  `denyUnmatched`, applied with `session/set_config_option`. A new thread
+  defaults to `allowAll`. A full-access choice made before that catalog
+  loads (`always-approve`) is sent as `allowAll`; an ask choice keeps the
+  mode the CLI already selected. There is no
+  `session/set_model` or `session/delete`. A Muse Code subscription is
+  billed only for turns that go through this CLI. Install and repair use
+  `curl -fsSL https://dev.meta.ai/install.sh | bash`. Sign in with `muse login`.
 
 - **Unreal Agent:** Settings → Agents offers `falcondeck-unreal-agent-acp`, a
   FalconDeck-hosted ACP adapter for the one-request `unreal-agent-runner` CLI.
