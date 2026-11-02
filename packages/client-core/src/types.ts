@@ -485,6 +485,8 @@ export type BotProfile = {
   context_files?: string[];
   /** Sidebar mark; resolve missing ones with `resolveBotIcons`. */
   icon?: import("./bot-icons").BotIcon | null;
+  /** Absent on older daemons and on active bots. */
+  status?: "active" | "paused" | "archived";
 };
 
 export type BotMutation =
@@ -492,7 +494,8 @@ export type BotMutation =
   | { action: "create"; name: string; instructions: string; provider?: AgentProvider; model_id?: string; thread_id?: string }
   | { action: "update"; id: string; name: string; instructions: string; can_start_threads: boolean; context_files?: string[]; icon?: import("./bot-icons").BotIcon }
   | { action: "reorder"; ids: string[] }
-  | { action: "stop" | "delete"; id: string };
+  | { action: "stop" | "delete"; id: string }
+  | { action: "set_status"; id: string; status: "active" | "paused" | "archived" };
 
 export type BotDocument = { name: string; content: string; version: string; modified_at?: string | null };
 export type BotDocumentMutation =

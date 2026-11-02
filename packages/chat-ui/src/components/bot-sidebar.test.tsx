@@ -113,6 +113,70 @@ describe("bot sidebar", () => {
     expect(screen.getByText("Needs you")).toBeInTheDocument();
   });
 
+  it("pauses a bot in place and archives it out of the working list", async () => {
+    const transport = api();
+    const { rerender } = render(
+      <BotSidebar
+        bots={[bot]}
+        botApi={transport}
+        groups={[]}
+        selectedThreadId={null}
+        onSelectThread={vi.fn()}
+      />,
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Edit Assistant" }));
+    fireEvent.click(screen.getByRole("button", { name: "Pause" }));
+    await waitFor(() =>
+      expect(transport.mutateBot).toHaveBeenCalledWith({
+        action: "set_status",
+        id: bot.id,
+        status: "paused",
+      }),
+    );
+    rerender(
+      <BotSidebar
+        bots={[{ ...bot, status: "paused" }]}
+        botApi={transport}
+        groups={[]}
+        selectedThreadId={null}
+        onSelectThread={vi.fn()}
+      />,
+    );
+    expect(screen.getByRole("button", { name: /^Assistant/ })).toHaveTextContent(
+      "Paused",
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Archive" }));
+    await waitFor(() =>
+      expect(transport.mutateBot).toHaveBeenCalledWith({
+        action: "set_status",
+        id: bot.id,
+        status: "archived",
+      }),
+    );
+    rerender(
+      <BotSidebar
+        bots={[{ ...bot, status: "archived" }]}
+        botApi={transport}
+        groups={[]}
+        selectedThreadId={null}
+        onSelectThread={vi.fn()}
+      />,
+    );
+    expect(
+      screen.queryByRole("button", { name: /^Assistant/ }),
+    ).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: /Archived/ }));
+    expect(screen.getByRole("button", { name: /^Assistant/ })).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Unarchive" }));
+    await waitFor(() =>
+      expect(transport.mutateBot).toHaveBeenCalledWith({
+        action: "set_status",
+        id: bot.id,
+        status: "active",
+      }),
+    );
+  });
+
   it("saves instructions and an explicit delegation restriction", async () => {
     const transport = api();
     render(

@@ -13,9 +13,11 @@ struct NativeBotsSection: View {
     @State private var expanded = true
     @State private var editor: BotEditorTarget?
     @State private var opening: String?
-    private var bots: [NativeBot] {
+    private var matching: [NativeBot] {
         model.bots.filter { search.isEmpty || $0.name.localizedCaseInsensitiveContains(search) }
     }
+    private var bots: [NativeBot] { matching.filter { $0.availability != "archived" } }
+    private var archived: [NativeBot] { matching.filter { $0.availability == "archived" } }
     var body: some View {
         HStack(spacing: 0) {
             Button { expanded.toggle() } label: {
@@ -50,11 +52,14 @@ struct NativeBotsSection: View {
                                 else { Image(systemName: "person.crop.square").foregroundStyle(FD.muted) }
                             }.frame(width: 18)
                             Text(bot.name).font(.subheadline).lineLimit(1)
+                                .foregroundStyle(bot.availability == "paused" ? FD.muted : FD.secondary)
                             Spacer(minLength: 4)
                             if needsYou {
                                 Text("Needs you").font(.caption).foregroundStyle(FD.warning)
                             } else if opening == bot.id || related.contains(where: \.working) { ActivityDiamond() }
-                            else if model.task(bot.taskID)?.unread == true { Circle().fill(FD.unread).frame(width: 6, height: 6) }
+                            else if bot.availability == "paused" {
+                                Text("Paused").font(.caption).foregroundStyle(FD.muted)
+                            } else if model.task(bot.taskID)?.unread == true { Circle().fill(FD.unread).frame(width: 6, height: 6) }
                         }.padding(.leading, 12).frame(minHeight: 44).contentShape(.rect)
                     }.buttonStyle(.plain).accessibilityIdentifier("sidebar-bot-\(bot.id)")
                         .accessibilityAddTraits(model.selection == .task(bot.taskID) ? .isSelected : [])
@@ -69,6 +74,30 @@ struct NativeBotsSection: View {
             if model.bots.isEmpty && search.isEmpty {
                 Text("Create a bot to coordinate work across your projects.")
                     .font(.caption).foregroundStyle(FD.secondary).padding(.horizontal, 12).padding(.bottom, 8)
+            }
+            if !archived.isEmpty {
+                DisclosureGroup("Archived") {
+                    ForEach(archived) { bot in
+                        HStack(spacing: 0) {
+                            Button {
+                                guard opening == nil else { return }; opening = bot.id
+                                Task { defer { opening = nil }; if await model.openBot(bot) { openDetail() } }
+                            } label: {
+                                HStack(spacing: 8) {
+                                    if let icon = model.botIcons[bot.id] { BotMark(icon: icon, size: 16) }
+                                    else { Image(systemName: "archivebox").foregroundStyle(FD.muted) }
+                                    Text(bot.name).font(.subheadline).lineLimit(1).foregroundStyle(FD.muted)
+                                    Spacer(minLength: 4)
+                                }.padding(.leading, 12).frame(minHeight: 44).contentShape(.rect)
+                            }.buttonStyle(.plain).accessibilityIdentifier("sidebar-bot-\(bot.id)")
+                            Button { editor = BotEditorTarget(bot: bot) } label: {
+                                Image(systemName: "slider.horizontal.3").font(.caption).foregroundStyle(FD.muted)
+                                    .frame(width: 44, height: 44).contentShape(.rect)
+                            }.buttonStyle(.plain).accessibilityLabel("Settings for \(bot.name)")
+                        }
+                    }
+                }.font(.caption).foregroundStyle(FD.muted).padding(.leading, 12)
+                    .accessibilityIdentifier("sidebar-archived-bots")
             }
         }
         Color.clear.frame(height: 0)
@@ -103,6 +132,19 @@ struct NativeBotEditor: View {
                     documentSection(bot)
                     delegatedSection(bot)
                     Section {
+                        let current = model.bots.first { $0.id == bot.id } ?? bot
+                        if current.availability == "archived" {
+                            Button("Unarchive", systemImage: "arrow.uturn.backward") {
+                                run { _ = try await model.setBotStatus(current, status: "active") }
+                            }.accessibilityIdentifier("bot-unarchive")
+                        } else {
+                            Button(current.availability == "paused" ? "Resume" : "Pause", systemImage: current.availability == "paused" ? "play" : "pause") {
+                                run { _ = try await model.setBotStatus(current, status: current.availability == "paused" ? "active" : "paused") }
+                            }.accessibilityIdentifier("bot-pause")
+                            Button("Archive", systemImage: "archivebox") {
+                                run { _ = try await model.setBotStatus(current, status: "archived") }
+                            }.accessibilityIdentifier("bot-archive")
+                        }
                         Button("Stop work", systemImage: "stop.circle") { stopping = true }
                             .accessibilityIdentifier("bot-stop-work")
                         Button("Delete bot", systemImage: "trash", role: .destructive) { deleting = true }

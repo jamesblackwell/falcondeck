@@ -647,7 +647,12 @@ impl AppState {
         if self.is_shutting_down() {
             return;
         }
-        let home = self.bot_for_thread(parent).await.map(|bot| bot.thread_id);
+        let home_bot = self.bot_for_thread(parent).await;
+        // A paused or archived coordinator is not woken. It reads outcomes when resumed.
+        if home_bot.as_ref().is_some_and(|bot| bot.status.is_resting()) {
+            return;
+        }
+        let home = home_bot.map(|bot| bot.thread_id);
         let destination = home.as_deref().unwrap_or(parent);
         let Ok(parent_workspace) = self.thread_workspace(destination).await else {
             return;

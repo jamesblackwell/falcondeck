@@ -38,6 +38,21 @@ private actor BotRelay: RelayServing {
         XCTAssertEqual(model.botTaskIDs, ["bot-home", "existing-task"])
         XCTAssertEqual(model.botWorkspaceIDs, ["bot-project"])
         XCTAssertTrue(model.bots[0].canStartThreads, "Older profiles default to allowing delegation")
+        XCTAssertEqual(model.bots[0].availability, "active")
+    }
+
+    func testPausingABotSendsSetStatusAndKeepsTheProfile() async throws {
+        let relay = BotRelay(response: .object(["bot": profile.setting("status", .string("paused"))]))
+        let model = AppModel.testing(relay: relay)
+        model.preferences = .object(["bots": .array([profile])])
+        let saved = try await model.setBotStatus(model.bots[0], status: "paused")
+        XCTAssertEqual(saved.availability, "paused")
+        XCTAssertEqual(model.bots.map(\.availability), ["paused"])
+        let call = await relay.requests().first
+        XCTAssertEqual(call?.0, "bots.mutate")
+        XCTAssertEqual(call?.1["action"].string, "set_status")
+        XCTAssertEqual(call?.1["status"].string, "paused")
+        XCTAssertEqual(call?.1["id"].string, "bot-one")
     }
 
     func testPromotingATaskOmitsHarnessSettingsAndUpdatesPreserveDelegationChoice() throws {

@@ -75,6 +75,17 @@ async fn dispatch_due(
 ) -> Result<(), String> {
     let now = Utc::now();
     for (automation_id, due_at) in app.control().due_automations(now).await {
+        // A paused or archived bot keeps its schedules, but they do not run or
+        // pile up skip rows. The occurrence is consumed so it is not retried.
+        if let Some(automation) = app.control().automation(&automation_id).await
+            && app.resting_bot_for_automation(&automation).await.is_some()
+        {
+            app.control()
+                .skip_resting_bot_occurrence(&automation_id, due_at)
+                .await
+                .map_err(|error| error.0.message)?;
+            continue;
+        }
         let run = app
             .control()
             .enqueue_run(&automation_id, Some(due_at), RunSource::Scheduled)
@@ -217,6 +228,23 @@ pub(crate) async fn execute_run(app: &AppState, run_id: &str) {
         emit_runs_changed(app).await;
         return;
     };
+    if let Some(bot) = app.resting_bot_for_automation(&automation).await {
+        let _ = app
+            .control()
+            .finish_run(
+                run_id,
+                AutomationRunStatus::Cancelled,
+                Some(format!(
+                    "{} is {}. Resume the bot to run its schedules.",
+                    bot.name,
+                    bot.status.label()
+                )),
+                None,
+            )
+            .await;
+        emit_runs_changed(app).await;
+        return;
+    }
 
     let mut bot_digest = None;
     if let Some(id) = automation.target.run_as_bot.clone() {

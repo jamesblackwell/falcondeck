@@ -451,8 +451,21 @@ pub(super) async fn list(
         .await
         .bots
         .into_iter()
-        .filter(|bot| !bot.owns_thread(caller))
-        .map(|bot| format!("{} `{}`", line(&bot.name, 60), line(&bot.thread_id, 128)))
+        .filter(|bot| {
+            !bot.owns_thread(caller) && bot.status != falcondeck_core::BotStatus::Archived
+        })
+        .map(|bot| {
+            let note = if bot.status == falcondeck_core::BotStatus::Paused {
+                " (paused)"
+            } else {
+                ""
+            };
+            format!(
+                "{}{note} `{}`",
+                line(&bot.name, 60),
+                line(&bot.thread_id, 128)
+            )
+        })
         .collect();
     if offset == 0 && !bots.is_empty() {
         markdown.push_str(&format!(

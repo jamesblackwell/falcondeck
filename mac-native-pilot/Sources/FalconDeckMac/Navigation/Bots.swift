@@ -6,6 +6,10 @@ struct NativeBot: Identifiable {
     var id: String { raw["id"].string }
     var name: String { raw["name"].string }
     var taskID: String { raw["thread_id"].string }
+    var availability: String {
+        let value = raw["status"].string
+        return value == "paused" || value == "archived" ? value : "active"
+    }
 }
 
 extension AppStore {
@@ -22,21 +26,39 @@ struct NativeBotsSection: View {
     @State private var creating = false
     var body: some View {
         Section {
-            ForEach(store.bots) { bot in
+            ForEach(store.bots.filter { $0.availability != "archived" }) { bot in
                 HStack {
                     Button { Task { await store.selectTask(bot.taskID, preservePinScope: false) } } label: {
                         HStack {
                             Image(systemName: "person.crop.square").foregroundStyle(FDTheme.muted)
-                            Text(bot.name).lineLimit(1); Spacer()
+                            Text(bot.name).lineLimit(1).foregroundStyle(bot.availability == "paused" ? FDTheme.muted : FDTheme.secondary)
+                            Spacer()
                             let related = store.tasks.filter { $0.id == bot.taskID || ($0.raw["origin"]["kind"].string == "agent_spawn" && $0.raw["origin"]["parent_thread_id"].string == bot.taskID) }
                             if related.contains(where: \.needsAttention) { Image(systemName: "exclamationmark.circle").foregroundStyle(.orange) }
                             else if related.contains(where: \.running) { ProgressView().controlSize(.mini) }
+                            else if bot.availability == "paused" { Text("Paused").foregroundStyle(FDTheme.muted) }
                         }.contentShape(Rectangle())
                     }.buttonStyle(.plain)
                     Button { editor = bot } label: { Image(systemName: "slider.horizontal.3") }
                         .buttonStyle(.plain).help("Edit \(bot.name)")
                 }.tag("task:\(bot.taskID)")
                     .font(NativePreferences.shared.font(size: 14, surface: "sidebar"))
+            }
+            if !store.bots.filter({ $0.availability == "archived" }).isEmpty {
+                DisclosureGroup("Archived") {
+                    ForEach(store.bots.filter { $0.availability == "archived" }) { bot in
+                        HStack {
+                            Button { Task { await store.selectTask(bot.taskID, preservePinScope: false) } } label: {
+                                HStack {
+                                    Image(systemName: "archivebox").foregroundStyle(FDTheme.muted)
+                                    Text(bot.name).lineLimit(1).foregroundStyle(FDTheme.muted); Spacer()
+                                }.contentShape(Rectangle())
+                            }.buttonStyle(.plain)
+                            Button { editor = bot } label: { Image(systemName: "slider.horizontal.3") }
+                                .buttonStyle(.plain).help("Edit \(bot.name)")
+                        }.tag("task:\(bot.taskID)")
+                    }
+                }
             }
         } header: {
             HStack { Text("Bots"); Spacer(); Button { creating = true } label: { Image(systemName: "plus") }.buttonStyle(.plain).help("New bot") }
@@ -50,6 +72,7 @@ struct NativeBotEditor: View {
     @Bindable var store: AppStore
     let bot: NativeBot?
     @Environment(\.dismiss) private var dismiss
+    @State private var availability = "active"
     @State private var name = ""
     @State private var instructions = ""
     @State private var provider = "codex"
@@ -131,6 +154,14 @@ struct NativeBotEditor: View {
             Divider()
             HStack {
                 if let bot {
+                    if availability == "archived" {
+                        Button("Unarchive") { setStatus(bot, "active") }
+                    } else {
+                        Button(availability == "paused" ? "Resume" : "Pause") {
+                            setStatus(bot, availability == "paused" ? "active" : "paused")
+                        }
+                        Button("Archive") { setStatus(bot, "archived") }
+                    }
                     Button("Stop work") { run { _ = try await store.request("/api/bots", method: "POST", body: .object(["action": .string("stop"), "id": .string(bot.id)])) } }
                     Button("Delete bot", role: .destructive) { deletingBot = true }
                 }
@@ -140,6 +171,7 @@ struct NativeBotEditor: View {
         }.frame(width: 620, height: 720).interactiveDismissDisabled(busy)
         .task {
             name = bot?.name ?? ""; instructions = bot?.raw["instructions"].string ?? ""; canStart = bot?.raw["can_start_threads"].bool ?? true
+            availability = bot?.availability ?? "active"
             if bot != nil { do { try await loadDocuments() } catch { self.error = error.localizedDescription } }
         }
         .confirmationDialog("Remove this bot? Its conversation will be archived and documents kept on disk.", isPresented: $deletingBot) {
@@ -154,6 +186,13 @@ struct NativeBotEditor: View {
         }
     }
 
+    private func setStatus(_ bot: NativeBot, _ status: String) {
+        run {
+            _ = try await store.request("/api/bots", method: "POST", body: .object(["action": .string("set_status"), "id": .string(bot.id), "status": .string(status)]))
+            availability = status
+            await store.refresh()
+        }
+    }
     private func save() {
         run {
             var fields: [String: JSON] = ["action": .string(bot == nil ? "create" : "update"), "name": .string(name), "instructions": .string(instructions)]

@@ -136,14 +136,18 @@ an operating-system sandbox or a restriction on running arbitrary shell commands
 Existing harness permissions and approval rules continue to apply.
 
 Stop work clears queued requests and interrupts the bot and its direct workers.
-Deletion requires that work to be stopped, removes the profile, and archives the
+Pause does that and leaves the bot in the sidebar. Its schedules wait without
+recording a run, and other bots cannot message it. Archive does the same and
+moves the bot out of the working list. Resume or unarchive puts it back.
+Documents, instructions and the home conversation stay either way. Deletion
+requires that work to be stopped, removes the profile, and archives the
 home conversation. Documents remain on disk. Bulk archive skips bot homes;
 individual archive/delete and project removal cannot strand a registered bot.
 
 ## Client contract
 
 Profiles are carried in `preferences.bots`; older snapshots default to no bots.
-Mutations use `POST /api/bots` with `create`, `update`, `reorder`, `stop`, or `delete`. Bots are listed in their saved order; `reorder` takes ids first to last, and bots it omits keep their relative order after those listed. Desktop reorders by dragging a row or Alt+↑/↓.
+Mutations use `POST /api/bots` with `create`, `update`, `reorder`, `stop`, `set_status`, or `delete`. `set_status` takes `active`, `paused`, or `archived`. Older profiles omit `status`, which means active. Bots are listed in their saved order; `reorder` takes ids first to last, and bots it omits keep their relative order after those listed. Desktop reorders by dragging a row or Alt+↑/↓.
 Document listing, reads and mutations use `/api/bots/:id/documents` and
 `/api/bots/:id/documents/content?name=...`.
 

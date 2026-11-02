@@ -101,12 +101,30 @@ export function BotSidebar({
   const [editor, setEditor] = useState<BotProfile | "new" | null>(null);
   const icons = useMemo(() => resolveBotIcons(bots), [bots]);
   const tasks = useMemo(() => groups.flatMap((group) => group.threads), [groups]);
-  const reorder = useBotReorder(bots, botApi);
+  const archivedBots = useMemo(
+    () => bots.filter((bot) => (bot.status ?? "active") === "archived"),
+    [bots],
+  );
+  const workingBots = useMemo(
+    () => bots.filter((bot) => (bot.status ?? "active") !== "archived"),
+    [bots],
+  );
+  const reorder = useBotReorder(
+    workingBots,
+    botApi,
+    archivedBots.map((bot) => bot.id),
+  );
   const showNumbers = useBotNumberShortcuts(
     botNumberShortcuts && Boolean(botApi),
     reorder.ordered,
     onSelectThread,
   );
+  const [showArchived, setShowArchived] = useState(false);
+  useEffect(() => {
+    if (archivedBots.some((bot) => bot.thread_id === selectedThreadId)) {
+      setShowArchived(true);
+    }
+  }, [archivedBots, selectedThreadId]);
   if (!botApi) return null;
   return (
     <section aria-labelledby="fd-bots-heading" className="mb-4">
@@ -148,7 +166,7 @@ export function BotSidebar({
               });
             }}
             className={cn(
-              "group flex items-center gap-1 rounded-[var(--fd-radius-md)] pr-1.5 transition-colors duration-[var(--fd-duration-hover)]",
+              "group relative flex items-center gap-1 rounded-[var(--fd-radius-md)] pr-1.5 transition-colors duration-[var(--fd-duration-hover)]",
               reorder.dragging === bot.id
                 ? "relative z-10 cursor-grabbing bg-interactive-selected shadow-[var(--fd-shadow-sm)]"
                 : selected
@@ -193,7 +211,9 @@ export function BotSidebar({
                   "fd-type-supporting min-w-0 flex-1 truncate transition-colors duration-[var(--fd-duration-fast)]",
                   selected
                     ? "text-fg-primary"
-                    : "text-fg-secondary group-hover:text-fg-primary",
+                    : (bot.status ?? "active") === "paused"
+                      ? "text-fg-muted group-hover:text-fg-secondary"
+                      : "text-fg-secondary group-hover:text-fg-primary",
                 )}
               >
                 {bot.name}
@@ -207,6 +227,8 @@ export function BotSidebar({
                   <ActivityDiamond size="xs" />
                   <span className="sr-only">Working</span>
                 </>
+              ) : (bot.status ?? "active") === "paused" ? (
+                <span className="fd-type-meta shrink-0 text-fg-muted">Paused</span>
               ) : home?.attention.unread ? (
                 <span
                   role="img"
@@ -214,12 +236,15 @@ export function BotSidebar({
                   className="h-2 w-2 shrink-0 rounded-full bg-unread"
                 />
               ) : null}
-              {showNumbers && index < 9 ? (
-                <Kbd aria-hidden="true" className="shrink-0">
-                  ⌘{index + 1}
-                </Kbd>
-              ) : null}
             </button>
+            {showNumbers && index < 9 ? (
+              <Kbd
+                aria-hidden="true"
+                className="pointer-events-none absolute right-1 top-1/2 z-10 -translate-y-1/2 px-1 py-0 text-[length:calc(var(--fd-text-2xs)*0.85)] leading-none"
+              >
+                ⌘{index + 1}
+              </Kbd>
+            ) : null}
             <button
               type="button"
               aria-label={`Edit ${bot.name}`}
@@ -236,7 +261,98 @@ export function BotSidebar({
           </div>
         );
       })}
-      {bots.length === 0 ? (
+      {archivedBots.length > 0 ? (
+        <div className="mt-1">
+          <button
+            type="button"
+            aria-expanded={showArchived}
+            className="fd-focus flex w-full items-center gap-1.5 rounded-[var(--fd-radius-md)] px-2.5 py-1.5 text-left text-fg-muted transition-colors duration-[var(--fd-duration-hover)] hover:bg-interactive-hover"
+            onClick={() => setShowArchived((open) => !open)}
+          >
+            <ChevronRight
+              aria-hidden="true"
+              className={cn(
+                "h-3 w-3 transition-transform duration-[var(--fd-duration-fast)]",
+                showArchived && "rotate-90",
+              )}
+            />
+            <span className="fd-type-meta">Archived</span>
+            <span className="fd-type-meta ml-auto">{archivedBots.length}</span>
+          </button>
+          {showArchived
+            ? archivedBots.map((bot) => {
+                const activity = botActivity(bot, tasks);
+                const home = tasks.find(
+                  (task) =>
+                    task.id === bot.thread_id &&
+                    task.workspace_id === bot.workspace_id,
+                );
+                const icon = icons.get(bot.id);
+                const selected = selectedThreadId === bot.thread_id;
+                return (
+                  <div
+                    key={bot.id}
+                    onContextMenu={(event) => {
+                      if (!home || !onOpenContextMenu) return;
+                      event.preventDefault();
+                      onOpenContextMenu({
+                        workspaceId: bot.workspace_id,
+                        thread: home,
+                        x: event.clientX,
+                        y: event.clientY,
+                      });
+                    }}
+                    className={cn(
+                      "group relative flex items-center gap-1 rounded-[var(--fd-radius-md)] pr-1.5 transition-colors duration-[var(--fd-duration-hover)]",
+                      selected
+                        ? "fd-row-selected"
+                        : "hover:bg-interactive-hover active:bg-interactive-selected",
+                    )}
+                  >
+                    <button
+                      type="button"
+                      className="fd-focus-inset flex min-w-0 flex-1 items-center gap-2 rounded-[var(--fd-radius-sm)] py-2 pl-2.5 text-left"
+                      onClick={() => onSelectThread(bot.workspace_id, bot.thread_id)}
+                    >
+                      <span className="flex h-4 w-4 shrink-0 items-center justify-center text-fg-muted">
+                        {icon ? (
+                          <BotMark icon={icon} />
+                        ) : (
+                          <Bot aria-hidden="true" className="h-3.5 w-3.5" />
+                        )}
+                      </span>
+                      <span className="fd-type-supporting min-w-0 flex-1 truncate text-fg-muted group-hover:text-fg-secondary">
+                        {bot.name}
+                      </span>
+                      {activity === "needs_input" ? (
+                        <span className="fd-type-meta shrink-0 text-warning">
+                          Needs you
+                        </span>
+                      ) : (
+                        <span className="fd-type-meta shrink-0 text-fg-muted">
+                          Archived
+                        </span>
+                      )}
+                    </button>
+                    <button
+                      type="button"
+                      aria-label={`Edit ${bot.name}`}
+                      title="Bot settings"
+                      className={cn(
+                        SECTION_ICON_BUTTON_CLASS,
+                        "opacity-0 focus-visible:opacity-100 group-focus-within:opacity-100 group-hover:opacity-100",
+                      )}
+                      onClick={() => setEditor(bot)}
+                    >
+                      <Settings2 className="h-3.5 w-3.5" />
+                    </button>
+                  </div>
+                );
+              })
+            : null}
+        </div>
+      ) : null}
+      {reorder.ordered.length === 0 && archivedBots.length === 0 ? (
         <button
           type="button"
           onClick={() => setEditor("new")}
@@ -258,7 +374,11 @@ export function BotSidebar({
       {editor ? (
         <BotEditor
           key={editor === "new" ? "new" : editor.id}
-          bot={editor === "new" ? undefined : editor}
+          bot={
+            editor === "new"
+              ? undefined
+              : (bots.find((bot) => bot.id === editor.id) ?? editor)
+          }
           api={botApi}
           bots={bots}
           groups={groups}
@@ -529,9 +649,13 @@ function BotEditor({
               {bot ? bot.name : "New bot"}
             </h2>
             <p className="fd-type-meta text-fg-muted">
-              {bot
-                ? "Bot settings"
-                : "A standing coordinator that delegates tasks and keeps notes between conversations."}
+              {bot?.status === "paused"
+                ? "Paused. Schedules wait, and other bots cannot message it."
+                : bot?.status === "archived"
+                  ? "Archived. Unarchive to put it back in the working list."
+                  : bot
+                    ? "Bot settings"
+                    : "A standing coordinator that delegates tasks and keeps notes between conversations."}
             </p>
           </div>
           <Button
@@ -862,6 +986,62 @@ function BotEditor({
             <>
               {bot ? (
                 <>
+                  {bot.status === "archived" ? (
+                    <Button
+                      type="button"
+                      variant="ghost"
+                      size="sm"
+                      disabled={pending}
+                      onClick={() =>
+                        void run(async () => {
+                          await api.mutateBot({
+                            action: "set_status",
+                            id: bot.id,
+                            status: "active",
+                          });
+                        })
+                      }
+                    >
+                      Unarchive
+                    </Button>
+                  ) : (
+                    <>
+                      <Button
+                        type="button"
+                        variant="ghost"
+                        size="sm"
+                        disabled={pending}
+                        onClick={() =>
+                          void run(async () => {
+                            await api.mutateBot({
+                              action: "set_status",
+                              id: bot.id,
+                              status: bot.status === "paused" ? "active" : "paused",
+                            });
+                          })
+                        }
+                      >
+                        {bot.status === "paused" ? "Resume" : "Pause"}
+                      </Button>
+                      <Button
+                        type="button"
+                        variant="ghost"
+                        size="sm"
+                        disabled={pending}
+                        onClick={() =>
+                          void run(async () => {
+                            await api.mutateBot({
+                              action: "set_status",
+                              id: bot.id,
+                              status: "archived",
+                            });
+                          })
+                        }
+                      >
+                        Archive
+                      </Button>
+                    </>
+                  )}
                   <Button
                     type="button"
                     variant="ghost"
@@ -1026,11 +1206,17 @@ function useBotNumberShortcuts(
  * webview). A row moves once the pointer travels a few pixels, so plain clicks
  * still open the bot. The new order is shown at once and saved on release.
  */
-function useBotReorder(bots: BotProfile[], api: BotApi | undefined) {
+function useBotReorder(
+  bots: BotProfile[],
+  api: BotApi | undefined,
+  trailingIds: string[] = [],
+) {
   const [order, setOrder] = useState<string[] | null>(null);
   const [dragging, setDragging] = useState<string | null>(null);
   const rows = useRef(new Map<string, HTMLElement>());
   const swallowClick = useRef(false);
+  const trailing = useRef(trailingIds);
+  trailing.current = trailingIds;
   const ordered = useMemo(() => {
     if (!order) return bots;
     const position = new Map(order.map((id, index) => [id, index]));
@@ -1043,8 +1229,12 @@ function useBotReorder(bots: BotProfile[], api: BotApi | undefined) {
     if (order && bots.map((bot) => bot.id).join() === order.join()) setOrder(null);
   }, [bots, order]);
   const save = (ids: string[]) => {
+    const full = [
+      ...ids,
+      ...trailing.current.filter((id) => !ids.includes(id)),
+    ];
     setOrder(ids);
-    void api?.mutateBot({ action: "reorder", ids }).catch(() => setOrder(null));
+    void api?.mutateBot({ action: "reorder", ids: full }).catch(() => setOrder(null));
   };
   const move = (id: string, to: number) => {
     const ids = ordered.map((bot) => bot.id);

@@ -1453,6 +1453,34 @@ impl ControlService {
         .map(|(run, _)| run)
     }
 
+    /// Consume a due occurrence for a paused or archived bot without recording a run.
+    /// The schedule advances, so the occurrence is not dispatched again on the next tick.
+    pub async fn skip_resting_bot_occurrence(
+        &self,
+        automation_id: &str,
+        occurrence: DateTime<Utc>,
+    ) -> Result<(), ControlError> {
+        let automation_id = automation_id.to_string();
+        self.mutate(move |state, now| {
+            let automation = state
+                .automations
+                .iter_mut()
+                .find(|automation| automation.id == automation_id)
+                .ok_or_else(|| ControlError::resource_not_found("automation", &automation_id))?;
+            let mut dispatched: BTreeSet<String> = state.occurrence_keys.iter().cloned().collect();
+            if let Some(key) = occurrence_key_for(&automation.trigger, occurrence) {
+                let scoped = format!("{}:{key}", automation.id);
+                dispatched.insert(scoped.clone());
+                state.occurrence_keys.push(scoped);
+            }
+            let next = automations::advance_after(automation, now, &dispatched)?;
+            automation.next_run_at = next.map(|next| next.at);
+            Ok(((), vec![ControlDomain::Automations]))
+        })
+        .await
+        .map(|_| ())
+    }
+
     /// Moves a queued run into the running state, capturing the resolved
     /// workspace and thread.
     pub async fn mark_run_running(

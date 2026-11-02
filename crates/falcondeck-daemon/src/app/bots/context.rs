@@ -263,7 +263,12 @@ impl AppState {
             .filter(|peer| peer.id != bot.id)
             .map(|peer| {
                 let status = Path::new(&peer.space_path).join("STATUS.md");
-                format!("\n- {}: {}", peer.name, status.display())
+                let note = if peer.status.is_resting() {
+                    format!(" ({}; do not message)", peer.status.label())
+                } else {
+                    String::new()
+                };
+                format!("\n- {}{note}: {}", peer.name, status.display())
             })
             .collect();
         let mut projects: Vec<_> = self
@@ -308,7 +313,9 @@ impl AppState {
         let peers = if peers.is_empty() {
             String::new()
         } else {
-            format!("\nOther bots (message by name; read their status before asking):{peers}")
+            format!(
+                "\nOther bots (message by name; read their status before asking; skip paused and archived bots):{peers}"
+            )
         };
         parts.push(part(
             "Documents, bots and projects",

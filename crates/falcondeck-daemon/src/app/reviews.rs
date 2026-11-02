@@ -120,7 +120,7 @@ mod tests {
     use super::*;
     use crate::app::thread_tools::tests::fixture;
     use falcondeck_core::control::{ControlExecuteRequest, ControlOrigin, ControlRequestContext};
-    use falcondeck_core::{BotProfile, UpdatePreferencesRequest};
+    use falcondeck_core::{BotProfile, BotStatus, UpdatePreferencesRequest};
     use serde_json::{Value, json};
 
     fn context(origin: ControlOrigin, thread: Option<&str>) -> ControlRequestContext {
@@ -341,6 +341,7 @@ mod tests {
             can_start_threads: true,
             context_files: Vec::new(),
             icon: None,
+            status: BotStatus::Active,
         });
         // Published from a former home; the review still belongs to Juno.
         let created = execute(

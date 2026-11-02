@@ -18,6 +18,7 @@ pub const BOT_DEFAULT_INSTRUCTIONS: &str = concat!(
     "Ask tasks to record lasting facts about code in that project's own docs as part of their work. ",
     "Report results as short summaries with task links, not transcripts.\n\n",
     "Message other bots or tasks only for decisions, blockers, review requests, results or surprises. ",
+    "Do not message a paused or archived bot. ",
     "Never send acknowledgements, thanks, progress narration or replies that need no action.\n\n",
     "## Scheduling\n",
     "Choose the home/current thread only when a run needs conversation context (such as a launch discussed at length). Otherwise use new_each_run with target.run_as_bot set to the bot id; write explicit criteria for sending one message home, otherwise update STATUS.md and finish silently. No-action scheduled runs must not message anyone.\n\n",
@@ -70,6 +71,42 @@ pub struct BotProfile {
     /// Sidebar mark; older profiles get one assigned on the next bot change.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub icon: Option<BotIcon>,
+    /// `active` when absent. Pause and archive keep the profile.
+    #[serde(default, skip_serializing_if = "BotStatus::is_active")]
+    pub status: BotStatus,
+}
+
+/// Whether a bot is working, resting in the sidebar, or hidden.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum BotStatus {
+    /// Runs schedules and can be messaged.
+    #[default]
+    Active,
+    /// Stays in the sidebar. Schedules wait and other bots cannot message it.
+    Paused,
+    /// Hidden from the working list, with the same freeze as paused.
+    Archived,
+}
+
+impl BotStatus {
+    fn is_active(status: &Self) -> bool {
+        matches!(status, Self::Active)
+    }
+
+    /// Pause and archive both stop autonomous work.
+    pub fn is_resting(&self) -> bool {
+        !Self::is_active(self)
+    }
+
+    /// Wire and sentence form: `active`, `paused`, or `archived`.
+    pub fn label(&self) -> &'static str {
+        match self {
+            Self::Active => "active",
+            Self::Paused => "paused",
+            Self::Archived => "archived",
+        }
+    }
 }
 
 /// Shapes a bot mark can take, in assignment order.
@@ -175,6 +212,13 @@ pub enum BotMutation {
     Stop {
         /// Bot identifier.
         id: String,
+    },
+    /// Pause, archive, or resume a bot without removing it.
+    SetStatus {
+        /// Bot identifier.
+        id: String,
+        /// `active`, `paused`, or `archived`.
+        status: BotStatus,
     },
     /// Remove the bot identity and archive its conversation, preserving files.
     Delete {

@@ -12,6 +12,11 @@ struct NativeBot: Identifiable, Hashable, Sendable {
     var canStartThreads: Bool { raw["can_start_threads"] != .bool(false) }
     var spacePath: String { raw["space_path"].string }
     var dedicatedWorkspace: Bool { raw["dedicated_workspace"].bool }
+    /// Older profiles omit this and stay active.
+    var availability: String {
+        let value = raw["status"].string
+        return value == "paused" || value == "archived" ? value : "active"
+    }
 }
 
 struct NativeBotDraft {
@@ -120,6 +125,22 @@ struct NativeBotDocument: Hashable, Sendable {
         let saved = NativeBot(raw: response["bot"])
         guard !saved.id.isEmpty, !saved.taskID.isEmpty, !saved.projectID.isEmpty else { throw PilotError("The computer returned an incomplete bot. Refresh before trying again.") }
         setBotProfile(saved, replacing: before, creatingAt: bot == nil ? revision : nil)
+        return saved
+    }
+
+    @discardableResult func setBotStatus(_ bot: NativeBot, status: String) async throws -> NativeBot {
+        let current = connectionID
+        let before = bots.first { $0.id == bot.id }?.raw
+        if demo {
+            let saved = NativeBot(raw: (before ?? bot.raw).setting("status", .string(status)))
+            setBotProfile(saved, replacing: before)
+            return saved
+        }
+        let response = try await relay.call("bots.mutate", params: .object(["action": .string("set_status"), "id": .string(bot.id), "status": .string(status)]))
+        guard current == connectionID else { throw CancellationError() }
+        let saved = NativeBot(raw: response["bot"])
+        guard !saved.id.isEmpty else { throw PilotError("The bot could not be updated. Refresh and try again.") }
+        setBotProfile(saved, replacing: before)
         return saved
     }
 

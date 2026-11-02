@@ -1,6 +1,8 @@
 //! Bot metadata and user-owned files. Native providers remain the history store.
 use super::*;
-use falcondeck_core::{BotDocument, BotDocumentMutation, BotIcon, BotMutation, BotProfile};
+use falcondeck_core::{
+    BotDocument, BotDocumentMutation, BotIcon, BotMutation, BotProfile, BotStatus,
+};
 
 use sha2::{Digest, Sha256};
 use std::io::{Read, Seek, Write};
@@ -222,6 +224,72 @@ impl AppState {
         Ok(())
     }
 
+    /// Clear queued work and interrupt the bot's home and its direct workers.
+    async fn stop_bot_work(&self, bot: &BotProfile) -> Result<(), DaemonError> {
+        let _spawn_gate = self.inner.agent_spawn_gate.lock().await;
+        if let Some(watches) = self
+            .inner
+            .agent_spawn_watches
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .as_mut()
+        {
+            watches.retain(|_, watch| !bot.owns_thread(&watch.parent_thread_id));
+        }
+        let threads: Vec<_> = self
+            .inner
+            .workspaces
+            .lock()
+            .await
+            .values()
+            .flat_map(|ws| ws.threads.values())
+            .filter(|t| {
+                t.summary.id == bot.thread_id
+                    || matches!(&t.summary.origin, Some(falcondeck_core::ThreadOrigin::Automation { bot_id: Some(id), .. }) if id == &bot.id)
+                    || matches!(&t.summary.origin, Some(falcondeck_core::ThreadOrigin::AgentSpawn { parent_thread_id, .. }) if bot.owns_thread(parent_thread_id))
+            })
+            .map(|t| t.summary.clone())
+            .collect();
+        for thread in threads {
+            for queued in &thread.queued_turns {
+                self.remove_queued_turn(&thread.workspace_id, &thread.id, &queued.id)
+                    .await?;
+            }
+            if matches!(
+                thread.status,
+                ThreadStatus::Running | ThreadStatus::WaitingForInput
+            ) {
+                self.interrupt_turn(thread.workspace_id, thread.id).await?;
+            }
+        }
+        Ok(())
+    }
+
+    /// The bot a schedule must not wake, when that bot is paused or archived.
+    /// A fresh run names the bot. A home-thread schedule is matched by thread id.
+    pub(crate) async fn resting_bot_for_automation(
+        &self,
+        automation: &falcondeck_core::control::Automation,
+    ) -> Option<BotProfile> {
+        let bots = self.preferences().await.bots;
+        if let Some(id) = &automation.target.run_as_bot {
+            return bots
+                .into_iter()
+                .find(|bot| &bot.id == id && bot.status.is_resting());
+        }
+        let thread_id = match &automation.target.thread {
+            falcondeck_core::control::AutomationThreadTarget::Existing { thread_id } => {
+                Some(thread_id.as_str())
+            }
+            falcondeck_core::control::AutomationThreadTarget::Managed { thread_id } => {
+                thread_id.as_deref()
+            }
+            _ => None,
+        }?;
+        bots.into_iter()
+            .find(|bot| bot.owns_thread(thread_id) && bot.status.is_resting())
+    }
+
     pub async fn mutate_bot(&self, mutation: BotMutation) -> Result<Value, DaemonError> {
         let _gate = self.inner.bot_mutations.lock().await;
         match mutation {
@@ -278,6 +346,7 @@ impl AppState {
                     can_start_threads: true,
                     context_files: Vec::new(),
                     icon: None,
+                    status: BotStatus::Active,
                 };
                 let mut bots = self.inner.preferences.lock().await.bots.clone();
                 // Settle older bots' marks first, as clients already display them.
@@ -361,35 +430,26 @@ impl AppState {
             }
             BotMutation::Stop { id } => {
                 let bot = self.bot(&id).await?;
-                let _spawn_gate = self.inner.agent_spawn_gate.lock().await;
-                if let Some(watches) = self
-                    .inner
-                    .agent_spawn_watches
-                    .lock()
-                    .unwrap_or_else(|e| e.into_inner())
-                    .as_mut()
-                {
-                    watches.retain(|_, watch| !bot.owns_thread(&watch.parent_thread_id));
-                }
-                let threads: Vec<_> = self.inner.workspaces.lock().await.values().flat_map(|ws| ws.threads.values())
-                    .filter(|t| t.summary.id == bot.thread_id
-                        || matches!(&t.summary.origin, Some(falcondeck_core::ThreadOrigin::Automation { bot_id: Some(id), .. }) if id == &bot.id)
-                        || matches!(&t.summary.origin,
-                        Some(falcondeck_core::ThreadOrigin::AgentSpawn { parent_thread_id, .. }) if bot.owns_thread(parent_thread_id)))
-                    .map(|t| t.summary.clone()).collect();
-                for thread in threads {
-                    for queued in &thread.queued_turns {
-                        self.remove_queued_turn(&thread.workspace_id, &thread.id, &queued.id)
-                            .await?;
-                    }
-                    if matches!(
-                        thread.status,
-                        ThreadStatus::Running | ThreadStatus::WaitingForInput
-                    ) {
-                        self.interrupt_turn(thread.workspace_id, thread.id).await?;
-                    }
-                }
+                self.stop_bot_work(&bot).await?;
                 Ok(json!({"ok": true}))
+            }
+            BotMutation::SetStatus { id, status } => {
+                let mut bot = self.bot(&id).await?;
+                if bot.status == status {
+                    return Ok(json!({"bot": bot}));
+                }
+                // Leaving the working list stops anything already in flight.
+                // Resume does not replay the occurrences that waited.
+                if status.is_resting() {
+                    self.stop_bot_work(&bot).await?;
+                }
+                bot.status = status;
+                let mut bots = self.inner.preferences.lock().await.bots.clone();
+                if let Some(saved) = bots.iter_mut().find(|b| b.id == id) {
+                    *saved = bot.clone();
+                }
+                self.save_bots(bots).await?;
+                Ok(json!({"bot": bot}))
             }
             BotMutation::Delete { id } => {
                 let bot = self.bot(&id).await?;

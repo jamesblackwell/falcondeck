@@ -1,5 +1,5 @@
 use super::*;
-use falcondeck_core::{BotDocumentMutation, BotMutation, BotProfile};
+use falcondeck_core::{BotDocumentMutation, BotMutation, BotProfile, BotStatus};
 
 async fn promote(app: &AppState) -> BotProfile {
     let result = app
@@ -584,6 +584,7 @@ async fn bot_context_lists_peer_status_files_but_not_its_own() {
         can_start_threads: true,
         context_files: Vec::new(),
         icon: None,
+        status: BotStatus::Active,
     });
     let context = app.bot_context("thread-1").await.unwrap();
     assert!(
@@ -767,6 +768,7 @@ async fn every_bot_gets_a_distinct_icon_and_edits_are_validated() {
         can_start_threads: true,
         context_files: Vec::new(),
         icon: None,
+        status: BotStatus::Active,
     });
     let update = |icon| BotMutation::Update {
         id: bot.id.clone(),
@@ -816,6 +818,7 @@ async fn creating_a_bot_keeps_the_marks_older_bots_already_show() {
         can_start_threads: true,
         context_files: Vec::new(),
         icon: None,
+        status: BotStatus::Active,
     });
     let bot = promote(&app).await;
     let bots = app.preferences().await.bots;
@@ -848,6 +851,7 @@ async fn bots_can_be_reordered_and_unlisted_ones_keep_their_place() {
         can_start_threads: true,
         context_files: Vec::new(),
         icon: None,
+        status: BotStatus::Active,
     };
     {
         let mut preferences = app.inner.preferences.lock().await;
@@ -1323,5 +1327,190 @@ async fn unchanged_fresh_schedule_finishes_without_a_thread_or_model() {
     assert_eq!(saved.status, AutomationRunStatus::SkippedUnchanged);
     assert!(saved.thread_id.is_none() && saved.input_tokens.is_none());
     assert_eq!(app.snapshot().await.threads.len(), 1);
+    app.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn pausing_or_archiving_a_bot_keeps_it_and_stops_messages() {
+    let (app, _temp) = fixture().await;
+    let bot = promote(&app).await;
+    let (other, _other_temp) = fixture().await;
+    let mut project = other
+        .inner
+        .workspaces
+        .lock()
+        .await
+        .remove("workspace-1")
+        .unwrap();
+    project.summary.id = "workspace-2".into();
+    let mut thread = project.threads.remove("thread-1").unwrap();
+    thread.summary.id = "project-thread".into();
+    thread.summary.workspace_id = "workspace-2".into();
+    project.threads.insert("project-thread".into(), thread);
+    app.inner
+        .workspaces
+        .lock()
+        .await
+        .insert("workspace-2".into(), project);
+    let paused = app
+        .mutate_bot(BotMutation::SetStatus {
+            id: bot.id.clone(),
+            status: BotStatus::Paused,
+        })
+        .await
+        .unwrap();
+    assert_eq!(paused["bot"]["status"], "paused");
+    assert_eq!(app.preferences().await.bots.len(), 1);
+
+    let refused = app
+        .invoke_thread_tool(
+            MESSAGE,
+            &json!({"thread_id":"Assistant","message":"Need a decision."}),
+            Some("project-thread"),
+            None,
+        )
+        .await
+        .unwrap_err();
+    assert!(
+        refused.to_string().contains("Assistant is paused"),
+        "{refused}"
+    );
+
+    let listed = app
+        .invoke_thread_tool(LIST, &json!({}), Some("project-thread"), None)
+        .await
+        .unwrap();
+    let listed = listed.result.as_str().unwrap();
+    assert!(
+        listed.contains("Assistant (paused) `thread-1`"),
+        "{listed}"
+    );
+
+    app.inner.preferences.lock().await.bots.push(BotProfile {
+        previous_thread_ids: Vec::new(),
+        id: "bot-cmo".into(),
+        name: "CMO".into(),
+        workspace_id: "workspace-peer".into(),
+        dedicated_workspace: true,
+        thread_id: "thread-cmo".into(),
+        space_path: "/tmp/bots/bot-cmo/space".into(),
+        instructions: String::new(),
+        can_start_threads: true,
+        context_files: Vec::new(),
+        icon: None,
+        status: BotStatus::Active,
+    });
+    let context = app.bot_context("thread-cmo").await.unwrap();
+    assert!(
+        context.contains("\n- Assistant (paused; do not message):"),
+        "{context}"
+    );
+
+    app.mutate_bot(BotMutation::SetStatus {
+        id: bot.id.clone(),
+        status: BotStatus::Archived,
+    })
+    .await
+    .unwrap();
+    let listed = app
+        .invoke_thread_tool(LIST, &json!({}), Some("project-thread"), None)
+        .await
+        .unwrap();
+    let listed = listed.result.as_str().unwrap();
+    assert!(!listed.contains("Assistant"), "{listed}");
+    assert!(listed.contains("CMO `thread-cmo`"), "{listed}");
+    let refused = app
+        .invoke_thread_tool(
+            MESSAGE,
+            &json!({"thread_id":"Assistant","message":"Still there?"}),
+            Some("project-thread"),
+            None,
+        )
+        .await
+        .unwrap_err();
+    assert!(refused.to_string().contains("archived"), "{refused}");
+
+    app.mutate_bot(BotMutation::Delete { id: bot.id })
+        .await
+        .unwrap();
+    let kept = app.preferences().await.bots;
+    assert_eq!(kept.len(), 1);
+    assert_eq!(kept[0].id, "bot-cmo");
+    app.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn a_resting_bots_schedule_is_consumed_without_a_run() {
+    use falcondeck_core::control::*;
+    let (app, _temp) = fixture().await;
+    let bot = promote(&app).await;
+    let workspace_path = app.workspace_path("workspace-1").await.unwrap();
+    let (created, _) = app
+        .control()
+        .execute(
+            serde_json::from_value(json!({"operation":"automation.create","arguments":{
+                "name":"Hourly check",
+                "trigger":{"kind":"interval","every_seconds":3600,"anchor_at":Utc::now()},
+                "task":{"kind":"prompt","instruction":"Check local work"},
+                "target":{"workspace_path":workspace_path,"provider":"claude","thread":{"kind":"new_each_run"},
+                    "run_as_bot":bot.id}
+            }}))
+            .unwrap(),
+            &ControlRequestContext::default(),
+            &crate::control::ControlDeps::none(),
+        )
+        .await;
+    assert!(created.ok, "{:?}", created.error);
+    let id = created.data.unwrap()["id"].as_str().unwrap().to_string();
+    let automation = app.control().automation(&id).await.unwrap();
+    assert!(app.resting_bot_for_automation(&automation).await.is_none());
+    app.mutate_bot(BotMutation::SetStatus {
+        id: bot.id.clone(),
+        status: BotStatus::Paused,
+    })
+    .await
+    .unwrap();
+    let due = automation.next_run_at.expect("interval schedule");
+    assert_eq!(
+        app.resting_bot_for_automation(&automation)
+            .await
+            .unwrap()
+            .id,
+        bot.id
+    );
+    app.control()
+        .skip_resting_bot_occurrence(&id, due)
+        .await
+        .unwrap();
+    let advanced = app.control().automation(&id).await.unwrap();
+    assert!(advanced.next_run_at.is_some_and(|next| next > due));
+    assert!(
+        app.control()
+            .runs_since(chrono::DateTime::<Utc>::MIN_UTC)
+            .await
+            .iter()
+            .all(|run| run.automation_id != id)
+    );
+    // A run already queued still settles, with a reason, instead of starting.
+    let run = app
+        .control()
+        .enqueue_run(
+            &id,
+            None,
+            crate::control::RunSource::Manual {
+                origin: ControlOrigin::DesktopUi,
+            },
+        )
+        .await
+        .unwrap();
+    assert!(app.control().claim_run_if_automation_free(&run.id).await);
+    crate::control::scheduler::execute_run(&app, &run.id).await;
+    let saved = app.control().run(&run.id).await.unwrap();
+    assert_eq!(saved.status, AutomationRunStatus::Cancelled);
+    let outcome = saved.outcome_preview.unwrap_or_default();
+    assert!(
+        outcome.contains("Assistant is paused. Resume the bot to run its schedules."),
+        "{outcome}"
+    );
     app.shutdown().await.unwrap();
 }

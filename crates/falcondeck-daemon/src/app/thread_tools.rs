@@ -428,6 +428,16 @@ impl AppState {
                         "cannot message the calling thread".into(),
                     ));
                 }
+                // Pause and archive keep the profile, but the bot is not taking work.
+                if let Some(bot) = self.bot_for_thread(&a.thread_id).await
+                    && bot.status.is_resting()
+                {
+                    return Err(DaemonError::Conflict(format!(
+                        "{} is {}. Resume it before sending a message.",
+                        line(&bot.name, 100),
+                        bot.status.label()
+                    )));
+                }
                 // Resolve within the target workspace before any send-side mutations.
                 let target_summary = self.thread_summary(&workspace, &a.thread_id).await?;
                 let text = format!(
