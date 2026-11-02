@@ -3113,15 +3113,15 @@ fn remote_event_message(
     })
 }
 
+/// One control message per method: wait for lane capacity so the method count
+/// can outgrow the control queue without dropping the connection.
 async fn register_remote_rpc_methods(writer: &mut RelayWriter) -> Result<(), String> {
     for method in REMOTE_RPC_METHODS {
-        send_relay_message(
-            writer,
-            &RelayClientMessage::RpcRegister {
-                method: (*method).to_string(),
-            },
-        )
-        .await?;
+        let payload = serde_json::to_string(&RelayClientMessage::RpcRegister {
+            method: (*method).to_string(),
+        })
+        .map_err(|error| format!("failed to encode relay message: {error}"))?;
+        writer.send_control_wait(payload).await?;
     }
     Ok(())
 }

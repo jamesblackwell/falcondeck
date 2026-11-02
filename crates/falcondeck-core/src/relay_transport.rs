@@ -129,6 +129,43 @@ impl TransportSender {
         self.enqueue(text, OutboundPriority::Control, None)
     }
 
+    /// Wait for control admission instead of failing. For bursts that scale
+    /// with the protocol, like one registration per RPC method at connect, so
+    /// adding methods can never overflow the bounded control lane.
+    pub async fn send_control_wait(&self, text: String) -> Result<(), String> {
+        if text.len() > CONTROL_BYTES {
+            return Err("relay control message exceeds transport limit".into());
+        }
+        let admit = async {
+            let message_permit = self
+                .control_messages
+                .clone()
+                .acquire_owned()
+                .await
+                .map_err(|_| "relay control queue closed")?;
+            let permit = self
+                .control_bytes
+                .clone()
+                .acquire_many_owned(text.len().max(1) as u32)
+                .await
+                .map_err(|_| "relay control budget closed")?;
+            self.urgent
+                .send(Outbound {
+                    text,
+                    generation: self.generation.load(Ordering::Acquire),
+                    queued: Instant::now(),
+                    completed: None,
+                    _permit: permit,
+                    _message_permit: Some(message_permit),
+                })
+                .await
+                .map_err(|_| "relay writer closed".to_string())
+        };
+        tokio::time::timeout(DEADLINE, admit)
+            .await
+            .map_err(|_| "relay control admission timed out".to_string())?
+    }
+
     fn enqueue(
         &self,
         text: String,
@@ -546,6 +583,40 @@ mod tests {
         let stream = futures_util::stream::pending::<Result<String, String>>();
         let (sender, _incoming, guard) = spawn_transport(sink, stream, true);
         (sender, guard)
+    }
+
+    #[tokio::test]
+    async fn control_bursts_beyond_the_lane_wait_instead_of_failing() {
+        let (written_tx, mut written_rx) = mpsc::unbounded_channel::<String>();
+        let (release_tx, release_rx) = watch::channel(false);
+        let sink = Box::pin(futures_util::sink::unfold(
+            (written_tx, release_rx),
+            |(tx, mut release), text: String| async move {
+                let _ = release.wait_for(|open| *open).await;
+                let _ = tx.send(text);
+                Ok::<_, String>((tx, release))
+            },
+        ));
+        let stream = futures_util::stream::pending::<Result<String, String>>();
+        let (sender, _incoming, _guard) = spawn_transport(sink, stream, true);
+        let total = CONTROL_MESSAGES * 2;
+        let burst = tokio::spawn(async move {
+            for index in 0..total {
+                sender
+                    .send_control_wait(format!(r#"{{"type":"rpc-register","method":"m{index}"}}"#))
+                    .await?;
+            }
+            Ok::<_, String>(())
+        });
+        tokio::task::yield_now().await;
+        assert!(!burst.is_finished(), "a full lane must make the burst wait");
+        release_tx.send_replace(true);
+        burst.await.unwrap().expect("every registration admitted");
+        let mut delivered = 0;
+        while delivered < total {
+            let frame = written_rx.recv().await.expect("writer alive");
+            delivered += frame.matches("rpc-register").count().max(1);
+        }
     }
 
     #[tokio::test]
