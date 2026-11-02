@@ -2953,6 +2953,24 @@ export const WorkspaceSidebar = memo(function WorkspaceSidebar({
     };
   }, [closeCreateStageDialog, createStageTarget, isCreatingStage]);
 
+  const pinnedList = (
+    <PinnedThreadList
+      entries={pinnedThreads}
+      collapsed={pinnedCollapsed}
+      onToggleCollapsed={handleTogglePinned}
+      selectedThreadId={visualSelectedThreadId}
+      onSelectThread={handleSelectThread}
+      onArchiveThread={requestArchiveConfirm}
+      onArchiveConfirm={confirmArchive}
+      onArchiveCancel={cancelArchiveConfirm}
+      pendingArchive={pendingArchive}
+      onOpenThreadContextMenu={handleOpenThreadContextMenu}
+      onRequestRenameThread={handleRequestRenameThread}
+      nowTick={nowTick}
+      threadTagsById={threadTagsById}
+    />
+  );
+
   const visibleErrors = errors.filter(Boolean);
   const showHeader =
     Boolean(title) || Boolean(onSearch) || Boolean(headerClassName);
@@ -3039,6 +3057,9 @@ export const WorkspaceSidebar = memo(function WorkspaceSidebar({
           </nav>
         ) : null}
         <div>
+        {/* Pinned sessions lead the bot-focused home so a session pinned
+            from the Sessions tab stays reachable from Bots. */}
+        {layoutMode === "bots" ? pinnedList : null}
         {layoutMode !== "bots" || botTab === "bots" ? (
         <BotSidebar
           bots={bots}
@@ -3051,23 +3072,9 @@ export const WorkspaceSidebar = memo(function WorkspaceSidebar({
           onOpenContextMenu={handleOpenThreadContextMenu}
         />
         ) : null}
+        {layoutMode !== "bots" ? pinnedList : null}
         {layoutMode !== "bots" || botTab === "sessions" ? (
         <>
-        <PinnedThreadList
-          entries={pinnedThreads}
-          collapsed={pinnedCollapsed}
-          onToggleCollapsed={handleTogglePinned}
-          selectedThreadId={visualSelectedThreadId}
-          onSelectThread={handleSelectThread}
-          onArchiveThread={requestArchiveConfirm}
-          onArchiveConfirm={confirmArchive}
-          onArchiveCancel={cancelArchiveConfirm}
-          pendingArchive={pendingArchive}
-          onOpenThreadContextMenu={handleOpenThreadContextMenu}
-          onRequestRenameThread={handleRequestRenameThread}
-          nowTick={nowTick}
-          threadTagsById={threadTagsById}
-        />
         <section aria-labelledby="fd-projects-heading">
           {/* The action icons match the per-project new-thread button: that
               glyph sits 10px from the sidebar edge (px-2 row + p-0.5 button).

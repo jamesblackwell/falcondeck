@@ -201,6 +201,7 @@ describe("DesktopSidebar", () => {
               last_message_preview: "Deploy is green.",
             }),
             thread({ id: "thread-1", title: "Main thread" }),
+            thread({ id: "thread-pinned", title: "Pinned thread", is_pinned: true }),
           ],
         },
       ],
@@ -213,9 +214,12 @@ describe("DesktopSidebar", () => {
     expect(screen.getByText("Deploy is green.")).toBeInTheDocument();
     // Projects and chats wait behind Sessions.
     expect(screen.queryByText("Main thread")).not.toBeInTheDocument();
+    // Pinned sessions stay on the bot home.
+    expect(screen.getByText("Pinned thread")).toBeInTheDocument();
 
     fireEvent.click(screen.getByRole("tab", { name: "Sessions" }));
     expect(screen.getByText("Main thread")).toBeInTheDocument();
+    expect(screen.getAllByText("Pinned thread")).toHaveLength(1);
   });
 
   it("shows Reviews with an open-count badge only when the inbox is on", () => {
