@@ -9524,3 +9524,17 @@ async fn archiving_reclaims_safe_variants_and_unarchive_restores_them() {
             .is_archived
     );
 }
+
+#[tokio::test]
+async fn extensions_bridge_is_spawned_without_any_extension_tools() {
+    let app = AppState::new("test".to_string(), HashMap::new());
+    app.set_local_base_url("http://127.0.0.1:1".to_string());
+    assert!(app.inner.extensions.lock().await.agent_tools().is_empty());
+    // The bridge also carries the daemon-owned thread tools, so turning off
+    // every extension must not drop it from new spawns.
+    let spec = app
+        .builtin_extensions_spec(&AgentProvider::CLAUDE, "/tmp/workspace", Some("thread-1"))
+        .await
+        .expect("extensions bridge spec");
+    assert_eq!(spec.thread_id.as_deref(), Some("thread-1"));
+}

@@ -1291,19 +1291,15 @@ impl AppState {
         }
     }
 
-    /// The extensions MCP bridge for one spawn, or `None` when no enabled
-    /// extension currently publishes a granted tool. Skipping the connector
-    /// entirely avoids spawning a bridge that could only report an empty
-    /// catalogue.
+    /// The extensions MCP bridge for one spawn. Always present: it also
+    /// carries the daemon-owned thread tools, so it must not depend on any
+    /// extension publishing a tool.
     async fn builtin_extensions_spec(
         &self,
         provider: &AgentProvider,
         workspace_path: &str,
         thread_id: Option<&str>,
     ) -> Option<crate::connectors::BuiltinExtensionsSpec> {
-        if self.inner.extensions.lock().await.agent_tools().is_empty() {
-            return None;
-        }
         let bridge_capability = Uuid::new_v4().to_string();
         let now = Utc::now();
         let mut capabilities = self.inner.extension_bridge_capabilities.lock().await;
