@@ -157,9 +157,9 @@ function EvidenceImage({
       aria-label={`Open ${label}`}
       className="fd-focus group flex w-full flex-col overflow-hidden rounded-[var(--fd-radius-lg)] border border-border-default bg-surface-0 text-left transition-colors hover:border-border-emphasis"
     >
-      <span className="flex h-44 items-center justify-center overflow-hidden bg-[length:16px_16px] [background-image:repeating-conic-gradient(var(--fd-bg-1)_0%_25%,var(--fd-bg-2)_0%_50%)]">
+      <span className="flex min-h-44 items-center justify-center overflow-hidden bg-[length:16px_16px] [background-image:repeating-conic-gradient(var(--fd-bg-1)_0%_25%,var(--fd-bg-2)_0%_50%)]">
         {url ? (
-          <img src={url} alt={evidence.caption ?? label} className="max-h-full max-w-full object-contain" />
+          <img src={url} alt={evidence.caption ?? label} className="h-auto max-h-[75vh] w-auto max-w-full object-contain" />
         ) : failed ? (
           <span className="px-3 text-center text-[length:var(--fd-text-xs)] text-fg-muted">
             Couldn’t load the image. Open it to see why.
@@ -202,7 +202,7 @@ function EvidenceView({
   return (
     <div className="space-y-3">
       {images.length > 0 ? (
-        <div className="grid gap-3 sm:grid-cols-2">
+        <div className={cn('grid gap-3', images.length > 1 && 'lg:grid-cols-2')}>
           {images.map((evidence) => (
             <EvidenceImage key={evidence.id} evidence={evidence} api={api} onOpen={() => open(evidence)} />
           ))}
@@ -293,7 +293,7 @@ function ItemCard({
         ) : null}
       </div>
       {item.note.trim() ? (
-        <div className="text-[length:var(--fd-text-sm)] text-fg-secondary">
+        <div className="max-w-[75ch] text-[length:var(--fd-text-sm)] text-fg-secondary">
           <MessageMarkdown text={item.note} defer={false} interpretDirectives={false} />
         </div>
       ) : null}
@@ -432,7 +432,7 @@ export function ReviewDetail({
   return (
     <div className="flex h-full min-h-0 flex-col">
       <div ref={scrollRef} className="min-h-0 flex-1 overflow-y-auto">
-        <article className="mx-auto w-full max-w-3xl space-y-5 px-6 py-6" aria-label={`Review ${review.id}: ${review.title}`}>
+        <article className="mx-auto w-full max-w-[96rem] space-y-5 px-6 py-6" aria-label={`Review ${review.id}: ${review.title}`}>
           <header className="space-y-3">
             <div className="flex flex-wrap items-center gap-2 text-[length:var(--fd-text-xs)] text-fg-muted">
               {bot?.icon ? <BotMark icon={bot.icon} size={14} /> : null}
@@ -453,8 +453,8 @@ export function ReviewDetail({
                 </Button>
               ) : null}
             </div>
-            <h2 className="fd-type-heading text-fg-primary">{review.title}</h2>
-            <p className="text-[length:var(--fd-text-base)] text-fg-primary">{review.ask}</p>
+            <h2 className="fd-type-heading max-w-[75ch] text-fg-primary">{review.title}</h2>
+            <p className="max-w-[75ch] text-[length:var(--fd-text-base)] text-fg-primary">{review.ask}</p>
             {ahead ? (
               <p
                 className={cn(
@@ -473,11 +473,11 @@ export function ReviewDetail({
             className="rounded-[var(--fd-radius-lg)] border border-border-default border-l-2 border-l-accent bg-surface-2 px-4 py-3"
           >
             <p className="fd-type-eyebrow mb-1 text-fg-muted">Recommendation</p>
-            <p className="text-[length:var(--fd-text-sm)] text-fg-primary">{review.recommendation}</p>
+            <p className="max-w-[75ch] text-[length:var(--fd-text-sm)] text-fg-primary">{review.recommendation}</p>
           </section>
 
           {review.body.trim() ? (
-            <div className="text-[length:var(--fd-text-sm)] text-fg-primary">
+            <div className="max-w-[75ch] text-[length:var(--fd-text-sm)] text-fg-primary">
               <MessageMarkdown text={review.body} defer={false} interpretDirectives={false} />
             </div>
           ) : null}
@@ -549,7 +549,7 @@ export function ReviewDetail({
 
       {!readOnly ? (
         <div className="shrink-0 border-t border-border-subtle bg-surface-1 px-6 py-3">
-          <div className="mx-auto flex w-full max-w-3xl flex-wrap items-center gap-3">
+          <div className="mx-auto flex w-full max-w-[96rem] flex-wrap items-center gap-3">
             <p
               id={submitId}
               role="status"
@@ -601,14 +601,14 @@ export function ReviewDetail({
             )}
           </div>
           {error ? (
-            <p role="alert" className="mx-auto mt-2 w-full max-w-3xl text-[length:var(--fd-text-sm)] text-danger">
+            <p role="alert" className="mx-auto mt-2 w-full max-w-[96rem] text-[length:var(--fd-text-sm)] text-danger">
               {error} Your answers are still here; try again.
             </p>
           ) : null}
         </div>
       ) : notice || draftHasContent(draft) ? (
         <div className="max-h-56 shrink-0 space-y-2 overflow-y-auto border-t border-border-subtle bg-surface-1 px-6 py-3">
-          <div className="mx-auto w-full max-w-3xl space-y-2">
+          <div className="mx-auto w-full max-w-[96rem] space-y-2">
             <p role="status" className="text-[length:var(--fd-text-sm)] text-fg-secondary">
               {notice ?? 'You have an unsent draft for this closed review.'}
             </p>
