@@ -1746,8 +1746,20 @@ fn claude_projects_root() -> PathBuf {
         .join("projects")
 }
 
+/// Mirrors the CLI's `/[^a-zA-Z0-9]/g` -> `-`, so dotted paths such as
+/// `~/.falcondeck/variants/...` resolve. JS replaces per UTF-16 unit.
 fn claude_project_dir_name(workspace_path: &str) -> String {
-    workspace_path.replace(['/', '\\'], "-")
+    workspace_path
+        .chars()
+        .flat_map(|ch| {
+            let (ch, count) = if ch.is_ascii_alphanumeric() {
+                (ch, 1)
+            } else {
+                ('-', ch.len_utf16())
+            };
+            std::iter::repeat_n(ch, count)
+        })
+        .collect()
 }
 
 fn collect_workspace_session_files(root: &Path, files: &mut Vec<PathBuf>) {
@@ -3241,6 +3253,13 @@ mod tests {
             claude_project_dir_name("/Users/James/www/sites/lucidpic"),
             "-Users-James-www-sites-lucidpic"
         );
+        // Isolated variants live under a dotted folder; the CLI dashes every
+        // non-alphanumeric character, not just separators.
+        assert_eq!(
+            claude_project_dir_name("/Users/James/.falcondeck/variants/quizgecko/98e25e40"),
+            "-Users-James--falcondeck-variants-quizgecko-98e25e40"
+        );
+        assert_eq!(claude_project_dir_name("/tmp/my_app v2"), "-tmp-my-app-v2");
     }
 
     #[test]
