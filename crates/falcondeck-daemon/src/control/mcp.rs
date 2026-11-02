@@ -459,10 +459,18 @@ async fn handle_tool_call(
         }
     };
     let status = response.status();
-    let payload: Value = response
-        .json()
-        .await
-        .unwrap_or_else(|_| json!({ "error": { "code": "internal_error", "message": format!("daemon returned HTTP {status}"), "retryable": false, "field_errors": [] } }));
+    let body = response.text().await.unwrap_or_default();
+    // Axum's body rejections (e.g. a missing `resource`) are plain text; pass
+    // the reason through so the agent can fix the call instead of guessing.
+    let payload: Value = serde_json::from_str(&body).unwrap_or_else(|_| {
+        let reason = body.trim();
+        let (code, message) = if status.is_client_error() && !reason.is_empty() {
+            ("invalid_arguments", reason.to_string())
+        } else {
+            ("internal_error", format!("daemon returned HTTP {status}"))
+        };
+        json!({ "error": { "code": code, "message": message, "retryable": false, "field_errors": [] } })
+    });
     if !status.is_success() {
         // Validation and interface failures are tool errors, not protocol
         // failures, so the agent can read the structured detail.

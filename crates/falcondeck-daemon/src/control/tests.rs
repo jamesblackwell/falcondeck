@@ -1779,3 +1779,37 @@ fn legacy_target_defaults_remain_unchanged() {
         falcondeck_core::control::AutomationThreadTarget::Managed { .. }
     ));
 }
+
+#[tokio::test]
+async fn update_accepts_expected_revision_nested_in_arguments() {
+    let (_dir, service) = service().await;
+    let created = create_valid_automation(&service).await;
+    let id = created["id"].as_str().unwrap().to_string();
+
+    let (response, _) = service
+        .execute(
+            execute_request(
+                registry::ops::AUTOMATION_UPDATE,
+                json!({ "automation_id": id, "expected_revision": 1, "name": "Nested revision" }),
+                None,
+            ),
+            &desktop(),
+            &ControlDeps::none(),
+        )
+        .await;
+    assert!(response.ok, "nested revision rejected: {:?}", response.error);
+    assert_eq!(response.data.unwrap()["revision"], json!(2));
+
+    let (response, _) = service
+        .execute(
+            execute_request(
+                registry::ops::AUTOMATION_UPDATE,
+                json!({ "automation_id": id, "expected_revision": 1, "name": "Disagreeing" }),
+                Some(2),
+            ),
+            &desktop(),
+            &ControlDeps::none(),
+        )
+        .await;
+    assert_eq!(response.error.unwrap().code, "invalid_arguments");
+}

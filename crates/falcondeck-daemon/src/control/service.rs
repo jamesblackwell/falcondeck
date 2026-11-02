@@ -150,7 +150,7 @@ impl ControlError {
             "expected_revision is required for this operation",
             false,
         )
-        .with_suggested_action("Read the current automation and retry with its revision.")
+        .with_suggested_action("Read the current automation with falcondeck_get and retry with its revision as expected_revision.")
     }
 
     /// A mutation based on a stale revision.
@@ -559,6 +559,10 @@ impl ControlService {
         context: &ControlRequestContext,
         deps: &ControlDeps<'_>,
     ) -> (ControlExecuteResponse, Option<ControlStateChanged>) {
+        let mut request = request;
+        if let Err(error) = hoist_envelope_fields(&mut request) {
+            return (error.into_envelope(&request.operation), None);
+        }
         if let Err(error) = self.ensure_usable() {
             return (error.into_envelope(&request.operation), None);
         }
@@ -2533,6 +2537,41 @@ pub(super) fn decode_arguments<T: serde::de::DeserializeOwned>(
         ))
         .with_suggested_action("Call falcondeck_search with detail full to see the schema.")
     })
+}
+
+/// Agents routinely nest `expected_revision` / `idempotency_key` inside
+/// `arguments`, where `deny_unknown_fields` rejected them while the top level
+/// demanded them. Accept either placement; disagreeing copies are an error.
+fn hoist_envelope_fields(request: &mut ControlExecuteRequest) -> Result<(), ControlError> {
+    if let Some(value) = request.arguments.remove("expected_revision") {
+        let nested = value.as_u64().ok_or_else(|| {
+            ControlError::field("expected_revision", "expected_revision must be a non-negative integer")
+        })?;
+        match request.expected_revision {
+            Some(top) if top != nested => {
+                return Err(ControlError::field(
+                    "expected_revision",
+                    "expected_revision differs between the request and its arguments",
+                ));
+            }
+            _ => request.expected_revision = Some(nested),
+        }
+    }
+    if let Some(value) = request.arguments.remove("idempotency_key") {
+        let Value::String(nested) = value else {
+            return Err(ControlError::field("idempotency_key", "idempotency_key must be a string"));
+        };
+        match request.idempotency_key.as_deref() {
+            Some(top) if top != nested => {
+                return Err(ControlError::field(
+                    "idempotency_key",
+                    "idempotency_key differs between the request and its arguments",
+                ));
+            }
+            _ => request.idempotency_key = Some(nested),
+        }
+    }
+    Ok(())
 }
 
 fn require_revision(request: &ControlExecuteRequest) -> Result<u64, ControlError> {
