@@ -414,11 +414,25 @@ desktop-dev-stop: desktop-prepare
 
 desktop-build: desktop-install
 
-.PHONY: desktop-restart
+.PHONY: desktop-restart desktop-install-head desktop-install-clean-check
 desktop-restart:
 	cd "$(ROOT)" && node scripts/restart-desktop.mjs
 
-desktop-install: desktop-brand-assets prune-local
+# The shared tree carries other agents' unfinished edits; installing them once
+# shipped a relay limit revert that kept the phone offline.
+desktop-install-clean-check:
+	@dirty=$$(git -C "$(ROOT)" status --porcelain --untracked-files=no -- crates apps/desktop packages Cargo.toml Cargo.lock package.json package-lock.json); \
+	if [ -n "$$dirty" ] && [ "$(DESKTOP_INSTALL_DIRTY)" != "1" ]; then \
+		echo "Refusing to install uncommitted changes:"; \
+		echo "$$dirty" | head -20; \
+		echo "Commit first and run 'make desktop-install-head', or set DESKTOP_INSTALL_DIRTY=1 to ship this tree as-is."; \
+		exit 1; \
+	fi
+
+desktop-install-head:
+	bash "$(ROOT)/scripts/desktop-install-head.sh"
+
+desktop-install: desktop-install-clean-check desktop-brand-assets prune-local
 	@set -e; \
 		if [ -n "$(DESKTOP_TAURI_TARGET)" ]; then \
 			if command -v rustup >/dev/null 2>&1; then \

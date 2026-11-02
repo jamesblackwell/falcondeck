@@ -50,7 +50,7 @@ FalconDeck is a monorepo for a local daemon-first agent control plane:
 
 ## Working Guidelines
 
-- Packaged Mac deployment: use `make desktop-install` (build/install/restart) or `make desktop-restart` (restart only). These are synchronous one-shot commands with a health check. Never use `launchctl submit`, KeepAlive jobs, or recurring automation for a one-off restart: a leftover job previously restarted the daemon 77 times and invalidated mobile sync tokens. Do not use broad `pkill` on the desktop binary; MCP helpers share it.
+- Packaged Mac deployment: commit, then `make desktop-install-head` (builds HEAD in a clean temp worktree, installs, restarts), or `make desktop-restart` (restart only). `make desktop-install` refuses a dirty tree: other agents' uncommitted edits once shipped and kept the phone offline. These are synchronous one-shot commands with a health check. Never use `launchctl submit`, KeepAlive jobs, or recurring automation for a one-off restart: a leftover job previously restarted the daemon 77 times and invalidated mobile sync tokens. Do not use broad `pkill` on the desktop binary; MCP helpers share it.
 - Multiple agents often work directly on `main`. Keep commits terse and scoped, commit completed work promptly, and exclude unrelated changes.
 - The Mac runs near-full on disk. Clean up after yourself before handing off:
   - Delete simulators, emulators, and Docker containers/images/volumes you created (`xcrun simctl delete <udid>`, `docker rm`/`rmi`/`volume rm`). Shut down booted simulators you started.
