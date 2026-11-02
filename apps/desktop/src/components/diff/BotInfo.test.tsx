@@ -1,6 +1,6 @@
 import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import type { Automation, BotProfile, ThreadSummary, Ticket } from '@falcondeck/client-core'
+import type { Automation, BotProfile, ThreadSummary } from '@falcondeck/client-core'
 import { InfoView } from './InfoView'
 import type { BotInfoContext } from './BotInfo'
 import type { ThreadActivityContext } from './ThreadActivity'
@@ -16,20 +16,18 @@ const schedule = {
   target: { thread: { kind: 'existing', thread_id: thread.id } },
   next_run_at: at(-1), resolved_schedule: 'At 09:00 daily (Europe/London)',
 } as Automation
-const ticket = { id: 'FD-1', owner: bot.name, state: 'active', title: 'Launch the dashboard', priority: 'P1', created_at: at(3) } as Ticket
 const conflict = { ok: false, operation: 'automation.pause', error: { code: 'revision_conflict', message: 'Changed elsewhere', retryable: true, field_errors: [] } }
 
-function setup({ content = '# Priorities\n\n**Ship** [the feature](falcondeck://thread/worker)', modified = at(2), docs = ['STATUS.md'], schedules = [schedule], tickets = [ticket], flags = ['rarely_useful'] } = {}) {
+function setup({ content = '# Priorities\n\n**Ship** [the feature](falcondeck://thread/worker)', modified = at(2), docs = ['STATUS.md'], schedules = [schedule], flags = ['rarely_useful'] } = {}) {
   const api: BotInfoContext['api'] = {
     botDocuments: vi.fn().mockResolvedValue(docs),
     readBotDocument: vi.fn().mockResolvedValue({ name: 'STATUS.md', content, version: 'v1', modified_at: modified }),
-    listTickets: vi.fn().mockResolvedValue(tickets),
     controlGet: vi.fn().mockImplementation(async (request) => ({ resource: request.resource, data:
       request.resource === 'automations' ? schedules : request.resource === 'automation' ? { ...schedule, revision: 5 } : { automations: [{ id: schedule.id, flags }] },
     })),
     controlExecute: vi.fn().mockResolvedValue({ ok: true, operation: 'automation.pause', data: { ...schedule, state: 'paused', revision: 4 } }),
   }
-  const context: BotInfoContext = { api, onOpenTickets: vi.fn(), onOpenAutomation: vi.fn(), onError: vi.fn() }
+  const context: BotInfoContext = { api, onOpenAutomation: vi.fn(), onError: vi.fn() }
   const activity: ThreadActivityContext = {
     threads: [thread, worker], bots: [bot], onSelectThread: vi.fn(),
     loadMessages: vi.fn().mockResolvedValue({ analytics_enabled: true, dispatches: [], messages: [{ at: at(1), from: worker.id, to: thread.id, excerpt: 'Ready to ship', delivery: 'steer' }] }),
@@ -47,14 +45,11 @@ describe('Bot Info sidebar', () => {
     expect(await screen.findByRole('heading', { name: 'Priorities' })).toBeInTheDocument()
     await screen.findByText('Ready to ship')
     expect(screen.getByRole('heading', { name: 'Juno' }).previousElementSibling).toHaveAttribute('width', '24')
-    expect(screen.getAllByRole('region').map((node) => node.getAttribute('aria-label'))).toEqual(['Status', 'Dispatched', 'Messages', 'Tickets', 'Schedules'])
+    expect(screen.getAllByRole('region').map((node) => node.getAttribute('aria-label'))).toEqual(['Status', 'Dispatched', 'Messages', 'Schedules'])
     expect(screen.getByText('Ship').tagName).toBe('STRONG')
     fireEvent.click(screen.getByRole('link', { name: 'the feature' }))
     expect(activity.onSelectThread).toHaveBeenCalledWith('product', 'worker')
     expect(screen.getByText(/Updated.*ago/)).not.toHaveClass('text-warning')
-    expect(api.listTickets).toHaveBeenCalledWith({ owner: 'Juno', include_closed: false })
-    fireEvent.click(screen.getByRole('button', { name: 'FD-1: Launch the dashboard' }))
-    expect(context.onOpenTickets).toHaveBeenCalledOnce()
     expect(screen.getByText('At 09:00 daily (Europe/London)')).toHaveClass('truncate')
     expect(screen.getByText('rarely useful')).toHaveClass('text-fg-muted')
     expect(screen.getByText(/^Next /)).toBeInTheDocument()
@@ -78,23 +73,19 @@ describe('Bot Info sidebar', () => {
     expect(screen.getByRole('button', { name: 'Show less' })).toHaveAttribute('aria-expanded', 'true')
   })
 
-  it('shows missing status and hides empty tickets and schedules', async () => {
-    const { api } = setup({ docs: [], tickets: [], schedules: [] })
+  it('shows missing status and hides empty schedules', async () => {
+    const { api } = setup({ docs: [], schedules: [] })
     expect(await screen.findByText('No STATUS.md yet')).toBeInTheDocument()
     expect(api.readBotDocument).not.toHaveBeenCalled()
-    expect(screen.queryByRole('region', { name: 'Tickets' })).not.toBeInTheDocument()
     expect(screen.queryByRole('region', { name: 'Schedules' })).not.toBeInTheDocument()
   })
 
-  it('excludes closed/unowned tickets and unrelated schedules, includes worker targets', async () => {
+  it('excludes unrelated schedules and includes worker targets', async () => {
     setup({
-      tickets: [ticket, { ...ticket, id: 'closed', title: 'Finished', state: 'done' }, { ...ticket, id: 'other', title: 'Another owner', owner: 'Iris' }],
       schedules: [{ ...schedule, id: 'worker-schedule', name: 'Worker check', target: { ...schedule.target, thread: { kind: 'existing', thread_id: worker.id } } }, { ...schedule, id: 'unrelated', name: 'Other bot', target: { ...schedule.target, thread: { kind: 'existing', thread_id: 'iris' } } }],
     })
     expect(await screen.findByText('Worker check')).toBeInTheDocument()
     expect(screen.queryByText('Other bot')).not.toBeInTheDocument()
-    expect(screen.queryByText('Finished')).not.toBeInTheDocument()
-    expect(screen.queryByText('Another owner')).not.toBeInTheDocument()
   })
 
   it('pauses with the read revision, without opening the editor, and retries a conflict once', async () => {

@@ -6,9 +6,9 @@ import {
 } from '@falcondeck/client-core'
 import { AUTOMATION_LIST_FIELDS } from '../automation-list-model'
 
-export type BotSidebarApi = Pick<DaemonApiClient, 'botDocuments' | 'readBotDocument' | 'listTickets' | 'controlGet' | 'controlExecute'>
+export type BotSidebarApi = Pick<DaemonApiClient, 'botDocuments' | 'readBotDocument' | 'controlGet' | 'controlExecute'>
 
-export async function readBotSidebar(api: BotSidebarApi, botId: string, owner: string) {
+export async function readBotSidebar(api: BotSidebarApi, botId: string) {
   const readStatus = async () => {
     const names = await api.botDocuments(botId)
     return names.includes('STATUS.md') ? api.readBotDocument(botId, 'STATUS.md') : null
@@ -26,17 +26,14 @@ export async function readBotSidebar(api: BotSidebarApi, botId: string, owner: s
     } while (cursor)
     return rows
   }
-  const [status, tickets, schedules, health] = await Promise.allSettled([
+  const [status, schedules, health] = await Promise.allSettled([
     readStatus(),
-    api.listTickets({ owner, include_closed: false }),
     readSchedules(),
     api.controlGet({ resource: 'automation.health', filters: { days: 7 } }),
   ])
   return {
     status: status.status === 'fulfilled' ? status.value : null,
     statusError: status.status === 'rejected',
-    tickets: tickets.status === 'fulfilled' ? tickets.value : [],
-    ticketsError: tickets.status === 'rejected',
     schedules: schedules.status === 'fulfilled' ? schedules.value : [],
     schedulesError: schedules.status === 'rejected',
     health: health.status === 'fulfilled' ? (health.value.data as { automations?: AnalyticsAutomation[] }).automations ?? [] : [],

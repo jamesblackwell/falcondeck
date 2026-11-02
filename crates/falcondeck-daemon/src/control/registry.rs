@@ -704,6 +704,11 @@ pub fn search(
     let mut candidates: Vec<(i64, usize, &'static Capability)> = Vec::new();
 
     for (index, capability) in capabilities().iter().enumerate() {
+        // Tickets are retired: still executable for the HTTP API and
+        // existing boards, but no longer offered to agents.
+        if capability.domain == "ticket" {
+            continue;
+        }
         if let Some(domain) = &request.domain
             && !domain.eq_ignore_ascii_case(capability.domain)
         {
@@ -976,7 +981,11 @@ mod tests {
             limit: 10_000,
             ..Default::default()
         });
-        assert_eq!(everything.len(), capabilities().len());
+        let offered = capabilities()
+            .iter()
+            .filter(|capability| capability.domain != "ticket")
+            .count();
+        assert_eq!(everything.len(), offered);
         assert!(everything.len() > 2);
     }
 

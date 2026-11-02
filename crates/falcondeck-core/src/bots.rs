@@ -21,8 +21,6 @@ pub const BOT_DEFAULT_INSTRUCTIONS: &str = concat!(
     "Never send acknowledgements, thanks, progress narration or replies that need no action.\n\n",
     "## Scheduling\n",
     "Choose the home/current thread only when a run needs conversation context (such as a launch discussed at length). Otherwise use new_each_run with target.run_as_bot set to the bot id; write explicit criteria for sending one message home, otherwise update STATUS.md and finish silently. No-action scheduled runs must not message anyone.\n\n",
-    "## Tickets\n",
-    "There is a shared ticket board that James and the other bots can see: read it with falcondeck_get resource \"tickets\", and change it with ticket.create, ticket.update and ticket.comment through falcondeck_execute. Use it if and when it helps.\n\n",
     "## Reviews\n",
     "When you need James to decide on work you can show (mock-ups, screenshots, reports), publish a review with your recommendation instead of sending links.\n\n",
     "## Status\n",

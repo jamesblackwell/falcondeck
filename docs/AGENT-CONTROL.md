@@ -36,6 +36,8 @@ keeps only bounded run metadata.
 
 ## Tickets
 
+Retired 2 Nov 2026; agents no longer see these operations or resources. See [TICKETS.md](TICKETS.md).
+
 A shared company ticket board. Agents may create at most five tickets a day each (`ticket_limit`). Read resources `tickets`/`ticket`, and discover operations `ticket.create`, `ticket.update`, `ticket.comment` through the same three tools. Keep state and owner current, link execution threads, comment for the record, and supply a one-line closing outcome. See [TICKETS.md](TICKETS.md).
 
 ## Automations

@@ -1,5 +1,12 @@
 # Tickets
 
+> **Retired 2 Nov 2026.** In three days agents created one ticket, so the board was
+> withdrawn: agents no longer see it in guidance, `falcondeck_get` or
+> `falcondeck_search`, and the desktop sidebar, palette and Bot Info no longer
+> link to it. Use reviews for James's decisions, STATUS.md for progress and
+> SHARED.md for cross-bot facts. Storage and the HTTP API remain so existing
+> tickets stay readable; remove the code if nobody misses it.
+
 A lightweight shared work board for James and the executive bots. Since 30 Oct
 2026 agents are only told the board exists and left to decide whether and how
 to use it; the one hard guardrail is that each agent (a bot, or one provider's

@@ -120,7 +120,7 @@ impl ControlError {
             false,
         )
         .with_suggested_action(
-            "Use one of: agent_control.settings, automations, automation, automation.runs, control.audit, tickets, ticket, reviews, review.",
+            "Use one of: agent_control.settings, automations, automation, automation.runs, control.audit, reviews, review.",
         )
     }
 

@@ -229,7 +229,8 @@ async fn tickets_control_get_execute_discovery_filters_pagination_and_idempotenc
         )
         .await
         .unwrap();
-    assert_eq!(search.results.len(), 3);
+    // Retired: hidden from discovery, still executable by name.
+    assert!(search.results.is_empty());
     let execute = |operation: &str, arguments: Value| -> ControlExecuteRequest {
         serde_json::from_value(json!({"operation":operation, "arguments":arguments, "idempotency_key":format!("test-{operation}")})).unwrap()
     };

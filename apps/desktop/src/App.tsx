@@ -4190,16 +4190,6 @@ function AppInner() {
     };
   }, [handleOpenBackupSettings]);
 
-  const handleOpenTickets = useCallback(() => {
-    setIsSettingsOpen(false);
-    setIsScheduledOpen(false);
-    setIsReviewsActive(false);
-    setIsTicketsOpen(true);
-    setIsExtensionsOpen(false);
-    setIsPluginsOpen(false);
-    setActiveExtensionPanelKey(null);
-  }, []);
-
   const handleOpenReviews = useCallback((id?: string) => {
     setIsSettingsOpen(false);
     setIsScheduledOpen(false);
@@ -4290,7 +4280,6 @@ function AppInner() {
       thread: selectedThread,
       botInfo: !isRemoteWorkspaceSelected && api ? {
         api,
-        onOpenTickets: handleOpenTickets,
         onOpenAutomation: handleOpenAutomation,
         onError: (title: string, description: string) => toast({ title, description, variant: "danger" }),
       } : undefined,
@@ -4301,7 +4290,7 @@ function AppInner() {
         onSelectThread: handleSelectThread,
       } : undefined,
     };
-  }, [api, handleOpenAutomation, handleOpenTickets, handleSelectThread, toast, isRemoteWorkspaceSelected, selectedThread, selectedWorkspace, snapshot?.preferences.bots, snapshot?.threads, workspaceHostBadges]);
+  }, [api, handleOpenAutomation, handleSelectThread, toast, isRemoteWorkspaceSelected, selectedThread, selectedWorkspace, snapshot?.preferences.bots, snapshot?.threads, workspaceHostBadges]);
 
   // Activity is a sidebar mode: the inbox replaces the project list and the
   // main pane stays the reading pane for whichever task is selected.
@@ -6291,7 +6280,6 @@ function AppInner() {
             onOpenBackup={handleOpenBackupSettings}
             onOpenUsage={handleOpenUsage}
             onOpenActivity={handleShowActivity}
-            onOpenTickets={handleOpenTickets}
             onOpenKeyboardShortcuts={handleOpenKeyboardShortcuts}
             onOpenPlugins={handleOpenPlugins}
             onSearchMessages={handleSearchThreadMessages}
@@ -6365,8 +6353,6 @@ function AppInner() {
                 ? updater.state.status
                 : null
             }
-            onOpenTickets={handleOpenTickets}
-            ticketsOpen={isTicketsOpen && !isReviewsActive}
             onOpenReviews={reviewsEnabled ? () => handleOpenReviews() : undefined}
             reviewsOpen={isTicketsOpen && isReviewsActive}
             reviewCount={reviewInbox.openCount}

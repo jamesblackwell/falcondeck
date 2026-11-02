@@ -9,7 +9,6 @@ import { readBotSidebar, setScheduleEnabled, type BotSidebarApi } from './bot-si
 
 export type BotInfoContext = {
   api: BotSidebarApi
-  onOpenTickets: () => void
   onOpenAutomation: (id: string) => void
   onError: (title: string, description: string) => void
 }
@@ -28,12 +27,11 @@ export function BotInfo({ bot, thread, activity, context, children }: {
   context: BotInfoContext
   children: ReactNode
 }) {
-  const load = useCallback(() => readBotSidebar(context.api, bot.id, bot.name), [context.api, bot.id, bot.name])
+  const load = useCallback(() => readBotSidebar(context.api, bot.id), [context.api, bot.id])
   const result = useThreadResource(bot.id, thread.updated_at, load)
   const data = result.data
   const [statusExpanded, setStatusExpanded] = useState(false)
   const [statusOverflow, setStatusOverflow] = useState(false)
-  const [ticketsExpanded, setTicketsExpanded] = useState(false)
   const [schedulesExpanded, setSchedulesExpanded] = useState(false)
   const [pending, setPending] = useState<Set<string>>(new Set())
   const [overrides, setOverrides] = useState<Record<string, Automation>>({})
@@ -56,8 +54,6 @@ export function BotInfo({ bot, thread, activity, context, children }: {
     return override && override.revision > schedule.revision ? override : schedule
   }).filter((schedule) => schedule.target.thread && 'thread_id' in schedule.target.thread && targetIds.has(schedule.target.thread.thread_id ?? ''))
     .sort((a, b) => (a.next_run_at ?? 'z').localeCompare(b.next_run_at ?? 'z') || a.name.localeCompare(b.name))
-  const tickets = (data?.tickets ?? []).filter((ticket) => ticket.owner === bot.name && ticket.state !== 'done' && ticket.state !== 'dropped')
-    .sort((a, b) => a.priority.localeCompare(b.priority) || a.created_at.localeCompare(b.created_at))
   const modifiedAt = data?.status?.modified_at
   const stale = modifiedAt && result.observedAt - Date.parse(modifiedAt) > 24 * 60 * 60 * 1000
   const toggle = async (schedule: Automation, enabled: boolean) => {
@@ -98,14 +94,6 @@ export function BotInfo({ bot, thread, activity, context, children }: {
       </> : <p className="px-3 text-xs text-fg-muted">{data?.statusError || result.error ? 'Could not load STATUS.md.' : data ? 'No STATUS.md yet' : 'Loading status…'}</p>}
     </ActivitySection>
     <ThreadActivity thread={thread} context={activity} />
-    {tickets.length || data?.ticketsError ? <ActivitySection title="Tickets">
-      {data?.ticketsError ? <p className="px-3 text-xs text-fg-muted">Could not load tickets.</p> : (ticketsExpanded ? tickets : tickets.slice(0, 8)).map((ticket) => <button key={ticket.id} type="button" aria-label={`${ticket.id}: ${ticket.title}`} className={ACTIVITY_ROW_CLASS} onClick={context.onOpenTickets}>
-        <span className="shrink-0 text-xs text-fg-muted">{ticket.id}</span>
-        <span className="min-w-0 flex-1 truncate">{ticket.title}</span>
-        <span className="shrink-0 text-xs text-fg-muted">{ticket.priority}</span>
-      </button>)}
-      {tickets.length > 8 ? <More expanded={ticketsExpanded} onClick={() => setTicketsExpanded(!ticketsExpanded)} /> : null}
-    </ActivitySection> : null}
     {schedules.length || data?.schedulesError ? <ActivitySection title="Schedules">
       {data?.schedulesError ? <p className="px-3 text-xs text-fg-muted">Could not load schedules.</p> : (schedulesExpanded ? schedules : schedules.slice(0, 8)).map((schedule) => {
         const flags = data?.health.find((health) => health.id === schedule.id)?.flags ?? []

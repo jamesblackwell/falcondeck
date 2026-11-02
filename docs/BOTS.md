@@ -71,6 +71,8 @@ discouraged.
 
 ## Tickets
 
+Retired 2 Nov 2026 (see [TICKETS.md](TICKETS.md)); bots are no longer told about the board.
+
 Bots are told the shared ticket board exists and how to reach it, and left to decide whether and how to use it (an experiment from 30 Oct 2026). Agents may create at most five tickets a day each. See [TICKETS.md](TICKETS.md) for tools and the board.
 
 ## Icons
