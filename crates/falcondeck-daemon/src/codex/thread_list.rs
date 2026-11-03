@@ -316,6 +316,7 @@ pub(super) fn parse_threads(
                     last_tool: None,
                     last_error: None,
                     agent: ThreadAgentParams {
+                        claude_autocompact_tokens: None,
                         model_id: extract_string(entry, &["model", "modelId", "model_id"]),
                         reasoning_effort: extract_string(
                             entry,

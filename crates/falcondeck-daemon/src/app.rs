@@ -1156,6 +1156,7 @@ impl AppState {
             provider: thread.summary.provider.clone(),
             thread: falcondeck_core::control::AutomationThreadTarget::Managed { thread_id: None },
             model_id: agent.model_id.clone(),
+            claude_autocompact_tokens: agent.claude_autocompact_tokens,
             permission_mode: agent.permission_mode.clone(),
             sandbox_mode: agent.sandbox_mode.clone(),
             reasoning_effort: agent.reasoning_effort.clone(),

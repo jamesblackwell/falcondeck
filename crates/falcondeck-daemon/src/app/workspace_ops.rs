@@ -1356,6 +1356,7 @@ async fn start_thread_internal(
         last_tool: None,
         last_error: None,
         agent: ThreadAgentParams {
+            claude_autocompact_tokens: None,
             model_id,
             reasoning_effort: None,
             collaboration_mode_id: request.collaboration_mode_id,

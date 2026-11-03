@@ -33,3 +33,25 @@ window (for `8-17`, 08:00 inclusive to 18:00 exclusive). Other cron schedules
 can use a fresh task without changing their calendar constraints.
 
 Existing saved automations are never migrated or rewritten by these controls.
+
+## Model and context size
+
+`target.model_id` is passed on every dispatched turn, including managed and
+existing tasks; it is also used on task creation. No model override is required
+when the existing task's model is appropriate.
+
+`target.claude_autocompact_tokens` optionally sets a per-thread Claude window.
+Use 100000 for small long-lived scheduled tasks. The supported range is
+100000–1000000; [Claude Code's documented minimum](https://code.claude.com/docs/en/model-config#values-and-warnings-for-claude_code_auto_compact_window)
+is 100k, so 60–99k is rejected. Explicit automation limits also override the
+usual `[1m]` exemption. The resolved thread stores the limit; it applies to
+manual continuations of that same task too. Clearing it on the automation
+restores the global preference on its next run. Other interactive tasks and
+the global preference stay unchanged (this checkout's built-in default is
+200k; a user's configured 300k is preserved).
+
+Bots already select their home model via their conversation configuration.
+Separate per-bot model/compaction defaults are deferred: they need coordinated
+bot mutation, harness-switch and settings UI changes. A future bot-level default
+could copy into the new home's agent params on creation/switch, with explicit
+per-automation values taking precedence. No bot configuration is migrated here.

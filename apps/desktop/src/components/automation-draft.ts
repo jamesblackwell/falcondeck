@@ -24,6 +24,7 @@ export type AutomationDraft = {
   runAsBot: string;
   onlyWhenChanged: boolean;
   modelId: string;
+  claudeAutocompactTokens: string;
   permissionMode: string;
   sandboxMode: string;
   reasoningEffort: string;
@@ -50,6 +51,7 @@ export function draftWithProvider(
   return {
     ...draft,
     provider: next,
+    claudeAutocompactTokens: next === "claude" ? draft.claudeAutocompactTokens : "",
     threadId: draft.threadKind === "managed" ? "" : draft.threadId,
   };
 }
@@ -78,6 +80,7 @@ export function emptyAutomationDraft(
     runAsBot: "",
     onlyWhenChanged: false,
     modelId: "",
+    claudeAutocompactTokens: "",
     permissionMode: "",
     sandboxMode: "",
     reasoningEffort: "",
@@ -126,6 +129,7 @@ export function automationDraftFrom(automation: Automation): AutomationDraft {
     runAsBot: automation.target.run_as_bot ?? "",
     onlyWhenChanged: automation.target.only_when_changed ?? false,
     modelId: automation.target.model_id ?? "",
+    claudeAutocompactTokens: automation.target.claude_autocompact_tokens?.toString() ?? "",
     permissionMode: automation.target.permission_mode ?? "",
     sandboxMode: automation.target.sandbox_mode ?? "",
     reasoningEffort: automation.target.reasoning_effort ?? "",
@@ -214,6 +218,7 @@ export function automationDraftArguments(
             : { kind: "new_each_run" },
       run_as_bot: draft.threadKind === "new_each_run" ? draft.runAsBot.trim() || null : null,
       only_when_changed: draft.threadKind === "new_each_run" && !!draft.runAsBot.trim() && draft.onlyWhenChanged,
+      ...(draft.claudeAutocompactTokens.trim() ? { claude_autocompact_tokens: Number(draft.claudeAutocompactTokens) } : {}),
       ...(draft.modelId.trim() ? { model_id: draft.modelId.trim() } : {}),
       ...(draft.permissionMode.trim()
         ? { permission_mode: draft.permissionMode.trim() }
@@ -246,6 +251,7 @@ export function automationDraftArguments(
 }
 
 export function draftIsSubmittable(draft: AutomationDraft): string | null {
+  if (draft.claudeAutocompactTokens.trim() && (draft.provider !== "claude" || !Number.isInteger(Number(draft.claudeAutocompactTokens)) || Number(draft.claudeAutocompactTokens) < 100_000 || Number(draft.claudeAutocompactTokens) > 1_000_000)) return "Claude compaction requires 100000–1000000 tokens.";
   if (!draft.name.trim()) return "A name is required.";
   if (!draft.instruction.trim()) return "An instruction is required.";
   if (!draft.workspacePath.trim().startsWith("/"))

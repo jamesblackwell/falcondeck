@@ -1852,3 +1852,16 @@ async fn cadence_guard_applies_to_agent_creates_and_target_only_updates() {
         .await;
     assert!(!blocked.ok);
 }
+
+#[tokio::test]
+async fn automation_compaction_override_validates_provider_and_cli_floor() {
+    let (_dir, service) = service().await;
+    for (provider, tokens, valid) in [("claude", 100_000, true), ("claude", 60_000, false), ("claude", 1_000_001, false), ("codex", 100_000, false)] {
+        let mut args = create_arguments();
+        args["target"]["provider"] = json!(provider);
+        args["target"]["claude_autocompact_tokens"] = json!(tokens);
+        let (response, _) = service.execute(execute_request(registry::ops::AUTOMATION_CREATE, args, None), &desktop(), &ControlDeps::none()).await;
+        assert_eq!(response.ok, valid, "{:?}", response.error);
+        if valid { assert_eq!(response.data.unwrap()["target"]["claude_autocompact_tokens"], 100_000); }
+    }
+}

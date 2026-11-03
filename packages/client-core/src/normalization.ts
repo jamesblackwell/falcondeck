@@ -518,6 +518,7 @@ function normalizeThreadAgent(value: unknown): ThreadAgentParams {
     approval_policy: agent.approval_policy ?? null,
     service_tier: agent.service_tier ?? null,
     permission_mode: agent.permission_mode ?? null,
+    ...(agent.claude_autocompact_tokens != null ? { claude_autocompact_tokens: agent.claude_autocompact_tokens } : {}),
     sandbox_mode: agent.sandbox_mode ?? null,
   };
 }

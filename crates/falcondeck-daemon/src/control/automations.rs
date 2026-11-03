@@ -594,6 +594,12 @@ pub fn validate_definition(
     target: &AutomationTarget,
     required_connectors: &[String],
 ) -> Result<(), ControlError> {
+    if let Some(tokens) = target.claude_autocompact_tokens
+        && (target.provider != falcondeck_core::AgentProvider::CLAUDE
+            || !(falcondeck_core::MIN_AUTOCOMPACT_TOKENS..=falcondeck_core::MAX_AUTOCOMPACT_TOKENS).contains(&tokens))
+    {
+        return Err(ControlError::field("target.claude_autocompact_tokens", "Claude compaction overrides require provider claude and 100000..1000000 tokens."));
+    }
     if target.run_as_bot.is_some()
         && target.thread != falcondeck_core::control::AutomationThreadTarget::NewEachRun
     {

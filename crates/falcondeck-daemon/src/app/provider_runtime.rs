@@ -434,6 +434,7 @@ impl ProviderRuntime {
                         &builtin,
                         agent_context.as_deref(),
                         autocompact_tokens,
+                        spec.thread.agent.claude_autocompact_tokens,
                     )
                     .await;
                 let spawn = match spawn {

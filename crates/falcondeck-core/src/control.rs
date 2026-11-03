@@ -380,6 +380,11 @@ pub struct AutomationTarget {
     #[serde(default)]
     pub model_id: Option<String>,
 
+    /// Optional Claude compaction window for this task (100k..1M). Applied to
+    /// its execution thread without changing the global interactive default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub claude_autocompact_tokens: Option<u32>,
+
     /// Explicit authority settings captured by the automation.
     #[serde(default)]
     pub permission_mode: Option<String>,

@@ -347,6 +347,7 @@ fn legacy_automation(
             provider: detail.summary.provider.clone(),
             thread: AutomationThreadTarget::NewEachRun,
             model_id: detail.model_id.clone(),
+            claude_autocompact_tokens: None,
             permission_mode: detail.permission_mode.clone(),
             sandbox_mode: detail.sandbox_mode.clone(),
             reasoning_effort: detail.reasoning_effort.clone(),

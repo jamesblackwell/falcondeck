@@ -584,6 +584,12 @@ export function AutomationEditor({
           )}
         </div>
 
+        {draft.provider === "claude" ? (
+          <label className="block space-y-1 text-sm text-fg-secondary">Task compaction window (tokens; blank uses global)
+            <Input aria-label="Claude compaction tokens" type="number" min={100000} max={1000000} value={draft.claudeAutocompactTokens} placeholder="100000" onChange={(event) => set("claudeAutocompactTokens", event.target.value)} />
+          </label>
+        ) : null}
+
         {advice.map((item) => (
           <div key={item.code} role="status" className="rounded-md border border-border px-3 py-2 text-sm text-fg-secondary">
             <p>{item.message} {item.suggested_action}</p>

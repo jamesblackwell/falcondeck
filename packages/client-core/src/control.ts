@@ -58,6 +58,7 @@ export type AutomationTarget = {
   run_as_bot?: string | null;
   only_when_changed?: boolean;
   model_id?: string | null;
+  claude_autocompact_tokens?: number | null;
   permission_mode?: string | null;
   sandbox_mode?: string | null;
   reasoning_effort?: string | null;

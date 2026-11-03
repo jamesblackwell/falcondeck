@@ -342,6 +342,7 @@ export type HarnessUpgradeJob = {
 };
 
 export type ThreadAgentParams = {
+  claude_autocompact_tokens?: number | null;
   model_id: string | null;
   reasoning_effort: string | null;
   collaboration_mode_id: string | null;

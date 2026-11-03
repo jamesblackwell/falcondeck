@@ -305,6 +305,7 @@ impl ClaudeRuntime {
         builtin: &crate::connectors::BuiltinConnectors,
         agent_context: Option<&str>,
         autocompact_tokens: u32,
+        autocompact_override: Option<u32>,
     ) -> Result<ClaudeTurnSpawn, DaemonError> {
         // Serialize the whole remove-kill-spawn-insert sequence per thread so
         // concurrent spawns cannot run two CLI processes on one session.
@@ -332,7 +333,7 @@ impl ClaudeRuntime {
             hooks_enabled,
             control_mcp: builtin.control.is_some(),
             extensions_mcp: builtin.extensions.is_some(),
-            autocompact_tokens: autocompact_window(model_id, autocompact_tokens),
+            autocompact_tokens: resolved_autocompact_window(model_id, autocompact_tokens, autocompact_override),
         };
         // Clear any interrupt aimed at earlier turns; interrupts arriving from
         // here on target this spawn and are re-checked after insertion below.
@@ -1403,6 +1404,10 @@ fn autocompact_window(model_id: Option<&str>, tokens: u32) -> Option<u32> {
     }
 }
 
+fn resolved_autocompact_window(model_id: Option<&str>, global: u32, explicit: Option<u32>) -> Option<u32> {
+    explicit.or_else(|| autocompact_window(model_id, global))
+}
+
 /// The ids are CLI aliases that always run the newest model in each family;
 /// only the labels are ours. Re-check them when the CLI moves an alias
 /// (`claude -p --model <alias> --output-format json` reports `modelUsage`).
@@ -2393,6 +2398,14 @@ impl StringExt for String {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn explicit_task_compaction_overrides_global_and_full_context_exemption() {
+        assert_eq!(resolved_autocompact_window(Some("opus[1m]"), 300_000, Some(100_000)), Some(100_000));
+        assert_eq!(resolved_autocompact_window(Some("sonnet"), 300_000, Some(100_000)), Some(100_000));
+        assert_eq!(resolved_autocompact_window(Some("sonnet"), 300_000, None), Some(300_000));
+        assert_eq!(resolved_autocompact_window(Some("opus[1m]"), 300_000, None), None);
+    }
 
     #[test]
     fn parses_authenticated_account_status() {
@@ -3546,6 +3559,7 @@ mod tests {
                 &Default::default(),
                 None,
                 200_000,
+                None,
             )
             .await
             .unwrap();
@@ -3583,6 +3597,7 @@ mod tests {
                 &Default::default(),
                 None,
                 300_000,
+                None,
             )
             .await;
         assert!(result.is_err(), "a new window needs a new CLI process");

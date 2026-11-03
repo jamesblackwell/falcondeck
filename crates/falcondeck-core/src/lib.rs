@@ -3162,6 +3162,9 @@ pub enum TurnInputItem {
 /// Agent configuration captured on a thread.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 pub struct ThreadAgentParams {
+    /// Per-thread Claude compaction window; absent uses the global preference.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub claude_autocompact_tokens: Option<u32>,
     /// Selected model identifier for the thread.
     pub model_id: Option<String>,
     /// Selected reasoning effort for the thread.
@@ -3191,6 +3194,7 @@ impl ThreadAgentParams {
                 *field = fallback.clone();
             }
         }
+        self.claude_autocompact_tokens = self.claude_autocompact_tokens.or(fallback.claude_autocompact_tokens);
         fill(&mut self.model_id, &fallback.model_id);
         fill(&mut self.reasoning_effort, &fallback.reasoning_effort);
         fill(

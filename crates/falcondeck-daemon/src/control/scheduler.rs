@@ -276,6 +276,7 @@ pub(crate) async fn execute_run(app: &AppState, run_id: &str) {
         automation.target.workspace_path = home.workspace_path;
         automation.target.provider = home.provider;
         automation.target.model_id = automation.target.model_id.or(home.model_id);
+        automation.target.claude_autocompact_tokens = automation.target.claude_autocompact_tokens.or(home.claude_autocompact_tokens);
         automation.target.reasoning_effort =
             automation.target.reasoning_effort.or(home.reasoning_effort);
         // Authority always comes from the bot, never from an unattended schedule.
@@ -418,6 +419,17 @@ pub(crate) async fn execute_run(app: &AppState, run_id: &str) {
             return;
         }
     };
+
+    // This is a per-thread limit: it survives native-session hydration and
+    // also applies if the user continues this managed task interactively.
+    if let Err(error) = app.with_thread_mut(&workspace.id, &thread_id, |thread| {
+        thread.agent.claude_autocompact_tokens = automation.target.claude_autocompact_tokens;
+    }).await {
+        let _ = app.control().fail_run(run_id, &error.to_string()).await;
+        emit_runs_changed(app).await;
+        return;
+    }
+    app.schedule_persist();
 
     if let Err(error) = app
         .control()
