@@ -194,6 +194,7 @@ pub fn router(state: AppState) -> Router {
         .route("/api/analytics", get(analytics_status))
         .route("/api/analytics/settings", post(update_analytics_settings))
         .route("/api/analytics/summary", get(analytics_summary))
+        .route("/api/analytics/usage", get(analytics_usage))
         .route("/api/analytics/thread", get(analytics_thread))
         .route("/api/analytics/prompts", get(analytics_prompts))
         .route("/api/analytics/clear", post(clear_analytics))
@@ -504,6 +505,34 @@ async fn analytics_summary(
 struct AnalyticsThreadQuery {
     id: String,
     days: Option<u32>,
+}
+
+/// Groupings the usage endpoint accepts.
+const USAGE_GROUPS: [&str; 5] = ["bot", "provider", "model", "thread", "day"];
+
+#[derive(serde::Deserialize)]
+struct AnalyticsUsageQuery {
+    #[serde(default)]
+    days: Option<u32>,
+    #[serde(default)]
+    group: Option<String>,
+}
+
+async fn analytics_usage(
+    State(state): State<AppState>,
+    Query(query): Query<AnalyticsUsageQuery>,
+) -> Result<Json<falcondeck_core::AnalyticsUsageReport>, DaemonError> {
+    let group = query.group.unwrap_or_else(|| "model".to_string());
+    if !USAGE_GROUPS.contains(&group.as_str()) {
+        return Err(DaemonError::BadRequest(format!(
+            "Group usage by one of: {}",
+            USAGE_GROUPS.join(", ")
+        )));
+    }
+    state
+        .analytics_usage(query.days.unwrap_or(30), &group)
+        .await
+        .map(Json)
 }
 
 async fn analytics_thread(

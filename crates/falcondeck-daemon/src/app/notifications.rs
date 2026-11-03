@@ -277,6 +277,9 @@ pub(super) async fn ingest_notification(
                 extract_thread_id(&params),
                 parse_thread_token_usage(&params),
             ) {
+                // The same `last` request can be re-reported with an unchanged
+                // cumulative total; the accumulator dedupes those.
+                app.note_codex_token_usage(&thread_id, &params);
                 app.inner
                     .thread_token_usage
                     .lock()
@@ -402,6 +405,9 @@ pub(super) async fn ingest_notification(
         }
         "turn/started" => {
             if let Some(thread_id) = extract_thread_id(&params) {
+                // A new turn starts a fresh usage window; anything accumulated
+                // before this point belongs to no turn.
+                app.reset_codex_turn_usage(&thread_id);
                 let turn_id = extract_turn_id(&params).unwrap_or_else(|| "turn".to_string());
                 let updated_at = notification_timestamp(method, &params).unwrap_or_else(Utc::now);
                 let associated_user_message = {
@@ -582,7 +588,7 @@ pub(super) async fn ingest_notification(
                     Some(workspace_id.to_string()),
                     Some(thread_id.clone()),
                     UnifiedEvent::TurnEnd {
-                        turn_id,
+                        turn_id: turn_id.clone(),
                         status: if retrying {
                             "running".to_string()
                         } else {
@@ -592,8 +598,12 @@ pub(super) async fn ingest_notification(
                     },
                 );
                 if retrying {
+                    // The retry is a new turn: its usage starts from zero.
+                    app.reset_codex_turn_usage(&thread_id);
                     return Ok(());
                 }
+                // Tokens the turn consumed, failed or not, land in analytics.
+                app.flush_codex_turn_usage(workspace_id, &thread_id, &turn_id);
                 app.schedule_codex_thread_release_if_idle(workspace_id, &thread_id);
                 app.schedule_codex_subagent_release(workspace_id);
                 // A finished turn means the agent is waiting on the user;

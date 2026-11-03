@@ -6055,6 +6055,11 @@ function AppInner() {
                     }
                     onSetExtensionEnabled={handleSetExtensionEnabled}
                     onSetExtensionPermission={handleSetExtensionPermission}
+                    onOpenThread={(_workspaceId, threadId) => {
+                      const target = resolveThreadLinkTarget(threadId, snapshot?.threads ?? []);
+                      if (target) handleSelectThread(target.workspace_id, target.id);
+                      else toast({ title: "Task unavailable", description: "This task is no longer available on this computer.", variant: "danger" });
+                    }}
                     onClose={() => setIsSettingsOpen(false)}
                   />
                 </Suspense>

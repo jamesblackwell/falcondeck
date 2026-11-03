@@ -206,6 +206,7 @@ async fn settings_stop_recording_and_clearing_removes_files() {
         .update_analytics_settings(AnalyticsSettings {
             enabled: true,
             record_prompts: false,
+            record_usage: true,
             retention_months: 6,
         })
         .await
@@ -223,6 +224,7 @@ async fn settings_stop_recording_and_clearing_removes_files() {
     app.update_analytics_settings(AnalyticsSettings {
         enabled: false,
         record_prompts: false,
+        record_usage: true,
         retention_months: 6,
     })
     .await

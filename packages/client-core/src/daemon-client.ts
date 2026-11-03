@@ -15,6 +15,8 @@ import type {
   AnalyticsStatus,
   AnalyticsSummary,
   AnalyticsThreadActivity,
+  AnalyticsUsageGrouping,
+  AnalyticsUsageReport,
   AgentProvider,
   CollaborationModeSummary,
   CreateScheduledTaskPayload,
@@ -688,6 +690,9 @@ export function createDaemonApiClient(baseUrl: string) {
     },
     async analyticsSummary(days: number) {
       return parseJson<AnalyticsSummary>(await fetch(`${baseUrl}/api/analytics/summary?${new URLSearchParams({ days: String(days) })}`));
+    },
+    async analyticsUsage(days: number, group: AnalyticsUsageGrouping = "model") {
+      return parseJson<AnalyticsUsageReport>(await fetch(`${baseUrl}/api/analytics/usage?${new URLSearchParams({ days: String(days), group })}`));
     },
     async analyticsThread(id: string, days = 2) {
       return parseJson<AnalyticsThreadActivity>(await fetch(`${baseUrl}/api/analytics/thread?${new URLSearchParams({ id, days: String(days) })}`));

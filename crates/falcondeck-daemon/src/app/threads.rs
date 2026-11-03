@@ -45,7 +45,8 @@ use crate::{
     claude::{
         self, ClaudeRuntime, ClaudeStreamLine, encode_control_response_error,
         is_resume_startup_failure, live_context_usage, parse_claude_stream_lines,
-        result_is_cancelled, result_model_context_window, synthetic_permission_requests,
+        result_is_cancelled, result_model_context_window, result_turn_model_usage,
+        result_usage_service_tier, synthetic_permission_requests,
     },
     codex::CodexSessionLease,
     error::DaemonError,
@@ -1844,19 +1845,75 @@ impl AppState {
                                 }
                                 parked_between_turns = false;
                             }
-                            if value.get("type").and_then(Value::as_str) == Some("result")
-                                && let Some(usage) = value.get("usage")
-                            {
-                                let count = |key: &str| usage.get(key).and_then(Value::as_u64);
-                                if let Some(input) = count("input_tokens") {
+                            if value.get("type").and_then(Value::as_str) == Some("result") {
+                                // `modelUsage` is the billed turn aggregate
+                                // (subagents included); `result.usage` is only
+                                // the last API call. `model_usage_since_last_result`
+                                // is preferred because the CLI process is
+                                // long-lived and emits one result per turn.
+                                if let Some(models) = result_turn_model_usage(&value) {
+                                    if !models.is_empty() {
+                                        let (input, cached) =
+                                            models.iter().fold((0, 0), |(input, cached), model| {
+                                                (
+                                                    input
+                                                        + model.input_tokens
+                                                        + model.cache_creation_input_tokens,
+                                                    cached + model.cache_read_input_tokens,
+                                                )
+                                            });
+                                        self.control()
+                                            .record_claude_run_usage(
+                                                &workspace_id,
+                                                &thread_id,
+                                                input,
+                                                cached,
+                                            )
+                                            .await;
+                                        let tier = result_usage_service_tier(&value);
+                                        let stamp = Utc::now().timestamp_millis();
+                                        for model in models {
+                                            self.record_turn_usage(super::analytics::TurnUsage {
+                                                workspace_id: &workspace_id,
+                                                thread_id: &thread_id,
+                                                provider: "claude",
+                                                model: model.model,
+                                                uncached_input: model.input_tokens,
+                                                cache_read: model.cache_read_input_tokens,
+                                                cache_write: model
+                                                    .cache_creation_input_tokens,
+                                                output: model.output_tokens,
+                                                reasoning: model.thinking_tokens.unwrap_or(0),
+                                                calls: None,
+                                                cost: model.cost_usd,
+                                                cost_source: "provider",
+                                                tier: tier.clone(),
+                                                effort: None,
+                                                cost_ticks: None,
+                                                id: format!(
+                                                    "claude:{thread_id}:{}:{stamp}",
+                                                    model.model
+                                                ),
+                                            });
+                                        }
+                                    }
+                                } else if let Some(usage) = value.get("usage")
+                                    && let Some(input) =
+                                        usage.get("input_tokens").and_then(Value::as_u64)
+                                {
+                                    // CLI too old for modelUsage: the last API
+                                    // call is the only usage it reports.
+                                    let count = |key: &str| {
+                                        usage.get(key).and_then(Value::as_u64).unwrap_or(0)
+                                    };
                                     self.control()
                                         .record_claude_run_usage(
                                             &workspace_id,
                                             &thread_id,
                                             input.saturating_add(
-                                                count("cache_creation_input_tokens").unwrap_or(0),
+                                                count("cache_creation_input_tokens"),
                                             ),
-                                            count("cache_read_input_tokens").unwrap_or(0),
+                                            count("cache_read_input_tokens"),
                                         )
                                         .await;
                                 }

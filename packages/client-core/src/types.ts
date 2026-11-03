@@ -526,8 +526,22 @@ export type BotApi = {
 };
 
 /** Local activity analytics (desktop only; never sent over the relay). */
-export type AnalyticsSettings = { enabled: boolean; record_prompts: boolean; retention_months: number };
-export type AnalyticsStatus = { settings: AnalyticsSettings; folder: string; events_bytes: number; prompts_bytes: number };
+export type AnalyticsSettings = {
+  enabled: boolean;
+  record_prompts: boolean;
+  /** Older daemons omit it; defaults to true. */
+  record_usage?: boolean;
+  retention_months: number;
+};
+export type AnalyticsStatus = {
+  settings: AnalyticsSettings;
+  folder: string;
+  events_bytes: number;
+  prompts_bytes: number;
+  /** Older daemons omit these. */
+  usage_bytes?: number;
+  dropped_usage_records?: number;
+};
 export type AnalyticsTotals = {
   user_messages: number;
   scheduled_messages: number;
@@ -618,6 +632,57 @@ export type AnalyticsAutomation = {
   /** rarely_useful, very_frequent, failing, thread_per_run */
   flags?: string[];
 };
+/** Token counts attributed to finished turns; `input_tokens` is uncached input. */
+export type AnalyticsUsageTotals = {
+  input_tokens: number;
+  cache_read_tokens: number;
+  cache_write_tokens: number;
+  output_tokens: number;
+  turns: number;
+  /** Provider-reported API-equivalent USD, where a harness reports one. */
+  cost_usd: number;
+};
+/** One row of a usage aggregation. */
+export type AnalyticsUsageRow = {
+  /** Grouping value: bot id, provider, model, thread id or `YYYY-MM-DD`. */
+  key: string;
+  /** Display label, resolved when the report was computed. */
+  label: string;
+  totals: AnalyticsUsageTotals;
+  /** Cost sources that contributed: provider, provider_unverified. */
+  cost_sources: string[];
+  /** Thread detail, present on `group=thread` rows. */
+  thread?: AnalyticsUsageThread;
+};
+/** Per-thread detail on a `group=thread` usage row. */
+export type AnalyticsUsageThread = {
+  bot: string | null;
+  workspace: string;
+  project: string;
+  /** user, agent_spawn, scheduled or automation. */
+  origin: string;
+  automation: string | null;
+  /** Dominant provider and model (the busiest combination). */
+  provider: string;
+  model: string;
+  /** Average prompt context per model call, in tokens. */
+  avg_context_per_call: number;
+};
+export type AnalyticsUsageGrouping = "bot" | "provider" | "model" | "thread" | "day";
+export type AnalyticsUsageReport = {
+  days: number;
+  group: AnalyticsUsageGrouping;
+  totals: AnalyticsUsageTotals;
+  rows: AnalyticsUsageRow[];
+};
+/** Token usage by bot, harness and model, for the Settings table. */
+export type AnalyticsUsage = {
+  bot: string | null;
+  provider: string;
+  model: string;
+  totals: AnalyticsUsageTotals;
+  cost_sources: string[];
+};
 export type AnalyticsSummary = {
   days: number;
   generated_at: string;
@@ -633,6 +698,7 @@ export type AnalyticsSummary = {
   triggers?: AnalyticsTriggers;
   waiting?: AnalyticsWaiting;
   automations?: AnalyticsAutomation[];
+  usage?: AnalyticsUsage[];
 };
 export type AnalyticsPrompt = {
   at: string;

@@ -1074,6 +1074,111 @@ fn prompt_usage_indicates_no_model_tokens(response: &Value) -> bool {
     false
 }
 
+/// Usage from Grok's `_x.ai/session/update` `turn_completed`: per turn, per
+/// model, with cost ticks. Returns `None` for other updates or turns that
+/// used no tokens.
+fn grok_turn_usage(update: &Value) -> Option<AcpTurnUsage> {
+    if update.get("sessionUpdate").and_then(Value::as_str) != Some("turn_completed") {
+        return None;
+    }
+    let usage = update.get("usage")?;
+    let count = |value: &Value, camel: &str, snake: &str| {
+        value
+            .get(camel)
+            .or_else(|| value.get(snake))
+            .and_then(|entry| {
+                entry
+                    .as_u64()
+                    .or_else(|| entry.as_i64().and_then(|n| u64::try_from(n).ok()))
+            })
+            .unwrap_or(0)
+    };
+    let entry = |value: &Value, model: &str| AcpModelUsage {
+        model: model.to_string(),
+        input_tokens: count(value, "inputTokens", "input_tokens"),
+        cache_read_tokens: count(value, "cachedReadTokens", "cached_read_tokens"),
+        cache_write_tokens: count(value, "cacheCreationTokens", "cache_creation_tokens"),
+        output_tokens: count(value, "outputTokens", "output_tokens"),
+        reasoning_tokens: count(value, "reasoningTokens", "reasoning_tokens"),
+        model_calls: value
+            .get("modelCalls")
+            .or_else(|| value.get("model_calls"))
+            .and_then(Value::as_u64),
+        cost_ticks: value
+            .get("costUsdTicks")
+            .or_else(|| value.get("cost_usd_ticks"))
+            .and_then(Value::as_u64),
+    };
+    let models: Vec<_> = usage
+        .get("modelUsage")
+        .or_else(|| usage.get("model_usage"))
+        .and_then(Value::as_object)
+        .map(|entries| {
+            entries
+                .iter()
+                .map(|(model, value)| entry(value, model))
+                .collect()
+        })
+        .unwrap_or_else(|| vec![entry(usage, "")]);
+    if models
+        .iter()
+        .all(|model| model.input_tokens == 0 && model.output_tokens == 0)
+    {
+        return None;
+    }
+    let mut models = models;
+    // Only the turn-level usage counts calls; apply it when a single model
+    // ran, so average context per call can be computed.
+    if models.len() == 1
+        && models[0].model_calls.is_none()
+        && let Some(calls) = usage
+            .get("modelCalls")
+            .or_else(|| usage.get("model_calls"))
+            .and_then(Value::as_u64)
+    {
+        models[0].model_calls = Some(calls);
+    }
+    Some(AcpTurnUsage {
+        models,
+        turn_cost_ticks: usage
+            .get("costUsdTicks")
+            .or_else(|| usage.get("cost_usd_ticks"))
+            .and_then(Value::as_u64),
+        prompt_id: update
+            .get("prompt_id")
+            .or_else(|| update.get("promptId"))
+            .and_then(Value::as_str)
+            .map(str::to_string),
+        input_includes_cached_reads: true,
+    })
+}
+
+/// Usage from an ACP `session/prompt` response: input and output tokens for
+/// the whole prompt, no cache split, no model name.
+fn acp_prompt_usage(response: &Value) -> Option<AcpTurnUsage> {
+    let usage = response.get("usage")?;
+    let input = json_u64_field(usage, "inputTokens")?;
+    let output = json_u64_field(usage, "outputTokens")?;
+    if input == 0 && output == 0 {
+        return None;
+    }
+    Some(AcpTurnUsage {
+        models: vec![AcpModelUsage {
+            model: String::new(),
+            input_tokens: input,
+            cache_read_tokens: json_u64_field(usage, "cachedReadTokens").unwrap_or(0),
+            cache_write_tokens: json_u64_field(usage, "cacheCreationTokens").unwrap_or(0),
+            output_tokens: output,
+            reasoning_tokens: json_u64_field(usage, "reasoningTokens").unwrap_or(0),
+            model_calls: json_u64_field(usage, "modelCalls"),
+            cost_ticks: None,
+        }],
+        turn_cost_ticks: None,
+        prompt_id: None,
+        input_includes_cached_reads: false,
+    })
+}
+
 fn is_successful_empty_prompt_stop_reason(stop_reason: &str) -> bool {
     matches!(
         stop_reason.trim().to_ascii_lowercase().as_str(),
@@ -1361,8 +1466,59 @@ pub enum AcpEvent {
         error: Option<String>,
         had_output: bool,
     },
+    /// Billed usage for a finished turn: Grok's vendor `turn_completed`, or a
+    /// `session/prompt` response. Projected into local usage analytics.
+    TurnUsage {
+        session_id: String,
+        usage: AcpTurnUsage,
+    },
     /// The agent process died or the stream broke.
     Fatal { message: String },
+}
+
+/// One model's usage in a finished ACP turn, as the agent reported it.
+/// Normalisation (splitting cached reads out of input) happens where it is
+/// recorded, because the convention differs per agent.
+#[derive(Debug, Clone, PartialEq)]
+pub struct AcpModelUsage {
+    /// Model id; empty when only the thread's selection knows it.
+    pub model: String,
+    pub input_tokens: u64,
+    pub cache_read_tokens: u64,
+    pub cache_write_tokens: u64,
+    pub output_tokens: u64,
+    /// Reasoning tokens, a subset of `output_tokens`.
+    pub reasoning_tokens: u64,
+    /// Model calls, when the agent counts them.
+    pub model_calls: Option<u64>,
+    /// Cost in the vendor's raw unit (Grok `costUsdTicks`), when reported.
+    pub cost_ticks: Option<u64>,
+}
+
+/// Turn-level usage reported by an ACP agent: Grok's vendor
+/// `_x.ai/session/update` `turn_completed`, or a `session/prompt` response.
+#[derive(Debug, Clone, PartialEq)]
+pub struct AcpTurnUsage {
+    /// One entry per model; a single unnamed entry when only the turn totals
+    /// are known.
+    pub models: Vec<AcpModelUsage>,
+    /// Turn-wide raw cost ticks, when only the turn reports them (Grok).
+    pub turn_cost_ticks: Option<u64>,
+    /// Vendor turn/prompt id, when reported; anchors the usage record id.
+    pub prompt_id: Option<String>,
+    /// Whether the reporter's `input_tokens` already includes cached reads
+    /// (Grok: yes, per observed payloads; unverified for other agents).
+    pub input_includes_cached_reads: bool,
+}
+
+impl AcpTurnUsage {
+    /// Raw vendor cost ticks as USD.
+    // TODO: the tick unit is unconfirmed. 1e-10 USD fits every observed
+    // sample (1195712000 ticks ≈ $0.12) but needs vendor confirmation before
+    // the figure is treated as exact; records keep the raw ticks too.
+    pub fn cost_usd_from_ticks(ticks: u64) -> f64 {
+        ticks as f64 * 1e-10
+    }
 }
 
 struct PendingPermission {
@@ -3306,6 +3462,10 @@ impl AcpRuntime {
         self.config.id.eq_ignore_ascii_case("hermes")
     }
 
+    pub(crate) fn is_grok(&self) -> bool {
+        self.config.id.eq_ignore_ascii_case("grok")
+    }
+
     pub(crate) async fn is_native_command(&self, session_id: &str, text: &str) -> bool {
         if !self.is_hermes() {
             return false;
@@ -3576,6 +3736,17 @@ impl AcpRuntime {
                 .and_then(Value::as_str)
                 .unwrap_or("end_turn")
                 .to_string();
+            // Most agents report billed usage on the prompt response. Grok's
+            // arrives on the vendor stream instead (captured there); reading
+            // it here too would double-count the same turn.
+            if !self.is_grok()
+                && let Some(usage) = acp_prompt_usage(&response)
+            {
+                let _ = self.events.send(AcpEvent::TurnUsage {
+                    session_id: session_id.to_string(),
+                    usage,
+                });
+            }
             let had_output = self
                 .prompt_output_sessions
                 .lock()
@@ -4328,9 +4499,10 @@ impl AcpRuntime {
         match method.as_str() {
             "session/update" => self.handle_session_update(&params).await,
             // Grok's vendor stream duplicates session/update with turn-level
-            // metadata; the only part we need is the real failure text, which
-            // never appears on the standard surface.
-            "_x.ai/session/update" => self.capture_vendor_turn_failure(&params).await,
+            // metadata. Two parts matter: billed turn usage, which no standard
+            // surface reports, and the real failure text, which never appears
+            // on the standard surface.
+            "_x.ai/session/update" => self.capture_vendor_turn_update(&params).await,
             "session/request_permission" => {
                 let raw_id = message.get("id").cloned().unwrap_or(Value::Null);
                 self.handle_permission_request(raw_id, &params).await;
@@ -4611,11 +4783,13 @@ impl AcpRuntime {
         )
     }
 
-    /// Records the failure text Grok reports through `_x.ai/session/update`
-    /// (`turn_completed` with `stop_reason: "error"`, or a failed
-    /// `retry_state`). The matching JSON-RPC prompt error says only
-    /// "Internal error"; `prompt` swaps in this detail when the turn fails.
-    async fn capture_vendor_turn_failure(&self, params: &Value) {
+    /// Reads Grok's vendor `_x.ai/session/update` stream: billed turn usage
+    /// from `turn_completed` (per model, with cost ticks), and the failure
+    /// text the standard surface never carries (`turn_completed` with
+    /// `stop_reason: "error"`, or a failed `retry_state`). The matching
+    /// JSON-RPC prompt error says only "Internal error"; `prompt` swaps in
+    /// this detail when the turn fails.
+    async fn capture_vendor_turn_update(&self, params: &Value) {
         let Some(session_id) = params.get("sessionId").and_then(Value::as_str) else {
             return;
         };
@@ -4638,6 +4812,13 @@ impl AcpRuntime {
                 .lock()
                 .await
                 .insert(session_id.to_string(), detail.to_string());
+        }
+        // Failed turns still consumed tokens; usage is recorded either way.
+        if let Some(usage) = grok_turn_usage(update) {
+            let _ = self.events.send(AcpEvent::TurnUsage {
+                session_id: session_id.to_string(),
+                usage,
+            });
         }
     }
 
@@ -4906,6 +5087,77 @@ impl AcpRuntime {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn grok_turn_usage_reads_per_model_totals_and_cost_ticks() {
+        // Real `turn_completed` line from ~/.grok sessions, via
+        // docs/usage-tracking-scope.md §2.
+        let update = json!({
+            "sessionUpdate": "turn_completed",
+            "prompt_id": "5df2cb0c-...",
+            "stop_reason": "end_turn",
+            "elapsed_ms": 106510,
+            "usage": {
+                "inputTokens": 491533, "outputTokens": 6193, "totalTokens": 497726,
+                "cachedReadTokens": 445696, "cacheCreationTokens": 0,
+                "reasoningTokens": 4987, "modelCalls": 13, "apiDurationMs": 100989,
+                "costUsdTicks": 1195712000,
+                "modelUsage": { "grok-4.7-build": {
+                    "inputTokens": 491533, "outputTokens": 6193,
+                    "cachedReadTokens": 445696, "cacheCreationTokens": 0,
+                    "reasoningTokens": 4987
+                }}
+            },
+            "numTurns": 13
+        });
+        let usage = grok_turn_usage(&update).unwrap();
+        assert_eq!(usage.prompt_id.as_deref(), Some("5df2cb0c-..."));
+        assert_eq!(usage.turn_cost_ticks, Some(1195712000));
+        assert!(usage.input_includes_cached_reads);
+        assert_eq!(usage.models.len(), 1);
+        let model = &usage.models[0];
+        assert_eq!(model.model, "grok-4.7-build");
+        // Grok folds cached reads into inputTokens: the normalised uncached
+        // input is the difference (the consumer subtracts it).
+        assert_eq!(
+            model.input_tokens.saturating_sub(model.cache_read_tokens),
+            45837
+        );
+        assert_eq!(model.cache_write_tokens, 0);
+        assert_eq!(model.output_tokens, 6193);
+        assert_eq!(model.reasoning_tokens, 4987);
+        // A single-model turn inherits the turn-level call count.
+        assert_eq!(model.model_calls, Some(13));
+
+        // Tick conversion: 1195712000 * 1e-10 ≈ $0.12.
+        assert!((AcpTurnUsage::cost_usd_from_ticks(1195712000) - 0.1195712).abs() < 1e-9);
+
+        // Other update kinds carry no usage; nor does an all-zero turn.
+        assert!(grok_turn_usage(&json!({"sessionUpdate": "user_message_chunk"})).is_none());
+        assert!(grok_turn_usage(&json!({
+            "sessionUpdate": "turn_completed",
+            "usage": {"inputTokens": 0, "outputTokens": 0}
+        }))
+        .is_none());
+    }
+
+    #[test]
+    fn acp_prompt_usage_reads_input_and_output_only() {
+        let usage = acp_prompt_usage(&json!({
+            "stopReason": "end_turn",
+            "usage": {"inputTokens": 1200, "outputTokens": 340, "totalTokens": 1540}
+        }))
+        .unwrap();
+        assert_eq!(usage.models.len(), 1);
+        assert_eq!(usage.models[0].model, "");
+        assert_eq!(usage.models[0].input_tokens, 1200);
+        assert_eq!(usage.models[0].output_tokens, 340);
+        assert!(!usage.input_includes_cached_reads);
+        assert_eq!(usage.turn_cost_ticks, None);
+
+        assert!(acp_prompt_usage(&json!({"usage": {"inputTokens": 0, "outputTokens": 0}})).is_none());
+        assert!(acp_prompt_usage(&json!({"stopReason": "end_turn"})).is_none());
+    }
 
     #[test]
     fn cursor_cli_model_lines_parse_with_verbatim_variant_ids() {

@@ -489,7 +489,9 @@ pub(crate) fn synthetic_permission_requests(pending: &[Value]) -> Vec<ClaudeStre
 }
 
 /// Live context snapshot from `message_start` / `message_delta` (and assistant
-/// echoes). `result.usage` is a billed-turn aggregate and is rejected.
+/// echoes). `result.usage` is only the last API call, not a turn aggregate, and
+/// is rejected; the turn aggregate lives in `modelUsage` (see
+/// [`result_turn_model_usage`]).
 pub(crate) fn live_context_usage(value: &Value) -> Option<ClaudeLiveContextUsage> {
     if value.get("type").and_then(Value::as_str) == Some("result") {
         return None;
@@ -587,6 +589,78 @@ pub(crate) fn result_model_context_window(value: &Value) -> Option<u64> {
             .filter(|window| *window > 0)
     })
 }
+
+/// One model's billed usage in a Claude `result`. `input_tokens` excludes
+/// cached tokens (Claude reports cache reads and writes separately). The
+/// model name borrows from the `result` value the entry was parsed from.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) struct ClaudeModelUsage<'a> {
+    pub model: &'a str,
+    pub input_tokens: u64,
+    pub cache_read_input_tokens: u64,
+    pub cache_creation_input_tokens: u64,
+    pub output_tokens: u64,
+    pub thinking_tokens: Option<u64>,
+    /// The CLI's own list-price API-equivalent cost for this model.
+    pub cost_usd: Option<f64>,
+}
+
+/// Per-model turn aggregate from a `result`: `model_usage_since_last_result`
+/// when the CLI reports it (a long-lived process emits several results), else
+/// `modelUsage`. Both include subagents. `result.usage` is NOT the aggregate —
+/// it is the last API call only — which is why it is never read here.
+/// `Some` with an empty vec means the delta was present and empty: no model
+/// usage in this turn, not "fall back to `modelUsage`".
+pub(crate) fn result_turn_model_usage(value: &Value) -> Option<Vec<ClaudeModelUsage<'_>>> {
+    if value.get("type").and_then(Value::as_str) != Some("result") {
+        return None;
+    }
+    let entries = value
+        .get("model_usage_since_last_result")
+        .and_then(Value::as_object)
+        .or_else(|| value.get("modelUsage")?.as_object())?;
+    let count = |entry: &Value, camel: &str, snake: &str| {
+        entry
+            .get(camel)
+            .or_else(|| entry.get(snake))
+            .and_then(json_u64)
+            .unwrap_or(0)
+    };
+    let models = entries
+        .iter()
+        .filter(|(_, entry)| entry.as_object().is_some_and(|map| !map.is_empty()))
+        .map(|(model, entry)| ClaudeModelUsage {
+            model: model.as_str(),
+            input_tokens: count(entry, "inputTokens", "input_tokens"),
+            cache_read_input_tokens: count(entry, "cacheReadInputTokens", "cache_read_input_tokens"),
+            cache_creation_input_tokens: count(
+                entry,
+                "cacheCreationInputTokens",
+                "cache_creation_input_tokens",
+            ),
+            output_tokens: count(entry, "outputTokens", "output_tokens"),
+            thinking_tokens: entry
+                .get("thinkingTokens")
+                .or_else(|| entry.get("thinking_tokens"))
+                .and_then(json_u64),
+            cost_usd: entry
+                .get("costUSD")
+                .or_else(|| entry.get("cost_usd"))
+                .and_then(Value::as_f64),
+        })
+        .collect::<Vec<_>>();
+    Some(models)
+}
+
+/// Service tier a Claude `result` reports for its API calls, when it does.
+pub(crate) fn result_usage_service_tier(value: &Value) -> Option<String> {
+    value
+        .get("usage")
+        .and_then(|usage| usage.get("service_tier"))
+        .and_then(Value::as_str)
+        .map(str::to_string)
+}
+
 
 /// A `result` that is an interrupt/abort side-effect, not a real failure.
 pub(crate) fn result_is_cancelled(value: &Value) -> bool {
@@ -899,6 +973,117 @@ mod tests {
             }
         });
         assert_eq!(live_context_usage(&result), None);
+    }
+
+    /// Probe from docs/usage-tracking-scope.md §2: one model call, so
+    /// `result.usage` and `modelUsage` agree here.
+    fn probe_result_single_call() -> Value {
+        json!({
+            "type": "result", "subtype": "success", "num_turns": 1,
+            "duration_ms": 2698, "duration_api_ms": 2534, "total_cost_usd": 0.00391086,
+            "usage": {
+                "input_tokens": 2, "cache_creation_input_tokens": 18949,
+                "cache_read_input_tokens": 11886, "output_tokens": 4,
+                "output_tokens_details": { "thinking_tokens": 0 },
+                "service_tier": "standard", "speed": "standard"
+            },
+            "modelUsage": {
+                "claude-haiku-5-5": {
+                    "inputTokens": 2, "outputTokens": 4,
+                    "cacheReadInputTokens": 11886, "cacheCreationInputTokens": 18949,
+                    "costUSD": 0.00391086, "contextWindow": 1000000, "maxOutputTokens": 128000,
+                    "thinkingTokens": 0, "cacheCreationEphemeral1hInputTokens": 18949,
+                    "canonicalModel": "claude-haiku-5-5", "provider": "firstParty",
+                    "costBasis": "list"
+                }
+            },
+            "model_usage_since_last_result": {
+                "claude-haiku-5-5": {
+                    "inputTokens": 2, "outputTokens": 4,
+                    "cacheReadInputTokens": 11886, "cacheCreationInputTokens": 18949,
+                    "costUSD": 0.00391086, "thinkingTokens": 0
+                }
+            },
+            "subagent_stats": { "spawned": 0 }
+        })
+    }
+
+    #[test]
+    fn result_turn_model_usage_reads_the_turn_aggregate_not_result_usage() {
+        let result = probe_result_single_call();
+        let models = result_turn_model_usage(&result).unwrap();
+        assert_eq!(models.len(), 1);
+        assert_eq!(models[0].model, "claude-haiku-5-5");
+        assert_eq!(models[0].input_tokens, 2);
+        assert_eq!(models[0].cache_read_input_tokens, 11886);
+        assert_eq!(models[0].cache_creation_input_tokens, 18949);
+        assert_eq!(models[0].output_tokens, 4);
+        assert_eq!(models[0].thinking_tokens, Some(0));
+        assert_eq!(models[0].cost_usd, Some(0.00391086));
+        assert_eq!(result_usage_service_tier(&result).as_deref(), Some("standard"));
+    }
+
+    #[test]
+    fn result_usage_is_the_last_api_call_model_usage_the_turn_aggregate() {
+        // Probe from docs/usage-tracking-scope.md §2: a main agent spawning one
+        // subagent, 4 API calls. `result.usage` is the last assistant message
+        // only; `modelUsage` matches the sum of the individual messages.
+        let result = json!({
+            "type": "result", "subtype": "success",
+            "usage": {
+                "input_tokens": 4, "cache_creation_input_tokens": 636,
+                "cache_read_input_tokens": 31391, "output_tokens": 17
+            },
+            "modelUsage": {
+                "claude-haiku-5-5": {
+                    "inputTokens": 10, "cacheCreationInputTokens": 38679,
+                    "cacheReadInputTokens": 76687, "outputTokens": 280,
+                    "costUSD": 0.00706
+                }
+            }
+        });
+        let models = result_turn_model_usage(&result).unwrap();
+        assert_eq!(models.len(), 1);
+        assert_eq!(models[0].input_tokens, 10);
+        assert_eq!(models[0].cache_creation_input_tokens, 38679);
+        assert_eq!(models[0].cache_read_input_tokens, 76687);
+        assert_eq!(models[0].output_tokens, 280);
+        // What the old code read: the last API call, under-reporting a
+        // multi-call turn by ~5x on cache reads.
+        let usage = &result["usage"];
+        assert_eq!(usage["cache_read_input_tokens"].as_u64().unwrap(), 31391);
+    }
+
+    #[test]
+    fn result_turn_model_usage_prefers_usage_since_last_result() {
+        let mut result = probe_result_single_call();
+        // A second result in a long-lived process: since-last-result carries
+        // just the new turn, while modelUsage keeps the process aggregate.
+        result["model_usage_since_last_result"] = json!({
+            "claude-haiku-5-5": {
+                "inputTokens": 1, "outputTokens": 2,
+                "cacheReadInputTokens": 3, "cacheCreationInputTokens": 4,
+                "costUSD": 0.0001
+            }
+        });
+        let models = result_turn_model_usage(&result).unwrap();
+        assert_eq!(
+            (models[0].input_tokens, models[0].cache_read_input_tokens),
+            (1, 3)
+        );
+
+        // Neither field present (old CLI): no aggregate to read.
+        let bare = json!({
+            "type": "result",
+            "usage": { "input_tokens": 5, "output_tokens": 6 }
+        });
+        assert_eq!(result_turn_model_usage(&bare), None);
+        // An empty since-last-result delta (a result with no API calls since
+        // the previous one) must not fall back to the cumulative `modelUsage`,
+        // which would re-report the whole process.
+        let mut empty_delta = probe_result_single_call();
+        empty_delta["model_usage_since_last_result"] = json!({});
+        assert_eq!(result_turn_model_usage(&empty_delta), Some(Vec::new()));
     }
 
     #[test]

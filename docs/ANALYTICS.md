@@ -26,9 +26,59 @@ Monthly, append-only JSONL:
   retention window (default 12 months, 1–120).
 - `prompts-YYYY-MM.jsonl`: the full text of messages the user sent, with
   project, thread title and provider at the time. Kept until cleared.
-- `settings.json`: `enabled`, `record_prompts`, `retention_months`.
+- `usage-YYYY-MM.jsonl`: per-turn, per-model token usage (below). Follows the
+  same retention window as events.
+- `settings.json`: `enabled`, `record_prompts`, `record_usage`,
+  `retention_months`.
 
 Expected size is small: an event is roughly 100–250 bytes.
+
+## Token usage
+
+One `usage` record per finished turn per model, with attribution frozen at
+write time (threads get deleted, renamed and re-modelled; the record keeps
+what was true when it was written):
+
+```json
+{"e":"usage","t":"2026-11-03T09:27:01Z","id":"claude:thread-7:claude-haiku-5-5:1762178821123",
+ "src":"live","th":"thread-7","par":"thread-3","root":"thread-1","bot":"bot-9",
+ "org":"agent_spawn","ws":"ws-1","prov":"claude","model":"claude-haiku-5-5",
+ "in":2,"cr":11886,"cw":18949,"out":4,"think":0,"cost":0.00391,"cost_src":"provider"}
+```
+
+- `in` is uncached input, `cr`/`cw` cache read and write, `out` includes
+  reasoning with `think` as a subset, `calls` counts model requests when the
+  harness reports them.
+- Normalisation: Claude's `inputTokens` already excludes cache. Codex and
+  Grok include cached reads in their input figure, so cached reads are
+  subtracted at record time.
+- `cost` is provider-reported when the harness supplies it (`cost_src:
+  "provider"`). Grok's `costUsdTicks` is converted at 1e-10 USD per tick and
+  marked `cost_src: "provider_unverified"` — the unit fits every observed
+  sample but is unconfirmed, so the raw ticks are kept too. Codex and other
+  ACP agents report no cost (`"none"`).
+- `org` is what created the thread: `user`, `agent_spawn`, `scheduled` or
+  `automation`. `bot` resolves through the full spawn chain (a bot's task
+  spawning its own sub-task still attributes), cycle-guarded and depth-capped.
+- Recording has its own switch (`record_usage`, default on), independent of
+  the activity switch, so turning analytics off does not silently stop usage
+  accounting. Records dropped by a full writer queue are counted, not lost
+  quietly (`dropped_usage_records` in the status response).
+- Claude `result.usage` is only the last API call, not a turn aggregate; the
+  aggregate is `modelUsage` (subagents included), or
+  `model_usage_since_last_result` when the CLI reports it for long-lived
+  processes. Automation-run usage reads the aggregate for the same reason.
+
+| Harness | Capture point |
+| --- | --- |
+| Claude | the `result` event: one record per `modelUsage` entry, cost from `costUSD` |
+| Codex | `thread/tokenUsage/updated`: per-request `last` deltas accumulated per turn, unchanged totals deduped, flushed on turn completion; model from the thread's turn selection |
+| Grok | `_x.ai/session/update` `turn_completed`: one record per `modelUsage` entry, `costUsdTicks` converted and kept raw |
+| Other ACP | the `session/prompt` response `usage` (input and output), model from the thread; Grok is excluded here to avoid double-counting |
+
+Capture is off the turn hot path: attribution is resolved in a spawned task
+and the serialized line is `try_send`ed to the writer thread. Usage rows
+label bot names and thread titles at read time, like the rest of analytics.
 
 ## What is recorded
 
@@ -82,7 +132,15 @@ paired remote clients are refused, like the rest of analytics.
 - `POST /api/analytics/settings`: replace settings.
 - `GET /api/analytics/summary?days=N`: totals, daily series, agent pairs, latest
   agent messages, files (with days written by more than one thread), per-bot and
-  per-provider turns, user messages per project.
+  per-provider turns, user messages per project, and a token-usage rollup by
+  bot, harness and model (`usage`).
+- `GET /api/analytics/usage?days=N&group=bot|provider|model|thread|day`: token
+  usage totals for the period, one row per group value plus overall totals.
+  `group=thread` rows also carry per-thread detail: bot, workspace and project,
+  origin (`user`/`agent_spawn`/`scheduled`/`automation`, with the automation
+  name when it still exists), the dominant provider and model, and the average
+  prompt context per model call (`in`+`cr`+`cw` over calls; records without a
+  call count contribute one call each).
 - `GET /api/analytics/prompts?query=&limit=`: the user's messages, newest first.
 - `GET /api/analytics/thread?id=<thread_id>&days=2`: inbound and outbound agent
   messages for one task over a rolling window (1–366 days), newest first, with

@@ -16,7 +16,7 @@ use falcondeck_core::{
 use serde_json::Value;
 use tokio::sync::mpsc;
 
-use crate::acp::{AcpDiffContent, AcpEvent, AcpRuntime, AcpToolMemory};
+use crate::acp::{AcpDiffContent, AcpEvent, AcpRuntime, AcpToolMemory, AcpTurnUsage};
 use crate::error::DaemonError;
 
 use super::agent_helpers::{
@@ -1431,6 +1431,58 @@ impl AppState {
                     Some(thread_id),
                     UnifiedEvent::ThreadTokenUsageUpdated { usage },
                 );
+            }
+            AcpEvent::TurnUsage { session_id, usage } => {
+                let Some(thread_id) = runtime.thread_for_session(&session_id).await else {
+                    return Ok(());
+                };
+                let provider = runtime.provider.to_string();
+                let stamp = Utc::now().timestamp_millis();
+                let turn_key = usage
+                    .prompt_id
+                    .clone()
+                    .unwrap_or_else(|| format!("{thread_id}-{stamp}"));
+                let turn_cost_ticks = (usage.models.len() == 1)
+                    .then_some(usage.turn_cost_ticks)
+                    .flatten();
+                for model in usage.models {
+                    // Grok folds cached reads into input_tokens; other agents
+                    // report input that already excludes them.
+                    let uncached_input = if usage.input_includes_cached_reads {
+                        model.input_tokens.saturating_sub(model.cache_read_tokens)
+                    } else {
+                        model.input_tokens
+                    };
+                    let cost_ticks = model.cost_ticks.or(turn_cost_ticks);
+                    let suffix = if model.model.is_empty() {
+                        String::new()
+                    } else {
+                        format!(":{}", model.model)
+                    };
+                    self.record_turn_usage(super::analytics::TurnUsage {
+                        workspace_id,
+                        thread_id: &thread_id,
+                        provider: &provider,
+                        model: &model.model,
+                        uncached_input,
+                        cache_read: model.cache_read_tokens,
+                        cache_write: model.cache_write_tokens,
+                        output: model.output_tokens,
+                        reasoning: model.reasoning_tokens,
+                        calls: model.model_calls,
+                        cost: cost_ticks.map(AcpTurnUsage::cost_usd_from_ticks),
+                        // The USD figure rides an unconfirmed tick unit.
+                        cost_source: if cost_ticks.is_some() {
+                            "provider_unverified"
+                        } else {
+                            "none"
+                        },
+                        tier: None,
+                        effort: None,
+                        cost_ticks,
+                        id: format!("{provider}:{turn_key}{suffix}"),
+                    });
+                }
             }
             AcpEvent::ToolCall {
                 session_id,

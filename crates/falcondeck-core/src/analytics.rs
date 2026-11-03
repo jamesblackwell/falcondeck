@@ -12,6 +12,10 @@ pub struct AnalyticsSettings {
     /// Also keep the full text of messages the user sends.
     #[serde(default = "enabled")]
     pub record_prompts: bool,
+    /// Record per-turn token usage. Independent of `enabled`, so turning
+    /// activity analytics off does not silently stop usage accounting.
+    #[serde(default = "enabled")]
+    pub record_usage: bool,
     /// Months of activity metadata to keep; the user's messages are kept until cleared.
     #[serde(default = "default_retention")]
     pub retention_months: u32,
@@ -30,6 +34,7 @@ impl Default for AnalyticsSettings {
         Self {
             enabled: true,
             record_prompts: true,
+            record_usage: true,
             retention_months: default_retention(),
         }
     }
@@ -46,6 +51,12 @@ pub struct AnalyticsStatus {
     pub events_bytes: u64,
     /// Bytes used by the user's message log.
     pub prompts_bytes: u64,
+    /// Bytes used by the token usage log.
+    #[serde(default)]
+    pub usage_bytes: u64,
+    /// Usage records dropped because the writer queue was full, since startup.
+    #[serde(default)]
+    pub dropped_usage_records: u64,
 }
 
 /// Counts for the requested period.
@@ -259,6 +270,97 @@ pub struct AnalyticsWaiting {
     pub p90_reply_ms: u64,
 }
 
+/// Token counts attributed to finished turns. `input_tokens` is uncached
+/// input; cache reads and writes are separate. Cost is provider-reported
+/// API-equivalent USD where a harness reports one, never a guess.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct AnalyticsUsageTotals {
+    /// Uncached input tokens.
+    pub input_tokens: u64,
+    /// Prompt tokens served from the provider cache.
+    pub cache_read_tokens: u64,
+    /// Prompt tokens written to the provider cache.
+    pub cache_write_tokens: u64,
+    /// Generated tokens, reasoning included.
+    pub output_tokens: u64,
+    /// Usage records (one per turn per model) in the period.
+    pub turns: u64,
+    /// Provider-reported API-equivalent cost in USD.
+    pub cost_usd: f64,
+}
+
+/// One row of a usage aggregation: everything in `AnalyticsUsageTotals` for
+/// one value of the requested grouping.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct AnalyticsUsageRow {
+    /// Grouping value: bot id, provider, model, thread id or `YYYY-MM-DD`.
+    pub key: String,
+    /// Display label for the key, resolved when the report was computed.
+    pub label: String,
+    /// Usage totals for the group.
+    pub totals: AnalyticsUsageTotals,
+    /// Cost sources that contributed: `provider`, `provider_unverified`.
+    /// Empty when no contributing record carried a cost.
+    pub cost_sources: Vec<String>,
+    /// Thread detail, filled for `group=thread` rows.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thread: Option<AnalyticsUsageThread>,
+}
+
+/// Per-thread detail on a `group=thread` usage row. Attribution values were
+/// frozen when the records were written; names are resolved when the report
+/// was computed.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct AnalyticsUsageThread {
+    /// Bot name, or null for user-driven threads.
+    pub bot: Option<String>,
+    /// Workspace owning the thread.
+    pub workspace: String,
+    /// Project folder name, or the workspace id when unknown.
+    pub project: String,
+    /// What created the thread: `user`, `agent_spawn`, `scheduled` or
+    /// `automation`.
+    pub origin: String,
+    /// Automation name, when the origin is an automation that still exists.
+    pub automation: Option<String>,
+    /// Dominant provider (the busiest combination).
+    pub provider: String,
+    /// Dominant model under that provider.
+    pub model: String,
+    /// Average prompt context per model call: uncached input plus cache reads
+    /// and writes, divided by calls (records without a call count contribute
+    /// one per record).
+    pub avg_context_per_call: u64,
+}
+
+/// Token usage for a period, grouped one way.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct AnalyticsUsageReport {
+    /// Period length in days, ending now.
+    pub days: u32,
+    /// Grouping used: `bot`, `provider`, `model`, `thread` or `day`.
+    pub group: String,
+    /// Totals across every group.
+    pub totals: AnalyticsUsageTotals,
+    /// One row per group value, busiest first.
+    pub rows: Vec<AnalyticsUsageRow>,
+}
+
+/// Token usage by bot, harness and model, for the Settings table.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct AnalyticsUsage {
+    /// Bot name, or null for user-driven threads.
+    pub bot: Option<String>,
+    /// Provider id.
+    pub provider: String,
+    /// Model id as the provider reported it.
+    pub model: String,
+    /// Usage totals for this combination.
+    pub totals: AnalyticsUsageTotals,
+    /// Cost sources that contributed: `provider`, `provider_unverified`.
+    pub cost_sources: Vec<String>,
+}
+
 /// Runs of one scheduled task, with signs it may not be earning its keep.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct AnalyticsAutomation {
@@ -301,7 +403,7 @@ pub struct AnalyticsAutomation {
 }
 
 /// Aggregated activity for the last `days` days.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct AnalyticsSummary {
     /// Period length in days, ending now.
     pub days: u32,
@@ -332,6 +434,9 @@ pub struct AnalyticsSummary {
     /// Scheduled tasks, busiest first.
     #[serde(default)]
     pub automations: Vec<AnalyticsAutomation>,
+    /// Token usage by bot, harness and model.
+    #[serde(default)]
+    pub usage: Vec<AnalyticsUsage>,
 }
 
 /// One message the user sent, as recorded.

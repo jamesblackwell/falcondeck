@@ -11,13 +11,15 @@ use falcondeck_core::control::AUTOMATION_MESSAGE_PREFIX;
 use falcondeck_core::{
     AnalyticsAgentMessage, AnalyticsAgentPair, AnalyticsAutomation, AnalyticsBot,
     AnalyticsClearTarget, AnalyticsDay, AnalyticsFile, AnalyticsProject, AnalyticsPrompt,
-    AnalyticsProvider, AnalyticsSettings, AnalyticsStatus, AnalyticsSummary,
+    AnalyticsProvider, AnalyticsSettings, AnalyticsStatus, AnalyticsSummary, AnalyticsUsage,
+    AnalyticsUsageReport, AnalyticsUsageRow, AnalyticsUsageThread, AnalyticsUsageTotals,
     AnalyticsThreadActivity, AnalyticsThreadDispatch, AnalyticsThreadMessage, AnalyticsTotals,
     AnalyticsTriggers, AnalyticsWaiting,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::io::{BufRead, BufWriter, Write as _};
+use std::sync::atomic::{AtomicU64, Ordering};
 use tokio::sync::{mpsc, oneshot};
 
 const QUEUE: usize = 4096;
@@ -95,9 +97,198 @@ enum Record {
     },
 }
 
+/// One model's usage in one finished turn, written to `usage-YYYY-MM.jsonl`.
+/// Attribution is frozen at write time; nothing is resolved at read time
+/// except display labels. Field names are short because there are many lines.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+struct UsageRecord {
+    t: DateTime<Utc>,
+    /// Turn identity within the provider, e.g. `claude:<session>:<ms>`.
+    id: String,
+    /// `live`; a backfill importer will reuse the file with `backfill`.
+    src: String,
+    th: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    par: Option<String>,
+    /// Root of the thread's spawn chain (the thread itself when top-level).
+    root: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    bot: Option<String>,
+    /// `user`, `agent_spawn`, `scheduled` or `automation`.
+    org: String,
+    ws: String,
+    prov: String,
+    model: String,
+    /// Uncached input tokens.
+    #[serde(rename = "in")]
+    uncached_input: u64,
+    cr: u64,
+    cw: u64,
+    out: u64,
+    /// Reasoning tokens, a subset of `out`.
+    #[serde(default)]
+    think: u64,
+    /// Model calls the totals were built from, when known.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    calls: Option<u64>,
+    /// Provider-reported (or converted) API-equivalent USD.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    cost: Option<f64>,
+    /// `provider`, `provider_unverified` or `none`.
+    cost_src: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    tier: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    effort: Option<String>,
+    /// Raw vendor cost field (Grok `costUsdTicks`), kept because its unit is
+    /// unconfirmed and the conversion may need correcting.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    cost_ticks: Option<u64>,
+}
+
+/// Wrapper giving usage lines the same `"e"` tag as activity records, so one
+/// reader can tell record kinds apart when the backfill importer arrives.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(tag = "e", rename_all = "snake_case")]
+enum UsageEntry {
+    Usage(UsageRecord),
+}
+
+/// One model's usage in one finished turn, handed over by a capture point.
+/// Borrowed fields are copied before the recording task is spawned.
+pub(super) struct TurnUsage<'a> {
+    pub workspace_id: &'a str,
+    pub thread_id: &'a str,
+    /// Provider id; empty to read it from the thread summary.
+    pub provider: &'a str,
+    /// Model id as the harness reported it; empty to fall back to the
+    /// thread's agent selection.
+    pub model: &'a str,
+    /// Uncached input tokens.
+    pub uncached_input: u64,
+    pub cache_read: u64,
+    pub cache_write: u64,
+    pub output: u64,
+    /// Reasoning tokens, a subset of `output`.
+    pub reasoning: u64,
+    pub calls: Option<u64>,
+    pub cost: Option<f64>,
+    /// `provider`, `provider_unverified` or `none`.
+    pub cost_source: &'a str,
+    pub tier: Option<String>,
+    pub effort: Option<String>,
+    pub cost_ticks: Option<u64>,
+    /// Record id, unique per turn and model, e.g. `grok:<prompt_id>`.
+    pub id: String,
+}
+
+/// Owned copy of [`TurnUsage`] moved into the recording task.
+struct OwnedTurnUsage {
+    workspace_id: String,
+    thread_id: String,
+    provider: String,
+    model: String,
+    uncached_input: u64,
+    cache_read: u64,
+    cache_write: u64,
+    output: u64,
+    reasoning: u64,
+    calls: Option<u64>,
+    cost: Option<f64>,
+    cost_source: String,
+    tier: Option<String>,
+    effort: Option<String>,
+    cost_ticks: Option<u64>,
+    id: String,
+}
+
+impl TurnUsage<'_> {
+    fn owned(&self) -> OwnedTurnUsage {
+        OwnedTurnUsage {
+            workspace_id: self.workspace_id.to_string(),
+            thread_id: self.thread_id.to_string(),
+            provider: self.provider.to_string(),
+            model: self.model.to_string(),
+            uncached_input: self.uncached_input,
+            cache_read: self.cache_read,
+            cache_write: self.cache_write,
+            output: self.output,
+            reasoning: self.reasoning,
+            calls: self.calls,
+            cost: self.cost,
+            cost_source: self.cost_source.to_string(),
+            tier: self.tier.clone(),
+            effort: self.effort.clone(),
+            cost_ticks: self.cost_ticks,
+            id: self.id.clone(),
+        }
+    }
+}
+
+/// Codex usage accumulated for a thread's active turn. Codex reports a
+/// cumulative total plus the latest request; repeats with an unchanged total
+/// carry no new information. `input_tokens` includes cached reads (Codex
+/// convention) and is normalised when the record is written.
+#[derive(Default, Debug)]
+pub(super) struct CodexTurnUsage {
+    /// Totals already counted, to drop unchanged repeats.
+    seen_totals: Option<[u64; 5]>,
+    input_tokens: u64,
+    cached_input_tokens: u64,
+    cache_write_tokens: u64,
+    output_tokens: u64,
+    reasoning_tokens: u64,
+    calls: u64,
+}
+
+impl CodexTurnUsage {
+    /// Folds one `thread/tokenUsage/updated` payload (`tokenUsage` object)
+    /// into the accumulator, deduping unchanged totals.
+    fn update(&mut self, report: &Value) {
+        let count = |value: &Value, key: &str| value.get(key).and_then(Value::as_u64).unwrap_or(0);
+        let Some(total) = report.get("total") else {
+            return;
+        };
+        let totals = [
+            count(total, "input_tokens"),
+            count(total, "cached_input_tokens"),
+            count(total, "output_tokens"),
+            count(total, "reasoning_output_tokens"),
+            count(total, "total_tokens"),
+        ];
+        if self.seen_totals == Some(totals) {
+            return;
+        }
+        let previous = self.seen_totals.replace(totals);
+        if let Some(last) = report.get("last") {
+            self.input_tokens += count(last, "input_tokens");
+            self.cached_input_tokens += count(last, "cached_input_tokens");
+            self.cache_write_tokens += count(last, "cache_write_input_tokens");
+            self.output_tokens += count(last, "output_tokens");
+            self.reasoning_tokens += count(last, "reasoning_output_tokens");
+            self.calls += 1;
+        } else if let Some(previous) = previous {
+            // No per-request split: the change in the cumulative total is the
+            // best available delta for this report. It still represents one
+            // request, so it counts as a call.
+            self.input_tokens += totals[0].saturating_sub(previous[0]);
+            self.cached_input_tokens += totals[1].saturating_sub(previous[1]);
+            self.output_tokens += totals[2].saturating_sub(previous[2]);
+            self.reasoning_tokens += totals[3].saturating_sub(previous[3]);
+            self.calls += 1;
+        }
+    }
+
+    /// Whether any request was counted.
+    fn is_empty(&self) -> bool {
+        self.calls == 0
+    }
+}
+
 enum Job {
     Event(String),
     Prompt(String),
+    Usage(String),
     Flush(oneshot::Sender<()>),
     Clear(AnalyticsClearTarget, oneshot::Sender<std::io::Result<()>>),
 }
@@ -106,6 +297,9 @@ pub(super) struct Recorder {
     dir: PathBuf,
     settings: Arc<StdMutex<AnalyticsSettings>>,
     tx: mpsc::Sender<Job>,
+    /// Usage records lost to a full or closed writer queue. Billing data must
+    /// not vanish silently, so the count is surfaced in the status response.
+    dropped_usage: AtomicU64,
 }
 
 fn settings_path(dir: &Path) -> PathBuf {
@@ -149,18 +343,21 @@ fn files_with_prefix(dir: &Path, prefix: &str) -> Vec<PathBuf> {
     files
 }
 
-/// Deletes event files older than the retention window.
+/// Deletes event and usage files older than the retention window.
 fn prune(dir: &Path, retention_months: u32) {
     let now = Utc::now();
     let total = now.year() * 12 + now.month0() as i32 - retention_months.max(1) as i32 + 1;
-    let oldest = format!("events-{:04}-{:02}.jsonl", total / 12, total % 12 + 1);
-    for path in files_with_prefix(dir, "events-") {
-        if path
-            .file_name()
-            .and_then(|n| n.to_str())
-            .is_some_and(|n| n < oldest.as_str())
-        {
-            let _ = std::fs::remove_file(path);
+    let month = format!("{:04}-{:02}", total / 12, total % 12 + 1);
+    for prefix in ["events-", "usage-"] {
+        let oldest = format!("{prefix}{month}.jsonl");
+        for path in files_with_prefix(dir, prefix) {
+            if path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .is_some_and(|n| n < oldest.as_str())
+            {
+                let _ = std::fs::remove_file(path);
+            }
         }
     }
 }
@@ -207,7 +404,8 @@ fn write_loop(
             .retention_months
     };
     prune(&dir, retention(&settings));
-    let (mut events, mut prompts) = (None::<Appender>, None::<Appender>);
+    let (mut events, mut prompts, mut usage) =
+        (None::<Appender>, None::<Appender>, None::<Appender>);
     let mut pruned_month = month_of(Utc::now());
     while let Some(first) = rx.blocking_recv() {
         let mut next = Some(first);
@@ -224,8 +422,16 @@ fn write_loop(
                         tracing::debug!(%error, "analytics prompt dropped");
                     }
                 }
+                Job::Usage(line) => {
+                    if let Err(error) = append(&dir, "usage", &mut usage, &line) {
+                        tracing::debug!(%error, "analytics usage dropped");
+                    }
+                }
                 Job::Flush(done) => {
-                    for open in [&mut events, &mut prompts].into_iter().flatten() {
+                    for open in [&mut events, &mut prompts, &mut usage]
+                        .into_iter()
+                        .flatten()
+                    {
                         let _ = open.file.flush();
                     }
                     let _ = done.send(());
@@ -238,11 +444,12 @@ fn write_loop(
                         }
                         AnalyticsClearTarget::Events => {
                             events = None;
-                            &["events-"]
+                            usage = None;
+                            &["events-", "usage-"]
                         }
                         AnalyticsClearTarget::All => {
-                            (events, prompts) = (None, None);
-                            &["events-", "prompts-"]
+                            (events, prompts, usage) = (None, None, None);
+                            &["events-", "usage-", "prompts-"]
                         }
                     };
                     let result = prefixes
@@ -254,7 +461,10 @@ fn write_loop(
             }
             next = rx.try_recv().ok();
         }
-        for open in [&mut events, &mut prompts].into_iter().flatten() {
+        for open in [&mut events, &mut prompts, &mut usage]
+            .into_iter()
+            .flatten()
+        {
             let _ = open.file.flush();
         }
         let month = month_of(Utc::now());
@@ -423,7 +633,12 @@ impl Recorder {
                 .name("falcondeck-analytics-events".into())
                 .spawn(move || listen_loop(events, listener.0, listener.1));
         }
-        Self { dir, settings, tx }
+        Self {
+            dir,
+            settings,
+            tx,
+            dropped_usage: AtomicU64::new(0),
+        }
     }
 
     fn settings(&self) -> AnalyticsSettings {
@@ -449,6 +664,29 @@ impl Recorder {
         {
             let _ = self.tx.try_send(Job::Prompt(line));
         }
+    }
+
+    /// Appends one usage record. Gated on `record_usage` alone — usage
+    /// accounting is independent of the activity switch — and counts drops so
+    /// billing data never disappears silently.
+    fn usage(&self, record: UsageRecord) {
+        if !self.settings().record_usage {
+            return;
+        }
+        let Ok(line) = serde_json::to_string(&UsageEntry::Usage(record)) else {
+            return;
+        };
+        if self.tx.try_send(Job::Usage(line)).is_err() {
+            let dropped = self.dropped_usage.fetch_add(1, Ordering::Relaxed) + 1;
+            if dropped == 1 || dropped.is_multiple_of(1000) {
+                tracing::warn!(dropped, "usage records dropped (analytics writer queue full)");
+            }
+        }
+    }
+
+    /// Usage records lost since startup.
+    fn dropped_usage(&self) -> u64 {
+        self.dropped_usage.load(Ordering::Relaxed)
     }
 
     /// Waits until everything queued so far is on disk.
@@ -687,6 +925,18 @@ fn read_records(dir: &Path, since: DateTime<Utc>) -> Vec<Record> {
         .collect()
 }
 
+/// Reads usage records newer than `since` from the monthly usage files.
+fn read_usage_records(dir: &Path, since: DateTime<Utc>) -> Vec<UsageRecord> {
+    months_since(since)
+        .iter()
+        .filter_map(|month| std::fs::File::open(dir.join(format!("usage-{month}.jsonl"))).ok())
+        .flat_map(|file| std::io::BufReader::new(file).lines().map_while(Result::ok))
+        .filter_map(|line| serde_json::from_str::<UsageEntry>(&line).ok())
+        .map(|UsageEntry::Usage(record)| record)
+        .filter(|record| record.t >= since)
+        .collect()
+}
+
 fn record_time(record: &Record) -> DateTime<Utc> {
     match record {
         Record::User { t, .. }
@@ -698,6 +948,187 @@ fn record_time(record: &Record) -> DateTime<Utc> {
         | Record::Wait { t, .. }
         | Record::Commit { t, .. } => *t,
     }
+}
+
+/// Adds one record to a totals bucket.
+fn add_usage(totals: &mut AnalyticsUsageTotals, record: &UsageRecord) {
+    totals.input_tokens += record.uncached_input;
+    totals.cache_read_tokens += record.cr;
+    totals.cache_write_tokens += record.cw;
+    totals.output_tokens += record.out;
+    totals.turns += 1;
+    if let Some(cost) = record.cost {
+        totals.cost_usd += cost;
+    }
+}
+
+/// Total tokens across every field; the sort key for usage rows.
+fn usage_token_total(totals: &AnalyticsUsageTotals) -> u64 {
+    totals.input_tokens
+        + totals.cache_read_tokens
+        + totals.cache_write_tokens
+        + totals.output_tokens
+}
+
+/// Key and display label a record contributes to under the requested grouping.
+fn usage_group_key(record: &UsageRecord, group: &str, labels: &Labels) -> (String, String) {
+    match group {
+        "bot" => match &record.bot {
+            Some(bot) => (bot.clone(), labels.bot_name(bot)),
+            None => (String::new(), "No bot".to_string()),
+        },
+        "provider" => (record.prov.clone(), record.prov.clone()),
+        "thread" => (record.th.clone(), labels.title(&record.th)),
+        "day" => {
+            let day = record
+                .t
+                .with_timezone(&Local)
+                .format("%Y-%m-%d")
+                .to_string();
+            (day.clone(), day)
+        }
+        _ => (record.model.clone(), record.model.clone()),
+    }
+}
+
+/// Accumulator for grouped usage: totals plus the cost sources seen.
+type UsageGroup = (AnalyticsUsageTotals, HashSet<String>);
+
+/// Per-group extras needed to build thread rows: prompt context, model calls,
+/// and the provider/model mix.
+#[derive(Default)]
+struct ThreadExtras {
+    /// Uncached input + cache reads + writes, summed.
+    context: u64,
+    /// Model calls; records without a count contribute one each.
+    calls: u64,
+    /// Tokens per provider/model combination, to pick the dominant one.
+    models: HashMap<(String, String), u64>,
+    /// Frozen attribution from the latest record.
+    bot: Option<String>,
+    workspace: String,
+    origin: String,
+}
+
+/// Groups usage records one way, busiest first. See `GET /api/analytics/usage`.
+/// Thread rows carry per-thread detail (bot, origin, dominant model, average
+/// context per call).
+fn aggregate_usage(
+    records: &[UsageRecord],
+    labels: &Labels,
+    days: u32,
+    group: &str,
+) -> AnalyticsUsageReport {
+    let by_thread = group == "thread";
+    let mut totals = AnalyticsUsageTotals::default();
+    let mut rows: HashMap<(String, String), UsageGroup> = HashMap::new();
+    let mut threads: HashMap<String, ThreadExtras> = HashMap::new();
+    for record in records {
+        add_usage(&mut totals, record);
+        let (key, label) = usage_group_key(record, group, labels);
+        let entry = rows.entry((key.clone(), label)).or_default();
+        add_usage(&mut entry.0, record);
+        if record.cost.is_some() {
+            entry.1.insert(record.cost_src.clone());
+        }
+        if by_thread {
+            let extras = threads.entry(key).or_default();
+            extras.context += record.uncached_input + record.cr + record.cw;
+            extras.calls += record.calls.unwrap_or(1);
+            let tokens = record.uncached_input + record.cr + record.cw + record.out;
+            *extras
+                .models
+                .entry((record.prov.clone(), record.model.clone()))
+                .or_default() += tokens;
+            extras.bot = record.bot.clone();
+            extras.workspace = record.ws.clone();
+            extras.origin = record.org.clone();
+        }
+    }
+    let mut rows: Vec<_> = rows
+        .into_iter()
+        .map(|((key, label), (totals, sources))| {
+            let mut cost_sources: Vec<_> = sources.into_iter().collect();
+            cost_sources.sort();
+            let thread = by_thread.then(|| {
+                let extras = threads.remove(&key).unwrap_or_default();
+                // The busiest combination names the thread's harness and model.
+                let (provider, model) = extras
+                    .models
+                    .into_iter()
+                    .max_by_key(|(_, tokens)| *tokens)
+                    .map_or_else(
+                        || (String::new(), String::new()),
+                        |((provider, model), _)| (provider, model),
+                    );
+                AnalyticsUsageThread {
+                    bot: extras.bot.as_ref().map(|bot| labels.bot_name(bot)),
+                    project: labels.project_of(&extras.workspace),
+                    workspace: extras.workspace,
+                    origin: extras.origin,
+                    automation: labels.automations.get(&key).cloned(),
+                    provider,
+                    model,
+                    avg_context_per_call: extras.context / extras.calls.max(1),
+                }
+            });
+            AnalyticsUsageRow {
+                key,
+                label,
+                totals,
+                cost_sources,
+                thread,
+            }
+        })
+        .collect();
+    rows.sort_by(|a, b| {
+        usage_token_total(&b.totals)
+            .cmp(&usage_token_total(&a.totals))
+            .then_with(|| a.label.cmp(&b.label))
+    });
+    AnalyticsUsageReport {
+        days,
+        group: group.to_string(),
+        totals,
+        rows,
+    }
+}
+
+/// Usage rollup for the analytics summary: bot by harness by model.
+fn usage_rollup(records: &[UsageRecord], labels: &Labels) -> Vec<AnalyticsUsage> {
+    let mut groups: HashMap<(Option<String>, String, String), UsageGroup> = HashMap::new();
+    for record in records {
+        let bot = record.bot.as_ref().map(|bot| labels.bot_name(bot));
+        let entry = groups
+            .entry((bot, record.prov.clone(), record.model.clone()))
+            .or_default();
+        add_usage(&mut entry.0, record);
+        if record.cost.is_some() {
+            entry.1.insert(record.cost_src.clone());
+        }
+    }
+    let mut usage: Vec<_> = groups
+        .into_iter()
+        .map(|((bot, provider, model), (totals, sources))| {
+            let mut cost_sources: Vec<_> = sources.into_iter().collect();
+            cost_sources.sort();
+            AnalyticsUsage {
+                bot,
+                provider,
+                model,
+                totals,
+                cost_sources,
+            }
+        })
+        .collect();
+    usage.sort_by(|a, b| {
+        usage_token_total(&b.totals)
+            .cmp(&usage_token_total(&a.totals))
+            .then_with(|| a.provider.cmp(&b.provider))
+            .then_with(|| a.model.cmp(&b.model))
+    });
+    usage.truncate(100);
+    usage
 }
 
 fn thread_activity(
@@ -750,8 +1181,12 @@ struct Labels {
     providers: HashMap<String, String>,
     projects: HashMap<String, String>,
     bots: HashMap<String, String>,
+    /// Bot id to bot name.
+    bot_names: HashMap<String, String>,
     /// Task thread to the thread that created it.
     parents: HashMap<String, String>,
+    /// Thread to the name of the automation that created it.
+    automations: HashMap<String, String>,
 }
 
 impl Labels {
@@ -771,6 +1206,51 @@ impl Labels {
                 .and_then(|parent| self.bots.get(parent))
         })
     }
+
+    fn bot_name(&self, bot: &str) -> String {
+        self.bot_names
+            .get(bot)
+            .cloned()
+            .unwrap_or_else(|| bot.to_string())
+    }
+
+    /// Project folder name for a workspace id, or the id when unknown.
+    fn project_of(&self, workspace: &str) -> String {
+        self.projects
+            .get(workspace)
+            .cloned()
+            .unwrap_or_else(|| workspace.to_string())
+    }
+}
+
+/// How far up a spawn chain attribution will walk before treating it as
+/// malformed. Real chains are two or three deep.
+const CHAIN_DEPTH_CAP: usize = 32;
+
+/// The bot that owns `thread` or one of its ancestors: a bot's home
+/// conversation, a bot task's own sub-tasks (grandchildren), or a scheduled
+/// thread spawned for the bot. `owned` maps bot-owned thread ids to bot ids,
+/// `automation_bots` maps scheduled threads to their `ThreadOrigin::Automation`
+/// bot id, and `parent_of` follows `AgentSpawn` origins. Cycle-guarded and
+/// depth-capped so a corrupt origin chain cannot spin.
+fn chain_bot(
+    thread: &str,
+    owned: &HashMap<String, String>,
+    automation_bots: &HashMap<String, String>,
+    parent_of: &HashMap<String, String>,
+) -> Option<String> {
+    let mut current = thread;
+    let mut seen = HashSet::with_capacity(4);
+    for _ in 0..CHAIN_DEPTH_CAP {
+        if !seen.insert(current) {
+            return None;
+        }
+        if let Some(bot) = owned.get(current).or_else(|| automation_bots.get(current)) {
+            return Some(bot.clone());
+        }
+        current = parent_of.get(current)?;
+    }
+    None
 }
 
 /// Value at quantile `q` (0–1) of `values`, or 0 when empty.
@@ -1128,6 +1608,7 @@ fn summarize(records: Vec<Record>, labels: &Labels, days: u32) -> AnalyticsSumma
         triggers,
         waiting,
         automations: Vec::new(),
+        usage: Vec::new(),
     }
 }
 
@@ -1250,6 +1731,34 @@ fn summarize_automations(
             .then(a.name.cmp(&b.name))
     });
     automations
+}
+
+/// Attribution frozen into a usage record at write time.
+struct UsageAttribution {
+    /// `user`, `agent_spawn`, `scheduled` or `automation`.
+    org: &'static str,
+    /// Immediate parent, when the thread is a spawned task.
+    parent: Option<String>,
+    /// Top of the spawn chain, or the thread itself.
+    root: String,
+    bot: Option<String>,
+    /// Provider and agent selection from the thread summary, when the thread
+    /// still exists.
+    provider: Option<String>,
+    model: Option<String>,
+    effort: Option<String>,
+}
+
+/// One link of a spawn chain walked for attribution.
+#[derive(Clone)]
+struct ChainLink {
+    id: String,
+    /// `AgentSpawn` parent, when this thread is a spawned task.
+    parent: Option<String>,
+    /// Bot id when the thread was created by `ThreadOrigin::Automation`.
+    automation_bot: Option<String>,
+    /// `user`, `agent_spawn`, `scheduled` or `automation`.
+    org: &'static str,
 }
 
 impl AppState {
@@ -1401,27 +1910,237 @@ impl AppState {
         });
     }
 
+    /// Records one model's usage in one finished turn. Never on the turn hot
+    /// path and never able to fail one: attribution is resolved in a spawned
+    /// task and the line is handed to the writer with `try_send`.
+    pub(super) fn record_turn_usage(&self, usage: TurnUsage<'_>) {
+        let app = self.clone();
+        let capture = usage.owned();
+        tokio::spawn(async move {
+            let attribution = app.usage_attribution(&capture.thread_id).await;
+            let provider = if capture.provider.is_empty() {
+                attribution
+                    .provider
+                    .unwrap_or_else(|| "unknown".to_string())
+            } else {
+                capture.provider
+            };
+            let model = if capture.model.is_empty() {
+                attribution.model.unwrap_or_default()
+            } else {
+                capture.model
+            };
+            app.analytics().usage(UsageRecord {
+                t: Utc::now(),
+                id: capture.id,
+                src: "live".to_string(),
+                th: capture.thread_id.clone(),
+                par: attribution.parent,
+                root: attribution.root,
+                bot: attribution.bot,
+                org: attribution.org.to_string(),
+                ws: capture.workspace_id,
+                prov: provider,
+                model,
+                uncached_input: capture.uncached_input,
+                cr: capture.cache_read,
+                cw: capture.cache_write,
+                out: capture.output,
+                think: capture.reasoning,
+                calls: capture.calls,
+                cost: capture.cost,
+                cost_src: capture.cost_source,
+                tier: capture.tier,
+                effort: capture.effort.or(attribution.effort),
+                cost_ticks: capture.cost_ticks,
+            });
+        });
+    }
+
+    /// Folds a Codex `thread/tokenUsage/updated` notification into the
+    /// thread's active-turn accumulator. Bounded work: one map lookup and
+    /// arithmetic, never blocking the notification stream.
+    pub(super) fn note_codex_token_usage(&self, thread_id: &str, params: &Value) {
+        let Some(report) = params
+            .get("tokenUsage")
+            .or_else(|| params.get("token_usage"))
+        else {
+            return;
+        };
+        self.inner
+            .codex_turn_usage
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .entry(thread_id.to_string())
+            .or_default()
+            .update(report);
+    }
+
+    /// Drops any partial accumulation so the next turn starts clean.
+    pub(super) fn reset_codex_turn_usage(&self, thread_id: &str) {
+        self.inner
+            .codex_turn_usage
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .remove(thread_id);
+    }
+
+    /// Writes the accumulated usage of a finished Codex turn, if any. The
+    /// heavy half runs in the recording task, like every usage capture.
+    pub(super) fn flush_codex_turn_usage(
+        &self,
+        workspace_id: &str,
+        thread_id: &str,
+        turn_id: &str,
+    ) {
+        let Some(accumulated) = self
+            .inner
+            .codex_turn_usage
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .remove(thread_id)
+        else {
+            return;
+        };
+        if accumulated.is_empty() {
+            return;
+        }
+        self.record_turn_usage(TurnUsage {
+            workspace_id,
+            thread_id,
+            // Provider and model come from the thread summary at write time
+            // (the model is the turn's own selection).
+            provider: "",
+            model: "",
+            uncached_input: accumulated
+                .input_tokens
+                .saturating_sub(accumulated.cached_input_tokens),
+            cache_read: accumulated.cached_input_tokens,
+            cache_write: accumulated.cache_write_tokens,
+            output: accumulated.output_tokens,
+            reasoning: accumulated.reasoning_tokens,
+            calls: Some(accumulated.calls),
+            cost: None,
+            cost_source: "none",
+            tier: None,
+            effort: None,
+            cost_ticks: None,
+            id: format!("codex:{thread_id}:{turn_id}:{}", Utc::now().timestamp_millis()),
+        });
+    }
+
+    /// Resolves a thread's attribution once: the spawn chain under one
+    /// workspace lock, then bot ownership under one preferences lock. Only
+    /// called from the recording task, off every turn.
+    async fn usage_attribution(&self, thread_id: &str) -> UsageAttribution {
+        let (chain, selection) = {
+            let workspaces = self.inner.workspaces.lock().await;
+            let mut chain = Vec::new();
+            let mut selection: Option<(String, Option<String>, Option<String>)> = None;
+            let mut current = thread_id.to_string();
+            let mut seen = HashSet::with_capacity(4);
+            while seen.insert(current.clone()) && chain.len() < CHAIN_DEPTH_CAP {
+                let Some(thread) = workspaces
+                    .values()
+                    .find_map(|workspace| workspace.threads.get(&current))
+                else {
+                    break;
+                };
+                let summary = &thread.summary;
+                let (parent, automation_bot, org) = match &summary.origin {
+                    Some(falcondeck_core::ThreadOrigin::AgentSpawn { parent_thread_id, .. }) => {
+                        (Some(parent_thread_id.clone()), None, "agent_spawn")
+                    }
+                    Some(falcondeck_core::ThreadOrigin::ScheduledTask { .. }) => {
+                        (None, None, "scheduled")
+                    }
+                    Some(falcondeck_core::ThreadOrigin::Automation { bot_id, .. }) => {
+                        (None, bot_id.clone(), "automation")
+                    }
+                    None => (None, None, "user"),
+                };
+                if chain.is_empty() {
+                    selection = Some((
+                        summary.provider.to_string(),
+                        summary.agent.model_id.clone(),
+                        summary.agent.reasoning_effort.clone(),
+                    ));
+                }
+                chain.push(ChainLink {
+                    id: current.clone(),
+                    parent: parent.clone(),
+                    automation_bot,
+                    org,
+                });
+                let Some(parent) = parent else {
+                    break;
+                };
+                current = parent;
+            }
+            (chain, selection)
+        };
+        let bot = {
+            let preferences = self.inner.preferences.lock().await;
+            let mut owned = HashMap::with_capacity(preferences.bots.len());
+            for bot in &preferences.bots {
+                for id in std::iter::once(&bot.thread_id).chain(&bot.previous_thread_ids) {
+                    owned.insert(id.clone(), bot.id.clone());
+                }
+            }
+            let automation_bots: HashMap<String, String> = chain
+                .iter()
+                .filter_map(|link| {
+                    link.automation_bot
+                        .clone()
+                        .map(|bot| (link.id.clone(), bot))
+                })
+                .collect();
+            let parent_of: HashMap<String, String> = chain
+                .iter()
+                .filter_map(|link| {
+                    link.parent.clone().map(|parent| (link.id.clone(), parent))
+                })
+                .collect();
+            chain_bot(thread_id, &owned, &automation_bots, &parent_of)
+        };
+        UsageAttribution {
+            org: chain.first().map_or("user", |link| link.org),
+            parent: chain.first().and_then(|link| link.parent.clone()),
+            root: chain
+                .last()
+                .map_or_else(|| thread_id.to_string(), |link| link.id.clone()),
+            bot,
+            provider: selection.as_ref().map(|(provider, _, _)| provider.clone()),
+            model: selection.as_ref().and_then(|(_, model, _)| model.clone()),
+            effort: selection.as_ref().and_then(|(_, _, effort)| effort.clone()),
+        }
+    }
+
     pub async fn analytics_status(&self) -> AnalyticsStatus {
         let recorder = self.analytics();
         recorder.flush().await;
         let dir = recorder.dir.clone();
-        let (events_bytes, prompts_bytes) = tokio::task::spawn_blocking(move || {
-            let size = |prefix| {
-                files_with_prefix(&dir, prefix)
-                    .iter()
-                    .filter_map(|path| std::fs::metadata(path).ok())
-                    .map(|meta| meta.len())
-                    .sum::<u64>()
-            };
-            (size("events-"), size("prompts-"))
-        })
-        .await
-        .unwrap_or_default();
+        let dropped_usage_records = recorder.dropped_usage();
+        let (events_bytes, prompts_bytes, usage_bytes) =
+            tokio::task::spawn_blocking(move || {
+                let size = |prefix| {
+                    files_with_prefix(&dir, prefix)
+                        .iter()
+                        .filter_map(|path| std::fs::metadata(path).ok())
+                        .map(|meta| meta.len())
+                        .sum::<u64>()
+                };
+                (size("events-"), size("prompts-"), size("usage-"))
+            })
+            .await
+            .unwrap_or_default();
         AnalyticsStatus {
             settings: recorder.settings(),
             folder: recorder.dir.to_string_lossy().into(),
             events_bytes,
             prompts_bytes,
+            usage_bytes,
+            dropped_usage_records,
         }
     }
 
@@ -1462,7 +2181,8 @@ impl AppState {
     }
 
     async fn analytics_labels(&self) -> Labels {
-        let (mut titles, mut providers, mut projects, mut parents) = (
+        let (mut titles, mut providers, mut projects, mut parents, mut automations) = (
+            HashMap::new(),
             HashMap::new(),
             HashMap::new(),
             HashMap::new(),
@@ -1479,33 +2199,35 @@ impl AppState {
                     thread.summary.id.clone(),
                     thread.summary.provider.to_string(),
                 );
-                if let Some(falcondeck_core::ThreadOrigin::AgentSpawn {
-                    parent_thread_id, ..
-                }) = &thread.summary.origin
-                {
-                    parents.insert(thread.summary.id.clone(), parent_thread_id.clone());
+                match &thread.summary.origin {
+                    Some(falcondeck_core::ThreadOrigin::AgentSpawn {
+                        parent_thread_id, ..
+                    }) => {
+                        parents.insert(thread.summary.id.clone(), parent_thread_id.clone());
+                    }
+                    Some(falcondeck_core::ThreadOrigin::Automation { name, .. }) => {
+                        automations.insert(thread.summary.id.clone(), name.clone());
+                    }
+                    _ => {}
                 }
             }
         }
-        let bots = self
-            .inner
-            .preferences
-            .lock()
-            .await
-            .bots
-            .iter()
-            .flat_map(|bot| {
-                std::iter::once(&bot.thread_id)
-                    .chain(bot.previous_thread_ids.iter())
-                    .map(|id| (id.clone(), bot.name.clone()))
-            })
-            .collect();
+        let preferences = self.inner.preferences.lock().await;
+        let (mut bots, mut bot_names) = (HashMap::new(), HashMap::new());
+        for bot in &preferences.bots {
+            bot_names.insert(bot.id.clone(), bot.name.clone());
+            for id in std::iter::once(&bot.thread_id).chain(&bot.previous_thread_ids) {
+                bots.insert(id.clone(), bot.name.clone());
+            }
+        }
         Labels {
             titles,
             providers,
             projects,
             bots,
+            bot_names,
             parents,
+            automations,
         }
     }
 
@@ -1532,25 +2254,50 @@ impl AppState {
         self.analytics().flush().await;
         let labels = self.analytics_labels().await;
         let dir = self.analytics().dir.clone();
-        // Start at local midnight of the first charted day, so totals and the
-        // daily buckets cover the same calendar days.
-        let first_day = Local::now().date_naive() - chrono::Duration::days(i64::from(days) - 1);
-        let since = first_day
-            .and_hms_opt(0, 0, 0)
-            .and_then(|midnight| midnight.and_local_timezone(Local).earliest())
-            .map_or_else(
-                || Utc::now() - chrono::Duration::days(i64::from(days)),
-                |start| start.with_timezone(&Utc),
-            );
+        let since = self.analytics_period_start(days).await;
         let runs = self.control().runs_since(since).await;
         let definitions = self.control().automations_snapshot().await;
         let mut summary = tokio::task::spawn_blocking(move || {
-            summarize(read_records(&dir, since), &labels, days)
+            let mut summary = summarize(read_records(&dir, since), &labels, days);
+            summary.usage = usage_rollup(&read_usage_records(&dir, since), &labels);
+            summary
         })
         .await
         .map_err(|e| DaemonError::Process(e.to_string()))?;
         summary.automations = summarize_automations(runs, &definitions, days);
         Ok(summary)
+    }
+
+    /// Token usage for the last `days` days, grouped one way. Local only.
+    pub async fn analytics_usage(
+        &self,
+        days: u32,
+        group: &str,
+    ) -> Result<AnalyticsUsageReport, DaemonError> {
+        let days = days.clamp(1, 366);
+        self.analytics().flush().await;
+        let labels = self.analytics_labels().await;
+        let dir = self.analytics().dir.clone();
+        let since = self.analytics_period_start(days).await;
+        let group = group.to_string();
+        tokio::task::spawn_blocking(move || {
+            aggregate_usage(&read_usage_records(&dir, since), &labels, days, &group)
+        })
+        .await
+        .map_err(|e| DaemonError::Process(e.to_string()))
+    }
+
+    /// Start of the summary window: local midnight of the first charted day,
+    /// so totals and daily buckets cover the same calendar days.
+    async fn analytics_period_start(&self, days: u32) -> DateTime<Utc> {
+        let first_day = Local::now().date_naive() - chrono::Duration::days(i64::from(days) - 1);
+        first_day
+            .and_hms_opt(0, 0, 0)
+            .and_then(|midnight| midnight.and_local_timezone(Local).earliest())
+            .map_or_else(
+                || Utc::now() - chrono::Duration::days(i64::from(days)),
+                |start| start.with_timezone(&Utc),
+            )
     }
 
     /// `falcondeck_get` resource `automation.health`: scheduled-task review data
@@ -1639,6 +2386,380 @@ impl AppState {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn usage_record(
+        id: &str,
+        thread: &str,
+        bot: Option<&str>,
+        provider: &str,
+        model: &str,
+        tokens: (u64, u64, u64, u64),
+        cost: Option<f64>,
+    ) -> UsageRecord {
+        UsageRecord {
+            t: Utc::now(),
+            id: id.to_string(),
+            src: "live".to_string(),
+            th: thread.to_string(),
+            par: None,
+            root: thread.to_string(),
+            bot: bot.map(str::to_string),
+            org: "user".to_string(),
+            ws: "ws".to_string(),
+            prov: provider.to_string(),
+            model: model.to_string(),
+            uncached_input: tokens.0,
+            cr: tokens.1,
+            cw: tokens.2,
+            out: tokens.3,
+            think: 0,
+            calls: None,
+            cost,
+            cost_src: cost.map_or("none", |_| "provider").to_string(),
+            tier: None,
+            effort: None,
+            cost_ticks: None,
+        }
+    }
+
+    fn test_labels() -> Labels {
+        Labels {
+            titles: HashMap::from([("grandchild".to_string(), "Deep task".to_string())]),
+            providers: HashMap::new(),
+            projects: HashMap::new(),
+            bots: HashMap::new(),
+            bot_names: HashMap::from([("bot-1".to_string(), "Juno".to_string())]),
+            parents: HashMap::new(),
+            automations: HashMap::new(),
+        }
+    }
+
+    #[test]
+    fn usage_records_round_trip_with_short_field_names() {
+        let record = usage_record(
+            "grok:5df2cb0c",
+            "grandchild",
+            Some("bot-1"),
+            "grok",
+            "grok-4.7-build",
+            (45837, 445696, 0, 6193),
+            Some(0.1195712),
+        );
+        let line = serde_json::to_string(&UsageEntry::Usage(record.clone())).unwrap();
+        assert!(line.starts_with(r#"{"e":"usage""#), "{line}");
+        assert!(line.contains(r#""in":45837"#), "{line}");
+        let back: UsageEntry = serde_json::from_str(&line).unwrap();
+        assert_eq!(back, UsageEntry::Usage(record));
+    }
+
+    #[test]
+    fn usage_aggregates_by_each_grouping() {
+        let labels = test_labels();
+        let records = vec![
+            usage_record(
+                "a",
+                "grandchild",
+                Some("bot-1"),
+                "claude",
+                "claude-haiku-5-5",
+                (2, 11886, 18949, 4),
+                Some(0.00391086),
+            ),
+            usage_record(
+                "b",
+                "other",
+                None,
+                "claude",
+                "claude-haiku-5-5",
+                (10, 0, 0, 20),
+                None,
+            ),
+            usage_record(
+                "c",
+                "other",
+                None,
+                "codex",
+                "gpt-6.1-sol",
+                (11008, 11008, 512, 257),
+                None,
+            ),
+        ];
+        let by_bot = aggregate_usage(&records, &labels, 7, "bot");
+        assert_eq!(by_bot.rows.len(), 2);
+        // Busiest first: Juno's row carries the large cache figures.
+        assert_eq!(by_bot.rows[0].label, "Juno");
+        assert_eq!(by_bot.rows[0].totals.cache_read_tokens, 11886);
+        assert_eq!(by_bot.rows[1].label, "No bot");
+        assert_eq!(by_bot.rows[1].totals.input_tokens, 11018);
+        assert_eq!(by_bot.totals.turns, 3);
+        assert!((by_bot.totals.cost_usd - 0.00391086).abs() < 1e-12);
+
+        let by_model = aggregate_usage(&records, &labels, 7, "model");
+        assert_eq!(by_model.rows[0].key, "claude-haiku-5-5");
+        assert_eq!(by_model.rows[0].totals.turns, 2);
+
+        let by_thread = aggregate_usage(&records, &labels, 7, "thread");
+        // Titles label the stored ids, and thread rows carry per-thread detail.
+        let deep = by_thread
+            .rows
+            .iter()
+            .find(|row| row.label == "Deep task")
+            .unwrap();
+        let detail = deep.thread.as_ref().unwrap();
+        assert_eq!(detail.bot.as_deref(), Some("Juno"));
+        assert_eq!(detail.provider, "claude");
+        assert_eq!(detail.model, "claude-haiku-5-5");
+        // (2 uncached + 11886 read + 18949 written) / 1 call.
+        assert_eq!(detail.avg_context_per_call, 30837);
+
+        let by_day = aggregate_usage(&records, &labels, 7, "day");
+        assert_eq!(by_day.rows.len(), 1);
+        assert_eq!(
+            by_day.rows[0].key,
+            Local::now().format("%Y-%m-%d").to_string()
+        );
+
+        // A cost-free row lists no cost sources; a costed one does.
+        let by_provider = aggregate_usage(&records, &labels, 7, "provider");
+        let codex = by_provider
+            .rows
+            .iter()
+            .find(|row| row.key == "codex")
+            .unwrap();
+        assert!(codex.cost_sources.is_empty());
+        let claude = by_provider
+            .rows
+            .iter()
+            .find(|row| row.key == "claude")
+            .unwrap();
+        assert_eq!(claude.cost_sources, ["provider"]);
+    }
+
+    #[test]
+    fn thread_rows_detail_origin_project_and_average_context() {
+        let labels = Labels {
+            titles: HashMap::from([("scheduled-1".to_string(), "Nightly check".to_string())]),
+            providers: HashMap::new(),
+            projects: HashMap::from([("ws-7".to_string(), "falcondeck".to_string())]),
+            bots: HashMap::new(),
+            bot_names: HashMap::from([("bot-2".to_string(), "Monitor".to_string())]),
+            parents: HashMap::new(),
+            automations: HashMap::from([(
+                "scheduled-1".to_string(),
+                "Nightly repo check".to_string(),
+            )]),
+        };
+        let mut first = usage_record(
+            "a",
+            "scheduled-1",
+            Some("bot-2"),
+            "codex",
+            "gpt-6.1-sol",
+            (11058, 11008, 0, 257),
+            None,
+        );
+        first.org = "automation".to_string();
+        first.ws = "ws-7".to_string();
+        first.calls = Some(2);
+        let mut second = usage_record(
+            "b",
+            "scheduled-1",
+            Some("bot-2"),
+            "codex",
+            "gpt-6.1-sol",
+            (100, 0, 50, 40),
+            None,
+        );
+        second.org = "automation".to_string();
+        second.ws = "ws-7".to_string();
+        // No call count: contributes one call.
+        let records = vec![first, second];
+        let report = aggregate_usage(&records, &labels, 30, "thread");
+        assert_eq!(report.rows.len(), 1);
+        let row = &report.rows[0];
+        assert_eq!(row.key, "scheduled-1");
+        assert_eq!(row.label, "Nightly check");
+        let detail = row.thread.as_ref().unwrap();
+        assert_eq!(detail.origin, "automation");
+        assert_eq!(detail.automation.as_deref(), Some("Nightly repo check"));
+        assert_eq!(detail.bot.as_deref(), Some("Monitor"));
+        assert_eq!(detail.project, "falcondeck");
+        assert_eq!(detail.workspace, "ws-7");
+        assert_eq!(
+            (detail.provider.as_str(), detail.model.as_str()),
+            ("codex", "gpt-6.1-sol")
+        );
+        // Context: (11058 + 11008) + (100 + 50) = 22216 over 3 calls.
+        assert_eq!(detail.avg_context_per_call, 7405);
+        assert_eq!(row.totals.turns, 2);
+        // Other groupings carry no thread detail.
+        let by_model = aggregate_usage(&records, &labels, 30, "model");
+        assert!(by_model.rows[0].thread.is_none());
+    }
+
+    #[test]
+    fn usage_rollup_groups_bot_provider_model() {
+        let labels = test_labels();
+        let records = vec![
+            usage_record(
+                "a",
+                "t1",
+                Some("bot-1"),
+                "claude",
+                "claude-haiku-5-5",
+                (1, 2, 3, 4),
+                Some(0.5),
+            ),
+            usage_record(
+                "b",
+                "t2",
+                Some("bot-1"),
+                "claude",
+                "claude-haiku-5-5",
+                (10, 0, 0, 0),
+                None,
+            ),
+            usage_record("c", "t3", None, "grok", "grok-4.7-build", (5, 0, 0, 0), None),
+        ];
+        let rollup = usage_rollup(&records, &labels);
+        assert_eq!(rollup.len(), 2);
+        // Busiest first: the two claude records sum above the grok one.
+        assert_eq!(rollup[0].bot.as_deref(), Some("Juno"));
+        assert_eq!(rollup[0].provider, "claude");
+        assert_eq!(rollup[0].totals.turns, 2);
+        assert_eq!(rollup[0].totals.input_tokens, 11);
+        assert_eq!(rollup[0].cost_sources, ["provider"]);
+        assert_eq!(rollup[1].bot, None);
+    }
+
+    /// Codex `thread/tokenUsage/updated` payloads, shaped like the rollout
+    /// `token_count` events in docs/usage-tracking-scope.md §2.
+    fn codex_report(total_input: u64, cached: u64, last: Option<(u64, u64, u64, u64, u64)>) -> Value {
+        let mut report = json!({
+            "total": {
+                "input_tokens": total_input,
+                "cached_input_tokens": cached,
+                "cache_write_input_tokens": 0,
+                "output_tokens": 257,
+                "reasoning_output_tokens": 77,
+                "total_tokens": total_input + 257
+            }
+        });
+        if let Some((input, cached, cache_write, output, reasoning)) = last {
+            report["last"] = json!({
+                "input_tokens": input,
+                "cached_input_tokens": cached,
+                "cache_write_input_tokens": cache_write,
+                "output_tokens": output,
+                "reasoning_output_tokens": reasoning,
+                "total_tokens": input + output
+            });
+        }
+        report
+    }
+
+    #[test]
+    fn codex_usage_accumulates_deltas_and_dedupes_unchanged_totals() {
+        let mut turn = CodexTurnUsage::default();
+        // First report of the turn: `last` counted.
+        turn.update(&codex_report(22066, 11008, Some((22066, 11008, 0, 257, 77))));
+        // Repeated token_count event with an unchanged total: ignored.
+        turn.update(&codex_report(22066, 11008, Some((22066, 11008, 0, 257, 77))));
+        // Second request in the same turn.
+        turn.update(&codex_report(33100, 22016, Some((11034, 11008, 512, 100, 23))));
+        assert!(!turn.is_empty());
+        assert_eq!(
+            (
+                turn.input_tokens,
+                turn.cached_input_tokens,
+                turn.cache_write_tokens
+            ),
+            (22066 + 11034, 11008 + 11008, 512)
+        );
+        assert_eq!(turn.output_tokens, 257 + 100);
+        assert_eq!(turn.reasoning_tokens, 77 + 23);
+        assert_eq!(turn.calls, 2);
+
+        // No per-request split: the change in the cumulative total is used.
+        // The first report only sets the baseline; each later change is one
+        // counted call.
+        let mut without_last = CodexTurnUsage::default();
+        without_last.update(&codex_report(1000, 400, None));
+        without_last.update(&codex_report(1500, 700, None));
+        without_last.update(&codex_report(1700, 800, None));
+        assert_eq!(
+            (without_last.input_tokens, without_last.cached_input_tokens),
+            (700, 400)
+        );
+        assert_eq!(without_last.calls, 2);
+
+        // Repeats with zero totals still count only once.
+        let mut zeroed = CodexTurnUsage::default();
+        zeroed.update(&codex_report(10, 0, Some((10, 0, 0, 0, 0))));
+        zeroed.update(&codex_report(10, 0, Some((10, 0, 0, 0, 0))));
+        assert_eq!(zeroed.calls, 1);
+    }
+
+    #[test]
+    fn codex_uncached_input_subtracts_cached_reads() {
+        // The flush normalises Codex's input-includes-cached convention:
+        // 22066 reported input, of which 11008 were cache reads.
+        let mut turn = CodexTurnUsage::default();
+        turn.update(&codex_report(22066, 11008, Some((22066, 11008, 0, 257, 77))));
+        let uncached = turn.input_tokens.saturating_sub(turn.cached_input_tokens);
+        assert_eq!(uncached, 11058);
+    }
+
+    #[test]
+    fn chain_bot_attributes_grandchildren_automation_and_survives_cycles() {
+        let owned = HashMap::from([("home".to_string(), "bot-1".to_string())]);
+        let automation_bots = HashMap::from([("scheduled".to_string(), "bot-2".to_string())]);
+        // grandchild -> child -> home.
+        let parents = HashMap::from([
+            ("grandchild".to_string(), "child".to_string()),
+            ("child".to_string(), "home".to_string()),
+        ]);
+        // A grandchild task two hops below the bot home still attributes.
+        assert_eq!(
+            chain_bot("grandchild", &owned, &automation_bots, &parents),
+            Some("bot-1".to_string())
+        );
+        assert_eq!(
+            chain_bot("home", &owned, &automation_bots, &parents),
+            Some("bot-1".to_string())
+        );
+        // A scheduled thread created for a bot attributes to that bot even
+        // without a parent link.
+        assert_eq!(
+            chain_bot("scheduled", &owned, &automation_bots, &parents),
+            Some("bot-2".to_string())
+        );
+        // A cycle terminates instead of spinning.
+        let cyclic = HashMap::from([
+            ("a".to_string(), "b".to_string()),
+            ("b".to_string(), "a".to_string()),
+        ]);
+        assert_eq!(chain_bot("a", &owned, &HashMap::new(), &cyclic), None);
+        // A chain longer than the depth cap stops cleanly.
+        let mut deep = HashMap::new();
+        for index in 0..(CHAIN_DEPTH_CAP + 8) {
+            deep.insert(format!("t{index}"), format!("t{}", index + 1));
+        }
+        assert_eq!(
+            chain_bot(
+                "t0",
+                &HashMap::from([("t9999".to_string(), "x".to_string())]),
+                &HashMap::new(),
+                &deep
+            ),
+            None
+        );
+        // Unrelated threads attribute to nothing.
+        assert_eq!(
+            chain_bot("stranger", &owned, &automation_bots, &parents),
+            None
+        );
+    }
 
     #[test]
     fn thread_query_filters_both_directions_window_and_orders_across_months() {

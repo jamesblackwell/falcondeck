@@ -344,6 +344,9 @@ struct InnerState {
     plugin_refresh_attempts: StdMutex<HashMap<String, std::time::Instant>>,
     /// Latest high-frequency token usage keyed by thread id.
     thread_token_usage: StdMutex<HashMap<String, ThreadTokenUsage>>,
+    /// Codex per-request usage accumulated for each thread's active turn,
+    /// flushed into analytics when the turn completes.
+    codex_turn_usage: StdMutex<HashMap<String, analytics::CodexTurnUsage>>,
     /// User-message excerpts per provider session, for content search.
     thread_search: StdMutex<thread_search::ThreadSearchIndex>,
     /// When the excerpt index last finished a scan of the session files.
@@ -1045,6 +1048,7 @@ impl AppState {
                 operational_conditions: StdMutex::new(HashMap::new()),
                 plugin_refresh_attempts: StdMutex::new(HashMap::new()),
                 thread_token_usage: StdMutex::new(HashMap::new()),
+                codex_turn_usage: StdMutex::new(HashMap::new()),
                 thread_search: StdMutex::new(thread_search::ThreadSearchIndex::default()),
                 thread_search_scanned_at: StdMutex::new(None),
                 thread_search_scan: Mutex::new(()),

@@ -88,6 +88,8 @@ export type SettingsViewProps = {
     permission: string,
     granted: boolean,
   ) => Promise<void>;
+  /** Opens a thread from a settings panel, when the host can navigate. */
+  onOpenThread?: (workspaceId: string, threadId: string) => void;
 };
 
 export function SettingsView(props: SettingsViewProps) {
@@ -234,7 +236,11 @@ export function SettingsView(props: SettingsViewProps) {
               onToast={props.onToast}
             />
           ) : activeSection === "analytics" ? (
-            <AnalyticsPanel baseUrl={props.baseUrl} onToast={props.onToast} />
+            <AnalyticsPanel
+              baseUrl={props.baseUrl}
+              onToast={props.onToast}
+              onOpenThread={props.onOpenThread}
+            />
           ) : activeSection === "backup" ? (
             <BackupPanel baseUrl={props.baseUrl} onToast={props.onToast} />
           ) : activeSection === "general" ? (
