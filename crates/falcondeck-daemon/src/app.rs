@@ -1234,6 +1234,14 @@ impl AppState {
         self.inner.control.search(request, context).await
     }
 
+    /// Latest reported context counters, without cloning conversations.
+    pub(crate) fn thread_context_tokens(&self, thread_id: &str) -> Option<u64> {
+        let usage = self.inner.thread_token_usage.lock().unwrap_or_else(|p| p.into_inner());
+        let usage = usage.get(thread_id)?;
+        let context = usage.last.as_ref().unwrap_or(&usage.total);
+        Some(context.input_tokens.saturating_add(context.cached_input_tokens))
+    }
+
     /// Whether this target reuses a bot's expensive home conversation.
     pub(crate) async fn automation_targets_bot_home(
         &self,

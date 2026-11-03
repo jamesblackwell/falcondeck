@@ -535,6 +535,9 @@ pub struct AutomationRun {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     /// Provider-reported cached prompt tokens, when available.
     pub cached_input_tokens: Option<u64>,
+    /// Latest provider-reported context size observed immediately before dispatch.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context_tokens_at_start: Option<u64>,
     /// Structured failure detail.
     #[serde(default)]
     pub error: Option<ControlErrorDetail>,

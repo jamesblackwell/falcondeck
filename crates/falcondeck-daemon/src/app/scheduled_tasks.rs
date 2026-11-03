@@ -470,6 +470,7 @@ fn legacy_run(
         turn_id: None,
         input_tokens: None,
         cached_input_tokens: None,
+        context_tokens_at_start: None,
         outcome_preview: run.preview.clone(),
         error: None,
     }

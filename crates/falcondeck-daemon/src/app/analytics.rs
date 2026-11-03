@@ -1145,6 +1145,7 @@ fn summarize_automations(
     runs: Vec<falcondeck_core::control::AutomationRun>,
     definitions: &[falcondeck_core::control::Automation],
     days: u32,
+    bot_home_ids: &HashSet<String>,
 ) -> Vec<AnalyticsAutomation> {
     use falcondeck_core::control::{
         AutomationRunStatus as Status, AutomationState, AutomationThreadTarget,
@@ -1175,7 +1176,14 @@ fn summarize_automations(
         }
     }
     let mut latest_queued: HashMap<String, DateTime<Utc>> = HashMap::new();
+    let mut large_context_ids = HashSet::new();
     for run in runs {
+        if run
+            .context_tokens_at_start
+            .is_some_and(|tokens| tokens > 100_000)
+        {
+            large_context_ids.insert(run.automation_id.clone());
+        }
         let (summary, threads) = by_id
             .entry(run.automation_id.clone())
             .or_insert_with(|| (blank(&run.automation_name), HashSet::new()));
@@ -1224,6 +1232,34 @@ fn summarize_automations(
                     AutomationThreadTarget::Current => "current",
                 }
                 .into();
+                let reused_id = match &definition.target.thread {
+                    AutomationThreadTarget::Existing { thread_id }
+                    | AutomationThreadTarget::Managed {
+                        thread_id: Some(thread_id),
+                    } => Some(thread_id),
+                    _ => None,
+                };
+                let bot_home = reused_id.is_some_and(|id| bot_home_ids.contains(id));
+                if let Ok(advice) = crate::control::automations::cadence_advice(
+                    &definition.trigger,
+                    &definition.target,
+                    bot_home,
+                    Utc::now(),
+                ) {
+                    summary.flags.extend(
+                        advice
+                            .iter()
+                            .filter_map(|a| a["code"].as_str().map(str::to_string)),
+                    );
+                }
+                if matches!(
+                    definition.target.thread,
+                    AutomationThreadTarget::Existing { .. }
+                        | AutomationThreadTarget::Managed { .. }
+                ) && large_context_ids.contains(&id)
+                {
+                    summary.flags.push("large_reused_context".into());
+                }
                 summary.id = Some(id);
             }
             let finished = summary.runs.saturating_sub(summary.skipped);
@@ -1549,7 +1585,14 @@ impl AppState {
         })
         .await
         .map_err(|e| DaemonError::Process(e.to_string()))?;
-        summary.automations = summarize_automations(runs, &definitions, days);
+        let bot_home_ids = self
+            .preferences()
+            .await
+            .bots
+            .into_iter()
+            .map(|bot| bot.thread_id)
+            .collect();
+        summary.automations = summarize_automations(runs, &definitions, days, &bot_home_ids);
         Ok(summary)
     }
 
@@ -1585,6 +1628,9 @@ impl AppState {
                     "very_frequent": "24 or more runs a day",
                     "failing": "30% or more of runs failed",
                     "thread_per_run": "starts a new thread every run",
+                    "cache_cold_reuse": "reuses a task with a minimum gap in (cache TTL minus 5 minutes, TTL plus 30 minutes]",
+                    "bot_home_frequent": "targets a bot home more often than every four hours",
+                    "large_reused_context": "reused task had over 100k context tokens at a run start in this period",
                 },
                 "automations": summary.automations,
             }),
@@ -1819,6 +1865,39 @@ mod tests {
     }
 
     #[test]
+    fn cost_flags_use_schedule_bot_home_and_run_start_context() {
+        let definition: falcondeck_core::control::Automation = serde_json::from_value(json!({
+            "id": "cost", "revision": 1, "name": "Cost", "trigger": {"kind": "interval", "every_seconds": 3600, "anchor_at": "2026-11-03T00:00:00Z"},
+            "task": {"kind": "prompt", "instruction": "Check"}, "target": {"workspace_path": "/tmp", "provider": "claude", "thread": {"kind": "existing", "thread_id": "home"}},
+            "state": "enabled", "concurrency_policy": "skip", "misfire_policy": "skip", "created_at": "2026-11-03T00:00:00Z", "updated_at": "2026-11-03T00:00:00Z", "next_run_at": null
+        })).unwrap();
+        let mut execution = run("r", "cost", "succeeded");
+        execution.context_tokens_at_start = Some(100_001);
+        let homes = HashSet::from(["home".into()]);
+        let health =
+            summarize_automations(vec![execution.clone()], &[definition.clone()], 7, &homes);
+        assert_eq!(
+            health[0].flags,
+            [
+                "cache_cold_reuse",
+                "bot_home_frequent",
+                "large_reused_context"
+            ]
+        );
+        execution.context_tokens_at_start = Some(100_000);
+        let health =
+            summarize_automations(vec![execution], &[definition.clone()], 7, &HashSet::new());
+        assert_eq!(health[0].flags, ["cache_cold_reuse"]);
+        let mut fresh = definition;
+        fresh.target.thread = falcondeck_core::control::AutomationThreadTarget::NewEachRun;
+        assert!(
+            summarize_automations(vec![], &[fresh], 7, &homes)[0]
+                .flags
+                .is_empty()
+        );
+    }
+
+    #[test]
     fn scheduled_tasks_are_flagged_when_they_cost_more_than_they_give() {
         let mut runs = Vec::new();
         // A monitor that almost never finds anything, run 30 times in a day.
@@ -1839,7 +1918,7 @@ mod tests {
         }
         // A healthy daily task.
         runs.push(run("d0", "Daily", "succeeded"));
-        let automations = summarize_automations(runs, &[], 1);
+        let automations = summarize_automations(runs, &[], 1, &HashSet::new());
         let find = |name: &str| automations.iter().find(|a| a.name == name).unwrap();
         let monitor = find("Monitor");
         assert_eq!(

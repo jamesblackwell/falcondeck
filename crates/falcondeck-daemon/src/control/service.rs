@@ -1442,6 +1442,7 @@ impl ControlService {
                 turn_id: None,
                 input_tokens: None,
                 cached_input_tokens: None,
+                context_tokens_at_start: None,
                 outcome_preview: None,
                 error: None,
             };
@@ -1537,6 +1538,22 @@ impl ControlService {
         })
         .await
         .map(|((), _)| ())
+    }
+
+    /// Captures already-available context usage without loading native history.
+    pub(crate) async fn record_run_context(
+        &self,
+        run_id: &str,
+        tokens: u64,
+    ) -> Result<(), ControlError> {
+        self.mutate(|state, _| {
+            if let Some(run) = state.runs.iter_mut().find(|run| run.id == run_id) {
+                run.context_tokens_at_start = Some(tokens);
+            }
+            Ok(((), vec![ControlDomain::Runs]))
+        })
+        .await
+        .map(|_| ())
     }
 
     /// Records a turn id on a running run.

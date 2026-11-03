@@ -71,6 +71,13 @@ outcome, with review flags:
 - `very_frequent`: 24 or more runs a day.
 - `failing`: two or more failures, and at least 30% of runs.
 - `thread_per_run`: a `new_each_run` task that used more than three threads.
+- `cache_cold_reuse`: reused task with a minimum gap in `(TTL−5min, TTL+30min]`;
+  Claude's measured one-hour TTL is currently the only registered TTL.
+- `bot_home_frequent`: bot home task scheduled more often than every four hours.
+- `large_reused_context`: managed/existing task with over 100k context tokens
+  observed immediately before a run in the reporting period. Uses the latest
+  provider context counters already in memory; unavailable usage stays unknown.
+  Older runs do not acquire this measurement retroactively.
 
 Agents read the same report with `falcondeck_get` resource `automation.health`
 (`filters.days`, default 7, at most 90). It is answered on the computer only;

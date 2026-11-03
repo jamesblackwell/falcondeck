@@ -429,6 +429,10 @@ pub(crate) async fn execute_run(app: &AppState, run_id: &str) {
     }
     emit_runs_changed(app).await;
 
+    if let Some(tokens) = app.thread_context_tokens(&thread_id) {
+        let _ = app.control().record_run_context(run_id, tokens).await;
+    }
+
     // Subscribe before dispatch: turn events emitted between subscribe and
     // send_turn must be observed.
     let mut events = app.subscribe();

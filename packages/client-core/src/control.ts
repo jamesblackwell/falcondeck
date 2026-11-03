@@ -137,6 +137,7 @@ export type AutomationRun = {
   turn_id?: string | null;
   input_tokens?: number | null;
   cached_input_tokens?: number | null;
+  context_tokens_at_start?: number | null;
   outcome_preview?: string | null;
   error?: ControlErrorDetail | null;
 };
