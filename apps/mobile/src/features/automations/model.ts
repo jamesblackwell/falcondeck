@@ -180,6 +180,9 @@ export function automationDraftArguments(draft: AutomationDraft): Record<string,
       permission_mode: draft.permissionMode.trim() || null,
       sandbox_mode: draft.sandboxMode.trim() || null,
       // Provider/thread edits intentionally clear now-incompatible options.
+      ...(draft.original && draft.original.target.provider !== draft.provider
+        ? { reasoning_effort: null, collaboration_mode_id: null, approval_policy: null }
+        : {}),
       ...(draft.provider !== 'claude' ? { claude_autocompact_tokens: null } : {}),
       ...(draft.threadKind !== 'new_each_run' ? { run_as_bot: null, only_when_changed: false } : {}),
       selected_skills: commaSeparated(draft.selectedSkills),

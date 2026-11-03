@@ -161,3 +161,17 @@ it('round-trips working windows, shell checks, compaction and future nested fiel
   expect(changed.task).not.toHaveProperty('precheck')
   expect(changed.target).toHaveProperty('model_id', null)
 })
+
+it('clears provider-specific options only when switching providers', () => {
+  const definition: Automation = {
+    ...automation,
+    target: { ...automation.target, reasoning_effort: 'low', collaboration_mode_id: 'plan', approval_policy: 'on-request' },
+  }
+  const draft = automationDraftFromDefinition(definition)
+  expect(automationDraftArguments({ ...draft, name: 'Renamed' })).toMatchObject({
+    target: { reasoning_effort: 'low', collaboration_mode_id: 'plan', approval_policy: 'on-request' },
+  })
+  expect(automationDraftArguments(draftWithProvider(draft, 'claude'))).toMatchObject({
+    target: { reasoning_effort: null, collaboration_mode_id: null, approval_policy: null },
+  })
+})
