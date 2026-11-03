@@ -13,16 +13,24 @@ import UniformTypeIdentifiers
     let onAttachments: ([NativeMacAttachment]) -> Void
     let onError: (String) -> Void
     var onAlternateSend: (() -> Void)? = nil
+    /// The editor grows with its draft up to `maximumHeight`, then scrolls.
+    /// `minimumHeight` holds a taller resting size for the expanded mode.
+    let minimumHeight: CGFloat
+    let maximumHeight: CGFloat
 
     init(text: Binding<String>, placeholder: String, onSend: @escaping () -> Void,
          onAttachments: @escaping ([NativeMacAttachment]) -> Void, onError: @escaping (String) -> Void,
-         onAlternateSend: (() -> Void)? = nil) {
+         onAlternateSend: (() -> Void)? = nil,
+         minimumHeight: CGFloat = ComposerNativeTextView.minimumComposerHeight,
+         maximumHeight: CGFloat = ComposerNativeTextView.maximumComposerHeight) {
         self._text = text
         self.placeholder = placeholder
         self.onSend = onSend
         self.onAttachments = onAttachments
         self.onError = onError
         self.onAlternateSend = onAlternateSend
+        self.maximumHeight = max(ComposerNativeTextView.minimumComposerHeight, maximumHeight)
+        self.minimumHeight = min(self.maximumHeight, max(ComposerNativeTextView.minimumComposerHeight, minimumHeight))
     }
 
     func makeCoordinator() -> Coordinator { Coordinator(self) }
@@ -72,22 +80,25 @@ import UniformTypeIdentifiers
 
     func sizeThatFits(_ proposal: ProposedViewSize, nsView: NSScrollView, context: Context) -> CGSize? {
         guard let width = proposal.width, width.isFinite, width > 0 else { return nil }
-        return Self.fittingSize(width: width, scrollView: nsView)
+        return Self.fittingSize(width: width, scrollView: nsView, minimum: minimumHeight, maximum: maximumHeight)
     }
 
-    static func fittingSize(width: CGFloat, scrollView: NSScrollView) -> CGSize? {
+    static func fittingSize(width: CGFloat, scrollView: NSScrollView,
+                            minimum: CGFloat = ComposerNativeTextView.minimumComposerHeight,
+                            maximum: CGFloat = ComposerNativeTextView.maximumComposerHeight) -> CGSize? {
         guard let editor = scrollView.documentView as? ComposerNativeTextView else { return nil }
         // Legacy scrollers occupy layout space; overlay scrollers do not.
         // Measure and wrap against the clip area, not the outer scroll view.
         let contentSize = NSScrollView.contentSize(
-            forFrameSize: NSSize(width: width, height: ComposerNativeTextView.maximumComposerHeight),
+            forFrameSize: NSSize(width: width, height: maximum),
             horizontalScrollerClass: nil,
             verticalScrollerClass: scrollView.hasVerticalScroller ? NSScroller.self : nil,
             borderType: scrollView.borderType,
             controlSize: scrollView.verticalScroller?.controlSize ?? .regular,
             scrollerStyle: scrollView.scrollerStyle
         )
-        return CGSize(width: width, height: editor.fittingComposerHeight(width: max(1, contentSize.width)))
+        let fitting = editor.fittingComposerHeight(width: max(1, contentSize.width), maximum: maximum)
+        return CGSize(width: width, height: min(maximum, max(minimum, fitting)))
     }
 
     private func update(_ editor: ComposerNativeTextView, coordinator: Coordinator) {
@@ -149,8 +160,43 @@ import UniformTypeIdentifiers
     }
 }
 
+/// Editor height limits for the conversation composer. The pane height is the
+/// conversation column; `chrome` is the composer's height minus the editor
+/// (location bar, quote, attachments, controls, padding).
+enum ComposerHeightPolicy {
+    /// The whole composer stays within this share of the pane so the
+    /// transcript remains usable.
+    static let paneShare: CGFloat = 0.6
+    /// The expanded editor rests at about half the pane.
+    static let expandedShare: CGFloat = 0.5
+
+    static func maximum(paneHeight: CGFloat, chrome: CGFloat) -> CGFloat {
+        let floor = ComposerNativeTextView.minimumComposerHeight
+        guard paneHeight > 0 else { return ComposerNativeTextView.maximumComposerHeight }
+        let budget = paneHeight * paneShare - max(0, chrome)
+        return max(floor, min(ComposerNativeTextView.maximumComposerHeight, budget))
+    }
+
+    static func expandedMaximum(paneHeight: CGFloat, chrome: CGFloat) -> CGFloat {
+        let floor = ComposerNativeTextView.minimumComposerHeight
+        guard paneHeight > 0 else { return ComposerNativeTextView.maximumComposerHeight }
+        return max(floor, paneHeight * paneShare - max(0, chrome))
+    }
+
+    /// Returns (minimum, maximum) editor heights for the current mode.
+    static func limits(expanded: Bool, paneHeight: CGFloat, chrome: CGFloat) -> (minimum: CGFloat, maximum: CGFloat) {
+        let floor = ComposerNativeTextView.minimumComposerHeight
+        guard expanded else { return (floor, maximum(paneHeight: paneHeight, chrome: chrome)) }
+        let ceiling = expandedMaximum(paneHeight: paneHeight, chrome: chrome)
+        let resting = paneHeight > 0 ? paneHeight * expandedShare : ComposerNativeTextView.maximumComposerHeight
+        return (min(ceiling, max(floor, resting)), ceiling)
+    }
+}
+
 @MainActor final class ComposerNativeTextView: NSTextView {
-    static let maximumComposerHeight: CGFloat = 220
+    /// Auto-grow ceiling: about 2.7x the original 220pt cap. Callers lower
+    /// it further so the composer never crowds out a short window.
+    nonisolated static let maximumComposerHeight: CGFloat = 600
     fileprivate static let attachmentPasteboardTypes: [NSPasteboard.PasteboardType] = [
         .fileURL, .png, .tiff, .init(UTType.jpeg.identifier)
     ]
@@ -172,9 +218,9 @@ import UniformTypeIdentifiers
     /// SwiftUI can measure several widths before choosing one. Keep those
     /// speculative layouts separate from the displayed editor's TextKit state.
     /// The resting height fits one line with even space above and below it.
-    static let minimumComposerHeight: CGFloat = 56
+    nonisolated static let minimumComposerHeight: CGFloat = 56
 
-    func fittingComposerHeight(width: CGFloat) -> CGFloat {
+    func fittingComposerHeight(width: CGFloat, maximum: CGFloat = maximumComposerHeight) -> CGFloat {
         guard let textStorage, let textContainer, let layoutManager else { return Self.minimumComposerHeight }
         let measurement = self.measurement
         // Sharing storage avoids copying or comparing the draft on every
@@ -199,7 +245,7 @@ import UniformTypeIdentifiers
         measurement.manager.ensureLayout(for: measurement.container)
         let textHeight = max(measurement.manager.usedRect(for: measurement.container).maxY,
                              measurement.manager.extraLineFragmentRect.maxY)
-        return min(Self.maximumComposerHeight, max(Self.minimumComposerHeight, ceil(textHeight + textContainerInset.height * 2)))
+        return min(max(Self.minimumComposerHeight, maximum), max(Self.minimumComposerHeight, ceil(textHeight + textContainerInset.height * 2)))
     }
 
     override func viewDidMoveToWindow() {

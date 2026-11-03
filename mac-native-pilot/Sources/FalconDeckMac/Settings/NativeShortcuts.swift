@@ -34,6 +34,7 @@ struct NativeShortcutDefinition: Identifiable {
         .init(id: "decreaseTextSize", label: "Decrease text size", category: "View", context: "global", defaults: ["Mod+-"]),
         .init(id: "resetTextSize", label: "Reset text size", category: "View", context: "global", defaults: ["Mod+0"]),
         .init(id: "focusComposer", label: "Focus prompt", category: "Composer", context: "global", defaults: ["Shift+Escape"]),
+        .init(id: "toggleComposerExpanded", label: "Expand or collapse prompt", category: "Composer", context: "global", defaults: ["Mod+Shift+E"]),
         .init(id: "openProjectMenu", label: "Choose project", category: "Composer", context: "global", defaults: ["Ctrl+Shift+L"]),
         .init(id: "openHarnessMenu", label: "Choose agent", category: "Composer", context: "global", defaults: ["Ctrl+Shift+A"]),
         .init(id: "openPermissionMenu", label: "Choose permission mode", category: "Composer", context: "global", defaults: ["Ctrl+Shift+P"]),

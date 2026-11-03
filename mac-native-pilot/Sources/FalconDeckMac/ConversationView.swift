@@ -16,6 +16,10 @@ struct ConversationView: View {
     @State var findText = ""
     @State var findIndex = 0
     @State var expansionDirective = 0
+    @State var composerExpanded = false
+    @State var paneHeight: CGFloat = 0
+    @State var composerHeight: CGFloat = 0
+    @State var editorHeight: CGFloat = 0
 
     var provider: String { store.selectedTask?.provider ?? store.provider }
     var agent: JSON { ConversationCatalog.agent(store.selectedProject, provider: provider) }
@@ -64,12 +68,17 @@ struct ConversationView: View {
             composer
         }
         .background(FDTheme.background)
+        .onGeometryChange(for: CGFloat.self) { $0.size.height.rounded() } action: { paneHeight = $0 }
+        .onReceive(NotificationCenter.default.publisher(for: .init("native.command"))) { note in
+            guard note.object as? String == "toggleComposerExpanded" else { return }
+            toggleComposerExpanded()
+        }
         .environment(\.transcriptOpenThread, { id in
             Task { await store.openTaskLink(id) }
         })
         .task(id: catalogKey) { restoreSelection(); await loadCatalog() }
         .onAppear { restorePayload() }
-        .onChange(of: store.composerKey) { _, _ in restorePayload(); restoreSelection(); followsLatest = true; findIndex = 0; expansionDirective = 0 }
+        .onChange(of: store.composerKey) { _, _ in restorePayload(); restoreSelection(); followsLatest = true; findIndex = 0; expansionDirective = 0; composerExpanded = false }
         .onChange(of: store.composerPayload(key: store.composerKey)) { _, _ in restorePayload() }
         .onChange(of: selection) { _, value in if store.selectedTask == nil { ConversationLocalStorage.save(value, key: selectionKey) } }
         .onChange(of: store.isSelectedHostConnected) { _, connected in if connected { Task { await loadCatalog() } } }
@@ -235,8 +244,27 @@ struct ConversationView: View {
         followsLatest = false; proxy.scrollTo(matches[findIndex], anchor: .top)
     }
 
+    var composerEditorLimits: (minimum: CGFloat, maximum: CGFloat) {
+        // Everything in the composer except the editor itself; stable while
+        // the editor resizes, so the cap does not feed back on itself.
+        let chrome = max(0, composerHeight - editorHeight)
+        return ComposerHeightPolicy.limits(expanded: composerExpanded, paneHeight: paneHeight, chrome: chrome)
+    }
+
+    func toggleComposerExpanded() {
+        withAnimation(.easeOut(duration: 0.18)) { composerExpanded.toggle() }
+        store.requestComposerFocus()
+    }
+
+    var composerExpandHelp: String {
+        let action = composerExpanded ? "Collapse prompt" : "Expand prompt"
+        guard let key = NativePreferences.shared.bindings(for: "toggleComposerExpanded").first.map(NativeShortcutDefinition.display) else { return action }
+        return "\(action) (\(key))"
+    }
+
     var composer: some View {
         let composerKey = store.composerKey
+        let limits = composerEditorLimits
         return VStack(spacing: 8) {
             if store.selectedTask == nil, selection.effectiveExecutionTarget(task: nil) == "cloud" {
                 NativeCloudNewTaskNote(store: store).id(store.selectedProjectID)
@@ -270,8 +298,10 @@ struct ConversationView: View {
                     ConversationAttachmentStrip(attachments: attachments) { id in attachments.removeAll { $0.id == id }; persistPayload() }.padding(10)
                 }
                 ConversationTextEditor(text: $store.draft, placeholder: !store.isInputReady ? "Restoring saved input…" : store.isRunning ? "Send a follow-up…" : "Message your agent…", onSend: send,
-                                       onAttachments: { appendAttachments($0, expectedKey: composerKey) }, onError: { store.errorMessage = $0 }, onAlternateSend: sendAlternate)
+                                       onAttachments: { appendAttachments($0, expectedKey: composerKey) }, onError: { store.errorMessage = $0 }, onAlternateSend: sendAlternate,
+                                       minimumHeight: limits.minimum, maximumHeight: limits.maximum)
                     .fixedSize(horizontal: false, vertical: true)
+                    .onGeometryChange(for: CGFloat.self) { $0.size.height.rounded() } action: { editorHeight = $0 }
                     .accessibilityIdentifier("message-composer")
                 HStack(spacing: 10) {
                     ConversationComposerControls(store: store, selection: $selection,
@@ -280,6 +310,14 @@ struct ConversationView: View {
                         else { store.provider = destination }
                     })
                     Spacer(minLength: 4)
+                    Button(action: toggleComposerExpanded) {
+                        Image(systemName: composerExpanded ? "arrow.down.right.and.arrow.up.left" : "arrow.up.left.and.arrow.down.right")
+                            .font(.system(size: 12)).frame(width: 28, height: 28)
+                            .foregroundStyle(composerExpanded ? FDTheme.accent : FDTheme.muted)
+                    }.buttonStyle(.plain)
+                        .help(composerExpandHelp)
+                        .accessibilityLabel(composerExpanded ? "Collapse prompt" : "Expand prompt")
+                        .accessibilityIdentifier("composer-expand")
                     if NativeSpeechController.shared.config.enabled {
                         Button { NativeSpeechController.shared.startOrStop() } label: {
                             Image(systemName: NativeSpeechController.shared.isRecording ? "stop.circle.fill" : "mic")
@@ -307,6 +345,7 @@ struct ConversationView: View {
                     .font(NativePreferences.shared.font(size: 12)).foregroundStyle(FDTheme.muted)
             }
         }.frame(maxWidth: 900).padding(.horizontal, 28).padding(.top, 12).padding(.bottom, 14).frame(maxWidth: .infinity)
+            .onGeometryChange(for: CGFloat.self) { $0.size.height.rounded() } action: { composerHeight = $0 }
     }
 
     func errorBanner(_ message: String) -> some View {
