@@ -279,7 +279,12 @@ pub(super) fn resolve(
     };
 
     // Second pass ignores subscription limits: an exhausted plan beats none.
-    for ceiling in [routing.usage_ceiling_percent, 100] {
+    let passes: &[u8] = if routing.usage_ceiling_percent < 100 {
+        &[routing.usage_ceiling_percent, 100]
+    } else {
+        &[100]
+    };
+    for &ceiling in passes {
         for (rule, target) in &candidates {
             match unavailable(target, availability, ceiling) {
                 None => {
@@ -300,7 +305,7 @@ pub(super) fn resolve(
                         skipped,
                     };
                 }
-                Some(reason) if ceiling == routing.usage_ceiling_percent => {
+                Some(reason) if ceiling == passes[0] => {
                     skipped.push(RouteSkip {
                         target: (*target).clone(),
                         reason,

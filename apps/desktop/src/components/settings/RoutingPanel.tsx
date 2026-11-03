@@ -25,7 +25,7 @@ import {
   Textarea,
 } from '@falcondeck/ui'
 import { ArrowDown, ArrowUp, Plus, RotateCcw, Trash2 } from 'lucide-react'
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 
 const ANY = 'any'
 const EFFORTS = ['low', 'medium', 'high', 'xhigh', 'max']
@@ -75,9 +75,19 @@ export function RoutingPanel({
   const [draft, setDraft] = useState<RoutingPreferences | null>(saved)
   const savedKey = JSON.stringify(saved)
   const dirty = draft !== null && JSON.stringify(draft) !== savedKey
-  // Adopt saved changes (another client, Reset) unless mid-edit.
+  // The daemon normalizes what it stores, so after Save or Reset the next
+  // saved value replaces the draft even if it differs from what was sent.
+  const adoptNextSave = useRef(false)
+  const save = (routing: RoutingPreferences) => {
+    adoptNextSave.current = true
+    onUpdatePreferences({ routing })
+  }
+  // Adopt saved changes (another client, Save, Reset) unless mid-edit.
   useEffect(() => {
-    if (!dirty) setDraft(saved)
+    if (!dirty || adoptNextSave.current) {
+      adoptNextSave.current = false
+      setDraft(saved)
+    }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [savedKey])
 
@@ -107,7 +117,7 @@ export function RoutingPanel({
             <Button size="sm" variant="ghost" onClick={() => setDraft(saved)}>
               Discard
             </Button>
-            <Button size="sm" onClick={() => onUpdatePreferences({ routing: draft })}>
+            <Button size="sm" onClick={() => save(draft)}>
               Save changes
             </Button>
           </div>
@@ -257,7 +267,7 @@ export function RoutingPanel({
           variant="ghost"
           size="sm"
           // The daemon fills every missing field with its default.
-          onClick={() => onUpdatePreferences({ routing: {} as RoutingPreferences })}
+          onClick={() => save({} as RoutingPreferences)}
         >
           <RotateCcw className="h-4 w-4" />
           Reset routing to defaults

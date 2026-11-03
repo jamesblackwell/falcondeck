@@ -24,8 +24,8 @@ choice.
      match.
    - Rules are skipped when the task-type confidence is below
      `min_confidence_percent`.
-   - The first matching rule wins if it has a usable target. Otherwise the
-     fallback list is used.
+   - Targets are tried in order: those of every matching rule, top to bottom,
+     then the fallback list. The first usable target wins.
 4. A target is skipped in any of these cases:
    - its harness isn't installed;
    - its harness needs sign-in;
