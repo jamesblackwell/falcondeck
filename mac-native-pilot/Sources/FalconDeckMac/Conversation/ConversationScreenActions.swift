@@ -73,6 +73,7 @@ extension ConversationView {
         fields["steer"] = .bool(steer && capabilities["supports_steering"].bool)
         if target != "cloud" { fields["selected_skills"] = .array(ConversationCatalog.selectedSkills(text, skills: skills)) }
         followsLatest = true
+        composerExpanded = false
         Task { await store.sendInputs(inputs, settings: fields) }
     }
 

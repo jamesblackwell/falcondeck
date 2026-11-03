@@ -277,6 +277,11 @@ pub(super) async fn ingest_notification(
                 extract_thread_id(&params),
                 parse_thread_token_usage(&params),
             ) {
+                // Repeated reports carry an unchanged cumulative total; the
+                // accumulator diffs per turn, so those are ignored.
+                let turn_id =
+                    extract_turn_id(&params).unwrap_or_else(|| "turn".to_string());
+                app.note_codex_token_usage(&thread_id, &turn_id, &params);
                 app.inner
                     .thread_token_usage
                     .lock()
@@ -436,11 +441,6 @@ pub(super) async fn ingest_notification(
                         thread.latest_turn_id = Some(turn_id.clone());
                         thread.last_error = None;
                         thread.updated_at = updated_at;
-                        if let Some(model_id) =
-                            extract_string(&params, &["model", "modelId", "model_id"])
-                        {
-                            thread.agent.model_id = Some(model_id);
-                        }
                         if let Some(reasoning_effort) = extract_string(
                             &params,
                             &["effort", "reasoningEffort", "reasoning_effort"],
@@ -459,11 +459,15 @@ pub(super) async fn ingest_notification(
                         }
                     })
                     .await?;
+                // The app-server's turn/started carries no model field, so
+                // usage attributes to the thread's current selection.
+                let turn_model = thread.agent.model_id.clone();
                 app.emit(
                     Some(workspace_id.to_string()),
                     Some(thread_id.clone()),
                     UnifiedEvent::ThreadUpdated { thread },
                 );
+                app.start_codex_turn_usage(&thread_id, &turn_id, turn_model.as_deref());
                 app.emit(
                     Some(workspace_id.to_string()),
                     Some(thread_id),
@@ -582,7 +586,7 @@ pub(super) async fn ingest_notification(
                     Some(workspace_id.to_string()),
                     Some(thread_id.clone()),
                     UnifiedEvent::TurnEnd {
-                        turn_id,
+                        turn_id: turn_id.clone(),
                         status: if retrying {
                             "running".to_string()
                         } else {
@@ -591,6 +595,9 @@ pub(super) async fn ingest_notification(
                         error: if retrying { None } else { error.clone() },
                     },
                 );
+                // Tokens the attempt consumed, failed or not, land in
+                // analytics; a retry then starts a fresh accumulation.
+                app.flush_codex_turn_usage(workspace_id, &thread_id);
                 if retrying {
                     return Ok(());
                 }

@@ -21,6 +21,7 @@ import {
   type AnalyticsSettings,
   type AnalyticsStatus,
   type AnalyticsSummary,
+  type AnalyticsUsageRow,
 } from '@falcondeck/client-core'
 import { RefreshCw } from 'lucide-react'
 
@@ -31,6 +32,8 @@ export type AnalyticsPanelProps = {
     title: string
     description?: string
   }) => void
+  /** Opens a thread by id; when absent, thread titles stay plain text. */
+  onOpenThread?: (workspaceId: string, threadId: string) => void
 }
 
 type Period = '7' | '30' | '90'
@@ -56,6 +59,13 @@ const AUTOMATION_FLAGS: Record<string, string> = {
   very_frequent: 'Very frequent',
   failing: 'Failing',
   thread_per_run: 'New thread each run',
+}
+
+const USAGE_ORIGINS: Record<string, string> = {
+  user: 'You',
+  agent_spawn: 'Agent task',
+  scheduled: 'Scheduled',
+  automation: 'Automation',
 }
 
 const count = (value: number) => value.toLocaleString()
@@ -95,6 +105,12 @@ function shortDate(date: string) {
 
 function percent(part: number, whole: number) {
   return whole ? `${Math.round((part / whole) * 100)}%` : '0%'
+}
+
+/** Provider-reported API-equivalent cost; small figures keep precision. */
+function usd(value: number) {
+  if (!value) return '—'
+  return `$${value >= 1 ? value.toFixed(2) : value.toFixed(4)}`
 }
 
 const TABLE = 'w-full text-left text-[length:var(--fd-text-sm)]'
@@ -204,12 +220,13 @@ function PromptRow({ prompt }: { prompt: AnalyticsPrompt }) {
   )
 }
 
-export function AnalyticsPanel({ baseUrl, onToast }: AnalyticsPanelProps) {
+export function AnalyticsPanel({ baseUrl, onToast, onOpenThread }: AnalyticsPanelProps) {
   const api = useMemo(() => (baseUrl ? createDaemonApiClient(baseUrl) : null), [baseUrl])
   const [period, setPeriod] = useState<Period>('30')
   const [metric, setMetric] = useState<DailyMetric>('user_messages')
   const [summary, setSummary] = useState<AnalyticsSummary | null>(null)
   const [status, setStatus] = useState<AnalyticsStatus | null>(null)
+  const [threadUsage, setThreadUsage] = useState<AnalyticsUsageRow[]>([])
   const [prompts, setPrompts] = useState<AnalyticsPrompt[]>([])
   const [query, setQuery] = useState('')
   const [loading, setLoading] = useState(false)
@@ -236,6 +253,16 @@ export function AnalyticsPanel({ baseUrl, onToast }: AnalyticsPanelProps) {
       setSummary(nextSummary)
       setStatus(nextStatus)
       wanted.current ??= nextStatus.settings
+      // Older daemons lack the usage endpoint; the tables simply stay empty
+      // instead of blanking the whole panel.
+      let rows: AnalyticsUsageRow[] = []
+      try {
+        rows = (await api.analyticsUsage(Number(period), 'thread')).rows ?? []
+      } catch {
+        rows = []
+      }
+      if (id !== loadId.current) return
+      setThreadUsage(rows)
     } catch (err) {
       if (id === loadId.current) setError(err instanceof Error ? err.message : String(err))
     } finally {
@@ -298,7 +325,12 @@ export function AnalyticsPanel({ baseUrl, onToast }: AnalyticsPanelProps) {
       await load()
       onToast({
         variant: 'success',
-        title: target === 'prompts' ? 'Your messages were deleted' : 'Activity history was deleted',
+        title:
+          target === 'prompts'
+            ? 'Your messages were deleted'
+            : target === 'usage'
+              ? 'Token usage history was deleted'
+              : 'Activity history was deleted',
       })
     } catch (err) {
       onToast({
@@ -705,6 +737,156 @@ export function AnalyticsPanel({ baseUrl, onToast }: AnalyticsPanelProps) {
         ) : null}
       </SettingsSection>
 
+      <SettingsSection
+        title="Token usage"
+        description="What finished turns actually consumed, by bot, harness and model. Tokens are the measure; the cost column is the provider's own list-price API equivalent where it reports one (Grok's cost unit is still unverified)."
+      >
+        {summary?.usage?.length ? (
+          <table className={TABLE}>
+            <thead>
+              <tr>
+                <th className={TH}>Bot</th>
+                <th className={TH}>Harness</th>
+                <th className={TH}>Model</th>
+                <th className={cn(TH, NUM)}>In (uncached)</th>
+                <th className={cn(TH, NUM)}>Cache read</th>
+                <th className={cn(TH, NUM)}>Cache write</th>
+                <th className={cn(TH, NUM)}>Out</th>
+                <th className={cn(TH, NUM)}>Turns</th>
+                <th className={cn(TH, NUM)}>API-equiv $</th>
+              </tr>
+            </thead>
+            <tbody>
+              {summary.usage.map((row) => {
+                const unverified = (row.cost_sources ?? []).includes('provider_unverified')
+                return (
+                  <tr key={`${row.bot ?? ''}:${row.provider}:${row.model}`}>
+                    <td className={TD}>{row.bot ?? '—'}</td>
+                    <td className={TD}>{row.provider}</td>
+                    <td className={cn(TD, 'fd-type-mono text-[length:var(--fd-text-xs)]')}>{row.model || '—'}</td>
+                    <td className={cn(TD, NUM)}>{compact(row.totals.input_tokens)}</td>
+                    <td className={cn(TD, NUM)}>{compact(row.totals.cache_read_tokens)}</td>
+                    <td className={cn(TD, NUM)}>{compact(row.totals.cache_write_tokens)}</td>
+                    <td className={cn(TD, NUM)}>{compact(row.totals.output_tokens)}</td>
+                    <td className={cn(TD, NUM)}>{count(row.totals.turns)}</td>
+                    <td
+                      className={cn(TD, NUM, 'text-fg-tertiary')}
+                      title={
+                        unverified
+                          ? 'Provider-reported; the cost unit is unverified'
+                          : 'Provider-reported list-price API equivalent'
+                      }
+                    >
+                      {usd(row.totals.cost_usd)}
+                    </td>
+                  </tr>
+                )
+              })}
+            </tbody>
+          </table>
+        ) : (
+          <p className={EMPTY}>No token usage recorded in this period.</p>
+        )}
+      </SettingsSection>
+
+      <SettingsSection
+        title="Top threads"
+        description="The twenty threads that used the most tokens. Context per call is the prompt the model saw: uncached input plus cache reads and writes."
+      >
+        {threadUsage.length ? (
+          <table className={TABLE}>
+            <thead>
+              <tr>
+                <th className={TH}>Thread</th>
+                <th className={TH}>Project</th>
+                <th className={TH}>Harness · model</th>
+                <th className={TH}>Bot</th>
+                <th className={TH}>Started by</th>
+                <th className={cn(TH, NUM)}>Turns</th>
+                <th className={cn(TH, NUM)}>Context / call</th>
+                <th className={cn(TH, NUM)}>Tokens</th>
+                <th className={cn(TH, NUM)}>API-equiv $</th>
+              </tr>
+            </thead>
+            <tbody>
+              {threadUsage.slice(0, 20).map((row) => {
+                const detail = row.thread
+                const unverified = (row.cost_sources ?? []).includes('provider_unverified')
+                const title = (
+                  <span className="min-w-0 truncate">{row.label || row.key}</span>
+                )
+                return (
+                  <tr key={row.key}>
+                    <td className={cn(TD, 'max-w-40')}>
+                      {detail && onOpenThread ? (
+                        <button
+                          type="button"
+                          className="fd-focus truncate text-left text-fg-primary underline decoration-border-subtle underline-offset-2 hover:decoration-fg-tertiary"
+                          onClick={() => onOpenThread(detail.workspace, row.key)}
+                          title={row.label || row.key}
+                        >
+                          {title}
+                        </button>
+                      ) : (
+                        <span className="block truncate" title={row.label || row.key}>
+                          {row.label || row.key}
+                        </span>
+                      )}
+                    </td>
+                    <td className={TD}>{detail?.project || '—'}</td>
+                    <td className={cn(TD, 'text-[length:var(--fd-text-xs)]')}>
+                      {detail ? (
+                        <span className="fd-type-mono">
+                          {detail.provider}
+                          {detail.model ? ` · ${detail.model}` : ''}
+                        </span>
+                      ) : (
+                        '—'
+                      )}
+                    </td>
+                    <td className={TD}>{detail?.bot ?? 'User'}</td>
+                    <td className={TD}>
+                      {detail
+                        ? [
+                            USAGE_ORIGINS[detail.origin] ?? detail.origin,
+                            detail.automation,
+                          ]
+                              .filter(Boolean)
+                              .join(' · ')
+                        : '—'}
+                    </td>
+                    <td className={cn(TD, NUM)}>{count(row.totals.turns)}</td>
+                    <td className={cn(TD, NUM)}>
+                      {detail?.avg_context_per_call ? `≈${compact(detail.avg_context_per_call)}` : '—'}
+                    </td>
+                    <td className={cn(TD, NUM)}>
+                      {compact(
+                        row.totals.input_tokens +
+                          row.totals.cache_read_tokens +
+                          row.totals.cache_write_tokens +
+                          row.totals.output_tokens,
+                      )}
+                    </td>
+                    <td
+                      className={cn(TD, NUM, 'text-fg-tertiary')}
+                      title={
+                        unverified
+                          ? 'Provider-reported; the cost unit is unverified'
+                          : 'Provider-reported list-price API equivalent'
+                      }
+                    >
+                      {usd(row.totals.cost_usd)}
+                    </td>
+                  </tr>
+                )
+              })}
+            </tbody>
+          </table>
+        ) : (
+          <p className={EMPTY}>No threads used tokens in this period.</p>
+        )}
+      </SettingsSection>
+
       <SettingsSection title="Recording" description="Everything is stored as plain files in FalconDeck's folder on this Mac.">
         <SettingList>
           <SwitchRow
@@ -713,6 +895,13 @@ export function AnalyticsPanel({ baseUrl, onToast }: AnalyticsPanelProps) {
             checked={status?.settings.enabled ?? true}
             disabled={!status}
             onCheckedChange={(enabled) => saveSettings({ enabled })}
+          />
+          <SwitchRow
+            title="Record token usage"
+            description="Per-turn tokens and provider-reported cost by bot, harness and model. Independent of activity recording above."
+            checked={status?.settings.record_usage ?? true}
+            disabled={!status}
+            onCheckedChange={(record_usage) => saveSettings({ record_usage })}
           />
           <SwitchRow
             title="Keep your messages"
@@ -749,7 +938,9 @@ export function AnalyticsPanel({ baseUrl, onToast }: AnalyticsPanelProps) {
             }
             control={
               <span className="text-[length:var(--fd-text-xs)] tabular-nums text-fg-tertiary">
-                {status ? `${bytes(status.events_bytes)} activity · ${bytes(status.prompts_bytes)} messages` : '—'}
+                {status
+                  ? `${bytes(status.events_bytes)} activity · ${bytes(status.usage_bytes ?? 0)} usage · ${bytes(status.prompts_bytes)} messages`
+                  : '—'}
               </span>
             }
           />
@@ -760,7 +951,9 @@ export function AnalyticsPanel({ baseUrl, onToast }: AnalyticsPanelProps) {
               <p className="min-w-0 flex-1 text-[length:var(--fd-text-sm)] text-fg-secondary">
                 {confirming === 'prompts'
                   ? 'Delete every recorded message you sent? This cannot be undone.'
-                  : 'Delete all recorded activity? This cannot be undone.'}
+                  : confirming === 'usage'
+                    ? 'Delete all recorded token usage? This cannot be undone.'
+                    : 'Delete all recorded activity? This cannot be undone.'}
               </p>
               <Button variant="ghost" size="sm" onClick={() => setConfirming(null)}>
                 Cancel
@@ -776,6 +969,9 @@ export function AnalyticsPanel({ baseUrl, onToast }: AnalyticsPanelProps) {
               </Button>
               <Button variant="ghost" size="sm" disabled={!status} onClick={() => setConfirming('events')}>
                 Delete activity
+              </Button>
+              <Button variant="ghost" size="sm" disabled={!status} onClick={() => setConfirming('usage')}>
+                Delete token usage
               </Button>
             </>
           )}

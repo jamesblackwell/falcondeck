@@ -52,6 +52,7 @@ import {
   type SkillSummary,
   type StartThreadPayload,
   type SuggestThreadTitleResponse,
+  type RouteDecision,
   type ThreadDetail,
   type ThreadDetailRequest,
   type ThreadHandle,
@@ -234,6 +235,7 @@ export type WorkspaceScopedApi = {
   ): Promise<{ ok: boolean; message?: string | null }>
   updateThread(payload: UpdateThreadPayload): Promise<ThreadHandle>
   suggestThreadTitle(workspaceId: string, threadId: string): Promise<SuggestThreadTitleResponse>
+  previewRoute(workspaceId: string, prompt: string): Promise<RouteDecision>
   archiveThread(workspaceId: string, threadId: string): Promise<ThreadSummary>
   archiveAllThreads(workspaceId: string): Promise<{ ok: boolean; message?: string | null }>
   unarchiveThread(workspaceId: string, threadId: string): Promise<ThreadSummary>
@@ -677,6 +679,11 @@ export class HostConnection {
         this.rpc<SuggestThreadTitleResponse>('thread.suggestTitle', {
           workspace_id: workspaceId,
           thread_id: threadId,
+        }),
+      previewRoute: async (workspaceId, prompt) =>
+        this.rpc<RouteDecision>('routing.preview', {
+          workspace_id: workspaceId,
+          prompt,
         }),
       archiveThread: async (workspaceId, threadId) =>
         normalizeThreadSummary(

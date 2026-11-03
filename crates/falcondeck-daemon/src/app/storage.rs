@@ -226,6 +226,13 @@ pub(super) fn merge_preferences_from_value(value: Value) -> FalconDeckPreference
     if let Some(prompt) = value.get("title_suggestion_prompt").and_then(Value::as_str) {
         preferences.title_suggestion_prompt = normalize_title_suggestion_prompt(prompt);
     }
+    if let Some(routing) = value
+        .get("routing")
+        .cloned()
+        .and_then(|value| serde_json::from_value(value).ok())
+    {
+        preferences.routing = super::routing::normalize_routing(routing);
+    }
 
     if let Some(workspace_order) = value.get("workspace_order").and_then(Value::as_array) {
         for workspace_id in workspace_order.iter().filter_map(Value::as_str) {
@@ -501,6 +508,9 @@ pub(super) fn apply_preferences_patch(
     }
     if let Some(prompt) = request.title_suggestion_prompt {
         preferences.title_suggestion_prompt = normalize_title_suggestion_prompt(&prompt);
+    }
+    if let Some(routing) = request.routing {
+        preferences.routing = super::routing::normalize_routing(routing);
     }
     if let Some(workspace_order) = request.workspace_order {
         preferences.workspace_order = workspace_order

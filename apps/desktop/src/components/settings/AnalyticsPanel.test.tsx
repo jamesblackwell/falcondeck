@@ -2,7 +2,11 @@ import { fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
 import { AnalyticsPanel } from './AnalyticsPanel'
-import type { AnalyticsStatus, AnalyticsSummary } from '@falcondeck/client-core'
+import type {
+  AnalyticsStatus,
+  AnalyticsSummary,
+  AnalyticsUsageReport,
+} from '@falcondeck/client-core'
 
 function jsonResponse(body: unknown) {
   return new Response(JSON.stringify(body), { headers: { 'Content-Type': 'application/json' } })
@@ -13,6 +17,39 @@ const status: AnalyticsStatus = {
   folder: '/Users/me/.falcondeck/analytics',
   events_bytes: 2048,
   prompts_bytes: 512,
+}
+
+const usageTotals = {
+  input_tokens: 11058,
+  cache_read_tokens: 11008,
+  cache_write_tokens: 0,
+  output_tokens: 257,
+  turns: 2,
+  cost_usd: 0,
+}
+
+const threadUsage: AnalyticsUsageReport = {
+  days: 7,
+  group: 'thread',
+  totals: { ...usageTotals, cost_usd: 0.1195712 },
+  rows: [
+    {
+      key: 'thread-9',
+      label: 'Nightly repo check',
+      totals: { ...usageTotals, cost_usd: 0.1195712 },
+      cost_sources: ['provider_unverified'],
+      thread: {
+        bot: null,
+        workspace: 'ws-1',
+        project: 'falcondeck',
+        origin: 'automation',
+        automation: 'Nightly repo check',
+        provider: 'grok',
+        model: 'grok-4.7-build',
+        avg_context_per_call: 7405,
+      },
+    },
+  ],
 }
 
 const summary: AnalyticsSummary = {
@@ -64,12 +101,29 @@ const summary: AnalyticsSummary = {
       flags: ['rarely_useful', 'thread_per_run'],
     },
   ],
+  usage: [
+    {
+      bot: 'Juno - CPO',
+      provider: 'claude',
+      model: 'claude-haiku-5-5',
+      totals: {
+        input_tokens: 2,
+        cache_read_tokens: 11886,
+        cache_write_tokens: 18949,
+        output_tokens: 4,
+        turns: 1,
+        cost_usd: 0.00391086,
+      },
+      cost_sources: ['provider'],
+    },
+  ],
 }
 
 function stubDaemon() {
   const fetch = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
     const url = String(input)
     if (url.includes('/api/analytics/summary')) return jsonResponse(summary)
+    if (url.includes('/api/analytics/usage')) return jsonResponse(threadUsage)
     if (url.includes('/api/analytics/prompts')) {
       return jsonResponse(
         url.includes('query=')
@@ -120,6 +174,15 @@ describe('AnalyticsPanel', () => {
     expect(screen.getByText('New thread each run')).toBeInTheDocument()
     expect(screen.getByText(/Every 30 minutes/)).toBeInTheDocument()
     expect(screen.getByText('15m 0s')).toBeInTheDocument()
+    // Token usage by bot, harness and model; cost is a labelled secondary.
+    expect(screen.getByText('claude-haiku-5-5')).toBeInTheDocument()
+    expect(screen.getByText('$0.0039')).toBeInTheDocument()
+    // Top threads: title, origin with the automation name, context per call.
+    expect(screen.getByText('Nightly repo check')).toBeInTheDocument()
+    expect(screen.getByText('grok · grok-4.7-build')).toBeInTheDocument()
+    expect(screen.getByText('Automation · Nightly repo check')).toBeInTheDocument()
+    expect(screen.getByText('≈7.4k')).toBeInTheDocument()
+    expect(screen.getByText('$0.1196')).toBeInTheDocument()
 
     fireEvent.change(screen.getByLabelText('Search your messages'), { target: { value: 'zzz' } })
     expect(await screen.findByText('No messages match.')).toBeInTheDocument()

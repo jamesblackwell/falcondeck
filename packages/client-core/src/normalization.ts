@@ -2426,6 +2426,10 @@ export function normalizePreferences(value: unknown): FalconDeckPreferences {
     title_suggestion_model: normalizeTitleSuggestionModel(raw.title_suggestion_model),
     title_suggestion_prompt: normalizeTitleSuggestionPrompt(raw.title_suggestion_prompt),
     computer_use: normalizeComputerUsePreferences(raw.computer_use),
+    // Daemon-normalized; passed through so older daemons stay undefined.
+    ...(raw.routing && typeof raw.routing === "object"
+      ? { routing: raw.routing }
+      : {}),
   };
 }
 

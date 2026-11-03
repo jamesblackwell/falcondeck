@@ -194,6 +194,7 @@ pub fn router(state: AppState) -> Router {
         .route("/api/analytics", get(analytics_status))
         .route("/api/analytics/settings", post(update_analytics_settings))
         .route("/api/analytics/summary", get(analytics_summary))
+        .route("/api/analytics/usage", get(analytics_usage))
         .route("/api/analytics/thread", get(analytics_thread))
         .route("/api/analytics/prompts", get(analytics_prompts))
         .route("/api/analytics/clear", post(clear_analytics))
@@ -328,6 +329,7 @@ pub fn router(state: AppState) -> Router {
         .route("/api/skills/{skill_name}", delete(uninstall_library_skill))
         .route("/api/providers", get(read_providers).put(update_providers))
         .route("/api/provider-usage", get(read_provider_usage))
+        .route("/api/routing/preview", post(preview_route))
         .route(
             "/api/provider-usage/codex/reset-credits/consume",
             post(consume_codex_reset_credit),
@@ -504,6 +506,34 @@ async fn analytics_summary(
 struct AnalyticsThreadQuery {
     id: String,
     days: Option<u32>,
+}
+
+/// Groupings the usage endpoint accepts.
+const USAGE_GROUPS: [&str; 5] = ["bot", "provider", "model", "thread", "day"];
+
+#[derive(serde::Deserialize)]
+struct AnalyticsUsageQuery {
+    #[serde(default)]
+    days: Option<u32>,
+    #[serde(default)]
+    group: Option<String>,
+}
+
+async fn analytics_usage(
+    State(state): State<AppState>,
+    Query(query): Query<AnalyticsUsageQuery>,
+) -> Result<Json<falcondeck_core::AnalyticsUsageReport>, DaemonError> {
+    let group = query.group.unwrap_or_else(|| "model".to_string());
+    if !USAGE_GROUPS.contains(&group.as_str()) {
+        return Err(DaemonError::BadRequest(format!(
+            "Group usage by one of: {}",
+            USAGE_GROUPS.join(", ")
+        )));
+    }
+    state
+        .analytics_usage(query.days.unwrap_or(30), &group)
+        .await
+        .map(Json)
 }
 
 async fn analytics_thread(
@@ -1345,6 +1375,13 @@ async fn read_provider_usage(
     Query(request): Query<falcondeck_core::ProviderUsageRequest>,
 ) -> Result<Json<falcondeck_core::ProviderUsageOverview>, DaemonError> {
     Ok(Json(state.provider_usage_overview(request.refresh).await))
+}
+
+async fn preview_route(
+    State(state): State<AppState>,
+    Json(request): Json<falcondeck_core::RoutePreviewRequest>,
+) -> Result<Json<falcondeck_core::RouteDecision>, DaemonError> {
+    Ok(Json(state.preview_route(request).await?))
 }
 
 async fn consume_codex_reset_credit(

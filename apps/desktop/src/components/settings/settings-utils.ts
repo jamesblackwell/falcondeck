@@ -22,6 +22,7 @@ import {
   Settings,
   ShieldCheck,
   Terminal,
+  Waypoints,
   Wifi,
 } from "lucide-react";
 
@@ -35,6 +36,7 @@ export type SettingsSectionId =
   | "keyboard"
   | "extensions"
   | "agents"
+  | "routing"
   | "harnesses"
   | "cloud"
   | "connectors"
@@ -157,6 +159,14 @@ export const SETTINGS_GROUPS: SettingsNavGroup[] = [
         icon: Bot,
         settings: ["Status on this computer", "Built in", "Recommended"],
         keywords: ["acp", "claude", "codex", "opencode", "grok", "cursor", "muse", "provider"],
+      },
+      {
+        id: "routing",
+        label: "Routing",
+        description: "Auto model choice for new threads",
+        icon: Waypoints,
+        settings: ["Auto routing", "Allow auto routing", "Try a prompt", "Rules", "Fallback", "Classifier", "Task types"],
+        keywords: ["auto", "model", "jev", "classifier", "cheap", "glm", "router", "delegate", "effort"],
       },
       {
         id: "harnesses",

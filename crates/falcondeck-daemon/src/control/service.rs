@@ -1739,22 +1739,26 @@ impl ControlService {
         input: u64,
         cached: u64,
     ) {
-        let ids: Vec<_> = self
-            .state
-            .lock()
-            .await
-            .runs
-            .iter()
-            .filter(|r| {
-                r.status == AutomationRunStatus::Running
-                    && r.runtime_workspace_id.as_deref() == Some(workspace)
-                    && r.thread_id.as_deref() == Some(thread)
+        let (workspace, thread) = (workspace.to_string(), thread.to_string());
+        // Recording usage must never fail a turn; a missed write is only a
+        // stale run summary.
+        let _ = self
+            .mutate(move |state, _| {
+                for run in state.runs.iter_mut() {
+                    if run.status == AutomationRunStatus::Running
+                        && run.runtime_workspace_id.as_deref() == Some(workspace.as_str())
+                        && run.thread_id.as_deref() == Some(thread.as_str())
+                    {
+                        // Each Claude result carries one turn's delta, and a
+                        // run can emit several results, so usage accumulates.
+                        run.input_tokens = Some(run.input_tokens.unwrap_or(0).saturating_add(input));
+                        run.cached_input_tokens =
+                            Some(run.cached_input_tokens.unwrap_or(0).saturating_add(cached));
+                    }
+                }
+                Ok(((), vec![ControlDomain::Runs]))
             })
-            .map(|r| r.id.clone())
-            .collect();
-        for id in ids {
-            let _ = self.record_run_usage(&id, input, cached).await;
-        }
+            .await;
     }
 
     pub(crate) async fn record_run_usage(

@@ -946,6 +946,123 @@ async fn retains_nested_codex_turn_id_for_steering() {
 }
 
 #[tokio::test]
+async fn codex_turn_usage_records_the_thread_model_selection() {
+    let temp_dir = tempdir().unwrap();
+    let app = AppState::new_with_state_path(
+        "test".to_string(),
+        HashMap::new(),
+        temp_dir.path().join("daemon-state.json"),
+    );
+    insert_claude_workspace_with_session(
+        &app,
+        "workspace-1",
+        "thread-1",
+        "77777777-7777-4777-8777-777777777777",
+        temp_dir.path(),
+    )
+    .await;
+    // The app-server's settings notification carries the selection;
+    // turn/started itself has no model field.
+    ingest_notification(
+        &app,
+        "workspace-1",
+        "thread/settings/updated",
+        json!({
+            "threadId": "thread-1",
+            "threadSettings": { "model": "gpt-6.1-sol", "effort": "medium" }
+        }),
+    )
+    .await
+    .unwrap();
+    ingest_notification(
+        &app,
+        "workspace-1",
+        "turn/started",
+        json!({ "threadId": "thread-1", "turn": { "id": "turn-42" } }),
+    )
+    .await
+    .unwrap();
+    ingest_notification(
+        &app,
+        "workspace-1",
+        "thread/tokenUsage/updated",
+        json!({
+            "threadId": "thread-1", "turnId": "turn-42",
+            "tokenUsage": {
+                "total": {
+                    "totalTokens": 11315, "inputTokens": 11058,
+                    "cachedInputTokens": 11008, "cacheWriteInputTokens": 0,
+                    "outputTokens": 257, "reasoningOutputTokens": 77
+                },
+                "last": {
+                    "totalTokens": 11315, "inputTokens": 11058,
+                    "cachedInputTokens": 11008, "cacheWriteInputTokens": 0,
+                    "outputTokens": 257, "reasoningOutputTokens": 77
+                }
+            }
+        }),
+    )
+    .await
+    .unwrap();
+    ingest_notification(
+        &app,
+        "workspace-1",
+        "turn/completed",
+        json!({
+            "threadId": "thread-1", "turnId": "turn-42", "status": "completed"
+        }),
+    )
+    .await
+    .unwrap();
+
+    // The record lands asynchronously (attribution runs in a task).
+    let analytics_dir = temp_dir.path().join("analytics");
+    let usage_lines = || {
+        let mut lines = Vec::new();
+        let Ok(entries) = std::fs::read_dir(&analytics_dir) else {
+            return lines;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let is_usage = path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name.starts_with("usage-"));
+            if is_usage
+                && let Ok(contents) = std::fs::read_to_string(&path)
+            {
+                lines.extend(contents.lines().map(str::to_string));
+            }
+        }
+        lines
+    };
+    let mut lines: Vec<String> = Vec::new();
+    for _ in 0..200 {
+        app.analytics_status().await;
+        lines = usage_lines();
+        if !lines.is_empty() {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    assert_eq!(lines.len(), 1, "one record for one turn: {lines:?}");
+    let record: serde_json::Value = serde_json::from_str(&lines[0]).unwrap();
+    assert_eq!(record["e"], "usage");
+    // Provider fixed to codex; model from the thread's selection, even though
+    // turn/started carries none.
+    assert_eq!(record["prov"], "codex");
+    assert_eq!(record["model"], "gpt-6.1-sol");
+    assert_eq!(record["effort"], "medium");
+    // Codex input includes cached reads: uncached is the difference.
+    assert_eq!(record["in"], 50);
+    assert_eq!(record["cr"], 11008);
+    assert_eq!(record["out"], 257);
+    assert_eq!(record["think"], 77);
+    assert_eq!(record["calls"], 1);
+    assert_eq!(record["cost_src"], "none");
+}
+
+#[tokio::test]
 async fn retains_streamed_realtime_assistant_and_final_user_transcripts() {
     let temp_dir = tempdir().unwrap();
     let app = AppState::new_with_state_path(

@@ -62,6 +62,8 @@ struct FalconDeckMacApp: App {
                     .keyboardShortcut(NativeCommandDispatcher.menuShortcut(for: "toggleChanges", preferences: preferences))
                 Toggle("Show terminal", isOn: $store.showTerminal)
                     .keyboardShortcut(NativeCommandDispatcher.menuShortcut(for: "toggleTerminal", preferences: preferences))
+                Button("Expand or collapse prompt") { NativeCommandDispatcher.shared.execute("toggleComposerExpanded") }
+                    .keyboardShortcut(NativeCommandDispatcher.menuShortcut(for: "toggleComposerExpanded", preferences: preferences))
             }
         }
     }

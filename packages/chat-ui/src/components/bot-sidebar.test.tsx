@@ -102,6 +102,10 @@ describe("bot sidebar", () => {
         botApi={api()}
         groups={group([
           task("worker", {
+            status: "error",
+            origin: { kind: "agent_spawn", parent_thread_id: bot.thread_id },
+          }),
+          task("asker", {
             status: "waiting_for_input",
             origin: { kind: "agent_spawn", parent_thread_id: bot.thread_id },
           }),
@@ -110,7 +114,54 @@ describe("bot sidebar", () => {
         onSelectThread={vi.fn()}
       />,
     );
-    expect(screen.getByText("Needs you")).toBeInTheDocument();
+    // Failed or waiting children never badge the long-lived bot row.
+    expect(screen.queryByText("Working")).not.toBeInTheDocument();
+    expect(screen.queryByText("Needs you")).not.toBeInTheDocument();
+  });
+
+  it("previews the newest real message, skipping no-action replies and empty children", () => {
+    const { rerender } = render(
+      <BotSidebar
+        focused
+        bots={[bot]}
+        botApi={api()}
+        groups={group([
+          task(bot.thread_id, {
+            workspace_id: "home",
+            updated_at: "2026-11-03T10:00:00Z",
+            last_message_preview: "Shipped the onboarding fix",
+            attention: { unread: false } as ThreadSummary["attention"],
+          }),
+          task("failed-child", {
+            status: "error",
+            updated_at: "2026-11-03T11:00:00Z",
+            origin: { kind: "agent_spawn", parent_thread_id: bot.thread_id },
+          }),
+        ])}
+        selectedThreadId={null}
+        onSelectThread={vi.fn()}
+      />,
+    );
+    expect(screen.getByText("Shipped the onboarding fix")).toBeInTheDocument();
+    expect(screen.queryByText("No messages yet")).not.toBeInTheDocument();
+    rerender(
+      <BotSidebar
+        focused
+        bots={[bot]}
+        botApi={api()}
+        groups={group([
+          task(bot.thread_id, {
+            workspace_id: "home",
+            updated_at: "2026-11-03T10:00:00Z",
+            last_message_preview: "FALCONDECK_NO_ACTION",
+            attention: { unread: false } as ThreadSummary["attention"],
+          }),
+        ])}
+        selectedThreadId={null}
+        onSelectThread={vi.fn()}
+      />,
+    );
+    expect(screen.queryByText("FALCONDECK_NO_ACTION")).not.toBeInTheDocument();
   });
 
   it("pauses a bot in place and archives it out of the working list", async () => {

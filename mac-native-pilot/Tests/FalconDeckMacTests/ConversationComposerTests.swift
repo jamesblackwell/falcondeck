@@ -359,3 +359,51 @@ final class ConversationComposerTests: XCTestCase {
         classes classArray: [AnyClass], searchOptions: [NSPasteboard.ReadingOptionKey: Any],
         using block: @escaping (NSDraggingItem, Int, UnsafeMutablePointer<ObjCBool>) -> Void) {}
 }
+
+final class ComposerHeightPolicyTests: XCTestCase {
+    func testAutoGrowCapIsAboutTripleTheOldCapAndKeepsTheMinimum() {
+        let limits = ComposerHeightPolicy.limits(expanded: false, paneHeight: 2000, chrome: 120)
+        XCTAssertEqual(limits.minimum, ComposerNativeTextView.minimumComposerHeight)
+        XCTAssertEqual(limits.maximum, ComposerNativeTextView.maximumComposerHeight)
+        XCTAssertGreaterThanOrEqual(limits.maximum, 220 * 2.5)
+    }
+
+    func testComposerNeverExceedsSixtyPercentOfThePane() {
+        for expanded in [false, true] {
+            let limits = ComposerHeightPolicy.limits(expanded: expanded, paneHeight: 700, chrome: 120)
+            XCTAssertLessThanOrEqual(limits.maximum + 120, 700 * 0.6 + 0.5)
+            XCTAssertLessThanOrEqual(limits.minimum, limits.maximum)
+        }
+        // A tiny window still keeps a usable one-line editor.
+        let tiny = ComposerHeightPolicy.limits(expanded: true, paneHeight: 200, chrome: 150)
+        XCTAssertEqual(tiny.minimum, ComposerNativeTextView.minimumComposerHeight)
+        XCTAssertEqual(tiny.maximum, ComposerNativeTextView.minimumComposerHeight)
+    }
+
+    func testExpandedModeRestsAtHalfThePaneWithinTheBudget() {
+        let limits = ComposerHeightPolicy.limits(expanded: true, paneHeight: 1000, chrome: 80)
+        XCTAssertEqual(limits.minimum, 500)
+        XCTAssertEqual(limits.maximum, 520)
+        let crowded = ComposerHeightPolicy.limits(expanded: true, paneHeight: 1000, chrome: 200)
+        XCTAssertEqual(crowded.minimum, 400, "Heavy chrome trims the resting height to the 60% budget")
+    }
+
+    @MainActor func testFittingSizeHonorsCallerLimits() throws {
+        let scrollView = NSScrollView(frame: NSRect(x: 0, y: 0, width: 360, height: 164))
+        scrollView.hasVerticalScroller = true
+        let editor = ComposerNativeTextView(frame: .zero)
+        editor.isVerticallyResizable = true
+        editor.textContainer?.widthTracksTextView = true
+        editor.font = .systemFont(ofSize: 15)
+        scrollView.documentView = editor
+        editor.string = "Short"
+        let tall = try XCTUnwrap(ConversationTextEditor.fittingSize(width: 360, scrollView: scrollView, minimum: 300, maximum: 400))
+        XCTAssertEqual(tall.height, 300)
+        editor.string = String(repeating: "Line\n", count: 200)
+        let capped = try XCTUnwrap(ConversationTextEditor.fittingSize(width: 360, scrollView: scrollView, minimum: 56, maximum: 250))
+        XCTAssertEqual(capped.height, 250)
+        editor.string = ""
+        let cleared = try XCTUnwrap(ConversationTextEditor.fittingSize(width: 360, scrollView: scrollView))
+        XCTAssertEqual(cleared.height, ComposerNativeTextView.minimumComposerHeight)
+    }
+}

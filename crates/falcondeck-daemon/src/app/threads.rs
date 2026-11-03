@@ -45,7 +45,9 @@ use crate::{
     claude::{
         self, ClaudeRuntime, ClaudeStreamLine, encode_control_response_error,
         is_resume_startup_failure, live_context_usage, parse_claude_stream_lines,
-        result_is_cancelled, result_model_context_window, synthetic_permission_requests,
+        result_is_cancelled, result_model_context_window, result_model_usage_is_cumulative,
+        result_num_turns, result_turn_model_usage, result_usage_service_tier,
+        synthetic_permission_requests,
     },
     codex::CodexSessionLease,
     error::DaemonError,
@@ -1565,6 +1567,10 @@ impl AppState {
         stderr: Option<tokio::process::ChildStderr>,
         resume_interrupted: bool,
     ) {
+        // A fresh monitor means a fresh CLI process (a parked reuse restarts
+        // nothing): its cumulative modelUsage starts from zero, so the
+        // differencing baselines must not carry the old process's totals.
+        self.reset_claude_usage_baselines(&thread_id);
         // Assistant prose and thinking accumulate per API message, so text
         // that follows a tool call starts a fresh conversation item below the
         // tool card instead of merging into the pre-tool prose. Items are
@@ -1844,19 +1850,55 @@ impl AppState {
                                 }
                                 parked_between_turns = false;
                             }
-                            if value.get("type").and_then(Value::as_str) == Some("result")
-                                && let Some(usage) = value.get("usage")
-                            {
-                                let count = |key: &str| usage.get(key).and_then(Value::as_u64);
-                                if let Some(input) = count("input_tokens") {
+                            if value.get("type").and_then(Value::as_str) == Some("result") {
+                                // `modelUsage` is the billed turn aggregate
+                                // (subagents included); `result.usage` is only
+                                // the last API call. `model_usage_since_last_result`
+                                // is preferred because the CLI process is
+                                // long-lived and emits one result per turn;
+                                // the cumulative fallback is differenced
+                                // against what the process last reported.
+                                if let Some(models) = result_turn_model_usage(&value) {
+                                    if !models.is_empty() {
+                                        let cumulative =
+                                            result_model_usage_is_cumulative(&value);
+                                        let tier = result_usage_service_tier(&value);
+                                        let calls = result_num_turns(&value);
+                                        if let Some((input, cached)) = self.record_claude_turn_usage(
+                                            &workspace_id,
+                                            &thread_id,
+                                            &models,
+                                            cumulative,
+                                            tier,
+                                            calls,
+                                        ) {
+                                            self.control()
+                                                .record_claude_run_usage(
+                                                    &workspace_id,
+                                                    &thread_id,
+                                                    input,
+                                                    cached,
+                                                )
+                                                .await;
+                                        }
+                                    }
+                                } else if let Some(usage) = value.get("usage")
+                                    && let Some(input) =
+                                        usage.get("input_tokens").and_then(Value::as_u64)
+                                {
+                                    // CLI too old for modelUsage: the last API
+                                    // call is the only usage it reports.
+                                    let count = |key: &str| {
+                                        usage.get(key).and_then(Value::as_u64).unwrap_or(0)
+                                    };
                                     self.control()
                                         .record_claude_run_usage(
                                             &workspace_id,
                                             &thread_id,
                                             input.saturating_add(
-                                                count("cache_creation_input_tokens").unwrap_or(0),
+                                                count("cache_creation_input_tokens"),
                                             ),
-                                            count("cache_read_input_tokens").unwrap_or(0),
+                                            count("cache_read_input_tokens"),
                                         )
                                         .await;
                                 }

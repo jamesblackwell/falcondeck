@@ -15,6 +15,8 @@ import type {
   AnalyticsStatus,
   AnalyticsSummary,
   AnalyticsThreadActivity,
+  AnalyticsUsageGrouping,
+  AnalyticsUsageReport,
   AgentProvider,
   CollaborationModeSummary,
   CreateScheduledTaskPayload,
@@ -70,6 +72,7 @@ import type {
   ThreadSummary,
   TurnInputItem,
   SuggestThreadTitleResponse,
+  RouteDecision,
   UpdatePreferencesPayload,
   FalconDeckBackup,
   BackupSummary,
@@ -689,6 +692,9 @@ export function createDaemonApiClient(baseUrl: string) {
     async analyticsSummary(days: number) {
       return parseJson<AnalyticsSummary>(await fetch(`${baseUrl}/api/analytics/summary?${new URLSearchParams({ days: String(days) })}`));
     },
+    async analyticsUsage(days: number, group: AnalyticsUsageGrouping = "model") {
+      return parseJson<AnalyticsUsageReport>(await fetch(`${baseUrl}/api/analytics/usage?${new URLSearchParams({ days: String(days), group })}`));
+    },
     async analyticsThread(id: string, days = 2) {
       return parseJson<AnalyticsThreadActivity>(await fetch(`${baseUrl}/api/analytics/thread?${new URLSearchParams({ id, days: String(days) })}`));
     },
@@ -790,6 +796,16 @@ export function createDaemonApiClient(baseUrl: string) {
             },
           ),
         ),
+      );
+    },
+    /** Classifies a brief and returns the model auto routing would pick. */
+    async previewRoute(workspaceId: string, prompt: string) {
+      return parseJson<RouteDecision>(
+        await fetch(`${baseUrl}/api/routing/preview`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ workspace_id: workspaceId, prompt }),
+        }),
       );
     },
     async suggestThreadTitle(workspaceId: string, threadId: string) {

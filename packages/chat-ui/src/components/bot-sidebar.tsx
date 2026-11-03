@@ -67,44 +67,50 @@ function errorMessage(error: unknown) {
   return error instanceof Error ? error.message : String(error);
 }
 
-function botActivity(bot: BotProfile, tasks: ThreadSummary[]) {
-  const related = tasks.filter(
+/** The bot's home conversation plus the tasks it spawned (any home). */
+function botThreads(bot: BotProfile, tasks: ThreadSummary[]) {
+  return tasks.filter(
     (task) =>
       task.id === bot.thread_id ||
       (task.origin?.kind === "agent_spawn" &&
-        (task.origin.parent_thread_id === bot.thread_id || bot.previous_thread_ids?.includes(task.origin.parent_thread_id))),
+        (task.origin.parent_thread_id === bot.thread_id ||
+          bot.previous_thread_ids?.includes(task.origin.parent_thread_id))),
   );
-  if (
-    related.some(
-      (task) =>
-        task.status === "waiting_for_input" || task.status === "error",
-    )
-  )
-    return "needs_input";
-  return related.some((task) => task.status === "running") ? "working" : null;
+}
+
+/**
+ * Bot rows only report work in progress. A child task that errored or is
+ * waiting stays that way until someone reruns it, so rolling it up into the
+ * bot pinned a "Needs you" badge on long-lived coordinators. The task itself
+ * and the bot's own thread view still surface those states.
+ */
+function botActivity(bot: BotProfile, tasks: ThreadSummary[]) {
+  return botThreads(bot, tasks).some((task) => task.status === "running")
+    ? "working"
+    : null;
+}
+
+/** Automation runs that found nothing to do reply with this marker. */
+const NO_ACTION_MARKER = /^\s*FALCONDECK_NO_ACTION\s*$/;
+
+function realPreview(task: ThreadSummary) {
+  const text = task.last_message_preview?.trim();
+  return text && !NO_ACTION_MARKER.test(text) ? text : null;
 }
 
 function botPreview(bot: BotProfile, tasks: ThreadSummary[]) {
-  const related = tasks
-    .filter(
-      (task) =>
-        task.id === bot.thread_id ||
-        (task.origin?.kind === "agent_spawn" &&
-          (task.origin.parent_thread_id === bot.thread_id ||
-            bot.previous_thread_ids?.includes(task.origin.parent_thread_id))),
-    )
-    .sort((a, b) => b.updated_at.localeCompare(a.updated_at));
+  const related = botThreads(bot, tasks).sort((a, b) =>
+    b.updated_at.localeCompare(a.updated_at),
+  );
   const latest = related[0];
-  return {
-    latest,
-    text:
-      latest?.last_message_preview ??
-      (latest?.status === "running"
-        ? "Working…"
-        : latest?.status === "waiting_for_input"
-          ? "Waiting for you"
-          : "No messages yet"),
-  };
+  if (latest?.status === "running") return { latest, text: "Working…" };
+  // Newest real message across the bot's threads; a failed child or a
+  // no-action automation reply has none, so fall back to an older one.
+  for (const task of related) {
+    const text = realPreview(task);
+    if (text) return { latest, text };
+  }
+  return { latest, text: null };
 }
 
 function botTimeAgo(dateStr: string | undefined) {
@@ -242,9 +248,6 @@ export function BotSidebar({
                     ) : (
                       <Bot aria-hidden="true" className="h-6 w-6 text-fg-muted" />
                     )}
-                    {activity === "needs_input" ? (
-                      <span className="absolute -right-0.5 -top-0.5 h-3 w-3 rounded-full border-2 border-surface-1 bg-warning" />
-                    ) : null}
                   </span>
                   <span className="min-w-0 flex-1">
                     <span className="flex items-baseline gap-2">
@@ -279,9 +282,7 @@ export function BotSidebar({
                   selected ? "text-accent" : "text-fg-muted",
                 )}
               >
-                {activity === "needs_input" ? (
-                  <span className="h-2.5 w-2.5 rounded-full bg-warning shadow-[0_0_0_3px_var(--fd-warning-muted)]" />
-                ) : icon ? (
+                {icon ? (
                   <BotMark icon={icon} />
                 ) : (
                   <Bot aria-hidden="true" className="h-3.5 w-3.5" />
@@ -301,11 +302,7 @@ export function BotSidebar({
               </span>
                 </>
               )}
-              {activity === "needs_input" ? (
-                <span className="fd-type-meta shrink-0 text-warning">
-                  Needs you
-                </span>
-              ) : activity === "working" ? (
+              {activity === "working" ? (
                 <>
                   <ActivityDiamond size="xs" />
                   <span className="sr-only">Working</span>
@@ -364,7 +361,6 @@ export function BotSidebar({
           </button>
           {showArchived
             ? archivedBots.map((bot) => {
-                const activity = botActivity(bot, tasks);
                 const home = tasks.find(
                   (task) =>
                     task.id === bot.thread_id &&
@@ -407,15 +403,9 @@ export function BotSidebar({
                       <span className="fd-type-supporting min-w-0 flex-1 truncate text-fg-muted group-hover:text-fg-secondary">
                         {bot.name}
                       </span>
-                      {activity === "needs_input" ? (
-                        <span className="fd-type-meta shrink-0 text-warning">
-                          Needs you
-                        </span>
-                      ) : (
-                        <span className="fd-type-meta shrink-0 text-fg-muted">
-                          Archived
-                        </span>
-                      )}
+                      <span className="fd-type-meta shrink-0 text-fg-muted">
+                        Archived
+                      </span>
                     </button>
                     <button
                       type="button"

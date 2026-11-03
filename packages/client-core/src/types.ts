@@ -468,6 +468,8 @@ export type FalconDeckPreferences = {
   title_suggestion_model?: string;
   /** Style instructions for generated titles and on-demand rename suggestions. */
   title_suggestion_prompt?: string;
+  /** Auto routing for new threads. Older daemons omit it (routing unsupported). */
+  routing?: RoutingPreferences;
   /** Older daemons omit this; `normalizePreferences` always fills it in. */
   computer_use?: ComputerUsePreferences;
 };
@@ -527,8 +529,22 @@ export type BotApi = {
 };
 
 /** Local activity analytics (desktop only; never sent over the relay). */
-export type AnalyticsSettings = { enabled: boolean; record_prompts: boolean; retention_months: number };
-export type AnalyticsStatus = { settings: AnalyticsSettings; folder: string; events_bytes: number; prompts_bytes: number };
+export type AnalyticsSettings = {
+  enabled: boolean;
+  record_prompts: boolean;
+  /** Older daemons omit it; defaults to true. */
+  record_usage?: boolean;
+  retention_months: number;
+};
+export type AnalyticsStatus = {
+  settings: AnalyticsSettings;
+  folder: string;
+  events_bytes: number;
+  prompts_bytes: number;
+  /** Older daemons omit these. */
+  usage_bytes?: number;
+  dropped_usage_records?: number;
+};
 export type AnalyticsTotals = {
   user_messages: number;
   scheduled_messages: number;
@@ -619,6 +635,58 @@ export type AnalyticsAutomation = {
   /** rarely_useful, very_frequent, failing, thread_per_run */
   flags?: string[];
 };
+/** Token counts attributed to finished turns; `input_tokens` is uncached input. */
+export type AnalyticsUsageTotals = {
+  input_tokens: number;
+  cache_read_tokens: number;
+  cache_write_tokens: number;
+  output_tokens: number;
+  turns: number;
+  /** Provider-reported API-equivalent USD, where a harness reports one. */
+  cost_usd: number;
+};
+/** One row of a usage aggregation. */
+export type AnalyticsUsageRow = {
+  /** Grouping value: bot id, provider, model, thread id or `YYYY-MM-DD`. */
+  key: string;
+  /** Display label, resolved when the report was computed. */
+  label: string;
+  totals: AnalyticsUsageTotals;
+  /** Cost sources that contributed: provider, provider_unverified. */
+  cost_sources: string[];
+  /** Thread detail, present on `group=thread` rows. */
+  thread?: AnalyticsUsageThread;
+};
+/** Per-thread detail on a `group=thread` usage row. */
+export type AnalyticsUsageThread = {
+  bot: string | null;
+  workspace: string;
+  project: string;
+  /** user, agent_spawn, scheduled or automation. */
+  origin: string;
+  automation: string | null;
+  /** Dominant provider and model (the busiest combination). */
+  provider: string;
+  model: string;
+  /** Average prompt context per model call, in tokens; null when no record
+   * reported a call count. */
+  avg_context_per_call?: number;
+};
+export type AnalyticsUsageGrouping = "bot" | "provider" | "model" | "thread" | "day";
+export type AnalyticsUsageReport = {
+  days: number;
+  group: AnalyticsUsageGrouping;
+  totals: AnalyticsUsageTotals;
+  rows: AnalyticsUsageRow[];
+};
+/** Token usage by bot, harness and model, for the Settings table. */
+export type AnalyticsUsage = {
+  bot: string | null;
+  provider: string;
+  model: string;
+  totals: AnalyticsUsageTotals;
+  cost_sources: string[];
+};
 export type AnalyticsSummary = {
   days: number;
   generated_at: string;
@@ -634,6 +702,7 @@ export type AnalyticsSummary = {
   triggers?: AnalyticsTriggers;
   waiting?: AnalyticsWaiting;
   automations?: AnalyticsAutomation[];
+  usage?: AnalyticsUsage[];
 };
 export type AnalyticsPrompt = {
   at: string;
@@ -643,7 +712,7 @@ export type AnalyticsPrompt = {
   provider: string;
   text: string;
 };
-export type AnalyticsClearTarget = "prompts" | "events" | "all";
+export type AnalyticsClearTarget = "prompts" | "events" | "usage" | "all";
 
 export type ComputerUseBackend = "cua_driver" | "agent_desktop";
 
@@ -748,6 +817,65 @@ export type UpdatePreferencesPayload = {
   utility_models?: UpdateUtilityModelPreferences | null;
   title_suggestion_model?: string;
   title_suggestion_prompt?: string;
+  /** Replaces the whole routing configuration. */
+  routing?: RoutingPreferences;
+};
+
+/** One harness + model + effort choice in the routing table. */
+export type RoutingTarget = {
+  provider: string;
+  model_id?: string | null;
+  reasoning_effort?: string | null;
+};
+
+/** A task type the classifier chooses between. */
+export type RoutingTaskType = { id: string; description: string };
+
+/** Conditions on the classification, then targets best first. */
+export type RoutingRule = {
+  label: string;
+  /** Empty matches any task type. */
+  task_types: string[];
+  /** 1–5, rounded classifier score. */
+  min_difficulty?: number | null;
+  max_difficulty?: number | null;
+  /** null ignores the flag. */
+  production_risk?: boolean | null;
+  needs_social?: boolean | null;
+  targets: RoutingTarget[];
+};
+
+/** Auto routing settings (Settings → Routing). */
+export type RoutingPreferences = {
+  enabled: boolean;
+  classifier_model: string;
+  /** Task-type confidence (0–100) below which the fallback is used. */
+  min_confidence_percent: number;
+  /** Skip a target while its subscription is at or above this use (0–100). */
+  usage_ceiling_percent: number;
+  task_types: RoutingTaskType[];
+  rules: RoutingRule[];
+  fallback: RoutingTarget[];
+};
+
+export type RouteClassification = {
+  task_type: string;
+  confidence_percent: number;
+  /** 1.0–5.0 */
+  difficulty: number;
+  production_risk_percent: number;
+  needs_social_percent: number;
+  classifier_model: string;
+  latency_ms: number;
+};
+
+export type RouteDecision = {
+  classification: RouteClassification | null;
+  /** Matched rule label; null means the fallback list. */
+  rule: string | null;
+  target: RoutingTarget | null;
+  skipped: { target: RoutingTarget; reason: string }[];
+  reason: string;
 };
 
 export type ToolArtifactKind =
