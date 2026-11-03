@@ -175,3 +175,9 @@ it('clears provider-specific options only when switching providers', () => {
     target: { reasoning_effort: null, collaboration_mode_id: null, approval_policy: null },
   })
 })
+
+it('clears model and effort pins for existing tasks but preserves managed pins', () => {
+  const draft = automationDraftFromDefinition({ ...automation, target: { ...automation.target, reasoning_effort: 'low' } })
+  expect(automationDraftArguments(draft)).toMatchObject({ target: { model_id: 'gpt-5', reasoning_effort: 'low' } })
+  expect(automationDraftArguments({ ...draft, threadKind: 'existing' })).toMatchObject({ target: { model_id: null, reasoning_effort: null } })
+})

@@ -46,6 +46,39 @@ describe('AutomationEditorSheet', () => {
       .toEqual({ checked: false })
   })
 
+  it('hides model pins for an existing task', () => {
+    const renderer = renderComponent(
+      <AutomationEditorSheet
+        target={{
+          kind: 'edit',
+          automation: {
+            id: 'automation-1',
+            revision: 4,
+            name: 'Native Support Ticket Sweep',
+            trigger: { kind: 'cron', expression: '0 8-17 * * 1-5', timezone: 'UTC' },
+            task: { kind: 'prompt', instruction: 'Sweep.' },
+            target: {
+              workspace_path: '/tmp/project',
+              provider: 'grok',
+              thread: { kind: 'existing', thread_id: 'grok-thread-abc' },
+            },
+            state: 'enabled',
+            concurrency_policy: 'skip',
+            misfire_policy: 'skip',
+            elevated: false,
+            required_connectors: [],
+            created_at: '2026-08-20T08:00:00Z',
+            updated_at: '2026-08-20T08:00:00Z',
+          },
+        }}
+        settings={null}
+        onClose={vi.fn()}
+        onSubmit={vi.fn()}
+      />,
+    )
+    expect(renderer.root.findAllByProps({ accessibilityLabel: 'Model id' })).toHaveLength(0)
+  })
+
   it('coalesces repeated create taps while the first submission is pending', async () => {
     let resolve!: () => void
     const pending = new Promise<void>((done) => {

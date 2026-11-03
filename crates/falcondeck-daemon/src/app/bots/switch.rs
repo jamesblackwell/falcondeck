@@ -105,12 +105,14 @@ impl AppState {
         );
         // Aliases are durable before either secondary store is updated. Admission
         // resolves aliases too, so a crash here cannot deliver to the retired home.
+        let home = self.thread_summary(&bot.workspace_id, &new_id).await?;
         self.control()
             .repoint_bot_automations(
                 &old.id,
                 &new_id,
                 &provider,
-                &self.thread_summary(&bot.workspace_id, &new_id).await?.agent,
+                &home.agent,
+                home.origin.as_ref(),
             )
             .await
             .map_err(|error| DaemonError::Process(error.0.message))?;

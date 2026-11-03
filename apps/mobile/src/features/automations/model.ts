@@ -176,7 +176,8 @@ export function automationDraftArguments(draft: AutomationDraft): Record<string,
         : draft.threadKind === 'existing'
           ? { kind: 'existing', thread_id: draft.threadId.trim() }
           : { kind: 'new_each_run' },
-      model_id: draft.modelId.trim() || null,
+      model_id: draft.threadKind === 'existing' ? null : draft.modelId.trim() || null,
+      ...(draft.threadKind === 'existing' ? { reasoning_effort: null } : {}),
       permission_mode: draft.permissionMode.trim() || null,
       sandbox_mode: draft.sandboxMode.trim() || null,
       // Provider/thread edits intentionally clear now-incompatible options.

@@ -162,13 +162,14 @@ appear only when a single automation is read explicitly.
 
 ## Scheduled model and effort overrides
 
-Existing/current tasks and managed tasks that already have a thread id use their
-own model and reasoning effort. Do not send `target.model_id` or
-`target.reasoning_effort` with those targets: create/update rejects them.
+Existing/current targets keep their own model and reasoning effort. Do not send
+`target.model_id` or `target.reasoning_effort` with those targets: create/update
+rejects them. Managed targets may set both fields, including after the first run.
+Pins apply when a task is created or its automation origin names this automation;
+a managed id pointing at an unrelated task keeps that task's settings instead.
 Switching a home conversation to a cheaper model can rewrite its entire cached
 context twice, when the automation runs and when normal work resumes. For a
 cheaper scheduled model, choose `new_each_run`, with `run_as_bot` for bot work.
-An unassigned managed task may set model/effort for its first native task only.
-Old stored pins are ignored on reused tasks; `automation.health` flags them as
-`reused_thread_model_pin` with a fix hint. Renames and other edits that omit the
-target remain possible; no saved automation is migrated automatically.
+`automation.health` flags stored pins on unowned reused tasks as
+`reused_thread_model_pin`, with a fix hint. No saved automation is migrated
+automatically.

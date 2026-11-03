@@ -366,8 +366,8 @@ describe("AutomationsView editor", () => {
     });
   });
 
-  it("edits preserve the stored thread, skills and schedule anchor", async () => {
-    const { executeCalls } = stubControl();
+  it("renames a pinned managed automation after its first run using the full editor payload", async () => {
+    const { executeCalls } = stubControl({ automation: { ...automation, target: { ...automation.target, model_id: "haiku", reasoning_effort: "low" } } });
     await renderView();
     fireEvent.click(screen.getByRole("button", { name: "Edit" }));
     await screen.findByText("Edit automation");
@@ -385,6 +385,8 @@ describe("AutomationsView editor", () => {
         name: "Renamed",
         target: {
           thread: { kind: "managed", thread_id: "thread-9" },
+          model_id: "haiku",
+          reasoning_effort: "low",
           selected_skills: ["inbox-triage"],
         },
       });

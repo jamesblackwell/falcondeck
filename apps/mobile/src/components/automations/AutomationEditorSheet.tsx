@@ -237,14 +237,16 @@ export const AutomationEditorSheet = memo(function AutomationEditorSheet({
               mono
             />
           ) : null}
-          <Field
+          {draft.threadKind === 'existing' ? (
+            <Text>Existing tasks keep their own model and effort. For a cheaper model, use a fresh run with run_as_bot for bot work.</Text>
+          ) : <Field
             label="Model id"
             value={draft.modelId}
             onChangeText={(value) => set('modelId', value)}
             placeholder="Provider default"
             autoCapitalize="none"
             mono
-          />
+          />}
           <Field
             label="Permission mode"
             value={draft.permissionMode}

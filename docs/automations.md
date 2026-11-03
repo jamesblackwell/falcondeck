@@ -40,22 +40,24 @@ Existing saved automations are never migrated or rewritten by these controls.
 
 ## Model and context size
 
-`target.model_id` and `target.reasoning_effort` are creation-time overrides only.
-Creates and target updates reject either field for existing/current threads or
-managed threads with a remembered id. Use `new_each_run`, with `run_as_bot` for
-bot work, to run a cheaper model without switching a home conversation's model.
-Fresh, unassigned managed tasks and `new_each_run` still honour both fields.
+`target.model_id` and `target.reasoning_effort` are allowed for managed tasks,
+with or without a remembered thread id, and for `new_each_run`. Creates and
+target updates reject either field for existing/current targets. For cheaper
+bot work without switching a home conversation's model, use `new_each_run`
+with `run_as_bot`.
 
-At dispatch, the scheduler tracks whether it actually created a native task.
-Reused tasks receive no model/effort override, even for legacy definitions with
-stored pins; their own settings win. If a managed task must be recreated because
-its old native task disappeared, the new task still receives the creation-time
-model and effort. A rename or task-only update that omits `target` remains valid.
+At dispatch, the scheduler applies pins when it creates a native task or when
+the thread's `ThreadOrigin::Automation` names this automation. Dedicated managed
+threads therefore retain their pinned model across runs and editor saves.
+Otherwise the thread's own model and effort win, even if a managed id points at
+an unrelated thread. Bot harness switches clear model/effort pins when repointing
+automations to a home thread they do not own.
 
-`automation.health` reports `reused_thread_model_pin` for stored pins on reused
-targets, including pins equal to the current model. Its one-line hint recommends
-clearing both fields or using fresh bot runs. This is configuration advice, not
-proof that a switch happened. Existing definitions are not modified automatically.
+`automation.health` reports `reused_thread_model_pin` for stored pins targeting
+a thread this automation does not own, including pins equal to its current
+model. Its one-line hint recommends clearing both fields or using fresh bot
+runs. This is configuration advice, not proof that a switch happened. Existing
+definitions are not modified automatically.
 
 `target.claude_autocompact_tokens` optionally sets a Claude window on managed
 and new-each-run tasks. Existing/current targets retain their interactive settings;

@@ -1850,6 +1850,7 @@ fn summarize_automations(
     definitions: &[falcondeck_core::control::Automation],
     days: u32,
     bot_home_ids: &HashSet<String>,
+    thread_owners: &HashMap<String, String>,
 ) -> Vec<AnalyticsAutomation> {
     use falcondeck_core::control::{
         AutomationRunStatus as Status, AutomationState, AutomationThreadTarget,
@@ -1965,7 +1966,10 @@ fn summarize_automations(
                 {
                     summary.flags.push("large_reused_context".into());
                 }
-                if crate::control::automations::reused_thread_model_pin(&definition.target) {
+                let owned = reused_id.is_some_and(|thread| {
+                    thread_owners.get(thread) == Some(&definition.id)
+                });
+                if crate::control::automations::reused_thread_model_pin(&definition.target, owned) {
                     summary.flags.push("reused_thread_model_pin".into());
                 }
                 summary.id = Some(id);
@@ -2642,10 +2646,25 @@ impl AppState {
             .into_iter()
             .map(|bot| bot.thread_id)
             .collect();
+        let thread_owners = self
+            .inner
+            .workspaces
+            .lock()
+            .await
+            .values()
+            .flat_map(|workspace| workspace.threads.values())
+            .filter_map(|thread| match &thread.summary.origin {
+                Some(falcondeck_core::ThreadOrigin::Automation { automation_id, .. }) => {
+                    Some((thread.summary.id.clone(), automation_id.clone()))
+                }
+                _ => None,
+            })
+            .collect();
         let summary = tokio::task::spawn_blocking(move || {
             let mut summary = summarize(read_records(&dir, since), &labels, days);
             summary.usage = usage_rollup(&read_usage_records(&dir, since), &labels);
-            summary.automations = summarize_automations(runs, &definitions, days, &bot_home_ids);
+            summary.automations =
+                summarize_automations(runs, &definitions, days, &bot_home_ids, &thread_owners);
             summary
         })
         .await
@@ -2720,7 +2739,7 @@ impl AppState {
                     "cache_cold_reuse": "reuses a task with any scanned gap in (cache TTL minus 5 minutes, TTL plus 30 minutes]",
                     "bot_home_frequent": "targets a bot home more often than every four hours",
                     "large_reused_context": "reused task had over 100k context tokens at a run start in this period",
-                    "reused_thread_model_pin": "Stored model/effort pins are ignored on reused tasks. Clear target.model_id and target.reasoning_effort, or use new_each_run with run_as_bot for cheaper bot work.",
+                    "reused_thread_model_pin": "Stored model/effort pins are ignored on tasks this automation does not own. Clear target.model_id and target.reasoning_effort, or use new_each_run with run_as_bot for cheaper bot work.",
                 },
                 "automations": summary.automations,
             }),
@@ -3478,7 +3497,7 @@ mod tests {
     }
 
     #[test]
-    fn model_pin_health_flag_tracks_reused_not_fresh_targets() {
+    fn model_pin_health_flag_exempts_owned_tasks() {
         let mut definition: falcondeck_core::control::Automation = serde_json::from_value(json!({
             "id":"a","revision":1,"name":"Check","trigger":{"kind":"once","run_at":"2026-12-01T00:00:00Z"},
             "task":{"kind":"prompt","instruction":"Check"},"target":{"workspace_path":"/tmp","provider":"claude","thread":{"kind":"managed"}},
@@ -3506,19 +3525,30 @@ mod tests {
             for effort_only in [false, true] {
                 definition.target.model_id = (!effort_only).then(|| "haiku".into());
                 definition.target.reasoning_effort = effort_only.then(|| "low".into());
-                let health = summarize_automations(
-                    vec![],
-                    std::slice::from_ref(&definition),
-                    7,
-                    &HashSet::new(),
-                );
-                assert_eq!(
-                    health[0]
-                        .flags
-                        .iter()
-                        .any(|f| f == "reused_thread_model_pin"),
-                    reused
-                );
+                for owner in ["a", "other"] {
+                    let owners = [("remembered".to_string(), owner.to_string())]
+                        .into_iter()
+                        .collect();
+                    let health = summarize_automations(
+                        vec![],
+                        std::slice::from_ref(&definition),
+                        7,
+                        &HashSet::new(),
+                        &owners,
+                    );
+                    let owned = owner == "a"
+                        && matches!(
+                            definition.target.thread,
+                            Target::Managed { thread_id: Some(_) }
+                        );
+                    assert_eq!(
+                        health[0]
+                            .flags
+                            .iter()
+                            .any(|f| f == "reused_thread_model_pin"),
+                        reused && !owned
+                    );
+                }
             }
         }
     }
@@ -3538,6 +3568,7 @@ mod tests {
             std::slice::from_ref(&definition),
             7,
             &homes,
+            &HashMap::new(),
         );
         assert_eq!(
             health[0].flags,
@@ -3553,12 +3584,13 @@ mod tests {
             std::slice::from_ref(&definition),
             7,
             &HashSet::new(),
+            &HashMap::new(),
         );
         assert_eq!(health[0].flags, ["cache_cold_reuse"]);
         let mut fresh = definition;
         fresh.target.thread = falcondeck_core::control::AutomationThreadTarget::NewEachRun;
         assert!(
-            summarize_automations(vec![], &[fresh], 7, &homes)[0]
+            summarize_automations(vec![], &[fresh], 7, &homes, &HashMap::new())[0]
                 .flags
                 .is_empty()
         );
@@ -3585,7 +3617,7 @@ mod tests {
         }
         // A healthy daily task.
         runs.push(run("d0", "Daily", "succeeded"));
-        let automations = summarize_automations(runs, &[], 1, &HashSet::new());
+        let automations = summarize_automations(runs, &[], 1, &HashSet::new(), &HashMap::new());
         let find = |name: &str| automations.iter().find(|a| a.name == name).unwrap();
         let monitor = find("Monitor");
         assert_eq!(

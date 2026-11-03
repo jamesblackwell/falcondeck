@@ -112,7 +112,7 @@ impl AppState {
                 for old in &bot.previous_thread_ids {
                     if let Err(error) = self
                         .control()
-                        .repoint_bot_automations(old, &bot.thread_id, &home.provider, &home.agent)
+                        .repoint_bot_automations(old, &bot.thread_id, &home.provider, &home.agent, home.origin.as_ref())
                         .await
                     {
                         tracing::warn!(error = %error.0.message, "failed to reconcile switched bot schedules");

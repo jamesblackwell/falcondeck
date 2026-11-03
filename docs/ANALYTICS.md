@@ -129,8 +129,9 @@ outcome, with review flags:
 - `thread_per_run`: a `new_each_run` task that used more than three threads.
 - `cache_cold_reuse`: reused task with any scanned gap in `(TTL−5min, TTL+30min]`;
   Claude's measured one-hour TTL is currently the only registered TTL.
-- `reused_thread_model_pin`: stored model/effort pins on existing/current or
-  assigned managed targets; runtime ignores them. Clear both fields, or use
+- `reused_thread_model_pin`: stored model/effort pins targeting a thread not
+  owned by this automation (its origin does not name the automation); runtime
+  ignores them. Dedicated managed tasks are exempt. Clear both fields, or use
   `new_each_run` with `run_as_bot` for cheaper bot work.
 - `bot_home_frequent`: bot home task scheduled more often than every four hours.
 - `large_reused_context`: managed/existing task with over 100k context tokens

@@ -95,3 +95,8 @@ it("preserves and validates approved shell pre-check fields", () => {
   expect(draftIsSubmittable({ ...draft, precheckTimeout: "0" })).toContain("1–300");
   expect(draftIsElevated({ ...draft, conditional: false })).toBe(false);
 });
+
+it("clears hidden model and effort pins for existing targets", () => {
+  const draft = { ...emptyAutomationDraft(null), threadKind: "existing" as const, threadId: "home", modelId: "haiku", reasoningEffort: "low" };
+  expect(automationDraftArguments(draft)).toMatchObject({ target: { model_id: null, reasoning_effort: null } });
+});

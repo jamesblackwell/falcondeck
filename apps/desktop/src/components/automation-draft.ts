@@ -230,16 +230,14 @@ export function automationDraftArguments(
       run_as_bot: draft.threadKind === "new_each_run" ? draft.runAsBot.trim() || null : null,
       only_when_changed: draft.threadKind === "new_each_run" && !!draft.runAsBot.trim() && draft.onlyWhenChanged,
       ...(draft.claudeAutocompactTokens.trim() ? { claude_autocompact_tokens: Number(draft.claudeAutocompactTokens) } : {}),
-      ...(draft.modelId.trim() ? { model_id: draft.modelId.trim() } : {}),
+      model_id: draft.threadKind === "existing" ? null : draft.modelId.trim() || null,
       ...(draft.permissionMode.trim()
         ? { permission_mode: draft.permissionMode.trim() }
         : {}),
       ...(draft.sandboxMode.trim()
         ? { sandbox_mode: draft.sandboxMode.trim() }
         : {}),
-      ...(draft.reasoningEffort.trim()
-        ? { reasoning_effort: draft.reasoningEffort.trim() }
-        : {}),
+      reasoning_effort: draft.threadKind === "existing" ? null : draft.reasoningEffort.trim() || null,
       ...(draft.collaborationModeId.trim()
         ? { collaboration_mode_id: draft.collaborationModeId.trim() }
         : {}),

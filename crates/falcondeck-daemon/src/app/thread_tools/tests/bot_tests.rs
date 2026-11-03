@@ -1067,8 +1067,8 @@ async fn bot_switch_repoints_existing_current_and_managed_schedules() {
     for schedule in app.control().automations_snapshot().await {
         let target = serde_json::to_value(schedule.target).unwrap();
         assert_eq!(target["thread"]["thread_id"], home);
-        assert_eq!(target["model_id"], "sonnet");
-        assert_eq!(target["reasoning_effort"], "high");
+        assert!(target["model_id"].is_null());
+        assert!(target["reasoning_effort"].is_null());
     }
 }
 

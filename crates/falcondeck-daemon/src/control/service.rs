@@ -1436,6 +1436,7 @@ impl ControlService {
         new: &str,
         provider: &falcondeck_core::AgentProvider,
         agent: &falcondeck_core::ThreadAgentParams,
+        origin: Option<&falcondeck_core::ThreadOrigin>,
     ) -> Result<(), ControlError> {
         self.mutate(|state, now| {
             use falcondeck_core::control::AutomationThreadTarget;
@@ -1450,8 +1451,13 @@ impl ControlService {
                 {
                     *target = new.into();
                     automation.target.provider = provider.clone();
-                    automation.target.model_id = agent.model_id.clone();
-                    automation.target.reasoning_effort = agent.reasoning_effort.clone();
+                    let owned = matches!(
+                        automation.target.thread,
+                        AutomationThreadTarget::Managed { .. }
+                    ) && automations::owns_thread(&automation.id, origin);
+                    automation.target.model_id = owned.then(|| agent.model_id.clone()).flatten();
+                    automation.target.reasoning_effort =
+                        owned.then(|| agent.reasoning_effort.clone()).flatten();
                     automation.target.sandbox_mode = agent.sandbox_mode.clone();
                     automation.target.permission_mode = agent.permission_mode.clone();
                     automation.target.approval_policy = agent.approval_policy.clone();

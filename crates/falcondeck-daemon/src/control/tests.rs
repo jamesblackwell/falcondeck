@@ -2272,12 +2272,9 @@ async fn agents_can_rename_noncompliant_schedules_but_not_resubmit_their_cadence
 }
 
 #[tokio::test]
-async fn model_and_effort_pins_are_creation_only_not_reused_target_updates() {
+async fn model_pins_allow_managed_editor_round_trips_but_reject_existing_targets() {
     let (_dir, service) = service().await;
-    for thread in [
-        json!({"kind":"existing","thread_id":"home"}),
-        json!({"kind":"managed","thread_id":"created"}),
-    ] {
+    for thread in [json!({"kind":"existing","thread_id":"home"})] {
         for pin in ["model_id", "reasoning_effort"] {
             let mut args = create_arguments();
             args["target"]["thread"] = thread.clone();
@@ -2300,7 +2297,11 @@ async fn model_and_effort_pins_are_creation_only_not_reused_target_updates() {
             assert!(error.suggested_action.unwrap().contains("new_each_run"));
         }
     }
-    for thread in [json!({"kind":"new_each_run"}), json!({"kind":"managed"})] {
+    for thread in [
+        json!({"kind":"new_each_run"}),
+        json!({"kind":"managed"}),
+        json!({"kind":"managed","thread_id":"created"}),
+    ] {
         let mut args = create_arguments();
         args["target"]["thread"] = thread;
         args["target"]["model_id"] = json!("haiku");
@@ -2321,12 +2322,13 @@ async fn model_and_effort_pins_are_creation_only_not_reused_target_updates() {
         if args["target"]["thread"]["kind"] == "managed" {
             let id = data["id"].as_str().unwrap();
             service.set_managed_thread(id, "created").await.unwrap();
+            let revision = service.automation(id).await.unwrap().revision;
             let renamed = service
                 .execute(
                     execute_request(
                         registry::ops::AUTOMATION_UPDATE,
                         json!({"automation_id":id,"name":"Legacy rename"}),
-                        Some(2),
+                        Some(revision),
                     ),
                     &desktop(),
                     &ControlDeps::none(),
@@ -2335,39 +2337,76 @@ async fn model_and_effort_pins_are_creation_only_not_reused_target_updates() {
                 .0;
             assert!(renamed.ok, "{:?}", renamed.error);
             args["target"]["thread"] = json!({"kind":"managed","thread_id":"created"});
-            let rejected = service
+            // Full editor payload after the first run: not just a partial rename.
+            args["automation_id"] = json!(id);
+            args["name"] = json!("Pinned managed renamed");
+            let saved = service
                 .execute(
-                    execute_request(
-                        registry::ops::AUTOMATION_UPDATE,
-                        json!({"automation_id":id,"target":args["target"]}),
-                        Some(3),
-                    ),
+                    execute_request(registry::ops::AUTOMATION_UPDATE, args, Some(revision + 1)),
                     &desktop(),
                     &ControlDeps::none(),
                 )
                 .await
                 .0;
-            assert_eq!(
-                rejected.error.unwrap().field_errors[0].field,
-                "target.model_id"
-            );
-            args["target"]["model_id"] = Value::Null;
-            args["target"]["reasoning_effort"] = Value::Null;
-            assert!(
-                service
-                    .execute(
-                        execute_request(
-                            registry::ops::AUTOMATION_UPDATE,
-                            json!({"automation_id":id,"target":args["target"]}),
-                            Some(3)
-                        ),
-                        &desktop(),
-                        &ControlDeps::none()
-                    )
-                    .await
-                    .0
-                    .ok
-            );
+            assert!(saved.ok, "{:?}", saved.error);
+            let saved = saved.data.unwrap();
+            assert_eq!(saved["name"], "Pinned managed renamed");
+            assert_eq!(saved["target"]["model_id"], "haiku");
+            assert_eq!(saved["target"]["reasoning_effort"], "low");
+            assert_eq!(saved["target"]["thread"]["thread_id"], "created");
         }
+    }
+}
+
+#[tokio::test]
+async fn bot_repoint_keeps_pins_only_for_owned_managed_threads() {
+    for (managed, owned) in [(false, false), (false, true), (true, false), (true, true)] {
+        let (_dir, service) = service().await;
+        let mut args = create_arguments();
+        args["target"]["thread"] = if managed {
+            json!({"kind":"managed", "thread_id":"old"})
+        } else {
+            json!({"kind":"existing", "thread_id":"old"})
+        };
+        let created = service
+            .execute(
+                execute_request(registry::ops::AUTOMATION_CREATE, args, None),
+                &desktop(),
+                &ControlDeps::none(),
+            )
+            .await
+            .0
+            .data
+            .unwrap();
+        let id = created["id"].as_str().unwrap();
+        let origin = falcondeck_core::ThreadOrigin::Automation {
+            automation_id: if owned { id } else { "other" }.into(),
+            bot_id: None,
+            name: "Monitor".into(),
+        };
+        let agent = falcondeck_core::ThreadAgentParams {
+            model_id: Some("sonnet".into()),
+            reasoning_effort: Some("high".into()),
+            ..Default::default()
+        };
+        service
+            .repoint_bot_automations(
+                "old",
+                "new",
+                &falcondeck_core::AgentProvider::CLAUDE,
+                &agent,
+                Some(&origin),
+            )
+            .await
+            .unwrap();
+        let saved = service.automation(id).await.unwrap();
+        assert_eq!(
+            saved.target.model_id.as_deref(),
+            (managed && owned).then_some("sonnet")
+        );
+        assert_eq!(
+            saved.target.reasoning_effort.as_deref(),
+            (managed && owned).then_some("high")
+        );
     }
 }

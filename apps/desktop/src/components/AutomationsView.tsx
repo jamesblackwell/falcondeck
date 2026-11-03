@@ -730,6 +730,9 @@ export function AutomationEditor({
           </label>
         </div>
 
+        {draft.threadKind === "existing" ? (
+          <p className="text-sm text-fg-muted">Existing tasks keep their own model and effort. For a cheaper model, use a fresh run with run_as_bot for bot work.</p>
+        ) : null}
         <div className="grid grid-cols-3 gap-3">
           <label className="space-y-1">
             <span className="text-[length:var(--fd-text-xs)] text-fg-muted">Thread strategy</span>

@@ -827,10 +827,10 @@ async fn terminal_state_from_thread(
 struct ResolvedAutomationThread {
     thread_id: String,
     created: bool,
+    owned: bool,
 }
 
-/// The actual provider request must never switch model/effort on a reused
-/// native task, including legacy schedules that still store explicit pins.
+/// Only newly created tasks and tasks owned by this automation receive pins.
 fn automation_turn_request(
     automation: &falcondeck_core::control::Automation,
     workspace_id: &str,
@@ -854,12 +854,10 @@ fn automation_turn_request(
             })
             .collect(),
         provider: Some(automation.target.provider.clone()),
-        model_id: resolved
-            .created
+        model_id: (resolved.created || resolved.owned)
             .then(|| automation.target.model_id.clone())
             .flatten(),
-        reasoning_effort: resolved
-            .created
+        reasoning_effort: (resolved.created || resolved.owned)
             .then(|| automation.target.reasoning_effort.clone())
             .flatten(),
         approval_policy: automation.target.approval_policy.clone(),
@@ -886,6 +884,10 @@ async fn resolve_thread(
                     Ok(ResolvedAutomationThread {
                         thread_id: thread_id.clone(),
                         created: false,
+                        owned: super::automations::owns_thread(
+                            &automation.id,
+                            thread.origin.as_ref(),
+                        ),
                     })
                 }
                 Ok(thread) => Err(format!(
@@ -905,6 +907,7 @@ async fn resolve_thread(
                 .map(|thread_id| ResolvedAutomationThread {
                     thread_id,
                     created: true,
+                    owned: true,
                 })
         }
         // `current` is pinned to a concrete thread when the definition is
@@ -922,6 +925,7 @@ async fn resolve_thread(
                 return Ok(ResolvedAutomationThread {
                     thread_id: thread_id.clone(),
                     created: false,
+                    owned: super::automations::owns_thread(&automation.id, thread.origin.as_ref()),
                 });
             }
             // Managed threads are created once and remembered; the stored id
@@ -936,6 +940,7 @@ async fn resolve_thread(
             Ok(ResolvedAutomationThread {
                 thread_id: created,
                 created: true,
+                owned: true,
             })
         }
     }
@@ -956,10 +961,12 @@ pub(crate) async fn apply_automation_compaction(
         app.with_thread_mut(workspace_id, thread_id, |thread| {
             // A remembered managed id can also name a pre-existing task;
             // strategy alone is not proof that the automation owns it.
-            if matches!(&thread.origin, Some(ThreadOrigin::Automation { automation_id, .. }) if automation_id == &automation.id) {
-                thread.agent.claude_autocompact_tokens = automation.target.claude_autocompact_tokens;
+            if super::automations::owns_thread(&automation.id, thread.origin.as_ref()) {
+                thread.agent.claude_autocompact_tokens =
+                    automation.target.claude_autocompact_tokens;
             }
-        }).await?;
+        })
+        .await?;
         app.schedule_persist();
     }
     Ok(())
@@ -1116,27 +1123,41 @@ mod tests {
             "task":{"kind":"prompt","instruction":"Check"},"target":{"workspace_path":"/tmp","provider":"claude","thread":{"kind":"managed"},"model_id":"haiku","reasoning_effort":"low"},
             "state":"enabled","concurrency_policy":"skip","misfire_policy":"skip","created_at":"2026-11-03T00:00:00Z","updated_at":"2026-11-03T00:00:00Z","next_run_at":null
         })).unwrap();
-        for (target, created) in [
+        for (target, created, owned) in [
             (
                 AutomationThreadTarget::Existing {
                     thread_id: "home".into(),
                 },
                 false,
+                false,
             ),
-            (AutomationThreadTarget::Current, false),
+            (AutomationThreadTarget::Current, false, false),
             (
                 AutomationThreadTarget::Managed {
                     thread_id: Some("managed".into()),
                 },
                 false,
+                false,
             ),
-            (AutomationThreadTarget::Managed { thread_id: None }, true),
-            (AutomationThreadTarget::NewEachRun, true),
+            (
+                AutomationThreadTarget::Managed { thread_id: None },
+                true,
+                true,
+            ),
+            (AutomationThreadTarget::NewEachRun, true, true),
+            (
+                AutomationThreadTarget::Managed {
+                    thread_id: Some("owned".into()),
+                },
+                false,
+                true,
+            ),
             // A stale remembered id may be recreated; it is a new native task.
             (
                 AutomationThreadTarget::Managed {
                     thread_id: Some("missing".into()),
                 },
+                true,
                 true,
             ),
         ] {
@@ -1144,13 +1165,17 @@ mod tests {
             let resolved = ResolvedAutomationThread {
                 thread_id: "resolved".into(),
                 created,
+                owned,
             };
             let request =
                 automation_turn_request(&automation, "workspace", &resolved, "Check".into());
-            assert_eq!(request.model_id.as_deref(), created.then_some("haiku"));
+            assert_eq!(
+                request.model_id.as_deref(),
+                (created || owned).then_some("haiku")
+            );
             assert_eq!(
                 request.reasoning_effort.as_deref(),
-                created.then_some("low")
+                (created || owned).then_some("low")
             );
             assert_eq!(request.thread_id, "resolved");
         }
