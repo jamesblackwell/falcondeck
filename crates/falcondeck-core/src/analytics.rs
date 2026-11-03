@@ -328,9 +328,10 @@ pub struct AnalyticsUsageThread {
     /// Dominant model under that provider.
     pub model: String,
     /// Average prompt context per model call: uncached input plus cache reads
-    /// and writes, divided by calls (records without a call count contribute
-    /// one per record).
-    pub avg_context_per_call: u64,
+    /// and writes, divided by calls. Null when no contributing record
+    /// reported a call count.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub avg_context_per_call: Option<u64>,
 }
 
 /// Token usage for a period, grouped one way.
@@ -464,6 +465,8 @@ pub enum AnalyticsClearTarget {
     Prompts,
     /// Activity metadata.
     Events,
-    /// Both.
+    /// The token usage log.
+    Usage,
+    /// All of them.
     All,
 }

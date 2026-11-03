@@ -45,8 +45,9 @@ use crate::{
     claude::{
         self, ClaudeRuntime, ClaudeStreamLine, encode_control_response_error,
         is_resume_startup_failure, live_context_usage, parse_claude_stream_lines,
-        result_is_cancelled, result_model_context_window, result_turn_model_usage,
-        result_usage_service_tier, synthetic_permission_requests,
+        result_is_cancelled, result_model_context_window, result_model_usage_is_cumulative,
+        result_num_turns, result_turn_model_usage, result_usage_service_tier,
+        synthetic_permission_requests,
     },
     codex::CodexSessionLease,
     error::DaemonError,
@@ -1850,51 +1851,31 @@ impl AppState {
                                 // (subagents included); `result.usage` is only
                                 // the last API call. `model_usage_since_last_result`
                                 // is preferred because the CLI process is
-                                // long-lived and emits one result per turn.
+                                // long-lived and emits one result per turn;
+                                // the cumulative fallback is differenced
+                                // against what the process last reported.
                                 if let Some(models) = result_turn_model_usage(&value) {
                                     if !models.is_empty() {
-                                        let (input, cached) =
-                                            models.iter().fold((0, 0), |(input, cached), model| {
-                                                (
-                                                    input
-                                                        + model.input_tokens
-                                                        + model.cache_creation_input_tokens,
-                                                    cached + model.cache_read_input_tokens,
-                                                )
-                                            });
-                                        self.control()
-                                            .record_claude_run_usage(
-                                                &workspace_id,
-                                                &thread_id,
-                                                input,
-                                                cached,
-                                            )
-                                            .await;
+                                        let cumulative =
+                                            result_model_usage_is_cumulative(&value);
                                         let tier = result_usage_service_tier(&value);
-                                        let stamp = Utc::now().timestamp_millis();
-                                        for model in models {
-                                            self.record_turn_usage(super::analytics::TurnUsage {
-                                                workspace_id: &workspace_id,
-                                                thread_id: &thread_id,
-                                                provider: "claude",
-                                                model: model.model,
-                                                uncached_input: model.input_tokens,
-                                                cache_read: model.cache_read_input_tokens,
-                                                cache_write: model
-                                                    .cache_creation_input_tokens,
-                                                output: model.output_tokens,
-                                                reasoning: model.thinking_tokens.unwrap_or(0),
-                                                calls: None,
-                                                cost: model.cost_usd,
-                                                cost_source: "provider",
-                                                tier: tier.clone(),
-                                                effort: None,
-                                                cost_ticks: None,
-                                                id: format!(
-                                                    "claude:{thread_id}:{}:{stamp}",
-                                                    model.model
-                                                ),
-                                            });
+                                        let calls = result_num_turns(&value);
+                                        if let Some((input, cached)) = self.record_claude_turn_usage(
+                                            &workspace_id,
+                                            &thread_id,
+                                            &models,
+                                            cumulative,
+                                            tier,
+                                            calls,
+                                        ) {
+                                            self.control()
+                                                .record_claude_run_usage(
+                                                    &workspace_id,
+                                                    &thread_id,
+                                                    input,
+                                                    cached,
+                                                )
+                                                .await;
                                         }
                                     }
                                 } else if let Some(usage) = value.get("usage")

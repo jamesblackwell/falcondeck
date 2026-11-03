@@ -1433,6 +1433,11 @@ impl AppState {
                 );
             }
             AcpEvent::TurnUsage { session_id, usage } => {
+                // session/load replays finished turns; recording them again
+                // would double-count every replayed result.
+                if replaying_sessions.contains(&session_id) {
+                    return Ok(());
+                }
                 let Some(thread_id) = runtime.thread_for_session(&session_id).await else {
                     return Ok(());
                 };

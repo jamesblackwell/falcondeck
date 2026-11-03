@@ -1768,6 +1768,55 @@ async fn bot_fresh_skips_overlap_even_when_allow_was_selected_and_records_usage(
     assert!(saved.status.is_terminal());
 }
 
+#[tokio::test]
+async fn claude_run_usage_accumulates_across_results() {
+    let (_dir, service) = service().await;
+    let args = create_arguments();
+    let (response, _) = service
+        .execute(
+            execute_request(registry::ops::AUTOMATION_CREATE, args, None),
+            &desktop(),
+            &ControlDeps::none(),
+        )
+        .await;
+    assert!(response.ok, "{:?}", response.error);
+    let id = response.data.unwrap()["id"].as_str().unwrap().to_string();
+    let run = service
+        .enqueue_run(
+            &id,
+            None,
+            super::service::RunSource::Manual {
+                origin: ControlOrigin::DesktopUi,
+            },
+        )
+        .await
+        .unwrap();
+    service
+        .mark_run_running(&run.id, "workspace-1", "thread-1")
+        .await
+        .unwrap();
+    // One Claude run can emit several results; each reports one turn's delta.
+    service
+        .record_claude_run_usage("workspace-1", "thread-1", 1000, 200)
+        .await;
+    service
+        .record_claude_run_usage("workspace-1", "thread-1", 500, 100)
+        .await;
+    // A finished run no longer matches, so a late result never lands.
+    service
+        .finish_run(&run.id, AutomationRunStatus::Succeeded, None, None)
+        .await
+        .unwrap();
+    service
+        .record_claude_run_usage("workspace-1", "thread-1", 999, 99)
+        .await;
+    let saved = service.run(&run.id).await.unwrap();
+    assert_eq!(
+        (saved.input_tokens, saved.cached_input_tokens),
+        (Some(1500), Some(300))
+    );
+}
+
 #[test]
 fn legacy_target_defaults_remain_unchanged() {
     let target: falcondeck_core::control::AutomationTarget =

@@ -16,11 +16,14 @@ use falcondeck_core::{
     AnalyticsThreadActivity, AnalyticsThreadDispatch, AnalyticsThreadMessage, AnalyticsTotals,
     AnalyticsTriggers, AnalyticsWaiting,
 };
+use falcondeck_core::TokenUsageBreakdown;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::io::{BufRead, BufWriter, Write as _};
 use std::sync::atomic::{AtomicU64, Ordering};
 use tokio::sync::{mpsc, oneshot};
+
+use crate::claude::ClaudeModelUsage;
 
 const QUEUE: usize = 4096;
 const EXCERPT_CHARS: usize = 160;
@@ -225,65 +228,218 @@ impl TurnUsage<'_> {
     }
 }
 
-/// Codex usage accumulated for a thread's active turn. Codex reports a
-/// cumulative total plus the latest request; repeats with an unchanged total
-/// carry no new information. `input_tokens` includes cached reads (Codex
-/// convention) and is normalised when the record is written.
-#[derive(Default, Debug)]
-pub(super) struct CodexTurnUsage {
-    /// Totals already counted, to drop unchanged repeats.
-    seen_totals: Option<[u64; 5]>,
+/// Codex token totals in one report snapshot. The five typed fields come from
+/// the shared `parse_thread_token_usage`; cache writes ride alongside because
+/// the shared `ThreadTokenUsage` type has no field for them.
+#[derive(Clone, Copy, Default, PartialEq, Eq, Debug)]
+struct CodexTotals {
     input_tokens: u64,
     cached_input_tokens: u64,
     cache_write_tokens: u64,
     output_tokens: u64,
     reasoning_tokens: u64,
+}
+
+impl CodexTotals {
+    fn from_breakdown(total: &TokenUsageBreakdown, cache_write: u64) -> Self {
+        Self {
+            input_tokens: total.input_tokens,
+            cached_input_tokens: total.cached_input_tokens,
+            cache_write_tokens: cache_write,
+            output_tokens: total.output_tokens,
+            reasoning_tokens: total.reasoning_output_tokens,
+        }
+    }
+
+    fn is_zero(self) -> bool {
+        self == Self::default()
+    }
+
+    /// This minus `baseline`, per field, never below zero.
+    fn delta_since(self, baseline: Self) -> Self {
+        Self {
+            input_tokens: self.input_tokens.saturating_sub(baseline.input_tokens),
+            cached_input_tokens: self
+                .cached_input_tokens
+                .saturating_sub(baseline.cached_input_tokens),
+            cache_write_tokens: self
+                .cache_write_tokens
+                .saturating_sub(baseline.cache_write_tokens),
+            output_tokens: self.output_tokens.saturating_sub(baseline.output_tokens),
+            reasoning_tokens: self
+                .reasoning_tokens
+                .saturating_sub(baseline.reasoning_tokens),
+        }
+    }
+}
+
+/// Usage accumulated for one Codex turn. Codex reports cumulative thread
+/// totals, so a turn is the difference between the totals at its end and
+/// where the previous turn ended (or `total - last` for a thread's very first
+/// report, which already includes that turn's first request). Repeated
+/// reports with unchanged totals are ignored, which also makes replayed or
+/// duplicated notifications harmless.
+#[derive(Default, Debug)]
+pub(super) struct CodexTurnUsage {
+    /// Totals last seen, kept across turns as the next turn's baseline.
+    last_totals: Option<CodexTotals>,
+    /// Turn (the notification's `turnId`) the current accumulation belongs to.
+    turn: Option<String>,
+    /// Totals where the current turn started.
+    baseline: Option<CodexTotals>,
+    /// Totals at the turn's latest report.
+    end: Option<CodexTotals>,
+    /// Reports with changed totals; each is one model request.
     calls: u64,
+    /// Model selected when the turn started, when the turn notification
+    /// carried one.
+    model: Option<String>,
 }
 
 impl CodexTurnUsage {
-    /// Folds one `thread/tokenUsage/updated` payload (`tokenUsage` object)
-    /// into the accumulator, deduping unchanged totals.
-    fn update(&mut self, report: &Value) {
-        let count = |value: &Value, key: &str| value.get(key).and_then(Value::as_u64).unwrap_or(0);
-        let Some(total) = report.get("total") else {
-            return;
-        };
-        let totals = [
-            count(total, "input_tokens"),
-            count(total, "cached_input_tokens"),
-            count(total, "output_tokens"),
-            count(total, "reasoning_output_tokens"),
-            count(total, "total_tokens"),
-        ];
-        if self.seen_totals == Some(totals) {
+    /// Folds one `thread/tokenUsage/updated` report into the accumulator.
+    fn note(
+        &mut self,
+        turn_id: &str,
+        usage: &ThreadTokenUsage,
+        total_cache_write: u64,
+        last_cache_write: u64,
+    ) {
+        // Post-compaction reports carry an all-zero `last`; they represent no
+        // model request.
+        if let Some(last) = &usage.last
+            && last.input_tokens == 0
+            && last.output_tokens == 0
+            && last.reasoning_output_tokens == 0
+        {
             return;
         }
-        let previous = self.seen_totals.replace(totals);
-        if let Some(last) = report.get("last") {
-            self.input_tokens += count(last, "input_tokens");
-            self.cached_input_tokens += count(last, "cached_input_tokens");
-            self.cache_write_tokens += count(last, "cache_write_input_tokens");
-            self.output_tokens += count(last, "output_tokens");
-            self.reasoning_tokens += count(last, "reasoning_output_tokens");
-            self.calls += 1;
-        } else if let Some(previous) = previous {
-            // No per-request split: the change in the cumulative total is the
-            // best available delta for this report. It still represents one
-            // request, so it counts as a call.
-            self.input_tokens += totals[0].saturating_sub(previous[0]);
-            self.cached_input_tokens += totals[1].saturating_sub(previous[1]);
-            self.output_tokens += totals[2].saturating_sub(previous[2]);
-            self.reasoning_tokens += totals[3].saturating_sub(previous[3]);
-            self.calls += 1;
+        let totals = CodexTotals::from_breakdown(&usage.total, total_cache_write);
+        if self.last_totals == Some(totals) {
+            return;
+        }
+        if self.turn.as_deref() != Some(turn_id) {
+            self.turn = Some(turn_id.to_string());
+            self.baseline = self.last_totals;
+            self.end = None;
+            self.calls = 0;
+        }
+        if self.baseline.is_none() {
+            // First report this thread has ever sent. If it names the latest
+            // request, the totals before it are where the turn started;
+            // otherwise nothing earlier is known, so the turn starts at the
+            // current totals rather than claiming the thread's whole history.
+            self.baseline = Some(usage.last.as_ref().map_or(totals, |last| {
+                totals.delta_since(CodexTotals::from_breakdown(last, last_cache_write))
+            }));
+        }
+        self.end = Some(totals);
+        self.last_totals = Some(totals);
+        self.calls += 1;
+    }
+
+    /// Registers the turn the next reports will belong to, with the model the
+    /// turn selected. Anything accumulated for a different, never-completed
+    /// turn is dropped; `last_totals` survives as the new turn's baseline.
+    fn start(&mut self, turn_id: &str, model: Option<&str>) {
+        if self.turn.as_deref() != Some(turn_id) {
+            self.turn = Some(turn_id.to_string());
+            self.baseline = None;
+            self.end = None;
+            self.calls = 0;
+        }
+        if model.is_some() {
+            self.model = model.map(str::to_string);
         }
     }
 
-    /// Whether any request was counted.
-    fn is_empty(&self) -> bool {
-        self.calls == 0
+    /// Closes the current accumulation, if any recorded report exists.
+    fn finish(&mut self) -> Option<CodexTurnDelta> {
+        let end = self.end.take()?;
+        let turn = self.turn.take()?;
+        let baseline = self.baseline.take().unwrap_or_default();
+        let calls = std::mem::take(&mut self.calls);
+        let delta = end.delta_since(baseline);
+        if delta.is_zero() {
+            return None;
+        }
+        Some(CodexTurnDelta {
+            turn,
+            delta,
+            calls,
+            model: self.model.take(),
+        })
     }
 }
+
+/// One Codex turn's accumulated usage, ready to record.
+pub(super) struct CodexTurnDelta {
+    turn: String,
+    delta: CodexTotals,
+    calls: u64,
+    model: Option<String>,
+}
+
+/// Per-model Claude totals last seen for one (long-lived) CLI process, used
+/// to difference the cumulative `modelUsage` fallback across turns.
+#[derive(Clone, Copy, Default)]
+pub(super) struct ClaudeModelTotals {
+    /// `[input, cache read, cache write, output, thinking]`.
+    tokens: [u64; 5],
+    cost_usd: f64,
+}
+
+/// Diffs a Claude result's per-model usage against what the process last
+/// reported, updating `baselines`. `cumulative` marks the fallback path where
+/// `modelUsage` carries process totals rather than the per-turn
+/// `model_usage_since_last_result` delta; baselines only track that path, so
+/// a per-turn delta never poisons a later cumulative diff. Returns per-model
+/// turn deltas; models that used nothing this turn are omitted.
+fn claude_model_deltas<'a>(
+    baselines: &mut HashMap<String, ClaudeModelTotals>,
+    models: &[ClaudeModelUsage<'a>],
+    cumulative: bool,
+) -> Vec<(&'a str, [u64; 5], Option<f64>)> {
+    let mut deltas = Vec::new();
+    for model in models {
+        let current = ClaudeModelTotals {
+            tokens: [
+                model.input_tokens,
+                model.cache_read_input_tokens,
+                model.cache_creation_input_tokens,
+                model.output_tokens,
+                model.thinking_tokens.unwrap_or(0),
+            ],
+            cost_usd: model.cost_usd.unwrap_or(0.0),
+        };
+        let mut delta = current.tokens;
+        let mut cost = model.cost_usd;
+        if cumulative {
+            let previous = baselines.get(model.model).copied().unwrap_or_default();
+            for (index, value) in current.tokens.iter().enumerate() {
+                delta[index] = value.saturating_sub(previous.tokens[index]);
+            }
+            // The CLI's cost figure follows the same cumulative totals.
+            cost = Some((current.cost_usd - previous.cost_usd).max(0.0));
+            baselines.insert(model.model.to_string(), current);
+        }
+        if delta.iter().any(|value| *value > 0) {
+            deltas.push((model.model, delta, cost));
+        }
+    }
+    deltas
+}
+
+/// Cache-write tokens from a raw usage breakdown; the shared
+/// `ThreadTokenUsage` type has no field for them.
+fn raw_cache_write_tokens(value: &Value) -> u64 {
+    value
+        .get("cacheWriteInputTokens")
+        .or_else(|| value.get("cache_write_input_tokens"))
+        .and_then(Value::as_u64)
+        .unwrap_or(0)
+}
+
 
 enum Job {
     Event(String),
@@ -444,8 +600,11 @@ fn write_loop(
                         }
                         AnalyticsClearTarget::Events => {
                             events = None;
+                            &["events-"]
+                        }
+                        AnalyticsClearTarget::Usage => {
                             usage = None;
-                            &["events-", "usage-"]
+                            &["usage-"]
                         }
                         AnalyticsClearTarget::All => {
                             (events, prompts, usage) = (None, None, None);
@@ -926,14 +1085,17 @@ fn read_records(dir: &Path, since: DateTime<Utc>) -> Vec<Record> {
 }
 
 /// Reads usage records newer than `since` from the monthly usage files.
+/// Duplicate record ids (a replayed notification, a re-delivered turn) count
+/// once.
 fn read_usage_records(dir: &Path, since: DateTime<Utc>) -> Vec<UsageRecord> {
+    let mut seen: HashSet<String> = HashSet::new();
     months_since(since)
         .iter()
         .filter_map(|month| std::fs::File::open(dir.join(format!("usage-{month}.jsonl"))).ok())
         .flat_map(|file| std::io::BufReader::new(file).lines().map_while(Result::ok))
         .filter_map(|line| serde_json::from_str::<UsageEntry>(&line).ok())
         .map(|UsageEntry::Usage(record)| record)
-        .filter(|record| record.t >= since)
+        .filter(|record| record.t >= since && seen.insert(record.id.clone()))
         .collect()
 }
 
@@ -998,9 +1160,10 @@ type UsageGroup = (AnalyticsUsageTotals, HashSet<String>);
 /// and the provider/model mix.
 #[derive(Default)]
 struct ThreadExtras {
-    /// Uncached input + cache reads + writes, summed.
+    /// Uncached input + cache reads + writes, summed over records that
+    /// report a call count.
     context: u64,
-    /// Model calls; records without a count contribute one each.
+    /// Model calls, from the same records.
     calls: u64,
     /// Tokens per provider/model combination, to pick the dominant one.
     models: HashMap<(String, String), u64>,
@@ -1033,8 +1196,13 @@ fn aggregate_usage(
         }
         if by_thread {
             let extras = threads.entry(key).or_default();
-            extras.context += record.uncached_input + record.cr + record.cw;
-            extras.calls += record.calls.unwrap_or(1);
+            // Context per call needs a call count; records without one are
+            // excluded from both numerator and denominator rather than
+            // pretending a whole turn was one call.
+            if let Some(record_calls) = record.calls {
+                extras.context += record.uncached_input + record.cr + record.cw;
+                extras.calls += record_calls;
+            }
             let tokens = record.uncached_input + record.cr + record.cw + record.out;
             *extras
                 .models
@@ -1069,7 +1237,8 @@ fn aggregate_usage(
                     automation: labels.automations.get(&key).cloned(),
                     provider,
                     model,
-                    avg_context_per_call: extras.context / extras.calls.max(1),
+                    avg_context_per_call: (extras.calls > 0)
+                        .then(|| extras.context / extras.calls),
                 }
             });
             AnalyticsUsageRow {
@@ -1251,6 +1420,16 @@ fn chain_bot(
         current = parent_of.get(current)?;
     }
     None
+}
+
+/// The root of a spawn chain: the topmost thread found, or the missing parent
+/// the walk stopped at — a deleted ancestor is still the last known root,
+/// which beats naming the thread its own root.
+fn chain_root(chain: &[ChainLink], missing: Option<&str>, thread: &str) -> String {
+    missing
+        .map(str::to_string)
+        .or_else(|| chain.last().map(|link| link.id.clone()))
+        .unwrap_or_else(|| thread.to_string())
 }
 
 /// Value at quantile `q` (0–1) of `values`, or 0 when empty.
@@ -1957,75 +2136,139 @@ impl AppState {
         });
     }
 
+    /// Records a Claude result's per-model usage. `cumulative` results (only
+    /// `modelUsage`, no per-turn delta) are differenced against what the
+    /// process last reported, so a long-lived CLI never double-counts.
+    /// Returns the summed `(input incl. cache write, cache read)` of the
+    /// turn, for automation-run usage.
+    pub(super) fn record_claude_turn_usage(
+        &self,
+        workspace_id: &str,
+        thread_id: &str,
+        models: &[ClaudeModelUsage<'_>],
+        cumulative: bool,
+        tier: Option<String>,
+        calls: Option<u64>,
+    ) -> Option<(u64, u64)> {
+        let deltas = {
+            let mut baselines = self
+                .inner
+                .claude_usage_baselines
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            let entry = baselines.entry(thread_id.to_string()).or_default();
+            claude_model_deltas(entry, models, cumulative)
+        };
+        if deltas.is_empty() {
+            return None;
+        }
+        let stamp = Utc::now().timestamp_millis();
+        let mut summed = (0, 0);
+        for (model, delta, cost) in deltas {
+            summed.0 += delta[0] + delta[2];
+            summed.1 += delta[1];
+            self.record_turn_usage(TurnUsage {
+                workspace_id,
+                thread_id,
+                provider: "claude",
+                model,
+                uncached_input: delta[0],
+                cache_read: delta[1],
+                cache_write: delta[2],
+                output: delta[3],
+                reasoning: delta[4],
+                calls,
+                cost,
+                cost_source: if cost.is_some() {
+                    "provider"
+                } else {
+                    "none"
+                },
+                tier: tier.clone(),
+                effort: None,
+                cost_ticks: None,
+                id: format!("claude:{thread_id}:{model}:{stamp}"),
+            });
+        }
+        Some(summed)
+    }
+
     /// Folds a Codex `thread/tokenUsage/updated` notification into the
-    /// thread's active-turn accumulator. Bounded work: one map lookup and
+    /// thread's turn accumulator. Bounded work: one map lookup and
     /// arithmetic, never blocking the notification stream.
-    pub(super) fn note_codex_token_usage(&self, thread_id: &str, params: &Value) {
-        let Some(report) = params
-            .get("tokenUsage")
-            .or_else(|| params.get("token_usage"))
-        else {
+    pub(super) fn note_codex_token_usage(&self, thread_id: &str, turn_id: &str, params: &Value) {
+        // Typed camelCase parse shared with the projection path; only cache
+        // writes (absent from the shared type) are read raw.
+        let Some(usage) = super::notifications::parse_thread_token_usage(params) else {
             return;
         };
+        let report = params
+            .get("tokenUsage")
+            .or_else(|| params.get("token_usage"))
+            .unwrap_or(&Value::Null);
+        let (total_write, last_write) = (
+            report.get("total").map(raw_cache_write_tokens).unwrap_or(0),
+            report.get("last").map(raw_cache_write_tokens).unwrap_or(0),
+        );
         self.inner
             .codex_turn_usage
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .entry(thread_id.to_string())
             .or_default()
-            .update(report);
+            .note(turn_id, &usage, total_write, last_write);
     }
 
-    /// Drops any partial accumulation so the next turn starts clean.
-    pub(super) fn reset_codex_turn_usage(&self, thread_id: &str) {
+    /// Registers a newly started Codex turn with the model it selected.
+    pub(super) fn start_codex_turn_usage(&self, thread_id: &str, turn_id: &str, model: Option<&str>) {
         self.inner
             .codex_turn_usage
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .remove(thread_id);
+            .entry(thread_id.to_string())
+            .or_default()
+            .start(turn_id, model);
     }
 
     /// Writes the accumulated usage of a finished Codex turn, if any. The
     /// heavy half runs in the recording task, like every usage capture.
-    pub(super) fn flush_codex_turn_usage(
-        &self,
-        workspace_id: &str,
-        thread_id: &str,
-        turn_id: &str,
-    ) {
+    pub(super) fn flush_codex_turn_usage(&self, workspace_id: &str, thread_id: &str) {
         let Some(accumulated) = self
             .inner
             .codex_turn_usage
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .remove(thread_id)
+            .get_mut(thread_id)
+            .and_then(CodexTurnUsage::finish)
         else {
             return;
         };
-        if accumulated.is_empty() {
-            return;
-        }
+        // `turn_id` is the turn that completed; when the accumulator holds an
+        // earlier turn (its completion never arrived), its tokens are still
+        // real and recorded under their own turn.
+        let turn = accumulated.turn.as_str();
+        let delta = accumulated.delta;
         self.record_turn_usage(TurnUsage {
             workspace_id,
             thread_id,
-            // Provider and model come from the thread summary at write time
-            // (the model is the turn's own selection).
-            provider: "",
-            model: "",
-            uncached_input: accumulated
+            // The notification path is Codex-only, and the model is the one
+            // the turn started with.
+            provider: "codex",
+            model: accumulated.model.as_deref().unwrap_or_default(),
+            uncached_input: delta
                 .input_tokens
-                .saturating_sub(accumulated.cached_input_tokens),
-            cache_read: accumulated.cached_input_tokens,
-            cache_write: accumulated.cache_write_tokens,
-            output: accumulated.output_tokens,
-            reasoning: accumulated.reasoning_tokens,
+                .saturating_sub(delta.cached_input_tokens),
+            cache_read: delta.cached_input_tokens,
+            cache_write: delta.cache_write_tokens,
+            output: delta.output_tokens,
+            reasoning: delta.reasoning_tokens,
             calls: Some(accumulated.calls),
             cost: None,
             cost_source: "none",
             tier: None,
             effort: None,
             cost_ticks: None,
-            id: format!("codex:{thread_id}:{turn_id}:{}", Utc::now().timestamp_millis()),
+            id: format!("codex:{thread_id}:{turn}:{}", Utc::now().timestamp_millis()),
         });
     }
 
@@ -2033,17 +2276,21 @@ impl AppState {
     /// workspace lock, then bot ownership under one preferences lock. Only
     /// called from the recording task, off every turn.
     async fn usage_attribution(&self, thread_id: &str) -> UsageAttribution {
-        let (chain, selection) = {
+        let (chain, selection, missing) = {
             let workspaces = self.inner.workspaces.lock().await;
             let mut chain = Vec::new();
             let mut selection: Option<(String, Option<String>, Option<String>)> = None;
             let mut current = thread_id.to_string();
             let mut seen = HashSet::with_capacity(4);
+            let mut missing: Option<String> = None;
             while seen.insert(current.clone()) && chain.len() < CHAIN_DEPTH_CAP {
                 let Some(thread) = workspaces
                     .values()
                     .find_map(|workspace| workspace.threads.get(&current))
                 else {
+                    // The chain names a parent that no longer exists; that id
+                    // is the last known root.
+                    missing = Some(current.clone());
                     break;
                 };
                 let summary = &thread.summary;
@@ -2077,7 +2324,7 @@ impl AppState {
                 };
                 current = parent;
             }
-            (chain, selection)
+            (chain, selection, missing)
         };
         let bot = {
             let preferences = self.inner.preferences.lock().await;
@@ -2106,9 +2353,7 @@ impl AppState {
         UsageAttribution {
             org: chain.first().map_or("user", |link| link.org),
             parent: chain.first().and_then(|link| link.parent.clone()),
-            root: chain
-                .last()
-                .map_or_else(|| thread_id.to_string(), |link| link.id.clone()),
+            root: chain_root(&chain, missing.as_deref(), thread_id),
             bot,
             provider: selection.as_ref().map(|(provider, _, _)| provider.clone()),
             model: selection.as_ref().and_then(|(_, model, _)| model.clone()),
@@ -2509,8 +2754,9 @@ mod tests {
         assert_eq!(detail.bot.as_deref(), Some("Juno"));
         assert_eq!(detail.provider, "claude");
         assert_eq!(detail.model, "claude-haiku-5-5");
-        // (2 uncached + 11886 read + 18949 written) / 1 call.
-        assert_eq!(detail.avg_context_per_call, 30837);
+        // The record reports no call count, so no context-per-call is claimed
+        // rather than pretending the whole turn was one call.
+        assert_eq!(detail.avg_context_per_call, None);
 
         let by_day = aggregate_usage(&records, &labels, 7, "day");
         assert_eq!(by_day.rows.len(), 1);
@@ -2589,8 +2835,9 @@ mod tests {
             (detail.provider.as_str(), detail.model.as_str()),
             ("codex", "gpt-6.1-sol")
         );
-        // Context: (11058 + 11008) + (100 + 50) = 22216 over 3 calls.
-        assert_eq!(detail.avg_context_per_call, 7405);
+        // Context: only the record with a call count counts — (11058 + 11008)
+        // over 2 calls; the calls-less record is excluded entirely.
+        assert_eq!(detail.avg_context_per_call, Some(11033));
         assert_eq!(row.totals.turns, 2);
         // Other groupings carry no thread detail.
         let by_model = aggregate_usage(&records, &labels, 30, "model");
@@ -2632,82 +2879,134 @@ mod tests {
         assert_eq!(rollup[1].bot, None);
     }
 
-    /// Codex `thread/tokenUsage/updated` payloads, shaped like the rollout
-    /// `token_count` events in docs/usage-tracking-scope.md §2.
-    fn codex_report(total_input: u64, cached: u64, last: Option<(u64, u64, u64, u64, u64)>) -> Value {
-        let mut report = json!({
-            "total": {
-                "input_tokens": total_input,
-                "cached_input_tokens": cached,
-                "cache_write_input_tokens": 0,
-                "output_tokens": 257,
-                "reasoning_output_tokens": 77,
-                "total_tokens": total_input + 257
-            }
-        });
-        if let Some((input, cached, cache_write, output, reasoning)) = last {
-            report["last"] = json!({
-                "input_tokens": input,
-                "cached_input_tokens": cached,
-                "cache_write_input_tokens": cache_write,
-                "output_tokens": output,
-                "reasoning_output_tokens": reasoning,
-                "total_tokens": input + output
-            });
+    /// Real `thread/tokenUsage/updated` notification shape (camelCase), as in
+    /// `parses_codex_thread_token_usage_without_losing_cached_or_reasoning_counts`.
+    fn codex_notification(
+        turn_id: &str,
+        total: (u64, u64, u64, u64, u64, u64),
+        last: Option<(u64, u64, u64, u64, u64, u64)>,
+    ) -> Value {
+        let breakdown = |(total_tokens, input, cached, cache_write, output, reasoning)| {
+            json!({
+                "totalTokens": total_tokens, "inputTokens": input,
+                "cachedInputTokens": cached, "cacheWriteInputTokens": cache_write,
+                "outputTokens": output, "reasoningOutputTokens": reasoning
+            })
+        };
+        let mut token_usage = json!({ "total": breakdown(total) });
+        if let Some(last) = last {
+            token_usage["last"] = breakdown(last);
         }
-        report
+        json!({ "threadId": "thread-1", "turnId": turn_id, "tokenUsage": token_usage })
+    }
+
+    fn note(
+        turn: &mut CodexTurnUsage,
+        notification: &Value,
+    ) {
+        let usage = super::super::notifications::parse_thread_token_usage(notification).unwrap();
+        let report = &notification["tokenUsage"];
+        turn.note(
+            notification["turnId"].as_str().unwrap(),
+            &usage,
+            super::raw_cache_write_tokens(&report["total"]),
+            report
+                .get("last")
+                .map(|last| super::raw_cache_write_tokens(last))
+                .unwrap_or(0),
+        );
     }
 
     #[test]
-    fn codex_usage_accumulates_deltas_and_dedupes_unchanged_totals() {
+    fn codex_usage_diffs_cumulative_totals_per_turn() {
         let mut turn = CodexTurnUsage::default();
-        // First report of the turn: `last` counted.
-        turn.update(&codex_report(22066, 11008, Some((22066, 11008, 0, 257, 77))));
-        // Repeated token_count event with an unchanged total: ignored.
-        turn.update(&codex_report(22066, 11008, Some((22066, 11008, 0, 257, 77))));
-        // Second request in the same turn.
-        turn.update(&codex_report(33100, 22016, Some((11034, 11008, 512, 100, 23))));
-        assert!(!turn.is_empty());
-        assert_eq!(
-            (
-                turn.input_tokens,
-                turn.cached_input_tokens,
-                turn.cache_write_tokens
-            ),
-            (22066 + 11034, 11008 + 11008, 512)
+        // A thread's first report: the request in `last` is all the totals
+        // hold, so the turn's baseline is zero.
+        note(
+            &mut turn,
+            &codex_notification("turn-1", (11315, 11058, 11008, 0, 257, 77), Some((11315, 11058, 11008, 0, 257, 77))),
         );
-        assert_eq!(turn.output_tokens, 257 + 100);
-        assert_eq!(turn.reasoning_tokens, 77 + 23);
-        assert_eq!(turn.calls, 2);
-
-        // No per-request split: the change in the cumulative total is used.
-        // The first report only sets the baseline; each later change is one
-        // counted call.
-        let mut without_last = CodexTurnUsage::default();
-        without_last.update(&codex_report(1000, 400, None));
-        without_last.update(&codex_report(1500, 700, None));
-        without_last.update(&codex_report(1700, 800, None));
-        assert_eq!(
-            (without_last.input_tokens, without_last.cached_input_tokens),
-            (700, 400)
+        // Second request in the same turn; totals are cumulative.
+        note(
+            &mut turn,
+            &codex_notification("turn-1", (22849, 22092, 22016, 512, 357, 100), Some((11546, 11034, 11008, 512, 100, 23))),
         );
-        assert_eq!(without_last.calls, 2);
+        let delta = turn.finish().unwrap();
+        assert_eq!(delta.turn, "turn-1");
+        // Totals at end minus totals at the turn's baseline.
+        assert_eq!(delta.delta.input_tokens, 22092);
+        assert_eq!(delta.delta.cached_input_tokens, 22016);
+        assert_eq!(delta.delta.cache_write_tokens, 512);
+        assert_eq!(delta.delta.output_tokens, 357);
+        assert_eq!(delta.delta.reasoning_tokens, 100);
+        assert_eq!(delta.calls, 2);
+        assert!(turn.finish().is_none(), "finish closes the accumulation");
 
-        // Repeats with zero totals still count only once.
-        let mut zeroed = CodexTurnUsage::default();
-        zeroed.update(&codex_report(10, 0, Some((10, 0, 0, 0, 0))));
-        zeroed.update(&codex_report(10, 0, Some((10, 0, 0, 0, 0))));
-        assert_eq!(zeroed.calls, 1);
+        // The next turn starts where the previous one ended: its delta is
+        // exactly its own request, not the whole thread history again.
+        note(
+            &mut turn,
+            &codex_notification("turn-2", (34992, 32092, 32016, 512, 500, 150), Some((12143, 10000, 10000, 0, 143, 50))),
+        );
+        let delta = turn.finish().unwrap();
+        assert_eq!(delta.turn, "turn-2");
+        assert_eq!(delta.delta.input_tokens, 10000);
+        assert_eq!(delta.delta.cached_input_tokens, 10000);
+        assert_eq!(delta.delta.cache_write_tokens, 0);
+        assert_eq!(delta.delta.output_tokens, 143);
+
+        // The model the turn started with rides along.
+        turn.start("turn-3", Some("gpt-6.1-terra"));
+        note(
+            &mut turn,
+            &codex_notification("turn-3", (36002, 33092, 32016, 512, 510, 151), Some((1010, 1000, 0, 0, 10, 1))),
+        );
+        let delta = turn.finish().unwrap();
+        assert_eq!(delta.model.as_deref(), Some("gpt-6.1-terra"));
+        assert_eq!(delta.delta.output_tokens, 10);
     }
 
     #[test]
-    fn codex_uncached_input_subtracts_cached_reads() {
-        // The flush normalises Codex's input-includes-cached convention:
-        // 22066 reported input, of which 11008 were cache reads.
+    fn codex_usage_ignores_repeats_and_zero_last_reports() {
         let mut turn = CodexTurnUsage::default();
-        turn.update(&codex_report(22066, 11008, Some((22066, 11008, 0, 257, 77))));
-        let uncached = turn.input_tokens.saturating_sub(turn.cached_input_tokens);
-        assert_eq!(uncached, 11058);
+        let report =
+            codex_notification("turn-1", (11315, 11058, 11008, 0, 257, 77), Some((11315, 11058, 11008, 0, 257, 77)));
+        note(&mut turn, &report);
+        // Repeated report with an unchanged total: no extra call, no change.
+        note(&mut turn, &report);
+        // Post-compaction report: totals moved but `last` is all zero — it
+        // describes no model request, so no call is added.
+        note(
+            &mut turn,
+            &codex_notification("turn-1", (11400, 11100, 11008, 0, 300, 92), Some((0, 0, 0, 0, 0, 0))),
+        );
+        let delta = turn.finish().unwrap();
+        assert_eq!(delta.calls, 1);
+        assert_eq!(delta.delta.output_tokens, 257);
+
+        // A turn with no reports records nothing.
+        let mut quiet = CodexTurnUsage::default();
+        quiet.start("turn-9", None);
+        assert!(quiet.finish().is_none());
+    }
+
+    #[test]
+    fn codex_first_report_without_last_starts_at_current_totals() {
+        let mut turn = CodexTurnUsage::default();
+        // No `last`, no earlier turn: nothing is known about the thread's
+        // history, so the turn must not claim all of it.
+        note(
+            &mut turn,
+            &codex_notification("turn-1", (50900, 50000, 40000, 0, 900, 100), None),
+        );
+        note(
+            &mut turn,
+            &codex_notification("turn-1", (53000, 52000, 41000, 0, 1000, 150), None),
+        );
+        let delta = turn.finish().unwrap();
+        assert_eq!(delta.delta.input_tokens, 2000);
+        assert_eq!(delta.delta.cached_input_tokens, 1000);
+        assert_eq!(delta.delta.output_tokens, 100);
     }
 
     #[test]
@@ -2759,6 +3058,89 @@ mod tests {
             chain_bot("stranger", &owned, &automation_bots, &parents),
             None
         );
+    }
+
+    #[test]
+    fn chain_root_prefers_the_last_known_parent() {
+        let link = |id: &str| ChainLink {
+            id: id.to_string(),
+            parent: None,
+            automation_bot: None,
+            org: "user",
+        };
+        // Intact chain: the topmost found thread.
+        let chain = vec![link("child"), link("home")];
+        assert_eq!(chain_root(&chain, None, "child"), "home");
+        // The walk stopped at a deleted parent: that id is still the root.
+        assert_eq!(chain_root(&chain, Some("gone"), "child"), "gone");
+        // Nothing found at all: the thread itself.
+        assert_eq!(chain_root(&[], None, "child"), "child");
+    }
+
+    #[test]
+    fn claude_cumulative_model_usage_differences_across_results() {
+        let model = |input: u64, cache_read: u64, cache_write: u64, out: u64, cost: f64| {
+            ClaudeModelUsage {
+                model: "claude-haiku-5-5",
+                input_tokens: input,
+                cache_read_input_tokens: cache_read,
+                cache_creation_input_tokens: cache_write,
+                output_tokens: out,
+                thinking_tokens: Some(0),
+                cost_usd: Some(cost),
+            }
+        };
+        let mut baselines = HashMap::new();
+        // Cumulative modelUsage (no per-turn delta): each result records only
+        // its growth, so a long-lived process never double-counts.
+        let first = claude_model_deltas(&mut baselines, &[model(10, 100, 20, 4, 0.01)], true);
+        assert_eq!(first[0].1, [10, 100, 20, 4, 0]);
+        assert_eq!(first[0].2, Some(0.01));
+        let second = claude_model_deltas(&mut baselines, &[model(12, 150, 25, 9, 0.02)], true);
+        assert_eq!(second[0].1, [2, 50, 5, 5, 0]);
+        assert_eq!(second[0].2, Some(0.01));
+        // An unchanged result contributes nothing and records no row.
+        assert!(claude_model_deltas(&mut baselines, &[model(12, 150, 25, 9, 0.02)], true).is_empty());
+        // The per-turn delta path records values as-is and leaves baselines
+        // untouched (a delta is not a cumulative figure).
+        let delta = claude_model_deltas(&mut baselines, &[model(1, 2, 3, 4, 0.5)], false);
+        assert_eq!(delta[0].1, [1, 2, 3, 4, 0]);
+        assert_eq!(delta[0].2, Some(0.5));
+        let cumulative_again = claude_model_deltas(&mut baselines, &[model(13, 160, 30, 12, 0.03)], true);
+        assert_eq!(
+            cumulative_again[0].1,
+            [1, 10, 5, 3, 0],
+            "baselines still hold the last cumulative report"
+        );
+    }
+
+    #[test]
+    fn usage_reads_deduplicate_replayed_record_ids() {
+        let dir = tempfile::tempdir().unwrap();
+        let since = Utc::now() - chrono::Duration::hours(1);
+        let record = usage_record(
+            "grok:prompt-1",
+            "thread-1",
+            None,
+            "grok",
+            "grok-4.7-build",
+            (45837, 445696, 0, 6193),
+            Some(0.1195712),
+        );
+        let line = serde_json::to_string(&UsageEntry::Usage(record)).unwrap();
+        let path = dir
+            .path()
+            .join(format!("usage-{}.jsonl", month_of(Utc::now())));
+        let mut file = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(path)
+            .unwrap();
+        // The same turn delivered twice (a replayed vendor notification).
+        writeln!(file, "{line}").unwrap();
+        writeln!(file, "{line}").unwrap();
+        let read = read_usage_records(dir.path(), since);
+        assert_eq!(read.len(), 1);
     }
 
     #[test]

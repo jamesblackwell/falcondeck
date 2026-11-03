@@ -277,9 +277,11 @@ pub(super) async fn ingest_notification(
                 extract_thread_id(&params),
                 parse_thread_token_usage(&params),
             ) {
-                // The same `last` request can be re-reported with an unchanged
-                // cumulative total; the accumulator dedupes those.
-                app.note_codex_token_usage(&thread_id, &params);
+                // Repeated reports carry an unchanged cumulative total; the
+                // accumulator diffs per turn, so those are ignored.
+                let turn_id =
+                    extract_turn_id(&params).unwrap_or_else(|| "turn".to_string());
+                app.note_codex_token_usage(&thread_id, &turn_id, &params);
                 app.inner
                     .thread_token_usage
                     .lock()
@@ -405,10 +407,8 @@ pub(super) async fn ingest_notification(
         }
         "turn/started" => {
             if let Some(thread_id) = extract_thread_id(&params) {
-                // A new turn starts a fresh usage window; anything accumulated
-                // before this point belongs to no turn.
-                app.reset_codex_turn_usage(&thread_id);
                 let turn_id = extract_turn_id(&params).unwrap_or_else(|| "turn".to_string());
+                let turn_model = extract_string(&params, &["model", "modelId", "model_id"]);
                 let updated_at = notification_timestamp(method, &params).unwrap_or_else(Utc::now);
                 let associated_user_message = {
                     let mut workspaces = app.inner.workspaces.lock().await;
@@ -442,10 +442,8 @@ pub(super) async fn ingest_notification(
                         thread.latest_turn_id = Some(turn_id.clone());
                         thread.last_error = None;
                         thread.updated_at = updated_at;
-                        if let Some(model_id) =
-                            extract_string(&params, &["model", "modelId", "model_id"])
-                        {
-                            thread.agent.model_id = Some(model_id);
+                        if let Some(model_id) = turn_model.as_deref() {
+                            thread.agent.model_id = Some(model_id.to_string());
                         }
                         if let Some(reasoning_effort) = extract_string(
                             &params,
@@ -470,6 +468,10 @@ pub(super) async fn ingest_notification(
                     Some(thread_id.clone()),
                     UnifiedEvent::ThreadUpdated { thread },
                 );
+                // Usage for this turn attributes to the model it started
+                // with (the thread selection once the notification applies
+                // its own model, if it carries one).
+                app.start_codex_turn_usage(&thread_id, &turn_id, turn_model.as_deref());
                 app.emit(
                     Some(workspace_id.to_string()),
                     Some(thread_id),
@@ -597,13 +599,12 @@ pub(super) async fn ingest_notification(
                         error: if retrying { None } else { error.clone() },
                     },
                 );
+                // Tokens the attempt consumed, failed or not, land in
+                // analytics; a retry then starts a fresh accumulation.
+                app.flush_codex_turn_usage(workspace_id, &thread_id);
                 if retrying {
-                    // The retry is a new turn: its usage starts from zero.
-                    app.reset_codex_turn_usage(&thread_id);
                     return Ok(());
                 }
-                // Tokens the turn consumed, failed or not, land in analytics.
-                app.flush_codex_turn_usage(workspace_id, &thread_id, &turn_id);
                 app.schedule_codex_thread_release_if_idle(workspace_id, &thread_id);
                 app.schedule_codex_subagent_release(workspace_id);
                 // A finished turn means the agent is waiting on the user;

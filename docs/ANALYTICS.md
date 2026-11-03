@@ -64,17 +64,22 @@ what was true when it was written):
   the activity switch, so turning analytics off does not silently stop usage
   accounting. Records dropped by a full writer queue are counted, not lost
   quietly (`dropped_usage_records` in the status response).
+- Replayed or re-delivered turns are counted once: the ACP event pump skips
+  usage while a `session/load` replay is in flight, and reading the files
+  deduplicates on the record id.
 - Claude `result.usage` is only the last API call, not a turn aggregate; the
   aggregate is `modelUsage` (subagents included), or
   `model_usage_since_last_result` when the CLI reports it for long-lived
-  processes. Automation-run usage reads the aggregate for the same reason.
+  processes. A result with only the cumulative `modelUsage` is differenced
+  against what the process last reported. Automation-run usage reads the same
+  aggregate, accumulating across a run's results.
 
 | Harness | Capture point |
 | --- | --- |
-| Claude | the `result` event: one record per `modelUsage` entry, cost from `costUSD` |
-| Codex | `thread/tokenUsage/updated`: per-request `last` deltas accumulated per turn, unchanged totals deduped, flushed on turn completion; model from the thread's turn selection |
+| Claude | the `result` event: one record per `modelUsage` entry, cost from `costUSD`, `calls` from `num_turns`; the cumulative fallback is differenced per process |
+| Codex | `thread/tokenUsage/updated`: cumulative totals diffed per turn (keyed by the notification's `turnId`), baselined where the previous turn ended, unchanged totals ignored, all-zero `last` reports skipped; flushed on turn completion (a transient retry flushes its attempt); provider fixed to `codex` and the model snapshotted at turn start |
 | Grok | `_x.ai/session/update` `turn_completed`: one record per `modelUsage` entry, `costUsdTicks` converted and kept raw |
-| Other ACP | the `session/prompt` response `usage` (input and output), model from the thread; Grok is excluded here to avoid double-counting |
+| Other ACP | the `session/prompt` response `usage` (input, output, and the cache/thought split when sent), model from the thread; Grok is excluded here to avoid double-counting |
 
 Capture is off the turn hot path: attribution is resolved in a spawned task
 and the serialized line is `try_send`ed to the writer thread. Usage rows
@@ -151,4 +156,6 @@ paired remote clients are refused, like the rest of analytics.
   the origin even with analytics off. Origins with no known dispatch time are
   omitted from the recent list rather than using their last activity time.
   Used by the desktop Info sidebar; local HTTP only, never a remote RPC.
-- `POST /api/analytics/clear` with `{"target": "prompts" | "events" | "all"}`.
+- `POST /api/analytics/clear` with `{"target": "prompts" | "events" | "usage"
+  | "all"}`. Usage has its own target: deleting activity metadata leaves the
+  token usage log alone.

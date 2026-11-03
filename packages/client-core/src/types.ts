@@ -665,8 +665,9 @@ export type AnalyticsUsageThread = {
   /** Dominant provider and model (the busiest combination). */
   provider: string;
   model: string;
-  /** Average prompt context per model call, in tokens. */
-  avg_context_per_call: number;
+  /** Average prompt context per model call, in tokens; null when no record
+   * reported a call count. */
+  avg_context_per_call?: number;
 };
 export type AnalyticsUsageGrouping = "bot" | "provider" | "model" | "thread" | "day";
 export type AnalyticsUsageReport = {
@@ -708,7 +709,7 @@ export type AnalyticsPrompt = {
   provider: string;
   text: string;
 };
-export type AnalyticsClearTarget = "prompts" | "events" | "all";
+export type AnalyticsClearTarget = "prompts" | "events" | "usage" | "all";
 
 export type ComputerUseBackend = "cua_driver" | "agent_desktop";
 

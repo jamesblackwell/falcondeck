@@ -347,6 +347,10 @@ struct InnerState {
     /// Codex per-request usage accumulated for each thread's active turn,
     /// flushed into analytics when the turn completes.
     codex_turn_usage: StdMutex<HashMap<String, analytics::CodexTurnUsage>>,
+    /// Per-model usage a Claude process last reported, keyed by thread, so
+    /// the cumulative `modelUsage` fallback can be differenced per turn.
+    claude_usage_baselines:
+        StdMutex<HashMap<String, HashMap<String, analytics::ClaudeModelTotals>>>,
     /// User-message excerpts per provider session, for content search.
     thread_search: StdMutex<thread_search::ThreadSearchIndex>,
     /// When the excerpt index last finished a scan of the session files.
@@ -1049,6 +1053,7 @@ impl AppState {
                 plugin_refresh_attempts: StdMutex::new(HashMap::new()),
                 thread_token_usage: StdMutex::new(HashMap::new()),
                 codex_turn_usage: StdMutex::new(HashMap::new()),
+                claude_usage_baselines: StdMutex::new(HashMap::new()),
                 thread_search: StdMutex::new(thread_search::ThreadSearchIndex::default()),
                 thread_search_scanned_at: StdMutex::new(None),
                 thread_search_scan: Mutex::new(()),

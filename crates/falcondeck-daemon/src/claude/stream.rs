@@ -661,6 +661,25 @@ pub(crate) fn result_usage_service_tier(value: &Value) -> Option<String> {
         .map(str::to_string)
 }
 
+/// Whether the result's per-model usage is the process-cumulative
+/// `modelUsage`: no `model_usage_since_last_result` delta was reported, so
+/// callers must difference it against the process's previous report.
+pub(crate) fn result_model_usage_is_cumulative(value: &Value) -> bool {
+    value
+        .get("model_usage_since_last_result")
+        .and_then(Value::as_object)
+        .is_none()
+        && value.get("modelUsage").is_some()
+}
+
+/// Agentic turns the CLI counted in this `result`, when it reports one.
+pub(crate) fn result_num_turns(value: &Value) -> Option<u64> {
+    value
+        .get("num_turns")
+        .or_else(|| value.get("numTurns"))
+        .and_then(json_u64)
+}
+
 
 /// A `result` that is an interrupt/abort side-effect, not a real failure.
 pub(crate) fn result_is_cancelled(value: &Value) -> bool {
@@ -1021,6 +1040,9 @@ mod tests {
         assert_eq!(models[0].thinking_tokens, Some(0));
         assert_eq!(models[0].cost_usd, Some(0.00391086));
         assert_eq!(result_usage_service_tier(&result).as_deref(), Some("standard"));
+        // A delta result is not cumulative, and the CLI counts its turns.
+        assert!(!result_model_usage_is_cumulative(&result));
+        assert_eq!(result_num_turns(&result), Some(1));
     }
 
     #[test]
@@ -1078,12 +1100,22 @@ mod tests {
             "usage": { "input_tokens": 5, "output_tokens": 6 }
         });
         assert_eq!(result_turn_model_usage(&bare), None);
+        // modelUsage without the delta is cumulative: callers must difference
+        // it against the process's previous report.
+        let mut cumulative = probe_result_single_call();
+        cumulative
+            .as_object_mut()
+            .unwrap()
+            .remove("model_usage_since_last_result");
+        assert!(result_turn_model_usage(&cumulative).is_some());
+        assert!(result_model_usage_is_cumulative(&cumulative));
         // An empty since-last-result delta (a result with no API calls since
         // the previous one) must not fall back to the cumulative `modelUsage`,
         // which would re-report the whole process.
         let mut empty_delta = probe_result_single_call();
         empty_delta["model_usage_since_last_result"] = json!({});
         assert_eq!(result_turn_model_usage(&empty_delta), Some(Vec::new()));
+        assert!(!result_model_usage_is_cumulative(&empty_delta));
     }
 
     #[test]

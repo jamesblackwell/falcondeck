@@ -1154,28 +1154,56 @@ fn grok_turn_usage(update: &Value) -> Option<AcpTurnUsage> {
 }
 
 /// Usage from an ACP `session/prompt` response: input and output tokens for
-/// the whole prompt, no cache split, no model name.
+/// the whole prompt, with the cache/reasoning split when the agent sends one.
 fn acp_prompt_usage(response: &Value) -> Option<AcpTurnUsage> {
     let usage = response.get("usage")?;
-    let input = json_u64_field(usage, "inputTokens")?;
-    let output = json_u64_field(usage, "outputTokens")?;
+    let field = |names: &[&str]| -> Option<u64> {
+        names
+            .iter()
+            .find_map(|name| json_u64_field(usage, name))
+    };
+    let input = field(&["inputTokens", "input_tokens"])?;
+    let output = field(&["outputTokens", "output_tokens"])?;
     if input == 0 && output == 0 {
         return None;
     }
+    // Agents differ: the ACP spec spells the fields cachedWriteTokens and
+    // thoughtTokens, Grok's vendor stream cachedCreationTokens and
+    // reasoningTokens.
+    let cache_read = field(&[
+        "cachedReadTokens",
+        "cached_read_tokens",
+    ])
+    .unwrap_or(0);
+    let cache_write = field(&[
+        "cachedWriteTokens",
+        "cacheWriteInputTokens",
+        "cache_creation_tokens",
+    ])
+    .unwrap_or(0);
+    let reasoning = field(&[
+        "thoughtTokens",
+        "reasoningTokens",
+        "reasoning_tokens",
+    ])
+    .unwrap_or(0);
+    // When cache reads are reported and fit inside the input figure, the
+    // agent counted them as input; normalisation subtracts them.
+    let input_includes_cached_reads = cache_read > 0 && cache_read <= input;
     Some(AcpTurnUsage {
         models: vec![AcpModelUsage {
             model: String::new(),
             input_tokens: input,
-            cache_read_tokens: json_u64_field(usage, "cachedReadTokens").unwrap_or(0),
-            cache_write_tokens: json_u64_field(usage, "cacheCreationTokens").unwrap_or(0),
+            cache_read_tokens: cache_read,
+            cache_write_tokens: cache_write,
             output_tokens: output,
-            reasoning_tokens: json_u64_field(usage, "reasoningTokens").unwrap_or(0),
-            model_calls: json_u64_field(usage, "modelCalls"),
+            reasoning_tokens: reasoning,
+            model_calls: field(&["modelCalls", "model_calls"]),
             cost_ticks: None,
         }],
         turn_cost_ticks: None,
         prompt_id: None,
-        input_includes_cached_reads: false,
+        input_includes_cached_reads,
     })
 }
 
@@ -5157,6 +5185,36 @@ mod tests {
 
         assert!(acp_prompt_usage(&json!({"usage": {"inputTokens": 0, "outputTokens": 0}})).is_none());
         assert!(acp_prompt_usage(&json!({"stopReason": "end_turn"})).is_none());
+    }
+
+    #[test]
+    fn acp_prompt_usage_accepts_spec_cache_and_thought_fields() {
+        // ACP-spec spellings, with cache reads folded into the input figure.
+        let usage = acp_prompt_usage(&json!({
+            "usage": {
+                "inputTokens": 5000, "outputTokens": 400,
+                "cachedReadTokens": 4500, "cachedWriteTokens": 100,
+                "thoughtTokens": 90
+            }
+        }))
+        .unwrap();
+        let model = &usage.models[0];
+        assert_eq!(model.cache_read_tokens, 4500);
+        assert_eq!(model.cache_write_tokens, 100);
+        assert_eq!(model.reasoning_tokens, 90);
+        assert!(usage.input_includes_cached_reads);
+        // The consumer's normalisation: uncached input is the difference.
+        assert_eq!(
+            model.input_tokens.saturating_sub(model.cache_read_tokens),
+            500
+        );
+        // Cache reads larger than input mean the input figure already
+        // excludes them; nothing is subtracted.
+        let exclusive = acp_prompt_usage(&json!({
+            "usage": {"inputTokens": 100, "outputTokens": 10, "cachedReadTokens": 4000}
+        }))
+        .unwrap();
+        assert!(!exclusive.input_includes_cached_reads);
     }
 
     #[test]

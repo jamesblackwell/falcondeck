@@ -48,10 +48,11 @@ pub use history::{
     DiscoveredClaudeThread, discover_threads, hydrate_native_thread, native_session_source,
 };
 pub(crate) use stream::{
-    ClaudeLiveContextUsage, ClaudeNdjsonFramer, ClaudeStreamLine, encode_control_response_error,
-    is_resume_startup_failure, live_context_usage, parse_claude_stream_lines, result_is_cancelled,
-    result_model_context_window, result_turn_model_usage, result_usage_service_tier,
-    synthetic_permission_requests,
+    ClaudeLiveContextUsage, ClaudeModelUsage, ClaudeNdjsonFramer, ClaudeStreamLine,
+    encode_control_response_error, is_resume_startup_failure, live_context_usage,
+    parse_claude_stream_lines, result_is_cancelled, result_model_context_window,
+    result_model_usage_is_cumulative, result_num_turns, result_turn_model_usage,
+    result_usage_service_tier, synthetic_permission_requests,
 };
 
 pub struct ClaudeBootstrap {

@@ -245,16 +245,24 @@ export function AnalyticsPanel({ baseUrl, onToast, onOpenThread }: AnalyticsPane
     setLoading(true)
     setError(null)
     try {
-      const [nextSummary, nextStatus, nextThreadUsage] = await Promise.all([
+      const [nextSummary, nextStatus] = await Promise.all([
         api.analyticsSummary(Number(period)),
         api.analyticsStatus(),
-        api.analyticsUsage(Number(period), 'thread'),
       ])
       if (id !== loadId.current) return
       setSummary(nextSummary)
       setStatus(nextStatus)
-      setThreadUsage(nextThreadUsage.rows ?? [])
       wanted.current ??= nextStatus.settings
+      // Older daemons lack the usage endpoint; the tables simply stay empty
+      // instead of blanking the whole panel.
+      let rows: AnalyticsUsageRow[] = []
+      try {
+        rows = (await api.analyticsUsage(Number(period), 'thread')).rows ?? []
+      } catch {
+        rows = []
+      }
+      if (id !== loadId.current) return
+      setThreadUsage(rows)
     } catch (err) {
       if (id === loadId.current) setError(err instanceof Error ? err.message : String(err))
     } finally {
@@ -317,7 +325,12 @@ export function AnalyticsPanel({ baseUrl, onToast, onOpenThread }: AnalyticsPane
       await load()
       onToast({
         variant: 'success',
-        title: target === 'prompts' ? 'Your messages were deleted' : 'Activity history was deleted',
+        title:
+          target === 'prompts'
+            ? 'Your messages were deleted'
+            : target === 'usage'
+              ? 'Token usage history was deleted'
+              : 'Activity history was deleted',
       })
     } catch (err) {
       onToast({
@@ -938,7 +951,9 @@ export function AnalyticsPanel({ baseUrl, onToast, onOpenThread }: AnalyticsPane
               <p className="min-w-0 flex-1 text-[length:var(--fd-text-sm)] text-fg-secondary">
                 {confirming === 'prompts'
                   ? 'Delete every recorded message you sent? This cannot be undone.'
-                  : 'Delete all recorded activity? This cannot be undone.'}
+                  : confirming === 'usage'
+                    ? 'Delete all recorded token usage? This cannot be undone.'
+                    : 'Delete all recorded activity (usage included)? This cannot be undone.'}
               </p>
               <Button variant="ghost" size="sm" onClick={() => setConfirming(null)}>
                 Cancel
@@ -954,6 +969,9 @@ export function AnalyticsPanel({ baseUrl, onToast, onOpenThread }: AnalyticsPane
               </Button>
               <Button variant="ghost" size="sm" disabled={!status} onClick={() => setConfirming('events')}>
                 Delete activity
+              </Button>
+              <Button variant="ghost" size="sm" disabled={!status} onClick={() => setConfirming('usage')}>
+                Delete token usage
               </Button>
             </>
           )}
