@@ -1934,16 +1934,55 @@ async fn shell_prechecks_need_elevated_setting_and_human_approval() {
         assert_eq!(response.error.unwrap().code, "precheck_approval_required");
     }
     for origin in [ControlOrigin::DesktopUi, ControlOrigin::RemoteRpc] {
-        let context = ControlRequestContext { origin, ..Default::default() };
-        let response = service.execute(execute_request(registry::ops::AUTOMATION_RESUME, json!({"automation_id":id}), Some(1)), &context, &ControlDeps::none()).await.0;
+        let context = ControlRequestContext {
+            origin,
+            ..Default::default()
+        };
+        let response = service
+            .execute(
+                execute_request(
+                    registry::ops::AUTOMATION_RESUME,
+                    json!({"automation_id":id}),
+                    Some(1),
+                ),
+                &context,
+                &ControlDeps::none(),
+            )
+            .await
+            .0;
         assert_eq!(response.error.unwrap().code, "precheck_approval_required");
     }
     let hash = created["precheck_approval_hash"].as_str().unwrap();
-    for (caller, hash, code) in [(mcp(Some("codex")), hash, "precheck_approval_required"), (desktop(), "wrong", "precheck_approval_required")] {
-        let response = service.execute(execute_request(registry::ops::AUTOMATION_APPROVE_PRECHECK, json!({"automation_id":id,"approval_hash":hash}), Some(1)), &caller, &ControlDeps::none()).await.0;
+    for (caller, hash, code) in [
+        (mcp(Some("codex")), hash, "precheck_approval_required"),
+        (desktop(), "wrong", "precheck_approval_required"),
+    ] {
+        let response = service
+            .execute(
+                execute_request(
+                    registry::ops::AUTOMATION_APPROVE_PRECHECK,
+                    json!({"automation_id":id,"approval_hash":hash}),
+                    Some(1),
+                ),
+                &caller,
+                &ControlDeps::none(),
+            )
+            .await
+            .0;
         assert_eq!(response.error.unwrap().code, code);
     }
-    let approved = service.execute(execute_request(registry::ops::AUTOMATION_APPROVE_PRECHECK, json!({"automation_id":id,"approval_hash":hash}), Some(1)), &desktop(), &ControlDeps::none()).await.0;
+    let approved = service
+        .execute(
+            execute_request(
+                registry::ops::AUTOMATION_APPROVE_PRECHECK,
+                json!({"automation_id":id,"approval_hash":hash}),
+                Some(1),
+            ),
+            &desktop(),
+            &ControlDeps::none(),
+        )
+        .await
+        .0;
     assert!(approved.ok, "{:?}", approved.error);
     assert_eq!(approved.data.unwrap()["precheck_approved"], true);
     let mut task = args["task"].clone();
@@ -1974,16 +2013,58 @@ async fn shell_prechecks_need_elevated_setting_and_human_approval() {
             .is_err()
     );
     // A toggle retry with the fresh revision still cannot approve the changed command.
-    let resumed = service.execute(execute_request(registry::ops::AUTOMATION_RESUME, json!({"automation_id": id}), Some(3)), &ControlRequestContext { origin: ControlOrigin::RemoteRpc, ..Default::default() }, &ControlDeps::none()).await.0;
+    let resumed = service
+        .execute(
+            execute_request(
+                registry::ops::AUTOMATION_RESUME,
+                json!({"automation_id": id}),
+                Some(3),
+            ),
+            &ControlRequestContext {
+                origin: ControlOrigin::RemoteRpc,
+                ..Default::default()
+            },
+            &ControlDeps::none(),
+        )
+        .await
+        .0;
     assert_eq!(resumed.error.unwrap().code, "precheck_approval_required");
     for revision in [2, 3] {
-        let response = service.execute(execute_request(registry::ops::AUTOMATION_APPROVE_PRECHECK, json!({"automation_id":id,"approval_hash":hash}), Some(revision)), &desktop(), &ControlDeps::none()).await.0;
-        assert_eq!(response.error.unwrap().code, if revision == 2 { "revision_conflict" } else { "precheck_approval_required" });
+        let response = service
+            .execute(
+                execute_request(
+                    registry::ops::AUTOMATION_APPROVE_PRECHECK,
+                    json!({"automation_id":id,"approval_hash":hash}),
+                    Some(revision),
+                ),
+                &desktop(),
+                &ControlDeps::none(),
+            )
+            .await
+            .0;
+        assert_eq!(
+            response.error.unwrap().code,
+            if revision == 2 {
+                "revision_conflict"
+            } else {
+                "precheck_approval_required"
+            }
+        );
     }
     let mut bot_args = args.clone();
     bot_args["target"]["thread"] = json!({"kind":"new_each_run"});
     bot_args["target"]["run_as_bot"] = json!("bot-1");
-    assert!(!service.execute(execute_request(registry::ops::AUTOMATION_CREATE, bot_args, None), &desktop(), &ControlDeps::none()).await.0.ok);
+    assert!(
+        !service
+            .execute(
+                execute_request(registry::ops::AUTOMATION_CREATE, bot_args, None),
+                &desktop(),
+                &ControlDeps::none()
+            )
+            .await
+            .0
+            .ok
+    );
     // Invalid commands/timeouts are rejected before any shell execution.
     for check in [
         json!({"command":"", "timeout_seconds":5}),
@@ -1999,5 +2080,51 @@ async fn shell_prechecks_need_elevated_setting_and_human_approval() {
             )
             .await;
         assert!(!invalid.ok);
+    }
+}
+
+#[tokio::test]
+async fn agents_can_rename_noncompliant_schedules_but_not_resubmit_their_cadence() {
+    let (_dir, service) = service().await;
+    for (provider, expression) in [("claude", "0 * * * *"), ("codex", "*/10 * * * *")] {
+        let mut args = create_arguments();
+        args["trigger"]["expression"] = json!(expression);
+        args["target"]["provider"] = json!(provider);
+        let created = service
+            .execute(
+                execute_request(registry::ops::AUTOMATION_CREATE, args.clone(), None),
+                &desktop(),
+                &ControlDeps::none(),
+            )
+            .await
+            .0;
+        assert!(created.ok);
+        let id = created.data.unwrap()["id"].clone();
+        let renamed = service
+            .execute(
+                execute_request(
+                    registry::ops::AUTOMATION_UPDATE,
+                    json!({"automation_id":id,"name":"Renamed"}),
+                    Some(1),
+                ),
+                &mcp(Some(provider)),
+                &ControlDeps::none(),
+            )
+            .await
+            .0;
+        assert!(renamed.ok, "{:?}", renamed.error);
+        let unchanged_target = service
+            .execute(
+                execute_request(
+                    registry::ops::AUTOMATION_UPDATE,
+                    json!({"automation_id":id,"target":args["target"]}),
+                    Some(2),
+                ),
+                &mcp(Some(provider)),
+                &ControlDeps::none(),
+            )
+            .await
+            .0;
+        assert_eq!(unchanged_target.error.unwrap().code, "invalid_schedule");
     }
 }

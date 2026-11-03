@@ -1,8 +1,8 @@
 # Automation cost controls
 
-The daemon validates schedules deterministically. MCP creates and updates must
+The daemon validates schedules deterministically. MCP creates and updates to a trigger or target must
 repeat no more often than every 30 minutes. For reused tasks (managed, existing,
-or current), a known cache TTL also rejects a minimum gap in `(TTL − 5 minutes,
+or current), a known cache TTL also rejects any scanned gap in `(TTL − 5 minutes,
 TTL + 30 minutes]`. Claude's measured main-conversation TTL is 3600 seconds;
 other providers have no registered TTL. Use a 3000-second (50-minute) interval
 or `new_each_run` for Claude. This is a cadence heuristic, not a guarantee that
@@ -24,8 +24,12 @@ ticks do not reset the grid. DST changes the local tick times, not the elapsed
 interval. Cron retains its existing semantics: skip nonexistent wall times,
 run ambiguous times once at the earlier instant.
 
-Minimum-gap checks simulate fourteen days from the first future occurrence,
-using the real scheduler and timezone. Sparse schedules with fewer than two
+Gap checks simulate fourteen days from the first future occurrence, or 62 days
+when cron restricts day-of-month or month,
+using the scheduler’s timezone and DST semantics. Cron parses once and scans
+local calendar occurrences directly; guards stop when disqualified. Advice,
+agent validation and health scans run on the blocking pool, off async workers.
+Renames and task-only edits do not revalidate cadence on older saved schedules. Sparse schedules with fewer than two
 occurrences in that window have no gap-based advice. The editor's 50-minute
 cron conversion is offered only for contiguous hours without month/day-of-month
 constraints, preserves weekdays and timezone, and uses the selected hours as a

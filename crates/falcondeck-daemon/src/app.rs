@@ -1292,12 +1292,9 @@ impl AppState {
                     .map_err(|error| {
                         crate::control::ControlError::invalid_arguments(format!("target: {error}"))
                     })?;
-            let advice = crate::control::automations::cadence_advice(
-                &trigger,
-                &target,
-                self.automation_targets_bot_home(&target).await,
-                Utc::now(),
-            )?;
+            let bot_home = self.automation_targets_bot_home(&target).await;
+            let advice = tokio::task::spawn_blocking(move || crate::control::automations::cadence_advice(&trigger, &target, bot_home, Utc::now()))
+                .await.map_err(|error| crate::control::ControlError::internal(error.to_string()))??;
             return Ok(falcondeck_core::control::ControlGetResponse {
                 resource: request.resource,
                 data: serde_json::json!(advice),

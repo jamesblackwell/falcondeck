@@ -71,7 +71,7 @@ outcome, with review flags:
 - `very_frequent`: 24 or more runs a day.
 - `failing`: two or more failures, and at least 30% of runs.
 - `thread_per_run`: a `new_each_run` task that used more than three threads.
-- `cache_cold_reuse`: reused task with a minimum gap in `(TTL−5min, TTL+30min]`;
+- `cache_cold_reuse`: reused task with any scanned gap in `(TTL−5min, TTL+30min]`;
   Claude's measured one-hour TTL is currently the only registered TTL.
 - `bot_home_frequent`: bot home task scheduled more often than every four hours.
 - `large_reused_context`: managed/existing task with over 100k context tokens

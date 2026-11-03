@@ -1581,11 +1581,6 @@ impl AppState {
             );
         let runs = self.control().runs_since(since).await;
         let definitions = self.control().automations_snapshot().await;
-        let mut summary = tokio::task::spawn_blocking(move || {
-            summarize(read_records(&dir, since), &labels, days)
-        })
-        .await
-        .map_err(|e| DaemonError::Process(e.to_string()))?;
         let bot_home_ids = self
             .preferences()
             .await
@@ -1593,7 +1588,13 @@ impl AppState {
             .into_iter()
             .map(|bot| bot.thread_id)
             .collect();
-        summary.automations = summarize_automations(runs, &definitions, days, &bot_home_ids);
+        let summary = tokio::task::spawn_blocking(move || {
+            let mut summary = summarize(read_records(&dir, since), &labels, days);
+            summary.automations = summarize_automations(runs, &definitions, days, &bot_home_ids);
+            summary
+        })
+        .await
+        .map_err(|e| DaemonError::Process(e.to_string()))?;
         Ok(summary)
     }
 
@@ -1875,8 +1876,12 @@ mod tests {
         let mut execution = run("r", "cost", "succeeded");
         execution.context_tokens_at_start = Some(100_001);
         let homes = HashSet::from(["home".into()]);
-        let health =
-            summarize_automations(vec![execution.clone()], std::slice::from_ref(&definition), 7, &homes);
+        let health = summarize_automations(
+            vec![execution.clone()],
+            std::slice::from_ref(&definition),
+            7,
+            &homes,
+        );
         assert_eq!(
             health[0].flags,
             [
@@ -1886,8 +1891,12 @@ mod tests {
             ]
         );
         execution.context_tokens_at_start = Some(100_000);
-        let health =
-            summarize_automations(vec![execution], std::slice::from_ref(&definition), 7, &HashSet::new());
+        let health = summarize_automations(
+            vec![execution],
+            std::slice::from_ref(&definition),
+            7,
+            &HashSet::new(),
+        );
         assert_eq!(health[0].flags, ["cache_cold_reuse"]);
         let mut fresh = definition;
         fresh.target.thread = falcondeck_core::control::AutomationThreadTarget::NewEachRun;

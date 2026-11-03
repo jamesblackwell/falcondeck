@@ -255,12 +255,10 @@ pub fn next_cron_occurrence(
 ) -> Option<NextOccurrence> {
     let after_local = after.with_timezone(&tz).naive_local();
     let mut date = after_local.date();
-    let hours: Vec<u32> = spec.hours.iter().copied().collect();
-    let minutes: Vec<u32> = spec.minutes.iter().copied().collect();
     for _ in 0..DAY_SCAN_HORIZON {
         if spec.day_matches(date) {
-            for &hour in &hours {
-                for &minute in &minutes {
+            for &hour in &spec.hours {
+                for &minute in &spec.minutes {
                     let candidate = date
                         .and_hms_opt(hour, minute, 0)
                         .expect("cron fields are within chrono bounds");
@@ -397,42 +395,119 @@ pub fn next_occurrence(
     }
 }
 
-/// Minimum elapsed gap in the next fourteen days (from the first occurrence).
-/// Cron uses the scheduler's timezone and DST semantics, never fixed UTC hours.
+/// Visits elapsed gaps once, parsing cron once. Returning false stops the scan.
+/// Calendar-constrained cron needs two month boundaries, not just two weeks.
+fn scan_gaps(
+    trigger: &AutomationTrigger,
+    now: DateTime<Utc>,
+    mut visit: impl FnMut(u64) -> bool,
+) -> Result<(), ControlError> {
+    match trigger {
+        AutomationTrigger::Once { .. } => Ok(()),
+        AutomationTrigger::Interval {
+            every_seconds,
+            active_window: None,
+            ..
+        } => {
+            next_occurrence(trigger, now)?;
+            visit(*every_seconds);
+            Ok(())
+        }
+        AutomationTrigger::Cron {
+            expression,
+            timezone,
+        } => {
+            let spec = CronSpec::parse(expression).map_err(|message| {
+                ControlError::invalid_schedule(message, Some("trigger.expression"))
+            })?;
+            let tz = parse_timezone(timezone)?;
+            let Some(first) = next_cron_occurrence(&spec, tz, now) else {
+                return Ok(());
+            };
+            let days = if spec.dom_restricted || spec.months.len() != 12 {
+                62
+            } else {
+                14
+            };
+            let horizon = first
+                .at
+                .checked_add_signed(Duration::days(days))
+                .ok_or_else(|| {
+                    ControlError::invalid_schedule(
+                        "schedule scan overflows supported dates",
+                        Some("trigger"),
+                    )
+                })?;
+            let mut date = first.at.with_timezone(&tz).date_naive();
+            let mut previous: Option<DateTime<Utc>> = None;
+            for _ in 0..=days + 1 {
+                if spec.day_matches(date) {
+                    for &hour in &spec.hours {
+                        for &minute in &spec.minutes {
+                            let local = date
+                                .and_hms_opt(hour, minute, 0)
+                                .expect("validated cron fields");
+                            let at = match tz.from_local_datetime(&local) {
+                                LocalResult::Single(at) | LocalResult::Ambiguous(at, _) => {
+                                    at.with_timezone(&Utc)
+                                }
+                                LocalResult::None => continue,
+                            };
+                            if at < first.at {
+                                continue;
+                            }
+                            if at > horizon {
+                                return Ok(());
+                            }
+                            if let Some(previous) = previous
+                                && !visit((at - previous).num_seconds() as u64)
+                            {
+                                return Ok(());
+                            }
+                            previous = Some(at);
+                        }
+                    }
+                }
+                date = date.succ_opt().ok_or_else(|| {
+                    ControlError::invalid_schedule(
+                        "schedule scan overflows supported dates",
+                        Some("trigger"),
+                    )
+                })?;
+            }
+            Ok(())
+        }
+        AutomationTrigger::Interval { .. } => {
+            let Some(first) = next_occurrence(trigger, now)? else {
+                return Ok(());
+            };
+            let horizon = first.at + Duration::days(14);
+            let mut previous = first.at;
+            for _ in 0..=14 * 24 * 60 {
+                let Some(next) = next_occurrence(trigger, previous)? else {
+                    break;
+                };
+                if next.at > horizon || !visit((next.at - previous).num_seconds() as u64) {
+                    break;
+                }
+                previous = next.at;
+            }
+            Ok(())
+        }
+    }
+}
+
+/// Minimum elapsed gap; cron uses the scheduler's timezone and DST semantics.
 pub fn minimum_gap_seconds(
     trigger: &AutomationTrigger,
     now: DateTime<Utc>,
 ) -> Result<Option<u64>, ControlError> {
-    if let AutomationTrigger::Interval {
-        every_seconds,
-        active_window: None,
-        ..
-    } = trigger
-    {
-        next_occurrence(trigger, now)?;
-        return Ok(Some(*every_seconds));
-    }
-    if matches!(trigger, AutomationTrigger::Once { .. }) {
-        return Ok(None);
-    }
-    let Some(first) = next_occurrence(trigger, now)? else {
-        return Ok(None);
-    };
-    let horizon = first.at + Duration::days(14);
-    let mut previous = first.at;
     let mut shortest = None;
-    // Five-field cron and interval validation both cap occurrences at one/minute.
-    for _ in 0..=14 * 24 * 60 {
-        let Some(next) = next_occurrence(trigger, previous)? else {
-            break;
-        };
-        if next.at > horizon {
-            break;
-        }
-        let gap = (next.at - previous).num_seconds() as u64;
+    scan_gaps(trigger, now, |gap| {
         shortest = Some(shortest.map_or(gap, |old: u64| old.min(gap)));
-        previous = next.at;
-    }
+        // Minute-based cron cannot improve on a one-minute gap.
+        gap != 60
+    })?;
     Ok(shortest)
 }
 
@@ -451,15 +526,21 @@ pub fn cadence_advice(
     bot_home: bool,
     now: DateTime<Utc>,
 ) -> Result<Vec<serde_json::Value>, ControlError> {
-    let Some(gap) = minimum_gap_seconds(trigger, now)? else {
+    let ttl = (target.thread != AutomationThreadTarget::NewEachRun)
+        .then(|| prompt_cache_ttl_seconds(&target.provider))
+        .flatten();
+    if ttl.is_none() && !bot_home {
         return Ok(vec![]);
-    };
+    }
+    let mut cold = false;
+    let mut home_frequent = false;
+    scan_gaps(trigger, now, |gap| {
+        cold |= ttl.is_some_and(|ttl| gap > ttl - 300 && gap <= ttl + 1800);
+        home_frequent |= bot_home && gap < 4 * 3600;
+        !(cold || ttl.is_none()) || !(home_frequent || !bot_home)
+    })?;
     let mut advice = Vec::new();
-    if target.thread != AutomationThreadTarget::NewEachRun
-        && let Some(ttl) = prompt_cache_ttl_seconds(&target.provider)
-        && gap > ttl - 300
-        && gap <= ttl + 1800
-    {
+    if cold && let Some(ttl) = ttl {
         advice.push(serde_json::json!({
             "code": "cache_cold_reuse",
             "message": format!("This reused {} task runs near its {}-minute prompt-cache TTL and can pay a cold context write each run.", target.provider, ttl / 60),
@@ -468,7 +549,7 @@ pub fn cadence_advice(
             "replacement_trigger": warm_interval(trigger, ttl - 600, now),
         }));
     }
-    if bot_home && gap < 4 * 3600 {
+    if home_frequent {
         advice.push(serde_json::json!({
             "code": "bot_home_frequent",
             "message": "Bot home conversations must not be scheduled more often than every 4 hours.",
@@ -538,8 +619,11 @@ pub fn validate_agent_frequency(
     trigger: &AutomationTrigger,
     now: DateTime<Utc>,
 ) -> Result<(), ControlError> {
-    let too_frequent =
-        minimum_gap_seconds(trigger, now)?.is_some_and(|gap| gap < MIN_AGENT_REPEAT_SECONDS as u64);
+    let mut too_frequent = false;
+    scan_gaps(trigger, now, |gap| {
+        too_frequent = gap < MIN_AGENT_REPEAT_SECONDS as u64;
+        !too_frequent
+    })?;
     if too_frequent {
         return Err(ControlError::invalid_schedule(
             "agents can schedule repeating work at most every 30 minutes",
@@ -595,7 +679,10 @@ pub fn validate_definition(
     required_connectors: &[String],
 ) -> Result<(), ControlError> {
     if task.precheck().is_some() && target.run_as_bot.is_some() {
-        return Err(ControlError::field("task.precheck", "Shell pre-checks cannot be combined with run_as_bot; use a fixed workspace target."));
+        return Err(ControlError::field(
+            "task.precheck",
+            "Shell pre-checks cannot be combined with run_as_bot; use a fixed workspace target.",
+        ));
     }
     if let Some(check) = task.precheck()
         && (check.command.trim().is_empty()
@@ -1164,6 +1251,45 @@ mod tests {
             .unwrap()
             .at
             .to_rfc3339()
+    }
+
+    #[test]
+    fn irregular_cadences_check_every_gap_and_month_boundaries() {
+        let now = utc("2026-02-02T00:00:00Z");
+        let cron = |expression: &str| AutomationTrigger::Cron {
+            expression: expression.into(),
+            timezone: "Europe/London".into(),
+        };
+        let target: AutomationTarget = serde_json::from_value(serde_json::json!({"workspace_path":"/tmp","provider":"claude","thread":{"kind":"managed"}})).unwrap();
+        let mixed = cron("0,50 */2 * * *");
+        assert_eq!(minimum_gap_seconds(&mixed, now).unwrap(), Some(3000));
+        assert_eq!(
+            cadence_advice(&mixed, &target, false, now).unwrap()[0]["code"],
+            "cache_cold_reuse"
+        );
+        for expression in ["0,59 0,23 1,31 * *", "0,59 0,23 1,31 3,4 *"] {
+            let trigger = cron(expression);
+            assert_eq!(minimum_gap_seconds(&trigger, now).unwrap(), Some(60));
+            assert!(validate_agent_frequency(&trigger, now).is_err());
+        }
+        let dense = cron("* * * * *");
+        let mut visits = 0;
+        scan_gaps(&dense, now, |gap| {
+            visits += 1;
+            gap >= 1800
+        })
+        .unwrap();
+        assert_eq!(visits, 1, "reject dense polling at its first short gap");
+        let started = std::time::Instant::now();
+        assert!(
+            cadence_advice(&dense, &target, false, now)
+                .unwrap()
+                .is_empty()
+        );
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(1),
+            "a full dense scan must not repeat parsing/quadratic occurrence lookup"
+        );
     }
 
     #[test]

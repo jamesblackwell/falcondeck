@@ -816,7 +816,9 @@ impl ControlService {
                 )
                 .await
             }
-            ops::AUTOMATION_APPROVE_PRECHECK => self.approve_precheck(request, context, settings).await,
+            ops::AUTOMATION_APPROVE_PRECHECK => {
+                self.approve_precheck(request, context, settings).await
+            }
             ops::AUTOMATION_RUN_NOW => {
                 self.run_automation_now(&request.arguments, context.origin.clone(), None)
                     .await
@@ -891,14 +893,23 @@ impl ControlService {
         } else {
             false
         };
-        if let Some(advice) = automations::cadence_advice(trigger, target, bot_home, now)?.first() {
-            return Err(ControlError::invalid_schedule(
-                advice["message"].as_str().unwrap_or_default(),
-                Some("trigger"),
-            )
-            .with_suggested_action(advice["suggested_action"].as_str().unwrap_or_default()));
-        }
-        Ok(())
+        let trigger = trigger.clone();
+        let target = target.clone();
+        tokio::task::spawn_blocking(move || {
+            automations::validate_agent_frequency(&trigger, now)?;
+            if let Some(advice) =
+                automations::cadence_advice(&trigger, &target, bot_home, now)?.first()
+            {
+                return Err(ControlError::invalid_schedule(
+                    advice["message"].as_str().unwrap_or_default(),
+                    Some("trigger"),
+                )
+                .with_suggested_action(advice["suggested_action"].as_str().unwrap_or_default()));
+            }
+            Ok(())
+        })
+        .await
+        .map_err(|error| ControlError::internal(error.to_string()))?
     }
 
     async fn create_automation(
@@ -921,7 +932,6 @@ impl ControlService {
         let now = Utc::now();
         let next = automations::validate_trigger(&args.trigger, now)?;
         if context.origin == ControlOrigin::Mcp {
-            automations::validate_agent_frequency(&args.trigger, now)?;
             Self::validate_cadence(&args.trigger, &args.target, deps, now).await?;
         }
         let elevated = args.task.precheck().is_some()
@@ -1020,10 +1030,10 @@ impl ControlService {
                 .await?;
         }
         // Validate the merged definition even when only the target changes.
-        if context.origin == ControlOrigin::Mcp {
+        if context.origin == ControlOrigin::Mcp && (args.trigger.is_some() || args.target.is_some())
+        {
             let trigger = args.trigger.as_ref().unwrap_or(&existing.trigger);
             let target = args.target.as_ref().unwrap_or(&existing.target);
-            automations::validate_agent_frequency(trigger, Utc::now())?;
             Self::validate_cadence(trigger, target, deps, Utc::now()).await?;
         }
         let automation_id = args.automation_id.clone();
@@ -1093,9 +1103,6 @@ impl ControlService {
             automation.elevated = elevated;
             if trigger_changed {
                 let next = automations::validate_trigger(&automation.trigger, now)?;
-                if context.origin == ControlOrigin::Mcp {
-                    automations::validate_agent_frequency(&automation.trigger, now)?;
-                }
                 automation.next_run_at = (automation.task.precheck().is_none()
                     || automation.precheck_approved)
                     .then_some(next.at);
@@ -1115,24 +1122,45 @@ impl ControlService {
         .await
     }
 
-    async fn approve_precheck(&self, request: &ControlExecuteRequest, context: &ControlRequestContext, settings: &AgentControlSettings) -> Result<(Value, Vec<ControlDomain>), ControlError> {
-        if !is_human_origin(&context.origin) { return Err(precheck_approval_required()); }
-        if !settings.allow_elevated_automations { return Err(ControlError::elevated_permissions_disabled()); }
+    async fn approve_precheck(
+        &self,
+        request: &ControlExecuteRequest,
+        context: &ControlRequestContext,
+        settings: &AgentControlSettings,
+    ) -> Result<(Value, Vec<ControlDomain>), ControlError> {
+        if !is_human_origin(&context.origin) {
+            return Err(precheck_approval_required());
+        }
+        if !settings.allow_elevated_automations {
+            return Err(ControlError::elevated_permissions_disabled());
+        }
         require_revision(request)?;
         let args: registry::ApprovePrecheckArgs = decode_arguments(&request.arguments)?;
         self.mutate(|state, now| {
-            let automation = state.automations.iter_mut().find(|a| a.id == args.automation_id)
-                .ok_or_else(|| ControlError::resource_not_found("automation", &args.automation_id))?;
+            let automation = state
+                .automations
+                .iter_mut()
+                .find(|a| a.id == args.automation_id)
+                .ok_or_else(|| {
+                    ControlError::resource_not_found("automation", &args.automation_id)
+                })?;
             ensure_automation_authority(automation, None)?;
             require_revision_for(request, automation)?;
-            let (hash, _) = super::precheck::definition_identity(automation).ok_or_else(precheck_approval_required)?;
-            if hash != args.approval_hash { return Err(precheck_approval_required()); }
+            let (hash, _) = super::precheck::definition_identity(automation)
+                .ok_or_else(precheck_approval_required)?;
+            if hash != args.approval_hash {
+                return Err(precheck_approval_required());
+            }
             automation.precheck_approved = true;
             automation.precheck_approved_hash = Some(hash);
             automation.updated_at = now;
             automation.revision += 1;
-            Ok((automation_value(automation), vec![ControlDomain::Automations]))
-        }).await
+            Ok((
+                automation_value(automation),
+                vec![ControlDomain::Automations],
+            ))
+        })
+        .await
     }
 
     async fn set_automation_state(
@@ -1157,7 +1185,8 @@ impl ControlService {
                 .find(|automation| automation.id == automation_id)
                 .ok_or_else(|| ControlError::resource_not_found("automation", &automation_id))?;
             require_revision_for(request, automation)?;
-            if target_state == AutomationState::Enabled && !super::precheck::is_approved(automation) {
+            if target_state == AutomationState::Enabled && !super::precheck::is_approved(automation)
+            {
                 return Err(precheck_approval_required());
             }
             let changing = automation.state != target_state;
