@@ -32,6 +32,8 @@ export type AutomationDraft = {
   concurrencyPolicy: AutomationConcurrencyPolicy
   misfirePolicy: AutomationMisfirePolicy
   anchorAt: string
+  /** Round-trip fields this editor does not expose yet. */
+  original?: Automation
 }
 
 /** Changing provider on a managed thread drops the remembered id so the next
@@ -87,6 +89,7 @@ export function automationDraftFromDefinition(automation: Automation): Automatio
   const task = automation.task ?? { kind: 'prompt' as const, instruction: '' }
   const thread = automation.target.thread ?? { kind: 'managed' as const }
   return {
+    original: automation,
     name: automation.name,
     description: automation.description ?? '',
     scheduleKind: automation.trigger.kind,
@@ -137,16 +140,17 @@ function requireIntervalSeconds(value: string): number {
 
 export function automationDraftArguments(draft: AutomationDraft): Record<string, unknown> {
   const trigger = draft.scheduleKind === 'cron'
-    ? { kind: 'cron', expression: draft.expression.trim(), timezone: draft.timezone.trim() }
+    ? { ...(draft.original?.trigger.kind === 'cron' ? draft.original.trigger : {}), kind: 'cron', expression: draft.expression.trim(), timezone: draft.timezone.trim() }
     : draft.scheduleKind === 'interval'
       ? {
+          ...(draft.original?.trigger.kind === 'interval' ? draft.original.trigger : {}),
           kind: 'interval',
           every_seconds: requireIntervalSeconds(draft.everySeconds),
           // The persisted anchor is part of the schedule. Re-anchoring an edit
           // to the time it was saved would silently move every future run.
           anchor_at: draft.anchorAt.trim() || new Date().toISOString(),
         }
-      : { kind: 'once', run_at: draft.runAt.trim() }
+      : { ...(draft.original?.trigger.kind === 'once' ? draft.original.trigger : {}), kind: 'once', run_at: draft.runAt.trim() }
 
   return {
     name: draft.name.trim(),
@@ -154,12 +158,14 @@ export function automationDraftArguments(draft: AutomationDraft): Record<string,
     trigger,
     task: draft.conditional
       ? {
+          ...(draft.original?.task?.kind === 'conditional_prompt' ? draft.original.task : {}),
           kind: 'conditional_prompt',
           instruction: draft.instruction,
           no_action_marker: draft.noActionMarker.trim(),
         }
-      : { kind: 'prompt', instruction: draft.instruction },
+      : { ...(draft.original?.task?.kind === 'prompt' ? draft.original.task : {}), kind: 'prompt', instruction: draft.instruction },
     target: {
+      ...draft.original?.target,
       workspace_path: draft.workspacePath.trim(),
       provider: draft.provider,
       thread: draft.threadKind === 'managed'
@@ -170,9 +176,12 @@ export function automationDraftArguments(draft: AutomationDraft): Record<string,
         : draft.threadKind === 'existing'
           ? { kind: 'existing', thread_id: draft.threadId.trim() }
           : { kind: 'new_each_run' },
-      ...(draft.modelId.trim() ? { model_id: draft.modelId.trim() } : {}),
-      ...(draft.permissionMode.trim() ? { permission_mode: draft.permissionMode.trim() } : {}),
-      ...(draft.sandboxMode.trim() ? { sandbox_mode: draft.sandboxMode.trim() } : {}),
+      model_id: draft.modelId.trim() || null,
+      permission_mode: draft.permissionMode.trim() || null,
+      sandbox_mode: draft.sandboxMode.trim() || null,
+      // Provider/thread edits intentionally clear now-incompatible options.
+      ...(draft.provider !== 'claude' ? { claude_autocompact_tokens: null } : {}),
+      ...(draft.threadKind !== 'new_each_run' ? { run_as_bot: null, only_when_changed: false } : {}),
       selected_skills: commaSeparated(draft.selectedSkills),
     },
     required_connectors: commaSeparated(draft.requiredConnectors),
@@ -205,7 +214,7 @@ export function automationDraftError(draft: AutomationDraft): string | null {
 }
 
 export function automationDraftIsElevated(draft: AutomationDraft) {
-  return [draft.permissionMode.trim(), draft.sandboxMode.trim()].some((mode) =>
+  return (draft.conditional && draft.original?.task?.kind === 'conditional_prompt' && !!draft.original.task.precheck) || [draft.permissionMode.trim(), draft.sandboxMode.trim()].some((mode) =>
     mode === 'bypassPermissions' || mode === 'danger-full-access',
   )
 }

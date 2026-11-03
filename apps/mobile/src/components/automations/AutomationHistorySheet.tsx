@@ -14,6 +14,8 @@ const RUN_TONE: Record<AutomationRun['status'], 'default' | 'success' | 'warning
   failed: 'danger',
   skipped_overlap: 'default',
   skipped_dependency: 'warning',
+  skipped_unchanged: 'default',
+  skipped_precheck: 'default',
   cancelled: 'default',
 }
 

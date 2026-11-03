@@ -142,3 +142,22 @@ describe('automation drafts', () => {
     }
   })
 })
+
+it('round-trips working windows, shell checks, compaction and future nested fields', () => {
+  const window = { timezone: 'Europe/London', start_minute: 480, end_minute: 1020, weekdays: [1,2,3,4,5] }
+  const definition = { ...automation,
+    trigger: { ...automation.trigger, active_window: window, future_trigger: 'keep' },
+    task: { kind: 'conditional_prompt' as const, instruction: 'Check', no_action_marker: 'NO_ACTION', precheck: { command: './check.sh', timeout_seconds: 15 }, future_task: 'keep' },
+    target: { ...automation.target, provider: 'claude', claude_autocompact_tokens: 100000, reasoning_effort: 'low', future_target: 'keep' },
+  } as unknown as Automation
+  const draft = automationDraftFromDefinition(definition)
+  expect(automationDraftArguments({ ...draft, name: 'Renamed' })).toMatchObject({
+    name: 'Renamed', trigger: { active_window: window, future_trigger: 'keep' },
+    task: { precheck: { command: './check.sh', timeout_seconds: 15 }, future_task: 'keep' },
+    target: { claude_autocompact_tokens: 100000, reasoning_effort: 'low', future_target: 'keep' },
+  })
+  const changed = automationDraftArguments({ ...draft, scheduleKind: 'cron', conditional: false, modelId: '' })
+  expect(changed.trigger).not.toHaveProperty('active_window')
+  expect(changed.task).not.toHaveProperty('precheck')
+  expect(changed.target).toHaveProperty('model_id', null)
+})
