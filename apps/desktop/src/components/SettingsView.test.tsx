@@ -204,7 +204,24 @@ describe('SettingsView deep links', () => {
   )(
     'every searchable setting on %s is rendered with the same title',
     (_id, item) => {
-      render(<SettingsView {...props} workspace={workspace} initialSection={item.id} />)
+      // Routing renders only once the daemon reports its routing preferences.
+      const preferences =
+        item.id === 'routing'
+          ? ({
+              routing: {
+                enabled: true,
+                classifier_model: 'typesafe/jev-1.13',
+                min_confidence_percent: 50,
+                usage_ceiling_percent: 90,
+                task_types: [{ id: 'ui', description: 'Interface work' }],
+                rules: [],
+                fallback: [],
+              },
+            } as SettingsViewProps['preferences'])
+          : props.preferences
+      render(
+        <SettingsView {...props} preferences={preferences} workspace={workspace} initialSection={item.id} />,
+      )
       for (const setting of item.settings.filter((title) => !tauriOnly.has(title))) {
         expect(screen.getAllByText(setting, { exact: true }).length).toBeGreaterThan(0)
       }

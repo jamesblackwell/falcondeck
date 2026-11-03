@@ -31,6 +31,9 @@ pub mod sync_index;
 pub mod terminal;
 /// Review inbox: decisions agents need from James, with evidence.
 pub mod reviews;
+
+pub mod routing;
+pub use routing::*;
 /// Lightweight company ticket records.
 pub mod tickets;
 pub use backup::*;
@@ -166,6 +169,9 @@ pub struct FalconDeckPreferences {
     /// `review.create` falls back to a plain message.
     #[serde(default = "default_review_inbox_enabled")]
     pub review_inbox_enabled: bool,
+    /// Auto routing for new threads: classifier and rule table.
+    #[serde(default)]
+    pub routing: RoutingPreferences,
 }
 
 fn default_review_inbox_enabled() -> bool {
@@ -193,6 +199,7 @@ impl Default for FalconDeckPreferences {
             title_suggestion_prompt: default_title_suggestion_prompt(),
             computer_use: ComputerUsePreferences::default(),
             review_inbox_enabled: true,
+            routing: RoutingPreferences::default(),
         }
     }
 }
@@ -759,6 +766,9 @@ pub struct UpdatePreferencesRequest {
     /// Optional review inbox switch.
     #[serde(default)]
     pub review_inbox_enabled: Option<bool>,
+    /// Optional replacement auto routing settings.
+    #[serde(default)]
+    pub routing: Option<RoutingPreferences>,
 }
 
 /// Partial update payload for background utility model preferences.

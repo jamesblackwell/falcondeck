@@ -108,6 +108,7 @@ import {
   type UpdatePreferencesPayload,
   type WorkspaceColorId,
   type WorkspaceIconPreference,
+  type RouteDecision,
   workspaceIconUrl,
 } from "@falcondeck/client-core";
 import {
@@ -314,6 +315,8 @@ function prefetchTerminalChrome() {
     module.prefetchTerminalRuntime(),
   );
 }
+const AUTO_ROUTE_STORAGE_KEY = "falcondeck.composer.autoRoute";
+
 export default function App() {
   return (
     <ToastProvider>
@@ -475,6 +478,23 @@ function AppInner() {
   const [selectedIsolation, setSelectedIsolation] =
     useState<ThreadIsolation>("project_folder");
   const [selectedExecutionTarget, setSelectedExecutionTarget] = useState<"local" | "cloud">("local");
+  // Auto routing: the daemon classifies the first message and picks the
+  // harness, model and effort from Settings → Routing.
+  const [autoRoute, setAutoRoute] = useState<boolean>(() => {
+    try {
+      return window.localStorage.getItem(AUTO_ROUTE_STORAGE_KEY) === "1";
+    } catch {
+      return false;
+    }
+  });
+  const handleAutoRouteChange = useCallback((value: boolean) => {
+    setAutoRoute(value);
+    try {
+      window.localStorage.setItem(AUTO_ROUTE_STORAGE_KEY, value ? "1" : "0");
+    } catch {
+      // Storage unavailable; the toggle still applies to this session.
+    }
+  }, []);
   const cloudStartKeys = useRef(new Map<string, string>());
   const [cloudConfiguration, setCloudConfiguration] = useState<{ api: unknown; settings: CloudSettings | null; error: string | null } | null>(null);
   const [persistedComposerSelections, setPersistedComposerSelections] =
@@ -1406,6 +1426,11 @@ function AppInner() {
   );
   const isCloudThread = selectedThread?.execution_target === "cloud";
   const isCloudExecutionSelected = selectedThread ? isCloudThread : selectedExecutionTarget === "cloud";
+  // Auto routing applies to new local threads while the daemon allows it.
+  const autoRouteAvailable =
+    !selectedThread &&
+    !isCloudExecutionSelected &&
+    snapshot?.preferences?.routing?.enabled === true;
   const cloudBlockReason = isCloudExecutionSelected && !selectedThread ? cloudLaunchBlockReason({
     workspace: selectedWorkspace, provider: selectedProvider,
     settings: cloudConfiguration?.api === selectedCloudApi ? cloudConfiguration.settings : null,
@@ -2926,6 +2951,14 @@ function AppInner() {
       ),
     );
     const activeProvider = selectedThread?.provider ?? selectedProvider;
+    // Values the turn actually uses; auto routing may replace them below.
+    let turnProvider = activeProvider;
+    let turnModel = selectedModel;
+    let turnEffort = selectedEffort;
+    let turnCollaborationMode = selectedCollaborationMode;
+    let turnPermissionMode = selectedPermissionMode;
+    let turnSandboxMode = selectedSandboxMode;
+    let turnServiceTier = selectedServiceTier;
     const imageBlockReason = imageAttachmentSendBlockReason(
       workspaceAgentCapabilities(selectedWorkspace, activeProvider),
       submittedAttachments,
@@ -2994,20 +3027,41 @@ function AppInner() {
     let activeThreadId = selectedThreadId;
     try {
       if (!activeThreadId) {
+        if (
+          autoRouteAvailable &&
+          autoRoute &&
+          submittedDraft.trim() &&
+          submittedAttachments.length === 0
+        ) {
+          const routed = await routeNewThread(
+            client,
+            selectedWorkspace,
+            submittedDraft,
+          );
+          if (routed) {
+            turnProvider = routed.provider;
+            turnModel = routed.modelId;
+            turnEffort = routed.effort;
+            turnCollaborationMode = routed.collaborationMode;
+            turnPermissionMode = routed.permissionMode;
+            turnSandboxMode = routed.sandboxMode;
+            turnServiceTier = null;
+          }
+        }
         if (selectedExecutionTarget !== "cloud" && selectedIsolation === "isolated") {
           setIsPreparingIsolation(true);
         }
         const handle = await client.startThread({
           workspace_id: selectedWorkspace.id,
-          provider: activeProvider,
-          model_id: selectedModel,
-          collaboration_mode_id: selectedCollaborationMode,
+          provider: turnProvider,
+          model_id: turnModel,
+          collaboration_mode_id: turnCollaborationMode,
           approval_policy: approvalPolicyForProvider(
-            activeProvider,
-            selectedPermissionMode,
+            turnProvider,
+            turnPermissionMode,
           ),
-          permission_mode: selectedPermissionMode,
-          sandbox_mode: selectedSandboxMode,
+          permission_mode: turnPermissionMode,
+          sandbox_mode: turnSandboxMode,
           isolation: selectedExecutionTarget === "cloud" ? "project_folder" : selectedIsolation,
           execution_target: selectedExecutionTarget,
           ...(selectedExecutionTarget === "cloud" ? { idempotency_key: (() => {
@@ -3132,9 +3186,9 @@ function AppInner() {
       // Tier-capable models get their tier stated on every turn — "fast off"
       // must reach the provider as an explicit standard-tier request, because
       // an omitted field means "keep the session's current tier".
-      const activeModels = workspaceModels(selectedWorkspace, activeProvider);
+      const activeModels = workspaceModels(selectedWorkspace, turnProvider);
       const activeModel =
-        activeModels.find((model) => model.id === selectedModel) ??
+        activeModels.find((model) => model.id === turnModel) ??
         activeModels.find((model) => model.is_default) ??
         null;
       const sendResponse = await client.sendTurn({
@@ -3142,16 +3196,16 @@ function AppInner() {
         thread_id: activeThreadId,
         inputs,
         selected_skills: isCloudExecutionSelected ? [] : submittedSkills,
-        provider: activeProvider,
-        model_id: selectedModel,
-        reasoning_effort: selectedEffort,
+        provider: turnProvider,
+        model_id: turnModel,
+        reasoning_effort: turnEffort,
         approval_policy: approvalPolicyForProvider(
-          activeProvider,
-          selectedPermissionMode,
+          turnProvider,
+          turnPermissionMode,
         ),
-        service_tier: serviceTierForTurn(selectedServiceTier, activeModel),
-        permission_mode: selectedPermissionMode,
-        sandbox_mode: selectedSandboxMode,
+        service_tier: serviceTierForTurn(turnServiceTier, activeModel),
+        permission_mode: turnPermissionMode,
+        sandbox_mode: turnSandboxMode,
         steer,
         user_item_id: userItemId,
         resume_interrupted: Boolean(override?.resumeInterrupted),
@@ -3222,7 +3276,7 @@ function AppInner() {
       }
       const rawMessage =
         error instanceof Error ? error.message : "Failed to send turn";
-      const msg = normalizeSendError(rawMessage, activeProvider);
+      const msg = normalizeSendError(rawMessage, turnProvider);
       setActionError(msg);
       toast({
         variant: "danger",
@@ -3233,6 +3287,78 @@ function AppInner() {
       setIsSending(false);
       setIsPreparingIsolation(false);
     }
+  }
+
+  /**
+   * Asks the daemon which harness, model and effort a new thread should use.
+   * Returns null (keep the composer's choice) when routing has no answer.
+   */
+  async function routeNewThread(
+    client: NonNullable<ReturnType<typeof apiFor>>,
+    workspace: NonNullable<typeof selectedWorkspace>,
+    prompt: string,
+  ) {
+    let decision: RouteDecision;
+    try {
+      decision = await client.previewRoute(workspace.id, prompt);
+    } catch (error) {
+      toast({
+        variant: "warning",
+        title: "Auto routing unavailable",
+        description: `${error instanceof Error ? error.message : "Routing failed"}. Using ${selectedProvider}.`,
+      });
+      return null;
+    }
+    const target = decision.target;
+    if (!target) {
+      toast({
+        variant: "warning",
+        title: "Auto routing found no model",
+        description: `${decision.reason}. Using ${selectedProvider}.`,
+      });
+      return null;
+    }
+    const provider = target.provider;
+    const preferred = composerSelectionFor(
+      persistedComposerSelections,
+      workspace.path,
+      provider,
+    );
+    const modelId = resolveThreadModelId(
+      null,
+      workspace,
+      target.model_id ?? preferred?.modelId,
+      provider,
+    );
+    const effort =
+      target.reasoning_effort ??
+      resolveReasoningEffort(null, workspace, modelId, preferred?.effort, provider);
+    const capabilities = workspaceAgentCapabilities(workspace, provider);
+    const collaborationModes = workspaceCollaborationModes(workspace, provider);
+    toast({
+      variant: "default",
+      title: `Auto: ${provider}${target.model_id ? ` ${target.model_id}` : ""}${target.reasoning_effort ? ` (${target.reasoning_effort})` : ""}`,
+      description: decision.reason,
+    });
+    return {
+      provider,
+      // Keep the routed id even if the cached list predates it; the harness
+      // validates it when the thread starts.
+      modelId: target.model_id ?? modelId,
+      effort: effort ?? null,
+      collaborationMode:
+        collaborationModes.find((mode) => mode.mode === "default")?.id ??
+        collaborationModes[0]?.id ??
+        null,
+      permissionMode: resolvePermissionMode(
+        preferred?.permissionMode,
+        capabilities.permission_modes,
+      ),
+      sandboxMode: resolvePersistedMode(
+        preferred?.sandboxMode,
+        capabilities.sandbox_modes,
+      ),
+    };
   }
 
   async function handleStartRemotePairing() {
@@ -6324,6 +6450,12 @@ function AppInner() {
                   selectedThread?.status !== "waiting_for_input",
                 providerLocked: Boolean(selectedThread),
                 showProviderSelector: !selectedThread,
+                ...(autoRouteAvailable
+                  ? {
+                      autoRoute,
+                      onAutoRouteChange: handleAutoRouteChange,
+                    }
+                  : {}),
                 handoffProviders: handoffProviderOptions,
                 onHandoffProviderSelect: selectedThread
                   ? handleHandoffProviderSelect

@@ -63,9 +63,9 @@ pub(super) fn catalog(max_children: u32) -> Vec<ExtensionAgentTool> {
         (CREATE, "Create thread", create_description.as_str(), json!({
             "prompt": {"type":"string", "minLength":1, "maxLength":24000, "description":"A self-contained brief: goal, relevant files, constraints, and what done looks like."},
             "title": {"type":"string", "minLength":1, "maxLength":200},
-            "provider": {"type":"string", "minLength":1},
-            "model": {"type":"string", "minLength":1},
-            "reasoning_effort": {"type":"string", "minLength":1, "description":"Harness setting, e.g. low, medium, high, xhigh; asking in the prompt does not set it."},
+            "provider": {"type":"string", "minLength":1, "description":"Harness id. With model \"auto\", limits auto routing to this harness."},
+            "model": {"type":"string", "minLength":1, "description":"Use \"auto\" (the default choice): FalconDeck classifies the prompt and picks harness, model and effort from Settings → Routing. Name a model only when you have a specific reason, such as the user asking for one."},
+            "reasoning_effort": {"type":"string", "minLength":1, "description":"Harness setting, e.g. low, medium, high, xhigh; asking in the prompt does not set it. Overrides the effort auto routing picks."},
             "isolation": {"type":"string", "enum":["project_folder","isolated"], "default":"project_folder"},
             "execution_target": {"type":"string", "enum":["local","cloud"], "default":"local", "description":"Where the new thread runs. Cloud uses the configured provider and copies eligible current project files; no GitHub push is required."},
             "idempotency_key": {"type":"string", "minLength":8, "maxLength":128, "description":"Reuse this key when retrying a cloud creation whose outcome is unknown."},
@@ -511,6 +511,28 @@ impl AppState {
                 if let Some(prompt) = &a.prompt {
                     require_word_spaces("prompt", prompt)?;
                 }
+                let mut a = a;
+                let is_auto = |v: &str| v.trim().eq_ignore_ascii_case(falcondeck_core::AUTO_ROUTE_MARKER);
+                let auto_provider = a.provider.as_ref().is_some_and(|p| is_auto(p.as_str()));
+                let route = if auto_provider || a.model.as_deref().is_some_and(is_auto) {
+                    if a.execution_target == falcondeck_core::ThreadExecutionTarget::Cloud {
+                        return Err(DaemonError::BadRequest("Auto routing runs local threads only; name a provider for cloud threads.".into()));
+                    }
+                    let Some(prompt) = a.prompt.as_deref() else {
+                        return Err(DaemonError::BadRequest("Auto routing classifies the prompt; include one.".into()));
+                    };
+                    let only = a.provider.clone().filter(|_| !auto_provider);
+                    let decision = self.route_brief(&workspace, prompt, only.as_ref()).await?;
+                    let Some(target) = decision.target.clone() else {
+                        return Err(DaemonError::BadRequest(format!("Auto routing found no usable model: {}. Name a provider and model.", decision.reason)));
+                    };
+                    a.provider = Some(target.provider);
+                    a.model = target.model_id;
+                    a.reasoning_effort = a.reasoning_effort.or(target.reasoning_effort);
+                    Some(decision)
+                } else {
+                    None
+                };
                 if a.execution_target == falcondeck_core::ThreadExecutionTarget::Cloud
                     && !matches!(&a.context, Context::None)
                 {
@@ -598,8 +620,8 @@ impl AppState {
                 let handle = self
                     .start_thread(StartThreadRequest {
                         workspace_id: workspace.clone(),
-                        provider: a.provider,
-                        model_id: a.model,
+                        provider: a.provider.clone(),
+                        model_id: a.model.clone(),
                         isolation: a.isolation,
                         execution_target: a.execution_target,
                         idempotency_key: a.idempotency_key,
@@ -644,7 +666,7 @@ impl AppState {
                             dispatched_at: Some(Utc::now()),
                         });
                     }
-                    thread.agent.reasoning_effort = a.reasoning_effort;
+                    thread.agent.reasoning_effort = a.reasoning_effort.clone();
                 })
                 .await?;
                 if let Some(title) = &a.title {
@@ -671,6 +693,12 @@ impl AppState {
                 }
                 self.persist_local_state().await?;
                 self.analytics_delegation(parent, &id, a.prompt.as_deref());
+                let chosen_provider = self.thread_summary(&workspace, &id).await?.provider;
+                self.analytics_route(
+                    Some((&id, parent)),
+                    Some((chosen_provider.as_str(), a.model.as_deref(), a.reasoning_effort.as_deref())),
+                    route.as_ref(),
+                );
                 let thread = self.thread_summary(&workspace, &id).await?;
                 self.emit(
                     Some(workspace.clone()),
@@ -682,6 +710,9 @@ impl AppState {
                     line(&id, 256),
                     line(parent, 256)
                 );
+                if let Some(decision) = &route {
+                    markdown.push_str(&format!("- Auto route: {}\n", line(&decision.reason, 600)));
+                }
                 if a.notify_parent {
                     markdown.push_str("- This thread will be notified when the child stops running or needs input.\n");
                 } else if bot.is_some() {
@@ -2066,6 +2097,53 @@ pub(in crate::app) mod tests {
                     .is_err()
             );
         }
+    }
+
+    #[tokio::test]
+    async fn create_auto_routes_from_settings_and_reports_the_choice() {
+        let (app, _temp) = fixture().await;
+        app.inner.workspaces.lock().await.get_mut("workspace-1").unwrap().summary.agents.push(
+            falcondeck_core::WorkspaceAgentSummary {
+                models_loading: false,
+                provider: AgentProvider::CLAUDE,
+                label: "Claude".into(),
+                account: Default::default(),
+                models: vec![],
+                collaboration_modes: vec![],
+                skills: vec![],
+                capabilities: falcondeck_core::AgentCapabilitySummary::claude(),
+            },
+        );
+        app.inner.preferences.lock().await.routing.fallback = vec![falcondeck_core::RoutingTarget {
+            provider: AgentProvider::CLAUDE,
+            model_id: Some("routed-model".into()),
+            reasoning_effort: Some("low".into()),
+        }];
+        // No prompt: nothing to classify.
+        assert!(app.invoke_extension_tool(call(CREATE, json!({"model":"auto"}))).await.is_err());
+        // No OpenRouter key in tests, so the classifier is unavailable and
+        // the fallback (Claude here; Codex is not installed) is used.
+        let result = app
+            .invoke_extension_tool(call(CREATE, json!({"model":"auto","prompt":"Rename the helper."})))
+            .await
+            .unwrap();
+        let text = result.result.as_str().unwrap();
+        assert!(text.contains("- Auto route: classifier unavailable"), "{text}");
+        assert!(text.contains("claude routed-model (low)"), "{text}");
+        let id = created_id(&result);
+        let workspaces = app.inner.workspaces.lock().await;
+        let child = &workspaces["workspace-1"].threads[&id];
+        assert_eq!(child.summary.provider, AgentProvider::CLAUDE);
+        assert_eq!(child.summary.agent.model_id.as_deref(), Some("routed-model"));
+        assert_eq!(child.summary.agent.reasoning_effort.as_deref(), Some("low"));
+        drop(workspaces);
+        // Routing switched off: auto is refused with a pointer to settings.
+        app.inner.preferences.lock().await.routing.enabled = false;
+        let error = app
+            .invoke_extension_tool(call(CREATE, json!({"model":"auto","prompt":"Rename it."})))
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("Settings → Routing"), "{error}");
     }
 
     #[tokio::test]

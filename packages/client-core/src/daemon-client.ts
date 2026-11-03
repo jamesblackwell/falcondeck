@@ -72,6 +72,7 @@ import type {
   ThreadSummary,
   TurnInputItem,
   SuggestThreadTitleResponse,
+  RouteDecision,
   UpdatePreferencesPayload,
   FalconDeckBackup,
   BackupSummary,
@@ -795,6 +796,16 @@ export function createDaemonApiClient(baseUrl: string) {
             },
           ),
         ),
+      );
+    },
+    /** Classifies a brief and returns the model auto routing would pick. */
+    async previewRoute(workspaceId: string, prompt: string) {
+      return parseJson<RouteDecision>(
+        await fetch(`${baseUrl}/api/routing/preview`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ workspace_id: workspaceId, prompt }),
+        }),
       );
     },
     async suggestThreadTitle(workspaceId: string, threadId: string) {
