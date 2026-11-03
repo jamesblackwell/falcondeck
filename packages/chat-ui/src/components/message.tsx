@@ -304,7 +304,27 @@ function hoverRevealActions(group: "message" | "review") {
   return `transition-opacity [@media(pointer:fine)]:opacity-0 ${reveal}`;
 }
 
-function AgentThreadMessageRow({ message }: { message: AgentThreadMessage }) {
+function formatMessageTimestamp(createdAt: string): string | undefined {
+  const timestamp = Date.parse(createdAt);
+  if (!Number.isFinite(timestamp)) return undefined;
+  return new Date(timestamp).toLocaleString(undefined, {
+    weekday: "long",
+    year: "numeric",
+    month: "long",
+    day: "numeric",
+    hour: "numeric",
+    minute: "2-digit",
+    timeZoneName: "short",
+  });
+}
+
+function AgentThreadMessageRow({
+  message,
+  createdAt,
+}: {
+  message: AgentThreadMessage;
+  createdAt: string;
+}) {
   const [open, setOpen] = useState(false);
   const label = `Agent message from ${message.threadTitle || "another task"}`;
 
@@ -312,10 +332,10 @@ function AgentThreadMessageRow({ message }: { message: AgentThreadMessage }) {
     <Collapsible.Root
       open={open}
       onOpenChange={setOpen}
+      title={formatMessageTimestamp(createdAt)}
       className="min-w-0 max-w-2xl"
     >
       <Collapsible.Trigger
-        title={`${label} · From another FalconDeck task`}
         className="fd-focus fd-type-supporting flex max-w-full items-center gap-2 rounded-[var(--fd-radius-sm)] py-2 text-left text-fg-muted transition-colors hover:text-fg-secondary"
       >
         <MessagesSquare aria-hidden="true" className="h-3.5 w-3.5 shrink-0" />
@@ -437,11 +457,20 @@ function UserMessage({
 
   const threadMessage = parseAgentThreadMessage(text);
   if (threadMessage && item.attachments.length === 0) {
-    return <AgentThreadMessageRow key={item.id} message={threadMessage} />;
+    return (
+      <AgentThreadMessageRow
+        key={item.id}
+        message={threadMessage}
+        createdAt={item.created_at}
+      />
+    );
   }
 
   return (
-    <div className="ml-auto w-fit min-w-0 max-w-2xl">
+    <div
+      title={formatMessageTimestamp(item.created_at)}
+      className="ml-auto w-fit min-w-0 max-w-2xl"
+    >
       {item.automated ||
       (projected.kind === "prompt" && projected.automated) ? (
         <div className="fd-type-meta mb-2 flex items-center justify-end gap-1 text-fg-muted">
@@ -753,10 +782,7 @@ function MessageReceivedAt({ createdAt }: { createdAt: string }) {
   }, []);
   const label = formatReceivedAgo(createdAt, nowMs);
   if (!label) return null;
-  const receivedAt = Date.parse(createdAt);
-  const absolute = Number.isFinite(receivedAt)
-    ? new Date(receivedAt).toLocaleString()
-    : createdAt;
+  const absolute = formatMessageTimestamp(createdAt);
   return (
     <time
       dateTime={createdAt}
@@ -820,6 +846,7 @@ function AssistantMessage({
     ) : null;
   return (
     <article
+      title={formatMessageTimestamp(item.created_at)}
       aria-label={`${isCommentary ? "Assistant progress update" : "Assistant message"}, ${lifecycle}`}
       aria-busy={lifecycle === "pending" || lifecycle === "streaming"}
       className={cn(
