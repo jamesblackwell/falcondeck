@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import {
   automationDraftArguments,
   draftIsSubmittable,
+  draftIsElevated,
   draftWithProvider,
   emptyAutomationDraft,
 } from "./automation-draft";
@@ -85,4 +86,12 @@ it("preserves per-schedule bot identity and clears it when choosing an existing 
   expect(automationDraftArguments({...draft, threadKind: "existing", threadId:"home"})).toMatchObject({target: {
     thread: {kind:"existing", thread_id:"home"}, run_as_bot:null, only_when_changed:false
   }});
+});
+
+it("preserves and validates approved shell pre-check fields", () => {
+  const draft = { ...emptyAutomationDraft(null, "/tmp"), conditional: true, precheckCommand: "./check.sh", precheckTimeout: "15" };
+  expect(draftIsElevated(draft)).toBe(true);
+  expect(automationDraftArguments(draft)).toMatchObject({ task: { precheck: { command: "./check.sh", timeout_seconds: 15 } } });
+  expect(draftIsSubmittable({ ...draft, precheckTimeout: "0" })).toContain("1–300");
+  expect(draftIsElevated({ ...draft, conditional: false })).toBe(false);
 });

@@ -75,6 +75,7 @@ const RUN_BADGE: Record<AutomationRun["status"], "success" | "warning" | "defaul
   skipped_overlap: "default",
   skipped_dependency: "warning",
   skipped_unchanged: "default",
+  skipped_precheck: "default",
   cancelled: "default",
 };
 
@@ -231,7 +232,7 @@ export function AutomationsView({ baseUrl, onToast, onEventRefetch }: Automation
                     <Button
                       size="sm"
                       variant="secondary"
-                      disabled={busyId === automation.id}
+                      disabled={busyId === automation.id || automation.precheck_pending}
                       onClick={() =>
                         void runOperation(
                           automation.state === "enabled"
@@ -255,7 +256,7 @@ export function AutomationsView({ baseUrl, onToast, onEventRefetch }: Automation
                     <Button
                       size="sm"
                       variant="secondary"
-                      disabled={busyId === automation.id}
+                      disabled={busyId === automation.id || automation.precheck_pending}
                       onClick={() =>
                         void runOperation(
                           "automation.run_now",
@@ -308,7 +309,7 @@ export function AutomationsView({ baseUrl, onToast, onEventRefetch }: Automation
                         });
                       }}
                     >
-                      Edit
+                      {automation.precheck_pending ? "Review pre-check" : "Edit"}
                     </Button>
                     <Button
                       size="icon"
@@ -660,6 +661,18 @@ export function AutomationEditor({
           ) : null}
         </div>
 
+        {draft.conditional ? (
+          <div className="space-y-2">
+            <label className="block text-sm text-fg-secondary">Pre-check command (optional)
+              <Textarea aria-label="Pre-check command" value={draft.precheckCommand} onChange={(event) => set("precheckCommand", event.target.value)} placeholder="./scripts/check-needs-action.sh" className="font-mono" />
+            </label>
+            {draft.precheckCommand.trim() ? <label className="block text-sm text-fg-secondary">Timeout (seconds, 1–300)
+              <Input aria-label="Pre-check timeout" type="number" min={1} max={300} value={draft.precheckTimeout} onChange={(event) => set("precheckTimeout", event.target.value)} />
+            </label> : null}
+            <p className="text-sm text-fg-secondary">Exit 0 with empty stdout skips the agent. Other results are attached to its instruction. Saving approves unattended shell execution in this workspace; commands run without per-call approval.</p>
+          </div>
+        ) : null}
+
         <div className="grid grid-cols-2 gap-3">
           <label className="space-y-1">
             <span className="text-[length:var(--fd-text-xs)] text-fg-muted">
@@ -814,8 +827,7 @@ export function AutomationEditor({
 
         {elevated ? (
           <div className="rounded-[var(--fd-radius-lg)] border border-danger/40 bg-surface-2 px-4 py-3 text-[length:var(--fd-text-sm)] text-fg-primary">
-            <strong>Elevated authority.</strong> This automation uses bypassPermissions or
-            danger-full-access.
+            <strong>Elevated authority.</strong> This automation runs an unattended shell command or uses bypassPermissions or danger-full-access.
             {!allowElevated
               ? " Elevated automations are disabled in agent control settings, so this cannot be saved."
               : ""}
@@ -851,7 +863,7 @@ export function AutomationEditor({
             }}
           >
             {isBusy ? <ActivityDiamond size="md" tone="current" /> : null}
-            {state.kind === "create" ? "Create automation" : "Save changes"}
+            {draft.conditional && draft.precheckCommand.trim() ? "Save and approve pre-check" : state.kind === "create" ? "Create automation" : "Save changes"}
           </Button>
         </div>
       </CardContent>

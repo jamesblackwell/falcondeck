@@ -1514,3 +1514,30 @@ async fn a_resting_bots_schedule_is_consumed_without_a_run() {
     );
     app.shutdown().await.unwrap();
 }
+
+#[tokio::test]
+async fn empty_precheck_skips_without_creating_a_thread_or_calling_a_model() {
+    use falcondeck_core::control::*;
+    let (app, _temp) = fixture().await;
+    let context = ControlRequestContext::default();
+    let deps = crate::control::ControlDeps::none();
+    let settings = serde_json::from_value(json!({"operation":"agent_control.settings.update","arguments":{"allow_elevated_automations":true}})).unwrap();
+    assert!(app.control().execute(settings, &context, &deps).await.0.ok);
+    let workspace = app.workspace_path("workspace-1").await.unwrap();
+    let request = serde_json::from_value(json!({"operation":"automation.create","arguments":{
+        "name":"Precheck", "trigger":{"kind":"interval","every_seconds":3600,"anchor_at":Utc::now()},
+        "task":{"kind":"conditional_prompt","instruction":"Check","no_action_marker":"FALCONDECK_NO_ACTION","precheck":{"command":"exit 0","timeout_seconds":5}},
+        "target":{"workspace_path":workspace,"provider":"claude","thread":{"kind":"new_each_run"}}
+    }})).unwrap();
+    let created = app.control().execute(request, &context, &deps).await.0;
+    assert!(created.ok, "{:?}", created.error);
+    let id = created.data.unwrap()["id"].as_str().unwrap().to_string();
+    let run = app.control().enqueue_run(&id, None, crate::control::RunSource::Manual { origin: ControlOrigin::DesktopUi }).await.unwrap();
+    assert!(app.control().claim_run_if_automation_free(&run.id).await);
+    crate::control::scheduler::execute_run(&app, &run.id).await;
+    let saved = app.control().run(&run.id).await.unwrap();
+    assert_eq!(saved.status, AutomationRunStatus::SkippedPrecheck, "{saved:?}");
+    assert!(saved.thread_id.is_none() && saved.input_tokens.is_none());
+    assert_eq!(app.snapshot().await.threads.len(), 1);
+    app.shutdown().await.unwrap();
+}

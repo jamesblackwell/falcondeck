@@ -55,3 +55,37 @@ Separate per-bot model/compaction defaults are deferred: they need coordinated
 bot mutation, harness-switch and settings UI changes. A future bot-level default
 could copy into the new home's agent params on creation/switch, with explicit
 per-automation values taking precedence. No bot configuration is migrated here.
+
+## Shell pre-checks
+
+A conditional prompt may include `task.precheck`:
+
+```json
+{"command": "./scripts/check-needs-action.sh", "timeout_seconds": 30}
+```
+
+The command runs under `/bin/sh -c` in the resolved workspace before task creation
+or any model call. Exit 0 with **empty stdout** (not just whitespace) records
+terminal `skipped_precheck`, creates no task and calls no model. Stderr alone
+does not defeat that condition. Other exits, output, timeout or spawn errors
+continue to the agent with exit status and bounded stdout/stderr evidence.
+Each stream retains at most 12k bytes plus a truncation marker. Output is drained
+after the cap, and the whole check has a 1–300 second timeout. On macOS/Unix,
+its process group is stopped at completion, timeout or shutdown; checks must
+not launch background services. Commands inherit the daemon environment.
+
+A shell command is elevated authority regardless of agent permission mode.
+The existing `allow_elevated_automations` setting must allow it. Agent-created
+checks start paused with `precheck_approved: false`; agents cannot approve,
+resume or manually run them. In the UI, open the definition, inspect its
+command and workspace, and save to approve it, then resume. Human resume through
+the control API also approves it. Agent edits to the task or target revoke that
+approval and pause it again. Even already-queued runs recheck approval and the
+elevated setting before executing. Disabling elevated automations stops shell
+pre-checks; it does not rewrite their saved definitions. Existing non-shell
+permission-mode behavior remains as before.
+
+Extension-owned schedules cannot add shell pre-checks: their public host
+contract does not grant unattended shell execution. Do not put credentials in
+commands; the definition is visible in the editor and control reads. Use files
+or existing environment configuration instead.

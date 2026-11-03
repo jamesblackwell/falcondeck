@@ -16,6 +16,8 @@ export type AutomationDraft = {
   instruction: string;
   conditional: boolean;
   noActionMarker: string;
+  precheckCommand: string;
+  precheckTimeout: string;
   workspacePath: string;
   provider: string;
   threadKind: "managed" | "existing" | "new_each_run";
@@ -73,6 +75,8 @@ export function emptyAutomationDraft(
     instruction: "",
     conditional: false,
     noActionMarker: DEFAULT_NO_ACTION_MARKER,
+    precheckCommand: "",
+    precheckTimeout: "30",
     workspacePath,
     provider: "codex",
     threadKind: "managed",
@@ -119,6 +123,8 @@ export function automationDraftFrom(automation: Automation): AutomationDraft {
       task.kind === "conditional_prompt"
         ? task.no_action_marker
         : DEFAULT_NO_ACTION_MARKER,
+    precheckCommand: task.kind === "conditional_prompt" ? task.precheck?.command ?? "" : "",
+    precheckTimeout: task.kind === "conditional_prompt" ? String(task.precheck?.timeout_seconds ?? 30) : "30",
     workspacePath: automation.target.workspace_path,
     provider: automation.target.provider,
     threadKind: thread.kind,
@@ -193,6 +199,7 @@ export function automationDraftArguments(
         kind: "conditional_prompt",
         instruction: draft.instruction,
         no_action_marker: draft.noActionMarker.trim(),
+        ...(draft.precheckCommand.trim() ? { precheck: { command: draft.precheckCommand, timeout_seconds: Number(draft.precheckTimeout) } } : {}),
       }
     : { kind: "prompt", instruction: draft.instruction };
   return {
@@ -252,6 +259,7 @@ export function automationDraftArguments(
 
 export function draftIsSubmittable(draft: AutomationDraft): string | null {
   if (draft.claudeAutocompactTokens.trim() && (draft.provider !== "claude" || !Number.isInteger(Number(draft.claudeAutocompactTokens)) || Number(draft.claudeAutocompactTokens) < 100_000 || Number(draft.claudeAutocompactTokens) > 1_000_000)) return "Claude compaction requires 100000–1000000 tokens.";
+  if (draft.conditional && draft.precheckCommand.trim() && (!Number.isInteger(Number(draft.precheckTimeout)) || Number(draft.precheckTimeout) < 1 || Number(draft.precheckTimeout) > 300)) return "Pre-check timeout must be 1–300 seconds.";
   if (!draft.name.trim()) return "A name is required.";
   if (!draft.instruction.trim()) return "An instruction is required.";
   if (!draft.workspacePath.trim().startsWith("/"))
@@ -281,7 +289,7 @@ export function draftIsSubmittable(draft: AutomationDraft): string | null {
 }
 
 export function draftIsElevated(draft: AutomationDraft): boolean {
-  return [draft.permissionMode.trim(), draft.sandboxMode.trim()].some((mode) =>
+  return (draft.conditional && !!draft.precheckCommand.trim()) || [draft.permissionMode.trim(), draft.sandboxMode.trim()].some((mode) =>
     ["bypassPermissions", "danger-full-access"].includes(mode),
   );
 }

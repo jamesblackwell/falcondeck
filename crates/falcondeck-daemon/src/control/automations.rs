@@ -594,11 +594,26 @@ pub fn validate_definition(
     target: &AutomationTarget,
     required_connectors: &[String],
 ) -> Result<(), ControlError> {
+    if let Some(check) = task.precheck()
+        && (check.command.trim().is_empty()
+            || check.command.len() > 8000
+            || check.command.contains('\0')
+            || !(1..=300).contains(&check.timeout_seconds))
+    {
+        return Err(ControlError::field(
+            "task.precheck",
+            "Use a nonempty shell command up to 8000 bytes and timeout_seconds between 1 and 300.",
+        ));
+    }
     if let Some(tokens) = target.claude_autocompact_tokens
         && (target.provider != falcondeck_core::AgentProvider::CLAUDE
-            || !(falcondeck_core::MIN_AUTOCOMPACT_TOKENS..=falcondeck_core::MAX_AUTOCOMPACT_TOKENS).contains(&tokens))
+            || !(falcondeck_core::MIN_AUTOCOMPACT_TOKENS..=falcondeck_core::MAX_AUTOCOMPACT_TOKENS)
+                .contains(&tokens))
     {
-        return Err(ControlError::field("target.claude_autocompact_tokens", "Claude compaction overrides require provider claude and 100000..1000000 tokens."));
+        return Err(ControlError::field(
+            "target.claude_autocompact_tokens",
+            "Claude compaction overrides require provider claude and 100000..1000000 tokens.",
+        ));
     }
     if target.run_as_bot.is_some()
         && target.thread != falcondeck_core::control::AutomationThreadTarget::NewEachRun
@@ -1549,6 +1564,7 @@ mod tests {
         let task = AutomationTask::ConditionalPrompt {
             instruction: "Check deployments.".into(),
             no_action_marker: "FALCONDECK_NO_ACTION".into(),
+            precheck: None,
         };
         assert_eq!(
             classify_conditional_outcome(&task, Some("  FALCONDECK_NO_ACTION \n")),

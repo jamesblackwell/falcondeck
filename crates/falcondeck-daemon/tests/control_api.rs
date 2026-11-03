@@ -12,6 +12,8 @@ fn config_with_state_path(path: std::path::PathBuf) -> DaemonConfig {
     DaemonConfig {
         bind_addr: "127.0.0.1:0".parse().unwrap(),
         state_path: Some(path),
+        // Control state still restores; native sessions are irrelevant here.
+        background_restore: false,
         ..DaemonConfig::default()
     }
 }

@@ -38,6 +38,7 @@ fn automation_payload() -> serde_json::Value {
         "concurrency_policy": "skip",
         "misfire_policy": "skip",
         "elevated": false,
+        "precheck_approved": false,
         "required_connectors": ["gmail"],
         "created_at": "2026-08-16T14:00:00Z",
         "updated_at": "2026-08-16T14:22:10Z",

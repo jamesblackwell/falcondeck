@@ -221,7 +221,7 @@ impl ControlError {
     pub fn elevated_permissions_disabled() -> Self {
         Self::new(
             "elevated_permissions_disabled",
-            "This automation uses an elevated permission or sandbox mode, and elevated automations are disabled.",
+            "This automation uses an unattended shell command or elevated permission/sandbox mode, and elevated automations are disabled.",
             false,
         )
         .with_suggested_action(
@@ -536,10 +536,7 @@ impl ControlService {
                     .ok_or_else(|| ControlError::resource_not_found("automation", id))?;
                 Ok(ControlGetResponse {
                     resource: request.resource.clone(),
-                    data: redaction::redacted(
-                        serde_json::to_value(automation)
-                            .map_err(|error| ControlError::internal(error.to_string()))?,
-                    ),
+                    data: redaction::redacted(automation_value(automation)),
                     next_cursor: None,
                 })
             }
@@ -802,12 +799,22 @@ impl ControlService {
                     .await
             }
             ops::AUTOMATION_PAUSE => {
-                self.set_automation_state(request, AutomationState::Paused, None)
-                    .await
+                self.set_automation_state(
+                    request,
+                    AutomationState::Paused,
+                    context.origin.clone(),
+                    None,
+                )
+                .await
             }
             ops::AUTOMATION_RESUME => {
-                self.set_automation_state(request, AutomationState::Enabled, None)
-                    .await
+                self.set_automation_state(
+                    request,
+                    AutomationState::Enabled,
+                    context.origin.clone(),
+                    None,
+                )
+                .await
             }
             ops::AUTOMATION_RUN_NOW => {
                 self.run_automation_now(&request.arguments, context.origin.clone(), None)
@@ -916,10 +923,18 @@ impl ControlService {
             automations::validate_agent_frequency(&args.trigger, now)?;
             Self::validate_cadence(&args.trigger, &args.target, deps, now).await?;
         }
-        let elevated = automations::is_elevated_mode(
-            args.target.permission_mode.as_deref(),
-            args.target.sandbox_mode.as_deref(),
-        );
+        let elevated = args.task.precheck().is_some()
+            || automations::is_elevated_mode(
+                args.target.permission_mode.as_deref(),
+                args.target.sandbox_mode.as_deref(),
+            );
+        if owner.is_some() && args.task.precheck().is_some() {
+            return Err(ControlError::field(
+                "task.precheck",
+                "Extension-owned automations do not support shell pre-checks.",
+            ));
+        }
+        let precheck_approved = args.task.precheck().is_none() || is_human_origin(&context.origin);
         if elevated && !settings.allow_elevated_automations {
             return Err(ControlError::elevated_permissions_disabled());
         }
@@ -936,14 +951,19 @@ impl ControlService {
             trigger: args.trigger,
             task: args.task,
             target: args.target,
-            state: AutomationState::Enabled,
+            state: if precheck_approved {
+                AutomationState::Enabled
+            } else {
+                AutomationState::Paused
+            },
             concurrency_policy: args.concurrency_policy,
             misfire_policy: args.misfire_policy,
             elevated,
+            precheck_approved,
             required_connectors: args.required_connectors,
             created_at: now,
             updated_at: now,
-            next_run_at: Some(next.at),
+            next_run_at: precheck_approved.then_some(next.at),
             last_run_at: None,
             latest_outcome: None,
         };
@@ -1044,12 +1064,28 @@ impl ControlService {
                 &automation.target,
                 &automation.required_connectors,
             )?;
-            let elevated = automations::is_elevated_mode(
-                automation.target.permission_mode.as_deref(),
-                automation.target.sandbox_mode.as_deref(),
-            );
+            let elevated = automation.task.precheck().is_some()
+                || automations::is_elevated_mode(
+                    automation.target.permission_mode.as_deref(),
+                    automation.target.sandbox_mode.as_deref(),
+                );
             if elevated && !settings.allow_elevated_automations {
                 return Err(ControlError::elevated_permissions_disabled());
+            }
+            if automation.owner.is_some() && automation.task.precheck().is_some() {
+                return Err(ControlError::field(
+                    "task.precheck",
+                    "Extension-owned automations do not support shell pre-checks.",
+                ));
+            }
+            if automation.task.precheck().is_some()
+                && (args.task.is_some() || args.target.is_some())
+            {
+                automation.precheck_approved = is_human_origin(&context.origin);
+            }
+            if automation.task.precheck().is_some() && !automation.precheck_approved {
+                automation.state = AutomationState::Paused;
+                automation.next_run_at = None;
             }
             automation.elevated = elevated;
             if trigger_changed {
@@ -1057,7 +1093,9 @@ impl ControlService {
                 if context.origin == ControlOrigin::Mcp {
                     automations::validate_agent_frequency(&automation.trigger, now)?;
                 }
-                automation.next_run_at = Some(next.at);
+                automation.next_run_at = (automation.task.precheck().is_none()
+                    || automation.precheck_approved)
+                    .then_some(next.at);
                 // A completed one-time automation that is rescheduled
                 // becomes enabled again.
                 if automation.state == AutomationState::Completed {
@@ -1078,6 +1116,7 @@ impl ControlService {
         &self,
         request: &ControlExecuteRequest,
         target_state: AutomationState,
+        origin: ControlOrigin,
         owner_extension_id: Option<&str>,
     ) -> Result<(Value, Vec<ControlDomain>), ControlError> {
         let args: registry::AutomationRefArgs = decode_arguments(&request.arguments)?;
@@ -1095,6 +1134,18 @@ impl ControlService {
                 .find(|automation| automation.id == automation_id)
                 .ok_or_else(|| ControlError::resource_not_found("automation", &automation_id))?;
             require_revision_for(request, automation)?;
+            if target_state == AutomationState::Enabled
+                && automation.task.precheck().is_some()
+                && !automation.precheck_approved
+            {
+                if !is_human_origin(&origin) {
+                    return Err(precheck_approval_required());
+                }
+                if !state.settings.allow_elevated_automations {
+                    return Err(ControlError::elevated_permissions_disabled());
+                }
+                automation.precheck_approved = true;
+            }
             let changing = automation.state != target_state;
             match (target_state, automation.state) {
                 (AutomationState::Paused, AutomationState::Paused)
@@ -1401,6 +1452,14 @@ impl ControlService {
                     automation.id,
                     state_name(automation.state)
                 )));
+            }
+            if automation.task.precheck().is_some() {
+                if !automation.precheck_approved {
+                    return Err(precheck_approval_required());
+                }
+                if !state.settings.allow_elevated_automations {
+                    return Err(ControlError::elevated_permissions_disabled());
+                }
             }
             let active = state
                 .runs
@@ -2193,7 +2252,12 @@ impl ControlService {
             } => {
                 let request = automation_ref_request(automation_id, Some(expected_revision));
                 let (_, changed) = self
-                    .set_automation_state(&request, AutomationState::Paused, Some(extension_id))
+                    .set_automation_state(
+                        &request,
+                        AutomationState::Paused,
+                        ControlOrigin::System,
+                        Some(extension_id),
+                    )
                     .await?;
                 domains.extend(changed);
             }
@@ -2203,7 +2267,12 @@ impl ControlService {
             } => {
                 let request = automation_ref_request(automation_id, Some(expected_revision));
                 let (_, changed) = self
-                    .set_automation_state(&request, AutomationState::Enabled, Some(extension_id))
+                    .set_automation_state(
+                        &request,
+                        AutomationState::Enabled,
+                        ControlOrigin::System,
+                        Some(extension_id),
+                    )
                     .await?;
                 domains.extend(changed);
             }
@@ -2238,7 +2307,12 @@ impl ControlService {
                 }) {
                     let request = automation_ref_request(automation.id, Some(automation.revision));
                     let (_, changed) = self
-                        .set_automation_state(&request, AutomationState::Paused, Some(extension_id))
+                        .set_automation_state(
+                            &request,
+                            AutomationState::Paused,
+                            ControlOrigin::System,
+                            Some(extension_id),
+                        )
                         .await?;
                     domains.extend(changed);
                 }
@@ -2543,6 +2617,10 @@ fn automation_value(automation: &Automation) -> Value {
         serde_json::to_value(automation).unwrap_or_else(|_| json!({ "id": automation.id }));
     if let Some(map) = value.as_object_mut() {
         map.insert(
+            "precheck_pending".into(),
+            json!(automation.task.precheck().is_some() && !automation.precheck_approved),
+        );
+        map.insert(
             "resolved_schedule".to_string(),
             json!(automations::schedule_summary(&automation.trigger)),
         );
@@ -2803,6 +2881,10 @@ fn list_automations(
             };
             if let Some(map) = projected.as_object_mut() {
                 map.insert(
+                    "precheck_pending".into(),
+                    json!(automation.task.precheck().is_some() && !automation.precheck_approved),
+                );
+                map.insert(
                     "resolved_schedule".to_string(),
                     json!(automations::schedule_summary(&automation.trigger)),
                 );
@@ -2980,4 +3062,13 @@ where
         rows: page_rows,
         next_cursor,
     })
+}
+
+fn is_human_origin(origin: &ControlOrigin) -> bool {
+    matches!(origin, ControlOrigin::DesktopUi | ControlOrigin::RemoteRpc)
+}
+
+fn precheck_approval_required() -> ControlError {
+    ControlError::new("precheck_approval_required", "This unattended shell pre-check needs user approval.", false)
+        .with_suggested_action("Open the automation in the UI, review its command and workspace, then approve and resume it.")
 }

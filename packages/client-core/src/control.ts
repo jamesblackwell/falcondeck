@@ -37,12 +37,15 @@ export type AutomationTrigger =
   | { kind: "cron"; expression: string; timezone: string }
   | { kind: "interval"; every_seconds: number; anchor_at: string; active_window?: AutomationActiveWindow | null };
 
+export type AutomationPrecheck = { command: string; timeout_seconds: number };
+
 export type AutomationTask =
   | { kind: "prompt"; instruction: string }
   | {
       kind: "conditional_prompt";
       instruction: string;
       no_action_marker: string;
+      precheck?: AutomationPrecheck | null;
     };
 
 export type AutomationThreadTarget =
@@ -77,6 +80,7 @@ export type AutomationRunStatus =
   | "succeeded_no_action"
   | "failed"
   | "skipped_overlap"
+  | "skipped_precheck"
   | "skipped_unchanged"
   | "skipped_dependency"
   | "cancelled";
@@ -111,6 +115,8 @@ export type Automation = {
   concurrency_policy: AutomationConcurrencyPolicy;
   misfire_policy: AutomationMisfirePolicy;
   elevated: boolean;
+  precheck_approved?: boolean;
+  precheck_pending?: boolean;
   required_connectors: string[];
   created_at?: string;
   updated_at?: string;
@@ -313,6 +319,7 @@ const RUN_STATUSES: ReadonlySet<string> = new Set([
   "failed",
   "skipped_overlap",
   "skipped_unchanged",
+  "skipped_precheck",
   "skipped_dependency",
   "cancelled",
 ]);
@@ -411,6 +418,7 @@ export function normalizeAutomationTask(value: unknown): AutomationTask | null {
             kind: "conditional_prompt",
             instruction: value.instruction,
             no_action_marker: value.no_action_marker,
+            ...(isRecord(value.precheck) ? { precheck: value.precheck as AutomationPrecheck } : {}),
           }
         : null;
     default:

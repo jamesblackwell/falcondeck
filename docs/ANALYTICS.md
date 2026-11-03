@@ -79,6 +79,10 @@ outcome, with review flags:
   provider context counters already in memory; unavailable usage stays unknown.
   Older runs do not acquire this measurement retroactively.
 
+`skipped_precheck` runs count as skips (not agent no-action replies). They carry
+no model token usage and no thread id. Their outcome records that the approved
+local check exited 0 with empty stdout.
+
 Agents read the same report with `falcondeck_get` resource `automation.health`
 (`filters.days`, default 7, at most 90). It is answered on the computer only;
 paired remote clients are refused, like the rest of analytics.

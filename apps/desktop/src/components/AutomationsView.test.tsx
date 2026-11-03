@@ -3,7 +3,9 @@ import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-libra
 
 import type { AgentControlSettings, Automation } from "@falcondeck/client-core";
 
-import { AutomationsView } from "./AutomationsView";
+import { AutomationEditor, AutomationsView } from "./AutomationsView";
+
+import { automationDraftFrom } from "./automation-draft";
 
 const onToast = vi.fn();
 
@@ -421,4 +423,16 @@ describe("AutomationsView editor", () => {
     const submit = screen.getByRole("button", { name: "Create automation" });
     expect(submit.getAttribute("disabled")).not.toBeNull();
   });
+});
+
+it("loads daemon cadence advice and preserves the window in its one-click fix", async () => {
+  const window = { timezone: "Europe/London", start_minute: 480, end_minute: 1020, weekdays: [1,2,3,4,5] };
+  const loadAdvice = vi.fn().mockResolvedValue([{ code: "cache_cold_reuse", message: "Cold cache risk", suggested_action: "Use 50 minutes", suggested_interval_seconds: 3000, replacement_trigger: { kind: "interval", every_seconds: 3000, anchor_at: "2026-11-03T08:00:00Z", active_window: window } }]);
+  const submit = vi.fn().mockResolvedValue(undefined);
+  render(<AutomationEditor state={{ kind: "edit", id: automation.id, revision: 4, draft: { ...automationDraftFrom(automation), provider: "claude" } }} loadAdvice={loadAdvice} allowElevated onCancel={() => {}} onSubmit={submit} />);
+  fireEvent.click(await screen.findByRole("button", { name: "Use 50 min" }));
+  expect(screen.getByLabelText("Interval seconds")).toHaveValue("3000");
+  expect(screen.getByLabelText("Window end minute")).toHaveValue(1020);
+  fireEvent.click(screen.getByRole("button", { name: "Save changes" }));
+  await waitFor(() => expect(submit).toHaveBeenCalledWith(expect.objectContaining({ scheduleKind: "interval", activeWindow: window }), true));
 });

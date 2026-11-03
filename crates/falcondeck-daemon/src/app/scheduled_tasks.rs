@@ -372,6 +372,7 @@ fn legacy_automation(
             AutomationMisfirePolicy::Skip
         },
         elevated,
+        precheck_approved: false,
         required_connectors: Vec::new(),
         created_at: detail.created_at,
         updated_at: detail.summary.updated_at,

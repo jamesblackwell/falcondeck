@@ -1191,9 +1191,10 @@ fn summarize_automations(
         match run.status {
             Status::SucceededNoAction => summary.no_action += 1,
             Status::Failed => summary.failed += 1,
-            Status::SkippedOverlap | Status::SkippedDependency | Status::SkippedUnchanged => {
-                summary.skipped += 1
-            }
+            Status::SkippedOverlap
+            | Status::SkippedDependency
+            | Status::SkippedUnchanged
+            | Status::SkippedPrecheck => summary.skipped += 1,
             _ => {}
         }
         if let (Some(start), Some(end)) = (run.started_at, run.finished_at) {
@@ -1875,7 +1876,7 @@ mod tests {
         execution.context_tokens_at_start = Some(100_001);
         let homes = HashSet::from(["home".into()]);
         let health =
-            summarize_automations(vec![execution.clone()], &[definition.clone()], 7, &homes);
+            summarize_automations(vec![execution.clone()], std::slice::from_ref(&definition), 7, &homes);
         assert_eq!(
             health[0].flags,
             [
@@ -1886,7 +1887,7 @@ mod tests {
         );
         execution.context_tokens_at_start = Some(100_000);
         let health =
-            summarize_automations(vec![execution], &[definition.clone()], 7, &HashSet::new());
+            summarize_automations(vec![execution], std::slice::from_ref(&definition), 7, &HashSet::new());
         assert_eq!(health[0].flags, ["cache_cold_reuse"]);
         let mut fresh = definition;
         fresh.target.thread = falcondeck_core::control::AutomationThreadTarget::NewEachRun;

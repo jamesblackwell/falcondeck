@@ -1856,12 +1856,137 @@ async fn cadence_guard_applies_to_agent_creates_and_target_only_updates() {
 #[tokio::test]
 async fn automation_compaction_override_validates_provider_and_cli_floor() {
     let (_dir, service) = service().await;
-    for (provider, tokens, valid) in [("claude", 100_000, true), ("claude", 60_000, false), ("claude", 1_000_001, false), ("codex", 100_000, false)] {
+    for (provider, tokens, valid) in [
+        ("claude", 100_000, true),
+        ("claude", 60_000, false),
+        ("claude", 1_000_001, false),
+        ("codex", 100_000, false),
+    ] {
         let mut args = create_arguments();
         args["target"]["provider"] = json!(provider);
         args["target"]["claude_autocompact_tokens"] = json!(tokens);
-        let (response, _) = service.execute(execute_request(registry::ops::AUTOMATION_CREATE, args, None), &desktop(), &ControlDeps::none()).await;
+        let (response, _) = service
+            .execute(
+                execute_request(registry::ops::AUTOMATION_CREATE, args, None),
+                &desktop(),
+                &ControlDeps::none(),
+            )
+            .await;
         assert_eq!(response.ok, valid, "{:?}", response.error);
-        if valid { assert_eq!(response.data.unwrap()["target"]["claude_autocompact_tokens"], 100_000); }
+        if valid {
+            assert_eq!(
+                response.data.unwrap()["target"]["claude_autocompact_tokens"],
+                100_000
+            );
+        }
+    }
+}
+
+#[tokio::test]
+async fn shell_prechecks_need_elevated_setting_and_human_approval() {
+    let (_dir, service) = service().await;
+    let mut args = create_arguments();
+    args["task"]["precheck"] = json!({"command": "exit 0", "timeout_seconds": 5});
+    let (blocked, _) = service
+        .execute(
+            execute_request(registry::ops::AUTOMATION_CREATE, args.clone(), None),
+            &mcp(Some("codex")),
+            &ControlDeps::none(),
+        )
+        .await;
+    assert_eq!(blocked.error.unwrap().code, "elevated_permissions_disabled");
+    let (enabled, _) = service
+        .execute(
+            execute_request(
+                registry::ops::SETTINGS_UPDATE,
+                json!({"allow_elevated_automations":true}),
+                None,
+            ),
+            &desktop(),
+            &ControlDeps::none(),
+        )
+        .await;
+    assert!(enabled.ok);
+    let (created, _) = service
+        .execute(
+            execute_request(registry::ops::AUTOMATION_CREATE, args.clone(), None),
+            &mcp(Some("codex")),
+            &ControlDeps::none(),
+        )
+        .await;
+    assert!(created.ok, "{:?}", created.error);
+    let created = created.data.unwrap();
+    assert_eq!(created["elevated"], true);
+    assert_eq!(created["precheck_pending"], true);
+    assert_eq!(created["state"], "paused");
+    let id = created["id"].as_str().unwrap();
+    for operation in [
+        registry::ops::AUTOMATION_RUN_NOW,
+        registry::ops::AUTOMATION_RESUME,
+    ] {
+        let (response, _) = service
+            .execute(
+                execute_request(operation, json!({"automation_id": id}), Some(1)),
+                &mcp(Some("codex")),
+                &ControlDeps::none(),
+            )
+            .await;
+        assert_eq!(response.error.unwrap().code, "precheck_approval_required");
+    }
+    let (approved, _) = service
+        .execute(
+            execute_request(
+                registry::ops::AUTOMATION_RESUME,
+                json!({"automation_id": id}),
+                Some(1),
+            ),
+            &desktop(),
+            &ControlDeps::none(),
+        )
+        .await;
+    assert!(approved.ok, "{:?}", approved.error);
+    assert_eq!(approved.data.unwrap()["precheck_approved"], true);
+    let mut task = args["task"].clone();
+    task["precheck"]["command"] = json!("echo changed");
+    let (changed, _) = service
+        .execute(
+            execute_request(
+                registry::ops::AUTOMATION_UPDATE,
+                json!({"automation_id": id, "task": task}),
+                Some(2),
+            ),
+            &mcp(Some("codex")),
+            &ControlDeps::none(),
+        )
+        .await;
+    assert!(changed.ok, "{:?}", changed.error);
+    assert_eq!(changed.data.unwrap()["precheck_pending"], true);
+    assert!(
+        service
+            .enqueue_run(
+                id,
+                None,
+                super::RunSource::Manual {
+                    origin: ControlOrigin::Mcp
+                }
+            )
+            .await
+            .is_err()
+    );
+    // Invalid commands/timeouts are rejected before any shell execution.
+    for check in [
+        json!({"command":"", "timeout_seconds":5}),
+        json!({"command":"true", "timeout_seconds":0}),
+        json!({"command":"true", "timeout_seconds":301}),
+    ] {
+        args["task"]["precheck"] = check;
+        let (invalid, _) = service
+            .execute(
+                execute_request(registry::ops::AUTOMATION_CREATE, args.clone(), None),
+                &desktop(),
+                &ControlDeps::none(),
+            )
+            .await;
+        assert!(!invalid.ok);
     }
 }

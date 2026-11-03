@@ -287,7 +287,8 @@ function automationAsScheduledTask(
               ? "succeeded"
               : automation.latest_outcome.status === "skipped_overlap" ||
                   automation.latest_outcome.status === "skipped_dependency" ||
-                  automation.latest_outcome.status === "skipped_unchanged"
+                  automation.latest_outcome.status === "skipped_unchanged" ||
+                  automation.latest_outcome.status === "skipped_precheck"
                 ? "skipped"
                 : automation.latest_outcome.status === "cancelled"
                   ? "interrupted"
@@ -1339,6 +1340,11 @@ export function ScheduledTasksView({
     setBusyKey(taskEntryKey(entry));
     try {
       if (entry.automation) {
+        if (entry.automation.precheck_pending && action !== "delete") {
+          const response = await api.controlGet({ resource: "automation", id: entry.automation.id });
+          setAutomationEditor({ entry, automation: response.data as Automation });
+          return false;
+        }
         const operation =
           action === "run"
             ? "automation.run_now"

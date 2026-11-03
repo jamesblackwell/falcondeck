@@ -1211,3 +1211,11 @@ Bots have an explicit user-created identity with broader coordination authority.
 Their space consists of user-controlled files, with history remaining in native
 agent storage; FalconDeck stores no second conversation database. Ordinary task
 handoffs continue using their transcript and repository files.
+
+### Automation shell pre-check boundary
+
+Core conditional automations may carry elevated `task.precheck` shell commands.
+Extension-owned automation creates and updates reject this field: the existing
+`automations:manage-owned` permission does not grant unattended shell execution.
+The shared run-status enum adds terminal `skipped_precheck`; this grants no new
+extension authority or access to core schedules.

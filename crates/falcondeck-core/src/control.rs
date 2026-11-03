@@ -139,6 +139,9 @@ pub struct Automation {
     /// Whether the captured authority settings count as elevated.
     #[serde(default)]
     pub elevated: bool,
+    /// Human approval of unattended shell execution; never an agent argument.
+    #[serde(default)]
+    pub precheck_approved: bool,
 
     /// Connector names the automation depends on.
     #[serde(default)]
@@ -342,10 +345,32 @@ pub enum AutomationTask {
         instruction: String,
         /// Single-line marker compared against the trimmed final reply.
         no_action_marker: String,
+        /// Local shell check before any model call. Requires elevated authority
+        /// and user approval. Exit 0 and empty stdout skips the agent entirely.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        precheck: Option<AutomationPrecheck>,
     },
 }
 
+/// An approved unattended command, executed in the automation workspace.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct AutomationPrecheck {
+    /// Shell program interpreted by /bin/sh -c. Must not contain credentials.
+    pub command: String,
+    /// Wall-clock timeout including output draining, 1..300 seconds.
+    pub timeout_seconds: u64,
+}
+
 impl AutomationTask {
+    /// Optional elevated shell check.
+    pub fn precheck(&self) -> Option<&AutomationPrecheck> {
+        match self {
+            Self::ConditionalPrompt { precheck, .. } => precheck.as_ref(),
+            Self::Prompt { .. } => None,
+        }
+    }
+
     /// The instruction text, regardless of task kind.
     pub fn instruction(&self) -> &str {
         match self {
@@ -581,6 +606,8 @@ pub enum AutomationRunStatus {
     SkippedDependency,
     /// No relevant local state changed; no model called.
     SkippedUnchanged,
+    /// Approved local check exited successfully with empty stdout; no model called.
+    SkippedPrecheck,
     /// Cancelled before execution.
     Cancelled,
 }
@@ -595,6 +622,7 @@ impl AutomationRunStatus {
                 | AutomationRunStatus::Failed
                 | AutomationRunStatus::SkippedOverlap
                 | AutomationRunStatus::SkippedUnchanged
+                | AutomationRunStatus::SkippedPrecheck
                 | AutomationRunStatus::SkippedDependency
                 | AutomationRunStatus::Cancelled
         )

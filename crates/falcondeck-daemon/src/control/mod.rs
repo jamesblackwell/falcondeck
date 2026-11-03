@@ -14,6 +14,7 @@
 
 pub mod automations;
 pub mod mcp;
+mod precheck;
 pub mod redaction;
 pub mod registry;
 pub mod scheduler;

@@ -379,6 +379,7 @@ pub const DEFAULT_AUTOMATION_LIST_FIELDS: &[&str] = &[
     "target.provider",
     "target.workspace_path",
     "elevated",
+    "precheck_approved",
     "required_connectors",
     "concurrency_policy",
     "misfire_policy",
