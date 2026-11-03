@@ -2325,6 +2325,14 @@ export function ScheduledTasksView({
                 ]?.settings?.allow_elevated_automations ?? false
               }
               onCancel={() => setAutomationEditor(null)}
+              onApprovePrecheck={async (hash) => {
+                const api = hostApi(automationEditor.entry.hostId, localApi, manager);
+                if (!api) return;
+                const response = await api.controlExecute({ operation: "automation.approve_precheck", arguments: { automation_id: automationEditor.automation.id, approval_hash: hash }, expected_revision: automationEditor.automation.revision });
+                if (!response.ok) throw new Error(controlErrorMessage(response));
+                setAutomationEditor(null);
+                await loadAutomations(automationEditor.entry.hostId ?? "local", api);
+              }}
               onSubmit={async (draft, includeTrigger) => {
                 const api = hostApi(
                   automationEditor.entry.hostId,
@@ -2350,7 +2358,9 @@ export function ScheduledTasksView({
                   });
                   return;
                 }
-                setAutomationEditor(null);
+                if (draft.conditional && draft.precheckCommand.trim()) {
+                  setAutomationEditor({ entry: automationEditor.entry, automation: response.data as Automation });
+                } else { setAutomationEditor(null); }
                 await loadAutomations(
                   automationEditor.entry.hostId ?? "local",
                   api,

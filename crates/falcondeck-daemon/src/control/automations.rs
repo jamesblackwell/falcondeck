@@ -594,6 +594,9 @@ pub fn validate_definition(
     target: &AutomationTarget,
     required_connectors: &[String],
 ) -> Result<(), ControlError> {
+    if task.precheck().is_some() && target.run_as_bot.is_some() {
+        return Err(ControlError::field("task.precheck", "Shell pre-checks cannot be combined with run_as_bot; use a fixed workspace target."));
+    }
     if let Some(check) = task.precheck()
         && (check.command.trim().is_empty()
             || check.command.len() > 8000

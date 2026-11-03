@@ -179,6 +179,16 @@ pub struct AutomationRefArgs {
     pub automation_id: String,
 }
 
+/// Explicit user approval of the command displayed in the editor.
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ApprovePrecheckArgs {
+    /// Automation whose full definition was reviewed.
+    pub automation_id: String,
+    /// SHA-256 of (command, timeout, resolved workspace) from the explicit read.
+    pub approval_hash: String,
+}
+
 /// User-only bot harness switch arguments.
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
@@ -267,6 +277,8 @@ pub mod ops {
     pub const AUTOMATION_PAUSE: &str = "automation.pause";
     /// Resume a paused automation.
     pub const AUTOMATION_RESUME: &str = "automation.resume";
+    /// Approve an exact shell pre-check after reviewing it in the editor.
+    pub const AUTOMATION_APPROVE_PRECHECK: &str = "automation.approve_precheck";
     /// Dispatch an automation immediately.
     pub const AUTOMATION_RUN_NOW: &str = "automation.run_now";
     /// Delete an automation.
@@ -528,6 +540,18 @@ pub fn capabilities() -> &'static [Capability] {
                 json!({ "automation_id": "automation-9fc78b39" })
             )],
             related_operations: &[ops::AUTOMATION_PAUSE, ops::AUTOMATION_RUN_NOW],
+        },
+        Capability {
+            id: ops::AUTOMATION_APPROVE_PRECHECK,
+            title: "Approve shell pre-check",
+            description: "User-only approval from the editor displaying the command, timeout and resolved workspace. Requires expected_revision and the precheck_approval_hash from a full definition read. Does not resume or run the automation. Ordinary resume, create and update never approve a command; agents cannot call this operation.",
+            domain: "automation",
+            scopes: &[ControlScope::Host, ControlScope::Workspace],
+            input_schema: schema::<ApprovePrecheckArgs>(),
+            output_schema: schema::<falcondeck_core::control::Automation>(),
+            behavior: CapabilityBehavior { read_only: false, destructive: false, idempotent: false, confirmation_class: ConfirmationClass::Sensitive },
+            examples: vec![],
+            related_operations: &[ops::AUTOMATION_UPDATE, ops::AUTOMATION_RESUME],
         },
         Capability {
             id: ops::AUTOMATION_RUN_NOW,

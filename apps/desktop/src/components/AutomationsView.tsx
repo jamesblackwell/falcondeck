@@ -400,15 +400,33 @@ export function AutomationsView({ baseUrl, onToast, onEventRefetch }: Automation
       {editor.kind !== "closed" ? (
         <AutomationEditor
             baseUrl={baseUrl}
-          key={editor.kind === "edit" ? editor.id : "create"}
+          key={editor.kind === "edit" ? `${editor.id}:${editor.revision}` : "create"}
           state={editor}
           extraProviders={Object.keys(settings?.providers ?? {})}
           allowElevated={settings?.allow_elevated_automations ?? false}
           onCancel={() => setEditor({ kind: "closed" })}
+          onApprovePrecheck={editor.kind === "edit" ? async (hash) => {
+            if (!baseUrl) return;
+            await executeControl(baseUrl, { operation: "automation.approve_precheck", arguments: { automation_id: editor.id, approval_hash: hash }, expected_revision: editor.revision });
+            setEditor({ kind: "closed" });
+            await load();
+          } : undefined}
           onSubmit={async (draft, includeTrigger) => {
             const payload = automationDraftArguments(draft);
             if (!includeTrigger) {
               delete payload.trigger;
+            }
+            if (draft.conditional && draft.precheckCommand.trim() && baseUrl) {
+              try {
+                const saved = await executeControl<Automation>(baseUrl, {
+                  operation: editor.kind === "create" ? "automation.create" : "automation.update",
+                  arguments: { ...(editor.kind === "edit" ? { automation_id: editor.id } : {}), ...payload },
+                  ...(editor.kind === "edit" ? { expected_revision: editor.revision } : {}),
+                });
+                setEditor({ kind: "edit", id: saved.id, revision: saved.revision, draft: automationDraftFrom(saved) });
+                await load();
+              } catch (error) { onToast({ variant: "danger", title: "Could not save automation", description: String(error) }); }
+              return;
             }
             const ok =
               editor.kind === "create"
@@ -437,12 +455,14 @@ export function AutomationEditor({
   state,
   baseUrl,
   loadAdvice,
+  onApprovePrecheck,
   extraProviders = [],
   allowElevated,
   onCancel,
   onSubmit,
 }: {
   baseUrl?: string | null;
+  onApprovePrecheck?: (hash: string) => Promise<void>;
   loadAdvice?: (filters: Record<string, unknown>) => Promise<AutomationAdvice[]>;
   state: Extract<AutomationEditorState, { kind: "create" | "edit" }>;
   extraProviders?: readonly string[];
@@ -669,7 +689,7 @@ export function AutomationEditor({
             {draft.precheckCommand.trim() ? <label className="block text-sm text-fg-secondary">Timeout (seconds, 1–300)
               <Input aria-label="Pre-check timeout" type="number" min={1} max={300} value={draft.precheckTimeout} onChange={(event) => set("precheckTimeout", event.target.value)} />
             </label> : null}
-            <p className="text-sm text-fg-secondary">Exit 0 with empty stdout skips the agent. Other results are attached to its instruction. Saving approves unattended shell execution in this workspace; commands run without per-call approval.</p>
+            <p className="text-sm text-fg-secondary">Exit 0 with empty stdout skips the agent. Other results are attached to its instruction. Save the definition, then review and explicitly approve the command below. Commands run without per-call approval.</p>
           </div>
         ) : null}
 
@@ -838,6 +858,20 @@ export function AutomationEditor({
           <p className="text-[length:var(--fd-text-sm)] text-danger">{validation}</p>
         ) : null}
 
+        {draft.conditional && draft.precheckApprovalHash && onApprovePrecheck ? (
+          <div className="space-y-2 rounded-md border border-border p-3 text-sm text-fg-secondary">
+            <p>Approve this saved shell pre-check in {draft.precheckWorkspace}, timeout {state.draft.precheckTimeout}s:</p>
+            <pre className="whitespace-pre-wrap">{state.draft.precheckCommand}</pre>
+            <Button disabled={isBusy || draft.precheckCommand !== state.draft.precheckCommand || draft.precheckTimeout !== state.draft.precheckTimeout || draft.workspacePath !== state.draft.workspacePath || draft.runAsBot !== state.draft.runAsBot} onClick={async () => {
+              setIsBusy(true);
+              try { await onApprovePrecheck(draft.precheckApprovalHash!); }
+              catch (error) { setValidation(String(error)); }
+              finally { setIsBusy(false); }
+            }}>Approve pre-check</Button>
+            <p>Approval does not resume the automation. If the definition changed elsewhere, reload and review it again.</p>
+          </div>
+        ) : null}
+
         <div className="flex justify-end gap-2">
           <Button variant="ghost" onClick={onCancel}>
             Cancel
@@ -863,7 +897,7 @@ export function AutomationEditor({
             }}
           >
             {isBusy ? <ActivityDiamond size="md" tone="current" /> : null}
-            {draft.conditional && draft.precheckCommand.trim() ? "Save and approve pre-check" : state.kind === "create" ? "Create automation" : "Save changes"}
+            {state.kind === "create" ? "Create automation" : "Save changes"}
           </Button>
         </div>
       </CardContent>

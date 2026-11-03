@@ -6,6 +6,32 @@ use tokio::io::{AsyncRead, AsyncReadExt};
 use tokio::process::Command;
 use tokio::time::{Duration, timeout};
 
+/// Identity of what a person reviewed. Paths are canonicalized both when
+/// presenting approval and immediately before execution.
+pub(super) fn approval_hash(check: &AutomationPrecheck, workspace: &str) -> String {
+    use sha2::{Digest, Sha256};
+    let payload = serde_json::to_vec(&(&check.command, check.timeout_seconds, workspace)).expect("precheck identity serializes");
+    format!("{:x}", Sha256::digest(payload))
+}
+
+pub(super) fn definition_identity(automation: &falcondeck_core::control::Automation) -> Option<(String, String)> {
+    let check = automation.task.precheck()?;
+    if automation.target.run_as_bot.is_some() { return None; }
+    let workspace = std::fs::canonicalize(&automation.target.workspace_path).ok()?.to_str()?.to_owned();
+    Some((approval_hash(check, &workspace), workspace))
+}
+
+pub(super) fn is_approved(automation: &falcondeck_core::control::Automation) -> bool {
+    if automation.task.precheck().is_none() { return true; }
+    automation.precheck_approved && definition_identity(automation).is_some_and(|(hash, _)| automation.precheck_approved_hash.as_ref() == Some(&hash))
+}
+
+pub(super) fn approved_in_workspace(automation: &falcondeck_core::control::Automation, workspace: &str) -> bool {
+    let Some(check) = automation.task.precheck() else { return true; };
+    automation.target.run_as_bot.is_none() && automation.precheck_approved
+        && automation.precheck_approved_hash.as_deref() == Some(approval_hash(check, workspace).as_str())
+}
+
 const OUTPUT_LIMIT: usize = 12_000;
 
 pub(super) enum PrecheckOutcome {

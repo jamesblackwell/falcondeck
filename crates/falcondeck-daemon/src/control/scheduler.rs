@@ -246,6 +246,12 @@ pub(crate) async fn execute_run(app: &AppState, run_id: &str) {
         return;
     }
 
+    if automation.task.precheck().is_some() && automation.target.run_as_bot.is_some() {
+        let _ = app.control().fail_run(run_id, "Shell pre-checks cannot run as a bot in a dynamic workspace").await;
+        emit_runs_changed(app).await;
+        return;
+    }
+
     let mut bot_digest = None;
     if let Some(id) = automation.target.run_as_bot.clone() {
         let Some(bot) = app
@@ -414,7 +420,7 @@ pub(crate) async fn execute_run(app: &AppState, run_id: &str) {
     };
 
     let precheck_evidence = if let Some(check) = automation.task.precheck() {
-        if !automation.precheck_approved
+        if !super::precheck::approved_in_workspace(&automation, &workspace.path)
             || !app
                 .control()
                 .settings_snapshot()

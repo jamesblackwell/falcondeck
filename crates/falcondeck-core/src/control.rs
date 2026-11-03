@@ -142,6 +142,9 @@ pub struct Automation {
     /// Human approval of unattended shell execution; never an agent argument.
     #[serde(default)]
     pub precheck_approved: bool,
+    /// Digest of the exact command, timeout and canonical workspace approved.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub precheck_approved_hash: Option<String>,
 
     /// Connector names the automation depends on.
     #[serde(default)]

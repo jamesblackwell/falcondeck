@@ -75,12 +75,14 @@ its process group is stopped at completion, timeout or shutdown; checks must
 not launch background services. Commands inherit the daemon environment.
 
 A shell command is elevated authority regardless of agent permission mode.
-The existing `allow_elevated_automations` setting must allow it. Agent-created
+The existing `allow_elevated_automations` setting must allow it. All newly created
 checks start paused with `precheck_approved: false`; agents cannot approve,
 resume or manually run them. In the UI, open the definition, inspect its
-command and workspace, and save to approve it, then resume. Human resume through
-the control API also approves it. Agent edits to the task or target revoke that
-approval and pause it again. Even already-queued runs recheck approval and the
+command, timeout and resolved workspace, then use the explicit **Approve pre-check**
+button after saving. `automation.approve_precheck` requires the displayed hash
+and exact definition revision and never retries stale approvals. Resume and generic
+toggles cannot approve a pending command. Task/target edits revoke approval for
+all callers. Pre-checks cannot be combined with `run_as_bot`, whose workspace is dynamic. Even already-queued runs recheck approval and the
 elevated setting before executing. Disabling elevated automations stops shell
 pre-checks; it does not rewrite their saved definitions. Existing non-shell
 permission-mode behavior remains as before.
@@ -89,3 +91,10 @@ Extension-owned schedules cannot add shell pre-checks: their public host
 contract does not grant unattended shell execution. Do not put credentials in
 commands; the definition is visible in the editor and control reads. Use files
 or existing environment configuration instead.
+
+The local `/api/control/execute` endpoint trusts the origin header from any local
+process. Consequently a local process can submit user-origin approval requests;
+this hash/revision check protects what was approved, not against a hostile local
+process. This branch does not change that pre-existing trust model. Pre-checks
+inherit the daemon's environment and run outside the automation's `sandbox_mode`;
+that mode governs the agent turn, not the preceding shell command.

@@ -436,3 +436,16 @@ it("loads daemon cadence advice and preserves the window in its one-click fix", 
   fireEvent.click(screen.getByRole("button", { name: "Save changes" }));
   await waitFor(() => expect(submit).toHaveBeenCalledWith(expect.objectContaining({ scheduleKind: "interval", activeWindow: window }), true));
 });
+
+it("requires a separate approval click on the displayed saved command", async () => {
+  const approve = vi.fn().mockResolvedValue(undefined);
+  const draft = { ...automationDraftFrom(automation), precheckCommand: "echo reviewed", precheckTimeout: "5", precheckApprovalHash: "displayed-hash", precheckWorkspace: "/private/tmp" };
+  render(<AutomationEditor state={{kind: "edit", id: automation.id, revision: 4, draft}} allowElevated onCancel={() => {}} onSubmit={vi.fn()} onApprovePrecheck={approve} />);
+  expect(screen.getByText("echo reviewed", { selector: "pre" })).toBeInTheDocument();
+  expect(approve).not.toHaveBeenCalled();
+  fireEvent.change(screen.getByLabelText("Pre-check command"), {target: {value: "echo changed"}});
+  expect(screen.getByRole("button", {name: "Approve pre-check"})).toBeDisabled();
+  fireEvent.change(screen.getByLabelText("Pre-check command"), {target: {value: "echo reviewed"}});
+  fireEvent.click(screen.getByRole("button", {name: "Approve pre-check"}));
+  await waitFor(() => expect(approve).toHaveBeenCalledWith("displayed-hash"));
+});

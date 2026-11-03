@@ -816,6 +816,7 @@ impl ControlService {
                 )
                 .await
             }
+            ops::AUTOMATION_APPROVE_PRECHECK => self.approve_precheck(request, context, settings).await,
             ops::AUTOMATION_RUN_NOW => {
                 self.run_automation_now(&request.arguments, context.origin.clone(), None)
                     .await
@@ -934,7 +935,7 @@ impl ControlService {
                 "Extension-owned automations do not support shell pre-checks.",
             ));
         }
-        let precheck_approved = args.task.precheck().is_none() || is_human_origin(&context.origin);
+        let precheck_approved = args.task.precheck().is_none();
         if elevated && !settings.allow_elevated_automations {
             return Err(ControlError::elevated_permissions_disabled());
         }
@@ -960,6 +961,7 @@ impl ControlService {
             misfire_policy: args.misfire_policy,
             elevated,
             precheck_approved,
+            precheck_approved_hash: None,
             required_connectors: args.required_connectors,
             created_at: now,
             updated_at: now,
@@ -1081,7 +1083,8 @@ impl ControlService {
             if automation.task.precheck().is_some()
                 && (args.task.is_some() || args.target.is_some())
             {
-                automation.precheck_approved = is_human_origin(&context.origin);
+                automation.precheck_approved = false;
+                automation.precheck_approved_hash = None;
             }
             if automation.task.precheck().is_some() && !automation.precheck_approved {
                 automation.state = AutomationState::Paused;
@@ -1112,11 +1115,31 @@ impl ControlService {
         .await
     }
 
+    async fn approve_precheck(&self, request: &ControlExecuteRequest, context: &ControlRequestContext, settings: &AgentControlSettings) -> Result<(Value, Vec<ControlDomain>), ControlError> {
+        if !is_human_origin(&context.origin) { return Err(precheck_approval_required()); }
+        if !settings.allow_elevated_automations { return Err(ControlError::elevated_permissions_disabled()); }
+        require_revision(request)?;
+        let args: registry::ApprovePrecheckArgs = decode_arguments(&request.arguments)?;
+        self.mutate(|state, now| {
+            let automation = state.automations.iter_mut().find(|a| a.id == args.automation_id)
+                .ok_or_else(|| ControlError::resource_not_found("automation", &args.automation_id))?;
+            ensure_automation_authority(automation, None)?;
+            require_revision_for(request, automation)?;
+            let (hash, _) = super::precheck::definition_identity(automation).ok_or_else(precheck_approval_required)?;
+            if hash != args.approval_hash { return Err(precheck_approval_required()); }
+            automation.precheck_approved = true;
+            automation.precheck_approved_hash = Some(hash);
+            automation.updated_at = now;
+            automation.revision += 1;
+            Ok((automation_value(automation), vec![ControlDomain::Automations]))
+        }).await
+    }
+
     async fn set_automation_state(
         &self,
         request: &ControlExecuteRequest,
         target_state: AutomationState,
-        origin: ControlOrigin,
+        _origin: ControlOrigin,
         owner_extension_id: Option<&str>,
     ) -> Result<(Value, Vec<ControlDomain>), ControlError> {
         let args: registry::AutomationRefArgs = decode_arguments(&request.arguments)?;
@@ -1134,17 +1157,8 @@ impl ControlService {
                 .find(|automation| automation.id == automation_id)
                 .ok_or_else(|| ControlError::resource_not_found("automation", &automation_id))?;
             require_revision_for(request, automation)?;
-            if target_state == AutomationState::Enabled
-                && automation.task.precheck().is_some()
-                && !automation.precheck_approved
-            {
-                if !is_human_origin(&origin) {
-                    return Err(precheck_approval_required());
-                }
-                if !state.settings.allow_elevated_automations {
-                    return Err(ControlError::elevated_permissions_disabled());
-                }
-                automation.precheck_approved = true;
+            if target_state == AutomationState::Enabled && !super::precheck::is_approved(automation) {
+                return Err(precheck_approval_required());
             }
             let changing = automation.state != target_state;
             match (target_state, automation.state) {
@@ -1454,7 +1468,7 @@ impl ControlService {
                 )));
             }
             if automation.task.precheck().is_some() {
-                if !automation.precheck_approved {
+                if !super::precheck::is_approved(&automation) {
                     return Err(precheck_approval_required());
                 }
                 if !state.settings.allow_elevated_automations {
@@ -2616,9 +2630,14 @@ fn automation_value(automation: &Automation) -> Value {
     let mut value =
         serde_json::to_value(automation).unwrap_or_else(|_| json!({ "id": automation.id }));
     if let Some(map) = value.as_object_mut() {
+        if let Some((hash, workspace)) = super::precheck::definition_identity(automation) {
+            map.insert("precheck_approval_hash".into(), json!(hash));
+            map.insert("precheck_workspace".into(), json!(workspace));
+        }
+
         map.insert(
             "precheck_pending".into(),
-            json!(automation.task.precheck().is_some() && !automation.precheck_approved),
+            json!(!super::precheck::is_approved(automation)),
         );
         map.insert(
             "resolved_schedule".to_string(),
@@ -2882,7 +2901,7 @@ fn list_automations(
             if let Some(map) = projected.as_object_mut() {
                 map.insert(
                     "precheck_pending".into(),
-                    json!(automation.task.precheck().is_some() && !automation.precheck_approved),
+                    json!(!super::precheck::is_approved(automation)),
                 );
                 map.insert(
                     "resolved_schedule".to_string(),
@@ -3070,5 +3089,5 @@ fn is_human_origin(origin: &ControlOrigin) -> bool {
 
 fn precheck_approval_required() -> ControlError {
     ControlError::new("precheck_approval_required", "This unattended shell pre-check needs user approval.", false)
-        .with_suggested_action("Open the automation in the UI, review its command and workspace, then approve and resume it.")
+        .with_suggested_action("Open the automation in the UI, review its command and workspace, then explicitly approve its command and resume it.")
 }

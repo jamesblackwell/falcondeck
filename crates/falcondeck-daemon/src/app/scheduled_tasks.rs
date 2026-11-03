@@ -373,6 +373,7 @@ fn legacy_automation(
         },
         elevated,
         precheck_approved: false,
+        precheck_approved_hash: None,
         required_connectors: Vec::new(),
         created_at: detail.created_at,
         updated_at: detail.summary.updated_at,

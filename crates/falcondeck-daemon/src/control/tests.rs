@@ -1933,17 +1933,17 @@ async fn shell_prechecks_need_elevated_setting_and_human_approval() {
             .await;
         assert_eq!(response.error.unwrap().code, "precheck_approval_required");
     }
-    let (approved, _) = service
-        .execute(
-            execute_request(
-                registry::ops::AUTOMATION_RESUME,
-                json!({"automation_id": id}),
-                Some(1),
-            ),
-            &desktop(),
-            &ControlDeps::none(),
-        )
-        .await;
+    for origin in [ControlOrigin::DesktopUi, ControlOrigin::RemoteRpc] {
+        let context = ControlRequestContext { origin, ..Default::default() };
+        let response = service.execute(execute_request(registry::ops::AUTOMATION_RESUME, json!({"automation_id":id}), Some(1)), &context, &ControlDeps::none()).await.0;
+        assert_eq!(response.error.unwrap().code, "precheck_approval_required");
+    }
+    let hash = created["precheck_approval_hash"].as_str().unwrap();
+    for (caller, hash, code) in [(mcp(Some("codex")), hash, "precheck_approval_required"), (desktop(), "wrong", "precheck_approval_required")] {
+        let response = service.execute(execute_request(registry::ops::AUTOMATION_APPROVE_PRECHECK, json!({"automation_id":id,"approval_hash":hash}), Some(1)), &caller, &ControlDeps::none()).await.0;
+        assert_eq!(response.error.unwrap().code, code);
+    }
+    let approved = service.execute(execute_request(registry::ops::AUTOMATION_APPROVE_PRECHECK, json!({"automation_id":id,"approval_hash":hash}), Some(1)), &desktop(), &ControlDeps::none()).await.0;
     assert!(approved.ok, "{:?}", approved.error);
     assert_eq!(approved.data.unwrap()["precheck_approved"], true);
     let mut task = args["task"].clone();
@@ -1973,6 +1973,17 @@ async fn shell_prechecks_need_elevated_setting_and_human_approval() {
             .await
             .is_err()
     );
+    // A toggle retry with the fresh revision still cannot approve the changed command.
+    let resumed = service.execute(execute_request(registry::ops::AUTOMATION_RESUME, json!({"automation_id": id}), Some(3)), &ControlRequestContext { origin: ControlOrigin::RemoteRpc, ..Default::default() }, &ControlDeps::none()).await.0;
+    assert_eq!(resumed.error.unwrap().code, "precheck_approval_required");
+    for revision in [2, 3] {
+        let response = service.execute(execute_request(registry::ops::AUTOMATION_APPROVE_PRECHECK, json!({"automation_id":id,"approval_hash":hash}), Some(revision)), &desktop(), &ControlDeps::none()).await.0;
+        assert_eq!(response.error.unwrap().code, if revision == 2 { "revision_conflict" } else { "precheck_approval_required" });
+    }
+    let mut bot_args = args.clone();
+    bot_args["target"]["thread"] = json!({"kind":"new_each_run"});
+    bot_args["target"]["run_as_bot"] = json!("bot-1");
+    assert!(!service.execute(execute_request(registry::ops::AUTOMATION_CREATE, bot_args, None), &desktop(), &ControlDeps::none()).await.0.ok);
     // Invalid commands/timeouts are rejected before any shell execution.
     for check in [
         json!({"command":"", "timeout_seconds":5}),

@@ -117,6 +117,9 @@ export type Automation = {
   elevated: boolean;
   precheck_approved?: boolean;
   precheck_pending?: boolean;
+  precheck_approval_hash?: string;
+  precheck_workspace?: string;
+  precheck_approved_hash?: string | null;
   required_connectors: string[];
   created_at?: string;
   updated_at?: string;

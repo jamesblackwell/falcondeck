@@ -1531,7 +1531,10 @@ async fn empty_precheck_skips_without_creating_a_thread_or_calling_a_model() {
     }})).unwrap();
     let created = app.control().execute(request, &context, &deps).await.0;
     assert!(created.ok, "{:?}", created.error);
-    let id = created.data.unwrap()["id"].as_str().unwrap().to_string();
+    let data = created.data.unwrap();
+    let id = data["id"].as_str().unwrap().to_string();
+    let request = serde_json::from_value(json!({"operation":"automation.approve_precheck","expected_revision":1,"arguments":{"automation_id":id,"approval_hash":data["precheck_approval_hash"]}})).unwrap();
+    assert!(app.control().execute(request, &context, &deps).await.0.ok);
     let run = app.control().enqueue_run(&id, None, crate::control::RunSource::Manual { origin: ControlOrigin::DesktopUi }).await.unwrap();
     assert!(app.control().claim_run_if_automation_free(&run.id).await);
     crate::control::scheduler::execute_run(&app, &run.id).await;

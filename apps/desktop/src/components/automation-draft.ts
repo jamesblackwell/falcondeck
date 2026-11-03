@@ -18,6 +18,8 @@ export type AutomationDraft = {
   noActionMarker: string;
   precheckCommand: string;
   precheckTimeout: string;
+  precheckApprovalHash?: string;
+  precheckWorkspace?: string;
   workspacePath: string;
   provider: string;
   threadKind: "managed" | "existing" | "new_each_run";
@@ -125,6 +127,8 @@ export function automationDraftFrom(automation: Automation): AutomationDraft {
         : DEFAULT_NO_ACTION_MARKER,
     precheckCommand: task.kind === "conditional_prompt" ? task.precheck?.command ?? "" : "",
     precheckTimeout: task.kind === "conditional_prompt" ? String(task.precheck?.timeout_seconds ?? 30) : "30",
+    precheckApprovalHash: automation.precheck_approval_hash,
+    precheckWorkspace: automation.precheck_workspace,
     workspacePath: automation.target.workspace_path,
     provider: automation.target.provider,
     threadKind: thread.kind,
