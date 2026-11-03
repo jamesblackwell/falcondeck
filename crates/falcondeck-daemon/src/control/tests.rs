@@ -1797,7 +1797,11 @@ async fn update_accepts_expected_revision_nested_in_arguments() {
             &ControlDeps::none(),
         )
         .await;
-    assert!(response.ok, "nested revision rejected: {:?}", response.error);
+    assert!(
+        response.ok,
+        "nested revision rejected: {:?}",
+        response.error
+    );
     assert_eq!(response.data.unwrap()["revision"], json!(2));
 
     let (response, _) = service
@@ -1812,4 +1816,39 @@ async fn update_accepts_expected_revision_nested_in_arguments() {
         )
         .await;
     assert_eq!(response.error.unwrap().code, "invalid_arguments");
+}
+
+#[tokio::test]
+async fn cadence_guard_applies_to_agent_creates_and_target_only_updates() {
+    let (_dir, service) = service().await;
+    let mut args = create_arguments();
+    args["trigger"]["expression"] = json!("0 * * * *");
+    args["target"]["provider"] = json!("claude");
+    let create = execute_request(registry::ops::AUTOMATION_CREATE, args.clone(), None);
+    let (blocked, _) = service
+        .execute(create.clone(), &mcp(Some("claude")), &ControlDeps::none())
+        .await;
+    assert!(!blocked.ok);
+    assert!(
+        blocked
+            .error
+            .unwrap()
+            .suggested_action
+            .unwrap()
+            .contains("3000")
+    );
+    let (allowed, _) = service
+        .execute(create, &desktop(), &ControlDeps::none())
+        .await;
+    assert!(allowed.ok);
+    let automation = allowed.data.unwrap();
+    let update = execute_request(
+        registry::ops::AUTOMATION_UPDATE,
+        json!({ "automation_id": automation["id"], "target": args["target"] }),
+        Some(1),
+    );
+    let (blocked, _) = service
+        .execute(update, &mcp(Some("claude")), &ControlDeps::none())
+        .await;
+    assert!(!blocked.ok);
 }

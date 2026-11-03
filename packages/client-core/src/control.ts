@@ -30,10 +30,12 @@ export type AutomationConcurrencyPolicy = "skip" | "queue_one" | "allow";
 
 export type AutomationMisfirePolicy = "skip" | "run_once";
 
+export type AutomationActiveWindow = { timezone: string; start_minute: number; end_minute: number; weekdays: number[] };
+
 export type AutomationTrigger =
   | { kind: "once"; run_at: string }
   | { kind: "cron"; expression: string; timezone: string }
-  | { kind: "interval"; every_seconds: number; anchor_at: string };
+  | { kind: "interval"; every_seconds: number; anchor_at: string; active_window?: AutomationActiveWindow | null };
 
 export type AutomationTask =
   | { kind: "prompt"; instruction: string }
@@ -385,6 +387,7 @@ export function normalizeAutomationTrigger(
             kind: "interval",
             every_seconds: value.every_seconds,
             anchor_at: value.anchor_at,
+            ...(isRecord(value.active_window) ? { active_window: value.active_window as AutomationActiveWindow } : {}),
           }
         : null;
     default:

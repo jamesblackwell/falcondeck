@@ -33,6 +33,8 @@ import {
   listRuns,
   readAutomation,
   readSettings,
+  readAutomationAdvice,
+  type AutomationAdvice,
 } from "../control-api";
 import {
   type AutomationDraft,
@@ -396,6 +398,7 @@ export function AutomationsView({ baseUrl, onToast, onEventRefetch }: Automation
 
       {editor.kind !== "closed" ? (
         <AutomationEditor
+            baseUrl={baseUrl}
           key={editor.kind === "edit" ? editor.id : "create"}
           state={editor}
           extraProviders={Object.keys(settings?.providers ?? {})}
@@ -431,11 +434,15 @@ export function AutomationsView({ baseUrl, onToast, onEventRefetch }: Automation
 
 export function AutomationEditor({
   state,
+  baseUrl,
+  loadAdvice,
   extraProviders = [],
   allowElevated,
   onCancel,
   onSubmit,
 }: {
+  baseUrl?: string | null;
+  loadAdvice?: (filters: Record<string, unknown>) => Promise<AutomationAdvice[]>;
   state: Extract<AutomationEditorState, { kind: "create" | "edit" }>;
   extraProviders?: readonly string[];
   allowElevated: boolean;
@@ -445,6 +452,21 @@ export function AutomationEditor({
   const [draft, setDraft] = useState<AutomationDraft>(state.draft);
   const [validation, setValidation] = useState<string | null>(null);
   const [isBusy, setIsBusy] = useState(false);
+
+  const [advice, setAdvice] = useState<AutomationAdvice[]>([]);
+  useEffect(() => {
+    let cancelled = false;
+    const timer = setTimeout(() => {
+      if (!baseUrl && !loadAdvice) return;
+      try {
+        const args = automationDraftArguments(draft);
+        void (loadAdvice ? loadAdvice({ trigger: args.trigger, target: args.target }) : readAutomationAdvice(baseUrl!, { trigger: args.trigger, target: args.target }))
+          .then((rows) => { if (!cancelled) setAdvice(rows); })
+          .catch(() => { if (!cancelled) setAdvice([]); });
+      } catch { setAdvice([]); }
+    }, 250);
+    return () => { cancelled = true; clearTimeout(timer); };
+  }, [baseUrl, draft, loadAdvice]);
 
   const elevated = useMemo(() => draftIsElevated(draft), [draft]);
   const error = useMemo(() => draftIsSubmittable(draft), [draft]);
@@ -499,7 +521,7 @@ export function AutomationEditor({
               aria-label="Schedule type"
               value={draft.scheduleKind}
               onChange={(event) =>
-                set("scheduleKind", event.target.value as AutomationDraft["scheduleKind"])
+                setSchedule("scheduleKind", event.target.value as AutomationDraft["scheduleKind"])
               }
               className="h-9 w-full rounded-[var(--fd-radius-md)] border border-border bg-surface-1 px-3 text-[length:var(--fd-text-sm)] text-fg-primary"
             >
@@ -561,6 +583,37 @@ export function AutomationEditor({
             </label>
           )}
         </div>
+
+        {advice.map((item) => (
+          <div key={item.code} role="status" className="rounded-md border border-border px-3 py-2 text-sm text-fg-secondary">
+            <p>{item.message} {item.suggested_action}</p>
+            {item.replacement_trigger?.kind === "interval" ? (
+              <Button size="sm" variant="secondary" onClick={() => {
+                const trigger = item.replacement_trigger;
+                if (trigger?.kind !== "interval") return;
+                setDraft((current) => ({ ...current, scheduleKind: "interval", everySeconds: String(trigger.every_seconds), anchorAt: trigger.anchor_at, activeWindow: trigger.active_window }));
+                setScheduleDirty(true);
+              }}>Use {Number(item.suggested_interval_seconds) / 60} min</Button>
+            ) : null}
+            <Button size="sm" variant="secondary" onClick={() => set("threadKind", "new_each_run")}>Use a fresh task each run</Button>
+          </div>
+        ))}
+        {draft.scheduleKind === "interval" ? (
+          <div className="space-y-2">
+            <label className="flex items-center gap-2 text-sm text-fg-secondary">
+              <input type="checkbox" aria-label="Limit to working window" checked={!!draft.activeWindow} onChange={(event) => setSchedule("activeWindow", event.target.checked ? { timezone: draft.timezone || "Europe/London", start_minute: 480, end_minute: 1020, weekdays: [1, 2, 3, 4, 5] } : null)} />
+              Limit to working window
+            </label>
+            {draft.activeWindow ? (
+              <div className="grid grid-cols-2 gap-3">
+                <Input aria-label="Window timezone" value={draft.activeWindow.timezone} onChange={(event) => setSchedule("activeWindow", { ...draft.activeWindow!, timezone: event.target.value })} />
+                <Input aria-label="Window ISO weekdays" value={draft.activeWindow.weekdays.join(",")} onChange={(event) => setSchedule("activeWindow", { ...draft.activeWindow!, weekdays: event.target.value.split(",").map(Number) })} />
+                <label className="text-sm text-fg-secondary">Start minute (08:00 = 480)<Input aria-label="Window start minute" type="number" value={draft.activeWindow.start_minute} onChange={(event) => setSchedule("activeWindow", { ...draft.activeWindow!, start_minute: Number(event.target.value) })} /></label>
+                <label className="text-sm text-fg-secondary">End minute, exclusive (17:00 = 1020)<Input aria-label="Window end minute" type="number" value={draft.activeWindow.end_minute} onChange={(event) => setSchedule("activeWindow", { ...draft.activeWindow!, end_minute: Number(event.target.value) })} /></label>
+              </div>
+            ) : null}
+          </div>
+        ) : null}
 
         <label className="block space-y-1">
           <span className="text-[length:var(--fd-text-xs)] text-fg-muted">Instruction</span>

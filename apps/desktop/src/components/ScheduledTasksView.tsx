@@ -2291,6 +2291,12 @@ export function ScheduledTasksView({
           >
             <AutomationEditor
               key={`${automationEditor.automation.id}:${automationEditor.automation.revision}`}
+              loadAdvice={async (filters) => {
+                const api = hostApi(automationEditor.entry.hostId, localApi, manager);
+                if (!api) return [];
+                const response = await api.controlGet({ resource: "automation.advice", filters });
+                return response.data as import("../control-api").AutomationAdvice[];
+              }}
               state={{
                 kind: "edit",
                 id: automationEditor.automation.id,

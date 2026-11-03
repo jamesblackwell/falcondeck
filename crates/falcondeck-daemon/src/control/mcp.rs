@@ -321,6 +321,7 @@ fn tool_definition(name: &str, _compatibility: &CompatibilityState) -> Value {
                         "automation.runs",
                         "control.audit",
                         "automation.health",
+                        "automation.advice",
                         "reviews",
                         "review"
                     ]
@@ -582,7 +583,9 @@ mod tests {
         let listed = tools_list_response(json!(1), &CompatibilityState::default());
         let tools = listed["result"]["tools"].as_array().unwrap();
         assert_eq!(tools.len(), 3);
-        let resources = tools[1]["inputSchema"]["properties"]["resource"]["enum"].as_array().unwrap();
+        let resources = tools[1]["inputSchema"]["properties"]["resource"]["enum"]
+            .as_array()
+            .unwrap();
         assert!(!resources.contains(&json!("tickets")));
         assert!(!resources.contains(&json!("ticket")));
         assert!(!listed.to_string().contains("ticket."));

@@ -18,7 +18,8 @@ use chrono::{
 use chrono_tz::Tz;
 use falcondeck_core::control::{
     Automation, AutomationConcurrencyPolicy, AutomationMisfirePolicy, AutomationRun,
-    AutomationRunStatus, AutomationState, AutomationTarget, AutomationTask, AutomationTrigger,
+    AutomationRunStatus, AutomationState, AutomationTarget, AutomationTask, AutomationThreadTarget,
+    AutomationTrigger,
 };
 
 use super::ControlError;
@@ -331,6 +332,7 @@ pub fn next_occurrence(
         AutomationTrigger::Interval {
             every_seconds,
             anchor_at,
+            active_window,
         } => {
             if *every_seconds < MIN_INTERVAL_SECONDS {
                 return Err(ControlError::invalid_schedule(
@@ -340,11 +342,46 @@ pub fn next_occurrence(
                     Some("trigger.every_seconds"),
                 ));
             }
+            let window = active_window.as_ref().map(|window| {
+                let tz = parse_timezone(&window.timezone)?;
+                if window.start_minute >= window.end_minute || window.end_minute > 1440
+                    || window.weekdays.is_empty() || window.weekdays.iter().any(|d| !(1..=7).contains(d))
+                    || *every_seconds > u64::from(window.end_minute - window.start_minute) * 60
+                {
+                    return Err(ControlError::field("trigger.active_window", "Use a nonempty same-day window, ISO weekdays 1..7, and an interval no longer than the window."));
+                }
+                Ok((window, tz))
+            }).transpose()?;
             let anchor = i128::from(anchor_at.timestamp());
             let after = i128::from(after.timestamp());
             let every = i128::from(*every_seconds);
             let step = (after - anchor).div_euclid(every) + 1;
-            let at = anchor + step * every;
+            let mut at = anchor + step * every;
+            if let Some((window, tz)) = window {
+                // At most a week of minute ticks before a valid weekday/window.
+                for _ in 0..(8 * 24 * 60) {
+                    let instant = i64::try_from(at)
+                        .ok()
+                        .and_then(|t| DateTime::from_timestamp(t, 0))
+                        .ok_or_else(|| {
+                            ControlError::invalid_schedule(
+                                "interval arithmetic overflowed",
+                                Some("trigger"),
+                            )
+                        })?;
+                    let local = instant.with_timezone(&tz);
+                    let minute = local.hour() * 60 + local.minute();
+                    if window
+                        .weekdays
+                        .contains(&local.weekday().number_from_monday())
+                        && minute >= window.start_minute
+                        && minute < window.end_minute
+                    {
+                        break;
+                    }
+                    at += every;
+                }
+            }
             let at = i64::try_from(at).map_err(|_| {
                 ControlError::invalid_schedule(
                     "the interval's next occurrence is outside the supported time range",
@@ -360,6 +397,139 @@ pub fn next_occurrence(
     }
 }
 
+/// Minimum elapsed gap in the next fourteen days (from the first occurrence).
+/// Cron uses the scheduler's timezone and DST semantics, never fixed UTC hours.
+pub fn minimum_gap_seconds(
+    trigger: &AutomationTrigger,
+    now: DateTime<Utc>,
+) -> Result<Option<u64>, ControlError> {
+    if let AutomationTrigger::Interval {
+        every_seconds,
+        active_window: None,
+        ..
+    } = trigger
+    {
+        next_occurrence(trigger, now)?;
+        return Ok(Some(*every_seconds));
+    }
+    if matches!(trigger, AutomationTrigger::Once { .. }) {
+        return Ok(None);
+    }
+    let Some(first) = next_occurrence(trigger, now)? else {
+        return Ok(None);
+    };
+    let horizon = first.at + Duration::days(14);
+    let mut previous = first.at;
+    let mut shortest = None;
+    // Five-field cron and interval validation both cap occurrences at one/minute.
+    for _ in 0..=14 * 24 * 60 {
+        let Some(next) = next_occurrence(trigger, previous)? else {
+            break;
+        };
+        if next.at > horizon {
+            break;
+        }
+        let gap = (next.at - previous).num_seconds() as u64;
+        shortest = Some(shortest.map_or(gap, |old: u64| old.min(gap)));
+        previous = next.at;
+    }
+    Ok(shortest)
+}
+
+/// Known main-conversation prompt cache TTLs. Unknown providers have no rule.
+pub fn prompt_cache_ttl_seconds(provider: &falcondeck_core::AgentProvider) -> Option<u64> {
+    const TTLS: &[(&str, u64)] = &[("claude", 3600)];
+    TTLS.iter()
+        .find(|(id, _)| *id == provider.as_str())
+        .map(|(_, ttl)| *ttl)
+}
+
+/// Shared deterministic advice used by MCP validation, the editor and health.
+pub fn cadence_advice(
+    trigger: &AutomationTrigger,
+    target: &AutomationTarget,
+    bot_home: bool,
+    now: DateTime<Utc>,
+) -> Result<Vec<serde_json::Value>, ControlError> {
+    let Some(gap) = minimum_gap_seconds(trigger, now)? else {
+        return Ok(vec![]);
+    };
+    let mut advice = Vec::new();
+    if target.thread != AutomationThreadTarget::NewEachRun
+        && let Some(ttl) = prompt_cache_ttl_seconds(&target.provider)
+        && gap > ttl - 300
+        && gap <= ttl + 1800
+    {
+        advice.push(serde_json::json!({
+            "code": "cache_cold_reuse",
+            "message": format!("This reused {} task runs near its {}-minute prompt-cache TTL and can pay a cold context write each run.", target.provider, ttl / 60),
+            "suggested_action": format!("Use an interval of {} seconds ({} minutes), preserving any active window, or thread kind new_each_run.", ttl - 600, (ttl - 600) / 60),
+            "suggested_interval_seconds": ttl - 600,
+            "replacement_trigger": warm_interval(trigger, ttl - 600, now),
+        }));
+    }
+    if bot_home && gap < 4 * 3600 {
+        advice.push(serde_json::json!({
+            "code": "bot_home_frequent",
+            "message": "Bot home conversations must not be scheduled more often than every 4 hours.",
+            "suggested_action": "Use thread kind new_each_run with target.run_as_bot set to the bot id instead.",
+        }));
+    }
+    Ok(advice)
+}
+
+// Offer a cron conversion only when all calendar constraints can be preserved.
+fn warm_interval(
+    trigger: &AutomationTrigger,
+    seconds: u64,
+    now: DateTime<Utc>,
+) -> Option<AutomationTrigger> {
+    use falcondeck_core::control::AutomationActiveWindow;
+    match trigger {
+        AutomationTrigger::Interval {
+            anchor_at,
+            active_window,
+            ..
+        } => Some(AutomationTrigger::Interval {
+            every_seconds: seconds,
+            anchor_at: *anchor_at,
+            active_window: active_window.clone(),
+        }),
+        AutomationTrigger::Cron {
+            expression,
+            timezone,
+        } => {
+            let spec = CronSpec::parse(expression).ok()?;
+            if spec.dom_restricted || spec.months.len() != 12 {
+                return None;
+            }
+            let start = *spec.hours.first()?;
+            let end = *spec.hours.last()? + 1;
+            if spec.hours.len() as u32 != end - start {
+                return None;
+            }
+            // Anchor at the first selected local hour, so a new interval begins
+            // inside the original window; thereafter it stays on an elapsed grid.
+            let first = next_occurrence(trigger, now).ok()??;
+            Some(AutomationTrigger::Interval {
+                every_seconds: seconds,
+                anchor_at: first.at,
+                active_window: Some(AutomationActiveWindow {
+                    timezone: timezone.clone(),
+                    start_minute: start * 60,
+                    end_minute: end * 60,
+                    weekdays: spec
+                        .days_of_week
+                        .iter()
+                        .map(|d| if *d == 0 { 7 } else { *d })
+                        .collect(),
+                }),
+            })
+        }
+        AutomationTrigger::Once { .. } => None,
+    }
+}
+
 /// Validates a trigger and requires a calculable next occurrence from `now`.
 /// Rejects agent-created schedules that repeat more often than every 30 minutes.
 /// Frequent polling fills threads and context; a one-time follow-up covers
@@ -368,37 +538,8 @@ pub fn validate_agent_frequency(
     trigger: &AutomationTrigger,
     now: DateTime<Utc>,
 ) -> Result<(), ControlError> {
-    let too_frequent = match trigger {
-        AutomationTrigger::Once { .. } => false,
-        AutomationTrigger::Interval { every_seconds, .. } => {
-            (*every_seconds as i64) < MIN_AGENT_REPEAT_SECONDS
-        }
-        AutomationTrigger::Cron { .. } => {
-            // Scan a week of occurrences (stopping at the first short gap), so
-            // irregular expressions can't hide a short gap later in the day.
-            // A week from the first occurrence, so sparse schedules still get
-            // their neighbouring runs compared.
-            let mut horizon: Option<DateTime<Utc>> = None;
-            let mut at = now;
-            let mut shortest = i64::MAX;
-            let mut previous: Option<DateTime<Utc>> = None;
-            for _ in 0..4_000 {
-                let Some(next) = next_occurrence(trigger, at)? else {
-                    break;
-                };
-                if let Some(previous) = previous {
-                    shortest = shortest.min((next.at - previous).num_seconds());
-                }
-                let horizon = *horizon.get_or_insert(next.at + chrono::Duration::days(8));
-                if shortest < MIN_AGENT_REPEAT_SECONDS || next.at > horizon {
-                    break;
-                }
-                previous = Some(next.at);
-                at = next.at;
-            }
-            shortest < MIN_AGENT_REPEAT_SECONDS
-        }
-    };
+    let too_frequent =
+        minimum_gap_seconds(trigger, now)?.is_some_and(|gap| gap < MIN_AGENT_REPEAT_SECONDS as u64);
     if too_frequent {
         return Err(ControlError::invalid_schedule(
             "agents can schedule repeating work at most every 30 minutes",
@@ -1002,6 +1143,106 @@ mod tests {
     }
 
     #[test]
+    fn minimum_gaps_follow_timezone_and_windows() {
+        let cron = |expression: &str| AutomationTrigger::Cron {
+            expression: expression.into(),
+            timezone: "Europe/London".into(),
+        };
+        let now = utc("2026-03-20T00:00:00Z");
+        assert_eq!(
+            minimum_gap_seconds(&cron("0 * * * *"), now).unwrap(),
+            Some(3600)
+        );
+        assert_eq!(
+            minimum_gap_seconds(&cron("0 8-17 * * 1-5"), now).unwrap(),
+            Some(3600)
+        );
+        // Spring loses an elapsed hour; autumn gains one. Fold times run once.
+        assert_eq!(
+            minimum_gap_seconds(&cron("0 8 * * *"), now).unwrap(),
+            Some(23 * 3600)
+        );
+        assert_eq!(
+            minimum_gap_seconds(&cron("0 8 * * *"), utc("2026-10-20T00:00:00Z")).unwrap(),
+            Some(86400)
+        );
+        assert_eq!(
+            minimum_gap_seconds(&cron("0 1 * * *"), utc("2026-10-20T00:00:00Z")).unwrap(),
+            Some(86400)
+        );
+        let interval = warm_interval(&cron("0 8-17 * * 1-5"), 3000, now).unwrap();
+        assert_eq!(minimum_gap_seconds(&interval, now).unwrap(), Some(3000));
+        let mut at = now;
+        for _ in 0..200 {
+            let next = next_occurrence(&interval, at).unwrap().unwrap();
+            let local = next.at.with_timezone(&chrono_tz::Europe::London);
+            assert!((8..18).contains(&local.hour()));
+            assert!(local.weekday().number_from_monday() <= 5);
+            assert!(next.at > at);
+            at = next.at;
+        }
+        assert!(warm_interval(&cron("0 8 1 * *"), 3000, now).is_none());
+    }
+
+    #[test]
+    fn cadence_advice_boundaries_and_thread_modes() {
+        let now = utc("2026-11-03T00:00:00Z");
+        let mut target: AutomationTarget = serde_json::from_value(serde_json::json!({ "workspace_path": "/tmp", "provider": "claude", "thread": {"kind": "managed"} })).unwrap();
+        for (gap, cold) in [
+            (3000, false),
+            (3300, false),
+            (3301, true),
+            (3600, true),
+            (5400, true),
+            (5401, false),
+        ] {
+            let trigger = AutomationTrigger::Interval {
+                every_seconds: gap,
+                anchor_at: now,
+                active_window: None,
+            };
+            assert_eq!(
+                !cadence_advice(&trigger, &target, false, now)
+                    .unwrap()
+                    .is_empty(),
+                cold
+            );
+        }
+        let trigger = AutomationTrigger::Interval {
+            every_seconds: 3600,
+            anchor_at: now,
+            active_window: None,
+        };
+        target.thread = AutomationThreadTarget::NewEachRun;
+        assert!(
+            cadence_advice(&trigger, &target, false, now)
+                .unwrap()
+                .is_empty()
+        );
+        target.thread = AutomationThreadTarget::Current;
+        target.provider = falcondeck_core::AgentProvider::CODEX;
+        assert!(
+            cadence_advice(&trigger, &target, false, now)
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(
+            cadence_advice(&trigger, &target, true, now).unwrap()[0]["code"],
+            "bot_home_frequent"
+        );
+        let trigger = AutomationTrigger::Interval {
+            every_seconds: 14400,
+            anchor_at: now,
+            active_window: None,
+        };
+        assert!(
+            cadence_advice(&trigger, &target, true, now)
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[test]
     fn describes_common_cron_expressions() {
         assert_eq!(
             cron("0 12 * * *").describe().as_deref(),
@@ -1060,6 +1301,7 @@ mod tests {
             schedule_summary(&AutomationTrigger::Interval {
                 every_seconds: 60,
                 anchor_at: utc("2026-09-07T00:00:00Z"),
+                active_window: None,
             }),
             "Every minute"
         );
@@ -1181,6 +1423,7 @@ mod tests {
         let trigger = AutomationTrigger::Interval {
             every_seconds: 1800,
             anchor_at: utc("2026-08-16T00:00:00Z"),
+            active_window: None,
         };
         let next = next_occurrence(&trigger, utc("2026-08-16T00:45:00Z"))
             .unwrap()
@@ -1208,6 +1451,7 @@ mod tests {
         let trigger = AutomationTrigger::Interval {
             every_seconds: u64::MAX,
             anchor_at: after,
+            active_window: None,
         };
 
         assert!(next_occurrence(&trigger, after).is_err());
@@ -1218,6 +1462,7 @@ mod tests {
         let trigger = AutomationTrigger::Interval {
             every_seconds: 30,
             anchor_at: utc("2026-08-16T00:00:00Z"),
+            active_window: None,
         };
         let error = next_occurrence(&trigger, utc("2026-08-16T00:00:00Z")).unwrap_err();
         assert_eq!(error.0.code, "invalid_schedule");
@@ -1229,6 +1474,7 @@ mod tests {
         let interval = |seconds| AutomationTrigger::Interval {
             every_seconds: seconds,
             anchor_at: now,
+            active_window: None,
         };
         let cron = |expression: &str| AutomationTrigger::Cron {
             expression: expression.into(),

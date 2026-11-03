@@ -304,7 +304,25 @@ pub enum AutomationTrigger {
         every_seconds: u64,
         /// Instant the interval grid is anchored to.
         anchor_at: DateTime<Utc>,
+        /// Optional local working window; interval ticks outside it are skipped.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        active_window: Option<AutomationActiveWindow>,
     },
+}
+
+/// Local time window for interval ticks. End is exclusive; overnight windows
+/// are expressed as separate schedules. Weekdays use ISO numbering (Mon=1).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct AutomationActiveWindow {
+    /// IANA timezone.
+    pub timezone: String,
+    /// Minutes after midnight, inclusive (0..1439).
+    pub start_minute: u32,
+    /// Minutes after midnight, exclusive (1..1440).
+    pub end_minute: u32,
+    /// Nonempty ISO weekdays (1..7).
+    pub weekdays: Vec<u32>,
 }
 
 /// What the scheduled agent is asked to do.

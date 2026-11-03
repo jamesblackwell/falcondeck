@@ -150,3 +150,9 @@ export async function executeControl<T>(
   }
   return response.data as T;
 }
+
+export type AutomationAdvice = { code: string; message: string; suggested_action: string; suggested_interval_seconds?: number; replacement_trigger?: Automation["trigger"] | null };
+export async function readAutomationAdvice(baseUrl: string, filters: Record<string, unknown>): Promise<AutomationAdvice[]> {
+  const response = await controlPost<ControlGetResponse>(baseUrl, "/api/control/get", { resource: "automation.advice", filters });
+  return response.data as AutomationAdvice[];
+}

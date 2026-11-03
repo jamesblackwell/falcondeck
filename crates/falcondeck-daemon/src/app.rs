@@ -1234,12 +1234,67 @@ impl AppState {
         self.inner.control.search(request, context).await
     }
 
+    /// Whether this target reuses a bot's expensive home conversation.
+    pub(crate) async fn automation_targets_bot_home(
+        &self,
+        target: &falcondeck_core::control::AutomationTarget,
+    ) -> bool {
+        use falcondeck_core::control::AutomationThreadTarget;
+        let id = match &target.thread {
+            AutomationThreadTarget::Existing { thread_id }
+            | AutomationThreadTarget::Managed {
+                thread_id: Some(thread_id),
+            } => thread_id,
+            _ => return false,
+        };
+        self.preferences()
+            .await
+            .bots
+            .iter()
+            .any(|bot| bot.thread_id == *id)
+    }
+
     /// Control reads through the control service.
     pub async fn control_get(
         &self,
         request: ControlGetRequest,
         context: &falcondeck_core::control::ControlRequestContext,
     ) -> Result<falcondeck_core::control::ControlGetResponse, crate::control::ControlError> {
+        if request.resource == "automation.advice" {
+            self.control()
+                .ensure_mcp_enabled(
+                    &self.control().settings_snapshot().await,
+                    context.provider.as_ref(),
+                )
+                .or_else(|error| {
+                    if context.origin == falcondeck_core::control::ControlOrigin::Mcp {
+                        Err(error)
+                    } else {
+                        Ok(())
+                    }
+                })?;
+            let trigger =
+                serde_json::from_value(request.filters.get("trigger").cloned().unwrap_or_default())
+                    .map_err(|error| {
+                        crate::control::ControlError::invalid_arguments(format!("trigger: {error}"))
+                    })?;
+            let target =
+                serde_json::from_value(request.filters.get("target").cloned().unwrap_or_default())
+                    .map_err(|error| {
+                        crate::control::ControlError::invalid_arguments(format!("target: {error}"))
+                    })?;
+            let advice = crate::control::automations::cadence_advice(
+                &trigger,
+                &target,
+                self.automation_targets_bot_home(&target).await,
+                Utc::now(),
+            )?;
+            return Ok(falcondeck_core::control::ControlGetResponse {
+                resource: request.resource,
+                data: serde_json::json!(advice),
+                next_cursor: None,
+            });
+        }
         // Analytics-backed; the control store alone cannot answer it.
         if request.resource == "automation.health" {
             return self.automation_health(&request, context).await;

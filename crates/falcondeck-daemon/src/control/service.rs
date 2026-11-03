@@ -872,6 +872,27 @@ impl ControlService {
         .await
     }
 
+    async fn validate_cadence(
+        trigger: &falcondeck_core::control::AutomationTrigger,
+        target: &falcondeck_core::control::AutomationTarget,
+        deps: &ControlDeps<'_>,
+        now: DateTime<Utc>,
+    ) -> Result<(), ControlError> {
+        let bot_home = if let Some(app) = deps.app {
+            app.automation_targets_bot_home(target).await
+        } else {
+            false
+        };
+        if let Some(advice) = automations::cadence_advice(trigger, target, bot_home, now)?.first() {
+            return Err(ControlError::invalid_schedule(
+                advice["message"].as_str().unwrap_or_default(),
+                Some("trigger"),
+            )
+            .with_suggested_action(advice["suggested_action"].as_str().unwrap_or_default()));
+        }
+        Ok(())
+    }
+
     async fn create_automation(
         &self,
         arguments: &serde_json::Map<String, Value>,
@@ -893,6 +914,7 @@ impl ControlService {
         let next = automations::validate_trigger(&args.trigger, now)?;
         if context.origin == ControlOrigin::Mcp {
             automations::validate_agent_frequency(&args.trigger, now)?;
+            Self::validate_cadence(&args.trigger, &args.target, deps, now).await?;
         }
         let elevated = automations::is_elevated_mode(
             args.target.permission_mode.as_deref(),
@@ -974,6 +996,13 @@ impl ControlService {
             let connectors = args.required_connectors.clone().unwrap_or_default();
             self.validate_against_daemon(deps, &target, &connectors)
                 .await?;
+        }
+        // Validate the merged definition even when only the target changes.
+        if context.origin == ControlOrigin::Mcp {
+            let trigger = args.trigger.as_ref().unwrap_or(&existing.trigger);
+            let target = args.target.as_ref().unwrap_or(&existing.target);
+            automations::validate_agent_frequency(trigger, Utc::now())?;
+            Self::validate_cadence(trigger, target, deps, Utc::now()).await?;
         }
         let automation_id = args.automation_id.clone();
         let trigger_changed = args.trigger.is_some();
@@ -2545,7 +2574,10 @@ pub(super) fn decode_arguments<T: serde::de::DeserializeOwned>(
 fn hoist_envelope_fields(request: &mut ControlExecuteRequest) -> Result<(), ControlError> {
     if let Some(value) = request.arguments.remove("expected_revision") {
         let nested = value.as_u64().ok_or_else(|| {
-            ControlError::field("expected_revision", "expected_revision must be a non-negative integer")
+            ControlError::field(
+                "expected_revision",
+                "expected_revision must be a non-negative integer",
+            )
         })?;
         match request.expected_revision {
             Some(top) if top != nested => {
@@ -2559,7 +2591,10 @@ fn hoist_envelope_fields(request: &mut ControlExecuteRequest) -> Result<(), Cont
     }
     if let Some(value) = request.arguments.remove("idempotency_key") {
         let Value::String(nested) = value else {
-            return Err(ControlError::field("idempotency_key", "idempotency_key must be a string"));
+            return Err(ControlError::field(
+                "idempotency_key",
+                "idempotency_key must be a string",
+            ));
         };
         match request.idempotency_key.as_deref() {
             Some(top) if top != nested => {

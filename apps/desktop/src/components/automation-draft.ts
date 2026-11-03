@@ -1,4 +1,4 @@
-import type { AgentControlSettings, Automation } from "@falcondeck/client-core";
+import type { AgentControlSettings, Automation, AutomationActiveWindow } from "@falcondeck/client-core";
 
 export type AutomationEditorState =
   | { kind: "closed" }
@@ -36,6 +36,7 @@ export type AutomationDraft = {
   misfirePolicy: "skip" | "run_once";
   /** Preserved interval anchor so edits never shift the schedule grid. */
   anchorAt: string;
+  activeWindow?: AutomationActiveWindow | null;
 };
 
 /** Changing provider on a managed thread drops the remembered id so the next
@@ -135,6 +136,7 @@ export function automationDraftFrom(automation: Automation): AutomationDraft {
     selectedSkills: (automation.target.selected_skills ?? []).join(", "),
     concurrencyPolicy: automation.concurrency_policy,
     misfirePolicy: automation.misfire_policy,
+    activeWindow: automation.trigger.kind === "interval" ? automation.trigger.active_window : null,
     anchorAt:
       automation.trigger.kind === "interval"
         ? automation.trigger.anchor_at
@@ -171,6 +173,7 @@ function draftTrigger(draft: AutomationDraft): Record<string, unknown> {
       ? {
           kind: "interval",
           every_seconds: requireIntervalSeconds(draft.everySeconds),
+          ...(draft.activeWindow ? { active_window: draft.activeWindow } : {}),
           // Editing must never shift the schedule grid: keep the stored
           // anchor and only fall back to now for brand-new automations.
           anchor_at: draft.anchorAt.trim() || new Date().toISOString(),
