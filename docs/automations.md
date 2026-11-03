@@ -44,12 +44,16 @@ Existing saved automations are never migrated or rewritten by these controls.
 existing tasks; it is also used on task creation. No model override is required
 when the existing task's model is appropriate.
 
-`target.claude_autocompact_tokens` optionally sets a per-thread Claude window.
+`target.claude_autocompact_tokens` optionally sets a Claude window on managed
+and new-each-run tasks. Existing/current targets retain their interactive settings;
+the automation override is not applied to them. A managed id pointing at a
+pre-existing task also leaves its settings alone; task provenance must match
+the automation before a persistent override is written.
 Use 100000 for small long-lived scheduled tasks. The supported range is
 100000–1000000; [Claude Code's documented minimum](https://code.claude.com/docs/en/model-config#values-and-warnings-for-claude_code_auto_compact_window)
 is 100k, so 60–99k is rejected. Explicit automation limits also override the
-usual `[1m]` exemption. The resolved thread stores the limit; it applies to
-manual continuations of that same task too. Clearing it on the automation
+usual `[1m]` exemption. The automation-created task stores the limit; it applies to
+manual continuations of that same managed task too. Clearing it on the automation
 restores the global preference on its next run. Other interactive tasks and
 the global preference stay unchanged (this checkout's built-in default is
 200k; a user's configured 300k is preserved).

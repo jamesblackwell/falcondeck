@@ -419,3 +419,17 @@ async fn automation_health_is_readable_by_agents_but_not_remote_clients() {
     };
     assert!(app.control_get(request, &remote).await.is_err());
 }
+
+#[tokio::test]
+async fn run_start_context_does_not_double_count_codex_cache_reads() {
+    let (app, _temp) = fixture().await;
+    let usage = falcondeck_core::ThreadTokenUsage {
+        total: falcondeck_core::TokenUsageBreakdown { total_tokens: 120_000, input_tokens: 90_000, cached_input_tokens: 30_000, output_tokens: 0, reasoning_output_tokens: 0 },
+        last: None, model_context_window: None, updated_at: None,
+    };
+    app.inner.thread_token_usage.lock().unwrap().insert("thread-1".into(), usage);
+    assert_eq!(app.thread_context_tokens("thread-1", &falcondeck_core::AgentProvider::CODEX), Some(90_000));
+    assert_eq!(app.thread_context_tokens("thread-1", &falcondeck_core::AgentProvider::CLAUDE), Some(120_000));
+    assert_eq!(app.thread_context_tokens("unknown", &falcondeck_core::AgentProvider::CODEX), None);
+    app.shutdown().await.unwrap();
+}

@@ -247,7 +247,13 @@ pub(crate) async fn execute_run(app: &AppState, run_id: &str) {
     }
 
     if automation.task.precheck().is_some() && automation.target.run_as_bot.is_some() {
-        let _ = app.control().fail_run(run_id, "Shell pre-checks cannot run as a bot in a dynamic workspace").await;
+        let _ = app
+            .control()
+            .fail_run(
+                run_id,
+                "Shell pre-checks cannot run as a bot in a dynamic workspace",
+            )
+            .await;
         emit_runs_changed(app).await;
         return;
     }
@@ -477,19 +483,13 @@ pub(crate) async fn execute_run(app: &AppState, run_id: &str) {
         }
     };
 
-    // This is a per-thread limit: it survives native-session hydration and
-    // also applies if the user continues this managed task interactively.
-    if let Err(error) = app
-        .with_thread_mut(&workspace.id, &thread_id, |thread| {
-            thread.agent.claude_autocompact_tokens = automation.target.claude_autocompact_tokens;
-        })
-        .await
+    if let Err(error) =
+        apply_automation_compaction(app, &automation, &workspace.id, &thread_id).await
     {
         let _ = app.control().fail_run(run_id, &error.to_string()).await;
         emit_runs_changed(app).await;
         return;
     }
-    app.schedule_persist();
 
     if let Err(error) = app
         .control()
@@ -501,7 +501,7 @@ pub(crate) async fn execute_run(app: &AppState, run_id: &str) {
     }
     emit_runs_changed(app).await;
 
-    if let Some(tokens) = app.thread_context_tokens(&thread_id) {
+    if let Some(tokens) = app.thread_context_tokens(&thread_id, &automation.target.provider) {
         let _ = app.control().record_run_context(run_id, tokens).await;
     }
 
@@ -895,6 +895,30 @@ async fn resolve_thread(
             Ok(created)
         }
     }
+}
+
+/// Persistent limits belong only to tasks the automation creates. An
+/// existing/current task may be the user's interactive or bot home task.
+pub(crate) async fn apply_automation_compaction(
+    app: &AppState,
+    automation: &falcondeck_core::control::Automation,
+    workspace_id: &str,
+    thread_id: &str,
+) -> Result<(), crate::DaemonError> {
+    if matches!(
+        automation.target.thread,
+        AutomationThreadTarget::Managed { .. } | AutomationThreadTarget::NewEachRun
+    ) {
+        app.with_thread_mut(workspace_id, thread_id, |thread| {
+            // A remembered managed id can also name a pre-existing task;
+            // strategy alone is not proof that the automation owns it.
+            if matches!(&thread.origin, Some(ThreadOrigin::Automation { automation_id, .. }) if automation_id == &automation.id) {
+                thread.agent.claude_autocompact_tokens = automation.target.claude_autocompact_tokens;
+            }
+        }).await?;
+        app.schedule_persist();
+    }
+    Ok(())
 }
 
 /// Earlier run threads of a fresh-thread-per-run automation that can leave the

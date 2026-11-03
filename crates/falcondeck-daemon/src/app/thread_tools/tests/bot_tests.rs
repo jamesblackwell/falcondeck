@@ -1544,3 +1544,29 @@ async fn empty_precheck_skips_without_creating_a_thread_or_calling_a_model() {
     assert_eq!(app.snapshot().await.threads.len(), 1);
     app.shutdown().await.unwrap();
 }
+
+#[tokio::test]
+async fn automation_compaction_leaves_existing_and_current_task_limits_unchanged() {
+    use falcondeck_core::control::*;
+    let (app, _temp) = fixture().await;
+    let mut automation: Automation = serde_json::from_value(json!({
+        "id":"a", "revision":1, "name":"Scope", "trigger":{"kind":"interval","every_seconds":3000,"anchor_at":Utc::now()},
+        "task":{"kind":"prompt","instruction":"Check"},
+        "target":{"workspace_path":"/tmp","provider":"claude","thread":{"kind":"managed"},"claude_autocompact_tokens":100000},
+        "state":"enabled","concurrency_policy":"skip","misfire_policy":"skip","created_at":Utc::now(),"updated_at":Utc::now(),"next_run_at":null
+    })).unwrap();
+    for (target, owned, expected) in [
+        (AutomationThreadTarget::Existing { thread_id:"thread-1".into() }, true, 300_000),
+        (AutomationThreadTarget::Current, true, 300_000),
+        (AutomationThreadTarget::Managed { thread_id:Some("thread-1".into()) }, false, 300_000),
+        (AutomationThreadTarget::Managed { thread_id:Some("thread-1".into()) }, true, 100_000),
+        (AutomationThreadTarget::NewEachRun, true, 100_000),
+    ] {
+        app.with_thread_mut("workspace-1", "thread-1", |thread| { thread.agent.claude_autocompact_tokens = Some(300_000);
+            thread.origin = owned.then(|| falcondeck_core::ThreadOrigin::Automation { automation_id: "a".into(), bot_id:None, name:"Scope".into() }); }).await.unwrap();
+        automation.target.thread = target;
+        crate::control::scheduler::apply_automation_compaction(&app, &automation, "workspace-1", "thread-1").await.unwrap();
+        assert_eq!(app.thread_summary("workspace-1", "thread-1").await.unwrap().agent.claude_autocompact_tokens, Some(expected));
+    }
+    app.shutdown().await.unwrap();
+}

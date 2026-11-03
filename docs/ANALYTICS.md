@@ -76,7 +76,8 @@ outcome, with review flags:
 - `bot_home_frequent`: bot home task scheduled more often than every four hours.
 - `large_reused_context`: managed/existing task with over 100k context tokens
   observed immediately before a run in the reporting period. Uses the latest
-  provider context counters already in memory; unavailable usage stays unknown.
+  provider context counters already in memory; Codex input includes cache reads,
+  while Claude input and cache reads are added. Unavailable usage stays unknown.
   Older runs do not acquire this measurement retroactively.
 
 `skipped_precheck` runs count as skips (not agent no-action replies). They carry

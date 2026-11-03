@@ -607,7 +607,8 @@ export function AutomationEditor({
 
         {draft.provider === "claude" ? (
           <label className="block space-y-1 text-sm text-fg-secondary">Task compaction window (tokens; blank uses global)
-            <Input aria-label="Claude compaction tokens" type="number" min={100000} max={1000000} value={draft.claudeAutocompactTokens} placeholder="100000" onChange={(event) => set("claudeAutocompactTokens", event.target.value)} />
+            <Input aria-label="Claude compaction tokens" disabled={draft.threadKind === "existing"} type="number" min={100000} max={1000000} value={draft.claudeAutocompactTokens} placeholder="100000" onChange={(event) => set("claudeAutocompactTokens", event.target.value)} />
+            {draft.threadKind === "existing" ? <p>Existing tasks keep their interactive compaction setting.</p> : null}
           </label>
         ) : null}
 

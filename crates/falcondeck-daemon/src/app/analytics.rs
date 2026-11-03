@@ -1630,7 +1630,7 @@ impl AppState {
                     "very_frequent": "24 or more runs a day",
                     "failing": "30% or more of runs failed",
                     "thread_per_run": "starts a new thread every run",
-                    "cache_cold_reuse": "reuses a task with a minimum gap in (cache TTL minus 5 minutes, TTL plus 30 minutes]",
+                    "cache_cold_reuse": "reuses a task with any scanned gap in (cache TTL minus 5 minutes, TTL plus 30 minutes]",
                     "bot_home_frequent": "targets a bot home more often than every four hours",
                     "large_reused_context": "reused task had over 100k context tokens at a run start in this period",
                 },
