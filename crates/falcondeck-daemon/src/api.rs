@@ -328,6 +328,7 @@ pub fn router(state: AppState) -> Router {
         .route("/api/skills/{skill_name}", delete(uninstall_library_skill))
         .route("/api/providers", get(read_providers).put(update_providers))
         .route("/api/provider-usage", get(read_provider_usage))
+        .route("/api/routing/preview", post(preview_route))
         .route(
             "/api/provider-usage/codex/reset-credits/consume",
             post(consume_codex_reset_credit),
@@ -1345,6 +1346,13 @@ async fn read_provider_usage(
     Query(request): Query<falcondeck_core::ProviderUsageRequest>,
 ) -> Result<Json<falcondeck_core::ProviderUsageOverview>, DaemonError> {
     Ok(Json(state.provider_usage_overview(request.refresh).await))
+}
+
+async fn preview_route(
+    State(state): State<AppState>,
+    Json(request): Json<falcondeck_core::RoutePreviewRequest>,
+) -> Result<Json<falcondeck_core::RouteDecision>, DaemonError> {
+    Ok(Json(state.preview_route(request).await?))
 }
 
 async fn consume_codex_reset_credit(

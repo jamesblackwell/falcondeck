@@ -9,6 +9,7 @@ import {
   Send,
   Square,
   Target,
+  Waypoints,
   X,
 } from "lucide-react";
 import React, {
@@ -147,6 +148,13 @@ export type PromptInputProps = {
   loadPrompts?: () => Promise<SavedPrompt[]>;
   selectedProvider: AgentProvider;
   onProviderChange: (value: AgentProvider) => void;
+  /**
+   * Auto routing for a new thread: the daemon classifies the first prompt
+   * and picks harness, model and effort. The chip renders only when a
+   * handler is passed.
+   */
+  autoRoute?: boolean;
+  onAutoRouteChange?: (value: boolean) => void;
   /** Providers the active workspace offers; defaults to the built-in pair. */
   providers?: ProviderOption[];
   /** Capabilities of the active provider; gates the mode pickers. */
@@ -297,6 +305,8 @@ export const PromptInput = memo(function PromptInput({
   loadPrompts,
   selectedProvider,
   onProviderChange,
+  autoRoute = false,
+  onAutoRouteChange,
   providers = DEFAULT_PROVIDER_OPTIONS,
   capabilities = NO_AGENT_CAPABILITIES,
   compactCommandAvailable = false,
@@ -1358,7 +1368,33 @@ export const PromptInput = memo(function PromptInput({
               leads because it is the toggle with consequences. */}
               {!compact ? (
                 <>
-                  {showProviderSelector ? (
+                  {onAutoRouteChange ? (
+                    <Tooltip
+                      label={
+                        autoRoute
+                          ? "Auto: the first message picks the agent and model (Settings → Routing)"
+                          : "Let the first message pick the agent and model"
+                      }
+                    >
+                      <button
+                        type="button"
+                        aria-pressed={autoRoute}
+                        aria-label="Auto-route"
+                        disabled={disabled}
+                        onClick={() => onAutoRouteChange(!autoRoute)}
+                        className={cn(
+                          "fd-focus inline-flex h-7 items-center gap-1.5 rounded-[var(--fd-radius-md)] px-2 text-[length:var(--fd-text-xs)] font-medium transition-colors disabled:opacity-40",
+                          autoRoute
+                            ? "bg-accent-muted text-accent"
+                            : "text-fg-muted hover:bg-surface-3 hover:text-fg-primary",
+                        )}
+                      >
+                        <Waypoints className="h-3.5 w-3.5" />
+                        Auto
+                      </button>
+                    </Tooltip>
+                  ) : null}
+                  {showProviderSelector && !autoRoute ? (
                     <ProviderSelector
                       value={selectedProvider}
                       providers={providers}
@@ -1367,7 +1403,7 @@ export const PromptInput = memo(function PromptInput({
                       {...optionMenuProps("provider")}
                     />
                   ) : null}
-                  {collaborationModes.length > 0 ? (
+                  {!autoRoute && collaborationModes.length > 0 ? (
                     <CollaborationModeSelector
                       value={selectedCollaborationMode}
                       modes={collaborationModes}
@@ -1381,7 +1417,7 @@ export const PromptInput = memo(function PromptInput({
                       }}
                     />
                   ) : null}
-                  {capabilities.permission_modes.length > 0 ? (
+                  {!autoRoute && capabilities.permission_modes.length > 0 ? (
                     <PermissionModeSelector
                       value={selectedPermissionMode}
                       modes={capabilities.permission_modes}
@@ -1390,7 +1426,7 @@ export const PromptInput = memo(function PromptInput({
                       {...optionMenuProps("permissions")}
                     />
                   ) : null}
-                  {capabilities.sandbox_modes.length > 0 ? (
+                  {!autoRoute && capabilities.sandbox_modes.length > 0 ? (
                     <SandboxSelector
                       value={selectedSandboxMode}
                       modes={capabilities.sandbox_modes}
@@ -1399,6 +1435,7 @@ export const PromptInput = memo(function PromptInput({
                       {...optionMenuProps("sandbox")}
                     />
                   ) : null}
+                  {autoRoute ? null : (
                   <ModelMenu
                     models={models}
                     selectedModel={selectedModel}
@@ -1419,6 +1456,7 @@ export const PromptInput = memo(function PromptInput({
                     disabled={disabled}
                     {...optionMenuProps("model")}
                   />
+                  )}
                 </>
               ) : null}
 

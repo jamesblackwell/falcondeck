@@ -476,6 +476,7 @@ pub(super) const REMOTE_RPC_METHODS: &[&str] = &[
     "thread.fork",
     "thread.update",
     "thread.suggestTitle",
+    "routing.preview",
     "thread.archive",
     "thread.archiveAll",
     "thread.unarchive",
@@ -1959,6 +1960,16 @@ impl AppState {
                         .and_then(|response| {
                             serde_json::to_value(response).map_err(DaemonError::from)
                         })
+                        .map_err(|error| error.to_string())
+                }
+                "routing.preview" => {
+                    let request = serde_json::from_value::<falcondeck_core::RoutePreviewRequest>(
+                        params.clone(),
+                    )
+                    .map_err(|error| format!("invalid routing preview: {error}"))?;
+                    self.preview_route(request)
+                        .await
+                        .and_then(|decision| serde_json::to_value(decision).map_err(DaemonError::from))
                         .map_err(|error| error.to_string())
                 }
                 "workspace.connect" => {

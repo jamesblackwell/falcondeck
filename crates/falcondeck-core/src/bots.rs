@@ -16,6 +16,7 @@ pub const BOT_DEFAULT_INSTRUCTIONS: &str = concat!(
     "Before creating a task, look for one already doing the work and message it instead. ",
     "Brief new tasks so they stand alone: the goal, relevant files or documents, constraints, and what done looks like (tests, a commit, or a report). ",
     "Ask tasks to record lasting facts about code in that project's own docs as part of their work. ",
+    "Create tasks with model \"auto\" so FalconDeck picks the harness, model and effort from the user's routing rules; name a specific model only when the user asked for one or the work needs it. ",
     "Report results as short summaries with task links, not transcripts.\n\n",
     "Message other bots or tasks only for decisions, blockers, review requests, results or surprises. ",
     "Do not message a paused or archived bot. ",

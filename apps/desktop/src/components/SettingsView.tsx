@@ -21,6 +21,7 @@ import { HarnessesPanel } from "./settings/HarnessesPanel";
 import { ExtensionsPanel } from "./settings/ExtensionsPanel";
 import { KeyboardShortcutsPanel } from "./settings/KeyboardShortcutsPanel";
 import { ModelsKeysPanel } from "./settings/ModelsKeysPanel";
+import { RoutingPanel } from "./settings/RoutingPanel";
 import { NotificationsSettingsPanel } from "./settings/NotificationsSettingsPanel";
 import { RemoteAccessPanel } from "./settings/RemoteAccessPanel";
 import { ServersPanel, type ServersPanelProps } from "./settings/ServersPanel";
@@ -186,6 +187,13 @@ export function SettingsView(props: SettingsViewProps) {
               preferences={props.preferences}
               onUpdatePreferences={props.onUpdatePreferences}
               onToast={props.onToast}
+            />
+          ) : activeSection === "routing" ? (
+            <RoutingPanel
+              baseUrl={props.baseUrl}
+              workspace={props.workspace}
+              preferences={props.preferences}
+              onUpdatePreferences={props.onUpdatePreferences}
             />
           ) : activeSection === "agents" ? (
             <AgentsPanel

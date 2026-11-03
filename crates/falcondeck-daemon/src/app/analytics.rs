@@ -93,6 +93,36 @@ enum Record {
         ws: String,
         th: String,
     },
+    /// A model choice for a new thread or a routing preview. `auto` is false
+    /// when the creator named the model itself; `th` is absent for previews.
+    Route {
+        t: DateTime<Utc>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        th: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        parent: Option<String>,
+        auto: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        task: Option<String>,
+        /// Task-type confidence and flag probabilities, 0–100.
+        #[serde(default)]
+        conf: u8,
+        /// Difficulty × 10 (10–50); 0 when unclassified.
+        #[serde(default)]
+        diff: u8,
+        #[serde(default)]
+        risk: u8,
+        #[serde(default)]
+        social: u8,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        rule: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        p: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        m: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        eff: Option<String>,
+    },
 }
 
 enum Job {
@@ -696,7 +726,8 @@ fn record_time(record: &Record) -> DateTime<Utc> {
         | Record::File { t, .. }
         | Record::Context { t, .. }
         | Record::Wait { t, .. }
-        | Record::Commit { t, .. } => *t,
+        | Record::Commit { t, .. }
+        | Record::Route { t, .. } => *t,
     }
 }
 
@@ -978,6 +1009,8 @@ fn summarize(records: Vec<Record>, labels: &Labels, days: u32) -> AnalyticsSumma
                 }
                 projects.entry(project_of(&ws, &th)).or_default().commits += 1;
             }
+            // Routing decisions are not part of the overview yet.
+            Record::Route { .. } => {}
         }
     }
 
@@ -1389,6 +1422,41 @@ impl AppState {
             d: delivery.to_string(),
             ack: ack_like(message),
             x: excerpt(message),
+        });
+    }
+
+    /// Records a routing decision (`auto`) or an explicit model choice.
+    pub(super) fn analytics_route(
+        &self,
+        thread: Option<(&str, &str)>,
+        explicit: Option<(&str, Option<&str>, Option<&str>)>,
+        decision: Option<&falcondeck_core::RouteDecision>,
+    ) {
+        let auto = decision.is_some();
+        let c = decision.and_then(|d| d.classification.as_ref());
+        let target = decision.and_then(|d| d.target.as_ref());
+        let (p, m, eff) = match explicit {
+            Some((p, m, e)) => (Some(p.to_string()), m.map(str::to_string), e.map(str::to_string)),
+            None => (
+                target.map(|t| t.provider.as_str().to_string()),
+                target.and_then(|t| t.model_id.clone()),
+                target.and_then(|t| t.reasoning_effort.clone()),
+            ),
+        };
+        self.analytics().record(Record::Route {
+            t: Utc::now(),
+            th: thread.map(|(child, _)| child.to_string()),
+            parent: thread.map(|(_, parent)| parent.to_string()),
+            auto,
+            task: c.map(|c| c.task_type.clone()),
+            conf: c.map_or(0, |c| c.confidence_percent),
+            diff: c.map_or(0, |c| (c.difficulty * 10.0).round() as u8),
+            risk: c.map_or(0, |c| c.production_risk_percent),
+            social: c.map_or(0, |c| c.needs_social_percent),
+            rule: decision.and_then(|d| d.rule.clone()),
+            p,
+            m,
+            eff,
         });
     }
 

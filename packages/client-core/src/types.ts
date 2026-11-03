@@ -467,6 +467,8 @@ export type FalconDeckPreferences = {
   title_suggestion_model?: string;
   /** Style instructions for generated titles and on-demand rename suggestions. */
   title_suggestion_prompt?: string;
+  /** Auto routing for new threads. Older daemons omit it (routing unsupported). */
+  routing?: RoutingPreferences;
   /** Older daemons omit this; `normalizePreferences` always fills it in. */
   computer_use?: ComputerUsePreferences;
 };
@@ -747,6 +749,65 @@ export type UpdatePreferencesPayload = {
   utility_models?: UpdateUtilityModelPreferences | null;
   title_suggestion_model?: string;
   title_suggestion_prompt?: string;
+  /** Replaces the whole routing configuration. */
+  routing?: RoutingPreferences;
+};
+
+/** One harness + model + effort choice in the routing table. */
+export type RoutingTarget = {
+  provider: string;
+  model_id?: string | null;
+  reasoning_effort?: string | null;
+};
+
+/** A task type the classifier chooses between. */
+export type RoutingTaskType = { id: string; description: string };
+
+/** Conditions on the classification, then targets best first. */
+export type RoutingRule = {
+  label: string;
+  /** Empty matches any task type. */
+  task_types: string[];
+  /** 1–5, rounded classifier score. */
+  min_difficulty?: number | null;
+  max_difficulty?: number | null;
+  /** null ignores the flag. */
+  production_risk?: boolean | null;
+  needs_social?: boolean | null;
+  targets: RoutingTarget[];
+};
+
+/** Auto routing settings (Settings → Routing). */
+export type RoutingPreferences = {
+  enabled: boolean;
+  classifier_model: string;
+  /** Task-type confidence (0–100) below which the fallback is used. */
+  min_confidence_percent: number;
+  /** Skip a target while its subscription is at or above this use (0–100). */
+  usage_ceiling_percent: number;
+  task_types: RoutingTaskType[];
+  rules: RoutingRule[];
+  fallback: RoutingTarget[];
+};
+
+export type RouteClassification = {
+  task_type: string;
+  confidence_percent: number;
+  /** 1.0–5.0 */
+  difficulty: number;
+  production_risk_percent: number;
+  needs_social_percent: number;
+  classifier_model: string;
+  latency_ms: number;
+};
+
+export type RouteDecision = {
+  classification: RouteClassification | null;
+  /** Matched rule label; null means the fallback list. */
+  rule: string | null;
+  target: RoutingTarget | null;
+  skipped: { target: RoutingTarget; reason: string }[];
+  reason: string;
 };
 
 export type ToolArtifactKind =

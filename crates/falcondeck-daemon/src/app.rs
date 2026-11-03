@@ -118,6 +118,7 @@ mod runtime_health;
 mod scheduled_tasks;
 mod snapshot_projection;
 mod speech;
+mod routing;
 mod speech_audio;
 mod startup_resume;
 pub(crate) mod storage;
