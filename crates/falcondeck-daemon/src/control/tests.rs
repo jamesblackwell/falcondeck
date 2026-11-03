@@ -1883,6 +1883,99 @@ async fn automation_compaction_override_validates_provider_and_cli_floor() {
 }
 
 #[tokio::test]
+async fn precheck_approval_survives_editor_saves_until_its_identity_changes() {
+    for changed_field in ["command", "timeout", "workspace"] {
+        let (dir, service) = service().await;
+        service
+            .execute(
+                execute_request(
+                    registry::ops::SETTINGS_UPDATE,
+                    json!({"allow_elevated_automations": true}),
+                    None,
+                ),
+                &desktop(),
+                &ControlDeps::none(),
+            )
+            .await;
+        let mut args = create_arguments();
+        args["task"]["precheck"] = json!({"command": "exit 0", "timeout_seconds": 5});
+        let created = service
+            .execute(
+                execute_request(registry::ops::AUTOMATION_CREATE, args.clone(), None),
+                &desktop(),
+                &ControlDeps::none(),
+            )
+            .await
+            .0
+            .data
+            .unwrap();
+        let id = created["id"].as_str().unwrap();
+        let hash = created["precheck_approval_hash"].as_str().unwrap();
+        let approved = service
+            .execute(
+                execute_request(
+                    registry::ops::AUTOMATION_APPROVE_PRECHECK,
+                    json!({"automation_id": id, "approval_hash": hash}),
+                    Some(1),
+                ),
+                &desktop(),
+                &ControlDeps::none(),
+            )
+            .await
+            .0;
+        assert!(approved.ok, "{:?}", approved.error);
+        let resumed = service
+            .execute(
+                execute_request(
+                    registry::ops::AUTOMATION_RESUME,
+                    json!({"automation_id": id}),
+                    Some(2),
+                ),
+                &desktop(),
+                &ControlDeps::none(),
+            )
+            .await
+            .0;
+        assert!(resumed.ok, "{:?}", resumed.error);
+        // Both editors resend task and target, even for a name-only edit.
+        let mut update = json!({"automation_id": id, "name": "Renamed",
+            "task": args["task"], "target": args["target"]});
+        let saved = service
+            .execute(
+                execute_request(registry::ops::AUTOMATION_UPDATE, update.clone(), Some(3)),
+                &desktop(),
+                &ControlDeps::none(),
+            )
+            .await
+            .0;
+        assert!(saved.ok, "{:?}", saved.error);
+        let saved = saved.data.unwrap();
+        assert_eq!(saved["precheck_pending"], false);
+        assert_eq!(saved["precheck_approved_hash"], hash);
+        assert_eq!(saved["state"], "enabled");
+        match changed_field {
+            "command" => update["task"]["precheck"]["command"] = json!("echo changed"),
+            "timeout" => update["task"]["precheck"]["timeout_seconds"] = json!(10),
+            "workspace" => update["target"]["workspace_path"] = json!(dir.path().to_str().unwrap()),
+            _ => unreachable!(),
+        }
+        let changed = service
+            .execute(
+                execute_request(registry::ops::AUTOMATION_UPDATE, update, Some(4)),
+                &desktop(),
+                &ControlDeps::none(),
+            )
+            .await
+            .0;
+        assert!(changed.ok, "{:?}", changed.error);
+        let changed = changed.data.unwrap();
+        assert_eq!(changed["precheck_pending"], true, "{changed_field}");
+        assert_eq!(changed["state"], "paused", "{changed_field}");
+        assert!(changed["precheck_approved_hash"].is_null());
+    }
+}
+
+#[tokio::test]
 async fn shell_prechecks_need_elevated_setting_and_human_approval() {
     let (_dir, service) = service().await;
     let mut args = create_arguments();

@@ -1094,9 +1094,7 @@ impl ControlService {
                     "Extension-owned automations do not support shell pre-checks.",
                 ));
             }
-            if automation.task.precheck().is_some()
-                && (args.task.is_some() || args.target.is_some())
-            {
+            if automation.task.precheck().is_some() && !super::precheck::is_approved(automation) {
                 automation.precheck_approved = false;
                 automation.precheck_approved_hash = None;
             }
