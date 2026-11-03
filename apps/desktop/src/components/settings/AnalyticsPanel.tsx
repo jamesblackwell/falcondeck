@@ -953,7 +953,7 @@ export function AnalyticsPanel({ baseUrl, onToast, onOpenThread }: AnalyticsPane
                   ? 'Delete every recorded message you sent? This cannot be undone.'
                   : confirming === 'usage'
                     ? 'Delete all recorded token usage? This cannot be undone.'
-                    : 'Delete all recorded activity (usage included)? This cannot be undone.'}
+                    : 'Delete all recorded activity? This cannot be undone.'}
               </p>
               <Button variant="ghost" size="sm" onClick={() => setConfirming(null)}>
                 Cancel

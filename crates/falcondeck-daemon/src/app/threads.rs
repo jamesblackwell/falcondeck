@@ -1567,6 +1567,10 @@ impl AppState {
         stderr: Option<tokio::process::ChildStderr>,
         resume_interrupted: bool,
     ) {
+        // A fresh monitor means a fresh CLI process (a parked reuse restarts
+        // nothing): its cumulative modelUsage starts from zero, so the
+        // differencing baselines must not carry the old process's totals.
+        self.reset_claude_usage_baselines(&thread_id);
         // Assistant prose and thinking accumulate per API message, so text
         // that follows a tool call starts a fresh conversation item below the
         // tool card instead of merging into the pre-tool prose. Items are

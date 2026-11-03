@@ -389,6 +389,17 @@ pub(super) struct ClaudeModelTotals {
     cost_usd: f64,
 }
 
+/// The delta that carries the turn's `calls` count: the busiest model. A
+/// result with several models (Opus plus a Haiku summariser) reports the
+/// turn's call count once, not once per model.
+fn calls_carrier(deltas: &[(&str, [u64; 5], Option<f64>)]) -> Option<usize> {
+    let (index, _) = deltas
+        .iter()
+        .enumerate()
+        .max_by_key(|(_, (_, tokens, _))| tokens.iter().sum::<u64>())?;
+    Some(index)
+}
+
 /// Diffs a Claude result's per-model usage against what the process last
 /// reported, updating `baselines`. `cumulative` marks the fallback path where
 /// `modelUsage` carries process totals rather than the per-turn
@@ -2162,9 +2173,11 @@ impl AppState {
         if deltas.is_empty() {
             return None;
         }
+        // The turn's call count rides on one record only.
+        let carrier = calls_carrier(&deltas);
         let stamp = Utc::now().timestamp_millis();
         let mut summed = (0, 0);
-        for (model, delta, cost) in deltas {
+        for (index, (model, delta, cost)) in deltas.iter().enumerate() {
             summed.0 += delta[0] + delta[2];
             summed.1 += delta[1];
             self.record_turn_usage(TurnUsage {
@@ -2177,8 +2190,8 @@ impl AppState {
                 cache_write: delta[2],
                 output: delta[3],
                 reasoning: delta[4],
-                calls,
-                cost,
+                calls: (Some(index) == carrier).then_some(calls).flatten(),
+                cost: *cost,
                 cost_source: if cost.is_some() {
                     "provider"
                 } else {
@@ -2191,6 +2204,18 @@ impl AppState {
             });
         }
         Some(summed)
+    }
+
+    /// Forgets what a thread's Claude process last reported. Called when a
+    /// new CLI process starts: its cumulative `modelUsage` restarts from
+    /// zero, and differencing against the old process would swallow every
+    /// turn until the new totals caught up.
+    pub(super) fn reset_claude_usage_baselines(&self, thread_id: &str) {
+        self.inner
+            .claude_usage_baselines
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .remove(thread_id);
     }
 
     /// Folds a Codex `thread/tokenUsage/updated` notification into the
@@ -2243,9 +2268,9 @@ impl AppState {
         else {
             return;
         };
-        // `turn_id` is the turn that completed; when the accumulator holds an
-        // earlier turn (its completion never arrived), its tokens are still
-        // real and recorded under their own turn.
+        // The accumulator normally holds the turn that just completed. A
+        // turn whose completion never arrives is dropped when the next turn
+        // starts, so its tokens never leak into another turn's record.
         let turn = accumulated.turn.as_str();
         let delta = accumulated.delta;
         self.record_turn_usage(TurnUsage {
@@ -3075,6 +3100,18 @@ mod tests {
         assert_eq!(chain_root(&chain, Some("gone"), "child"), "gone");
         // Nothing found at all: the thread itself.
         assert_eq!(chain_root(&[], None, "child"), "child");
+    }
+
+    #[test]
+    fn calls_carrier_puts_the_turn_call_count_on_the_busiest_model() {
+        let opus = ("claude-opus-5-5", [10, 100, 20, 4, 0], Some(0.01));
+        let haiku = ("claude-haiku-5-5", [1, 2, 0, 1, 0], None);
+        // The busiest model carries the count once, not once per model.
+        assert_eq!(calls_carrier(&[opus, haiku]), Some(0));
+        assert_eq!(calls_carrier(&[haiku, opus]), Some(1));
+        // A single model always carries it; nothing to carry when empty.
+        assert_eq!(calls_carrier(&[haiku]), Some(0));
+        assert_eq!(calls_carrier(&[]), None);
     }
 
     #[test]

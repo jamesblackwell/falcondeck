@@ -71,13 +71,14 @@ what was true when it was written):
   aggregate is `modelUsage` (subagents included), or
   `model_usage_since_last_result` when the CLI reports it for long-lived
   processes. A result with only the cumulative `modelUsage` is differenced
-  against what the process last reported. Automation-run usage reads the same
-  aggregate, accumulating across a run's results.
+  against what the process last reported, reset whenever the CLI process
+  restarts. Automation-run usage reads the same aggregate, accumulating
+  across a run's results.
 
 | Harness | Capture point |
 | --- | --- |
-| Claude | the `result` event: one record per `modelUsage` entry, cost from `costUSD`, `calls` from `num_turns`; the cumulative fallback is differenced per process |
-| Codex | `thread/tokenUsage/updated`: cumulative totals diffed per turn (keyed by the notification's `turnId`), baselined where the previous turn ended, unchanged totals ignored, all-zero `last` reports skipped; flushed on turn completion (a transient retry flushes its attempt); provider fixed to `codex` and the model snapshotted at turn start |
+| Claude | the `result` event: one record per `modelUsage` entry, cost from `costUSD`, the turn's `num_turns` as `calls` on the busiest entry only; the cumulative fallback is differenced per process |
+| Codex | `thread/tokenUsage/updated`: cumulative totals diffed per turn (keyed by the notification's `turnId`), baselined where the previous turn ended, unchanged totals ignored, all-zero `last` reports skipped; flushed on turn completion (a transient retry flushes its attempt); provider fixed to `codex` and the model snapshotted from the thread's selection at turn start (`turn/started` carries no model field) |
 | Grok | `_x.ai/session/update` `turn_completed`: one record per `modelUsage` entry, `costUsdTicks` converted and kept raw |
 | Other ACP | the `session/prompt` response `usage` (input, output, and the cache/thought split when sent), model from the thread; Grok is excluded here to avoid double-counting |
 

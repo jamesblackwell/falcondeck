@@ -408,7 +408,6 @@ pub(super) async fn ingest_notification(
         "turn/started" => {
             if let Some(thread_id) = extract_thread_id(&params) {
                 let turn_id = extract_turn_id(&params).unwrap_or_else(|| "turn".to_string());
-                let turn_model = extract_string(&params, &["model", "modelId", "model_id"]);
                 let updated_at = notification_timestamp(method, &params).unwrap_or_else(Utc::now);
                 let associated_user_message = {
                     let mut workspaces = app.inner.workspaces.lock().await;
@@ -442,9 +441,6 @@ pub(super) async fn ingest_notification(
                         thread.latest_turn_id = Some(turn_id.clone());
                         thread.last_error = None;
                         thread.updated_at = updated_at;
-                        if let Some(model_id) = turn_model.as_deref() {
-                            thread.agent.model_id = Some(model_id.to_string());
-                        }
                         if let Some(reasoning_effort) = extract_string(
                             &params,
                             &["effort", "reasoningEffort", "reasoning_effort"],
@@ -463,14 +459,14 @@ pub(super) async fn ingest_notification(
                         }
                     })
                     .await?;
+                // The app-server's turn/started carries no model field, so
+                // usage attributes to the thread's current selection.
+                let turn_model = thread.agent.model_id.clone();
                 app.emit(
                     Some(workspace_id.to_string()),
                     Some(thread_id.clone()),
                     UnifiedEvent::ThreadUpdated { thread },
                 );
-                // Usage for this turn attributes to the model it started
-                // with (the thread selection once the notification applies
-                // its own model, if it carries one).
                 app.start_codex_turn_usage(&thread_id, &turn_id, turn_model.as_deref());
                 app.emit(
                     Some(workspace_id.to_string()),
