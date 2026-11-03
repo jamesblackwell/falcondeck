@@ -285,7 +285,7 @@ pub struct AnalyticsAutomation {
     /// Outcome of that run, such as `succeeded_no_action`.
     #[serde(default)]
     pub last_status: Option<String>,
-    /// Review prompts: `rarely_useful`, `very_frequent`, `failing`, `thread_per_run`, `cache_cold_reuse`, `bot_home_frequent`, `large_reused_context`.
+    /// Review prompts: `rarely_useful`, `very_frequent`, `failing`, `thread_per_run`, `cache_cold_reuse`, `bot_home_frequent`, `large_reused_context`, `reused_thread_model_pin`.
     #[serde(default)]
     pub flags: Vec<String>,
     /// Runs in the period.

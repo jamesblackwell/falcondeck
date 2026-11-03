@@ -929,6 +929,7 @@ impl ControlService {
             &args.target,
             &args.required_connectors,
         )?;
+        automations::validate_model_pin(&args.target)?;
         let now = Utc::now();
         let next = automations::validate_trigger(&args.trigger, now)?;
         if context.origin == ControlOrigin::Mcp {
@@ -1068,6 +1069,9 @@ impl ControlService {
             }
             if let Some(policy) = args.misfire_policy {
                 automation.misfire_policy = policy;
+            }
+            if args.target.is_some() {
+                automations::validate_model_pin(&automation.target)?;
             }
             automations::validate_definition(
                 &automation.name,

@@ -670,6 +670,32 @@ pub fn is_elevated_mode(permission_mode: Option<&str>, sandbox_mode: Option<&str
         .any(|mode| ELEVATED_MODES.contains(&mode))
 }
 
+/// Model/effort overrides are safe only while creating a native task.
+pub fn reused_thread_model_pin(target: &AutomationTarget) -> bool {
+    let reused = matches!(
+        target.thread,
+        AutomationThreadTarget::Existing { .. }
+            | AutomationThreadTarget::Current
+            | AutomationThreadTarget::Managed { thread_id: Some(_) }
+    );
+    reused && (target.model_id.is_some() || target.reasoning_effort.is_some())
+}
+
+/// Saves cannot pin a different model onto an already-existing conversation.
+/// Legacy definitions remain runnable: dispatch ignores their stale pins.
+pub fn validate_model_pin(target: &AutomationTarget) -> Result<(), ControlError> {
+    if reused_thread_model_pin(target) {
+        let field = if target.model_id.is_some() {
+            "target.model_id"
+        } else {
+            "target.reasoning_effort"
+        };
+        return Err(ControlError::field(field, "Reused tasks must use their own model and reasoning effort; an automation pin can rewrite the entire cached context.")
+            .with_suggested_action("Clear target.model_id and target.reasoning_effort. To use a cheaper model, choose new_each_run, with run_as_bot for bot work."));
+    }
+    Ok(())
+}
+
 /// Validates every definition-level field that does not need daemon context.
 pub fn validate_definition(
     name: &str,

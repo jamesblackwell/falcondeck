@@ -1570,3 +1570,23 @@ async fn automation_compaction_leaves_existing_and_current_task_limits_unchanged
     }
     app.shutdown().await.unwrap();
 }
+
+#[tokio::test]
+async fn current_automation_cannot_pin_its_conversations_model_or_effort() {
+    use falcondeck_core::control::*;
+    let (app, _temp) = fixture().await;
+    let workspace = app.workspace_path("workspace-1").await.unwrap();
+    for pin in ["model_id", "reasoning_effort"] {
+        let mut arguments = json!({
+            "name":"Current pin", "trigger":{"kind":"once","run_at":Utc::now() + chrono::Duration::hours(1)},
+            "task":{"kind":"prompt","instruction":"Check"},
+            "target":{"workspace_path":workspace,"provider":"claude","thread":{"kind":"current"}}
+        });
+        arguments["target"][pin] = json!(if pin == "model_id" { "haiku" } else { "low" });
+        let request = serde_json::from_value(json!({"operation":"automation.create","arguments":arguments})).unwrap();
+        let context = ControlRequestContext { thread_id:Some("thread-1".into()), workspace_path:Some(workspace.clone()), ..Default::default() };
+        let result = app.control().execute(request, &context, &crate::control::ControlDeps { app:Some(&app) }).await.0;
+        assert_eq!(result.error.unwrap().field_errors[0].field, format!("target.{pin}"));
+    }
+    app.shutdown().await.unwrap();
+}

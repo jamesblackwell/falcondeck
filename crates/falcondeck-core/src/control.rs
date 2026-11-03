@@ -404,7 +404,9 @@ pub struct AutomationTarget {
     #[serde(default)]
     pub only_when_changed: bool,
 
-    /// Optional current-provider-default model resolution.
+    /// Optional model for new_each_run or an unassigned managed thread.
+    /// Reused threads must keep their own model; clear this field on existing,
+    /// current, or managed targets with a remembered thread id.
     #[serde(default)]
     pub model_id: Option<String>,
 
@@ -421,7 +423,8 @@ pub struct AutomationTarget {
     #[serde(default)]
     pub sandbox_mode: Option<String>,
 
-    /// Optional reasoning setting captured at definition time.
+    /// Optional reasoning setting for a newly-created task only. Clear it
+    /// together with model_id when targeting an existing/current/assigned task.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reasoning_effort: Option<String>,
     /// Optional provider collaboration mode captured at definition time.

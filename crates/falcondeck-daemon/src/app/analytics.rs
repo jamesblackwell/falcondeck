@@ -1261,6 +1261,9 @@ fn summarize_automations(
                 {
                     summary.flags.push("large_reused_context".into());
                 }
+                if crate::control::automations::reused_thread_model_pin(&definition.target) {
+                    summary.flags.push("reused_thread_model_pin".into());
+                }
                 summary.id = Some(id);
             }
             let finished = summary.runs.saturating_sub(summary.skipped);
@@ -1633,6 +1636,7 @@ impl AppState {
                     "cache_cold_reuse": "reuses a task with any scanned gap in (cache TTL minus 5 minutes, TTL plus 30 minutes]",
                     "bot_home_frequent": "targets a bot home more often than every four hours",
                     "large_reused_context": "reused task had over 100k context tokens at a run start in this period",
+                    "reused_thread_model_pin": "Stored model/effort pins are ignored on reused tasks. Clear target.model_id and target.reasoning_effort, or use new_each_run with run_as_bot for cheaper bot work.",
                 },
                 "automations": summary.automations,
             }),
@@ -1864,6 +1868,52 @@ mod tests {
             "thread_id": format!("thread-{id}"),
         }))
         .unwrap()
+    }
+
+    #[test]
+    fn model_pin_health_flag_tracks_reused_not_fresh_targets() {
+        let mut definition: falcondeck_core::control::Automation = serde_json::from_value(json!({
+            "id":"a","revision":1,"name":"Check","trigger":{"kind":"once","run_at":"2026-12-01T00:00:00Z"},
+            "task":{"kind":"prompt","instruction":"Check"},"target":{"workspace_path":"/tmp","provider":"claude","thread":{"kind":"managed"}},
+            "state":"enabled","concurrency_policy":"skip","misfire_policy":"skip","created_at":"2026-11-03T00:00:00Z","updated_at":"2026-11-03T00:00:00Z","next_run_at":null
+        })).unwrap();
+        use falcondeck_core::control::AutomationThreadTarget as Target;
+        for (thread, reused) in [
+            (
+                Target::Existing {
+                    thread_id: "home".into(),
+                },
+                true,
+            ),
+            (Target::Current, true),
+            (
+                Target::Managed {
+                    thread_id: Some("remembered".into()),
+                },
+                true,
+            ),
+            (Target::Managed { thread_id: None }, false),
+            (Target::NewEachRun, false),
+        ] {
+            definition.target.thread = thread;
+            for effort_only in [false, true] {
+                definition.target.model_id = (!effort_only).then(|| "haiku".into());
+                definition.target.reasoning_effort = effort_only.then(|| "low".into());
+                let health = summarize_automations(
+                    vec![],
+                    std::slice::from_ref(&definition),
+                    7,
+                    &HashSet::new(),
+                );
+                assert_eq!(
+                    health[0]
+                        .flags
+                        .iter()
+                        .any(|f| f == "reused_thread_model_pin"),
+                    reused
+                );
+            }
+        }
     }
 
     #[test]

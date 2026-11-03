@@ -474,14 +474,16 @@ pub(crate) async fn execute_run(app: &AppState, run_id: &str) {
     };
 
     // Thread resolution per the automation's thread strategy.
-    let thread_id = match resolve_thread(app, &automation, &workspace.id).await {
-        Ok(thread_id) => thread_id,
+    let resolved = match resolve_thread(app, &automation, &workspace.id).await {
+        Ok(resolved) => resolved,
         Err(error) => {
             let _ = app.control().fail_run(run_id, &error).await;
             emit_runs_changed(app).await;
             return;
         }
     };
+
+    let thread_id = resolved.thread_id.clone();
 
     if let Err(error) =
         apply_automation_compaction(app, &automation, &workspace.id, &thread_id).await
@@ -524,34 +526,14 @@ pub(crate) async fn execute_run(app: &AppState, run_id: &str) {
         precheck_evidence
     );
     let response = app
-        .send_turn(falcondeck_core::SendTurnRequest {
-            workspace_id: workspace.id.clone(),
-            thread_id: thread_id.clone(),
-            inputs: vec![TurnInputItem::Text {
-                id: None,
-                text: instruction,
-            }],
-            selected_skills: automation
-                .target
-                .selected_skills
-                .iter()
-                .map(|skill_id| falcondeck_core::SelectedSkillReference {
-                    skill_id: skill_id.clone(),
-                    alias: format!("/{skill_id}"),
-                })
-                .collect(),
-            provider: Some(automation.target.provider.clone()),
-            model_id: automation.target.model_id.clone(),
-            reasoning_effort: automation.target.reasoning_effort.clone(),
-            approval_policy: automation.target.approval_policy.clone(),
-            service_tier: None,
-            permission_mode: automation.target.permission_mode.clone(),
-            sandbox_mode: automation.target.sandbox_mode.clone(),
-            steer: false,
-            user_item_id: None,
-            resume_interrupted: false,
-        })
+        .send_turn(automation_turn_request(
+            &automation,
+            &workspace.id,
+            &resolved,
+            instruction,
+        ))
         .await;
+
     if let Err(error) = response {
         let _ = app
             .control()
@@ -842,18 +824,69 @@ async fn terminal_state_from_thread(
         .flatten()
 }
 
+struct ResolvedAutomationThread {
+    thread_id: String,
+    created: bool,
+}
+
+/// The actual provider request must never switch model/effort on a reused
+/// native task, including legacy schedules that still store explicit pins.
+fn automation_turn_request(
+    automation: &falcondeck_core::control::Automation,
+    workspace_id: &str,
+    resolved: &ResolvedAutomationThread,
+    instruction: String,
+) -> falcondeck_core::SendTurnRequest {
+    falcondeck_core::SendTurnRequest {
+        workspace_id: workspace_id.to_string(),
+        thread_id: resolved.thread_id.clone(),
+        inputs: vec![TurnInputItem::Text {
+            id: None,
+            text: instruction,
+        }],
+        selected_skills: automation
+            .target
+            .selected_skills
+            .iter()
+            .map(|skill_id| falcondeck_core::SelectedSkillReference {
+                skill_id: skill_id.clone(),
+                alias: format!("/{skill_id}"),
+            })
+            .collect(),
+        provider: Some(automation.target.provider.clone()),
+        model_id: resolved
+            .created
+            .then(|| automation.target.model_id.clone())
+            .flatten(),
+        reasoning_effort: resolved
+            .created
+            .then(|| automation.target.reasoning_effort.clone())
+            .flatten(),
+        approval_policy: automation.target.approval_policy.clone(),
+        service_tier: None,
+        permission_mode: automation.target.permission_mode.clone(),
+        sandbox_mode: automation.target.sandbox_mode.clone(),
+        steer: false,
+        user_item_id: None,
+        resume_interrupted: false,
+    }
+}
+
 /// Resolves the native thread for one automation run. On success returns
-/// the thread id; on failure, a message recorded on the run.
+/// the thread id and whether it was newly created; on failure, a run error.
 async fn resolve_thread(
     app: &AppState,
     automation: &falcondeck_core::control::Automation,
     workspace_id: &str,
-) -> Result<String, String> {
+) -> Result<ResolvedAutomationThread, String> {
     match &automation.target.thread {
         AutomationThreadTarget::Existing { thread_id } => {
             match app.thread_summary(workspace_id, thread_id).await {
                 Ok(thread) if thread.provider == automation.target.provider => {
-                    Ok(thread_id.clone())
+                    Ok(ResolvedAutomationThread {
+                        thread_id: thread_id.clone(),
+                        created: false,
+                    })
                 }
                 Ok(thread) => Err(format!(
                     "thread {thread_id} is bound to {}, not {}",
@@ -867,7 +900,12 @@ async fn resolve_thread(
         }
         AutomationThreadTarget::NewEachRun => {
             archive_settled_run_threads(app, automation).await;
-            start_automation_thread(app, automation, workspace_id).await
+            start_automation_thread(app, automation, workspace_id)
+                .await
+                .map(|thread_id| ResolvedAutomationThread {
+                    thread_id,
+                    created: true,
+                })
         }
         // `current` is pinned to a concrete thread when the definition is
         // created or updated, so a stored value here means the definition
@@ -881,7 +919,10 @@ async fn resolve_thread(
                 && let Ok(thread) = app.thread_summary(workspace_id, thread_id).await
                 && thread.provider == automation.target.provider
             {
-                return Ok(thread_id.clone());
+                return Ok(ResolvedAutomationThread {
+                    thread_id: thread_id.clone(),
+                    created: false,
+                });
             }
             // Managed threads are created once and remembered; the stored id
             // persists back into the definition with a revision bump. A
@@ -892,7 +933,10 @@ async fn resolve_thread(
                 .control()
                 .set_managed_thread(&automation.id, &created)
                 .await;
-            Ok(created)
+            Ok(ResolvedAutomationThread {
+                thread_id: created,
+                created: true,
+            })
         }
     }
 }
@@ -1063,6 +1107,53 @@ mod tests {
         });
         thread.attention.unread = unread;
         thread
+    }
+
+    #[test]
+    fn provider_turn_request_ignores_legacy_pins_only_when_reusing_a_task() {
+        let mut automation: falcondeck_core::control::Automation = serde_json::from_value(serde_json::json!({
+            "id":"a","revision":1,"name":"Check","trigger":{"kind":"once","run_at":"2026-12-01T00:00:00Z"},
+            "task":{"kind":"prompt","instruction":"Check"},"target":{"workspace_path":"/tmp","provider":"claude","thread":{"kind":"managed"},"model_id":"haiku","reasoning_effort":"low"},
+            "state":"enabled","concurrency_policy":"skip","misfire_policy":"skip","created_at":"2026-11-03T00:00:00Z","updated_at":"2026-11-03T00:00:00Z","next_run_at":null
+        })).unwrap();
+        for (target, created) in [
+            (
+                AutomationThreadTarget::Existing {
+                    thread_id: "home".into(),
+                },
+                false,
+            ),
+            (AutomationThreadTarget::Current, false),
+            (
+                AutomationThreadTarget::Managed {
+                    thread_id: Some("managed".into()),
+                },
+                false,
+            ),
+            (AutomationThreadTarget::Managed { thread_id: None }, true),
+            (AutomationThreadTarget::NewEachRun, true),
+            // A stale remembered id may be recreated; it is a new native task.
+            (
+                AutomationThreadTarget::Managed {
+                    thread_id: Some("missing".into()),
+                },
+                true,
+            ),
+        ] {
+            automation.target.thread = target;
+            let resolved = ResolvedAutomationThread {
+                thread_id: "resolved".into(),
+                created,
+            };
+            let request =
+                automation_turn_request(&automation, "workspace", &resolved, "Check".into());
+            assert_eq!(request.model_id.as_deref(), created.then_some("haiku"));
+            assert_eq!(
+                request.reasoning_effort.as_deref(),
+                created.then_some("low")
+            );
+            assert_eq!(request.thread_id, "resolved");
+        }
     }
 
     #[test]

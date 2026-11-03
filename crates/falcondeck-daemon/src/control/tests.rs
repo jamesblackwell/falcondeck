@@ -2128,3 +2128,104 @@ async fn agents_can_rename_noncompliant_schedules_but_not_resubmit_their_cadence
         assert_eq!(unchanged_target.error.unwrap().code, "invalid_schedule");
     }
 }
+
+#[tokio::test]
+async fn model_and_effort_pins_are_creation_only_not_reused_target_updates() {
+    let (_dir, service) = service().await;
+    for thread in [
+        json!({"kind":"existing","thread_id":"home"}),
+        json!({"kind":"managed","thread_id":"created"}),
+    ] {
+        for pin in ["model_id", "reasoning_effort"] {
+            let mut args = create_arguments();
+            args["target"]["thread"] = thread.clone();
+            args["target"][pin] = json!(if pin == "model_id" { "haiku" } else { "low" });
+            let result = service
+                .execute(
+                    execute_request(registry::ops::AUTOMATION_CREATE, args, None),
+                    &desktop(),
+                    &ControlDeps::none(),
+                )
+                .await
+                .0;
+            let error = result.error.unwrap();
+            assert!(
+                error
+                    .field_errors
+                    .iter()
+                    .any(|e| e.field == format!("target.{pin}"))
+            );
+            assert!(error.suggested_action.unwrap().contains("new_each_run"));
+        }
+    }
+    for thread in [json!({"kind":"new_each_run"}), json!({"kind":"managed"})] {
+        let mut args = create_arguments();
+        args["target"]["thread"] = thread;
+        args["target"]["model_id"] = json!("haiku");
+        args["target"]["reasoning_effort"] = json!("low");
+        let created = service
+            .execute(
+                execute_request(registry::ops::AUTOMATION_CREATE, args.clone(), None),
+                &desktop(),
+                &ControlDeps::none(),
+            )
+            .await
+            .0;
+        assert!(created.ok, "{:?}", created.error);
+        let data = created.data.unwrap();
+        assert_eq!(data["target"]["model_id"], "haiku");
+        assert_eq!(data["target"]["reasoning_effort"], "low");
+        // A managed definition acquires its id internally after the first run.
+        if args["target"]["thread"]["kind"] == "managed" {
+            let id = data["id"].as_str().unwrap();
+            service.set_managed_thread(id, "created").await.unwrap();
+            let renamed = service
+                .execute(
+                    execute_request(
+                        registry::ops::AUTOMATION_UPDATE,
+                        json!({"automation_id":id,"name":"Legacy rename"}),
+                        Some(2),
+                    ),
+                    &desktop(),
+                    &ControlDeps::none(),
+                )
+                .await
+                .0;
+            assert!(renamed.ok, "{:?}", renamed.error);
+            args["target"]["thread"] = json!({"kind":"managed","thread_id":"created"});
+            let rejected = service
+                .execute(
+                    execute_request(
+                        registry::ops::AUTOMATION_UPDATE,
+                        json!({"automation_id":id,"target":args["target"]}),
+                        Some(3),
+                    ),
+                    &desktop(),
+                    &ControlDeps::none(),
+                )
+                .await
+                .0;
+            assert_eq!(
+                rejected.error.unwrap().field_errors[0].field,
+                "target.model_id"
+            );
+            args["target"]["model_id"] = Value::Null;
+            args["target"]["reasoning_effort"] = Value::Null;
+            assert!(
+                service
+                    .execute(
+                        execute_request(
+                            registry::ops::AUTOMATION_UPDATE,
+                            json!({"automation_id":id,"target":args["target"]}),
+                            Some(3)
+                        ),
+                        &desktop(),
+                        &ControlDeps::none()
+                    )
+                    .await
+                    .0
+                    .ok
+            );
+        }
+    }
+}
