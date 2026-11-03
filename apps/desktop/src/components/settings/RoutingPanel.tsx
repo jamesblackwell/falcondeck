@@ -63,6 +63,31 @@ function describeTarget(target: RoutingTarget) {
     .join(' ')
 }
 
+/** Serializes routing the way the daemon stores it: every rule field present,
+ * blank model and effort as null. Keeps dirty tracking from flagging a saved
+ * draft whose only difference is fields the client left out. */
+function routingKey(routing: RoutingPreferences | null): string {
+  if (!routing) return 'null'
+  const target = (t: RoutingTarget): RoutingTarget => ({
+    provider: t.provider,
+    model_id: t.model_id?.trim() || null,
+    reasoning_effort: t.reasoning_effort?.trim() || null,
+  })
+  return JSON.stringify({
+    ...routing,
+    rules: routing.rules.map((rule) => ({
+      label: rule.label,
+      task_types: rule.task_types,
+      min_difficulty: rule.min_difficulty ?? null,
+      max_difficulty: rule.max_difficulty ?? null,
+      production_risk: rule.production_risk ?? null,
+      needs_social: rule.needs_social ?? null,
+      targets: rule.targets.map(target),
+    })),
+    fallback: routing.fallback.map(target),
+  })
+}
+
 /** Auto routing: Jev classifies a brief once, then these rules pick the
  * harness, model and effort. Agents opt in with `model: "auto"`. */
 export function RoutingPanel({
@@ -73,10 +98,12 @@ export function RoutingPanel({
 }: RoutingPanelProps) {
   const saved = preferences?.routing ?? null
   const [draft, setDraft] = useState<RoutingPreferences | null>(saved)
-  const savedKey = JSON.stringify(saved)
-  const dirty = draft !== null && JSON.stringify(draft) !== savedKey
-  // The daemon normalizes what it stores, so after Save or Reset the next
-  // saved value replaces the draft even if it differs from what was sent.
+  const savedKey = routingKey(saved)
+  const dirty = draft !== null && routingKey(draft) !== savedKey
+  // The daemon also trims, dedupes and clamps what it stores, so after Save or
+  // Reset the next saved value replaces the draft even if it differs. Any
+  // further edit disarms this, so a later change from another client never
+  // overwrites work in progress.
   const adoptNextSave = useRef(false)
   const save = (routing: RoutingPreferences) => {
     adoptNextSave.current = true
@@ -99,7 +126,10 @@ export function RoutingPanel({
     )
   }
 
-  const update = (patch: Partial<RoutingPreferences>) => setDraft({ ...draft, ...patch })
+  const update = (patch: Partial<RoutingPreferences>) => {
+    adoptNextSave.current = false
+    setDraft({ ...draft, ...patch })
+  }
   const setRule = (index: number, rule: RoutingRule) =>
     update({ rules: draft.rules.map((r, i) => (i === index ? rule : r)) })
 
