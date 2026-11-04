@@ -273,3 +273,17 @@ the reporting window. Manual turns outside those intervals are excluded, and a
 record matching overlapping runs of one task counts once. Runs missing either
 boundary stay unattributed until both are available; retained usage can outlive
 deleted definitions.
+
+## Provider usage payloads (facts for token tracking)
+
+Scoping notes live in [usage-tracking-scope.md](usage-tracking-scope.md). Lasting facts:
+
+- Claude `result.usage` is the **last API call only**, not the turn. The turn
+  aggregate, including subagents, is `result.modelUsage` (per model, with
+  `costUSD`); `model_usage_since_last_result` is the per-result slice.
+  `input_tokens` excludes cache.
+- Codex `input_tokens` **includes** `cached_input_tokens`. `last_token_usage` is
+  per request, `total_token_usage` is cumulative.
+- Grok sends per-turn usage, per-model usage and `costUsdTicks` in
+  `_x.ai/session/update` `turn_completed`. Generic ACP agents may return
+  `usage` on the `session/prompt` response; `usage_update` is context fill only.
