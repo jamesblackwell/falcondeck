@@ -9805,3 +9805,157 @@ async fn extensions_bridge_is_spawned_without_any_extension_tools() {
         .expect("extensions bridge spec");
     assert_eq!(spec.thread_id.as_deref(), Some("thread-1"));
 }
+
+#[test]
+fn legacy_managed_origin_backfill_is_idempotent_and_rejects_shared_targets() {
+    use std::collections::HashSet;
+    use super::{backfill_automation_origins, PersistedThreadState, PersistedWorkspaceState};
+    use falcondeck_core::control::{Automation, AutomationThreadTarget as Target};
+    let definition: Automation = serde_json::from_value(serde_json::json!({
+        "id":"a","revision":1,"name":"Legacy","trigger":{"kind":"once","run_at":"2026-12-01T00:00:00Z"},
+        "task":{"kind":"prompt","instruction":"Check"},"target":{"workspace_path":"/tmp","provider":"claude","thread":{"kind":"managed","thread_id":"legacy"}},
+        "state":"enabled","concurrency_policy":"skip","misfire_policy":"skip","created_at":"2026-11-03T00:00:00Z","updated_at":"2026-11-03T00:00:00Z","next_run_at":null
+    })).unwrap();
+    let thread: PersistedThreadState =
+        serde_json::from_value(serde_json::json!({"thread_id":"legacy"})).unwrap();
+    let workspace = PersistedWorkspaceState {
+        thread_states: vec![thread],
+        ..Default::default()
+    };
+    let mut workspaces = vec![workspace.clone()];
+    backfill_automation_origins(&mut workspaces, std::slice::from_ref(&definition), &HashSet::new());
+    assert!(crate::control::automations::owns_thread(
+        "a",
+        workspaces[0].thread_states[0].origin.as_ref()
+    ));
+    let once = workspaces.clone();
+    backfill_automation_origins(&mut workspaces, std::slice::from_ref(&definition), &HashSet::new());
+    assert_eq!(workspaces, once);
+    let mut other = definition.clone();
+    other.id = "b".into();
+    for target in [
+        Target::Managed {
+            thread_id: Some("legacy".into()),
+        },
+        Target::Existing {
+            thread_id: "legacy".into(),
+        },
+    ] {
+        other.target.thread = target;
+        let mut shared = vec![workspace.clone()];
+        backfill_automation_origins(&mut shared, &[definition.clone(), other.clone()], &HashSet::new());
+        assert!(shared[0].thread_states[0].origin.is_none());
+    }
+    other.target.thread = Target::Managed {
+        thread_id: Some("missing".into()),
+    };
+    backfill_automation_origins(&mut workspaces, &[other], &HashSet::new());
+    assert_eq!(workspaces, once);
+    let mut renamed_owner = definition.clone();
+    renamed_owner.id = "different".into();
+    backfill_automation_origins(&mut workspaces, &[renamed_owner], &HashSet::new());
+    assert_eq!(workspaces, once);
+}
+
+fn legacy_automation_fixture(id: &str, thread_id: &str, model: &str) -> falcondeck_core::control::Automation {
+    serde_json::from_value(serde_json::json!({
+        "id":id,"revision":1,"name":id,"trigger":{"kind":"once","run_at":"2099-11-05T09:00:00Z"},
+        "task":{"kind":"prompt","instruction":"Check"},
+        "target":{"workspace_path":"/tmp","provider":"codex","model_id":model,"thread":{"kind":"managed","thread_id":thread_id}},
+        "state":"enabled","concurrency_policy":"skip","misfire_policy":"skip",
+        "created_at":"2026-11-03T00:00:00Z","updated_at":"2026-11-03T00:00:00Z","next_run_at":null
+    })).unwrap()
+}
+
+#[test]
+fn legacy_backfill_preserves_lucidpic_model_selection_and_bot_homes() {
+    use super::{backfill_automation_origins, PersistedThreadState, PersistedWorkspaceState};
+    use std::collections::HashSet;
+    for (id, model, protected) in [
+        ("lucidpic", Some("gpt-6.1-terra"), false),
+        ("unknown", None, false),
+        ("home", Some("gpt-6.1-sol"), true),
+        ("previous-home", Some("gpt-6.1-sol"), true),
+        ("matching", Some("gpt-6.1-sol"), false),
+    ] {
+        let mut definition = legacy_automation_fixture("a", id, "gpt-6.1-sol");
+        definition.name = "Investigate recent Lucidpic feedback".into();
+        let thread: PersistedThreadState = serde_json::from_value(serde_json::json!({
+            "thread_id":id, "agent":{"model_id":model}
+        })).unwrap();
+        let mut workspaces = vec![PersistedWorkspaceState { thread_states: vec![thread], ..Default::default() }];
+        let homes = if protected { HashSet::from([id.to_string()]) } else { HashSet::new() };
+        backfill_automation_origins(&mut workspaces, std::slice::from_ref(&definition), &homes);
+        let owned = crate::control::automations::owns_thread("a", workspaces[0].thread_states[0].origin.as_ref());
+        assert_eq!(owned, id == "matching", "{id}");
+        assert_eq!(workspaces[0].thread_states[0].agent.model_id.as_deref(), model);
+        assert_eq!(crate::control::automations::reused_thread_model_pin(&definition.target, owned), !owned);
+    }
+}
+
+#[tokio::test]
+async fn startup_backfills_legacy_origins_and_persists_model_and_home_guards() {
+    use super::{PersistedThreadState, PersistedWorkspaceState};
+    use falcondeck_core::control::AutomationState;
+    use crate::control::store::{self, PersistedControlState};
+    let temp = tempdir().unwrap();
+    let state_path = temp.path().join("daemon-state.json");
+    let mut definitions = vec![
+        legacy_automation_fixture("owned", "managed", "gpt-6.1-sol"),
+        legacy_automation_fixture("lucidpic", "lucidpic", "gpt-6.1-sol"),
+        legacy_automation_fixture("weekly", "weekly", "grok-4.6"),
+        legacy_automation_fixture("home", "home", "gpt-6.1-sol"),
+        legacy_automation_fixture("previous", "previous", "gpt-6.1-sol"),
+    ];
+    definitions[1].name = "Investigate recent Lucidpic feedback".into();
+    definitions[2].name = "Weekly Ops CLI".into();
+    definitions[2].state = AutomationState::Paused;
+    let threads: Vec<PersistedThreadState> = [
+        ("managed", "gpt-6.1-sol"), ("lucidpic", "gpt-6.1-terra"),
+        ("weekly", "grok-4.7"), ("home", "gpt-6.1-sol"), ("previous", "gpt-6.1-sol"),
+    ].into_iter().map(|(id, model)| serde_json::from_value(serde_json::json!({
+        "thread_id":id,"provider":"codex","agent":{"model_id":model},"status":"idle"
+    })).unwrap()).collect();
+    let persisted = PersistedAppState {
+        workspaces: vec![PersistedWorkspaceState {
+            path: temp.path().to_string_lossy().into_owned(), id: Some("ws".into()),
+            thread_states: threads, ..Default::default()
+        }], remote: None,
+    };
+    tokio::fs::write(&state_path, serde_json::to_vec(&persisted).unwrap()).await.unwrap();
+    store::persist(&store::control_store_path(&state_path), &PersistedControlState {
+        automations: definitions, ..Default::default()
+    }).await.unwrap();
+    let mut preferences = falcondeck_core::FalconDeckPreferences::default();
+    preferences.bots.push(serde_json::from_value(serde_json::json!({
+        "id":"bot","name":"Bot","workspace_id":"ws","dedicated_workspace":false,
+        "thread_id":"home","previous_thread_ids":["previous"],"space_path":temp.path().to_string_lossy()
+    })).unwrap());
+    tokio::fs::write(temp.path().join("falcondeck.json"), serde_json::to_vec(&preferences).unwrap()).await.unwrap();
+    // Follow the daemon startup order, rather than calling the migration helper.
+    let app = AppState::new_with_state_path("test".into(), HashMap::new(), state_path.clone());
+    app.restore_control_state().await.unwrap();
+    app.restore_local_state().await.unwrap();
+    let snapshot = app.snapshot().await;
+    for id in ["managed", "lucidpic", "weekly", "home", "previous"] {
+        let thread = snapshot.threads.iter().find(|t| t.id == id).unwrap();
+        assert_eq!(crate::control::automations::owns_thread("owned", thread.origin.as_ref()), id == "managed", "{id}");
+        if id != "managed" { assert!(thread.origin.is_none(), "{id}"); }
+    }
+    let lucidpic = snapshot.threads.iter().find(|t| t.id == "lucidpic").unwrap();
+    assert_eq!(lucidpic.agent.model_id.as_deref(), Some("gpt-6.1-terra"));
+    let health = app.analytics_summary(7).await.unwrap();
+    assert!(health.automations.iter().find(|a| a.id.as_deref() == Some("lucidpic")).unwrap().flags.iter().any(|flag| flag == "reused_thread_model_pin"));
+    let saved = super::load_persisted_app_state(&state_path).await.unwrap();
+    assert_eq!(saved.workspaces[0].thread_states.iter().filter(|t| t.origin.is_some()).count(), 1);
+    // A second real startup preserves the same ownership and model decisions.
+    let restored = AppState::new_with_state_path("test".into(), HashMap::new(), state_path.clone());
+    restored.restore_control_state().await.unwrap();
+    restored.restore_local_state().await.unwrap();
+    let saved_again = super::load_persisted_app_state(&state_path).await.unwrap();
+    for thread in &saved.workspaces[0].thread_states {
+        let again = saved_again.workspaces[0].thread_states.iter().find(|t| t.thread_id == thread.thread_id).unwrap();
+        assert_eq!(again.origin, thread.origin);
+        assert_eq!(again.agent.model_id, thread.agent.model_id);
+    }
+}

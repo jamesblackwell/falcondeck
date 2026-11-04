@@ -1,4 +1,4 @@
-import { fireEvent, render, screen, waitFor } from '@testing-library/react'
+import { fireEvent, within, render, screen, waitFor } from '@testing-library/react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
 import { AnalyticsPanel } from './AnalyticsPanel'
@@ -87,6 +87,9 @@ const summary: AnalyticsSummary = {
   waiting: { requests: 2, median_request_wait_ms: 90_000, replies: 4, median_reply_ms: 600_000, p90_reply_ms: 7_200_000 },
   automations: [
     {
+      models: ['claude-haiku-5-5', 'claude-sonnet-5-5'],
+      configured_model: 'claude-opus-5-5',
+      usage: usageTotals,
       id: 'a1',
       name: 'Fast Start Monitor',
       state: 'enabled',
@@ -99,6 +102,10 @@ const summary: AnalyticsSummary = {
       threads: 15,
       agent_ms: 900_000,
       flags: ['rarely_useful', 'thread_per_run'],
+    },
+    {
+      id: 'a2', name: 'Quiet task', state: 'enabled', runs: 0, no_action: 0,
+      failed: 0, skipped: 0, threads: 0, configured_model: 'claude-opus-5-5',
     },
   ],
   usage: [
@@ -152,6 +159,24 @@ function stubDaemon() {
 }
 
 describe('AnalyticsPanel', () => {
+  it('shows observed models, differing pin, token breakdown and editor action', async () => {
+    stubDaemon()
+    const onOpenAutomation = vi.fn()
+    render(<AnalyticsPanel baseUrl="http://daemon" onToast={vi.fn()} onOpenAutomation={onOpenAutomation} />)
+    expect(await screen.findByText('Haiku 5.5 · Sonnet 5.5')).toBeInTheDocument()
+    expect(screen.getByText('Pin: Opus 5.5')).toBeInTheDocument()
+    expect(screen.getByTitle(/Input: 11,058 · Cache read: 11,008/)).toHaveTextContent('22k')
+    fireEvent.click(screen.getByRole('button', { name: 'Fast Start Monitor' }))
+    expect(onOpenAutomation).toHaveBeenCalledWith('a1')
+    const table = screen.getByRole('button', { name: /Tokens/ }).closest('table')!
+    expect(within(table).getByText('Opus 5.5')).toHaveClass('text-fg-muted')
+    fireEvent.click(screen.getByRole('button', { name: /Tokens/ }))
+    expect(screen.getByRole('columnheader', { name: /^Tokens ↓$/ })).toHaveAttribute('aria-sort', 'descending')
+    expect(within(table).getAllByRole('row')[1]).toHaveTextContent('Fast Start Monitor')
+    fireEvent.click(screen.getByRole('button', { name: /Tokens/ }))
+    expect(within(table).getAllByRole('row')[1]).toHaveTextContent('Quiet task')
+  })
+
   afterEach(() => vi.unstubAllGlobals())
 
   it('shows totals, agent chatter, files and your messages', async () => {

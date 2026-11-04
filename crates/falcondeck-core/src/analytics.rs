@@ -381,9 +381,9 @@ pub struct AnalyticsUsage {
 }
 
 /// Runs of one scheduled task, with signs it may not be earning its keep.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct AnalyticsAutomation {
-    /// Automation id, when it still exists.
+    /// Automation id from the definition or retained run history.
     #[serde(default)]
     pub id: Option<String>,
     /// Automation name.
@@ -409,6 +409,18 @@ pub struct AnalyticsAutomation {
     /// Review prompts: `rarely_useful`, `very_frequent`, `failing`, `thread_per_run`, `cache_cold_reuse`, `bot_home_frequent`, `large_reused_context`, `reused_thread_model_pin`.
     #[serde(default)]
     pub flags: Vec<String>,
+    /// Models observed in usage records on run threads during the reporting window.
+    #[serde(default)]
+    pub models: Vec<String>,
+    /// Current model pin, even when a shared thread ignores it.
+    #[serde(default)]
+    pub configured_model: Option<String>,
+    /// Current thread model when no observed usage is available.
+    #[serde(default)]
+    pub fallback_model: Option<String>,
+    /// Recorded tokens on the automation's run threads in the reporting window.
+    #[serde(default)]
+    pub usage: AnalyticsUsageTotals,
     /// Runs in the period.
     pub runs: u64,
     /// Runs that found nothing to do.

@@ -1922,6 +1922,10 @@ fn summarize_automations(
         last_run_at: None,
         last_status: None,
         flags: Vec::new(),
+        models: Vec::new(),
+        configured_model: None,
+        fallback_model: None,
+        usage: AnalyticsUsageTotals::default(),
     };
     let mut by_id: BTreeMap<String, (AnalyticsAutomation, HashSet<String>)> = BTreeMap::new();
     for definition in definitions {
@@ -1977,8 +1981,10 @@ fn summarize_automations(
     let mut automations: Vec<_> = by_id
         .into_iter()
         .map(|(id, (mut summary, threads))| {
+            summary.id = Some(id.clone());
             summary.threads = threads.len() as u64;
             if let Some(definition) = definitions.get(id.as_str()) {
+                summary.configured_model = definition.target.model_id.clone();
                 summary.name = definition.name.clone();
                 summary.state = serialized_name(&definition.state);
                 summary.schedule =
@@ -2049,6 +2055,62 @@ fn summarize_automations(
             .then(a.name.cmp(&b.name))
     });
     automations
+}
+
+/// Count each usage record once when its thread and timestamp match a finished run.
+/// Shared threads also contain manual turns and runs from other automations.
+fn summarize_automation_usage(
+    summaries: &mut [AnalyticsAutomation],
+    runs: &[falcondeck_core::control::AutomationRun],
+    definitions: &[falcondeck_core::control::Automation],
+    usage: &[UsageRecord],
+    thread_models: &HashMap<String, String>,
+) {
+    use falcondeck_core::control::AutomationThreadTarget as Target;
+    for summary in summaries {
+        let relevant: Vec<_> = runs
+            .iter()
+            .filter(|run| Some(&run.automation_id) == summary.id.as_ref())
+            .collect();
+        let mut windows: HashMap<&str, Vec<(DateTime<Utc>, DateTime<Utc>)>> = HashMap::new();
+        for run in &relevant {
+            if let (Some(thread), Some(start), Some(end)) = (run.thread_id.as_deref(), run.started_at, run.finished_at) {
+                windows.entry(thread).or_default().push((start, end));
+            }
+        }
+        let mut models = std::collections::BTreeSet::new();
+        for record in usage {
+            if windows.get(record.th.as_str()).is_some_and(|intervals| {
+                intervals.iter().any(|(start, end)| record.t >= *start && record.t <= *end)
+            }) {
+                add_usage(&mut summary.usage, record);
+                if !record.model.is_empty() {
+                    models.insert(record.model.clone());
+                }
+            }
+        }
+        summary.models = models.into_iter().collect();
+        let target = definitions
+            .iter()
+            .find(|d| Some(&d.id) == summary.id.as_ref())
+            .and_then(|d| match &d.target.thread {
+                Target::Managed {
+                    thread_id: Some(id),
+                }
+                | Target::Existing { thread_id: id } => Some(id),
+                _ => None,
+            });
+        summary.fallback_model = target
+            .and_then(|id| thread_models.get(id))
+            .cloned()
+            .or_else(|| {
+                relevant
+                    .iter()
+                    .filter_map(|r| r.thread_id.as_ref().and_then(|id| thread_models.get(id)))
+                    .min()
+                    .cloned()
+            });
+    }
 }
 
 /// Attribution frozen into a usage record at write time.
@@ -2721,6 +2783,22 @@ impl AppState {
             .into_iter()
             .map(|bot| bot.thread_id)
             .collect();
+        let thread_models: HashMap<String, String> = self
+            .inner
+            .workspaces
+            .lock()
+            .await
+            .values()
+            .flat_map(|workspace| workspace.threads.values())
+            .filter_map(|thread| {
+                thread
+                    .summary
+                    .agent
+                    .model_id
+                    .clone()
+                    .map(|model| (thread.summary.id.clone(), model))
+            })
+            .collect();
         let thread_owners = self
             .inner
             .workspaces
@@ -2737,9 +2815,22 @@ impl AppState {
             .collect();
         let summary = tokio::task::spawn_blocking(move || {
             let mut summary = summarize(read_records(&dir, since), &labels, days);
-            summary.usage = usage_rollup(&read_usage_records(&dir, since), &labels);
-            summary.automations =
-                summarize_automations(runs, &definitions, days, &bot_home_ids, &thread_owners);
+            let usage = read_usage_records(&dir, since);
+            summary.usage = usage_rollup(&usage, &labels);
+            summary.automations = summarize_automations(
+                runs.clone(),
+                &definitions,
+                days,
+                &bot_home_ids,
+                &thread_owners,
+            );
+            summarize_automation_usage(
+                &mut summary.automations,
+                &runs,
+                &definitions,
+                &usage,
+                &thread_models,
+            );
             summary
         })
         .await
@@ -3599,6 +3690,45 @@ mod tests {
             "thread_id": format!("thread-{id}"),
         }))
         .unwrap()
+    }
+
+    #[test]
+    fn scheduled_usage_joins_by_thread_and_run_window_without_double_counting() {
+        let mut a_later = run("3", "a", "succeeded");
+        a_later.thread_id = Some("thread-1".into());
+        a_later.started_at = a_later.started_at.map(|t| t + chrono::Duration::minutes(2));
+        a_later.finished_at = a_later.finished_at.map(|t| t + chrono::Duration::minutes(2));
+        let mut b_shared = run("2", "b", "succeeded");
+        b_shared.thread_id = Some("thread-1".into());
+        b_shared.started_at = b_shared.started_at.map(|t| t + chrono::Duration::minutes(4));
+        b_shared.finished_at = b_shared.finished_at.map(|t| t + chrono::Duration::minutes(4));
+        let mut unfinished = run("4", "c", "running");
+        unfinished.thread_id = Some("thread-1".into());
+        unfinished.finished_at = None;
+        let first_run = run("1", "a", "succeeded");
+        // Duplicate/overlapping run windows must not count the same record twice.
+        let runs = vec![first_run.clone(), first_run.clone(), a_later.clone(), b_shared.clone(), unfinished];
+        let mut rows = summarize_automations(runs.clone(), &[], 7, &HashSet::new(), &HashMap::new());
+        let mut first = usage_record("u1", "thread-1", None, "claude", "haiku", (1, 2, 3, 4), None);
+        first.t = first_run.started_at.unwrap();
+        let mut second = first.clone(); second.id = "u2".into(); second.model = "sonnet".into();
+        second.t = a_later.finished_at.unwrap();
+        let mut before = first.clone(); before.t -= chrono::Duration::seconds(1);
+        let mut between = first.clone(); between.t = first_run.finished_at.unwrap() + chrono::Duration::seconds(1);
+        let mut after = first.clone(); after.t = b_shared.finished_at.unwrap() + chrono::Duration::seconds(1);
+        let mut other_task = first.clone(); other_task.t = b_shared.started_at.unwrap(); other_task.model = "opus".into();
+        let mut unrelated = first.clone(); unrelated.th = "other".into();
+        summarize_automation_usage(&mut rows, &runs, &[], &[first, second, before, between, after, other_task, unrelated], &HashMap::new());
+        let a = rows.iter().find(|r| r.id.as_deref() == Some("a")).unwrap();
+        assert_eq!(a.models, ["haiku", "sonnet"]);
+        assert_eq!(usage_token_total(&a.usage), 20);
+        assert_eq!(a.usage.turns, 2);
+        let b = rows.iter().find(|r| r.id.as_deref() == Some("b")).unwrap();
+        assert_eq!(b.models, ["opus"]);
+        assert_eq!(usage_token_total(&b.usage), 10);
+        let c = rows.iter().find(|r| r.id.as_deref() == Some("c")).unwrap();
+        assert!(c.models.is_empty());
+        assert_eq!(c.usage.turns, 0);
     }
 
     #[test]

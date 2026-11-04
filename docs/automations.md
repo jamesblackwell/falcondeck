@@ -121,3 +121,17 @@ this hash/revision check protects what was approved, not against a hostile local
 process. This branch does not change that pre-existing trust model. Pre-checks
 inherit the daemon's environment and run outside the automation's `sandbox_mode`;
 that mode governs the agent turn, not the preceding shell command.
+
+## Legacy managed-thread ownership
+
+At daemon startup, managed targets with a remembered thread id backfill a missing
+thread origin to the owning automation. The migration is idempotent and persisted
+with restored daemon state. Existing origins are preserved. If any other automation
+(managed or existing, including paused definitions) targets that id, the origin is
+left unset and a warning is logged. Missing threads are ignored. Current and previous bot home threads are never
+claimed. When a stored model pin differs from the thread's current model (or the
+current model is unknown), the origin stays unset so the thread's own model wins
+and the model-pin health warning remains. This restores
+model pins and per-automation compaction overrides for dedicated legacy tasks.
+Settings → Analytics lists models observed on run threads, differing configured
+pins, and sortable recorded token totals. Its task-name action opens the editor.

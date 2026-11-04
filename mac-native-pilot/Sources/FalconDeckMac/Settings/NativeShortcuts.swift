@@ -11,6 +11,7 @@ struct NativeShortcutDefinition: Identifiable {
         .init(id: "commandPalette", label: "Command menu", category: "App", context: "global", defaults: ["Mod+K", "Mod+Shift+P"]),
         .init(id: "openSettings", label: "Settings", category: "App", context: "global", defaults: ["Mod+,"]),
         .init(id: "openActivity", label: "Activity", category: "App", context: "global", defaults: ["Mod+U"]),
+        .init(id: "openAnalytics", label: "Analytics", category: "App", context: "global", defaults: ["Mod+Shift+A"]),
         .init(id: "openUsage", label: "Usage", category: "App", context: "global", defaults: ["Mod+Shift+U"]),
         .init(id: "openKeyboardShortcuts", label: "Keyboard shortcuts", category: "App", context: "global", defaults: ["Shift+/", "Mod+Shift+/"]),
         .init(id: "openProject", label: "Open project", category: "App", context: "global", defaults: ["Mod+O"]),

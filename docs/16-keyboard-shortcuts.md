@@ -38,6 +38,10 @@ defaults. Custom values are versioned and stored locally because shortcuts are
 device and keyboard-layout preferences. Empty binding arrays explicitly unbind
 a command. Bindings update without restarting the app.
 
+Options → Analytics opens Settings directly to Analytics. Its default in-app
+shortcut is `⌘⇧A` (`openAnalytics`) on desktop and the native Mac pilot, and can
+be customized in Keyboard shortcuts.
+
 ## Dispatch and safety rules
 
 - Global commands do not fire from text fields unless they use Command or

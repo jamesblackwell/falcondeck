@@ -260,3 +260,16 @@ The rollout totals 6,715,479 input tokens including cache; the usage log has
 4,487,217, leaving 2,228,262 unrecorded. The accumulator was not checkpointed
 before restart. This remains a documented limitation rather than a recovered
 or backfilled total.
+
+The Scheduled tasks table shows observed models, a differing configured pin,
+recorded tokens (uncached input + cache reads + cache writes + output), and a
+hover breakdown. Tokens can be sorted in either direction. With no recorded
+usage, the configured pin or current thread model appears muted. Task names
+open the Automations editor; review flags have readable labels and fix hints.
+Options → Analytics opens this panel directly (default ⌘⇧A; customizable).
+The native Mac pilot also has an Analytics destination and the same shortcut.
+Usage matches both the run thread and its recorded start/finish interval within
+the reporting window. Manual turns outside those intervals are excluded, and a
+record matching overlapping runs of one task counts once. Runs missing either
+boundary stay unattributed until both are available; retained usage can outlive
+deleted definitions.

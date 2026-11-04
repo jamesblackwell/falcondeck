@@ -827,6 +827,53 @@ impl Default for PersistedWorkspaceState {
     }
 }
 
+/// Re-running this at startup is harmless: only unclaimed legacy managed threads change.
+fn backfill_automation_origins(
+    workspaces: &mut [PersistedWorkspaceState],
+    definitions: &[falcondeck_core::control::Automation],
+    bot_thread_ids: &HashSet<String>,
+) {
+    use falcondeck_core::control::AutomationThreadTarget as Target;
+    let mut targets: HashMap<&str, Vec<&falcondeck_core::control::Automation>> = HashMap::new();
+    for definition in definitions {
+        if let Target::Managed {
+            thread_id: Some(id),
+        }
+        | Target::Existing { thread_id: id } = &definition.target.thread
+        {
+            targets.entry(id).or_default().push(definition);
+        }
+    }
+    for workspace in workspaces {
+        for thread in &mut workspace.thread_states {
+            if thread.origin.is_some() || bot_thread_ids.contains(&thread.thread_id) {
+                continue;
+            }
+            let Some(owners) = targets.get(thread.thread_id.as_str()) else {
+                continue;
+            };
+            if owners.len() != 1 {
+                tracing::warn!(thread_id = %thread.thread_id, "ambiguous automation thread ownership; leaving origin unset");
+                continue;
+            }
+            let owner = owners[0];
+            // A later interactive model selection must keep winning over a legacy pin.
+            if owner.target.model_id.as_ref().is_some_and(|pin| thread.agent.model_id.as_ref() != Some(pin)) {
+                tracing::warn!(thread_id = %thread.thread_id, automation_id = %owner.id,
+                    "legacy automation model pin differs from thread model; leaving origin unset");
+                continue;
+            }
+            if matches!(owner.target.thread, Target::Managed { .. }) {
+                thread.origin = Some(falcondeck_core::ThreadOrigin::Automation {
+                    automation_id: owner.id.clone(),
+                    bot_id: owner.target.run_as_bot.clone(),
+                    name: owner.name.clone(),
+                });
+            }
+        }
+    }
+}
+
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
 struct PersistedThreadState {
     thread_id: String,
@@ -1660,7 +1707,12 @@ impl AppState {
         }
         persist_preferences(&self.inner.preferences_path, &preferences).await?;
 
-        let persisted = load_persisted_app_state(&self.inner.state_path).await?;
+        let mut persisted = load_persisted_app_state(&self.inner.state_path).await?;
+        let definitions = self.control().automations_snapshot().await;
+        let bot_thread_ids = preferences.bots.iter()
+            .flat_map(|bot| std::iter::once(&bot.thread_id).chain(&bot.previous_thread_ids))
+            .cloned().collect();
+        backfill_automation_origins(&mut persisted.workspaces, &definitions, &bot_thread_ids);
         // Clients can mutate lazy projects as soon as the first snapshot is
         // published. Keep the pairing durable while its keychain read is pending.
         if let Some(remote) = &persisted.remote {

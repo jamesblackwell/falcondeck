@@ -39,6 +39,7 @@ import {
 export type SidebarOptionsMenuProps = {
   onOpenSettings?: () => void
   settingsOpen?: boolean
+  onOpenAnalytics?: () => void
   onOpenUsage?: () => void
   onOpenKeyboardShortcuts?: () => void
   onOpenSpeechSettings?: () => void
@@ -87,6 +88,7 @@ const MENU_ITEM_CLASS =
 export const SidebarOptionsMenu = memo(function SidebarOptionsMenu({
   onOpenSettings,
   settingsOpen = false,
+  onOpenAnalytics,
   onOpenUsage,
   onOpenKeyboardShortcuts,
   onOpenSpeechSettings,
@@ -114,6 +116,7 @@ export const SidebarOptionsMenu = memo(function SidebarOptionsMenu({
   // already treat a missing hint as "show no Kbd".
   const settingsShortcut = shortcutHintTokens('openSettings', shortcutSettings)?.join('')
   const shortcutsShortcut = shortcutHintTokens('openKeyboardShortcuts', shortcutSettings)?.join('')
+  const analyticsShortcut = shortcutHintTokens('openAnalytics', shortcutSettings)?.join('')
   const usageShortcut = shortcutHintTokens('openUsage', shortcutSettings)?.join('')
 
   const handleOpenSubmenu = (submenu: Submenu) => {
@@ -215,6 +218,12 @@ export const SidebarOptionsMenu = memo(function SidebarOptionsMenu({
             onKeyDown={handleMenuKeyDown}
             className="flex flex-col gap-0.5"
           >
+            {onOpenAnalytics ? (
+              <button type="button" role="menuitem" onClick={() => { setOpen(false); onOpenAnalytics() }} className="fd-focus flex w-full items-center justify-between gap-2.5 rounded-[var(--fd-radius-md)] px-2.5 py-1.5 text-left text-[length:var(--fd-text-sm)] text-fg-primary hover:bg-surface-3">
+                <span className="flex items-center gap-2.5"><Gauge aria-hidden="true" className="h-4 w-4 text-fg-muted" />Analytics</span>
+                {analyticsShortcut ? <Kbd>{analyticsShortcut}</Kbd> : null}
+              </button>
+            ) : null}
             {onOpenUsage ? (
               <button
                 type="button"
