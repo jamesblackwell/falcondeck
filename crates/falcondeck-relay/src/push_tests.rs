@@ -588,7 +588,10 @@ async fn a_review_dropped_at_capacity_is_not_acknowledged_and_can_retry() {
         Err(RelayError::TooManyRequests(_))
     ));
     tokio::time::sleep(StdDuration::from_millis(100)).await;
-    assert!(expo_events.try_recv().is_err(), "nothing sends until all can");
+    assert!(
+        expo_events.try_recv().is_err(),
+        "nothing sends until all can"
+    );
     drop(permits);
     state
         .notify("session", "daemon", review("R-1"))
@@ -808,4 +811,51 @@ async fn postgres_upgrade_preserves_existing_client_tokens_push_and_replay_seque
         .unwrap();
     drop(client);
     connection.await.unwrap();
+}
+
+#[tokio::test]
+async fn a_late_receipt_does_not_replace_a_newer_result() {
+    let directory = tempfile::tempdir().unwrap();
+    let state = state(&directory, String::new(), None);
+    let ticket_recorded = Utc::now();
+    let record = |outcome, attempt| {
+        state.record_push_outcome("session", "phone", "review", "expo", outcome, None, attempt)
+    };
+    let latest = || async {
+        state
+            .inner
+            .store
+            .lock()
+            .await
+            .push_health
+            .get(&("session".to_owned(), "phone".to_owned()))
+            .map(|record| record.outcome)
+    };
+    record(PushDeliveryOutcome::Accepted, None).await;
+    record(PushDeliveryOutcome::Unregistered, Some(ticket_recorded)).await;
+    assert_eq!(latest().await, Some(PushDeliveryOutcome::Accepted));
+    record(PushDeliveryOutcome::Unregistered, Some(Utc::now())).await;
+    assert_eq!(latest().await, Some(PushDeliveryOutcome::Unregistered));
+}
+
+#[tokio::test]
+async fn a_duplicate_is_not_acknowledged_while_capacity_is_exhausted() {
+    let (endpoint, _events, task) = mock_server().await;
+    let directory = tempfile::tempdir().unwrap();
+    let provider = Arc::new(ApnsProvider::mock(endpoint));
+    let state = state(&directory, String::new(), Some(provider.clone()));
+    state
+        .register_push_registration("session", "native", "native", Some(native("aabb")))
+        .await
+        .unwrap();
+    let permits = (0..).map_while(|_| provider.reserve()).collect::<Vec<_>>();
+    for _ in 0..2 {
+        assert!(matches!(
+            state.notify("session", "daemon", review("R-1")).await,
+            Err(RelayError::TooManyRequests(_))
+        ));
+    }
+    assert!(state.inner.store.lock().await.push_dedupe.is_empty());
+    drop(permits);
+    task.abort();
 }

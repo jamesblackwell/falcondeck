@@ -3353,9 +3353,18 @@ impl AppState {
         provider: &str,
         outcome: PushDeliveryOutcome,
         detail: Option<String>,
+        attempt_recorded_at: Option<DateTime<Utc>>,
     ) {
-        self.inner.store.lock().await.push_health.insert(
-            (session_id.to_owned(), device_id.to_owned()),
+        let mut store = self.inner.store.lock().await;
+        let key = (session_id.to_owned(), device_id.to_owned());
+        // A receipt arrives minutes late; a newer send's result outranks it.
+        if let (Some(attempt), Some(latest)) = (attempt_recorded_at, store.push_health.get(&key))
+            && latest.at > attempt
+        {
+            return;
+        }
+        store.push_health.insert(
+            key,
             PushDeliveryRecord {
                 at: Utc::now(),
                 kind: kind.to_owned(),
@@ -3373,6 +3382,7 @@ impl AppState {
         kind: &str,
         outcome: PushDeliveryOutcome,
         detail: Option<String>,
+        attempt_recorded_at: Option<DateTime<Utc>>,
     ) {
         let device_ids = {
             let store = self.inner.store.lock().await;
@@ -3403,6 +3413,7 @@ impl AppState {
                 "expo",
                 outcome,
                 detail.clone(),
+                attempt_recorded_at,
             )
             .await;
         }
@@ -3477,6 +3488,7 @@ impl AppState {
                 provider,
                 outcome,
                 detail.clone(),
+                None,
             )
             .await;
             results.push(PushTestDeviceResult {
@@ -3604,8 +3616,8 @@ impl AppState {
     /// The title and optional reply preview are visible to the relay and push
     /// service so the OS can render them.
     ///
-    /// Returns false when a recipient could not be scheduled, in which case the
-    /// dedupe entry is released so the caller can retry.
+    /// Returns false when a recipient could not be scheduled. Nothing was sent
+    /// or deduped then, so the caller can retry.
     async fn dispatch_push_notifications(
         &self,
         session_id: &str,
@@ -3624,7 +3636,7 @@ impl AppState {
             .as_ref()
             .map(|id| format!("review:{id}"))
             .or_else(|| thread_id.clone());
-        let recipients = {
+        let (recipients, mut permits, enough_capacity) = {
             let mut store = self.inner.store.lock().await;
             let now = Utc::now();
             let dedupe_window = Duration::seconds(PUSH_DEDUPE_SECONDS);
@@ -3679,8 +3691,24 @@ impl AppState {
             if recipients.is_empty() {
                 return true;
             }
-            store.push_dedupe.insert(dedupe_key, now);
-            recipients
+            // All or nothing, and before the dedupe entry is visible: a
+            // duplicate must never be acknowledged for a send that can't happen,
+            // and a retry after a partial send would alert some devices twice.
+            let apns_count = recipients
+                .iter()
+                .filter(|(_, _, registered)| {
+                    matches!(registered.registration, PushRegistration::Apns { .. })
+                })
+                .count();
+            let mut permits = Vec::with_capacity(apns_count);
+            if let Some(provider) = &self.inner.apns {
+                permits.extend((0..apns_count).map_while(|_| provider.reserve()));
+            }
+            let enough_capacity = permits.len() == apns_count;
+            if enough_capacity {
+                store.push_dedupe.insert(dedupe_key, now);
+            }
+            (recipients, permits, enough_capacity)
         };
 
         let (title, body) =
@@ -3692,21 +3720,8 @@ impl AppState {
                     .unwrap_or_default()
             )
         );
-        // All or nothing, before anything is sent. A retry after a partial
-        // send would alert the devices that already got this one again.
-        let apns_count = recipients
-            .iter()
-            .filter(|(_, _, registered)| {
-                matches!(registered.registration, PushRegistration::Apns { .. })
-            })
-            .count();
-        let mut permits = Vec::with_capacity(apns_count);
-        if let Some(provider) = &self.inner.apns {
-            permits.extend((0..apns_count).map_while(|_| provider.reserve()));
-        }
-        if permits.len() < apns_count {
+        if !enough_capacity {
             warn!("APNs delivery capacity exceeded");
-            drop(permits);
             for (device_id, _, registered) in &recipients {
                 if matches!(registered.registration, PushRegistration::Apns { .. }) {
                     self.record_push_outcome(
@@ -3716,12 +3731,11 @@ impl AppState {
                         "apns",
                         PushDeliveryOutcome::Rejected,
                         Some("relay APNs capacity exceeded".to_owned()),
+                        None,
                     )
                     .await;
                 }
             }
-            let key = push_dedupe_key(session_id, &kind, dedupe_scope.as_deref());
-            self.inner.store.lock().await.push_dedupe.remove(&key);
             return false;
         }
         if let Some(provider) = &self.inner.apns
@@ -3806,6 +3820,7 @@ impl AppState {
                             "apns",
                             outcome,
                             detail,
+                            None,
                         )
                         .await;
                 });
@@ -3913,6 +3928,7 @@ impl AppState {
                             &kind,
                             PushDeliveryOutcome::Rejected,
                             failure,
+                            None,
                         )
                         .await;
                 }
@@ -3980,9 +3996,10 @@ impl AppState {
             }
         };
         for (ticket, token) in tickets.iter().zip(recipients) {
-            self.record_expo_ticket(session_id, kind, token, ticket)
+            self.record_expo_ticket(session_id, kind, token, ticket, None)
                 .await;
         }
+        let tickets_recorded_at = Utc::now();
         let receipt_tickets = tickets
             .iter()
             .zip(recipients)
@@ -4018,7 +4035,7 @@ impl AppState {
         let kind = kind.to_string();
         tokio::spawn(async move {
             state
-                .poll_push_receipts(&session_id, &kind, receipt_tickets)
+                .poll_push_receipts(&session_id, &kind, receipt_tickets, tickets_recorded_at)
                 .await;
         });
     }
@@ -4030,6 +4047,7 @@ impl AppState {
         kind: &str,
         token: &str,
         ticket: &ExpoPushTicket,
+        attempt_recorded_at: Option<DateTime<Utc>>,
     ) {
         let error = expo_ticket_error(ticket);
         let (outcome, detail) = match error.as_deref() {
@@ -4046,6 +4064,7 @@ impl AppState {
             kind,
             outcome,
             detail,
+            attempt_recorded_at,
         )
         .await;
     }
@@ -4055,6 +4074,7 @@ impl AppState {
         session_id: &str,
         kind: &str,
         tickets: Vec<(String, String)>,
+        tickets_recorded_at: DateTime<Utc>,
     ) {
         tokio::time::sleep(std::time::Duration::from_secs(PUSH_RECEIPT_DELAY_SECONDS)).await;
 
@@ -4093,8 +4113,14 @@ impl AppState {
         };
         for (id, token) in &tickets {
             if let Some(receipt) = receipts.get(id) {
-                self.record_expo_ticket(session_id, kind, token, receipt)
-                    .await;
+                self.record_expo_ticket(
+                    session_id,
+                    kind,
+                    token,
+                    receipt,
+                    Some(tickets_recorded_at),
+                )
+                .await;
             }
         }
         let dead_tokens = tickets
