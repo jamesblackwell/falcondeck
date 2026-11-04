@@ -3310,8 +3310,13 @@ impl AppState {
             ));
         }
         validate_notification(&request)?;
-        self.dispatch_push_notifications(session_id, request).await;
-        Ok(())
+        if self.dispatch_push_notifications(session_id, request).await {
+            Ok(())
+        } else {
+            Err(RelayError::TooManyRequests(
+                "push delivery is at capacity".to_string(),
+            ))
+        }
     }
 
     fn device_push_target(&self, device: &TrustedDeviceRecord) -> Option<RegisteredPush> {
@@ -3598,7 +3603,14 @@ impl AppState {
     /// review costs more than a banner the client can choose not to show.
     /// The title and optional reply preview are visible to the relay and push
     /// service so the OS can render them.
-    async fn dispatch_push_notifications(&self, session_id: &str, request: RelayNotifyRequest) {
+    ///
+    /// Returns false when a recipient could not be scheduled, in which case the
+    /// dedupe entry is released so the caller can retry.
+    async fn dispatch_push_notifications(
+        &self,
+        session_id: &str,
+        request: RelayNotifyRequest,
+    ) -> bool {
         let RelayNotifyRequest {
             kind,
             workspace_id,
@@ -3622,7 +3634,7 @@ impl AppState {
             let dedupe_key = push_dedupe_key(session_id, &kind, dedupe_scope.as_deref());
             if store.push_dedupe.contains_key(&dedupe_key) {
                 info!(session_id, kind, "push skipped: duplicate within window");
-                return;
+                return true;
             }
             let connected_devices = store
                 .live_sessions
@@ -3636,7 +3648,7 @@ impl AppState {
                 })
                 .unwrap_or_default();
             let Some(session) = store.data.sessions.get_mut(session_id) else {
-                return;
+                return true;
             };
             session.migrate_legacy_device_fields();
             let session = &*session;
@@ -3665,7 +3677,7 @@ impl AppState {
                 "push dispatch"
             );
             if recipients.is_empty() {
-                return;
+                return true;
             }
             store.push_dedupe.insert(dedupe_key, now);
             recipients
@@ -3680,6 +3692,7 @@ impl AppState {
                     .unwrap_or_default()
             )
         );
+        let mut scheduled = true;
         if let Some(provider) = &self.inner.apns
             && let Some(payload) = crate::push::apns_payload(
                 title,
@@ -3698,6 +3711,7 @@ impl AppState {
                 }
                 let Some(permit) = provider.reserve() else {
                     warn!("APNs delivery capacity exceeded");
+                    scheduled = false;
                     self.record_push_outcome(
                         session_id,
                         device_id,
@@ -3884,6 +3898,11 @@ impl AppState {
                 }
             });
         }
+        if !scheduled {
+            let key = push_dedupe_key(session_id, &kind, dedupe_scope.as_deref());
+            self.inner.store.lock().await.push_dedupe.remove(&key);
+        }
+        scheduled
     }
 
     async fn clear_dead_native_registration(

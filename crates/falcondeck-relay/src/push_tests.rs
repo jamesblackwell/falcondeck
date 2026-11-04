@@ -563,6 +563,30 @@ async fn test_push_clears_a_token_expo_calls_dead_and_names_other_failures() {
 }
 
 #[tokio::test]
+async fn a_review_dropped_at_capacity_is_not_acknowledged_and_can_retry() {
+    let (endpoint, mut events, task) = mock_server().await;
+    let directory = tempfile::tempdir().unwrap();
+    let provider = Arc::new(ApnsProvider::mock(endpoint));
+    let state = state(&directory, String::new(), Some(provider.clone()));
+    state
+        .register_push_registration("session", "native", "native", Some(native("aabb")))
+        .await
+        .unwrap();
+    let permits = std::iter::from_fn(|| provider.reserve()).collect::<Vec<_>>();
+    assert!(matches!(
+        state.notify("session", "daemon", review("R-1")).await,
+        Err(RelayError::TooManyRequests(_))
+    ));
+    drop(permits);
+    state
+        .notify("session", "daemon", review("R-1"))
+        .await
+        .unwrap();
+    assert_eq!(next_push(&mut events).await.1["reviewId"], "R-1");
+    task.abort();
+}
+
+#[tokio::test]
 async fn http_notify_is_daemon_only_and_validated() {
     let (endpoint, mut events, task) = mock_server().await;
     let directory = tempfile::tempdir().unwrap();
