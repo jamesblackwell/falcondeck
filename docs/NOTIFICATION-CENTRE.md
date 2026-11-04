@@ -36,7 +36,9 @@ bodies in `bodies/<id>.md`, written only by the daemon.
   records, then the oldest. The newest record always survives.
 - A failed write keeps the record in memory and the next save retries. A bad or
   future file is left untouched and the daemon runs from memory, because
-  recording must never lose an event to a storage problem or a downgrade.
+  recording must never lose an event to a storage problem or a downgrade. Ids
+  restart in that mode, so a notice with a report is refused rather than risk
+  overwriting a body the preserved index still points at.
 
 ## Record, then deliver
 
@@ -44,7 +46,12 @@ bodies in `bodies/<id>.md`, written only by the daemon.
 leaves the daemon; `deliver_attention` has no other caller. Anything pushed is
 therefore stored. Preferences, desktop presence and a dead relay gate delivery
 only, so a suppressed event is still recorded. A repeat of a known event (same
-request, review or turn) records nothing and does not push again.
+request, review or turn) records nothing and does not push again, including one
+already folded into a thread's row (the row keeps the last 32 folded keys).
+
+A request is published before it is recorded, so a fast answer can arrive first.
+The store remembers the last 64 keys resolved with no record, and a late record
+is then stored already resolved and not pushed.
 
 ### Which turn completions belong
 

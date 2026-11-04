@@ -145,7 +145,7 @@ impl AppState {
         } else {
             self.inner.notifications.record(new, now).await
         };
-        if matches!(recorded, Recorded::Duplicate(_)) {
+        if matches!(recorded, Recorded::Duplicate(_)) || recorded.record().resolved_at.is_some() {
             return AttentionOutcome::Recorded(recorded);
         }
         self.emit_notifications_changed().await;

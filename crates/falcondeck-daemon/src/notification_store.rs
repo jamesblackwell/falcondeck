@@ -5,6 +5,7 @@
 //! rewrite. Recording must never lose an attention event to a storage problem:
 //! a failed write keeps the record in memory for the next save, and a bad or
 //! future file is left untouched while this daemon runs from memory.
+use std::collections::VecDeque;
 use std::path::PathBuf;
 
 use chrono::{DateTime, Duration, Utc};
@@ -32,6 +33,9 @@ pub(crate) const NOTICES_PER_DAY: usize = 10;
 pub(crate) const HIGH_NOTICES_PER_DAY: usize = 2;
 /// Notices all agents together may send, however many tasks are running.
 pub(crate) const ALL_NOTICES_PER_DAY: usize = 30;
+/// Folded event keys kept per record. Replays arrive close to the original.
+const MAX_FOLDED_KEYS: usize = 32;
+const MAX_RESOLVED_EARLY: usize = 64;
 
 /// A record as saved: the wire record plus what only the daemon needs.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -41,6 +45,10 @@ struct Stored {
     /// The same event never records twice: a request, a review, or a turn.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     dedupe_key: Option<String>,
+    /// Keys of earlier events folded into this record, so a replay of one is
+    /// still recognised after a later event took over `dedupe_key`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    folded_keys: Vec<String>,
     /// Who sent a notice, for rate limits.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     sender: Option<String>,
@@ -126,6 +134,9 @@ struct State {
     loaded: bool,
     /// False when the file on disk is not ours to overwrite.
     writable: bool,
+    /// Keys resolved before their record arrived: a request is published
+    /// before it is recorded, so a quick answer can win the race.
+    resolved_early: VecDeque<String>,
 }
 
 pub(crate) struct NotificationStore {
@@ -141,6 +152,7 @@ impl NotificationStore {
                 file: File::default(),
                 loaded: false,
                 writable: true,
+                resolved_early: VecDeque::new(),
             }),
         }
     }
@@ -294,6 +306,7 @@ impl NotificationStore {
         file.records.push(Stored {
             record: record.clone(),
             dedupe_key: new.dedupe_key,
+            folded_keys: Vec::new(),
             sender: new.sender,
             report_key: None,
         });
@@ -309,12 +322,10 @@ impl NotificationStore {
         self.ensure_loaded(state).await;
         self.prune(state, now).await;
         if let Some(key) = new.dedupe_key.as_deref()
-            && let Some(existing) = state
-                .file
-                .records
-                .iter()
-                .rev()
-                .find(|stored| stored.dedupe_key.as_deref() == Some(key))
+            && let Some(existing) = state.file.records.iter().rev().find(|stored| {
+                stored.dedupe_key.as_deref() == Some(key)
+                    || stored.folded_keys.iter().any(|folded| folded == key)
+            })
         {
             return Recorded::Duplicate(Box::new(existing.record.clone()));
         }
@@ -336,12 +347,27 @@ impl NotificationStore {
             stored.record.preview = new.preview;
             stored.record.created_at = now;
             stored.record.repeat_count += 1;
-            stored.dedupe_key = new.dedupe_key;
+            if let Some(key) = std::mem::replace(&mut stored.dedupe_key, new.dedupe_key) {
+                if stored.folded_keys.len() == MAX_FOLDED_KEYS {
+                    stored.folded_keys.remove(0);
+                }
+                stored.folded_keys.push(key);
+            }
             let record = stored.record.clone();
             state.file.records.push(stored);
             Recorded::Coalesced(Box::new(record))
         } else {
-            Recorded::Created(Box::new(Self::insert(&mut state.file, new, now)))
+            let answered = new
+                .dedupe_key
+                .as_ref()
+                .is_some_and(|key| state.resolved_early.contains(key));
+            let mut record = Self::insert(&mut state.file, new, now);
+            if answered && let Some(stored) = state.file.records.last_mut() {
+                stored.record.resolved_at = Some(now);
+                stored.record.read_at = Some(now);
+                record = stored.record.clone();
+            }
+            Recorded::Created(Box::new(record))
         };
         self.prune(state, now).await;
         self.save(state).await;
@@ -436,6 +462,13 @@ impl NotificationStore {
         });
         if let Some(refused) = refused {
             return Err(refused);
+        }
+        // Ids restart when the index could not be loaded, so writing a body
+        // here could overwrite a report the preserved index still points at.
+        if new.body.is_some() && !state.writable {
+            return Err(NoticeRefused::Storage(
+                "notification history could not be loaded, so a report cannot be kept".into(),
+            ));
         }
         let id = format!("N-{}", state.file.next_id);
         if let Some(body) = &new.body {
@@ -619,6 +652,10 @@ impl NotificationStore {
         let Some(stored) = state.file.records.iter_mut().rev().find(|stored| {
             stored.dedupe_key.as_deref() == Some(dedupe_key) && stored.record.resolved_at.is_none()
         }) else {
+            if state.resolved_early.len() == MAX_RESOLVED_EARLY {
+                state.resolved_early.pop_front();
+            }
+            state.resolved_early.push_back(dedupe_key.to_string());
             return false;
         };
         stored.record.resolved_at = Some(now);
@@ -949,6 +986,7 @@ mod tests {
                         repeat_count: 0,
                     },
                     dedupe_key: None,
+                    folded_keys: Vec::new(),
                     sender: None,
                     report_key: None,
                 });
@@ -985,6 +1023,55 @@ mod tests {
             .await;
         assert_eq!(store.status().await.unread_count, 1);
         assert_eq!(std::fs::read_to_string(&path).unwrap(), future);
+    }
+
+    #[tokio::test]
+    async fn a_notice_cannot_overwrite_a_report_when_the_index_will_not_load() {
+        let (temp, store) = store();
+        let dir = temp.path().join("notifications");
+        std::fs::create_dir_all(dir.join("bodies")).unwrap();
+        std::fs::write(dir.join("notifications.json"), "not json").unwrap();
+        std::fs::write(dir.join("bodies/N-1.md"), "the original").unwrap();
+        let report = NewNotification {
+            body: Some("a newer report".into()),
+            ..notice("bot:juno", "Report")
+        };
+        let refused = store.record_notice(report, now()).await.unwrap_err();
+        assert!(matches!(refused, NoticeRefused::Storage(_)));
+        assert_eq!(
+            std::fs::read_to_string(dir.join("bodies/N-1.md")).unwrap(),
+            "the original"
+        );
+        let plain = store
+            .record_notice(notice("bot:juno", "Short"), now())
+            .await;
+        assert!(matches!(plain, Ok(Recorded::Created(_))));
+    }
+
+    #[tokio::test]
+    async fn an_answer_that_beats_its_record_still_resolves_it() {
+        let (_temp, store) = store();
+        assert!(!store.resolve("input:1", now()).await);
+        let late = store
+            .record(event(NotificationKind::InputRequired, "input:1"), now())
+            .await;
+        assert!(late.record().resolved_at.is_some());
+        let counts = store.status().await;
+        assert_eq!((counts.unread_count, counts.needs_you_count), (0, 0));
+    }
+
+    #[tokio::test]
+    async fn a_replay_of_a_folded_event_is_still_a_duplicate() {
+        let (_temp, store) = store();
+        let folding = |key| NewNotification {
+            coalesce: true,
+            ..event(NotificationKind::TurnComplete, key)
+        };
+        store.record(folding("turn:a"), now()).await;
+        store.record(folding("turn:b"), now()).await;
+        let replay = store.record(folding("turn:a"), now()).await;
+        assert!(matches!(replay, Recorded::Duplicate(_)));
+        assert_eq!(replay.record().repeat_count, 1);
     }
 
     #[tokio::test]
