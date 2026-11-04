@@ -3163,17 +3163,15 @@ async fn wait_for_claude_hook_reply(
             request: request.clone(),
         },
     );
-    app.record_and_deliver_attention(super::notification_centre::AttentionEvent::request(
-        &request,
-    ))
-    .await;
+    // Before the file write below: the hook client can vanish during it, which
+    // drops this future, and the card must exist for the guard to cancel.
     let _ = app
         .push_conversation_item(
             workspace_id,
             thread_id,
             ConversationItem::InteractiveRequest {
                 id: request_id.clone(),
-                request: Box::new(request),
+                request: Box::new(request.clone()),
                 created_at: Utc::now(),
                 resolved: false,
                 resolution: None,
@@ -3181,6 +3179,10 @@ async fn wait_for_claude_hook_reply(
             false,
         )
         .await;
+    app.record_and_deliver_attention(super::notification_centre::AttentionEvent::request(
+        &request,
+    ))
+    .await;
 
     match timeout(CLAUDE_APPROVAL_TIMEOUT, decision_rx).await {
         Ok(Ok(reply)) => {
@@ -3337,25 +3339,29 @@ pub(super) async fn ingest_server_request(
                 request: request.clone(),
             },
         );
+        let pushed = match request.thread_id.clone() {
+            Some(thread_id) => app
+                .push_conversation_item(
+                    workspace_id,
+                    &thread_id,
+                    ConversationItem::InteractiveRequest {
+                        id: request_id,
+                        request: Box::new(request.clone()),
+                        created_at: Utc::now(),
+                        resolved: false,
+                        resolution: None,
+                    },
+                    false,
+                )
+                .await
+                .map(drop),
+            None => Ok(()),
+        };
         app.record_and_deliver_attention(super::notification_centre::AttentionEvent::request(
             &request,
         ))
         .await;
-        if let Some(thread_id) = request.thread_id.clone() {
-            app.push_conversation_item(
-                workspace_id,
-                &thread_id,
-                ConversationItem::InteractiveRequest {
-                    id: request_id,
-                    request: Box::new(request),
-                    created_at: Utc::now(),
-                    resolved: false,
-                    resolution: None,
-                },
-                false,
-            )
-            .await?;
-        }
+        pushed?;
         return Ok(());
     }
 

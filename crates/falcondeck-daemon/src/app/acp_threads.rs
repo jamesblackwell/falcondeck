@@ -1784,23 +1784,25 @@ impl AppState {
                             request: request.clone(),
                         },
                     );
+                    let pushed = self
+                        .push_conversation_item(
+                            workspace_id,
+                            &thread_id,
+                            ConversationItem::InteractiveRequest {
+                                id: request_id.clone(),
+                                request: Box::new(request.clone()),
+                                created_at: Utc::now(),
+                                resolved: false,
+                                resolution: None,
+                            },
+                            false,
+                        )
+                        .await;
                     self.record_and_deliver_attention(
                         super::notification_centre::AttentionEvent::request(&request),
                     )
                     .await;
-                    self.push_conversation_item(
-                        workspace_id,
-                        &thread_id,
-                        ConversationItem::InteractiveRequest {
-                            id: request_id.clone(),
-                            request: Box::new(request),
-                            created_at: Utc::now(),
-                            resolved: false,
-                            resolution: None,
-                        },
-                        false,
-                    )
-                    .await?;
+                    pushed?;
                 }
                 self.emit(
                     Some(workspace_id.to_string()),
@@ -1866,23 +1868,25 @@ impl AppState {
                         request: request.clone(),
                     },
                 );
+                let pushed = self
+                    .push_conversation_item(
+                        workspace_id,
+                        &thread_id,
+                        ConversationItem::InteractiveRequest {
+                            id: request_id,
+                            request: Box::new(request.clone()),
+                            created_at: Utc::now(),
+                            resolved: false,
+                            resolution: None,
+                        },
+                        false,
+                    )
+                    .await;
                 self.record_and_deliver_attention(
                     super::notification_centre::AttentionEvent::request(&request),
                 )
                 .await;
-                self.push_conversation_item(
-                    workspace_id,
-                    &thread_id,
-                    ConversationItem::InteractiveRequest {
-                        id: request_id,
-                        request: Box::new(request),
-                        created_at: Utc::now(),
-                        resolved: false,
-                        resolution: None,
-                    },
-                    false,
-                )
-                .await?;
+                pushed?;
                 self.emit(
                     Some(workspace_id.to_string()),
                     None,
@@ -1944,23 +1948,25 @@ impl AppState {
                         request: request.clone(),
                     },
                 );
+                let pushed = self
+                    .push_conversation_item(
+                        workspace_id,
+                        &thread_id,
+                        ConversationItem::InteractiveRequest {
+                            id: request_id,
+                            request: Box::new(request.clone()),
+                            created_at: Utc::now(),
+                            resolved: false,
+                            resolution: None,
+                        },
+                        false,
+                    )
+                    .await;
                 self.record_and_deliver_attention(
                     super::notification_centre::AttentionEvent::request(&request),
                 )
                 .await;
-                self.push_conversation_item(
-                    workspace_id,
-                    &thread_id,
-                    ConversationItem::InteractiveRequest {
-                        id: request_id,
-                        request: Box::new(request),
-                        created_at: Utc::now(),
-                        resolved: false,
-                        resolution: None,
-                    },
-                    false,
-                )
-                .await?;
+                pushed?;
                 self.emit(
                     Some(workspace_id.to_string()),
                     None,
