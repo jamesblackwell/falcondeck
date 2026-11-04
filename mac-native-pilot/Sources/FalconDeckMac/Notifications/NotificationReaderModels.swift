@@ -142,7 +142,8 @@ struct NotificationReviewRecord: Equatable {
                 await load()
                 return
             }
-            note = ""
+            // Words typed during the send were not sent.
+            if note.trimmingCharacters(in: .whitespacesAndNewlines) == trimmed { note = "" }
             if response["data"]["id"].string.isEmpty { await load() }
             else {
                 // A read that began while the answer was on its way is older than this.

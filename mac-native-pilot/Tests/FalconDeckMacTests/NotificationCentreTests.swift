@@ -937,6 +937,21 @@ private actor NotificationNavigationDaemon: DaemonServing {
         XCTAssertEqual(model.note, "")
     }
 
+    func testWordsTypedDuringAResponseAreKept() async {
+        let daemon = FakeReviewDaemon()
+        let model = model(daemon)
+        await model.load()
+        model.note = "Keep the badge."
+        daemon.holdPosts = true
+        let answer = Task { await model.respond(.requestChanges) }
+        for _ in 0..<500 where daemon.heldPostCount == 0 { await Task.yield() }
+        XCTAssertEqual(daemon.heldPostCount, 1)
+        model.note = "Keep the badge. And the"
+        daemon.releasePosts()
+        await answer.value
+        XCTAssertEqual(model.note, "Keep the badge. And the")
+    }
+
     func testAnEmptyNoteIsOmitted() async {
         let daemon = FakeReviewDaemon()
         let model = model(daemon)

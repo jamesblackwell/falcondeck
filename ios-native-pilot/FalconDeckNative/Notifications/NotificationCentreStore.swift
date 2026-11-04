@@ -34,6 +34,9 @@ final class NotificationCentreStore {
     private(set) var offlineReads: Set<String> = []
     /// Hosted reports as rows, newest first. Shown only while out of reach.
     private(set) var reportRecords: [NotificationRecord] = []
+    /// Hosted copies have no read state of their own, and the daemon's list may
+    /// not reach them, so a replayed read would otherwise come back unread.
+    private var readReports: Set<String> = []
     private(set) var replies: [String: String] = [:]
     /// A notification tap asking the list to open this.
     var openRequest: NotificationDetailTarget?
@@ -94,7 +97,7 @@ final class NotificationCentreStore {
     func unreadCount(offline: Bool) -> Int {
         guard offline else { return counts.unread }
         let known = Set(pages.values.flatMap { $0.items.map(\.id) })
-        return counts.unread + reportRecords.filter { !known.contains($0.id) && !offlineReads.contains($0.id) }.count
+        return counts.unread + reportRecords.filter { !known.contains($0.id) && !readPending($0) }.count
     }
 
     func record(_ id: String) -> NotificationRecord? {
@@ -107,7 +110,7 @@ final class NotificationCentreStore {
         return record.markedRead(at: .now)
     }
     private func readPending(_ record: NotificationRecord) -> Bool {
-        offlineReads.contains(record.id) || inFlightReads.contains(record.id) || inFlightUpToSeq.map { record.seq <= $0 && record.seq > 0 } ?? false
+        offlineReads.contains(record.id) || readReports.contains(record.id) || inFlightReads.contains(record.id) || inFlightUpToSeq.map { record.seq <= $0 && record.seq > 0 } ?? false
     }
 
     // MARK: Lifecycle
@@ -123,7 +126,7 @@ final class NotificationCentreStore {
         replySaves = [:]
         pages = [:]; counts = NotificationCounts(); filter = .all; refreshError = nil; actionError = nil; unsupported = false; loadMoreFailed = false
         offlineReads = []; inFlightReads = []; inFlightUpToSeq = nil; readsOverlapped = false; readsRestored = false; readSessionID = nil
-        reports = [:]; reportRecords = []; unreadableReports = []; reportKey = nil; reportsCheckedAt = nil
+        reports = [:]; reportRecords = []; readReports = []; unreadableReports = []; reportKey = nil; reportsCheckedAt = nil
         replies = [:]; repliesRestored = false; vaultCache = nil; demoRecords = nil; openRequest = nil
         Task { [reportClient] in await reportClient.forgetCapabilities() }
         if forgotten { readQueue.purge(); NotificationReplyVault.purge(root: replyRoot) }
@@ -386,6 +389,7 @@ final class NotificationCentreStore {
         guard let response = try? await model.relay.call("notifications.mark_read", params: .object(["ids": .array(ids.sorted().map(JSON.string))])),
               current == model.connectionID else { return }
         offlineReads.subtract(ids)
+        readReports.formUnion(ids.intersection(reportRecords.map(\.id)))
         persistOfflineReads()
         mutationRevision += 1
         adoptKeepingHead(NotificationCounts(response))

@@ -767,6 +767,23 @@ private func settle(_ condition: @MainActor () async -> Bool, file: StaticString
         XCTAssertEqual(rows(rig.store, offline: true), [], "Filters apply to offline rows too")
     }
 
+    func testAHostedReportStaysReadAfterItsReadReachesTheComputer() async throws {
+        let rig = Rig(connected: false) { method, _ in
+            method == "notifications.mark_read" ? Wire.counts(unread: 0, latest: 0) : Wire.list([])
+        }
+        await rig.http.put("rpt_2", try Wire.report("rpt_2", plaintext: Wire.plaintext("rpt_2", notification: "N-20")))
+        await rig.store.refresh(model: rig.model, immediate: true)
+        XCTAssertEqual(rig.store.unreadCount(offline: true), 1)
+        await rig.store.markRead("N-20", model: rig.model)
+        XCTAssertEqual(rig.store.unreadCount(offline: true), 0)
+        rig.model.connected = true
+        await rig.store.replayOfflineReads(model: rig.model)
+        XCTAssertEqual(rig.store.offlineReads, [])
+        rig.model.connected = false
+        XCTAssertEqual(rig.store.unreadCount(offline: true), 0, "The daemon's list does not reach this row")
+        XCTAssertEqual(rig.store.record("N-20")?.isRead, true)
+    }
+
     func testReportsOpenWithBoundedConcurrencyAndOnlyOnce() async throws {
         let rig = Rig(connected: false)
         for index in 0..<12 { await rig.http.put("rpt_\(index)", try Wire.report("rpt_\(index)", plaintext: Wire.plaintext("rpt_\(index)", notification: "N-\(index)"))) }

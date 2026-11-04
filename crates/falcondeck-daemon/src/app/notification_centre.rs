@@ -157,9 +157,11 @@ impl AppState {
             .map(|report| report.report_id.clone());
         if push.report_id.is_some() {
             // The push should not beat the report to the relay: the Mac may
-            // sleep the moment it is sent. Bounded, because a slow relay must
-            // not hold a notice back; the sync retries on the next connection.
-            let _ = tokio::time::timeout(REPORT_UPLOAD_WAIT, self.sync_relay_reports()).await;
+            // sleep the moment it is sent. Only the wait is bounded, because a
+            // slow relay must not hold a notice back; the upload itself carries on.
+            let app = self.clone();
+            let upload = tokio::spawn(async move { app.sync_relay_reports().await });
+            let _ = tokio::time::timeout(REPORT_UPLOAD_WAIT, upload).await;
         }
         self.deliver_attention(push).await;
         AttentionOutcome::Recorded(recorded)
@@ -525,7 +527,8 @@ impl AppState {
     }
 }
 
-const REPORT_UPLOAD_WAIT: std::time::Duration = std::time::Duration::from_secs(5);
+const REPORT_UPLOAD_WAIT: std::time::Duration =
+    std::time::Duration::from_secs(if cfg!(test) { 1 } else { 5 });
 const REPORT_UPLOAD_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(20);
 
 /// What this relay accepts, or `None` for a relay without report hosting.
@@ -1148,9 +1151,11 @@ mod notice_tests {
     struct Relay {
         reports: bool,
         puts: Arc<StdLock<Vec<(String, falcondeck_core::PutRelayReportRequest)>>>,
+        slow: std::time::Duration,
     }
 
     async fn capabilities(State(relay): State<Relay>) -> Json<Value> {
+        tokio::time::sleep(relay.slow).await;
         Json(if relay.reports {
             json!({"expo": true, "apns": [], "reports": {"max_bytes": 262144, "max_ttl_seconds": 2592000}})
         } else {
@@ -1198,6 +1203,33 @@ mod notice_tests {
     }
 
     const REPORT: &str = "# Launch\n\nThe secret pricing change shipped.";
+
+    #[tokio::test]
+    async fn a_slow_relay_holds_the_notice_back_only_briefly_and_still_gets_the_report() {
+        let (app, _temp) = fixture().await;
+        let relay = Relay {
+            reports: true,
+            slow: REPORT_UPLOAD_WAIT + std::time::Duration::from_millis(300),
+            ..Default::default()
+        };
+        paired(&app, &relay, [7; 32]).await;
+        let _rx = bridge(&app).await;
+        notify(
+            &app,
+            json!({"title": "Launch", "summary": "Shipped.", "body": REPORT}),
+        )
+        .await
+        .unwrap();
+        assert!(relay.puts.lock().unwrap().is_empty(), "the wait ran out");
+        let uploaded = async {
+            while relay.puts.lock().unwrap().is_empty() {
+                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            }
+        };
+        tokio::time::timeout(std::time::Duration::from_secs(5), uploaded)
+            .await
+            .expect("the upload outlives the wait");
+    }
 
     #[tokio::test]
     async fn a_report_goes_up_encrypted_and_binds_itself_to_its_ids() {
