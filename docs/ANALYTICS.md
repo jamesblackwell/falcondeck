@@ -145,7 +145,8 @@ deleted threads.
 The summary lists every scheduled task with runs in the period (and every
 enabled one, even without runs): schedule, state, thread mode, runs, runs that
 found nothing to do, failures, skips, agent time, threads used and the latest
-outcome, with review flags:
+outcome, the harness, model and bot behind its runs (`agents`, `bots`) and its
+configured `provider`, with review flags:
 
 - `rarely_useful`: at least 80% of finished runs (six or more) found nothing to do.
 - `very_frequent`: 24 or more runs a day.
@@ -273,3 +274,17 @@ the reporting window. Manual turns outside those intervals are excluded, and a
 record matching overlapping runs of one task counts once. Runs missing either
 boundary stay unattributed until both are available; retained usage can outlive
 deleted definitions.
+
+## Provider usage payloads (facts for token tracking)
+
+Scoping notes live in [usage-tracking-scope.md](usage-tracking-scope.md). Lasting facts:
+
+- Claude `result.usage` is the **last API call only**, not the turn. The turn
+  aggregate, including subagents, is `result.modelUsage` (per model, with
+  `costUSD`); `model_usage_since_last_result` is the per-result slice.
+  `input_tokens` excludes cache.
+- Codex `input_tokens` **includes** `cached_input_tokens`. `last_token_usage` is
+  per request, `total_token_usage` is cumulative.
+- Grok sends per-turn usage, per-model usage and `costUsdTicks` in
+  `_x.ai/session/update` `turn_completed`. Generic ACP agents may return
+  `usage` on the `session/prompt` response; `usage_update` is context fill only.

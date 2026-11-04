@@ -1,29 +1,33 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import {
-  Badge,
-  Button,
-  CopyButton,
-  SearchField,
-  SegmentedControl,
-  SettingList,
-  SettingRow,
-  SettingsPage,
-  SettingsPageHeader,
-  SettingsSection,
-  SwitchRow,
-  cn,
-} from '@falcondeck/ui'
+import { Button, SegmentedControl, SettingsPage, SettingsPageHeader, cn } from '@falcondeck/ui'
 import {
   createDaemonApiClient,
   type AnalyticsClearTarget,
-  type AnalyticsDay,
   type AnalyticsPrompt,
   type AnalyticsSettings,
   type AnalyticsStatus,
   type AnalyticsSummary,
-  type AnalyticsUsageRow,
+  type AnalyticsUsageReport,
 } from '@falcondeck/client-core'
 import { RefreshCw } from 'lucide-react'
+
+import { ActivityTab } from './analytics/ActivityTab'
+import { LoadingTab, NOTE } from './analytics/analytics-ui'
+import {
+  ANALYTICS_SETTING_TABS,
+  ANALYTICS_TABS,
+  NO_SCHEDULED_FILTERS,
+  NO_THREAD_FILTERS,
+  readStoredTab,
+  storeTab,
+  type AnalyticsTab,
+} from './analytics/analytics-utils'
+import { MessagesTab } from './analytics/MessagesTab'
+import { OverviewTab } from './analytics/OverviewTab'
+import { RecordingTab } from './analytics/RecordingTab'
+import { ScheduledTab } from './analytics/ScheduledTab'
+import { ThreadsTab } from './analytics/ThreadsTab'
+import { TokensTab } from './analytics/TokensTab'
 
 export type AnalyticsPanelProps = {
   baseUrl: string | null
@@ -35,228 +39,30 @@ export type AnalyticsPanelProps = {
   /** Opens a thread by id; when absent, thread titles stay plain text. */
   onOpenAutomation?: (id: string) => void
   onOpenThread?: (workspaceId: string, threadId: string) => void
+  /** A deep link to an on-page title; a fresh object per request opens its tab. */
+  focusRequest?: { setting: string } | null
 }
 
 type Period = '7' | '30' | '90'
-type DailyMetric = 'user_messages' | 'agent_messages' | 'scheduled' | 'turns' | 'commits'
 
-const DAILY_METRICS: Array<{ value: DailyMetric; label: string }> = [
-  { value: 'user_messages', label: 'Your messages' },
-  { value: 'agent_messages', label: 'Agent messages' },
-  { value: 'scheduled', label: 'Scheduled' },
-  { value: 'turns', label: 'Turns' },
-  { value: 'commits', label: 'Commits' },
-]
+const requestedTab = (focus: AnalyticsPanelProps['focusRequest']) =>
+  focus ? ANALYTICS_SETTING_TABS[focus.setting] : undefined
 
-const RETENTION: Array<{ value: string; label: string }> = [
-  { value: '3', label: '3 months' },
-  { value: '6', label: '6 months' },
-  { value: '12', label: '1 year' },
-  { value: '24', label: '2 years' },
-]
-
-const AUTOMATION_FLAGS: Record<string, string> = {
-  large_reused_context: 'Large context',
-  reused_thread_model_pin: 'Model pin on shared thread',
-  bot_home_frequent: 'Frequent bot-home runs',
-  cache_cold_reuse: 'Cold cache reuse',
-  rarely_useful: 'Rarely finds anything',
-  very_frequent: 'Very frequent',
-  failing: 'Failing',
-  thread_per_run: 'New thread each run',
-}
-
-const AUTOMATION_HINTS: Record<string, string> = {
-  large_reused_context: 'Use fresh runs or a smaller compaction window to reduce reused context.',
-  reused_thread_model_pin: 'Clear model and effort pins or use fresh runs with a bot.',
-  bot_home_frequent: 'Use fresh runs with a bot or schedule the home thread at least four hours apart.',
-  cache_cold_reuse: 'Run within the cache TTL or use fresh threads.',
-  rarely_useful: 'Run less often or add a shell pre-check.',
-  very_frequent: 'Reduce the schedule frequency.',
-  failing: 'Open the automation and inspect recent failures.',
-  thread_per_run: 'Review the schedule and whether each run needs a fresh thread.',
-}
-
-function modelLabel(model: string) {
-  return model.replace(/^claude-/, '').replace(/-(\d{8})$/, '').replace(/-(\d+)-(\d+)$/, ' $1.$2').replace(/^(haiku|sonnet|opus)/, (name) => name[0].toUpperCase() + name.slice(1))
-}
-
-function tokenTotal(usage?: { input_tokens: number; cache_read_tokens: number; cache_write_tokens: number; output_tokens: number }) {
-  return usage ? usage.input_tokens + usage.cache_read_tokens + usage.cache_write_tokens + usage.output_tokens : 0
-}
-
-const USAGE_ORIGINS: Record<string, string> = {
-  user: 'You',
-  agent_spawn: 'Agent task',
-  scheduled: 'Scheduled',
-  automation: 'Automation',
-}
-
-const count = (value: number) => value.toLocaleString()
-
-function compact(value: number) {
-  if (value < 1000) return String(value)
-  if (value < 1_000_000) return `${(value / 1000).toFixed(value < 10_000 ? 1 : 0)}k`
-  return `${(value / 1_000_000).toFixed(1)}M`
-}
-
-function duration(ms: number) {
-  if (!ms) return '—'
-  const seconds = Math.round(ms / 1000)
-  if (seconds < 60) return `${seconds}s`
-  const minutes = Math.floor(seconds / 60)
-  return minutes < 60 ? `${minutes}m ${seconds % 60}s` : `${Math.floor(minutes / 60)}h ${minutes % 60}m`
-}
-
-function bytes(value: number) {
-  if (value < 1024) return `${value} B`
-  if (value < 1024 * 1024) return `${(value / 1024).toFixed(0)} KB`
-  return `${(value / 1024 / 1024).toFixed(1)} MB`
-}
-
-function when(at: string) {
-  return new Date(at).toLocaleString(undefined, {
-    month: 'short',
-    day: 'numeric',
-    hour: '2-digit',
-    minute: '2-digit',
-  })
-}
-
-function shortDate(date: string) {
-  return new Date(`${date}T00:00:00`).toLocaleDateString(undefined, { month: 'short', day: 'numeric' })
-}
-
-function percent(part: number, whole: number) {
-  return whole ? `${Math.round((part / whole) * 100)}%` : '0%'
-}
-
-/** Provider-reported API-equivalent cost; small figures keep precision. */
-function usd(value: number) {
-  if (!value) return '—'
-  return `$${value >= 1 ? value.toFixed(2) : value.toFixed(4)}`
-}
-
-const TABLE = 'w-full text-left text-[length:var(--fd-text-sm)]'
-const TH = 'pb-2 text-[length:var(--fd-text-xs)] font-medium text-fg-muted'
-const TD = 'border-t border-border-subtle py-2 pr-3 align-top text-fg-secondary'
-const NUM = 'text-right tabular-nums'
-const EMPTY = 'text-[length:var(--fd-text-sm)] text-fg-muted'
-
-function Stat({ label, value, detail }: { label: string; value: string; detail?: string }) {
-  return (
-    <div className="space-y-1 rounded-[var(--fd-radius-lg)] border border-border-subtle bg-surface-2 px-3.5 py-3">
-      <p className="text-[length:var(--fd-text-xs)] text-fg-muted">{label}</p>
-      <p className="fd-type-heading text-fg-primary tabular-nums">{value}</p>
-      {detail ? <p className="text-[length:var(--fd-text-xs)] text-fg-tertiary">{detail}</p> : null}
-    </div>
-  )
-}
-
-/** Single-series daily bars; each bar names its day and value on hover. */
-function DailyBars({ days, metric, label }: { days: AnalyticsDay[]; metric: DailyMetric; label: string }) {
-  const peak = Math.max(1, ...days.map((day) => day[metric] ?? 0))
-  return (
-    <figure className="space-y-2">
-      <div className="flex items-baseline justify-between text-[length:var(--fd-text-xs)] text-fg-muted">
-        <figcaption>{label} per day</figcaption>
-        <span className="tabular-nums">Peak {count(peak)}</span>
-      </div>
-      <div className="flex h-28 items-end gap-[2px] border-b border-border-subtle" aria-hidden="true">
-        {days.map((day) => {
-          const value = day[metric] ?? 0
-          return (
-            <div
-              key={day.date}
-              title={`${shortDate(day.date)}: ${count(value)}`}
-              className="group flex h-full min-w-0 flex-1 items-end"
-            >
-              <div
-                className="w-full rounded-t-[4px] bg-accent opacity-80 transition-opacity group-hover:opacity-100"
-                style={{ height: value ? `${Math.max(3, (value / peak) * 100)}%` : 0 }}
-              />
-            </div>
-          )
-        })}
-      </div>
-      <div className="flex justify-between text-[length:var(--fd-text-2xs)] text-fg-muted">
-        <span>{days[0] ? shortDate(days[0].date) : ''}</span>
-        <span>{days.at(-1) ? shortDate(days.at(-1)!.date) : ''}</span>
-      </div>
-      <table className="sr-only">
-        <caption>{label} per day</caption>
-        <tbody>
-          {days.map((day) => (
-            <tr key={day.date}>
-              <th scope="row">{day.date}</th>
-              <td>{day[metric] ?? 0}</td>
-            </tr>
-          ))}
-        </tbody>
-      </table>
-    </figure>
-  )
-}
-
-/** One labelled share bar per row; a single hue, so no legend is needed. */
-function ShareBars({ rows, total }: { rows: Array<{ label: string; value: number }>; total: number }) {
-  return (
-    <dl className="space-y-2">
-      {rows.map((row) => (
-        <div key={row.label} className="grid grid-cols-[9rem_1fr_4.5rem] items-center gap-3">
-          <dt className="text-[length:var(--fd-text-sm)] text-fg-secondary">{row.label}</dt>
-          <div className="h-2 rounded-full bg-surface-3" aria-hidden="true">
-            <div
-              className="h-2 rounded-full bg-accent opacity-80"
-              style={{ width: total ? `${(row.value / total) * 100}%` : 0 }}
-            />
-          </div>
-          <dd className="text-right text-[length:var(--fd-text-xs)] tabular-nums text-fg-tertiary">
-            {count(row.value)} · {percent(row.value, total)}
-          </dd>
-        </div>
-      ))}
-    </dl>
-  )
-}
-
-function PromptRow({ prompt }: { prompt: AnalyticsPrompt }) {
-  const [open, setOpen] = useState(false)
-  return (
-    <li className="space-y-1 border-t border-border-subtle py-2.5 first:border-t-0">
-      <div className="flex flex-wrap items-baseline gap-x-2 text-[length:var(--fd-text-xs)] text-fg-muted">
-        <span className="tabular-nums">{when(prompt.at)}</span>
-        <span className="text-fg-tertiary">{prompt.project || 'No project'}</span>
-        <span className="min-w-0 truncate">· {prompt.title}</span>
-      </div>
-      <button
-        type="button"
-        onClick={() => setOpen((value) => !value)}
-        className={cn(
-          'fd-focus block w-full whitespace-pre-wrap rounded-[var(--fd-radius-sm)] text-left text-[length:var(--fd-text-sm)] text-fg-secondary',
-          open ? null : 'line-clamp-3',
-        )}
-        aria-expanded={open}
-      >
-        {prompt.text}
-      </button>
-    </li>
-  )
-}
-
-export function AnalyticsPanel({ baseUrl, onToast, onOpenThread, onOpenAutomation }: AnalyticsPanelProps) {
+export function AnalyticsPanel({ baseUrl, onToast, onOpenThread, onOpenAutomation, focusRequest }: AnalyticsPanelProps) {
   const api = useMemo(() => (baseUrl ? createDaemonApiClient(baseUrl) : null), [baseUrl])
-  const [tokenSort, setTokenSort] = useState<'desc' | 'asc' | null>(null)
+  const [tab, setTab] = useState<AnalyticsTab>(() => requestedTab(focusRequest) ?? readStoredTab())
   const [period, setPeriod] = useState<Period>('30')
-  const [metric, setMetric] = useState<DailyMetric>('user_messages')
   const [summary, setSummary] = useState<AnalyticsSummary | null>(null)
   const [status, setStatus] = useState<AnalyticsStatus | null>(null)
-  const [threadUsage, setThreadUsage] = useState<AnalyticsUsageRow[]>([])
+  const [threadUsage, setThreadUsage] = useState<AnalyticsUsageReport | null>(null)
   const [prompts, setPrompts] = useState<AnalyticsPrompt[]>([])
   const [query, setQuery] = useState('')
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [confirming, setConfirming] = useState<AnalyticsClearTarget | null>(null)
+  // Filters live here so they survive switching tabs.
+  const [threadFilters, setThreadFilters] = useState(NO_THREAD_FILTERS)
+  const [scheduledFilters, setScheduledFilters] = useState(NO_SCHEDULED_FILTERS)
   // Only the latest load may update the page; an older, slower one is discarded.
   const loadId = useRef(0)
   // Saves run one at a time from the latest wanted settings, so a quick second
@@ -280,14 +86,9 @@ export function AnalyticsPanel({ baseUrl, onToast, onOpenThread, onOpenAutomatio
       wanted.current ??= nextStatus.settings
       // Older daemons lack the usage endpoint; the tables simply stay empty
       // instead of blanking the whole panel.
-      let rows: AnalyticsUsageRow[] = []
-      try {
-        rows = (await api.analyticsUsage(Number(period), 'thread')).rows ?? []
-      } catch {
-        rows = []
-      }
+      const report = await api.analyticsUsage(Number(period), 'thread').catch(() => null)
       if (id !== loadId.current) return
-      setThreadUsage(rows)
+      setThreadUsage(report)
     } catch (err) {
       if (id === loadId.current) setError(err instanceof Error ? err.message : String(err))
     } finally {
@@ -298,6 +99,16 @@ export function AnalyticsPanel({ baseUrl, onToast, onOpenThread, onOpenAutomatio
   useEffect(() => {
     void load()
   }, [load])
+
+  const selectTab = useCallback((next: AnalyticsTab) => {
+    setTab(next)
+    storeTab(next)
+  }, [])
+
+  useEffect(() => {
+    const requested = requestedTab(focusRequest)
+    if (requested) selectTab(requested)
+  }, [focusRequest, selectTab])
 
   useEffect(() => {
     if (!api) return
@@ -366,32 +177,6 @@ export function AnalyticsPanel({ baseUrl, onToast, onOpenThread, onOpenAutomatio
     }
   }
 
-  const totals = summary?.totals
-  const scheduledRuns = useMemo(
-    () =>
-      (summary?.automations ?? []).reduce(
-        (sum, automation) => ({
-          runs: sum.runs + automation.runs,
-          noAction: sum.noAction + automation.no_action,
-        }),
-        { runs: 0, noAction: 0 },
-      ),
-    [summary?.automations],
-  )
-  const waiting = summary?.waiting
-  const triggerRows = useMemo(() => {
-    const triggers = summary?.triggers
-    const rows = [
-      { label: 'You', value: triggers?.user ?? 0 },
-      { label: 'Scheduled tasks', value: triggers?.scheduled ?? 0 },
-      { label: 'Other agents', value: triggers?.agent ?? 0 },
-      { label: 'Delegated briefs', value: triggers?.delegation ?? 0 },
-      { label: 'Continuing work', value: triggers?.other ?? 0 },
-    ]
-    return { rows, user: rows[0].value, total: rows.reduce((sum, row) => sum + row.value, 0) }
-  }, [summary?.triggers])
-  const metricLabel = DAILY_METRICS.find((option) => option.value === metric)?.label ?? ''
-
   return (
     <SettingsPage>
       <SettingsPageHeader
@@ -421,608 +206,57 @@ export function AnalyticsPanel({ baseUrl, onToast, onOpenThread, onOpenAutomatio
           </>
         }
       />
+      <SegmentedControl
+        kind="tabs"
+        ariaLabel="Analytics sections"
+        value={tab}
+        onChange={selectTab}
+        options={ANALYTICS_TABS}
+        className="flex w-fit max-w-full overflow-x-auto [&>button]:shrink-0 [&>button]:whitespace-nowrap"
+      />
       {error ? (
         <p role="alert" className="text-[length:var(--fd-text-sm)] text-danger">
           {error}
         </p>
       ) : null}
 
-      <SettingsSection title="Overview" description="Totals for the selected period.">
-        <div className="grid grid-cols-2 gap-2.5 sm:grid-cols-3">
-          <Stat
-            label="Your messages"
-            value={totals ? count(totals.user_messages) : '—'}
-            detail={totals?.scheduled_messages ? `+ ${count(totals.scheduled_messages)} scheduled` : undefined}
+      <div role="tabpanel" aria-label={ANALYTICS_TABS.find((option) => option.value === tab)?.label} className="space-y-6">
+        {tab === 'recording' ? (
+          <RecordingTab
+            status={status}
+            confirming={confirming}
+            onConfirm={setConfirming}
+            onClear={(target) => void clear(target)}
+            onSave={saveSettings}
           />
-          <Stat
-            label="Agent messages"
-            value={totals ? count(totals.agent_messages) : '—'}
-            detail={
-              totals?.agent_messages
-                ? `${percent(totals.ack_like_messages, totals.agent_messages)} look like acknowledgements`
-                : undefined
-            }
+        ) : !api ? (
+          <p className={NOTE}>Connect to the daemon to see analytics.</p>
+        ) : !summary ? (
+          error ? null : <LoadingTab />
+        ) : tab === 'overview' ? (
+          <OverviewTab summary={summary} usageTotals={threadUsage?.totals ?? null} />
+        ) : tab === 'tokens' ? (
+          <TokensTab summary={summary} />
+        ) : tab === 'threads' ? (
+          <ThreadsTab
+            rows={threadUsage?.rows ?? []}
+            filters={threadFilters}
+            onFilters={setThreadFilters}
+            onOpenThread={onOpenThread}
           />
-          <Stat
-            label="Scheduled runs"
-            value={summary ? count(scheduledRuns.runs) : '—'}
-            detail={
-              scheduledRuns.runs
-                ? `${percent(scheduledRuns.noAction, scheduledRuns.runs)} found nothing to do`
-                : undefined
-            }
+        ) : tab === 'scheduled' ? (
+          <ScheduledTab
+            automations={summary.automations ?? []}
+            filters={scheduledFilters}
+            onFilters={setScheduledFilters}
+            onOpenAutomation={onOpenAutomation}
           />
-          <Stat label="Tasks agents created" value={totals ? count(totals.delegations) : '—'} />
-          <Stat
-            label="Turns"
-            value={totals ? count(totals.turns) : '—'}
-            detail={totals?.failed_turns ? `${count(totals.failed_turns)} failed` : undefined}
-          />
-          <Stat label="Commits" value={totals ? count(totals.commits ?? 0) : '—'} />
-          <Stat label="File writes" value={totals ? count(totals.file_writes) : '—'} />
-        </div>
-        {summary ? (
-          <div className="space-y-3">
-            <SegmentedControl ariaLabel="Daily chart" value={metric} onChange={setMetric} options={DAILY_METRICS} />
-            <DailyBars days={summary.daily} metric={metric} label={metricLabel} />
-          </div>
-        ) : null}
-      </SettingsSection>
-
-      <SettingsSection
-        title="Scheduled tasks"
-        description="Every scheduled task, flagged when it may cost more than it gives. A run that finds nothing to do still takes a turn; frequent runs grow a thread's context or the sidebar."
-      >
-        {summary?.automations?.length ? (
-          <div className="overflow-x-auto"><table className={cn(TABLE, "min-w-[960px]")}>
-            <thead>
-              <tr>
-                <th className={cn(TH, "min-w-64 pr-4")}>Task</th>
-                <th className={cn(TH, "min-w-40 pr-4")}>Models</th>
-                <th className={cn(TH, NUM, "px-3 whitespace-nowrap")} aria-sort={tokenSort === null ? "none" : tokenSort === "desc" ? "descending" : "ascending"}><button type="button" className="fd-focus" onClick={() => setTokenSort(tokenSort === "desc" ? "asc" : "desc")}>Tokens {tokenSort === "desc" ? "↓" : tokenSort === "asc" ? "↑" : "↕"}</button></th>
-                <th className={cn(TH, NUM, "px-3 whitespace-nowrap")}>Runs</th>
-                <th className={cn(TH, NUM, "px-3 whitespace-nowrap")}>Nothing to do</th>
-                <th className={cn(TH, NUM, "px-3 whitespace-nowrap")}>Failed</th>
-                <th className={cn(TH, NUM, "px-3 whitespace-nowrap")}>Agent time</th>
-                <th className={cn(TH, NUM, "px-3 whitespace-nowrap")}>Threads</th>
-              </tr>
-            </thead>
-            <tbody>
-              {[...summary.automations].sort((a, b) => tokenSort ? (tokenSort === "desc" ? -1 : 1) * (tokenTotal(a.usage) - tokenTotal(b.usage)) : 0).map((automation) => (
-                <tr key={automation.id ?? automation.name}>
-                  <td className={TD}>
-                    <div className="space-y-1">
-                      <div className="flex flex-wrap items-center gap-1.5">
-                        <span className={automation.state === 'paused' ? 'text-fg-muted' : undefined}>
-                          {automation.id && automation.state && onOpenAutomation ? <button type="button" className="fd-focus text-left hover:underline" onClick={() => onOpenAutomation(automation.id!)}>{automation.name}</button> : automation.name}
-                        </span>
-                        {(automation.flags ?? []).map((flag) => (
-                          <span key={flag} title={AUTOMATION_HINTS[flag]}><Badge variant={flag === 'failing' ? 'danger' : 'warning'}>
-                            {AUTOMATION_FLAGS[flag] ?? flag}
-                          </Badge></span>
-                        ))}
-                      </div>
-                      <p className="text-[length:var(--fd-text-xs)] text-fg-muted">
-                        {[
-                          automation.schedule,
-                          automation.state && automation.state !== 'enabled' ? automation.state : null,
-                          automation.last_run_at ? `last ran ${when(automation.last_run_at)}` : null,
-                        ]
-                          .filter(Boolean)
-                          .join(' · ')}
-                      </p>
-                    </div>
-                  </td>
-                  <td className={TD}>
-                    <p className={automation.models?.length ? undefined : 'text-fg-muted'}>
-                      {automation.models?.length ? automation.models.map(modelLabel).join(' · ') : modelLabel(automation.configured_model || automation.fallback_model || 'Unknown')}
-                    </p>
-                    {automation.models?.length && automation.configured_model && !automation.models.includes(automation.configured_model) ? <p className="text-fg-muted text-[length:var(--fd-text-xs)]">Pin: {modelLabel(automation.configured_model)}</p> : null}
-                  </td>
-                  <td className={cn(TD, NUM, 'whitespace-nowrap')} title={automation.usage ? `Input: ${count(automation.usage.input_tokens)} · Cache read: ${count(automation.usage.cache_read_tokens)} · Cache write: ${count(automation.usage.cache_write_tokens)} · Output: ${count(automation.usage.output_tokens)}` : 'No recorded usage'}>{automation.usage?.turns ? compact(tokenTotal(automation.usage)) : '—'}</td>
-                  <td className={cn(TD, NUM, "whitespace-nowrap px-3")}>{count(automation.runs)}</td>
-                  <td className={cn(TD, NUM, "whitespace-nowrap px-3")}>
-                    {automation.runs > automation.skipped ? percent(automation.no_action, automation.runs - automation.skipped) : '—'}
-                  </td>
-                  <td className={cn(TD, NUM, automation.failed ? 'text-danger' : null)}>{count(automation.failed)}</td>
-                  <td className={cn(TD, NUM, "whitespace-nowrap px-3")}>{automation.agent_ms ? duration(automation.agent_ms) : '—'}</td>
-                  <td className={cn(TD, NUM, "whitespace-nowrap px-3")}>{count(automation.threads)}</td>
-                </tr>
-              ))}
-            </tbody>
-          </table></div>
+        ) : tab === 'activity' ? (
+          <ActivityTab summary={summary} />
         ) : (
-          <p className={EMPTY}>No scheduled tasks ran in this period.</p>
+          <MessagesTab projects={summary.projects} prompts={prompts} query={query} onQuery={setQuery} />
         )}
-      </SettingsSection>
-
-      <SettingsSection
-        title="Who drives the work"
-        description="What started each agent turn. The more turns start without you, the more the system runs itself."
-      >
-        {triggerRows.total ? (
-          <>
-            <p className="text-[length:var(--fd-text-sm)] text-fg-secondary">
-              <span className="fd-type-heading tabular-nums text-fg-primary">
-                {percent(triggerRows.total - triggerRows.user, triggerRows.total)}
-              </span>{' '}
-              of turns started without you
-            </p>
-            <ShareBars rows={triggerRows.rows} total={triggerRows.total} />
-          </>
-        ) : (
-          <p className={EMPTY}>No finished turns in this period.</p>
-        )}
-      </SettingsSection>
-
-      <SettingsSection
-        title="Waiting on you"
-        description="How long finished work and approvals waited for you. Replies more than three days later are left out."
-      >
-        <div className="grid grid-cols-2 gap-2.5 sm:grid-cols-3">
-          <Stat
-            label="Median time to your reply"
-            value={waiting?.replies ? duration(waiting.median_reply_ms) : '—'}
-            detail={waiting?.replies ? `${count(waiting.replies)} replies` : undefined}
-          />
-          <Stat
-            label="Slowest 10% of replies"
-            value={waiting?.replies ? `over ${duration(waiting.p90_reply_ms)}` : '—'}
-          />
-          <Stat
-            label="Approvals and questions"
-            value={waiting?.requests ? duration(waiting.median_request_wait_ms) : '—'}
-            detail={waiting?.requests ? `median wait across ${count(waiting.requests)}` : undefined}
-          />
-        </div>
-      </SettingsSection>
-
-      <SettingsSection
-        title="Agent communication"
-        description="Messages agents send each other through FalconDeck. Short acknowledgements usually mean an agent is replying when nothing needs to be said."
-      >
-        {summary?.agent_pairs.length ? (
-          <table className={TABLE}>
-            <thead>
-              <tr>
-                <th className={TH}>From → to</th>
-                <th className={cn(TH, NUM)}>Messages</th>
-                <th className={cn(TH, NUM)}>Avg length</th>
-                <th className={cn(TH, NUM)}>Acknowledgements</th>
-              </tr>
-            </thead>
-            <tbody>
-              {summary.agent_pairs.map((pair) => (
-                <tr key={`${pair.from}:${pair.to}`}>
-                  <td className={TD}>
-                    {pair.from_title} → {pair.to_title}
-                  </td>
-                  <td className={cn(TD, NUM)}>{count(pair.messages)}</td>
-                  <td className={cn(TD, NUM)}>{count(pair.avg_chars)} chars</td>
-                  <td className={cn(TD, NUM)}>{percent(pair.ack_like, pair.messages)}</td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        ) : (
-          <p className={EMPTY}>No messages between agents in this period.</p>
-        )}
-        {summary?.recent_agent_messages.length ? (
-          <div className="space-y-2">
-            <p className="text-[length:var(--fd-text-xs)] font-medium text-fg-muted">Latest</p>
-            <ul>
-              {summary.recent_agent_messages.map((message, index) => (
-                <li key={index} className="space-y-1 border-t border-border-subtle py-2 first:border-t-0">
-                  <div className="flex flex-wrap items-center gap-x-2 text-[length:var(--fd-text-xs)] text-fg-muted">
-                    <span className="tabular-nums">{when(message.at)}</span>
-                    <span>
-                      {message.from_title} → {message.to_title}
-                    </span>
-                    {message.ack_like ? <Badge variant="warning">Acknowledgement</Badge> : null}
-                  </div>
-                  <p className="text-[length:var(--fd-text-sm)] text-fg-secondary">{message.excerpt}</p>
-                </li>
-              ))}
-            </ul>
-          </div>
-        ) : null}
-      </SettingsSection>
-
-      <SettingsSection
-        title="Your messages"
-        description="What you send to agents, newest first. Messages written by agents and scheduled tasks are counted but not kept."
-      >
-        {summary?.projects.length ? (
-          <table className={TABLE}>
-            <thead>
-              <tr>
-                <th className={TH}>Project or bot</th>
-                <th className={cn(TH, NUM)}>Messages</th>
-                <th className={cn(TH, NUM)}>Avg length</th>
-                <th className={cn(TH, NUM)}>Commits</th>
-              </tr>
-            </thead>
-            <tbody>
-              {summary.projects.map((project) => (
-                <tr key={project.project}>
-                  <td className={TD}>{project.project}</td>
-                  <td className={cn(TD, NUM)}>{count(project.messages)}</td>
-                  <td className={cn(TD, NUM)}>{project.messages ? `${count(project.avg_chars)} chars` : '—'}</td>
-                  <td className={cn(TD, NUM)}>{count(project.commits ?? 0)}</td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        ) : null}
-        <SearchField
-          label="Search your messages"
-          placeholder="Search your messages"
-          value={query}
-          onChange={(event) => setQuery(event.target.value)}
-        />
-        {prompts.length ? (
-          <ul className="max-h-[28rem] overflow-y-auto pr-1">
-            {prompts.map((prompt, index) => (
-              <PromptRow key={`${prompt.at}:${index}`} prompt={prompt} />
-            ))}
-          </ul>
-        ) : (
-          <p className={EMPTY}>{query ? 'No messages match.' : 'No messages recorded yet.'}</p>
-        )}
-      </SettingsSection>
-
-      <SettingsSection
-        title="Files agents write"
-        description="Most-edited files. Files written by more than one thread on the same day are where agents are most likely to collide."
-      >
-        {summary?.files.length ? (
-          <table className={TABLE}>
-            <thead>
-              <tr>
-                <th className={TH}>File</th>
-                <th className={cn(TH, NUM)}>Writes</th>
-                <th className={cn(TH, NUM)}>Threads</th>
-                <th className={cn(TH, NUM)}>Shared days</th>
-              </tr>
-            </thead>
-            <tbody>
-              {summary.files.map((file) => (
-                <tr key={file.path}>
-                  <td className={cn(TD, 'fd-type-mono max-w-0 truncate text-[length:var(--fd-text-xs)]')} title={file.path}>
-                    {file.path}
-                  </td>
-                  <td className={cn(TD, NUM)}>{count(file.writes)}</td>
-                  <td className={cn(TD, NUM)}>{count(file.threads)}</td>
-                  <td className={cn(TD, NUM, file.contested_days ? 'text-warning' : null)}>
-                    {count(file.contested_days)}
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        ) : (
-          <p className={EMPTY}>No file writes recorded in this period.</p>
-        )}
-      </SettingsSection>
-
-      <SettingsSection
-        title="Turns by bot"
-        description="Context is what FalconDeck adds to each bot turn: built-in guidance, instructions, context files and lists."
-      >
-        {summary?.bots.length ? (
-          <table className={TABLE}>
-            <thead>
-              <tr>
-                <th className={TH}>Bot</th>
-                <th className={cn(TH, NUM)}>Turns</th>
-                <th className={cn(TH, NUM)}>Avg turn</th>
-                <th className={cn(TH, NUM)}>Context per turn</th>
-                <th className={cn(TH, NUM)}>Tasks</th>
-                <th className={cn(TH, NUM)}>Messages</th>
-                <th className={cn(TH, NUM)}>Commits</th>
-              </tr>
-            </thead>
-            <tbody>
-              {summary.bots.map((bot) => (
-                <tr key={bot.name}>
-                  <td className={TD}>{bot.name}</td>
-                  <td className={cn(TD, NUM)}>{count(bot.turns)}</td>
-                  <td className={cn(TD, NUM)}>{duration(bot.avg_turn_ms)}</td>
-                  <td className={cn(TD, NUM)}>≈{compact(bot.avg_context_tokens)}</td>
-                  <td className={cn(TD, NUM)}>{count(bot.delegations)}</td>
-                  <td className={cn(TD, NUM)}>{count(bot.messages_sent)}</td>
-                  <td className={cn(TD, NUM)}>{count(bot.commits ?? 0)}</td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        ) : (
-          <p className={EMPTY}>No bot activity in this period.</p>
-        )}
-        {summary?.providers.length ? (
-          <table className={TABLE}>
-            <thead>
-              <tr>
-                <th className={TH}>Harness</th>
-                <th className={cn(TH, NUM)}>Turns</th>
-                <th className={cn(TH, NUM)}>Failed</th>
-                <th className={cn(TH, NUM)}>Avg turn</th>
-                <th className={cn(TH, NUM)}>Avg peak context</th>
-                <th className={cn(TH, NUM)}>Input tokens</th>
-                <th className={cn(TH, NUM)}>Output tokens</th>
-              </tr>
-            </thead>
-            <tbody>
-              {summary.providers.map((provider) => (
-                <tr key={provider.provider}>
-                  <td className={TD}>{provider.provider}</td>
-                  <td className={cn(TD, NUM)}>{count(provider.turns)}</td>
-                  <td className={cn(TD, NUM)}>{count(provider.failed)}</td>
-                  <td className={cn(TD, NUM)}>{duration(provider.avg_turn_ms)}</td>
-                  <td className={cn(TD, NUM)}>
-                    {provider.avg_peak_context_tokens ? `≈${compact(provider.avg_peak_context_tokens)}` : '—'}
-                  </td>
-                  <td className={cn(TD, NUM)}>{provider.input_tokens ? compact(provider.input_tokens) : '—'}</td>
-                  <td className={cn(TD, NUM)}>{provider.output_tokens ? compact(provider.output_tokens) : '—'}</td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        ) : null}
-      </SettingsSection>
-
-      <SettingsSection
-        title="Token usage"
-        description="What finished turns actually consumed, by bot, harness and model. Tokens are the measure; the cost column is the provider's own list-price API equivalent where it reports one (Grok's cost unit is still unverified)."
-      >
-        {summary?.usage?.length ? (
-          <table className={TABLE}>
-            <thead>
-              <tr>
-                <th className={TH}>Bot</th>
-                <th className={TH}>Harness</th>
-                <th className={TH}>Model</th>
-                <th className={cn(TH, NUM)}>In (uncached)</th>
-                <th className={cn(TH, NUM)}>Cache read</th>
-                <th className={cn(TH, NUM)}>Cache write</th>
-                <th className={cn(TH, NUM)}>Out</th>
-                <th className={cn(TH, NUM)}>Turns</th>
-                <th className={cn(TH, NUM)}>API-equiv $</th>
-              </tr>
-            </thead>
-            <tbody>
-              {summary.usage.map((row) => {
-                const unverified = (row.cost_sources ?? []).includes('provider_unverified')
-                return (
-                  <tr key={`${row.bot ?? ''}:${row.provider}:${row.model}`}>
-                    <td className={TD}>{row.bot ?? '—'}</td>
-                    <td className={TD}>{row.provider}</td>
-                    <td className={cn(TD, 'fd-type-mono text-[length:var(--fd-text-xs)]')}>{row.model || '—'}</td>
-                    <td className={cn(TD, NUM)}>{compact(row.totals.input_tokens)}</td>
-                    <td className={cn(TD, NUM)}>{compact(row.totals.cache_read_tokens)}</td>
-                    <td className={cn(TD, NUM)}>{compact(row.totals.cache_write_tokens)}</td>
-                    <td className={cn(TD, NUM)}>{compact(row.totals.output_tokens)}</td>
-                    <td className={cn(TD, NUM)}>{count(row.totals.turns)}</td>
-                    <td
-                      className={cn(TD, NUM, 'text-fg-tertiary')}
-                      title={
-                        unverified
-                          ? 'Provider-reported; the cost unit is unverified'
-                          : 'Provider-reported list-price API equivalent'
-                      }
-                    >
-                      {usd(row.totals.cost_usd)}
-                    </td>
-                  </tr>
-                )
-              })}
-            </tbody>
-          </table>
-        ) : (
-          <p className={EMPTY}>No token usage recorded in this period.</p>
-        )}
-      </SettingsSection>
-
-      <SettingsSection
-        title="Top threads"
-        description="The twenty threads that used the most tokens. Context per call is the prompt the model saw: uncached input plus cache reads and writes."
-      >
-        {threadUsage.length ? (
-          <table className={TABLE}>
-            <thead>
-              <tr>
-                <th className={TH}>Thread</th>
-                <th className={TH}>Project</th>
-                <th className={TH}>Harness · model</th>
-                <th className={TH}>Bot</th>
-                <th className={TH}>Started by</th>
-                <th className={cn(TH, NUM)}>Turns</th>
-                <th className={cn(TH, NUM)}>Context / call</th>
-                <th className={cn(TH, NUM)}>Tokens</th>
-                <th className={cn(TH, NUM)}>API-equiv $</th>
-              </tr>
-            </thead>
-            <tbody>
-              {threadUsage.slice(0, 20).map((row) => {
-                const detail = row.thread
-                const unverified = (row.cost_sources ?? []).includes('provider_unverified')
-                const title = (
-                  <span className="min-w-0 truncate">{row.label || row.key}</span>
-                )
-                return (
-                  <tr key={row.key}>
-                    <td className={cn(TD, 'max-w-40')}>
-                      {detail && onOpenThread ? (
-                        <button
-                          type="button"
-                          className="fd-focus truncate text-left text-fg-primary underline decoration-border-subtle underline-offset-2 hover:decoration-fg-tertiary"
-                          onClick={() => onOpenThread(detail.workspace, row.key)}
-                          title={row.label || row.key}
-                        >
-                          {title}
-                        </button>
-                      ) : (
-                        <span className="block truncate" title={row.label || row.key}>
-                          {row.label || row.key}
-                        </span>
-                      )}
-                    </td>
-                    <td className={TD}>{detail?.project || '—'}</td>
-                    <td className={cn(TD, 'text-[length:var(--fd-text-xs)]')}>
-                      {detail ? (
-                        <span className="fd-type-mono">
-                          {detail.provider}
-                          {detail.model ? ` · ${detail.model}` : ''}
-                        </span>
-                      ) : (
-                        '—'
-                      )}
-                    </td>
-                    <td className={TD}>{detail?.bot ?? 'User'}</td>
-                    <td className={TD}>
-                      {detail
-                        ? [
-                            USAGE_ORIGINS[detail.origin] ?? detail.origin,
-                            detail.automation,
-                          ]
-                              .filter(Boolean)
-                              .join(' · ')
-                        : '—'}
-                    </td>
-                    <td className={cn(TD, NUM)}>{count(row.totals.turns)}</td>
-                    <td className={cn(TD, NUM)}>
-                      {detail?.avg_context_per_call ? `≈${compact(detail.avg_context_per_call)}` : '—'}
-                    </td>
-                    <td className={cn(TD, NUM)}>
-                      {compact(
-                        row.totals.input_tokens +
-                          row.totals.cache_read_tokens +
-                          row.totals.cache_write_tokens +
-                          row.totals.output_tokens,
-                      )}
-                    </td>
-                    <td
-                      className={cn(TD, NUM, 'text-fg-tertiary')}
-                      title={
-                        unverified
-                          ? 'Provider-reported; the cost unit is unverified'
-                          : 'Provider-reported list-price API equivalent'
-                      }
-                    >
-                      {usd(row.totals.cost_usd)}
-                    </td>
-                  </tr>
-                )
-              })}
-            </tbody>
-          </table>
-        ) : (
-          <p className={EMPTY}>No threads used tokens in this period.</p>
-        )}
-      </SettingsSection>
-
-      <SettingsSection title="Recording" description="Everything is stored as plain files in FalconDeck's folder on this Mac.">
-        <SettingList>
-          <SwitchRow
-            title="Record activity"
-            description="Counts, timings and file paths. No message content except your own messages, below."
-            checked={status?.settings.enabled ?? true}
-            disabled={!status}
-            onCheckedChange={(enabled) => saveSettings({ enabled })}
-          />
-          <SwitchRow
-            title="Record token usage"
-            description="Per-turn tokens and provider-reported cost by bot, harness and model. Independent of activity recording above."
-            checked={status?.settings.record_usage ?? true}
-            disabled={!status}
-            onCheckedChange={(record_usage) => saveSettings({ record_usage })}
-          />
-          <SwitchRow
-            title="Keep your messages"
-            description="Save the full text of what you send to agents so you can search it later."
-            checked={status?.settings.record_prompts ?? true}
-            disabled={!status || !status.settings.enabled}
-            onCheckedChange={(record_prompts) => saveSettings({ record_prompts })}
-          />
-          <SettingRow
-            title="Keep activity for"
-            description="Older activity is deleted automatically. Your messages are kept until you delete them."
-            control={
-              <SegmentedControl
-                ariaLabel="Keep activity for"
-                value={String(status?.settings.retention_months ?? 12)}
-                onChange={(value) => saveSettings({ retention_months: Number(value) })}
-                options={RETENTION}
-              />
-            }
-          />
-          {(status?.usage_health ?? []).map((health) => (
-            <SettingRow
-              key={health.provider}
-              title={`${health.provider} usage capture`}
-              description="Since daemon startup, while usage recording is enabled. Includes failed and interrupted turns."
-              control={
-                <span className="text-[length:var(--fd-text-xs)] tabular-nums text-fg-secondary">
-                  {health.completed_turns} completed · {health.usage_records_written} records · {health.missing_usage_turns} missing usage
-                </span>
-              }
-            />
-          ))}
-          <SettingRow
-            title="Storage"
-            description={
-              status ? (
-                <span className="flex items-center gap-1.5">
-                  <span className="fd-type-mono min-w-0 truncate" title={status.folder}>
-                    {status.folder}
-                  </span>
-                  <CopyButton text={status.folder} label="Copy folder path" />
-                </span>
-              ) : (
-                'Not connected'
-              )
-            }
-            control={
-              <span className="text-[length:var(--fd-text-xs)] tabular-nums text-fg-tertiary">
-                {status
-                  ? `${bytes(status.events_bytes)} activity · ${bytes(status.usage_bytes ?? 0)} usage · ${bytes(status.prompts_bytes)} messages`
-                  : '—'}
-              </span>
-            }
-          />
-        </SettingList>
-        <div className="flex flex-wrap items-center gap-2">
-          {confirming ? (
-            <>
-              <p className="min-w-0 flex-1 text-[length:var(--fd-text-sm)] text-fg-secondary">
-                {confirming === 'prompts'
-                  ? 'Delete every recorded message you sent? This cannot be undone.'
-                  : confirming === 'usage'
-                    ? 'Delete all recorded token usage? This cannot be undone.'
-                    : 'Delete all recorded activity? This cannot be undone.'}
-              </p>
-              <Button variant="ghost" size="sm" onClick={() => setConfirming(null)}>
-                Cancel
-              </Button>
-              <Button variant="danger" size="sm" onClick={() => void clear(confirming)}>
-                Delete
-              </Button>
-            </>
-          ) : (
-            <>
-              <Button variant="ghost" size="sm" disabled={!status} onClick={() => setConfirming('prompts')}>
-                Delete your messages
-              </Button>
-              <Button variant="ghost" size="sm" disabled={!status} onClick={() => setConfirming('events')}>
-                Delete activity
-              </Button>
-              <Button variant="ghost" size="sm" disabled={!status} onClick={() => setConfirming('usage')}>
-                Delete token usage
-              </Button>
-            </>
-          )}
-        </div>
-      </SettingsSection>
+      </div>
     </SettingsPage>
   )
 }
