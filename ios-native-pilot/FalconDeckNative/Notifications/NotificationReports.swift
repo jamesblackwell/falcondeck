@@ -126,20 +126,31 @@ actor NotificationReportClient {
         guard Self.isValid(id: id) else { throw NotificationReportError.unavailable }
         let (data, status) = try await http.send(request("reports/\(id)", session: session))
         guard status == 200 else { throw NotificationReportError.unavailable }
-        guard let response = try? JSON.decode(data) else { throw NotificationReportError.malformed }
+        // Not JSON from a 200 is a portal or a proxy, not the report.
+        guard let response = try? JSON.decode(data) else { throw NotificationReportError.unavailable }
         return try NotificationReport.open(response, reportID: id, session: session)
     }
 
     /// Opens many reports with a bounded number in flight. A report that
-    /// cannot be read is left out; the rest still show.
+    /// cannot be read is left out; the rest still show. `failed` holds only
+    /// ciphertext this key will never open: a network or relay failure may
+    /// clear, so it is reported as neither and is asked for again.
     func fetch(_ ids: [String], session: SavedSession, concurrency: Int = 4) async -> (reports: [NotificationReport], failed: [String]) {
-        await withTaskGroup(of: (String, NotificationReport?).self) { group in
+        await withTaskGroup(of: (String, Result<NotificationReport, any Error>).self) { group in
             var remaining = ids.makeIterator()
             var reports: [NotificationReport] = [], failed: [String] = []
-            func start(_ id: String) { group.addTask { (id, try? await self.fetch(id, session: session)) } }
+            func start(_ id: String) {
+                group.addTask {
+                    do { return (id, .success(try await self.fetch(id, session: session))) } catch { return (id, .failure(error)) }
+                }
+            }
             for _ in 0..<max(1, concurrency) { if let id = remaining.next() { start(id) } }
-            while let (id, report) = await group.next() {
-                if let report { reports.append(report) } else { failed.append(id) }
+            while let (id, result) = await group.next() {
+                switch result {
+                case .success(let report): reports.append(report)
+                case .failure(let error):
+                    if let error = error as? NotificationReportError, error != .unavailable { failed.append(id) }
+                }
                 if let id = remaining.next() { start(id) }
             }
             return (reports, failed)

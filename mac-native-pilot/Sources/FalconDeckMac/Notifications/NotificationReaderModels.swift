@@ -144,7 +144,11 @@ struct NotificationReviewRecord: Equatable {
             }
             note = ""
             if response["data"]["id"].string.isEmpty { await load() }
-            else { review = NotificationReviewRecord(response["data"]) }
+            else {
+                // A read that began while the answer was on its way is older than this.
+                loadRevision += 1
+                review = NotificationReviewRecord(response["data"])
+            }
         } catch {
             responseError = "The response wasn’t sent. \(error.localizedDescription)"
             await load()

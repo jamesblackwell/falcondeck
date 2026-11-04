@@ -394,6 +394,20 @@ private func controlEvent(_ domains: String...) -> JSON {
         XCTAssertFalse(NotificationRecord(daemon.rows.last!).isRead)
     }
 
+    func testOnlyAHeadReadMovesTheMarkAllBoundary() async {
+        let daemon = FakeNotifications((1...60).map { row($0) })
+        let store = centre(daemon)
+        await store.refresh()
+        XCTAssertEqual(store.counts.latestSeq, 60)
+        daemon.rows.append(row(61))
+        await store.loadMore()
+        XCTAssertEqual(store.counts.latestSeq, 60, "61 was never on screen")
+        await store.markRead(store.records[0], hostID: nil)
+        XCTAssertEqual(store.counts.latestSeq, 60, "A mark-read answer is not a head read")
+        await store.markAllRead()
+        XCTAssertEqual(daemon.reads.last?.body, .object(["up_to_seq": .number(60)]))
+    }
+
     func testMarkAllDoesNothingWhenAllRead() async {
         let daemon = FakeNotifications([row(1, read: true)])
         let store = centre(daemon)
@@ -843,7 +857,9 @@ private actor NotificationNavigationDaemon: DaemonServing {
     var response: JSON?
     var failure: Error?
     var holdReads = false
+    var holdPosts = false
     private var held: [CheckedContinuation<Void, Never>] = []
+    private var heldPosts: [CheckedContinuation<Void, Never>] = []
 
     init(status: String = "open") {
         review = .object(["id": .string("R-1"), "title": .string("Pricing page"), "ask": .string("Ship the hero?"),
@@ -857,12 +873,15 @@ private actor NotificationNavigationDaemon: DaemonServing {
                 ])])])])
     }
     var heldCount: Int { held.count }
+    var heldPostCount: Int { heldPosts.count }
     func release() { let waiting = held; held = []; waiting.forEach { $0.resume() } }
+    func releasePosts() { let waiting = heldPosts; heldPosts = []; waiting.forEach { $0.resume() } }
 
     func transport(_ path: [String], _ method: String, _ query: [URLQueryItem], _ body: JSON?, _ host: String?) async throws -> JSON {
         calls.append((path, method, body))
         if let failure { throw failure }
         if method == "POST" {
+            if holdPosts { await withCheckedContinuation { heldPosts.append($0) } }
             if let response { return response }
             review = review.setting("status", .string("approved"))
             return .object(["ok": .bool(true), "operation": .string("review.respond"), "data": review])
@@ -933,6 +952,23 @@ private actor NotificationNavigationDaemon: DaemonServing {
         await eventually("held read") { daemon.heldCount == 1 }
         daemon.holdReads = false
         await model.respond(.approve)
+        daemon.release()
+        await stale
+        XCTAssertEqual(model.review?.status, "approved")
+    }
+
+    func testAReadStartedDuringAnAnswerCannotReopenTheReview() async {
+        let daemon = FakeReviewDaemon()
+        let model = model(daemon)
+        await model.load()
+        daemon.holdPosts = true
+        async let answer: Void = model.respond(.approve)
+        await eventually("held answer") { daemon.heldPostCount == 1 }
+        daemon.holdReads = true
+        async let stale: Void = model.load()
+        await eventually("held read") { daemon.heldCount == 1 }
+        daemon.releasePosts()
+        await answer
         daemon.release()
         await stale
         XCTAssertEqual(model.review?.status, "approved")

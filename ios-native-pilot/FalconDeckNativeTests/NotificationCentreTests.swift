@@ -41,6 +41,7 @@ private actor CentreHTTP: PushHTTP {
     var capabilityStatus = 200
     var listed: [String] = []
     var reports: [String: JSON] = [:]
+    var unavailable = false
     private(set) var paths: [String] = []
     private(set) var authorization: [String?] = []
     private(set) var inFlight = 0
@@ -48,6 +49,7 @@ private actor CentreHTTP: PushHTTP {
     func set(capability body: String, status: Int = 200) { capabilityBody = body; capabilityStatus = status }
     func put(_ id: String, _ response: JSON) { reports[id] = response; listed.append(id) }
     func drop(_ id: String) { reports[id] = nil; listed.removeAll { $0 == id } }
+    func set(unavailable value: Bool) { unavailable = value }
     func send(_ request: URLRequest) async throws -> (Data, Int) {
         let path = request.url?.path() ?? ""
         paths.append(path); authorization.append(request.value(forHTTPHeaderField: "Authorization"))
@@ -59,6 +61,7 @@ private actor CentreHTTP: PushHTTP {
             let rows = listed.map { JSON.object(["report_id": .string($0), "created_at": .string("2026-11-01T09:00:00Z"), "expires_at": .string("2036-11-01T09:00:00Z"), "size_bytes": .number(100)]) }
             return (try JSON.object(["reports": .array(rows)]).data(), 200)
         }
+        if unavailable { return (Data("{}".utf8), 503) }
         guard let id = path.split(separator: "/").last, let report = reports[String(id)] else { return (Data("{}".utf8), 404) }
         return (try report.data(), 200)
     }
@@ -309,6 +312,20 @@ private func settle(_ condition: @MainActor () async -> Bool, file: StaticString
         XCTAssertEqual(rig.store.counts.latestSeq, 300, "301 was never on screen, so mark-all must not cover it")
     }
 
+    func testOnlyAHeadReadMovesTheMarkAllBoundary() async throws {
+        let rig = Rig { method, params in
+            if method == "notifications.mark_read" { return Wire.counts(unread: 1, latest: 102) }
+            return params["before_seq"].optionalInt == nil ? Wire.list(Wire.rows(51...100), next: 51, unread: 2, latest: 100)
+                : Wire.list(Wire.rows(1...50), unread: 3, latest: 101)
+        }
+        await rig.store.refresh(model: rig.model)
+        await rig.store.loadMore(model: rig.model)
+        XCTAssertEqual(rig.store.counts.latestSeq, 100, "101 was never on screen")
+        XCTAssertEqual(rig.store.counts.unread, 3, "The rest of the counts stay live")
+        await rig.store.markRead("N-100", model: rig.model)
+        XCTAssertEqual(rig.store.counts.latestSeq, 100, "102 was never on screen")
+    }
+
     func testAFailedPageCanBeRetriedAndKeepsTheRows() async throws {
         let rig = Rig { _, params in
             if params["before_seq"].optionalInt != nil { throw PilotError("The computer took too long to respond.") }
@@ -384,7 +401,7 @@ private func settle(_ condition: @MainActor () async -> Bool, file: StaticString
         await rig.relay.release(); await read.value
         let sent = await rig.relay.last("notifications.mark_read")
         XCTAssertEqual(sent, .object(["ids": .array([.string("N-10")])]))
-        XCTAssertEqual(rig.store.counts, NotificationCounts(unread: 4, needsYou: 2, latestSeq: 12))
+        XCTAssertEqual(rig.store.counts, NotificationCounts(unread: 4, needsYou: 2, latestSeq: 10), "Its counts win, but not over what is on screen")
     }
 
     func testARefusedReadIsPutBack() async throws {
@@ -606,6 +623,21 @@ private func settle(_ condition: @MainActor () async -> Bool, file: StaticString
     func testAnIncompleteReportIsRefused() throws {
         let empty = try Wire.report(plaintext: Wire.plaintext().setting("notification_id", .string("")))
         XCTAssertThrowsError(try NotificationReport.open(empty, reportID: "rpt_1", session: Wire.session())) { XCTAssertEqual($0 as? NotificationReportError, .malformed) }
+    }
+
+    func testARelayFailureIsRetriedButACorruptReportIsNot() async throws {
+        let rig = Rig(connected: false)
+        await rig.http.put("rpt_1", try Wire.report())
+        await rig.http.put("rpt_2", try Wire.report("rpt_2", key: Data(repeating: 1, count: 32)))
+        await rig.http.set(unavailable: true)
+        await rig.store.refresh(model: rig.model, immediate: true)
+        XCTAssertTrue(rig.store.reportRecords.isEmpty)
+        await rig.http.set(unavailable: false)
+        await rig.store.refresh(model: rig.model, immediate: true)
+        XCTAssertEqual(rig.store.reportRecords.count, 1, "A pull to refresh recovers from the outage")
+        await rig.store.refresh(model: rig.model, immediate: true)
+        let calls = await rig.http.reportCalls()
+        XCTAssertEqual(calls.filter { $0.hasSuffix("/rpt_2") }.count, 2, "Asked in the outage and once after, then remembered")
     }
 
     func testReportIDsCannotEscapeTheURLPath() {

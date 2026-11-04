@@ -189,11 +189,19 @@ import Observation
             let known = Set(records.map(\.id))
             records += response["items"].array.map(NotificationRecord.init).filter { !known.contains($0.id) }
             nextBeforeSeq = response["next_before_seq"].optionalInt
-            counts = NotificationCounts(response)
+            adoptKeepingHead(response)
         } catch {
             guard generation == listGeneration else { return }
             loadMoreError = "Couldn’t load older notifications."
         }
+    }
+
+    /// Only a head read moves `latest_seq`. Anything else can report a record
+    /// James has not been shown, and mark-all would take it.
+    private func adoptKeepingHead(_ response: JSON) {
+        var adopted = NotificationCounts(response)
+        adopted.latestSeq = counts.latestSeq
+        counts = adopted
     }
 
     /// A page that crossed a mutation or a refresh is unusable, and the sentinel
@@ -271,7 +279,7 @@ import Observation
             guard generation == hostGeneration else { return }
             finishMutation()
             // A later mutation's optimism is newer than this answer.
-            if mutationsInFlight == 0 { counts = NotificationCounts(response) }
+            if mutationsInFlight == 0 { adoptKeepingHead(response) }
         } catch {
             guard generation == hostGeneration else { return }
             let restored = Dictionary(previous.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })

@@ -224,7 +224,7 @@ final class NotificationCentreStore {
             page.items += response.items.filter { !known.contains($0.id) }.map(overlaid)
             page.nextBeforeSeq = response.nextBeforeSeq
             pages[filter] = page
-            if started == mutationRevision { adopt(response.counts, listed: response.items) } else { scheduleRefresh(model: model) }
+            if started == mutationRevision { adopt(response.counts, listed: response.items, head: false) } else { scheduleRefresh(model: model) }
         } catch {
             guard current == model.connectionID, gen == generation else { return }
             loadMoreFailed = true
@@ -232,9 +232,18 @@ final class NotificationCentreStore {
     }
 
     /// The daemon's counts, less reads it has not seen yet.
-    private func adopt(_ incoming: NotificationCounts, listed: [NotificationRecord]) {
+    private func adopt(_ incoming: NotificationCounts, listed: [NotificationRecord], head: Bool = true) {
         var adopted = incoming
         adopted.unread = max(0, incoming.unread - listed.filter { !$0.isRead && readPending($0) }.count)
+        if !head { adopted.latestSeq = counts.latestSeq }
+        counts = adopted
+    }
+
+    /// Only a head read moves `latest_seq`. Anything else can report a record
+    /// James has not been shown, and mark-all would take it.
+    private func adoptKeepingHead(_ incoming: NotificationCounts) {
+        var adopted = incoming
+        adopted.latestSeq = counts.latestSeq
         counts = adopted
     }
 
@@ -269,7 +278,7 @@ final class NotificationCentreStore {
             inFlightReads.remove(id)
             guard current == model.connectionID else { return }
             mutationRevision += 1
-            if inFlightReads.isEmpty, inFlightUpToSeq == nil { counts = NotificationCounts(response) }
+            if inFlightReads.isEmpty, inFlightUpToSeq == nil { adoptKeepingHead(NotificationCounts(response)) }
         } catch {
             inFlightReads.remove(id)
             guard scope == model.sessionScope else { return }
@@ -298,7 +307,7 @@ final class NotificationCentreStore {
             inFlightUpToSeq = nil
             guard current == model.connectionID else { return }
             mutationRevision += 1
-            if inFlightReads.isEmpty { counts = NotificationCounts(response) }
+            if inFlightReads.isEmpty { adoptKeepingHead(NotificationCounts(response)) }
         } catch {
             inFlightUpToSeq = nil
             guard scope == model.sessionScope else { return }
@@ -357,7 +366,7 @@ final class NotificationCentreStore {
         offlineReads.subtract(ids)
         persistOfflineReads()
         mutationRevision += 1
-        counts = NotificationCounts(response)
+        adoptKeepingHead(NotificationCounts(response))
     }
 
     // MARK: Reports on the relay
@@ -473,7 +482,10 @@ final class NotificationCentreStore {
 
     private func vault(model: AppModel) async -> NotificationReplyVault? {
         if let vaultCache { return vaultCache }
-        guard let session = await session(model), let vault = NotificationReplyVault(session: session, root: replyRoot) else { return nil }
+        let scope = model.sessionScope
+        // A re-pair during the load must not bring back the old computer's vault.
+        guard let session = await session(model), scope == model.sessionScope,
+              let vault = NotificationReplyVault(session: session, root: replyRoot) else { return nil }
         vaultCache = vault
         return vault
     }
