@@ -23,7 +23,9 @@ private func row(_ seq: Int, kind: String = "turn_complete", read: Bool = false,
     var calls: [Call] = []
     var failure: Error?
     var failReads: Error?
+    var failOlderPages: Error?
     var holdLists = false
+    var holdOlderPages = false
     var holdReads = false
     private var held: [CheckedContinuation<Void, Never>] = []
 
@@ -65,7 +67,8 @@ private func row(_ seq: Int, kind: String = "turn_complete", read: Bool = false,
         response["items"] = .array(page)
         if matching.count > page.count { response["next_before_seq"] = page.last?["seq"] }
         if let failure { throw failure }
-        if holdLists { await withCheckedContinuation { held.append($0) } }
+        if before != nil, let failOlderPages { throw failOlderPages }
+        if holdLists || (holdOlderPages && before != nil) { await withCheckedContinuation { held.append($0) } }
         return .object(response)
     }
 }
@@ -111,7 +114,7 @@ private func controlEvent(_ domains: String...) -> JSON {
         XCTAssertEqual(daemon.lists.count, calls, "The last page must not be requested again")
     }
 
-    func testARefetchKeepsAScrolledListAndItsCursor() async {
+    func testARefetchRereadsTheLoadedRowsAndOlderOnesComeBackOnScroll() async {
         let daemon = FakeNotifications((1...120).map { row($0) })
         let store = centre(daemon)
         await store.refresh()
@@ -119,11 +122,153 @@ private func controlEvent(_ domains: String...) -> JSON {
         daemon.rows.append(row(121))
         await store.refresh()
         XCTAssertEqual(store.records.first?.id, "N-121")
-        XCTAssertEqual(store.records.count, 101, "Nothing already loaded disappears")
-        XCTAssertEqual(store.records.map(\.seq), store.records.map(\.seq).sorted(by: >))
+        XCTAssertEqual(store.records.count, 100)
+        XCTAssertEqual(store.nextBeforeSeq, 22)
         await store.loadMore()
         XCTAssertEqual(store.records.count, 121)
         XCTAssertEqual(Set(store.records.map(\.id)).count, 121, "No row repeats across the seam")
+    }
+
+    func testARefetchAfterABurstLeavesNoGapBehindTheCursor() async {
+        let daemon = FakeNotifications((1...100).map { row($0) })
+        let store = centre(daemon)
+        await store.refresh()
+        XCTAssertEqual(store.nextBeforeSeq, 51)
+        daemon.rows += (101...200).map { row($0) }
+
+        await store.refresh()
+        XCTAssertEqual(store.records.map(\.seq), Array((151...200).reversed()))
+        XCTAssertEqual(store.nextBeforeSeq, 151)
+
+        await store.loadMore()
+        await store.loadMore()
+        await store.loadMore()
+        XCTAssertEqual(store.records.map(\.seq), Array((1...200).reversed()), "Every record is reachable, once")
+        XCTAssertNil(store.nextBeforeSeq)
+    }
+
+    func testARefetchWalksPastTheMaximumPageSoEveryLoadedRowIsFresh() async {
+        let daemon = FakeNotifications((1...300).map { row($0) })
+        let store = centre(daemon)
+        await store.refresh()
+        for _ in 0..<4 { await store.loadMore() }
+        XCTAssertEqual(store.records.count, 250)
+        XCTAssertEqual(store.nextBeforeSeq, 51)
+
+        // Read on another device, including rows past the first 200.
+        daemon.rows = daemon.rows.map { $0.setting("read_at", stamp(Date())) }
+        let calls = daemon.lists.count
+        await store.refresh()
+
+        XCTAssertEqual(store.records.count, 250)
+        XCTAssertTrue(store.records.allSatisfy(\.isRead))
+        XCTAssertEqual(store.records.map(\.seq), Array((51...300).reversed()))
+        XCTAssertEqual(store.nextBeforeSeq, 51, "The cursor comes from the last page")
+        func values(_ name: String) -> [String?] {
+            daemon.lists[calls...].map { call in call.query.first { $0.name == name }?.value }
+        }
+        XCTAssertEqual(values("limit"), ["200", "50"])
+        XCTAssertEqual(values("before_seq"), [nil, "101"])
+    }
+
+    func testAWalkThatFailsPartWayChangesNothing() async {
+        let daemon = FakeNotifications((1...300).map { row($0) })
+        let store = centre(daemon)
+        await store.refresh()
+        for _ in 0..<4 { await store.loadMore() }
+        let shown = store.records.map(\.id), cursor = store.nextBeforeSeq, unread = store.counts.unread
+
+        daemon.rows = daemon.rows.map { $0.setting("read_at", stamp(Date())) }
+        daemon.failOlderPages = PilotError("offline")
+        await store.refresh()
+        XCTAssertEqual(store.records.map(\.id), shown)
+        XCTAssertFalse(store.records.contains(where: \.isRead), "No page of the failed walk is applied")
+        XCTAssertEqual(store.nextBeforeSeq, cursor)
+        XCTAssertEqual(store.counts.unread, unread)
+        XCTAssertNotNil(store.loadError)
+
+        daemon.failOlderPages = nil
+        await store.refresh()
+        XCTAssertTrue(store.records.allSatisfy(\.isRead))
+        XCTAssertNil(store.loadError)
+    }
+
+    func testAMutationDuringTheWalkDiscardsItAndRefetches() async throws {
+        let daemon = FakeNotifications((1...300).map { row($0) })
+        let store = centre(daemon)
+        await store.refresh()
+        for _ in 0..<4 { await store.loadMore() }
+        let oldest = try XCTUnwrap(store.records.last)
+
+        daemon.holdOlderPages = true
+        async let walk: Void = store.refresh()
+        await eventually("the second page") { daemon.heldCount == 1 }
+        daemon.holdOlderPages = false
+        await store.markRead(oldest, hostID: nil)
+        daemon.release()
+        await walk
+        await eventually("the rerun") { !store.isLoading && daemon.lists.count > 7 }
+        XCTAssertEqual(store.records.count, 250)
+        XCTAssertTrue(try XCTUnwrap(store.records.last).isRead, "The stale walk does not undo the read")
+    }
+
+    func testAFilterChangeDropsAWalkInProgress() async {
+        var rows = (1...300).map { row($0) }
+        rows.append(row(301, bot: "ops"))
+        let daemon = FakeNotifications(rows)
+        let store = centre(daemon)
+        await store.refresh()
+        for _ in 0..<4 { await store.loadMore() }
+
+        daemon.holdOlderPages = true
+        async let walk: Void = store.refresh()
+        await eventually("the second page") { daemon.heldCount == 1 }
+        daemon.holdOlderPages = false
+        store.setFilter(.bots)
+        await eventually("the bots list") { store.hasLoaded && store.records.count == 1 }
+        daemon.release()
+        await walk
+        XCTAssertEqual(store.records.map(\.id), ["N-301"], "The old walk cannot replace the new list")
+    }
+
+    func testAnOlderPageThatCrossesARefetchIsAskedForAgain() async {
+        let daemon = FakeNotifications((1...100).map { row($0) })
+        let store = centre(daemon)
+        await store.refresh()
+        daemon.holdLists = true
+        async let older: Void = store.loadMore()
+        await eventually("the held page") { daemon.heldCount == 1 }
+        daemon.holdLists = false
+
+        daemon.rows += (101...200).map { row($0) }
+        await store.refresh()
+        XCTAssertEqual(store.nextBeforeSeq, 151)
+        daemon.release()
+        await older
+
+        await eventually("the page under the new cursor") { store.records.count == 100 }
+        XCTAssertEqual(store.records.map(\.seq), Array((101...200).reversed()), "Nothing is appended past a gap")
+        XCTAssertEqual(store.nextBeforeSeq, 101)
+    }
+
+    func testARefetchThatFinishesAfterAnOlderPageKeepsThatPage() async {
+        let daemon = FakeNotifications((1...120).map { row($0) })
+        let store = centre(daemon)
+        await store.refresh()
+        await store.loadMore()
+
+        daemon.holdLists = true
+        async let walk: Void = store.refresh()
+        await eventually("the held refresh") { daemon.heldCount == 1 }
+        daemon.holdLists = false
+        await store.loadMore()
+        XCTAssertEqual(store.records.count, 120)
+        daemon.release()
+        await walk
+
+        await eventually("the rerun") { !store.isLoading && daemon.lists.count > 4 }
+        XCTAssertEqual(store.records.count, 120, "The list does not shrink under the reader")
+        XCTAssertNil(store.nextBeforeSeq)
     }
 
     func testARefreshedRecordMovesToTheTopWithoutRepeating() async {

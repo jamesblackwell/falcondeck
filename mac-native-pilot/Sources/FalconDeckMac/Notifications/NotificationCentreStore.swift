@@ -124,11 +124,13 @@ import Observation
         return try await transport(["api", "notifications"], "GET", query, nil, host)
     }
 
+    /// Re-reads everything on screen from the head and replaces it, so a change on
+    /// another device reaches scrolled rows and the cursor always sits under what
+    /// is shown. Rows pushed off the bottom come back through `loadMore`.
     func refresh() async {
         guard !isLoading else { refreshAgain = true; return }
         let generation = listGeneration, started = mutationRevision, host = hostID, filter = filter
-        // Asking for what is on screen keeps a scrolled list and its read state fresh.
-        let limit = min(Self.maximumPage, max(Self.pageSize, records.count))
+        let wanted = max(Self.pageSize, records.count)
         isLoading = true
         defer {
             if generation == listGeneration {
@@ -137,18 +139,34 @@ import Observation
             }
         }
         do {
-            let response = try await list(Self.listQuery(filter: filter, limit: limit), host: host)
-            guard generation == listGeneration else { return }
-            setUnsupported(false, host: host)
-            let rows = response["items"].array.map(NotificationRecord.init)
-            let latest = NotificationCounts(response)
-            // A page of Needs you holds no notices, so it cannot reveal one.
-            if filter == .needsYou { await watchNotices(host) }
-            else { reveal(rows, latestSeq: latest.latestSeq, host: host) }
-            guard generation == listGeneration else { return }
-            guard started == mutationRevision, mutationsInFlight == 0 else { refreshAgain = true; return }
-            applyHead(rows, next: response["next_before_seq"].optionalInt)
-            counts = latest
+            var rows: [NotificationRecord] = []
+            var head: NotificationCounts?
+            var next: Int?
+            var page: [NotificationRecord]
+            repeat {
+                let limit = min(Self.maximumPage, wanted - rows.count)
+                let response = try await list(Self.listQuery(filter: filter, limit: limit, before: next), host: host)
+                guard generation == listGeneration else { return }
+                page = response["items"].array.map(NotificationRecord.init)
+                if head == nil {
+                    setUnsupported(false, host: host)
+                    let latest = NotificationCounts(response)
+                    // Counts stay with the head: mark-all must not reach past what is shown.
+                    head = latest
+                    // A page of Needs you holds no notices, so it cannot reveal one.
+                    if filter == .needsYou { await watchNotices(host) }
+                    else { reveal(page, latestSeq: latest.latestSeq, host: host) }
+                    guard generation == listGeneration else { return }
+                }
+                guard started == mutationRevision, mutationsInFlight == 0 else { refreshAgain = true; return }
+                rows += page
+                next = response["next_before_seq"].optionalInt
+            } while rows.count < wanted && next != nil && !page.isEmpty
+            // An older page landed during the walk, so this one is too short.
+            guard records.count <= wanted else { refreshAgain = true; return }
+            records = rows
+            nextBeforeSeq = next
+            if let head { counts = head }
             hasLoaded = true
             loadError = nil
         } catch {
@@ -156,15 +174,6 @@ import Observation
             if Self.isUnsupported(error) { setUnsupported(true, host: host) }
             else { loadError = "Couldn’t load notifications. \(error.localizedDescription)" }
         }
-    }
-
-    /// Records past the page are kept, so a refetch never collapses a scrolled list.
-    private func applyHead(_ rows: [NotificationRecord], next: Int?) {
-        guard hasLoaded, let next else { records = rows; nextBeforeSeq = next; return }
-        let ids = Set(rows.map(\.id))
-        let tail = records.filter { $0.seq < next && !ids.contains($0.id) }
-        records = rows + tail
-        if tail.isEmpty { nextBeforeSeq = next }
     }
 
     func loadMore() async {
@@ -176,7 +185,7 @@ import Observation
         do {
             let response = try await list(Self.listQuery(filter: filter, limit: Self.pageSize, before: before), host: host)
             guard generation == listGeneration else { return }
-            guard started == mutationRevision, mutationsInFlight == 0 else { loadAgainAfterMutations(); return }
+            guard started == mutationRevision, mutationsInFlight == 0, before == nextBeforeSeq else { loadAgain(); return }
             let known = Set(records.map(\.id))
             records += response["items"].array.map(NotificationRecord.init).filter { !known.contains($0.id) }
             nextBeforeSeq = response["next_before_seq"].optionalInt
@@ -187,9 +196,9 @@ import Observation
         }
     }
 
-    /// A page that crossed a mutation is unusable, and the sentinel that asked
-    /// for it will not appear again by itself.
-    private func loadAgainAfterMutations() {
+    /// A page that crossed a mutation or a refresh is unusable, and the sentinel
+    /// that asked for it will not appear again by itself.
+    private func loadAgain() {
         if mutationsInFlight > 0 { loadMoreAgain = true }
         else { Task { await loadMore() } }
     }

@@ -244,7 +244,7 @@ private struct NotificationReviewContent: View {
                 }
             }
             if let failure = review.deliveryError {
-                Text("Your response is saved, but the task couldn’t receive it. \(failure)")
+                Text("Your response is saved, but the task couldn’t receive it: \(failure)")
                     .font(NativePreferences.shared.font(size: 12))
                     .foregroundStyle(FDTheme.danger)
                     .textSelection(.enabled)

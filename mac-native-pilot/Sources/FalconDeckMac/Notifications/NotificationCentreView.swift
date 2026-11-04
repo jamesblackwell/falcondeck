@@ -8,8 +8,14 @@ struct NotificationBell: View {
         @Bindable var centre = store.notifications
         if !centre.unsupported {
             Button { centre.isPresented.toggle() } label: {
-                NotificationBellGlyph(count: centre.counts.unread)
+                Label {
+                    Text("Notifications")
+                } icon: {
+                    NotificationBellGlyph(count: centre.counts.unread)
+                }
             }
+            // A hosted toolbar view otherwise draws a resting border its neighbours lack.
+            .buttonStyle(.borderless)
             .help(helpText(centre.counts.unread))
             .accessibilityLabel(helpText(centre.counts.unread))
             .accessibilityIdentifier("notification-bell")
@@ -28,20 +34,20 @@ private struct NotificationBellGlyph: View {
     let count: Int
 
     var body: some View {
-        // The padding keeps the badge inside the toolbar item, which clips overlays.
+        // Sized to its neighbours. The frame keeps the badge on the bell's
+        // shoulder, inside the toolbar item, so it never hides the bell.
         Image(systemName: "bell")
-            .padding(.horizontal, 5)
-            .padding(.top, 2)
+            .font(.system(size: 15))
+            .frame(width: 30, height: 24)
             .overlay(alignment: .topTrailing) {
                 if let label = NotificationBadge.label(count) {
                     Text(label)
                         .font(.system(size: 9, weight: .semibold).monospacedDigit())
                         .foregroundStyle(FDTheme.background)
-                        .padding(.horizontal, 3.5)
-                        .frame(minWidth: 14, minHeight: 14)
+                        .padding(.horizontal, 3)
+                        .frame(minWidth: 13, minHeight: 13)
                         .background(FDTheme.info, in: .capsule)
                         .fixedSize()
-                        .offset(x: label.count > 1 ? 3 : 0, y: -1)
                 }
             }
     }
@@ -61,7 +67,7 @@ struct NotificationCentreView: View {
             content
         }
         .frame(width: 396, height: 540)
-        .background(FDTheme.background)
+        .presentationBackground(FDTheme.surface)
         .task { await centre.refresh() }
     }
 
@@ -125,7 +131,7 @@ struct NotificationCentreView: View {
                             .padding(.top, 10)
                             .padding(.bottom, 4)
                             .frame(maxWidth: .infinity, alignment: .leading)
-                            .background(FDTheme.background)
+                            .background(FDTheme.surface)
                             .accessibilityAddTraits(.isHeader)
                     }
                 }
@@ -230,14 +236,14 @@ struct NotificationRowPresentation {
     let detail: String?
     let accessibilityLabel: String
 
-    enum Tone { case attention, failure, notice, quiet, finished }
+    enum Tone { case attention, failure, notice, quiet }
 
     init(_ record: NotificationRecord) {
         switch record.kind {
-        case "input_required": (symbol, tone) = ("hand.raised", .attention)
-        case "review": (symbol, tone) = ("checklist", .attention)
+        case "input_required": (symbol, tone) = ("hand.raised", record.wasDealtWith ? .quiet : .attention)
+        case "review": (symbol, tone) = ("checklist", record.wasDealtWith ? .quiet : .attention)
         case "error": (symbol, tone) = ("exclamationmark.circle", .failure)
-        case "turn_complete": (symbol, tone) = ("checkmark.circle", .finished)
+        case "turn_complete": (symbol, tone) = ("checkmark.circle", .quiet)
         case "agent_notice": (symbol, tone) = (record.hasBody ? "doc.text" : "text.bubble", .notice)
         default: (symbol, tone) = ("bell", .quiet)
         }
@@ -258,7 +264,7 @@ private extension NotificationRowPresentation {
         case .attention: FDTheme.warning
         case .failure: FDTheme.danger
         case .notice: FDTheme.accent
-        case .finished, .quiet: FDTheme.muted
+        case .quiet: FDTheme.muted
         }
     }
 }
