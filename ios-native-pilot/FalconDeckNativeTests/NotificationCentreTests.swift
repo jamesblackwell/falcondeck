@@ -313,6 +313,56 @@ private func settle(_ condition: @MainActor () async -> Bool, file: StaticString
         XCTAssertEqual(rig.store.counts.latestSeq, 300, "301 was never on screen, so mark-all must not cover it")
     }
 
+    func testARefusedReadThatCrossedAMarkAllIsSettledByARefresh() async throws {
+        let rig = Rig { method, params in
+            if method == "notifications.mark_read" {
+                if params["ids"].array.isEmpty { return Wire.counts(unread: 0, latest: 10) }
+                throw PilotError("The computer refused.")
+            }
+            return Wire.list([Wire.record(10), Wire.record(9)], unread: 2, latest: 10)
+        }
+        await rig.store.refresh(model: rig.model)
+        await rig.relay.gate("notifications.mark_read")
+        let read = Task { await rig.store.markRead("N-10", model: rig.model) }
+        await settle { await rig.relay.holding() }
+        await rig.store.markAllRead(model: rig.model)
+        await rig.relay.release(); await read.value
+        let listed = await rig.relay.count("notifications.list")
+        await settle { await rig.relay.count("notifications.list") > listed }
+    }
+
+    func testAMarkAllLostWithAnEarlierConnectionLeavesTheNewerListAlone() async throws {
+        let rig = Rig { method, _ in
+            if method == "notifications.mark_read" { throw PilotError("The connection closed.") }
+            return Wire.list([Wire.record(3)], unread: 1, latest: 3)
+        }
+        await rig.store.refresh(model: rig.model)
+        await rig.relay.gate("notifications.mark_read")
+        let mark = Task { await rig.store.markAllRead(model: rig.model) }
+        await settle { await rig.relay.holding() }
+        await rig.model.reconnect(); rig.model.connected = true
+        await rig.relay.release(); await mark.value
+        XCTAssertNil(rig.store.actionError)
+        let listed = await rig.relay.count("notifications.list")
+        await settle { await rig.relay.count("notifications.list") > listed }
+    }
+
+    func testAPageAddedDuringARefreshIsKept() async throws {
+        let rig = Rig { _, params in
+            if params["before_seq"].optionalInt != nil { return Wire.list(Wire.rows(1...50)) }
+            let limit = params["limit"].optionalInt ?? 50
+            return limit > 50 ? Wire.list(Wire.rows(1...100)) : Wire.list(Wire.rows(51...100), next: 51)
+        }
+        await rig.store.refresh(model: rig.model)
+        await rig.relay.gate("notifications.list")
+        let refresh = Task { await rig.store.refresh(model: rig.model) }
+        await settle { await rig.relay.holding() }
+        await rig.store.loadMore(model: rig.model)
+        XCTAssertEqual(rows(rig.store).count, 100)
+        await rig.relay.release(); await refresh.value
+        XCTAssertEqual(rows(rig.store).count, 100, "The shorter walk must not replace the longer list")
+    }
+
     func testOverlappingReadsAreSettledByARefresh() async throws {
         let rig = Rig { method, _ in
             method == "notifications.mark_read" ? Wire.counts(unread: 1, latest: 10) : Wire.list([Wire.record(10), Wire.record(9)], unread: 2, latest: 10)

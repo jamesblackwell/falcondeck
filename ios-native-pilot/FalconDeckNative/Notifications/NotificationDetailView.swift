@@ -116,7 +116,8 @@ struct NotificationDetailView: View {
             defer { sending = false }
             do {
                 try await model.sendNotificationReply(text, workspaceID: source.workspaceID, threadID: source.threadID)
-                store.editReply(record.id, text: "", model: model)
+                // Words typed or dictated during the send were not sent.
+                if store.reply(record.id) == text { store.editReply(record.id, text: "", model: model) }
                 sent = true
             } catch { sendError = error.localizedDescription }
         }

@@ -180,6 +180,8 @@ final class NotificationCentreStore {
                 first = first ?? response.counts
                 if fresh.isEmpty { break }
             } while items.count < wanted && cursor != nil
+            // A page added during the walk is not in it. Go again rather than drop it.
+            guard (pages[filter]?.items.count ?? 0) <= wanted else { refreshAgain = true; return }
             pages[filter] = Page(items: items.map(overlaid), nextBeforeSeq: cursor, loaded: true)
             adopt(first ?? NotificationCounts(), listed: items)
             unsupported = false
@@ -288,6 +290,7 @@ final class NotificationCentreStore {
             applyUnread([id])
             if listed != nil { counts.unread += 1 }
             actionError = "Couldn't mark that as read. Try again."
+            settleRefusedRead(model: model)
         }
     }
 
@@ -312,10 +315,13 @@ final class NotificationCentreStore {
         } catch {
             inFlightUpToSeq = nil
             guard scope == model.sessionScope else { return }
+            // Its fate is unknown and a later list may be on screen, so a fresh read decides.
+            guard current == model.connectionID else { scheduleRefresh(model: model); return }
             mutationRevision += 1
             applyUnread(touched)
             counts.unread = previous
             actionError = "Couldn't mark everything as read. Try again."
+            settleRefusedRead(model: model)
         }
     }
 
@@ -324,6 +330,13 @@ final class NotificationCentreStore {
     private func settleRead(_ incoming: NotificationCounts, model: AppModel) {
         guard inFlightReads.isEmpty, inFlightUpToSeq == nil else { readsOverlapped = true; return }
         adoptKeepingHead(incoming)
+        if readsOverlapped { readsOverlapped = false; scheduleRefresh(model: model) }
+    }
+
+    /// A refused read can cross one that landed, and its rollback may have put
+    /// back a row the daemon holds as read. Only a fresh list can say.
+    private func settleRefusedRead(model: AppModel) {
+        guard inFlightReads.isEmpty, inFlightUpToSeq == nil else { readsOverlapped = true; return }
         if readsOverlapped { readsOverlapped = false; scheduleRefresh(model: model) }
     }
 

@@ -164,6 +164,41 @@ describe('useNotificationCentre', () => {
     expect(result.current.counts.unread_count).toBe(2)
   })
 
+  it('sends a read for a record outside the list on screen', async () => {
+    const api = new FakeDaemon([row(1), row(2, { kind: 'agent_notice' })])
+    const { result } = await loaded(api)
+    act(() => result.current.setFilter('needs_you'))
+    await waitFor(() => expect(result.current.records).toEqual([]))
+    await act(() => result.current.markRead('N-2'))
+    expect(api.reads).toEqual([{ ids: ['N-2'] }])
+    expect(result.current.counts.unread_count).toBe(1)
+  })
+
+  it('keeps paging after the daemon changes during a page', async () => {
+    const first = new FakeDaemon(range(1, 60))
+    const second = new FakeDaemon(range(1, 60))
+    const { result, rerender } = renderHook(
+      ({ api }) => useNotificationCentre({ api, baseUrl: 'http://daemon', enabled: true }),
+      { initialProps: { api: first } },
+    )
+    await waitFor(() => expect(result.current.loading).toBe(false))
+    first.holdOlder = true
+    let older!: Promise<void>
+    act(() => {
+      older = result.current.loadMore()
+    })
+    await waitFor(() => expect(first.heldCount).toBe(1))
+    rerender({ api: second })
+    await waitFor(() => expect(result.current.records).toHaveLength(50))
+    expect(result.current.loadingMore).toBe(false)
+    await act(async () => {
+      first.release()
+      await older
+    })
+    await act(() => result.current.loadMore())
+    expect(result.current.records).toHaveLength(60)
+  })
+
   it('does not send a read for a row already read', async () => {
     const api = new FakeDaemon([row(1, { read_at: '2026-11-04T11:00:00Z' })])
     const { result } = await loaded(api)

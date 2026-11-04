@@ -217,6 +217,8 @@ export function useNotificationCentre({
     refreshAgain.current = false
     mutationsInFlight.current = 0
     noticeBaseline.current = null
+    loadingMoreRef.current = false
+    setLoadingMore(false)
     showRecords([])
     showCounts(EMPTY_COUNTS)
     showCursor(undefined)
@@ -343,9 +345,10 @@ export function useNotificationCentre({
 
   const markRead = useCallback(
     async (id: string) => {
+      // A report opened from a banner can sit outside the list on screen.
       const row = recordsRef.current.find((record) => record.id === id)
-      if (!row || row.read_at) return
-      await mutate({ ids: [id] }, new Set([id]), 1)
+      if (row?.read_at) return
+      await mutate({ ids: [id] }, new Set([id]), row ? 1 : 0)
     },
     [mutate],
   )
