@@ -49,6 +49,7 @@ struct ReviewFeedbackField: View {
     var focus: FocusState<String?>.Binding
     /// Called after a transcript is appended, so it can be written to disk first.
     let persist: () async -> Bool
+    var dictateLabel = "Dictate feedback"
     @State private var showSavedRecording = false
     private var recorder: VoiceRecorder { model.voice }
     private var mine: Bool { recorder.ownerID == dictationKey }
@@ -65,7 +66,7 @@ struct ReviewFeedbackField: View {
                         Image(systemName: "mic").font(.system(size: 17)).foregroundStyle(FD.secondary).frame(width: 44, height: 44).contentShape(.rect)
                     }
                     .buttonStyle(.plain).disabled(recorder.starting || recorder.acceptingTranscript || recorder.transcribing || recorder.recording)
-                    .accessibilityLabel("Dictate feedback").accessibilityIdentifier("\(identifier)-dictate")
+                    .accessibilityLabel(dictateLabel).accessibilityIdentifier("\(identifier)-dictate")
                 }
             }
             .background(FD.raised, in: .rect(cornerRadius: 12))

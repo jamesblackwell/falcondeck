@@ -436,10 +436,11 @@ actor RelayClient: RelayServing {
         try await call("thread.detail", params: NativeRequest.history(task: task, before: before))
     }
 
+    /// Every RPC this client may send. A method missing here fails as if offline.
+    static let permittedMethods: Set<String> = ["sync.index", "sync.threads", "sync.extensions", "snapshot.current", "thread.detail", "thread.start", "thread.update", "thread.archive", "thread.mark_read", "thread.mark_unread", "thread.unarchive", "thread.fork", "thread.suggestTitle", "thread.goal.set", "thread.goal.clear", "thread.compact", "thread.queue.remove", "thread.queue.edit", "thread.queue.steer", "thread.queue.attachment_preview", "chat.create", "provider.hydrate", "workspace.skills", "workspace.prompts", "workspace.icon", "file.stat", "file.read_range", "extensions.read", "extensions.action.invoke", "thread.item", "control.get", "control.execute", "reviews.list", "review.get", "review.respond", "notifications.list", "notification.get", "notifications.mark_read", "speech.status", "speech.models", "speech.transcribe", "speech.synthesize", "turn.start", "turn.interrupt", "preferences.update", "interactive.respond", "bots.mutate", "bots.documents", "bots.document.read", "bots.document.mutate"]
+
     func call(_ method: String, params: JSON) async throws -> JSON {
-        let allowed = ["sync.index", "sync.threads", "sync.extensions", "snapshot.current", "thread.detail", "thread.start", "thread.update", "thread.archive", "thread.mark_read", "thread.mark_unread", "thread.unarchive", "thread.fork", "thread.suggestTitle", "thread.goal.set", "thread.goal.clear", "thread.compact", "thread.queue.remove", "thread.queue.edit", "thread.queue.steer", "thread.queue.attachment_preview", "chat.create", "provider.hydrate", "workspace.skills", "workspace.prompts", "workspace.icon", "file.stat", "file.read_range", "extensions.read", "extensions.action.invoke", "thread.item", "control.get", "control.execute", "speech.status", "speech.models", "speech.transcribe", "speech.synthesize", "turn.start", "turn.interrupt", "preferences.update", "interactive.respond"]
-        let botMethods = ["bots.mutate", "bots.documents", "bots.document.read", "bots.document.mutate"]
-        guard (allowed.contains(method) || botMethods.contains(method)), let key = session?.dataKey, socket != nil else {
+        guard Self.permittedMethods.contains(method), let key = session?.dataKey, socket != nil else {
             throw PilotError("Connect to your computer first.")
         }
         let id = "swift-pilot-\(UUID().uuidString)"

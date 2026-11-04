@@ -5,13 +5,15 @@ protocol PushHTTP: Sendable {
 }
 
 final class PushURLSession: NSObject, PushHTTP, URLSessionTaskDelegate, @unchecked Sendable {
+    private let limit: Int
+    init(limit: Int = 64 * 1024) { self.limit = limit }
     func send(_ request: URLRequest) async throws -> (Data, Int) {
         let configuration = URLSessionConfiguration.ephemeral
         configuration.timeoutIntervalForRequest = 15; configuration.timeoutIntervalForResource = 20
         let session = URLSession(configuration: configuration, delegate: self, delegateQueue: nil)
         defer { session.finishTasksAndInvalidate() }
         let (data, response) = try await session.data(for: request)
-        guard data.count <= 64 * 1024, let response = response as? HTTPURLResponse else { throw PilotError("Invalid push registration response.") }
+        guard data.count <= limit, let response = response as? HTTPURLResponse else { throw PilotError("Invalid push registration response.") }
         return (data, response.statusCode)
     }
     nonisolated func urlSession(_ session: URLSession, task: URLSessionTask, willPerformHTTPRedirection response: HTTPURLResponse, newRequest request: URLRequest, completionHandler: @escaping @Sendable (URLRequest?) -> Void) { completionHandler(nil) }

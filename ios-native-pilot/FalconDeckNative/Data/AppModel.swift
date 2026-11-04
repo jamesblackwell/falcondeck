@@ -2,7 +2,7 @@ import Foundation
 import Observation
 
 enum Destination: Hashable, Codable {
-    case projects, settings, automations, reviews, archived, task(String), draft(String, String?)
+    case projects, settings, automations, reviews, notifications, archived, task(String), draft(String, String?)
 }
 
 @MainActor @Observable
@@ -20,6 +20,7 @@ final class AppModel {
     let reviews = ReviewStore()
     /// A notification asked for this review. The inbox consumes it.
     var requestedReviewID: String?
+    let notificationCentre: NotificationCentreStore
     let notifications: LocalNotifications
     let push: NativePushNotifications
     let taskActivity: TaskLiveActivity
@@ -32,8 +33,9 @@ final class AppModel {
     // Local audio survives socket replacement, but never a pairing switch.
     private(set) var sessionScope = UUID()
 
-    init(relay: any RelayServing = RelayClient(), voice: VoiceRecorder = VoiceRecorder(), push: NativePushNotifications = .shared, notifications: LocalNotifications = LocalNotifications(), taskActivity: TaskLiveActivity = TaskLiveActivity(), backgroundExecution: BackgroundExecution = BackgroundExecution(), sessionLoader: @escaping @Sendable () throws -> SavedSession? = { try SessionVault.load() }, sessionCacheRoot: URL? = nil, inputDraftRoot: URL? = nil) {
+    init(relay: any RelayServing = RelayClient(), voice: VoiceRecorder = VoiceRecorder(), push: NativePushNotifications = .shared, notifications: LocalNotifications = LocalNotifications(), taskActivity: TaskLiveActivity = TaskLiveActivity(), backgroundExecution: BackgroundExecution = BackgroundExecution(), sessionLoader: @escaping @Sendable () throws -> SavedSession? = { try SessionVault.load() }, sessionCacheRoot: URL? = nil, inputDraftRoot: URL? = nil, notificationCentre: NotificationCentreStore = NotificationCentreStore()) {
         self.voice = voice
+        self.notificationCentre = notificationCentre
         self.relay = relay
         self.push = push; self.notifications = notifications; self.sessionLoader = sessionLoader; self.sessionCacheRoot = sessionCacheRoot
         self.inputDraftRoot = inputDraftRoot
@@ -46,7 +48,7 @@ final class AppModel {
         notifications.shouldPresent = { [weak self] destination in
             guard let self, !self.demo, (try? sessionLoader())?.sessionID == destination.sessionID else { return false }
             if destination.reviewID != nil { return self.selection != .reviews }
-            return self.selection != .task(destination.threadID)
+            return destination.detailTarget != nil || self.selection != .task(destination.threadID)
         }
     }
     var syncIndex: CompactSync?
@@ -165,6 +167,7 @@ final class AppModel {
             restoringSession = false
             consumeQueuedPairingPayload()
             applyPendingShortcut()
+            Task { await openPendingNotification() }
         }
         SpeechLiveActivity.shared.voice(nil); SpeechLiveActivity.shared.readAloud(nil)
         let events = await relay.events()
@@ -195,6 +198,7 @@ final class AppModel {
         // Reveal local content before waiting on the relay handshake.
         restoringSession = false
         applyPendingShortcut()
+        await openPendingNotification()
         do {
             let restored = try await relay.restore(connectionID: current)
             guard current == connectionID else { return }
@@ -221,6 +225,7 @@ final class AppModel {
         }
         realtimeAudio.reset(); automations.reset(); extensions.reset(); composerCatalogs = [:]
         reviews.reset(clearData: clearData, forgotten: clearData && !hasSession)
+        notificationCentre.reset(clearData: clearData, forgotten: clearData && !hasSession)
         connectionID = UUID(); receivedEventSequences = RecentEventSequences(); connected = false; syncIndex = nil; taskPageLoads = []; pairingNeedsReconnect = false
         preferenceWrite = nil; archivedLoadID = nil; archivedTouched = []
         itemCache = [:]; itemCacheOrder = []; itemLoads = [:]; mediaGate = MediaTransferGate()

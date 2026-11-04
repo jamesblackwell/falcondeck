@@ -54,6 +54,7 @@ struct SidebarView: View {
             Group {
                 sidebarAction("New chat", symbol: "square.and.pencil") { Task { if await model.newChat() != nil { openDetail() } } }
                     .disabled(!model.demo && !model.connected).accessibilityIdentifier("sidebar-new-chat")
+                NotificationsSidebarRow(selected: model.selection == .notifications) { navigate(.notifications) }
                 ReviewsSidebarRow(selected: model.selection == .reviews) { navigate(.reviews) }
                 sidebarAction("Automations", symbol: "calendar.badge.clock", selected: model.selection == .automations) { navigate(.automations) }
                 if showingBotHome {

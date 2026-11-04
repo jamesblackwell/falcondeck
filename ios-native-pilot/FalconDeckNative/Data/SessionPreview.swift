@@ -31,6 +31,7 @@ import Foundation
         tasks = preview.tasks.map(AgentTask.init)
         preferences = preview.preferences
         cachedAt = preview.savedAt
+        notificationCentre.restorePreview(preview.notifications)
         for (id, history) in preview.histories {
             guard let task = task(id) else { continue }
             let chat = chat(for: task)
@@ -80,6 +81,6 @@ import Foundation
             guard let chat = chats[task.id], chat.loaded, !chat.needsRefresh, !chat.transcript.needsRecovery else { continue }
             histories[task.id] = CachedHistory(items: chat.transcript.items.suffix(150).map(\.raw), hasOlder: chat.hasOlder || chat.transcript.items.count > 150)
         }
-        return SessionCacheInput(projects: projects.map(\.raw), tasks: tasks.map(\.raw), preferences: preferences, selectedID: selected, histories: histories, modelCatalogs: modelCatalogCache, writeRevision: InputWriteRevision.next())
+        return SessionCacheInput(projects: projects.map(\.raw), tasks: tasks.map(\.raw), preferences: preferences, selectedID: selected, histories: histories, modelCatalogs: modelCatalogCache, notifications: notificationCentre.previewSnapshot, writeRevision: InputWriteRevision.next())
     }
 }

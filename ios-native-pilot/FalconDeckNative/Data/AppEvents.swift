@@ -32,6 +32,7 @@ struct RecentEventSequences {
             if reconnected { for catalog in composerCatalogs.values { catalog.modelsError = nil } }
             if connectionLog.last?.message != text { connectionLog.append(ConnectionLogEntry(message: text)); if connectionLog.count > 100 { connectionLog.removeFirst(connectionLog.count - 100) } }
             if online { reconnectAttempt = 0; reconnectTask?.cancel(); reconnectTask = nil; seedIndexScope(); automations.scheduleRefresh(model: self); synchronizePush(); Task { await self.extensions.load(model: self); await self.openPendingNotification() } }
+            if reconnected { notificationCentre.computerReached(model: self) }
             if text == "Connecting…" { receivedEventSequences = RecentEventSequences() }
             synchronizeTaskActivity()
         case .snapshot(let value):
@@ -148,7 +149,7 @@ struct RecentEventSequences {
             serviceNotices.removeAll { $0["id"] == event["condition_id"] }
         case "thread-token-usage-updated": if !id.isEmpty { tokenUsage = tokenUsage.setting(id, event["usage"]) }
         case "extension-catalog-updated", "extension-view-updated": extensions.apply(event)
-        case "control-state-changed": automations.scheduleRefresh(model: self); reviews.controlStateChanged(event, model: self)
+        case "control-state-changed": automations.scheduleRefresh(model: self); reviews.controlStateChanged(event, model: self); notificationCentre.controlStateChanged(event, model: self)
         case "workspace-updated":
             let project = Project(event["workspace"])
             if let index = projects.firstIndex(where: { $0.id == project.id }) { projects[index] = project }

@@ -2,27 +2,49 @@ import Observation
 import UIKit
 import UserNotifications
 
+/// Where a tapped notification goes. An ordinary push carries a thread. A
+/// notification-centre push adds `notificationId`, and a notice adds `reportId`;
+/// a notice may have no thread at all, so then the thread fields stay empty.
 struct NotificationDestination: Equatable, Sendable {
     let sessionID: String
     let workspaceID: String
     let threadID: String
     /// Set for a review, which opens the inbox and may have no source task.
     let reviewID: String?
+    let kind: String?
+    let notificationID: String?
+    let reportID: String?
     var userInfo: [String: String] {
         var info = ["sessionId": sessionID, "workspaceId": workspaceID, "threadId": threadID]
         if let reviewID { info["reviewId"] = reviewID }
+        if let kind { info["kind"] = kind }
+        if let notificationID { info["notificationId"] = notificationID }
+        if let reportID { info["reportId"] = reportID }
         return info
     }
+    /// A notice opens its report, with the Mac asleep or not. So does a record
+    /// with nowhere else to go. A review always opens the review.
+    var detailTarget: NotificationDetailTarget? {
+        guard reviewID == nil, notificationID != nil || reportID != nil, kind == "agent-notice" || reportID != nil || threadID.isEmpty else { return nil }
+        return NotificationDetailTarget(notificationID: notificationID, reportID: reportID)
+    }
     init?(userInfo: [AnyHashable: Any]) {
-        func valid(_ value: String) -> Bool { !value.isEmpty && value.utf8.count <= 1024 && !value.unicodeScalars.contains(where: CharacterSet.controlCharacters.contains) }
-        guard let session = userInfo["sessionId"] as? String, valid(session) else { return nil }
-        let review = userInfo["reviewId"] as? String
-        if let review, !valid(review) { return nil }
-        let workspace = userInfo["workspaceId"] as? String ?? "", thread = userInfo["threadId"] as? String ?? ""
-        if review == nil {
-            guard valid(workspace), valid(thread) else { return nil }
-        } else if [workspace, thread].contains(where: { !$0.isEmpty && !valid($0) }) { return nil }
-        sessionID = session; workspaceID = workspace; threadID = thread; reviewID = review
+        func field(_ key: String) -> String? {
+            guard let value = userInfo[key] as? String, !value.isEmpty, value.utf8.count <= 1024, !value.unicodeScalars.contains(where: CharacterSet.controlCharacters.contains) else { return nil }
+            return value
+        }
+        func malformed(_ key: String) -> Bool { (userInfo[key] as? String).map { !$0.isEmpty && field(key) == nil } ?? false }
+        guard let session = field("sessionId") else { return nil }
+        let review = field("reviewId")
+        if userInfo["reviewId"] is String, review == nil { return nil }
+        if review != nil, malformed("workspaceId") || malformed("threadId") { return nil }
+        let workspace = field("workspaceId"), thread = field("threadId"), notification = field("notificationId")
+        let report = field("reportId").flatMap { NotificationReportClient.isValid(id: $0) ? $0 : nil }
+        let hasThread = workspace != nil && thread != nil
+        guard hasThread || review != nil || notification != nil || report != nil else { return nil }
+        // A review keeps whatever it has of its source; a half-addressed row keeps nothing.
+        sessionID = session; workspaceID = hasThread || review != nil ? workspace ?? "" : ""; threadID = hasThread || review != nil ? thread ?? "" : ""
+        reviewID = review; kind = field("kind"); notificationID = notification; reportID = report
     }
 }
 

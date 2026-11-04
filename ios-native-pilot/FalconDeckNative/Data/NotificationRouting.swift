@@ -24,7 +24,23 @@ import Foundation
         }
     }
     func openPendingNotification() async {
-        guard let destination = pendingNotification, !demo, connected else { return }
+        guard let destination = pendingNotification, !demo else { return }
+        // Reading a record and opening a report need no computer. Launch restores
+        // navigation, so wait for that rather than be overwritten by it.
+        if destination.notificationID != nil || destination.detailTarget != nil {
+            guard !restoringSession else { return }
+            guard (try? sessionLoader())?.sessionID == destination.sessionID else {
+                pendingNotification = nil; error = "This notification belongs to another computer connection."; return
+            }
+            if let id = destination.notificationID { Task { await notificationCentre.markRead(id, model: self) } }
+            if let target = destination.detailTarget {
+                pendingNotification = nil; pendingSelection = nil
+                notificationCentre.openRequest = target
+                if selection == .notifications { detailRequestID = UUID() } else { selection = .notifications }
+                return
+            }
+        }
+        guard connected else { return }
         guard (try? sessionLoader())?.sessionID == destination.sessionID else {
             pendingNotification = nil; error = "This notification belongs to another computer connection."; return
         }
@@ -42,5 +58,29 @@ import Foundation
             guard raw["id"].string == destination.threadID, raw["workspace_id"].string == destination.workspaceID else { throw PilotError("This task is no longer available on your computer.") }
             upsertTask(raw); selection = .task(destination.threadID)
         } catch { if current == connectionID { self.error = error.localizedDescription } }
+    }
+
+    /// A reply from a notification goes to the source thread as an ordinary
+    /// message, through the composer's own delivery path. Throws if it was not
+    /// accepted, so the words stay in the field.
+    func sendNotificationReply(_ text: String, workspaceID: String, threadID: String) async throws {
+        guard demo || connected else { throw PilotError("Connect to your computer to reply.") }
+        var task = self.task(threadID)
+        if task == nil, !demo {
+            let current = connectionID
+            let raw = try await relay.detail(task: AgentTask(.object(["workspace_id": .string(workspaceID), "id": .string(threadID)])), before: nil)["thread"]
+            guard current == connectionID else { throw CancellationError() }
+            guard raw["id"].string == threadID else { throw PilotError("This task is no longer available on your computer.") }
+            upsertTask(raw); task = self.task(threadID)
+        }
+        guard let task else { throw PilotError("This task is no longer available.") }
+        let chat = chat(for: task)
+        let previous = chat.outgoingMessage
+        chat.error = nil
+        await send(task, textOverride: text)
+        if let failure = chat.error { throw PilotError(failure) }
+        guard let outgoing = chat.outgoingMessage, outgoing !== previous, outgoing.phase != .sending else {
+            throw PilotError(chat.notice ?? "The message couldn't be sent. Try again.")
+        }
     }
 }

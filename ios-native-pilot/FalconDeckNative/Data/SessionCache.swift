@@ -16,6 +16,7 @@ struct SessionCache: Codable, Sendable, Equatable {
     var preferences: JSON
     var histories: [String: CachedHistory]
     var modelCatalogs: [CachedModelCatalog]? = nil
+    var notifications: CachedNotifications? = nil
 }
 
 struct SessionCacheInput: Sendable {
@@ -25,6 +26,7 @@ struct SessionCacheInput: Sendable {
     var selectedID: String?
     var histories: [String: CachedHistory]
     var modelCatalogs: [CachedModelCatalog] = []
+    var notifications: CachedNotifications? = nil
     var writeRevision: UInt64 = 0
 }
 
@@ -69,6 +71,7 @@ actor SessionCacheStore {
             guard cache.version == 1, cache.tasks.count <= 200, cache.histories.count <= 5 else { throw PilotError("Unsupported preview") }
             var validated = cache
             validated.modelCatalogs = CachedModelCatalog.bounded(cache.modelCatalogs ?? [])
+            if let rows = validated.notifications?.rows, rows.count > NotificationCentreStore.pageSize { validated.notifications = nil }
             previous = validated
             return validated
         } catch {
@@ -122,7 +125,7 @@ actor SessionCacheStore {
         }
         let projectIDs = Set(input.projects.map { $0["id"].string })
         let catalogs = CachedModelCatalog.bounded(input.modelCatalogs.filter { projectIDs.contains($0.projectID) })
-        var cache = SessionCache(projects: projects, tasks: rows, preferences: input.preferences, histories: histories, modelCatalogs: catalogs)
+        var cache = SessionCache(projects: projects, tasks: rows, preferences: input.preferences, histories: histories, modelCatalogs: catalogs, notifications: input.notifications ?? previous?.notifications)
         // Avoid re-encrypting identical content just because a refresh completed.
         if let previous { cache.savedAt = previous.savedAt; if cache == previous { return } }
         cache.savedAt = .now
