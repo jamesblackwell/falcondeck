@@ -3692,7 +3692,38 @@ impl AppState {
                     .unwrap_or_default()
             )
         );
-        let mut scheduled = true;
+        // All or nothing, before anything is sent. A retry after a partial
+        // send would alert the devices that already got this one again.
+        let apns_count = recipients
+            .iter()
+            .filter(|(_, _, registered)| {
+                matches!(registered.registration, PushRegistration::Apns { .. })
+            })
+            .count();
+        let mut permits = Vec::with_capacity(apns_count);
+        if let Some(provider) = &self.inner.apns {
+            permits.extend((0..apns_count).map_while(|_| provider.reserve()));
+        }
+        if permits.len() < apns_count {
+            warn!("APNs delivery capacity exceeded");
+            drop(permits);
+            for (device_id, _, registered) in &recipients {
+                if matches!(registered.registration, PushRegistration::Apns { .. }) {
+                    self.record_push_outcome(
+                        session_id,
+                        device_id,
+                        &kind,
+                        "apns",
+                        PushDeliveryOutcome::Rejected,
+                        Some("relay APNs capacity exceeded".to_owned()),
+                    )
+                    .await;
+                }
+            }
+            let key = push_dedupe_key(session_id, &kind, dedupe_scope.as_deref());
+            self.inner.store.lock().await.push_dedupe.remove(&key);
+            return false;
+        }
         if let Some(provider) = &self.inner.apns
             && let Some(payload) = crate::push::apns_payload(
                 title,
@@ -3709,18 +3740,7 @@ impl AppState {
                 if !matches!(registered.registration, PushRegistration::Apns { .. }) {
                     continue;
                 }
-                let Some(permit) = provider.reserve() else {
-                    warn!("APNs delivery capacity exceeded");
-                    scheduled = false;
-                    self.record_push_outcome(
-                        session_id,
-                        device_id,
-                        &kind,
-                        "apns",
-                        PushDeliveryOutcome::Rejected,
-                        Some("relay APNs capacity exceeded".to_owned()),
-                    )
-                    .await;
+                let Some(permit) = permits.pop() else {
                     continue;
                 };
                 let (
@@ -3898,11 +3918,7 @@ impl AppState {
                 }
             });
         }
-        if !scheduled {
-            let key = push_dedupe_key(session_id, &kind, dedupe_scope.as_deref());
-            self.inner.store.lock().await.push_dedupe.remove(&key);
-        }
-        scheduled
+        true
     }
 
     async fn clear_dead_native_registration(

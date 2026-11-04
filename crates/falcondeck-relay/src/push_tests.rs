@@ -565,11 +565,21 @@ async fn test_push_clears_a_token_expo_calls_dead_and_names_other_failures() {
 #[tokio::test]
 async fn a_review_dropped_at_capacity_is_not_acknowledged_and_can_retry() {
     let (endpoint, mut events, task) = mock_server().await;
+    let (expo, mut expo_events, expo_task) = mock_server().await;
     let directory = tempfile::tempdir().unwrap();
     let provider = Arc::new(ApnsProvider::mock(endpoint));
-    let state = state(&directory, String::new(), Some(provider.clone()));
+    let state = state(&directory, expo, Some(provider.clone()));
     state
         .register_push_registration("session", "native", "native", Some(native("aabb")))
+        .await
+        .unwrap();
+    state
+        .register_push_token(
+            "session",
+            "expo",
+            "expo",
+            Some("ExponentPushToken[legacy]".to_owned()),
+        )
         .await
         .unwrap();
     let permits = std::iter::from_fn(|| provider.reserve()).collect::<Vec<_>>();
@@ -577,13 +587,19 @@ async fn a_review_dropped_at_capacity_is_not_acknowledged_and_can_retry() {
         state.notify("session", "daemon", review("R-1")).await,
         Err(RelayError::TooManyRequests(_))
     ));
+    tokio::time::sleep(StdDuration::from_millis(100)).await;
+    assert!(expo_events.try_recv().is_err(), "nothing sends until all can");
     drop(permits);
     state
         .notify("session", "daemon", review("R-1"))
         .await
         .unwrap();
     assert_eq!(next_push(&mut events).await.1["reviewId"], "R-1");
+    next_push(&mut expo_events).await;
+    tokio::time::sleep(StdDuration::from_millis(100)).await;
+    assert!(expo_events.try_recv().is_err(), "the retry alerts once");
     task.abort();
+    expo_task.abort();
 }
 
 #[tokio::test]

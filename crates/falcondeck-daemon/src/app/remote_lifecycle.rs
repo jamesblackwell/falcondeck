@@ -303,11 +303,12 @@ impl AppState {
         let preferences = self.preferences().await.notifications;
         let desktop_active = preferences.suppress_when_desktop_active && self.desktop_is_active();
         let policy = attention_policy(kind, &preferences, desktop_active);
+        let http_route = review_id.is_some() && self.relay_session_target().await.is_some();
         let command_tx = {
             let mut remote = self.inner.remote.lock().await;
             let command_tx = remote.command_tx.clone();
             // A review reaches the relay over HTTP, so a dead bridge is no loss.
-            let reachable = command_tx.is_some() || review_id.is_some();
+            let reachable = command_tx.is_some() || http_route;
             record_attention(&mut remote.attention, kind, policy, reachable);
             command_tx
         };
@@ -317,7 +318,7 @@ impl AppState {
             bridge = command_tx.is_some(),
             "attention event"
         );
-        if policy != AttentionPolicy::Deliver || (command_tx.is_none() && review_id.is_none()) {
+        if policy != AttentionPolicy::Deliver || (command_tx.is_none() && !http_route) {
             return;
         }
         // Capture before enqueueing: the bridge may process this after

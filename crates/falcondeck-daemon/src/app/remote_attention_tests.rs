@@ -210,3 +210,23 @@ async fn a_review_reaches_the_relay_with_an_active_desktop_and_no_bridge() {
     assert_eq!(status.attention[0].sent, 1);
     assert_eq!(status.attention[0].suppressed_desktop_active, 0);
 }
+
+#[tokio::test]
+async fn a_review_with_no_route_is_not_counted_as_sent() {
+    let directory = tempfile::tempdir().unwrap();
+    let app = AppState::new_with_state_path(
+        "test".to_string(),
+        Default::default(),
+        directory.path().join("state.json"),
+    );
+    app.deliver_attention(AttentionEvent {
+        kind: "review",
+        workspace_id: None,
+        thread_id: None,
+        preview: None,
+        review_id: Some("R-1".to_string()),
+    })
+    .await;
+    let status = build_remote_status_response(&*app.inner.remote.lock().await);
+    assert_eq!((status.attention[0].sent, status.attention[0].no_bridge), (0, 1));
+}
