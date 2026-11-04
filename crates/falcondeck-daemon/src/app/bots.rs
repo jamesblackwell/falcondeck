@@ -474,6 +474,7 @@ impl AppState {
                 let mut bots = self.inner.preferences.lock().await.bots.clone();
                 bots.retain(|b| b.id != id);
                 self.save_bots(bots).await?;
+                self.terminals().close_scope(None, Some(id.as_str()));
                 Ok(
                     json!({"ok": true, "message": "Bot removed. Conversation archived and documents kept on disk."}),
                 )

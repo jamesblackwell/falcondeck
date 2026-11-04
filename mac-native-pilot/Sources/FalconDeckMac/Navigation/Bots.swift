@@ -20,6 +20,33 @@ extension AppStore {
     var botTaskIDs: Set<String> { Set(bots.map(\.taskID)) }
 }
 
+/// Only the home conversation counts as the bot working. Running child tasks
+/// are reported as a quiet count so a finished reply never looks stuck.
+struct NativeBotActivity {
+    let homeRunning: Bool
+    let runningTasks: [AgentTask]
+    let needsAttention: Bool
+
+    init(bot: NativeBot, tasks: [AgentTask]) {
+        let related = tasks.filter {
+            $0.id == bot.taskID || ($0.raw["origin"]["kind"].string == "agent_spawn" && $0.raw["origin"]["parent_thread_id"].string == bot.taskID)
+        }
+        homeRunning = related.contains { $0.id == bot.taskID && $0.running }
+        runningTasks = related.filter { $0.id != bot.taskID && $0.running }
+        needsAttention = related.contains(where: \.needsAttention)
+    }
+
+    var runningLabel: String? {
+        guard !runningTasks.isEmpty else { return nil }
+        return "\(runningTasks.count) running"
+    }
+
+    var runningHelp: String {
+        let noun = runningTasks.count == 1 ? "task" : "tasks"
+        return (["\(runningTasks.count) \(noun) running:"] + runningTasks.map(\.title)).joined(separator: "\n")
+    }
+}
+
 struct NativeBotsSection: View {
     @Bindable var store: AppStore
     @State private var editor: NativeBot?
@@ -33,9 +60,12 @@ struct NativeBotsSection: View {
                             Image(systemName: "person.crop.square").foregroundStyle(FDTheme.muted)
                             Text(bot.name).lineLimit(1).foregroundStyle(bot.availability == "paused" ? FDTheme.muted : FDTheme.secondary)
                             Spacer()
-                            let related = store.tasks.filter { $0.id == bot.taskID || ($0.raw["origin"]["kind"].string == "agent_spawn" && $0.raw["origin"]["parent_thread_id"].string == bot.taskID) }
-                            if related.contains(where: \.needsAttention) { Image(systemName: "exclamationmark.circle").foregroundStyle(.orange) }
-                            else if related.contains(where: \.running) { ProgressView().controlSize(.mini) }
+                            let activity = NativeBotActivity(bot: bot, tasks: store.tasks)
+                            if !activity.homeRunning, let label = activity.runningLabel {
+                                Text(label).font(.caption).monospacedDigit().foregroundStyle(FDTheme.muted).help(activity.runningHelp)
+                            }
+                            if activity.needsAttention { Image(systemName: "exclamationmark.circle").foregroundStyle(.orange) }
+                            else if activity.homeRunning { ProgressView().controlSize(.mini) }
                             else if bot.availability == "paused" { Text("Paused").foregroundStyle(FDTheme.muted) }
                         }.contentShape(Rectangle())
                     }.buttonStyle(.plain)

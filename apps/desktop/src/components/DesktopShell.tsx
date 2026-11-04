@@ -14,6 +14,9 @@ export type DesktopShellProps = {
   rail?: React.ReactNode
   bottom?: React.ReactNode
   bottomVisible?: boolean
+  /** Controlled bottom panel height; uncontrolled (session-only) when absent. */
+  bottomHeight?: number
+  onBottomHeightChange?: (height: number) => void
   sidebarVisible?: boolean
   sidebarPeekEnabled?: boolean
   railVisible?: boolean
@@ -101,6 +104,8 @@ export function DesktopShell({
   rail,
   bottom,
   bottomVisible = true,
+  bottomHeight: controlledBottomHeight,
+  onBottomHeightChange,
   sidebarVisible = true,
   sidebarPeekEnabled = true,
   railVisible = true,
@@ -110,7 +115,10 @@ export function DesktopShell({
   const railOpen = Boolean(rail) && railVisible
   const bottomOpen = Boolean(bottom) && bottomVisible
   const animating = useToggleAnimation([sidebarVisible, railOpen, bottomOpen])
-  const [bottomHeight, setBottomHeight] = React.useState(BOTTOM_PANEL_DEFAULT_HEIGHT)
+  const [localBottomHeight, setLocalBottomHeight] = React.useState(BOTTOM_PANEL_DEFAULT_HEIGHT)
+  const bottomHeight =
+    controlledBottomHeight === undefined ? localBottomHeight : clampBottomHeight(controlledBottomHeight)
+  const setBottomHeight = onBottomHeightChange ?? setLocalBottomHeight
   const [sidebarPeeking, setSidebarPeeking] = React.useState(false)
   const [sidebarWidthPercent, setSidebarWidthPercent] = React.useState(20)
   const showSidebarPeek = !sidebarVisible && sidebarPeekEnabled && sidebarPeeking

@@ -1956,6 +1956,7 @@ impl AppState {
                     .or(persisted_workspace.updated_at)
                     .unwrap_or(now),
                 last_message_preview: None,
+                last_message_at: None,
                 latest_turn_id: None,
                 latest_plan: None,
                 latest_diff: None,
@@ -4160,6 +4161,7 @@ impl AppState {
             ));
         }
         workspace_ops::delete_thread(self, workspace_id, thread_id).await?;
+        self.inner.terminals.close_scope(Some(thread_id), None);
         Ok(CommandResponse {
             ok: true,
             message: Some("thread deleted".to_string()),
@@ -5079,6 +5081,31 @@ impl AppState {
             request,
         )
         .await
+    }
+
+    /// Where a new terminal starts: a bot's space, a thread's working
+    /// directory (its worktree when isolated), else the workspace folder.
+    pub async fn terminal_cwd(
+        &self,
+        workspace_id: &str,
+        thread_id: Option<&str>,
+        bot_id: Option<&str>,
+    ) -> Result<String, DaemonError> {
+        if let Some(bot_id) = bot_id {
+            let space = self
+                .inner
+                .preferences
+                .lock()
+                .await
+                .bots
+                .iter()
+                .find(|bot| bot.id == bot_id)
+                .map(|bot| bot.space_path.clone());
+            if let Some(space) = space.filter(|path| std::path::Path::new(path).is_dir()) {
+                return Ok(space);
+            }
+        }
+        self.git_root(workspace_id, thread_id).await
     }
 
     /// Directory git status and diffs are read from: an isolated thread's own

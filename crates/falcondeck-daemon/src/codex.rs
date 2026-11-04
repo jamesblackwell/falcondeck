@@ -1670,12 +1670,17 @@ fn hydrate_thread_summary(
         summary.native_session_id = Some(summary.id.clone());
     }
 
-    if let Some(last_message) = items.iter().rev().find_map(|item| match item {
-        ConversationItem::AssistantMessage { text, .. }
-        | ConversationItem::UserMessage { text, .. } => Some(text.clone()),
+    if let Some((last_message, created_at)) = items.iter().rev().find_map(|item| match item {
+        ConversationItem::AssistantMessage {
+            text, created_at, ..
+        }
+        | ConversationItem::UserMessage {
+            text, created_at, ..
+        } => Some((text.clone(), *created_at)),
         _ => None,
     }) {
         summary.last_message_preview = Some(truncate_preview(&last_message));
+        summary.last_message_at = Some(created_at);
     }
 
     if let Some(last_tool) = items.iter().rev().find_map(|item| match item {
@@ -4493,6 +4498,7 @@ mod tests {
                 status: ThreadStatus::Idle,
                 updated_at: Utc::now(),
                 last_message_preview: None,
+                last_message_at: None,
                 latest_turn_id: None,
                 latest_plan: None,
                 latest_diff: None,
@@ -4576,6 +4582,7 @@ mod tests {
                     .unwrap()
                     .with_timezone(&Utc),
                 last_message_preview: None,
+                last_message_at: None,
                 latest_turn_id: None,
                 latest_plan: None,
                 latest_diff: None,
@@ -4625,6 +4632,7 @@ mod tests {
                 status: ThreadStatus::Idle,
                 updated_at: Utc::now(),
                 last_message_preview: None,
+                last_message_at: None,
                 latest_turn_id: None,
                 latest_plan: None,
                 latest_diff: None,

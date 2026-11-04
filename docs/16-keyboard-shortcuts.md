@@ -30,7 +30,8 @@ without a project in the Chats section.
 Holding `⌘` for a moment numbers the first nine bots in the working list, and
 `⌘1`–`⌘9` opens that bot's conversation. These positional jumps are fixed, not
 customizable, and desktop-only (browsers use them for tabs). The terminal keeps
-`⌘1`–`⌘9` for its own tabs while it has focus.
+`⌘1`–`⌘9` for its own tabs while it has focus. Terminal splits, pane focus and font size are
+listed in [terminal.md](terminal.md).
 
 The registry is the source of truth for labels, descriptions, contexts, and
 defaults. Custom values are versioned and stored locally because shortcuts are

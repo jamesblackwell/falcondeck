@@ -2187,6 +2187,7 @@ fn claude_thread_summary(
         status: ThreadStatus::Idle,
         updated_at,
         last_message_preview,
+        last_message_at: None,
         latest_turn_id: None,
         latest_plan: None,
         latest_diff: None,
