@@ -380,6 +380,15 @@ pub struct AnalyticsUsage {
     pub cost_sources: Vec<String>,
 }
 
+/// A harness and model observed in a scheduled task's usage records.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AnalyticsAgent {
+    /// Harness id, such as `claude` or `codex`.
+    pub provider: String,
+    /// Model id; empty when the harness did not report one.
+    pub model: String,
+}
+
 /// Runs of one scheduled task, with signs it may not be earning its keep.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct AnalyticsAutomation {
@@ -412,6 +421,15 @@ pub struct AnalyticsAutomation {
     /// Models observed in usage records on run threads during the reporting window.
     #[serde(default)]
     pub models: Vec<String>,
+    /// Harness and model pairs observed in those same usage records.
+    #[serde(default)]
+    pub agents: Vec<AnalyticsAgent>,
+    /// Bot names observed in those records, plus the configured bot if any.
+    #[serde(default)]
+    pub bots: Vec<String>,
+    /// Harness the automation is configured to run on.
+    #[serde(default)]
+    pub provider: Option<String>,
     /// Current model pin, even when a shared thread ignores it.
     #[serde(default)]
     pub configured_model: Option<String>,

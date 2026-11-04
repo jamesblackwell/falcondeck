@@ -578,6 +578,7 @@ function AppInner() {
   const [settingsSection, setSettingsSection] =
     useState<SettingsSectionId>("general");
   const [settingsRequestKey, setSettingsRequestKey] = useState(0);
+  const [settingsTarget, setSettingsTarget] = useState<{ section: SettingsSectionId; setting: string } | null>(null);
   const [paletteRequest, setPaletteRequest] = useState({
     key: 0,
     query: "",
@@ -897,8 +898,9 @@ function AppInner() {
     baseUrl,
     onTranscript: handleVoiceTranscript,
   });
-  const openSettingsSection = useCallback((section: SettingsSectionId) => {
+  const openSettingsSection = useCallback((section: SettingsSectionId, setting?: string) => {
     setSettingsSection(section);
+    setSettingsTarget(setting ? { section, setting } : null);
     setSettingsRequestKey((current) => current + 1);
     setIsSettingsOpen(true);
     setIsScheduledOpen(false);
@@ -6172,6 +6174,7 @@ function AppInner() {
                     initialCloudOwnerId={selectedCloudOwnerId}
                     onOpenAutomation={handleOpenAutomation}
                     initialSection={settingsSection}
+                    initialSetting={settingsTarget?.section === settingsSection ? settingsTarget.setting : undefined}
                     sectionRequestKey={settingsRequestKey}
                     workspace={selectedWorkspace}
                     localWorkspaces={snapshot?.workspaces ?? []}

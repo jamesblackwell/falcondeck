@@ -50,6 +50,8 @@ function findSettingAnchor(root: HTMLElement, title: string) {
 export type SettingsViewProps = {
   /** Section shown when the view mounts so app-level deep links can land on a panel. */
   initialSection?: SettingsSectionId;
+  /** On-page title a deep link lands on, such as an Analytics section. */
+  initialSetting?: string;
   /** Changes for every deep-link request, including repeats of the same section. */
   sectionRequestKey?: number;
   workspace?: WorkspaceSummary | null;
@@ -112,7 +114,7 @@ export function SettingsView(props: SettingsViewProps) {
   };
 
   useEffect(() => {
-    selectSection(props.initialSection ?? "general");
+    selectSection(props.initialSection ?? "general", props.initialSetting);
     // Deep links fire on section or request-key changes only.
   }, [props.initialSection, props.sectionRequestKey]);
 
@@ -145,7 +147,8 @@ export function SettingsView(props: SettingsViewProps) {
         );
       }
     };
-    tryFocus();
+    // After this commit's effects, so a panel can reveal the target's tab first.
+    timer = window.setTimeout(tryFocus, 0);
     return () => window.clearTimeout(timer);
   }, [focusRequest]);
 
@@ -250,6 +253,7 @@ export function SettingsView(props: SettingsViewProps) {
               onToast={props.onToast}
               onOpenAutomation={props.onOpenAutomation}
               onOpenThread={props.onOpenThread}
+              focusRequest={focusRequest}
             />
           ) : activeSection === "backup" ? (
             <BackupPanel baseUrl={props.baseUrl} onToast={props.onToast} />

@@ -191,7 +191,8 @@ describe('SettingsView deep links', () => {
 
   // Search scrolls to these exact titles, so they must exist on the page.
   // Agent control loads from the daemon; dictionary and history are Tauri-only.
-  const offlineSections = new Set(['agent-control'])
+  // Analytics titles sit on separate tabs; AnalyticsPanel.test.tsx covers them.
+  const offlineSections = new Set(['agent-control', 'analytics'])
   const tauriOnly = new Set(['Correction dictionary', 'Recording history'])
   const workspace = {
     agents: [{ provider: 'codex', account: { status: 'ready', label: 'Signed in' }, models: [] }],
