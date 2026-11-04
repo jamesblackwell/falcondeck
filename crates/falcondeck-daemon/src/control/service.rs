@@ -1927,6 +1927,27 @@ impl ControlService {
     }
 
     /// Snapshot of one automation, for the dispatcher.
+    /// The reply that means "nothing to report" for a run going on in this
+    /// thread right now. Quiet runs must not reach James as a finished turn.
+    pub async fn quiet_marker_for_thread(&self, thread_id: &str) -> Option<String> {
+        let state = self.state.lock().await;
+        let run = state.runs.iter().find(|run| {
+            run.status == AutomationRunStatus::Running
+                && run.thread_id.as_deref() == Some(thread_id)
+        })?;
+        let automation = state
+            .automations
+            .iter()
+            .find(|automation| automation.id == run.automation_id)?;
+        match &automation.task {
+            falcondeck_core::control::AutomationTask::ConditionalPrompt {
+                no_action_marker,
+                ..
+            } => Some(no_action_marker.clone()),
+            _ => None,
+        }
+    }
+
     pub async fn automation(&self, automation_id: &str) -> Option<Automation> {
         self.state
             .lock()

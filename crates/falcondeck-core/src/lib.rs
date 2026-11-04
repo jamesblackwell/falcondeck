@@ -23,6 +23,8 @@ pub mod crypto;
 /// Synced project folder metadata and atomic edits.
 pub mod project_folders;
 pub use project_folders::*;
+/// Notification centre: the durable history of attention events and agent notices.
+pub mod notifications;
 /// Bounded, multiplexed relay socket transport.
 pub mod relay_transport;
 /// Review inbox: decisions agents need from James, with evidence.

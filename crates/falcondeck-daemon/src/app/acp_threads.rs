@@ -1784,8 +1784,10 @@ impl AppState {
                             request: request.clone(),
                         },
                     );
-                    self.notify_remote_attention("approval", workspace_id, Some(thread_id.clone()))
-                        .await;
+                    self.record_and_deliver_attention(
+                        super::notification_centre::AttentionEvent::request(&request),
+                    )
+                    .await;
                     self.push_conversation_item(
                         workspace_id,
                         &thread_id,
@@ -1864,8 +1866,10 @@ impl AppState {
                         request: request.clone(),
                     },
                 );
-                self.notify_remote_attention("approval", workspace_id, Some(thread_id.clone()))
-                    .await;
+                self.record_and_deliver_attention(
+                    super::notification_centre::AttentionEvent::request(&request),
+                )
+                .await;
                 self.push_conversation_item(
                     workspace_id,
                     &thread_id,
@@ -1940,8 +1944,10 @@ impl AppState {
                         request: request.clone(),
                     },
                 );
-                self.notify_remote_attention("question", workspace_id, Some(thread_id.clone()))
-                    .await;
+                self.record_and_deliver_attention(
+                    super::notification_centre::AttentionEvent::request(&request),
+                )
+                .await;
                 self.push_conversation_item(
                     workspace_id,
                     &thread_id,
@@ -2841,7 +2847,7 @@ pub(super) async fn start_acp_turn(
                     UnifiedEvent::ThreadUpdated { thread },
                 );
             }
-            app.notify_remote_attention("turn-error", &workspace_id, Some(thread_id))
+            app.record_and_deliver_attention(super::notification_centre::AttentionEvent::turn(&workspace_id, &thread_id, true))
                 .await;
         }
     });

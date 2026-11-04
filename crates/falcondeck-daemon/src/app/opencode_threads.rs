@@ -890,6 +890,7 @@ async fn surface_permissions(
                 request: request.clone(),
             },
         );
+        let attention = request.clone();
         app.push_conversation_item(
             workspace_id,
             thread_id,
@@ -903,8 +904,10 @@ async fn surface_permissions(
             false,
         )
         .await?;
-        app.notify_remote_attention("approval", workspace_id, Some(thread_id.to_string()))
-            .await;
+        app.record_and_deliver_attention(super::notification_centre::AttentionEvent::request(
+            &attention,
+        ))
+        .await;
     }
     Ok(())
 }
@@ -1053,6 +1056,7 @@ async fn surface_questions(
                 request: request.clone(),
             },
         );
+        let attention = request.clone();
         app.push_conversation_item(
             workspace_id,
             thread_id,
@@ -1066,8 +1070,10 @@ async fn surface_questions(
             false,
         )
         .await?;
-        app.notify_remote_attention("question", workspace_id, Some(thread_id.to_string()))
-            .await;
+        app.record_and_deliver_attention(super::notification_centre::AttentionEvent::request(
+            &attention,
+        ))
+        .await;
     }
     Ok(())
 }

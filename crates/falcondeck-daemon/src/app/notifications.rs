@@ -609,14 +609,12 @@ pub(super) async fn ingest_notification(
                 // A user-requested interrupt is not attention-worthy, though:
                 // the user just acted on this thread themselves.
                 if !turn_was_interrupted {
-                    app.notify_remote_attention(
-                        if error.is_some() {
-                            "turn-error"
-                        } else {
-                            "turn-complete"
-                        },
-                        workspace_id,
-                        Some(thread_id.clone()),
+                    app.record_and_deliver_attention(
+                        super::notification_centre::AttentionEvent::turn(
+                            workspace_id,
+                            &thread_id,
+                            error.is_some(),
+                        ),
                     )
                     .await;
                 }
@@ -2970,7 +2968,6 @@ pub(super) async fn handle_claude_pre_tool_use(app: &AppState, payload: Value) -
         &thread_id,
         request,
         Value::Null,
-        "approval",
     )
     .await
     {
@@ -3035,19 +3032,11 @@ async fn handle_claude_ask_user_question(
         "original_questions": parsed.original_questions,
         "questions": parsed.questions,
     });
-    let reply = match wait_for_claude_hook_reply(
-        app,
-        &workspace_id,
-        &thread_id,
-        request,
-        params,
-        "question",
-    )
-    .await
-    {
-        Ok(reply) => reply,
-        Err(deny) => return deny,
-    };
+    let reply =
+        match wait_for_claude_hook_reply(app, &workspace_id, &thread_id, request, params).await {
+            Ok(reply) => reply,
+            Err(deny) => return deny,
+        };
     match reply {
         crate::claude::ClaudeHookReply::QuestionAnswers(answers) => claude_hook_allow_with_input(
             "Answered in FalconDeck",
@@ -3088,19 +3077,12 @@ async fn handle_claude_exit_plan_mode(
         questions: Vec::new(),
         created_at: Utc::now(),
     };
-    let reply = match wait_for_claude_hook_reply(
-        app,
-        &workspace_id,
-        &thread_id,
-        request,
-        tool_input,
-        "approval",
-    )
-    .await
-    {
-        Ok(reply) => reply,
-        Err(deny) => return deny,
-    };
+    let reply =
+        match wait_for_claude_hook_reply(app, &workspace_id, &thread_id, request, tool_input).await
+        {
+            Ok(reply) => reply,
+            Err(deny) => return deny,
+        };
     match reply {
         crate::claude::ClaudeHookReply::Plan {
             outcome: falcondeck_core::PlanApprovalOutcome::Approved,
@@ -3147,7 +3129,6 @@ async fn wait_for_claude_hook_reply(
     thread_id: &str,
     request: InteractiveRequest,
     params: Value,
-    attention_kind: &str,
 ) -> Result<crate::claude::ClaudeHookReply, Value> {
     let request_id = request.request_id.clone();
     let (decision_tx, decision_rx) = tokio::sync::oneshot::channel();
@@ -3182,8 +3163,10 @@ async fn wait_for_claude_hook_reply(
             request: request.clone(),
         },
     );
-    app.notify_remote_attention(attention_kind, workspace_id, Some(thread_id.to_string()))
-        .await;
+    app.record_and_deliver_attention(super::notification_centre::AttentionEvent::request(
+        &request,
+    ))
+    .await;
     let _ = app
         .push_conversation_item(
             workspace_id,
@@ -3354,15 +3337,9 @@ pub(super) async fn ingest_server_request(
                 request: request.clone(),
             },
         );
-        app.notify_remote_attention(
-            match request.kind {
-                InteractiveRequestKind::Approval => "approval",
-                InteractiveRequestKind::Question => "question",
-                InteractiveRequestKind::PlanApproval => "approval",
-            },
-            workspace_id,
-            request.thread_id.clone(),
-        )
+        app.record_and_deliver_attention(super::notification_centre::AttentionEvent::request(
+            &request,
+        ))
         .await;
         if let Some(thread_id) = request.thread_id.clone() {
             app.push_conversation_item(

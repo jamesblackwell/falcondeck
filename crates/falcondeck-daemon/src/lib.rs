@@ -30,6 +30,7 @@ mod git;
 mod file_preview;
 pub mod harness_conformance;
 pub mod logging;
+mod notification_store;
 pub(crate) mod opencode;
 pub mod opencode_conformance;
 #[cfg(unix)]

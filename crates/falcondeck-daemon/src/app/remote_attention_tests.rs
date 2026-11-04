@@ -191,7 +191,7 @@ async fn a_review_reaches_the_relay_with_an_active_desktop_and_no_bridge() {
     })
     .await
     .unwrap();
-    app.deliver_attention(AttentionEvent {
+    app.deliver_attention(AttentionPush {
         kind: "review",
         workspace_id: None,
         thread_id: None,
@@ -219,7 +219,7 @@ async fn a_review_with_no_route_is_not_counted_as_sent() {
         Default::default(),
         directory.path().join("state.json"),
     );
-    app.deliver_attention(AttentionEvent {
+    app.deliver_attention(AttentionPush {
         kind: "review",
         workspace_id: None,
         thread_id: None,

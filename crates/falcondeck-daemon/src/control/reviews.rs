@@ -572,11 +572,17 @@ impl ControlService {
             ops::REVIEW_WITHDRAW => {
                 let args: WithdrawReviewArgs = decode_arguments(&request.arguments)?;
                 let review = self.reviews.withdraw(args, actor).await?;
+                if let Some(app) = deps.app {
+                    app.resolve_review_notification(&review.id).await;
+                }
                 Ok((to_value(&review)?, vec![ControlDomain::Reviews]))
             }
             ops::REVIEW_RESPOND => {
                 let args: RespondReviewArgs = decode_arguments(&request.arguments)?;
                 let review = self.reviews.respond(args, actor).await?;
+                if let Some(app) = deps.app {
+                    app.resolve_review_notification(&review.id).await;
+                }
                 let delivery = match deps.app {
                     Some(app) => app.deliver_review_response(&review).await,
                     None => ReviewDelivery::Failed {

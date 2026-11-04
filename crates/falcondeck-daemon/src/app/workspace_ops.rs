@@ -5964,6 +5964,7 @@ pub(super) async fn mark_thread_read(
         );
         app.persist_local_state().await?;
     }
+    app.read_thread_notifications(workspace_id, thread_id).await;
     Ok(thread)
 }
 

@@ -500,6 +500,19 @@ impl AppState {
             .ok_or_else(|| DaemonError::NotFound("created folder was not found".into()))
     }
 
+    /// Whether a parent asked to hear when this child finishes.
+    pub(in crate::app) fn parent_watches_completion(&self, child: &str) -> bool {
+        let watches = self
+            .inner
+            .agent_spawn_watches
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        watches
+            .as_ref()
+            .and_then(|watches| watches.get(child))
+            .is_some_and(|watch| watch.notify_on_completion)
+    }
+
     /// Registers a child before its first dispatch; the watcher subscribes
     /// synchronously so the child's first status change cannot be missed.
     pub(in crate::app) fn watch_child(

@@ -184,6 +184,9 @@ pub fn router(state: AppState) -> Router {
         .route("/api/reviews/{id}", get(review_read))
         .route("/api/reviews/{id}/respond", post(review_respond))
         .route("/api/reviews/{id}/withdraw", post(review_withdraw))
+        .route("/api/notifications", get(notifications_list))
+        .route("/api/notifications/read", post(notifications_mark_read))
+        .route("/api/notifications/{id}", get(notification_read))
         .route("/api/control/search", post(control_search))
         .route("/api/control/get", post(control_get))
         .route("/api/control/execute", post(control_execute))
@@ -2420,6 +2423,25 @@ async fn review_withdraw(
     Json(args): Json<serde_json::Map<String, serde_json::Value>>,
 ) -> Result<Json<falcondeck_core::control::ControlExecuteResponse>, Response> {
     review_mutate(state, headers, "review.withdraw", id, args).await
+}
+
+async fn notifications_list(
+    State(state): State<AppState>,
+    Query(request): Query<falcondeck_core::notifications::NotificationListRequest>,
+) -> Json<falcondeck_core::notifications::NotificationListResponse> {
+    Json(state.notifications_list(&request).await)
+}
+async fn notification_read(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<Json<falcondeck_core::notifications::NotificationRecord>, DaemonError> {
+    Ok(Json(state.notification_get(&id).await?))
+}
+async fn notifications_mark_read(
+    State(state): State<AppState>,
+    Json(request): Json<falcondeck_core::notifications::MarkNotificationsReadRequest>,
+) -> Json<falcondeck_core::notifications::NotificationCounts> {
+    Json(state.notifications_mark_read(&request).await)
 }
 
 #[cfg(test)]

@@ -103,6 +103,7 @@ mod extensions;
 pub(crate) mod harness_manager;
 mod harness_user_text;
 pub(crate) mod host_provisioning;
+mod notification_centre;
 mod notifications;
 mod opencode_threads;
 mod project_folders;
@@ -415,6 +416,8 @@ struct InnerState {
     /// One refresh at a time. Settings can open twice while the first fetch runs.
     rewrite_catalog_refresh: Mutex<()>,
     remote: Mutex<RemoteBridgeState>,
+    /// Durable history behind the notification centre.
+    notifications: crate::notification_store::NotificationStore,
     /// Coalesces at-least-once relay delivery for mutating RPCs across bridge
     /// reconnects so an action cannot execute twice in one daemon process.
     remote_rpc_deduplicator: remote_bridge::RemoteRpcDeduplicator,
@@ -1007,6 +1010,10 @@ impl AppState {
         let preferences_path = default_preferences_path(&state_path);
         let scheduled_tasks_path = scheduled_tasks::scheduled_tasks_path(&state_path);
         let control_store = crate::control::store::control_store_path(&state_path);
+        let notifications_dir = state_path
+            .parent()
+            .unwrap_or(std::path::Path::new("."))
+            .join("notifications");
         let extension_registry = extensions::ExtensionRegistry::new(&state_path);
         let extension_hosts = extension_host::ExtensionHostPool::new(state_path.clone(), deno_bin);
         let analytics = analytics::Recorder::new(&state_path, broadcaster.subscribe());
@@ -1087,6 +1094,7 @@ impl AppState {
                 rewrite_catalog: StdMutex::new(None),
                 rewrite_catalog_disk_checked: AtomicBool::new(false),
                 rewrite_catalog_refresh: Mutex::new(()),
+                notifications: crate::notification_store::NotificationStore::new(notifications_dir),
                 remote: Mutex::new(RemoteBridgeState {
                     attention: BTreeMap::new(),
                     status: RemoteConnectionStatus::Inactive,
@@ -3539,6 +3547,8 @@ impl AppState {
     }
 
     pub fn desktop_is_active(&self) -> bool {
+        // Tests use the lease: the real Mac's keyboard must not decide them.
+        #[cfg(not(test))]
         if let Some(present) = crate::desktop_presence::native_desktop_is_present() {
             return present;
         }

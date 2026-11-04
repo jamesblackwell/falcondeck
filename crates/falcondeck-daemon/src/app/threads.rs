@@ -1457,8 +1457,12 @@ impl AppState {
                 UnifiedEvent::ThreadUpdated { thread },
             );
         }
-        self.notify_remote_attention("turn-complete", workspace_id, Some(thread_id.to_string()))
-            .await;
+        self.record_and_deliver_attention(super::notification_centre::AttentionEvent::turn(
+            workspace_id,
+            thread_id,
+            false,
+        ))
+        .await;
         self.dispatch_next_queued_turn(workspace_id, thread_id);
         if saw_agent_output {
             self.maybe_schedule_ai_thread_title(workspace_id.to_string(), thread_id.to_string())
@@ -2529,15 +2533,11 @@ impl AppState {
         // A user-requested interrupt is not attention-worthy; a finished or
         // failed turn is. The relay only pushes to disconnected devices.
         if !was_interrupted {
-            self.notify_remote_attention(
-                if turn_error.is_some() {
-                    "turn-error"
-                } else {
-                    "turn-complete"
-                },
+            self.record_and_deliver_attention(super::notification_centre::AttentionEvent::turn(
                 &workspace_id,
-                Some(thread_id.clone()),
-            )
+                &thread_id,
+                turn_error.is_some(),
+            ))
             .await;
         }
         self.dispatch_next_queued_turn(&workspace_id, &thread_id);
@@ -2946,15 +2946,11 @@ impl AppState {
             );
         }
         if !was_interrupted {
-            self.notify_remote_attention(
-                if turn_error.is_some() {
-                    "turn-error"
-                } else {
-                    "turn-complete"
-                },
+            self.record_and_deliver_attention(super::notification_centre::AttentionEvent::turn(
                 &workspace_id,
-                Some(thread_id.clone()),
-            )
+                &thread_id,
+                turn_error.is_some(),
+            ))
             .await;
         }
         self.dispatch_next_queued_turn(&workspace_id, &thread_id);
@@ -3149,6 +3145,8 @@ impl AppState {
         request_id: &str,
         resolution: Option<InteractiveRequestResolution>,
     ) -> Result<(), DaemonError> {
+        self.resolve_request_notification(workspace_id, request_id)
+            .await;
         let mut workspaces = self.inner.workspaces.lock().await;
         let workspace = workspaces
             .get_mut(workspace_id)

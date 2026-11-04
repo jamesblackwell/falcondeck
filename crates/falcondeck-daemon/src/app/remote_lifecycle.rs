@@ -209,12 +209,15 @@ const NOTIFY_RETRY_DELAYS: [std::time::Duration; 4] = [
 ];
 const NOTIFY_ATTEMPT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(8);
 
-pub(super) struct AttentionEvent<'a> {
-    pub(super) kind: &'a str,
-    pub(super) workspace_id: Option<String>,
-    pub(super) thread_id: Option<String>,
-    pub(super) preview: Option<String>,
-    pub(super) review_id: Option<String>,
+/// One push to attempt. The preview is captured at record time: the bridge may
+/// process this after another turn has started.
+#[derive(Debug, Clone, Default)]
+pub(super) struct AttentionPush {
+    pub kind: &'static str,
+    pub workspace_id: Option<String>,
+    pub thread_id: Option<String>,
+    pub preview: Option<String>,
+    pub review_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -275,31 +278,16 @@ fn record_attention(
 impl AppState {
     /// Best-effort: forward an attention event to the relay so devices that
     /// are not connected can receive a push notification. A missing or dead
-    /// bridge simply drops the request.
-    pub(super) async fn notify_remote_attention(
-        &self,
-        kind: &str,
-        workspace_id: &str,
-        thread_id: Option<String>,
-    ) {
-        self.deliver_attention(AttentionEvent {
-            kind,
-            workspace_id: Some(workspace_id.to_string()),
-            thread_id,
-            preview: None,
-            review_id: None,
-        })
-        .await;
-    }
-
-    pub(super) async fn deliver_attention(&self, event: AttentionEvent<'_>) {
-        let AttentionEvent {
+    /// bridge simply drops the request. The only caller is
+    /// `record_and_deliver_attention`, so anything pushed is also stored.
+    pub(super) async fn deliver_attention(&self, push: AttentionPush) {
+        let AttentionPush {
             kind,
             workspace_id,
             thread_id,
             preview,
             review_id,
-        } = event;
+        } = push;
         let preferences = self.preferences().await.notifications;
         let desktop_active = preferences.suppress_when_desktop_active && self.desktop_is_active();
         let policy = attention_policy(kind, &preferences, desktop_active);
@@ -321,25 +309,11 @@ impl AppState {
         if policy != AttentionPolicy::Deliver || (command_tx.is_none() && !http_route) {
             return;
         }
-        // Capture before enqueueing: the bridge may process this after
-        // another turn has started. Never hydrate native history for a push.
-        let message_preview = if preview.is_some() {
-            preview
-        } else if kind == "turn-complete" {
-            let workspaces = self.inner.workspaces.lock().await;
-            thread_id
-                .as_deref()
-                .zip(workspace_id.as_deref())
-                .and_then(|(id, workspace_id)| workspaces.get(workspace_id)?.threads.get(id))
-                .and_then(|thread| notification_message_preview(&thread.items))
-        } else {
-            None
-        };
         let command = super::RemoteBridgeCommand::NotifyAttention {
             kind: kind.to_string(),
             workspace_id,
             thread_id,
-            message_preview,
+            message_preview: preview,
             review_id,
         };
         let acknowledged = matches!(
@@ -1877,7 +1851,7 @@ pub(super) fn current_pairing_for_remote_attempt(
 
 /// Only assistant answers from the latest user turn may become push copy.
 /// Explicit commentary, reasoning, and tool output are never reply previews.
-fn notification_message_preview(items: &[ConversationItem]) -> Option<String> {
+pub(super) fn notification_message_preview(items: &[ConversationItem]) -> Option<String> {
     let text = items
         .iter()
         .rev()
@@ -1901,7 +1875,7 @@ fn notification_message_preview(items: &[ConversationItem]) -> Option<String> {
 
 /// Render readable Markdown content before bounding the notification body.
 /// Preserve link labels and code; formatting and link destinations stay out.
-fn notification_markdown_preview(text: &str) -> Option<String> {
+pub(super) fn notification_markdown_preview(text: &str) -> Option<String> {
     const MAX_PREVIEW_CHARS: usize = 200;
     let options =
         Options::ENABLE_STRIKETHROUGH | Options::ENABLE_TABLES | Options::ENABLE_TASKLISTS;

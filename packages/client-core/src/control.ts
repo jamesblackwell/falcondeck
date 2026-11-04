@@ -194,7 +194,7 @@ export type ControlErrorDetail = {
   suggested_action?: string | null;
 };
 
-export type ControlDomain = "settings" | "automations" | "runs" | "audit" | "tickets" | "reviews";
+export type ControlDomain = "settings" | "automations" | "runs" | "audit" | "tickets" | "reviews" | "notifications";
 
 export type ControlStateChanged = {
   store_revision: number;

@@ -5,18 +5,6 @@ use falcondeck_core::reviews::{Review, ReviewDelivery};
 
 use crate::control::EvidenceAccess;
 
-/// The push body. The relay bounds notification text at 256 characters.
-fn review_push_line(review: &Review) -> String {
-    let who = review.bot.as_deref().unwrap_or("An agent");
-    let line = format!("{who} needs a decision: {}", review.title.trim());
-    if line.chars().count() <= 200 {
-        return line;
-    }
-    let mut cut: String = line.chars().take(199).collect();
-    cut.push('…');
-    cut
-}
-
 impl AppState {
     /// Whether the review inbox is switched on (Settings → General).
     pub(crate) async fn review_inbox_enabled(&self) -> bool {
@@ -101,18 +89,12 @@ impl AppState {
             .map_err(|error| error.to_string())
     }
 
-    /// Push "Juno needs a decision: …" to paired devices that are not looking.
+    /// Record the review and push "Juno needs a decision: …" to paired devices
+    /// that are not looking.
     pub(crate) async fn notify_review_created(&self, review: &Review) {
-        self.deliver_attention(super::remote_lifecycle::AttentionEvent {
-            kind: "review",
-            workspace_id: review
-                .source_workspace_id
-                .clone()
-                .filter(|id| !id.is_empty()),
-            thread_id: review.source_thread_id.clone(),
-            preview: Some(review_push_line(review)),
-            review_id: Some(review.id.clone()),
-        })
+        self.record_and_deliver_attention(super::notification_centre::AttentionEvent::Review(
+            Box::new(review.clone()),
+        ))
         .await;
     }
 }
@@ -509,6 +491,7 @@ mod tests {
             "overall_note": null, "delivery": null
         }))
         .unwrap();
+        use crate::app::notification_centre::review_push_line;
         assert_eq!(
             review_push_line(&review),
             "Juno needs a decision: Pricing page"

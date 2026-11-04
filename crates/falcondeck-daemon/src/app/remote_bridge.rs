@@ -384,6 +384,8 @@ fn remote_rpc_is_read_only(method: &str) -> bool {
             | "ticket.get"
             | "reviews.list"
             | "review.get"
+            | "notifications.list"
+            | "notification.get"
             | "thread.search"
             | "thread.detail"
             | "thread.item"
@@ -465,6 +467,9 @@ pub(super) const REMOTE_RPC_METHODS: &[&str] = &[
     "reviews.list",
     "review.get",
     "review.respond",
+    "notifications.list",
+    "notification.get",
+    "notifications.mark_read",
     "control.execute",
     "speech.status",
     "speech.models",
@@ -1495,6 +1500,30 @@ impl AppState {
                         ..Default::default()
                     };
                     serde_json::to_value(self.control_execute(request, &context).await)
+                        .map_err(|error| error.to_string())
+                }
+                "notifications.list" => {
+                    let request = serde_json::from_value(params.clone())
+                        .map_err(|error| format!("invalid notifications payload: {error}"))?;
+                    serde_json::to_value(self.notifications_list(&request).await)
+                        .map_err(|error| error.to_string())
+                }
+                "notification.get" => {
+                    let id = params
+                        .get("id")
+                        .and_then(serde_json::Value::as_str)
+                        .ok_or("invalid notification payload")?;
+                    serde_json::to_value(
+                        self.notification_get(id)
+                            .await
+                            .map_err(|error| error.to_string())?,
+                    )
+                    .map_err(|error| error.to_string())
+                }
+                "notifications.mark_read" => {
+                    let request = serde_json::from_value(params.clone())
+                        .map_err(|error| format!("invalid notifications payload: {error}"))?;
+                    serde_json::to_value(self.notifications_mark_read(&request).await)
                         .map_err(|error| error.to_string())
                 }
                 "control.get" => {

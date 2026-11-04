@@ -759,6 +759,8 @@ pub enum ControlDomain {
     Tickets,
     /// Review inbox changed.
     Reviews,
+    /// Notification centre changed.
+    Notifications,
     /// Audit records changed.
     Audit,
 }
