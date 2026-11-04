@@ -5,10 +5,9 @@ use std::sync::{
 
 use axum::{Json, http::StatusCode, routing::post};
 use falcondeck_core::{NotificationPreferences, RelayNotifyRequest};
-use tokio::sync::mpsc;
 
 use super::*;
-use crate::app::{AppState, RemoteBridgeCommand};
+use crate::app::{AppState, RemotePairingState};
 
 fn preferences(suppress: bool) -> NotificationPreferences {
     NotificationPreferences {
@@ -58,29 +57,27 @@ fn notification_preferences_still_silence_reviews() {
 }
 
 #[test]
-fn counters_separate_each_reason_per_kind() {
+fn counters_separate_each_outcome_per_kind() {
     let mut counters = BTreeMap::new();
-    record_attention(&mut counters, "review", AttentionPolicy::Deliver, true);
-    record_attention(&mut counters, "review", AttentionPolicy::Deliver, false);
-    record_attention(
-        &mut counters,
-        "approval",
-        AttentionPolicy::DesktopActive,
-        true,
-    );
-    record_attention(
-        &mut counters,
-        "approval",
-        AttentionPolicy::OffByPreference,
-        true,
-    );
+    count_push(&mut counters, "review", PushOutcome::Delivered);
+    count_push(&mut counters, "review", PushOutcome::Lost);
+    count_push(&mut counters, "approval", PushOutcome::DesktopActive);
+    count_push(&mut counters, "approval", PushOutcome::OffByPreference);
+    count_push(&mut counters, "approval", PushOutcome::Settled);
+    count_push(&mut counters, "approval", PushOutcome::Expired);
+    count_push(&mut counters, "approval", PushOutcome::Evicted);
     assert_eq!(
-        (counters["review"].sent, counters["review"].no_bridge),
+        (counters["review"].delivered, counters["review"].lost),
         (1, 1)
     );
-    assert_eq!(counters["approval"].suppressed_desktop_active, 1);
-    assert_eq!(counters["approval"].suppressed_preferences, 1);
-    assert_eq!(counters["approval"].sent, 0);
+    let approval = &counters["approval"];
+    assert_eq!(approval.suppressed_desktop_active, 1);
+    assert_eq!(approval.suppressed_preferences, 1);
+    assert_eq!(
+        (approval.settled, approval.expired, approval.evicted),
+        (1, 1, 1)
+    );
+    assert_eq!(approval.delivered, 0);
     assert!(counters["review"].last_at.is_some());
 }
 
@@ -119,6 +116,26 @@ async fn relay(statuses: Vec<u16>) -> (String, Arc<AtomicUsize>) {
     (url, calls)
 }
 
+fn test_pairing() -> RemotePairingState {
+    RemotePairingState {
+        pairing_id: "pairing".to_string(),
+        pairing_code: "code".to_string(),
+        session_id: Some("session".to_string()),
+        device_id: None,
+        trusted_at: None,
+        expires_at: Utc::now(),
+        client_bundle: None,
+        local_key_pair: falcondeck_core::crypto::LocalBoxKeyPair::generate(),
+        data_key: [0; 32],
+    }
+}
+
+/// A phone to deliver to, for tests that only care what would be pushed.
+pub(in crate::app) async fn pair_for_tests(app: &AppState) {
+    let mut remote = app.inner.remote.lock().await;
+    remote.pairing.get_or_insert_with(test_pairing);
+}
+
 async fn app_with_relay(url: &str, directory: &tempfile::TempDir) -> AppState {
     let app = AppState::new_with_state_path(
         "test".to_string(),
@@ -129,40 +146,18 @@ async fn app_with_relay(url: &str, directory: &tempfile::TempDir) -> AppState {
         let mut remote = app.inner.remote.lock().await;
         remote.relay_url = Some(url.to_string());
         remote.daemon_token = Some("daemon".to_string());
-        remote.pairing = Some(crate::app::RemotePairingState {
-            pairing_id: "pairing".to_string(),
-            pairing_code: "code".to_string(),
-            session_id: Some("session".to_string()),
-            device_id: None,
-            trusted_at: None,
-            expires_at: Utc::now(),
-            client_bundle: None,
-            local_key_pair: falcondeck_core::crypto::LocalBoxKeyPair::generate(),
-            data_key: [0; 32],
-        });
+        remote.pairing = Some(test_pairing());
     }
     app
 }
 
-fn review_command() -> RemoteBridgeCommand {
-    RemoteBridgeCommand::NotifyAttention {
-        kind: "review".to_string(),
-        workspace_id: None,
-        thread_id: None,
-        message_preview: Some("Juno needs a decision: Pricing".to_string()),
+fn review() -> AttentionPush {
+    AttentionPush {
+        kind: "review",
+        preview: Some("Juno needs a decision: Pricing".to_string()),
         review_id: Some("R-1".to_string()),
-        title: None,
-        notification_id: None,
-        report_id: None,
-        ignore_presence: false,
-        held_since: None,
+        ..AttentionPush::default()
     }
-}
-
-async fn attach_bridge(app: &AppState) -> mpsc::UnboundedReceiver<RemoteBridgeCommand> {
-    let (bridge, commands) = mpsc::unbounded_channel();
-    app.inner.remote.lock().await.command_tx = Some(bridge);
-    commands
 }
 
 async fn counters(app: &AppState) -> falcondeck_core::AttentionDeliveryCounter {
@@ -179,56 +174,121 @@ fn approval() -> AttentionPush {
     }
 }
 
+async fn held_ids(app: &AppState) -> Vec<Option<String>> {
+    let mut ids = vec![];
+    while let Some(held) = app.next_held_push().await {
+        ids.push(held.push.notification_id.clone());
+        app.push_delivered(held.push.kind).await;
+    }
+    ids
+}
+
+async fn age_held_pushes(app: &AppState, minutes: i64) {
+    let mut remote = app.inner.remote.lock().await;
+    for held in &mut remote.held_pushes.queue {
+        held.held_at -= chrono::Duration::minutes(minutes);
+    }
+}
+
+/// A recorded request, its record id, and the push that announced it.
+async fn recorded_request(app: &AppState, key: &str) -> AttentionPush {
+    let record = app
+        .inner
+        .notifications
+        .record(
+            crate::notification_store::NewNotification {
+                kind: falcondeck_core::notifications::NotificationKind::InputRequired,
+                title: "Task".to_string(),
+                preview: "Approval needed".to_string(),
+                bot: None,
+                thread_id: Some("thread-1".to_string()),
+                workspace_id: Some("workspace-1".to_string()),
+                target: None,
+                importance: falcondeck_core::notifications::NotificationImportance::Normal,
+                dedupe_key: Some(key.to_string()),
+                coalesce: false,
+                sender: None,
+                body: None,
+            },
+            Utc::now(),
+        )
+        .await;
+    AttentionPush {
+        notification_id: Some(record.record().id.clone()),
+        ..approval()
+    }
+}
+
 #[tokio::test]
-async fn the_fallback_uses_the_bridge_in_place_now() {
+async fn a_review_the_relay_will_not_take_waits_for_the_socket() {
     let (url, _calls) = relay(vec![404]).await;
     let directory = tempfile::tempdir().unwrap();
     let app = app_with_relay(&url, &directory).await;
-    // The channel captured when the push was queued has gone by the time HTTP
-    // gives up; the bridge restarted with a new one.
-    drop(attach_bridge(&app).await);
-    let mut restarted = attach_bridge(&app).await;
-    app.deliver_acknowledged(review_command()).await;
-    assert!(restarted.try_recv().is_ok());
-    assert_eq!(counters(&app).await.sent, 1);
+    app.deliver_acknowledged(review()).await;
+    let waiting = counters(&app).await;
+    assert_eq!((waiting.held, waiting.delivered), (1, 0));
+    let held = app.next_held_push().await.unwrap();
+    assert_eq!(held.push.review_id.as_deref(), Some("R-1"));
 }
 
+/// The reviewer's repro: nothing took the push, and a bridge coming back does
+/// not make it lost and delivered at once.
 #[tokio::test]
-async fn a_push_the_dead_bridge_could_not_take_waits_and_only_then_counts() {
+async fn a_held_push_that_goes_out_counts_once_as_delivered() {
     let directory = tempfile::tempdir().unwrap();
     let app = app_with_relay("http://127.0.0.1:9", &directory).await;
-    drop(attach_bridge(&app).await);
     app.deliver_attention(approval()).await;
-    let held = counters(&app).await;
-    assert_eq!((held.sent, held.no_bridge), (0, 1), "nothing took it");
-
-    let mut restarted = attach_bridge(&app).await;
-    app.flush_held_pushes().await;
-    assert!(matches!(
-        restarted.try_recv(),
-        Ok(RemoteBridgeCommand::NotifyAttention { notification_id: Some(id), .. }) if id == "N-1"
-    ));
-    assert_eq!(counters(&app).await.sent, 1);
-    app.flush_held_pushes().await;
-    assert!(restarted.try_recv().is_err(), "a held push goes out once");
+    let waiting = counters(&app).await;
+    assert_eq!(
+        (waiting.held, waiting.delivered, waiting.lost),
+        (1, 0, 0),
+        "waiting, not lost"
+    );
+    assert_eq!(held_ids(&app).await, [Some("N-1".to_string())]);
+    let done = counters(&app).await;
+    assert_eq!((done.held, done.delivered, done.lost), (0, 1, 0));
+    assert!(app.next_held_push().await.is_none(), "it goes out once");
 }
 
 #[tokio::test]
-async fn a_failed_socket_write_is_held_without_counting_twice() {
+async fn a_bridge_dropped_unread_loses_nothing_and_claims_nothing() {
     let directory = tempfile::tempdir().unwrap();
     let app = app_with_relay("http://127.0.0.1:9", &directory).await;
-    let mut bridge = attach_bridge(&app).await;
+    // A healthy session that dies before it reads: the push never entered it.
+    let (bridge, commands) = tokio::sync::mpsc::unbounded_channel();
+    app.inner.remote.lock().await.command_tx = Some(bridge);
     app.deliver_attention(approval()).await;
-    let command = bridge.try_recv().unwrap();
-    assert_eq!(counters(&app).await.sent, 1);
-    app.hold_push(command, true).await;
-    app.flush_held_pushes().await;
-    assert!(bridge.try_recv().is_ok());
-    assert_eq!(counters(&app).await.sent, 1);
+    drop(commands);
+    let waiting = counters(&app).await;
+    assert_eq!((waiting.held, waiting.delivered), (1, 0));
+    assert_eq!(held_ids(&app).await, [Some("N-1".to_string())]);
 }
 
 #[tokio::test]
-async fn held_pushes_are_bounded_newest_first_and_forgotten_with_the_pairing() {
+async fn a_failed_write_goes_back_first_with_its_age() {
+    let directory = tempfile::tempdir().unwrap();
+    let app = app_with_relay("http://127.0.0.1:9", &directory).await;
+    app.deliver_attention(approval()).await;
+    app.deliver_attention(AttentionPush {
+        notification_id: Some("N-2".to_string()),
+        ..approval()
+    })
+    .await;
+    age_held_pushes(&app, 50).await;
+    let held = app.next_held_push().await.unwrap();
+    app.return_held_push(held).await;
+    assert_eq!(counters(&app).await.held, 2);
+    age_held_pushes(&app, 11).await;
+    assert_eq!(held_ids(&app).await, Vec::<Option<String>>::new());
+    assert_eq!(
+        counters(&app).await.expired,
+        2,
+        "the clock was not restarted"
+    );
+}
+
+#[tokio::test]
+async fn held_pushes_are_bounded_newest_first_and_counted_when_dropped() {
     let directory = tempfile::tempdir().unwrap();
     let app = app_with_relay("http://127.0.0.1:9", &directory).await;
     for index in 0..MAX_HELD_PUSHES + 3 {
@@ -238,56 +298,206 @@ async fn held_pushes_are_bounded_newest_first_and_forgotten_with_the_pairing() {
         })
         .await;
     }
-    let mut bridge = attach_bridge(&app).await;
-    app.flush_held_pushes().await;
-    assert!(matches!(
-        bridge.try_recv(),
-        Ok(RemoteBridgeCommand::NotifyAttention { notification_id: Some(id), .. }) if id == "N-3"
-    ));
+    let waiting = counters(&app).await;
+    assert_eq!((waiting.held, waiting.evicted), (MAX_HELD_PUSHES as u64, 3));
+    let first = app.next_held_push().await.unwrap();
+    assert_eq!(first.push.notification_id.as_deref(), Some("N-3"));
+}
 
-    app.inner.remote.lock().await.command_tx = None;
+#[tokio::test]
+async fn forgetting_the_pairing_loses_what_was_held_and_says_so() {
+    let directory = tempfile::tempdir().unwrap();
+    let app = app_with_relay("http://127.0.0.1:9", &directory).await;
     app.deliver_attention(approval()).await;
     app.clear_remote_bridge_state().await;
-    let mut paired_again = attach_bridge(&app).await;
-    app.flush_held_pushes().await;
-    assert!(paired_again.try_recv().is_err());
+    let gone = counters(&app).await;
+    assert_eq!((gone.held, gone.lost), (0, 1));
+    pair_for_tests(&app).await;
+    assert!(app.next_held_push().await.is_none());
 }
 
 #[tokio::test]
-async fn a_held_push_that_went_stale_is_dropped() {
+async fn a_push_past_the_hour_expires_by_the_wall_clock() {
     let directory = tempfile::tempdir().unwrap();
     let app = app_with_relay("http://127.0.0.1:9", &directory).await;
     app.deliver_attention(approval()).await;
-    app.inner
-        .remote
-        .lock()
+    age_held_pushes(&app, HELD_PUSH_TTL_MINUTES + 1).await;
+    assert!(app.next_held_push().await.is_none());
+    let done = counters(&app).await;
+    assert_eq!((done.held, done.expired, done.delivered), (0, 1, 0));
+}
+
+#[tokio::test]
+async fn status_stops_calling_a_push_held_once_its_hour_is_up() {
+    let directory = tempfile::tempdir().unwrap();
+    let app = app_with_relay("http://127.0.0.1:9", &directory).await;
+    app.deliver_attention(approval()).await;
+    age_held_pushes(&app, HELD_PUSH_TTL_MINUTES + 1).await;
+    let status = app.remote_status().await;
+    assert_eq!(
+        (status.attention[0].held, status.attention[0].expired),
+        (0, 1)
+    );
+}
+
+/// The reviewer's repro: Needs You 0, and the phone still buzzes.
+#[tokio::test]
+async fn a_request_answered_while_held_never_pushes() {
+    let directory = tempfile::tempdir().unwrap();
+    let app = app_with_relay("http://127.0.0.1:9", &directory).await;
+    let key = "input:workspace-1:0:2026-11-04T00:00:00Z";
+    app.deliver_attention(recorded_request(&app, key).await)
+        .await;
+    assert!(app.inner.notifications.resolve(key, Utc::now()).await);
+    assert!(app.next_held_push().await.is_none());
+    let done = counters(&app).await;
+    assert_eq!((done.settled, done.delivered, done.held), (1, 0, 0));
+}
+
+#[tokio::test]
+async fn a_held_push_rechecks_preferences_and_presence_as_it_goes() {
+    let directory = tempfile::tempdir().unwrap();
+    let app = app_with_relay("http://127.0.0.1:9", &directory).await;
+    app.deliver_attention(approval()).await;
+    hold_phone_pushes(&app).await;
+    assert!(app.next_held_push().await.is_none(), "back at the Mac");
+    assert_eq!(counters(&app).await.suppressed_desktop_active, 1);
+
+    app.set_desktop_activity(false);
+    app.deliver_attention(approval()).await;
+    app.update_preferences(falcondeck_core::UpdatePreferencesRequest {
+        notifications: Some(falcondeck_core::NotificationPreferencesPatch {
+            enabled: Some(false),
+            ..Default::default()
+        }),
+        ..Default::default()
+    })
+    .await
+    .unwrap();
+    assert!(app.next_held_push().await.is_none(), "turned off meanwhile");
+    assert_eq!(counters(&app).await.suppressed_preferences, 1);
+}
+
+#[tokio::test]
+async fn a_high_notice_still_goes_out_with_him_at_the_mac() {
+    let directory = tempfile::tempdir().unwrap();
+    let app = app_with_relay("http://127.0.0.1:9", &directory).await;
+    app.deliver_attention(AttentionPush {
+        kind: "turn-error",
+        ignore_presence: true,
+        ..AttentionPush::default()
+    })
+    .await;
+    hold_phone_pushes(&app).await;
+    assert!(app.next_held_push().await.is_some());
+}
+
+/// A relay socket that reports each notify frame, and how a session is run
+/// against it end to end.
+async fn relay_socket() -> (
+    String,
+    tokio::sync::mpsc::UnboundedReceiver<serde_json::Value>,
+) {
+    use axum::{Router, extract::WebSocketUpgrade, routing::get};
+    let (frames, received) = tokio::sync::mpsc::unbounded_channel();
+    let router = Router::new()
+        .route(
+            "/v1/sessions/session/ws-ticket",
+            post(|| async {
+                Json(falcondeck_core::RelayWebSocketTicketResponse {
+                    ticket: "test-ticket".into(),
+                    expires_at: Utc::now() + chrono::Duration::minutes(1),
+                })
+            }),
+        )
+        .route(
+            "/v1/updates/ws",
+            get(move |upgrade: WebSocketUpgrade| {
+                let frames = frames.clone();
+                async move {
+                    upgrade.on_upgrade(move |mut socket| async move {
+                        while let Some(Ok(message)) = socket.recv().await {
+                            if let axum::extract::ws::Message::Text(text) = message {
+                                let frame: serde_json::Value = serde_json::from_str(&text).unwrap();
+                                if frame["type"] == "notify" {
+                                    let _ = frames.send(frame);
+                                }
+                            }
+                        }
+                    })
+                }
+            }),
+        );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("http://{}", listener.local_addr().unwrap());
+    tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+    (url, received)
+}
+
+async fn next_frame(
+    frames: &mut tokio::sync::mpsc::UnboundedReceiver<serde_json::Value>,
+) -> serde_json::Value {
+    tokio::time::timeout(std::time::Duration::from_secs(5), frames.recv())
         .await
-        .held_pushes
-        .front_mut()
+        .expect("no push reached the relay")
         .unwrap()
-        .held_at -= HELD_PUSH_TTL + std::time::Duration::from_secs(1);
-    let mut bridge = attach_bridge(&app).await;
-    app.flush_held_pushes().await;
-    assert!(bridge.try_recv().is_err());
 }
 
 #[tokio::test]
-async fn failed_writes_cannot_keep_a_held_push_alive() {
+async fn a_live_session_writes_what_waited_and_what_comes_next() {
+    let (url, mut frames) = relay_socket().await;
     let directory = tempfile::tempdir().unwrap();
-    let app = app_with_relay("http://127.0.0.1:9", &directory).await;
-    app.deliver_attention(approval()).await;
-    let mut bridge = attach_bridge(&app).await;
-    app.flush_held_pushes().await;
-    let mut command = bridge.try_recv().unwrap();
-    // The bridge took it, the write failed, and it comes back an hour on.
-    if let RemoteBridgeCommand::NotifyAttention { held_since, .. } = &mut command {
-        *held_since = held_since
-            .unwrap()
-            .checked_sub(HELD_PUSH_TTL + std::time::Duration::from_secs(1));
-    }
-    app.hold_push(command, true).await;
-    app.flush_held_pushes().await;
-    assert!(bridge.try_recv().is_err());
+    let app = app_with_relay(&url, &directory).await;
+    app.set_desktop_activity(false);
+    let key = "input:workspace-1:0:2026-11-04T00:00:00Z";
+    app.deliver_attention(recorded_request(&app, key).await)
+        .await;
+    app.deliver_attention(AttentionPush {
+        notification_id: Some("N-waited".to_string()),
+        ..approval()
+    })
+    .await;
+    assert!(app.inner.notifications.resolve(key, Utc::now()).await);
+
+    let session = {
+        let app = app.clone();
+        let mut pairing = test_pairing();
+        pairing.device_id = Some("device".to_string());
+        pairing.expires_at = Utc::now() + chrono::Duration::hours(1);
+        tokio::spawn(async move {
+            let (_commands, mut commands) = tokio::sync::mpsc::unbounded_channel();
+            let mut retry = RemoteBridgeRetry::default();
+            app.connect_remote_session(
+                url,
+                "daemon".to_string(),
+                "session".to_string(),
+                pairing,
+                None,
+                &mut commands,
+                &mut retry,
+            )
+            .await
+        })
+    };
+    let first = next_frame(&mut frames).await;
+    assert_eq!(
+        first["notification_id"], "N-waited",
+        "the answered one stays quiet"
+    );
+
+    app.deliver_attention(AttentionPush {
+        notification_id: Some("N-next".to_string()),
+        ..approval()
+    })
+    .await;
+    assert_eq!(next_frame(&mut frames).await["notification_id"], "N-next");
+    session.abort();
+    let done = counters(&app).await;
+    assert_eq!(
+        (done.delivered, done.settled, done.held),
+        (2, 1, 0),
+        "every push is accounted for"
+    );
 }
 
 #[tokio::test]
@@ -295,27 +505,13 @@ async fn a_review_retries_until_the_relay_acknowledges_it() {
     let (url, calls) = relay(vec![503, 200]).await;
     let directory = tempfile::tempdir().unwrap();
     let app = app_with_relay(&url, &directory).await;
-    let mut bridge = attach_bridge(&app).await;
-    app.deliver_acknowledged(review_command()).await;
+    app.deliver_acknowledged(review()).await;
     assert_eq!(calls.load(Ordering::SeqCst), 2);
     assert!(
-        bridge.try_recv().is_err(),
+        app.next_held_push().await.is_none(),
         "an acknowledged push is not resent"
     );
-}
-
-#[tokio::test]
-async fn a_relay_without_the_endpoint_gets_the_review_over_the_socket() {
-    let (url, calls) = relay(vec![404]).await;
-    let directory = tempfile::tempdir().unwrap();
-    let app = app_with_relay(&url, &directory).await;
-    let mut bridge = attach_bridge(&app).await;
-    app.deliver_acknowledged(review_command()).await;
-    assert_eq!(calls.load(Ordering::SeqCst), 1);
-    assert!(matches!(
-        bridge.try_recv(),
-        Ok(RemoteBridgeCommand::NotifyAttention { review_id: Some(id), .. }) if id == "R-1"
-    ));
+    assert_eq!(counters(&app).await.delivered, 1);
 }
 
 #[tokio::test]
@@ -351,12 +547,12 @@ async fn a_review_reaches_the_relay_with_an_active_desktop_and_no_bridge() {
     .await
     .expect("the review never reached the relay");
     let status = build_remote_status_response(&*app.inner.remote.lock().await);
-    assert_eq!(status.attention[0].sent, 1);
+    assert_eq!(status.attention[0].delivered, 1);
     assert_eq!(status.attention[0].suppressed_desktop_active, 0);
 }
 
 #[tokio::test]
-async fn a_review_with_no_route_is_not_counted_as_sent() {
+async fn a_review_with_no_phone_paired_is_lost() {
     let directory = tempfile::tempdir().unwrap();
     let app = AppState::new_with_state_path(
         "test".to_string(),
@@ -374,7 +570,7 @@ async fn a_review_with_no_route_is_not_counted_as_sent() {
     .await;
     let status = build_remote_status_response(&*app.inner.remote.lock().await);
     assert_eq!(
-        (status.attention[0].sent, status.attention[0].no_bridge),
+        (status.attention[0].delivered, status.attention[0].lost),
         (0, 1)
     );
 }

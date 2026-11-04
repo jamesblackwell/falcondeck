@@ -5718,14 +5718,22 @@ pub struct RelayNotifyRequest {
 pub struct AttentionDeliveryCounter {
     /// Attention kind, e.g. `review`.
     pub kind: String,
-    /// Handed to the relay path.
-    pub sent: u64,
-    /// Dropped because Mac input was recent.
+    /// Acknowledged by the relay over HTTP, or written to its socket.
+    pub delivered: u64,
+    /// Waiting for the socket right now. Every other field is a final outcome.
+    pub held: u64,
+    /// Not sent: it was answered or read while it waited.
+    pub settled: u64,
+    /// Not sent: it waited past the hour.
+    pub expired: u64,
+    /// Not sent: newer pushes filled the queue.
+    pub evicted: u64,
+    /// Not sent: no phone was paired, or the pairing went while it waited.
+    pub lost: u64,
+    /// Not sent because Mac input was recent.
     pub suppressed_desktop_active: u64,
-    /// Dropped by notification preferences.
+    /// Not sent because of notification preferences.
     pub suppressed_preferences: u64,
-    /// Dropped because no relay bridge exists.
-    pub no_bridge: u64,
     /// When this kind last fired.
     pub last_at: Option<DateTime<Utc>>,
 }

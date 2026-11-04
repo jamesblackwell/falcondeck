@@ -3098,6 +3098,10 @@ impl AppState {
             ConversationItem::ToolCall { .. } | ConversationItem::FileChange { .. } => {
                 thread.tool_items.insert(id.to_string(), index);
             }
+            // A provider's request ids can repeat; an answer means the newest.
+            ConversationItem::InteractiveRequest { .. } => {
+                thread.other_items.insert(id.to_string(), index);
+            }
             _ => {
                 // First-wins to mirror the previous position()-based scan.
                 thread.other_items.entry(id.to_string()).or_insert(index);
@@ -3187,7 +3191,7 @@ impl AppState {
                 )
             })
             .or_else(|| {
-                thread.items.iter().position(|item| match item {
+                thread.items.iter().rposition(|item| match item {
                     ConversationItem::InteractiveRequest { id, .. } => id == request_id,
                     _ => false,
                 })
@@ -3297,6 +3301,9 @@ impl ManagedThread {
                 }
                 ConversationItem::ToolCall { .. } | ConversationItem::FileChange { .. } => {
                     self.tool_items.insert(id, index);
+                }
+                ConversationItem::InteractiveRequest { .. } => {
+                    self.other_items.insert(id, index);
                 }
                 _ => {
                     // First-wins to mirror the position()-based scan this

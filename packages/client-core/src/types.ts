@@ -2373,10 +2373,15 @@ export type PushTestResponse = { results: PushTestDeviceResult[] };
 /** Daemon-side attention decisions for one kind since it started. */
 export type AttentionDeliveryCounter = {
   kind: string;
-  sent: number;
+  delivered: number;
+  /** Waiting for the socket now. The other counts are final outcomes. */
+  held: number;
+  settled: number;
+  expired: number;
+  evicted: number;
+  lost: number;
   suppressed_desktop_active: number;
   suppressed_preferences: number;
-  no_bridge: number;
   last_at: string | null;
 };
 

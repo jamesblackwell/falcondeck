@@ -82,14 +82,18 @@ export function describeDesktopTest(shown: boolean, permission: DesktopPermissio
 /** One sentence per kind, leaving out the reasons that did not happen. */
 export function describeAttention(counters: AttentionDeliveryCounter[]): string[] {
   return counters.map((counter) => {
-    const parts = [`${counter.sent} sent`]
+    const parts = [`${counter.delivered} delivered`]
+    if (counter.held) parts.push(`${counter.held} waiting for the relay`)
+    if (counter.settled) parts.push(`${counter.settled} answered or read before they could go`)
     if (counter.suppressed_desktop_active) {
-      parts.push(`${counter.suppressed_desktop_active} held because you were at the Mac`)
+      parts.push(`${counter.suppressed_desktop_active} not sent because you were at the Mac`)
     }
     if (counter.suppressed_preferences) {
       parts.push(`${counter.suppressed_preferences} off in preferences`)
     }
-    if (counter.no_bridge) parts.push(`${counter.no_bridge} lost with no relay connection`)
+    if (counter.expired) parts.push(`${counter.expired} expired after an hour waiting`)
+    if (counter.evicted) parts.push(`${counter.evicted} dropped for newer ones`)
+    if (counter.lost) parts.push(`${counter.lost} lost with no phone paired`)
     return `${KIND_LABELS[counter.kind] ?? counter.kind}: ${parts.join(', ')}.`
   })
 }

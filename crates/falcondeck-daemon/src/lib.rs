@@ -246,6 +246,7 @@ pub async fn spawn_embedded(config: DaemonConfig) -> Result<EmbeddedDaemonHandle
     if let Err(error) = state.restore_control_state().await {
         tracing::warn!("failed to restore agent control state: {error}");
     }
+    state.retire_unanswerable_requests().await;
     let listener = TcpListener::bind(config.bind_addr).await?;
     let local_addr = listener.local_addr()?;
     // A failed bind must not leave a detached scheduler holding state ownership

@@ -54,11 +54,18 @@ never enough:
 
 - A **request** key carries the request's `created_at`. Codex and ACP ids are
   JSON-RPC ids that restart at 0 with each process, so an old key must not match a
-  new approval. Resolving reads `created_at` from the transcript card.
+  new approval. Resolving reads `created_at` from the transcript card, the newest
+  with that id.
 - A **completion** key carries the turn and the answer it ended on. A Claude turn
   settles at its result and again when the process goes, which is one event. A
   background task can wake a parked turn under the same turn id, which is another.
 - An **error** has no key. Each failure is news, even a retry of the same turn.
+
+The daemon tracks one pending request per workspace and id, so a new event retires
+any open row with the same id: only the newest can be answered, whether the old
+process died without cancelling or the provider replayed it. Pending requests are
+held in memory, so at startup every open request row is settled too. Reviews stay
+open. Retired rows stop waiting and read as settled, like answered ones.
 
 A request is published before it is recorded, so a fast answer can arrive first.
 The store remembers the last 64 keys resolved with no record, and a late record
@@ -75,9 +82,9 @@ history never disagree: these turns no longer push either.
 | Interrupted by James | No | He did it himself |
 | A message is queued behind it | No | The next turn starts straight away |
 | Child whose parent set `notify_parent` | No | The parent decides what reaches James |
-| Bot automation run (`run_as_bot`) | No | It reports home in its own turn, or stays silent on purpose |
+| Run in a thread created for a bot's automation (`run_as_bot`) | No | It reports home in its own turn, or stays silent on purpose |
 | Automation reply equal to its no-action marker | No | The run found nothing |
-| Any other automation run | Yes | Its result is what James scheduled |
+| Any other automation run, including one in a home or current thread | Yes | Its result is what James scheduled |
 | Top-level task or bot home | Yes | Someone is waiting on it |
 | Spawned child nobody is watching | Yes | Nobody else will say so |
 | No written reply | Yes, "Finished." | A missed completion costs more than one odd row |
@@ -154,15 +161,15 @@ agents, so a fleet of tasks cannot add up to a flood. The last 5 of those 30 are
 kept for `high`, so a noisy day cannot shut out the one that matters. A refused
 notice stores and pushes nothing. The error says James has not been told, when a
 slot frees, and to batch or publish a review; it does not point at the final
-reply, because a bot run's final reply does not alert him. The same sender
-repeating the same title and summary within an hour replays the first record, at
-no cost and with no second push.
+reply, because the final reply in a thread created for a bot's run does not alert
+him. The same sender repeating the same title and summary within an hour replays
+the first record, at no cost and with no second push.
 
 Guidance lives in the always-on instructions (`agent_context.rs`), the bot
 defaults (`BOT_DEFAULT_INSTRUCTIONS`), the tool description and the
 `falcondeck-mcp` skill. All of them say the same thing: rare by default, and your
-final reply already reaches James, except in a scheduled bot run, where it stays
-in the thread without an alert.
+final reply already reaches James, except in a thread created for a bot's
+scheduled run, where it stays in the thread without an alert.
 
 ## Reports while the Mac is asleep
 

@@ -20,6 +20,19 @@ const device = (push: TrustedDevice['push']): TrustedDevice => ({
   push,
 })
 
+const counter = {
+  kind: 'approval',
+  delivered: 0,
+  held: 0,
+  settled: 0,
+  expired: 0,
+  evicted: 0,
+  lost: 0,
+  suppressed_desktop_active: 0,
+  suppressed_preferences: 0,
+  last_at: null,
+}
+
 describe('notification health copy', () => {
   it('tells an old relay apart from a device with no registration', () => {
     expect(describeDevicePush(device(undefined))).toContain('relay needs an update')
@@ -70,14 +83,21 @@ describe('notification health copy', () => {
     expect(
       describeAttention([
         {
-          kind: 'approval',
-          sent: 2,
+          ...counter,
+          delivered: 2,
           suppressed_desktop_active: 3,
-          suppressed_preferences: 0,
-          no_bridge: 0,
-          last_at: null,
         },
       ]),
-    ).toEqual(['Approvals: 2 sent, 3 held because you were at the Mac.'])
+    ).toEqual(['Approvals: 2 delivered, 3 not sent because you were at the Mac.'])
+  })
+
+  it('names every way a push can end, and what is still waiting', () => {
+    expect(
+      describeAttention([
+        { ...counter, delivered: 1, held: 2, settled: 3, expired: 4, evicted: 5, lost: 6 },
+      ]),
+    ).toEqual([
+      'Approvals: 1 delivered, 2 waiting for the relay, 3 answered or read before they could go, 4 expired after an hour waiting, 5 dropped for newer ones, 6 lost with no phone paired.',
+    ])
   })
 })

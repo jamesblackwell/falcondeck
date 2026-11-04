@@ -740,7 +740,7 @@ struct RemoteBridgeState {
     /// Attention decisions since this daemon started, per kind.
     attention: BTreeMap<String, falcondeck_core::AttentionDeliveryCounter>,
     /// Pushes nothing could take, kept for the next connection.
-    held_pushes: std::collections::VecDeque<remote_lifecycle::HeldPush>,
+    held_pushes: remote_lifecycle::HeldPushes,
     status: RemoteConnectionStatus,
     relay_url: Option<String>,
     pairing: Option<RemotePairingState>,
@@ -975,7 +975,7 @@ struct PersistedRemoteSecrets {
 #[derive(Debug)]
 enum RemoteBridgeCommand {
     PublishBootstrap {
-        // Boxed to keep the enum small; NotifyAttention is sent far more often.
+        // Boxed to keep the enum small.
         pairing: Box<RemotePairingState>,
         client_bundle: Box<PairingPublicKeyBundle>,
     },
@@ -983,23 +983,6 @@ enum RemoteBridgeCommand {
         pairing: Box<RemotePairingState>,
         client_bundles: Vec<PairingPublicKeyBundle>,
         completed: oneshot::Sender<Result<(), String>>,
-    },
-    /// Ask the relay to push an attention notification to trusted
-    /// devices that are not currently connected.
-    NotifyAttention {
-        kind: String,
-        workspace_id: Option<String>,
-        thread_id: Option<String>,
-        message_preview: Option<String>,
-        review_id: Option<String>,
-        /// A notice's own title; other kinds use the thread's.
-        title: Option<String>,
-        notification_id: Option<String>,
-        report_id: Option<String>,
-        /// Push even to a device that looks connected.
-        ignore_presence: bool,
-        /// When it was first held, so failed retries cannot extend its life.
-        held_since: Option<std::time::Instant>,
     },
 }
 

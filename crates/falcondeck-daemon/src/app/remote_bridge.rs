@@ -670,7 +670,8 @@ impl AppState {
         let mut key_generation = 0u64;
         // Anything written while the relay was out of reach goes up now.
         self.spawn_report_sync();
-        self.flush_held_pushes().await;
+        let push_wake = self.inner.remote.lock().await.held_pushes.wake();
+        push_wake.notify_one();
         // Collapses the per-chunk stream storm before it reaches the phone.
         let mut coalescer = EventCoalescer::default();
         let mut coalesce_flush = tokio::time::interval(EVENT_COALESCE_INTERVAL);
@@ -753,6 +754,9 @@ impl AppState {
                     // reconnect (the websocket can remain healthy throughout).
                     register_remote_rpc_methods(&mut writer).await?;
                 }
+                _ = push_wake.notified() => {
+                    self.write_held_pushes(&writer).await?;
+                }
                 command = command_rx.recv() => {
                     if let Some(command) = command {
                         match command {
@@ -798,47 +802,6 @@ impl AppState {
                                         return Err(RemoteBridgeError::Transient(error));
                                     }
                                 }
-                            }
-                            RemoteBridgeCommand::NotifyAttention { kind, workspace_id, thread_id, message_preview, review_id, title, notification_id, report_id, ignore_presence, held_since } => {
-                                // A failed write must not take the push with it.
-                                let retry = RemoteBridgeCommand::NotifyAttention {
-                                    kind: kind.clone(),
-                                    workspace_id: workspace_id.clone(),
-                                    thread_id: thread_id.clone(),
-                                    message_preview: message_preview.clone(),
-                                    review_id: review_id.clone(),
-                                    title: title.clone(),
-                                    notification_id: notification_id.clone(),
-                                    report_id: report_id.clone(),
-                                    ignore_presence,
-                                    held_since,
-                                };
-                                let thread_title = match title {
-                                    Some(title) => notification_thread_title(&title),
-                                    None => {
-                                        self.notification_title(workspace_id.as_deref(), thread_id.as_deref())
-                                            .await
-                                    }
-                                };
-                                let written = send_relay_message(
-                                    &mut writer,
-                                    &RelayClientMessage::Notify {
-                                        kind,
-                                        workspace_id,
-                                        thread_id,
-                                        thread_title,
-                                        message_preview,
-                                        review_id,
-                                        notification_id,
-                                        report_id,
-                                        ignore_presence,
-                                    },
-                                ).await;
-                                if written.is_err() {
-                                    tracing::warn!("attention push held: the socket write failed");
-                                    self.hold_push(retry, true).await;
-                                }
-                                written?;
                             }
                         }
                     }
@@ -976,6 +939,35 @@ impl AppState {
                 }
             }
         }
+    }
+
+    /// Everything waiting and still worth saying. A push counts as delivered
+    /// once written; one the socket refuses goes back for the next session.
+    async fn write_held_pushes(&self, writer: &RelayWriter) -> Result<(), String> {
+        while let Some(held) = self.next_held_push().await {
+            let push = &held.push;
+            let message = RelayClientMessage::Notify {
+                kind: push.kind.to_string(),
+                workspace_id: push.workspace_id.clone(),
+                thread_id: push.thread_id.clone(),
+                thread_title: self.push_title(push).await,
+                message_preview: push.preview.clone(),
+                review_id: push.review_id.clone(),
+                notification_id: push.notification_id.clone(),
+                report_id: push.report_id.clone(),
+                ignore_presence: push.ignore_presence,
+            };
+            if let Err(error) = send_relay_message(writer, &message).await {
+                tracing::warn!(
+                    kind = push.kind,
+                    "attention push held: the socket write failed"
+                );
+                self.return_held_push(held).await;
+                return Err(error);
+            }
+            self.push_delivered(push.kind).await;
+        }
+        Ok(())
     }
 
     pub(super) async fn notification_title(

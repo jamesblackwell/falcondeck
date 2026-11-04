@@ -1,6 +1,7 @@
 use std::collections::BTreeMap;
+use std::sync::Arc;
 
-use chrono::Utc;
+use chrono::{DateTime, Utc};
 use falcondeck_core::{
     AssistantMessagePhase, ContentLifecycle, ConversationItem, PairingAuthority,
     PairingPublicKeyBundle, PairingStatusResponse, RemoteConnectionStatus, RemotePairingSession,
@@ -208,17 +209,39 @@ const NOTIFY_RETRY_DELAYS: [std::time::Duration; 4] = [
     std::time::Duration::from_secs(8),
 ];
 const NOTIFY_ATTEMPT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(8);
-/// Pushes kept for the next connection. An alert stops being useful quickly,
-/// and a long outage must not end in a burst: the record is what lasts.
+/// Pushes kept for the socket. An alert stops being useful quickly, and a long
+/// outage must not end in a burst: the record is what lasts.
 const MAX_HELD_PUSHES: usize = 16;
-const HELD_PUSH_TTL: std::time::Duration = std::time::Duration::from_secs(60 * 60);
+/// Wall clock: `Instant` stops while a Mac sleeps, which is when pushes wait.
+const HELD_PUSH_TTL_MINUTES: i64 = 60;
 
-/// A push that could not be handed over.
+/// A push on its way to the relay socket.
 pub(super) struct HeldPush {
-    command: super::RemoteBridgeCommand,
-    held_at: std::time::Instant,
-    /// A socket write that failed was already counted when it was handed over.
-    counted: bool,
+    pub(super) push: AttentionPush,
+    /// When it was first held. A failed write does not restart the clock.
+    held_at: DateTime<Utc>,
+}
+
+impl HeldPush {
+    fn expired(&self, now: DateTime<Utc>) -> bool {
+        now - self.held_at > chrono::Duration::minutes(HELD_PUSH_TTL_MINUTES)
+    }
+}
+
+/// The one queue in front of the socket. A push stays here until a live
+/// session has written it, so a bridge that dies cannot take any with it.
+#[derive(Default)]
+pub(super) struct HeldPushes {
+    queue: std::collections::VecDeque<HeldPush>,
+    /// Tells the live session to write. One permit however many are waiting,
+    /// and it survives until the next session if none is live.
+    wake: Arc<tokio::sync::Notify>,
+}
+
+impl HeldPushes {
+    pub(super) fn wake(&self) -> Arc<tokio::sync::Notify> {
+        self.wake.clone()
+    }
 }
 
 /// One push to attempt. The preview is captured at record time: the bridge may
@@ -275,12 +298,33 @@ pub(super) fn attention_policy(
     }
 }
 
-fn record_attention(
-    counters: &mut BTreeMap<String, falcondeck_core::AttentionDeliveryCounter>,
+/// Where a push ended up. `AttentionDeliveryCounter::held` is the count of the
+/// ones that have not ended yet.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PushOutcome {
+    Delivered,
+    Settled,
+    Expired,
+    Evicted,
+    Lost,
+    OffByPreference,
+    DesktopActive,
+}
+
+impl AttentionPolicy {
+    fn refusal(self) -> Option<PushOutcome> {
+        match self {
+            Self::Deliver => None,
+            Self::OffByPreference => Some(PushOutcome::OffByPreference),
+            Self::DesktopActive => Some(PushOutcome::DesktopActive),
+        }
+    }
+}
+
+fn attention_counter<'a>(
+    counters: &'a mut BTreeMap<String, falcondeck_core::AttentionDeliveryCounter>,
     kind: &str,
-    policy: AttentionPolicy,
-    has_bridge: bool,
-) {
+) -> &'a mut falcondeck_core::AttentionDeliveryCounter {
     let counter = counters.entry(kind.to_string()).or_insert_with(|| {
         falcondeck_core::AttentionDeliveryCounter {
             kind: kind.to_string(),
@@ -288,38 +332,78 @@ fn record_attention(
         }
     });
     counter.last_at = Some(Utc::now());
-    match policy {
-        AttentionPolicy::OffByPreference => counter.suppressed_preferences += 1,
-        AttentionPolicy::DesktopActive => counter.suppressed_desktop_active += 1,
-        AttentionPolicy::Deliver if has_bridge => counter.sent += 1,
-        AttentionPolicy::Deliver => counter.no_bridge += 1,
+    counter
+}
+
+fn count_push(
+    counters: &mut BTreeMap<String, falcondeck_core::AttentionDeliveryCounter>,
+    kind: &str,
+    outcome: PushOutcome,
+) {
+    let counter = attention_counter(counters, kind);
+    let tally = match outcome {
+        PushOutcome::Delivered => &mut counter.delivered,
+        PushOutcome::Settled => &mut counter.settled,
+        PushOutcome::Expired => &mut counter.expired,
+        PushOutcome::Evicted => &mut counter.evicted,
+        PushOutcome::Lost => &mut counter.lost,
+        PushOutcome::OffByPreference => &mut counter.suppressed_preferences,
+        PushOutcome::DesktopActive => &mut counter.suppressed_desktop_active,
+    };
+    *tally += 1;
+}
+
+fn queue_held(remote: &mut RemoteBridgeState, held: HeldPush, oldest_first: bool) {
+    attention_counter(&mut remote.attention, held.push.kind).held += 1;
+    if oldest_first {
+        remote.held_pushes.queue.push_front(held);
+    } else {
+        remote.held_pushes.queue.push_back(held);
     }
 }
 
-fn push_kind(command: &super::RemoteBridgeCommand) -> String {
-    match command {
-        super::RemoteBridgeCommand::NotifyAttention { kind, .. } => kind.clone(),
-        _ => String::new(),
-    }
+fn take_held(remote: &mut RemoteBridgeState) -> Option<HeldPush> {
+    let held = remote.held_pushes.queue.pop_front()?;
+    let counter = attention_counter(&mut remote.attention, held.push.kind);
+    counter.held = counter.held.saturating_sub(1);
+    Some(held)
 }
 
 /// Only with a pairing to deliver to, and the newest are the ones kept.
-fn hold_locked(remote: &mut RemoteBridgeState, command: super::RemoteBridgeCommand, counted: bool) {
+fn hold_locked(remote: &mut RemoteBridgeState, held: HeldPush) {
     if remote.pairing.is_none() {
+        tracing::warn!(kind = held.push.kind, "attention push lost: nothing paired");
+        count_push(&mut remote.attention, held.push.kind, PushOutcome::Lost);
         return;
     }
-    if remote.held_pushes.len() == MAX_HELD_PUSHES {
-        remote.held_pushes.pop_front();
+    if remote.held_pushes.queue.len() >= MAX_HELD_PUSHES
+        && let Some(oldest) = take_held(remote)
+    {
+        tracing::warn!(
+            kind = oldest.push.kind,
+            "attention push dropped for a newer one"
+        );
+        count_push(
+            &mut remote.attention,
+            oldest.push.kind,
+            PushOutcome::Evicted,
+        );
     }
-    let since = match &command {
-        super::RemoteBridgeCommand::NotifyAttention { held_since, .. } => *held_since,
-        _ => None,
-    };
-    remote.held_pushes.push_back(HeldPush {
-        command,
-        held_at: since.unwrap_or_else(std::time::Instant::now),
-        counted,
-    });
+    queue_held(remote, held, false);
+}
+
+fn expire_held_locked(remote: &mut RemoteBridgeState, now: DateTime<Utc>) {
+    while remote
+        .held_pushes
+        .queue
+        .front()
+        .is_some_and(|held| held.expired(now))
+    {
+        if let Some(held) = take_held(remote) {
+            tracing::warn!(kind = held.push.kind, "attention push expired while held");
+            count_push(&mut remote.attention, held.push.kind, PushOutcome::Expired);
+        }
+    }
 }
 
 impl AppState {
@@ -339,40 +423,42 @@ impl AppState {
             report_id,
             ignore_presence,
         } = push;
-        let preferences = self.preferences().await.notifications;
-        let desktop_active = preferences.suppress_when_desktop_active
-            && !ignore_presence
-            && self.desktop_is_active();
-        let policy = attention_policy(kind, &preferences, desktop_active);
+        let policy = self.push_policy(kind, ignore_presence).await;
         // A notice with a report is as easy to lose as a review, and a retry is
         // as safe: the relay dedupes a notice by its own id.
         let http_eligible = review_id.is_some() || kind == AGENT_NOTICE_KIND;
         let http_route = http_eligible && self.relay_session_target().await.is_some();
         tracing::info!(kind, ?policy, http_route, "attention event");
-        if policy != AttentionPolicy::Deliver {
-            let mut remote = self.inner.remote.lock().await;
-            record_attention(&mut remote.attention, kind, policy, false);
+        if let Some(refusal) = policy.refusal() {
+            count_push(&mut self.inner.remote.lock().await.attention, kind, refusal);
             return;
         }
-        let command = super::RemoteBridgeCommand::NotifyAttention {
-            kind: kind.to_string(),
+        let push = AttentionPush {
+            kind,
             workspace_id,
             thread_id,
-            message_preview: preview,
+            preview,
             review_id,
             title,
             notification_id,
             report_id,
             ignore_presence,
-            held_since: None,
         };
         if http_route {
             // A tool call must not wait on the relay.
             let app = self.clone();
-            tokio::spawn(async move { app.deliver_acknowledged(command).await });
+            tokio::spawn(async move { app.deliver_acknowledged(push).await });
         } else {
-            self.hand_to_bridge(command).await;
+            self.queue_push(push).await;
         }
+    }
+
+    async fn push_policy(&self, kind: &str, ignore_presence: bool) -> AttentionPolicy {
+        let preferences = self.preferences().await.notifications;
+        let desktop_active = preferences.suppress_when_desktop_active
+            && !ignore_presence
+            && self.desktop_is_active();
+        attention_policy(kind, &preferences, desktop_active)
     }
 
     /// A socket write proves nothing: the bridge reconnects often enough that
@@ -380,40 +466,19 @@ impl AppState {
     /// the relay acknowledges it, and only falls back to the socket for relays
     /// that lack the endpoint or while HTTP keeps failing. The relay dedupes on
     /// the review or notice, so a retry after a lost response cannot double-alert.
-    async fn deliver_acknowledged(&self, command: super::RemoteBridgeCommand) {
-        let super::RemoteBridgeCommand::NotifyAttention {
-            kind,
-            workspace_id,
-            thread_id,
-            message_preview,
-            review_id,
-            title,
-            notification_id,
-            report_id,
-            ignore_presence,
-            ..
-        } = &command
-        else {
-            return;
-        };
+    async fn deliver_acknowledged(&self, push: AttentionPush) {
         let target = self.relay_session_target().await;
         if let Some((relay_url, session_id, daemon_token)) = target {
             let request = falcondeck_core::RelayNotifyRequest {
-                kind: kind.clone(),
-                workspace_id: workspace_id.clone(),
-                thread_id: thread_id.clone(),
-                thread_title: match title {
-                    Some(title) => super::remote_bridge::notification_thread_title(title),
-                    None => {
-                        self.notification_title(workspace_id.as_deref(), thread_id.as_deref())
-                            .await
-                    }
-                },
-                message_preview: message_preview.clone(),
-                review_id: review_id.clone(),
-                notification_id: notification_id.clone(),
-                report_id: report_id.clone(),
-                ignore_presence: *ignore_presence,
+                kind: push.kind.to_string(),
+                workspace_id: push.workspace_id.clone(),
+                thread_id: push.thread_id.clone(),
+                thread_title: self.push_title(&push).await,
+                message_preview: push.preview.clone(),
+                review_id: push.review_id.clone(),
+                notification_id: push.notification_id.clone(),
+                report_id: push.report_id.clone(),
+                ignore_presence: push.ignore_presence,
             };
             let url = format!(
                 "{}/v1/sessions/{session_id}/notify",
@@ -430,14 +495,12 @@ impl AppState {
                     .await;
                 match response {
                     Ok(response) if response.status().is_success() => {
-                        tracing::info!(kind, ?review_id, "relay acknowledged attention push");
-                        let mut remote = self.inner.remote.lock().await;
-                        record_attention(
-                            &mut remote.attention,
-                            kind,
-                            AttentionPolicy::Deliver,
-                            true,
+                        tracing::info!(
+                            kind = push.kind,
+                            review_id = ?push.review_id,
+                            "relay acknowledged attention push"
                         );
+                        self.push_delivered(push.kind).await;
                         return;
                     }
                     // An older relay. The socket path is all it has.
@@ -451,71 +514,73 @@ impl AppState {
                 }
             }
         }
-        self.hand_to_bridge(command).await;
+        self.queue_push(push).await;
     }
 
-    /// The channel in place now, not one captured earlier: the bridge replaces
-    /// it when it restarts, and a send to the old one goes nowhere. Counted as
-    /// sent only once the bridge has it.
-    async fn hand_to_bridge(&self, command: super::RemoteBridgeCommand) {
-        let mut remote = self.inner.remote.lock().await;
-        let kind = push_kind(&command);
-        let unsent = match remote.command_tx.as_ref() {
-            Some(bridge) => bridge.send(command).err().map(|error| error.0),
-            None => Some(command),
-        };
-        record_attention(
-            &mut remote.attention,
-            &kind,
-            AttentionPolicy::Deliver,
-            unsent.is_none(),
-        );
-        if let Some(command) = unsent {
-            tracing::warn!(kind, "attention push held: the relay bridge is down");
-            hold_locked(&mut remote, command, false);
+    pub(super) async fn push_title(&self, push: &AttentionPush) -> Option<String> {
+        match &push.title {
+            Some(title) => super::remote_bridge::notification_thread_title(title),
+            None => {
+                self.notification_title(push.workspace_id.as_deref(), push.thread_id.as_deref())
+                    .await
+            }
         }
     }
 
-    pub(super) async fn hold_push(&self, command: super::RemoteBridgeCommand, counted: bool) {
-        hold_locked(&mut *self.inner.remote.lock().await, command, counted);
+    pub(super) async fn push_delivered(&self, kind: &str) {
+        let mut remote = self.inner.remote.lock().await;
+        count_push(&mut remote.attention, kind, PushOutcome::Delivered);
     }
 
-    /// The bridge is back: anything still worth saying goes out.
-    pub(super) async fn flush_held_pushes(&self) {
+    async fn queue_push(&self, push: AttentionPush) {
         let mut remote = self.inner.remote.lock().await;
-        let held = std::mem::take(&mut remote.held_pushes);
-        for HeldPush {
-            mut command,
-            held_at,
-            counted,
-        } in held
-        {
-            let kind = push_kind(&command);
-            if let super::RemoteBridgeCommand::NotifyAttention { held_since, .. } = &mut command {
-                *held_since = Some(held_at);
-            }
-            if held_at.elapsed() > HELD_PUSH_TTL {
-                tracing::warn!(kind, "attention push expired while the relay was away");
-                continue;
-            }
-            let unsent = match remote.command_tx.as_ref() {
-                Some(bridge) => bridge.send(command).err().map(|error| error.0),
-                None => Some(command),
+        let held = HeldPush {
+            push,
+            held_at: Utc::now(),
+        };
+        hold_locked(&mut remote, held);
+        remote.held_pushes.wake.notify_one();
+    }
+
+    /// The next push still worth saying, decided as it goes out rather than
+    /// when it was queued: he may have answered it or come back to the Mac.
+    pub(super) async fn next_held_push(&self) -> Option<HeldPush> {
+        loop {
+            let held = {
+                let mut remote = self.inner.remote.lock().await;
+                expire_held_locked(&mut remote, Utc::now());
+                take_held(&mut remote)?
             };
-            match unsent {
-                Some(command) => remote.held_pushes.push_back(HeldPush {
-                    command,
-                    held_at,
-                    counted,
-                }),
-                None if !counted => record_attention(
-                    &mut remote.attention,
-                    &kind,
-                    AttentionPolicy::Deliver,
-                    true,
-                ),
-                None => {}
-            }
+            let push = &held.push;
+            let settled = match &push.notification_id {
+                Some(id) => self.inner.notifications.is_read(id).await,
+                None => false,
+            };
+            let outcome = if settled {
+                Some(PushOutcome::Settled)
+            } else {
+                self.push_policy(push.kind, push.ignore_presence)
+                    .await
+                    .refusal()
+            };
+            let Some(outcome) = outcome else {
+                return Some(held);
+            };
+            tracing::info!(kind = push.kind, ?outcome, "held attention push dropped");
+            let mut remote = self.inner.remote.lock().await;
+            count_push(&mut remote.attention, push.kind, outcome);
+        }
+    }
+
+    /// The write failed: back to the front, with its age, for the next session.
+    pub(super) async fn return_held_push(&self, held: HeldPush) {
+        let mut remote = self.inner.remote.lock().await;
+        if remote.pairing.is_none() {
+            count_push(&mut remote.attention, held.push.kind, PushOutcome::Lost);
+        } else if remote.held_pushes.queue.len() >= MAX_HELD_PUSHES {
+            count_push(&mut remote.attention, held.push.kind, PushOutcome::Evicted);
+        } else {
+            queue_held(&mut remote, held, true);
         }
     }
 
@@ -590,7 +655,9 @@ impl AppState {
         remote.daemon_token = None;
         remote.last_error = None;
         remote.command_tx = None;
-        remote.held_pushes.clear();
+        while let Some(held) = take_held(&mut remote) {
+            count_push(&mut remote.attention, held.push.kind, PushOutcome::Lost);
+        }
         remote.trusted_client_bundles.clear();
         remote.trusted_client_devices.clear();
         remote.unresumed_remote = None;
@@ -606,6 +673,7 @@ impl AppState {
         let snapshot = {
             let mut remote = self.inner.remote.lock().await;
             reconcile_remote_runtime_state(&mut remote);
+            expire_held_locked(&mut remote, Utc::now());
             (
                 build_remote_status_response(&remote),
                 remote.relay_url.clone(),
@@ -2042,6 +2110,9 @@ pub(super) fn notification_markdown_preview(text: &str) -> Option<String> {
     }
     (!preview.is_empty()).then_some(preview)
 }
+
+#[cfg(test)]
+pub(super) use attention_tests::pair_for_tests;
 
 #[cfg(test)]
 #[path = "remote_attention_tests.rs"]

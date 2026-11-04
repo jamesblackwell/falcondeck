@@ -62,7 +62,7 @@ pub(super) fn catalog(max_children: u32) -> Vec<ExtensionAgentTool> {
             "message": {"type":"string", "minLength":1, "maxLength":24000, "description":"Readable prose with normal spaces between words."},
             "delivery": {"type":"string", "enum":["steer","queue"], "description":"Deprecated and ignored; messages always steer when the receiver can take them."}
         }), vec!["thread_id", "message"]),
-        (NOTIFY, "Notify James", "Tell James something important happened when no decision is needed: a finished launch, a failed deploy you already handled, a result he asked to hear about. It reaches his phone as a push and stays in his notification centre, and body becomes a Markdown report he can read there. Rare by design: do not use it for progress, ordinary completions or anything your final reply already says. A scheduled bot run's final reply does not alert him, so use this there for what he must hear. If you need him to decide, publish a review instead. Limits per sender: 3 an hour, 10 a day, 2 high a day; 30 a day across all agents, the last 5 kept for high. Pushes are not end-to-end encrypted, so keep secrets out of title and summary; body is encrypted.", json!({
+        (NOTIFY, "Notify James", "Tell James something important happened when no decision is needed: a finished launch, a failed deploy you already handled, a result he asked to hear about. It reaches his phone as a push and stays in his notification centre, and body becomes a Markdown report he can read there. Rare by design: do not use it for progress, ordinary completions or anything your final reply already says. In a thread created for a bot's scheduled run the final reply does not alert him, so use this there for what he must hear. If you need him to decide, publish a review instead. Limits per sender: 3 an hour, 10 a day, 2 high a day; 30 a day across all agents, the last 5 kept for high. Pushes are not end-to-end encrypted, so keep secrets out of title and summary; body is encrypted.", json!({
             "title": {"type":"string", "minLength":1, "maxLength":120, "description":"What happened, as a headline."},
             "summary": {"type":"string", "minLength":1, "maxLength":200, "description":"One or two plain sentences. This is the push preview."},
             "body": {"type":"string", "minLength":1, "maxLength":64000, "description":"Optional long report in Markdown, opened from the notification."},
@@ -320,7 +320,7 @@ impl AppState {
             }
             AttentionOutcome::Refused(NoticeRefused::RateLimited { limit, retry_after }) => {
                 return Err(DaemonError::BadRequest(format!(
-                    "notice not sent, and James has not been told: the limit is {limit}. A slot frees in about {} minutes. Batch this into one notice then, or publish a review if he must decide. A bot run's final reply does not alert him",
+                    "notice not sent, and James has not been told: the limit is {limit}. A slot frees in about {} minutes. Batch this into one notice then, or publish a review if he must decide. The final reply in a thread created for a bot's run does not alert him",
                     retry_after.num_minutes().max(1)
                 )));
             }

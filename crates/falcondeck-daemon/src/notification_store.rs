@@ -538,6 +538,18 @@ impl NotificationStore {
         Self::counts(&state.file)
     }
 
+    /// Whether James has dealt with a record: answering one also reads it.
+    pub(crate) async fn is_read(&self, id: &str) -> bool {
+        let mut guard = self.state.lock().await;
+        let state = &mut *guard;
+        self.ensure_loaded(state).await;
+        state
+            .file
+            .records
+            .iter()
+            .any(|stored| stored.record.id == id && stored.record.is_read())
+    }
+
     /// One record with its body.
     pub(crate) async fn get(&self, id: &str) -> Option<NotificationRecord> {
         let mut guard = self.state.lock().await;
@@ -697,6 +709,38 @@ impl NotificationStore {
         stored.record.read_at.get_or_insert(now);
         self.save(state).await;
         true
+    }
+
+    /// Settles open records under `prefix` that nobody can answer now, except
+    /// `keep`. Returns whether any changed.
+    pub(crate) async fn retire_open(
+        &self,
+        prefix: &str,
+        keep: Option<&str>,
+        now: DateTime<Utc>,
+    ) -> bool {
+        let mut guard = self.state.lock().await;
+        let state = &mut *guard;
+        self.ensure_loaded(state).await;
+        let mut changed = false;
+        for stored in &mut state.file.records {
+            let under_prefix = stored
+                .dedupe_key
+                .as_deref()
+                .is_some_and(|key| key.starts_with(prefix));
+            if under_prefix
+                && stored.record.resolved_at.is_none()
+                && keep != Some(stored.record.id.as_str())
+            {
+                stored.record.resolved_at = Some(now);
+                stored.record.read_at.get_or_insert(now);
+                changed = true;
+            }
+        }
+        if changed {
+            self.save(state).await;
+        }
+        changed
     }
 
     async fn update(

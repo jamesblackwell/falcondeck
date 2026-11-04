@@ -98,14 +98,19 @@ because a queued socket write proves nothing and the bridge reconnects often. Th
 daemon makes four attempts of up to 8 seconds each, with 13 seconds of waits
 between them: about 13 seconds when the relay refuses straight away, 45 at worst,
 always inside the relay's 60 second dedupe window. It then falls back to the
-socket, using the bridge in place at that moment. It also falls back at once on a
-404 from an older relay. The relay dedupes per review or notice, so a retry cannot
+socket. It also falls back at once on a 404 from an older relay. The relay dedupes per review or notice, so a retry cannot
 double-alert.
 
-A push nothing can take waits in memory for the next connection: the newest 16, for
-up to an hour. That covers a dead bridge, and a socket write that fails. A frame
-the socket accepted and then lost is still gone. A restart forgets held pushes;
-the record stays.
+Every socket push goes through one queue in memory, and a live session writes it
+from there, so a bridge that dies or reconnects cannot take a push with it. The
+queue keeps the newest 16, each for up to an hour by the wall clock (`Instant` stops
+while a Mac sleeps). A failed write puts the push back at the front with its age.
+
+Each push is decided again as it goes out. One whose record was answered or read
+meanwhile is dropped, and preferences and desktop presence are checked as they are
+at first; `high` notices and reviews skip presence as usual. A push the session has
+written can still die with the socket. A restart forgets the queue; the record
+stays.
 
 ## Preferences
 
@@ -144,10 +149,12 @@ Settings → Notifications → Delivery shows:
 - this Mac's notification permission and last posted alert;
 - each paired device's registered provider and the last push result, with the
   provider's failure reason;
-- daemon counters since it started: sent, held by desktop activity, off in
-  preferences, and no relay connection, per kind. A push counts as sent only when
-  the relay acknowledges it or the bridge takes it. One that waits for the next
-  connection counts as no connection, and as sent too once the bridge has it;
+- daemon counters since it started, per kind. Every push ends as exactly one of:
+  delivered (the relay acknowledged it, or a session wrote it to the socket),
+  answered or read before it could go, not sent because of desktop activity, off
+  in preferences, expired, dropped for newer ones, or lost with no phone paired.
+  Waiting is the number in the queue right now, and it stops counting a push once
+  that push ends. `delivered` over the socket means written, not acknowledged;
 - Send test notification, which posts on the Mac and pushes to every device with
   `POST /api/remote/notifications/test` → `POST /v1/sessions/{id}/push-test`.
 
@@ -181,12 +188,11 @@ From the review of the delivery and centre work (November 2026), left for later:
   boot. Update replay already allows 64 MiB per session for 7 days, so this adds to
   an existing exposure. Not exploited in testing. Add a global cap before opening
   the relay to more users.
-- **Low: phantom Needs you rows.** A request that dies with a daemon restart appears
-  to stay unresolved for up to 90 days. Found by reading only.
 - **Low: an unusable store is quiet.** If `notifications.json` is unusable the daemon
   runs from memory with only a log line, and records are lost at each restart.
 - **Low: shared store path.** Dev and packaged daemons share
-  `~/.falcondeck/notifications`, so running both would clobber records.
+  `~/.falcondeck/notifications`, so running both would clobber records, and one
+  starting settles the other's open requests.
   `agent-control.json` already shares that directory the same way.
 - **Low: per-thread notice budgets.** Each task thread has its own budget, so spawned
   threads get around the per-sender limit of 2 `high` a day. The 30 a day across all

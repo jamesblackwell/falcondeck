@@ -144,6 +144,12 @@ impl AppState {
         event: AttentionEvent,
     ) -> AttentionOutcome {
         let notice = matches!(event, AttentionEvent::Notice(_));
+        let replaces = match &event {
+            AttentionEvent::Request(request) => {
+                Some(input_key_prefix(&request.workspace_id, &request.request_id))
+            }
+            _ => None,
+        };
         let Some((new, mut push)) = self.attention_record(event).await else {
             return AttentionOutcome::Noise;
         };
@@ -156,6 +162,12 @@ impl AppState {
         } else {
             self.inner.notifications.record(new, now).await
         };
+        // The daemon tracks one pending request per id, so an earlier one with
+        // this id has been replaced: only the new event can be answered now.
+        if let (Some(prefix), Recorded::Created(record)) = (&replaces, &recorded) {
+            let store = &self.inner.notifications;
+            store.retire_open(prefix, Some(&record.id), now).await;
+        }
         if matches!(recorded, Recorded::Duplicate(_)) || recorded.record().resolved_at.is_some() {
             return AttentionOutcome::Recorded(recorded);
         }
@@ -512,6 +524,15 @@ impl AppState {
         }
     }
 
+    /// Pending requests live in memory, so none survives a restart. Runs at
+    /// startup, before any provider can raise a new one.
+    pub(crate) async fn retire_unanswerable_requests(&self) {
+        let store = &self.inner.notifications;
+        if store.retire_open("input:", None, Utc::now()).await {
+            self.emit_notifications_changed().await;
+        }
+    }
+
     /// A review was answered or withdrawn.
     pub(crate) async fn resolve_review_notification(&self, review_id: &str) {
         let key = review_key(review_id);
@@ -713,27 +734,16 @@ mod tests {
     use crate::app::thread_tools::tests::fixture;
     use falcondeck_core::notifications::{NotificationFilter, NotificationListRequest};
     use falcondeck_core::{NotificationPreferencesPatch, UpdatePreferencesRequest};
-    use tokio::sync::mpsc;
 
-    async fn bridge(app: &AppState) -> mpsc::UnboundedReceiver<RemoteBridgeCommand> {
-        let (tx, rx) = mpsc::unbounded_channel();
-        app.inner.remote.lock().await.command_tx = Some(tx);
-        rx
+    async fn bridge(app: &AppState) {
+        remote_lifecycle::pair_for_tests(app).await;
     }
 
-    fn pushed(
-        rx: &mut mpsc::UnboundedReceiver<RemoteBridgeCommand>,
-    ) -> Vec<(String, Option<String>)> {
+    /// What a live session would write.
+    async fn pushed(app: &AppState) -> Vec<(String, Option<String>)> {
         let mut pushes = vec![];
-        while let Ok(command) = rx.try_recv() {
-            if let RemoteBridgeCommand::NotifyAttention {
-                kind,
-                message_preview,
-                ..
-            } = command
-            {
-                pushes.push((kind, message_preview));
-            }
+        while let Some(held) = app.next_held_push().await {
+            pushes.push((held.push.kind.to_string(), held.push.preview));
         }
         pushes
     }
@@ -790,7 +800,7 @@ mod tests {
     #[tokio::test]
     async fn a_pushed_event_is_stored_with_the_same_text() {
         let (app, _temp) = fixture().await;
-        let mut rx = bridge(&app).await;
+        bridge(&app).await;
         app.set_desktop_activity(false);
         reply(&app, "All **tests** pass.").await;
         finish(&app).await;
@@ -799,7 +809,7 @@ mod tests {
         assert_eq!(records[0].kind, NotificationKind::TurnComplete);
         assert_eq!(records[0].preview, "All tests pass.");
         assert_eq!(
-            pushed(&mut rx),
+            pushed(&app).await,
             [(
                 "turn-complete".to_string(),
                 Some("All tests pass.".to_string())
@@ -810,7 +820,7 @@ mod tests {
     #[tokio::test]
     async fn delivery_suppression_never_stops_a_record() {
         let (app, _temp) = fixture().await;
-        let mut rx = bridge(&app).await;
+        bridge(&app).await;
         // At the desk.
         app.set_desktop_activity(true);
         reply(&app, "One.").await;
@@ -827,25 +837,25 @@ mod tests {
         .await;
         app.record_and_deliver_attention(AttentionEvent::request(&request("r1")))
             .await;
-        // No bridge at all.
-        app.inner.remote.lock().await.command_tx = None;
+        // Nothing to deliver to at all.
+        app.inner.remote.lock().await.pairing = None;
         app.record_and_deliver_attention(AttentionEvent::request(&request("r2")))
             .await;
-        assert!(pushed(&mut rx).is_empty());
+        assert!(pushed(&app).await.is_empty());
         assert_eq!(history(&app).await.len(), 3);
     }
 
     #[tokio::test]
     async fn a_repeated_event_pushes_once() {
         let (app, _temp) = fixture().await;
-        let mut rx = bridge(&app).await;
+        bridge(&app).await;
         app.set_desktop_activity(false);
         let request = request("r1");
         for _ in 0..3 {
             app.record_and_deliver_attention(AttentionEvent::request(&request))
                 .await;
         }
-        assert_eq!(pushed(&mut rx).len(), 1);
+        assert_eq!(pushed(&app).await.len(), 1);
         assert_eq!(history(&app).await.len(), 1);
     }
 
@@ -889,12 +899,13 @@ mod tests {
     #[tokio::test]
     async fn a_new_process_reusing_an_answered_request_id_still_alerts() {
         let (app, _temp) = fixture().await;
-        let mut rx = bridge(&app).await;
+        bridge(&app).await;
         app.set_desktop_activity(false);
         ask(&app, &request("0")).await;
+        assert_eq!(pushed(&app).await.len(), 1);
         answer(&app, "0").await;
         ask(&app, &request("0")).await;
-        assert_eq!(pushed(&mut rx).len(), 2);
+        assert_eq!(pushed(&app).await.len(), 1);
         assert_eq!(history(&app).await.len(), 2);
         assert_eq!(needs_you(&app).await, 1, "the new one is waiting");
         answer(&app, "0").await;
@@ -904,23 +915,146 @@ mod tests {
     #[tokio::test]
     async fn a_new_process_reusing_an_unanswered_request_id_still_alerts() {
         let (app, _temp) = fixture().await;
-        let mut rx = bridge(&app).await;
+        bridge(&app).await;
+        app.set_desktop_activity(false);
+        ask(&app, &request("0")).await;
+        assert_eq!(pushed(&app).await.len(), 1);
+        ask(&app, &request("0")).await;
+        assert_eq!(pushed(&app).await.len(), 1);
+    }
+
+    /// The same id with a new timestamp cannot be told from a new process, so
+    /// it alerts; but only the newest can be answered, so one row waits.
+    #[tokio::test]
+    async fn a_replayed_request_retires_the_row_it_replaced() {
+        let (app, _temp) = fixture().await;
+        bridge(&app).await;
+        app.set_desktop_activity(false);
+        let first = request("0");
+        let mut replay = first.clone();
+        replay.created_at = first.created_at + chrono::Duration::seconds(5);
+        ask(&app, &first).await;
+        assert_eq!(pushed(&app).await.len(), 1);
+        ask(&app, &replay).await;
+        assert_eq!(pushed(&app).await.len(), 1);
+        assert_eq!(history(&app).await.len(), 2);
+        assert_eq!(needs_you(&app).await, 1);
+        answer(&app, "0").await;
+        assert_eq!(needs_you(&app).await, 0, "no stuck row after answering");
+    }
+
+    #[tokio::test]
+    async fn a_held_push_for_a_replaced_request_stays_quiet() {
+        let (app, _temp) = fixture().await;
+        bridge(&app).await;
         app.set_desktop_activity(false);
         ask(&app, &request("0")).await;
         ask(&app, &request("0")).await;
-        assert_eq!(pushed(&mut rx).len(), 2);
+        assert_eq!(pushed(&app).await.len(), 1, "only the live one");
+    }
+
+    #[tokio::test]
+    async fn another_requests_row_survives_a_replay() {
+        let (app, _temp) = fixture().await;
+        bridge(&app).await;
+        ask(&app, &request("1")).await;
+        ask(&app, &request("0")).await;
+        ask(&app, &request("0")).await;
+        assert_eq!(needs_you(&app).await, 2);
+    }
+
+    #[tokio::test]
+    async fn startup_settles_requests_that_died_with_the_process_only() {
+        let (app, _temp) = fixture().await;
+        bridge(&app).await;
+        ask(&app, &request("0")).await;
+        let review = crate::notification_store::NewNotification {
+            kind: NotificationKind::Review,
+            title: "Pricing".into(),
+            preview: "Juno needs a decision".into(),
+            bot: None,
+            thread_id: None,
+            workspace_id: None,
+            target: None,
+            importance: NotificationImportance::Normal,
+            dedupe_key: Some(review_key("R-1")),
+            coalesce: false,
+            sender: None,
+            body: None,
+        };
+        app.inner.notifications.record(review, Utc::now()).await;
+        assert_eq!(needs_you(&app).await, 2);
+        app.retire_unanswerable_requests().await;
+        let waiting = app
+            .notifications_list(&NotificationListRequest {
+                filter: NotificationFilter::NeedsYou,
+                ..Default::default()
+            })
+            .await
+            .items;
+        assert_eq!(waiting.len(), 1);
+        assert_eq!(
+            waiting[0].kind,
+            NotificationKind::Review,
+            "still answerable"
+        );
+    }
+
+    async fn cards_resolved(app: &AppState) -> Vec<bool> {
+        let workspaces = app.inner.workspaces.lock().await;
+        workspaces["workspace-1"].threads["thread-1"]
+            .items
+            .iter()
+            .filter_map(|item| match item {
+                ConversationItem::InteractiveRequest { resolved, .. } => Some(*resolved),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn an_answer_settles_the_newest_card_under_a_reused_id() {
+        let (app, _temp) = fixture().await;
+        ask(&app, &request("0")).await;
+        answer(&app, "0").await;
+        ask(&app, &request("0")).await;
+        assert_eq!(cards_resolved(&app).await, [true, false]);
+        answer(&app, "0").await;
+        assert_eq!(cards_resolved(&app).await, [true, true]);
+    }
+
+    #[tokio::test]
+    async fn a_reloaded_transcript_still_settles_the_newest_card() {
+        let (app, _temp) = fixture().await;
+        ask(&app, &request("0")).await;
+        answer(&app, "0").await;
+        ask(&app, &request("0")).await;
+        {
+            let mut workspaces = app.inner.workspaces.lock().await;
+            let thread = workspaces
+                .get_mut("workspace-1")
+                .unwrap()
+                .threads
+                .get_mut("thread-1")
+                .unwrap();
+            let items = thread.items.clone();
+            thread.replace_items(items);
+        }
+        answer(&app, "0").await;
+        assert_eq!(cards_resolved(&app).await, [true, true]);
     }
 
     #[tokio::test]
     async fn a_repeated_answer_cannot_silence_the_next_use_of_the_id() {
         let (app, _temp) = fixture().await;
-        let mut rx = bridge(&app).await;
+        bridge(&app).await;
         app.set_desktop_activity(false);
         ask(&app, &request("0")).await;
+        assert_eq!(pushed(&app).await.len(), 1);
         answer(&app, "0").await;
         answer(&app, "0").await;
         ask(&app, &request("0")).await;
-        assert_eq!(pushed(&mut rx).len(), 2);
+        assert_eq!(pushed(&app).await.len(), 1);
         assert_eq!(needs_you(&app).await, 1, "not recorded as already answered");
     }
 
@@ -971,13 +1105,13 @@ mod tests {
     #[tokio::test]
     async fn a_result_after_a_background_wake_alerts_under_the_same_turn_id() {
         let (app, _temp) = fixture().await;
-        let mut rx = bridge(&app).await;
+        bridge(&app).await;
         app.set_desktop_activity(false);
         reply(&app, "Waiting on the tests.").await;
         finish(&app).await;
         answer_again(&app, "The tests passed.").await;
         finish(&app).await;
-        assert_eq!(pushed(&mut rx).len(), 2);
+        assert_eq!(pushed(&app).await.len(), 2);
         let records = history(&app).await;
         assert_eq!(records.len(), 1, "one unread line");
         assert_eq!(records[0].preview, "The tests passed.");
@@ -986,32 +1120,32 @@ mod tests {
     #[tokio::test]
     async fn a_turn_settling_twice_on_the_same_answer_alerts_once() {
         let (app, _temp) = fixture().await;
-        let mut rx = bridge(&app).await;
+        bridge(&app).await;
         app.set_desktop_activity(false);
         reply(&app, "Done.").await;
         finish(&app).await;
         finish(&app).await;
-        assert_eq!(pushed(&mut rx).len(), 1);
+        assert_eq!(pushed(&app).await.len(), 1);
     }
 
     #[tokio::test]
     async fn every_failure_of_a_retried_turn_alerts() {
         let (app, _temp) = fixture().await;
-        let mut rx = bridge(&app).await;
+        bridge(&app).await;
         app.set_desktop_activity(false);
         reply(&app, "Trying.").await;
         for _ in 0..3 {
             app.record_and_deliver_attention(AttentionEvent::turn("workspace-1", "thread-1", true))
                 .await;
         }
-        assert_eq!(pushed(&mut rx).len(), 3);
+        assert_eq!(pushed(&app).await.len(), 3);
         assert_eq!(history(&app).await.len(), 1, "one unread line");
     }
 
     #[tokio::test]
     async fn james_following_up_in_a_bots_run_thread_alerts_as_usual() {
         let (app, _temp) = fixture().await;
-        let mut rx = bridge(&app).await;
+        bridge(&app).await;
         app.set_desktop_activity(false);
         reply(&app, "Report sent.").await;
         app.inner
@@ -1030,7 +1164,7 @@ mod tests {
             name: "n".into(),
         });
         finish(&app).await;
-        assert_eq!(pushed(&mut rx).len(), 1);
+        assert_eq!(pushed(&app).await.len(), 1);
     }
 
     #[test]
@@ -1071,7 +1205,7 @@ mod tests {
     #[tokio::test]
     async fn back_and_forth_in_one_thread_is_one_unread_line_but_every_turn_pushes() {
         let (app, _temp) = fixture().await;
-        let mut rx = bridge(&app).await;
+        bridge(&app).await;
         app.set_desktop_activity(false);
         for text in ["First", "Second", "Third"] {
             reply(&app, text).await;
@@ -1081,13 +1215,13 @@ mod tests {
         assert_eq!(records.len(), 1);
         assert_eq!(records[0].preview, "Third");
         assert_eq!(records[0].repeat_count, 2);
-        assert_eq!(pushed(&mut rx).len(), 3);
+        assert_eq!(pushed(&app).await.len(), 3);
     }
 
     #[tokio::test]
     async fn noise_is_neither_recorded_nor_pushed() {
         let (app, _temp) = fixture().await;
-        let mut rx = bridge(&app).await;
+        bridge(&app).await;
         app.set_desktop_activity(false);
         reply(&app, "Working on the next step.").await;
         {
@@ -1108,7 +1242,7 @@ mod tests {
         }
         finish(&app).await;
         assert!(history(&app).await.is_empty());
-        assert!(pushed(&mut rx).is_empty());
+        assert!(pushed(&app).await.is_empty());
     }
 
     fn summary(origin: Option<ThreadOrigin>) -> ThreadSummary {
@@ -1241,7 +1375,6 @@ mod notice_tests {
     use axum::{Json, extract::State, http::HeaderMap, routing::get};
     use falcondeck_core::notifications::NotificationListRequest;
     use std::sync::{Arc, Mutex as StdLock};
-    use tokio::sync::mpsc;
 
     async fn notify(app: &AppState, arguments: Value) -> Result<String, String> {
         app.invoke_thread_tool(NOTIFY, &arguments, Some("thread-1"), None)
@@ -1250,31 +1383,38 @@ mod notice_tests {
             .map_err(|error| error.to_string())
     }
 
-    fn pushes(rx: &mut mpsc::UnboundedReceiver<RemoteBridgeCommand>) -> Vec<RemoteBridgeCommand> {
-        std::iter::from_fn(|| rx.try_recv().ok()).collect()
+    /// What a live session would write.
+    async fn pushes(app: &AppState) -> Vec<AttentionPush> {
+        let mut pushes = vec![];
+        while let Some(held) = app.next_held_push().await {
+            pushes.push(held.push);
+        }
+        pushes
     }
 
-    fn only(rx: &mut mpsc::UnboundedReceiver<RemoteBridgeCommand>) -> RemoteBridgeCommand {
-        let mut all = pushes(rx);
+    async fn only(app: &AppState) -> AttentionPush {
+        let mut all = pushes(app).await;
         assert_eq!(all.len(), 1);
         all.remove(0)
     }
 
     /// A relay without `/notify` answers 404, so the push reaches the socket a
     /// moment later, as it does on a relay that has not been deployed yet.
-    async fn next_push(
-        rx: &mut mpsc::UnboundedReceiver<RemoteBridgeCommand>,
-    ) -> RemoteBridgeCommand {
-        tokio::time::timeout(std::time::Duration::from_secs(5), rx.recv())
-            .await
-            .expect("no push arrived")
-            .expect("the bridge closed")
+    async fn next_push(app: &AppState) -> AttentionPush {
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop {
+                if let Some(held) = app.next_held_push().await {
+                    return held.push;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("no push arrived")
     }
 
-    async fn bridge(app: &AppState) -> mpsc::UnboundedReceiver<RemoteBridgeCommand> {
-        let (tx, rx) = mpsc::unbounded_channel();
-        app.inner.remote.lock().await.command_tx = Some(tx);
-        rx
+    async fn bridge(app: &AppState) {
+        remote_lifecycle::pair_for_tests(app).await;
     }
 
     async fn records(app: &AppState) -> Vec<NotificationRecord> {
@@ -1286,7 +1426,7 @@ mod notice_tests {
     #[tokio::test]
     async fn a_notice_reaches_the_phone_and_the_centre() {
         let (app, _temp) = fixture().await;
-        let mut rx = bridge(&app).await;
+        bridge(&app).await;
         app.set_desktop_activity(false);
         let sent = notify(
             &app,
@@ -1303,20 +1443,17 @@ mod notice_tests {
             thread_target("workspace-1", Some("thread-1"))
         );
         assert!(!list[0].has_body);
-        let RemoteBridgeCommand::NotifyAttention {
+        let AttentionPush {
             kind,
             title,
-            message_preview,
+            preview,
             notification_id,
             report_id,
             ..
-        } = only(&mut rx)
-        else {
-            panic!("expected one push");
-        };
+        } = only(&app).await;
         assert_eq!(kind, "agent-notice");
         assert_eq!(title.as_deref(), Some("Deploy finished"));
-        assert_eq!(message_preview.as_deref(), Some("All green."));
+        assert_eq!(preview.as_deref(), Some("All green."));
         assert_eq!(notification_id.as_deref(), Some("N-1"));
         assert_eq!(report_id, None);
     }
@@ -1324,33 +1461,33 @@ mod notice_tests {
     #[tokio::test]
     async fn at_the_desk_a_normal_notice_is_quiet_and_a_high_one_is_not() {
         let (app, _temp) = fixture().await;
-        let mut rx = bridge(&app).await;
+        bridge(&app).await;
         app.set_desktop_activity(true);
         notify(&app, json!({"title": "One", "summary": "Normal."}))
             .await
             .unwrap();
-        assert!(pushes(&mut rx).is_empty());
+        assert!(pushes(&app).await.is_empty());
         notify(
             &app,
             json!({"title": "Two", "summary": "High.", "importance": "high"}),
         )
         .await
         .unwrap();
-        assert_eq!(pushes(&mut rx).len(), 1);
+        assert_eq!(pushes(&app).await.len(), 1);
         assert_eq!(records(&app).await.len(), 2, "both are in the history");
     }
 
     #[tokio::test]
     async fn the_limit_refuses_with_directions_and_nothing_is_stored_or_pushed() {
         let (app, _temp) = fixture().await;
-        let mut rx = bridge(&app).await;
+        bridge(&app).await;
         app.set_desktop_activity(false);
         for index in 0..3 {
             notify(&app, json!({"title": format!("n{index}"), "summary": "s"}))
                 .await
                 .unwrap();
         }
-        pushes(&mut rx);
+        pushes(&app).await;
         let error = notify(&app, json!({"title": "over", "summary": "s"}))
             .await
             .unwrap_err();
@@ -1359,19 +1496,19 @@ mod notice_tests {
             "{error}"
         );
         assert_eq!(records(&app).await.len(), 3);
-        assert!(pushes(&mut rx).is_empty());
+        assert!(pushes(&app).await.is_empty());
     }
 
     #[tokio::test]
     async fn a_retry_is_not_sent_twice() {
         let (app, _temp) = fixture().await;
-        let mut rx = bridge(&app).await;
+        bridge(&app).await;
         app.set_desktop_activity(false);
         let arguments = json!({"title": "Same", "summary": "Same."});
         notify(&app, arguments.clone()).await.unwrap();
         let again = notify(&app, arguments).await.unwrap();
         assert!(again.contains("already sent"), "{again}");
-        assert_eq!(pushes(&mut rx).len(), 1);
+        assert_eq!(pushes(&app).await.len(), 1);
     }
 
     #[tokio::test]
@@ -1478,7 +1615,7 @@ mod notice_tests {
             ..Default::default()
         };
         paired(&app, &relay, [7; 32]).await;
-        let _rx = bridge(&app).await;
+        bridge(&app).await;
         notify(
             &app,
             json!({"title": "Launch", "summary": "Shipped.", "body": REPORT}),
@@ -1505,7 +1642,7 @@ mod notice_tests {
         };
         let key = [7; 32];
         paired(&app, &relay, key).await;
-        let mut rx = bridge(&app).await;
+        bridge(&app).await;
         app.set_desktop_activity(false);
         notify(
             &app,
@@ -1530,12 +1667,9 @@ mod notice_tests {
         let record = app.notification_get("N-1").await.unwrap();
         assert_eq!(record.body.as_deref(), Some(REPORT));
         assert!(record.report.as_ref().unwrap().hosted);
-        let RemoteBridgeCommand::NotifyAttention {
+        let AttentionPush {
             report_id: pushed, ..
-        } = next_push(&mut rx).await
-        else {
-            panic!("expected one push");
-        };
+        } = next_push(&app).await;
         assert_eq!(
             pushed.as_deref(),
             Some(report_id.as_str()),
@@ -1548,7 +1682,7 @@ mod notice_tests {
         let (app, _temp) = fixture().await;
         let relay = Relay::default();
         paired(&app, &relay, [7; 32]).await;
-        let mut rx = bridge(&app).await;
+        bridge(&app).await;
         app.set_desktop_activity(false);
         notify(
             &app,
@@ -1557,7 +1691,7 @@ mod notice_tests {
         .await
         .unwrap();
         assert!(relay.puts.lock().unwrap().is_empty());
-        next_push(&mut rx).await;
+        next_push(&app).await;
         let record = app.notification_get("N-1").await.unwrap();
         assert_eq!(
             record.body.as_deref(),
