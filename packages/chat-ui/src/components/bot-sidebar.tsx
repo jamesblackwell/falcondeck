@@ -106,22 +106,31 @@ function realPreview(task: ThreadSummary) {
   return text && !NO_ACTION_MARKER.test(text) ? text : null;
 }
 
+/** When the previewed message was written; older daemons only send `updated_at`. */
+function messageAt(task: ThreadSummary) {
+  return task.last_message_at ?? task.updated_at;
+}
+
+/**
+ * The preview and its timestamp describe one message: the newest real reply
+ * across the bot's home thread and its children. `updated_at` also moves on
+ * tool calls, so dating the row by it paired an old reply with "now".
+ */
 function botPreview(bot: BotProfile, tasks: ThreadSummary[]) {
-  const related = botThreads(bot, tasks).sort((a, b) =>
-    b.updated_at.localeCompare(a.updated_at),
-  );
+  const related = botThreads(bot, tasks);
   const home = related.find((task) => task.id === bot.thread_id);
-  if (home?.status === "running") return { latest: home, text: "Working…" };
-  // Newest real message across the bot's threads; a failed child or a
-  // no-action automation reply has none, so fall back to an older one.
-  // Running children are mid-reply, so their text and timestamp would bury
-  // the bot's last finished message.
-  const settled = related.filter((task) => task.status !== "running");
+  if (home?.status === "running") return { at: home.updated_at, text: "Working…" };
+  // A failed child or a no-action automation reply has no real message, so
+  // fall back to an older one. Running children are mid-reply, so their text
+  // would bury the bot's last finished message.
+  const settled = related
+    .filter((task) => task.status !== "running")
+    .sort((a, b) => messageAt(b).localeCompare(messageAt(a)));
   for (const task of settled) {
     const text = realPreview(task);
-    if (text) return { latest: task, text };
+    if (text) return { at: messageAt(task), text };
   }
-  return { latest: settled[0], text: null };
+  return { at: settled[0] ? messageAt(settled[0]) : undefined, text: null };
 }
 
 function runningTasksLabel(count: number, short: boolean) {
@@ -300,9 +309,9 @@ export function BotSidebar({
                       >
                         {bot.name}
                       </span>
-                      {botTimeAgo(preview?.latest?.updated_at) ? (
+                      {botTimeAgo(preview?.at) ? (
                         <span className="fd-type-meta shrink-0 tabular-nums text-fg-muted">
-                          {botTimeAgo(preview?.latest?.updated_at)}
+                          {botTimeAgo(preview?.at)}
                         </span>
                       ) : null}
                     </span>

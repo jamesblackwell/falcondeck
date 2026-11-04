@@ -1904,6 +1904,7 @@ impl AppState {
                     .or(persisted_workspace.updated_at)
                     .unwrap_or(now),
                 last_message_preview: None,
+                last_message_at: None,
                 latest_turn_id: None,
                 latest_plan: None,
                 latest_diff: None,

@@ -1133,6 +1133,9 @@ pub(super) fn merge_hydrated_threads_with_persisted_state(
                 last_message_preview: adopted
                     .as_ref()
                     .and_then(|transcript| transcript.summary.last_message_preview.clone()),
+                last_message_at: adopted
+                    .as_ref()
+                    .and_then(|transcript| transcript.summary.last_message_at),
                 latest_turn_id: None,
                 latest_plan: None,
                 latest_diff: None,
@@ -1350,6 +1353,7 @@ async fn start_thread_internal(
         status: ThreadStatus::Idle,
         updated_at: now,
         last_message_preview: None,
+        last_message_at: None,
         latest_turn_id: None,
         latest_plan: None,
         latest_diff: None,
@@ -1457,11 +1461,19 @@ pub(super) async fn fork_thread(
     let thread_id = extract_thread_id(&result)
         .ok_or_else(|| DaemonError::Rpc("thread/fork did not return a thread id".to_string()))?;
     let items = crate::codex::hydrate_thread_items(&result);
-    let retained_preview = items.iter().rev().find_map(|item| match item {
-        ConversationItem::UserMessage { text, .. }
-        | ConversationItem::AssistantMessage { text, .. } => Some(truncate_preview(text, 160)),
-        _ => None,
-    });
+    let (retained_preview, retained_at) = items
+        .iter()
+        .rev()
+        .find_map(|item| match item {
+            ConversationItem::UserMessage {
+                text, created_at, ..
+            }
+            | ConversationItem::AssistantMessage {
+                text, created_at, ..
+            } => Some((Some(truncate_preview(text, 160)), Some(*created_at))),
+            _ => None,
+        })
+        .unwrap_or_default();
     let now = Utc::now();
     let mut thread = source;
     thread.id = thread_id.clone();
@@ -1470,6 +1482,7 @@ pub(super) async fn fork_thread(
     thread.updated_at = now;
     thread.latest_turn_id = Some(last_turn_id.to_string());
     thread.last_message_preview = retained_preview;
+    thread.last_message_at = retained_at;
     thread.latest_plan = None;
     thread.latest_diff = None;
     thread.last_tool = None;
@@ -3342,6 +3355,7 @@ async fn send_turn_with_startup_mode(
                         status: ThreadStatus::Idle,
                         updated_at: now,
                         last_message_preview: None,
+                        last_message_at: None,
                         latest_turn_id: None,
                         latest_plan: None,
                         latest_diff: None,
@@ -6350,6 +6364,7 @@ mod tests {
                 status: ThreadStatus::Idle,
                 updated_at: Utc::now(),
                 last_message_preview: Some(preview.to_string()),
+                last_message_at: None,
                 latest_turn_id: None,
                 latest_plan: None,
                 latest_diff: None,
@@ -7082,6 +7097,7 @@ mod tests {
             status: ThreadStatus::Running,
             updated_at: now,
             last_message_preview: None,
+            last_message_at: None,
             latest_turn_id: None,
             latest_plan: None,
             latest_diff: None,

@@ -3232,6 +3232,7 @@ mod tests {
             status,
             updated_at: Utc::now(),
             last_message_preview: None,
+            last_message_at: None,
             latest_turn_id: None,
             latest_plan: None,
             latest_diff: None,

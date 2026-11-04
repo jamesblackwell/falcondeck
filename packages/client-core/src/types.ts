@@ -1160,6 +1160,8 @@ export type ThreadSummary = {
   status: ThreadStatus;
   updated_at: string;
   last_message_preview: string | null;
+  /** When the preview's message was written; `updated_at` also moves on tool activity. */
+  last_message_at?: string | null;
   latest_turn_id: string | null;
   latest_plan: ThreadPlan | null;
   latest_diff: string | null;

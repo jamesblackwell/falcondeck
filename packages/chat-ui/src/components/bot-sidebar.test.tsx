@@ -154,6 +154,80 @@ describe("bot sidebar", () => {
     expect(screen.getByText("Should I ship the build?")).toBeInTheDocument();
   });
 
+  it("updates an unopened bot row when a new reply lands, dating it by the message", () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-11-04T12:00:00Z"));
+    try {
+      const home = (patch: Partial<ThreadSummary>) =>
+        task(bot.thread_id, {
+          workspace_id: "home",
+          attention: { unread: false } as ThreadSummary["attention"],
+          ...patch,
+        });
+      const view = (threads: ThreadSummary[]) => (
+        <BotSidebar
+          focused
+          bots={[bot]}
+          botApi={api()}
+          groups={group(threads)}
+          selectedThreadId={null}
+          onSelectThread={vi.fn()}
+        />
+      );
+      const row = () => screen.getByRole("button", { name: /^Assistant/ });
+      // Tool activity moved updated_at to "now"; the preview is an hour old.
+      const { rerender } = render(
+        view([
+          home({
+            updated_at: "2026-11-04T12:00:00Z",
+            last_message_at: "2026-11-04T11:00:00Z",
+            last_message_preview: "The new navigation went live",
+          }),
+        ]),
+      );
+      expect(row()).toHaveTextContent("The new navigation went live");
+      expect(row()).toHaveTextContent("1h");
+      expect(row()).not.toHaveTextContent("now");
+
+      // The daemon pushes a thread-updated summary for the finished turn.
+      rerender(
+        view([
+          home({
+            updated_at: "2026-11-04T12:00:00Z",
+            last_message_at: "2026-11-04T11:58:00Z",
+            last_message_preview: "Should I ship the build?",
+            attention: { unread: true } as ThreadSummary["attention"],
+          }),
+        ]),
+      );
+      expect(row()).toHaveTextContent("Should I ship the build?");
+      expect(row()).not.toHaveTextContent("The new navigation went live");
+      expect(row()).toHaveTextContent("2m");
+      expect(screen.getByRole("img", { name: "Unread" })).toBeInTheDocument();
+
+      // A child's newer reply wins, and the time follows that message.
+      rerender(
+        view([
+          home({
+            updated_at: "2026-11-04T12:00:00Z",
+            last_message_at: "2026-11-04T11:58:00Z",
+            last_message_preview: "Should I ship the build?",
+          }),
+          task("child", {
+            updated_at: "2026-11-04T11:59:30Z",
+            last_message_at: "2026-11-04T11:59:30Z",
+            last_message_preview: "Build finished",
+            origin: { kind: "agent_spawn", parent_thread_id: bot.thread_id },
+          }),
+        ]),
+      );
+      expect(row()).toHaveTextContent("Build finished");
+      expect(row()).toHaveTextContent("now");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("previews the newest real message, skipping no-action replies and empty children", () => {
     const { rerender } = render(
       <BotSidebar
