@@ -154,13 +154,15 @@ agents, so a fleet of tasks cannot add up to a flood. The last 5 of those 30 are
 kept for `high`, so a noisy day cannot shut out the one that matters. A refused
 notice stores and pushes nothing. The error says James has not been told, when a
 slot frees, and to batch or publish a review; it does not point at the final
-reply, because a bot run's final reply does not alert him. The same sender repeating the same title and summary within
-an hour replays the first record, at no cost and with no second push.
+reply, because a bot run's final reply does not alert him. The same sender
+repeating the same title and summary within an hour replays the first record, at
+no cost and with no second push.
 
 Guidance lives in the always-on instructions (`agent_context.rs`), the bot
 defaults (`BOT_DEFAULT_INSTRUCTIONS`), the tool description and the
 `falcondeck-mcp` skill. All of them say the same thing: rare by default, and your
-final reply already reaches James.
+final reply already reaches James, except in a scheduled bot run, where it stays
+in the thread without an alert.
 
 ## Reports while the Mac is asleep
 

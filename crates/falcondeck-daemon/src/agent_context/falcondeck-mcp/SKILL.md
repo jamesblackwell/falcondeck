@@ -72,9 +72,11 @@ must decide, publish a review instead: a review asks for a decision, a notice
 does not.
 
 It is rare by design. Your final reply already reaches them, so never use it for
-progress, routine completions or anything your reply says anyway. Limits per
-sender: 3 an hour, 10 a day, 2 `importance: "high"` a day; all agents together
-share 30 a day. A retry of the same notice within the hour is not sent twice.
+progress, routine completions or anything your reply says anyway. The exception
+is a scheduled bot run: its final reply stays in the thread without an alert, so
+a result they must hear about needs a notice. Limits per sender: 3 an hour, 10 a
+day, 2 `importance: "high"` a day; all agents together share 30 a day, with the
+last 5 kept for `high`. A retry of the same notice within the hour is not sent twice.
 `high` also pushes while they are at the Mac, so keep it for what would justify
 an interruption. Pushes are not end-to-end encrypted: keep secrets out of `title`
 and `summary`. `body` is encrypted.
