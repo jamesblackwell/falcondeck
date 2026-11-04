@@ -625,8 +625,15 @@ export type AnalyticsWaiting = {
   median_reply_ms: number;
   p90_reply_ms: number;
 };
+/** A harness and model observed on an automation's usage records. */
+export type AnalyticsAgent = { provider: string; model: string };
 export type AnalyticsAutomation = {
   models?: string[];
+  agents?: AnalyticsAgent[];
+  /** Bot names from usage records, plus the configured bot. */
+  bots?: string[];
+  /** Harness the automation is configured to run on. */
+  provider?: string | null;
   configured_model?: string | null;
   fallback_model?: string | null;
   usage?: AnalyticsUsageTotals;

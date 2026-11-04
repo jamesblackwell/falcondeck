@@ -9,7 +9,7 @@ use super::*;
 use chrono::{DateTime, Datelike, Local, NaiveDate};
 use falcondeck_core::control::AUTOMATION_MESSAGE_PREFIX;
 use falcondeck_core::{
-    AnalyticsAgentMessage, AnalyticsAgentPair, AnalyticsAutomation, AnalyticsBot,
+    AnalyticsAgent, AnalyticsAgentMessage, AnalyticsAgentPair, AnalyticsAutomation, AnalyticsBot,
     AnalyticsClearTarget, AnalyticsDay, AnalyticsFile, AnalyticsProject, AnalyticsPrompt,
     AnalyticsProvider, AnalyticsSettings, AnalyticsStatus, AnalyticsSummary, AnalyticsUsage,
     AnalyticsUsageReport, AnalyticsUsageRow, AnalyticsUsageThread, AnalyticsUsageTotals,
@@ -1923,6 +1923,9 @@ fn summarize_automations(
         last_status: None,
         flags: Vec::new(),
         models: Vec::new(),
+        agents: Vec::new(),
+        bots: Vec::new(),
+        provider: None,
         configured_model: None,
         fallback_model: None,
         usage: AnalyticsUsageTotals::default(),
@@ -2065,6 +2068,7 @@ fn summarize_automation_usage(
     definitions: &[falcondeck_core::control::Automation],
     usage: &[UsageRecord],
     thread_models: &HashMap<String, String>,
+    labels: &Labels,
 ) {
     use falcondeck_core::control::AutomationThreadTarget as Target;
     for summary in summaries {
@@ -2079,6 +2083,8 @@ fn summarize_automation_usage(
             }
         }
         let mut models = std::collections::BTreeSet::new();
+        let mut agents = std::collections::BTreeSet::new();
+        let mut bots = std::collections::BTreeSet::new();
         for record in usage {
             if windows.get(record.th.as_str()).is_some_and(|intervals| {
                 intervals.iter().any(|(start, end)| record.t >= *start && record.t <= *end)
@@ -2087,19 +2093,38 @@ fn summarize_automation_usage(
                 if !record.model.is_empty() {
                     models.insert(record.model.clone());
                 }
+                agents.insert((record.prov.clone(), record.model.clone()));
+                if let Some(bot) = &record.bot {
+                    bots.insert(labels.bot_name(bot));
+                }
             }
         }
         summary.models = models.into_iter().collect();
-        let target = definitions
+        summary.agents = agents
+            .into_iter()
+            .map(|(provider, model)| AnalyticsAgent { provider, model })
+            .collect();
+        let definition = definitions
             .iter()
-            .find(|d| Some(&d.id) == summary.id.as_ref())
-            .and_then(|d| match &d.target.thread {
-                Target::Managed {
-                    thread_id: Some(id),
-                }
-                | Target::Existing { thread_id: id } => Some(id),
-                _ => None,
-            });
+            .find(|d| Some(&d.id) == summary.id.as_ref());
+        let target = definition.and_then(|d| match &d.target.thread {
+            Target::Managed {
+                thread_id: Some(id),
+            }
+            | Target::Existing { thread_id: id } => Some(id),
+            _ => None,
+        });
+        // Tasks without recorded usage still name the harness and bot they run as.
+        if let Some(definition) = definition {
+            summary.provider = Some(definition.target.provider.to_string());
+            if let Some(bot) = &definition.target.run_as_bot {
+                bots.insert(labels.bot_name(bot));
+            }
+        }
+        if let Some(bot) = target.and_then(|id| labels.bot_of(id)) {
+            bots.insert(bot.clone());
+        }
+        summary.bots = bots.into_iter().collect();
         summary.fallback_model = target
             .and_then(|id| thread_models.get(id))
             .cloned()
@@ -2830,6 +2855,7 @@ impl AppState {
                 &definitions,
                 &usage,
                 &thread_models,
+                &labels,
             );
             summary
         })
@@ -3711,16 +3737,21 @@ mod tests {
         let mut rows = summarize_automations(runs.clone(), &[], 7, &HashSet::new(), &HashMap::new());
         let mut first = usage_record("u1", "thread-1", None, "claude", "haiku", (1, 2, 3, 4), None);
         first.t = first_run.started_at.unwrap();
+        first.bot = Some("bot-1".into());
         let mut second = first.clone(); second.id = "u2".into(); second.model = "sonnet".into();
+        second.prov = "codex".into();
         second.t = a_later.finished_at.unwrap();
         let mut before = first.clone(); before.t -= chrono::Duration::seconds(1);
         let mut between = first.clone(); between.t = first_run.finished_at.unwrap() + chrono::Duration::seconds(1);
         let mut after = first.clone(); after.t = b_shared.finished_at.unwrap() + chrono::Duration::seconds(1);
         let mut other_task = first.clone(); other_task.t = b_shared.started_at.unwrap(); other_task.model = "opus".into();
         let mut unrelated = first.clone(); unrelated.th = "other".into();
-        summarize_automation_usage(&mut rows, &runs, &[], &[first, second, before, between, after, other_task, unrelated], &HashMap::new());
+        summarize_automation_usage(&mut rows, &runs, &[], &[first, second, before, between, after, other_task, unrelated], &HashMap::new(), &test_labels());
         let a = rows.iter().find(|r| r.id.as_deref() == Some("a")).unwrap();
         assert_eq!(a.models, ["haiku", "sonnet"]);
+        let agents: Vec<_> = a.agents.iter().map(|agent| (agent.provider.as_str(), agent.model.as_str())).collect();
+        assert_eq!(agents, [("claude", "haiku"), ("codex", "sonnet")]);
+        assert_eq!(a.bots, ["Juno"]);
         assert_eq!(usage_token_total(&a.usage), 20);
         assert_eq!(a.usage.turns, 2);
         let b = rows.iter().find(|r| r.id.as_deref() == Some("b")).unwrap();

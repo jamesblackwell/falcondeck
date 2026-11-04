@@ -145,7 +145,8 @@ deleted threads.
 The summary lists every scheduled task with runs in the period (and every
 enabled one, even without runs): schedule, state, thread mode, runs, runs that
 found nothing to do, failures, skips, agent time, threads used and the latest
-outcome, with review flags:
+outcome, the harness, model and bot behind its runs (`agents`, `bots`) and its
+configured `provider`, with review flags:
 
 - `rarely_useful`: at least 80% of finished runs (six or more) found nothing to do.
 - `very_frequent`: 24 or more runs a day.
