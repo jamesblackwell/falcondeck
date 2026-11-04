@@ -25,12 +25,12 @@ pub mod project_folders;
 pub use project_folders::*;
 /// Bounded, multiplexed relay socket transport.
 pub mod relay_transport;
+/// Review inbox: decisions agents need from James, with evidence.
+pub mod reviews;
 /// Compact, revision-bound remote index pages.
 pub mod sync_index;
 /// Terminal session contract for daemon-owned PTY sessions.
 pub mod terminal;
-/// Review inbox: decisions agents need from James, with evidence.
-pub mod reviews;
 
 pub mod routing;
 pub use routing::*;
@@ -5606,6 +5606,112 @@ pub struct TrustedDevice {
     pub last_seen_at: Option<DateTime<Utc>>,
     /// Timestamp when the device was revoked.
     pub revoked_at: Option<DateTime<Utc>>,
+    /// Push delivery state. Absent when the relay predates delivery health,
+    /// which is different from a device with no registration.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub push: Option<DevicePushHealth>,
+}
+
+/// Provider verdict for one attempted push.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum PushDeliveryOutcome {
+    /// The provider accepted the push. This is not proof of display.
+    Accepted,
+    /// The provider or transport refused or failed the push.
+    Rejected,
+    /// The provider says the token is dead, so the relay cleared it.
+    Unregistered,
+    /// A newer relay reported an outcome this build does not know.
+    #[serde(other)]
+    Unknown,
+}
+
+/// The last push the relay attempted for one device.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PushDeliveryRecord {
+    /// When the outcome was recorded.
+    pub at: DateTime<Utc>,
+    /// Attention kind, e.g. `review`.
+    pub kind: String,
+    /// `apns` or `expo`.
+    pub provider: String,
+    /// Provider verdict.
+    pub outcome: PushDeliveryOutcome,
+    /// Provider failure reason. Never contains a token.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
+}
+
+/// Push state for one trusted device. The record lives in relay memory, so a
+/// relay restart clears `last_delivery` but not `provider`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct DevicePushHealth {
+    /// Registered provider, or `None` when the device cannot receive pushes.
+    pub provider: Option<String>,
+    /// Most recent attempt, if any since the relay started.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_delivery: Option<PushDeliveryRecord>,
+}
+
+/// One device's result from a test push.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PushTestDeviceResult {
+    /// Trusted device identifier.
+    pub device_id: String,
+    /// User-visible device label.
+    pub label: Option<String>,
+    /// Provider used, or `None` when the device has no registration.
+    pub provider: Option<String>,
+    /// Provider verdict, or `None` when nothing could be sent.
+    pub outcome: Option<PushDeliveryOutcome>,
+    /// Failure reason, if any.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
+}
+
+/// Per-device results of `POST /v1/sessions/{id}/push-test`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PushTestResponse {
+    /// One entry per active trusted device.
+    pub results: Vec<PushTestDeviceResult>,
+}
+
+/// Body of `POST /v1/sessions/{id}/notify`, the acknowledged twin of the
+/// websocket `notify` message.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RelayNotifyRequest {
+    /// Attention kind, e.g. `review`.
+    pub kind: String,
+    /// Workspace the attention belongs to.
+    pub workspace_id: Option<String>,
+    /// Thread the attention belongs to.
+    pub thread_id: Option<String>,
+    /// User-visible thread title.
+    pub thread_title: Option<String>,
+    /// Short body text. Visible to the relay and push service.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub message_preview: Option<String>,
+    /// Review the attention belongs to.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub review_id: Option<String>,
+}
+
+/// Daemon-side record of attention events for one kind since it started.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AttentionDeliveryCounter {
+    /// Attention kind, e.g. `review`.
+    pub kind: String,
+    /// Handed to the relay path.
+    pub sent: u64,
+    /// Dropped because Mac input was recent.
+    pub suppressed_desktop_active: u64,
+    /// Dropped by notification preferences.
+    pub suppressed_preferences: u64,
+    /// Dropped because no relay bridge exists.
+    pub no_bridge: u64,
+    /// When this kind last fired.
+    pub last_at: Option<DateTime<Utc>>,
 }
 
 /// Presence information for a daemon attached to a relay session.
@@ -5799,6 +5905,9 @@ pub struct RemoteStatusResponse {
     pub presence: Option<MachinePresence>,
     /// Most recent remote-access error, if any.
     pub last_error: Option<String>,
+    /// Attention events this daemon has seen since it started.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub attention: Vec<AttentionDeliveryCounter>,
 }
 
 /// Role used when connecting to the relay websocket.
@@ -5920,6 +6029,9 @@ pub enum RelayClientMessage {
         /// the relay and push service, unlike encrypted conversation payloads.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         message_preview: Option<String>,
+        /// Review this attention belongs to. Older relays ignore it.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        review_id: Option<String>,
     },
 }
 

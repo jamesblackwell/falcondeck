@@ -66,6 +66,8 @@ pub fn router(state: AppState) -> Router {
             "/v1/sessions/{session_id}/devices/{device_id}/push-registration",
             post(register_push_registration).layer(DefaultBodyLimit::max(16 * 1024)),
         )
+        .route("/v1/sessions/{session_id}/notify", post(notify))
+        .route("/v1/sessions/{session_id}/push-test", post(push_test))
         .route("/v1/updates/ws", get(updates_ws))
         .layer(relay_cors_layer())
         .with_state(state)
@@ -584,6 +586,27 @@ async fn register_push_token(
         .register_push_token(&session_id, &token, &device_id, request.push_token)
         .await?;
     Ok(Json(serde_json::json!({ "ok": true })))
+}
+
+/// Acknowledged attention push. Retrying is safe: the relay dedupes per review.
+async fn notify(
+    State(state): State<AppState>,
+    Path(session_id): Path<String>,
+    headers: HeaderMap,
+    Json(request): Json<falcondeck_core::RelayNotifyRequest>,
+) -> Result<Json<serde_json::Value>, RelayError> {
+    let token = auth_token(&headers)?;
+    state.notify(&session_id, &token, request).await?;
+    Ok(Json(serde_json::json!({ "ok": true })))
+}
+
+async fn push_test(
+    State(state): State<AppState>,
+    Path(session_id): Path<String>,
+    headers: HeaderMap,
+) -> Result<Json<falcondeck_core::PushTestResponse>, RelayError> {
+    let token = auth_token(&headers)?;
+    Ok(Json(state.send_test_push(&session_id, &token).await?))
 }
 
 async fn push_capabilities(

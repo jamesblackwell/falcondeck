@@ -103,14 +103,16 @@ impl AppState {
 
     /// Push "Juno needs a decision: …" to paired devices that are not looking.
     pub(crate) async fn notify_review_created(&self, review: &Review) {
-        let preview = review_push_line(review);
-        let workspace_id = review.source_workspace_id.clone().unwrap_or_default();
-        self.notify_remote_attention_with_preview(
-            "review",
-            &workspace_id,
-            review.source_thread_id.clone(),
-            Some(preview),
-        )
+        self.deliver_attention(super::remote_lifecycle::AttentionEvent {
+            kind: "review",
+            workspace_id: review
+                .source_workspace_id
+                .clone()
+                .filter(|id| !id.is_empty()),
+            thread_id: review.source_thread_id.clone(),
+            preview: Some(review_push_line(review)),
+            review_id: Some(review.id.clone()),
+        })
         .await;
     }
 }

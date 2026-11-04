@@ -3675,6 +3675,7 @@ async fn client_peers_cannot_request_push_notifications() {
             thread_id: None,
             thread_title: None,
             message_preview: None,
+            review_id: None,
         },
     )
     .await;

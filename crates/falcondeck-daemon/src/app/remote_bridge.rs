@@ -789,15 +789,10 @@ impl AppState {
                                     }
                                 }
                             }
-                            RemoteBridgeCommand::NotifyAttention { kind, workspace_id, thread_id, message_preview } => {
-                                let thread_title = match (&workspace_id, &thread_id) {
-                                    (Some(workspace_id), Some(thread_id)) => self
-                                        .thread_summary(workspace_id, thread_id)
-                                        .await
-                                        .ok()
-                                        .and_then(|thread| notification_thread_title(&thread.title)),
-                                    _ => None,
-                                };
+                            RemoteBridgeCommand::NotifyAttention { kind, workspace_id, thread_id, message_preview, review_id } => {
+                                let thread_title = self
+                                    .notification_title(workspace_id.as_deref(), thread_id.as_deref())
+                                    .await;
                                 send_relay_message(
                                     &mut writer,
                                     &RelayClientMessage::Notify {
@@ -806,6 +801,7 @@ impl AppState {
                                         thread_id,
                                         thread_title,
                                         message_preview,
+                                        review_id,
                                     },
                                 ).await?;
                             }
@@ -945,6 +941,15 @@ impl AppState {
                 }
             }
         }
+    }
+
+    pub(super) async fn notification_title(
+        &self,
+        workspace_id: Option<&str>,
+        thread_id: Option<&str>,
+    ) -> Option<String> {
+        let thread = self.thread_summary(workspace_id?, thread_id?).await.ok()?;
+        notification_thread_title(&thread.title)
     }
 
     pub(super) async fn fetch_remote_status(

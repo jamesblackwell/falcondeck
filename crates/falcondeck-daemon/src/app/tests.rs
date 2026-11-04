@@ -4109,6 +4109,7 @@ fn reconnect_attempt_uses_current_trusted_pairing_state() {
         ..initial_pairing
     };
     let remote = super::RemoteBridgeState {
+        attention: Default::default(),
         status: falcondeck_core::RemoteConnectionStatus::Connected,
         relay_url: Some("https://connect.falcondeck.com".to_string()),
         pairing: Some(updated_pairing.clone()),
@@ -4164,6 +4165,7 @@ fn revoking_primary_device_rotates_key_and_rebuilds_bootstrap_allowlist() {
     trusted_client_devices.insert("revoked-device".to_string(), revoked_bundle.clone());
     trusted_client_devices.insert("remaining-device".to_string(), remaining_bundle.clone());
     let mut remote = super::RemoteBridgeState {
+        attention: Default::default(),
         status: falcondeck_core::RemoteConnectionStatus::Connected,
         relay_url: Some("https://connect.falcondeck.com".to_string()),
         pairing: Some(pairing),
@@ -4218,6 +4220,7 @@ fn revoking_last_device_never_reuses_its_bootstrap_bundle() {
     let mut trusted_client_devices = HashMap::new();
     trusted_client_devices.insert("revoked-device".to_string(), revoked_bundle.clone());
     let mut remote = super::RemoteBridgeState {
+        attention: Default::default(),
         status: falcondeck_core::RemoteConnectionStatus::Connected,
         relay_url: Some("https://connect.falcondeck.com".to_string()),
         pairing: Some(pairing),
@@ -4256,6 +4259,7 @@ async fn remote_status_stops_offering_a_claimed_pairing_code() {
         data_key: generate_data_key(),
     };
     let remote = super::RemoteBridgeState {
+        attention: Default::default(),
         status: falcondeck_core::RemoteConnectionStatus::Connected,
         relay_url: Some("https://connect.falcondeck.com".to_string()),
         pairing: Some(claimed_pairing),
@@ -4299,6 +4303,7 @@ async fn remote_status_still_offers_an_unclaimed_pairing_code() {
         data_key: generate_data_key(),
     };
     let remote = super::RemoteBridgeState {
+        attention: Default::default(),
         status: falcondeck_core::RemoteConnectionStatus::PairingPending,
         relay_url: Some("https://connect.falcondeck.com".to_string()),
         pairing: Some(unclaimed_pairing),
@@ -4344,6 +4349,7 @@ fn reconnect_attempt_ignores_pending_additional_pairing_state() {
         data_key: generate_data_key(),
     };
     let remote = super::RemoteBridgeState {
+        attention: Default::default(),
         status: falcondeck_core::RemoteConnectionStatus::Connected,
         relay_url: Some("https://connect.falcondeck.com".to_string()),
         pairing: Some(active_pairing.clone()),
@@ -4381,6 +4387,7 @@ async fn finished_remote_tasks_are_pruned_before_pairing_logic() {
 
     let (command_tx, _command_rx) = mpsc::unbounded_channel();
     let mut remote = super::RemoteBridgeState {
+        attention: Default::default(),
         status: falcondeck_core::RemoteConnectionStatus::Inactive,
         relay_url: Some("https://connect.falcondeck.com".to_string()),
         pairing: None,
@@ -4438,6 +4445,7 @@ async fn reconcile_remote_runtime_state_clears_orphaned_additional_pairing() {
     };
     let (command_tx, _command_rx) = mpsc::unbounded_channel();
     let mut remote = super::RemoteBridgeState {
+        attention: Default::default(),
         status: falcondeck_core::RemoteConnectionStatus::Connected,
         relay_url: Some("https://connect.falcondeck.com".to_string()),
         pairing: Some(active_pairing),
@@ -4484,6 +4492,7 @@ fn remote_status_response_hides_stale_unclaimed_pairing_without_a_live_bridge() 
         data_key: generate_data_key(),
     };
     let remote = super::RemoteBridgeState {
+        attention: Default::default(),
         status: falcondeck_core::RemoteConnectionStatus::PairingPending,
         relay_url: Some("https://connect.falcondeck.com".to_string()),
         pairing: Some(pairing),
@@ -4529,6 +4538,7 @@ fn remote_status_response_hides_stale_trusted_pairing_without_a_live_bridge() {
         data_key: generate_data_key(),
     };
     let remote = super::RemoteBridgeState {
+        attention: Default::default(),
         status: falcondeck_core::RemoteConnectionStatus::Connected,
         relay_url: Some("https://connect.falcondeck.com".to_string()),
         pairing: Some(pairing),

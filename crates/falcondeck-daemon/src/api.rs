@@ -145,6 +145,10 @@ pub fn router(state: AppState) -> Router {
         .route("/api/remote/status", get(remote_status))
         .route("/api/remote/pairing", post(start_remote_pairing))
         .route(
+            "/api/remote/notifications/test",
+            post(send_test_notification),
+        )
+        .route(
             "/api/remote/devices/{device_id}",
             delete(revoke_remote_device),
         )
@@ -772,6 +776,12 @@ async fn remote_status(
     State(state): State<AppState>,
 ) -> Json<falcondeck_core::RemoteStatusResponse> {
     Json(state.remote_status().await)
+}
+
+async fn send_test_notification(
+    State(state): State<AppState>,
+) -> Result<Json<falcondeck_core::PushTestResponse>, DaemonError> {
+    Ok(Json(state.send_test_notification().await?))
 }
 
 async fn start_remote_pairing(

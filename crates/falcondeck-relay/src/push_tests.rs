@@ -30,6 +30,17 @@ async fn mock_server() -> (
     (endpoint, receiver, task)
 }
 
+fn notify(kind: &str, thread_id: Option<String>) -> RelayNotifyRequest {
+    RelayNotifyRequest {
+        kind: kind.to_owned(),
+        workspace_id: None,
+        thread_id,
+        thread_title: None,
+        message_preview: None,
+        review_id: None,
+    }
+}
+
 fn state(directory: &tempfile::TempDir, expo: String, apns: Option<Arc<ApnsProvider>>) -> AppState {
     let now = Utc::now();
     let mut session: SessionRecord=serde_json::from_value(serde_json::json!({"session_id":"session","pairing_id":"pairing","daemon_token":"daemon","created_at":now,"updated_at":now,"updates":[]})).unwrap();
@@ -92,11 +103,11 @@ async fn expo_and_native_receive_separate_payloads_and_persist_across_restart() 
     state
         .dispatch_push_notifications(
             "session",
-            "question".to_owned(),
-            Some("workspace".to_owned()),
-            Some("thread".to_owned()),
-            Some("Native parity".to_owned()),
-            None,
+            RelayNotifyRequest {
+                workspace_id: Some("workspace".to_owned()),
+                thread_title: Some("Native parity".to_owned()),
+                ..notify("question", Some("thread".to_owned()))
+            },
         )
         .await;
     let (_, expo) = tokio::time::timeout(StdDuration::from_secs(5), expo_events.recv())
@@ -256,14 +267,7 @@ async fn background_client_can_receive_push_without_closing_rpc_socket() {
         }
     ));
     state
-        .dispatch_push_notifications(
-            "session",
-            "question".to_owned(),
-            None,
-            Some("thread".to_owned()),
-            None,
-            None,
-        )
+        .dispatch_push_notifications("session", notify("question", Some("thread".to_owned())))
         .await;
     assert!(
         events.try_recv().is_err(),
@@ -279,14 +283,7 @@ async fn background_client_can_receive_push_without_closing_rpc_socket() {
         .await
         .unwrap();
     state
-        .dispatch_push_notifications(
-            "session",
-            "question".to_owned(),
-            None,
-            Some("thread".to_owned()),
-            None,
-            None,
-        )
+        .dispatch_push_notifications("session", notify("question", Some("thread".to_owned())))
         .await;
     assert!(
         tokio::time::timeout(StdDuration::from_secs(5), events.recv())
@@ -315,14 +312,284 @@ async fn background_client_can_receive_push_without_closing_rpc_socket() {
     state
         .dispatch_push_notifications(
             "session",
-            "turn-complete".to_owned(),
-            None,
-            Some("other-thread".to_owned()),
-            None,
-            None,
+            notify("turn-complete", Some("other-thread".to_owned())),
         )
         .await;
     assert!(events.try_recv().is_err());
+    task.abort();
+}
+
+fn review(id: &str) -> RelayNotifyRequest {
+    RelayNotifyRequest {
+        review_id: Some(id.to_owned()),
+        message_preview: Some(format!("Juno needs a decision: {id}")),
+        ..notify("review", Some("bot-home".to_owned()))
+    }
+}
+
+async fn next_push(
+    events: &mut mpsc::Receiver<(HeaderMap, serde_json::Value)>,
+) -> (HeaderMap, serde_json::Value) {
+    tokio::time::timeout(StdDuration::from_secs(5), events.recv())
+        .await
+        .unwrap()
+        .unwrap()
+}
+
+#[tokio::test]
+async fn a_review_reaches_a_device_whose_socket_still_looks_live() {
+    let (endpoint, mut events, task) = mock_server().await;
+    let directory = tempfile::tempdir().unwrap();
+    let state = state(
+        &directory,
+        String::new(),
+        Some(Arc::new(ApnsProvider::mock(endpoint))),
+    );
+    state
+        .register_push_registration("session", "native", "native", Some(native("aabb")))
+        .await
+        .unwrap();
+    let (_peer, _queue, _ready) = state
+        .register_peer("session", RelayPeerRole::Client, Some("native".to_owned()))
+        .await
+        .unwrap();
+    state
+        .dispatch_push_notifications("session", notify("question", Some("thread".to_owned())))
+        .await;
+    assert!(events.try_recv().is_err(), "other kinds keep suppression");
+    state
+        .dispatch_push_notifications("session", review("R-1"))
+        .await;
+    let (_, payload) = next_push(&mut events).await;
+    assert_eq!(payload["reviewId"], "R-1");
+    assert_eq!(payload["kind"], "review");
+    assert_eq!(
+        payload["aps"]["alert"]["body"],
+        "Juno needs a decision: R-1"
+    );
+    task.abort();
+}
+
+#[tokio::test]
+async fn reviews_dedupe_per_review_and_never_collapse_into_each_other() {
+    let (endpoint, mut events, task) = mock_server().await;
+    let directory = tempfile::tempdir().unwrap();
+    let state = state(
+        &directory,
+        String::new(),
+        Some(Arc::new(ApnsProvider::mock(endpoint))),
+    );
+    state
+        .register_push_registration("session", "native", "native", Some(native("aabb")))
+        .await
+        .unwrap();
+    for id in ["R-1", "R-1", "R-2"] {
+        state
+            .dispatch_push_notifications("session", review(id))
+            .await;
+    }
+    let (first, first_payload) = next_push(&mut events).await;
+    let (second, second_payload) = next_push(&mut events).await;
+    let mut ids = [
+        first_payload["reviewId"].clone(),
+        second_payload["reviewId"].clone(),
+    ];
+    ids.sort_by_key(|id| id.to_string());
+    assert_eq!(ids, ["R-1", "R-2"]);
+    assert_ne!(first["apns-collapse-id"], second["apns-collapse-id"]);
+    tokio::time::sleep(StdDuration::from_millis(100)).await;
+    assert!(events.try_recv().is_err(), "the repeat of R-1 is dropped");
+    task.abort();
+}
+
+#[tokio::test]
+async fn delivery_health_reports_registration_and_last_result_per_device() {
+    let router = axum::Router::new().route(
+        "/3/device/{token}",
+        post(|| async {
+            (
+                axum::http::StatusCode::FORBIDDEN,
+                Json(serde_json::json!({"reason":"TopicDisallowed"})),
+            )
+        }),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let endpoint = format!("http://{}", listener.local_addr().unwrap());
+    let task = tokio::spawn(async move {
+        axum::serve(listener, router).await.unwrap();
+    });
+    let directory = tempfile::tempdir().unwrap();
+    let state = state(
+        &directory,
+        String::new(),
+        Some(Arc::new(ApnsProvider::mock(endpoint))),
+    );
+    state
+        .register_push_registration("session", "native", "native", Some(native("aabb")))
+        .await
+        .unwrap();
+    state
+        .dispatch_push_notifications("session", review("R-1"))
+        .await;
+    let record = tokio::time::timeout(StdDuration::from_secs(5), async {
+        loop {
+            let response = state.trusted_devices_response("session").await.unwrap();
+            let push = response
+                .devices
+                .iter()
+                .find(|device| device.device_id == "native")
+                .and_then(|device| device.push.clone())
+                .unwrap();
+            if let Some(record) = push.last_delivery {
+                assert_eq!(push.provider.as_deref(), Some("apns"));
+                return record;
+            }
+            tokio::time::sleep(StdDuration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(record.outcome, PushDeliveryOutcome::Rejected);
+    assert_eq!(record.kind, "review");
+    assert_eq!(record.detail.as_deref(), Some("APNs 403 TopicDisallowed"));
+    let unregistered = state.trusted_devices_response("session").await.unwrap();
+    let expo = unregistered
+        .devices
+        .iter()
+        .find(|device| device.device_id == "expo")
+        .unwrap();
+    assert_eq!(
+        expo.push,
+        Some(DevicePushHealth {
+            provider: None,
+            last_delivery: None
+        })
+    );
+    task.abort();
+}
+
+#[tokio::test]
+async fn test_push_bypasses_presence_and_reports_each_device() {
+    let (endpoint, mut events, task) = mock_server().await;
+    let directory = tempfile::tempdir().unwrap();
+    let state = state(
+        &directory,
+        String::new(),
+        Some(Arc::new(ApnsProvider::mock(endpoint))),
+    );
+    state
+        .register_push_registration("session", "native", "native", Some(native("aabb")))
+        .await
+        .unwrap();
+    let (_peer, _queue, _ready) = state
+        .register_peer("session", RelayPeerRole::Client, Some("native".to_owned()))
+        .await
+        .unwrap();
+    assert!(matches!(
+        state.send_test_push("session", "native").await,
+        Err(RelayError::Unauthorized(_))
+    ));
+    let mut results = state
+        .send_test_push("session", "daemon")
+        .await
+        .unwrap()
+        .results;
+    results.sort_by(|a, b| a.device_id.cmp(&b.device_id));
+    assert_eq!(results.len(), 2);
+    assert_eq!(results[0].device_id, "expo");
+    assert_eq!(
+        (results[0].provider.as_deref(), results[0].outcome),
+        (None, None)
+    );
+    assert_eq!(results[1].provider.as_deref(), Some("apns"));
+    assert_eq!(results[1].outcome, Some(PushDeliveryOutcome::Accepted));
+    assert_eq!(next_push(&mut events).await.1["kind"], "test");
+    assert!(matches!(
+        state.send_test_push("session", "daemon").await,
+        Err(RelayError::TooManyRequests(_))
+    ));
+    task.abort();
+}
+
+#[tokio::test]
+async fn test_push_clears_a_token_expo_calls_dead_and_names_other_failures() {
+    let router = axum::Router::new().route(
+        "/send",
+        post(|Json(payload): Json<serde_json::Value>| async move {
+            let token = payload[0]["to"].as_str().unwrap_or_default();
+            let error = if token.contains("dead") {
+                "DeviceNotRegistered"
+            } else {
+                "MismatchSenderId"
+            };
+            Json(serde_json::json!({"data":[{"status":"error","details":{"error":error}}]}))
+        }),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let endpoint = format!("http://{}/send", listener.local_addr().unwrap());
+    let task = tokio::spawn(async move {
+        axum::serve(listener, router).await.unwrap();
+    });
+    let directory = tempfile::tempdir().unwrap();
+    let state = state(&directory, endpoint, None);
+    for (device, token) in [
+        ("expo", "ExponentPushToken[dead]"),
+        ("native", "ExponentPushToken[old]"),
+    ] {
+        state
+            .register_push_token("session", device, device, Some(token.to_owned()))
+            .await
+            .unwrap();
+    }
+    let results = state
+        .send_test_push("session", "daemon")
+        .await
+        .unwrap()
+        .results;
+    for result in results {
+        if result.device_id == "expo" {
+            assert_eq!(result.outcome, Some(PushDeliveryOutcome::Unregistered));
+        } else {
+            assert_eq!(result.outcome, Some(PushDeliveryOutcome::Rejected));
+            assert_eq!(result.detail.as_deref(), Some("MismatchSenderId"));
+        }
+    }
+    let store = state.inner.store.lock().await;
+    let devices = &store.data.sessions["session"].devices;
+    assert!(devices["expo"].push_token.is_none());
+    assert!(devices["native"].push_token.is_some());
+    drop(store);
+    task.abort();
+}
+
+#[tokio::test]
+async fn http_notify_is_daemon_only_and_validated() {
+    let (endpoint, mut events, task) = mock_server().await;
+    let directory = tempfile::tempdir().unwrap();
+    let state = state(
+        &directory,
+        String::new(),
+        Some(Arc::new(ApnsProvider::mock(endpoint))),
+    );
+    state
+        .register_push_registration("session", "native", "native", Some(native("aabb")))
+        .await
+        .unwrap();
+    assert!(matches!(
+        state.notify("session", "native", review("R-1")).await,
+        Err(RelayError::Unauthorized(_))
+    ));
+    let mut bad = review("R-1");
+    bad.review_id = Some("x".repeat(300));
+    assert!(matches!(
+        state.notify("session", "daemon", bad).await,
+        Err(RelayError::BadRequest(_))
+    ));
+    state
+        .notify("session", "daemon", review("R-1"))
+        .await
+        .unwrap();
+    assert_eq!(next_push(&mut events).await.1["reviewId"], "R-1");
     task.abort();
 }
 

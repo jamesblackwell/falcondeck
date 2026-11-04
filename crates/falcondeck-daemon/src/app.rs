@@ -1,5 +1,5 @@
 use std::{
-    collections::{HashMap, HashSet},
+    collections::{BTreeMap, HashMap, HashSet},
     path::{Path, PathBuf},
     sync::{
         Arc, Mutex as StdMutex, OnceLock,
@@ -732,6 +732,8 @@ struct PendingServerRequest {
 }
 
 struct RemoteBridgeState {
+    /// Attention decisions since this daemon started, per kind.
+    attention: BTreeMap<String, falcondeck_core::AttentionDeliveryCounter>,
     status: RemoteConnectionStatus,
     relay_url: Option<String>,
     pairing: Option<RemotePairingState>,
@@ -935,6 +937,7 @@ enum RemoteBridgeCommand {
         workspace_id: Option<String>,
         thread_id: Option<String>,
         message_preview: Option<String>,
+        review_id: Option<String>,
     },
 }
 
@@ -1085,6 +1088,7 @@ impl AppState {
                 rewrite_catalog_disk_checked: AtomicBool::new(false),
                 rewrite_catalog_refresh: Mutex::new(()),
                 remote: Mutex::new(RemoteBridgeState {
+                    attention: BTreeMap::new(),
                     status: RemoteConnectionStatus::Inactive,
                     relay_url: None,
                     pairing: None,

@@ -89,7 +89,8 @@ pub(crate) enum DeliveryOutcome {
     Accepted,
     /// APNs invalidated this token at the given UNIX millisecond timestamp.
     Unregistered(i64),
-    Failed,
+    /// Failed with a provider reason. Never contains a token.
+    Failed(String),
 }
 
 impl ApnsProvider {
@@ -259,19 +260,19 @@ impl ApnsProvider {
             environment,
         } = registration
         else {
-            return DeliveryOutcome::Failed;
+            return DeliveryOutcome::Failed("not an APNs registration".to_owned());
         };
         let Some(identity) = self.applications.get(&ApnsApplication {
             topic: topic.clone(),
             environment: *environment,
         }) else {
-            return DeliveryOutcome::Failed;
+            return DeliveryOutcome::Failed("APNs application is not configured".to_owned());
         };
         let Ok(_connection) = self.connections.acquire().await else {
-            return DeliveryOutcome::Failed;
+            return DeliveryOutcome::Failed("APNs is shutting down".to_owned());
         };
         let Ok(bearer) = identity.bearer().await else {
-            return DeliveryOutcome::Failed;
+            return DeliveryOutcome::Failed("APNs signing failed".to_owned());
         };
         let endpoint = match environment {
             ApnsEnvironment::Sandbox => "https://api.sandbox.push.apple.com",
@@ -299,43 +300,64 @@ impl ApnsProvider {
                 Ok(response) if response.status().as_u16() == 200 => {
                     return DeliveryOutcome::Accepted;
                 }
-                Ok(mut response) if response.status().as_u16() == 410 => {
-                    let mut body = Vec::new();
-                    while let Ok(Some(chunk)) = response.chunk().await {
-                        if body.len() + chunk.len() > 8_192 {
-                            return DeliveryOutcome::Failed;
-                        }
-                        body.extend_from_slice(&chunk);
-                    }
-                    if let Ok(failure) = serde_json::from_slice::<ApnsFailure>(&body)
+                Ok(response) if response.status().as_u16() == 410 => {
+                    let failure = read_failure(response).await;
+                    if let Some(failure) = &failure
                         && failure.reason == "Unregistered"
                         && let Some(timestamp) = failure.timestamp
                     {
                         return DeliveryOutcome::Unregistered(timestamp);
                     }
-                    return DeliveryOutcome::Failed;
+                    return DeliveryOutcome::Failed(failure_reason(410, failure));
                 }
                 Ok(response)
                     if response.status().as_u16() == 429 || response.status().is_server_error() =>
                 {
                     if attempt == 2 {
-                        tracing::warn!(status = %response.status(), "APNs delivery failed after retries");
-                        return DeliveryOutcome::Failed;
+                        let status = response.status().as_u16();
+                        let reason = failure_reason(status, read_failure(response).await);
+                        tracing::warn!(%reason, "APNs delivery failed after retries");
+                        return DeliveryOutcome::Failed(reason);
                     }
                 }
                 Ok(response) => {
-                    tracing::warn!(status = %response.status(), "APNs delivery rejected");
-                    return DeliveryOutcome::Failed;
+                    let status = response.status().as_u16();
+                    let reason = failure_reason(status, read_failure(response).await);
+                    tracing::warn!(%reason, "APNs delivery rejected");
+                    return DeliveryOutcome::Failed(reason);
                 }
                 Err(_) if attempt == 2 => {
                     tracing::warn!("APNs network request failed after retries");
-                    return DeliveryOutcome::Failed;
+                    return DeliveryOutcome::Failed("APNs network request failed".to_owned());
                 }
                 Err(_) => {}
             }
             tokio::time::sleep(Duration::from_millis(500 * (1 << attempt))).await;
         }
-        DeliveryOutcome::Failed
+        DeliveryOutcome::Failed("APNs retries exhausted".to_owned())
+    }
+}
+
+async fn read_failure(mut response: reqwest::Response) -> Option<ApnsFailure> {
+    let mut body = Vec::new();
+    while let Ok(Some(chunk)) = response.chunk().await {
+        if body.len() + chunk.len() > 8_192 {
+            return None;
+        }
+        body.extend_from_slice(&chunk);
+    }
+    serde_json::from_slice(&body).ok()
+}
+
+/// Apple's reasons are a fixed vocabulary, but the bytes come from the network,
+/// so bound them before they reach logs and the daemon.
+fn failure_reason(status: u16, failure: Option<ApnsFailure>) -> String {
+    let reason = failure.map(|failure| failure.reason).filter(|reason| {
+        reason.len() <= 64 && reason.bytes().all(|byte| byte.is_ascii_alphanumeric())
+    });
+    match reason {
+        Some(reason) => format!("APNs {status} {reason}"),
+        None => format!("APNs {status}"),
     }
 }
 
@@ -363,12 +385,16 @@ pub(crate) fn apns_payload(
     workspace: Option<&str>,
     thread: Option<&str>,
     kind: &str,
+    review: Option<&str>,
     collapse: &str,
 ) -> Option<serde_json::Value> {
     let mut title = title.to_owned();
     let mut body = body.to_owned();
     loop {
-        let payload = serde_json::json!({"aps": {"alert": {"title":title,"body":body},"sound":"default","thread-id":collapse},"sessionId":session,"workspaceId":workspace,"threadId":thread,"kind":kind});
+        let mut payload = serde_json::json!({"aps": {"alert": {"title":title,"body":body},"sound":"default","thread-id":collapse},"sessionId":session,"workspaceId":workspace,"threadId":thread,"kind":kind});
+        if let Some(review) = review {
+            payload["reviewId"] = review.into();
+        }
         if serde_json::to_vec(&payload).ok()?.len() <= 4096 {
             return Some(payload);
         }
@@ -423,7 +449,10 @@ mod tests {
         use std::sync::atomic::{AtomicUsize, Ordering};
         for (statuses, expected) in [
             (vec![503, 503, 200], DeliveryOutcome::Accepted),
-            (vec![403], DeliveryOutcome::Failed),
+            (
+                vec![403],
+                DeliveryOutcome::Failed("APNs 403 InvalidProviderToken".to_owned()),
+            ),
             (vec![410], DeliveryOutcome::Unregistered(90_000)),
         ] {
             let attempts = Arc::new(AtomicUsize::new(0));
@@ -581,6 +610,7 @@ mod tests {
             Some(&text),
             Some(&text),
             &text,
+            None,
             "collapse",
         )
         .unwrap();

@@ -24,7 +24,7 @@ use falcondeck_core::{
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use tokio::sync::{Mutex, OwnedSemaphorePermit, Semaphore, mpsc};
-use tracing::warn;
+use tracing::{info, warn};
 use uuid::Uuid;
 
 #[cfg(test)]
@@ -35,7 +35,10 @@ use crate::{
     error::RelayError,
     push::{ApnsProvider, DeliveryOutcome, RegisteredPush, normalize_registration},
 };
-use falcondeck_core::{PushRegistration, RelayPushCapabilities};
+use falcondeck_core::{
+    DevicePushHealth, PushDeliveryOutcome, PushDeliveryRecord, PushRegistration,
+    PushTestDeviceResult, PushTestResponse, RelayNotifyRequest, RelayPushCapabilities,
+};
 
 const PEER_QUEUE_CAPACITY: usize = 256;
 /// Maximum inbound websocket message size shared with the HTTP upgrade
@@ -116,6 +119,10 @@ const MAX_IDEMPOTENCY_KEY_LENGTH: usize = 256;
 const MAX_PUSH_TOKEN_LENGTH: usize = 4_096;
 const MAX_LOGGED_ERROR_LENGTH: usize = 4_096;
 const MAX_NOTIFICATION_FIELD_LENGTH: usize = 256;
+/// Reviews skip live-connection suppression and dedupe per review.
+const PUSH_REVIEW_KIND: &str = "review";
+const PUSH_TEST_KIND: &str = "test";
+const PUSH_TEST_INTERVAL_SECONDS: i64 = 5;
 /// Starting a pairing is deliberately unauthenticated, so keep both a
 /// per-origin budget and a relay-wide safety budget ahead of durable writes.
 /// Normal desktop retries are far below these limits: an origin may burst ten
@@ -434,6 +441,11 @@ struct Store {
     /// of the same attention event collapse into one push per window
     /// without one kind (e.g. turn-complete) swallowing another (approval).
     push_dedupe: HashMap<(String, String, String), DateTime<Utc>>,
+    /// Last push outcome per (session, device). In memory on purpose: it is a
+    /// diagnostic, and a restart only loses the most recent result.
+    push_health: HashMap<(String, String), PushDeliveryRecord>,
+    /// Last test push per session, to keep the test endpoint cheap.
+    push_test_at: HashMap<String, DateTime<Utc>>,
 }
 
 #[derive(Debug, Clone)]
@@ -555,6 +567,14 @@ pub(crate) struct TrustedDeviceRecord {
 }
 
 impl TrustedDeviceRecord {
+    fn push_provider(&self) -> Option<&'static str> {
+        if self.push_registration.is_some() {
+            Some("apns")
+        } else {
+            self.push_token.as_ref().map(|_| "expo")
+        }
+    }
+
     fn bump_persist_generation(&mut self) {
         self.persist_generation = self.persist_generation.saturating_add(1);
     }
@@ -1067,6 +1087,8 @@ impl AppState {
                     ws_tickets: HashMap::new(),
                     pairing_challenges: HashMap::new(),
                     push_dedupe: HashMap::new(),
+                    push_health: HashMap::new(),
+                    push_test_at: HashMap::new(),
                 })),
                 backend,
                 needs_flush,
@@ -2376,37 +2398,23 @@ impl AppState {
                 thread_id,
                 thread_title,
                 message_preview,
+                review_id,
             } => {
                 if !matches!(role, RelayPeerRole::Daemon) {
                     return Err(RelayError::Unauthorized(
                         "only daemon peers may request push notifications".to_string(),
                     ));
                 }
-                for (name, value) in [
-                    ("notification kind", Some(kind.as_str())),
-                    ("workspace_id", workspace_id.as_deref()),
-                    ("thread_id", thread_id.as_deref()),
-                    ("thread_title", thread_title.as_deref()),
-                    ("message_preview", message_preview.as_deref()),
-                ] {
-                    if let Some(value) = value {
-                        validate_bounded_text(
-                            name,
-                            value,
-                            MAX_NOTIFICATION_FIELD_LENGTH,
-                            name != "notification kind",
-                        )?;
-                    }
-                }
-                self.dispatch_push_notifications(
-                    session_id,
+                let request = RelayNotifyRequest {
                     kind,
                     workspace_id,
                     thread_id,
                     thread_title,
                     message_preview,
-                )
-                .await;
+                    review_id,
+                };
+                validate_notification(&request)?;
+                self.dispatch_push_notifications(session_id, request).await;
             }
         }
 
@@ -3065,6 +3073,17 @@ impl AppState {
         let mut devices = session.trusted_devices();
         for device in &mut devices {
             device.connected = connected_device_ids.contains(device.device_id.as_str());
+            let provider = session
+                .devices
+                .get(&device.device_id)
+                .and_then(|record| record.push_provider());
+            device.push = Some(DevicePushHealth {
+                provider: provider.map(str::to_owned),
+                last_delivery: store
+                    .push_health
+                    .get(&(session_id.to_owned(), device.device_id.clone()))
+                    .cloned(),
+            });
         }
         Ok(TrustedDevicesResponse {
             session_id: session_id.to_string(),
@@ -3276,19 +3295,323 @@ impl AppState {
         Ok(())
     }
 
-    /// Send an attention push to every active trusted device that has a push
-    /// token and is not currently connected. The title and optional reply
-    /// preview are visible to the relay and push service so the OS can render them.
-    async fn dispatch_push_notifications(
+    /// HTTP twin of the websocket `notify` message. A success means the relay
+    /// took responsibility, which a socket write cannot prove.
+    pub async fn notify(
         &self,
         session_id: &str,
-        kind: String,
-        workspace_id: Option<String>,
-        thread_id: Option<String>,
-        thread_title: Option<String>,
-        message_preview: Option<String>,
+        token: &str,
+        request: RelayNotifyRequest,
+    ) -> Result<(), RelayError> {
+        let auth = self.authenticate_session(session_id, token).await?;
+        if !matches!(auth.role, RelayPeerRole::Daemon) {
+            return Err(RelayError::Unauthorized(
+                "only daemon peers may request push notifications".to_string(),
+            ));
+        }
+        validate_notification(&request)?;
+        self.dispatch_push_notifications(session_id, request).await;
+        Ok(())
+    }
+
+    fn device_push_target(&self, device: &TrustedDeviceRecord) -> Option<RegisteredPush> {
+        if let Some(registration) = &device.push_registration {
+            let PushRegistration::Apns {
+                topic, environment, ..
+            } = &registration.registration
+            else {
+                return None;
+            };
+            return self
+                .inner
+                .apns
+                .as_ref()
+                .is_some_and(|provider| provider.supports(topic, *environment))
+                .then(|| registration.clone());
+        }
+        if self.inner.push_endpoint.trim().is_empty() {
+            return None;
+        }
+        Some(RegisteredPush {
+            registration: PushRegistration::Expo {
+                token: device.push_token.clone()?,
+            },
+            registered_at: Utc::now(),
+        })
+    }
+
+    async fn record_push_outcome(
+        &self,
+        session_id: &str,
+        device_id: &str,
+        kind: &str,
+        provider: &str,
+        outcome: PushDeliveryOutcome,
+        detail: Option<String>,
     ) {
+        self.inner.store.lock().await.push_health.insert(
+            (session_id.to_owned(), device_id.to_owned()),
+            PushDeliveryRecord {
+                at: Utc::now(),
+                kind: kind.to_owned(),
+                provider: provider.to_owned(),
+                outcome,
+                detail,
+            },
+        );
+    }
+
+    async fn record_expo_outcome(
+        &self,
+        session_id: &str,
+        tokens: &[String],
+        kind: &str,
+        outcome: PushDeliveryOutcome,
+        detail: Option<String>,
+    ) {
+        let device_ids = {
+            let store = self.inner.store.lock().await;
+            store
+                .data
+                .sessions
+                .get(session_id)
+                .map(|session| {
+                    session
+                        .devices
+                        .values()
+                        .filter(|device| {
+                            device
+                                .push_token
+                                .as_ref()
+                                .is_some_and(|token| tokens.contains(token))
+                        })
+                        .map(|device| device.device_id.clone())
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default()
+        };
+        for device_id in device_ids {
+            self.record_push_outcome(
+                session_id,
+                &device_id,
+                kind,
+                "expo",
+                outcome,
+                detail.clone(),
+            )
+            .await;
+        }
+    }
+
+    /// Send a test push to every active device and report what each provider
+    /// said. It skips presence and dedupe: the point is to exercise delivery.
+    pub async fn send_test_push(
+        &self,
+        session_id: &str,
+        token: &str,
+    ) -> Result<PushTestResponse, RelayError> {
+        let auth = self.authenticate_session(session_id, token).await?;
+        if !matches!(auth.role, RelayPeerRole::Daemon) {
+            return Err(RelayError::Unauthorized(
+                "only daemon peers may send test notifications".to_string(),
+            ));
+        }
+        let targets = {
+            let mut store = self.inner.store.lock().await;
+            let now = Utc::now();
+            if store
+                .push_test_at
+                .get(session_id)
+                .is_some_and(|last| *last + Duration::seconds(PUSH_TEST_INTERVAL_SECONDS) > now)
+            {
+                return Err(RelayError::TooManyRequests(
+                    "wait a few seconds before sending another test".to_string(),
+                ));
+            }
+            store.push_test_at.insert(session_id.to_owned(), now);
+            let session = store
+                .data
+                .sessions
+                .get_mut(session_id)
+                .ok_or_else(|| RelayError::NotFound("session not found".to_string()))?;
+            session.migrate_legacy_device_fields();
+            let session = &*session;
+            session
+                .devices
+                .values()
+                .filter(|device| device.revoked_at.is_none())
+                .map(|device| {
+                    (
+                        device.device_id.clone(),
+                        device.label.clone(),
+                        device.persist_generation,
+                        self.device_push_target(device),
+                    )
+                })
+                .collect::<Vec<_>>()
+        };
+        let mut results = Vec::with_capacity(targets.len());
+        for (device_id, label, generation, target) in targets {
+            let Some(registered) = target else {
+                results.push(PushTestDeviceResult {
+                    device_id,
+                    label,
+                    provider: None,
+                    outcome: None,
+                    detail: None,
+                });
+                continue;
+            };
+            let (provider, outcome, detail) = self
+                .deliver_test(session_id, &device_id, generation, &registered)
+                .await;
+            self.record_push_outcome(
+                session_id,
+                &device_id,
+                PUSH_TEST_KIND,
+                provider,
+                outcome,
+                detail.clone(),
+            )
+            .await;
+            results.push(PushTestDeviceResult {
+                device_id,
+                label,
+                provider: Some(provider.to_owned()),
+                outcome: Some(outcome),
+                detail,
+            });
+        }
+        info!(session_id, devices = results.len(), "test push finished");
+        Ok(PushTestResponse { results })
+    }
+
+    async fn deliver_test(
+        &self,
+        session_id: &str,
+        device_id: &str,
+        generation: u64,
+        registered: &RegisteredPush,
+    ) -> (&'static str, PushDeliveryOutcome, Option<String>) {
+        const TITLE: &str = "FalconDeck";
+        const BODY: &str = "Test notification. Delivery is working.";
+        match &registered.registration {
+            PushRegistration::Apns { .. } => {
+                let provider = self.inner.apns.as_ref();
+                let collapse = format!("test-{}", Uuid::new_v4().simple());
+                let payload = crate::push::apns_payload(
+                    TITLE,
+                    BODY,
+                    session_id,
+                    None,
+                    None,
+                    PUSH_TEST_KIND,
+                    None,
+                    &collapse,
+                );
+                let (Some(provider), Some(payload)) = (provider, payload) else {
+                    return (
+                        "apns",
+                        PushDeliveryOutcome::Rejected,
+                        Some("APNs is not configured".to_owned()),
+                    );
+                };
+                match provider
+                    .deliver(&registered.registration, &payload, &collapse)
+                    .await
+                {
+                    DeliveryOutcome::Accepted => ("apns", PushDeliveryOutcome::Accepted, None),
+                    DeliveryOutcome::Unregistered(timestamp) => {
+                        if timestamp >= registered.registered_at.timestamp_millis() {
+                            self.clear_dead_native_registration(
+                                session_id, device_id, generation, registered,
+                            )
+                            .await;
+                        }
+                        ("apns", PushDeliveryOutcome::Unregistered, None)
+                    }
+                    DeliveryOutcome::Failed(reason) => {
+                        ("apns", PushDeliveryOutcome::Rejected, Some(reason))
+                    }
+                }
+            }
+            PushRegistration::Expo { token } => {
+                let message = serde_json::json!([{
+                    "to": token,
+                    "title": TITLE,
+                    "body": BODY,
+                    "sound": "default",
+                    "priority": "high",
+                    "channelId": "default",
+                    "ttl": 3600,
+                    "data": { "sessionId": session_id, "kind": PUSH_TEST_KIND },
+                }]);
+                let mut request = self
+                    .inner
+                    .push_client
+                    .post(&self.inner.push_endpoint)
+                    .json(&message);
+                if let Some(access_token) = self.inner.push_access_token.as_deref() {
+                    request = request.bearer_auth(access_token);
+                }
+                let reply = match request.send().await {
+                    Ok(response) if response.status().is_success() => {
+                        response.json::<ExpoPushResponse>().await
+                    }
+                    Ok(response) => {
+                        let detail = format!("Expo {}", response.status().as_u16());
+                        return ("expo", PushDeliveryOutcome::Rejected, Some(detail));
+                    }
+                    Err(_) => {
+                        return (
+                            "expo",
+                            PushDeliveryOutcome::Rejected,
+                            Some("Expo network request failed".to_owned()),
+                        );
+                    }
+                };
+                let error = reply
+                    .ok()
+                    .and_then(|reply| reply.data.into_iter().next())
+                    .map(|ticket| expo_ticket_error(&ticket));
+                match error {
+                    Some(None) => ("expo", PushDeliveryOutcome::Accepted, None),
+                    Some(Some(error)) if error == "DeviceNotRegistered" => {
+                        self.clear_dead_push_tokens(session_id, std::slice::from_ref(token))
+                            .await;
+                        ("expo", PushDeliveryOutcome::Unregistered, None)
+                    }
+                    Some(Some(error)) => ("expo", PushDeliveryOutcome::Rejected, Some(error)),
+                    None => (
+                        "expo",
+                        PushDeliveryOutcome::Rejected,
+                        Some("Expo returned no ticket".to_owned()),
+                    ),
+                }
+            }
+        }
+    }
+
+    /// Send an attention push to every active trusted device that has a push
+    /// token and is not currently connected. Reviews also reach connected
+    /// devices: a socket can look live after the phone has gone, and a missed
+    /// review costs more than a banner the client can choose not to show.
+    /// The title and optional reply preview are visible to the relay and push
+    /// service so the OS can render them.
+    async fn dispatch_push_notifications(&self, session_id: &str, request: RelayNotifyRequest) {
+        let RelayNotifyRequest {
+            kind,
+            workspace_id,
+            thread_id,
+            thread_title,
+            message_preview,
+            review_id,
+        } = request;
         let endpoint = self.inner.push_endpoint.clone();
+        let dedupe_scope = review_id
+            .as_ref()
+            .map(|id| format!("review:{id}"))
+            .or_else(|| thread_id.clone());
         let recipients = {
             let mut store = self.inner.store.lock().await;
             let now = Utc::now();
@@ -3296,8 +3619,9 @@ impl AppState {
             store
                 .push_dedupe
                 .retain(|_, last| *last + dedupe_window > now);
-            let dedupe_key = push_dedupe_key(session_id, &kind, thread_id.as_deref());
+            let dedupe_key = push_dedupe_key(session_id, &kind, dedupe_scope.as_deref());
             if store.push_dedupe.contains_key(&dedupe_key) {
+                info!(session_id, kind, "push skipped: duplicate within window");
                 return;
             }
             let connected_devices = store
@@ -3306,7 +3630,7 @@ impl AppState {
                 .map(|live| {
                     live.peers
                         .values()
-                        .filter(|peer| peer.foreground)
+                        .filter(|peer| peer.foreground && kind != PUSH_REVIEW_KIND)
                         .filter_map(|peer| peer.device_id.clone())
                         .collect::<std::collections::HashSet<_>>()
                 })
@@ -3315,46 +3639,31 @@ impl AppState {
                 return;
             };
             session.migrate_legacy_device_fields();
-            let recipients = session
+            let session = &*session;
+            let active = session
                 .devices
                 .values()
                 .filter(|device| device.revoked_at.is_none())
+                .collect::<Vec<_>>();
+            let recipients = active
+                .iter()
                 .filter(|device| !connected_devices.contains(&device.device_id))
                 .filter_map(|device| {
-                    let registration = if let Some(registration) = &device.push_registration {
-                        let PushRegistration::Apns {
-                            topic, environment, ..
-                        } = &registration.registration
-                        else {
-                            return None;
-                        };
-                        if !self
-                            .inner
-                            .apns
-                            .as_ref()
-                            .is_some_and(|provider| provider.supports(topic, *environment))
-                        {
-                            return None;
-                        }
-                        registration.clone()
-                    } else {
-                        if endpoint.trim().is_empty() {
-                            return None;
-                        }
-                        RegisteredPush {
-                            registration: PushRegistration::Expo {
-                                token: device.push_token.clone()?,
-                            },
-                            registered_at: now,
-                        }
-                    };
                     Some((
                         device.device_id.clone(),
                         device.persist_generation,
-                        registration,
+                        self.device_push_target(device)?,
                     ))
                 })
                 .collect::<Vec<_>>();
+            info!(
+                session_id,
+                kind,
+                active_devices = active.len(),
+                live_devices = connected_devices.len(),
+                recipients = recipients.len(),
+                "push dispatch"
+            );
             if recipients.is_empty() {
                 return;
             }
@@ -3367,7 +3676,7 @@ impl AppState {
         let collapse_id = format!(
             "{:x}",
             Sha256::digest(
-                serde_json::to_vec(&push_dedupe_key(session_id, &kind, thread_id.as_deref()))
+                serde_json::to_vec(&push_dedupe_key(session_id, &kind, dedupe_scope.as_deref()))
                     .unwrap_or_default()
             )
         );
@@ -3379,6 +3688,7 @@ impl AppState {
                 workspace_id.as_deref(),
                 thread_id.as_deref(),
                 &kind,
+                review_id.as_deref(),
                 &collapse_id,
             )
         {
@@ -3388,6 +3698,15 @@ impl AppState {
                 }
                 let Some(permit) = provider.reserve() else {
                     warn!("APNs delivery capacity exceeded");
+                    self.record_push_outcome(
+                        session_id,
+                        device_id,
+                        &kind,
+                        "apns",
+                        PushDeliveryOutcome::Rejected,
+                        Some("relay APNs capacity exceeded".to_owned()),
+                    )
+                    .await;
                     continue;
                 };
                 let (
@@ -3399,6 +3718,7 @@ impl AppState {
                     registered,
                     payload,
                     collapse_id,
+                    kind,
                 ) = (
                     self.clone(),
                     provider.clone(),
@@ -3408,12 +3728,14 @@ impl AppState {
                     registered.clone(),
                     payload.clone(),
                     collapse_id.clone(),
+                    kind.clone(),
                 );
                 tokio::spawn(async move {
                     let _permit = permit;
-                    if let DeliveryOutcome::Unregistered(timestamp) = provider
+                    let delivered = provider
                         .deliver(&registered.registration, &payload, &collapse_id)
-                        .await
+                        .await;
+                    if let DeliveryOutcome::Unregistered(timestamp) = delivered
                         && timestamp >= registered.registered_at.timestamp_millis()
                     {
                         state
@@ -3425,6 +3747,33 @@ impl AppState {
                             )
                             .await;
                     }
+                    let (outcome, detail) = match delivered {
+                        DeliveryOutcome::Accepted => (PushDeliveryOutcome::Accepted, None),
+                        DeliveryOutcome::Unregistered(_) => {
+                            warn!(session_id, device_id, "APNs reported an unregistered token");
+                            (PushDeliveryOutcome::Unregistered, None)
+                        }
+                        DeliveryOutcome::Failed(reason) => {
+                            (PushDeliveryOutcome::Rejected, Some(reason))
+                        }
+                    };
+                    info!(
+                        session_id,
+                        device_id,
+                        kind,
+                        ?outcome,
+                        "APNs delivery finished"
+                    );
+                    state
+                        .record_push_outcome(
+                            &session_id,
+                            &device_id,
+                            &kind,
+                            "apns",
+                            outcome,
+                            detail,
+                        )
+                        .await;
                 });
             }
         }
@@ -3453,6 +3802,7 @@ impl AppState {
                             "workspaceId": workspace_id,
                             "threadId": thread_id,
                             "kind": kind,
+                            "reviewId": review_id,
                         },
                     })
                 })
@@ -3462,7 +3812,9 @@ impl AppState {
             let client = self.inner.push_client.clone();
             let access_token = self.inner.push_access_token.clone();
             let endpoint = endpoint.clone();
+            let kind = kind.clone();
             tokio::spawn(async move {
+                let mut failure = None;
                 for attempt in 0..PUSH_MAX_ATTEMPTS {
                     let mut request = client.post(&endpoint).json(&messages);
                     if let Some(access_token) = access_token.as_deref() {
@@ -3485,6 +3837,7 @@ impl AppState {
                                 status = %response.status(),
                                 "push notification delivery failed after retries"
                             );
+                            failure = Some(format!("Expo {}", response.status().as_u16()));
                         }
                         Ok(response) if !response.status().is_success() => {
                             warn!(
@@ -3492,10 +3845,16 @@ impl AppState {
                                 status = %response.status(),
                                 "push notification delivery was rejected"
                             );
+                            failure = Some(format!("Expo {}", response.status().as_u16()));
                         }
                         Ok(response) => {
                             state
-                                .handle_push_tickets(&session_id, &chunk_recipients, response)
+                                .handle_push_tickets(
+                                    &session_id,
+                                    &kind,
+                                    &chunk_recipients,
+                                    response,
+                                )
                                 .await;
                         }
                         Err(_error) if attempt + 1 < PUSH_MAX_ATTEMPTS => {
@@ -3507,9 +3866,21 @@ impl AppState {
                         }
                         Err(error) => {
                             warn!(session_id, %error, "failed to deliver push notification after retries");
+                            failure = Some("Expo network request failed".to_owned());
                         }
                     }
                     break;
+                }
+                if failure.is_some() {
+                    state
+                        .record_expo_outcome(
+                            &session_id,
+                            &chunk_recipients,
+                            &kind,
+                            PushDeliveryOutcome::Rejected,
+                            failure,
+                        )
+                        .await;
                 }
             });
         }
@@ -3562,6 +3933,7 @@ impl AppState {
     async fn handle_push_tickets(
         &self,
         session_id: &str,
+        kind: &str,
         recipients: &[String],
         response: reqwest::Response,
     ) {
@@ -3572,6 +3944,10 @@ impl AppState {
                 return;
             }
         };
+        for (ticket, token) in tickets.iter().zip(recipients) {
+            self.record_expo_ticket(session_id, kind, token, ticket)
+                .await;
+        }
         let receipt_tickets = tickets
             .iter()
             .zip(recipients)
@@ -3604,12 +3980,47 @@ impl AppState {
 
         let state = self.clone();
         let session_id = session_id.to_string();
+        let kind = kind.to_string();
         tokio::spawn(async move {
-            state.poll_push_receipts(&session_id, receipt_tickets).await;
+            state
+                .poll_push_receipts(&session_id, &kind, receipt_tickets)
+                .await;
         });
     }
 
-    async fn poll_push_receipts(&self, session_id: &str, tickets: Vec<(String, String)>) {
+    /// A ticket or receipt error is the only place Expo says why a push died.
+    async fn record_expo_ticket(
+        &self,
+        session_id: &str,
+        kind: &str,
+        token: &str,
+        ticket: &ExpoPushTicket,
+    ) {
+        let error = expo_ticket_error(ticket);
+        let (outcome, detail) = match error.as_deref() {
+            None => (PushDeliveryOutcome::Accepted, None),
+            Some("DeviceNotRegistered") => (PushDeliveryOutcome::Unregistered, None),
+            Some(_) => (PushDeliveryOutcome::Rejected, error.clone()),
+        };
+        if outcome != PushDeliveryOutcome::Accepted {
+            warn!(session_id, kind, ?outcome, ?detail, "Expo refused a push");
+        }
+        self.record_expo_outcome(
+            session_id,
+            std::slice::from_ref(&token.to_owned()),
+            kind,
+            outcome,
+            detail,
+        )
+        .await;
+    }
+
+    async fn poll_push_receipts(
+        &self,
+        session_id: &str,
+        kind: &str,
+        tickets: Vec<(String, String)>,
+    ) {
         tokio::time::sleep(std::time::Duration::from_secs(PUSH_RECEIPT_DELAY_SECONDS)).await;
 
         let ids = tickets.iter().map(|(id, _)| id.clone()).collect::<Vec<_>>();
@@ -3645,6 +4056,12 @@ impl AppState {
                 return;
             }
         };
+        for (id, token) in &tickets {
+            if let Some(receipt) = receipts.get(id) {
+                self.record_expo_ticket(session_id, kind, token, receipt)
+                    .await;
+            }
+        }
         let dead_tokens = tickets
             .iter()
             .filter_map(|(id, token)| {
@@ -4510,6 +4927,7 @@ impl SessionRecord {
                 created_at: device.created_at,
                 last_seen_at: device.last_seen_at,
                 revoked_at: device.revoked_at,
+                push: None,
             })
             .collect::<Vec<_>>();
         devices.sort_by_key(|device| device.created_at);
@@ -4571,6 +4989,17 @@ struct ExpoReceiptResponse {
 struct ExpoPushTicketDetails {
     #[serde(default)]
     error: Option<String>,
+}
+
+/// A ticket or receipt's error, or `None` when Expo accepted it.
+fn expo_ticket_error(ticket: &ExpoPushTicket) -> Option<String> {
+    (ticket.status.as_deref() == Some("error")).then(|| {
+        ticket
+            .details
+            .as_ref()
+            .and_then(|details| details.error.clone())
+            .unwrap_or_else(|| "Expo error".to_owned())
+    })
 }
 
 /// Namespace a client-chosen rpc request id with the requesting peer's
@@ -4934,6 +5363,27 @@ fn verify_secret(stored_verifier: &str, candidate: &str) -> bool {
         // versions. Startup normalization replaces these values immediately.
         constant_time_eq(stored_verifier, candidate)
     }
+}
+
+fn validate_notification(request: &RelayNotifyRequest) -> Result<(), RelayError> {
+    for (name, value) in [
+        ("notification kind", Some(request.kind.as_str())),
+        ("workspace_id", request.workspace_id.as_deref()),
+        ("thread_id", request.thread_id.as_deref()),
+        ("thread_title", request.thread_title.as_deref()),
+        ("message_preview", request.message_preview.as_deref()),
+        ("review_id", request.review_id.as_deref()),
+    ] {
+        if let Some(value) = value {
+            validate_bounded_text(
+                name,
+                value,
+                MAX_NOTIFICATION_FIELD_LENGTH,
+                name != "notification kind",
+            )?;
+        }
+    }
+    Ok(())
 }
 
 fn validate_bounded_text(

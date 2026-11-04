@@ -1,3 +1,5 @@
+use std::collections::BTreeMap;
+
 use chrono::Utc;
 use falcondeck_core::{
     AssistantMessagePhase, ContentLifecycle, ConversationItem, PairingAuthority,
@@ -196,6 +198,77 @@ pub(super) fn remember_trusted_client_bundle(
     trusted.push(bundle.clone());
 }
 
+/// Delay before each attempt to get a review to the relay.
+const NOTIFY_RETRY_DELAYS: [std::time::Duration; 4] = [
+    std::time::Duration::ZERO,
+    std::time::Duration::from_secs(1),
+    std::time::Duration::from_secs(4),
+    std::time::Duration::from_secs(15),
+];
+
+pub(super) struct AttentionEvent<'a> {
+    pub(super) kind: &'a str,
+    pub(super) workspace_id: Option<String>,
+    pub(super) thread_id: Option<String>,
+    pub(super) preview: Option<String>,
+    pub(super) review_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum AttentionPolicy {
+    Deliver,
+    OffByPreference,
+    DesktopActive,
+}
+
+/// Reviews wait for James and nothing else will surface them, so recent Mac
+/// input does not hold them back. Approvals and questions keep suppression:
+/// they arrive far more often, and the Mac alerts for them while he is there.
+fn ignores_desktop_activity(kind: &str) -> bool {
+    kind == "review"
+}
+
+pub(super) fn attention_policy(
+    kind: &str,
+    preferences: &falcondeck_core::NotificationPreferences,
+    desktop_active: bool,
+) -> AttentionPolicy {
+    let enabled_for_kind = match kind {
+        "turn-complete" => preferences.notify_on_turn_complete,
+        "approval" | "question" | "review" => preferences.notify_on_input_required,
+        "turn-error" => preferences.notify_on_error,
+        _ => preferences.enabled,
+    };
+    if !preferences.enabled || !enabled_for_kind {
+        AttentionPolicy::OffByPreference
+    } else if desktop_active && !ignores_desktop_activity(kind) {
+        AttentionPolicy::DesktopActive
+    } else {
+        AttentionPolicy::Deliver
+    }
+}
+
+fn record_attention(
+    counters: &mut BTreeMap<String, falcondeck_core::AttentionDeliveryCounter>,
+    kind: &str,
+    policy: AttentionPolicy,
+    has_bridge: bool,
+) {
+    let counter = counters.entry(kind.to_string()).or_insert_with(|| {
+        falcondeck_core::AttentionDeliveryCounter {
+            kind: kind.to_string(),
+            ..Default::default()
+        }
+    });
+    counter.last_at = Some(Utc::now());
+    match policy {
+        AttentionPolicy::OffByPreference => counter.suppressed_preferences += 1,
+        AttentionPolicy::DesktopActive => counter.suppressed_desktop_active += 1,
+        AttentionPolicy::Deliver if has_bridge => counter.sent += 1,
+        AttentionPolicy::Deliver => counter.no_bridge += 1,
+    }
+}
+
 impl AppState {
     /// Best-effort: forward an attention event to the relay so devices that
     /// are not connected can receive a push notification. A missing or dead
@@ -206,53 +279,186 @@ impl AppState {
         workspace_id: &str,
         thread_id: Option<String>,
     ) {
-        self.notify_remote_attention_with_preview(kind, workspace_id, thread_id, None)
-            .await;
+        self.deliver_attention(AttentionEvent {
+            kind,
+            workspace_id: Some(workspace_id.to_string()),
+            thread_id,
+            preview: None,
+            review_id: None,
+        })
+        .await;
     }
 
-    /// As [`Self::notify_remote_attention`], with a caller-supplied body for
-    /// kinds that carry their own text (a review's "needs a decision" line).
-    pub(super) async fn notify_remote_attention_with_preview(
-        &self,
-        kind: &str,
-        workspace_id: &str,
-        thread_id: Option<String>,
-        preview: Option<String>,
-    ) {
+    pub(super) async fn deliver_attention(&self, event: AttentionEvent<'_>) {
+        let AttentionEvent {
+            kind,
+            workspace_id,
+            thread_id,
+            preview,
+            review_id,
+        } = event;
         let preferences = self.preferences().await.notifications;
-        let enabled_for_kind = match kind {
-            "turn-complete" => preferences.notify_on_turn_complete,
-            "approval" | "question" | "review" => preferences.notify_on_input_required,
-            "turn-error" => preferences.notify_on_error,
-            _ => preferences.enabled,
+        let desktop_active = preferences.suppress_when_desktop_active && self.desktop_is_active();
+        let policy = attention_policy(kind, &preferences, desktop_active);
+        let command_tx = {
+            let mut remote = self.inner.remote.lock().await;
+            let command_tx = remote.command_tx.clone();
+            record_attention(&mut remote.attention, kind, policy, command_tx.is_some());
+            command_tx
         };
-        if !preferences.enabled || !enabled_for_kind {
+        tracing::info!(
+            kind,
+            ?policy,
+            bridge = command_tx.is_some(),
+            "attention event"
+        );
+        if policy != AttentionPolicy::Deliver {
             return;
         }
-        if preferences.suppress_when_desktop_active && self.desktop_is_active() {
+        let Some(command_tx) = command_tx else {
             return;
+        };
+        // Capture before enqueueing: the bridge may process this after
+        // another turn has started. Never hydrate native history for a push.
+        let message_preview = if preview.is_some() {
+            preview
+        } else if kind == "turn-complete" {
+            let workspaces = self.inner.workspaces.lock().await;
+            thread_id
+                .as_deref()
+                .zip(workspace_id.as_deref())
+                .and_then(|(id, workspace_id)| workspaces.get(workspace_id)?.threads.get(id))
+                .and_then(|thread| notification_message_preview(&thread.items))
+        } else {
+            None
+        };
+        let command = super::RemoteBridgeCommand::NotifyAttention {
+            kind: kind.to_string(),
+            workspace_id,
+            thread_id,
+            message_preview,
+            review_id,
+        };
+        if matches!(
+            &command,
+            super::RemoteBridgeCommand::NotifyAttention {
+                review_id: Some(_),
+                ..
+            }
+        ) {
+            // A tool call must not wait on the relay.
+            let app = self.clone();
+            tokio::spawn(async move { app.deliver_acknowledged(command, command_tx).await });
+        } else {
+            let _ = command_tx.send(command);
         }
-        let command_tx = { self.inner.remote.lock().await.command_tx.clone() };
-        if let Some(command_tx) = command_tx {
-            // Capture before enqueueing: the bridge may process this after
-            // another turn has started. Never hydrate native history for a push.
-            let message_preview = if preview.is_some() {
-                preview
-            } else if kind == "turn-complete" {
-                let workspaces = self.inner.workspaces.lock().await;
-                thread_id
-                    .as_deref()
-                    .and_then(|id| workspaces.get(workspace_id)?.threads.get(id))
-                    .and_then(|thread| notification_message_preview(&thread.items))
-            } else {
-                None
+    }
+
+    /// A socket write proves nothing: the bridge reconnects often enough that
+    /// a queued frame can die with it. A review goes over HTTP until the relay
+    /// acknowledges it, and only falls back to the socket for relays that lack
+    /// the endpoint or while HTTP keeps failing. The relay dedupes per review,
+    /// so a retry after a lost response cannot double-alert.
+    async fn deliver_acknowledged(
+        &self,
+        command: super::RemoteBridgeCommand,
+        fallback: mpsc::UnboundedSender<super::RemoteBridgeCommand>,
+    ) {
+        let super::RemoteBridgeCommand::NotifyAttention {
+            kind,
+            workspace_id,
+            thread_id,
+            message_preview,
+            review_id,
+        } = &command
+        else {
+            return;
+        };
+        let target = self.relay_session_target().await;
+        if let Some((relay_url, session_id, daemon_token)) = target {
+            let request = falcondeck_core::RelayNotifyRequest {
+                kind: kind.clone(),
+                workspace_id: workspace_id.clone(),
+                thread_id: thread_id.clone(),
+                thread_title: self
+                    .notification_title(workspace_id.as_deref(), thread_id.as_deref())
+                    .await,
+                message_preview: message_preview.clone(),
+                review_id: review_id.clone(),
             };
-            let _ = command_tx.send(super::RemoteBridgeCommand::NotifyAttention {
-                kind: kind.to_string(),
-                workspace_id: Some(workspace_id.to_string()),
-                thread_id,
-                message_preview,
-            });
+            let url = format!(
+                "{}/v1/sessions/{session_id}/notify",
+                relay_url.trim_end_matches('/')
+            );
+            for delay in NOTIFY_RETRY_DELAYS {
+                tokio::time::sleep(delay).await;
+                let response = reqwest::Client::new()
+                    .post(&url)
+                    .bearer_auth(&daemon_token)
+                    .timeout(std::time::Duration::from_secs(15))
+                    .json(&request)
+                    .send()
+                    .await;
+                match response {
+                    Ok(response) if response.status().is_success() => {
+                        tracing::info!(kind, ?review_id, "relay acknowledged attention push");
+                        return;
+                    }
+                    // An older relay. The socket path is all it has.
+                    Ok(response) if response.status().as_u16() == 404 => break,
+                    Ok(response) => {
+                        tracing::warn!(status = %response.status(), "relay refused attention push");
+                    }
+                    Err(error) => {
+                        tracing::warn!(%error, "attention push request failed");
+                    }
+                }
+            }
+        }
+        let _ = fallback.send(command);
+    }
+
+    async fn relay_session_target(&self) -> Option<(String, String, String)> {
+        let remote = self.inner.remote.lock().await;
+        Some((
+            remote.relay_url.clone()?,
+            remote.pairing.as_ref()?.session_id.clone()?,
+            remote.daemon_token.clone()?,
+        ))
+    }
+
+    /// Push a test notification to every paired device through the relay and
+    /// report each provider's answer.
+    pub async fn send_test_notification(
+        &self,
+    ) -> Result<falcondeck_core::PushTestResponse, DaemonError> {
+        let (relay_url, session_id, daemon_token) = self
+            .relay_session_target()
+            .await
+            .ok_or_else(|| DaemonError::Conflict("No phone is paired yet.".to_string()))?;
+        let response = reqwest::Client::new()
+            .post(format!(
+                "{}/v1/sessions/{session_id}/push-test",
+                relay_url.trim_end_matches('/')
+            ))
+            .bearer_auth(&daemon_token)
+            .timeout(std::time::Duration::from_secs(45))
+            .send()
+            .await
+            .map_err(|error| DaemonError::Rpc(format!("failed to reach the relay: {error}")))?;
+        match response.status().as_u16() {
+            404 => Err(DaemonError::Conflict(
+                "This relay needs an update before it can send a test notification.".to_string(),
+            )),
+            429 => Err(DaemonError::Conflict(
+                "Wait a few seconds before sending another test.".to_string(),
+            )),
+            status if !(200..300).contains(&status) => Err(DaemonError::Rpc(
+                relay_request_error(response, "relay test notification").await,
+            )),
+            _ => response.json().await.map_err(|error| {
+                DaemonError::Rpc(format!("failed to parse the relay response: {error}"))
+            }),
         }
     }
 
@@ -1514,6 +1720,7 @@ pub(super) fn build_remote_status_response(remote: &RemoteBridgeState) -> Remote
                     last_seen_at: matches!(&status, RemoteConnectionStatus::Connected)
                         .then(Utc::now),
                     revoked_at: None,
+                    push: None,
                 })
         })
         .into_iter()
@@ -1537,6 +1744,7 @@ pub(super) fn build_remote_status_response(remote: &RemoteBridgeState) -> Remote
         trusted_devices,
         presence,
         last_error: remote.last_error.clone(),
+        attention: remote.attention.values().cloned().collect(),
     }
 }
 
@@ -1732,6 +1940,10 @@ fn notification_markdown_preview(text: &str) -> Option<String> {
     }
     (!preview.is_empty()).then_some(preview)
 }
+
+#[cfg(test)]
+#[path = "remote_attention_tests.rs"]
+mod attention_tests;
 
 #[cfg(test)]
 mod tests {
