@@ -50,6 +50,7 @@ final class NotificationCentreStore {
     @ObservationIgnored private var mutationRevision = 0
     @ObservationIgnored private var inFlightReads: Set<String> = []
     @ObservationIgnored private var inFlightUpToSeq: Int?
+    @ObservationIgnored private var readsOverlapped = false
     @ObservationIgnored private var replaying = false
     @ObservationIgnored private var readsRestored = false
     @ObservationIgnored private var readSessionID: String?
@@ -121,7 +122,7 @@ final class NotificationCentreStore {
         for task in replySaves.values { task.cancel() }
         replySaves = [:]
         pages = [:]; counts = NotificationCounts(); filter = .all; refreshError = nil; actionError = nil; unsupported = false; loadMoreFailed = false
-        offlineReads = []; inFlightReads = []; inFlightUpToSeq = nil; readsRestored = false; readSessionID = nil
+        offlineReads = []; inFlightReads = []; inFlightUpToSeq = nil; readsOverlapped = false; readsRestored = false; readSessionID = nil
         reports = [:]; reportRecords = []; unreadableReports = []; reportKey = nil; reportsCheckedAt = nil
         replies = [:]; repliesRestored = false; vaultCache = nil; demoRecords = nil; openRequest = nil
         Task { [reportClient] in await reportClient.forgetCapabilities() }
@@ -278,7 +279,7 @@ final class NotificationCentreStore {
             inFlightReads.remove(id)
             guard current == model.connectionID else { return }
             mutationRevision += 1
-            if inFlightReads.isEmpty, inFlightUpToSeq == nil { adoptKeepingHead(NotificationCounts(response)) }
+            settleRead(NotificationCounts(response), model: model)
         } catch {
             inFlightReads.remove(id)
             guard scope == model.sessionScope else { return }
@@ -307,7 +308,7 @@ final class NotificationCentreStore {
             inFlightUpToSeq = nil
             guard current == model.connectionID else { return }
             mutationRevision += 1
-            if inFlightReads.isEmpty { adoptKeepingHead(NotificationCounts(response)) }
+            settleRead(NotificationCounts(response), model: model)
         } catch {
             inFlightUpToSeq = nil
             guard scope == model.sessionScope else { return }
@@ -316,6 +317,14 @@ final class NotificationCentreStore {
             counts.unread = previous
             actionError = "Couldn't mark everything as read. Try again."
         }
+    }
+
+    /// Answers can cross, so the last to arrive may hold the oldest counts. Reads
+    /// that overlapped are settled by a fresh read of the list.
+    private func settleRead(_ incoming: NotificationCounts, model: AppModel) {
+        guard inFlightReads.isEmpty, inFlightUpToSeq == nil else { readsOverlapped = true; return }
+        adoptKeepingHead(incoming)
+        if readsOverlapped { readsOverlapped = false; scheduleRefresh(model: model) }
     }
 
     private func applyRead(_ ids: Set<String>) {
@@ -393,6 +402,9 @@ final class NotificationCentreStore {
               await reportClient.capability(session) != nil else { return }
         guard let listed = try? await reportClient.list(session: session), scope == model.sessionScope else { return }
         if reportKey != key { reportKey = key; reports = [:]; unreadableReports = [] }
+        // After a key rotation a report is unreadable only until the daemon has
+        // sealed it again, so pulling to refresh always tries.
+        if immediate { unreadableReports = [] }
         reportsCheckedAt = .now
         let live = listed.filter { ($0.expiresAt ?? .distantFuture) > .now }.prefix(Self.reportLimit).map(\.reportID)
         let missing = live.filter { reports[$0] == nil && !unreadableReports.contains($0) }

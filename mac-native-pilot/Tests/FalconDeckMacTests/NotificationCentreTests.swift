@@ -394,6 +394,22 @@ private func controlEvent(_ domains: String...) -> JSON {
         XCTAssertFalse(NotificationRecord(daemon.rows.last!).isRead)
     }
 
+    func testOverlappingReadsAreSettledByARefresh() async {
+        let daemon = FakeNotifications([row(1), row(2)])
+        let store = centre(daemon)
+        await store.refresh()
+        let listed = daemon.lists.count
+        daemon.holdReads = true
+        async let first: Void = store.markRead(store.records[0], hostID: nil)
+        async let second: Void = store.markRead(store.records[1], hostID: nil)
+        await eventually("both reads held") { daemon.heldCount == 2 }
+        daemon.holdReads = false
+        daemon.release()
+        _ = await (first, second)
+        await eventually("a settling refresh") { daemon.lists.count > listed }
+        await eventually("the daemon's counts") { store.counts.unread == 0 }
+    }
+
     func testOnlyAHeadReadMovesTheMarkAllBoundary() async {
         let daemon = FakeNotifications((1...60).map { row($0) })
         let store = centre(daemon)

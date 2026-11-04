@@ -50,6 +50,7 @@ private actor CentreHTTP: PushHTTP {
     func put(_ id: String, _ response: JSON) { reports[id] = response; listed.append(id) }
     func drop(_ id: String) { reports[id] = nil; listed.removeAll { $0 == id } }
     func set(unavailable value: Bool) { unavailable = value }
+    func reseal(_ id: String, _ response: JSON) { reports[id] = response }
     func send(_ request: URLRequest) async throws -> (Data, Int) {
         let path = request.url?.path() ?? ""
         paths.append(path); authorization.append(request.value(forHTTPHeaderField: "Authorization"))
@@ -310,6 +311,21 @@ private func settle(_ condition: @MainActor () async -> Bool, file: StaticString
         }
         await rig.store.refresh(model: rig.model)
         XCTAssertEqual(rig.store.counts.latestSeq, 300, "301 was never on screen, so mark-all must not cover it")
+    }
+
+    func testOverlappingReadsAreSettledByARefresh() async throws {
+        let rig = Rig { method, _ in
+            method == "notifications.mark_read" ? Wire.counts(unread: 1, latest: 10) : Wire.list([Wire.record(10), Wire.record(9)], unread: 2, latest: 10)
+        }
+        await rig.store.refresh(model: rig.model)
+        await rig.relay.gate("notifications.mark_read")
+        async let first: Void = rig.store.markRead("N-10", model: rig.model)
+        async let second: Void = rig.store.markRead("N-9", model: rig.model)
+        await settle { await rig.relay.count("notifications.mark_read") == 2 }
+        await rig.relay.release()
+        _ = await (first, second)
+        let listed = await rig.relay.count("notifications.list")
+        await settle { await rig.relay.count("notifications.list") > listed }
     }
 
     func testOnlyAHeadReadMovesTheMarkAllBoundary() async throws {
@@ -625,7 +641,7 @@ private func settle(_ condition: @MainActor () async -> Bool, file: StaticString
         XCTAssertThrowsError(try NotificationReport.open(empty, reportID: "rpt_1", session: Wire.session())) { XCTAssertEqual($0 as? NotificationReportError, .malformed) }
     }
 
-    func testARelayFailureIsRetriedButACorruptReportIsNot() async throws {
+    func testAPullRecoversFromAnOutageAndAReportNotYetResealed() async throws {
         let rig = Rig(connected: false)
         await rig.http.put("rpt_1", try Wire.report())
         await rig.http.put("rpt_2", try Wire.report("rpt_2", key: Data(repeating: 1, count: 32)))
@@ -634,10 +650,10 @@ private func settle(_ condition: @MainActor () async -> Bool, file: StaticString
         XCTAssertTrue(rig.store.reportRecords.isEmpty)
         await rig.http.set(unavailable: false)
         await rig.store.refresh(model: rig.model, immediate: true)
-        XCTAssertEqual(rig.store.reportRecords.count, 1, "A pull to refresh recovers from the outage")
+        XCTAssertEqual(rig.store.reportRecords.count, 1, "The outage is over; rpt_2 is still under the old key")
+        await rig.http.reseal("rpt_2", try Wire.report("rpt_2", plaintext: Wire.plaintext("rpt_2", notification: "N-10")))
         await rig.store.refresh(model: rig.model, immediate: true)
-        let calls = await rig.http.reportCalls()
-        XCTAssertEqual(calls.filter { $0.hasSuffix("/rpt_2") }.count, 2, "Asked in the outage and once after, then remembered")
+        XCTAssertEqual(rig.store.reportRecords.count, 2, "The daemon sealed it again under the current key")
     }
 
     func testReportIDsCannotEscapeTheURLPath() {
@@ -724,7 +740,7 @@ private func settle(_ condition: @MainActor () async -> Bool, file: StaticString
         XCTAssertEqual(rig.store.reportRecords.map(\.id), ["N-1"])
         await rig.store.refresh(model: rig.model, immediate: true)
         let calls = await rig.http.reportCalls().filter { $0.hasSuffix("rpt_old") }.count
-        XCTAssertEqual(calls, 1, "A report this key cannot open is not fetched again")
+        XCTAssertEqual(calls, 2, "A pull asks again, in case the daemon has sealed it since")
     }
 
     func testAPassingDisconnectCostsNoRelayRequests() async throws {

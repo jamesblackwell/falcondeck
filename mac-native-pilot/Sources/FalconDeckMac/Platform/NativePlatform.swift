@@ -290,7 +290,8 @@ struct NativeAttentionNotice: Equatable {
     private func isViewed(_ notice: NativeAttentionNotice, hostID: String?) -> Bool {
         if let viewed { return viewed(notice, hostID) }
         guard NSApp.isActive, NSApp.keyWindow != nil, desktopPresent, currentHost() == hostID else { return false }
-        if notice.notificationID != nil, store?.notifications.isPresented == true { return true }
+        // A report opens apart from its task, so an open task has not shown it.
+        if notice.notificationID != nil { return store?.notifications.isPresented == true }
         return store?.selectedTaskID.map { NativeHostManager.split($0).id } == notice.taskID
             && ["project", "pins", "chats"].contains(store?.selectedSection ?? "")
     }

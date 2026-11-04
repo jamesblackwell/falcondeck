@@ -279,7 +279,9 @@ import Observation
             guard generation == hostGeneration else { return }
             finishMutation()
             // A later mutation's optimism is newer than this answer.
-            if mutationsInFlight == 0 { adoptKeepingHead(response) }
+            // Answers can cross, so the last to arrive may hold the oldest counts.
+            // The refresh that follows overlapping reads settles them.
+            if mutationsInFlight == 0 { adoptKeepingHead(response) } else { refreshAgain = true }
         } catch {
             guard generation == hostGeneration else { return }
             let restored = Dictionary(previous.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
