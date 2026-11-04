@@ -799,7 +799,7 @@ impl AppState {
                                     }
                                 }
                             }
-                            RemoteBridgeCommand::NotifyAttention { kind, workspace_id, thread_id, message_preview, review_id, title, notification_id, report_id, ignore_presence } => {
+                            RemoteBridgeCommand::NotifyAttention { kind, workspace_id, thread_id, message_preview, review_id, title, notification_id, report_id, ignore_presence, held_since } => {
                                 // A failed write must not take the push with it.
                                 let retry = RemoteBridgeCommand::NotifyAttention {
                                     kind: kind.clone(),
@@ -811,6 +811,7 @@ impl AppState {
                                     notification_id: notification_id.clone(),
                                     report_id: report_id.clone(),
                                     ignore_presence,
+                                    held_since,
                                 };
                                 let thread_title = match title {
                                     Some(title) => notification_thread_title(&title),

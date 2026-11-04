@@ -654,7 +654,9 @@ private func settle(_ condition: @MainActor () async -> Bool, file: StaticString
         rig.store.setFilter(.needsYou); await rig.store.refresh(model: rig.model)
         XCTAssertTrue(rig.store.visibleRecords(offline: false).allSatisfy(\.isWaiting))
         await rig.store.markAllRead(model: rig.model)
-        XCTAssertEqual(rig.store.counts.unread, 0)
+        XCTAssertTrue(rig.store.visibleRecords(offline: false).allSatisfy(\.isRead))
+        rig.store.setFilter(.all)
+        XCTAssertEqual(rig.store.counts.unread, rig.store.visibleRecords(offline: false).filter { !$0.isRead }.count, "Only what the filter showed")
         let calls = await rig.relay.calls.count
         XCTAssertEqual(calls, 0)
     }

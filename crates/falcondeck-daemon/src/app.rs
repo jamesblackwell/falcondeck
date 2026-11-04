@@ -998,6 +998,8 @@ enum RemoteBridgeCommand {
         report_id: Option<String>,
         /// Push even to a device that looks connected.
         ignore_presence: bool,
+        /// When it was first held, so failed retries cannot extend its life.
+        held_since: Option<std::time::Instant>,
     },
 }
 

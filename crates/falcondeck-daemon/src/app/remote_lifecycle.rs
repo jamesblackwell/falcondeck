@@ -311,9 +311,13 @@ fn hold_locked(remote: &mut RemoteBridgeState, command: super::RemoteBridgeComma
     if remote.held_pushes.len() == MAX_HELD_PUSHES {
         remote.held_pushes.pop_front();
     }
+    let since = match &command {
+        super::RemoteBridgeCommand::NotifyAttention { held_since, .. } => *held_since,
+        _ => None,
+    };
     remote.held_pushes.push_back(HeldPush {
         command,
-        held_at: std::time::Instant::now(),
+        held_at: since.unwrap_or_else(std::time::Instant::now),
         counted,
     });
 }
@@ -360,6 +364,7 @@ impl AppState {
             notification_id,
             report_id,
             ignore_presence,
+            held_since: None,
         };
         if http_route {
             // A tool call must not wait on the relay.
@@ -386,6 +391,7 @@ impl AppState {
             notification_id,
             report_id,
             ignore_presence,
+            ..
         } = &command
         else {
             return;
@@ -479,12 +485,15 @@ impl AppState {
         let mut remote = self.inner.remote.lock().await;
         let held = std::mem::take(&mut remote.held_pushes);
         for HeldPush {
-            command,
+            mut command,
             held_at,
             counted,
         } in held
         {
             let kind = push_kind(&command);
+            if let super::RemoteBridgeCommand::NotifyAttention { held_since, .. } = &mut command {
+                *held_since = Some(held_at);
+            }
             if held_at.elapsed() > HELD_PUSH_TTL {
                 tracing::warn!(kind, "attention push expired while the relay was away");
                 continue;

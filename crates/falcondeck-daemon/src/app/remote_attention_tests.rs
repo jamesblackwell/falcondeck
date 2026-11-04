@@ -155,6 +155,7 @@ fn review_command() -> RemoteBridgeCommand {
         notification_id: None,
         report_id: None,
         ignore_presence: false,
+        held_since: None,
     }
 }
 
@@ -266,6 +267,25 @@ async fn a_held_push_that_went_stale_is_dropped() {
         .unwrap()
         .held_at -= HELD_PUSH_TTL + std::time::Duration::from_secs(1);
     let mut bridge = attach_bridge(&app).await;
+    app.flush_held_pushes().await;
+    assert!(bridge.try_recv().is_err());
+}
+
+#[tokio::test]
+async fn failed_writes_cannot_keep_a_held_push_alive() {
+    let directory = tempfile::tempdir().unwrap();
+    let app = app_with_relay("http://127.0.0.1:9", &directory).await;
+    app.deliver_attention(approval()).await;
+    let mut bridge = attach_bridge(&app).await;
+    app.flush_held_pushes().await;
+    let mut command = bridge.try_recv().unwrap();
+    // The bridge took it, the write failed, and it comes back an hour on.
+    if let RemoteBridgeCommand::NotifyAttention { held_since, .. } = &mut command {
+        *held_since = held_since
+            .unwrap()
+            .checked_sub(HELD_PUSH_TTL + std::time::Duration::from_secs(1));
+    }
+    app.hold_push(command, true).await;
     app.flush_held_pushes().await;
     assert!(bridge.try_recv().is_err());
 }
