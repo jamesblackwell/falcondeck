@@ -1432,10 +1432,14 @@ impl AppState {
                     UnifiedEvent::ThreadTokenUsageUpdated { usage },
                 );
             }
-            AcpEvent::TurnUsage { session_id, usage } => {
+            AcpEvent::TurnUsage {
+                session_id,
+                usage,
+                replay,
+            } => {
                 // session/load replays finished turns; recording them again
                 // would double-count every replayed result.
-                if replaying_sessions.contains(&session_id) {
+                if replay {
                     return Ok(());
                 }
                 let Some(thread_id) = runtime.thread_for_session(&session_id).await else {
@@ -1486,6 +1490,7 @@ impl AppState {
                         effort: None,
                         cost_ticks,
                         id: format!("{provider}:{turn_key}{suffix}"),
+                        turn_key: turn_key.clone(),
                     });
                 }
             }

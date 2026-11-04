@@ -1170,23 +1170,14 @@ fn acp_prompt_usage(response: &Value) -> Option<AcpTurnUsage> {
     // Agents differ: the ACP spec spells the fields cachedWriteTokens and
     // thoughtTokens, Grok's vendor stream cachedCreationTokens and
     // reasoningTokens.
-    let cache_read = field(&[
-        "cachedReadTokens",
-        "cached_read_tokens",
-    ])
-    .unwrap_or(0);
+    let cache_read = field(&["cachedReadTokens", "cached_read_tokens"]).unwrap_or(0);
     let cache_write = field(&[
         "cachedWriteTokens",
         "cacheWriteInputTokens",
         "cache_creation_tokens",
     ])
     .unwrap_or(0);
-    let reasoning = field(&[
-        "thoughtTokens",
-        "reasoningTokens",
-        "reasoning_tokens",
-    ])
-    .unwrap_or(0);
+    let reasoning = field(&["thoughtTokens", "reasoningTokens", "reasoning_tokens"]).unwrap_or(0);
     // When cache reads are reported and fit inside the input figure, the
     // agent counted them as input; normalisation subtracts them.
     let input_includes_cached_reads = cache_read > 0 && cache_read <= input;
@@ -1497,6 +1488,8 @@ pub enum AcpEvent {
     /// Billed usage for a finished turn: Grok's vendor `turn_completed`, or a
     /// `session/prompt` response. Projected into local usage analytics.
     TurnUsage {
+        /// Classified at receipt, before a delayed/cancelled load can poison the pump.
+        replay: bool,
         session_id: String,
         usage: AcpTurnUsage,
     },
@@ -3771,6 +3764,7 @@ impl AcpRuntime {
                 && let Some(usage) = acp_prompt_usage(&response)
             {
                 let _ = self.events.send(AcpEvent::TurnUsage {
+                    replay: false,
                     session_id: session_id.to_string(),
                     usage,
                 });
@@ -4530,7 +4524,9 @@ impl AcpRuntime {
             // metadata. Two parts matter: billed turn usage, which no standard
             // surface reports, and the real failure text, which never appears
             // on the standard surface.
-            "_x.ai/session/update" => self.capture_vendor_turn_update(&params).await,
+            "_x.ai/session/update" | "_x.ai/session_notification" => {
+                self.capture_vendor_turn_update(&params).await;
+            }
             "session/request_permission" => {
                 let raw_id = message.get("id").cloned().unwrap_or(Value::Null);
                 self.handle_permission_request(raw_id, &params).await;
@@ -4844,6 +4840,8 @@ impl AcpRuntime {
         // Failed turns still consumed tokens; usage is recorded either way.
         if let Some(usage) = grok_turn_usage(update) {
             let _ = self.events.send(AcpEvent::TurnUsage {
+                replay: self.replay_sessions.lock().await.contains(session_id)
+                    && !self.prompt_sessions.lock().await.contains(session_id),
                 session_id: session_id.to_string(),
                 usage,
             });
@@ -5115,6 +5113,40 @@ impl AcpRuntime {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn captured_grok_wire_method_and_replay_classification() {
+        // Captured from grok 1.0.70 stdio on 2026-11-04. Session files still
+        // label these _x.ai/session/update; the live wire uses session_notification.
+        let wire: Value =
+            serde_json::from_str(include_str!("fixtures/grok-1.0.70-turn-completed.json")).unwrap();
+        let sid = wire["params"]["sessionId"].as_str().unwrap();
+        let (runtime, mut events) = fixture_runtime("grok-defaults").await;
+        while events.try_recv().is_ok() {}
+        runtime.handle_message(wire.clone()).await;
+        let AcpEvent::TurnUsage { usage, replay, .. } = next_acp_event(&mut events).await else {
+            panic!("missing usage")
+        };
+        assert!(!replay);
+        assert_eq!(usage.models[0].input_tokens, 21541);
+        assert_eq!(usage.models[0].cache_read_tokens, 1664);
+        assert_eq!(usage.models[0].cost_ticks, Some(277127200));
+        runtime.replay_sessions.lock().await.insert(sid.into());
+        runtime.handle_message(wire.clone()).await;
+        assert!(matches!(
+            next_acp_event(&mut events).await,
+            AcpEvent::TurnUsage { replay: true, .. }
+        ));
+        // A cancelled load can leave its marker behind. An actual prompt
+        // is live even then; classify it before the asynchronous pump.
+        runtime.prompt_sessions.lock().await.insert(sid.into());
+        runtime.handle_message(wire).await;
+        assert!(matches!(
+            next_acp_event(&mut events).await,
+            AcpEvent::TurnUsage { replay: false, .. }
+        ));
+        runtime.shutdown().await;
+    }
 
     #[test]
     fn grok_turn_usage_reads_per_model_totals_and_cost_ticks() {

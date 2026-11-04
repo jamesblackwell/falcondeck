@@ -435,3 +435,37 @@ async fn run_start_context_does_not_double_count_codex_cache_reads() {
     assert_eq!(app.thread_context_tokens("unknown", &falcondeck_core::AgentProvider::CODEX), None);
     app.shutdown().await.unwrap();
 }
+
+#[tokio::test]
+async fn usage_health_counts_missing_turns_with_activity_disabled() {
+    let (app, _temp) = fixture().await;
+    app.with_thread_mut("workspace-1", "thread-1", |thread| {
+        thread.provider = falcondeck_core::AgentProvider::CODEX;
+    }).await.unwrap();
+    app.update_analytics_settings(AnalyticsSettings {
+        enabled: false,
+        ..Default::default()
+    }).await.unwrap();
+    let wire: Vec<Value> = serde_json::from_str(include_str!("../../../fixtures/codex-0.166.0-usage.json")).unwrap();
+    let params = &wire[1]["params"];
+    let turn = params["turnId"].as_str().unwrap();
+    set_status(&app, ThreadStatus::Running, 0).await;
+    app.note_codex_token_usage("thread-1", turn, params);
+    app.flush_codex_turn_usage("workspace-1", "thread-1");
+    set_status(&app, ThreadStatus::Idle, 0).await;
+    // A second completed turn with no provider usage must remain visible.
+    set_status(&app, ThreadStatus::Running, 0).await;
+    set_status(&app, ThreadStatus::Error, 0).await;
+    for _ in 0..100 {
+        let status = app.analytics_status().await;
+        if let Some(row) = status.usage_health.iter().find(|r| r.provider == "codex") {
+            if row.completed_turns == 2 && row.usage_records_written == 1 {
+                assert_eq!(row.turns_with_usage, 1);
+                assert_eq!(row.missing_usage_turns, 1);
+                return;
+            }
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    panic!("usage health failed to catch the gap: {:?}", app.analytics_status().await);
+}

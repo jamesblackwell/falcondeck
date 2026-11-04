@@ -57,6 +57,24 @@ pub struct AnalyticsStatus {
     /// Usage records dropped because the writer queue was full, since startup.
     #[serde(default)]
     pub dropped_usage_records: u64,
+    #[serde(default)]
+    /// Per-provider capture diagnostics since startup.
+    pub usage_health: Vec<AnalyticsUsageHealth>,
+}
+
+/// Capture health since daemon startup. Multiple models may produce several rows per turn.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AnalyticsUsageHealth {
+    /// Harness/provider identifier.
+    pub provider: String,
+    /// Observed live turns reaching idle or error while recording usage.
+    pub completed_turns: u64,
+    /// Model rows successfully appended by the writer.
+    pub usage_records_written: u64,
+    /// Distinct thread/turn keys with at least one written model row.
+    pub turns_with_usage: u64,
+    /// Completed turns minus captured turns, saturated at zero.
+    pub missing_usage_turns: u64,
 }
 
 /// Counts for the requested period.

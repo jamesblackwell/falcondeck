@@ -506,6 +506,31 @@ pub(super) async fn start_opencode_turn(
         if app.is_shutting_down() {
             return;
         }
+        // Read only this admitted input's messages, including partial usage
+        // when settlement failed or the user interrupted. Hydration never records.
+        if let Ok(messages) = runtime.messages_since(&session_id, &message_id).await {
+            for (model, usage) in native_turn_usage(&messages) {
+                app.record_turn_usage(super::analytics::TurnUsage {
+                    workspace_id: &workspace_id,
+                    thread_id: &thread_id,
+                    provider: "opencode",
+                    model: &model,
+                    uncached_input: usage.0[0],
+                    cache_read: usage.0[1],
+                    cache_write: usage.0[2],
+                    output: usage.0[3],
+                    reasoning: usage.0[4],
+                    calls: Some(usage.1),
+                    cost: Some(usage.2),
+                    cost_source: "provider",
+                    tier: None,
+                    effort: None,
+                    cost_ticks: None,
+                    id: format!("opencode:{session_id}:{message_id}:{model}"),
+                    turn_key: message_id.clone(),
+                });
+            }
+        }
         let mut interrupted = false;
         let _ = app
             .with_managed_thread_mut(&workspace_id, &thread_id, |thread| {
@@ -603,6 +628,50 @@ pub(super) async fn start_opencode_turn(
             .await;
     });
     Ok(())
+}
+
+/// Native assistant messages report uncached input and cache separately.
+fn native_turn_usage(
+    messages: &[Value],
+) -> std::collections::BTreeMap<String, ([u64; 5], u64, f64)> {
+    let mut models = std::collections::BTreeMap::<String, ([u64; 5], u64, f64)>::new();
+    let mut seen = std::collections::HashSet::new();
+    for message in messages {
+        if message["type"] != "assistant" {
+            continue;
+        }
+        let Some(id) = message["id"].as_str() else {
+            continue;
+        };
+        if !seen.insert(id) {
+            continue;
+        }
+        let Some(tokens) = message.get("tokens") else {
+            continue;
+        };
+        let counts = [
+            tokens["input"].as_u64().unwrap_or(0),
+            tokens["cache"]["read"].as_u64().unwrap_or(0),
+            tokens["cache"]["write"].as_u64().unwrap_or(0),
+            tokens["output"].as_u64().unwrap_or(0),
+            tokens["reasoning"].as_u64().unwrap_or(0),
+        ];
+        if counts.iter().all(|n| *n == 0) {
+            continue;
+        }
+        let model = format!(
+            "{}/{}",
+            message["model"]["providerID"].as_str().unwrap_or_default(),
+            message["model"]["id"].as_str().unwrap_or_default()
+        );
+        let entry = models.entry(model).or_default();
+        for (sum, n) in entry.0.iter_mut().zip(counts) {
+            *sum += n;
+        }
+        entry.1 += 1;
+        entry.2 += message["cost"].as_f64().unwrap_or(0.0);
+    }
+    models
 }
 
 pub(super) fn native_permission_modes() -> Vec<String> {
@@ -1585,6 +1654,19 @@ mod tests {
         .await
         .unwrap();
         (temp, app)
+    }
+
+    #[test]
+    fn captured_native_usage_sums_calls_without_replaying_messages() {
+        // GET /api/session/.../message captured 2026-11-04; content omitted.
+        let mut messages: Vec<Value> =
+            serde_json::from_str(include_str!("../fixtures/opencode-native-usage.json")).unwrap();
+        messages.push(messages[0].clone());
+        let totals = native_turn_usage(&messages);
+        let (tokens, calls, cost) = totals["zai-coding-plan/glm-5.3"];
+        assert_eq!(tokens, [1164, 748032, 0, 620, 63]);
+        assert_eq!(calls, 2);
+        assert_eq!(cost, 0.0);
     }
 
     #[tokio::test]

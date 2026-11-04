@@ -922,6 +922,18 @@ export function AnalyticsPanel({ baseUrl, onToast, onOpenThread }: AnalyticsPane
               />
             }
           />
+          {(status?.usage_health ?? []).map((health) => (
+            <SettingRow
+              key={health.provider}
+              title={`${health.provider} usage capture`}
+              description="Since daemon startup, while usage recording is enabled. Includes failed and interrupted turns."
+              control={
+                <span className="text-[length:var(--fd-text-xs)] tabular-nums text-fg-secondary">
+                  {health.completed_turns} completed · {health.usage_records_written} records · {health.missing_usage_turns} missing usage
+                </span>
+              }
+            />
+          ))}
           <SettingRow
             title="Storage"
             description={

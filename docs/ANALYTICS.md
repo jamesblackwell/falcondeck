@@ -65,7 +65,8 @@ what was true when it was written):
   accounting. Records dropped by a full writer queue are counted, not lost
   quietly (`dropped_usage_records` in the status response).
 - Replayed or re-delivered turns are counted once: the ACP event pump skips
-  usage while a `session/load` replay is in flight, and reading the files
+  usage classified as a `session/load` replay when received (an active prompt
+  always counts as live), and reading the files
   deduplicates on the record id.
 - Claude `result.usage` is only the last API call, not a turn aggregate; the
   aggregate is `modelUsage` (subagents included), or
@@ -79,7 +80,8 @@ what was true when it was written):
 | --- | --- |
 | Claude | the `result` event: one record per `modelUsage` entry, cost from `costUSD`, the turn's `num_turns` as `calls` on the busiest entry only; the cumulative fallback is differenced per process |
 | Codex | `thread/tokenUsage/updated`: cumulative totals diffed per turn (keyed by the notification's `turnId`), baselined where the previous turn ended, unchanged totals ignored, all-zero `last` reports skipped; flushed on turn completion (a transient retry flushes its attempt); provider fixed to `codex` and the model snapshotted from the thread's selection at turn start (`turn/started` carries no model field) |
-| Grok | `_x.ai/session/update` `turn_completed`: one record per `modelUsage` entry, `costUsdTicks` converted and kept raw |
+| Grok | `_x.ai/session_notification` (older builds: `_x.ai/session/update`) `turn_completed`: one record per `modelUsage` entry, `costUsdTicks` converted and kept raw |
+| Native OpenCode | assistant messages from the admitted input onward, fetched at settlement (including failure/interruption); summed by model, deduped by message id; input and cache counts are already separate |
 | Other ACP | the `session/prompt` response `usage` (input, output, and the cache/thought split when sent), model from the thread; Grok is excluded here to avoid double-counting |
 
 Capture is off the turn hot path: attribution is resolved in a spawned task
@@ -150,7 +152,15 @@ paired remote clients are refused, like the rest of analytics.
 
 ## API
 
-- `GET /api/analytics`: settings, folder, and bytes used.
+- `GET /api/analytics`: settings, folder, bytes used, and `usage_health` per
+  provider since daemon startup: `completed_turns`, `usage_records_written`,
+  `turns_with_usage`, and `missing_usage_turns`. Completion counts follow live
+  running/waiting → idle/error status transitions independently of the activity
+  switch, while `record_usage` is enabled. Written records count successful writer
+  appends; multiple models count as several records but one captured turn.
+  The mismatch is a diagnostic, not a billing reconciliation: zero-token turns
+  can have no record, retries/steer segments may have several captures, and a
+  daemon restart resets counters. Settings → Analytics shows these figures.
 - `POST /api/analytics/settings`: replace settings.
 - `GET /api/analytics/summary?days=N`: totals, daily series, agent pairs, latest
   agent messages, files (with days written by more than one thread), per-bot and
@@ -176,3 +186,38 @@ paired remote clients are refused, like the rest of analytics.
 - `POST /api/analytics/clear` with `{"target": "prompts" | "events" | "usage"
   | "all"}`. Usage has its own target: deleting activity metadata leaves the
   token usage log alone.
+
+## Capture regression evidence (4 November 2026)
+
+The fixtures under `crates/falcondeck-daemon/src/fixtures/` retain usage-only
+payloads from direct local protocol probes, with conversation content omitted:
+
+- Grok 1.0.70 stdio: the live method is `_x.ai/session_notification`, although
+  `~/.grok/sessions/.../updates.jsonl` still stores `_x.ai/session/update`.
+  The captured turn reports 21,541 input, 1,664 cache read, 28 output and
+  277,127,200 cost ticks. The old dispatcher never reached its usage parser.
+- Native OpenCode: `GET /api/session/<session>/message` for the existing
+  `ses_e5da18d09ffedm4Pd7uKHt77K5` session returned assistant messages with
+  `tokens`, `model` and `cost`. Recent FalconDeck OpenCode threads use native
+  transport, bypassing the ACP prompt-response hook entirely. The two retained
+  messages sum to 1,164 uncached input, 748,032 cache read and 620 output.
+  A direct ACP probe returned authentication-required, so it cannot establish
+  the billed response shape of a successful generic ACP turn.
+- Codex 0.166.0 app-server: captured `turn/started`,
+  `thread/tokenUsage/updated`, and `turn/completed` agree on turn identity.
+  A scan of all rollout files modified since recording began (including rollouts
+  created before November) found seven FalconDeck `task_complete` events between
+  3 November 14:14 UTC and 4 November 13:03 UTC. Every one matches a usage id:
+
+| Thread prefix | Finished turns (UTC) |
+| --- | --- |
+| `01a1a173` | Nov 3 14:33:14, 15:34:37, 15:48:56, 15:59:49 |
+| `01a19130` | Nov 4 09:01:14 |
+| `01a1a65d` | Nov 4 11:49:14 |
+| `01a1a670` | Nov 4 12:08:11 |
+
+No post-launch Codex drop, interrupted completion, subagent completion, or turn-id
+mismatch was established by that scan. Earlier completions in those rollouts
+predate the recording window; `codex_exec` CLI sessions are separate from the
+daemon's app-server sessions. Codex retains the previous terminal totals as the
+next start's baseline and uses a stable thread/turn record id for read dedupe.

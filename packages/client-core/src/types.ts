@@ -544,6 +544,14 @@ export type AnalyticsStatus = {
   /** Older daemons omit these. */
   usage_bytes?: number;
   dropped_usage_records?: number;
+  /** Capture health since daemon startup, independent of activity recording. */
+  usage_health?: Array<{
+    provider: string;
+    completed_turns: number;
+    usage_records_written: number;
+    turns_with_usage: number;
+    missing_usage_turns: number;
+  }>;
 };
 export type AnalyticsTotals = {
   user_messages: number;
