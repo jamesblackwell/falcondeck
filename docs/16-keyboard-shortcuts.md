@@ -30,12 +30,23 @@ without a project in the Chats section.
 Holding `⌘` for a moment numbers the first nine bots in the working list, and
 `⌘1`–`⌘9` opens that bot's conversation. These positional jumps are fixed, not
 customizable, and desktop-only (browsers use them for tabs). The terminal keeps
-`⌘1`–`⌘9` for its own tabs while it has focus.
+`⌘1`–`⌘9` for its own tabs while it has focus. Terminal splits, pane focus and font size are
+listed in [terminal.md](terminal.md).
 
 The registry is the source of truth for labels, descriptions, contexts, and
 defaults. Custom values are versioned and stored locally because shortcuts are
 device and keyboard-layout preferences. Empty binding arrays explicitly unbind
 a command. Bindings update without restarting the app.
+
+`⌘⇧X` (`toggleComposerExpanded`) switches the composer between its normal
+auto-growing size and a tall writing mode of about half the conversation pane.
+The composer leaves that mode on send and on switching chats. The native Mac
+pilot uses `⌘⇧E`, but the desktop app can't: that key is the native File →
+Export Full Backup accelerator, which macOS handles before the webview sees it.
+
+Options → Analytics opens Settings directly to Analytics. Its default in-app
+shortcut is `⌘⇧A` (`openAnalytics`) on desktop and the native Mac pilot, and can
+be customized in Keyboard shortcuts.
 
 ## Dispatch and safety rules
 

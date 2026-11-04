@@ -544,6 +544,14 @@ export type AnalyticsStatus = {
   /** Older daemons omit these. */
   usage_bytes?: number;
   dropped_usage_records?: number;
+  /** Capture health since daemon startup, independent of activity recording. */
+  usage_health?: Array<{
+    provider: string;
+    completed_turns: number;
+    usage_records_written: number;
+    turns_with_usage: number;
+    missing_usage_turns: number;
+  }>;
 };
 export type AnalyticsTotals = {
   user_messages: number;
@@ -618,6 +626,10 @@ export type AnalyticsWaiting = {
   p90_reply_ms: number;
 };
 export type AnalyticsAutomation = {
+  models?: string[];
+  configured_model?: string | null;
+  fallback_model?: string | null;
+  usage?: AnalyticsUsageTotals;
   id?: string | null;
   name: string;
   /** enabled, paused, completed or failed; empty when deleted. */
@@ -1160,6 +1172,8 @@ export type ThreadSummary = {
   status: ThreadStatus;
   updated_at: string;
   last_message_preview: string | null;
+  /** When the preview's message was written; `updated_at` also moves on tool activity. */
+  last_message_at?: string | null;
   latest_turn_id: string | null;
   latest_plan: ThreadPlan | null;
   latest_diff: string | null;
@@ -2634,11 +2648,19 @@ export type TerminalSessionInfo = {
   cols: number;
   rows: number;
   created_at: string;
+  /** Thread the session was opened for; absent on workspace-level shells. */
+  thread_id?: string | null;
+  /** Bot the session was opened for; wins over `thread_id`. */
+  bot_id?: string | null;
 };
 
 export type OpenTerminalPayload = {
   cols: number;
   rows: number;
+  /** Start in this thread's working directory and keep the shell with it. */
+  thread_id?: string | null;
+  /** Start in this bot's space and keep the shell with the bot. */
+  bot_id?: string | null;
 };
 
 export type TerminalOpenedResponse = {
@@ -2670,7 +2692,8 @@ export type TerminalServerFrame =
   | { type: "terminal_output"; chunk: TerminalChunk }
   | { type: "terminal_exited"; exit_code: number | null }
   | { type: "terminal_error"; message: string }
-  | { type: "terminal_pong" };
+  | { type: "terminal_pong" }
+  | { type: "terminal_status"; process: string | null; cwd: string | null };
 
 export type WorkspaceBackupEntry = {
   path: string;

@@ -200,6 +200,7 @@ impl AppState {
                     settled_at,
                     error,
                 ));
+                refresh_last_message_preview(thread);
                 let terminal_receipt = terminal_assistant_receipt_with_error(
                     &thread.items,
                     content_terminal,
@@ -807,6 +808,7 @@ impl AppState {
                     status: ThreadStatus::Idle,
                     updated_at: now,
                     last_message_preview: None,
+                    last_message_at: None,
                     latest_turn_id: None,
                     latest_plan: None,
                     latest_diff: None,
@@ -3035,6 +3037,12 @@ impl AppState {
                     .max(self.inner.sequence.load(Ordering::Relaxed));
             }
             let skip_summary = is_in_flight_text_item(&item);
+            if track_attention
+                && !skip_summary
+                && matches!(item, ConversationItem::AssistantMessage { .. })
+            {
+                refresh_last_message_preview(thread);
+            }
             let append_delta = in_flight_append_delta(&previous, &item);
             drop(workspaces);
             if let Some(delta) = append_delta {
@@ -3113,6 +3121,12 @@ impl AppState {
         // backstop for threads whose first agent item never arrives.
         let wants_title = !thread.ai_title_in_flight && should_generate_ai_thread_title(thread);
         let skip_summary = is_in_flight_text_item(&item);
+        if track_attention
+            && !skip_summary
+            && matches!(item, ConversationItem::AssistantMessage { .. })
+        {
+            refresh_last_message_preview(thread);
+        }
         drop(workspaces);
         let emitted_item = with_renderable_attachment_previews(item).await;
         self.emit(
@@ -3399,6 +3413,7 @@ fn apply_codex_native_refresh(
         };
         thread.summary.last_error = error;
         thread.summary.last_message_preview = hydrated.summary.last_message_preview;
+        thread.summary.last_message_at = hydrated.summary.last_message_at;
         thread.summary.last_tool = hydrated.summary.last_tool;
         thread.summary.updated_at = thread.summary.updated_at.max(completed_at);
     }
@@ -3439,6 +3454,7 @@ fn apply_codex_thread_hydration(
     }
     if thread.summary.last_message_preview.is_none() {
         thread.summary.last_message_preview = hydrated.summary.last_message_preview;
+        thread.summary.last_message_at = hydrated.summary.last_message_at;
     }
     if thread.summary.latest_turn_id.is_none() {
         thread.summary.latest_turn_id = hydrated.summary.latest_turn_id;
@@ -3713,6 +3729,40 @@ fn in_flight_append_delta(
 /// stamping attention for those flips read threads back to unread every time
 /// the daemon settles a dying turn, e.g. on every app quit while a turn runs.
 /// Genuine failures already demand attention through the error status.
+/// Points the summary preview and its timestamp at the newest settled
+/// assistant reply. Claude and ACP turns only ever reached the preview through
+/// history hydration, so a bot row kept quoting a reply from before the last
+/// load while `updated_at` moved with every tool call.
+///
+/// Streaming and receipt items are skipped. A failed reply leaves the preview
+/// alone: providers that report an error put its text there themselves.
+fn refresh_last_message_preview(thread: &mut ManagedThread) {
+    let newest = thread.items.iter().rev().find_map(|item| match item {
+        ConversationItem::AssistantMessage {
+            id,
+            text,
+            lifecycle,
+            created_at,
+            ..
+        } if !id.starts_with(TURN_RECEIPT_ID_PREFIX)
+            && !matches!(
+                lifecycle,
+                ContentLifecycle::Pending | ContentLifecycle::Streaming
+            )
+            && (*lifecycle == ContentLifecycle::Error || !text.trim().is_empty()) =>
+        {
+            Some((text, *lifecycle, *created_at))
+        }
+        _ => None,
+    });
+    if let Some((text, lifecycle, created_at)) = newest
+        && lifecycle != ContentLifecycle::Error
+    {
+        thread.summary.last_message_preview = Some(super::conversation_helpers::truncate_preview(text, 160));
+        thread.summary.last_message_at = Some(created_at);
+    }
+}
+
 fn marks_agent_activity(item: &ConversationItem) -> bool {
     match item {
         ConversationItem::UserMessage { .. } | ConversationItem::Service { .. } => false,
@@ -4047,6 +4097,7 @@ mod tests {
             status: ThreadStatus::Idle,
             updated_at: Utc::now(),
             last_message_preview: None,
+            last_message_at: None,
             latest_turn_id: None,
             latest_plan: None,
             latest_diff: None,

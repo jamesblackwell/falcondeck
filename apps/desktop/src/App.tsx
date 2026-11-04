@@ -236,6 +236,15 @@ import {
   useShortcutSettings,
 } from "./shortcuts";
 import {
+  botIdForThread,
+  terminalScopeFor,
+  useTerminalScopes,
+} from "./terminal-scopes";
+import {
+  setTerminalPanelHeight,
+  useTerminalPanelHeight,
+} from "./terminal-prefs";
+import {
   desktopAttentionNotification,
   sendDesktopAttentionNotification,
 } from "./desktop-notifications";
@@ -303,9 +312,9 @@ const ExtensionsView = lazy(() =>
     default: module.ExtensionsView,
   })),
 );
-const TerminalPanel = lazy(() =>
+const TerminalDock = lazy(() =>
   import("./components/TerminalPanel").then((module) => ({
-    default: module.TerminalPanel,
+    default: module.TerminalDock,
   })),
 );
 
@@ -525,10 +534,20 @@ function AppInner() {
   const [isScheduledOpen, setIsScheduledOpen] = useState(false);
   const [automationOpenRequest, setAutomationOpenRequest] = useState<{ id: string; key: number } | null>(null);
   const automationOpenKey = useRef(0);
-  const [isTerminalOpen, setIsTerminalOpen] = useState(false);
+  // The terminal panel belongs to the selected bot, thread or project: each
+  // keeps its own open state, tabs and splits (see docs/terminal.md).
+  const terminalBotId = useMemo(
+    () => botIdForThread(snapshot?.preferences.bots, selectedThreadId),
+    [selectedThreadId, snapshot?.preferences.bots],
+  );
+  const terminalScope = useMemo(
+    () => terminalScopeFor(selectedWorkspaceId, selectedThreadId, terminalBotId),
+    [selectedThreadId, selectedWorkspaceId, terminalBotId],
+  );
+  const terminal = useTerminalScopes(terminalScope);
+  const isTerminalOpen = terminal.isOpen;
+  const terminalHeight = useTerminalPanelHeight(terminalScope?.key ?? null);
   const [terminalMounted, setTerminalMounted] = useState(false);
-  const [terminalCreateKey, setTerminalCreateKey] = useState(0);
-  const [terminalFindKey, setTerminalFindKey] = useState(0);
 
   useEffect(() => {
     if (isTerminalOpen) setTerminalMounted(true);
@@ -568,6 +587,7 @@ function AppInner() {
     mode: "toggle" as "open" | "toggle" | "close",
   });
   const [composerFocusRequestKey, setComposerFocusRequestKey] = useState(0);
+  const [composerExpandRequestKey, setComposerExpandRequestKey] = useState(0);
   const [projectMenuRequestKey, setProjectMenuRequestKey] = useState(0);
   const [composerMenuRequest, setComposerMenuRequest] =
     useState<ComposerMenuRequest>({ key: 0, menu: "model" });
@@ -1416,6 +1436,23 @@ function AppInner() {
     },
     [openLinkedFile, toast],
   );
+  // ⌘-click on `path:line` in the terminal: files open in the default
+  // editor, folders in Finder. (No line-aware editor command exists yet.)
+  const openTerminalFile = useCallback(
+    ({ path }: { path: string }) => {
+      if (!isTauriDesktop()) return;
+      void localPathKind(path)
+        .then((kind) => {
+          if (kind === "file") handleLocalPath("open-default-editor", path);
+          else if (kind === "directory") handleLocalPath("open", path);
+        })
+        .catch(() => undefined);
+    },
+    [handleLocalPath],
+  );
+  const focusComposerAfterTerminal = useCallback(() => {
+    setComposerFocusRequestKey((current) => current + 1);
+  }, []);
   const selectedThread = useMemo(
     () =>
       threadForSelection(
@@ -5679,16 +5716,9 @@ function AppInner() {
   useEffect(() => {
     function handleShortcut(event: KeyboardEvent) {
       if (event.isComposing || event.keyCode === 229 || event.repeat) return;
-      // The terminal panel owns its tab shortcuts (⌘T, ⌘W, ⌘⇧[ ]) while it
-      // has focus; they must not fall through to the global bindings.
-      const inTerminalPanel =
-        event.target instanceof Element &&
-        Boolean(event.target.closest("[data-terminal-panel]"));
-      if (
-        inTerminalPanel &&
-        commandForEvent("terminal", event, shortcutSettings)
-      )
-        return;
+      // Terminal-context shortcuts (⌘T, ⌘W, ⌘D…) are consumed by the panel's
+      // capture-phase listener and never arrive here; the ones it passes on
+      // (⌘[ with a single pane) keep their global meaning.
       const command = commandForEvent("global", event, shortcutSettings);
       if (!command) return;
       if (isEditableTarget(event.target) && !event.metaKey && !event.ctrlKey)
@@ -5729,6 +5759,9 @@ function AppInner() {
           setIsExtensionsOpen(false);
           setIsPluginsOpen(false);
           break;
+        case "openAnalytics":
+          openSettingsSection("analytics");
+          break;
         case "openUsage":
           handleOpenUsage();
           break;
@@ -5749,7 +5782,7 @@ function AppInner() {
             event.target instanceof Element &&
             Boolean(event.target.closest("[data-terminal-panel]"));
           if (inTerminal) {
-            setTerminalFindKey((current) => current + 1);
+            terminal.requestFind();
             break;
           }
           if (isSettingsOpen) {
@@ -5775,11 +5808,10 @@ function AppInner() {
           toggleSidebar();
           break;
         case "toggleTerminal":
-          setIsTerminalOpen((current) => !current);
+          terminal.toggle();
           break;
         case "newTerminal":
-          setIsTerminalOpen(true);
-          setTerminalCreateKey((current) => current + 1);
+          terminal.openNew();
           break;
         case "toggleChanges":
           toggleRail();
@@ -5813,6 +5845,14 @@ function AppInner() {
           setIsExtensionsOpen(false);
           setIsPluginsOpen(false);
           setComposerFocusRequestKey((current) => current + 1);
+          break;
+        case "toggleComposerExpanded":
+          setIsSettingsOpen(false);
+          setIsScheduledOpen(false);
+          setIsTicketsOpen(false);
+          setIsExtensionsOpen(false);
+          setIsPluginsOpen(false);
+          setComposerExpandRequestKey((current) => current + 1);
           break;
         case "openProjectMenu":
           handleOpenProjectMenu();
@@ -5855,9 +5895,10 @@ function AppInner() {
     handleOpenKeyboardShortcuts,
     handleOpenProjectMenu,
     handleOpenUsage,
+    openSettingsSection,
     handleStopCallback,
     isSettingsOpen,
-    isTerminalOpen,
+    terminal,
     navigateSelectionHistory,
     selectAdjacentThread,
     selectedThread?.status,
@@ -6021,6 +6062,7 @@ function AppInner() {
             isAddingProject={isAddingProject}
             onOpenSettings={handleOpenSettings}
             settingsOpen={isSettingsOpen}
+            onOpenAnalytics={() => openSettingsSection("analytics")}
             onOpenUsage={handleOpenUsage}
             onOpenKeyboardShortcuts={handleOpenKeyboardShortcuts}
             onOpenSpeechSettings={openSpeechSettings}
@@ -6168,6 +6210,7 @@ function AppInner() {
                   <SettingsView
                     cloudOwners={cloudOwners}
                     initialCloudOwnerId={selectedCloudOwnerId}
+                    onOpenAutomation={handleOpenAutomation}
                     initialSection={settingsSection}
                     sectionRequestKey={settingsRequestKey}
                     workspace={selectedWorkspace}
@@ -6457,6 +6500,11 @@ function AppInner() {
                 onAlternateSubmit: handleAlternateSubmitCallback,
                 resolveComposerShortcut,
                 focusRequestKey: composerFocusRequestKey,
+                expandRequestKey: composerExpandRequestKey,
+                expandShortcut: shortcutHintTokens(
+                  "toggleComposerExpanded",
+                  shortcutSettings,
+                ),
                 menuRequest: composerMenuRequest,
                 menuShortcuts: composerMenuShortcuts,
                 sendShortcut: shortcutHintTokens(
@@ -6683,18 +6731,20 @@ function AppInner() {
         bottom={
           terminalMounted && baseUrl && !isCloudThread ? (
             <Suspense fallback={null}>
-              <TerminalPanel
+              <TerminalDock
                 baseUrl={baseUrl}
-                workspaceId={selectedWorkspaceId}
-                visible={isTerminalOpen}
-                createRequestKey={terminalCreateKey}
-                findRequestKey={terminalFindKey}
-                onHide={() => setIsTerminalOpen(false)}
+                controller={terminal}
+                onFocusLeave={focusComposerAfterTerminal}
+                onOpenFile={openTerminalFile}
               />
             </Suspense>
           ) : undefined
         }
         bottomVisible={isTerminalOpen && !isCloudThread}
+        bottomHeight={terminalHeight}
+        onBottomHeightChange={(height) =>
+          setTerminalPanelHeight(terminalScope?.key ?? null, height)
+        }
       />
       {snapshot?.restore_phase === "loading_persisted_state" ? (
         <StartupRestoreOverlay />

@@ -4370,6 +4370,11 @@ pub struct ThreadSummary {
     pub updated_at: DateTime<Utc>,
     /// Preview text from the latest user- or assistant-visible message.
     pub last_message_preview: Option<String>,
+    /// When the message behind `last_message_preview` was written. Unlike
+    /// `updated_at`, tool calls and status changes do not move it, so a row
+    /// can date the preview it shows. `None` when the source had no time.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_message_at: Option<DateTime<Utc>>,
     /// Latest turn identifier, if a turn has been started.
     pub latest_turn_id: Option<String>,
     /// Latest plan emitted into the thread, if any.

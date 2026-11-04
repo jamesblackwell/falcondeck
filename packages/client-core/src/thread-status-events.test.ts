@@ -184,6 +184,45 @@ describe("thread status events", () => {
     expect(next.threads[0]?.last_message_preview).toBe("Hello so far");
   });
 
+  it("lands a finished reply on an unopened thread's preview and message time", () => {
+    // Nothing selected or loaded: the summary event is the row's only source.
+    const snapshot = snapshotWith(
+      thread({
+        last_message_preview: "An hour-old reply",
+        last_message_at: "2026-08-13T17:00:00Z",
+        updated_at: "2026-08-13T18:28:00Z",
+      }),
+    );
+    const next = apply(
+      snapshot,
+      thread({
+        last_message_preview: "Should I ship the build?",
+        last_message_at: "2026-08-13T18:28:10Z",
+        updated_at: "2026-08-13T18:28:15Z",
+      }),
+    );
+    expect(next.threads[0]).toMatchObject({
+      last_message_preview: "Should I ship the build?",
+      last_message_at: "2026-08-13T18:28:10Z",
+    });
+  });
+
+  it("applies a running update that only moves the message time", () => {
+    const snapshot = snapshotWith(
+      thread({ ...running, last_message_preview: "Done", last_message_at: "2026-08-13T18:00:00Z" }),
+    );
+    const next = apply(
+      snapshot,
+      thread({
+        ...running,
+        updated_at: "2026-08-13T18:28:20Z",
+        last_message_preview: "Done",
+        last_message_at: "2026-08-13T18:28:20Z",
+      }),
+    );
+    expect(next.threads[0]?.last_message_at).toBe("2026-08-13T18:28:20Z");
+  });
+
   it("ignores a running attention bump when goal, variant, and handoff objects are rebuilt", () => {
     const initial = thread({
       status: "running",

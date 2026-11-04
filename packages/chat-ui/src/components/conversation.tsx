@@ -1039,7 +1039,10 @@ export const Conversation = memo(function Conversation({
           editors={localPathEditors ?? undefined}
           describePath={describeLocalPath}
         >
-          <div className="fd-type-scope fd-scope-chat flex min-h-0 flex-1 flex-col">
+          <div
+            data-conversation-viewport
+            className="fd-type-scope fd-scope-chat flex min-h-0 flex-1 flex-col"
+          >
             <div className="relative min-h-0 flex-1">
               <div
                 ref={scrollRef}

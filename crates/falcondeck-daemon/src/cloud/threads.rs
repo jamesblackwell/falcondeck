@@ -85,6 +85,7 @@ fn summary(record: &JobRecord, native: Option<&ThreadSummary>) -> ThreadSummary 
             status: ThreadStatus::Idle,
             updated_at: record.job.updated_at,
             last_message_preview: None,
+            last_message_at: None,
             latest_turn_id: None,
             latest_plan: None,
             latest_diff: None,

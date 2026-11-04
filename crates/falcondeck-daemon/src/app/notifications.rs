@@ -936,18 +936,6 @@ pub(super) async fn ingest_notification(
                         .get_mut(&thread_id)
                         .ok_or_else(|| DaemonError::NotFound("thread not found".to_string()))?;
 
-                    thread.summary.last_message_preview = Some(truncate_preview(
-                        &format!(
-                            "{}{}",
-                            thread
-                                .summary
-                                .last_message_preview
-                                .clone()
-                                .unwrap_or_default(),
-                            delta
-                        ),
-                        160,
-                    ));
                     thread.summary.updated_at = Utc::now();
                     workspace.summary.current_thread_id = Some(thread_id.clone());
                     workspace.summary.updated_at = Utc::now();
@@ -1001,6 +989,12 @@ pub(super) async fn ingest_notification(
                         thread
                             .assistant_items
                             .insert(item_id.clone(), thread.items.len() - 1);
+                    }
+                    // Preview the message being streamed. Appending the delta
+                    // to the old preview kept a full-length previous reply
+                    // on screen, since truncation cut the new text off.
+                    if let ConversationItem::AssistantMessage { text, .. } = &next {
+                        thread.summary.last_message_preview = Some(truncate_preview(text, 160));
                     }
                     let end_offset = start_offset + delta.encode_utf16().count() as u64;
                     (next, existing_index.is_some(), start_offset, end_offset)

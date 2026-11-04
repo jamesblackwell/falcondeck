@@ -33,6 +33,7 @@ export type AnalyticsPanelProps = {
     description?: string
   }) => void
   /** Opens a thread by id; when absent, thread titles stay plain text. */
+  onOpenAutomation?: (id: string) => void
   onOpenThread?: (workspaceId: string, threadId: string) => void
 }
 
@@ -55,10 +56,33 @@ const RETENTION: Array<{ value: string; label: string }> = [
 ]
 
 const AUTOMATION_FLAGS: Record<string, string> = {
+  large_reused_context: 'Large context',
+  reused_thread_model_pin: 'Model pin on shared thread',
+  bot_home_frequent: 'Frequent bot-home runs',
+  cache_cold_reuse: 'Cold cache reuse',
   rarely_useful: 'Rarely finds anything',
   very_frequent: 'Very frequent',
   failing: 'Failing',
   thread_per_run: 'New thread each run',
+}
+
+const AUTOMATION_HINTS: Record<string, string> = {
+  large_reused_context: 'Use fresh runs or a smaller compaction window to reduce reused context.',
+  reused_thread_model_pin: 'Clear model and effort pins or use fresh runs with a bot.',
+  bot_home_frequent: 'Use fresh runs with a bot or schedule the home thread at least four hours apart.',
+  cache_cold_reuse: 'Run within the cache TTL or use fresh threads.',
+  rarely_useful: 'Run less often or add a shell pre-check.',
+  very_frequent: 'Reduce the schedule frequency.',
+  failing: 'Open the automation and inspect recent failures.',
+  thread_per_run: 'Review the schedule and whether each run needs a fresh thread.',
+}
+
+function modelLabel(model: string) {
+  return model.replace(/^claude-/, '').replace(/-(\d{8})$/, '').replace(/-(\d+)-(\d+)$/, ' $1.$2').replace(/^(haiku|sonnet|opus)/, (name) => name[0].toUpperCase() + name.slice(1))
+}
+
+function tokenTotal(usage?: { input_tokens: number; cache_read_tokens: number; cache_write_tokens: number; output_tokens: number }) {
+  return usage ? usage.input_tokens + usage.cache_read_tokens + usage.cache_write_tokens + usage.output_tokens : 0
 }
 
 const USAGE_ORIGINS: Record<string, string> = {
@@ -220,8 +244,9 @@ function PromptRow({ prompt }: { prompt: AnalyticsPrompt }) {
   )
 }
 
-export function AnalyticsPanel({ baseUrl, onToast, onOpenThread }: AnalyticsPanelProps) {
+export function AnalyticsPanel({ baseUrl, onToast, onOpenThread, onOpenAutomation }: AnalyticsPanelProps) {
   const api = useMemo(() => (baseUrl ? createDaemonApiClient(baseUrl) : null), [baseUrl])
+  const [tokenSort, setTokenSort] = useState<'desc' | 'asc' | null>(null)
   const [period, setPeriod] = useState<Period>('30')
   const [metric, setMetric] = useState<DailyMetric>('user_messages')
   const [summary, setSummary] = useState<AnalyticsSummary | null>(null)
@@ -449,30 +474,32 @@ export function AnalyticsPanel({ baseUrl, onToast, onOpenThread }: AnalyticsPane
         description="Every scheduled task, flagged when it may cost more than it gives. A run that finds nothing to do still takes a turn; frequent runs grow a thread's context or the sidebar."
       >
         {summary?.automations?.length ? (
-          <table className={TABLE}>
+          <div className="overflow-x-auto"><table className={cn(TABLE, "min-w-[960px]")}>
             <thead>
               <tr>
-                <th className={TH}>Task</th>
-                <th className={cn(TH, NUM)}>Runs</th>
-                <th className={cn(TH, NUM)}>Nothing to do</th>
-                <th className={cn(TH, NUM)}>Failed</th>
-                <th className={cn(TH, NUM)}>Agent time</th>
-                <th className={cn(TH, NUM)}>Threads</th>
+                <th className={cn(TH, "min-w-64 pr-4")}>Task</th>
+                <th className={cn(TH, "min-w-40 pr-4")}>Models</th>
+                <th className={cn(TH, NUM, "px-3 whitespace-nowrap")} aria-sort={tokenSort === null ? "none" : tokenSort === "desc" ? "descending" : "ascending"}><button type="button" className="fd-focus" onClick={() => setTokenSort(tokenSort === "desc" ? "asc" : "desc")}>Tokens {tokenSort === "desc" ? "↓" : tokenSort === "asc" ? "↑" : "↕"}</button></th>
+                <th className={cn(TH, NUM, "px-3 whitespace-nowrap")}>Runs</th>
+                <th className={cn(TH, NUM, "px-3 whitespace-nowrap")}>Nothing to do</th>
+                <th className={cn(TH, NUM, "px-3 whitespace-nowrap")}>Failed</th>
+                <th className={cn(TH, NUM, "px-3 whitespace-nowrap")}>Agent time</th>
+                <th className={cn(TH, NUM, "px-3 whitespace-nowrap")}>Threads</th>
               </tr>
             </thead>
             <tbody>
-              {summary.automations.map((automation) => (
+              {[...summary.automations].sort((a, b) => tokenSort ? (tokenSort === "desc" ? -1 : 1) * (tokenTotal(a.usage) - tokenTotal(b.usage)) : 0).map((automation) => (
                 <tr key={automation.id ?? automation.name}>
                   <td className={TD}>
                     <div className="space-y-1">
                       <div className="flex flex-wrap items-center gap-1.5">
                         <span className={automation.state === 'paused' ? 'text-fg-muted' : undefined}>
-                          {automation.name}
+                          {automation.id && automation.state && onOpenAutomation ? <button type="button" className="fd-focus text-left hover:underline" onClick={() => onOpenAutomation(automation.id!)}>{automation.name}</button> : automation.name}
                         </span>
                         {(automation.flags ?? []).map((flag) => (
-                          <Badge key={flag} variant={flag === 'failing' ? 'danger' : 'warning'}>
+                          <span key={flag} title={AUTOMATION_HINTS[flag]}><Badge variant={flag === 'failing' ? 'danger' : 'warning'}>
                             {AUTOMATION_FLAGS[flag] ?? flag}
-                          </Badge>
+                          </Badge></span>
                         ))}
                       </div>
                       <p className="text-[length:var(--fd-text-xs)] text-fg-muted">
@@ -486,17 +513,24 @@ export function AnalyticsPanel({ baseUrl, onToast, onOpenThread }: AnalyticsPane
                       </p>
                     </div>
                   </td>
-                  <td className={cn(TD, NUM)}>{count(automation.runs)}</td>
-                  <td className={cn(TD, NUM)}>
-                    {automation.runs ? percent(automation.no_action, automation.runs - automation.skipped) : '—'}
+                  <td className={TD}>
+                    <p className={automation.models?.length ? undefined : 'text-fg-muted'}>
+                      {automation.models?.length ? automation.models.map(modelLabel).join(' · ') : modelLabel(automation.configured_model || automation.fallback_model || 'Unknown')}
+                    </p>
+                    {automation.models?.length && automation.configured_model && !automation.models.includes(automation.configured_model) ? <p className="text-fg-muted text-[length:var(--fd-text-xs)]">Pin: {modelLabel(automation.configured_model)}</p> : null}
+                  </td>
+                  <td className={cn(TD, NUM, 'whitespace-nowrap')} title={automation.usage ? `Input: ${count(automation.usage.input_tokens)} · Cache read: ${count(automation.usage.cache_read_tokens)} · Cache write: ${count(automation.usage.cache_write_tokens)} · Output: ${count(automation.usage.output_tokens)}` : 'No recorded usage'}>{automation.usage?.turns ? compact(tokenTotal(automation.usage)) : '—'}</td>
+                  <td className={cn(TD, NUM, "whitespace-nowrap px-3")}>{count(automation.runs)}</td>
+                  <td className={cn(TD, NUM, "whitespace-nowrap px-3")}>
+                    {automation.runs > automation.skipped ? percent(automation.no_action, automation.runs - automation.skipped) : '—'}
                   </td>
                   <td className={cn(TD, NUM, automation.failed ? 'text-danger' : null)}>{count(automation.failed)}</td>
-                  <td className={cn(TD, NUM)}>{automation.agent_ms ? duration(automation.agent_ms) : '—'}</td>
-                  <td className={cn(TD, NUM)}>{count(automation.threads)}</td>
+                  <td className={cn(TD, NUM, "whitespace-nowrap px-3")}>{automation.agent_ms ? duration(automation.agent_ms) : '—'}</td>
+                  <td className={cn(TD, NUM, "whitespace-nowrap px-3")}>{count(automation.threads)}</td>
                 </tr>
               ))}
             </tbody>
-          </table>
+          </table></div>
         ) : (
           <p className={EMPTY}>No scheduled tasks ran in this period.</p>
         )}
@@ -922,6 +956,18 @@ export function AnalyticsPanel({ baseUrl, onToast, onOpenThread }: AnalyticsPane
               />
             }
           />
+          {(status?.usage_health ?? []).map((health) => (
+            <SettingRow
+              key={health.provider}
+              title={`${health.provider} usage capture`}
+              description="Since daemon startup, while usage recording is enabled. Includes failed and interrupted turns."
+              control={
+                <span className="text-[length:var(--fd-text-xs)] tabular-nums text-fg-secondary">
+                  {health.completed_turns} completed · {health.usage_records_written} records · {health.missing_usage_turns} missing usage
+                </span>
+              }
+            />
+          ))}
           <SettingRow
             title="Storage"
             description={

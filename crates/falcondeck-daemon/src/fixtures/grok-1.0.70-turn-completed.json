@@ -1,0 +1,42 @@
+{
+  "jsonrpc": "2.0",
+  "method": "_x.ai/session_notification",
+  "params": {
+    "sessionId": "01a1a6aa-ff89-7a33-a0cf-b7bfc00b4eaf",
+    "update": {
+      "sessionUpdate": "turn_completed",
+      "prompt_id": "06dd7794-fc1d-4cb0-b3f0-abcf0ef4e38b",
+      "stop_reason": "end_turn",
+      "usage": {
+        "inputTokens": 21541,
+        "outputTokens": 28,
+        "totalTokens": 21569,
+        "cachedReadTokens": 1664,
+        "cacheCreationTokens": 0,
+        "reasoningTokens": 27,
+        "modelCalls": 1,
+        "apiDurationMs": 2333,
+        "costUsdTicks": 277127200,
+        "modelUsage": {
+          "grok-4.7-build-fast": {
+            "inputTokens": 21541,
+            "outputTokens": 28,
+            "totalTokens": 21569,
+            "cachedReadTokens": 1664,
+            "cacheCreationTokens": 0,
+            "reasoningTokens": 27,
+            "modelCalls": 1,
+            "apiDurationMs": 2333,
+            "costUsdTicks": 277127200
+          }
+        },
+        "numTurns": 1
+      },
+      "elapsed_ms": 3881
+    },
+    "_meta": {
+      "eventId": "01a1a6aa-ff89-7a33-a0cf-b7bfc00b4eaf-18",
+      "agentTimestampMs": 1793797591437
+    }
+  }
+}

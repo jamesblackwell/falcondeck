@@ -768,6 +768,7 @@ export function normalizeThreadSummary(
     status: thread.status ?? "idle",
     updated_at: thread.updated_at ?? new Date(0).toISOString(),
     last_message_preview: thread.last_message_preview ?? null,
+    last_message_at: thread.last_message_at ?? null,
     latest_turn_id: thread.latest_turn_id ?? null,
     latest_plan: thread.latest_plan ?? null,
     latest_diff: thread.latest_diff ?? null,

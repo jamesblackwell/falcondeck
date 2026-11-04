@@ -8,19 +8,22 @@ import {
   readTerminalTheme,
   TerminalChunkApplier,
   TERMINAL_FONT_FAMILY,
-  TERMINAL_FONT_SIZE,
   TERMINAL_WIRE_INPUT,
   writeStatusNotice,
 } from '../terminal-utils'
 import { tabIndexForKeyEvent } from '../terminal-tabs'
 import { commandForEvent } from '../shortcuts'
+import { findFileLinks } from '../terminal-links'
+import {
+  getTerminalFontSize,
+  setTerminalFontSize,
+  subscribeTerminalFontSize,
+} from '../terminal-prefs'
 
 const RECONNECT_DELAY_MS = 1_000
 const PING_INTERVAL_MS = 15_000
 const RESIZE_DEBOUNCE_MS = 32
 const MAX_WEBGL_RECOVERY_ATTEMPTS = 3
-const FONT_SIZE_MIN = 10
-const FONT_SIZE_MAX = 22
 
 export interface TerminalViewProps {
   session: TerminalSessionInfo
@@ -29,6 +32,10 @@ export interface TerminalViewProps {
   onExited: (exitCode: number | null) => void
   onTitleChange: (title: string) => void
   onUserInput?: () => void
+  /** Foreground process and directory as reported by the daemon. */
+  onStatus?: (status: { process: string | null; cwd: string | null }) => void
+  /** ⌘-click on a file reference; `path` is as printed (maybe relative). */
+  onOpenFile?: (link: { path: string; line: number | null; column: number | null }) => void
   /** Overrides the socket factory so tests can inject a fake WebSocket. */
   createSocket?: (url: string) => WebSocket
 }
@@ -37,6 +44,8 @@ export type TerminalViewHandle = {
   focus(): void
   fit(): void
   reactivate(): void
+  /** Releases GPU resources while hidden; `reactivate` restores them. */
+  suspend(): void
   findNext(term: string, options?: { incremental?: boolean; caseSensitive?: boolean }): boolean
   findPrevious(term: string, options?: { incremental?: boolean; caseSensitive?: boolean }): boolean
   clearSearch(): void
@@ -55,13 +64,25 @@ type WebglAddonApi = ITerminalAddon & {
 type FitAddonApi = ITerminalAddon & { fit(): void }
 
 export const TerminalView = forwardRef<TerminalViewHandle, TerminalViewProps>(function TerminalView(
-  { session, socketUrl, active, onExited, onTitleChange, onUserInput, createSocket },
+  {
+    session,
+    socketUrl,
+    active,
+    onExited,
+    onTitleChange,
+    onUserInput,
+    onStatus,
+    onOpenFile,
+    createSocket,
+  },
   ref,
 ) {
   const containerRef = useRef<HTMLDivElement | null>(null)
   const onExitedRef = useRef(onExited)
   const onTitleChangeRef = useRef(onTitleChange)
   const onUserInputRef = useRef(onUserInput)
+  const onStatusRef = useRef(onStatus)
+  const onOpenFileRef = useRef(onOpenFile)
   const apiRef = useRef<TerminalViewHandle | null>(null)
   const activeRef = useRef(active)
   activeRef.current = active
@@ -70,6 +91,8 @@ export const TerminalView = forwardRef<TerminalViewHandle, TerminalViewProps>(fu
     onExitedRef.current = onExited
     onTitleChangeRef.current = onTitleChange
     onUserInputRef.current = onUserInput
+    onStatusRef.current = onStatus
+    onOpenFileRef.current = onOpenFile
   })
 
   const sendInput = useCallback((socket: WebSocket, data: string) => {
@@ -99,7 +122,14 @@ export const TerminalView = forwardRef<TerminalViewHandle, TerminalViewProps>(fu
     let themeObserver: MutationObserver | null = null
     let lastCols = 0
     let lastRows = 0
-    let fontSize = TERMINAL_FONT_SIZE
+    let fontSize = getTerminalFontSize()
+    let unsubscribeFontSize: (() => void) | null = null
+    // Focus is only ever given on request (a click, a shortcut, a new tab the
+    // user made). A request made before xterm loads waits for it here.
+    let focusWhenReady = false
+    // Hidden panes drop their WebGL context: WebKit caps live contexts, and
+    // retained scopes can hold many terminals.
+    let webglSuspended = false
     let webglRecoveryAttempts = 0
     let pendingWebglRecovery = false
     let WebglAddonCtor: (new () => WebglAddonApi) | null = null
@@ -134,6 +164,9 @@ export const TerminalView = forwardRef<TerminalViewHandle, TerminalViewProps>(fu
           onExitedRef.current?.(null)
           break
         case 'terminal_pong':
+          break
+        case 'terminal_status':
+          onStatusRef.current?.({ process: raw.process, cwd: raw.cwd })
           break
       }
     }
@@ -267,7 +300,26 @@ export const TerminalView = forwardRef<TerminalViewHandle, TerminalViewProps>(fu
       refreshRenderer()
     }
 
+    function suspend() {
+      if (!webgl) return
+      const addon = webgl
+      webgl = null
+      webglSuspended = true
+      try {
+        addon.dispose()
+      } catch {
+        // Already gone.
+      }
+    }
+
     function reactivate() {
+      if (webglSuspended) {
+        webglSuspended = false
+        enableWebgl()
+        fit()
+        refreshRenderer()
+        return
+      }
       if (pendingWebglRecovery || (!webgl && WebglAddonCtor && webglRecoveryAttempts < MAX_WEBGL_RECOVERY_ATTEMPTS)) {
         pendingWebglRecovery = true
         recoverWebgl()
@@ -279,20 +331,22 @@ export const TerminalView = forwardRef<TerminalViewHandle, TerminalViewProps>(fu
     }
 
     function focusTerminal() {
-      terminal?.focus()
+      if (terminal) terminal.focus()
+      else focusWhenReady = true
+    }
+
+    function applyFontSize() {
+      const next = getTerminalFontSize()
+      if (next === fontSize || !terminal) return
+      fontSize = next
+      terminal.options.fontSize = fontSize
+      scheduleFit()
     }
 
     function handleWheel(event: WheelEvent) {
       if (!event.ctrlKey || event.metaKey) return
       event.preventDefault()
-      const next = Math.min(
-        FONT_SIZE_MAX,
-        Math.max(FONT_SIZE_MIN, fontSize + (event.deltaY < 0 ? 1 : -1)),
-      )
-      if (next === fontSize || !terminal) return
-      fontSize = next
-      terminal.options.fontSize = fontSize
-      scheduleFit()
+      setTerminalFontSize(fontSize + (event.deltaY < 0 ? 1 : -1))
     }
 
     function ensureSearchAddon(): SearchAddonApi | null {
@@ -313,6 +367,7 @@ export const TerminalView = forwardRef<TerminalViewHandle, TerminalViewProps>(fu
       focus: focusTerminal,
       fit,
       reactivate,
+      suspend,
       findNext(term, options) {
         return ensureSearchAddon()?.findNext(term, options) ?? false
       },
@@ -382,6 +437,30 @@ export const TerminalView = forwardRef<TerminalViewHandle, TerminalViewProps>(fu
       }, () => {
         if (pendingReplayTitle !== null) publishTitle(pendingReplayTitle)
       })
+      activeTerminal.registerLinkProvider({
+        provideLinks(bufferLineNumber, callback) {
+          const line = activeTerminal.buffer.active.getLine(bufferLineNumber - 1)
+          if (!line) return callback(undefined)
+          const text = line.translateToString(true)
+          const links = findFileLinks(text)
+          if (links.length === 0) return callback(undefined)
+          callback(
+            links.map((link) => ({
+              text: link.text,
+              range: {
+                start: { x: link.start + 1, y: bufferLineNumber },
+                end: { x: link.start + link.text.length, y: bufferLineNumber },
+              },
+              decorations: { pointerCursor: true, underline: true },
+              activate(event: MouseEvent) {
+                if (!event.metaKey && !event.ctrlKey) return
+                event.preventDefault()
+                onOpenFileRef.current?.({ path: link.path, line: link.line, column: link.column })
+              },
+            })),
+          )
+        },
+      })
       activeTerminal.open(host)
       scheduleFit()
       activeTerminal.attachCustomKeyEventHandler((event) => {
@@ -389,6 +468,9 @@ export const TerminalView = forwardRef<TerminalViewHandle, TerminalViewProps>(fu
         // Panel-level shortcuts (find, tab strip navigation) bubble past xterm
         // so the shell never sees them as input.
         if (commandForEvent('terminal', event)) return false
+        // ⌃` would otherwise reach the shell as NUL instead of hiding the panel.
+        const global = commandForEvent('global', event)
+        if (global === 'toggleTerminal' || global === 'newTerminal') return false
         if (tabIndexForKeyEvent(event, Number.MAX_SAFE_INTEGER) !== null) return false
         return true
       })
@@ -427,9 +509,12 @@ export const TerminalView = forwardRef<TerminalViewHandle, TerminalViewProps>(fu
 
       fit()
       connect()
-      if (activeRef.current) {
-        focusTerminal()
+      if (focusWhenReady) {
+        focusWhenReady = false
+        activeTerminal.focus()
       }
+      if (!activeRef.current) suspend()
+      unsubscribeFontSize = subscribeTerminalFontSize(applyFontSize)
 
       resizeObserver = new ResizeObserver(() => scheduleFit())
       resizeObserver.observe(host)
@@ -459,6 +544,7 @@ export const TerminalView = forwardRef<TerminalViewHandle, TerminalViewProps>(fu
       resizeObserver?.disconnect()
       themeObserver?.disconnect()
       host.removeEventListener('wheel', handleWheel)
+      unsubscribeFontSize?.()
       if (socket) {
         socket.onclose = null
         socket.close()
@@ -482,6 +568,9 @@ export const TerminalView = forwardRef<TerminalViewHandle, TerminalViewProps>(fu
       reactivate() {
         apiRef.current?.reactivate()
       },
+      suspend() {
+        apiRef.current?.suspend()
+      },
       findNext(term, options) {
         return apiRef.current?.findNext(term, options) ?? false
       },
@@ -495,10 +584,11 @@ export const TerminalView = forwardRef<TerminalViewHandle, TerminalViewProps>(fu
     [],
   )
 
+  // Becoming visible never takes focus: switching bots or reopening the
+  // panel must leave keyboard (and dictation) input where the user put it.
   useEffect(() => {
-    if (!active) return
-    apiRef.current?.reactivate()
-    apiRef.current?.focus()
+    if (active) apiRef.current?.reactivate()
+    else apiRef.current?.suspend()
   }, [active])
 
   return (

@@ -310,6 +310,7 @@ pub(super) fn parse_threads(
                     )
                     .unwrap_or(now),
                     last_message_preview: preview.as_deref().map(truncate_preview),
+                    last_message_at: None,
                     latest_turn_id: None,
                     latest_plan: None,
                     latest_diff: None,

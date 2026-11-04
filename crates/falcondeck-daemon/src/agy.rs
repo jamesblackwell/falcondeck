@@ -1098,6 +1098,7 @@ pub fn parse_hydrated_threads(
                 status: ThreadStatus::Idle,
                 updated_at,
                 last_message_preview: (!preview.is_empty()).then(|| preview.to_string()),
+                last_message_at: None,
                 latest_turn_id: None,
                 latest_plan: None,
                 latest_diff: None,

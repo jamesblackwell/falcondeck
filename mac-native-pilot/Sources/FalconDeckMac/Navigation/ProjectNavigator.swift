@@ -520,6 +520,11 @@ struct ProjectNavigator: View {
                     }
                 }
                 Divider()
+                Button("Analytics", systemImage: "chart.bar.xaxis") {
+                    UserDefaults.standard.set("analytics", forKey: "falcondeck.native.settings.section")
+                    store.selectSection("settings")
+                    NotificationCenter.default.post(name: .init("falcondeck.native.openSettingsSection"), object: "analytics")
+                }
                 Button("Keyboard shortcuts…", systemImage: "keyboard") {
                     store.selectSection("settings")
                     NotificationCenter.default.post(name: .init("falcondeck.native.openSettingsSection"), object: "keyboard")

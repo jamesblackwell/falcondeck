@@ -53,6 +53,12 @@ struct FalconDeckMacApp: App {
                 Button("Activity") { store.selectSection("activity") }
                     .keyboardShortcut(NativeCommandDispatcher.menuShortcut(for: "openActivity", preferences: preferences))
                 Button("Automations") { store.selectSection("automations") }
+                Button("Analytics") {
+                    UserDefaults.standard.set("analytics", forKey: "falcondeck.native.settings.section")
+                    store.selectSection("settings")
+                    NotificationCenter.default.post(name: .init("falcondeck.native.openSettingsSection"), object: "analytics")
+                }
+                .keyboardShortcut(NativeCommandDispatcher.menuShortcut(for: "openAnalytics", preferences: preferences))
                 Button("Usage") { store.selectSection("usage") }
                     .keyboardShortcut(NativeCommandDispatcher.menuShortcut(for: "openUsage", preferences: preferences))
                 Button("Notifications") { store.notifications.isPresented = true }

@@ -28,7 +28,12 @@ export type SlashCommandMenuProps = {
   onActiveIndexChange: (index: number) => void;
   onSelect: (item: RankedSlashItem) => void;
   listId: string;
+  /** Room above the composer. A tall composer on a short window leaves less. */
+  maxHeight?: number;
 };
+
+const MENU_GAP = 16;
+const MIN_MENU_HEIGHT = 120;
 
 /**
  * Composer slash menu. The textarea keeps focus; this is a listbox the
@@ -42,6 +47,7 @@ export function SlashCommandMenu({
   onActiveIndexChange,
   onSelect,
   listId,
+  maxHeight = 0,
 }: SlashCommandMenuProps) {
   const pointerArmedRef = useRef(false);
   const itemIds = items.map((item) => item.id).join("\0");
@@ -69,7 +75,12 @@ export function SlashCommandMenu({
     <div
       data-side="top"
       data-state="open"
-      className="fd-menu-pop absolute right-3 bottom-full left-3 z-40 mb-2 overflow-hidden rounded-[var(--fd-radius-lg)] border border-border-subtle bg-surface-1 shadow-[var(--fd-shadow-lg)]"
+      className="fd-menu-pop absolute right-3 bottom-full left-3 z-40 mb-2 flex flex-col overflow-hidden rounded-[var(--fd-radius-lg)] border border-border-subtle bg-surface-1 shadow-[var(--fd-shadow-lg)]"
+      style={
+        maxHeight > 0
+          ? { maxHeight: Math.max(MIN_MENU_HEIGHT, maxHeight - MENU_GAP) }
+          : undefined
+      }
     >
       {items.length === 0 ? (
         <p className="px-3 py-3 text-[length:var(--fd-text-sm)] text-fg-muted">
@@ -96,7 +107,7 @@ export function SlashCommandMenu({
             onPointerMove={() => {
               pointerArmedRef.current = true;
             }}
-            className="max-h-72 overflow-y-auto overscroll-contain p-1"
+            className="max-h-72 min-h-0 overflow-y-auto overscroll-contain p-1"
           >
             {items.map((item, index) => {
               const active = index === activeIndex;

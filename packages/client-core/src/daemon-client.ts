@@ -59,6 +59,7 @@ import type {
   SavedPrompt,
   SelectedSkillReference,
   SkillSummary,
+  OpenTerminalPayload,
   TerminalListResponse,
   TerminalOpenedResponse,
   FalconDeckPreferences,
@@ -1214,10 +1215,7 @@ export function createDaemonApiClient(baseUrl: string) {
         ),
       );
     },
-    async openTerminal(
-      workspaceId: string,
-      payload: { cols: number; rows: number },
-    ) {
+    async openTerminal(workspaceId: string, payload: OpenTerminalPayload) {
       return parseJson<TerminalOpenedResponse>(
         await fetch(
           `${baseUrl}/api/workspaces/${encodeURIComponent(workspaceId)}/terminals`,

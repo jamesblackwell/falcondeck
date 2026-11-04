@@ -213,10 +213,12 @@ pub(super) struct TurnUsage<'a> {
     pub cost_ticks: Option<u64>,
     /// Record id, unique per turn and model, e.g. `grok:<prompt_id>`.
     pub id: String,
+    pub turn_key: String,
 }
 
 /// Owned copy of [`TurnUsage`] moved into the recording task.
 struct OwnedTurnUsage {
+    turn_key: String,
     workspace_id: String,
     thread_id: String,
     provider: String,
@@ -238,6 +240,7 @@ struct OwnedTurnUsage {
 impl TurnUsage<'_> {
     fn owned(&self) -> OwnedTurnUsage {
         OwnedTurnUsage {
+            turn_key: self.turn_key.clone(),
             workspace_id: self.workspace_id.to_string(),
             thread_id: self.thread_id.to_string(),
             provider: self.provider.to_string(),
@@ -374,7 +377,7 @@ impl CodexTurnUsage {
     fn start(&mut self, turn_id: &str, model: Option<&str>) {
         if self.turn.as_deref() != Some(turn_id) {
             self.turn = Some(turn_id.to_string());
-            self.baseline = None;
+            self.baseline = self.last_totals;
             self.end = None;
             self.calls = 0;
         }
@@ -481,11 +484,10 @@ fn raw_cache_write_tokens(value: &Value) -> u64 {
         .unwrap_or(0)
 }
 
-
 enum Job {
     Event(String),
     Prompt(String),
-    Usage(String),
+    Usage(String, String, String, String),
     Flush(oneshot::Sender<()>),
     Clear(AnalyticsClearTarget, oneshot::Sender<std::io::Result<()>>),
 }
@@ -497,6 +499,7 @@ pub(super) struct Recorder {
     /// Usage records lost to a full or closed writer queue. Billing data must
     /// not vanish silently, so the count is surfaced in the status response.
     dropped_usage: AtomicU64,
+    health: Arc<StdMutex<BTreeMap<String, falcondeck_core::AnalyticsUsageHealth>>>,
 }
 
 fn settings_path(dir: &Path) -> PathBuf {
@@ -593,6 +596,7 @@ fn write_loop(
     dir: PathBuf,
     settings: Arc<StdMutex<AnalyticsSettings>>,
     mut rx: mpsc::Receiver<Job>,
+    health: Arc<StdMutex<BTreeMap<String, falcondeck_core::AnalyticsUsageHealth>>>,
 ) {
     let retention = |settings: &Arc<StdMutex<AnalyticsSettings>>| {
         settings
@@ -603,6 +607,7 @@ fn write_loop(
     prune(&dir, retention(&settings));
     let (mut events, mut prompts, mut usage) =
         (None::<Appender>, None::<Appender>, None::<Appender>);
+    let mut written_turns = HashSet::new();
     let mut pruned_month = month_of(Utc::now());
     while let Some(first) = rx.blocking_recv() {
         let mut next = Some(first);
@@ -619,9 +624,17 @@ fn write_loop(
                         tracing::debug!(%error, "analytics prompt dropped");
                     }
                 }
-                Job::Usage(line) => {
+                Job::Usage(line, provider, thread, turn) => {
                     if let Err(error) = append(&dir, "usage", &mut usage, &line) {
-                        tracing::debug!(%error, "analytics usage dropped");
+                        tracing::warn!(%error, "analytics usage dropped");
+                    } else {
+                        let mut counters = health.lock().unwrap_or_else(|p| p.into_inner());
+                        let counter = counters.entry(provider.clone()).or_default();
+                        counter.provider = provider.clone();
+                        counter.usage_records_written += 1;
+                        if written_turns.insert((provider, thread, turn)) {
+                            counter.turns_with_usage += 1;
+                        }
                     }
                 }
                 Job::Flush(done) => {
@@ -688,6 +701,9 @@ struct ThreadTrack {
     at_start: Option<(u64, u64)>,
     /// Others (Claude, ACP) report how full the context is: tracked as a peak.
     peak: u64,
+    /// A fresh provider turn event, rather than a stale summary's latest id.
+    has_turn_id: bool,
+    made_model_call: bool,
 }
 
 /// Follows the event stream. Turns are timed from thread status changes, which
@@ -696,6 +712,7 @@ fn listen_loop(
     mut events: broadcast::Receiver<Arc<CachedEnvelope>>,
     settings: Arc<StdMutex<AnalyticsSettings>>,
     tx: mpsc::Sender<Job>,
+    health: Arc<StdMutex<BTreeMap<String, falcondeck_core::AnalyticsUsageHealth>>>,
 ) {
     let mut threads: HashMap<String, ThreadTrack> = HashMap::new();
     loop {
@@ -704,9 +721,7 @@ fn listen_loop(
             Err(broadcast::error::RecvError::Lagged(_)) => continue,
             Err(broadcast::error::RecvError::Closed) => return,
         };
-        if !settings.lock().unwrap_or_else(|p| p.into_inner()).enabled {
-            continue;
-        }
+
         let envelope = &cached.envelope;
         let now = envelope.emitted_at;
         let mut records = Vec::new();
@@ -721,6 +736,8 @@ fn listen_loop(
                     track.started = Some(now);
                     track.at_start = track.latest;
                     track.peak = 0;
+                    track.has_turn_id = false;
+                    track.made_model_call = false;
                 }
                 let attention = &thread.attention;
                 let needs_user = if attention.pending_approval_count > 0 {
@@ -746,6 +763,19 @@ fn listen_loop(
                     _ => {}
                 }
                 if !in_turn && let Some(start) = track.started.take() {
+                    if settings
+                        .lock()
+                        .unwrap_or_else(|p| p.into_inner())
+                        .record_usage
+                        && (thread.provider != AgentProvider::CODEX
+                            || track.has_turn_id || track.made_model_call)
+                    {
+                        let mut counters = health.lock().unwrap_or_else(|p| p.into_inner());
+                        let provider = thread.provider.to_string();
+                        let counter = counters.entry(provider.clone()).or_default();
+                        counter.provider = provider;
+                        counter.completed_turns += 1;
+                    }
                     // No baseline means no usage was reported during the turn.
                     let (i, out) = match (track.latest, track.at_start.take()) {
                         (Some(end), Some(start)) => {
@@ -764,6 +794,12 @@ fn listen_loop(
                     });
                 }
             }
+            UnifiedEvent::TurnStart { turn_id } => {
+                if let Some(thread) = envelope.thread_id.as_ref() {
+                    let track = threads.entry(thread.clone()).or_default();
+                    track.has_turn_id = !turn_id.is_empty() && turn_id != "turn";
+                }
+            }
             UnifiedEvent::ThreadTokenUsageUpdated { usage } => {
                 let Some(thread) = envelope.thread_id.clone() else {
                     continue;
@@ -773,6 +809,11 @@ fn listen_loop(
                 let context = match &usage.last {
                     Some(last) => {
                         let total = (usage.total.input_tokens, usage.total.output_tokens);
+                        if in_turn && track.latest != Some(total)
+                            && (last.input_tokens > 0 || last.output_tokens > 0
+                                || last.reasoning_output_tokens > 0) {
+                            track.made_model_call = true;
+                        }
                         // First report with no baseline (e.g. after a restart): the
                         // total before this request is where the turn started.
                         if in_turn && track.at_start.is_none() {
@@ -803,6 +844,9 @@ fn listen_loop(
             }
             _ => {}
         }
+        if !settings.lock().unwrap_or_else(|p| p.into_inner()).enabled {
+            continue;
+        }
         for record in records {
             if let Ok(line) = serde_json::to_string(&record) {
                 let _ = tx.try_send(Job::Event(line));
@@ -823,21 +867,23 @@ impl Recorder {
             .unwrap_or_default();
         let settings = Arc::new(StdMutex::new(saved));
         let (tx, rx) = mpsc::channel(QUEUE);
-        let writer = (dir.clone(), settings.clone());
+        let health = Arc::new(StdMutex::new(BTreeMap::new()));
+        let writer = (dir.clone(), settings.clone(), health.clone());
         let spawned = std::thread::Builder::new()
             .name("falcondeck-analytics-writer".into())
-            .spawn(move || write_loop(writer.0, writer.1, rx));
+            .spawn(move || write_loop(writer.0, writer.1, rx, writer.2));
         if spawned.is_ok() {
-            let listener = (settings.clone(), tx.clone());
+            let listener = (settings.clone(), tx.clone(), health.clone());
             let _ = std::thread::Builder::new()
                 .name("falcondeck-analytics-events".into())
-                .spawn(move || listen_loop(events, listener.0, listener.1));
+                .spawn(move || listen_loop(events, listener.0, listener.1, listener.2));
         }
         Self {
             dir,
             settings,
             tx,
             dropped_usage: AtomicU64::new(0),
+            health,
         }
     }
 
@@ -869,14 +915,20 @@ impl Recorder {
     /// Appends one usage record. Gated on `record_usage` alone — usage
     /// accounting is independent of the activity switch — and counts drops so
     /// billing data never disappears silently.
-    fn usage(&self, record: UsageRecord) {
+    fn usage(&self, record: UsageRecord, turn_key: String) {
         if !self.settings().record_usage {
             return;
         }
+        let provider = record.prov.clone();
+        let thread = record.th.clone();
         let Ok(line) = serde_json::to_string(&UsageEntry::Usage(record)) else {
             return;
         };
-        if self.tx.try_send(Job::Usage(line)).is_err() {
+        if self
+            .tx
+            .try_send(Job::Usage(line, provider, thread, turn_key))
+            .is_err()
+        {
             let dropped = self.dropped_usage.fetch_add(1, Ordering::Relaxed) + 1;
             if dropped == 1 || dropped.is_multiple_of(1000) {
                 tracing::warn!(dropped, "usage records dropped (analytics writer queue full)");
@@ -1870,6 +1922,10 @@ fn summarize_automations(
         last_run_at: None,
         last_status: None,
         flags: Vec::new(),
+        models: Vec::new(),
+        configured_model: None,
+        fallback_model: None,
+        usage: AnalyticsUsageTotals::default(),
     };
     let mut by_id: BTreeMap<String, (AnalyticsAutomation, HashSet<String>)> = BTreeMap::new();
     for definition in definitions {
@@ -1925,8 +1981,10 @@ fn summarize_automations(
     let mut automations: Vec<_> = by_id
         .into_iter()
         .map(|(id, (mut summary, threads))| {
+            summary.id = Some(id.clone());
             summary.threads = threads.len() as u64;
             if let Some(definition) = definitions.get(id.as_str()) {
+                summary.configured_model = definition.target.model_id.clone();
                 summary.name = definition.name.clone();
                 summary.state = serialized_name(&definition.state);
                 summary.schedule =
@@ -1966,9 +2024,8 @@ fn summarize_automations(
                 {
                     summary.flags.push("large_reused_context".into());
                 }
-                let owned = reused_id.is_some_and(|thread| {
-                    thread_owners.get(thread) == Some(&definition.id)
-                });
+                let owned = reused_id
+                    .is_some_and(|thread| thread_owners.get(thread) == Some(&definition.id));
                 if crate::control::automations::reused_thread_model_pin(&definition.target, owned) {
                     summary.flags.push("reused_thread_model_pin".into());
                 }
@@ -1998,6 +2055,62 @@ fn summarize_automations(
             .then(a.name.cmp(&b.name))
     });
     automations
+}
+
+/// Count each usage record once when its thread and timestamp match a finished run.
+/// Shared threads also contain manual turns and runs from other automations.
+fn summarize_automation_usage(
+    summaries: &mut [AnalyticsAutomation],
+    runs: &[falcondeck_core::control::AutomationRun],
+    definitions: &[falcondeck_core::control::Automation],
+    usage: &[UsageRecord],
+    thread_models: &HashMap<String, String>,
+) {
+    use falcondeck_core::control::AutomationThreadTarget as Target;
+    for summary in summaries {
+        let relevant: Vec<_> = runs
+            .iter()
+            .filter(|run| Some(&run.automation_id) == summary.id.as_ref())
+            .collect();
+        let mut windows: HashMap<&str, Vec<(DateTime<Utc>, DateTime<Utc>)>> = HashMap::new();
+        for run in &relevant {
+            if let (Some(thread), Some(start), Some(end)) = (run.thread_id.as_deref(), run.started_at, run.finished_at) {
+                windows.entry(thread).or_default().push((start, end));
+            }
+        }
+        let mut models = std::collections::BTreeSet::new();
+        for record in usage {
+            if windows.get(record.th.as_str()).is_some_and(|intervals| {
+                intervals.iter().any(|(start, end)| record.t >= *start && record.t <= *end)
+            }) {
+                add_usage(&mut summary.usage, record);
+                if !record.model.is_empty() {
+                    models.insert(record.model.clone());
+                }
+            }
+        }
+        summary.models = models.into_iter().collect();
+        let target = definitions
+            .iter()
+            .find(|d| Some(&d.id) == summary.id.as_ref())
+            .and_then(|d| match &d.target.thread {
+                Target::Managed {
+                    thread_id: Some(id),
+                }
+                | Target::Existing { thread_id: id } => Some(id),
+                _ => None,
+            });
+        summary.fallback_model = target
+            .and_then(|id| thread_models.get(id))
+            .cloned()
+            .or_else(|| {
+                relevant
+                    .iter()
+                    .filter_map(|r| r.thread_id.as_ref().and_then(|id| thread_models.get(id)))
+                    .min()
+                    .cloned()
+            });
+    }
 }
 
 /// Attribution frozen into a usage record at write time.
@@ -2179,7 +2292,11 @@ impl AppState {
         let c = decision.and_then(|d| d.classification.as_ref());
         let target = decision.and_then(|d| d.target.as_ref());
         let (p, m, eff) = match explicit {
-            Some((p, m, e)) => (Some(p.to_string()), m.map(str::to_string), e.map(str::to_string)),
+            Some((p, m, e)) => (
+                Some(p.to_string()),
+                m.map(str::to_string),
+                e.map(str::to_string),
+            ),
             None => (
                 target.map(|t| t.provider.as_str().to_string()),
                 target.and_then(|t| t.model_id.clone()),
@@ -2232,30 +2349,33 @@ impl AppState {
             } else {
                 capture.model
             };
-            app.analytics().usage(UsageRecord {
-                t: Utc::now(),
-                id: capture.id,
-                src: "live".to_string(),
-                th: capture.thread_id.clone(),
-                par: attribution.parent,
-                root: attribution.root,
-                bot: attribution.bot,
-                org: attribution.org.to_string(),
-                ws: capture.workspace_id,
-                prov: provider,
-                model,
-                uncached_input: capture.uncached_input,
-                cr: capture.cache_read,
-                cw: capture.cache_write,
-                out: capture.output,
-                think: capture.reasoning,
-                calls: capture.calls,
-                cost: capture.cost,
-                cost_src: capture.cost_source,
-                tier: capture.tier,
-                effort: capture.effort.or(attribution.effort),
-                cost_ticks: capture.cost_ticks,
-            });
+            app.analytics().usage(
+                UsageRecord {
+                    t: Utc::now(),
+                    id: capture.id,
+                    src: "live".to_string(),
+                    th: capture.thread_id.clone(),
+                    par: attribution.parent,
+                    root: attribution.root,
+                    bot: attribution.bot,
+                    org: attribution.org.to_string(),
+                    ws: capture.workspace_id,
+                    prov: provider,
+                    model,
+                    uncached_input: capture.uncached_input,
+                    cr: capture.cache_read,
+                    cw: capture.cache_write,
+                    out: capture.output,
+                    think: capture.reasoning,
+                    calls: capture.calls,
+                    cost: capture.cost,
+                    cost_src: capture.cost_source,
+                    tier: capture.tier,
+                    effort: capture.effort.or(attribution.effort),
+                    cost_ticks: capture.cost_ticks,
+                },
+                capture.turn_key,
+            );
         });
     }
 
@@ -2313,6 +2433,7 @@ impl AppState {
                 effort: None,
                 cost_ticks: None,
                 id: format!("claude:{thread_id}:{model}:{stamp}"),
+                turn_key: format!("{thread_id}:{stamp}"),
             });
         }
         Some(summed)
@@ -2357,7 +2478,12 @@ impl AppState {
     }
 
     /// Registers a newly started Codex turn with the model it selected.
-    pub(super) fn start_codex_turn_usage(&self, thread_id: &str, turn_id: &str, model: Option<&str>) {
+    pub(super) fn start_codex_turn_usage(
+        &self,
+        thread_id: &str,
+        turn_id: &str,
+        model: Option<&str>,
+    ) {
         self.inner
             .codex_turn_usage
             .lock()
@@ -2405,7 +2531,8 @@ impl AppState {
             tier: None,
             effort: None,
             cost_ticks: None,
-            id: format!("codex:{thread_id}:{turn}:{}", Utc::now().timestamp_millis()),
+            id: format!("codex:{thread_id}:{turn}"),
+            turn_key: turn.to_string(),
         });
     }
 
@@ -2432,9 +2559,9 @@ impl AppState {
                 };
                 let summary = &thread.summary;
                 let (parent, automation_bot, org) = match &summary.origin {
-                    Some(falcondeck_core::ThreadOrigin::AgentSpawn { parent_thread_id, .. }) => {
-                        (Some(parent_thread_id.clone()), None, "agent_spawn")
-                    }
+                    Some(falcondeck_core::ThreadOrigin::AgentSpawn {
+                        parent_thread_id, ..
+                    }) => (Some(parent_thread_id.clone()), None, "agent_spawn"),
                     Some(falcondeck_core::ThreadOrigin::ScheduledTask { .. }) => {
                         (None, None, "scheduled")
                     }
@@ -2481,9 +2608,7 @@ impl AppState {
                 .collect();
             let parent_of: HashMap<String, String> = chain
                 .iter()
-                .filter_map(|link| {
-                    link.parent.clone().map(|parent| (link.id.clone(), parent))
-                })
+                .filter_map(|link| link.parent.clone().map(|parent| (link.id.clone(), parent)))
                 .collect();
             chain_bot(thread_id, &owned, &automation_bots, &parent_of)
         };
@@ -2523,6 +2648,18 @@ impl AppState {
             prompts_bytes,
             usage_bytes,
             dropped_usage_records,
+            usage_health: recorder
+                .health
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .values()
+                .cloned()
+                .map(|mut row| {
+                    row.missing_usage_turns =
+                        row.completed_turns.saturating_sub(row.turns_with_usage);
+                    row
+                })
+                .collect(),
         }
     }
 
@@ -2646,6 +2783,22 @@ impl AppState {
             .into_iter()
             .map(|bot| bot.thread_id)
             .collect();
+        let thread_models: HashMap<String, String> = self
+            .inner
+            .workspaces
+            .lock()
+            .await
+            .values()
+            .flat_map(|workspace| workspace.threads.values())
+            .filter_map(|thread| {
+                thread
+                    .summary
+                    .agent
+                    .model_id
+                    .clone()
+                    .map(|model| (thread.summary.id.clone(), model))
+            })
+            .collect();
         let thread_owners = self
             .inner
             .workspaces
@@ -2662,9 +2815,22 @@ impl AppState {
             .collect();
         let summary = tokio::task::spawn_blocking(move || {
             let mut summary = summarize(read_records(&dir, since), &labels, days);
-            summary.usage = usage_rollup(&read_usage_records(&dir, since), &labels);
-            summary.automations =
-                summarize_automations(runs, &definitions, days, &bot_home_ids, &thread_owners);
+            let usage = read_usage_records(&dir, since);
+            summary.usage = usage_rollup(&usage, &labels);
+            summary.automations = summarize_automations(
+                runs.clone(),
+                &definitions,
+                days,
+                &bot_home_ids,
+                &thread_owners,
+            );
+            summarize_automation_usage(
+                &mut summary.automations,
+                &runs,
+                &definitions,
+                &usage,
+                &thread_models,
+            );
             summary
         })
         .await
@@ -3029,7 +3195,15 @@ mod tests {
                 (10, 0, 0, 0),
                 None,
             ),
-            usage_record("c", "t3", None, "grok", "grok-4.7-build", (5, 0, 0, 0), None),
+            usage_record(
+                "c",
+                "t3",
+                None,
+                "grok",
+                "grok-4.7-build",
+                (5, 0, 0, 0),
+                None,
+            ),
         ];
         let rollup = usage_rollup(&records, &labels);
         assert_eq!(rollup.len(), 2);
@@ -3063,10 +3237,7 @@ mod tests {
         json!({ "threadId": "thread-1", "turnId": turn_id, "tokenUsage": token_usage })
     }
 
-    fn note(
-        turn: &mut CodexTurnUsage,
-        notification: &Value,
-    ) {
+    fn note(turn: &mut CodexTurnUsage, notification: &Value) {
         let usage = super::super::notifications::parse_thread_token_usage(notification).unwrap();
         let report = &notification["tokenUsage"];
         turn.note(
@@ -3077,6 +3248,31 @@ mod tests {
                 .get("last")
                 .map(|last| super::raw_cache_write_tokens(last))
                 .unwrap_or(0),
+        );
+    }
+
+    #[test]
+    fn captured_codex_usage_handles_missing_start_and_known_baseline() {
+        let wire: Vec<Value> =
+            serde_json::from_str(include_str!("../fixtures/codex-0.166.0-usage.json")).unwrap();
+        let params = &wire[1]["params"];
+        let usage = super::super::notifications::parse_thread_token_usage(params).unwrap();
+        let turn_id = params["turnId"].as_str().unwrap();
+        let mut accumulator = CodexTurnUsage::default();
+        // Restart/missed start: recover the last known request, not history.
+        accumulator.note(turn_id, &usage, 0, 0);
+        let first = accumulator.finish().unwrap();
+        assert_eq!(
+            first.delta.input_tokens,
+            usage.last.as_ref().unwrap().input_tokens
+        );
+        assert!(accumulator.finish().is_none());
+        // A start uses the previous terminal totals even when a report was
+        // missed. It must not replace that known baseline with total-last.
+        accumulator.start(turn_id, Some("gpt-6.1-sol"));
+        assert_eq!(
+            accumulator.baseline,
+            Some(CodexTotals::from_breakdown(&usage.total, 0))
         );
     }
 
@@ -3494,6 +3690,45 @@ mod tests {
             "thread_id": format!("thread-{id}"),
         }))
         .unwrap()
+    }
+
+    #[test]
+    fn scheduled_usage_joins_by_thread_and_run_window_without_double_counting() {
+        let mut a_later = run("3", "a", "succeeded");
+        a_later.thread_id = Some("thread-1".into());
+        a_later.started_at = a_later.started_at.map(|t| t + chrono::Duration::minutes(2));
+        a_later.finished_at = a_later.finished_at.map(|t| t + chrono::Duration::minutes(2));
+        let mut b_shared = run("2", "b", "succeeded");
+        b_shared.thread_id = Some("thread-1".into());
+        b_shared.started_at = b_shared.started_at.map(|t| t + chrono::Duration::minutes(4));
+        b_shared.finished_at = b_shared.finished_at.map(|t| t + chrono::Duration::minutes(4));
+        let mut unfinished = run("4", "c", "running");
+        unfinished.thread_id = Some("thread-1".into());
+        unfinished.finished_at = None;
+        let first_run = run("1", "a", "succeeded");
+        // Duplicate/overlapping run windows must not count the same record twice.
+        let runs = vec![first_run.clone(), first_run.clone(), a_later.clone(), b_shared.clone(), unfinished];
+        let mut rows = summarize_automations(runs.clone(), &[], 7, &HashSet::new(), &HashMap::new());
+        let mut first = usage_record("u1", "thread-1", None, "claude", "haiku", (1, 2, 3, 4), None);
+        first.t = first_run.started_at.unwrap();
+        let mut second = first.clone(); second.id = "u2".into(); second.model = "sonnet".into();
+        second.t = a_later.finished_at.unwrap();
+        let mut before = first.clone(); before.t -= chrono::Duration::seconds(1);
+        let mut between = first.clone(); between.t = first_run.finished_at.unwrap() + chrono::Duration::seconds(1);
+        let mut after = first.clone(); after.t = b_shared.finished_at.unwrap() + chrono::Duration::seconds(1);
+        let mut other_task = first.clone(); other_task.t = b_shared.started_at.unwrap(); other_task.model = "opus".into();
+        let mut unrelated = first.clone(); unrelated.th = "other".into();
+        summarize_automation_usage(&mut rows, &runs, &[], &[first, second, before, between, after, other_task, unrelated], &HashMap::new());
+        let a = rows.iter().find(|r| r.id.as_deref() == Some("a")).unwrap();
+        assert_eq!(a.models, ["haiku", "sonnet"]);
+        assert_eq!(usage_token_total(&a.usage), 20);
+        assert_eq!(a.usage.turns, 2);
+        let b = rows.iter().find(|r| r.id.as_deref() == Some("b")).unwrap();
+        assert_eq!(b.models, ["opus"]);
+        assert_eq!(usage_token_total(&b.usage), 10);
+        let c = rows.iter().find(|r| r.id.as_deref() == Some("c")).unwrap();
+        assert!(c.models.is_empty());
+        assert_eq!(c.usage.turns, 0);
     }
 
     #[test]

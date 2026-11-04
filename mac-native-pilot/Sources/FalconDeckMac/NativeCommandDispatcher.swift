@@ -107,6 +107,10 @@ import SwiftUI
         switch command {
         case "openSettings": store.selectSection("settings")
         case "openActivity": store.selectSection("activity")
+        case "openAnalytics":
+            UserDefaults.standard.set("analytics", forKey: "falcondeck.native.settings.section")
+            store.selectSection("settings")
+            NotificationCenter.default.post(name: .init("falcondeck.native.openSettingsSection"), object: "analytics")
         case "openUsage": store.selectSection("usage")
         case "openKeyboardShortcuts":
             store.selectSection("settings")

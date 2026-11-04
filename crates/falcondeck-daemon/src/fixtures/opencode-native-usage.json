@@ -1,0 +1,56 @@
+[
+  {
+    "id": "msg_1a5f98565001mAhvOzsSFjn9FK",
+    "time": {
+      "created": 1793785955688,
+      "streamed": 1793785964157,
+      "completed": 1793785964158
+    },
+    "type": "assistant",
+    "agent": "build",
+    "model": {
+      "id": "glm-5.3",
+      "providerID": "zai-coding-plan",
+      "variant": "max"
+    },
+    "finish": "stop",
+    "rawFinish": "stop",
+    "cost": 0,
+    "tokens": {
+      "input": 383,
+      "output": 385,
+      "reasoning": 0,
+      "cache": {
+        "read": 374400,
+        "write": 0
+      }
+    }
+  },
+  {
+    "id": "msg_1a5f96a05001ueKQPZmduPBael",
+    "time": {
+      "created": 1793785948682,
+      "streamed": 1793785955495,
+      "completed": 1793785955658
+    },
+    "type": "assistant",
+    "agent": "build",
+    "model": {
+      "id": "glm-5.3",
+      "providerID": "zai-coding-plan",
+      "variant": "max"
+    },
+    "finish": "tool-calls",
+    "rawFinish": "tool_calls",
+    "cost": 0,
+    "tokens": {
+      "input": 781,
+      "output": 235,
+      "reasoning": 63,
+      "cache": {
+        "read": 373632,
+        "write": 0
+      }
+    }
+  }
+]

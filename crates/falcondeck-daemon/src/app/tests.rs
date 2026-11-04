@@ -2171,6 +2171,132 @@ async fn cursor_provider_error_dump_becomes_a_failed_receipt() {
 }
 
 #[tokio::test]
+async fn live_assistant_reply_refreshes_unopened_thread_preview() {
+    let temp_dir = tempdir().unwrap();
+    let app = AppState::new_with_state_path(
+        "test".to_string(),
+        HashMap::new(),
+        temp_dir.path().join("daemon-state.json"),
+    );
+    insert_claude_workspace_with_session(
+        &app,
+        "workspace-1",
+        "thread-1",
+        "88888888-8888-4888-8888-888888888888",
+        temp_dir.path(),
+    )
+    .await;
+    let stale_at = Utc::now() - Duration::hours(1);
+    app.with_thread_mut("workspace-1", "thread-1", |thread| {
+        thread.last_message_preview = Some("Hydrated an hour ago".to_string());
+        thread.last_message_at = Some(stale_at);
+    })
+    .await
+    .unwrap();
+    let assistant = |text: &str, lifecycle, created_at| ConversationItem::AssistantMessage {
+        id: "reply-1".to_string(),
+        text: text.to_string(),
+        phase: None,
+        memory_citation: None,
+        citations: Vec::new(),
+        lifecycle,
+        error: None,
+        created_at,
+    };
+    let summary = |app: AppState| async move {
+        let workspaces = app.inner.workspaces.lock().await;
+        workspaces["workspace-1"].threads["thread-1"].summary.clone()
+    };
+
+    let mut events = app.subscribe();
+    let replied_at = Utc::now();
+    // Mid-stream text is not a finished reply yet.
+    app.push_conversation_item(
+        "workspace-1",
+        "thread-1",
+        assistant("Should I", ContentLifecycle::Streaming, replied_at),
+        true,
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        summary(app.clone()).await.last_message_preview.as_deref(),
+        Some("Hydrated an hour ago")
+    );
+    app.push_conversation_item(
+        "workspace-1",
+        "thread-1",
+        assistant("Should I ship the build?", ContentLifecycle::Complete, replied_at),
+        true,
+    )
+    .await
+    .unwrap();
+    // A later tool call moves updated_at but not the preview's timestamp.
+    app.push_conversation_item(
+        "workspace-1",
+        "thread-1",
+        ConversationItem::ToolCall {
+            id: "tool-1".to_string(),
+            title: "Read".to_string(),
+            tool_kind: "read".to_string(),
+            status: "completed".to_string(),
+            output: None,
+            exit_code: None,
+            display: Default::default(),
+            detail: None,
+            created_at: replied_at + Duration::seconds(5),
+            completed_at: None,
+        },
+        true,
+    )
+    .await
+    .unwrap();
+
+    let live = summary(app.clone()).await;
+    assert_eq!(live.last_message_preview.as_deref(), Some("Should I ship the build?"));
+    assert_eq!(live.last_message_at, Some(replied_at));
+    // Clients learn about it without opening the thread.
+    let emitted = std::iter::from_fn(|| events.try_recv().ok()).collect::<Vec<_>>();
+    assert!(emitted.iter().any(|envelope| matches!(
+        &envelope.event,
+        falcondeck_core::UnifiedEvent::ThreadUpdated { thread }
+            if thread.last_message_preview.as_deref() == Some("Should I ship the build?")
+                && thread.last_message_at == Some(replied_at)
+    )));
+
+    // A reply still streaming when the turn ends is settled into the preview.
+    let second_at = replied_at + Duration::seconds(10);
+    app.push_conversation_item(
+        "workspace-1",
+        "thread-1",
+        ConversationItem::AssistantMessage {
+            id: "reply-2".to_string(),
+            text: "Done, shipped.".to_string(),
+            phase: None,
+            memory_citation: None,
+            citations: Vec::new(),
+            lifecycle: ContentLifecycle::Streaming,
+            error: None,
+            created_at: second_at,
+        },
+        true,
+    )
+    .await
+    .unwrap();
+    app.settle_turn_items_with_error(
+        "workspace-1",
+        "thread-1",
+        second_at + Duration::seconds(1),
+        ToolSettlement::Completed,
+        None,
+    )
+    .await;
+    let settled = summary(app.clone()).await;
+    assert_eq!(settled.last_message_preview.as_deref(), Some("Done, shipped."));
+    assert_eq!(settled.last_message_at, Some(second_at));
+}
+
+#[tokio::test]
 async fn terminal_turn_cancels_orphaned_interactive_requests() {
     let temp_dir = tempdir().unwrap();
     let app = AppState::new_with_state_path(
@@ -3042,6 +3168,7 @@ fn restored_threads_require_resume_but_new_threads_do_not() {
         status: ThreadStatus::Idle,
         updated_at: Utc::now(),
         last_message_preview: None,
+        last_message_at: None,
         latest_turn_id: None,
         latest_plan: None,
         latest_diff: None,
@@ -3217,6 +3344,7 @@ async fn suggest_thread_title_rejects_an_empty_conversation() {
                     status: ThreadStatus::Idle,
                     updated_at: Utc::now(),
                     last_message_preview: None,
+                    last_message_at: None,
                     latest_turn_id: None,
                     latest_plan: None,
                     latest_diff: None,
@@ -3300,6 +3428,7 @@ async fn builtin_rename_thread_tool_applies_the_agent_supplied_title() {
                     status: ThreadStatus::Idle,
                     updated_at: Utc::now(),
                     last_message_preview: None,
+                    last_message_at: None,
                     latest_turn_id: None,
                     latest_plan: None,
                     latest_diff: None,
@@ -3474,6 +3603,7 @@ fn workspace_bridge_binds_only_one_running_task_for_the_same_provider() {
         status,
         updated_at: Utc::now(),
         last_message_preview: None,
+        last_message_at: None,
         latest_turn_id: None,
         latest_plan: None,
         latest_diff: None,
@@ -3522,6 +3652,7 @@ fn workspace_bridge_binds_the_thread_executing_the_matching_mcp_call() {
         status,
         updated_at: Utc::now(),
         last_message_preview: None,
+        last_message_at: None,
         latest_turn_id: None,
         latest_plan: None,
         latest_diff: None,
@@ -3703,6 +3834,7 @@ async fn workspace_bridge_rename_binds_the_calling_thread_among_concurrent_codex
             status: ThreadStatus::Running,
             updated_at: Utc::now(),
             last_message_preview: None,
+            last_message_at: None,
             latest_turn_id: None,
             latest_plan: None,
             latest_diff: None,
@@ -3883,6 +4015,7 @@ fn a_running_turn_is_titleable_before_the_agent_produces_anything() {
         status: ThreadStatus::Running,
         updated_at: Utc::now(),
         last_message_preview: None,
+        last_message_at: None,
         latest_turn_id: None,
         latest_plan: None,
         latest_diff: None,
@@ -3969,6 +4102,7 @@ async fn update_thread_title_marks_thread_as_manual() {
                     status: ThreadStatus::Idle,
                     updated_at: Utc::now(),
                     last_message_preview: None,
+                    last_message_at: None,
                     latest_turn_id: None,
                     latest_plan: None,
                     latest_diff: None,
@@ -5416,6 +5550,7 @@ async fn persist_local_state_merges_saved_workspaces_with_live_workspaces() {
         status: ThreadStatus::Idle,
         updated_at: Utc::now(),
         last_message_preview: None,
+        last_message_at: None,
         latest_turn_id: None,
         latest_plan: None,
         latest_diff: None,
@@ -5535,6 +5670,7 @@ async fn close_workspace_keeps_persist_and_lists_it_in_the_library() {
         status: ThreadStatus::Idle,
         updated_at: Utc::now(),
         last_message_preview: None,
+        last_message_at: None,
         latest_turn_id: None,
         latest_plan: None,
         latest_diff: None,
@@ -5639,6 +5775,7 @@ async fn shutdown_marks_running_threads_as_error_and_persists_them() {
         status: ThreadStatus::Running,
         updated_at: Utc::now(),
         last_message_preview: None,
+        last_message_at: None,
         latest_turn_id: None,
         latest_plan: None,
         latest_diff: None,
@@ -5763,6 +5900,7 @@ async fn shutdown_marks_waiting_threads_as_error_and_persists_them() {
         status: ThreadStatus::WaitingForInput,
         updated_at: Utc::now(),
         last_message_preview: None,
+        last_message_at: None,
         latest_turn_id: None,
         latest_plan: None,
         latest_diff: None,
@@ -5844,6 +5982,7 @@ async fn provider_disconnect_fails_only_that_providers_active_threads() {
         status: ThreadStatus::Running,
         updated_at: Utc::now(),
         last_message_preview: None,
+        last_message_at: None,
         latest_turn_id: None,
         latest_plan: None,
         latest_diff: None,
@@ -6421,6 +6560,7 @@ async fn insert_claude_workspace_with_session(
                     status: ThreadStatus::Running,
                     updated_at: Utc::now(),
                     last_message_preview: None,
+                    last_message_at: None,
                     latest_turn_id: None,
                     latest_plan: None,
                     latest_diff: None,
@@ -7277,6 +7417,7 @@ async fn snapshot_with_request_excludes_archived_threads_for_mobile_clients() {
         status: ThreadStatus::Idle,
         updated_at: Utc::now(),
         last_message_preview: None,
+        last_message_at: None,
         latest_turn_id: None,
         latest_plan: None,
         latest_diff: None,
@@ -7305,6 +7446,7 @@ async fn snapshot_with_request_excludes_archived_threads_for_mobile_clients() {
         status: ThreadStatus::Idle,
         updated_at: Utc::now(),
         last_message_preview: None,
+        last_message_at: None,
         latest_turn_id: None,
         latest_plan: None,
         latest_diff: None,
@@ -7460,6 +7602,7 @@ async fn archive_all_threads_updates_once_and_is_idempotent() {
         status: ThreadStatus::Idle,
         updated_at: Utc::now(),
         last_message_preview: None,
+        last_message_at: None,
         latest_turn_id: None,
         latest_plan: None,
         latest_diff: None,
@@ -7711,6 +7854,7 @@ async fn snapshot_with_request_strips_thread_plans_and_diffs_for_remote_clients(
         status: ThreadStatus::Idle,
         updated_at: Utc::now(),
         last_message_preview: Some("hello".to_string()),
+        last_message_at: None,
         latest_turn_id: None,
         latest_plan: Some(ThreadPlan {
             explanation: Some("implement the change".to_string()),
@@ -7869,6 +8013,7 @@ async fn dispatched_send_echoes_the_client_supplied_user_item_id() {
         status: ThreadStatus::Idle,
         updated_at: Utc::now(),
         last_message_preview: None,
+        last_message_at: None,
         latest_turn_id: None,
         latest_plan: None,
         latest_diff: None,
@@ -7983,6 +8128,7 @@ async fn sends_against_a_running_thread_queue_can_be_reordered_and_removed() {
         status: ThreadStatus::Running,
         updated_at: Utc::now(),
         last_message_preview: None,
+        last_message_at: None,
         latest_turn_id: None,
         latest_plan: None,
         latest_diff: None,
@@ -8205,6 +8351,7 @@ async fn busy_thread_app(
         status: ThreadStatus::Running,
         updated_at: Utc::now(),
         last_message_preview: None,
+        last_message_at: None,
         latest_turn_id: Some("turn-steer-active".to_string()),
         latest_plan: None,
         latest_diff: None,
@@ -8810,6 +8957,7 @@ async fn pre_tool_use_honours_live_permission_mode_and_read_only_tools() {
         status: ThreadStatus::Running,
         updated_at: Utc::now(),
         last_message_preview: None,
+        last_message_at: None,
         latest_turn_id: None,
         latest_plan: None,
         latest_diff: None,
@@ -9134,6 +9282,7 @@ async fn control_current_thread_target_pins_the_calling_thread() {
             status,
             updated_at: Utc::now(),
             last_message_preview: None,
+            last_message_at: None,
             latest_turn_id: None,
             latest_plan: None,
             latest_diff: None,
@@ -9558,6 +9707,7 @@ async fn archiving_reclaims_safe_variants_and_unarchive_restores_them() {
         status: ThreadStatus::Idle,
         updated_at: Utc::now(),
         last_message_preview: None,
+        last_message_at: None,
         latest_turn_id: None,
         latest_plan: None,
         latest_diff: None,
@@ -9664,4 +9814,158 @@ async fn extensions_bridge_is_spawned_without_any_extension_tools() {
         .await
         .expect("extensions bridge spec");
     assert_eq!(spec.thread_id.as_deref(), Some("thread-1"));
+}
+
+#[test]
+fn legacy_managed_origin_backfill_is_idempotent_and_rejects_shared_targets() {
+    use std::collections::HashSet;
+    use super::{backfill_automation_origins, PersistedThreadState, PersistedWorkspaceState};
+    use falcondeck_core::control::{Automation, AutomationThreadTarget as Target};
+    let definition: Automation = serde_json::from_value(serde_json::json!({
+        "id":"a","revision":1,"name":"Legacy","trigger":{"kind":"once","run_at":"2026-12-01T00:00:00Z"},
+        "task":{"kind":"prompt","instruction":"Check"},"target":{"workspace_path":"/tmp","provider":"claude","thread":{"kind":"managed","thread_id":"legacy"}},
+        "state":"enabled","concurrency_policy":"skip","misfire_policy":"skip","created_at":"2026-11-03T00:00:00Z","updated_at":"2026-11-03T00:00:00Z","next_run_at":null
+    })).unwrap();
+    let thread: PersistedThreadState =
+        serde_json::from_value(serde_json::json!({"thread_id":"legacy"})).unwrap();
+    let workspace = PersistedWorkspaceState {
+        thread_states: vec![thread],
+        ..Default::default()
+    };
+    let mut workspaces = vec![workspace.clone()];
+    backfill_automation_origins(&mut workspaces, std::slice::from_ref(&definition), &HashSet::new());
+    assert!(crate::control::automations::owns_thread(
+        "a",
+        workspaces[0].thread_states[0].origin.as_ref()
+    ));
+    let once = workspaces.clone();
+    backfill_automation_origins(&mut workspaces, std::slice::from_ref(&definition), &HashSet::new());
+    assert_eq!(workspaces, once);
+    let mut other = definition.clone();
+    other.id = "b".into();
+    for target in [
+        Target::Managed {
+            thread_id: Some("legacy".into()),
+        },
+        Target::Existing {
+            thread_id: "legacy".into(),
+        },
+    ] {
+        other.target.thread = target;
+        let mut shared = vec![workspace.clone()];
+        backfill_automation_origins(&mut shared, &[definition.clone(), other.clone()], &HashSet::new());
+        assert!(shared[0].thread_states[0].origin.is_none());
+    }
+    other.target.thread = Target::Managed {
+        thread_id: Some("missing".into()),
+    };
+    backfill_automation_origins(&mut workspaces, &[other], &HashSet::new());
+    assert_eq!(workspaces, once);
+    let mut renamed_owner = definition.clone();
+    renamed_owner.id = "different".into();
+    backfill_automation_origins(&mut workspaces, &[renamed_owner], &HashSet::new());
+    assert_eq!(workspaces, once);
+}
+
+fn legacy_automation_fixture(id: &str, thread_id: &str, model: &str) -> falcondeck_core::control::Automation {
+    serde_json::from_value(serde_json::json!({
+        "id":id,"revision":1,"name":id,"trigger":{"kind":"once","run_at":"2099-11-05T09:00:00Z"},
+        "task":{"kind":"prompt","instruction":"Check"},
+        "target":{"workspace_path":"/tmp","provider":"codex","model_id":model,"thread":{"kind":"managed","thread_id":thread_id}},
+        "state":"enabled","concurrency_policy":"skip","misfire_policy":"skip",
+        "created_at":"2026-11-03T00:00:00Z","updated_at":"2026-11-03T00:00:00Z","next_run_at":null
+    })).unwrap()
+}
+
+#[test]
+fn legacy_backfill_preserves_lucidpic_model_selection_and_bot_homes() {
+    use super::{backfill_automation_origins, PersistedThreadState, PersistedWorkspaceState};
+    use std::collections::HashSet;
+    for (id, model, protected) in [
+        ("lucidpic", Some("gpt-6.1-terra"), false),
+        ("unknown", None, false),
+        ("home", Some("gpt-6.1-sol"), true),
+        ("previous-home", Some("gpt-6.1-sol"), true),
+        ("matching", Some("gpt-6.1-sol"), false),
+    ] {
+        let mut definition = legacy_automation_fixture("a", id, "gpt-6.1-sol");
+        definition.name = "Investigate recent Lucidpic feedback".into();
+        let thread: PersistedThreadState = serde_json::from_value(serde_json::json!({
+            "thread_id":id, "agent":{"model_id":model}
+        })).unwrap();
+        let mut workspaces = vec![PersistedWorkspaceState { thread_states: vec![thread], ..Default::default() }];
+        let homes = if protected { HashSet::from([id.to_string()]) } else { HashSet::new() };
+        backfill_automation_origins(&mut workspaces, std::slice::from_ref(&definition), &homes);
+        let owned = crate::control::automations::owns_thread("a", workspaces[0].thread_states[0].origin.as_ref());
+        assert_eq!(owned, id == "matching", "{id}");
+        assert_eq!(workspaces[0].thread_states[0].agent.model_id.as_deref(), model);
+        assert_eq!(crate::control::automations::reused_thread_model_pin(&definition.target, owned), !owned);
+    }
+}
+
+#[tokio::test]
+async fn startup_backfills_legacy_origins_and_persists_model_and_home_guards() {
+    use super::{PersistedThreadState, PersistedWorkspaceState};
+    use falcondeck_core::control::AutomationState;
+    use crate::control::store::{self, PersistedControlState};
+    let temp = tempdir().unwrap();
+    let state_path = temp.path().join("daemon-state.json");
+    let mut definitions = vec![
+        legacy_automation_fixture("owned", "managed", "gpt-6.1-sol"),
+        legacy_automation_fixture("lucidpic", "lucidpic", "gpt-6.1-sol"),
+        legacy_automation_fixture("weekly", "weekly", "grok-4.6"),
+        legacy_automation_fixture("home", "home", "gpt-6.1-sol"),
+        legacy_automation_fixture("previous", "previous", "gpt-6.1-sol"),
+    ];
+    definitions[1].name = "Investigate recent Lucidpic feedback".into();
+    definitions[2].name = "Weekly Ops CLI".into();
+    definitions[2].state = AutomationState::Paused;
+    let threads: Vec<PersistedThreadState> = [
+        ("managed", "gpt-6.1-sol"), ("lucidpic", "gpt-6.1-terra"),
+        ("weekly", "grok-4.7"), ("home", "gpt-6.1-sol"), ("previous", "gpt-6.1-sol"),
+    ].into_iter().map(|(id, model)| serde_json::from_value(serde_json::json!({
+        "thread_id":id,"provider":"codex","agent":{"model_id":model},"status":"idle"
+    })).unwrap()).collect();
+    let persisted = PersistedAppState {
+        workspaces: vec![PersistedWorkspaceState {
+            path: temp.path().to_string_lossy().into_owned(), id: Some("ws".into()),
+            thread_states: threads, ..Default::default()
+        }], remote: None,
+    };
+    tokio::fs::write(&state_path, serde_json::to_vec(&persisted).unwrap()).await.unwrap();
+    store::persist(&store::control_store_path(&state_path), &PersistedControlState {
+        automations: definitions, ..Default::default()
+    }).await.unwrap();
+    let mut preferences = falcondeck_core::FalconDeckPreferences::default();
+    preferences.bots.push(serde_json::from_value(serde_json::json!({
+        "id":"bot","name":"Bot","workspace_id":"ws","dedicated_workspace":false,
+        "thread_id":"home","previous_thread_ids":["previous"],"space_path":temp.path().to_string_lossy()
+    })).unwrap());
+    tokio::fs::write(temp.path().join("falcondeck.json"), serde_json::to_vec(&preferences).unwrap()).await.unwrap();
+    // Follow the daemon startup order, rather than calling the migration helper.
+    let app = AppState::new_with_state_path("test".into(), HashMap::new(), state_path.clone());
+    app.restore_control_state().await.unwrap();
+    app.restore_local_state().await.unwrap();
+    let snapshot = app.snapshot().await;
+    for id in ["managed", "lucidpic", "weekly", "home", "previous"] {
+        let thread = snapshot.threads.iter().find(|t| t.id == id).unwrap();
+        assert_eq!(crate::control::automations::owns_thread("owned", thread.origin.as_ref()), id == "managed", "{id}");
+        if id != "managed" { assert!(thread.origin.is_none(), "{id}"); }
+    }
+    let lucidpic = snapshot.threads.iter().find(|t| t.id == "lucidpic").unwrap();
+    assert_eq!(lucidpic.agent.model_id.as_deref(), Some("gpt-6.1-terra"));
+    let health = app.analytics_summary(7).await.unwrap();
+    assert!(health.automations.iter().find(|a| a.id.as_deref() == Some("lucidpic")).unwrap().flags.iter().any(|flag| flag == "reused_thread_model_pin"));
+    let saved = super::load_persisted_app_state(&state_path).await.unwrap();
+    assert_eq!(saved.workspaces[0].thread_states.iter().filter(|t| t.origin.is_some()).count(), 1);
+    // A second real startup preserves the same ownership and model decisions.
+    let restored = AppState::new_with_state_path("test".into(), HashMap::new(), state_path.clone());
+    restored.restore_control_state().await.unwrap();
+    restored.restore_local_state().await.unwrap();
+    let saved_again = super::load_persisted_app_state(&state_path).await.unwrap();
+    for thread in &saved.workspaces[0].thread_states {
+        let again = saved_again.workspaces[0].thread_states.iter().find(|t| t.thread_id == thread.thread_id).unwrap();
+        assert_eq!(again.origin, thread.origin);
+        assert_eq!(again.agent.model_id, thread.agent.model_id);
+    }
 }

@@ -1,0 +1,75 @@
+[
+  {
+    "method": "turn/started",
+    "params": {
+      "threadId": "01a1a6ae-90a5-74b2-ab63-9fe1001fe0fa",
+      "turn": {
+        "id": "01a1a6ae-9541-7871-95b4-af24727c8b4e",
+        "rootTurnId": "01a1a6ae-9541-7871-95b4-af24727c8b4e",
+        "items": [],
+        "itemsView": "notLoaded",
+        "status": "inProgress",
+        "error": null,
+        "startedAt": 1793797821,
+        "completedAt": null,
+        "durationMs": null
+      }
+    },
+    "emittedAtMs": 1793797822026
+  },
+  {
+    "method": "thread/tokenUsage/updated",
+    "params": {
+      "threadId": "01a1a6ae-90a5-74b2-ab63-9fe1001fe0fa",
+      "turnId": "01a1a6ae-9541-7871-95b4-af24727c8b4e",
+      "tokenUsage": {
+        "total": {
+          "totalTokens": 21883,
+          "inputTokens": 21878,
+          "cachedInputTokens": 13184,
+          "cacheWriteInputTokens": 0,
+          "outputTokens": 5,
+          "reasoningOutputTokens": 0
+        },
+        "last": {
+          "totalTokens": 21883,
+          "inputTokens": 21878,
+          "cachedInputTokens": 13184,
+          "cacheWriteInputTokens": 0,
+          "outputTokens": 5,
+          "reasoningOutputTokens": 0
+        },
+        "modelContextWindow": 475000
+      }
+    },
+    "emittedAtMs": 1793797825167
+  },
+  {
+    "method": "turn/completed",
+    "params": {
+      "threadId": "01a1a6ae-90a5-74b2-ab63-9fe1001fe0fa",
+      "turn": {
+        "id": "01a1a6ae-9541-7871-95b4-af24727c8b4e",
+        "rootTurnId": "01a1a6ae-9541-7871-95b4-af24727c8b4e",
+        "items": [
+          {
+            "type": "agentMessage",
+            "id": "msg_0aabec2bb2264ce9016aeb2ec1119487d2b6346ab530ee40c1",
+            "text": "OK",
+            "phase": "final_answer",
+            "memoryCitation": null,
+            "delivery": null,
+            "questions": null
+          }
+        ],
+        "itemsView": "summary",
+        "status": "completed",
+        "error": null,
+        "startedAt": 1793797821,
+        "completedAt": 1793797825,
+        "durationMs": 3457
+      }
+    },
+    "emittedAtMs": 1793797825256
+  }
+]
