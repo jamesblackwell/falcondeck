@@ -303,7 +303,9 @@ impl AppState {
         let command_tx = {
             let mut remote = self.inner.remote.lock().await;
             let command_tx = remote.command_tx.clone();
-            record_attention(&mut remote.attention, kind, policy, command_tx.is_some());
+            // A review reaches the relay over HTTP, so a dead bridge is no loss.
+            let reachable = command_tx.is_some() || review_id.is_some();
+            record_attention(&mut remote.attention, kind, policy, reachable);
             command_tx
         };
         tracing::info!(
@@ -312,12 +314,9 @@ impl AppState {
             bridge = command_tx.is_some(),
             "attention event"
         );
-        if policy != AttentionPolicy::Deliver {
+        if policy != AttentionPolicy::Deliver || (command_tx.is_none() && review_id.is_none()) {
             return;
         }
-        let Some(command_tx) = command_tx else {
-            return;
-        };
         // Capture before enqueueing: the bridge may process this after
         // another turn has started. Never hydrate native history for a push.
         let message_preview = if preview.is_some() {
@@ -339,17 +338,18 @@ impl AppState {
             message_preview,
             review_id,
         };
-        if matches!(
+        let acknowledged = matches!(
             &command,
             super::RemoteBridgeCommand::NotifyAttention {
                 review_id: Some(_),
                 ..
             }
-        ) {
+        );
+        if acknowledged {
             // A tool call must not wait on the relay.
             let app = self.clone();
             tokio::spawn(async move { app.deliver_acknowledged(command, command_tx).await });
-        } else {
+        } else if let Some(command_tx) = command_tx {
             let _ = command_tx.send(command);
         }
     }
@@ -362,7 +362,7 @@ impl AppState {
     async fn deliver_acknowledged(
         &self,
         command: super::RemoteBridgeCommand,
-        fallback: mpsc::UnboundedSender<super::RemoteBridgeCommand>,
+        fallback: Option<mpsc::UnboundedSender<super::RemoteBridgeCommand>>,
     ) {
         let super::RemoteBridgeCommand::NotifyAttention {
             kind,
@@ -415,7 +415,12 @@ impl AppState {
                 }
             }
         }
-        let _ = fallback.send(command);
+        match fallback {
+            Some(fallback) => {
+                let _ = fallback.send(command);
+            }
+            None => tracing::warn!(kind, ?review_id, "attention push lost: no route to relay"),
+        }
     }
 
     async fn relay_session_target(&self) -> Option<(String, String, String)> {

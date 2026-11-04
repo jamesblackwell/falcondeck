@@ -144,7 +144,7 @@ async fn a_review_retries_until_the_relay_acknowledges_it() {
     let directory = tempfile::tempdir().unwrap();
     let app = app_with_relay(&url, &directory).await;
     let (fallback, mut bridge) = mpsc::unbounded_channel();
-    app.deliver_acknowledged(review_command(), fallback).await;
+    app.deliver_acknowledged(review_command(), Some(fallback)).await;
     assert_eq!(calls.load(Ordering::SeqCst), 2);
     assert!(
         bridge.try_recv().is_err(),
@@ -158,7 +158,7 @@ async fn a_relay_without_the_endpoint_gets_the_review_over_the_socket() {
     let directory = tempfile::tempdir().unwrap();
     let app = app_with_relay(&url, &directory).await;
     let (fallback, mut bridge) = mpsc::unbounded_channel();
-    app.deliver_acknowledged(review_command(), fallback).await;
+    app.deliver_acknowledged(review_command(), Some(fallback)).await;
     assert_eq!(calls.load(Ordering::SeqCst), 1);
     assert!(matches!(
         bridge.try_recv(),
@@ -167,12 +167,10 @@ async fn a_relay_without_the_endpoint_gets_the_review_over_the_socket() {
 }
 
 #[tokio::test]
-async fn a_review_reaches_the_relay_while_the_desktop_is_active() {
+async fn a_review_reaches_the_relay_with_an_active_desktop_and_no_bridge() {
     let (url, calls) = relay(vec![200]).await;
     let directory = tempfile::tempdir().unwrap();
     let app = app_with_relay(&url, &directory).await;
-    let (bridge_tx, _bridge) = mpsc::unbounded_channel();
-    app.inner.remote.lock().await.command_tx = Some(bridge_tx);
     *app.inner.desktop_active_until.lock().unwrap() =
         Some(Utc::now() + chrono::Duration::minutes(5));
     app.update_preferences(falcondeck_core::UpdatePreferencesRequest {
