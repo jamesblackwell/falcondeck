@@ -46,14 +46,14 @@ describe('useReviewInbox', () => {
     const api = { listReviews: vi.fn(async () => [row('R-1'), row('R-2')]) }
     const onNew = vi.fn()
     const { result, unmount } = renderHook(() =>
-      useReviewInbox({ api, baseUrl: 'http://x', enabled: true, onNewReviews: onNew }),
+      useReviewInbox({ api, baseUrl: 'http://127.0.0.1:1', enabled: true, onNewReviews: onNew }),
     )
     await waitFor(() => expect(result.current.openCount).toBe(2))
     expect(onNew.mock.calls[0][0].map((r: Review) => r.id)).toEqual(['R-2'])
     unmount()
     onNew.mockClear()
     const relaunched = renderHook(() =>
-      useReviewInbox({ api, baseUrl: 'http://x', enabled: true, onNewReviews: onNew }),
+      useReviewInbox({ api, baseUrl: 'http://127.0.0.1:1', enabled: true, onNewReviews: onNew }),
     )
     await waitFor(() => expect(relaunched.result.current.openCount).toBe(2))
     expect(onNew).not.toHaveBeenCalled()

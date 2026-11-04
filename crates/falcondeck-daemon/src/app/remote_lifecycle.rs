@@ -198,13 +198,16 @@ pub(super) fn remember_trusted_client_bundle(
     trusted.push(bundle.clone());
 }
 
-/// Delay before each attempt to get a review to the relay.
+/// Delay before each attempt to get a review to the relay. With
+/// [`NOTIFY_ATTEMPT_TIMEOUT`], the whole retry must end inside the relay's 60
+/// second dedupe window, or a retry after a lost response would alert twice.
 const NOTIFY_RETRY_DELAYS: [std::time::Duration; 4] = [
     std::time::Duration::ZERO,
     std::time::Duration::from_secs(1),
     std::time::Duration::from_secs(4),
-    std::time::Duration::from_secs(15),
+    std::time::Duration::from_secs(8),
 ];
+const NOTIFY_ATTEMPT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(8);
 
 pub(super) struct AttentionEvent<'a> {
     pub(super) kind: &'a str,
@@ -395,7 +398,7 @@ impl AppState {
                 let response = reqwest::Client::new()
                     .post(&url)
                     .bearer_auth(&daemon_token)
-                    .timeout(std::time::Duration::from_secs(15))
+                    .timeout(NOTIFY_ATTEMPT_TIMEOUT)
                     .json(&request)
                     .send()
                     .await;

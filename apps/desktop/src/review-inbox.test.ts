@@ -10,7 +10,9 @@ import {
   openReviewCount,
   reviewAge,
   reviewBadgeLabel,
+  readAlertedReviews,
   reviewNotification,
+  writeAlertedReviews,
   reviewSections,
   submitState,
 } from './review-inbox'
@@ -198,5 +200,17 @@ describe('notifications', () => {
     ])
     expect(second.fresh.map((r) => r.id)).toEqual(['R-3'])
     expect(newlyOpenReviews(second.seen, [review({ id: 'R-3' })]).fresh).toEqual([])
+  })
+})
+
+describe('alerted review history', () => {
+  it('survives a new local port but stays separate per daemon', () => {
+    localStorage.clear()
+    const open = [{ id: 'R-1', status: 'open' }, { id: 'R-2', status: 'approved' }] as unknown as Review[]
+    writeAlertedReviews('http://127.0.0.1:62731', open)
+    expect(readAlertedReviews('http://127.0.0.1:50000')).toEqual(new Set(['R-1']))
+    expect(readAlertedReviews('https://other.example')).toBeNull()
+    writeAlertedReviews('https://other.example', [])
+    expect(readAlertedReviews('http://127.0.0.1:50000')).toEqual(new Set(['R-1']))
   })
 })

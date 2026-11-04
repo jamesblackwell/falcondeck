@@ -65,7 +65,7 @@ export function useReviewInbox({
       if (requestRef.current !== current) return
       const { fresh, seen } = newlyOpenReviews(seenRef.current, rows)
       seenRef.current = seen
-      writeAlertedReviews(rows)
+      writeAlertedReviews(baseUrl, rows)
       setReviews(rows)
       setError(null)
       if (fresh.length > 0) onNewRef.current?.(fresh)
@@ -76,12 +76,12 @@ export function useReviewInbox({
     } finally {
       if (requestRef.current === current) setLoading(false)
     }
-  }, [api, enabled])
+  }, [api, baseUrl, enabled])
 
   // A different daemon, or the switch turning off, starts from nothing: ids
   // from one store mean nothing in another.
   useEffect(() => {
-    seenRef.current = readAlertedReviews()
+    seenRef.current = readAlertedReviews(baseUrl)
     requestRef.current++
     setReviews([])
     setError(null)
@@ -96,7 +96,7 @@ export function useReviewInbox({
       // eslint-disable-next-line react-hooks/exhaustive-deps
       requestRef.current++
     }
-  }, [api, enabled, load])
+  }, [api, baseUrl, enabled, load])
 
   useControlStateEvents(
     enabled ? baseUrl : null,

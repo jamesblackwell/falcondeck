@@ -88,7 +88,8 @@ restarts first, the click only raises it.
 
 A review uses `POST /v1/sessions/{id}/notify` rather than the bridge socket,
 because a queued socket write proves nothing and the bridge reconnects often. The
-daemon retries for about 20 seconds, then falls back to the socket. It also falls
+daemon retries for up to 45 seconds, inside the relay's 60 second dedupe window,
+then falls back to the socket. It also falls
 back at once on a 404 from an older relay. The relay dedupes per review, so a
 retry cannot double-alert.
 

@@ -164,14 +164,20 @@ export function reviewNotification(
 
 const ALERTED_REVIEWS_KEY = 'falcondeck.reviews.alerted'
 
+/** Review ids belong to one daemon. The local daemon's port changes per launch. */
+function alertedKey(baseUrl: string | null): string {
+  const local = !baseUrl || /^https?:\/\/(127\.0\.0\.1|localhost)(:|\/|$)/.test(baseUrl)
+  return local ? ALERTED_REVIEWS_KEY : `${ALERTED_REVIEWS_KEY}:${baseUrl}`
+}
+
 /**
  * Open reviews this app has already alerted about. Stored so an app relaunch
  * neither repeats an alert nor misses a review created while it was down.
  * Null on first run, which seeds quietly.
  */
-export function readAlertedReviews(): Set<string> | null {
+export function readAlertedReviews(baseUrl: string | null): Set<string> | null {
   try {
-    const stored = JSON.parse(localStorage.getItem(ALERTED_REVIEWS_KEY) ?? 'null') as unknown
+    const stored = JSON.parse(localStorage.getItem(alertedKey(baseUrl)) ?? 'null') as unknown
     return Array.isArray(stored) ? new Set(stored.map(String)) : null
   } catch {
     return null
@@ -179,10 +185,10 @@ export function readAlertedReviews(): Set<string> | null {
 }
 
 /** Only open ids are kept: a closed review can never be fresh, so this stays small. */
-export function writeAlertedReviews(reviews: readonly Review[]): void {
+export function writeAlertedReviews(baseUrl: string | null, reviews: readonly Review[]): void {
   try {
     const open = reviews.filter((review) => review.status === 'open').map((review) => review.id)
-    localStorage.setItem(ALERTED_REVIEWS_KEY, JSON.stringify(open))
+    localStorage.setItem(alertedKey(baseUrl), JSON.stringify(open))
   } catch {
     // Without storage the next launch simply seeds quietly.
   }

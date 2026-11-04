@@ -84,6 +84,15 @@ fn counters_separate_each_reason_per_kind() {
     assert!(counters["review"].last_at.is_some());
 }
 
+#[test]
+fn review_retries_finish_inside_the_relay_dedupe_window() {
+    let total: std::time::Duration = NOTIFY_RETRY_DELAYS
+        .iter()
+        .map(|delay| *delay + NOTIFY_ATTEMPT_TIMEOUT)
+        .sum();
+    assert!(total < std::time::Duration::from_secs(60), "{total:?}");
+}
+
 /// A relay whose notify endpoint answers with `statuses` in order.
 async fn relay(statuses: Vec<u16>) -> (String, Arc<AtomicUsize>) {
     let calls = Arc::new(AtomicUsize::new(0));

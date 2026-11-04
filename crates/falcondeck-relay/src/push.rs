@@ -378,6 +378,7 @@ fn valid_apple_id(value: &str) -> bool {
     value.len() == 10 && value.bytes().all(|byte| byte.is_ascii_alphanumeric())
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn apns_payload(
     title: &str,
     body: &str,
