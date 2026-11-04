@@ -212,8 +212,20 @@ Read state set offline is queued and replayed over `notifications.mark_read`.
 
 ## Clients
 
-- **Mac** (`mac-native-pilot`): the bell, day-grouped list, filters and report
-  view. It talks to the daemon, so it never uses the relay copy.
-- **iOS** (`ios-native-pilot`): the same list and deep links, a report view with
-  voice reply to the source thread, and the offline path above.
+Both clients refresh by re-reading what is on screen from the head of the list and
+replacing it, rather than merging into a loaded tail, so a backlog cannot leave a
+gap and a read on another device reaches every loaded row. A list scrolled very
+deep therefore costs more pages per refresh. `latest_seq` moves only with a head
+read: mark-all covers what James was shown, never a record that arrived since.
+
+- **Mac** (`mac-native-pilot`): a toolbar bell with an unread badge, a popover list
+  by day with the three filters and mark-all. Reports and reviews open in the main
+  column, with a compact review view (overall response only; per-item decisions
+  and evidence previews are not in this client). New agent notices show a native
+  banner. It talks to the daemon, so it never uses the relay copy.
+- **iOS** (`ios-native-pilot`): a Notifications row in the sidebar with the same
+  list and deep links, a detail screen with a typed or dictated reply that goes to
+  the source thread as an ordinary message, and the offline path above. A push
+  routes by content: a review opens the review, a notice opens its report, the
+  rest open the thread.
 - Older clients ignore the `notifications` control domain and the new push fields.
