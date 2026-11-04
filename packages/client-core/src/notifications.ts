@@ -55,6 +55,8 @@ export type NotificationListQuery = {
 export type MarkNotificationsReadRequest = {
   ids?: string[];
   up_to_seq?: number;
+  /** Limits `up_to_seq` to what this filter shows. */
+  filter?: NotificationFilter;
 };
 
 export const NOTIFICATION_FILTERS: readonly { value: NotificationFilter; label: string }[] = [

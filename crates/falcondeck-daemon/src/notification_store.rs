@@ -33,6 +33,9 @@ pub(crate) const NOTICES_PER_DAY: usize = 10;
 pub(crate) const HIGH_NOTICES_PER_DAY: usize = 2;
 /// Notices all agents together may send, however many tasks are running.
 pub(crate) const ALL_NOTICES_PER_DAY: usize = 30;
+/// Daily slots only a high-importance notice can take, so a noisy day cannot
+/// shut out the one that matters.
+pub(crate) const HIGH_NOTICES_RESERVED: usize = 5;
 /// Folded event keys kept per record. Replays arrive close to the original.
 const MAX_FOLDED_KEYS: usize = 32;
 const MAX_RESOLVED_EARLY: usize = 64;
@@ -422,6 +425,7 @@ impl NotificationStore {
                 .map(|(at, _)| *at)
                 .collect::<Vec<_>>()
         };
+        let high = new.importance == NotificationImportance::High;
         let refused = limited(
             "3 per hour",
             at(false),
@@ -439,24 +443,31 @@ impl NotificationStore {
             )
         })
         .or_else(|| {
-            (new.importance == NotificationImportance::High)
-                .then(|| {
-                    limited(
-                        "2 high-importance per day",
-                        at(true),
-                        day,
-                        HIGH_NOTICES_PER_DAY,
-                        Duration::days(1),
-                    )
-                })
-                .flatten()
+            high.then(|| {
+                limited(
+                    "2 high-importance per day",
+                    at(true),
+                    day,
+                    HIGH_NOTICES_PER_DAY,
+                    Duration::days(1),
+                )
+            })
+            .flatten()
         })
         .or_else(|| {
             limited(
-                "30 per day across all agents",
+                if high {
+                    "30 per day across all agents"
+                } else {
+                    "25 per day across all agents, with 5 kept for high importance"
+                },
                 everyone,
                 day,
-                ALL_NOTICES_PER_DAY,
+                if high {
+                    ALL_NOTICES_PER_DAY
+                } else {
+                    ALL_NOTICES_PER_DAY - HIGH_NOTICES_RESERVED
+                },
                 Duration::days(1),
             )
         });
@@ -555,7 +566,9 @@ impl NotificationStore {
             now,
             |record| {
                 (request.ids.contains(&record.id)
-                    || request.up_to_seq.is_some_and(|seq| record.seq <= seq))
+                    || request
+                        .up_to_seq
+                        .is_some_and(|seq| record.seq <= seq && record.matches(request.filter)))
                     && !record.is_read()
             },
             |record| record.read_at = Some(now),
@@ -656,6 +669,28 @@ impl NotificationStore {
                 state.resolved_early.pop_front();
             }
             state.resolved_early.push_back(dedupe_key.to_string());
+            return false;
+        };
+        stored.record.resolved_at = Some(now);
+        stored.record.read_at.get_or_insert(now);
+        self.save(state).await;
+        true
+    }
+
+    /// The newest open record under `prefix`. Unlike `resolve` it remembers
+    /// nothing on a miss: with no exact key, a later event could be mistaken
+    /// for this one and arrive already answered.
+    pub(crate) async fn resolve_newest(&self, prefix: &str, now: DateTime<Utc>) -> bool {
+        let mut guard = self.state.lock().await;
+        let state = &mut *guard;
+        self.ensure_loaded(state).await;
+        let Some(stored) = state.file.records.iter_mut().rev().find(|stored| {
+            stored.record.resolved_at.is_none()
+                && stored
+                    .dedupe_key
+                    .as_deref()
+                    .is_some_and(|key| key.starts_with(prefix))
+        }) else {
             return false;
         };
         stored.record.resolved_at = Some(now);
@@ -1182,9 +1217,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn all_agents_together_share_a_daily_ceiling() {
+    async fn all_agents_share_a_daily_ceiling_with_room_kept_for_high_importance() {
         let (_temp, store) = store();
-        for index in 0..ALL_NOTICES_PER_DAY {
+        let open = ALL_NOTICES_PER_DAY - HIGH_NOTICES_RESERVED;
+        for index in 0..open {
             store
                 .record_notice(notice(&format!("thread:{index}"), "n"), now())
                 .await
@@ -1197,10 +1233,54 @@ mod tests {
         assert!(matches!(
             refused,
             NoticeRefused::RateLimited {
+                limit: "25 per day across all agents, with 5 kept for high importance",
+                ..
+            }
+        ));
+        let high = |sender: String| NewNotification {
+            importance: NotificationImportance::High,
+            ..notice(&sender, "urgent")
+        };
+        for index in 0..HIGH_NOTICES_RESERVED {
+            store
+                .record_notice(high(format!("thread:high{index}")), now())
+                .await
+                .unwrap();
+        }
+        let refused = store
+            .record_notice(high("thread:last".into()), now())
+            .await
+            .unwrap_err();
+        assert!(matches!(
+            refused,
+            NoticeRefused::RateLimited {
                 limit: "30 per day across all agents",
                 ..
             }
         ));
+    }
+
+    #[tokio::test]
+    async fn mark_all_can_keep_to_one_filter() {
+        let (_temp, store) = store();
+        store
+            .record_notice(notice("bot:Juno", "n"), now())
+            .await
+            .unwrap();
+        store
+            .record(event(NotificationKind::TurnComplete, "turn"), now())
+            .await;
+        store
+            .mark_read(
+                &MarkNotificationsReadRequest {
+                    up_to_seq: Some(2),
+                    filter: NotificationFilter::Bots,
+                    ..Default::default()
+                },
+                now(),
+            )
+            .await;
+        assert_eq!(store.status().await.unread_count, 1, "the rest stay unread");
     }
 
     #[tokio::test]

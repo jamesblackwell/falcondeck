@@ -739,6 +739,8 @@ struct PendingServerRequest {
 struct RemoteBridgeState {
     /// Attention decisions since this daemon started, per kind.
     attention: BTreeMap<String, falcondeck_core::AttentionDeliveryCounter>,
+    /// Pushes nothing could take, kept for the next connection.
+    held_pushes: std::collections::VecDeque<remote_lifecycle::HeldPush>,
     status: RemoteConnectionStatus,
     relay_url: Option<String>,
     pairing: Option<RemotePairingState>,
@@ -994,6 +996,8 @@ enum RemoteBridgeCommand {
         title: Option<String>,
         notification_id: Option<String>,
         report_id: Option<String>,
+        /// Push even to a device that looks connected.
+        ignore_presence: bool,
     },
 }
 
@@ -1151,6 +1155,7 @@ impl AppState {
                 report_sync: Mutex::new(()),
                 remote: Mutex::new(RemoteBridgeState {
                     attention: BTreeMap::new(),
+                    held_pushes: Default::default(),
                     status: RemoteConnectionStatus::Inactive,
                     relay_url: None,
                     pairing: None,

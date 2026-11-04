@@ -1,6 +1,7 @@
 import { act, cleanup, renderHook, waitFor } from '@testing-library/react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import type {
+  MarkNotificationsReadRequest,
   NotificationCounts,
   NotificationListQuery,
   NotificationListResponse,
@@ -35,7 +36,7 @@ function row(seq: number, overrides: Partial<NotificationRecord> = {}): Notifica
 class FakeDaemon implements NotificationCentreApi {
   rows: NotificationRecord[]
   lists: NotificationListQuery[] = []
-  reads: { ids?: string[]; up_to_seq?: number }[] = []
+  reads: MarkNotificationsReadRequest[] = []
   failure: unknown = null
   failReads: unknown = null
   holdReads = false
@@ -82,13 +83,16 @@ class FakeDaemon implements NotificationCentreApi {
   async getNotification(id: string): Promise<NotificationRecord> {
     return this.rows.find((item) => item.id === id)!
   }
-  async markNotificationsRead(request: { ids?: string[]; up_to_seq?: number }): Promise<NotificationCounts> {
+  async markNotificationsRead(request: MarkNotificationsReadRequest): Promise<NotificationCounts> {
     this.reads.push(request)
     if (this.holdReads) await new Promise<void>((resume) => this.held.push(resume))
     if (this.failReads) throw this.failReads
     const ids = new Set(request.ids ?? [])
+    const shown = (item: NotificationRecord) => request.filter !== 'bots' || item.kind === 'agent_notice' || Boolean(item.bot)
     this.rows = this.rows.map((item) =>
-      ids.has(item.id) || item.seq <= (request.up_to_seq ?? -1) ? { ...item, read_at: '2026-11-04T11:00:00Z' } : item,
+      ids.has(item.id) || (item.seq <= (request.up_to_seq ?? -1) && shown(item))
+        ? { ...item, read_at: '2026-11-04T11:00:00Z' }
+        : item,
     )
     return this.counts()
   }
@@ -223,6 +227,17 @@ describe('useNotificationCentre', () => {
     await act(() => result.current.markAllRead())
     expect(api.reads).toEqual([{ up_to_seq: 3 }])
     expect(api.rows.find((item) => item.id === 'N-4')?.read_at).toBeUndefined()
+  })
+
+  it('mark all keeps to the filter on screen', async () => {
+    const api = new FakeDaemon([row(1), row(2, { kind: 'agent_notice' })])
+    const { result } = await loaded(api)
+    act(() => result.current.setFilter('bots'))
+    await waitFor(() => expect(result.current.records.map((item) => item.id)).toEqual(['N-2']))
+    await act(() => result.current.markAllRead())
+    expect(api.reads).toEqual([{ up_to_seq: 2, filter: 'bots' }])
+    expect(api.rows.find((item) => item.id === 'N-1')?.read_at).toBeUndefined()
+    expect(result.current.counts.unread_count).toBe(1)
   })
 
   it('only a head read moves the mark-all boundary', async () => {

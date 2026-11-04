@@ -256,6 +256,12 @@ impl ControlError {
     }
 }
 
+/// An automation run's claim on a turn.
+pub struct RunTurn {
+    /// The reply that means "nothing to report".
+    pub quiet_marker: Option<String>,
+}
+
 /// Dependencies the control service uses for deep validation and dispatch.
 /// Tests drive the service with `app: None` to exercise store behaviour
 /// without live providers.
@@ -1927,25 +1933,28 @@ impl ControlService {
     }
 
     /// Snapshot of one automation, for the dispatcher.
-    /// The reply that means "nothing to report" for a run going on in this
-    /// thread right now. Quiet runs must not reach James as a finished turn.
-    pub async fn quiet_marker_for_thread(&self, thread_id: &str) -> Option<String> {
+    /// The run this turn belongs to. A run can settle before its completion is
+    /// recorded, so a finished run still owns the turn it recorded. A later turn
+    /// in the same thread is someone else's.
+    pub async fn run_for_turn(&self, thread_id: &str, turn_id: Option<&str>) -> Option<RunTurn> {
         let state = self.state.lock().await;
-        let run = state.runs.iter().find(|run| {
-            run.status == AutomationRunStatus::Running
-                && run.thread_id.as_deref() == Some(thread_id)
+        let run = state.runs.iter().rev().find(|run| {
+            run.thread_id.as_deref() == Some(thread_id)
+                && (run.status == AutomationRunStatus::Running
+                    || (turn_id.is_some() && run.turn_id.as_deref() == turn_id))
         })?;
-        let automation = state
+        let quiet_marker = state
             .automations
             .iter()
-            .find(|automation| automation.id == run.automation_id)?;
-        match &automation.task {
-            falcondeck_core::control::AutomationTask::ConditionalPrompt {
-                no_action_marker,
-                ..
-            } => Some(no_action_marker.clone()),
-            _ => None,
-        }
+            .find(|automation| automation.id == run.automation_id)
+            .and_then(|automation| match &automation.task {
+                falcondeck_core::control::AutomationTask::ConditionalPrompt {
+                    no_action_marker,
+                    ..
+                } => Some(no_action_marker.clone()),
+                _ => None,
+            });
+        Some(RunTurn { quiet_marker })
     }
 
     pub async fn automation(&self, automation_id: &str) -> Option<Automation> {

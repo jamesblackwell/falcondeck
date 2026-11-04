@@ -27,7 +27,7 @@ mod tickets;
 pub(crate) use reviews::{EvidenceAccess, response_message};
 pub use service::{
     ControlDeps, ControlError, ControlService, LegacyImportOutcome, MAX_CONCURRENT_AUTOMATION_RUNS,
-    RunSource,
+    RunSource, RunTurn,
 };
 
 #[cfg(test)]

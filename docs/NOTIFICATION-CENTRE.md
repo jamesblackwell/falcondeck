@@ -45,9 +45,20 @@ bodies in `bodies/<id>.md`, written only by the daemon.
 `AppState::record_and_deliver_attention` is the only way an attention event
 leaves the daemon; `deliver_attention` has no other caller. Anything pushed is
 therefore stored. Preferences, desktop presence and a dead relay gate delivery
-only, so a suppressed event is still recorded. A repeat of a known event (same
-request, review or turn) records nothing and does not push again, including one
-already folded into a thread's row (the row keeps the last 32 folded keys).
+only, so a suppressed event is still recorded. A repeat of a known event records
+nothing and does not push again, including one already folded into a thread's row
+(the row keeps the last 32 folded keys).
+
+A key names one event, and lasts as long as the record, so a provider's own id is
+never enough:
+
+- A **request** key carries the request's `created_at`. Codex and ACP ids are
+  JSON-RPC ids that restart at 0 with each process, so an old key must not match a
+  new approval. Resolving reads `created_at` from the transcript card.
+- A **completion** key carries the turn and the answer it ended on. A Claude turn
+  settles at its result and again when the process goes, which is one event. A
+  background task can wake a parked turn under the same turn id, which is another.
+- An **error** has no key. Each failure is news, even a retry of the same turn.
 
 A request is published before it is recorded, so a fast answer can arrive first.
 The store remembers the last 64 keys resolved with no record, and a late record
@@ -79,7 +90,8 @@ showing the thread marks it read, which reads the record too.
 To keep history scannable, **a thread has at most one unread completion row**. A
 later completion refreshes it (new preview and time, `repeat_count` + 1, back to
 the top) while every turn still pushes. Once read, the next one is a new row.
-Errors fold the same way, so a retry loop is one line.
+Errors fold the same way, so a retry loop is one line, and the relay holds a
+repeat of the same push to one a minute.
 
 ## Read state
 
@@ -128,18 +140,21 @@ its current home, so a reply reaches the bot.
 
 - **Normal** follows the usual rules, including quiet while James is at the Mac.
   The record lands either way, and the Mac app shows its own banner.
-- **High** also pushes while he is at the Mac. The master switch still wins.
+- **High** also pushes while he is at the Mac, and to a phone that only looks
+  connected to the relay. The master switch still wins.
 
 A notice travels like a review: `POST /v1/sessions/{id}/notify` with retries, then
 the bridge socket, because a queued socket write can die with the connection. The
-relay dedupes a notice by its own id, so a retry cannot alert twice and two notices
-from one thread both arrive.
+relay dedupes by the record's id and text, so a retry cannot alert twice and two
+notices from one thread both arrive.
 
 Limits, counted from the store so they survive a restart: 3 an hour, 10 a day and
 2 `high` a day per sender (a bot, or one task thread), and 30 a day across all
-agents, so a fleet of tasks cannot add up to a flood. A refused notice stores and
-pushes nothing, and the error tells the agent when a slot frees and to use its
-final reply instead. The same sender repeating the same title and summary within
+agents, so a fleet of tasks cannot add up to a flood. The last 5 of those 30 are
+kept for `high`, so a noisy day cannot shut out the one that matters. A refused
+notice stores and pushes nothing. The error says James has not been told, when a
+slot frees, and to batch or publish a review; it does not point at the final
+reply, because a bot run's final reply does not alert him. The same sender repeating the same title and summary within
 an hour replays the first record, at no cost and with no second push.
 
 Guidance lives in the always-on instructions (`agent_context.rs`), the bot
@@ -217,6 +232,8 @@ replacing it, rather than merging into a loaded tail, so a backlog cannot leave 
 gap and a read on another device reaches every loaded row. A list scrolled very
 deep therefore costs more pages per refresh. `latest_seq` moves only with a head
 read: mark-all covers what James was shown, never a record that arrived since.
+Desktop and iOS also keep mark-all to the filter on screen; native Mac marks the
+whole store.
 
 - **Desktop** (`apps/desktop`, the Mac app James runs): a Notifications row with an
   unread badge at the top of the sidebar opens a main view, in the same slot as

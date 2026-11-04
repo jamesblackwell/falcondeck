@@ -37,6 +37,7 @@ final class NotificationCentreStore {
     /// Hosted copies have no read state of their own, and the daemon's list may
     /// not reach them, so a replayed read would otherwise come back unread.
     private var readReports: Set<String> = []
+    private var inFlightUpToFilter = NotificationFilter.all
     private(set) var replies: [String: String] = [:]
     /// A notification tap asking the list to open this.
     var openRequest: NotificationDetailTarget?
@@ -110,7 +111,8 @@ final class NotificationCentreStore {
         return record.markedRead(at: .now)
     }
     private func readPending(_ record: NotificationRecord) -> Bool {
-        offlineReads.contains(record.id) || readReports.contains(record.id) || inFlightReads.contains(record.id) || inFlightUpToSeq.map { record.seq <= $0 && record.seq > 0 } ?? false
+        offlineReads.contains(record.id) || readReports.contains(record.id) || inFlightReads.contains(record.id)
+            || inFlightUpToSeq.map { record.seq <= $0 && record.seq > 0 && record.matches(inFlightUpToFilter) } ?? false
     }
 
     // MARK: Lifecycle
@@ -297,20 +299,23 @@ final class NotificationCentreStore {
         }
     }
 
-    /// Everything up to the newest `seq` James was showing, so a record that
-    /// arrived since stays unread. The whole store, whatever the filter.
+    /// Everything the current filter shows up to the newest `seq` James was
+    /// shown, so a record that arrived since stays unread.
     func markAllRead(model: AppModel) async {
-        let upTo = counts.latestSeq, previous = counts.unread
+        let upTo = counts.latestSeq, previous = counts.unread, filter = self.filter
         guard previous > 0, model.demo || model.connected, inFlightUpToSeq == nil else { return }
-        let touched = Set(pages.values.flatMap(\.items).filter { !$0.isRead && $0.seq <= upTo }.map(\.id))
+        let touched = Set(pages.values.flatMap(\.items).filter { !$0.isRead && $0.seq <= upTo && $0.matches(filter) }.map(\.id))
         mutationRevision += 1; actionError = nil
         applyRead(touched)
-        counts.unread = 0
+        // The daemon's answer has the true count; a filter covers an unknown share.
+        counts.unread = filter == .all ? 0 : max(0, previous - touched.count)
         guard !model.demo else { return }
         let current = model.connectionID, scope = model.sessionScope
-        inFlightUpToSeq = upTo
+        inFlightUpToSeq = upTo; inFlightUpToFilter = filter
+        var params: [String: JSON] = ["up_to_seq": .number(Double(upTo))]
+        if filter != .all { params["filter"] = .string(filter.rawValue) }
         do {
-            let response = try await model.relay.call("notifications.mark_read", params: .object(["up_to_seq": .number(Double(upTo))]))
+            let response = try await model.relay.call("notifications.mark_read", params: .object(params))
             inFlightUpToSeq = nil
             guard current == model.connectionID else { return }
             mutationRevision += 1

@@ -40,6 +40,7 @@ fn notify(kind: &str, thread_id: Option<String>) -> RelayNotifyRequest {
         review_id: None,
         notification_id: None,
         report_id: None,
+        ignore_presence: false,
     }
 }
 
@@ -644,6 +645,93 @@ async fn two_notices_from_a_thread_both_alert_and_a_retry_does_not() {
     assert_eq!(second["reportId"], "rpt_N-2");
     tokio::time::sleep(StdDuration::from_millis(100)).await;
     assert!(events.try_recv().is_err(), "the retry alerts once");
+    task.abort();
+}
+
+#[tokio::test]
+async fn two_approvals_in_a_thread_both_alert_and_a_retry_does_not() {
+    let (endpoint, mut events, task) = mock_server().await;
+    let directory = tempfile::tempdir().unwrap();
+    let state = state(
+        &directory,
+        String::new(),
+        Some(Arc::new(ApnsProvider::mock(endpoint))),
+    );
+    state
+        .register_push_registration("session", "native", "native", Some(native("aabb")))
+        .await
+        .unwrap();
+    let approval = |id: &str| RelayNotifyRequest {
+        notification_id: Some(id.to_owned()),
+        ..notify("approval", Some("thread".to_owned()))
+    };
+    for id in ["N-1", "N-1", "N-2"] {
+        state
+            .notify("session", "daemon", approval(id))
+            .await
+            .unwrap();
+    }
+    assert_eq!(next_push(&mut events).await.1["notificationId"], "N-1");
+    assert_eq!(next_push(&mut events).await.1["notificationId"], "N-2");
+    tokio::time::sleep(StdDuration::from_millis(100)).await;
+    assert!(events.try_recv().is_err(), "the retry alerts once");
+    task.abort();
+}
+
+#[tokio::test]
+async fn a_new_answer_folded_into_one_record_alerts_and_a_repeat_does_not() {
+    let (endpoint, mut events, task) = mock_server().await;
+    let directory = tempfile::tempdir().unwrap();
+    let state = state(
+        &directory,
+        String::new(),
+        Some(Arc::new(ApnsProvider::mock(endpoint))),
+    );
+    state
+        .register_push_registration("session", "native", "native", Some(native("aabb")))
+        .await
+        .unwrap();
+    let done = |text: &str| RelayNotifyRequest {
+        notification_id: Some("N-1".to_owned()),
+        message_preview: Some(text.to_owned()),
+        ..notify("turn-complete", Some("thread".to_owned()))
+    };
+    for text in ["Waiting.", "Waiting.", "Tests passed."] {
+        state.notify("session", "daemon", done(text)).await.unwrap();
+    }
+    next_push(&mut events).await;
+    next_push(&mut events).await;
+    tokio::time::sleep(StdDuration::from_millis(100)).await;
+    assert!(events.try_recv().is_err());
+    task.abort();
+}
+
+#[tokio::test]
+async fn a_daemon_sending_no_id_keeps_the_per_thread_window() {
+    let (endpoint, mut events, task) = mock_server().await;
+    let directory = tempfile::tempdir().unwrap();
+    let state = state(
+        &directory,
+        String::new(),
+        Some(Arc::new(ApnsProvider::mock(endpoint))),
+    );
+    state
+        .register_push_registration("session", "native", "native", Some(native("aabb")))
+        .await
+        .unwrap();
+    for _ in 0..2 {
+        state
+            .notify(
+                "session",
+                "daemon",
+                notify("approval", Some("thread".to_owned())),
+            )
+            .await
+            .unwrap();
+    }
+    next_push(&mut events).await;
+    tokio::time::sleep(StdDuration::from_millis(100)).await;
+    assert!(events.try_recv().is_err());
     task.abort();
 }
 

@@ -3678,6 +3678,7 @@ async fn client_peers_cannot_request_push_notifications() {
             review_id: None,
             notification_id: None,
             report_id: None,
+            ignore_presence: false,
         },
     )
     .await;

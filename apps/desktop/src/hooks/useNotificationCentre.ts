@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 
 import type {
   DaemonApiClient,
+  MarkNotificationsReadRequest,
   NotificationCounts,
   NotificationFilter,
   NotificationRecord,
@@ -304,7 +305,7 @@ export function useNotificationCentre({
   }, [adoptKeepingHead, api, showCursor, showRecords])
 
   const mutate = useCallback(
-    async (request: { ids?: string[]; up_to_seq?: number }, ids: ReadonlySet<string>, unread: number) => {
+    async (request: MarkNotificationsReadRequest, ids: ReadonlySet<string>, unread: number) => {
       if (!api) return
       const host = hostGeneration.current
       const before = recordsRef.current
@@ -356,9 +357,16 @@ export function useNotificationCentre({
   const markAllRead = useCallback(async () => {
     const { latest_seq: upTo, unread_count: unread } = countsRef.current
     if (unread === 0 || upTo === 0) return
-    // Only what James could see: a record newer than this stays unread.
+    // Only what James could see: a record newer than this stays unread, and
+    // so does one the filter is hiding. Those counts come back from the daemon.
     const ids = recordsRef.current.filter((row) => !row.read_at && row.seq <= upTo).map((row) => row.id)
-    await mutate({ up_to_seq: upTo }, new Set(ids), unread)
+    const filter = filterRef.current
+    const everything = filter === 'all'
+    await mutate(
+      everything ? { up_to_seq: upTo } : { up_to_seq: upTo, filter },
+      new Set(ids),
+      everything ? unread : ids.length,
+    )
   }, [mutate])
 
   return useMemo(

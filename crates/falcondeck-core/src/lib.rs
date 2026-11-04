@@ -5708,6 +5708,9 @@ pub struct RelayNotifyRequest {
     /// Relay report to open on tap while the Mac is asleep.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub report_id: Option<String>,
+    /// Push even to a device that looks connected, as a review does.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub ignore_presence: bool,
 }
 
 /// Daemon-side record of attention events for one kind since it started.
@@ -6052,6 +6055,9 @@ pub enum RelayClientMessage {
         /// Relay report to open on tap while the Mac is asleep. Opaque.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         report_id: Option<String>,
+        /// Push even to a device that looks connected.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        ignore_presence: bool,
     },
 }
 

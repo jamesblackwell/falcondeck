@@ -513,6 +513,24 @@ private func settle(_ condition: @MainActor () async -> Bool, file: StaticString
         XCTAssertNotNil(rig.store.actionError)
     }
 
+    func testMarkAllKeepsToTheFilterOnScreen() async throws {
+        let rig = Rig { method, params in
+            if method == "notifications.mark_read" { return Wire.counts(unread: 1, latest: 3) }
+            return params["filter"].string == "bots"
+                ? Wire.list([Wire.record(3, kind: "agent_notice")], unread: 2, latest: 3)
+                : Wire.list([Wire.record(3, kind: "agent_notice"), Wire.record(2)], unread: 2, latest: 3)
+        }
+        await rig.store.refresh(model: rig.model)
+        rig.store.setFilter(.bots)
+        await rig.store.refresh(model: rig.model)
+        await rig.store.markAllRead(model: rig.model)
+        let sent = await rig.relay.last("notifications.mark_read")
+        XCTAssertEqual(sent?["filter"].string, "bots")
+        XCTAssertEqual(rig.store.record("N-3")?.isRead, true)
+        XCTAssertEqual(rig.store.record("N-2")?.isRead, false, "Outside the filter, so still unread")
+        XCTAssertEqual(rig.store.unreadCount(offline: false), 1)
+    }
+
     func testMarkAllNeedsTheComputer() async throws {
         let rig = Rig { _, _ in Wire.list([Wire.record(3)], unread: 1) }
         await rig.store.refresh(model: rig.model)

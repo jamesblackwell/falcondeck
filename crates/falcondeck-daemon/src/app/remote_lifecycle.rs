@@ -208,6 +208,18 @@ const NOTIFY_RETRY_DELAYS: [std::time::Duration; 4] = [
     std::time::Duration::from_secs(8),
 ];
 const NOTIFY_ATTEMPT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(8);
+/// Pushes kept for the next connection. An alert stops being useful quickly,
+/// and a long outage must not end in a burst: the record is what lasts.
+const MAX_HELD_PUSHES: usize = 16;
+const HELD_PUSH_TTL: std::time::Duration = std::time::Duration::from_secs(60 * 60);
+
+/// A push that could not be handed over.
+pub(super) struct HeldPush {
+    command: super::RemoteBridgeCommand,
+    held_at: std::time::Instant,
+    /// A socket write that failed was already counted when it was handed over.
+    counted: bool,
+}
 
 /// One push to attempt. The preview is captured at record time: the bridge may
 /// process this after another turn has started.
@@ -222,8 +234,9 @@ pub(super) struct AttentionPush {
     pub title: Option<String>,
     pub notification_id: Option<String>,
     pub report_id: Option<String>,
-    /// High-importance notices also push while James is at the Mac.
-    pub ignore_desktop_presence: bool,
+    /// High-importance notices also push while James is at the Mac, and to a
+    /// device that only looks connected.
+    pub ignore_presence: bool,
 }
 
 const AGENT_NOTICE_KIND: &str = "agent-notice";
@@ -283,10 +296,32 @@ fn record_attention(
     }
 }
 
+fn push_kind(command: &super::RemoteBridgeCommand) -> String {
+    match command {
+        super::RemoteBridgeCommand::NotifyAttention { kind, .. } => kind.clone(),
+        _ => String::new(),
+    }
+}
+
+/// Only with a pairing to deliver to, and the newest are the ones kept.
+fn hold_locked(remote: &mut RemoteBridgeState, command: super::RemoteBridgeCommand, counted: bool) {
+    if remote.pairing.is_none() {
+        return;
+    }
+    if remote.held_pushes.len() == MAX_HELD_PUSHES {
+        remote.held_pushes.pop_front();
+    }
+    remote.held_pushes.push_back(HeldPush {
+        command,
+        held_at: std::time::Instant::now(),
+        counted,
+    });
+}
+
 impl AppState {
     /// Best-effort: forward an attention event to the relay so devices that
-    /// are not connected can receive a push notification. A missing or dead
-    /// bridge simply drops the request. The only caller is
+    /// are not connected can receive a push notification. A push nothing can
+    /// take waits for the next connection. The only caller is
     /// `record_and_deliver_attention`, so anything pushed is also stored.
     pub(super) async fn deliver_attention(&self, push: AttentionPush) {
         let AttentionPush {
@@ -298,32 +333,21 @@ impl AppState {
             title,
             notification_id,
             report_id,
-            ignore_desktop_presence,
+            ignore_presence,
         } = push;
         let preferences = self.preferences().await.notifications;
         let desktop_active = preferences.suppress_when_desktop_active
-            && !ignore_desktop_presence
+            && !ignore_presence
             && self.desktop_is_active();
         let policy = attention_policy(kind, &preferences, desktop_active);
         // A notice with a report is as easy to lose as a review, and a retry is
         // as safe: the relay dedupes a notice by its own id.
         let http_eligible = review_id.is_some() || kind == AGENT_NOTICE_KIND;
         let http_route = http_eligible && self.relay_session_target().await.is_some();
-        let command_tx = {
+        tracing::info!(kind, ?policy, http_route, "attention event");
+        if policy != AttentionPolicy::Deliver {
             let mut remote = self.inner.remote.lock().await;
-            let command_tx = remote.command_tx.clone();
-            // A review reaches the relay over HTTP, so a dead bridge is no loss.
-            let reachable = command_tx.is_some() || http_route;
-            record_attention(&mut remote.attention, kind, policy, reachable);
-            command_tx
-        };
-        tracing::info!(
-            kind,
-            ?policy,
-            bridge = command_tx.is_some(),
-            "attention event"
-        );
-        if policy != AttentionPolicy::Deliver || (command_tx.is_none() && !http_route) {
+            record_attention(&mut remote.attention, kind, policy, false);
             return;
         }
         let command = super::RemoteBridgeCommand::NotifyAttention {
@@ -335,13 +359,14 @@ impl AppState {
             title,
             notification_id,
             report_id,
+            ignore_presence,
         };
         if http_route {
             // A tool call must not wait on the relay.
             let app = self.clone();
-            tokio::spawn(async move { app.deliver_acknowledged(command, command_tx).await });
-        } else if let Some(command_tx) = command_tx {
-            let _ = command_tx.send(command);
+            tokio::spawn(async move { app.deliver_acknowledged(command).await });
+        } else {
+            self.hand_to_bridge(command).await;
         }
     }
 
@@ -350,11 +375,7 @@ impl AppState {
     /// the relay acknowledges it, and only falls back to the socket for relays
     /// that lack the endpoint or while HTTP keeps failing. The relay dedupes on
     /// the review or notice, so a retry after a lost response cannot double-alert.
-    async fn deliver_acknowledged(
-        &self,
-        command: super::RemoteBridgeCommand,
-        fallback: Option<mpsc::UnboundedSender<super::RemoteBridgeCommand>>,
-    ) {
+    async fn deliver_acknowledged(&self, command: super::RemoteBridgeCommand) {
         let super::RemoteBridgeCommand::NotifyAttention {
             kind,
             workspace_id,
@@ -364,6 +385,7 @@ impl AppState {
             title,
             notification_id,
             report_id,
+            ignore_presence,
         } = &command
         else {
             return;
@@ -385,6 +407,7 @@ impl AppState {
                 review_id: review_id.clone(),
                 notification_id: notification_id.clone(),
                 report_id: report_id.clone(),
+                ignore_presence: *ignore_presence,
             };
             let url = format!(
                 "{}/v1/sessions/{session_id}/notify",
@@ -402,6 +425,13 @@ impl AppState {
                 match response {
                     Ok(response) if response.status().is_success() => {
                         tracing::info!(kind, ?review_id, "relay acknowledged attention push");
+                        let mut remote = self.inner.remote.lock().await;
+                        record_attention(
+                            &mut remote.attention,
+                            kind,
+                            AttentionPolicy::Deliver,
+                            true,
+                        );
                         return;
                     }
                     // An older relay. The socket path is all it has.
@@ -415,11 +445,68 @@ impl AppState {
                 }
             }
         }
-        match fallback {
-            Some(fallback) => {
-                let _ = fallback.send(command);
+        self.hand_to_bridge(command).await;
+    }
+
+    /// The channel in place now, not one captured earlier: the bridge replaces
+    /// it when it restarts, and a send to the old one goes nowhere. Counted as
+    /// sent only once the bridge has it.
+    async fn hand_to_bridge(&self, command: super::RemoteBridgeCommand) {
+        let mut remote = self.inner.remote.lock().await;
+        let kind = push_kind(&command);
+        let unsent = match remote.command_tx.as_ref() {
+            Some(bridge) => bridge.send(command).err().map(|error| error.0),
+            None => Some(command),
+        };
+        record_attention(
+            &mut remote.attention,
+            &kind,
+            AttentionPolicy::Deliver,
+            unsent.is_none(),
+        );
+        if let Some(command) = unsent {
+            tracing::warn!(kind, "attention push held: the relay bridge is down");
+            hold_locked(&mut remote, command, false);
+        }
+    }
+
+    pub(super) async fn hold_push(&self, command: super::RemoteBridgeCommand, counted: bool) {
+        hold_locked(&mut *self.inner.remote.lock().await, command, counted);
+    }
+
+    /// The bridge is back: anything still worth saying goes out.
+    pub(super) async fn flush_held_pushes(&self) {
+        let mut remote = self.inner.remote.lock().await;
+        let held = std::mem::take(&mut remote.held_pushes);
+        for HeldPush {
+            command,
+            held_at,
+            counted,
+        } in held
+        {
+            let kind = push_kind(&command);
+            if held_at.elapsed() > HELD_PUSH_TTL {
+                tracing::warn!(kind, "attention push expired while the relay was away");
+                continue;
             }
-            None => tracing::warn!(kind, ?review_id, "attention push lost: no route to relay"),
+            let unsent = match remote.command_tx.as_ref() {
+                Some(bridge) => bridge.send(command).err().map(|error| error.0),
+                None => Some(command),
+            };
+            match unsent {
+                Some(command) => remote.held_pushes.push_back(HeldPush {
+                    command,
+                    held_at,
+                    counted,
+                }),
+                None if !counted => record_attention(
+                    &mut remote.attention,
+                    &kind,
+                    AttentionPolicy::Deliver,
+                    true,
+                ),
+                None => {}
+            }
         }
     }
 
@@ -494,6 +581,7 @@ impl AppState {
         remote.daemon_token = None;
         remote.last_error = None;
         remote.command_tx = None;
+        remote.held_pushes.clear();
         remote.trusted_client_bundles.clear();
         remote.trusted_client_devices.clear();
         remote.unresumed_remote = None;

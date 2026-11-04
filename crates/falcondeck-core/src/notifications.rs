@@ -204,4 +204,11 @@ pub struct MarkNotificationsReadRequest {
     /// Mark everything at or below this position.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub up_to_seq: Option<u64>,
+    /// Limits `up_to_seq` to what this filter shows.
+    #[serde(default, skip_serializing_if = "is_all")]
+    pub filter: NotificationFilter,
+}
+
+fn is_all(filter: &NotificationFilter) -> bool {
+    *filter == NotificationFilter::All
 }

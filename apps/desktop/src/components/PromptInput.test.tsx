@@ -585,7 +585,7 @@ describe("PromptInput", () => {
     const textarea = screen.getByPlaceholderText(
       "Ask anything",
     ) as HTMLTextAreaElement;
-    expect(textarea.style.height).toBe("200px");
+    expect(textarea.style.height).toBe("320px");
 
     // Caret at the end (the Shift+Enter case): follow the new line. The
     // mid-text case (scroll position preserved) is not representable here —

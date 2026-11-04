@@ -95,10 +95,17 @@ restarts first, the click only raises it.
 
 A review or agent notice uses `POST /v1/sessions/{id}/notify` rather than the bridge socket,
 because a queued socket write proves nothing and the bridge reconnects often. The
-daemon retries for up to 45 seconds, inside the relay's 60 second dedupe window,
-then falls back to the socket. It also falls
-back at once on a 404 from an older relay. The relay dedupes per review or notice,
-so a retry cannot double-alert.
+daemon makes four attempts of up to 8 seconds each, with 13 seconds of waits
+between them: about 13 seconds when the relay refuses straight away, 45 at worst,
+always inside the relay's 60 second dedupe window. It then falls back to the
+socket, using the bridge in place at that moment. It also falls back at once on a
+404 from an older relay. The relay dedupes per review or notice, so a retry cannot
+double-alert.
+
+A push nothing can take waits in memory for the next connection: the newest 16, for
+up to an hour. That covers a dead bridge, and a socket write that fails. A frame
+the socket accepted and then lost is still gone. A restart forgets held pushes;
+the record stays.
 
 ## Preferences
 
@@ -138,7 +145,9 @@ Settings → Notifications → Delivery shows:
 - each paired device's registered provider and the last push result, with the
   provider's failure reason;
 - daemon counters since it started: sent, held by desktop activity, off in
-  preferences, and lost with no relay connection, per kind;
+  preferences, and no relay connection, per kind. A push counts as sent only when
+  the relay acknowledges it or the bridge takes it. One that waits for the next
+  connection counts as no connection, and as sent too once the bridge has it;
 - Send test notification, which posts on the Mac and pushes to every device with
   `POST /api/remote/notifications/test` → `POST /v1/sessions/{id}/push-test`.
 
@@ -158,6 +167,35 @@ counts, plus `APNs delivery finished` per device. `recipients=0` with
 `active_devices=1` is a device with no registration. Older builds logged nothing
 on the success path, so history before this change cannot be reconstructed.
 
+## Known gaps
+
+From the review of the delivery and centre work (November 2026), left for later:
+
+- **Medium: no acknowledged path for approvals, questions or errors.** Only reviews
+  and notices use `/notify` (`http_eligible` in `remote_lifecycle.rs`). A frame queued
+  on a dying socket is lost, though the record survives. This matches main before
+  the centre. Approvals block agents, so they are next.
+- **Medium: no relay-wide report quota.** Pairing is deliberately unauthenticated
+  (burst 100, then 2 per second globally), and a claimed pairing yields a daemon
+  token. Each session can hold 32 MiB of reports for 30 days, in RAM and reloaded at
+  boot. Update replay already allows 64 MiB per session for 7 days, so this adds to
+  an existing exposure. Not exploited in testing. Add a global cap before opening
+  the relay to more users.
+- **Low: phantom Needs you rows.** A request that dies with a daemon restart appears
+  to stay unresolved for up to 90 days. Found by reading only.
+- **Low: an unusable store is quiet.** If `notifications.json` is unusable the daemon
+  runs from memory with only a log line, and records are lost at each restart.
+- **Low: shared store path.** Dev and packaged daemons share
+  `~/.falcondeck/notifications`, so running both would clobber records.
+  `agent-control.json` already shares that directory the same way.
+- **Low: per-thread notice budgets.** Each task thread has its own budget, so spawned
+  threads get around the per-sender limit of 2 `high` a day. The 30 a day across all
+  agents still bounds it, but those can arrive in minutes.
+- **Low: native Mac mark-all ignores the filter.** Desktop and iOS keep to it.
+- **Low: an old iOS opt-out cannot be told from never choosing.** Earlier builds
+  saved "off" on every launch, so one such install gets push turned on once, if
+  the OS permission is already granted.
+
 ## Relay configuration
 
 The relay uses Expo Push Service by default:
@@ -170,9 +208,11 @@ The relay uses Expo Push Service by default:
   Expo project enables authenticated Push API access.
 
 Delivery retries transient HTTP/network failures, polls Expo receipts, and
-clears tokens reported as `DeviceNotRegistered`. It deduplicates the same
-session/kind/thread for 60 seconds, or the same review or notice when one is
-named (so two notices from one thread both arrive), and retains a one-day TTL on
+clears tokens reported as `DeviceNotRegistered`. It deduplicates for 60 seconds:
+the same review, or the same record and text when the daemon names one (so two
+approvals in a thread both arrive, and so does a new answer folded into one
+record), or the same session, kind and thread from a daemon that names neither. It
+retains a one-day TTL on
 the device
 notification so stale task completions do not arrive indefinitely.
 

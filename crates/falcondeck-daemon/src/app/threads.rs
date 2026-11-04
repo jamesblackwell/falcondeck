@@ -3,7 +3,7 @@ use std::{
     sync::{Arc, atomic::Ordering},
 };
 
-use chrono::Utc;
+use chrono::{DateTime, Utc};
 use falcondeck_core::{
     AgentProvider, ApprovalDecision, ContentLifecycle, ConversationItem, InteractiveRequestKind,
     InteractiveRequestOutcome, InteractiveRequestResolution, SendTurnRequest, ServiceLevel,
@@ -3159,7 +3159,14 @@ impl AppState {
         request_id: &str,
         resolution: Option<InteractiveRequestResolution>,
     ) -> Result<(), DaemonError> {
-        self.resolve_request_notification(workspace_id, request_id)
+        let created_at = {
+            let workspaces = self.inner.workspaces.lock().await;
+            workspaces
+                .get(workspace_id)
+                .and_then(|workspace| workspace.threads.get(thread_id))
+                .and_then(|thread| thread.interactive_request_created_at(request_id))
+        };
+        self.resolve_request_notification(workspace_id, request_id, created_at)
             .await;
         let mut workspaces = self.inner.workspaces.lock().await;
         let workspace = workspaces
@@ -3211,6 +3218,16 @@ impl AppState {
 }
 
 impl ManagedThread {
+    /// The newest card with this id: a provider's ids can repeat in one thread.
+    fn interactive_request_created_at(&self, request_id: &str) -> Option<DateTime<Utc>> {
+        self.items.iter().rev().find_map(|item| match item {
+            ConversationItem::InteractiveRequest { id, request, .. } if id == request_id => {
+                Some(request.created_at)
+            }
+            _ => None,
+        })
+    }
+
     pub(super) fn has_unpersisted_codex_start(&self) -> bool {
         // Codex creates the rollout lazily on the first turn. Unsubscribing
         // or retiring its runtime before then destroys the only live copy.

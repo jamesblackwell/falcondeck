@@ -1817,6 +1817,53 @@ async fn claude_run_usage_accumulates_across_results() {
     );
 }
 
+#[tokio::test]
+async fn a_run_owns_its_turn_after_it_settles_and_no_later_one() {
+    let (_dir, service) = service().await;
+    let args = create_arguments();
+    let (response, _) = service
+        .execute(
+            execute_request(registry::ops::AUTOMATION_CREATE, args, None),
+            &desktop(),
+            &ControlDeps::none(),
+        )
+        .await;
+    assert!(response.ok, "{:?}", response.error);
+    let id = response.data.unwrap()["id"].as_str().unwrap().to_string();
+    let run = service
+        .enqueue_run(
+            &id,
+            None,
+            super::service::RunSource::Manual {
+                origin: ControlOrigin::DesktopUi,
+            },
+        )
+        .await
+        .unwrap();
+    service
+        .mark_run_running(&run.id, "workspace-1", "thread-1")
+        .await
+        .unwrap();
+    assert!(
+        service.run_for_turn("thread-1", Some("turn-1")).await.is_some(),
+        "running, before its turn id is known"
+    );
+    service.record_run_turn(&run.id, "turn-1").await.unwrap();
+    service
+        .finish_run(&run.id, AutomationRunStatus::Succeeded, None, None)
+        .await
+        .unwrap();
+    assert!(
+        service.run_for_turn("thread-1", Some("turn-1")).await.is_some(),
+        "the run can settle before the completion is recorded"
+    );
+    assert!(
+        service.run_for_turn("thread-1", Some("turn-2")).await.is_none(),
+        "James's follow-up"
+    );
+    assert!(service.run_for_turn("thread-1", None).await.is_none());
+}
+
 #[test]
 fn legacy_target_defaults_remain_unchanged() {
     let target: falcondeck_core::control::AutomationTarget =

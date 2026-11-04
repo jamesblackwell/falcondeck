@@ -670,6 +670,7 @@ impl AppState {
         let mut key_generation = 0u64;
         // Anything written while the relay was out of reach goes up now.
         self.spawn_report_sync();
+        self.flush_held_pushes().await;
         // Collapses the per-chunk stream storm before it reaches the phone.
         let mut coalescer = EventCoalescer::default();
         let mut coalesce_flush = tokio::time::interval(EVENT_COALESCE_INTERVAL);
@@ -798,7 +799,19 @@ impl AppState {
                                     }
                                 }
                             }
-                            RemoteBridgeCommand::NotifyAttention { kind, workspace_id, thread_id, message_preview, review_id, title, notification_id, report_id } => {
+                            RemoteBridgeCommand::NotifyAttention { kind, workspace_id, thread_id, message_preview, review_id, title, notification_id, report_id, ignore_presence } => {
+                                // A failed write must not take the push with it.
+                                let retry = RemoteBridgeCommand::NotifyAttention {
+                                    kind: kind.clone(),
+                                    workspace_id: workspace_id.clone(),
+                                    thread_id: thread_id.clone(),
+                                    message_preview: message_preview.clone(),
+                                    review_id: review_id.clone(),
+                                    title: title.clone(),
+                                    notification_id: notification_id.clone(),
+                                    report_id: report_id.clone(),
+                                    ignore_presence,
+                                };
                                 let thread_title = match title {
                                     Some(title) => notification_thread_title(&title),
                                     None => {
@@ -806,7 +819,7 @@ impl AppState {
                                             .await
                                     }
                                 };
-                                send_relay_message(
+                                let written = send_relay_message(
                                     &mut writer,
                                     &RelayClientMessage::Notify {
                                         kind,
@@ -817,8 +830,14 @@ impl AppState {
                                         review_id,
                                         notification_id,
                                         report_id,
+                                        ignore_presence,
                                     },
-                                ).await?;
+                                ).await;
+                                if written.is_err() {
+                                    tracing::warn!("attention push held: the socket write failed");
+                                    self.hold_push(retry, true).await;
+                                }
+                                written?;
                             }
                         }
                     }

@@ -8,7 +8,9 @@ use super::remote_lifecycle::{
     AttentionPush, notification_markdown_preview, notification_message_preview,
 };
 use super::*;
+use crate::control::RunTurn;
 use crate::notification_store::{NewNotification, NoticeRefused, Recorded};
+use chrono::{DateTime, SecondsFormat};
 use falcondeck_core::ThreadOrigin;
 use falcondeck_core::control::{ControlDomain, ControlStateChanged};
 use falcondeck_core::notifications::{
@@ -81,22 +83,29 @@ impl AttentionEvent {
     }
 }
 
-/// `input:<workspace>:<request>`, shared by recording and resolving.
-fn input_key(workspace_id: &str, request_id: &str) -> String {
-    format!("input:{workspace_id}:{request_id}")
+/// One request event. A provider's request id alone does not identify it:
+/// Codex and ACP ids are JSON-RPC ids that restart at 0 with each process, and
+/// these keys outlive it by 90 days. `created_at` is minted once per event and
+/// travels with the transcript card, which is how resolving finds it again.
+fn input_key(workspace_id: &str, request_id: &str, created_at: DateTime<Utc>) -> String {
+    let at = created_at.to_rfc3339_opts(SecondsFormat::Nanos, true);
+    format!("{}{at}", input_key_prefix(workspace_id, request_id))
+}
+fn input_key_prefix(workspace_id: &str, request_id: &str) -> String {
+    format!("input:{workspace_id}:{request_id}:")
 }
 fn review_key(review_id: &str) -> String {
     format!("review:{review_id}")
 }
 
 /// Whether a clean completion is worth a line: true when nobody else will tell
-/// James and the thread has actually stopped. `quiet_marker` is the reply a
-/// running automation treats as "nothing to report".
+/// James and the thread has actually stopped. `run` is the automation run
+/// this turn belongs to, if any.
 fn completion_is_notable(
     summary: &ThreadSummary,
     reply: Option<&str>,
     parent_is_watching: bool,
-    quiet_marker: Option<&str>,
+    run: Option<&RunTurn>,
 ) -> bool {
     // A queued message starts straight away, so this is not the end of the work.
     if !summary.queued_turns.is_empty() {
@@ -106,6 +115,10 @@ fn completion_is_notable(
     if parent_is_watching {
         return false;
     }
+    let Some(run) = run else {
+        // James's own follow-up in a run's thread, whatever started the thread.
+        return true;
+    };
     // Bot runs report home in their own turn, or finish silently on purpose.
     if matches!(
         &summary.origin,
@@ -116,12 +129,10 @@ fn completion_is_notable(
     ) {
         return false;
     }
-    if let (Some(marker), Some(reply)) = (quiet_marker, reply)
-        && reply.trim() == marker.trim()
-    {
-        return false;
-    }
-    true
+    !matches!(
+        (run.quiet_marker.as_deref(), reply),
+        (Some(marker), Some(reply)) if reply.trim() == marker.trim()
+    )
 }
 
 impl AppState {
@@ -233,7 +244,11 @@ impl AppState {
             thread_id: thread_id.clone(),
             workspace_id: Some(workspace_id.clone()),
             importance: NotificationImportance::Normal,
-            dedupe_key: Some(input_key(&workspace_id, &request.request_id)),
+            dedupe_key: Some(input_key(
+                &workspace_id,
+                &request.request_id,
+                request.created_at,
+            )),
             coalesce: false,
             sender: None,
             body: None,
@@ -253,29 +268,36 @@ impl AppState {
         thread_id: String,
     ) -> Option<(NewNotification, AttentionPush)> {
         // Never hydrate native history for a notification.
-        let (summary, reply) = {
+        let (summary, reply, answer_id) = {
             let workspaces = self.inner.workspaces.lock().await;
             let thread = workspaces.get(&workspace_id)?.threads.get(&thread_id)?;
             (
                 thread.summary.clone(),
                 notification_message_preview(&thread.items),
+                latest_answer_id(&thread.items),
             )
         };
-        let quiet_marker = self.control().quiet_marker_for_thread(&thread_id).await;
+        let run = self
+            .control()
+            .run_for_turn(&thread_id, summary.latest_turn_id.as_deref())
+            .await;
         let notable = completion_is_notable(
             &summary,
             reply.as_deref(),
             self.parent_watches_completion(&thread_id),
-            quiet_marker.as_deref(),
+            run.as_ref(),
         );
         if !notable {
             return None;
         }
         let bot = self.bot_for_thread(&thread_id).await.map(|bot| bot.name);
-        let dedupe_key = summary
-            .latest_turn_id
-            .as_ref()
-            .map(|turn| format!("turn:{workspace_id}:{thread_id}:{turn}"));
+        // A Claude turn settles at its result, and again when the process goes.
+        // A background task can also wake it under the same turn id, so the
+        // turn alone does not identify a completion: the answer it ended on does.
+        let dedupe_key = summary.latest_turn_id.as_ref().map(|turn| {
+            let answer = answer_id.as_deref().unwrap_or_default();
+            format!("turn:{workspace_id}:{thread_id}:{turn}:{answer}")
+        });
         let new = NewNotification {
             kind: NotificationKind::TurnComplete,
             title: display_title(&summary.title),
@@ -312,9 +334,6 @@ impl AppState {
             .and_then(|thread| thread.last_error.as_deref())
             .and_then(notification_markdown_preview)
             .unwrap_or_else(|| "The latest run ended with an error.".into());
-        let dedupe_key = summary
-            .and_then(|thread| thread.latest_turn_id)
-            .map(|turn| format!("error:{workspace_id}:{thread_id}:{turn}"));
         let new = NewNotification {
             kind: NotificationKind::Error,
             title,
@@ -324,7 +343,9 @@ impl AppState {
             thread_id: Some(thread_id.clone()),
             workspace_id: Some(workspace_id.clone()),
             importance: NotificationImportance::Normal,
-            dedupe_key,
+            // Each failure is news, even a retry of the same turn. Unread ones
+            // fold into one row, and the relay holds a repeat to one a minute.
+            dedupe_key: None,
             coalesce: true,
             sender: None,
             body: None,
@@ -466,9 +487,27 @@ impl AppState {
     }
 
     /// A pending approval or question was dealt with, on any device.
-    pub(super) async fn resolve_request_notification(&self, workspace_id: &str, request_id: &str) {
-        let key = input_key(workspace_id, request_id);
-        if self.inner.notifications.resolve(&key, Utc::now()).await {
+    /// `created_at` comes from the transcript card, which always goes out
+    /// before the record. With no card only an open record can match.
+    pub(super) async fn resolve_request_notification(
+        &self,
+        workspace_id: &str,
+        request_id: &str,
+        created_at: Option<DateTime<Utc>>,
+    ) {
+        let store = &self.inner.notifications;
+        let now = Utc::now();
+        let resolved = match created_at {
+            Some(at) => {
+                let key = input_key(workspace_id, request_id, at);
+                store.resolve(&key, now).await
+            }
+            None => {
+                let prefix = input_key_prefix(workspace_id, request_id);
+                store.resolve_newest(&prefix, now).await
+            }
+        };
+        if resolved {
             self.emit_notifications_changed().await;
         }
     }
@@ -620,7 +659,7 @@ fn notice_record(notice: AgentNotice) -> (NewNotification, AttentionPush) {
         thread_id: Some(thread_id),
         preview: Some(summary),
         title: Some(title),
-        ignore_desktop_presence: importance == NotificationImportance::High,
+        ignore_presence: importance == NotificationImportance::High,
         ..AttentionPush::default()
     };
     (new, push)
@@ -635,6 +674,13 @@ fn display_title(title: &str) -> String {
     }
 }
 
+fn latest_answer_id(items: &[ConversationItem]) -> Option<String> {
+    items.iter().rev().find_map(|item| match item {
+        ConversationItem::AssistantMessage { id, .. } => Some(id.clone()),
+        _ => None,
+    })
+}
+
 fn thread_target(workspace_id: &str, thread_id: Option<&str>) -> Option<NotificationTarget> {
     thread_id.map(|thread_id| NotificationTarget::Thread {
         workspace_id: workspace_id.to_string(),
@@ -645,7 +691,14 @@ fn thread_target(workspace_id: &str, thread_id: Option<&str>) -> Option<Notifica
 /// The push body. The relay bounds notification text at 256 characters.
 pub(super) fn review_push_line(review: &Review) -> String {
     let who = review.bot.as_deref().unwrap_or("An agent");
-    let line = format!("{who} needs a decision: {}", review.title.trim());
+    // Reviews allow a multi-line title; the relay refuses a control character.
+    let title = review
+        .title
+        .chars()
+        .map(|c| if c.is_control() { ' ' } else { c })
+        .collect::<String>();
+    let title = title.split_whitespace().collect::<Vec<_>>().join(" ");
+    let line = format!("{who} needs a decision: {title}");
     if line.chars().count() <= 200 {
         return line;
     }
@@ -787,12 +840,212 @@ mod tests {
         let (app, _temp) = fixture().await;
         let mut rx = bridge(&app).await;
         app.set_desktop_activity(false);
+        let request = request("r1");
         for _ in 0..3 {
-            app.record_and_deliver_attention(AttentionEvent::request(&request("r1")))
+            app.record_and_deliver_attention(AttentionEvent::request(&request))
                 .await;
         }
         assert_eq!(pushed(&mut rx).len(), 1);
         assert_eq!(history(&app).await.len(), 1);
+    }
+
+    /// What a provider does: the card first, then the event.
+    async fn ask(app: &AppState, request: &InteractiveRequest) {
+        app.push_conversation_item(
+            "workspace-1",
+            "thread-1",
+            ConversationItem::InteractiveRequest {
+                id: request.request_id.clone(),
+                request: Box::new(request.clone()),
+                created_at: request.created_at,
+                resolved: false,
+                resolution: None,
+            },
+            false,
+        )
+        .await
+        .unwrap();
+        app.record_and_deliver_attention(AttentionEvent::request(request))
+            .await;
+    }
+
+    async fn answer(app: &AppState, id: &str) {
+        app.resolve_interactive_request_item("workspace-1", "thread-1", id, None)
+            .await
+            .unwrap();
+    }
+
+    async fn needs_you(app: &AppState) -> usize {
+        app.notifications_list(&NotificationListRequest {
+            filter: NotificationFilter::NeedsYou,
+            ..Default::default()
+        })
+        .await
+        .items
+        .len()
+    }
+
+    /// Codex and ACP ids are JSON-RPC ids: each new process starts again at 0.
+    #[tokio::test]
+    async fn a_new_process_reusing_an_answered_request_id_still_alerts() {
+        let (app, _temp) = fixture().await;
+        let mut rx = bridge(&app).await;
+        app.set_desktop_activity(false);
+        ask(&app, &request("0")).await;
+        answer(&app, "0").await;
+        ask(&app, &request("0")).await;
+        assert_eq!(pushed(&mut rx).len(), 2);
+        assert_eq!(history(&app).await.len(), 2);
+        assert_eq!(needs_you(&app).await, 1, "the new one is waiting");
+        answer(&app, "0").await;
+        assert_eq!(needs_you(&app).await, 0);
+    }
+
+    #[tokio::test]
+    async fn a_new_process_reusing_an_unanswered_request_id_still_alerts() {
+        let (app, _temp) = fixture().await;
+        let mut rx = bridge(&app).await;
+        app.set_desktop_activity(false);
+        ask(&app, &request("0")).await;
+        ask(&app, &request("0")).await;
+        assert_eq!(pushed(&mut rx).len(), 2);
+    }
+
+    #[tokio::test]
+    async fn a_repeated_answer_cannot_silence_the_next_use_of_the_id() {
+        let (app, _temp) = fixture().await;
+        let mut rx = bridge(&app).await;
+        app.set_desktop_activity(false);
+        ask(&app, &request("0")).await;
+        answer(&app, "0").await;
+        answer(&app, "0").await;
+        ask(&app, &request("0")).await;
+        assert_eq!(pushed(&mut rx).len(), 2);
+        assert_eq!(needs_you(&app).await, 1, "not recorded as already answered");
+    }
+
+    #[tokio::test]
+    async fn an_answer_that_beats_its_record_still_settles_it() {
+        let (app, _temp) = fixture().await;
+        let request = request("0");
+        app.push_conversation_item(
+            "workspace-1",
+            "thread-1",
+            ConversationItem::InteractiveRequest {
+                id: "0".into(),
+                request: Box::new(request.clone()),
+                created_at: request.created_at,
+                resolved: false,
+                resolution: None,
+            },
+            false,
+        )
+        .await
+        .unwrap();
+        answer(&app, "0").await;
+        app.record_and_deliver_attention(AttentionEvent::request(&request))
+            .await;
+        assert_eq!(needs_you(&app).await, 0);
+    }
+
+    fn answer_again(app: &AppState, text: &'static str) -> impl Future<Output = ()> {
+        // A wake keeps the turn id; only a new message arrives.
+        async move {
+            let mut workspaces = app.inner.workspaces.lock().await;
+            let thread = workspaces
+                .get_mut("workspace-1")
+                .unwrap()
+                .threads
+                .get_mut("thread-1")
+                .unwrap();
+            thread.items.push(
+                serde_json::from_value(json!({
+                    "kind": "assistant_message", "id": uuid::Uuid::new_v4().to_string(),
+                    "text": text, "lifecycle": "complete", "created_at": Utc::now()
+                }))
+                .unwrap(),
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn a_result_after_a_background_wake_alerts_under_the_same_turn_id() {
+        let (app, _temp) = fixture().await;
+        let mut rx = bridge(&app).await;
+        app.set_desktop_activity(false);
+        reply(&app, "Waiting on the tests.").await;
+        finish(&app).await;
+        answer_again(&app, "The tests passed.").await;
+        finish(&app).await;
+        assert_eq!(pushed(&mut rx).len(), 2);
+        let records = history(&app).await;
+        assert_eq!(records.len(), 1, "one unread line");
+        assert_eq!(records[0].preview, "The tests passed.");
+    }
+
+    #[tokio::test]
+    async fn a_turn_settling_twice_on_the_same_answer_alerts_once() {
+        let (app, _temp) = fixture().await;
+        let mut rx = bridge(&app).await;
+        app.set_desktop_activity(false);
+        reply(&app, "Done.").await;
+        finish(&app).await;
+        finish(&app).await;
+        assert_eq!(pushed(&mut rx).len(), 1);
+    }
+
+    #[tokio::test]
+    async fn every_failure_of_a_retried_turn_alerts() {
+        let (app, _temp) = fixture().await;
+        let mut rx = bridge(&app).await;
+        app.set_desktop_activity(false);
+        reply(&app, "Trying.").await;
+        for _ in 0..3 {
+            app.record_and_deliver_attention(AttentionEvent::turn("workspace-1", "thread-1", true))
+                .await;
+        }
+        assert_eq!(pushed(&mut rx).len(), 3);
+        assert_eq!(history(&app).await.len(), 1, "one unread line");
+    }
+
+    #[tokio::test]
+    async fn james_following_up_in_a_bots_run_thread_alerts_as_usual() {
+        let (app, _temp) = fixture().await;
+        let mut rx = bridge(&app).await;
+        app.set_desktop_activity(false);
+        reply(&app, "Report sent.").await;
+        app.inner
+            .workspaces
+            .lock()
+            .await
+            .get_mut("workspace-1")
+            .unwrap()
+            .threads
+            .get_mut("thread-1")
+            .unwrap()
+            .summary
+            .origin = Some(ThreadOrigin::Automation {
+            automation_id: "a".into(),
+            bot_id: Some("b".into()),
+            name: "n".into(),
+        });
+        finish(&app).await;
+        assert_eq!(pushed(&mut rx).len(), 1);
+    }
+
+    #[test]
+    fn a_multi_line_review_title_makes_a_push_the_relay_accepts() {
+        let review: Review = serde_json::from_value(json!({
+            "id": "R-1", "revision": 1, "title": "Pricing\n\tpage\u{7}now", "ask": "Ship?",
+            "recommendation": "Yes", "body": "", "status": "open", "items": [],
+            "created_by": {"name": "Juno", "context": {"origin": "mcp"}},
+            "created_at": Utc::now(), "updated_at": Utc::now()
+        }))
+        .unwrap();
+        assert_eq!(
+            review_push_line(&review),
+            "An agent needs a decision: Pricing page now"
+        );
     }
 
     #[tokio::test]
@@ -873,6 +1126,9 @@ mod tests {
     #[test]
     fn the_completion_rule() {
         let plain = summary(None);
+        let quiet = |marker: Option<&str>| RunTurn {
+            quiet_marker: marker.map(str::to_string),
+        };
         assert!(completion_is_notable(&plain, Some("Done."), false, None));
         assert!(
             completion_is_notable(&plain, None, false, None),
@@ -895,7 +1151,16 @@ mod tests {
             bot_id: Some("b".into()),
             name: "n".into(),
         }));
-        assert!(!completion_is_notable(&bot_run, Some("Done."), false, None));
+        assert!(!completion_is_notable(
+            &bot_run,
+            Some("Done."),
+            false,
+            Some(&quiet(None))
+        ));
+        assert!(
+            completion_is_notable(&bot_run, Some("Done."), false, None),
+            "James's own follow-up"
+        );
         let run = summary(Some(ThreadOrigin::Automation {
             automation_id: "a".into(),
             bot_id: None,
@@ -905,13 +1170,13 @@ mod tests {
             &run,
             Some("Inbox has two urgent emails."),
             false,
-            Some("NO_ACTION")
+            Some(&quiet(Some("NO_ACTION")))
         ));
         assert!(!completion_is_notable(
             &run,
             Some("NO_ACTION"),
             false,
-            Some("NO_ACTION")
+            Some(&quiet(Some("NO_ACTION")))
         ));
     }
 
@@ -1090,7 +1355,7 @@ mod notice_tests {
             .await
             .unwrap_err();
         assert!(
-            error.contains("3 per hour") && error.contains("final reply"),
+            error.contains("3 per hour") && error.contains("does not alert him"),
             "{error}"
         );
         assert_eq!(records(&app).await.len(), 3);

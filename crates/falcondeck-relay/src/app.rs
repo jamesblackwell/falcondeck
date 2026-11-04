@@ -2433,6 +2433,7 @@ impl AppState {
                 review_id,
                 notification_id,
                 report_id,
+                ignore_presence,
             } => {
                 if !matches!(role, RelayPeerRole::Daemon) {
                     return Err(RelayError::Unauthorized(
@@ -2448,6 +2449,7 @@ impl AppState {
                     review_id,
                     notification_id,
                     report_id,
+                    ignore_presence,
                 };
                 validate_notification(&request)?;
                 self.dispatch_push_notifications(session_id, request).await;
@@ -3785,16 +3787,20 @@ impl AppState {
             review_id,
             notification_id,
             report_id,
+            ignore_presence,
         } = request;
         let endpoint = self.inner.push_endpoint.clone();
-        // Two notices from one thread are two messages, not a repeat.
+        // Two approvals in a thread are two events, not a repeat. A daemon that
+        // folds a new answer into an unread record reuses its id, so the text
+        // counts too; a retry repeats both. Older daemons send no id.
         let dedupe_scope = review_id
             .as_ref()
             .map(|id| format!("review:{id}"))
             .or_else(|| {
-                (kind == "agent-notice")
-                    .then(|| notification_id.clone())
-                    .flatten()
+                notification_id.as_ref().map(|id| {
+                    let text = message_preview.as_deref().unwrap_or_default();
+                    format!("notification:{id}:{:x}", Sha256::digest(text.as_bytes()))
+                })
             })
             .or_else(|| thread_id.clone());
         let (recipients, mut permits, enough_capacity) = {
@@ -3815,7 +3821,9 @@ impl AppState {
                 .map(|live| {
                     live.peers
                         .values()
-                        .filter(|peer| peer.foreground && kind != PUSH_REVIEW_KIND)
+                        .filter(|peer| {
+                            peer.foreground && kind != PUSH_REVIEW_KIND && !ignore_presence
+                        })
                         .filter_map(|peer| peer.device_id.clone())
                         .collect::<std::collections::HashSet<_>>()
                 })

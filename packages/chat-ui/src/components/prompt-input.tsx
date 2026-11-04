@@ -287,6 +287,8 @@ const DEFAULT_PROVIDER_OPTIONS: ProviderOption[] = [
 ];
 const EMPTY_HANDOFF_PROVIDER_OPTIONS: ProviderOption[] = [];
 const EMPTY_QUOTED_SELECTIONS: readonly QuotedSelection[] = [];
+// A fresh `[]` default would change an effect's dependencies on every render.
+const EMPTY_PROMPTS: SavedPrompt[] = [];
 /** Stable default so an unset menuShortcuts never rebuilds optionMenuProps. */
 const NO_MENU_SHORTCUTS: Partial<Record<ComposerMenu, string[]>> = {};
 
@@ -309,7 +311,7 @@ export const PromptInput = memo(function PromptInput({
   preparingAttachmentCount = 0,
   skills = [],
   loadSkills,
-  prompts = [],
+  prompts = EMPTY_PROMPTS,
   loadPrompts,
   selectedProvider,
   onProviderChange,
@@ -703,7 +705,14 @@ export const PromptInput = memo(function PromptInput({
         typeof caretIndex === "number"
           ? caretIndex
           : (textareaRef.current?.selectionStart ?? nextValue.length);
-      setSlashQuery(activeSlashQuery(nextValue, index, promptAliases));
+      const next = activeSlashQuery(nextValue, index, promptAliases);
+      setSlashQuery((current) =>
+        current?.query === next?.query &&
+        current?.rangeStart === next?.rangeStart &&
+        current?.rangeEnd === next?.rangeEnd
+          ? current
+          : next,
+      );
     },
     [disabled, promptAliases],
   );

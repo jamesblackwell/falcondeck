@@ -320,7 +320,7 @@ impl AppState {
             }
             AttentionOutcome::Refused(NoticeRefused::RateLimited { limit, retry_after }) => {
                 return Err(DaemonError::BadRequest(format!(
-                    "notice not sent: the limit is {limit}. A slot frees in about {} minutes. Put this in your final reply instead, or batch it into one notice later",
+                    "notice not sent, and James has not been told: the limit is {limit}. A slot frees in about {} minutes. Batch this into one notice then, or publish a review if he must decide. A bot run's final reply does not alert him",
                     retry_after.num_minutes().max(1)
                 )));
             }

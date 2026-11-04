@@ -154,7 +154,120 @@ fn review_command() -> RemoteBridgeCommand {
         title: None,
         notification_id: None,
         report_id: None,
+        ignore_presence: false,
     }
+}
+
+async fn attach_bridge(app: &AppState) -> mpsc::UnboundedReceiver<RemoteBridgeCommand> {
+    let (bridge, commands) = mpsc::unbounded_channel();
+    app.inner.remote.lock().await.command_tx = Some(bridge);
+    commands
+}
+
+async fn counters(app: &AppState) -> falcondeck_core::AttentionDeliveryCounter {
+    let status = build_remote_status_response(&*app.inner.remote.lock().await);
+    status.attention.into_iter().next().unwrap_or_default()
+}
+
+fn approval() -> AttentionPush {
+    AttentionPush {
+        kind: "approval",
+        notification_id: Some("N-1".to_string()),
+        thread_id: Some("thread-1".to_string()),
+        ..AttentionPush::default()
+    }
+}
+
+#[tokio::test]
+async fn the_fallback_uses_the_bridge_in_place_now() {
+    let (url, _calls) = relay(vec![404]).await;
+    let directory = tempfile::tempdir().unwrap();
+    let app = app_with_relay(&url, &directory).await;
+    // The channel captured when the push was queued has gone by the time HTTP
+    // gives up; the bridge restarted with a new one.
+    drop(attach_bridge(&app).await);
+    let mut restarted = attach_bridge(&app).await;
+    app.deliver_acknowledged(review_command()).await;
+    assert!(restarted.try_recv().is_ok());
+    assert_eq!(counters(&app).await.sent, 1);
+}
+
+#[tokio::test]
+async fn a_push_the_dead_bridge_could_not_take_waits_and_only_then_counts() {
+    let directory = tempfile::tempdir().unwrap();
+    let app = app_with_relay("http://127.0.0.1:9", &directory).await;
+    drop(attach_bridge(&app).await);
+    app.deliver_attention(approval()).await;
+    let held = counters(&app).await;
+    assert_eq!((held.sent, held.no_bridge), (0, 1), "nothing took it");
+
+    let mut restarted = attach_bridge(&app).await;
+    app.flush_held_pushes().await;
+    assert!(matches!(
+        restarted.try_recv(),
+        Ok(RemoteBridgeCommand::NotifyAttention { notification_id: Some(id), .. }) if id == "N-1"
+    ));
+    assert_eq!(counters(&app).await.sent, 1);
+    app.flush_held_pushes().await;
+    assert!(restarted.try_recv().is_err(), "a held push goes out once");
+}
+
+#[tokio::test]
+async fn a_failed_socket_write_is_held_without_counting_twice() {
+    let directory = tempfile::tempdir().unwrap();
+    let app = app_with_relay("http://127.0.0.1:9", &directory).await;
+    let mut bridge = attach_bridge(&app).await;
+    app.deliver_attention(approval()).await;
+    let command = bridge.try_recv().unwrap();
+    assert_eq!(counters(&app).await.sent, 1);
+    app.hold_push(command, true).await;
+    app.flush_held_pushes().await;
+    assert!(bridge.try_recv().is_ok());
+    assert_eq!(counters(&app).await.sent, 1);
+}
+
+#[tokio::test]
+async fn held_pushes_are_bounded_newest_first_and_forgotten_with_the_pairing() {
+    let directory = tempfile::tempdir().unwrap();
+    let app = app_with_relay("http://127.0.0.1:9", &directory).await;
+    for index in 0..MAX_HELD_PUSHES + 3 {
+        app.deliver_attention(AttentionPush {
+            notification_id: Some(format!("N-{index}")),
+            ..approval()
+        })
+        .await;
+    }
+    let mut bridge = attach_bridge(&app).await;
+    app.flush_held_pushes().await;
+    assert!(matches!(
+        bridge.try_recv(),
+        Ok(RemoteBridgeCommand::NotifyAttention { notification_id: Some(id), .. }) if id == "N-3"
+    ));
+
+    app.inner.remote.lock().await.command_tx = None;
+    app.deliver_attention(approval()).await;
+    app.clear_remote_bridge_state().await;
+    let mut paired_again = attach_bridge(&app).await;
+    app.flush_held_pushes().await;
+    assert!(paired_again.try_recv().is_err());
+}
+
+#[tokio::test]
+async fn a_held_push_that_went_stale_is_dropped() {
+    let directory = tempfile::tempdir().unwrap();
+    let app = app_with_relay("http://127.0.0.1:9", &directory).await;
+    app.deliver_attention(approval()).await;
+    app.inner
+        .remote
+        .lock()
+        .await
+        .held_pushes
+        .front_mut()
+        .unwrap()
+        .held_at -= HELD_PUSH_TTL + std::time::Duration::from_secs(1);
+    let mut bridge = attach_bridge(&app).await;
+    app.flush_held_pushes().await;
+    assert!(bridge.try_recv().is_err());
 }
 
 #[tokio::test]
@@ -162,8 +275,8 @@ async fn a_review_retries_until_the_relay_acknowledges_it() {
     let (url, calls) = relay(vec![503, 200]).await;
     let directory = tempfile::tempdir().unwrap();
     let app = app_with_relay(&url, &directory).await;
-    let (fallback, mut bridge) = mpsc::unbounded_channel();
-    app.deliver_acknowledged(review_command(), Some(fallback)).await;
+    let mut bridge = attach_bridge(&app).await;
+    app.deliver_acknowledged(review_command()).await;
     assert_eq!(calls.load(Ordering::SeqCst), 2);
     assert!(
         bridge.try_recv().is_err(),
@@ -176,8 +289,8 @@ async fn a_relay_without_the_endpoint_gets_the_review_over_the_socket() {
     let (url, calls) = relay(vec![404]).await;
     let directory = tempfile::tempdir().unwrap();
     let app = app_with_relay(&url, &directory).await;
-    let (fallback, mut bridge) = mpsc::unbounded_channel();
-    app.deliver_acknowledged(review_command(), Some(fallback)).await;
+    let mut bridge = attach_bridge(&app).await;
+    app.deliver_acknowledged(review_command()).await;
     assert_eq!(calls.load(Ordering::SeqCst), 1);
     assert!(matches!(
         bridge.try_recv(),
@@ -240,7 +353,10 @@ async fn a_review_with_no_route_is_not_counted_as_sent() {
     })
     .await;
     let status = build_remote_status_response(&*app.inner.remote.lock().await);
-    assert_eq!((status.attention[0].sent, status.attention[0].no_bridge), (0, 1));
+    assert_eq!(
+        (status.attention[0].sent, status.attention[0].no_bridge),
+        (0, 1)
+    );
 }
 
 async fn hold_phone_pushes(app: &AppState) {
@@ -264,7 +380,7 @@ fn notice(high: bool) -> AttentionPush {
         preview: Some("All green.".to_string()),
         notification_id: Some("N-1".to_string()),
         report_id: Some("rpt_1".to_string()),
-        ignore_desktop_presence: high,
+        ignore_presence: high,
         ..AttentionPush::default()
     }
 }
