@@ -107,3 +107,101 @@ or 404: hide the bell, as reviews do.
 
 Filters: **Needs you** is `input_required` and `review` not yet resolved. **From
 bots** is anything with a `bot`, plus every `agent_notice`.
+
+## Agent notices
+
+`falcondeck_notify` is a built-in session tool for bots and tasks. A **review**
+asks James for a decision; a **notice** tells him something happened and asks for
+nothing.
+
+Arguments: `title` (120 characters), `summary` (200, the push preview), optional
+Markdown `body` (64 KB), `importance` (`normal` or `high`). The sender, bot and
+source thread come from the call, never from arguments. A bot's notice points at
+its current home, so a reply reaches the bot.
+
+- **Normal** follows the usual rules, including quiet while James is at the Mac.
+  The record lands either way, and the Mac app shows its own banner.
+- **High** also pushes while he is at the Mac. The master switch still wins.
+
+Limits, counted from the store so they survive a restart: 3 an hour, 10 a day and
+2 `high` a day per sender (a bot, or one task thread), and 30 a day across all
+agents, so a fleet of tasks cannot add up to a flood. A refused notice stores and
+pushes nothing, and the error tells the agent when a slot frees and to use its
+final reply instead. The same sender repeating the same title and summary within
+an hour replays the first record, at no cost and with no second push.
+
+Guidance lives in the always-on instructions (`agent_context.rs`), the bot
+defaults (`BOT_DEFAULT_INSTRUCTIONS`), the tool description and the
+`falcondeck-mcp` skill. All of them say the same thing: rare by default, and your
+final reply already reaches James.
+
+## Reports while the Mac is asleep
+
+A report must be readable when the daemon is unreachable, so a copy goes to the
+relay. Pushes are not end-to-end encrypted; relay payloads are. So the push
+carries only a preview and an opaque id, and the report goes up as ciphertext the
+relay cannot read.
+
+```text
+falcondeck_notify
+  -> record + body in the daemon store (source of truth)
+  -> encrypt with the session data key, PUT to the relay (bounded wait, 5 s)
+  -> push: title, summary, notificationId, reportId
+phone, Mac asleep
+  -> GET the ciphertext, decrypt, check ids, render
+```
+
+**Encryption.** The same session data key and AES-256-GCM scheme as relay payloads
+(`encrypt_json`), held only by the daemon and paired devices. The plaintext is JSON:
+`version` (1), `report_id`, `session_id`, `notification_id`, `title`, `summary`,
+`body`, `bot`, `thread_id`, `workspace_id`, `importance`, `created_at`. The ids are
+inside the ciphertext because the relay chooses what to serve: **a client must
+reject a report whose `report_id` or `session_id` does not match its request**, so
+the relay cannot swap one report for another. The `report_id` is random and reveals
+nothing about the record.
+
+**What the relay learns.** Session id, report id, ciphertext size, and the times.
+It cannot read titles, summaries or bodies from a report. It does see a notice's
+title and summary in the push, as it does for every push, which is why agents are
+told to keep secrets out of them.
+
+**Relay API.** Bearer auth, as for other session routes. Revoked devices fail
+authentication.
+
+| Route | Who | Notes |
+| --- | --- | --- |
+| `PUT /v1/sessions/:id/reports/:report_id` | Daemon | `{"envelope","ttl_seconds"}`. Rewriting keeps `created_at` |
+| `GET /v1/sessions/:id/reports` | Daemon or device | `{"reports":[{report_id,created_at,expires_at,size_bytes}]}`, newest first |
+| `GET /v1/sessions/:id/reports/:report_id` | Daemon or device | Adds `envelope`. 404 once expired |
+
+**Bounds.** 256 KiB of ciphertext per report (the 64 KB body cap always fits). TTL
+30 days, clamped by the relay. Per session: 500 reports and 32 MiB, oldest evicted
+first, because the daemon keeps every report and eviction only loses offline
+reading. The prune pass deletes expired reports, and they read as 404 from the
+moment they expire. Sessions cascade.
+
+**Capability check.** `GET /v1/push-capabilities` gains `reports`. Without it,
+daemons and clients make no report calls and read reports over RPC, so everything
+works against a relay that has not been deployed. A daemon writes no state that an
+older relay could reject.
+
+**Keeping it correct.** The daemon records which key each hosted report used, by a
+hash that names the key without revealing it. `sync_relay_reports` uploads whatever
+is not on the relay under the current key and runs after a notice, on every bridge
+connection, and after a key rotation. That one pass covers an unreachable relay, a
+re-pair, a relay deployed later, and a device revocation: rotating the session key
+makes old ciphertext unreadable to the devices that remain, so reports are
+re-encrypted under the new key. A revoked device keeps any key it already held but
+can no longer fetch anything.
+
+**Reading order on a phone.** Daemon first when connected. Otherwise the relay copy.
+If that is missing, expired or undecryptable, say the report is on the computer.
+Read state set offline is queued and replayed over `notifications.mark_read`.
+
+## Clients
+
+- **Mac** (`mac-native-pilot`): the bell, day-grouped list, filters and report
+  view. It talks to the daemon, so it never uses the relay copy.
+- **iOS** (`ios-native-pilot`): the same list and deep links, a report view with
+  voice reply to the source thread, and the offline path above.
+- Older clients ignore the `notifications` control domain and the new push fields.

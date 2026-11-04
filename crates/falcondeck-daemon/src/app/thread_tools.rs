@@ -18,11 +18,13 @@ const CREATE: &str = "falcondeck_create_thread";
 const MESSAGE: &str = "falcondeck_message_thread";
 const SUMMARY: &str = "falcondeck_thread_summary";
 const CHANGES: &str = "falcondeck_thread_changes";
+pub(super) const NOTIFY: &str = "falcondeck_notify";
 const MAX_CHARS: usize = 24_000;
 const MAX_ITEMS: usize = 100;
 
 pub(super) fn is_builtin(name: &str) -> bool {
-    actions::is_action(name) || matches!(name, LIST | VIEW | CREATE | MESSAGE | SUMMARY | CHANGES)
+    actions::is_action(name)
+        || matches!(name, LIST | VIEW | CREATE | MESSAGE | SUMMARY | CHANGES | NOTIFY)
 }
 
 /// `max_children` is the configured per-parent child limit, stated in the create tool's description.
@@ -60,6 +62,12 @@ pub(super) fn catalog(max_children: u32) -> Vec<ExtensionAgentTool> {
             "message": {"type":"string", "minLength":1, "maxLength":24000, "description":"Readable prose with normal spaces between words."},
             "delivery": {"type":"string", "enum":["steer","queue"], "description":"Deprecated and ignored; messages always steer when the receiver can take them."}
         }), vec!["thread_id", "message"]),
+        (NOTIFY, "Notify James", "Tell James something important happened when no decision is needed: a finished launch, a failed deploy you already handled, a result he asked to hear about. It reaches his phone as a push and stays in his notification centre, and body becomes a Markdown report he can read there. Rare by design: do not use it for progress, ordinary completions or anything your final reply already says, because he sees those. If you need him to decide, publish a review instead. Limits per sender: 3 an hour, 10 a day, 2 high a day. Pushes are not end-to-end encrypted, so keep secrets out of title and summary; body is encrypted.", json!({
+            "title": {"type":"string", "minLength":1, "maxLength":120, "description":"What happened, as a headline."},
+            "summary": {"type":"string", "minLength":1, "maxLength":200, "description":"One or two plain sentences. This is the push preview."},
+            "body": {"type":"string", "minLength":1, "maxLength":64000, "description":"Optional long report in Markdown, opened from the notification."},
+            "importance": {"type":"string", "enum":["normal","high"], "default":"normal", "description":"high also pushes while he is at his Mac. Keep it for what he would want to be interrupted for."}
+        }), vec!["title", "summary"]),
         (CREATE, "Create thread", create_description.as_str(), json!({
             "prompt": {"type":"string", "minLength":1, "maxLength":24000, "description":"A self-contained brief: goal, relevant files, constraints, and what done looks like."},
             "title": {"type":"string", "minLength":1, "maxLength":200},
@@ -246,7 +254,86 @@ fn child_is_active(thread: &ThreadSummary, parent: &str) -> bool {
                 && thread.status == ThreadStatus::Idle))
 }
 
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct NotifyArgs {
+    title: String,
+    summary: String,
+    body: Option<String>,
+    #[serde(default)]
+    importance: falcondeck_core::notifications::NotificationImportance,
+}
+
+const NOTICE_TITLE_CHARS: usize = 120;
+const NOTICE_SUMMARY_CHARS: usize = 200;
+const NOTICE_BODY_BYTES: usize = 64_000;
+
 impl AppState {
+    /// `falcondeck_notify`. The sender and source thread come from the call,
+    /// never from arguments, so an agent cannot speak for another.
+    async fn notify_tool(
+        &self,
+        arguments: &Value,
+        caller: &str,
+        home: &str,
+        workspace_id: &str,
+        bot: Option<String>,
+    ) -> Result<ExtensionToolResponse, DaemonError> {
+        use super::notification_centre::{AgentNotice, AttentionEvent, AttentionOutcome};
+        use crate::notification_store::{NoticeRefused, Recorded};
+        let args: NotifyArgs = args(arguments)?;
+        let title = line(&args.title, NOTICE_TITLE_CHARS);
+        let summary = line(&args.summary, NOTICE_SUMMARY_CHARS);
+        if title.is_empty() || summary.is_empty() {
+            return Err(DaemonError::BadRequest(
+                "title and summary must not be blank".into(),
+            ));
+        }
+        let body = args.body.filter(|body| !body.trim().is_empty());
+        if body.as_ref().is_some_and(|body| body.len() > NOTICE_BODY_BYTES) {
+            return Err(DaemonError::BadRequest(format!(
+                "body is over {NOTICE_BODY_BYTES} bytes. Shorten the report, or keep the detail in a file and say where it is"
+            )));
+        }
+        let sender = bot
+            .as_ref()
+            .map_or_else(|| format!("thread:{caller}"), |name| format!("bot:{name}"));
+        let notice = AgentNotice {
+            title,
+            summary,
+            body,
+            importance: args.importance,
+            sender,
+            bot,
+            workspace_id: workspace_id.to_string(),
+            thread_id: home.to_string(),
+        };
+        let outcome = self
+            .record_and_deliver_attention(AttentionEvent::Notice(Box::new(notice)))
+            .await;
+        let text = match outcome {
+            AttentionOutcome::Recorded(Recorded::Duplicate(record)) => {
+                format!("{} was already sent; James was not notified again.", record.id)
+            }
+            AttentionOutcome::Recorded(recorded) => {
+                format!("Sent as {}.", recorded.record().id)
+            }
+            AttentionOutcome::Refused(NoticeRefused::RateLimited { limit, retry_after }) => {
+                return Err(DaemonError::BadRequest(format!(
+                    "notice not sent: the limit is {limit}. A slot frees in about {} minutes. Put this in your final reply instead, or batch it into one notice later",
+                    retry_after.num_minutes().max(1)
+                )));
+            }
+            AttentionOutcome::Refused(NoticeRefused::Storage(error)) => {
+                return Err(DaemonError::Rpc(format!("notice not saved: {error}")));
+            }
+            AttentionOutcome::Noise => {
+                return Err(DaemonError::Rpc("notice was dropped".into()));
+            }
+        };
+        Ok(response(text))
+    }
+
     pub(super) async fn invoke_thread_tool(
         &self,
         name: &str,
@@ -375,6 +462,11 @@ impl AppState {
             return Err(DaemonError::BadRequest(
                 "Task creation is disabled for this bot".into(),
             ));
+        }
+        if name == NOTIFY {
+            return self
+                .notify_tool(&arguments, parent, coordinator, &caller_workspace, bot.as_ref().map(|b| b.name.clone()))
+                .await;
         }
         if actions::is_action(name) {
             return self

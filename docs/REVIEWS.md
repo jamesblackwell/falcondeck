@@ -109,9 +109,13 @@ error}` (the source thread is gone); the response itself is always kept.
 - Push: a new review sends kind `review` ("Juno needs a decision: …"). Respects
   the "needs input" notification setting. Needs the relay deployed for the exact
   text; an older relay shows its generic "needs your attention".
+- [Notification centre](NOTIFICATION-CENTRE.md): every review is recorded there
+  even when the push is suppressed, and answering or withdrawing it resolves the
+  record.
 
 ## Steering agents
 
 `BOT_DEFAULT_INSTRUCTIONS` has one line under "Reviews", and the `review.create`
 description says to use it instead of sending links. Standing instructions are
-James's to edit.
+James's to edit. A review asks for a decision; for news that needs none, agents
+use `falcondeck_notify` (see [NOTIFICATION-CENTRE](NOTIFICATION-CENTRE.md)).

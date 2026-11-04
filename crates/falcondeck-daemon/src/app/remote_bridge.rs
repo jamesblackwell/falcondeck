@@ -668,6 +668,8 @@ impl AppState {
         let mut bootstrap_request_publishes: HashMap<String, tokio::time::Instant> = HashMap::new();
         let mut last_bootstrap_refusal: Option<tokio::time::Instant> = None;
         let mut key_generation = 0u64;
+        // Anything written while the relay was out of reach goes up now.
+        self.spawn_report_sync();
         // Collapses the per-chunk stream storm before it reaches the phone.
         let mut coalescer = EventCoalescer::default();
         let mut coalesce_flush = tokio::time::interval(EVENT_COALESCE_INTERVAL);
@@ -787,6 +789,8 @@ impl AppState {
                                 match result {
                                     Ok(()) => {
                                         let _ = completed.send(Ok(()));
+                                        // Hosted reports are unreadable under the new key.
+                                        self.spawn_report_sync();
                                     }
                                     Err(error) => {
                                         let _ = completed.send(Err(error.clone()));
@@ -794,10 +798,14 @@ impl AppState {
                                     }
                                 }
                             }
-                            RemoteBridgeCommand::NotifyAttention { kind, workspace_id, thread_id, message_preview, review_id } => {
-                                let thread_title = self
-                                    .notification_title(workspace_id.as_deref(), thread_id.as_deref())
-                                    .await;
+                            RemoteBridgeCommand::NotifyAttention { kind, workspace_id, thread_id, message_preview, review_id, title, notification_id, report_id } => {
+                                let thread_title = match title {
+                                    Some(title) => notification_thread_title(&title),
+                                    None => {
+                                        self.notification_title(workspace_id.as_deref(), thread_id.as_deref())
+                                            .await
+                                    }
+                                };
                                 send_relay_message(
                                     &mut writer,
                                     &RelayClientMessage::Notify {
@@ -807,6 +815,8 @@ impl AppState {
                                         thread_title,
                                         message_preview,
                                         review_id,
+                                        notification_id,
+                                        report_id,
                                     },
                                 ).await?;
                             }
@@ -2960,7 +2970,7 @@ fn parse_start_thread_request(params: &Value) -> Result<StartThreadRequest, Daem
     })
 }
 
-fn notification_thread_title(title: &str) -> Option<String> {
+pub(super) fn notification_thread_title(title: &str) -> Option<String> {
     const MAX_TITLE_CHARS: usize = 256;
 
     let title = title

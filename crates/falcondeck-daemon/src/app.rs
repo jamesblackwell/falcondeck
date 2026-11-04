@@ -418,6 +418,8 @@ struct InnerState {
     remote: Mutex<RemoteBridgeState>,
     /// Durable history behind the notification centre.
     notifications: crate::notification_store::NotificationStore,
+    /// One report upload pass at a time.
+    report_sync: Mutex<()>,
     /// Coalesces at-least-once relay delivery for mutating RPCs across bridge
     /// reconnects so an action cannot execute twice in one daemon process.
     remote_rpc_deduplicator: remote_bridge::RemoteRpcDeduplicator,
@@ -941,6 +943,10 @@ enum RemoteBridgeCommand {
         thread_id: Option<String>,
         message_preview: Option<String>,
         review_id: Option<String>,
+        /// A notice's own title; other kinds use the thread's.
+        title: Option<String>,
+        notification_id: Option<String>,
+        report_id: Option<String>,
     },
 }
 
@@ -1095,6 +1101,7 @@ impl AppState {
                 rewrite_catalog_disk_checked: AtomicBool::new(false),
                 rewrite_catalog_refresh: Mutex::new(()),
                 notifications: crate::notification_store::NotificationStore::new(notifications_dir),
+                report_sync: Mutex::new(()),
                 remote: Mutex::new(RemoteBridgeState {
                     attention: BTreeMap::new(),
                     status: RemoteConnectionStatus::Inactive,

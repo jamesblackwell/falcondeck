@@ -218,7 +218,15 @@ pub(super) struct AttentionPush {
     pub thread_id: Option<String>,
     pub preview: Option<String>,
     pub review_id: Option<String>,
+    /// A notice's own title; other kinds use the thread's.
+    pub title: Option<String>,
+    pub notification_id: Option<String>,
+    pub report_id: Option<String>,
+    /// High-importance notices also push while James is at the Mac.
+    pub ignore_desktop_presence: bool,
 }
+
+const AGENT_NOTICE_KIND: &str = "agent-notice";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum AttentionPolicy {
@@ -287,11 +295,20 @@ impl AppState {
             thread_id,
             preview,
             review_id,
+            title,
+            notification_id,
+            report_id,
+            ignore_desktop_presence,
         } = push;
         let preferences = self.preferences().await.notifications;
-        let desktop_active = preferences.suppress_when_desktop_active && self.desktop_is_active();
+        let desktop_active = preferences.suppress_when_desktop_active
+            && !ignore_desktop_presence
+            && self.desktop_is_active();
         let policy = attention_policy(kind, &preferences, desktop_active);
-        let http_route = review_id.is_some() && self.relay_session_target().await.is_some();
+        // A notice with a report is as easy to lose as a review, and a retry is
+        // as safe: the relay dedupes a notice by its own id.
+        let http_eligible = review_id.is_some() || kind == AGENT_NOTICE_KIND;
+        let http_route = http_eligible && self.relay_session_target().await.is_some();
         let command_tx = {
             let mut remote = self.inner.remote.lock().await;
             let command_tx = remote.command_tx.clone();
@@ -315,15 +332,11 @@ impl AppState {
             thread_id,
             message_preview: preview,
             review_id,
+            title,
+            notification_id,
+            report_id,
         };
-        let acknowledged = matches!(
-            &command,
-            super::RemoteBridgeCommand::NotifyAttention {
-                review_id: Some(_),
-                ..
-            }
-        );
-        if acknowledged {
+        if http_eligible {
             // A tool call must not wait on the relay.
             let app = self.clone();
             tokio::spawn(async move { app.deliver_acknowledged(command, command_tx).await });
@@ -333,10 +346,10 @@ impl AppState {
     }
 
     /// A socket write proves nothing: the bridge reconnects often enough that
-    /// a queued frame can die with it. A review goes over HTTP until the relay
-    /// acknowledges it, and only falls back to the socket for relays that lack
-    /// the endpoint or while HTTP keeps failing. The relay dedupes per review,
-    /// so a retry after a lost response cannot double-alert.
+    /// a queued frame can die with it. A review or notice goes over HTTP until
+    /// the relay acknowledges it, and only falls back to the socket for relays
+    /// that lack the endpoint or while HTTP keeps failing. The relay dedupes on
+    /// the review or notice, so a retry after a lost response cannot double-alert.
     async fn deliver_acknowledged(
         &self,
         command: super::RemoteBridgeCommand,
@@ -348,6 +361,9 @@ impl AppState {
             thread_id,
             message_preview,
             review_id,
+            title,
+            notification_id,
+            report_id,
         } = &command
         else {
             return;
@@ -358,11 +374,17 @@ impl AppState {
                 kind: kind.clone(),
                 workspace_id: workspace_id.clone(),
                 thread_id: thread_id.clone(),
-                thread_title: self
-                    .notification_title(workspace_id.as_deref(), thread_id.as_deref())
-                    .await,
+                thread_title: match title {
+                    Some(title) => super::remote_bridge::notification_thread_title(title),
+                    None => {
+                        self.notification_title(workspace_id.as_deref(), thread_id.as_deref())
+                            .await
+                    }
+                },
                 message_preview: message_preview.clone(),
                 review_id: review_id.clone(),
+                notification_id: notification_id.clone(),
+                report_id: report_id.clone(),
             };
             let url = format!(
                 "{}/v1/sessions/{session_id}/notify",

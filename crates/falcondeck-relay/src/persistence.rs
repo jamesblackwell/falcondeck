@@ -15,8 +15,8 @@ use crate::error::RelayError;
 use falcondeck_core::RelayUpdate;
 
 use super::app::{
-    PairingRecord, PersistedState, QueuedActionRecord, RetentionConfig, SessionMeta, SessionRecord,
-    TrustedDeviceRecord,
+    PairingRecord, PersistedState, QueuedActionRecord, ReportRecord, RetentionConfig, SessionMeta,
+    SessionRecord, TrustedDeviceRecord,
 };
 
 const FILE_PERSIST_DEBOUNCE_MS: u64 = 150;
@@ -80,6 +80,20 @@ pub(crate) trait PersistenceBackend: Send + Sync {
         &self,
         session_id: &str,
         update_ids: &[String],
+    ) -> Result<(), RelayError>;
+
+    /// Store a report, replacing any with the same id.
+    async fn persist_report(
+        &self,
+        session: &SessionMeta,
+        report: &ReportRecord,
+    ) -> Result<(), RelayError>;
+
+    /// Delete expired or evicted reports.
+    async fn remove_reports(
+        &self,
+        session_id: &str,
+        report_ids: &[String],
     ) -> Result<(), RelayError>;
 
     /// Delete update rows older than the oldest retained sequence.
@@ -208,6 +222,22 @@ impl PersistenceBackend for FileBackend {
         &self,
         _session_id: &str,
         _update_ids: &[String],
+    ) -> Result<(), RelayError> {
+        Ok(())
+    }
+
+    async fn persist_report(
+        &self,
+        _session: &SessionMeta,
+        _report: &ReportRecord,
+    ) -> Result<(), RelayError> {
+        Ok(())
+    }
+
+    async fn remove_reports(
+        &self,
+        _session_id: &str,
+        _report_ids: &[String],
     ) -> Result<(), RelayError> {
         Ok(())
     }
@@ -602,6 +632,38 @@ impl PersistenceBackend for PostgresBackend {
         })
     }
 
+    async fn persist_report(
+        &self,
+        session: &SessionMeta,
+        report: &ReportRecord,
+    ) -> Result<(), RelayError> {
+        with_reconnect!(self, |client| {
+            upsert_session(client, session).await?;
+            upsert_relay_report(client, &session.session_id, report).await?;
+            Ok(())
+        })
+    }
+
+    async fn remove_reports(
+        &self,
+        session_id: &str,
+        report_ids: &[String],
+    ) -> Result<(), RelayError> {
+        if report_ids.is_empty() {
+            return Ok(());
+        }
+        with_reconnect!(self, |client| {
+            client
+                .execute(
+                    "DELETE FROM relay_reports WHERE session_id = $1 AND report_id = ANY($2)",
+                    &[&session_id, &report_ids],
+                )
+                .await
+                .map_err(|error| RelayError::StatePersist(error.to_string()))?;
+            Ok(())
+        })
+    }
+
     async fn remove_updates(
         &self,
         session_id: &str,
@@ -894,6 +956,14 @@ async fn init_postgres_schema(client: &PostgresClient) -> Result<(), RelayError>
                 (SELECT COALESCE(MAX(seq) + 1, 1) FROM relay_updates u
                  WHERE u.session_id = relay_sessions.session_id)
             );
+            CREATE TABLE IF NOT EXISTS relay_reports (
+                session_id TEXT NOT NULL REFERENCES relay_sessions(session_id) ON DELETE CASCADE,
+                report_id TEXT NOT NULL,
+                envelope JSONB NOT NULL,
+                created_at TIMESTAMPTZ NOT NULL,
+                expires_at TIMESTAMPTZ NOT NULL,
+                PRIMARY KEY (session_id, report_id)
+            );
             CREATE TABLE IF NOT EXISTS relay_actions (
                 action_id TEXT PRIMARY KEY,
                 session_id TEXT NOT NULL REFERENCES relay_sessions(session_id) ON DELETE CASCADE,
@@ -967,6 +1037,7 @@ async fn load_postgres_state_from_client(
                     .try_into()
                     .map_err(|_| RelayError::StateLoad("invalid lost sequence".to_string()))?,
                 updates: Vec::new(),
+                reports: std::collections::HashMap::new(),
                 actions: std::collections::HashMap::new(),
             },
         );
@@ -1047,6 +1118,26 @@ async fn load_postgres_state_from_client(
                 body: decode_json_field(row.get("body"))?,
                 created_at: row.get("created_at"),
             });
+        }
+    }
+
+    for row in client
+        .query(
+            "SELECT session_id, report_id, envelope, created_at, expires_at FROM relay_reports",
+            &[],
+        )
+        .await
+        .map_err(|error| RelayError::StateLoad(error.to_string()))?
+    {
+        let session_id: String = row.get("session_id");
+        if let Some(session) = state.sessions.get_mut(&session_id) {
+            let report = ReportRecord {
+                report_id: row.get("report_id"),
+                created_at: row.get("created_at"),
+                expires_at: row.get("expires_at"),
+                envelope: decode_json_field(row.get("envelope"))?,
+            };
+            session.reports.insert(report.report_id.clone(), report);
         }
     }
 
@@ -1320,6 +1411,32 @@ async fn touch_device_last_seen(
     Ok(())
 }
 
+async fn upsert_relay_report(
+    client: &mut PostgresClient,
+    session_id: &str,
+    report: &ReportRecord,
+) -> Result<(), RelayError> {
+    client
+        .execute(
+            "INSERT INTO relay_reports (session_id, report_id, envelope, created_at, expires_at)
+             VALUES ($1, $2, $3, $4, $5)
+             ON CONFLICT (session_id, report_id) DO UPDATE SET
+               envelope = EXCLUDED.envelope,
+               created_at = EXCLUDED.created_at,
+               expires_at = EXCLUDED.expires_at",
+            &[
+                &session_id,
+                &report.report_id,
+                &encode_json_field(&report.envelope)?,
+                &report.created_at,
+                &report.expires_at,
+            ],
+        )
+        .await
+        .map_err(|error| RelayError::StatePersist(error.to_string()))?;
+    Ok(())
+}
+
 async fn upsert_relay_update(
     client: &mut PostgresClient,
     session_id: &str,
@@ -1492,6 +1609,23 @@ async fn flush_postgres_state(
                     &seq,
                     &encode_json_field(&update.body)?,
                     &update.created_at,
+                ],
+            )
+            .await
+            .map_err(|error| RelayError::StatePersist(error.to_string()))?;
+        }
+
+        // Deleting the sessions above cascaded to their reports.
+        for report in session.reports.values() {
+            tx.execute(
+                "INSERT INTO relay_reports (session_id, report_id, envelope, created_at, expires_at)
+                 VALUES ($1, $2, $3, $4, $5)",
+                &[
+                    &session.session_id,
+                    &report.report_id,
+                    &encode_json_field(&report.envelope)?,
+                    &report.created_at,
+                    &report.expires_at,
                 ],
             )
             .await

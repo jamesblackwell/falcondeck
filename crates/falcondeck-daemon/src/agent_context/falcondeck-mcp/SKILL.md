@@ -18,8 +18,8 @@ task; do not wait for the user to name them.
   `falcondeck_thread_changes`, `falcondeck_view_thread`,
   `falcondeck_message_thread`, `falcondeck_create_thread`,
   `falcondeck_wait_thread`,
-  `falcondeck_organize_thread`, `falcondeck_interrupt_thread`, and
-  `falcondeck_answer_question`.
+  `falcondeck_organize_thread`, `falcondeck_interrupt_thread`,
+  `falcondeck_answer_question`, and `falcondeck_notify`.
 
 ## Notifications
 
@@ -59,6 +59,25 @@ Follow-ups the user asks for during a conversation ("check back in a few
 hours", "remind me here tomorrow") should run in this same thread: create the
 automation with `"thread": { "kind": "current" }`. Use a `managed` thread only
 for standing schedules that are not about this conversation.
+
+## Notifying the user
+
+`falcondeck_notify` sends a push with a preview and keeps it in the user's
+notification centre, with an optional Markdown report (`body`) they can read on
+their phone even while the Mac is asleep.
+
+Use it when something important happened and **no decision is needed**: a launch
+finished, an incident is over, a result they asked to hear about arrived. If they
+must decide, publish a review instead: a review asks for a decision, a notice
+does not.
+
+It is rare by design. Your final reply already reaches them, so never use it for
+progress, routine completions or anything your reply says anyway. Limits per
+sender: 3 an hour, 10 a day, 2 `importance: "high"` a day; all agents together
+share 30 a day. A retry of the same notice within the hour is not sent twice.
+`high` also pushes while they are at the Mac, so keep it for what would justify
+an interruption. Pushes are not end-to-end encrypted: keep secrets out of `title`
+and `summary`. `body` is encrypted.
 
 ## Sibling threads
 

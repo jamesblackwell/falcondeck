@@ -10,10 +10,13 @@ On launch or notification tap, recover current state from the daemon.
 `GET /v1/push-capabilities` returns:
 
 ```json
-{"expo":true,"apns":[{"topic":"org.example.native","environment":"sandbox"}]}
+{"expo":true,"apns":[{"topic":"org.example.native","environment":"sandbox"}],
+ "reports":{"max_bytes":262144,"max_ttl_seconds":2592000}}
 ```
 
-Older relays return 404. Continue foreground operation and explain that background
+`reports` advertises encrypted report hosting (see
+[NOTIFICATION-CENTRE](NOTIFICATION-CENTRE.md)). When it is absent, make no report
+calls. Older relays return 404. Continue foreground operation and explain that background
 push is unavailable. Do not send raw APNs tokens to the legacy Expo endpoint.
 
 Register with the trusted device's bearer token:

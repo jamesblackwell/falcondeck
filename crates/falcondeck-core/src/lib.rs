@@ -5697,6 +5697,12 @@ pub struct RelayNotifyRequest {
     /// Review the attention belongs to.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub review_id: Option<String>,
+    /// Notification-centre record behind this push.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub notification_id: Option<String>,
+    /// Relay report to open on tap while the Mac is asleep.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub report_id: Option<String>,
 }
 
 /// Daemon-side record of attention events for one kind since it started.
@@ -6034,6 +6040,13 @@ pub enum RelayClientMessage {
         /// Review this attention belongs to. Older relays ignore it.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         review_id: Option<String>,
+        /// Notification-centre record behind this push, so a tap can mark it
+        /// read. Opaque; older relays ignore it.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        notification_id: Option<String>,
+        /// Relay report to open on tap while the Mac is asleep. Opaque.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        report_id: Option<String>,
     },
 }
 
@@ -6090,6 +6103,61 @@ pub struct RelayPushCapabilities {
     pub expo: bool,
     /// Applications supported by the optional native provider.
     pub apns: Vec<ApnsApplication>,
+    /// Encrypted report hosting. Older relays omit it: make no report calls.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reports: Option<RelayReportCapabilities>,
+}
+
+/// What a relay accepts for encrypted reports.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RelayReportCapabilities {
+    /// Largest ciphertext accepted, in bytes.
+    pub max_bytes: usize,
+    /// Longest retention accepted, in seconds.
+    pub max_ttl_seconds: i64,
+}
+
+/// Store an end-to-end encrypted report. Daemon only. The relay cannot read it.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PutRelayReportRequest {
+    /// Ciphertext, encrypted with the session data key.
+    pub envelope: EncryptedEnvelope,
+    /// Seconds to keep it, clamped to the relay's maximum.
+    pub ttl_seconds: i64,
+}
+
+/// A hosted report without its ciphertext.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RelayReportSummary {
+    /// Opaque id chosen by the daemon.
+    pub report_id: String,
+    /// When the relay first stored it.
+    pub created_at: DateTime<Utc>,
+    /// When the relay deletes it.
+    pub expires_at: DateTime<Utc>,
+    /// Ciphertext size.
+    pub size_bytes: usize,
+}
+
+/// Hosted reports for a session, newest first.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RelayReportList {
+    /// Reports without ciphertext.
+    pub reports: Vec<RelayReportSummary>,
+}
+
+/// One hosted report.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RelayReport {
+    /// Opaque id chosen by the daemon.
+    pub report_id: String,
+    /// When the relay first stored it.
+    pub created_at: DateTime<Utc>,
+    /// When the relay deletes it.
+    pub expires_at: DateTime<Utc>,
+    /// Ciphertext, decrypted by the client with the session data key.
+    pub envelope: EncryptedEnvelope,
 }
 
 /// Public application identity, excluding all provider credentials.

@@ -8,7 +8,7 @@ use super::remote_lifecycle::{
     AttentionPush, notification_markdown_preview, notification_message_preview,
 };
 use super::*;
-use crate::notification_store::{NewNotification, Recorded};
+use crate::notification_store::{NewNotification, NoticeRefused, Recorded};
 use falcondeck_core::ThreadOrigin;
 use falcondeck_core::control::{ControlDomain, ControlStateChanged};
 use falcondeck_core::notifications::{
@@ -34,6 +34,31 @@ pub(super) enum AttentionEvent {
     },
     /// A review was published.
     Review(Box<Review>),
+    /// An agent has something to say. No decision needed.
+    Notice(Box<AgentNotice>),
+}
+
+/// A notice from `falcondeck_notify`, after validation.
+#[derive(Debug, Clone)]
+pub(super) struct AgentNotice {
+    pub title: String,
+    pub summary: String,
+    pub body: Option<String>,
+    pub importance: NotificationImportance,
+    /// `bot:<name>` or `thread:<id>`: who the rate limits count.
+    pub sender: String,
+    pub bot: Option<String>,
+    pub workspace_id: String,
+    pub thread_id: String,
+}
+
+/// What happened to an event. Only notices can be refused; everything else
+/// is recorded or was noise, and callers have nothing to do either way.
+#[derive(Debug)]
+pub(super) enum AttentionOutcome {
+    Noise,
+    Recorded(Recorded),
+    Refused(NoticeRefused),
 }
 
 impl AttentionEvent {
@@ -103,16 +128,41 @@ impl AppState {
     /// Records the event, then delivers it. Every attention event goes through
     /// here. Noise produces neither a record nor a push; a repeat of an event
     /// already recorded produces no second push.
-    pub(super) async fn record_and_deliver_attention(&self, event: AttentionEvent) {
-        let Some((new, push)) = self.attention_record(event).await else {
-            return;
+    pub(super) async fn record_and_deliver_attention(
+        &self,
+        event: AttentionEvent,
+    ) -> AttentionOutcome {
+        let notice = matches!(event, AttentionEvent::Notice(_));
+        let Some((new, mut push)) = self.attention_record(event).await else {
+            return AttentionOutcome::Noise;
         };
-        let recorded = self.inner.notifications.record(new, Utc::now()).await;
+        let now = Utc::now();
+        let recorded = if notice {
+            match self.inner.notifications.record_notice(new, now).await {
+                Ok(recorded) => recorded,
+                Err(refused) => return AttentionOutcome::Refused(refused),
+            }
+        } else {
+            self.inner.notifications.record(new, now).await
+        };
         if matches!(recorded, Recorded::Duplicate(_)) {
-            return;
+            return AttentionOutcome::Recorded(recorded);
         }
         self.emit_notifications_changed().await;
+        let record = recorded.record();
+        push.notification_id = Some(record.id.clone());
+        push.report_id = record
+            .report
+            .as_ref()
+            .map(|report| report.report_id.clone());
+        if push.report_id.is_some() {
+            // The push should not beat the report to the relay: the Mac may
+            // sleep the moment it is sent. Bounded, because a slow relay must
+            // not hold a notice back; the sync retries on the next connection.
+            let _ = tokio::time::timeout(REPORT_UPLOAD_WAIT, self.sync_relay_reports()).await;
+        }
         self.deliver_attention(push).await;
+        AttentionOutcome::Recorded(recorded)
     }
 
     /// What to store and push for an event, or `None` when it is noise.
@@ -131,6 +181,7 @@ impl AppState {
                 thread_id,
             } => Some(self.error_record(workspace_id, thread_id).await),
             AttentionEvent::Review(review) => Some(self.review_record(&review)),
+            AttentionEvent::Notice(notice) => Some(notice_record(*notice)),
         }
     }
 
@@ -189,7 +240,6 @@ impl AppState {
             kind: if question { "question" } else { "approval" },
             workspace_id: Some(workspace_id),
             thread_id,
-            preview: None,
             ..AttentionPush::default()
         };
         (new, push)
@@ -281,7 +331,6 @@ impl AppState {
             kind: "turn-error",
             workspace_id: Some(workspace_id),
             thread_id: Some(thread_id),
-            preview: None,
             ..AttentionPush::default()
         };
         (new, push)
@@ -314,8 +363,96 @@ impl AppState {
             thread_id: review.source_thread_id.clone(),
             preview: Some(review_push_line(review)),
             review_id: Some(review.id.clone()),
+            ..AttentionPush::default()
         };
         (new, push)
+    }
+
+    pub(super) fn spawn_report_sync(&self) {
+        let app = self.clone();
+        tokio::spawn(async move { app.sync_relay_reports().await });
+    }
+
+    /// Puts every live report on the relay under the current session key:
+    /// after a notice, on each connection (so a report written while the relay
+    /// was out of reach goes up), and after a key rotation (the old ciphertext
+    /// is unreadable by the devices that remain). Idempotent and best-effort;
+    /// the daemon's own copy stays the source of truth.
+    pub(super) async fn sync_relay_reports(&self) {
+        let _serial = self.inner.report_sync.lock().await;
+        let (relay_url, token, session_id, data_key) = {
+            let remote = self.inner.remote.lock().await;
+            let (Some(relay_url), Some(token), Some(pairing)) = (
+                remote.relay_url.clone(),
+                remote.daemon_token.clone(),
+                remote.pairing.as_ref(),
+            ) else {
+                return;
+            };
+            let Some(session_id) = pairing.session_id.clone() else {
+                return;
+            };
+            (relay_url, token, session_id, pairing.data_key)
+        };
+        let key_id = report_key_id(&session_id, &data_key);
+        let store = &self.inner.notifications;
+        let pending = store.pending_reports(&key_id, Utc::now()).await;
+        if pending.is_empty() {
+            return;
+        }
+        let client = reqwest::Client::new();
+        let Some(limits) = relay_report_limits(&client, &relay_url).await else {
+            return;
+        };
+        for pending in pending {
+            let Some(reference) = pending.record.report.clone() else {
+                continue;
+            };
+            let plain = report_plaintext(
+                &pending.record,
+                &reference.report_id,
+                &session_id,
+                &pending.body,
+            );
+            let ttl = (reference.expires_at - Utc::now())
+                .num_seconds()
+                .min(limits.max_ttl_seconds);
+            let envelope = match falcondeck_core::crypto::encrypt_json(&data_key, &plain) {
+                Ok(envelope) if envelope.ciphertext.len() <= limits.max_bytes && ttl > 0 => {
+                    envelope
+                }
+                Ok(_) => {
+                    tracing::warn!(id = %pending.record.id, "report stays on the daemon: over relay limits");
+                    continue;
+                }
+                Err(error) => {
+                    tracing::warn!(%error, "could not encrypt report");
+                    continue;
+                }
+            };
+            let url = format!(
+                "{relay_url}/v1/sessions/{session_id}/reports/{}",
+                reference.report_id
+            );
+            let sent = client
+                .put(url)
+                .bearer_auth(&token)
+                .json(&falcondeck_core::PutRelayReportRequest {
+                    envelope,
+                    ttl_seconds: ttl,
+                })
+                .timeout(REPORT_UPLOAD_TIMEOUT)
+                .send()
+                .await
+                .and_then(reqwest::Response::error_for_status);
+            match sent {
+                Ok(_) => store.mark_report_hosted(&pending.record.id, &key_id).await,
+                Err(error) => {
+                    tracing::warn!(%error, "report upload failed; retrying on the next connection");
+                    return;
+                }
+            }
+        }
     }
 
     /// Clients refetch on this, as they do for reviews.
@@ -386,6 +523,104 @@ impl AppState {
         }
         self.inner.notifications.status().await
     }
+}
+
+const REPORT_UPLOAD_WAIT: std::time::Duration = std::time::Duration::from_secs(5);
+const REPORT_UPLOAD_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(20);
+
+/// What this relay accepts, or `None` for a relay without report hosting.
+async fn relay_report_limits(
+    client: &reqwest::Client,
+    relay_url: &str,
+) -> Option<falcondeck_core::RelayReportCapabilities> {
+    let response = client
+        .get(format!("{relay_url}/v1/push-capabilities"))
+        .timeout(REPORT_UPLOAD_TIMEOUT)
+        .send()
+        .await
+        .ok()?;
+    response
+        .json::<falcondeck_core::RelayPushCapabilities>()
+        .await
+        .ok()?
+        .reports
+}
+
+/// Names a session key without revealing it, to spot reports under an old one.
+fn report_key_id(session_id: &str, data_key: &[u8; 32]) -> String {
+    use sha2::{Digest, Sha256};
+    let digest = Sha256::new()
+        .chain_update(b"falcondeck-report-key\0")
+        .chain_update(session_id.as_bytes())
+        .chain_update(b"\0")
+        .chain_update(data_key)
+        .finalize();
+    digest
+        .iter()
+        .take(16)
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
+}
+
+/// What the phone decrypts. It carries its own ids because the relay chooses
+/// what to serve: a client rejects a report that does not match its request.
+fn report_plaintext(
+    record: &NotificationRecord,
+    report_id: &str,
+    session_id: &str,
+    body: &str,
+) -> Value {
+    json!({
+        "version": 1,
+        "report_id": report_id,
+        "session_id": session_id,
+        "notification_id": record.id,
+        "title": record.title,
+        "summary": record.preview,
+        "body": body,
+        "bot": record.bot,
+        "thread_id": record.thread_id,
+        "workspace_id": record.workspace_id,
+        "importance": record.importance,
+        "created_at": record.created_at,
+    })
+}
+
+fn notice_record(notice: AgentNotice) -> (NewNotification, AttentionPush) {
+    let AgentNotice {
+        title,
+        summary,
+        body,
+        importance,
+        sender,
+        bot,
+        workspace_id,
+        thread_id,
+    } = notice;
+    let new = NewNotification {
+        kind: NotificationKind::AgentNotice,
+        title: title.clone(),
+        preview: summary.clone(),
+        bot,
+        target: thread_target(&workspace_id, Some(&thread_id)),
+        thread_id: Some(thread_id.clone()),
+        workspace_id: Some(workspace_id.clone()),
+        importance,
+        dedupe_key: None,
+        coalesce: false,
+        sender: Some(sender),
+        body,
+    };
+    let push = AttentionPush {
+        kind: "agent-notice",
+        workspace_id: Some(workspace_id),
+        thread_id: Some(thread_id),
+        preview: Some(summary),
+        title: Some(title),
+        ignore_desktop_presence: importance == NotificationImportance::High,
+        ..AttentionPush::default()
+    };
+    (new, push)
 }
 
 fn display_title(title: &str) -> String {
@@ -728,5 +963,351 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(counts["unread_count"], 0);
+    }
+}
+
+#[cfg(test)]
+mod notice_tests {
+    use super::*;
+    use crate::app::thread_tools::{NOTIFY, tests::fixture};
+    use axum::{Json, extract::State, http::HeaderMap, routing::get};
+    use falcondeck_core::notifications::NotificationListRequest;
+    use std::sync::{Arc, Mutex as StdLock};
+    use tokio::sync::mpsc;
+
+    async fn notify(app: &AppState, arguments: Value) -> Result<String, String> {
+        app.invoke_thread_tool(NOTIFY, &arguments, Some("thread-1"), None)
+            .await
+            .map(|response| serde_json::to_string(&response).unwrap())
+            .map_err(|error| error.to_string())
+    }
+
+    fn pushes(rx: &mut mpsc::UnboundedReceiver<RemoteBridgeCommand>) -> Vec<RemoteBridgeCommand> {
+        std::iter::from_fn(|| rx.try_recv().ok()).collect()
+    }
+
+    fn only(rx: &mut mpsc::UnboundedReceiver<RemoteBridgeCommand>) -> RemoteBridgeCommand {
+        let mut all = pushes(rx);
+        assert_eq!(all.len(), 1);
+        all.remove(0)
+    }
+
+    async fn bridge(app: &AppState) -> mpsc::UnboundedReceiver<RemoteBridgeCommand> {
+        let (tx, rx) = mpsc::unbounded_channel();
+        app.inner.remote.lock().await.command_tx = Some(tx);
+        rx
+    }
+
+    async fn records(app: &AppState) -> Vec<NotificationRecord> {
+        app.notifications_list(&NotificationListRequest::default())
+            .await
+            .items
+    }
+
+    #[tokio::test]
+    async fn a_notice_reaches_the_phone_and_the_centre() {
+        let (app, _temp) = fixture().await;
+        let mut rx = bridge(&app).await;
+        app.set_desktop_activity(false);
+        let sent = notify(
+            &app,
+            json!({"title": "Deploy finished", "summary": "All green."}),
+        )
+        .await
+        .unwrap();
+        assert!(sent.contains("N-1"), "{sent}");
+        let list = records(&app).await;
+        assert_eq!(list[0].kind, NotificationKind::AgentNotice);
+        assert_eq!(list[0].title, "Deploy finished");
+        assert_eq!(
+            list[0].target,
+            thread_target("workspace-1", Some("thread-1"))
+        );
+        assert!(!list[0].has_body);
+        let RemoteBridgeCommand::NotifyAttention {
+            kind,
+            title,
+            message_preview,
+            notification_id,
+            report_id,
+            ..
+        } = only(&mut rx)
+        else {
+            panic!("expected one push");
+        };
+        assert_eq!(kind, "agent-notice");
+        assert_eq!(title.as_deref(), Some("Deploy finished"));
+        assert_eq!(message_preview.as_deref(), Some("All green."));
+        assert_eq!(notification_id.as_deref(), Some("N-1"));
+        assert_eq!(report_id, None);
+    }
+
+    #[tokio::test]
+    async fn at_the_desk_a_normal_notice_is_quiet_and_a_high_one_is_not() {
+        let (app, _temp) = fixture().await;
+        let mut rx = bridge(&app).await;
+        app.set_desktop_activity(true);
+        notify(&app, json!({"title": "One", "summary": "Normal."}))
+            .await
+            .unwrap();
+        assert!(pushes(&mut rx).is_empty());
+        notify(
+            &app,
+            json!({"title": "Two", "summary": "High.", "importance": "high"}),
+        )
+        .await
+        .unwrap();
+        assert_eq!(pushes(&mut rx).len(), 1);
+        assert_eq!(records(&app).await.len(), 2, "both are in the history");
+    }
+
+    #[tokio::test]
+    async fn the_limit_refuses_with_directions_and_nothing_is_stored_or_pushed() {
+        let (app, _temp) = fixture().await;
+        let mut rx = bridge(&app).await;
+        app.set_desktop_activity(false);
+        for index in 0..3 {
+            notify(&app, json!({"title": format!("n{index}"), "summary": "s"}))
+                .await
+                .unwrap();
+        }
+        pushes(&mut rx);
+        let error = notify(&app, json!({"title": "over", "summary": "s"}))
+            .await
+            .unwrap_err();
+        assert!(
+            error.contains("3 per hour") && error.contains("final reply"),
+            "{error}"
+        );
+        assert_eq!(records(&app).await.len(), 3);
+        assert!(pushes(&mut rx).is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_retry_is_not_sent_twice() {
+        let (app, _temp) = fixture().await;
+        let mut rx = bridge(&app).await;
+        app.set_desktop_activity(false);
+        let arguments = json!({"title": "Same", "summary": "Same."});
+        notify(&app, arguments.clone()).await.unwrap();
+        let again = notify(&app, arguments).await.unwrap();
+        assert!(again.contains("already sent"), "{again}");
+        assert_eq!(pushes(&mut rx).len(), 1);
+    }
+
+    #[tokio::test]
+    async fn arguments_are_bounded_and_an_agent_cannot_speak_for_another() {
+        let (app, _temp) = fixture().await;
+        for bad in [
+            json!({"title": "  ", "summary": "s"}),
+            json!({"title": "t", "summary": "\n"}),
+            json!({"title": "t", "summary": "s", "sender": "bot:Juno"}),
+            json!({"title": "t", "summary": "s", "thread_id": "other"}),
+            json!({"title": "t", "summary": "s", "importance": "urgent"}),
+            json!({"title": "t", "summary": "s", "body": "x".repeat(64_001)}),
+        ] {
+            assert!(notify(&app, bad.clone()).await.is_err(), "{bad}");
+        }
+        assert!(records(&app).await.is_empty());
+        let long = json!({"title": "t".repeat(500), "summary": "s".repeat(500)});
+        notify(&app, long).await.unwrap();
+        let record = &records(&app).await[0];
+        assert_eq!(record.title.chars().count(), 120);
+        assert_eq!(record.preview.chars().count(), 200);
+    }
+
+    #[tokio::test]
+    async fn the_tool_requires_a_real_calling_thread() {
+        let (app, _temp) = fixture().await;
+        let arguments = json!({"title": "t", "summary": "s"});
+        assert!(
+            app.invoke_thread_tool(NOTIFY, &arguments, None, None)
+                .await
+                .is_err()
+        );
+        assert!(
+            app.invoke_thread_tool(NOTIFY, &arguments, Some("nope"), None)
+                .await
+                .is_err()
+        );
+        assert!(records(&app).await.is_empty());
+    }
+
+    #[derive(Clone, Default)]
+    struct Relay {
+        reports: bool,
+        puts: Arc<StdLock<Vec<(String, falcondeck_core::PutRelayReportRequest)>>>,
+    }
+
+    async fn capabilities(State(relay): State<Relay>) -> Json<Value> {
+        Json(if relay.reports {
+            json!({"expo": true, "apns": [], "reports": {"max_bytes": 262144, "max_ttl_seconds": 2592000}})
+        } else {
+            json!({"expo": true, "apns": []})
+        })
+    }
+
+    async fn put(
+        State(relay): State<Relay>,
+        axum::extract::Path((session, report)): axum::extract::Path<(String, String)>,
+        headers: HeaderMap,
+        Json(request): Json<falcondeck_core::PutRelayReportRequest>,
+    ) -> Json<Value> {
+        assert_eq!(session, "session-1");
+        assert_eq!(headers["authorization"], "Bearer daemon-token");
+        relay.puts.lock().unwrap().push((report, request));
+        Json(json!({}))
+    }
+
+    async fn paired(app: &AppState, relay: &Relay, key: [u8; 32]) {
+        let router = axum::Router::new()
+            .route("/v1/push-capabilities", get(capabilities))
+            .route(
+                "/v1/sessions/{session}/reports/{report}",
+                axum::routing::put(put),
+            )
+            .with_state(relay.clone());
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+        let mut remote = app.inner.remote.lock().await;
+        remote.relay_url = Some(url);
+        remote.daemon_token = Some("daemon-token".into());
+        remote.pairing = Some(RemotePairingState {
+            pairing_id: "pairing".into(),
+            pairing_code: "code".into(),
+            session_id: Some("session-1".into()),
+            device_id: None,
+            trusted_at: None,
+            expires_at: Utc::now(),
+            client_bundle: None,
+            local_key_pair: falcondeck_core::crypto::LocalBoxKeyPair::generate(),
+            data_key: key,
+        });
+    }
+
+    const REPORT: &str = "# Launch\n\nThe secret pricing change shipped.";
+
+    #[tokio::test]
+    async fn a_report_goes_up_encrypted_and_binds_itself_to_its_ids() {
+        let (app, _temp) = fixture().await;
+        let relay = Relay {
+            reports: true,
+            ..Default::default()
+        };
+        let key = [7; 32];
+        paired(&app, &relay, key).await;
+        let mut rx = bridge(&app).await;
+        app.set_desktop_activity(false);
+        notify(
+            &app,
+            json!({"title": "Launch", "summary": "Shipped.", "body": REPORT}),
+        )
+        .await
+        .unwrap();
+
+        let (report_id, request) = relay.puts.lock().unwrap().remove(0);
+        assert!(
+            !serde_json::to_string(&request)
+                .unwrap()
+                .contains("secret pricing")
+        );
+        let plain: Value = falcondeck_core::crypto::decrypt_json(&key, &request.envelope).unwrap();
+        assert_eq!(plain["body"], REPORT);
+        assert_eq!(plain["report_id"], report_id);
+        assert_eq!(plain["session_id"], "session-1");
+        assert_eq!(plain["notification_id"], "N-1");
+        assert!(request.ttl_seconds <= 30 * 24 * 60 * 60);
+
+        let record = app.notification_get("N-1").await.unwrap();
+        assert_eq!(record.body.as_deref(), Some(REPORT));
+        assert!(record.report.as_ref().unwrap().hosted);
+        let RemoteBridgeCommand::NotifyAttention {
+            report_id: pushed, ..
+        } = only(&mut rx)
+        else {
+            panic!("expected one push");
+        };
+        assert_eq!(
+            pushed.as_deref(),
+            Some(report_id.as_str()),
+            "the push sends the id, never the text"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_current_relay_gets_no_report_calls_and_the_notice_still_lands() {
+        let (app, _temp) = fixture().await;
+        let relay = Relay::default();
+        paired(&app, &relay, [7; 32]).await;
+        let mut rx = bridge(&app).await;
+        app.set_desktop_activity(false);
+        notify(
+            &app,
+            json!({"title": "Launch", "summary": "Shipped.", "body": REPORT}),
+        )
+        .await
+        .unwrap();
+        assert!(relay.puts.lock().unwrap().is_empty());
+        assert_eq!(pushes(&mut rx).len(), 1);
+        let record = app.notification_get("N-1").await.unwrap();
+        assert_eq!(
+            record.body.as_deref(),
+            Some(REPORT),
+            "the phone reads it from the daemon"
+        );
+        assert!(!record.report.unwrap().hosted);
+    }
+
+    #[tokio::test]
+    async fn a_rotated_key_reuploads_and_a_second_pass_does_nothing() {
+        let (app, _temp) = fixture().await;
+        let relay = Relay {
+            reports: true,
+            ..Default::default()
+        };
+        paired(&app, &relay, [7; 32]).await;
+        notify(
+            &app,
+            json!({"title": "Launch", "summary": "Shipped.", "body": REPORT}),
+        )
+        .await
+        .unwrap();
+        relay.puts.lock().unwrap().clear();
+
+        app.sync_relay_reports().await;
+        assert!(
+            relay.puts.lock().unwrap().is_empty(),
+            "already hosted under this key"
+        );
+
+        let rotated = [9; 32];
+        app.inner
+            .remote
+            .lock()
+            .await
+            .pairing
+            .as_mut()
+            .unwrap()
+            .data_key = rotated;
+        app.sync_relay_reports().await;
+        let (_, request) = relay.puts.lock().unwrap().remove(0);
+        let plain: Value =
+            falcondeck_core::crypto::decrypt_json(&rotated, &request.envelope).unwrap();
+        assert_eq!(plain["body"], REPORT);
+    }
+
+    #[test]
+    fn list_filters_parse_from_the_query_string() {
+        let uri: axum::http::Uri = "/api/notifications?filter=needs_you&limit=5&before_seq=9"
+            .parse()
+            .unwrap();
+        let axum::extract::Query(request) =
+            axum::extract::Query::<NotificationListRequest>::try_from_uri(&uri).unwrap();
+        assert_eq!(
+            request.filter,
+            falcondeck_core::notifications::NotificationFilter::NeedsYou
+        );
+        assert_eq!((request.limit, request.before_seq), (Some(5), Some(9)));
     }
 }

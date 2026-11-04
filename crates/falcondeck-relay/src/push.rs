@@ -388,6 +388,8 @@ pub(crate) fn apns_payload(
     kind: &str,
     review: Option<&str>,
     collapse: &str,
+    notification: Option<&str>,
+    report: Option<&str>,
 ) -> Option<serde_json::Value> {
     let mut title = title.to_owned();
     let mut body = body.to_owned();
@@ -395,6 +397,12 @@ pub(crate) fn apns_payload(
         let mut payload = serde_json::json!({"aps": {"alert": {"title":title,"body":body},"sound":"default","thread-id":collapse},"sessionId":session,"workspaceId":workspace,"threadId":thread,"kind":kind});
         if let Some(review) = review {
             payload["reviewId"] = review.into();
+        }
+        if let Some(notification) = notification {
+            payload["notificationId"] = notification.into();
+        }
+        if let Some(report) = report {
+            payload["reportId"] = report.into();
         }
         if serde_json::to_vec(&payload).ok()?.len() <= 4096 {
             return Some(payload);
@@ -613,6 +621,8 @@ mod tests {
             &text,
             None,
             "collapse",
+            Some("N-1"),
+            Some("rpt_1"),
         )
         .unwrap();
         assert!(serde_json::to_vec(&payload).unwrap().len() <= 4096);

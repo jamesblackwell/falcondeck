@@ -556,6 +556,61 @@ impl NotificationStore {
         .await
     }
 
+    /// Reports that are not on the relay under this key and still have life
+    /// left, oldest first. Answering from a phone never depends on this list.
+    pub(crate) async fn pending_reports(
+        &self,
+        key: &str,
+        now: DateTime<Utc>,
+    ) -> Vec<PendingReport> {
+        let mut guard = self.state.lock().await;
+        let state = &mut *guard;
+        self.ensure_loaded(state).await;
+        let candidates: Vec<_> = state
+            .file
+            .records
+            .iter()
+            .filter(|stored| stored.report_key.as_deref() != Some(key))
+            .filter(|stored| {
+                stored
+                    .record
+                    .report
+                    .as_ref()
+                    .is_some_and(|report| report.expires_at > now)
+            })
+            .map(|stored| stored.record.clone())
+            .collect();
+        drop(guard);
+        let mut pending = Vec::with_capacity(candidates.len());
+        for record in candidates {
+            match tokio::fs::read_to_string(self.body_path(&record.id)).await {
+                Ok(body) => pending.push(PendingReport { record, body }),
+                Err(error) => tracing::warn!(id = %record.id, %error, "report body unreadable"),
+            }
+        }
+        pending
+    }
+
+    /// The relay holds this report under this key.
+    pub(crate) async fn mark_report_hosted(&self, id: &str, key: &str) {
+        let mut guard = self.state.lock().await;
+        let state = &mut *guard;
+        self.ensure_loaded(state).await;
+        let Some(stored) = state
+            .file
+            .records
+            .iter_mut()
+            .find(|stored| stored.record.id == id)
+        else {
+            return;
+        };
+        stored.report_key = Some(key.to_string());
+        if let Some(report) = &mut stored.record.report {
+            report.hosted = true;
+        }
+        self.save(state).await;
+    }
+
     /// The request or review was dealt with, wherever that happened.
     pub(crate) async fn resolve(&self, dedupe_key: &str, now: DateTime<Utc>) -> bool {
         let mut guard = self.state.lock().await;
@@ -1077,6 +1132,30 @@ mod tests {
             assert_eq!(again.record().id, first.record().id);
         }
         assert_eq!(store.status().await.unread_count, 1);
+    }
+
+    #[tokio::test]
+    async fn reports_stay_pending_until_hosted_and_again_after_a_key_change() {
+        let (_temp, store) = store();
+        let new = NewNotification {
+            body: Some("# Report".into()),
+            ..notice("bot:Juno", "Report")
+        };
+        let recorded = store.record_notice(new, now()).await.unwrap();
+        let id = recorded.record().id.clone();
+        let pending = store.pending_reports("key-1", now()).await;
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].body, "# Report");
+
+        store.mark_report_hosted(&id, "key-1").await;
+        assert!(store.pending_reports("key-1", now()).await.is_empty());
+        assert!(store.get(&id).await.unwrap().report.unwrap().hosted);
+
+        // The session key rotated after a device was revoked.
+        assert_eq!(store.pending_reports("key-2", now()).await.len(), 1);
+        // A report past its relay lifetime stays on the daemon only.
+        let late = now() + Duration::days(REPORT_TTL_DAYS + 1);
+        assert!(store.pending_reports("key-2", late).await.is_empty());
     }
 
     #[tokio::test]

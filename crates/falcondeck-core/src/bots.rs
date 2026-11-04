@@ -25,6 +25,8 @@ pub const BOT_DEFAULT_INSTRUCTIONS: &str = concat!(
     "Choose the home/current thread only when a run needs conversation context (such as a launch discussed at length). Otherwise use new_each_run with target.run_as_bot set to the bot id; write explicit criteria for sending one message home, otherwise update STATUS.md and finish silently. No-action scheduled runs must not message anyone.\n\n",
     "## Reviews\n",
     "When you need James to decide on work you can show (mock-ups, screenshots, reports), publish a review with your recommendation instead of sending links.\n\n",
+    "## Notices\n",
+    "When something important happened and no decision is needed, use falcondeck_notify, with a Markdown report if it needs one. A review asks for a decision; a notice does not. Use it rarely: never for progress or routine results, which belong in STATUS.md and your replies.\n\n",
     "## Status\n",
     "Keep a short STATUS.md (under 4 KB) at the root of your document space: an Updated date line, then four sections: priorities, in flight (linked tasks), waiting on the user, and recently done. One line per item, linking to detail. ",
     "Rewrite it in place before ending any turn that changed your work; never append a log. The user and other bots read it instead of asking you for updates, and you can read theirs. ",

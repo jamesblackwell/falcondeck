@@ -68,6 +68,13 @@ pub fn router(state: AppState) -> Router {
         )
         .route("/v1/sessions/{session_id}/notify", post(notify))
         .route("/v1/sessions/{session_id}/push-test", post(push_test))
+        .route("/v1/sessions/{session_id}/reports", get(list_reports))
+        .route(
+            "/v1/sessions/{session_id}/reports/{report_id}",
+            get(get_report).put(put_report).layer(DefaultBodyLimit::max(
+                crate::app::MAX_REPORT_BYTES + 16 * 1024,
+            )),
+        )
         .route("/v1/updates/ws", get(updates_ws))
         .layer(relay_cors_layer())
         .with_state(state)
@@ -613,6 +620,40 @@ async fn push_capabilities(
     State(state): State<AppState>,
 ) -> Json<falcondeck_core::RelayPushCapabilities> {
     Json(state.push_capabilities())
+}
+
+async fn put_report(
+    State(state): State<AppState>,
+    Path((session_id, report_id)): Path<(String, String)>,
+    headers: HeaderMap,
+    Json(request): Json<falcondeck_core::PutRelayReportRequest>,
+) -> Result<Json<falcondeck_core::RelayReportSummary>, RelayError> {
+    let token = auth_token(&headers)?;
+    Ok(Json(
+        state
+            .put_report(&session_id, &token, &report_id, request)
+            .await?,
+    ))
+}
+
+async fn list_reports(
+    State(state): State<AppState>,
+    Path(session_id): Path<String>,
+    headers: HeaderMap,
+) -> Result<Json<falcondeck_core::RelayReportList>, RelayError> {
+    let token = auth_token(&headers)?;
+    Ok(Json(state.list_reports(&session_id, &token).await?))
+}
+
+async fn get_report(
+    State(state): State<AppState>,
+    Path((session_id, report_id)): Path<(String, String)>,
+    headers: HeaderMap,
+) -> Result<Json<falcondeck_core::RelayReport>, RelayError> {
+    let token = auth_token(&headers)?;
+    Ok(Json(
+        state.get_report(&session_id, &token, &report_id).await?,
+    ))
 }
 
 async fn register_push_registration(

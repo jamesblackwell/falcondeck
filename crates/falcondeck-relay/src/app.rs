@@ -30,6 +30,9 @@ use uuid::Uuid;
 #[cfg(test)]
 #[path = "push_tests.rs"]
 mod push_tests;
+#[cfg(test)]
+#[path = "report_tests.rs"]
+mod report_tests;
 
 use crate::{
     error::RelayError,
@@ -37,7 +40,9 @@ use crate::{
 };
 use falcondeck_core::{
     DevicePushHealth, PushDeliveryOutcome, PushDeliveryRecord, PushRegistration,
-    PushTestDeviceResult, PushTestResponse, RelayNotifyRequest, RelayPushCapabilities,
+    PushTestDeviceResult, PushTestResponse, PutRelayReportRequest, RelayNotifyRequest,
+    RelayPushCapabilities, RelayReport, RelayReportCapabilities, RelayReportList,
+    RelayReportSummary,
 };
 
 const PEER_QUEUE_CAPACITY: usize = 256;
@@ -69,6 +74,14 @@ const WS_SYNC_REPLAY_MAX_BYTES: usize = 512 << 10;
 /// new challenge request replaces any outstanding one for the pairing.
 const PAIRING_CHALLENGE_TTL_SECONDS: i64 = 300;
 const PENDING_RPC_TTL_SECONDS: i64 = 30;
+/// Largest report ciphertext. Bodies are capped well below this by the daemon.
+pub(crate) const MAX_REPORT_BYTES: usize = 256 * 1024;
+const MAX_REPORT_TTL_SECONDS: i64 = 30 * 24 * 60 * 60;
+const MAX_REPORT_ID_BYTES: usize = 64;
+/// One session's hosted reports. Past either limit the oldest go first: the
+/// daemon keeps every report, so eviction only loses reading it while offline.
+const MAX_REPORTS_PER_SESSION: usize = 500;
+const MAX_REPORT_BYTES_PER_SESSION: usize = 32 * 1024 * 1024;
 const PENDING_RPC_MAX_COUNT: usize = 256;
 /// Pending params outlive transport queue admission while the daemon works.
 /// Retain room for one maximum accepted message plus routing metadata.
@@ -516,6 +529,9 @@ pub(crate) struct SessionRecord {
     /// truncation. Zero means no update was ever pruned.
     #[serde(default)]
     pub(crate) oldest_lost_seq: u64,
+    /// End-to-end encrypted reports readable while the daemon is offline.
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub(crate) reports: HashMap<String, ReportRecord>,
     pub(crate) updates: Vec<RelayUpdate>,
     #[serde(default)]
     pub(crate) actions: HashMap<String, QueuedActionRecord>,
@@ -534,6 +550,21 @@ pub(crate) struct SessionMeta {
     pub(crate) updated_at: DateTime<Utc>,
     pub(crate) next_seq: u64,
     pub(crate) oldest_lost_seq: u64,
+}
+
+/// A report the relay stores and cannot read.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct ReportRecord {
+    pub(crate) report_id: String,
+    pub(crate) created_at: DateTime<Utc>,
+    pub(crate) expires_at: DateTime<Utc>,
+    pub(crate) envelope: EncryptedEnvelope,
+}
+
+impl ReportRecord {
+    fn size_bytes(&self) -> usize {
+        self.envelope.ciphertext.len()
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1216,6 +1247,7 @@ impl AppState {
                     next_seq: 1,
                     oldest_lost_seq: 0,
                     updates: Vec::new(),
+                    reports: HashMap::new(),
                     actions: HashMap::new(),
                 };
                 session_snapshot = session.meta();
@@ -2399,6 +2431,8 @@ impl AppState {
                 thread_title,
                 message_preview,
                 review_id,
+                notification_id,
+                report_id,
             } => {
                 if !matches!(role, RelayPeerRole::Daemon) {
                     return Err(RelayError::Unauthorized(
@@ -2412,6 +2446,8 @@ impl AppState {
                     thread_title,
                     message_preview,
                     review_id,
+                    notification_id,
+                    report_id,
                 };
                 validate_notification(&request)?;
                 self.dispatch_push_notifications(session_id, request).await;
@@ -3213,7 +3249,122 @@ impl AppState {
                 .as_ref()
                 .map(|provider| provider.applications())
                 .unwrap_or_default(),
+            reports: Some(RelayReportCapabilities {
+                max_bytes: MAX_REPORT_BYTES,
+                max_ttl_seconds: MAX_REPORT_TTL_SECONDS,
+            }),
         }
+    }
+
+    /// Stores a report, daemon only. Rewriting an id keeps its creation time,
+    /// which is how the daemon re-encrypts live reports after a key rotation.
+    pub async fn put_report(
+        &self,
+        session_id: &str,
+        token: &str,
+        report_id: &str,
+        request: PutRelayReportRequest,
+    ) -> Result<RelayReportSummary, RelayError> {
+        let auth = self.authenticate_session(session_id, token).await?;
+        if !matches!(auth.role, RelayPeerRole::Daemon) {
+            return Err(RelayError::Unauthorized(
+                "only daemon peers may store reports".to_string(),
+            ));
+        }
+        if report_id.is_empty()
+            || report_id.len() > MAX_REPORT_ID_BYTES
+            || !report_id
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_' || byte == b'-')
+        {
+            return Err(RelayError::BadRequest("invalid report id".to_string()));
+        }
+        let size = request.envelope.ciphertext.len();
+        if size == 0 || size > MAX_REPORT_BYTES {
+            return Err(RelayError::BadRequest(format!(
+                "report ciphertext must be 1 to {MAX_REPORT_BYTES} bytes"
+            )));
+        }
+        if request.ttl_seconds <= 0 {
+            return Err(RelayError::BadRequest("ttl_seconds must be positive".to_string()));
+        }
+        let now = Utc::now();
+        let (meta, record, evicted) = {
+            let mut store = self.inner.store.lock().await;
+            let session = store
+                .data
+                .sessions
+                .get_mut(session_id)
+                .ok_or_else(|| RelayError::NotFound("session not found".to_string()))?;
+            let created_at = session
+                .reports
+                .get(report_id)
+                .map_or(now, |existing| existing.created_at);
+            let record = ReportRecord {
+                report_id: report_id.to_string(),
+                created_at,
+                expires_at: now + Duration::seconds(request.ttl_seconds.min(MAX_REPORT_TTL_SECONDS)),
+                envelope: request.envelope,
+            };
+            session.reports.insert(report_id.to_string(), record.clone());
+            let evicted = evict_reports(session, report_id);
+            (session.meta(), record, evicted)
+        };
+        self.inner.backend.persist_report(&meta, &record).await?;
+        self.inner
+            .backend
+            .remove_reports(session_id, &evicted)
+            .await?;
+        self.schedule_flush(PersistMode::Immediate).await?;
+        Ok(report_summary(&record))
+    }
+
+    /// Lists live reports, newest first. Any active device or the daemon.
+    pub async fn list_reports(
+        &self,
+        session_id: &str,
+        token: &str,
+    ) -> Result<RelayReportList, RelayError> {
+        self.authenticate_session(session_id, token).await?;
+        let now = Utc::now();
+        let store = self.inner.store.lock().await;
+        let session = store
+            .data
+            .sessions
+            .get(session_id)
+            .ok_or_else(|| RelayError::NotFound("session not found".to_string()))?;
+        let mut reports: Vec<_> = session
+            .reports
+            .values()
+            .filter(|report| report.expires_at > now)
+            .map(report_summary)
+            .collect();
+        reports.sort_by(|a, b| b.created_at.cmp(&a.created_at));
+        Ok(RelayReportList { reports })
+    }
+
+    /// One report's ciphertext. Revoked devices fail authentication.
+    pub async fn get_report(
+        &self,
+        session_id: &str,
+        token: &str,
+        report_id: &str,
+    ) -> Result<RelayReport, RelayError> {
+        self.authenticate_session(session_id, token).await?;
+        let store = self.inner.store.lock().await;
+        let report = store
+            .data
+            .sessions
+            .get(session_id)
+            .and_then(|session| session.reports.get(report_id))
+            .filter(|report| report.expires_at > Utc::now())
+            .ok_or_else(|| RelayError::NotFound("report not found".to_string()))?;
+        Ok(RelayReport {
+            report_id: report.report_id.clone(),
+            created_at: report.created_at,
+            expires_at: report.expires_at,
+            envelope: report.envelope.clone(),
+        })
     }
 
     /// Clients can update only their own device. A daemon can manage its devices.
@@ -3525,6 +3676,8 @@ impl AppState {
                     PUSH_TEST_KIND,
                     None,
                     &collapse,
+                    None,
+                    None,
                 );
                 let (Some(provider), Some(payload)) = (provider, payload) else {
                     return (
@@ -3630,11 +3783,19 @@ impl AppState {
             thread_title,
             message_preview,
             review_id,
+            notification_id,
+            report_id,
         } = request;
         let endpoint = self.inner.push_endpoint.clone();
+        // Two notices from one thread are two messages, not a repeat.
         let dedupe_scope = review_id
             .as_ref()
             .map(|id| format!("review:{id}"))
+            .or_else(|| {
+                (kind == "agent-notice")
+                    .then(|| notification_id.clone())
+                    .flatten()
+            })
             .or_else(|| thread_id.clone());
         let (recipients, mut permits, enough_capacity) = {
             let mut store = self.inner.store.lock().await;
@@ -3748,6 +3909,8 @@ impl AppState {
                 &kind,
                 review_id.as_deref(),
                 &collapse_id,
+                notification_id.as_deref(),
+                report_id.as_deref(),
             )
         {
             for (device_id, generation, registered) in &recipients {
@@ -3852,6 +4015,8 @@ impl AppState {
                             "threadId": thread_id,
                             "kind": kind,
                             "reviewId": review_id,
+                            "notificationId": notification_id,
+                            "reportId": report_id,
                         },
                     })
                 })
@@ -4831,6 +4996,9 @@ impl AppState {
         for (session_id, device_id) in &report.removed_devices {
             backend.remove_device(session_id, device_id).await?;
         }
+        for (session_id, report_ids) in &report.removed_reports {
+            backend.remove_reports(session_id, report_ids).await?;
+        }
         for (session, oldest_retained_seq) in &report.pruned_update_sessions {
             backend
                 .prune_updates(&session.session_id, *oldest_retained_seq)
@@ -5124,6 +5292,8 @@ struct PruneReport {
     /// Individual stale device rows removed from sessions that are otherwise
     /// retained, as `(session_id, device_id)` pairs.
     removed_devices: Vec<(String, String)>,
+    /// Expired reports in retained sessions.
+    removed_reports: Vec<(String, Vec<String>)>,
 }
 
 impl PruneReport {
@@ -5133,7 +5303,41 @@ impl PruneReport {
             && self.removed_session_ids.is_empty()
             && self.removed_pairing_ids.is_empty()
             && self.removed_devices.is_empty()
+            && self.removed_reports.is_empty()
     }
+}
+
+fn report_summary(report: &ReportRecord) -> RelayReportSummary {
+    RelayReportSummary {
+        report_id: report.report_id.clone(),
+        created_at: report.created_at,
+        expires_at: report.expires_at,
+        size_bytes: report.size_bytes(),
+    }
+}
+
+/// Drops the oldest reports until the session fits, never the one just stored.
+fn evict_reports(session: &mut SessionRecord, keep: &str) -> Vec<String> {
+    let mut by_age: Vec<_> = session
+        .reports
+        .values()
+        .filter(|report| report.report_id != keep)
+        .map(|report| (report.created_at, report.report_id.clone(), report.size_bytes()))
+        .collect();
+    by_age.sort();
+    let mut count = session.reports.len();
+    let mut bytes: usize = session.reports.values().map(ReportRecord::size_bytes).sum();
+    let mut evicted = Vec::new();
+    for (_, report_id, size) in by_age {
+        if count <= MAX_REPORTS_PER_SESSION && bytes <= MAX_REPORT_BYTES_PER_SESSION {
+            break;
+        }
+        session.reports.remove(&report_id);
+        count -= 1;
+        bytes -= size;
+        evicted.push(report_id);
+    }
+    evicted
 }
 
 fn prune_state(
@@ -5219,6 +5423,19 @@ fn prune_state(
         // revoked rows once their grace window passes, and active rows that
         // nothing has connected with for the trusted-device retention period.
         let session_id = session.session_id.clone();
+        let mut expired_reports = Vec::new();
+        session.reports.retain(|report_id, report| {
+            let keep = report.expires_at > now;
+            if !keep {
+                expired_reports.push(report_id.clone());
+            }
+            keep
+        });
+        if !expired_reports.is_empty() {
+            report
+                .removed_reports
+                .push((session_id.clone(), expired_reports));
+        }
         let revoked_device_cutoff = saturating_sub(now, retention.completed_action_retention);
         let stale_device_cutoff = saturating_sub(now, retention.trusted_device_retention);
         session.devices.retain(|device_id, device| {
@@ -5434,6 +5651,8 @@ fn validate_notification(request: &RelayNotifyRequest) -> Result<(), RelayError>
         ("thread_title", request.thread_title.as_deref()),
         ("message_preview", request.message_preview.as_deref()),
         ("review_id", request.review_id.as_deref()),
+        ("notification_id", request.notification_id.as_deref()),
+        ("report_id", request.report_id.as_deref()),
     ] {
         if let Some(value) = value {
             validate_bounded_text(
@@ -5492,6 +5711,12 @@ fn push_notification_content<'a>(
             .map(str::trim)
             .filter(|preview| !preview.is_empty())
             .unwrap_or("An agent needs a decision from you"),
+        // The notice's own summary. Pushes are not end-to-end encrypted; the
+        // report itself is, and never travels through a push.
+        "agent-notice" => message_preview
+            .map(str::trim)
+            .filter(|preview| !preview.is_empty())
+            .unwrap_or("An agent sent you a notice"),
         _ => "An agent needs your attention",
     };
     (title, body)
@@ -6115,6 +6340,7 @@ mod tests {
             next_seq: 1,
             oldest_lost_seq: 0,
             updates: Vec::new(),
+            reports: HashMap::new(),
             actions: HashMap::new(),
         }
     }
@@ -6584,6 +6810,7 @@ mod tests {
             next_seq: 7,
             oldest_lost_seq: 0,
             updates: Vec::new(),
+            reports: HashMap::new(),
             actions: HashMap::new(),
         };
 

@@ -3676,6 +3676,8 @@ async fn client_peers_cannot_request_push_notifications() {
             thread_title: None,
             message_preview: None,
             review_id: None,
+            notification_id: None,
+            report_id: None,
         },
     )
     .await;
@@ -4784,4 +4786,86 @@ fn test_envelope(marker: &str) -> EncryptedEnvelope {
         ciphertext: format!("opaque-{marker}"),
         scope_hint: None,
     }
+}
+
+#[tokio::test]
+async fn reports_round_trip_over_http_for_paired_devices_only() {
+    let server = spawn_server().await;
+    let client = reqwest::Client::new();
+    let (pairing, claim) = create_claimed_session(&client, &server.http_base).await;
+    let capabilities: serde_json::Value = client
+        .get(format!("{}/v1/push-capabilities", server.http_base))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(capabilities["reports"]["max_bytes"], 262_144);
+
+    let url = format!(
+        "{}/v1/sessions/{}/reports/rpt_1",
+        server.http_base, claim.session_id
+    );
+    let request = serde_json::json!({
+        "envelope": {"ciphertext": "AAAA"},
+        "ttl_seconds": 3600
+    });
+    let forged = client
+        .put(&url)
+        .bearer_auth(&claim.client_token)
+        .json(&request)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(forged.status(), StatusCode::UNAUTHORIZED);
+    let stored = client
+        .put(&url)
+        .bearer_auth(&pairing.daemon_token)
+        .json(&request)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(stored.status(), StatusCode::OK);
+
+    let read: serde_json::Value = client
+        .get(&url)
+        .bearer_auth(&claim.client_token)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(read["envelope"]["ciphertext"], "AAAA");
+    let list: serde_json::Value = client
+        .get(format!(
+            "{}/v1/sessions/{}/reports",
+            server.http_base, claim.session_id
+        ))
+        .bearer_auth(&claim.client_token)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(list["reports"][0]["report_id"], "rpt_1");
+    assert_eq!(list["reports"][0]["size_bytes"], 4);
+    assert!(list["reports"][0].get("envelope").is_none());
+
+    let anonymous = client.get(&url).send().await.unwrap();
+    assert_eq!(anonymous.status(), StatusCode::UNAUTHORIZED);
+    let oversized = serde_json::json!({
+        "envelope": {"ciphertext": "A".repeat(600 * 1024)},
+        "ttl_seconds": 3600
+    });
+    let rejected = client
+        .put(&url)
+        .bearer_auth(&pairing.daemon_token)
+        .json(&oversized)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(rejected.status(), StatusCode::PAYLOAD_TOO_LARGE);
 }

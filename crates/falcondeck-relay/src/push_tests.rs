@@ -38,6 +38,8 @@ fn notify(kind: &str, thread_id: Option<String>) -> RelayNotifyRequest {
         thread_title: None,
         message_preview: None,
         review_id: None,
+        notification_id: None,
+        report_id: None,
     }
 }
 

@@ -4,19 +4,22 @@ Install [FalconDeck for iPhone and iPad from the App Store](https://apps.apple.c
 
 ## Product boundary
 
-The daemon is the source of truth for agent state. Notifications are a
-downstream delivery channel for attention events, not a second conversation
-store or an inbox. The current semantic events are:
+The daemon is the source of truth for agent state. Attention events now have
+two halves: a durable record in the [notification centre](NOTIFICATION-CENTRE.md),
+which is an inbox and history kept by the daemon, and this document's best-effort
+delivery of that record to a device. It is still not a second conversation store:
+a record points at a thread or review and never copies a transcript. The semantic
+events are:
 
 - `input_required`: an approval or user question is waiting.
 - `review`: a bot published a review that needs a decision.
 - `turn_complete`: an agent turn finished successfully.
 - `error`: an agent turn failed.
+- `agent_notice`: an agent reported something with no decision needed.
 
-The daemon already emits the underlying interactive-request, thread-status,
-turn-lifecycle, and service/error events. A future calm attention screen can
-consume those same primitives and retain richer history; push payloads should
-remain small.
+Every event goes through `record_and_deliver_attention`, which stores it and then
+delivers it, so anything pushed is also in the history and nothing that gates
+delivery can stop a record. Push payloads remain small.
 
 The packaged macOS desktop app delivers these attention events through
 `UNUserNotificationCenter`, so FalconDeck requests real system authorization,
@@ -37,6 +40,7 @@ while the app was closed.
 ```text
 agent provider
   -> daemon event / interactive request
+  -> notification centre record (always, unless the event is noise)
   -> daemon notification policy
   -> remote bridge (E2E session)
   -> relay checks device presence and push token
@@ -45,10 +49,13 @@ agent provider
 ```
 
 Push data contains the session, workspace, thread, and semantic kind needed
-for a tap to open the right context. It also includes the thread title and a
-bounded assistant reply preview for completed turns. Unlike encrypted updates
+for a tap to open the right context, plus the notification id and, for a notice
+with a report, its opaque report id. It also includes the thread title and a
+bounded assistant reply preview for completed turns, or a notice's title and
+summary. Unlike encrypted updates
 and RPC payloads, this display text is visible to the relay, Expo Push Service,
-and the device notification service; full transcripts are not included.
+and the device notification service; full transcripts are not included, and
+neither are reports, which reach the relay only as end-to-end encrypted blobs.
 
 Reviews also carry `reviewId`, the deep link target. A review may have no source
 thread, so `workspaceId` and `threadId` can be absent on those payloads.
@@ -105,6 +112,10 @@ Notification preferences are daemon-owned and included in snapshots and
 - only push when away from desktop (two minutes without Mac input). Reviews
   ignore this one.
 
+These gate delivery, never the record. Reviews follow approvals and questions;
+agent notices follow the master switch only, and a `high` notice also ignores the
+away-from-desktop rule.
+
 Desktop also has a device-local turn-complete chime, off by default, under
 Settings → General → Sounds. It plays on this computer when a thread leaves
 `running` for `idle` or `error`, including while the window is focused. It is
@@ -160,8 +171,9 @@ The relay uses Expo Push Service by default:
 
 Delivery retries transient HTTP/network failures, polls Expo receipts, and
 clears tokens reported as `DeviceNotRegistered`. It deduplicates the same
-session/kind/thread for 60 seconds, or the same review when one is named, and
-retains a one-day TTL on the device
+session/kind/thread for 60 seconds, or the same review or notice when one is
+named (so two notices from one thread both arrive), and retains a one-day TTL on
+the device
 notification so stale task completions do not arrive indefinitely.
 
 ## Release and testing checklist
