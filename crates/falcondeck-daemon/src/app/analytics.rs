@@ -701,6 +701,9 @@ struct ThreadTrack {
     at_start: Option<(u64, u64)>,
     /// Others (Claude, ACP) report how full the context is: tracked as a peak.
     peak: u64,
+    /// A fresh provider turn event, rather than a stale summary's latest id.
+    has_turn_id: bool,
+    made_model_call: bool,
 }
 
 /// Follows the event stream. Turns are timed from thread status changes, which
@@ -733,6 +736,8 @@ fn listen_loop(
                     track.started = Some(now);
                     track.at_start = track.latest;
                     track.peak = 0;
+                    track.has_turn_id = false;
+                    track.made_model_call = false;
                 }
                 let attention = &thread.attention;
                 let needs_user = if attention.pending_approval_count > 0 {
@@ -762,6 +767,8 @@ fn listen_loop(
                         .lock()
                         .unwrap_or_else(|p| p.into_inner())
                         .record_usage
+                        && (thread.provider != AgentProvider::CODEX
+                            || track.has_turn_id || track.made_model_call)
                     {
                         let mut counters = health.lock().unwrap_or_else(|p| p.into_inner());
                         let provider = thread.provider.to_string();
@@ -787,6 +794,12 @@ fn listen_loop(
                     });
                 }
             }
+            UnifiedEvent::TurnStart { turn_id } => {
+                if let Some(thread) = envelope.thread_id.as_ref() {
+                    let track = threads.entry(thread.clone()).or_default();
+                    track.has_turn_id = !turn_id.is_empty() && turn_id != "turn";
+                }
+            }
             UnifiedEvent::ThreadTokenUsageUpdated { usage } => {
                 let Some(thread) = envelope.thread_id.clone() else {
                     continue;
@@ -796,6 +809,11 @@ fn listen_loop(
                 let context = match &usage.last {
                     Some(last) => {
                         let total = (usage.total.input_tokens, usage.total.output_tokens);
+                        if in_turn && track.latest != Some(total)
+                            && (last.input_tokens > 0 || last.output_tokens > 0
+                                || last.reasoning_output_tokens > 0) {
+                            track.made_model_call = true;
+                        }
                         // First report with no baseline (e.g. after a restart): the
                         // total before this request is where the turn started.
                         if in_turn && track.at_start.is_none() {

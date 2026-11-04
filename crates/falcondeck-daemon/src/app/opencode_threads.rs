@@ -508,8 +508,8 @@ pub(super) async fn start_opencode_turn(
         }
         // Read only this admitted input's messages, including partial usage
         // when settlement failed or the user interrupted. Hydration never records.
-        if let Ok(messages) = runtime.messages_since(&session_id, &message_id).await {
-            for (model, usage) in native_turn_usage(&messages) {
+        match runtime.messages_since(&session_id, &message_id).await {
+            Ok(messages) => for (model, usage) in native_turn_usage(&messages) {
                 app.record_turn_usage(super::analytics::TurnUsage {
                     workspace_id: &workspace_id,
                     thread_id: &thread_id,
@@ -530,6 +530,7 @@ pub(super) async fn start_opencode_turn(
                     turn_key: message_id.clone(),
                 });
             }
+            Err(error) => tracing::warn!(%error, thread = %thread_id, "OpenCode turn usage capture failed"),
         }
         let mut interrupted = false;
         let _ = app
@@ -653,7 +654,10 @@ fn native_turn_usage(
             tokens["input"].as_u64().unwrap_or(0),
             tokens["cache"]["read"].as_u64().unwrap_or(0),
             tokens["cache"]["write"].as_u64().unwrap_or(0),
-            tokens["output"].as_u64().unwrap_or(0),
+            // Native OpenCode separates visible output from reasoning. Our
+            // normalized output includes both, with reasoning kept as a subset.
+            tokens["output"].as_u64().unwrap_or(0)
+                .saturating_add(tokens["reasoning"].as_u64().unwrap_or(0)),
             tokens["reasoning"].as_u64().unwrap_or(0),
         ];
         if counts.iter().all(|n| *n == 0) {
@@ -1664,9 +1668,19 @@ mod tests {
         messages.push(messages[0].clone());
         let totals = native_turn_usage(&messages);
         let (tokens, calls, cost) = totals["zai-coding-plan/glm-5.3"];
-        assert_eq!(tokens, [1164, 748032, 0, 620, 63]);
+        assert_eq!(tokens, [1164, 748032, 0, 683, 63]);
         assert_eq!(calls, 2);
         assert_eq!(cost, 0.0);
+
+        // Captured native HTTP response: reasoning exceeds visible output.
+        let reasoning_messages: Vec<Value> = serde_json::from_str(include_str!(
+            "../fixtures/opencode-native-reasoning-usage.json"
+        )).unwrap();
+        let totals = native_turn_usage(&reasoning_messages);
+        let (tokens, calls, _) = totals["zai-coding-plan/glm-5.3"];
+        assert_eq!(tokens, [3834, 356992, 0, 2931, 1566]);
+        assert!(tokens[4] <= tokens[3], "thinking is a subset of normalized output");
+        assert_eq!(calls, 1);
     }
 
     #[tokio::test]

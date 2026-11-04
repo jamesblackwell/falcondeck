@@ -14,8 +14,10 @@ user asks for over time. Viewable in desktop Settings → Analytics.
 - Not conversation history. The native agent remains the history store.
   Nothing restores, replays or hydrates from these files. The user-message log
   is a private journal for analysis and search, and can be turned off or deleted.
-- Never on the turn path. Callers serialize one line and `try_send` it to a
-  writer thread; when the queue (4096) is full the record is dropped.
+- The writer never blocks the turn path. Callers serialize one line and
+  `try_send` it to a writer thread; when the queue (4096) is full the record
+  is dropped. Native OpenCode capture has an awaited source-fetch exception
+  described below.
 
 ## Files
 
@@ -84,9 +86,29 @@ what was true when it was written):
 | Native OpenCode | assistant messages from the admitted input onward, fetched at settlement (including failure/interruption); summed by model, deduped by message id; input and cache counts are already separate |
 | Other ACP | the `session/prompt` response `usage` (input, output, and the cache/thought split when sent), model from the thread; Grok is excluded here to avoid double-counting |
 
-Capture is off the turn hot path: attribution is resolved in a spawned task
-and the serialized line is `try_send`ed to the writer thread. Usage rows
-label bot names and thread titles at read time, like the rest of analytics.
+Attribution is resolved in a spawned task and the serialized line is
+`try_send`ed to the writer thread. Native OpenCode currently makes an additional
+awaited `messages_since` fetch before publishing idle/error, including after
+failed or interrupted settlement. That source fetch can delay settlement; its
+failure logs `OpenCode turn usage capture failed` and produces no usage record.
+The rest of the recording path uses already-delivered provider events or
+responses. Usage rows label bot names and thread titles at read time.
+
+Capture limitations:
+
+- Codex accumulation is memory-only until a turn completes. A daemon restart or
+  shutdown before completion loses that unfinished accumulation; there is no
+  shutdown flush, persistent checkpoint, or automatic rollout backfill. A start
+  notification for a later turn also replaces an unfinished accumulation. After
+  restart, the first report can recover its last request, but cannot reconstruct
+  earlier requests in that turn. This applies to orderly shutdown as well as
+  abrupt termination; finished-turn coverage does not prove complete token totals.
+- Native OpenCode captures the admitted parent session only. Provider-created
+  child sessions are not queried or included in the parent's usage records.
+- Generic ACP usage remains unproven: no successful billed `session/prompt`
+  response fixture has been captured. Cursor and Muse have no observed usage
+  records in the investigated data. Existing generic parsing and its tests do
+  not establish working coverage for those providers.
 
 ## What is recorded
 
@@ -156,7 +178,11 @@ paired remote clients are refused, like the rest of analytics.
   provider since daemon startup: `completed_turns`, `usage_records_written`,
   `turns_with_usage`, and `missing_usage_turns`. Completion counts follow live
   running/waiting → idle/error status transitions independently of the activity
-  switch, while `record_usage` is enabled. Written records count successful writer
+  switch, while `record_usage` is enabled. Codex transitions count only after a
+  fresh provider `TurnStart` event with a real id, or a changed nonzero model-call
+  usage report; stale `latest_turn_id` summaries and status-only flips do not
+  count. `thread/status/changed` maps provider `active` to running even without
+  a turn, so status transitions alone are insufficient evidence of a Codex turn. Written records count successful writer
   appends; multiple models count as several records but one captured turn.
   The mismatch is a diagnostic, not a billing reconciliation: zero-token turns
   can have no record, retries/steer segments may have several captures, and a
@@ -200,7 +226,10 @@ payloads from direct local protocol probes, with conversation content omitted:
   `ses_e5da18d09ffedm4Pd7uKHt77K5` session returned assistant messages with
   `tokens`, `model` and `cost`. Recent FalconDeck OpenCode threads use native
   transport, bypassing the ACP prompt-response hook entirely. The two retained
-  messages sum to 1,164 uncached input, 748,032 cache read and 620 output.
+  messages sum to 1,164 uncached input, 748,032 cache read, 620 visible output
+  and 63 reasoning tokens: normalized output is 683. An additional HTTP-captured
+  fixture has 1,365 visible output and 1,566 reasoning tokens; normalized output
+  is 2,931. Native `tokens.output` excludes reasoning, while our `out` includes it.
   A direct ACP probe returned authentication-required, so it cannot establish
   the billed response shape of a successful generic ACP turn.
 - Codex 0.166.0 app-server: captured `turn/started`,
@@ -216,8 +245,18 @@ payloads from direct local protocol probes, with conversation content omitted:
 | `01a1a65d` | Nov 4 11:49:14 |
 | `01a1a670` | Nov 4 12:08:11 |
 
-No post-launch Codex drop, interrupted completion, subagent completion, or turn-id
-mismatch was established by that scan. Earlier completions in those rollouts
-predate the recording window; `codex_exec` CLI sessions are separate from the
-daemon's app-server sessions. Codex retains the previous terminal totals as the
-next start's baseline and uses a stable thread/turn record id for read dedupe.
+That completion-only scan established no missing finished-turn records in the
+stated interval; it did not check unfinished turns or establish complete token
+coverage. Earlier completions in those rollouts predate the recording window;
+`codex_exec` CLI sessions are separate from the daemon's app-server sessions.
+Codex retains the previous terminal totals as the next start's baseline and
+uses a stable thread/turn record id for read dedupe.
+
+A later restart demonstrates the unfinished-turn loss: thread
+`01a1a6f3-faf0-7a72-8a75-25e48d716ab6` started turn `01a1a6f3-fbe7` at
+14:26:10 UTC on November 4, with no completion. The daemon log records startup
+at 14:35:23.586 UTC; the next turn started at 14:35:40 and completed at 14:46:22.
+The rollout totals 6,715,479 input tokens including cache; the usage log has
+4,487,217, leaving 2,228,262 unrecorded. The accumulator was not checkpointed
+before restart. This remains a documented limitation rather than a recovered
+or backfilled total.

@@ -450,11 +450,13 @@ async fn usage_health_counts_missing_turns_with_activity_disabled() {
     let params = &wire[1]["params"];
     let turn = params["turnId"].as_str().unwrap();
     set_status(&app, ThreadStatus::Running, 0).await;
+    app.emit(Some("workspace-1".into()), Some("thread-1".into()), UnifiedEvent::TurnStart { turn_id: turn.into() });
     app.note_codex_token_usage("thread-1", turn, params);
     app.flush_codex_turn_usage("workspace-1", "thread-1");
     set_status(&app, ThreadStatus::Idle, 0).await;
-    // A second completed turn with no provider usage must remain visible.
+    // A real turn with no provider usage must remain visible.
     set_status(&app, ThreadStatus::Running, 0).await;
+    app.emit(Some("workspace-1".into()), Some("thread-1".into()), UnifiedEvent::TurnStart { turn_id: "real-turn-with-missing-usage".into() });
     set_status(&app, ThreadStatus::Error, 0).await;
     for _ in 0..100 {
         let status = app.analytics_status().await;
@@ -468,4 +470,35 @@ async fn usage_health_counts_missing_turns_with_activity_disabled() {
         tokio::time::sleep(std::time::Duration::from_millis(10)).await;
     }
     panic!("usage health failed to catch the gap: {:?}", app.analytics_status().await);
+}
+
+
+#[tokio::test]
+async fn usage_health_excludes_codex_status_flips_but_counts_calls_without_start() {
+    let (app, _temp) = fixture().await;
+    app.with_thread_mut("workspace-1", "thread-1", |thread| {
+        thread.provider = falcondeck_core::AgentProvider::CODEX;
+        thread.latest_turn_id = Some("stale-summary-turn".into());
+    }).await.unwrap();
+    // A stale summary id and short active/idle flips are not provider turns.
+    for _ in 0..6 {
+        set_status(&app, ThreadStatus::Running, 0).await;
+        set_status(&app, ThreadStatus::Idle, 0).await;
+    }
+    // A real model call counts even if the turn/started event was missed.
+    let wire: Vec<Value> = serde_json::from_str(include_str!("../../../fixtures/codex-0.166.0-usage.json")).unwrap();
+    let usage = crate::app::notifications::parse_thread_token_usage(&wire[1]["params"]).unwrap();
+    set_status(&app, ThreadStatus::Running, 0).await;
+    app.emit(Some("workspace-1".into()), Some("thread-1".into()), UnifiedEvent::ThreadTokenUsageUpdated { usage });
+    set_status(&app, ThreadStatus::Idle, 0).await;
+    for _ in 0..100 {
+        let status = app.analytics_status().await;
+        if let Some(row) = status.usage_health.iter().find(|r| r.provider == "codex") {
+            assert_eq!(row.completed_turns, 1);
+            assert_eq!(row.missing_usage_turns, 1);
+            return;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    panic!("model-call turn was not counted");
 }

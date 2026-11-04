@@ -1,0 +1,29 @@
+[
+  {
+    "id": "msg_1a5f514aa001XHVbaBNOHNLGjy",
+    "time": {
+      "created": 1793785664685,
+      "streamed": 1793785710105,
+      "completed": 1793785710168
+    },
+    "type": "assistant",
+    "agent": "build",
+    "model": {
+      "id": "glm-5.3",
+      "providerID": "zai-coding-plan",
+      "variant": "max"
+    },
+    "finish": "tool-calls",
+    "rawFinish": "tool_calls",
+    "cost": 0,
+    "tokens": {
+      "input": 3834,
+      "output": 1365,
+      "reasoning": 1566,
+      "cache": {
+        "read": 356992,
+        "write": 0
+      }
+    }
+  }
+]
