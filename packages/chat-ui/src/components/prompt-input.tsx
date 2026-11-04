@@ -2,7 +2,9 @@ import * as Popover from "@radix-ui/react-popover";
 import {
   ChevronLeft,
   FileText,
+  Maximize2,
   Mic,
+  Minimize2,
   Paperclip,
   Plus,
   Quote,
@@ -69,6 +71,11 @@ import {
 import { GoalPanel, type GoalPanelProps } from "./goal-control";
 import { SlashCommandMenu } from "./slash-command-menu";
 import { formatVoiceDuration, VoiceWaveform } from "./voice-waveform";
+import {
+  composerHeightLimits,
+  UNMEASURED_COMPOSER,
+  type ComposerMetrics,
+} from "../lib/composer-height";
 import { isComposingKeyboardEvent } from "../lib/keyboard";
 import type { QuotedSelection } from "../lib/quoted-selection";
 
@@ -203,6 +210,10 @@ export type PromptInputProps = {
   autoFocusKey?: string | null;
   /** Focus request for app-level shortcuts; unlike autoFocusKey it may repeat in an existing chat. */
   focusRequestKey?: number;
+  /** Toggles the tall writing mode whenever this changes; hosts own the binding. */
+  expandRequestKey?: number;
+  /** Keycap tokens for the expand toggle, from the host keymap. */
+  expandShortcut?: string[];
   /** Opens one of the option menus in response to an app-level shortcut. */
   menuRequest?: ComposerMenuRequest | null;
   /**
@@ -252,9 +263,6 @@ export type PromptInputProps = {
    */
   externalFileDragActive?: boolean;
 };
-
-const PROMPT_INPUT_MIN_HEIGHT = 52;
-const PROMPT_INPUT_MAX_HEIGHT = 200;
 
 function partitionAttachmentFiles(files: FileList | readonly File[]) {
   const selected = Array.from(files);
@@ -334,6 +342,8 @@ export const PromptInput = memo(function PromptInput({
   contextBar,
   autoFocusKey = null,
   focusRequestKey = 0,
+  expandRequestKey = 0,
+  expandShortcut,
   menuRequest = null,
   menuShortcuts = NO_MENU_SHORTCUTS,
   sendShortcut,
@@ -353,6 +363,9 @@ export const PromptInput = memo(function PromptInput({
   externalFileDragActive = false,
 }: PromptInputProps) {
   const textareaId = useId();
+  const rootRef = useRef<HTMLDivElement>(null);
+  const extrasRef = useRef<HTMLDivElement>(null);
+  const editorAreaRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const plusButtonRef = useRef<HTMLButtonElement>(null);
@@ -368,6 +381,17 @@ export const PromptInput = memo(function PromptInput({
   // a stale key must read as already-handled or every remount would replay
   // the last shortcut and pop its menu open.
   const handledMenuRequestKeyRef = useRef(menuRequest?.key ?? 0);
+  // Same remount reasoning as the menu request above.
+  const handledExpandRequestKeyRef = useRef(expandRequestKey);
+  const [expanded, setExpanded] = useState(false);
+  const [metrics, setMetrics] = useState<ComposerMetrics>(UNMEASURED_COMPOSER);
+  const limits = composerHeightLimits(expanded, metrics);
+  const { editorMin, editorMax } = limits;
+  const hasExtras =
+    attachments.length > 0 ||
+    preparingAttachmentCount > 0 ||
+    quotedSelections.length > 0;
+  const voiceActive = Boolean(voice);
   const [slashQuery, setSlashQuery] = useState<ActiveSlashQuery | null>(null);
   const [liveSkills, setLiveSkills] = useState<SkillSummary[] | null>(null);
   const [livePrompts, setLivePrompts] = useState<SavedPrompt[] | null>(null);
@@ -514,7 +538,7 @@ export const PromptInput = memo(function PromptInput({
       if (!element) return;
       const previousScrollTop = element.scrollTop;
       element.style.height = "auto";
-      element.style.height = `${Math.min(element.scrollHeight, PROMPT_INPUT_MAX_HEIGHT)}px`;
+      element.style.height = `${Math.min(Math.max(element.scrollHeight, editorMin), editorMax)}px`;
       // Collapsing to `auto` resets scroll position, and once the textarea is
       // pinned at max height the browser won't chase the caret on its own —
       // without this, a Shift+Enter newline lands below the visible area.
@@ -523,12 +547,73 @@ export const PromptInput = memo(function PromptInput({
         element.selectionEnd === element.value.length;
       element.scrollTop = caretAtEnd ? element.scrollHeight : previousScrollTop;
     },
-    [],
+    [editorMax, editorMin],
   );
 
   useLayoutEffect(() => {
     syncTextareaHeight(textareaRef.current);
   }, [syncTextareaHeight, value]);
+
+  // Hosts mark the pane and the transcript; the composer's direct parent may
+  // be a content-sized wrapper. Without the marks, only the fixed caps apply.
+  useLayoutEffect(() => {
+    const root = rootRef.current;
+    const pane = root?.closest<HTMLElement>("[data-conversation-pane]");
+    if (!root || !pane) return;
+    const transcript = pane.querySelector<HTMLElement>(
+      "[data-conversation-viewport]",
+    );
+    const measure = () => {
+      const textarea = textareaRef.current;
+      const editorArea = editorAreaRef.current;
+      if (!textarea || !editorArea) return;
+      const paneRect = pane.getBoundingClientRect();
+      const rootHeight = root.getBoundingClientRect().height;
+      const extras = extrasRef.current;
+      const extrasBoxHeight = extras?.getBoundingClientRect().height ?? 0;
+      const next: ComposerMetrics = {
+        paneHeight: Math.round(paneRect.height),
+        roomHeight: transcript
+          ? Math.round(transcript.getBoundingClientRect().height + rootHeight)
+          : 0,
+        chromeHeight: Math.round(
+          rootHeight - textarea.getBoundingClientRect().height - extrasBoxHeight,
+        ),
+        extrasHeight: extras?.scrollHeight ?? 0,
+        spaceAbove: Math.round(
+          editorArea.getBoundingClientRect().top - paneRect.top,
+        ),
+      };
+      setMetrics((current) =>
+        current.paneHeight === next.paneHeight &&
+        current.roomHeight === next.roomHeight &&
+        current.chromeHeight === next.chromeHeight &&
+        current.extrasHeight === next.extrasHeight &&
+        current.spaceAbove === next.spaceAbove
+          ? current
+          : next,
+      );
+    };
+    measure();
+    if (typeof ResizeObserver === "undefined") return;
+    const observer = new ResizeObserver(measure);
+    observer.observe(pane);
+    observer.observe(root);
+    if (transcript) observer.observe(transcript);
+    return () => observer.disconnect();
+  }, []);
+
+  const toggleExpanded = useCallback(() => {
+    setExpanded((current) => !current);
+    textareaRef.current?.focus();
+  }, []);
+
+  useEffect(() => {
+    if (expandRequestKey === handledExpandRequestKeyRef.current) return;
+    handledExpandRequestKeyRef.current = expandRequestKey;
+    if (disabled || voiceActive) return;
+    toggleExpanded();
+  }, [disabled, expandRequestKey, toggleExpanded, voiceActive]);
 
   useEffect(() => {
     if (autoFocusKey == null || disabled) return;
@@ -644,6 +729,11 @@ export const PromptInput = memo(function PromptInput({
     if (accepted.length > 0) onPickImages?.(accepted);
   }
 
+  function submit() {
+    setExpanded(false);
+    onSubmit();
+  }
+
   function handleKeyDown(event: React.KeyboardEvent<HTMLTextAreaElement>) {
     if (isComposingKeyboardEvent(event)) return;
     if (event.repeat) return;
@@ -705,12 +795,15 @@ export const PromptInput = memo(function PromptInput({
     }
     if (shortcutAction === "alternate-submit") {
       event.preventDefault();
-      if (canSubmit) onAlternateSubmit?.();
+      if (canSubmit) {
+        setExpanded(false);
+        onAlternateSubmit?.();
+      }
       return;
     }
     if (shortcutAction === "submit") {
       event.preventDefault();
-      if (canSubmit) onSubmit();
+      if (canSubmit) submit();
       return;
     }
     if (!resolveComposerShortcut && event.key === "Enter") {
@@ -721,7 +814,7 @@ export const PromptInput = memo(function PromptInput({
       // Plain Enter → submit
       event.preventDefault();
       if (canSubmit) {
-        onSubmit();
+        submit();
       }
     }
   }
@@ -882,7 +975,10 @@ export const PromptInput = memo(function PromptInput({
   );
 
   return (
-    <div className="mx-auto w-full max-w-3xl px-3 pt-3 pb-[calc(env(safe-area-inset-bottom)+0.75rem)] md:mb-4 md:px-6 md:pt-3 md:pb-0">
+    <div
+      ref={rootRef}
+      className="mx-auto w-full max-w-3xl px-3 pt-3 pb-[calc(env(safe-area-inset-bottom)+0.75rem)] md:px-6 md:pt-3 md:pb-4"
+    >
       {contextBar}
       {/* `relative` keeps the card painting above the docked context bar tab. */}
       <div
@@ -909,100 +1005,110 @@ export const PromptInput = memo(function PromptInput({
               : "Attachments are unavailable right now"}
           </div>
         ) : null}
-        {/* Attachment previews */}
-        {attachments.length > 0 || isPreparingAttachments ? (
-          <div className="flex flex-wrap gap-2 border-b border-border-subtle px-4 py-3">
-            {attachments.map((attachment) => (
-              <div key={attachment.id} className="relative">
-                {!isDocumentAttachment(attachment) &&
-                canRenderAttachmentImage(attachment.url) ? (
-                  <img
-                    src={attachment.url}
-                    alt={attachment.name ?? "attachment"}
-                    className="h-14 w-14 rounded-[var(--fd-radius-md)] border border-border-default object-cover"
-                  />
-                ) : (
-                  <div
-                    className="flex h-14 w-36 items-center gap-2 rounded-[var(--fd-radius-md)] border border-border-default bg-surface-2 px-2 text-[length:var(--fd-text-xs)] text-fg-secondary"
-                    title={attachmentLabel(attachment)}
-                  >
-                    <FileText
-                      className="h-4 w-4 shrink-0 text-fg-muted"
-                      aria-hidden="true"
+        {/* Attachments and quotes scroll here rather than push the editor
+            out of the composer's share of the pane. */}
+        {hasExtras ? (
+          <div
+            ref={extrasRef}
+            className="overflow-y-auto"
+            style={{ maxHeight: limits.extrasMax }}
+          >
+          {/* Attachment previews */}
+          {attachments.length > 0 || isPreparingAttachments ? (
+            <div className="flex flex-wrap gap-2 border-b border-border-subtle px-4 py-3">
+              {attachments.map((attachment) => (
+                <div key={attachment.id} className="relative">
+                  {!isDocumentAttachment(attachment) &&
+                  canRenderAttachmentImage(attachment.url) ? (
+                    <img
+                      src={attachment.url}
+                      alt={attachment.name ?? "attachment"}
+                      className="h-14 w-14 rounded-[var(--fd-radius-md)] border border-border-default object-cover"
                     />
-                    <span className="min-w-0 flex-1">
-                      <span className="block truncate text-fg-primary">
-                        {attachmentLabel(attachment)}
+                  ) : (
+                    <div
+                      className="flex h-14 w-36 items-center gap-2 rounded-[var(--fd-radius-md)] border border-border-default bg-surface-2 px-2 text-[length:var(--fd-text-xs)] text-fg-secondary"
+                      title={attachmentLabel(attachment)}
+                    >
+                      <FileText
+                        className="h-4 w-4 shrink-0 text-fg-muted"
+                        aria-hidden="true"
+                      />
+                      <span className="min-w-0 flex-1">
+                        <span className="block truncate text-fg-primary">
+                          {attachmentLabel(attachment)}
+                        </span>
+                        <span className="block truncate text-[length:var(--fd-text-2xs)] text-fg-muted">
+                          {attachmentTypeLabel(attachment)}
+                        </span>
                       </span>
-                      <span className="block truncate text-[length:var(--fd-text-2xs)] text-fg-muted">
-                        {attachmentTypeLabel(attachment)}
-                      </span>
-                    </span>
-                  </div>
-                )}
-                {onRemoveAttachment ? (
-                  <button
-                    type="button"
-                    onClick={() => onRemoveAttachment(attachment.id)}
-                    disabled={disabled}
-                    className="fd-focus absolute -top-1.5 -right-1.5 inline-flex h-5 w-5 items-center justify-center rounded-full border border-border-default bg-surface-3 text-fg-secondary shadow-sm transition-colors hover:bg-surface-4 hover:text-fg-primary disabled:pointer-events-none disabled:opacity-60"
-                    aria-label={`Remove ${attachment.name ?? "attachment"}`}
-                  >
-                    <X className="h-3 w-3" />
-                  </button>
-                ) : null}
-              </div>
-            ))}
-            {isPreparingAttachments ? (
-              <div
-                role="status"
-                aria-live="polite"
-                aria-atomic="true"
-                className="flex min-h-14 items-center gap-2 rounded-[var(--fd-radius-md)] border border-border-default bg-surface-2 px-3 text-[length:var(--fd-text-xs)] text-fg-secondary"
-              >
-                <ActivityDiamond size="md" />
-                Preparing {preparingAttachmentCount}{" "}
-                {preparingAttachmentCount === 1 ? "file" : "files"}…
-              </div>
-            ) : null}
-          </div>
-        ) : null}
-        {quotedSelections.length > 0 ? (
-          <div className="border-b border-border-subtle px-4 py-3">
-            <div className="mb-2 flex items-center gap-2 text-[length:var(--fd-text-xs)] font-medium text-fg-muted">
-              <Quote aria-hidden="true" className="h-3.5 w-3.5" />
-              {quotedSelections.length} selected{" "}
-              {quotedSelections.length === 1 ? "excerpt" : "excerpts"}
-            </div>
-            <div className="flex max-h-48 flex-col gap-2 overflow-y-auto">
-              {quotedSelections.map((selection, index) => (
-                <div
-                  key={selection.id}
-                  className="group/quote flex items-start gap-2 rounded-[var(--fd-radius-md)] border border-border-subtle bg-surface-3 px-3 py-2 shadow-sm"
-                >
-                  <blockquote className="line-clamp-2 min-w-0 flex-1 whitespace-pre-wrap border-l-2 border-accent pl-2 text-[length:var(--fd-text-sm)] leading-relaxed text-fg-secondary">
-                    {selection.text}
-                  </blockquote>
-                  {onRemoveQuotedSelection ? (
+                    </div>
+                  )}
+                  {onRemoveAttachment ? (
                     <button
                       type="button"
-                      onClick={() => onRemoveQuotedSelection(selection.id)}
-                      aria-label={`Remove selected excerpt ${index + 1}`}
-                      className="fd-focus inline-flex h-6 w-6 shrink-0 items-center justify-center rounded-full text-fg-muted transition-colors hover:bg-surface-4 hover:text-fg-primary"
+                      onClick={() => onRemoveAttachment(attachment.id)}
+                      disabled={disabled}
+                      className="fd-focus absolute -top-1.5 -right-1.5 inline-flex h-5 w-5 items-center justify-center rounded-full border border-border-default bg-surface-3 text-fg-secondary shadow-sm transition-colors hover:bg-surface-4 hover:text-fg-primary disabled:pointer-events-none disabled:opacity-60"
+                      aria-label={`Remove ${attachment.name ?? "attachment"}`}
                     >
-                      <X aria-hidden="true" className="h-3.5 w-3.5" />
+                      <X className="h-3 w-3" />
                     </button>
                   ) : null}
                 </div>
               ))}
+              {isPreparingAttachments ? (
+                <div
+                  role="status"
+                  aria-live="polite"
+                  aria-atomic="true"
+                  className="flex min-h-14 items-center gap-2 rounded-[var(--fd-radius-md)] border border-border-default bg-surface-2 px-3 text-[length:var(--fd-text-xs)] text-fg-secondary"
+                >
+                  <ActivityDiamond size="md" />
+                  Preparing {preparingAttachmentCount}{" "}
+                  {preparingAttachmentCount === 1 ? "file" : "files"}…
+                </div>
+              ) : null}
             </div>
+          ) : null}
+          {quotedSelections.length > 0 ? (
+            <div className="border-b border-border-subtle px-4 py-3">
+              <div className="mb-2 flex items-center gap-2 text-[length:var(--fd-text-xs)] font-medium text-fg-muted">
+                <Quote aria-hidden="true" className="h-3.5 w-3.5" />
+                {quotedSelections.length} selected{" "}
+                {quotedSelections.length === 1 ? "excerpt" : "excerpts"}
+              </div>
+              <div className="flex max-h-48 flex-col gap-2 overflow-y-auto">
+                {quotedSelections.map((selection, index) => (
+                  <div
+                    key={selection.id}
+                    className="group/quote flex items-start gap-2 rounded-[var(--fd-radius-md)] border border-border-subtle bg-surface-3 px-3 py-2 shadow-sm"
+                  >
+                    <blockquote className="line-clamp-2 min-w-0 flex-1 whitespace-pre-wrap border-l-2 border-accent pl-2 text-[length:var(--fd-text-sm)] leading-relaxed text-fg-secondary">
+                      {selection.text}
+                    </blockquote>
+                    {onRemoveQuotedSelection ? (
+                      <button
+                        type="button"
+                        onClick={() => onRemoveQuotedSelection(selection.id)}
+                        aria-label={`Remove selected excerpt ${index + 1}`}
+                        className="fd-focus inline-flex h-6 w-6 shrink-0 items-center justify-center rounded-full text-fg-muted transition-colors hover:bg-surface-4 hover:text-fg-primary"
+                      >
+                        <X aria-hidden="true" className="h-3.5 w-3.5" />
+                      </button>
+                    ) : null}
+                  </div>
+                ))}
+              </div>
+            </div>
+          ) : null}
           </div>
         ) : null}
 
         {/* Textarea + footer stay mounted during dictation so the card keeps
             its idle height. The session overlays that layout instead of
             replacing it with a shorter row. */}
-        <div className="relative">
+        <div ref={editorAreaRef} className="relative">
           {voice ? (
             <div className="absolute inset-0 z-10 flex items-center gap-3 px-4">
               {voice.state === "recording" || voice.state === "transcribing" ? (
@@ -1065,7 +1171,10 @@ export const PromptInput = memo(function PromptInput({
                       <Tooltip label="Send" shortcut={sendShortcut}>
                         <Button
                           type="button"
-                          onClick={voice.onStopAndSend}
+                          onClick={() => {
+                            setExpanded(false);
+                            voice.onStopAndSend();
+                          }}
                           disabled={sendDisabled}
                           aria-label="Transcribe and send"
                           className="h-9 w-9 shrink-0 rounded-full p-0"
@@ -1161,8 +1270,8 @@ export const PromptInput = memo(function PromptInput({
                  drops to the standard body size once there is room. */
               className="block w-full resize-none bg-transparent px-4 pt-4 pb-3 text-[length:var(--fd-text-md)] leading-relaxed text-fg-primary placeholder:text-fg-muted focus:outline-none md:text-[length:var(--fd-text-base)]"
               style={{
-                minHeight: `${PROMPT_INPUT_MIN_HEIGHT}px`,
-                maxHeight: `${PROMPT_INPUT_MAX_HEIGHT}px`,
+                minHeight: `${editorMin}px`,
+                maxHeight: `${editorMax}px`,
               }}
               rows={1}
             />
@@ -1191,6 +1300,7 @@ export const PromptInput = memo(function PromptInput({
                 onActiveIndexChange={setActiveSkillIndex}
                 onSelect={activateSlashItem}
                 listId={slashListId}
+                maxHeight={metrics.spaceAbove}
               />
             ) : null}
 
@@ -1461,6 +1571,29 @@ export const PromptInput = memo(function PromptInput({
               ) : null}
 
               <div className="ml-auto flex items-center gap-2">
+                {/* Phones have no room for it, and no room to expand into. */}
+                <Tooltip
+                  label={expanded ? "Collapse prompt" : "Expand prompt"}
+                  shortcut={expandShortcut}
+                >
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    onClick={toggleExpanded}
+                    disabled={disabled}
+                    aria-label={expanded ? "Collapse prompt" : "Expand prompt"}
+                    className={cn(
+                      "hidden h-9 w-9 rounded-full p-0 md:inline-flex",
+                      expanded && "text-accent",
+                    )}
+                  >
+                    {expanded ? (
+                      <Minimize2 className="h-4 w-4" />
+                    ) : (
+                      <Maximize2 className="h-4 w-4" />
+                    )}
+                  </Button>
+                </Tooltip>
                 {/* Dictation keeps its own slot rather than standing in for Send
                 on an empty composer: speaking into a half-written prompt is
                 as common as speaking a whole one. */}
@@ -1500,7 +1633,7 @@ export const PromptInput = memo(function PromptInput({
                   >
                     <Button
                       type="button"
-                      onClick={onSubmit}
+                      onClick={submit}
                       disabled={!canSubmit}
                       aria-label={
                         isPreparingAttachments

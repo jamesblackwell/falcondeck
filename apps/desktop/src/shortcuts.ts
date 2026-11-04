@@ -40,6 +40,7 @@ export type ShortcutCommandId =
   | 'decreaseTextSize'
   | 'resetTextSize'
   | 'focusComposer'
+  | 'toggleComposerExpanded'
   | 'openProjectMenu'
   | 'openHarnessMenu'
   | 'openPermissionMenu'
@@ -110,6 +111,8 @@ export const SHORTCUT_DEFINITIONS: readonly ShortcutDefinition[] = [
   { id: 'decreaseTextSize', label: 'Decrease text size', description: 'Decrease the interface text scale', category: 'View', context: 'global', defaults: ['Mod+-'] },
   { id: 'resetTextSize', label: 'Reset text size', description: 'Restore the default interface text scale', category: 'View', context: 'global', defaults: ['Mod+0'] },
   { id: 'focusComposer', label: 'Focus prompt', description: 'Move focus to the prompt composer', category: 'Composer', context: 'global', defaults: ['Shift+Escape'] },
+  // ⌘⇧E belongs to File → Export Full Backup; the native menu takes it first.
+  { id: 'toggleComposerExpanded', label: 'Expand or collapse prompt', description: 'Switch the composer to a tall writing mode and back', category: 'Composer', context: 'global', defaults: ['Mod+Shift+X'] },
   { id: 'openProjectMenu', label: 'Choose project', description: 'Change the project for a new chat', category: 'Composer', context: 'global', defaults: ['Ctrl+Shift+L'] },
   { id: 'openHarnessMenu', label: 'Choose agent', description: 'Open the agent picker on the composer', category: 'Composer', context: 'global', defaults: ['Ctrl+Shift+A'] },
   { id: 'openPermissionMenu', label: 'Choose permission mode', description: 'Open the permission mode picker on the composer', category: 'Composer', context: 'global', defaults: ['Ctrl+Shift+P'] },

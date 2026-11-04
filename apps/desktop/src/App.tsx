@@ -586,6 +586,7 @@ function AppInner() {
     mode: "toggle" as "open" | "toggle" | "close",
   });
   const [composerFocusRequestKey, setComposerFocusRequestKey] = useState(0);
+  const [composerExpandRequestKey, setComposerExpandRequestKey] = useState(0);
   const [projectMenuRequestKey, setProjectMenuRequestKey] = useState(0);
   const [composerMenuRequest, setComposerMenuRequest] =
     useState<ComposerMenuRequest>({ key: 0, menu: "model" });
@@ -5815,6 +5816,14 @@ function AppInner() {
           setIsPluginsOpen(false);
           setComposerFocusRequestKey((current) => current + 1);
           break;
+        case "toggleComposerExpanded":
+          setIsSettingsOpen(false);
+          setIsScheduledOpen(false);
+          setIsTicketsOpen(false);
+          setIsExtensionsOpen(false);
+          setIsPluginsOpen(false);
+          setComposerExpandRequestKey((current) => current + 1);
+          break;
         case "openProjectMenu":
           handleOpenProjectMenu();
           break;
@@ -6457,6 +6466,11 @@ function AppInner() {
                 onAlternateSubmit: handleAlternateSubmitCallback,
                 resolveComposerShortcut,
                 focusRequestKey: composerFocusRequestKey,
+                expandRequestKey: composerExpandRequestKey,
+                expandShortcut: shortcutHintTokens(
+                  "toggleComposerExpanded",
+                  shortcutSettings,
+                ),
                 menuRequest: composerMenuRequest,
                 menuShortcuts: composerMenuShortcuts,
                 sendShortcut: shortcutHintTokens(

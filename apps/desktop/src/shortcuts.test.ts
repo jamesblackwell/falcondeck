@@ -3,6 +3,7 @@ import { beforeEach, describe, expect, it } from 'vitest'
 import {
   bindingsFor,
   commandForEvent,
+  getShortcutSettings,
   isEditableTarget,
   normalizeShortcut,
   resetAllShortcuts,
@@ -14,6 +15,7 @@ import {
   shortcutTitle,
   shortcutTokens,
   shortcutValidation,
+  SHORTCUT_DEFINITIONS,
 } from './shortcuts'
 
 function key(key: string, modifiers: Partial<KeyboardEvent> = {}) {
@@ -92,6 +94,17 @@ describe('keyboard shortcuts', () => {
     expect(shortcutHintTokens('openSettings')).toBeUndefined()
     // An unbound command falls back to a plain label rather than "(  )".
     expect(shortcutTitle('Settings', 'openSettings')).toBe('Settings')
+  })
+
+  it('toggles the composer with a key the native menu does not own', () => {
+    const event = key('x', { metaKey: true, shiftKey: true })
+    expect(commandForEvent('global', event, getShortcutSettings())).toBe('toggleComposerExpanded')
+    expect(shortcutHint('toggleComposerExpanded')).toBe('⌘⇧X')
+    // CmdOrCtrl+Shift+E and +I are File menu accelerators in src-tauri/src/lib.rs.
+    const reserved = ['Mod+Shift+E', 'Mod+Shift+I']
+    for (const definition of SHORTCUT_DEFINITIONS) {
+      expect(definition.defaults.filter((binding) => reserved.includes(binding))).toEqual([])
+    }
   })
 
   it('persists explicit unbinding and supports reset', () => {

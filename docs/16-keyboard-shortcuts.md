@@ -38,6 +38,12 @@ defaults. Custom values are versioned and stored locally because shortcuts are
 device and keyboard-layout preferences. Empty binding arrays explicitly unbind
 a command. Bindings update without restarting the app.
 
+`⌘⇧X` (`toggleComposerExpanded`) switches the composer between its normal
+auto-growing size and a tall writing mode of about half the conversation pane.
+The composer leaves that mode on send and on switching chats. The native Mac
+pilot uses `⌘⇧E`, but the desktop app can't: that key is the native File →
+Export Full Backup accelerator, which macOS handles before the webview sees it.
+
 Options → Analytics opens Settings directly to Analytics. Its default in-app
 shortcut is `⌘⇧A` (`openAnalytics`) on desktop and the native Mac pilot, and can
 be customized in Keyboard shortcuts.
