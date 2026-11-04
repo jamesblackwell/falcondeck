@@ -162,9 +162,36 @@ export function reviewNotification(
   }
 }
 
+const ALERTED_REVIEWS_KEY = 'falcondeck.reviews.alerted'
+
 /**
- * Reviews that appeared since the last load. The first load only seeds the set:
- * a backlog at startup is not news. Returns the new ids and the set to keep.
+ * Open reviews this app has already alerted about. Stored so an app relaunch
+ * neither repeats an alert nor misses a review created while it was down.
+ * Null on first run, which seeds quietly.
+ */
+export function readAlertedReviews(): Set<string> | null {
+  try {
+    const stored = JSON.parse(localStorage.getItem(ALERTED_REVIEWS_KEY) ?? 'null') as unknown
+    return Array.isArray(stored) ? new Set(stored.map(String)) : null
+  } catch {
+    return null
+  }
+}
+
+/** Only open ids are kept: a closed review can never be fresh, so this stays small. */
+export function writeAlertedReviews(reviews: readonly Review[]): void {
+  try {
+    const open = reviews.filter((review) => review.status === 'open').map((review) => review.id)
+    localStorage.setItem(ALERTED_REVIEWS_KEY, JSON.stringify(open))
+  } catch {
+    // Without storage the next launch simply seeds quietly.
+  }
+}
+
+/**
+ * Reviews that appeared since the last load. With no record at all, the load
+ * only seeds the set: a backlog on first run is not news. Returns the new ids
+ * and the set to keep.
  */
 export function newlyOpenReviews(
   seen: ReadonlySet<string> | null,

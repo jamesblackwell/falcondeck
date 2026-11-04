@@ -18,6 +18,10 @@ struct ReviewsView: View {
         }
         .background(FD.background)
         .navigationDestination(item: $openID) { ReviewDetailView(reviewID: $0) }
+        .onChange(of: model.requestedReviewID, initial: true) { _, requested in
+            guard let requested else { return }
+            openID = requested; model.requestedReviewID = nil
+        }
         .accessibilityIdentifier("reviews-screen")
     }
 

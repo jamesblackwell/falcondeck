@@ -2,7 +2,12 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 
 import type { DaemonApiClient, Review, ReviewDraft } from '@falcondeck/client-core'
 
-import { newlyOpenReviews, openReviewCount } from '../review-inbox'
+import {
+  newlyOpenReviews,
+  openReviewCount,
+  readAlertedReviews,
+  writeAlertedReviews,
+} from '../review-inbox'
 import { useControlStateEvents } from './useControlStateEvents'
 
 type ReviewListApi = Pick<DaemonApiClient, 'listReviews'>
@@ -60,6 +65,7 @@ export function useReviewInbox({
       if (requestRef.current !== current) return
       const { fresh, seen } = newlyOpenReviews(seenRef.current, rows)
       seenRef.current = seen
+      writeAlertedReviews(rows)
       setReviews(rows)
       setError(null)
       if (fresh.length > 0) onNewRef.current?.(fresh)
@@ -75,7 +81,7 @@ export function useReviewInbox({
   // A different daemon, or the switch turning off, starts from nothing: ids
   // from one store mean nothing in another.
   useEffect(() => {
-    seenRef.current = null
+    seenRef.current = readAlertedReviews()
     requestRef.current++
     setReviews([])
     setError(null)
@@ -92,9 +98,13 @@ export function useReviewInbox({
     }
   }, [api, enabled, load])
 
-  useControlStateEvents(enabled ? baseUrl : null, (_revision, domains) => {
-    if (domains.includes('reviews')) void load()
-  })
+  useControlStateEvents(
+    enabled ? baseUrl : null,
+    (_revision, domains) => {
+      if (domains.includes('reviews')) void load()
+    },
+    () => void load(),
+  )
 
   useEffect(() => {
     if (!enabled || !api) return

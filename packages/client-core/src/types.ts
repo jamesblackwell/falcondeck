@@ -2317,6 +2317,46 @@ export type TrustedDevice = {
   created_at: string;
   last_seen_at: string | null;
   revoked_at: string | null;
+  /** Absent on relays that predate delivery health. */
+  push?: DevicePushHealth;
+};
+
+export type PushDeliveryOutcome = "accepted" | "rejected" | "unregistered" | "unknown";
+
+/** The last push the relay attempted for one device. */
+export type PushDeliveryRecord = {
+  at: string;
+  kind: string;
+  provider: string;
+  outcome: PushDeliveryOutcome;
+  detail?: string | null;
+};
+
+export type DevicePushHealth = {
+  /** `apns`, `expo`, or null when the device cannot receive pushes. */
+  provider: string | null;
+  last_delivery?: PushDeliveryRecord | null;
+};
+
+/** One device's answer from POST /api/remote/notifications/test. */
+export type PushTestDeviceResult = {
+  device_id: string;
+  label: string | null;
+  provider: string | null;
+  outcome: PushDeliveryOutcome | null;
+  detail?: string | null;
+};
+
+export type PushTestResponse = { results: PushTestDeviceResult[] };
+
+/** Daemon-side attention decisions for one kind since it started. */
+export type AttentionDeliveryCounter = {
+  kind: string;
+  sent: number;
+  suppressed_desktop_active: number;
+  suppressed_preferences: number;
+  no_bridge: number;
+  last_at: string | null;
 };
 
 export type MachinePresence = {
@@ -2362,6 +2402,7 @@ export type RemoteStatusResponse = {
   trusted_devices: TrustedDevice[];
   presence: MachinePresence | null;
   last_error: string | null;
+  attention?: AttentionDeliveryCounter[];
 };
 
 export type PairingChallengeRequest = {

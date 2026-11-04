@@ -1,0 +1,83 @@
+import { describe, expect, it } from 'vitest'
+import type { TrustedDevice } from '@falcondeck/client-core'
+
+import {
+  describeAttention,
+  describeDesktop,
+  describeDesktopTest,
+  describeDevicePush,
+  describeTestResult,
+} from './notification-health'
+
+const device = (push: TrustedDevice['push']): TrustedDevice => ({
+  device_id: 'd',
+  session_id: 's',
+  label: 'iPhone',
+  status: 'active',
+  created_at: '2026-11-04T00:00:00Z',
+  last_seen_at: null,
+  revoked_at: null,
+  push,
+})
+
+describe('notification health copy', () => {
+  it('tells an old relay apart from a device with no registration', () => {
+    expect(describeDevicePush(device(undefined))).toContain('relay needs an update')
+    expect(describeDevicePush(device({ provider: null }))).toContain('Not registered')
+  })
+
+  it('names the provider and failure reason', () => {
+    const text = describeDevicePush(
+      device({
+        provider: 'apns',
+        last_delivery: {
+          at: '2026-11-04T10:00:00Z',
+          kind: 'review',
+          provider: 'apns',
+          outcome: 'rejected',
+          detail: 'APNs 400 BadDeviceToken',
+        },
+      }),
+    )
+    expect(text).toContain('Apple Push')
+    expect(text).toContain('Reviews')
+    expect(text).toContain('APNs 400 BadDeviceToken')
+  })
+
+  it('reports each test result', () => {
+    expect(
+      describeTestResult({ device_id: 'd', label: 'iPhone', provider: null, outcome: null }),
+    ).toBe('iPhone: not registered, nothing sent.')
+    expect(
+      describeTestResult({ device_id: 'd', label: null, provider: 'apns', outcome: 'accepted' }),
+    ).toBe('Paired device: accepted by Apple Push.')
+  })
+
+  it('says when macOS is the problem', () => {
+    expect(describeDesktop('denied', null)).toContain('System Settings')
+    expect(
+      describeDesktop('granted', { at: '2026-11-04T10:00:00Z', outcome: 'failed' }),
+    ).toContain('Last alert failed')
+  })
+
+  it('separates a blocked Mac from one that never registered', () => {
+    expect(describeDesktopTest(true, 'granted')).toBe('This Mac: posted.')
+    expect(describeDesktopTest(false, 'denied')).toContain('System Settings')
+    expect(describeDesktopTest(false, 'default')).toContain('did not record an answer')
+  })
+
+  it('leaves out reasons that did not happen', () => {
+    expect(
+      describeAttention([
+        {
+          kind: 'approval',
+          sent: 2,
+          suppressed_desktop_active: 3,
+          suppressed_preferences: 0,
+          no_bridge: 0,
+          last_at: null,
+        },
+      ]),
+    ).toEqual(['Approvals: 2 sent, 3 held because you were at the Mac.'])
+  })
+})

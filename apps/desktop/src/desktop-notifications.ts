@@ -16,6 +16,32 @@ import { isTauriDesktop } from './api'
 export type DesktopAttentionNotification = {
   title: string
   body: string
+  /** Set for a review: macOS dedupes on it and a click opens that review. */
+  reviewId?: string
+}
+
+export type DesktopPermission = 'default' | 'denied' | 'granted' | 'unsupported'
+
+export type DesktopDeliveryResult = {
+  at: string
+  outcome: 'delivered' | 'not_allowed' | 'failed'
+}
+
+let lastDesktopDelivery: DesktopDeliveryResult | null = null
+
+/** The last system notification this app tried to post. Lost on relaunch. */
+export function getLastDesktopDelivery(): DesktopDeliveryResult | null {
+  return lastDesktopDelivery
+}
+
+/** The macOS permission, without prompting. */
+export async function desktopNotificationPermission(): Promise<DesktopPermission> {
+  if (!isTauriDesktop()) return 'unsupported'
+  try {
+    return await invoke<DesktopPermission>('macos_notification_permission_state')
+  } catch {
+    return 'unsupported'
+  }
 }
 
 /** Deduplicate the particular turn or request, rather than its attention level. */
@@ -50,20 +76,14 @@ export function desktopAttentionNotification(
   return null
 }
 
-type NativeMacOSPermissionState = 'default' | 'denied' | 'granted' | 'unsupported'
-
 async function sendNativeMacOSNotification(
   notification: DesktopAttentionNotification,
 ): Promise<boolean | null> {
-  let permission = await invoke<NativeMacOSPermissionState>(
-    'macos_notification_permission_state',
-  )
+  let permission = await invoke<DesktopPermission>('macos_notification_permission_state')
   if (permission === 'unsupported') return null
 
   if (permission === 'default') {
-    permission = await invoke<NativeMacOSPermissionState>(
-      'request_macos_notification_permission',
-    )
+    permission = await invoke<DesktopPermission>('request_macos_notification_permission')
   }
   if (permission !== 'granted') return false
 
@@ -82,25 +102,29 @@ export async function sendDesktopAttentionNotification(
   notification: DesktopAttentionNotification,
 ): Promise<boolean> {
   if (!isTauriDesktop()) return false
+  const remember = (outcome: DesktopDeliveryResult['outcome']) => {
+    lastDesktopDelivery = { at: new Date().toISOString(), outcome }
+    return outcome === 'delivered'
+  }
 
   try {
     const nativeResult = await sendNativeMacOSNotification(notification)
-    if (nativeResult !== null) return nativeResult
+    if (nativeResult !== null) return remember(nativeResult ? 'delivered' : 'not_allowed')
 
     let granted = await isPermissionGranted()
     if (!granted) {
       granted = (await requestPermission()) === 'granted'
     }
-    if (!granted) return false
+    if (!granted) return remember('not_allowed')
 
     await sendNotification({
       title: notification.title,
       body: notification.body,
       sound: 'Ping',
     })
-    return true
+    return remember('delivered')
   } catch (error) {
     console.warn('FalconDeck could not deliver a desktop notification', error)
-    return false
+    return remember('failed')
   }
 }

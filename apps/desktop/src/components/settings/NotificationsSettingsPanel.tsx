@@ -1,4 +1,10 @@
-import type { FalconDeckPreferences, UpdatePreferencesPayload } from '@falcondeck/client-core'
+import { useEffect, useState } from 'react'
+import type {
+  FalconDeckPreferences,
+  PushTestResponse,
+  RemoteStatusResponse,
+  UpdatePreferencesPayload,
+} from '@falcondeck/client-core'
 import { normalizePreferences } from '@falcondeck/client-core'
 import {
   Button,
@@ -16,6 +22,19 @@ import {
 import { Volume2 } from 'lucide-react'
 
 import {
+  desktopNotificationPermission,
+  getLastDesktopDelivery,
+  sendDesktopAttentionNotification,
+  type DesktopPermission,
+} from '../../desktop-notifications'
+import {
+  describeAttention,
+  describeDesktop,
+  describeDesktopTest,
+  describeDevicePush,
+  describeTestResult,
+} from '../../notification-health'
+import {
   availableSounds,
   playSound,
   resolveSoundId,
@@ -26,17 +45,59 @@ import {
 type NotificationsSettingsPanelProps = {
   preferences: FalconDeckPreferences | null
   onUpdatePreferences: (payload: UpdatePreferencesPayload) => void
+  remoteStatus?: RemoteStatusResponse | null
+  onSendTestNotification?: () => Promise<PushTestResponse>
 }
 
 export function NotificationsSettingsPanel({
   preferences,
   onUpdatePreferences,
+  remoteStatus = null,
+  onSendTestNotification,
 }: NotificationsSettingsPanelProps) {
   const current = normalizePreferences(preferences)
   const soundSettings = useSoundSettings()
   const soundOptions = availableSounds()
   const selectedSoundId = resolveSoundId(soundSettings.soundId, soundOptions)
   const selectedSound = soundOptions.find((sound) => sound.id === selectedSoundId)
+  const [permission, setPermission] = useState<DesktopPermission>('unsupported')
+  const [testing, setTesting] = useState(false)
+  const [testResult, setTestResult] = useState<string[]>([])
+  const devices = (remoteStatus?.trusted_devices ?? []).filter(
+    (device) => device.status === 'active',
+  )
+  const attention = describeAttention(remoteStatus?.attention ?? [])
+
+  useEffect(() => {
+    let current = true
+    void desktopNotificationPermission().then((next) => {
+      if (current) setPermission(next)
+    })
+    return () => {
+      current = false
+    }
+  }, [testResult])
+
+  const sendTest = async () => {
+    setTesting(true)
+    setTestResult([])
+    const lines: string[] = []
+    const shown = await sendDesktopAttentionNotification({
+      title: 'FalconDeck',
+      body: 'Test notification. Delivery is working.',
+    })
+    const after = await desktopNotificationPermission()
+    if (after !== 'unsupported') lines.push(describeDesktopTest(shown, after))
+    try {
+      const response = await onSendTestNotification?.()
+      lines.push(...(response?.results.map(describeTestResult) ?? []))
+      if (response?.results.length === 0) lines.push('No phone is paired.')
+    } catch (error) {
+      lines.push(error instanceof Error ? error.message : 'The relay could not be reached.')
+    }
+    setTestResult(lines)
+    setTesting(false)
+  }
 
   return (
     <SettingsPage>
@@ -86,11 +147,52 @@ export function NotificationsSettingsPanel({
           />
           <SwitchRow
             title="Only push when away from desktop"
-            description="Send phone alerts after two minutes without keyboard or mouse activity on your Mac, even if FalconDeck is left open. Desktop alerts still appear."
+            description="Hold phone alerts until two minutes without keyboard or mouse activity on your Mac, even if FalconDeck is left open. Reviews always reach your phone, and desktop alerts still appear."
             checked={current.notifications.suppress_when_desktop_active}
             disabled={!current.notifications.enabled}
             onCheckedChange={(next) =>
               onUpdatePreferences({ notifications: { suppress_when_desktop_active: next } })
+            }
+          />
+        </SettingList>
+      </SettingsSection>
+
+      <SettingsSection
+        title="Delivery"
+        description="Whether alerts actually reach your devices. Accepted means Apple or Expo took the notification, which is as far as the relay can see."
+        contentClassName="pt-1"
+      >
+        <SettingList>
+          <SettingRow
+            title="This Mac"
+            description={describeDesktop(permission, getLastDesktopDelivery())}
+          />
+          {devices.map((device) => (
+            <SettingRow
+              key={device.device_id}
+              title={device.label ?? 'Paired device'}
+              description={describeDevicePush(device)}
+            />
+          ))}
+          {attention.length > 0 ? (
+            <SettingRow title="Since FalconDeck started" description={attention.join(' ')} />
+          ) : null}
+          <SettingRow
+            title="Send test notification"
+            description={
+              testResult.length > 0
+                ? testResult.join(' ')
+                : 'Posts an alert on this Mac and pushes to every paired device through the relay.'
+            }
+            control={
+              <Button
+                type="button"
+                variant="secondary"
+                disabled={testing}
+                onClick={() => void sendTest()}
+              >
+                {testing ? 'Sending…' : 'Send test'}
+              </Button>
             }
           />
         </SettingList>

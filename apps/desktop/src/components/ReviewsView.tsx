@@ -38,6 +38,8 @@ export type ReviewsViewProps = {
   bots?: readonly BotProfile[]
   /** Select a review from outside, e.g. from a notification. `key` makes a repeat request count. */
   openRequest?: { id: string; key: number } | null
+  /** Reports the review on screen, so an alert can skip only that one. */
+  onShownReviewChange?: (id: string | null) => void
   onPreview: (target: FilePreviewTarget) => void
   onOpenThread?: ((workspaceId: string | null, threadId: string) => void) | null
   /** Host handler for non-preview path actions (open, reveal, …) from links in the body. */
@@ -130,6 +132,7 @@ export function ReviewsView({
   api,
   bots,
   openRequest = null,
+  onShownReviewChange,
   onPreview,
   onOpenThread = null,
   onLocalPath = null,
@@ -156,6 +159,11 @@ export function ReviewsView({
   useEffect(() => {
     if (shownId) setSelectedId((current) => current ?? shownId)
   }, [selectedId, shownId])
+
+  useEffect(() => {
+    onShownReviewChange?.(shownId)
+    return () => onShownReviewChange?.(null)
+  }, [onShownReviewChange, shownId])
 
   const refreshNow = useCallback(async () => {
     setRefreshing(true)

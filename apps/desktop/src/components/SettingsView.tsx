@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react";
 
 import type {
   FalconDeckPreferences,
+  PushTestResponse,
   RemoteStatusResponse,
   TrustedDevice,
   UpdatePreferencesPayload,
@@ -62,6 +63,7 @@ export type SettingsViewProps = {
   onToast: ServersPanelProps["onToast"];
   preferences: FalconDeckPreferences | null;
   remoteStatus: RemoteStatusResponse | null;
+  onSendTestNotification?: () => Promise<PushTestResponse>;
   pairingLink: string | null;
   relayUrl: string;
   isStartingRemote: boolean;
@@ -176,6 +178,8 @@ export function SettingsView(props: SettingsViewProps) {
             <NotificationsSettingsPanel
               preferences={props.preferences}
               onUpdatePreferences={props.onUpdatePreferences}
+              remoteStatus={props.remoteStatus}
+              onSendTestNotification={props.onSendTestNotification}
             />
           ) : activeSection === "conversations" ? (
             <ConversationSettingsPanel

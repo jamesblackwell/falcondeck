@@ -43,6 +43,7 @@ import type {
   MarkThreadReadPayload,
   MarkThreadUnreadPayload,
   RemoteStatusResponse,
+  PushTestResponse,
   ScheduledTaskDetail,
   ScheduledTaskRunSummary,
   ScheduledTaskSummary,
@@ -380,6 +381,12 @@ export function createDaemonApiClient(baseUrl: string) {
     async remoteStatus() {
       return parseJson<RemoteStatusResponse>(
         await fetchWithTimeout(`${baseUrl}/api/remote/status`),
+      );
+    },
+    /** Push a test notification to every paired device, via the relay. */
+    async sendTestNotification() {
+      return parseJson<PushTestResponse>(
+        await fetch(`${baseUrl}/api/remote/notifications/test`, { method: "POST" }),
       );
     },
     /** Cached (60s) local harness inventory; shallow, no network lookups. */

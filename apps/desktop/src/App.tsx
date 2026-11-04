@@ -518,6 +518,7 @@ function AppInner() {
   const [isTicketsOpen, setIsTicketsOpen] = useState(false);
   const [isReviewsActive, setIsReviewsActive] = useState(false);
   const [reviewOpenRequest, setReviewOpenRequest] = useState<{ id: string; key: number } | null>(null);
+  const shownReviewRef = useRef<string | null>(null);
   const reviewOpenKey = useRef(0);
   const pendingReviewFocusRef = useRef<{ id: string; at: number } | null>(null);
   const [filePreview, setFilePreview] = useState<FilePreviewTarget | null>(null);
@@ -4316,7 +4317,13 @@ function AppInner() {
       for (const review of fresh) {
         const notification = reviewNotification(review, reviewNotificationPrefs);
         if (!notification) continue;
-        const reading = document.hasFocus() && isReviewsActive && isTicketsOpen;
+        // Only the review on screen is being read. Sitting in the inbox with a
+        // different review open is exactly when a new one needs saying.
+        const reading =
+          document.hasFocus() &&
+          isReviewsActive &&
+          isTicketsOpen &&
+          shownReviewRef.current === review.id;
         if (reading) continue;
         // The native notification has no click callback, so remember what it was
         // about: coming back to the window soon after is almost always the click.
@@ -4326,11 +4333,34 @@ function AppInner() {
         void sendDesktopAttentionNotification({
           title: notification.title,
           body: notification.body,
+          reviewId: review.id,
         });
       }
     },
     [isReviewsActive, isTicketsOpen, reviewNotificationPrefs],
   );
+  const handleShownReviewChange = useCallback((id: string | null) => {
+    shownReviewRef.current = id;
+  }, []);
+  // A click on a review's macOS notification opens that review.
+  useEffect(() => {
+    if (!window.__TAURI_INTERNALS__) return;
+    let cancelled = false;
+    let unlisten: (() => void) | undefined;
+    void import("@tauri-apps/api/event").then(({ listen }) => {
+      void listen<string>("falcondeck://open-review", ({ payload }) => {
+        pendingReviewFocusRef.current = null;
+        handleOpenReviews(payload);
+      }).then((stop) => {
+        if (cancelled) stop();
+        else unlisten = stop;
+      });
+    });
+    return () => {
+      cancelled = true;
+      unlisten?.();
+    };
+  }, [handleOpenReviews]);
   const reviewInbox = useReviewInbox({
     api,
     baseUrl,
@@ -6068,6 +6098,7 @@ function AppInner() {
                     api={api}
                     bots={snapshot?.preferences.bots}
                     openRequest={reviewOpenRequest}
+                    onShownReviewChange={handleShownReviewChange}
                     onPreview={requestFilePreview}
                     onOpenThread={(_workspaceId, threadId) => {
                       const target = resolveThreadLinkTarget(threadId, snapshot?.threads ?? []);
@@ -6147,6 +6178,9 @@ function AppInner() {
                     onToast={toast}
                     preferences={effectivePreferences}
                     remoteStatus={remoteStatus}
+                    onSendTestNotification={
+                      api ? () => api.sendTestNotification() : undefined
+                    }
                     pairingLink={pairingLink}
                     relayUrl={relayUrl}
                     isStartingRemote={isStartingRemote}

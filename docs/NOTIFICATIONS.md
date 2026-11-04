@@ -9,6 +9,7 @@ downstream delivery channel for attention events, not a second conversation
 store or an inbox. The current semantic events are:
 
 - `input_required`: an approval or user question is waiting.
+- `review`: a bot published a review that needs a decision.
 - `turn_complete`: an agent turn finished successfully.
 - `error`: an agent turn failed.
 
@@ -24,6 +25,12 @@ deduplicates a notification after macOS accepts it. Other desktop platforms
 use the Tauri notification plugin. Desktop delivery follows the same
 daemon-owned notification preferences as mobile; browser previews do not
 attempt native delivery.
+
+The client decides this from what it can see, so it depends on the webview
+running. The events socket reconnects with backoff, and the review inbox reloads
+on every reconnect. Which open reviews have already alerted is kept in local
+storage, so a relaunch neither repeats an alert nor misses a review created
+while the app was closed.
 
 ## Current flow
 
@@ -43,12 +50,25 @@ bounded assistant reply preview for completed turns. Unlike encrypted updates
 and RPC payloads, this display text is visible to the relay, Expo Push Service,
 and the device notification service; full transcripts are not included.
 
-The relay suppresses a push to a device with a live relay connection. When
-desktop suppression is enabled, the Mac daemon checks the time since the last
+Reviews also carry `reviewId`, the deep link target. A review may have no source
+thread, so `workspaceId` and `threadId` can be absent on those payloads.
+
+The relay suppresses a push to a device with a live relay connection, except for
+reviews. A socket can look live for up to the 45 second idle timeout after a
+phone has gone, and a review must not depend on that. The client decides whether
+to show a push that arrives while it is in the foreground. When desktop
+suppression is enabled, the Mac daemon checks the time since the last
 hardware keyboard or mouse input across all apps at notification delivery.
 Phone pushes resume after two minutes of inactivity. Switching to another app
 keeps phone alerts quiet; leaving FalconDeck open does not count as presence.
 The check reads elapsed time, without recording keys or mouse positions.
+
+Desktop suppression does not apply to reviews. A review has no deadline that
+brings James back to it, and bots publish a few a day, so a phone push costs
+little. It still applies to approvals and questions: they arrive in bursts during
+active work, the Mac alert is the right channel while he is there, and doubling
+each one on the phone would train him to ignore both. `ignores_desktop_activity` in `remote_lifecycle.rs` is the one line
+to change if that proves wrong.
 
 On platforms without native idle detection, local client interaction refreshes
 a short activity lease. Window focus alone does not keep it alive indefinitely.
@@ -61,6 +81,17 @@ previously selected task. Alerts are deduplicated per turn or pending request,
 so a later completion or question can notify again without clearing older unread
 activity first.
 
+A review alerts on the Mac unless the window is focused and showing that exact
+review. Being in the inbox with another review open does not count. Each review
+has one Notification Center entry, and clicking it opens the review. If the app
+restarts first, the click only raises it.
+
+A review uses `POST /v1/sessions/{id}/notify` rather than the bridge socket,
+because a queued socket write proves nothing and the bridge reconnects often. The
+daemon retries for about 20 seconds, then falls back to the socket. It also falls
+back at once on a 404 from an older relay. The relay dedupes per review, so a
+retry cannot double-alert.
+
 ## Preferences
 
 Notification preferences are daemon-owned and included in snapshots and
@@ -70,7 +101,8 @@ Notification preferences are daemon-owned and included in snapshots and
 - completed turns;
 - approvals and questions;
 - failed turns;
-- only push when away from desktop (two minutes without Mac input).
+- only push when away from desktop (two minutes without Mac input). Reviews
+  ignore this one.
 
 Desktop also has a device-local turn-complete chime, off by default, under
 Settings → General → Sounds. It plays on this computer when a thread leaves
@@ -81,8 +113,38 @@ sounds (Glass, Ping, and similar); two small bundled WAVs cover everything
 else.
 
 Mobile additionally keeps a local OS-permission/token registration gate. A
-device with notifications disabled clears its relay token. Disconnecting also
+device with notifications disabled clears its relay token. The native iOS app
+turns push on once, the first time a computer connects, by asking iOS for
+permission. Only an explicit choice on its Push notifications toggle keeps it off. Disconnecting also
 clears the token before discarding the client credential.
+
+## Delivery health
+
+Settings → Notifications → Delivery shows:
+
+- this Mac's notification permission and last posted alert;
+- each paired device's registered provider and the last push result, with the
+  provider's failure reason;
+- daemon counters since it started: sent, held by desktop activity, off in
+  preferences, and lost with no relay connection, per kind;
+- Send test notification, which posts on the Mac and pushes to every device with
+  `POST /api/remote/notifications/test` → `POST /v1/sessions/{id}/push-test`.
+
+"Not registered" means the relay has nothing to send to, so every alert for that
+device is dropped. "Accepted" means Apple or Expo took it, which is as far as the
+relay can see. Expo also reports through receipts, about 15 seconds later, and
+those update the same record. The test push skips presence
+and dedupe and is limited to one per five seconds per session. On a phone the
+test appears only when the app is in the background.
+
+Push results live in relay memory and reset when it restarts. Registrations are
+persisted, so the provider row survives.
+
+To trace an incident, the daemon logs `attention event` with the kind and policy
+decision, and the relay logs `push dispatch` with active, live and recipient
+counts, plus `APNs delivery finished` per device. `recipients=0` with
+`active_devices=1` is a device with no registration. Older builds logged nothing
+on the success path, so history before this change cannot be reconstructed.
 
 ## Relay configuration
 
@@ -97,7 +159,8 @@ The relay uses Expo Push Service by default:
 
 Delivery retries transient HTTP/network failures, polls Expo receipts, and
 clears tokens reported as `DeviceNotRegistered`. It deduplicates the same
-session/kind/thread for 60 seconds and retains a one-day TTL on the device
+session/kind/thread for 60 seconds, or the same review when one is named, and
+retains a one-day TTL on the device
 notification so stale task completions do not arrive indefinitely.
 
 ## Release and testing checklist
@@ -115,12 +178,15 @@ notification so stale task completions do not arrive indefinitely.
    relay socket, run a completed/failed turn and an approval/question, and tap
    each notification to verify workspace/thread routing.
 5. Reconnect the mobile app and confirm no duplicate push is generated while
-   it is live; toggle preferences on each client and verify the other client
-   reflects the update.
+   it is live, except for reviews, which always push; toggle preferences on each
+   client and verify the other client reflects the update.
 6. On macOS, restart the packaged desktop app after installing a build with
    native notifications, trigger an approval/question or completed turn while
    FalconDeck is unfocused, and confirm FalconDeck appears in System Settings
    > Notifications with the configured alert style.
+7. Publish a review while using the Mac, and confirm the Mac alert and phone push
+   both arrive and that each opens the review. Check Settings → Notifications →
+   Delivery shows both as delivered.
 
 Quiz Gecko's existing Laravel notification stack uses direct FCM tokens and
 `NotificationChannels\\Fcm\\FcmChannel`. It is a separate product path and

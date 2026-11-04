@@ -29,6 +29,10 @@ import Foundation
             pendingNotification = nil; error = "This notification belongs to another computer connection."; return
         }
         pendingNotification = nil
+        if let review = destination.reviewID {
+            requestedReviewID = review; selection = .reviews
+            return
+        }
         let current = connectionID
         do {
             let target = AgentTask(.object(["workspace_id": .string(destination.workspaceID), "id": .string(destination.threadID)]))

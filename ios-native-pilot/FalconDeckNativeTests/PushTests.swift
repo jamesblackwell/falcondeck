@@ -154,6 +154,49 @@ private actor PushRelay: RelayServing {
             XCTAssertEqual(body["registration"], .null)
         }
     }
+    func testAReviewOpensTheInboxEvenWithoutASourceTask() async throws {
+        let review = try XCTUnwrap(NotificationDestination(userInfo: ["sessionId": "session", "reviewId": "R-7", "kind": "review"]))
+        XCTAssertEqual(review.reviewID, "R-7")
+        XCTAssertEqual(review.threadID, "")
+        XCTAssertEqual(NotificationDestination(userInfo: review.userInfo), review)
+        XCTAssertNil(NotificationDestination(userInfo: ["sessionId": "session", "reviewId": "bad\nid"]))
+        XCTAssertNil(NotificationDestination(userInfo: ["sessionId": "session", "kind": "test"]), "only a review may omit its task")
+    }
+
+    func testPushTurnsOnOnceWhenAComputerConnectsUnlessTheUserChose() async throws {
+        let name = "push-default-\(UUID())"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: name))
+        defer { defaults.removePersistentDomain(forName: name) }
+        defaults.set(false, forKey: "native.notifications.push")
+        let session = SavedSession(relay: URL(string: "https://relay.example")!, sessionID: "s", deviceID: "d", token: "t", secret: Data(repeating: 0, count: 32), daemonKey: "daemon", daemonIdentity: "identity")
+        let push = NativePushNotifications(defaults: defaults, sync: PushRegistrationSync(http: PushHTTPMock()), authorize: { true })
+        XCTAssertFalse(push.enabled)
+        await push.configure(session: nil)
+        XCTAssertFalse(push.enabled, "nothing to register against yet")
+        await push.configure(session: session)
+        XCTAssertTrue(push.enabled)
+        XCTAssertTrue(defaults.bool(forKey: "native.notifications.connected"))
+
+        try await push.setEnabled(false)
+        let relaunched = NativePushNotifications(defaults: defaults, sync: PushRegistrationSync(http: PushHTTPMock()), authorize: { true })
+        await relaunched.configure(session: session)
+        XCTAssertFalse(relaunched.enabled, "turning it off sticks")
+    }
+
+    func testDecliningThePromptLeavesPushOffWithoutAskingAgain() async throws {
+        let name = "push-declined-\(UUID())"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: name))
+        defer { defaults.removePersistentDomain(forName: name) }
+        let session = SavedSession(relay: URL(string: "https://relay.example")!, sessionID: "s", deviceID: "d", token: "t", secret: Data(repeating: 0, count: 32), daemonKey: "daemon", daemonIdentity: "identity")
+        let asked = AskCounter()
+        let push = NativePushNotifications(defaults: defaults, sync: PushRegistrationSync(http: PushHTTPMock()), authorize: { await asked.ask() })
+        await push.configure(session: session)
+        await push.configure(session: session)
+        XCTAssertFalse(push.enabled)
+        let count = await asked.count
+        XCTAssertEqual(count, 1)
+    }
+
     func testNotificationDestinationsRequireBoundedRoutingFields() {
         let info: [AnyHashable: Any] = ["sessionId": "session", "workspaceId": "workspace", "threadId": "thread"]
         XCTAssertEqual(NotificationDestination(userInfo: info)?.threadID, "thread")
@@ -210,4 +253,9 @@ private actor PushRelay: RelayServing {
         let disabled = await sync.update(target(enabled: false)); XCTAssertEqual(disabled, .disabled)
         let forgotten = await sync.update(nil); XCTAssertEqual(forgotten, .disabled)
     }
+}
+
+private actor AskCounter {
+    private(set) var count = 0
+    func ask() -> Bool { count += 1; return false }
 }

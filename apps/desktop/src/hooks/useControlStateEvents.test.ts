@@ -8,6 +8,7 @@ type Frame = { data: string };
 class FakeWebSocket {
   static instances: FakeWebSocket[] = [];
   onmessage: ((message: Frame) => void) | null = null;
+  onopen: (() => void) | null = null;
   onclose: (() => void) | null = null;
   closed = false;
 
@@ -30,6 +31,30 @@ afterEach(() => {
 });
 
 describe("useControlStateEvents", () => {
+  it("reconnects after a drop and lets the caller catch up", () => {
+    vi.useFakeTimers();
+    vi.stubGlobal("WebSocket", FakeWebSocket);
+    const onReconnect = vi.fn();
+    const { unmount } = renderHook(() =>
+      useControlStateEvents("http://127.0.0.1:4123", vi.fn(), onReconnect),
+    );
+    act(() => FakeWebSocket.instances[0].onopen?.());
+    expect(onReconnect).not.toHaveBeenCalled();
+
+    act(() => FakeWebSocket.instances[0].onclose?.());
+    expect(FakeWebSocket.instances).toHaveLength(1);
+    act(() => void vi.advanceTimersByTime(1_000));
+    expect(FakeWebSocket.instances).toHaveLength(2);
+    act(() => FakeWebSocket.instances[1].onopen?.());
+    expect(onReconnect).toHaveBeenCalledTimes(1);
+
+    unmount();
+    act(() => FakeWebSocket.instances[1].onclose?.());
+    act(() => void vi.advanceTimersByTime(60_000));
+    expect(FakeWebSocket.instances).toHaveLength(2);
+    vi.useRealTimers();
+  });
+
   it("connects to the events stream and forwards control changes", () => {
     vi.stubGlobal("WebSocket", FakeWebSocket);
     const onChange = vi.fn();

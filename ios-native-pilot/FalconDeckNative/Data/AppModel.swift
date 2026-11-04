@@ -18,6 +18,8 @@ final class AppModel {
     let extensions = NativeExtensions()
     let automations = AutomationStore()
     let reviews = ReviewStore()
+    /// A notification asked for this review. The inbox consumes it.
+    var requestedReviewID: String?
     let notifications: LocalNotifications
     let push: NativePushNotifications
     let taskActivity: TaskLiveActivity
@@ -43,6 +45,7 @@ final class AppModel {
         }
         notifications.shouldPresent = { [weak self] destination in
             guard let self, !self.demo, (try? sessionLoader())?.sessionID == destination.sessionID else { return false }
+            if destination.reviewID != nil { return self.selection != .reviews }
             return self.selection != .task(destination.threadID)
         }
     }
