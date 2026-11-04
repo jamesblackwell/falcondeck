@@ -711,12 +711,14 @@ impl NotificationStore {
         true
     }
 
-    /// Settles open records under `prefix` that nobody can answer now, except
-    /// `keep`. Returns whether any changed.
+    /// Settles open records under `prefix` that nobody can answer now: those
+    /// recorded before `before_seq`, or all of them without one. Going by order
+    /// rather than sparing one record means two events racing cannot retire
+    /// each other. Returns whether any changed.
     pub(crate) async fn retire_open(
         &self,
         prefix: &str,
-        keep: Option<&str>,
+        before_seq: Option<u64>,
         now: DateTime<Utc>,
     ) -> bool {
         let mut guard = self.state.lock().await;
@@ -730,7 +732,7 @@ impl NotificationStore {
                 .is_some_and(|key| key.starts_with(prefix));
             if under_prefix
                 && stored.record.resolved_at.is_none()
-                && keep != Some(stored.record.id.as_str())
+                && before_seq.is_none_or(|seq| stored.record.seq < seq)
             {
                 stored.record.resolved_at = Some(now);
                 stored.record.read_at.get_or_insert(now);
@@ -795,6 +797,25 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let store = NotificationStore::new(temp.path().join("notifications"));
         (temp, store)
+    }
+
+    #[tokio::test]
+    async fn racing_replacements_leave_the_newest_open_in_either_order() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = NotificationStore::new(temp.path().join("notifications"));
+        let now = Utc::now();
+        let first = store
+            .record(event(NotificationKind::InputRequired, "input:w:0:a"), now)
+            .await;
+        let second = store
+            .record(event(NotificationKind::InputRequired, "input:w:0:b"), now)
+            .await;
+        let (first, second) = (first.record().clone(), second.record().clone());
+        store.retire_open("input:w:0:", Some(second.seq), now).await;
+        store.retire_open("input:w:0:", Some(first.seq), now).await;
+        assert!(store.is_read(&first.id).await);
+        assert!(!store.is_read(&second.id).await);
+        assert_eq!(store.status().await.needs_you_count, 1);
     }
 
     fn event(kind: NotificationKind, key: &str) -> NewNotification {

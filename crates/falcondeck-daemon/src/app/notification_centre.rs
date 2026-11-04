@@ -166,7 +166,7 @@ impl AppState {
         // this id has been replaced: only the new event can be answered now.
         if let (Some(prefix), Recorded::Created(record)) = (&replaces, &recorded) {
             let store = &self.inner.notifications;
-            store.retire_open(prefix, Some(&record.id), now).await;
+            store.retire_open(prefix, Some(record.seq), now).await;
         }
         if matches!(recorded, Recorded::Duplicate(_)) || recorded.record().resolved_at.is_some() {
             return AttentionOutcome::Recorded(recorded);
