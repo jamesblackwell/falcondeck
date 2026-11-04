@@ -263,6 +263,7 @@ fn install_history(
             thread.ai_title_generated = !history.title_is_provider_preview;
         }
         thread.summary.last_message_preview = history.summary.last_message_preview;
+        thread.summary.last_message_at = history.summary.last_message_at;
         if is_shutdown_interrupted(&thread.summary.status, thread.summary.last_error.as_deref()) {
             settle_items_as_shutdown_interrupted(
                 &mut history.items,

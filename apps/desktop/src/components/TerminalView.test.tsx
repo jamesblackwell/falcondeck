@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { render, waitFor } from '@testing-library/react'
+import { createRef } from 'react'
+import { act, cleanup, render, waitFor } from '@testing-library/react'
 import { readFileSync } from 'node:fs'
 import { resolve } from 'node:path'
 
@@ -13,7 +14,16 @@ import {
   encodeTerminalInputBinary,
   writeStatusNotice,
 } from '../terminal-utils'
-import { TerminalView } from './TerminalView'
+import { TerminalView, type TerminalViewHandle } from './TerminalView'
+
+const xterm = vi.hoisted(() => ({
+  instances: [] as Array<{
+    focus: ReturnType<typeof import('vitest').vi.fn>
+    keyHandler: ((event: KeyboardEvent) => boolean) | null
+    linkProvider: unknown
+  }>,
+  webglDisposed: 0,
+}))
 
 vi.mock('@xterm/xterm', () => ({
   Terminal: class {
@@ -29,11 +39,24 @@ vi.mock('@xterm/xterm', () => ({
     }
     onResize = vi.fn()
     onSelectionChange = vi.fn()
-    attachCustomKeyEventHandler = vi.fn()
+    keyHandler: ((event: KeyboardEvent) => boolean) | null = null
+    attachCustomKeyEventHandler = (handler: (event: KeyboardEvent) => boolean) => {
+      this.keyHandler = handler
+    }
+    linkProvider: unknown = null
+    registerLinkProvider = (provider: unknown) => {
+      this.linkProvider = provider
+      return { dispose: vi.fn() }
+    }
+    buffer = { active: { getLine: () => undefined } }
+    constructor() {
+      xterm.instances.push(this as never)
+    }
     loadAddon = vi.fn()
     open = vi.fn()
     write = (data: string | Uint8Array, callback?: () => void) => {
       const text = typeof data === 'string' ? data : new TextDecoder().decode(data)
+      // eslint-disable-next-line no-control-regex -- OSC title escape bytes
       const match = /\u001b\]0;([^\u0007]*)\u0007/.exec(text)
       if (match?.[1]) this.titleHandler?.(match[1])
       callback?.()
@@ -53,7 +76,9 @@ vi.mock('@xterm/addon-fit', () => ({
 vi.mock('@xterm/addon-webgl', () => ({
   WebglAddon: class {
     onContextLoss = vi.fn()
-    dispose = vi.fn()
+    dispose = () => {
+      xterm.webglDisposed += 1
+    }
   },
 }))
 vi.mock('@xterm/addon-search', () => ({
@@ -112,8 +137,97 @@ class FakeSocket {
   }
 }
 
+const fakeSocketFactory = (url: string) => new FakeSocket(url) as unknown as WebSocket
+
 afterEach(() => {
+  cleanup()
   FakeSocket.instances = []
+  xterm.instances = []
+  xterm.webglDisposed = 0
+})
+
+function renderView(props: Partial<React.ComponentProps<typeof TerminalView>> = {}) {
+  const ref = createRef<TerminalViewHandle>()
+  const utils = render(
+    <TerminalView
+      ref={ref}
+      session={fakeSession}
+      socketUrl="ws://127.0.0.1:4123/api/terminals/term-test/ws?since_seq=0"
+      active
+      onExited={vi.fn()}
+      onTitleChange={vi.fn()}
+      createSocket={fakeSocketFactory}
+      {...props}
+    />,
+  )
+  return { ...utils, ref }
+}
+
+function keyEvent(init: Partial<KeyboardEvent>): KeyboardEvent {
+  return {
+    key: '',
+    code: '',
+    metaKey: false,
+    ctrlKey: false,
+    altKey: false,
+    shiftKey: false,
+    ...init,
+  } as KeyboardEvent
+}
+
+describe('TerminalView focus and chrome', () => {
+  it('never takes focus by becoming active; only on request', async () => {
+    const { ref, rerender } = renderView({ active: false })
+    await waitFor(() => expect(xterm.instances).toHaveLength(1))
+    const terminal = xterm.instances[0]!
+    rerender(
+      <TerminalView
+        ref={ref}
+        session={fakeSession}
+        socketUrl="ws://127.0.0.1:4123/api/terminals/term-test/ws?since_seq=0"
+        active
+        onExited={vi.fn()}
+        onTitleChange={vi.fn()}
+        createSocket={fakeSocketFactory}
+      />,
+    )
+    expect(xterm.instances).toHaveLength(1)
+    expect(terminal.focus).not.toHaveBeenCalled()
+    act(() => ref.current?.focus())
+    expect(terminal.focus).toHaveBeenCalledOnce()
+  })
+
+  it('honours a focus request made before xterm finished loading', async () => {
+    const { ref } = renderView()
+    act(() => ref.current?.focus())
+    await waitFor(() => expect(xterm.instances).toHaveLength(1))
+    await waitFor(() => expect(xterm.instances[0]!.focus).toHaveBeenCalledOnce())
+  })
+
+  it('releases WebGL while hidden', async () => {
+    renderView({ active: false })
+    await waitFor(() => expect(xterm.instances).toHaveLength(1))
+    await waitFor(() => expect(xterm.webglDisposed).toBe(1))
+  })
+
+  it('reports daemon status frames', async () => {
+    const onStatus = vi.fn()
+    renderView({ onStatus })
+    await waitFor(() => expect(FakeSocket.instances).toHaveLength(1))
+    FakeSocket.instances[0]!.receive({ type: 'terminal_status', process: 'vim', cwd: '/tmp/x' })
+    expect(onStatus).toHaveBeenCalledWith({ process: 'vim', cwd: '/tmp/x' })
+  })
+
+  it('lets panel and toggle shortcuts bypass the shell', async () => {
+    renderView()
+    await waitFor(() => expect(xterm.instances[0]?.keyHandler).toBeTruthy())
+    const handler = xterm.instances[0]!.keyHandler!
+    expect(handler(keyEvent({ key: '`', code: 'Backquote', ctrlKey: true }))).toBe(false)
+    expect(handler(keyEvent({ key: 'd', code: 'KeyD', metaKey: true }))).toBe(false)
+    expect(handler(keyEvent({ key: 'D', code: 'KeyD', metaKey: true, shiftKey: true }))).toBe(false)
+    expect(handler(keyEvent({ key: 'c', code: 'KeyC', ctrlKey: true }))).toBe(true)
+    expect(handler(keyEvent({ key: 'a', code: 'KeyA' }))).toBe(true)
+  })
 })
 
 describe('TerminalView styles', () => {

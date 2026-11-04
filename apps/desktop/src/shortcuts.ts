@@ -24,6 +24,17 @@ export type ShortcutCommandId =
   | 'terminalCloseTab'
   | 'terminalNextTab'
   | 'terminalPreviousTab'
+  | 'terminalSplitRight'
+  | 'terminalSplitDown'
+  | 'terminalNextPane'
+  | 'terminalPreviousPane'
+  | 'terminalFocusLeft'
+  | 'terminalFocusRight'
+  | 'terminalFocusUp'
+  | 'terminalFocusDown'
+  | 'terminalZoomIn'
+  | 'terminalZoomOut'
+  | 'terminalZoomReset'
   | 'increaseTextSize'
   | 'decreaseTextSize'
   | 'resetTextSize'
@@ -74,14 +85,25 @@ export const SHORTCUT_DEFINITIONS: readonly ShortcutDefinition[] = [
   { id: 'nextThread', label: 'Next chat', description: 'Select the next visible chat', category: 'Navigation', context: 'global', defaults: ['Mod+Shift+]'] },
   { id: 'toggleSidebar', label: 'Toggle sidebar', description: 'Show or hide projects and chats', category: 'View', context: 'global', defaults: ['Mod+B'] },
   { id: 'toggleChanges', label: 'Toggle changes panel', description: 'Show or hide the changes panel', category: 'View', context: 'global', defaults: ['Mod+Alt+B'] },
-  { id: 'toggleTerminal', label: 'Toggle terminal', description: 'Show or hide the terminal panel', category: 'Terminal', context: 'global', defaults: ['Mod+J'] },
+  { id: 'toggleTerminal', label: 'Toggle terminal', description: 'Show or hide the terminal panel', category: 'Terminal', context: 'global', defaults: ['Mod+J', 'Ctrl+`'] },
   { id: 'newTerminal', label: 'New terminal', description: 'Open a new terminal tab in the current project from anywhere', category: 'Terminal', context: 'global', defaults: ['Ctrl+Shift+`'] },
   // Terminal-context bindings win over global ones while the terminal has
   // focus, so the tab strip behaves like Terminal.app and iTerm.
   { id: 'terminalNewTab', label: 'New terminal tab', description: 'Open another tab while the terminal is focused', category: 'Terminal', context: 'terminal', defaults: ['Mod+T'] },
-  { id: 'terminalCloseTab', label: 'Close terminal tab', description: 'Close the active tab; closing the last one hides the panel', category: 'Terminal', context: 'terminal', defaults: ['Mod+W'] },
+  { id: 'terminalCloseTab', label: 'Close terminal pane', description: 'Close the focused pane; the last pane closes its tab, the last tab hides the panel', category: 'Terminal', context: 'terminal', defaults: ['Mod+W'] },
   { id: 'terminalNextTab', label: 'Next terminal tab', description: 'Switch to the tab on the right', category: 'Terminal', context: 'terminal', defaults: ['Mod+Shift+]', 'Ctrl+Tab'] },
   { id: 'terminalPreviousTab', label: 'Previous terminal tab', description: 'Switch to the tab on the left', category: 'Terminal', context: 'terminal', defaults: ['Mod+Shift+[', 'Ctrl+Shift+Tab'] },
+  { id: 'terminalSplitRight', label: 'Split terminal right', description: 'Open a shell beside the focused pane', category: 'Terminal', context: 'terminal', defaults: ['Mod+D'] },
+  { id: 'terminalSplitDown', label: 'Split terminal down', description: 'Open a shell below the focused pane', category: 'Terminal', context: 'terminal', defaults: ['Mod+Shift+D'] },
+  { id: 'terminalNextPane', label: 'Next terminal pane', description: 'Focus the next split pane (chat history keeps the key with one pane)', category: 'Terminal', context: 'terminal', defaults: ['Mod+]'] },
+  { id: 'terminalPreviousPane', label: 'Previous terminal pane', description: 'Focus the previous split pane (chat history keeps the key with one pane)', category: 'Terminal', context: 'terminal', defaults: ['Mod+['] },
+  { id: 'terminalFocusLeft', label: 'Focus pane left', description: 'Focus the split pane to the left', category: 'Terminal', context: 'terminal', defaults: ['Mod+Alt+Left'] },
+  { id: 'terminalFocusRight', label: 'Focus pane right', description: 'Focus the split pane to the right', category: 'Terminal', context: 'terminal', defaults: ['Mod+Alt+Right'] },
+  { id: 'terminalFocusUp', label: 'Focus pane above', description: 'Focus the split pane above', category: 'Terminal', context: 'terminal', defaults: ['Mod+Alt+Up'] },
+  { id: 'terminalFocusDown', label: 'Focus pane below', description: 'Focus the split pane below', category: 'Terminal', context: 'terminal', defaults: ['Mod+Alt+Down'] },
+  { id: 'terminalZoomIn', label: 'Larger terminal text', description: 'Increase the terminal font size', category: 'Terminal', context: 'terminal', defaults: ['Mod+=', 'Mod+Shift+Plus'] },
+  { id: 'terminalZoomOut', label: 'Smaller terminal text', description: 'Decrease the terminal font size', category: 'Terminal', context: 'terminal', defaults: ['Mod+-'] },
+  { id: 'terminalZoomReset', label: 'Reset terminal text size', description: 'Restore the default terminal font size', category: 'Terminal', context: 'terminal', defaults: ['Mod+0'] },
   { id: 'increaseTextSize', label: 'Increase text size', description: 'Increase the interface text scale', category: 'View', context: 'global', defaults: ['Mod+=', 'Mod+Shift+Plus'] },
   { id: 'decreaseTextSize', label: 'Decrease text size', description: 'Decrease the interface text scale', category: 'View', context: 'global', defaults: ['Mod+-'] },
   { id: 'resetTextSize', label: 'Reset text size', description: 'Restore the default interface text scale', category: 'View', context: 'global', defaults: ['Mod+0'] },

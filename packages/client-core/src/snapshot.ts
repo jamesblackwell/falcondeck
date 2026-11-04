@@ -513,6 +513,7 @@ function isRunningAttentionOnlyUpdate(
   return (
     current.title === next.title &&
     current.last_message_preview === next.last_message_preview &&
+    current.last_message_at === next.last_message_at &&
     current.last_tool === next.last_tool &&
     current.last_error === next.last_error &&
     current.latest_turn_id === next.latest_turn_id &&

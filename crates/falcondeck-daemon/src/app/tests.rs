@@ -2171,6 +2171,132 @@ async fn cursor_provider_error_dump_becomes_a_failed_receipt() {
 }
 
 #[tokio::test]
+async fn live_assistant_reply_refreshes_unopened_thread_preview() {
+    let temp_dir = tempdir().unwrap();
+    let app = AppState::new_with_state_path(
+        "test".to_string(),
+        HashMap::new(),
+        temp_dir.path().join("daemon-state.json"),
+    );
+    insert_claude_workspace_with_session(
+        &app,
+        "workspace-1",
+        "thread-1",
+        "88888888-8888-4888-8888-888888888888",
+        temp_dir.path(),
+    )
+    .await;
+    let stale_at = Utc::now() - Duration::hours(1);
+    app.with_thread_mut("workspace-1", "thread-1", |thread| {
+        thread.last_message_preview = Some("Hydrated an hour ago".to_string());
+        thread.last_message_at = Some(stale_at);
+    })
+    .await
+    .unwrap();
+    let assistant = |text: &str, lifecycle, created_at| ConversationItem::AssistantMessage {
+        id: "reply-1".to_string(),
+        text: text.to_string(),
+        phase: None,
+        memory_citation: None,
+        citations: Vec::new(),
+        lifecycle,
+        error: None,
+        created_at,
+    };
+    let summary = |app: AppState| async move {
+        let workspaces = app.inner.workspaces.lock().await;
+        workspaces["workspace-1"].threads["thread-1"].summary.clone()
+    };
+
+    let mut events = app.subscribe();
+    let replied_at = Utc::now();
+    // Mid-stream text is not a finished reply yet.
+    app.push_conversation_item(
+        "workspace-1",
+        "thread-1",
+        assistant("Should I", ContentLifecycle::Streaming, replied_at),
+        true,
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        summary(app.clone()).await.last_message_preview.as_deref(),
+        Some("Hydrated an hour ago")
+    );
+    app.push_conversation_item(
+        "workspace-1",
+        "thread-1",
+        assistant("Should I ship the build?", ContentLifecycle::Complete, replied_at),
+        true,
+    )
+    .await
+    .unwrap();
+    // A later tool call moves updated_at but not the preview's timestamp.
+    app.push_conversation_item(
+        "workspace-1",
+        "thread-1",
+        ConversationItem::ToolCall {
+            id: "tool-1".to_string(),
+            title: "Read".to_string(),
+            tool_kind: "read".to_string(),
+            status: "completed".to_string(),
+            output: None,
+            exit_code: None,
+            display: Default::default(),
+            detail: None,
+            created_at: replied_at + Duration::seconds(5),
+            completed_at: None,
+        },
+        true,
+    )
+    .await
+    .unwrap();
+
+    let live = summary(app.clone()).await;
+    assert_eq!(live.last_message_preview.as_deref(), Some("Should I ship the build?"));
+    assert_eq!(live.last_message_at, Some(replied_at));
+    // Clients learn about it without opening the thread.
+    let emitted = std::iter::from_fn(|| events.try_recv().ok()).collect::<Vec<_>>();
+    assert!(emitted.iter().any(|envelope| matches!(
+        &envelope.event,
+        falcondeck_core::UnifiedEvent::ThreadUpdated { thread }
+            if thread.last_message_preview.as_deref() == Some("Should I ship the build?")
+                && thread.last_message_at == Some(replied_at)
+    )));
+
+    // A reply still streaming when the turn ends is settled into the preview.
+    let second_at = replied_at + Duration::seconds(10);
+    app.push_conversation_item(
+        "workspace-1",
+        "thread-1",
+        ConversationItem::AssistantMessage {
+            id: "reply-2".to_string(),
+            text: "Done, shipped.".to_string(),
+            phase: None,
+            memory_citation: None,
+            citations: Vec::new(),
+            lifecycle: ContentLifecycle::Streaming,
+            error: None,
+            created_at: second_at,
+        },
+        true,
+    )
+    .await
+    .unwrap();
+    app.settle_turn_items_with_error(
+        "workspace-1",
+        "thread-1",
+        second_at + Duration::seconds(1),
+        ToolSettlement::Completed,
+        None,
+    )
+    .await;
+    let settled = summary(app.clone()).await;
+    assert_eq!(settled.last_message_preview.as_deref(), Some("Done, shipped."));
+    assert_eq!(settled.last_message_at, Some(second_at));
+}
+
+#[tokio::test]
 async fn terminal_turn_cancels_orphaned_interactive_requests() {
     let temp_dir = tempdir().unwrap();
     let app = AppState::new_with_state_path(
@@ -3042,6 +3168,7 @@ fn restored_threads_require_resume_but_new_threads_do_not() {
         status: ThreadStatus::Idle,
         updated_at: Utc::now(),
         last_message_preview: None,
+        last_message_at: None,
         latest_turn_id: None,
         latest_plan: None,
         latest_diff: None,
@@ -3217,6 +3344,7 @@ async fn suggest_thread_title_rejects_an_empty_conversation() {
                     status: ThreadStatus::Idle,
                     updated_at: Utc::now(),
                     last_message_preview: None,
+                    last_message_at: None,
                     latest_turn_id: None,
                     latest_plan: None,
                     latest_diff: None,
@@ -3300,6 +3428,7 @@ async fn builtin_rename_thread_tool_applies_the_agent_supplied_title() {
                     status: ThreadStatus::Idle,
                     updated_at: Utc::now(),
                     last_message_preview: None,
+                    last_message_at: None,
                     latest_turn_id: None,
                     latest_plan: None,
                     latest_diff: None,
@@ -3474,6 +3603,7 @@ fn workspace_bridge_binds_only_one_running_task_for_the_same_provider() {
         status,
         updated_at: Utc::now(),
         last_message_preview: None,
+        last_message_at: None,
         latest_turn_id: None,
         latest_plan: None,
         latest_diff: None,
@@ -3522,6 +3652,7 @@ fn workspace_bridge_binds_the_thread_executing_the_matching_mcp_call() {
         status,
         updated_at: Utc::now(),
         last_message_preview: None,
+        last_message_at: None,
         latest_turn_id: None,
         latest_plan: None,
         latest_diff: None,
@@ -3703,6 +3834,7 @@ async fn workspace_bridge_rename_binds_the_calling_thread_among_concurrent_codex
             status: ThreadStatus::Running,
             updated_at: Utc::now(),
             last_message_preview: None,
+            last_message_at: None,
             latest_turn_id: None,
             latest_plan: None,
             latest_diff: None,
@@ -3883,6 +4015,7 @@ fn a_running_turn_is_titleable_before_the_agent_produces_anything() {
         status: ThreadStatus::Running,
         updated_at: Utc::now(),
         last_message_preview: None,
+        last_message_at: None,
         latest_turn_id: None,
         latest_plan: None,
         latest_diff: None,
@@ -3969,6 +4102,7 @@ async fn update_thread_title_marks_thread_as_manual() {
                     status: ThreadStatus::Idle,
                     updated_at: Utc::now(),
                     last_message_preview: None,
+                    last_message_at: None,
                     latest_turn_id: None,
                     latest_plan: None,
                     latest_diff: None,
@@ -5406,6 +5540,7 @@ async fn persist_local_state_merges_saved_workspaces_with_live_workspaces() {
         status: ThreadStatus::Idle,
         updated_at: Utc::now(),
         last_message_preview: None,
+        last_message_at: None,
         latest_turn_id: None,
         latest_plan: None,
         latest_diff: None,
@@ -5525,6 +5660,7 @@ async fn close_workspace_keeps_persist_and_lists_it_in_the_library() {
         status: ThreadStatus::Idle,
         updated_at: Utc::now(),
         last_message_preview: None,
+        last_message_at: None,
         latest_turn_id: None,
         latest_plan: None,
         latest_diff: None,
@@ -5629,6 +5765,7 @@ async fn shutdown_marks_running_threads_as_error_and_persists_them() {
         status: ThreadStatus::Running,
         updated_at: Utc::now(),
         last_message_preview: None,
+        last_message_at: None,
         latest_turn_id: None,
         latest_plan: None,
         latest_diff: None,
@@ -5753,6 +5890,7 @@ async fn shutdown_marks_waiting_threads_as_error_and_persists_them() {
         status: ThreadStatus::WaitingForInput,
         updated_at: Utc::now(),
         last_message_preview: None,
+        last_message_at: None,
         latest_turn_id: None,
         latest_plan: None,
         latest_diff: None,
@@ -5834,6 +5972,7 @@ async fn provider_disconnect_fails_only_that_providers_active_threads() {
         status: ThreadStatus::Running,
         updated_at: Utc::now(),
         last_message_preview: None,
+        last_message_at: None,
         latest_turn_id: None,
         latest_plan: None,
         latest_diff: None,
@@ -6411,6 +6550,7 @@ async fn insert_claude_workspace_with_session(
                     status: ThreadStatus::Running,
                     updated_at: Utc::now(),
                     last_message_preview: None,
+                    last_message_at: None,
                     latest_turn_id: None,
                     latest_plan: None,
                     latest_diff: None,
@@ -7267,6 +7407,7 @@ async fn snapshot_with_request_excludes_archived_threads_for_mobile_clients() {
         status: ThreadStatus::Idle,
         updated_at: Utc::now(),
         last_message_preview: None,
+        last_message_at: None,
         latest_turn_id: None,
         latest_plan: None,
         latest_diff: None,
@@ -7295,6 +7436,7 @@ async fn snapshot_with_request_excludes_archived_threads_for_mobile_clients() {
         status: ThreadStatus::Idle,
         updated_at: Utc::now(),
         last_message_preview: None,
+        last_message_at: None,
         latest_turn_id: None,
         latest_plan: None,
         latest_diff: None,
@@ -7450,6 +7592,7 @@ async fn archive_all_threads_updates_once_and_is_idempotent() {
         status: ThreadStatus::Idle,
         updated_at: Utc::now(),
         last_message_preview: None,
+        last_message_at: None,
         latest_turn_id: None,
         latest_plan: None,
         latest_diff: None,
@@ -7701,6 +7844,7 @@ async fn snapshot_with_request_strips_thread_plans_and_diffs_for_remote_clients(
         status: ThreadStatus::Idle,
         updated_at: Utc::now(),
         last_message_preview: Some("hello".to_string()),
+        last_message_at: None,
         latest_turn_id: None,
         latest_plan: Some(ThreadPlan {
             explanation: Some("implement the change".to_string()),
@@ -7859,6 +8003,7 @@ async fn dispatched_send_echoes_the_client_supplied_user_item_id() {
         status: ThreadStatus::Idle,
         updated_at: Utc::now(),
         last_message_preview: None,
+        last_message_at: None,
         latest_turn_id: None,
         latest_plan: None,
         latest_diff: None,
@@ -7973,6 +8118,7 @@ async fn sends_against_a_running_thread_queue_can_be_reordered_and_removed() {
         status: ThreadStatus::Running,
         updated_at: Utc::now(),
         last_message_preview: None,
+        last_message_at: None,
         latest_turn_id: None,
         latest_plan: None,
         latest_diff: None,
@@ -8195,6 +8341,7 @@ async fn busy_thread_app(
         status: ThreadStatus::Running,
         updated_at: Utc::now(),
         last_message_preview: None,
+        last_message_at: None,
         latest_turn_id: Some("turn-steer-active".to_string()),
         latest_plan: None,
         latest_diff: None,
@@ -8800,6 +8947,7 @@ async fn pre_tool_use_honours_live_permission_mode_and_read_only_tools() {
         status: ThreadStatus::Running,
         updated_at: Utc::now(),
         last_message_preview: None,
+        last_message_at: None,
         latest_turn_id: None,
         latest_plan: None,
         latest_diff: None,
@@ -9124,6 +9272,7 @@ async fn control_current_thread_target_pins_the_calling_thread() {
             status,
             updated_at: Utc::now(),
             last_message_preview: None,
+            last_message_at: None,
             latest_turn_id: None,
             latest_plan: None,
             latest_diff: None,
@@ -9548,6 +9697,7 @@ async fn archiving_reclaims_safe_variants_and_unarchive_restores_them() {
         status: ThreadStatus::Idle,
         updated_at: Utc::now(),
         last_message_preview: None,
+        last_message_at: None,
         latest_turn_id: None,
         latest_plan: None,
         latest_diff: None,

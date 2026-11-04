@@ -38,6 +38,7 @@ fn thread(title: &str, history: Arc<ClaudeHistoryState>) -> ManagedThread {
         status: ThreadStatus::Idle,
         updated_at: "2026-10-05T10:00:00Z".parse().unwrap(),
         last_message_preview: Some(title.to_string()),
+        last_message_at: None,
         latest_turn_id: None,
         latest_plan: None,
         latest_diff: None,

@@ -30,6 +30,15 @@ pub struct TerminalSessionInfo {
     pub rows: u16,
     /// When the daemon spawned the PTY.
     pub created_at: DateTime<Utc>,
+    /// Thread the session belongs to, when it was opened for one. Clients
+    /// keep each thread's terminals separate; the daemon closes them when the
+    /// thread is deleted.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thread_id: Option<String>,
+    /// Bot the session belongs to. Takes precedence over `thread_id` so a
+    /// bot's terminals survive it switching home conversations.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bot_id: Option<String>,
 }
 
 /// Body for `POST /api/workspaces/{workspace_id}/terminals`.
@@ -39,6 +48,13 @@ pub struct OpenTerminalRequest {
     pub cols: u16,
     /// Initial row count for the PTY.
     pub rows: u16,
+    /// Scope the session to a thread; the shell starts in its working
+    /// directory (an isolated thread's worktree).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thread_id: Option<String>,
+    /// Scope the session to a bot; the shell starts in the bot's space.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bot_id: Option<String>,
 }
 
 /// Response for terminal list endpoints.
@@ -119,6 +135,14 @@ pub enum TerminalServerFrame {
     },
     /// Reply to `TerminalPing`.
     TerminalPong,
+    /// Foreground process and working directory, sent on attach and whenever
+    /// either changes. Either may be unknown on platforms without lookups.
+    TerminalStatus {
+        /// Name of the foreground process (`zsh`, `vim`, `cargo`).
+        process: Option<String>,
+        /// Working directory of the foreground process.
+        cwd: Option<String>,
+    },
 }
 
 /// Kind byte for a replayed PTY output chunk on the binary WebSocket.

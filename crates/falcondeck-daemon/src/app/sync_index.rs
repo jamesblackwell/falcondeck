@@ -105,6 +105,7 @@ pub(super) fn row(thread: &ThreadSummary) -> ThreadSummary {
             .last_message_preview
             .as_ref()
             .map(|s| s.chars().take(256).collect()),
+        last_message_at: thread.last_message_at,
         latest_turn_id: thread.latest_turn_id.clone(),
         latest_plan: None,
         latest_diff: None,
