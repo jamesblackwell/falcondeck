@@ -992,6 +992,17 @@ mod notice_tests {
         all.remove(0)
     }
 
+    /// A relay without `/notify` answers 404, so the push reaches the socket a
+    /// moment later, as it does on a relay that has not been deployed yet.
+    async fn next_push(
+        rx: &mut mpsc::UnboundedReceiver<RemoteBridgeCommand>,
+    ) -> RemoteBridgeCommand {
+        tokio::time::timeout(std::time::Duration::from_secs(5), rx.recv())
+            .await
+            .expect("no push arrived")
+            .expect("the bridge closed")
+    }
+
     async fn bridge(app: &AppState) -> mpsc::UnboundedReceiver<RemoteBridgeCommand> {
         let (tx, rx) = mpsc::unbounded_channel();
         app.inner.remote.lock().await.command_tx = Some(tx);
@@ -1224,7 +1235,7 @@ mod notice_tests {
         assert!(record.report.as_ref().unwrap().hosted);
         let RemoteBridgeCommand::NotifyAttention {
             report_id: pushed, ..
-        } = only(&mut rx)
+        } = next_push(&mut rx).await
         else {
             panic!("expected one push");
         };
@@ -1249,7 +1260,7 @@ mod notice_tests {
         .await
         .unwrap();
         assert!(relay.puts.lock().unwrap().is_empty());
-        assert_eq!(pushes(&mut rx).len(), 1);
+        next_push(&mut rx).await;
         let record = app.notification_get("N-1").await.unwrap();
         assert_eq!(
             record.body.as_deref(),

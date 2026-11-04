@@ -608,6 +608,46 @@ async fn a_review_dropped_at_capacity_is_not_acknowledged_and_can_retry() {
 }
 
 #[tokio::test]
+async fn two_notices_from_a_thread_both_alert_and_a_retry_does_not() {
+    let (endpoint, mut events, task) = mock_server().await;
+    let directory = tempfile::tempdir().unwrap();
+    let state = state(
+        &directory,
+        String::new(),
+        Some(Arc::new(ApnsProvider::mock(endpoint))),
+    );
+    state
+        .register_push_registration("session", "native", "native", Some(native("aabb")))
+        .await
+        .unwrap();
+    let notice = |id: &str| RelayNotifyRequest {
+        notification_id: Some(id.to_owned()),
+        report_id: Some(format!("rpt_{id}")),
+        message_preview: Some("All green.".to_owned()),
+        ..notify("agent-notice", Some("thread".to_owned()))
+    };
+    state
+        .notify("session", "daemon", notice("N-1"))
+        .await
+        .unwrap();
+    assert_eq!(next_push(&mut events).await.1["notificationId"], "N-1");
+    state
+        .notify("session", "daemon", notice("N-1"))
+        .await
+        .unwrap();
+    state
+        .notify("session", "daemon", notice("N-2"))
+        .await
+        .unwrap();
+    let (_, second) = next_push(&mut events).await;
+    assert_eq!(second["notificationId"], "N-2");
+    assert_eq!(second["reportId"], "rpt_N-2");
+    tokio::time::sleep(StdDuration::from_millis(100)).await;
+    assert!(events.try_recv().is_err(), "the retry alerts once");
+    task.abort();
+}
+
+#[tokio::test]
 async fn http_notify_is_daemon_only_and_validated() {
     let (endpoint, mut events, task) = mock_server().await;
     let directory = tempfile::tempdir().unwrap();

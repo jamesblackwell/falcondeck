@@ -336,7 +336,7 @@ impl AppState {
             notification_id,
             report_id,
         };
-        if http_eligible {
+        if http_route {
             // A tool call must not wait on the relay.
             let app = self.clone();
             tokio::spawn(async move { app.deliver_acknowledged(command, command_tx).await });

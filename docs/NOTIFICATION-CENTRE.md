@@ -130,6 +130,11 @@ its current home, so a reply reaches the bot.
   The record lands either way, and the Mac app shows its own banner.
 - **High** also pushes while he is at the Mac. The master switch still wins.
 
+A notice travels like a review: `POST /v1/sessions/{id}/notify` with retries, then
+the bridge socket, because a queued socket write can die with the connection. The
+relay dedupes a notice by its own id, so a retry cannot alert twice and two notices
+from one thread both arrive.
+
 Limits, counted from the store so they survive a restart: 3 an hour, 10 a day and
 2 `high` a day per sender (a bot, or one task thread), and 30 a day across all
 agents, so a fleet of tasks cannot add up to a flood. A refused notice stores and

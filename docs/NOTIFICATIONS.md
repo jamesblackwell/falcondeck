@@ -93,12 +93,12 @@ review. Being in the inbox with another review open does not count. Each review
 has one Notification Center entry, and clicking it opens the review. If the app
 restarts first, the click only raises it.
 
-A review uses `POST /v1/sessions/{id}/notify` rather than the bridge socket,
+A review or agent notice uses `POST /v1/sessions/{id}/notify` rather than the bridge socket,
 because a queued socket write proves nothing and the bridge reconnects often. The
 daemon retries for up to 45 seconds, inside the relay's 60 second dedupe window,
 then falls back to the socket. It also falls
-back at once on a 404 from an older relay. The relay dedupes per review, so a
-retry cannot double-alert.
+back at once on a 404 from an older relay. The relay dedupes per review or notice,
+so a retry cannot double-alert.
 
 ## Preferences
 

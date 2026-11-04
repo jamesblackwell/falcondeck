@@ -100,7 +100,14 @@ async fn relay(statuses: Vec<u16>) -> (String, Arc<AtomicUsize>) {
     let router = axum::Router::new().route(
         "/v1/sessions/session/notify",
         post(move |Json(request): Json<RelayNotifyRequest>| {
-            assert_eq!(request.review_id.as_deref(), Some("R-1"));
+            match request.kind.as_str() {
+                "agent-notice" => {
+                    assert_eq!(request.notification_id.as_deref(), Some("N-1"));
+                    assert_eq!(request.report_id.as_deref(), Some("rpt_1"));
+                    assert_eq!(request.thread_title.as_deref(), Some("Deploy finished"));
+                }
+                _ => assert_eq!(request.review_id.as_deref(), Some("R-1")),
+            }
             let call = counter.fetch_add(1, Ordering::SeqCst);
             let status = statuses[call.min(statuses.len() - 1)];
             async move { StatusCode::from_u16(status).unwrap() }
@@ -144,6 +151,9 @@ fn review_command() -> RemoteBridgeCommand {
         thread_id: None,
         message_preview: Some("Juno needs a decision: Pricing".to_string()),
         review_id: Some("R-1".to_string()),
+        title: None,
+        notification_id: None,
+        report_id: None,
     }
 }
 
@@ -197,6 +207,7 @@ async fn a_review_reaches_the_relay_with_an_active_desktop_and_no_bridge() {
         thread_id: None,
         preview: Some("Juno needs a decision: Pricing".to_string()),
         review_id: Some("R-1".to_string()),
+        ..AttentionPush::default()
     })
     .await;
     tokio::time::timeout(std::time::Duration::from_secs(5), async {
@@ -225,8 +236,64 @@ async fn a_review_with_no_route_is_not_counted_as_sent() {
         thread_id: None,
         preview: None,
         review_id: Some("R-1".to_string()),
+        ..AttentionPush::default()
     })
     .await;
     let status = build_remote_status_response(&*app.inner.remote.lock().await);
     assert_eq!((status.attention[0].sent, status.attention[0].no_bridge), (0, 1));
+}
+
+async fn hold_phone_pushes(app: &AppState) {
+    *app.inner.desktop_active_until.lock().unwrap() =
+        Some(Utc::now() + chrono::Duration::minutes(5));
+    app.update_preferences(falcondeck_core::UpdatePreferencesRequest {
+        notifications: Some(falcondeck_core::NotificationPreferencesPatch {
+            suppress_when_desktop_active: Some(true),
+            ..Default::default()
+        }),
+        ..Default::default()
+    })
+    .await
+    .unwrap();
+}
+
+fn notice(high: bool) -> AttentionPush {
+    AttentionPush {
+        kind: "agent-notice",
+        title: Some("Deploy finished".to_string()),
+        preview: Some("All green.".to_string()),
+        notification_id: Some("N-1".to_string()),
+        report_id: Some("rpt_1".to_string()),
+        ignore_desktop_presence: high,
+        ..AttentionPush::default()
+    }
+}
+
+#[tokio::test]
+async fn a_high_notice_reaches_the_relay_acknowledged_with_its_ids() {
+    let (url, calls) = relay(vec![200]).await;
+    let directory = tempfile::tempdir().unwrap();
+    let app = app_with_relay(&url, &directory).await;
+    hold_phone_pushes(&app).await;
+    app.deliver_attention(notice(true)).await;
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        while calls.load(Ordering::SeqCst) == 0 {
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("the notice never reached the relay");
+}
+
+#[tokio::test]
+async fn a_normal_notice_waits_while_james_is_at_the_mac() {
+    let (url, calls) = relay(vec![200]).await;
+    let directory = tempfile::tempdir().unwrap();
+    let app = app_with_relay(&url, &directory).await;
+    hold_phone_pushes(&app).await;
+    app.deliver_attention(notice(false)).await;
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    assert_eq!(calls.load(Ordering::SeqCst), 0);
+    let status = build_remote_status_response(&*app.inner.remote.lock().await);
+    assert_eq!(status.attention[0].suppressed_desktop_active, 1);
 }
