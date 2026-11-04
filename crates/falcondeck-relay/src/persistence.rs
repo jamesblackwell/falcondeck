@@ -1833,6 +1833,59 @@ mod tests {
     /// A PostgreSQL restart used to wedge the relay permanently: the single
     /// client was never replaced, so every later write failed with
     /// "connection closed" until the relay process itself restarted.
+    /// A reconnect flush deletes every session row, which cascades to reports,
+    /// so the flush has to write them back or a blip would lose them all.
+    #[tokio::test]
+    #[ignore = "set FALCONDECK_RELAY_TEST_DATABASE_URL to run the PostgreSQL integration test"]
+    async fn reports_survive_a_reload_and_a_full_flush() {
+        let database_url = std::env::var("FALCONDECK_RELAY_TEST_DATABASE_URL")
+            .expect("FALCONDECK_RELAY_TEST_DATABASE_URL is required");
+        let backend = PostgresBackend::connect(&database_url).await.unwrap();
+        let session_id = format!("report-test-{}", uuid::Uuid::new_v4().simple());
+        let now = Utc::now();
+        let session = SessionMeta {
+            session_id: session_id.clone(),
+            pairing_id: "pairing".to_string(),
+            daemon_token: "daemon".to_string(),
+            daemon_last_seen_at: None,
+            created_at: now,
+            updated_at: now,
+            next_seq: 1,
+            oldest_lost_seq: 0,
+        };
+        let report = |id: &str, ciphertext: &str| ReportRecord {
+            report_id: id.to_string(),
+            created_at: now,
+            expires_at: now + chrono::Duration::days(30),
+            envelope: serde_json::from_value(serde_json::json!({"ciphertext": ciphertext})).unwrap(),
+        };
+        backend.persist_report(&session, &report("rpt_1", "AAAA")).await.unwrap();
+        backend.persist_report(&session, &report("rpt_1", "BBBB")).await.unwrap();
+        backend.persist_report(&session, &report("rpt_2", "CCCC")).await.unwrap();
+
+        let loaded = load_postgres_state(&backend).await.unwrap();
+        let stored = &loaded.sessions[&session_id].reports;
+        assert_eq!(stored.len(), 2);
+        assert_eq!(stored["rpt_1"].envelope.ciphertext, "BBBB", "rewriting replaces");
+
+        backend.remove_reports(&session_id, &["rpt_2".to_string()]).await.unwrap();
+        let state = load_postgres_state(&backend).await.unwrap();
+        assert_eq!(state.sessions[&session_id].reports.len(), 1);
+
+        backend.flush_all(&state).await.unwrap();
+        let flushed = load_postgres_state(&backend).await.unwrap();
+        assert_eq!(flushed.sessions[&session_id].reports["rpt_1"].envelope.ciphertext, "BBBB");
+
+        // Sessions own their reports.
+        backend.remove_sessions(std::slice::from_ref(&session_id)).await.unwrap();
+        let client = connect_postgres_client(&database_url).await.unwrap();
+        let rows = client
+            .query_one("SELECT count(*) FROM relay_reports WHERE session_id = $1", &[&session_id])
+            .await
+            .unwrap();
+        assert_eq!(rows.get::<_, i64>(0), 0);
+    }
+
     #[tokio::test]
     #[ignore = "set FALCONDECK_RELAY_TEST_DATABASE_URL to run the PostgreSQL integration test"]
     async fn postgres_backend_reconnects_after_the_connection_drops() {
