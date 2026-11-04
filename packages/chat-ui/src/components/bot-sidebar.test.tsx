@@ -80,43 +80,78 @@ describe("bot sidebar", () => {
     expect(onSelect).toHaveBeenCalledWith("home", "home-thread");
   });
 
-  it("reports worker activity while its home conversation is idle", () => {
-    const { rerender } = render(
+  it("shows Working only while the home conversation itself is running", () => {
+    const home = (patch: Partial<ThreadSummary> = {}) =>
+      task(bot.thread_id, {
+        workspace_id: "home",
+        updated_at: "2026-11-03T10:00:00Z",
+        last_message_preview: "Should I ship the build?",
+        attention: { unread: true } as ThreadSummary["attention"],
+        ...patch,
+      });
+    const child = (id: string, patch: Partial<ThreadSummary> = {}) =>
+      task(id, {
+        title: `Build ${id}`,
+        updated_at: "2026-11-03T10:30:00Z",
+        last_message_preview: `Compiling ${id}`,
+        origin: { kind: "agent_spawn", parent_thread_id: bot.thread_id },
+        ...patch,
+      });
+    const view = (threads: ThreadSummary[], focused = true) => (
       <BotSidebar
+        focused={focused}
         bots={[bot]}
         botApi={api()}
-        groups={group([
-          task("worker", {
-            status: "running",
-            origin: { kind: "agent_spawn", parent_thread_id: bot.thread_id },
-          }),
-        ])}
+        groups={group(threads)}
         selectedThreadId={null}
         onSelectThread={vi.fn()}
-      />,
+      />
     );
+    const row = () => screen.getByRole("button", { name: /^Assistant/ });
+
+    // Home running: spinner and "Working…".
+    const { rerender } = render(view([home({ status: "running" }), child("a")]));
     expect(screen.getByText("Working")).toBeInTheDocument();
-    rerender(
-      <BotSidebar
-        bots={[bot]}
-        botApi={api()}
-        groups={group([
-          task("worker", {
-            status: "error",
-            origin: { kind: "agent_spawn", parent_thread_id: bot.thread_id },
-          }),
-          task("asker", {
-            status: "waiting_for_input",
-            origin: { kind: "agent_spawn", parent_thread_id: bot.thread_id },
-          }),
-        ])}
-        selectedThreadId={null}
-        onSelectThread={vi.fn()}
-      />,
-    );
-    // Failed or waiting children never badge the long-lived bot row.
+    expect(screen.getByText("Working…")).toBeInTheDocument();
+
+    // Only children running: keep the home question, quiet count, no spinner.
+    const running = [
+      home(),
+      child("a", { status: "running" }),
+      child("b", { status: "running" }),
+      child("c", { status: "running" }),
+    ];
+    rerender(view(running));
     expect(screen.queryByText("Working")).not.toBeInTheDocument();
+    expect(screen.queryByText("Working…")).not.toBeInTheDocument();
+    expect(screen.getByText("Should I ship the build?")).toBeInTheDocument();
+    expect(screen.queryByText("Compiling a")).not.toBeInTheDocument();
+    const count = screen.getByLabelText("3 tasks running");
+    expect(count).toHaveTextContent("3 tasks running");
+    expect(count).toHaveAttribute(
+      "title",
+      "3 tasks running:\nBuild a\nBuild b\nBuild c",
+    );
+    expect(screen.getByRole("img", { name: "Unread" })).toBeInTheDocument();
+    // Compact rows get the short form.
+    rerender(view(running, false));
+    expect(row()).toHaveTextContent("3 running");
+    expect(screen.queryByText("Working")).not.toBeInTheDocument();
+    expect(screen.getByRole("img", { name: "Unread" })).toBeInTheDocument();
+
+    // Idle: newest real message, no indicator. Failed or waiting children
+    // never badge the long-lived bot row.
+    rerender(
+      view([
+        home(),
+        child("a", { status: "error", last_message_preview: undefined }),
+        child("b", { status: "waiting_for_input", last_message_preview: undefined }),
+      ]),
+    );
+    expect(screen.queryByText("Working")).not.toBeInTheDocument();
+    expect(screen.queryByText(/running/)).not.toBeInTheDocument();
     expect(screen.queryByText("Needs you")).not.toBeInTheDocument();
+    expect(screen.getByText("Should I ship the build?")).toBeInTheDocument();
   });
 
   it("previews the newest real message, skipping no-action replies and empty children", () => {

@@ -83,11 +83,19 @@ function botThreads(bot: BotProfile, tasks: ThreadSummary[]) {
  * waiting stays that way until someone reruns it, so rolling it up into the
  * bot pinned a "Needs you" badge on long-lived coordinators. The task itself
  * and the bot's own thread view still surface those states.
+ *
+ * Only the home conversation counts as the bot "working": running children
+ * are reported separately so a finished reply (often a question) stays
+ * visible instead of hiding behind a spinner.
  */
 function botActivity(bot: BotProfile, tasks: ThreadSummary[]) {
-  return botThreads(bot, tasks).some((task) => task.status === "running")
-    ? "working"
-    : null;
+  const running = botThreads(bot, tasks).filter(
+    (task) => task.status === "running",
+  );
+  return {
+    homeRunning: running.some((task) => task.id === bot.thread_id),
+    runningTasks: running.filter((task) => task.id !== bot.thread_id),
+  };
 }
 
 /** Automation runs that found nothing to do reply with this marker. */
@@ -102,15 +110,44 @@ function botPreview(bot: BotProfile, tasks: ThreadSummary[]) {
   const related = botThreads(bot, tasks).sort((a, b) =>
     b.updated_at.localeCompare(a.updated_at),
   );
-  const latest = related[0];
-  if (latest?.status === "running") return { latest, text: "Working…" };
+  const home = related.find((task) => task.id === bot.thread_id);
+  if (home?.status === "running") return { latest: home, text: "Working…" };
   // Newest real message across the bot's threads; a failed child or a
   // no-action automation reply has none, so fall back to an older one.
-  for (const task of related) {
+  // Running children are mid-reply, so their text and timestamp would bury
+  // the bot's last finished message.
+  const settled = related.filter((task) => task.status !== "running");
+  for (const task of settled) {
     const text = realPreview(task);
-    if (text) return { latest, text };
+    if (text) return { latest: task, text };
   }
-  return { latest, text: null };
+  return { latest: settled[0], text: null };
+}
+
+function runningTasksLabel(count: number, short: boolean) {
+  if (short) return `${count} running`;
+  return `${count} ${count === 1 ? "task" : "tasks"} running`;
+}
+
+/** Quiet count of running child tasks; the tooltip names them. */
+function RunningTasks({
+  tasks,
+  short,
+}: {
+  tasks: ThreadSummary[];
+  short: boolean;
+}) {
+  if (tasks.length === 0) return null;
+  const label = runningTasksLabel(tasks.length, false);
+  return (
+    <span
+      title={`${label}:\n${tasks.map((task) => task.title || "Untitled").join("\n")}`}
+      aria-label={label}
+      className="fd-type-meta shrink-0 tabular-nums text-fg-muted"
+    >
+      {runningTasksLabel(tasks.length, short)}
+    </span>
+  );
 }
 
 function botTimeAgo(dateStr: string | undefined) {
@@ -269,8 +306,11 @@ export function BotSidebar({
                         </span>
                       ) : null}
                     </span>
-                    <span className="fd-type-supporting block truncate text-fg-muted">
-                      {preview?.text}
+                    <span className="flex items-baseline gap-2">
+                      <span className="fd-type-supporting min-w-0 flex-1 truncate text-fg-muted">
+                        {preview?.text}
+                      </span>
+                      <RunningTasks tasks={activity.runningTasks} short={false} />
                     </span>
                   </span>
                 </>
@@ -302,7 +342,10 @@ export function BotSidebar({
               </span>
                 </>
               )}
-              {activity === "working" ? (
+              {!focused && !activity.homeRunning ? (
+                <RunningTasks tasks={activity.runningTasks} short />
+              ) : null}
+              {activity.homeRunning ? (
                 <>
                   <ActivityDiamond size="xs" />
                   <span className="sr-only">Working</span>
