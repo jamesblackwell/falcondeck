@@ -1,9 +1,10 @@
-import type { ProjectFolderMutation, Review } from '@falcondeck/client-core';
+import type { NotificationRecord, ProjectFolderMutation, Review } from '@falcondeck/client-core';
 import { resolveThreadLinkTarget, reviewInboxEnabled } from "@falcondeck/client-core";
 import { ThreadLinkProvider } from "@falcondeck/chat-ui";
 import { DICTIONARY_REQUEST_EVENT, DICTIONARY_REQUEST_KEY } from "./components/DictationDictionary";
 import { ExternalLinkHandler } from "./external-links";
 import type { FilePreviewTarget } from "./local-file-links";
+import { useNotificationCentre } from "./hooks/useNotificationCentre";
 import { useReviewInbox } from "./hooks/useReviewInbox";
 import { reviewNotification } from "./review-inbox";
 import {
@@ -292,6 +293,9 @@ const DiffPanel = lazy(() =>
 /** How soon after a "needs a decision" notification a returning focus counts as its click. */
 const REVIEW_FOCUS_WINDOW_MS = 5 * 60_000;
 const ReviewsView = lazy(() => import("./components/ReviewsView").then((module) => ({ default: module.ReviewsView })));
+const NotificationsView = lazy(() =>
+  import("./components/NotificationsView").then((module) => ({ default: module.NotificationsView })),
+);
 const FilePreviewDialog = lazy(() =>
   import("./components/FilePreviewDialog").then((module) => ({ default: module.FilePreviewDialog })),
 );
@@ -526,6 +530,10 @@ function AppInner() {
   // Tickets/Reviews slot is open, and `isReviewsActive` says which of the two.
   const [isTicketsOpen, setIsTicketsOpen] = useState(false);
   const [isReviewsActive, setIsReviewsActive] = useState(false);
+  const [isNotificationsActive, setIsNotificationsActive] = useState(false);
+  const [notificationOpenRequest, setNotificationOpenRequest] = useState<{ id: string; key: number } | null>(null);
+  const notificationOpenKey = useRef(0);
+  const pendingNoticeFocusRef = useRef<{ id: string; at: number } | null>(null);
   const [reviewOpenRequest, setReviewOpenRequest] = useState<{ id: string; key: number } | null>(null);
   const shownReviewRef = useRef<string | null>(null);
   const reviewOpenKey = useRef(0);
@@ -564,9 +572,11 @@ function AppInner() {
     string | null
   >(null);
   const activeMainViewId = isTicketsOpen
-    ? isReviewsActive
-      ? "core.reviews"
-      : "core.tickets"
+    ? isNotificationsActive
+      ? "core.notifications"
+      : isReviewsActive
+        ? "core.reviews"
+        : "core.tickets"
     : isScheduledOpen
       ? "core.scheduled"
       : isExtensionsOpen
@@ -4337,12 +4347,25 @@ function AppInner() {
   const handleOpenReviews = useCallback((id?: string) => {
     setIsSettingsOpen(false);
     setIsScheduledOpen(false);
+    setIsNotificationsActive(false);
     setIsReviewsActive(true);
     setIsTicketsOpen(true);
     setIsExtensionsOpen(false);
     setIsPluginsOpen(false);
     setActiveExtensionPanelKey(null);
     if (id) setReviewOpenRequest({ id, key: ++reviewOpenKey.current });
+  }, []);
+
+  const handleOpenNotifications = useCallback((reportId?: string) => {
+    setIsSettingsOpen(false);
+    setIsScheduledOpen(false);
+    setIsReviewsActive(false);
+    setIsNotificationsActive(true);
+    setIsTicketsOpen(true);
+    setIsExtensionsOpen(false);
+    setIsPluginsOpen(false);
+    setActiveExtensionPanelKey(null);
+    if (reportId) setNotificationOpenRequest({ id: reportId, key: ++notificationOpenKey.current });
   }, []);
 
   // Review inbox. `reviewInboxEnabled` is false on older daemons, which hides
@@ -4398,6 +4421,28 @@ function AppInner() {
       unlisten?.();
     };
   }, [handleOpenReviews]);
+  // The daemon pushes notices to the phone; the Mac alerts for them here.
+  const notificationsPrefs = snapshot?.preferences.notifications;
+  const handleNewNotices = useCallback(
+    (notices: NotificationRecord[]) => {
+      if (notificationsPrefs && !notificationsPrefs.enabled) return;
+      for (const notice of notices.slice(0, 3)) {
+        if (document.hasFocus() && isTicketsOpen && isNotificationsActive) continue;
+        // As with reviews, the native notification has no click callback here.
+        if (!document.hasFocus() && notice.has_body) {
+          pendingNoticeFocusRef.current = { id: notice.id, at: Date.now() };
+        }
+        void sendDesktopAttentionNotification({ title: notice.title, body: notice.preview });
+      }
+    },
+    [isNotificationsActive, isTicketsOpen, notificationsPrefs],
+  );
+  const notificationCentre = useNotificationCentre({
+    api,
+    baseUrl,
+    enabled: !isOnboardingActive,
+    onNewNotices: handleNewNotices,
+  });
   const reviewInbox = useReviewInbox({
     api,
     baseUrl,
@@ -4408,12 +4453,14 @@ function AppInner() {
     const onFocus = () => {
       const pending = pendingReviewFocusRef.current;
       pendingReviewFocusRef.current = null;
-      if (!pending || Date.now() - pending.at > REVIEW_FOCUS_WINDOW_MS) return;
-      handleOpenReviews(pending.id);
+      const notice = pendingNoticeFocusRef.current;
+      pendingNoticeFocusRef.current = null;
+      if (pending && Date.now() - pending.at <= REVIEW_FOCUS_WINDOW_MS) handleOpenReviews(pending.id);
+      else if (notice && Date.now() - notice.at <= REVIEW_FOCUS_WINDOW_MS) handleOpenNotifications(notice.id);
     };
     window.addEventListener("focus", onFocus);
     return () => window.removeEventListener("focus", onFocus);
-  }, [handleOpenReviews]);
+  }, [handleOpenNotifications, handleOpenReviews]);
   // Turning the inbox off while it is showing must not strand an empty view.
   useEffect(() => {
     if (!reviewsEnabled && isReviewsActive) {
@@ -6072,6 +6119,9 @@ function AppInner() {
                 ? updater.state.status
                 : null
             }
+            onOpenNotifications={notificationCentre.unsupported ? undefined : () => handleOpenNotifications()}
+            notificationsOpen={isTicketsOpen && isNotificationsActive}
+            unreadNotifications={notificationCentre.counts.unread_count}
             onOpenReviews={reviewsEnabled ? () => handleOpenReviews() : undefined}
             reviewsOpen={isTicketsOpen && isReviewsActive}
             reviewCount={reviewInbox.openCount}
@@ -6130,6 +6180,26 @@ function AppInner() {
                       if (target) handleSelectThread(target.workspace_id, target.id);
                       else toast({ title: "Task unavailable", description: "This task is no longer available on this computer.", variant: "danger" });
                     }}
+                  />
+                </Suspense>
+              ),
+              "core.notifications": (
+                <Suspense fallback={loadingThreadState}>
+                  <NotificationsView
+                    centre={notificationCentre}
+                    api={api}
+                    openRequest={notificationOpenRequest}
+                    onOpenThread={(workspaceId, threadId) => {
+                      const target = resolveThreadLinkTarget(threadId, snapshot?.threads ?? []);
+                      if (target) handleSelectThread(target.workspace_id, target.id);
+                      else if (workspaceId && snapshot?.workspaces.some((workspace) => workspace.id === workspaceId)) handleSelectThread(workspaceId, threadId);
+                      else toast({ title: "Task unavailable", description: "This task is no longer available on this computer.", variant: "danger" });
+                    }}
+                    onOpenReview={handleOpenReviews}
+                    onPreview={requestFilePreview}
+                    onLocalPath={isTauriDesktop() ? handleLocalPath : null}
+                    localPathEditors={desktopEditors}
+                    describeLocalPath={isTauriDesktop() ? describeLocalPath : null}
                   />
                 </Suspense>
               ),

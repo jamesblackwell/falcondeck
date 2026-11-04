@@ -212,13 +212,23 @@ Read state set offline is queued and replayed over `notifications.mark_read`.
 
 ## Clients
 
-Both clients refresh by re-reading what is on screen from the head of the list and
+All clients refresh by re-reading what is on screen from the head of the list and
 replacing it, rather than merging into a loaded tail, so a backlog cannot leave a
 gap and a read on another device reaches every loaded row. A list scrolled very
 deep therefore costs more pages per refresh. `latest_seq` moves only with a head
 read: mark-all covers what James was shown, never a record that arrived since.
 
-- **Mac** (`mac-native-pilot`): a toolbar bell with an unread badge, a popover list
+- **Desktop** (`apps/desktop`, the Mac app James runs): a Notifications row with an
+  unread badge at the top of the sidebar opens a main view, in the same slot as
+  Reviews: the list by day, the three filters, mark-all and older pages. A report
+  renders with the shared `MessageMarkdown`; other rows go to their thread or
+  review. A new agent notice shows a desktop banner unless the list is already in
+  front, and only while the master switch is on. The banner has no click callback,
+  so a notice with a report opens when the window next takes focus, as reviews do.
+  The bell hides on a daemon without the centre. `notifications-qa.html` renders
+  it all against a fake daemon. Formatting shared with other clients lives in
+  `packages/client-core/src/notifications.ts`.
+- **Native Mac** (`mac-native-pilot`, not installed today): a toolbar bell with an unread badge, a popover list
   by day with the three filters and mark-all. Reports and reviews open in the main
   column, with a compact review view (overall response only; per-item decisions
   and evidence previews are not in this client). New agent notices show a native

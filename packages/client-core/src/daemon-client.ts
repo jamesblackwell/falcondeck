@@ -1,6 +1,13 @@
 import type { Ticket, TicketFilters, CreateTicketArgs, UpdateTicketArgs } from "./tickets";
 import type { Review, ReviewFilters, RespondReviewArgs } from "./reviews";
 import type {
+  MarkNotificationsReadRequest,
+  NotificationCounts,
+  NotificationListQuery,
+  NotificationListResponse,
+  NotificationRecord,
+} from "./notifications";
+import type {
   BotProfile,
   BotMutation,
   BotDocument,
@@ -575,6 +582,26 @@ export function createDaemonApiClient(baseUrl: string) {
     },
     async commentTicket(ticketId: string, body: string): Promise<Ticket> {
       return mutateTicket(`${baseUrl}/api/tickets/${encodeURIComponent(ticketId)}/comments`, { body });
+    },
+    /** Notification centre: one page, newest first, with counts for the whole store. */
+    async listNotifications(query: NotificationListQuery = {}): Promise<NotificationListResponse> {
+      const params = new URLSearchParams();
+      if (query.filter) params.set("filter", query.filter);
+      if (query.limit !== undefined) params.set("limit", String(query.limit));
+      if (query.before_seq !== undefined) params.set("before_seq", String(query.before_seq));
+      return parseJson<NotificationListResponse>(await fetch(`${baseUrl}/api/notifications?${params}`));
+    },
+    /** One record with its report body. */
+    async getNotification(id: string): Promise<NotificationRecord> {
+      return parseJson<NotificationRecord>(await fetch(`${baseUrl}/api/notifications/${encodeURIComponent(id)}`));
+    },
+    /** Pass `up_to_seq` from the list on screen so a newer record stays unread. */
+    async markNotificationsRead(request: MarkNotificationsReadRequest): Promise<NotificationCounts> {
+      return parseJson<NotificationCounts>(await fetch(`${baseUrl}/api/notifications/read`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(request),
+      }));
     },
     /** Review inbox. Open reviews by default; `include_closed` adds answered ones. */
     async listReviews(filters: ReviewFilters = {}): Promise<Review[]> {

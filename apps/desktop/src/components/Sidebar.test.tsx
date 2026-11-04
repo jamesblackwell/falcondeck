@@ -248,6 +248,29 @@ describe("DesktopSidebar", () => {
     expect(screen.queryByRole("button", { name: /^Reviews/ })).toBeNull();
   });
 
+  it("shows Notifications with an unread badge above Reviews", () => {
+    const onOpenNotifications = vi.fn();
+    const { rerenderSidebar } = renderSidebar({
+      onOpenNotifications,
+      onOpenReviews: vi.fn(),
+      unreadNotifications: 4,
+    });
+    const bell = screen.getByRole("button", { name: "Notifications, 4 unread" });
+    expect(bell).toHaveTextContent("4");
+    const reviews = screen.getByRole("button", { name: "Reviews" });
+    expect(bell.compareDocumentPosition(reviews) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    fireEvent.click(bell);
+    expect(onOpenNotifications).toHaveBeenCalledOnce();
+
+    rerenderSidebar({ onOpenNotifications, unreadNotifications: 0, notificationsOpen: true });
+    const quiet = screen.getByRole("button", { name: "Notifications" });
+    expect(quiet).toHaveAttribute("aria-current", "page");
+    expect(quiet).not.toHaveTextContent(/\d/);
+
+    rerenderSidebar({ onOpenNotifications: undefined });
+    expect(screen.queryByRole("button", { name: /^Notifications/ })).toBeNull();
+  });
+
   it("opens search from the header and adds projects from the Projects heading", () => {
     const onSearch = vi.fn();
     const onAddProject = vi.fn();
