@@ -6,6 +6,7 @@ export type ShortcutCommandId =
   | 'commandPalette'
   | 'openSettings'
   | 'openUsage'
+  | 'openAnalytics'
   | 'openKeyboardShortcuts'
   | 'openProject'
   | 'newChat'
@@ -58,6 +59,7 @@ export type ShortcutSettings = {
 export const SHORTCUT_DEFINITIONS: readonly ShortcutDefinition[] = [
   { id: 'commandPalette', label: 'Command menu', description: 'Search chats and available commands', category: 'App', context: 'global', defaults: ['Mod+K', 'Mod+Shift+P'] },
   { id: 'openSettings', label: 'Settings', description: 'Open FalconDeck settings', category: 'App', context: 'global', defaults: ['Mod+,'] },
+  { id: 'openAnalytics', label: 'Analytics', description: 'Open local activity analytics', category: 'App', context: 'global', defaults: ['Mod+Shift+A'] },
   { id: 'openUsage', label: 'Usage', description: 'Open subscription usage and limits', category: 'App', context: 'global', defaults: ['Mod+Shift+U'] },
   // "?" is the cross-app convention for the shortcut sheet (GitHub, Slack, Linear).
   // It is safe as a bare key because the global handler ignores editable targets,

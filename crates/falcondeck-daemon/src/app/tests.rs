@@ -9655,3 +9655,53 @@ async fn extensions_bridge_is_spawned_without_any_extension_tools() {
         .expect("extensions bridge spec");
     assert_eq!(spec.thread_id.as_deref(), Some("thread-1"));
 }
+
+#[test]
+fn legacy_managed_origin_backfill_is_idempotent_and_rejects_shared_targets() {
+    use super::{backfill_automation_origins, PersistedThreadState, PersistedWorkspaceState};
+    use falcondeck_core::control::{Automation, AutomationThreadTarget as Target};
+    let definition: Automation = serde_json::from_value(serde_json::json!({
+        "id":"a","revision":1,"name":"Legacy","trigger":{"kind":"once","run_at":"2026-12-01T00:00:00Z"},
+        "task":{"kind":"prompt","instruction":"Check"},"target":{"workspace_path":"/tmp","provider":"claude","thread":{"kind":"managed","thread_id":"legacy"}},
+        "state":"enabled","concurrency_policy":"skip","misfire_policy":"skip","created_at":"2026-11-03T00:00:00Z","updated_at":"2026-11-03T00:00:00Z","next_run_at":null
+    })).unwrap();
+    let thread: PersistedThreadState =
+        serde_json::from_value(serde_json::json!({"thread_id":"legacy"})).unwrap();
+    let workspace = PersistedWorkspaceState {
+        thread_states: vec![thread],
+        ..Default::default()
+    };
+    let mut workspaces = vec![workspace.clone()];
+    backfill_automation_origins(&mut workspaces, std::slice::from_ref(&definition));
+    assert!(crate::control::automations::owns_thread(
+        "a",
+        workspaces[0].thread_states[0].origin.as_ref()
+    ));
+    let once = workspaces.clone();
+    backfill_automation_origins(&mut workspaces, std::slice::from_ref(&definition));
+    assert_eq!(workspaces, once);
+    let mut other = definition.clone();
+    other.id = "b".into();
+    for target in [
+        Target::Managed {
+            thread_id: Some("legacy".into()),
+        },
+        Target::Existing {
+            thread_id: "legacy".into(),
+        },
+    ] {
+        other.target.thread = target;
+        let mut shared = vec![workspace.clone()];
+        backfill_automation_origins(&mut shared, &[definition.clone(), other.clone()]);
+        assert!(shared[0].thread_states[0].origin.is_none());
+    }
+    other.target.thread = Target::Managed {
+        thread_id: Some("missing".into()),
+    };
+    backfill_automation_origins(&mut workspaces, &[other]);
+    assert_eq!(workspaces, once);
+    let mut renamed_owner = definition.clone();
+    renamed_owner.id = "different".into();
+    backfill_automation_origins(&mut workspaces, &[renamed_owner]);
+    assert_eq!(workspaces, once);
+}

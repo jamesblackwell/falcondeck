@@ -20,6 +20,7 @@ import { SidebarOptionsMenu } from "./SidebarOptionsMenu";
 export type DesktopSidebarProps = WorkspaceSidebarProps & {
   onOpenSettings?: () => void;
   settingsOpen?: boolean;
+  onOpenAnalytics?: () => void
   onOpenUsage?: () => void;
   onOpenKeyboardShortcuts?: () => void;
   onOpenSpeechSettings?: () => void;
@@ -47,6 +48,7 @@ export type DesktopSidebarProps = WorkspaceSidebarProps & {
 export const DesktopSidebar = memo(function DesktopSidebar({
   onOpenSettings,
   settingsOpen = false,
+  onOpenAnalytics,
   onOpenUsage,
   onOpenKeyboardShortcuts,
   onOpenSpeechSettings,
@@ -153,6 +155,7 @@ export const DesktopSidebar = memo(function DesktopSidebar({
         <SidebarOptionsMenu
           onOpenSettings={onOpenSettings}
           settingsOpen={settingsOpen}
+          onOpenAnalytics={onOpenAnalytics}
           onOpenUsage={onOpenUsage}
           onOpenKeyboardShortcuts={onOpenKeyboardShortcuts}
           onOpenSpeechSettings={onOpenSpeechSettings}

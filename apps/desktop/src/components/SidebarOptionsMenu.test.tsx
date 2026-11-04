@@ -6,6 +6,14 @@ import { SidebarOptionsMenu } from './SidebarOptionsMenu'
 import { readDictationSettings, writeDictationSettings, DEFAULT_DICTATION_SETTINGS } from '../dictation'
 
 describe('SidebarOptionsMenu', () => {
+  it('opens Analytics from Options', () => {
+    const open = vi.fn()
+    render(<SidebarOptionsMenu onOpenAnalytics={open} />)
+    fireEvent.click(screen.getByRole('button', { name: 'Options' }))
+    fireEvent.click(screen.getByRole('menuitem', { name: /Analytics/ }))
+    expect(open).toHaveBeenCalledOnce()
+  })
+
   beforeEach(() => {
     updateAppearance({ theme: 'system' })
   })

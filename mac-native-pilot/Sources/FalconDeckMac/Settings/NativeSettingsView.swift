@@ -4,7 +4,7 @@ enum NativeSettingsSection: String, CaseIterable, Identifiable {
     case general, appearance, notifications, conversations, keyboard, extensions, agents, harnesses, connectors
     case agentControl = "agent-control"
     case computerUse = "computer-use"
-    case speech, models, cloud, remote, servers, backup
+    case speech, models, cloud, remote, servers, backup, analytics
     var id: String { rawValue }
     var title: String {
         switch self {
@@ -24,6 +24,7 @@ enum NativeSettingsSection: String, CaseIterable, Identifiable {
         case .cloud: "Cloud execution"
         case .remote: "Remote access"
         case .servers: "Servers"
+        case .analytics: "Analytics"
         case .backup: "Backup & data"
         }
     }
@@ -45,6 +46,7 @@ enum NativeSettingsSection: String, CaseIterable, Identifiable {
         case .cloud: "cloud"
         case .remote: "wifi"
         case .servers: "server.rack"
+        case .analytics: "chart.bar.xaxis"
         case .backup: "archivebox"
         }
     }
@@ -52,7 +54,7 @@ enum NativeSettingsSection: String, CaseIterable, Identifiable {
         switch self {
         case .general, .appearance, .notifications, .conversations, .keyboard, .extensions: "App"
         case .agents, .harnesses, .connectors, .agentControl, .computerUse, .speech, .models: "Agents"
-        case .cloud, .remote, .servers, .backup: "Connection & data"
+        case .cloud, .remote, .servers, .backup, .analytics: "Connection & data"
         }
     }
     var detail: String {
@@ -73,6 +75,7 @@ enum NativeSettingsSection: String, CaseIterable, Identifiable {
         case .cloud: "Isolated Linux workers and cloud task credentials"
         case .remote: "Pair devices and manage trusted connections"
         case .servers: "SSH servers and remote projects"
+        case .analytics: "Local activity and scheduled-task token usage"
         case .backup: "Export, inspect, restore and reset"
         }
     }
@@ -94,6 +97,7 @@ enum NativeSettingsSection: String, CaseIterable, Identifiable {
         case .cloud: "vercel sandbox cloud codex openai worker linux token image network timeout"
         case .remote: "relay device pairing trusted revoke code qr mobile"
         case .servers: "ssh provision host port credentials daemon restart remote project"
+        case .analytics: "tokens models scheduled tasks activity"
         case .backup: "data archive export import restore migration path mapping reset"
         }
     }
@@ -193,6 +197,7 @@ struct NativeSettingsView: View {
 
     @ViewBuilder private var detail: some View {
         switch selected {
+        case .analytics: NativeAnalyticsSettingsView(store: store)
         case .general: scrolling { NativeGeneralSettingsView(store: store) }
         case .appearance: NativeAppearanceSettingsView()
         case .notifications: NativeNotificationsSettingsView(store: store)

@@ -176,3 +176,13 @@ paired remote clients are refused, like the rest of analytics.
 - `POST /api/analytics/clear` with `{"target": "prompts" | "events" | "usage"
   | "all"}`. Usage has its own target: deleting activity metadata leaves the
   token usage log alone.
+
+The Scheduled tasks table shows observed models, a differing configured pin,
+recorded tokens (uncached input + cache reads + cache writes + output), and a
+hover breakdown. Tokens can be sorted in either direction. With no recorded
+usage, the configured pin or current thread model appears muted. Task names
+open the Automations editor; review flags have readable labels and fix hints.
+Options → Analytics opens this panel directly (default ⌘⇧A; customizable).
+The native Mac pilot also has an Analytics destination and the same shortcut.
+Usage is joined to run threads within the reporting window; retained usage can
+outlive deleted definitions. Shared-thread totals can include manual turns.

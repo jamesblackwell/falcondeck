@@ -618,6 +618,10 @@ export type AnalyticsWaiting = {
   p90_reply_ms: number;
 };
 export type AnalyticsAutomation = {
+  models?: string[];
+  configured_model?: string | null;
+  fallback_model?: string | null;
+  usage?: AnalyticsUsageTotals;
   id?: string | null;
   name: string;
   /** enabled, paused, completed or failed; empty when deleted. */

@@ -5699,6 +5699,9 @@ function AppInner() {
           setIsExtensionsOpen(false);
           setIsPluginsOpen(false);
           break;
+        case "openAnalytics":
+          openSettingsSection("analytics");
+          break;
         case "openUsage":
           handleOpenUsage();
           break;
@@ -5825,6 +5828,7 @@ function AppInner() {
     handleOpenKeyboardShortcuts,
     handleOpenProjectMenu,
     handleOpenUsage,
+    openSettingsSection,
     handleStopCallback,
     isSettingsOpen,
     isTerminalOpen,
@@ -5991,6 +5995,7 @@ function AppInner() {
             isAddingProject={isAddingProject}
             onOpenSettings={handleOpenSettings}
             settingsOpen={isSettingsOpen}
+            onOpenAnalytics={() => openSettingsSection("analytics")}
             onOpenUsage={handleOpenUsage}
             onOpenKeyboardShortcuts={handleOpenKeyboardShortcuts}
             onOpenSpeechSettings={openSpeechSettings}
@@ -6137,6 +6142,7 @@ function AppInner() {
                   <SettingsView
                     cloudOwners={cloudOwners}
                     initialCloudOwnerId={selectedCloudOwnerId}
+                    onOpenAutomation={handleOpenAutomation}
                     initialSection={settingsSection}
                     sectionRequestKey={settingsRequestKey}
                     workspace={selectedWorkspace}
