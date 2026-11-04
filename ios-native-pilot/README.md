@@ -139,6 +139,17 @@ keys, tokens, real device inventory or private screenshots in git.
   `preferences.review_inbox_enabled`; refreshes on connect and on `control-state-changed` for
   `reviews`. The demo includes sample reviews with generated mock-ups. See
   [REVIEWS](../docs/REVIEWS.md).
+- Notification centre: the sidebar's **Notifications** row shows the unread count and opens the
+  daemon's history by day, with All / Needs you / From bots filters, paging and Mark all read
+  (`notifications.list`, `notification.get`, `notifications.mark_read`). A row deep-links like its
+  push: thread, review, or a detail screen for a notice or report, with a typed or dictated reply
+  that goes to the source thread as an ordinary message. With the computer asleep the list shows
+  what was last loaded (kept in the encrypted session preview) plus reports hosted on the relay,
+  decrypted with the session key and checked against the requested report and session; reads are
+  queued and replayed on reconnect. A relay without `reports` in `/v1/push-capabilities` gets no
+  report calls, and a daemon without the RPCs hides the row. `--demo` has sample history;
+  add `--notification-preview=offline` for the asleep states. See
+  [NOTIFICATION-CENTRE](../docs/NOTIFICATION-CENTRE.md).
 - Settings: all 19 shared theme palettes, text size/Dynamic Type, conversation,
   connected alerts, speech, connection diagnostics, about and developer tools.
 - Extension stages, declarative filters/panels and follow-up suggestions. Buttons

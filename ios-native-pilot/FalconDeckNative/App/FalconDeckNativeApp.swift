@@ -101,6 +101,10 @@ struct RootView: View {
     @Environment(\.dynamicTypeSize) private var textSize
     @AppStorage("native.debug.overlay") private var showPerformance = false
     @State private var compactColumn: NavigationSplitViewColumn = .sidebar
+    /// Popping a push inside the detail stack leaves `compactColumn` stale, and
+    /// reasserting `.detail` then stacks the detail a second time. Only reveal
+    /// the detail column when the phone is really on the sidebar.
+    @State private var sidebarOnScreen = true
     @State private var columnVisibility: NavigationSplitViewVisibility = .all
     @State private var detailPath: [DetailDestination] = []
     @State private var botInfoID: String?
@@ -143,6 +147,8 @@ struct RootView: View {
                 if sizeClass == .compact { compactColumn = .detail }
             }
                 .navigationSplitViewColumnWidth(min: 280, ideal: 320, max: 380)
+                .onAppear { sidebarOnScreen = true }
+                .onDisappear { sidebarOnScreen = false }
         } detail: {
             // Keep the navigation controller stable while the compact column
             // opens. Replacing the stack can deliver disappearance to the new
@@ -174,6 +180,7 @@ struct RootView: View {
                 // workspace appears. Default launches still open the sidebar.
                 switch model.selection { case .projects, nil: break; default: compactColumn = .detail }
             }
+            openRequestedNotification()
         }
         .sensoryFeedback(.selection, trigger: model.selection) { _, _ in motion.active }
         // Sidebar taps also reveal an unchanged selection. This observer handles
@@ -181,13 +188,22 @@ struct RootView: View {
         .onChange(of: model.selection) { _, selection in
             var reset = Transaction(); reset.disablesAnimations = true
             withTransaction(reset) { detailPath.removeAll() }
-            if selection != nil && sizeClass == .compact { compactColumn = .detail }
+            if selection != nil && sizeClass == .compact && sidebarOnScreen { compactColumn = .detail }
+            openRequestedNotification()
         }
         .onChange(of: model.detailRequestID) { _, _ in
             var reset = Transaction(); reset.disablesAnimations = true
             withTransaction(reset) { detailPath.removeAll() }
-            if sizeClass == .compact { compactColumn = .detail }
+            if sizeClass == .compact && sidebarOnScreen { compactColumn = .detail }
+            openRequestedNotification()
         }
+    }
+    /// A tapped push can arrive before the notifications screen exists, so its
+    /// report is pushed here, after the reset above.
+    private func openRequestedNotification() {
+        guard model.selection == .notifications, let request = model.notificationCentre.openRequest else { return }
+        model.notificationCentre.openRequest = nil
+        detailPath = [.notificationDetail(request)]
     }
     /// A bot's title carries its mark and opens its status sheet.
     @ViewBuilder private var conversationTitle: some View {
@@ -231,7 +247,7 @@ struct RootView: View {
             case .settings: SettingsView()
             case .automations: AutomationsView()
             case .reviews: ReviewsView()
-            case .notifications: NotificationsView()
+            case .notifications: NotificationsView(path: $detailPath)
             default: StartView()
             }
         }

@@ -26,7 +26,10 @@ import XCTest
         }
     }
     private func element(_ app: XCUIApplication, _ id: String) -> XCUIElement { app.descendants(matching: .any).matching(identifier: id).firstMatch }
-    private func back(_ app: XCUIApplication) { app.navigationBars.buttons.element(boundBy: 0).tap() }
+    private func back(_ app: XCUIApplication) {
+        let button = app.buttons["BackButton"].exists ? app.buttons["BackButton"] : app.navigationBars.buttons.element(boundBy: 0)
+        button.tap()
+    }
     private func openCentre(_ app: XCUIApplication) {
         XCTAssertTrue(app.buttons["sidebar-notifications"].waitForExistence(timeout: 30))
         app.buttons["sidebar-notifications"].tap()
@@ -91,10 +94,17 @@ import XCTest
         app.buttons["notification-reply-send"].tap()
         XCTAssertTrue(element(app, "notification-reply-sent").waitForExistence(timeout: 15))
 
-        // The link back lands in the thread that received the reply.
+        // The link back leaves the report for the thread that received the reply.
         reveal(app, app.buttons["notification-open-thread"])
         app.buttons["notification-open-thread"].tap()
-        XCTAssertTrue(app.staticTexts["Yes, do the upload change this week."].waitForExistence(timeout: 20))
+        XCTAssertTrue(element(app, "conversation-title").waitForExistence(timeout: 20), "Open thread leaves the report")
+        XCTAssertFalse(element(app, "notification-body").exists)
+        // Demo chats reload their canned transcript, so the reply itself is covered by unit tests.
+        back(app)
+        XCTAssertTrue(app.buttons["sidebar-notifications"].waitForExistence(timeout: 20), "One back reaches the sidebar")
+        XCTAssertTrue(app.buttons["sidebar-task-native"].waitForExistence(timeout: 10))
+        app.buttons["sidebar-task-native"].tap()
+        XCTAssertTrue(element(app, "conversation-title").waitForExistence(timeout: 20), "A task row still opens from the sidebar")
     }
 
     func testTappingFollowsTheRecordAndMarkAllClearsTheBadge() {

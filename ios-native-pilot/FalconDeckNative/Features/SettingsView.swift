@@ -136,6 +136,8 @@ struct AboutView: View {
 enum DetailDestination: Hashable {
     case connections, extensions, automations, appearance, conversation, notifications, speech, developer, about, connectionLog
     case extensionPanel(extensionID: String, contribution: JSON)
+    case notificationDetail(NotificationDetailTarget)
+    case review(String)
 
     @MainActor @ViewBuilder var view: some View {
         switch self {
@@ -149,6 +151,8 @@ enum DetailDestination: Hashable {
         case .developer: DeveloperSettingsView()
         case .about: AboutView()
         case .connectionLog: ConnectionLogView()
+        case .notificationDetail(let target): NotificationDetailView(target: target)
+        case .review(let id): ReviewDetailView(reviewID: id)
         case .extensionPanel(let extensionID, let contribution): ExtensionPanelView(extensionID: extensionID, contribution: contribution)
         }
     }

@@ -66,7 +66,7 @@ struct NotificationDetailView: View {
     @ViewBuilder private func links(_ record: NotificationRecord) -> some View {
         VStack(alignment: .leading, spacing: 0) {
             if case .review(let id)? = record.target {
-                NavigationLink { ReviewDetailView(reviewID: id) } label: { sourceLabel("Open review", symbol: "text.badge.checkmark") }
+                NavigationLink(value: DetailDestination.review(id)) { sourceLabel("Open review", symbol: "text.badge.checkmark") }
                     .buttonStyle(.plain).accessibilityIdentifier("notification-open-review")
             }
             if let source = record.sourceThread {

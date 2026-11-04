@@ -4,10 +4,9 @@ import SwiftUI
 /// history; this shows it, and keeps reading while the computer is asleep.
 struct NotificationsView: View {
     @Environment(AppModel.self) private var model
-    /// The detail stack's path only holds `DetailDestination`s, so a notice or
-    /// review is pushed with its own destination rather than a value on that path.
-    @State private var openDetail: NotificationDetailTarget?
-    @State private var openReview: String?
+    /// Pushes live on the shared detail path, so opening a thread from anywhere
+    /// clears them along with this screen.
+    @Binding var path: [DetailDestination]
     private let clock = MinuteClock.shared
     private var store: NotificationCentreStore { model.notificationCentre }
 
@@ -20,14 +19,7 @@ struct NotificationsView: View {
             }
         }
         .background(FD.background)
-        .navigationDestination(item: $openDetail) { NotificationDetailView(target: $0) }
-        .navigationDestination(item: $openReview) { ReviewDetailView(reviewID: $0) }
         .accessibilityIdentifier("notifications-screen")
-        // A tapped push, which can arrive before this screen exists.
-        .onChange(of: store.openRequest, initial: true) { _, request in
-            guard let request else { return }
-            openReview = nil; openDetail = request; store.openRequest = nil
-        }
     }
 
     private var history: some View {
@@ -59,7 +51,8 @@ struct NotificationsView: View {
             .padding(.horizontal, 16).padding(.vertical, 12).frame(maxWidth: 720).frame(maxWidth: .infinity)
         }
         .overlay { if sections.isEmpty && store.refreshError == nil { placeholder(offline: offline) } }
-        .safeAreaInset(edge: .top, spacing: 0) { filterBar }
+        .safeAreaBar(edge: .top, spacing: 0) { filterBar }
+        .scrollEdgeEffectStyle(.hard, for: .top)
         .refreshable { await store.refresh(model: model, immediate: true) }
         .task(id: store.filter) { await store.refresh(model: model) }
         .onAppear { MinuteClock.shared.start() }
@@ -112,8 +105,8 @@ struct NotificationsView: View {
     private func open(_ record: NotificationRecord) {
         Task { await store.markRead(record.id, model: model) }
         switch record.action {
-        case .detail: openDetail = NotificationDetailTarget(record)
-        case .review(let id): openReview = id
+        case .detail: path = [.notificationDetail(NotificationDetailTarget(record))]
+        case .review(let id): path = [.review(id)]
         case .thread(let workspaceID, let threadID): Task { await model.openTask(threadID, workspaceID: workspaceID) }
         }
     }

@@ -207,6 +207,11 @@ import XCTest
         app.terminate()
         let chat = launchDemo()
         sidebar(chat)
+        // Landscape fits few rows, and the sidebar builds them lazily.
+        let list = chat.collectionViews.firstMatch
+        for _ in 0..<6 where !chat.buttons["sidebar-task-native"].isHittable {
+            list.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.7)).press(forDuration: 0.05, thenDragTo: list.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.45)))
+        }
         chat.buttons["sidebar-task-native"].tap()
         XCTAssertTrue(chat.buttons["composer-model"].waitForExistence(timeout: 5))
         XCTAssertTrue(chat.buttons["composer-model"].isHittable)
