@@ -59,7 +59,12 @@ extension String {
 
 struct PilotError: LocalizedError, Sendable {
     let message: String
-    init(_ message: String) { self.message = message }
+    /// HTTP status, when the local daemon answered with one.
+    let status: Int?
+    init(_ message: String, status: Int? = nil) {
+        self.message = message
+        self.status = status
+    }
     var errorDescription: String? { message }
 }
 

@@ -202,8 +202,9 @@ actor DaemonClient {
         guard let response = response as? HTTPURLResponse else { throw PilotError("The local daemon did not return an HTTP response.") }
         guard (200..<300).contains(response.statusCode) else {
             let error = try? JSON.decode(data)
-            let message = error?["error"].string ?? ""
-            throw PilotError(message.isEmpty ? "Daemon request failed (HTTP \(response.statusCode))." : message)
+            // Control reads answer with a structured `error` object.
+            let message = error?["error"].string.nonempty ?? error?["error"]["message"].string ?? ""
+            throw PilotError(message.isEmpty ? "Daemon request failed (HTTP \(response.statusCode))." : message, status: response.statusCode)
         }
         if response.statusCode == 204 || data.isEmpty { return .null }
         return try JSON.decode(data)

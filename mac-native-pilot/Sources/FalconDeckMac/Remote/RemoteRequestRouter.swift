@@ -66,7 +66,7 @@ enum NativeRemoteRequestRouter {
         "include_workspace_skills", "include_archived_threads", "include_thread_plans", "include_thread_diffs", "include_agent_skills",
         "inline_images", "strict_limit", "compact_workspace", "refresh_native", "refresh"
     ]
-    private static let integerQueryKeys: Set<String> = ["limit", "tool_output_bytes"]
+    private static let integerQueryKeys: Set<String> = ["limit", "tool_output_bytes", "before_seq"]
 
     private struct Route {
         let verb: String
@@ -152,6 +152,11 @@ enum NativeRemoteRequestRouter {
         Route("GET", "api/workspaces/:workspace_id/threads/:thread_id/queue/:queued_id/attachment-preview", "thread.queue.attachment_preview"),
         Route("POST", "api/workspaces/:workspace_id/interactive-requests/:request_id/respond", "interactive.respond"),
         Route("POST", "api/workspaces/:workspace_id/approvals/:request_id/respond", "approval.respond"),
+        Route("GET", "api/notifications", "notifications.list"),
+        Route("POST", "api/notifications/read", "notifications.mark_read"),
+        Route("GET", "api/notifications/:id", "notification.get"),
+        Route("GET", "api/reviews/:id", "review.get"),
+        Route("POST", "api/reviews/:review_id/respond", "review.respond"),
         Route("GET", "api/connectors", "connectors.read"),
         Route("PUT", "api/connectors", "connectors.update"),
         Route("GET", "api/skills", "skills.read"),

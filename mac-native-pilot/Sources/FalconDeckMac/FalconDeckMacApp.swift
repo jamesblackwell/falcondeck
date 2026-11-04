@@ -21,7 +21,7 @@ struct FalconDeckMacApp: App {
                         let id = host.map { NativeHostManager.namespace(hostID: $0, id: task) } ?? task
                         await store.selectTask(id)
                         NSApp.activate(ignoringOtherApps: true)
-                    })
+                    }, recordRoute: { host, id in await store.openNotification(id: id, hostID: host) })
                     NativeRecovery.shared.attach(store: store)
                     await store.reconnect()
                 }
@@ -55,6 +55,8 @@ struct FalconDeckMacApp: App {
                 Button("Automations") { store.selectSection("automations") }
                 Button("Usage") { store.selectSection("usage") }
                     .keyboardShortcut(NativeCommandDispatcher.menuShortcut(for: "openUsage", preferences: preferences))
+                Button("Notifications") { store.notifications.isPresented = true }
+                    .disabled(store.notifications.unsupported)
                 Divider()
                 Button("Toggle sidebar") { NativeCommandDispatcher.shared.execute("toggleSidebar") }
                     .keyboardShortcut(NativeCommandDispatcher.menuShortcut(for: "toggleSidebar", preferences: preferences))

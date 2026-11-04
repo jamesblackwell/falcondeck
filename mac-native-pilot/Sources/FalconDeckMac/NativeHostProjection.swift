@@ -60,6 +60,18 @@ enum NativeHostProjection {
         return value.setting("request", request(value["request"], host: host))
     }
 
+    static func notification(_ value: JSON, host: String) -> JSON {
+        var result = ids(value, keys: ["workspace_id", "thread_id"], host: host)
+        if value["target"] != .null {
+            result = result.setting("target", ids(value["target"], keys: ["workspace_id", "thread_id"], host: host))
+        }
+        return result
+    }
+
+    static func review(_ value: JSON, host: String) -> JSON {
+        ids(value, keys: ["source_workspace_id", "source_thread_id"], host: host)
+    }
+
     static func scheduledRun(_ value: JSON, host: String) -> JSON {
         ids(value, keys: ["id", "task_id", "workspace_id", "thread_id"], host: host)
     }
@@ -142,6 +154,12 @@ enum NativeHostProjection {
         if path == ["api", "preferences"] { return preferences(value, host: host) }
         if path == ["api", "workspaces", "connect"] || path == ["api", "chats"] { return workspace(value, host: host) }
         if path == ["api", "extensions"] { return extensions(value, host: host) }
+        if path.count >= 2, path[1] == "notifications" {
+            return value["id"] == .null ? rows(value, key: "items") { notification($0, host: host) } : notification(value, host: host)
+        }
+        if path.count >= 3, path[1] == "reviews", value["data"] != .null {
+            return value.setting("data", review(value["data"], host: host))
+        }
         if path.count >= 2, path[1] == "scheduled-tasks" {
             if case .array(let values) = value {
                 return .array(values.map { path.last == "runs" ? scheduledRun($0, host: host) : scheduledTask($0, host: host) })

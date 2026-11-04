@@ -24,6 +24,7 @@ struct WorkspaceView: View {
         .tint(FDTheme.accent)
         .toolbar {
             ToolbarItemGroup(placement: .primaryAction) {
+                NotificationBell(store: store)
                 Button { showingSearch = true } label: {
                     Label("Search tasks and commands", systemImage: "magnifyingglass")
                 }

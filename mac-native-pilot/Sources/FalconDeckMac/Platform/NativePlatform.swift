@@ -11,6 +11,8 @@ struct NativeAttentionNotice: Equatable {
     let body: String
     let projectID: String
     let taskID: String
+    /// Set for a banner that opens a notification-centre record, not a task.
+    var notificationID: String? = nil
 }
 
 /// Native notification delivery is a projection of daemon events, not history.
@@ -23,6 +25,7 @@ struct NativeAttentionNotice: Equatable {
 
     typealias NotificationRoute = @MainActor (String?, String, String) async -> Void
     typealias NoticeDelivery = @MainActor (NativeAttentionNotice, String?) async -> Void
+    typealias NotificationRecordRoute = @MainActor (String?, String) async -> Void
     @ObservationIgnored private let preferences: NativePreferences
     @ObservationIgnored private let sound: @MainActor (String) -> Void
     @ObservationIgnored private let badge: @MainActor (Int) -> Void
@@ -31,6 +34,7 @@ struct NativeAttentionNotice: Equatable {
     @ObservationIgnored private weak var store: AppStore?
     @ObservationIgnored private var currentHost: @MainActor () -> String? = { nil }
     @ObservationIgnored private var route: NotificationRoute?
+    @ObservationIgnored private var recordRoute: NotificationRecordRoute?
     @ObservationIgnored private var center: UNUserNotificationCenter?
     @ObservationIgnored private var heartbeat: Task<Void, Never>?
     @ObservationIgnored private var hosts: [String: AttentionHost] = [:]
@@ -62,10 +66,12 @@ struct NativeAttentionNotice: Equatable {
         super.init()
     }
 
-    func attach(store: AppStore, currentHost: @escaping @MainActor () -> String? = { nil }, route: NotificationRoute? = nil) {
+    func attach(store: AppStore, currentHost: @escaping @MainActor () -> String? = { nil }, route: NotificationRoute? = nil,
+                recordRoute: NotificationRecordRoute? = nil) {
         self.store = store
         self.currentHost = currentHost
         self.route = route
+        self.recordRoute = recordRoute
         if center == nil, Bundle.main.bundleURL.pathExtension == "app", Bundle.main.bundleIdentifier != nil {
             center = UNUserNotificationCenter.current()
             center?.delegate = self
@@ -195,6 +201,20 @@ struct NativeAttentionNotice: Equatable {
         return .init(key: "complete:\(turn)", kind: "notify_on_turn_complete", title: title, body: "The latest turn finished.", projectID: projectID, taskID: taskID)
     }
 
+    /// Agent notices never appear in thread state, so the notification centre
+    /// hands them over when a refetch reveals a new one. Thread alerts stay on
+    /// the path above; a notice has no alert of its own there to duplicate.
+    func deliverAgentNotice(_ record: NotificationRecord, hostID: String?) async {
+        let hostKey = hostID ?? "local"
+        guard remember("\(hostKey):agent-notice:\(record.id)") else { return }
+        let notice = NativeAttentionNotice(key: "agent-notice:\(record.id)", kind: "agent_notice",
+            title: record.bot.map { "\($0): \(record.title)" } ?? record.title, body: record.preview,
+            projectID: record.workspaceID.map { NativeHostManager.split($0).id } ?? "",
+            taskID: record.threadID.map { NativeHostManager.split($0).id } ?? "", notificationID: record.id)
+        guard isCurrent(notice, hostID: hostID) else { return }
+        await deliver(notice, hostID: hostID)
+    }
+
     private func scheduleFlush(_ hostKey: String) {
         guard pendingFlushes.insert(hostKey).inserted else { return }
         Task { [weak self] in
@@ -260,7 +280,8 @@ struct NativeAttentionNotice: Equatable {
         content.title = notice.title
         content.body = notice.body
         content.threadIdentifier = "\(hostID ?? "local"):\(notice.projectID):\(notice.taskID)"
-        content.userInfo = ["workspace_id": notice.projectID, "thread_id": notice.taskID, "host_id": hostID ?? ""]
+        content.userInfo = ["workspace_id": notice.projectID, "thread_id": notice.taskID, "host_id": hostID ?? "",
+                            "notification_id": notice.notificationID ?? ""]
         let request = UNNotificationRequest(identifier: "\(content.threadIdentifier):\(notice.key)", content: content, trigger: nil)
         do { try await center.add(request); notificationError = nil }
         catch { notificationError = error.localizedDescription }
@@ -268,12 +289,16 @@ struct NativeAttentionNotice: Equatable {
 
     private func isViewed(_ notice: NativeAttentionNotice, hostID: String?) -> Bool {
         if let viewed { return viewed(notice, hostID) }
-        return NSApp.isActive && NSApp.keyWindow != nil && desktopPresent
-            && currentHost() == hostID && store?.selectedTaskID.map { NativeHostManager.split($0).id } == notice.taskID
+        guard NSApp.isActive, NSApp.keyWindow != nil, desktopPresent, currentHost() == hostID else { return false }
+        if notice.notificationID != nil, store?.notifications.isPresented == true { return true }
+        return store?.selectedTaskID.map { NativeHostManager.split($0).id } == notice.taskID
             && ["project", "pins", "chats"].contains(store?.selectedSection ?? "")
     }
 
     private func isCurrent(_ notice: NativeAttentionNotice, hostID: String?) -> Bool {
+        if notice.notificationID != nil {
+            return Self.enabled("enabled", in: hosts[hostID ?? "local"]?.preferences ?? .null) && !isViewed(notice, hostID: hostID)
+        }
         guard let host = hosts[hostID ?? "local"], let task = host.tasks[notice.taskID] else { return false }
         return Self.enabled("enabled", in: host.preferences) && Self.enabled(notice.kind, in: host.preferences)
             && Self.notice(task: task, requests: host.requests)?.key == notice.key
@@ -308,8 +333,14 @@ struct NativeAttentionNotice: Equatable {
         let taskID = info["thread_id"] as? String ?? ""
         let projectID = info["workspace_id"] as? String ?? ""
         let hostID = (info["host_id"] as? String)?.nonempty
+        let notificationID = (info["notification_id"] as? String)?.nonempty
         Task { @MainActor in
             defer { completionHandler() }
+            if let notificationID {
+                NativeWorkspaceWindow.show()
+                await recordRoute?(hostID, notificationID)
+                return
+            }
             guard !taskID.isEmpty, !projectID.isEmpty else { return }
             NativeWorkspaceWindow.show()
             if let route { await route(hostID, projectID, taskID) }

@@ -28,6 +28,8 @@ struct MainWorkspaceView: View {
                 case "plugins": NativePluginsView(store: store)
                 case "extensions": NativeExtensionsView(store: store).id("\(store.selectedHostID ?? "local"):extensions")
                 case "settings": NativeSettingsView(store: store)
+                case "notification":
+                    if let reader = store.selectedReader { NotificationReaderView(store: store, reader: reader).id(reader) }
                 case "extension-panel":
                     if let extensionID = store.selectedExtensionID, let panelID = store.selectedPanelID {
                         NativeExtensionPanel(store: store, extensionID: extensionID, panelID: panelID)

@@ -53,13 +53,17 @@ extension DaemonClient: DaemonServing {}
     var showTerminal = UserDefaults.standard.bool(forKey: "falcondeck.native.terminal") {
         didSet { UserDefaults.standard.set(showTerminal, forKey: "falcondeck.native.terminal") }
     }
-    private(set) var selectedProjectID: String?
+    private(set) var selectedProjectID: String? {
+        didSet { notifications.follow(hostID: selectedHostID) }
+    }
     private(set) var selectedTaskID: String? {
         didSet { refreshSelectedTask() }
     }
     // Conversation views must not observe the full task index: another agent's
     // metadata updates should only redraw that task's navigation rows.
     private(set) var selectedTask: AgentTask?
+    @ObservationIgnored let notifications = NotificationCentreStore()
+    private(set) var selectedReader: NotificationReader?
     private(set) var transcript = Transcript()
     private(set) var isConnected = false
     private(set) var isLoading = false
@@ -114,6 +118,7 @@ extension DaemonClient: DaemonServing {}
         var task: String?
         var extensionID: String?
         var panelID: String?
+        var reader: NotificationReader?
     }
     @ObservationIgnored private var navigationHistory: [Navigation] = []
     @ObservationIgnored private var navigationIndex = -1
@@ -138,7 +143,15 @@ extension DaemonClient: DaemonServing {}
             selectedProjectID = UserDefaults.standard.string(forKey: "falcondeck.native.selectedProject")
             selectedTaskID = UserDefaults.standard.string(forKey: "falcondeck.native.selectedTask")
             selectedSection = Self.restoredSection(UserDefaults.standard.string(forKey: "falcondeck.native.selectedSection"))
+            notifications.onNewNotice = { record, hostID in
+                Task { await NativePlatform.shared.deliverAgentNotice(record, hostID: hostID) }
+            }
         }
+        notifications.transport = { [weak self] path, method, query, body, hostID in
+            guard let self else { throw PilotError("The app is closing.") }
+            return try await self.request(path, method: method, query: query, body: body, hostID: hostID)
+        }
+        notifications.follow(hostID: selectedHostID)
     }
 
     var messages: [Message] { transcript.items }
@@ -449,10 +462,12 @@ extension DaemonClient: DaemonServing {}
             snapshotRaw = localSnapshot
         }
         if client is DaemonClient, notifyPlatform { NativePlatform.shared.handle(envelope, hostID: originHost) }
+        notifications.receive(event, hostID: originHost)
         if taskID == selectedTaskID { NativeAudioPlayback.shared.handleRealtime(event, taskID: taskID) }
         switch event["type"].string {
         case "snapshot":
             if selectedHostID == nil { NativeAudioPlayback.shared.stopRealtime() }
+            notifications.connected(hostID: originHost)
             let snapshot = event["snapshot"]
             localSnapshot = snapshot
             snapshotRaw = snapshot
@@ -551,7 +566,8 @@ extension DaemonClient: DaemonServing {}
     }
 
     nonisolated static func restoredSection(_ section: String?) -> String {
-        section == "cloud" ? "project" : section ?? "project"
+        // A notification reader has nothing to open until a record is chosen.
+        ["cloud", "notification"].contains(section) ? "project" : section ?? "project"
     }
 
     func selectSection(_ section: String) {
@@ -595,7 +611,8 @@ extension DaemonClient: DaemonServing {}
     private func recordNavigation(addingHistory: Bool = true) {
         let entry = Navigation(section: selectedSection, project: selectedProjectID, task: selectedTaskID,
             extensionID: selectedSection == "extension-panel" ? selectedExtensionID : nil,
-            panelID: selectedSection == "extension-panel" ? selectedPanelID : nil)
+            panelID: selectedSection == "extension-panel" ? selectedPanelID : nil,
+            reader: selectedSection == "notification" ? selectedReader : nil)
         if addingHistory, (!navigationHistory.indices.contains(navigationIndex) || navigationHistory[navigationIndex] != entry) {
             if navigationIndex + 1 < navigationHistory.count { navigationHistory.removeSubrange((navigationIndex + 1)... ) }
             navigationHistory.append(entry)
@@ -619,6 +636,7 @@ extension DaemonClient: DaemonServing {}
         selectedSection = entry.section
         selectedExtensionID = entry.extensionID
         selectedPanelID = entry.panelID
+        selectedReader = entry.reader
         if let id = entry.task, tasks.contains(where: { $0.id == id }) {
             if ["project", "chats", "pins"].contains(entry.section) { await selectTask(id, recordHistory: false) }
             else { selectedTaskID = id; recordNavigation(addingHistory: false) }
@@ -649,6 +667,15 @@ extension DaemonClient: DaemonServing {}
         selectedExtensionID = extensionID; selectedPanelID = panelID; selectedSection = "extension-panel"
         recordNavigation()
     }
+
+    func selectNotificationReader(_ reader: NotificationReader) {
+        navigationID = UUID()
+        selectedReader = reader
+        selectedSection = "notification"
+        recordNavigation()
+    }
+
+    var canNavigateBack: Bool { navigationIndex > 0 }
 
     func request(_ path: String, method: String = "GET", body: JSON? = nil, hostID: String? = nil) async throws -> JSON {
         guard let components = URLComponents(string: path), components.scheme == nil, components.host == nil else {
@@ -1095,6 +1122,7 @@ extension DaemonClient: DaemonServing {}
             refreshRemoteMetadata(hostID: update.hostID)
             preferenceRevision[update.hostID, default: 0] &+= 1
             if client is DaemonClient { NativePlatform.shared.handle(.object(["event": .object(["type": .string("snapshot"), "snapshot": value])]), hostID: update.hostID) }
+            notifications.connected(hostID: update.hostID)
             rebuildIndexes()
             recoverRemoteSelection(hostID: update.hostID)
         case .rebase(let values):
@@ -1115,6 +1143,7 @@ extension DaemonClient: DaemonServing {}
                 }
                 if type == "snapshot" {
                     preferenceRevision[update.hostID, default: 0] &+= 1
+                    notifications.connected(hostID: update.hostID)
                     rebuildIndexes()
                     recoverRemoteSelection(hostID: update.hostID)
                     continue
@@ -1127,6 +1156,7 @@ extension DaemonClient: DaemonServing {}
             remoteSnapshots.removeValue(forKey: update.hostID)
             refreshRemoteMetadata(hostID: update.hostID)
             remoteStatuses.removeValue(forKey: update.hostID)
+            notifications.forget(hostID: update.hostID)
             rebuildIndexes()
         case .status(let status, _): remoteStatuses[update.hostID] = status; eventRevision &+= 1
         }
