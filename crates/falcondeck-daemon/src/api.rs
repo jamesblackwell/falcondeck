@@ -1868,14 +1868,20 @@ async fn open_terminal(
     Path(workspace_id): Path<String>,
     Json(request): Json<OpenTerminalRequest>,
 ) -> Result<Json<TerminalOpenedResponse>, DaemonError> {
-    let Some(cwd) = state.workspace_path(&workspace_id).await else {
-        return Err(DaemonError::NotFound(format!(
-            "workspace not found: {workspace_id}"
-        )));
-    };
+    let thread_id = request.thread_id.filter(|id| !id.is_empty());
+    let bot_id = request.bot_id.filter(|id| !id.is_empty());
+    let cwd = state
+        .terminal_cwd(&workspace_id, thread_id.as_deref(), bot_id.as_deref())
+        .await?;
     let session = state
         .terminals()
-        .open(&workspace_id, &cwd, request.cols, request.rows)
+        .open_scoped(
+            &workspace_id,
+            &cwd,
+            request.cols,
+            request.rows,
+            crate::terminal::TerminalScope { thread_id, bot_id },
+        )
         .map_err(DaemonError::BadRequest)?;
     Ok(Json(TerminalOpenedResponse { session }))
 }
@@ -1891,6 +1897,8 @@ async fn close_terminal(
     }
     Ok(Json(serde_json::json!({ "ok": true })))
 }
+
+const TERMINAL_STATUS_INTERVAL: std::time::Duration = std::time::Duration::from_millis(1_000);
 
 #[derive(serde::Deserialize, Default)]
 struct TerminalWsQuery {
@@ -1935,10 +1943,29 @@ async fn terminal_socket(
         return;
     };
 
+    // Tab titles follow the foreground process and its directory; polling is
+    // per attached socket and only sends changes.
+    let mut status_tick = tokio::time::interval(TERMINAL_STATUS_INTERVAL);
+    status_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    let mut last_status = None;
     loop {
         tokio::select! {
             frame = receiver.recv() => {
                 let Some(frame) = frame else { break; };
+                if send_terminal_frame(&mut socket, &frame).await.is_err() {
+                    break;
+                }
+            }
+            _ = status_tick.tick() => {
+                let Some(status) = state.terminals().status(&terminal_id) else { continue; };
+                if last_status.as_ref() == Some(&status) {
+                    continue;
+                }
+                let frame = TerminalServerFrame::TerminalStatus {
+                    process: status.process.clone(),
+                    cwd: status.cwd.clone(),
+                };
+                last_status = Some(status);
                 if send_terminal_frame(&mut socket, &frame).await.is_err() {
                     break;
                 }

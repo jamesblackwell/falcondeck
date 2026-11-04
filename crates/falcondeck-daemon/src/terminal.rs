@@ -240,6 +240,18 @@ impl TerminalManager {
         cols: u16,
         rows: u16,
     ) -> Result<TerminalSessionInfo, String> {
+        self.open_scoped(workspace_id, cwd, cols, rows, TerminalScope::default())
+    }
+
+    /// `open` for a session owned by a thread or bot.
+    pub fn open_scoped(
+        &self,
+        workspace_id: &str,
+        cwd: &str,
+        cols: u16,
+        rows: u16,
+        scope: TerminalScope,
+    ) -> Result<TerminalSessionInfo, String> {
         if !Path::new(cwd).is_dir() {
             return Err(format!("workspace path is not a directory: {cwd}"));
         }
@@ -292,6 +304,8 @@ impl TerminalManager {
             cols,
             rows,
             created_at: chrono::Utc::now(),
+            thread_id: scope.thread_id,
+            bot_id: scope.bot_id,
         };
         let session = Arc::new(TerminalSession {
             info: info.clone(),
@@ -497,6 +511,31 @@ impl TerminalManager {
         true
     }
 
+    /// Closes every session owned by `thread_id` (or, with `bot_id`, by that
+    /// bot). Returns how many were closed.
+    pub fn close_scope(&self, thread_id: Option<&str>, bot_id: Option<&str>) -> usize {
+        let ids: Vec<String> = {
+            let sessions = self.sessions.lock().expect("sessions lock");
+            sessions
+                .values()
+                .filter(|session| {
+                    let info = &session.info;
+                    (thread_id.is_some() && info.thread_id.as_deref() == thread_id)
+                        || (bot_id.is_some() && info.bot_id.as_deref() == bot_id)
+                })
+                .map(|session| session.info.id.clone())
+                .collect()
+        };
+        ids.iter().filter(|id| self.close(id)).count()
+    }
+
+    /// Foreground process name and its working directory, for tab titles.
+    pub fn status(&self, id: &str) -> Option<TerminalForegroundStatus> {
+        let session = self.get(id)?;
+        let leader = session.master.lock().ok()?.process_group_leader();
+        Some(foreground_status(leader))
+    }
+
     /// Terminates every session; used on daemon shutdown. SIGHUP with a
     /// SIGKILL sweep after the grace period.
     pub async fn shutdown_all(&self) {
@@ -514,6 +553,65 @@ impl TerminalManager {
             }
         }
     }
+}
+
+/// Owner of a new session; both empty means workspace-level.
+#[derive(Debug, Clone, Default)]
+pub struct TerminalScope {
+    pub thread_id: Option<String>,
+    pub bot_id: Option<String>,
+}
+
+/// What a session's foreground process is doing, as far as the OS will say.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct TerminalForegroundStatus {
+    pub process: Option<String>,
+    pub cwd: Option<String>,
+}
+
+#[cfg(target_os = "macos")]
+fn foreground_status(pid: Option<libc::pid_t>) -> TerminalForegroundStatus {
+    let Some(pid) = pid.filter(|pid| *pid > 0) else {
+        return TerminalForegroundStatus::default();
+    };
+    let mut name = [0u8; 256];
+    // SAFETY: the buffer outlives the call and its length is passed in.
+    let len = unsafe { libc::proc_name(pid, name.as_mut_ptr().cast(), name.len() as u32) };
+    let process = (len > 0)
+        .then(|| String::from_utf8_lossy(&name[..len as usize]).trim().to_string())
+        .filter(|name| !name.is_empty());
+    let mut info = std::mem::MaybeUninit::<libc::proc_vnodepathinfo>::zeroed();
+    let size = std::mem::size_of::<libc::proc_vnodepathinfo>() as libc::c_int;
+    // SAFETY: proc_pidinfo writes at most `size` bytes into `info`.
+    let written = unsafe {
+        libc::proc_pidinfo(
+            pid,
+            libc::PROC_PIDVNODEPATHINFO,
+            0,
+            info.as_mut_ptr().cast(),
+            size,
+        )
+    };
+    let cwd = (written == size)
+        .then(|| {
+            // SAFETY: fully written above.
+            let info = unsafe { info.assume_init() };
+            let raw = info.pvi_cdir.vip_path;
+            let bytes: Vec<u8> = raw
+                .iter()
+                .flat_map(|row| row.iter())
+                .map(|c| *c as u8)
+                .take_while(|c| *c != 0)
+                .collect();
+            String::from_utf8_lossy(&bytes).to_string()
+        })
+        .filter(|path| !path.is_empty());
+    TerminalForegroundStatus { process, cwd }
+}
+
+#[cfg(not(target_os = "macos"))]
+fn foreground_status(_pid: Option<i32>) -> TerminalForegroundStatus {
+    TerminalForegroundStatus::default()
 }
 
 fn terminate_session(session: &TerminalSession) {
@@ -743,6 +841,57 @@ mod tests {
             .to_string(),
             _ => String::new(),
         }
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn scoped_sessions_close_with_their_thread_or_bot() {
+        let manager = test_manager();
+        let (_dir, cwd) = workspace_dir();
+        let scoped = |thread: Option<&str>, bot: Option<&str>| TerminalScope {
+            thread_id: thread.map(str::to_string),
+            bot_id: bot.map(str::to_string),
+        };
+        let thread = manager
+            .open_scoped("ws-test", &cwd, 80, 24, scoped(Some("thread-1"), None))
+            .expect("thread terminal");
+        let other = manager
+            .open_scoped("ws-test", &cwd, 80, 24, scoped(Some("thread-2"), None))
+            .expect("other terminal");
+        let bot = manager
+            .open_scoped("ws-test", &cwd, 80, 24, scoped(Some("home"), Some("atlas")))
+            .expect("bot terminal");
+        assert_eq!(thread.thread_id.as_deref(), Some("thread-1"));
+        assert_eq!(bot.bot_id.as_deref(), Some("atlas"));
+        let json = serde_json::to_value(&thread).expect("serialize");
+        assert_eq!(json["thread_id"], "thread-1");
+        assert!(json.get("bot_id").is_none());
+
+        assert_eq!(manager.close_scope(Some("thread-1"), None), 1);
+        assert_eq!(manager.close_scope(None, Some("atlas")), 1);
+        assert_eq!(manager.close_scope(Some("missing"), None), 0);
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+        while manager.list("ws-test").len() > 1 && tokio::time::Instant::now() < deadline {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        let remaining: Vec<String> = manager.list("ws-test").into_iter().map(|s| s.id).collect();
+        assert_eq!(remaining, vec![other.id.clone()]);
+        manager.close(&other.id);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn reports_the_foreground_process_and_directory() {
+        let manager = test_manager();
+        let (_dir, cwd) = workspace_dir();
+        let info = manager.open("ws-test", &cwd, 80, 24).expect("open");
+        let (_info, mut receiver, _client) = manager.attach(&info.id, 0).expect("attach");
+        wait_for_shell_prompt(&mut receiver).await;
+        let status = manager.status(&info.id).expect("live session");
+        // macOS `/bin/sh` re-execs the selected shell, so only require a name.
+        assert!(status.process.as_deref().is_some_and(|name| !name.is_empty()));
+        let canonical = std::fs::canonicalize(&cwd).expect("canonical cwd");
+        assert_eq!(status.cwd.as_deref(), canonical.to_str());
+        manager.close(&info.id);
     }
 
     #[tokio::test(flavor = "multi_thread")]
