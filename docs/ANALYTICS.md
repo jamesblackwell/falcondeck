@@ -184,5 +184,8 @@ usage, the configured pin or current thread model appears muted. Task names
 open the Automations editor; review flags have readable labels and fix hints.
 Options → Analytics opens this panel directly (default ⌘⇧A; customizable).
 The native Mac pilot also has an Analytics destination and the same shortcut.
-Usage is joined to run threads within the reporting window; retained usage can
-outlive deleted definitions. Shared-thread totals can include manual turns.
+Usage matches both the run thread and its recorded start/finish interval within
+the reporting window. Manual turns outside those intervals are excluded, and a
+record matching overlapping runs of one task counts once. Runs missing either
+boundary stay unattributed until both are available; retained usage can outlive
+deleted definitions.

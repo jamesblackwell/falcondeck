@@ -2005,7 +2005,8 @@ fn summarize_automations(
     automations
 }
 
-/// Join reporting-window usage by the distinct threads recorded by each automation.
+/// Count each usage record once when its thread and timestamp match a finished run.
+/// Shared threads also contain manual turns and runs from other automations.
 fn summarize_automation_usage(
     summaries: &mut [AnalyticsAutomation],
     runs: &[falcondeck_core::control::AutomationRun],
@@ -2019,10 +2020,17 @@ fn summarize_automation_usage(
             .iter()
             .filter(|run| Some(&run.automation_id) == summary.id.as_ref())
             .collect();
-        let threads: HashSet<&str> = relevant.iter().filter_map(|run| run.thread_id.as_deref()).collect();
+        let mut windows: HashMap<&str, Vec<(DateTime<Utc>, DateTime<Utc>)>> = HashMap::new();
+        for run in &relevant {
+            if let (Some(thread), Some(start), Some(end)) = (run.thread_id.as_deref(), run.started_at, run.finished_at) {
+                windows.entry(thread).or_default().push((start, end));
+            }
+        }
         let mut models = std::collections::BTreeSet::new();
         for record in usage {
-            if threads.contains(record.th.as_str()) {
+            if windows.get(record.th.as_str()).is_some_and(|intervals| {
+                intervals.iter().any(|(start, end)| record.t >= *start && record.t <= *end)
+            }) {
                 add_usage(&mut summary.usage, record);
                 if !record.model.is_empty() {
                     models.insert(record.model.clone());
@@ -3579,41 +3587,42 @@ mod tests {
     }
 
     #[test]
-    fn scheduled_usage_joins_models_and_tokens_once_by_run_thread() {
-        let runs = vec![run("1", "a", "succeeded"), run("2", "b", "succeeded")];
-        let mut rows =
-            summarize_automations(runs.clone(), &[], 7, &HashSet::new(), &HashMap::new());
-        let mut first = usage_record(
-            "u1",
-            "thread-1",
-            None,
-            "claude",
-            "haiku",
-            (1, 2, 3, 4),
-            None,
-        );
-        first.t = runs[0].started_at.unwrap();
-        let mut second = first.clone();
-        second.id = "u2".into();
-        second.model = "sonnet".into();
-        let mut manual = first.clone();
-        manual.th = "not-a-run-thread".into();
-        let mut unrelated = first.clone();
-        unrelated.th = "other".into();
-        summarize_automation_usage(
-            &mut rows,
-            &runs,
-            &[],
-            &[first, second, manual, unrelated],
-            &HashMap::from([("thread-2".into(), "opus".into())]),
-        );
+    fn scheduled_usage_joins_by_thread_and_run_window_without_double_counting() {
+        let mut a_later = run("3", "a", "succeeded");
+        a_later.thread_id = Some("thread-1".into());
+        a_later.started_at = a_later.started_at.map(|t| t + chrono::Duration::minutes(2));
+        a_later.finished_at = a_later.finished_at.map(|t| t + chrono::Duration::minutes(2));
+        let mut b_shared = run("2", "b", "succeeded");
+        b_shared.thread_id = Some("thread-1".into());
+        b_shared.started_at = b_shared.started_at.map(|t| t + chrono::Duration::minutes(4));
+        b_shared.finished_at = b_shared.finished_at.map(|t| t + chrono::Duration::minutes(4));
+        let mut unfinished = run("4", "c", "running");
+        unfinished.thread_id = Some("thread-1".into());
+        unfinished.finished_at = None;
+        let first_run = run("1", "a", "succeeded");
+        // Duplicate/overlapping run windows must not count the same record twice.
+        let runs = vec![first_run.clone(), first_run.clone(), a_later.clone(), b_shared.clone(), unfinished];
+        let mut rows = summarize_automations(runs.clone(), &[], 7, &HashSet::new(), &HashMap::new());
+        let mut first = usage_record("u1", "thread-1", None, "claude", "haiku", (1, 2, 3, 4), None);
+        first.t = first_run.started_at.unwrap();
+        let mut second = first.clone(); second.id = "u2".into(); second.model = "sonnet".into();
+        second.t = a_later.finished_at.unwrap();
+        let mut before = first.clone(); before.t -= chrono::Duration::seconds(1);
+        let mut between = first.clone(); between.t = first_run.finished_at.unwrap() + chrono::Duration::seconds(1);
+        let mut after = first.clone(); after.t = b_shared.finished_at.unwrap() + chrono::Duration::seconds(1);
+        let mut other_task = first.clone(); other_task.t = b_shared.started_at.unwrap(); other_task.model = "opus".into();
+        let mut unrelated = first.clone(); unrelated.th = "other".into();
+        summarize_automation_usage(&mut rows, &runs, &[], &[first, second, before, between, after, other_task, unrelated], &HashMap::new());
         let a = rows.iter().find(|r| r.id.as_deref() == Some("a")).unwrap();
         assert_eq!(a.models, ["haiku", "sonnet"]);
         assert_eq!(usage_token_total(&a.usage), 20);
         assert_eq!(a.usage.turns, 2);
         let b = rows.iter().find(|r| r.id.as_deref() == Some("b")).unwrap();
-        assert!(b.models.is_empty());
-        assert_eq!(b.fallback_model.as_deref(), Some("opus"));
+        assert_eq!(b.models, ["opus"]);
+        assert_eq!(usage_token_total(&b.usage), 10);
+        let c = rows.iter().find(|r| r.id.as_deref() == Some("c")).unwrap();
+        assert!(c.models.is_empty());
+        assert_eq!(c.usage.turns, 0);
     }
 
     #[test]
