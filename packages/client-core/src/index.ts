@@ -57,7 +57,7 @@ export * from "./thread-commands";
 export * from "./extension-ui";
 export * from "./mermaid";
 
-export { useStreamingText } from "./streaming-text";
+export { nextRevealLength, useStreamingText } from "./streaming-text";
 export * from './project-folders'
 export * from "./model-selection";
 

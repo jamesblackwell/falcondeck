@@ -43,6 +43,12 @@ import {
 } from "../lib/local-path-context";
 import { normalizeQuotedSelection } from "../lib/quoted-selection";
 import type { ReadAloudController } from "../lib/read-aloud";
+import {
+  captureReaderAnchor,
+  engineAnchorsScrolling,
+  readerAnchorDrift,
+  type ReaderAnchor,
+} from "../lib/reader-anchor";
 import { WebLinkProvider, type WebLinkOpener } from "../lib/web-link-context";
 import { ConversationExportButton } from "./conversation-export-button";
 import { ExtensionAgentToolResultCards } from "./extension-agent-tool-results";
@@ -281,6 +287,7 @@ export const Conversation = memo(function Conversation({
   const scrollRef = useRef<HTMLDivElement>(null);
   const contentRef = useRef<HTMLDivElement>(null);
   const tailSpacerRef = useRef<HTMLDivElement>(null);
+  const scrollFloorRef = useRef<HTMLDivElement>(null);
   const pinToBottomFrameRef = useRef<number | null>(null);
   const scrollPositionsRef = useRef(new Map<string, SavedScrollPosition>());
   const activeThreadKeyRef = useRef<string | null>(threadKey);
@@ -301,6 +308,8 @@ export const Conversation = memo(function Conversation({
   const programmaticScrollTopRef = useRef<number | null>(null);
   const wasSendingRef = useRef(isSending);
   const smoothScrollFrameRef = useRef<number | null>(null);
+  /// What a detached reader was looking at, as of their last scroll.
+  const readerAnchorRef = useRef<ReaderAnchor | null>(null);
   const prependAnchorRef = useRef<{
     blockId: string | null;
     blockTop: number;
@@ -558,6 +567,15 @@ export const Conversation = memo(function Conversation({
     }
     const next = height > 0 ? `${height}px` : "";
     if (spacer.style.height !== next) spacer.style.height = next;
+
+    // WebKit clamps scrollTop part way through laying out replaced blocks,
+    // while the scroller's overflow still lacks their height. This floor sits
+    // outside the flow and only moves here, after layout has settled.
+    const floor = scrollFloorRef.current;
+    if (floor) {
+      const floorHeight = `${content.offsetHeight + Math.max(0, height)}px`;
+      if (floor.style.height !== floorHeight) floor.style.height = floorHeight;
+    }
   }, []);
 
   /// Every scroll position this component sets goes through here so the
@@ -567,6 +585,23 @@ export const Conversation = memo(function Conversation({
     programmaticScrollTopRef.current = el.scrollTop;
     lastScrollTopRef.current = el.scrollTop;
   }, []);
+
+  /// Cancels any height change above a detached reader before it paints.
+  const holdReaderAnchor = useCallback(() => {
+    const el = scrollRef.current;
+    if (!el || engineAnchorsScrolling()) return;
+    const anchor = readerAnchorRef.current;
+    if (!anchor) {
+      readerAnchorRef.current = captureReaderAnchor(el);
+      return;
+    }
+    const drift = readerAnchorDrift(anchor, el);
+    if (drift === null) {
+      readerAnchorRef.current = captureReaderAnchor(el);
+    } else if (Math.abs(drift) >= 0.5) {
+      writeScrollTop(el, el.scrollTop + drift);
+    }
+  }, [writeScrollTop]);
 
   const cancelSmoothScroll = useCallback(() => {
     if (smoothScrollFrameRef.current === null) return;
@@ -678,6 +713,8 @@ export const Conversation = memo(function Conversation({
     // A glide left over from the previous thread must not keep writing into
     // the restored position.
     cancelSmoothScroll();
+    syncTailSpacer();
+    readerAnchorRef.current = null;
 
     const savedPosition = threadKey
       ? (scrollPositionsRef.current.get(threadKey) ?? null)
@@ -700,6 +737,7 @@ export const Conversation = memo(function Conversation({
     persistScrollPosition,
     schedulePinToBottom,
     scrollToBottom,
+    syncTailSpacer,
     threadKey,
     writeScrollTop,
   ]);
@@ -734,14 +772,29 @@ export const Conversation = memo(function Conversation({
         stickyToBottomRef.current = true;
       }
     }
+    const scrolled = el.scrollTop - lastScrollTopRef.current;
     lastScrollTopRef.current = el.scrollTop;
     programmaticScrollTopRef.current = null;
+    // Blocks resolving as they scroll into range land in this frame's layout,
+    // so anything the anchor moved beyond the scroll itself is a height change
+    // above the reader, which must be cancelled before capturing afresh.
+    const anchor = readerAnchorRef.current;
+    if (anchor && !stickyToBottomRef.current) {
+      const moved = readerAnchorDrift(anchor, el);
+      if (moved !== null && Math.abs(moved + scrolled) >= 0.5) {
+        writeScrollTop(el, el.scrollTop + moved + scrolled);
+      }
+    }
+    readerAnchorRef.current =
+      stickyToBottomRef.current || engineAnchorsScrolling()
+        ? null
+        : captureReaderAnchor(el);
     setSelectedExcerpt(null);
     setShowJump(
       !stickyToBottomRef.current && distanceFromBottom > JUMP_THRESHOLD,
     );
     persistScrollPosition();
-  }, [persistScrollPosition]);
+  }, [persistScrollPosition, writeScrollTop]);
 
   const captureSelectedExcerpt = useCallback(() => {
     if (!onQuoteSelection) return;
@@ -964,6 +1017,7 @@ export const Conversation = memo(function Conversation({
       // A parked reader gets the jump button as soon as the tail outgrows
       // the threshold, not only once they next scroll.
       if (!stickyToBottomRef.current) {
+        holdReaderAnchor();
         const distance = persistScrollPosition();
         if (distance !== undefined) setShowJump(distance > JUMP_THRESHOLD);
         return;
@@ -978,6 +1032,7 @@ export const Conversation = memo(function Conversation({
       observer.disconnect();
     };
   }, [
+    holdReaderAnchor,
     isLoading,
     persistScrollPosition,
     pinToBottomNow,
@@ -1051,7 +1106,7 @@ export const Conversation = memo(function Conversation({
                 aria-label="Conversation"
                 aria-live="off"
                 aria-busy={isBusy}
-                className="h-full overflow-x-hidden overflow-y-auto overscroll-y-contain"
+                className="relative h-full overflow-x-hidden overflow-y-auto overscroll-y-contain"
                 onScroll={handleScroll}
                 onMouseUp={captureSelectedExcerpt}
               >
@@ -1201,6 +1256,12 @@ export const Conversation = memo(function Conversation({
                 ref={tailSpacerRef}
                 aria-hidden="true"
                 data-conversation-tail-spacer
+              />
+              <div
+                ref={scrollFloorRef}
+                aria-hidden="true"
+                data-conversation-scroll-floor
+                className="pointer-events-none absolute top-0 left-0 w-px"
               />
             </div>
 

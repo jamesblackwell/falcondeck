@@ -919,8 +919,12 @@ expanded and non-collapsible until the authoritative request resolves.
   attachment picking, or per-conversation draft persistence. The unavailable
   action exposes a screen-reader reason and becomes actionable again after
   reconnect without discarding input.
-- Scrolling up disables bottom-follow; returning to the tail restores it.
+- Scrolling up disables bottom-follow; returning to the tail restores it. Only
+  the reader may stop following: a height change must never do it.
 - Prepending history and expanding content preserve the visible anchor.
+- A detached reader's content does not move while a turn streams, including when
+  a message settles or a row above them changes height. See "Streaming scroll
+  stability" below.
 - Every client opens a bounded authoritative tail and exposes earlier history
   while `has_older` is true. Older pages prepend by stable `(kind, id)` identity;
   the first page clears the partial-history state without discarding the live
@@ -1019,12 +1023,72 @@ older blocks. This defers offscreen layout and paint without removing history
 from find-in-page, keyboard navigation, selection, or the accessibility tree.
 `ConversationPerformance.test.tsx` replaces the row contents with a render
 probe and requires a 1,000-message streamed tail update to render only the tail.
+WebKit has no `overflow-anchor`, and deferred blocks change height as they scroll
+into range, so engines without it lay these blocks out up front (see below).
 Desktop and native `long-thread-1000` fixtures stream the final block while the
 reader is both pinned to the tail and scrolled into older history.
 Every native renderer is keyed at the shared message-routing boundary by stable
 render-block identity. FlashList may reuse its outer cell, but disclosure, preview,
 retry-error, paging, and export state must remount for a different block while
 remaining intact across deltas and lifecycle updates to the same block.
+
+### Streaming scroll stability
+
+The desktop app runs in WKWebView, so scroll behaviour must be judged there:
+Chromium's scroll anchoring hides every defect below. Three mechanisms keep the
+view still, all in `Conversation` and `lib/reader-anchor.ts`:
+
+- **Scroll floor.** When React replaces blocks (a tail block settling, a message
+  completing), WebKit clamps `scrollTop` part way through layout, as if the
+  transcript ended just after the first new block. No script reads or writes
+  scroll in that window. The out-of-flow `data-conversation-scroll-floor` holds
+  the scrollable height at its last settled value and moves only from the
+  ResizeObserver, so that layout has nothing to clamp against. Real shrinkage
+  still releases it before paint.
+- **Reader anchor.** Used only where the engine has no `overflow-anchor`; on top
+  of native anchoring it would move the content twice. A detached reader's top visible element is captured on each
+  scroll and restored from the ResizeObserver, before paint. The scroll handler
+  also cancels movement beyond its own scroll delta, because a height change can
+  land in the handler's forced layout. Replaced elements are found again by text; if they cannot be, nothing is corrected.
+- **Eager layout in WebKit.** `content-visibility` blocks resolve to their real
+  height mid-gesture, and the scrolling thread can overwrite a correction made
+  during one. `@supports not (overflow-anchor: auto)` keeps them laid out.
+
+`useStreamingText` with `{ paced: true }` spreads each ~100 ms wire burst across
+display frames, draining the backlog over 180 ms with a 45 characters/s floor (the
+native client's numbers). Completion, replacement and Reduce Motion show the real
+text at once; a hidden webview falls back to a 120 ms timer. Web clients get this
+through `MessageMarkdown`. Expo keeps the unpaced 50 ms cadence until it has been
+measured on a device, since it would add a Markdown parse per frame on the phone.
+
+`scripts/stream-qa` measures all of this against the real `Conversation`
+(`apps/desktop/stream-qa.html`) at the daemon's burst cadence, in the system
+WKWebView with trackpad-shaped wheel events delivered straight to the view. The
+window is offscreen and never activates:
+
+    node scripts/stream-qa/run.mjs --label after --engines webkit --only near,read-start
+    node scripts/stream-qa/report.mjs after
+
+Run scenarios once with `--only`; a full pass takes about ten minutes. Confirm the
+`wheels` column shows delivered events before trusting a parked number.
+
+Measured in WKWebView on macOS 26, production build, one run each, 5 Nov 2026:
+
+| Scenario | Unprompted upward leap | Parked reader drift | Jumps while scrolling up | Left behind with no input |
+| --- | ---: | ---: | ---: | ---: |
+| Read start of message, return | 2,052 → 42 px | 217 → 0 px | 1 → 0 | 505 → 121 px |
+| Near the tail | 2,052 → 42 px | 495 → 0 px | 1 → 0 | 505 → 80 px |
+| Parked through turn end | 217 → 0 px | 217 → 0 px | 1 → 0 | 505 → 80 px |
+| Thought collapses, no input | 218 → 42 px | n/a | n/a | 7,584 → 99 px |
+| Tool output above reader | 2,124 → 42 px | 0 → 0 px | 0 → 0 | 1,353 → 121 px |
+| 1,000 blocks, climb history | 120 → 0 px | n/a | 38 (393 px) → 0 | 505 → 99 px |
+| 1,000 blocks, following | 662 → 42 px | n/a | n/a | 7,285 → 157 px |
+
+Streaming the 7 KB message went from 8.9 to 58 paints a second, from 35 (max 65)
+to 5.3 characters a paint (max 28 outside long threads). Frame p50 stayed 17 ms,
+p95 18-19 ms. Mounting 1,000 blocks took about 100 ms longer. The remaining 42 px
+is a real settle: the finished message is shorter than its streamed blocks. Gaps
+around 100 px are one sample taken before the same frame's pin.
 
 Attachment previews are owned by stable attachment identity but always derive
 their URL, label, and availability from the current authoritative message or

@@ -979,6 +979,8 @@ export function renderMessageContent(
   );
 }
 
+const PACED_REVEAL = { paced: true };
+
 /**
  * Bounds token-by-token Markdown parsing to a regular cadence. The
  * content remains complete and ordered, but a burst may coalesce into fewer
@@ -1000,7 +1002,7 @@ export const MessageMarkdown = memo(function MessageMarkdown({
   /** Tint slash-command mentions; only user-authored messages opt in. */
   highlightCommands?: boolean;
 }) {
-  const visibleText = useStreamingText(text, streaming && defer);
+  const visibleText = useStreamingText(text, streaming && defer, PACED_REVEAL);
   return useMemo(() => {
     const content = streaming ? (
       <StreamingMessageContent

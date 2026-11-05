@@ -1926,6 +1926,17 @@ body {
   contain-intrinsic-size: auto 96px;
 }
 
+/* Deferred blocks change height as they scroll into range, which only reads
+   as stillness if the engine anchors scrolling. WebKit does not, and its
+   scrolling thread can overwrite a script correction mid-gesture, so lay
+   these blocks out up front there. On 1,000 blocks that added ~60 ms to mount
+   and nothing measurable to streaming frames. */
+@supports not (overflow-anchor: auto) {
+  .fd-conversation-block--deferred {
+    content-visibility: visible;
+  }
+}
+
 /* A just-sent message glides up into the transcript instead of flashing in.
    Conversation applies this only to messages appended while the thread is
    already on screen — hydrated history, thread switches, and older-page
