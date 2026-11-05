@@ -1380,6 +1380,7 @@ dependencies = [
  "iana-time-zone",
  "keyring",
  "libc",
+ "memchr",
  "portable-pty",
  "pulldown-cmark",
  "regex",

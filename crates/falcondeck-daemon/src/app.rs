@@ -314,6 +314,10 @@ struct InnerState {
     workspaces: Mutex<HashMap<String, ManagedWorkspace>>,
     variant_gates: Mutex<AcpHydrationGates>,
     variant_disk_low: AtomicBool,
+    variant_maintenance_started: AtomicBool,
+    variant_reap_tick_running: AtomicBool,
+    variant_disk_gate: Mutex<()>,
+    variant_dependency_watches: Mutex<HashSet<(String, String)>>,
     /// Resolved sidebar icon bytes keyed by workspace id.
     workspace_icons: Mutex<HashMap<String, crate::workspace_icons::CachedWorkspaceIcon>>,
     /// Per-workspace/provider gates prevent background metadata hydration and
@@ -494,6 +498,7 @@ struct ManagedWorkspace {
 
 struct ManagedThread {
     summary: ThreadSummary,
+    variant_reap: Option<variant_lifecycle::Eligibility>,
     /// Native Claude history is read only on opening or admitting a turn.
     /// The same state owns the gate used by readers and turn admission.
     claude_history: Option<Arc<claude_history::ClaudeHistoryState>>,
@@ -583,6 +588,10 @@ struct RealtimeTranscriptState {
 /// A send accepted while the thread was busy, held until the active turn ends.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
 struct QueuedTurnRequest {
+    /// Accepted while the variant was being provisioned; this is explicit
+    /// admission, including a resume that may proceed after dependencies finish.
+    #[serde(default)]
+    preparing_variant: bool,
     id: String,
     request: SendTurnRequest,
     summary: falcondeck_core::QueuedTurnSummary,
@@ -957,6 +966,8 @@ struct PersistedThreadState {
     /// clean up when the thread is deleted.
     #[serde(default)]
     variant: Option<falcondeck_core::ThreadVariant>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    variant_reap: Option<variant_lifecycle::Eligibility>,
     /// Model/effort/tier/mode selections on the thread. Provider hydration
     /// only restores the fields its own records carry, so these fill the gaps
     /// after a restart.
@@ -1142,6 +1153,10 @@ impl AppState {
                 interactive_requests: Mutex::new(HashMap::new()),
                 variant_gates: Mutex::new(HashMap::new()),
                 variant_disk_low: AtomicBool::new(false),
+                variant_maintenance_started: AtomicBool::new(false),
+                variant_reap_tick_running: AtomicBool::new(false),
+                variant_disk_gate: Mutex::new(()),
+                variant_dependency_watches: Mutex::new(HashSet::new()),
                 service_notices: StdMutex::new(Vec::new()),
                 operational_conditions: StdMutex::new(HashMap::new()),
                 plugin_refresh_attempts: StdMutex::new(HashMap::new()),
@@ -1912,6 +1927,7 @@ impl AppState {
             tracing::error!(%error, "failed to restore scheduled tasks");
         }
         scheduled_tasks::migrate_compatible(self).await;
+        self.start_variant_maintenance();
         // Lazy projects never reach connect's persistence path. Save their
         // identities and interruption markers after remote state is restored.
         self.persist_during_restore().await;
@@ -2067,6 +2083,7 @@ impl AppState {
             };
             let mut thread = ManagedThread::new(summary);
             thread.queued_requests = state.queued_requests.clone();
+            thread.variant_reap = state.variant_reap.clone();
             thread.pending_handoff_context = state.handoff_context.clone();
             thread.manual_title = state.manual_title;
             thread.ai_title_generated = state.ai_title_generated
@@ -4710,6 +4727,7 @@ impl AppState {
                     last_read_seq: thread.summary.attention.last_read_seq,
                     last_agent_activity_seq: thread.summary.attention.last_agent_activity_seq,
                     variant: thread.summary.variant.clone(),
+                    variant_reap: thread.variant_reap.clone(),
                     agent: thread.summary.agent.clone(),
                     goal: thread.summary.goal.clone(),
                     queued_requests: thread
@@ -5123,6 +5141,7 @@ impl AppState {
         workspace_id: &str,
         thread_id: Option<&str>,
     ) -> Result<falcondeck_core::GitStatusResponse, DaemonError> {
+        let _checkout_guard = self.checkout_guard(workspace_id, thread_id).await;
         crate::git::git_status(&self.git_root(workspace_id, thread_id).await?).await
     }
 
@@ -5151,6 +5170,7 @@ impl AppState {
         path: Option<&str>,
         status: Option<&falcondeck_core::GitFileStatus>,
     ) -> Result<falcondeck_core::GitDiffResponse, DaemonError> {
+        let _checkout_guard = self.checkout_guard(workspace_id, thread_id).await;
         crate::git::git_diff(&self.git_root(workspace_id, thread_id).await?, path, status).await
     }
 
@@ -5158,6 +5178,7 @@ impl AppState {
         &self,
         request: &falcondeck_core::GitCommitRequest,
     ) -> Result<falcondeck_core::GitCommitResponse, DaemonError> {
+        let _checkout_guard = self.checkout_guard(&request.workspace_id, Some(&request.thread_id)).await;
         let (checkout, title) = self
             .isolated_checkout(&request.workspace_id, &request.thread_id)
             .await?;
@@ -5173,6 +5194,8 @@ impl AppState {
         &self,
         request: &falcondeck_core::ShipThreadRequest,
     ) -> Result<falcondeck_core::ShipThreadResponse, DaemonError> {
+        let _checkout_guard = self.checkout_guard(&request.workspace_id, Some(&request.thread_id)).await;
+        self.restore_variant_for_turn(&request.workspace_id, &request.thread_id).await?;
         let workspaces = self.inner.workspaces.lock().await;
         let workspace = workspaces
             .get(&request.workspace_id)
@@ -5197,6 +5220,7 @@ impl AppState {
         workspace_id: &str,
         thread_id: &str,
     ) -> Result<(String, String), DaemonError> {
+        self.restore_variant_for_turn(workspace_id, thread_id).await?;
         let workspaces = self.inner.workspaces.lock().await;
         let workspace = workspaces
             .get(workspace_id)
@@ -5225,6 +5249,7 @@ impl AppState {
         thread_id: Option<&str>,
         query: Option<&str>,
     ) -> Result<falcondeck_core::WorkspaceFilesResponse, DaemonError> {
+        let _checkout_guard = self.checkout_guard(workspace_id, thread_id).await;
         crate::workspace_files::list_files(&self.git_root(workspace_id, thread_id).await?, query)
             .await
     }
@@ -5235,6 +5260,7 @@ impl AppState {
         thread_id: Option<&str>,
         path: &str,
     ) -> Result<falcondeck_core::WorkspaceFileResponse, DaemonError> {
+        let _checkout_guard = self.checkout_guard(workspace_id, thread_id).await;
         crate::workspace_files::read_file(&self.git_root(workspace_id, thread_id).await?, path)
             .await
     }
@@ -5246,6 +5272,7 @@ impl AppState {
         path: &str,
         request: &falcondeck_core::WriteWorkspaceFileRequest,
     ) -> Result<falcondeck_core::WorkspaceFileResponse, DaemonError> {
+        let _checkout_guard = self.checkout_guard(workspace_id, thread_id).await;
         crate::workspace_files::write_file(
             &self.git_root(workspace_id, thread_id).await?,
             path,
@@ -5262,6 +5289,7 @@ impl AppState {
         thread_id: Option<&str>,
         bot_id: Option<&str>,
     ) -> Result<String, DaemonError> {
+        let _checkout_guard = self.checkout_guard(workspace_id, thread_id).await;
         if let Some(bot_id) = bot_id {
             let space = self
                 .inner
@@ -5291,6 +5319,7 @@ impl AppState {
         if thread_id.is_some_and(|id| id.starts_with("cloud-")) {
             return Err(DaemonError::BadRequest("This task's files are in its cloud environment. Collect and import its changes before using local files, Git or terminals.".into()));
         }
+        if let Some(thread) = thread_id { self.restore_variant_for_turn(workspace_id, thread).await?; }
         let workspaces = self.inner.workspaces.lock().await;
         let workspace = workspaces
             .get(workspace_id)

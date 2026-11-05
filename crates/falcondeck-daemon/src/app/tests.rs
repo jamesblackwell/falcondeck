@@ -4804,6 +4804,7 @@ async fn mark_thread_unread_walks_read_seq_back_behind_agent_activity() {
                 last_read_seq: 7,
                 last_agent_activity_seq: 7,
                 variant: None,
+                variant_reap: None,
                 agent: ThreadAgentParams::default(),
                 goal: None,
                 queued_requests: Vec::new(),
@@ -4899,6 +4900,7 @@ async fn restored_caught_up_thread_app(
                 last_read_seq: 7,
                 last_agent_activity_seq: 7,
                 variant: None,
+                variant_reap: None,
                 agent: ThreadAgentParams::default(),
                 goal: None,
                 queued_requests: Vec::new(),
@@ -5110,6 +5112,7 @@ async fn restore_seeds_sequence_counter_past_persisted_attention_seqs() {
                 last_read_seq: 150_000,
                 last_agent_activity_seq: 200_000,
                 variant: None,
+                variant_reap: None,
                 agent: ThreadAgentParams::default(),
                 goal: None,
                 queued_requests: Vec::new(),
@@ -5178,6 +5181,7 @@ async fn transcript_replay_does_not_flip_a_read_thread_unread() {
                 last_read_seq: 7,
                 last_agent_activity_seq: 7,
                 variant: None,
+                variant_reap: None,
                 agent: ThreadAgentParams::default(),
                 goal: None,
                 queued_requests: Vec::new(),
@@ -5307,6 +5311,7 @@ async fn restore_keeps_workspace_visible_when_reconnect_fails() {
                 last_read_seq: 2,
                 last_agent_activity_seq: 7,
                 variant: None,
+                variant_reap: None,
                 agent: ThreadAgentParams::default(),
                 goal: None,
                 queued_requests: Vec::new(),
@@ -5503,6 +5508,7 @@ async fn persist_local_state_merges_saved_workspaces_with_live_workspaces() {
                     last_read_seq: 0,
                     last_agent_activity_seq: 0,
                     variant: None,
+                variant_reap: None,
                     agent: ThreadAgentParams::default(),
                     goal: None,
                     queued_requests: Vec::new(),
@@ -5539,6 +5545,7 @@ async fn persist_local_state_merges_saved_workspaces_with_live_workspaces() {
                     last_read_seq: 1,
                     last_agent_activity_seq: 3,
                     variant: None,
+                variant_reap: None,
                     agent: ThreadAgentParams::default(),
                     goal: None,
                     queued_requests: Vec::new(),
@@ -9831,6 +9838,11 @@ async fn archiving_reclaims_safe_variants_and_unarchive_restores_them() {
             .unwrap()
             .summary
             .updated_at = completed;
+        for id in ["thread-safe", "thread-work"] {
+            ws.get_mut(&workspace_id).unwrap().threads.get_mut(id).unwrap().variant_reap = Some(super::variant_lifecycle::Eligibility {
+                completed_at: completed, eligible_after: completed + chrono::Duration::hours(72),
+            });
+        }
     }
     assert!(
         app.reap_finished_variant(

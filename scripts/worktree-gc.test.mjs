@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { after, before, test } from 'node:test';
 import { execFileSync } from 'node:child_process';
-import { existsSync, mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, realpathSync, rmSync, unlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -19,6 +19,7 @@ import {
   parseStatusZ,
   removalBlocker,
   unpushedAfterCherry,
+  validateSetup,
 } from './worktree-gc.mjs';
 
 const OLD = Date.now() - 30 * 86_400_000;
@@ -299,4 +300,72 @@ test('collapsed ignored framework caches pass but sessions remain protected', as
   mkdirSync(join(path, 'storage/framework/sessions'), { recursive: true });
   writeFileSync(join(path, 'storage/framework/sessions/session'), 'session');
   assert.equal((await assess(path)).class, 'REVIEW');
+});
+
+test('dist, target and vendor are anchored away from reports', () => {
+  for (const path of ['reports/dist/q3-final-analysis.md', 'reports/target/results', 'reports/vendor/research']) assert.equal(isRebuildable(path), false);
+  for (const path of ['dist/bundle.js', 'target/debug/binary', 'vendor/autoload.php', 'frontend/dist/index.js']) assert.equal(isRebuildable(path), true);
+});
+
+test('hidden assume-unchanged and skip-worktree files block removal', async () => {
+  const path = worktree('hidden-flags', 'falcondeck/hidden-flags');
+  for (const flag of ['--assume-unchanged', '--skip-worktree']) {
+    sh(path, 'update-index', flag, 'a.txt');
+    writeFileSync(join(path, 'a.txt'), 'hidden authored work');
+    const entry = await assess(path);
+    assert.equal(entry.class, 'REVIEW');
+    assert.equal(entry.hiddenIndex, true);
+    sh(path, 'update-index', '--no-assume-unchanged', 'a.txt');
+    sh(path, 'update-index', '--no-skip-worktree', 'a.txt');
+    sh(path, 'restore', 'a.txt');
+  }
+  // Sparse's own absent skip-worktree entries are safe.
+  sh(path, 'sparse-checkout', 'set', '--no-cone', '/*', '!/a.txt');
+  assert.equal((await assess(path)).hiddenIndex, false);
+});
+
+test('detached and mismatched owner branches block removal', async () => {
+  const path = worktree('branch-identity', 'falcondeck/branch-identity');
+  const entry = await inspect({ path, source: 'variant' }, { opts: { ...opts, activeHours: 0, minAgeDays: 0 }, owners: new Map([[path, { branch: 'falcondeck/different', status: 'idle', updatedAt: OLD }]]), cwds: [] });
+  assert.equal(entry.branchMismatch, true);
+  assert.equal(classify(entry, { ...opts, activeHours: 0, minAgeDays: 0 }).class, 'REVIEW');
+  sh(path, 'switch', '--detach');
+  assert.equal((await assess(path)).class, 'REVIEW');
+});
+
+test('in-progress git operations cannot be classified SAFE', async () => {
+  const path = worktree('operations', 'falcondeck/operations');
+  const dir = sh(path, 'rev-parse', '--absolute-git-dir');
+  for (const marker of ['rebase-merge', 'rebase-apply', 'MERGE_HEAD', 'CHERRY_PICK_HEAD', 'REVERT_HEAD', 'BISECT_LOG', 'sequencer']) {
+    const file = join(dir, marker);
+    writeFileSync(file, 'in progress');
+    assert.equal((await assess(path)).class, 'REVIEW', marker);
+    unlinkSync(file);
+  }
+});
+
+test('setup recipes reject invalid settings rather than poisoning restore', () => {
+  assert.doesNotThrow(() => validateSetup({ sparse_exclude: ['data/qbank'], dependency_roots: ['frontend', '.'], sparse_hint: 'Add a missing directory' }));
+  for (const value of [null, [], { unknown: true }, { sparse_exclude: null }, { sparse_exclude: ['/absolute'] }, { dependency_roots: ['../outside'] }, { sparse_hint: 1 }]) assert.throws(() => validateSetup(value));
+});
+
+test('apply keeps a checkout when project settings cannot produce a valid restore recipe', async () => {
+  const path = worktree('invalid-recipe', 'falcondeck/invalid-recipe');
+  const config = join(sandbox, 'invalid-setup.json');
+  writeFileSync(config, JSON.stringify({ unknown_setting: true }));
+  sh(project, 'config', 'falcondeck.worktreeSetup', config);
+  const previousHome = process.env.HOME;
+  try {
+    const entry = await assess(path);
+    assert.equal(entry.class, 'SAFE');
+    process.env.HOME = sandbox;
+    const result = await apply({ entries: [entry] }, { ...opts, minAgeDays: 0, activeHours: 0 }, { log: () => {} });
+    assert.equal(result.removed.length, 0);
+    assert.equal(result.failed.length, 1);
+    assert.match(result.failed[0].reason, /unknown worktree setup field/);
+    assert.equal(existsSync(path), true);
+  } finally {
+    process.env.HOME = previousHome;
+    sh(project, 'config', '--unset', 'falcondeck.worktreeSetup');
+  }
 });

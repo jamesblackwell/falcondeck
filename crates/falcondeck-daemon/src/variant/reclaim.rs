@@ -19,23 +19,24 @@ use std::time::Duration;
 use falcondeck_core::{ThreadVariant, ThreadVariantKind};
 use tokio::{fs, process::Command, time::timeout};
 
-use super::{copy_untracked_allowlist, matches_allowlist, run_git};
+use super::{matches_allowlist, run_git};
 
 /// Directories a build or install recreates; ignored files inside them never
 /// block reclaiming.
 const REBUILDABLE: &[&str] = &[
     "node_modules",
-    "vendor",
-    "target",
+    "/vendor",
+    "/target",
     ".next",
-    "dist",
+    "/dist",
+    "/frontend/dist",
     ".phpunit.cache",
     ".react-router",
     "__pycache__",
     ".pytest_cache",
-    "bootstrap/cache",
-    "storage/framework/cache",
-    "storage/framework/views",
+    "/bootstrap/cache",
+    "/storage/framework/cache",
+    "/storage/framework/views",
 ];
 
 const REMOTE_TIMEOUT: Duration = Duration::from_secs(120);
@@ -54,31 +55,76 @@ pub enum Reclaim {
 /// Uses `git worktree remove` without `--force`, so git itself refuses if the
 /// tree turned dirty after the assessment. The branch is never deleted.
 pub async fn reclaim_if_safe(project_path: &str, variant: &ThreadVariant) -> Reclaim {
+    match assess(project_path, variant).await {
+        Ok(assessment) => finish_reclaim(project_path, variant, assessment).await,
+        Err(result) => result,
+    }
+}
+
+pub(crate) struct Assessment {
+    head: String,
+}
+
+/// Network work runs before taking the app's admission gate. A ticket never
+/// authorizes removal by itself: finish_reclaim repeats all local checks.
+pub(crate) async fn assess(
+    project_path: &str,
+    variant: &ThreadVariant,
+) -> Result<Assessment, Reclaim> {
     if variant.kind != ThreadVariantKind::Worktree {
-        return Reclaim::Kept(vec!["not a worktree variant".to_string()]);
+        return Err(Reclaim::Kept(vec!["not a worktree variant".into()]));
     }
     if !Path::new(&variant.path).exists() {
-        let _ = run_git(project_path, &["worktree", "prune"]).await;
-        return Reclaim::Removed;
+        return Err(Reclaim::Removed);
     }
-    let head = run_git(&variant.path, &["rev-parse", "HEAD"]).await.ok();
+    let head = run_git(&variant.path, &["rev-parse", "HEAD"])
+        .await
+        .map_err(|e| Reclaim::Kept(vec![e.to_string()]))?;
     let blockers = blockers(project_path, variant).await;
     if !blockers.is_empty() {
-        return Reclaim::Kept(blockers);
+        return Err(Reclaim::Kept(blockers));
+    }
+    Ok(Assessment { head })
+}
+
+pub(crate) async fn finish_reclaim(
+    project_path: &str,
+    variant: &ThreadVariant,
+    assessment: Assessment,
+) -> Reclaim {
+    if !Path::new(&variant.path).exists() {
+        return Reclaim::Removed;
     }
     // Remote verification can be slow; recheck local state and processes at
     // the destructive boundary as well as before the network call.
-    let mut fresh = status_blockers(project_path, &variant.path)
-        .await
-        .unwrap_or_else(|e| vec![e]);
+    let mut fresh = checkout_identity(variant).await;
+    fresh.extend(
+        status_blockers(project_path, &variant.path)
+            .await
+            .unwrap_or_else(|e| vec![e]),
+    );
     if let Err(reason) = process_clear(Path::new(&variant.path)).await {
         fresh.push(reason);
     }
-    if head.is_none() || run_git(&variant.path, &["rev-parse", "HEAD"]).await.ok() != head {
+    if run_git(&variant.path, &["rev-parse", "HEAD"])
+        .await
+        .ok()
+        .as_deref()
+        != Some(assessment.head.as_str())
+    {
         fresh.push("HEAD changed during assessment".into());
     }
     if !fresh.is_empty() {
         return Reclaim::Kept(fresh);
+    }
+    let setup = match super::setup::restore_setup(project_path, &variant.slug).await {
+        Ok(setup) => setup,
+        Err(e) => return Reclaim::Kept(vec![format!("could not preserve checkout setup: {e}")]),
+    };
+    if let Err(e) =
+        super::setup::save_setup(project_path, &variant.slug, Path::new(&variant.path), setup).await
+    {
+        return Reclaim::Kept(vec![format!("could not preserve checkout setup: {e}")]);
     }
     if let Err(error) = run_git(project_path, &["worktree", "remove", &variant.path]).await {
         return Reclaim::Kept(vec![format!("git worktree remove refused: {error}")]);
@@ -91,33 +137,46 @@ pub async fn reclaim_if_safe(project_path: &str, variant: &ThreadVariant) -> Rec
 /// so an unarchived thread finds its working directory again. No-op when the
 /// checkout exists. Returns whether a checkout was recreated.
 pub async fn restore(project_path: &str, variant: &ThreadVariant) -> Result<bool, String> {
-    if variant.kind != ThreadVariantKind::Worktree || Path::new(&variant.path).exists() {
+    if variant.kind != ThreadVariantKind::Worktree {
         return Ok(false);
     }
-    // A leftover administrative entry for the missing path would block `add`.
-    let _ = run_git(project_path, &["worktree", "prune"]).await;
-    run_git(
-        project_path,
-        &[
-            "worktree",
-            "add",
-            "--no-checkout",
-            &variant.path,
-            &variant.branch,
-        ],
-    )
-    .await
-    .map_err(|error| format!("could not recreate {}: {error}", variant.path))?;
-    super::setup::provision(project_path, Path::new(&variant.path))
+    if Path::new(&variant.path).exists() {
+        super::populated(&variant.path).await?;
+        return Ok(false);
+    }
+    let reference = format!("refs/heads/{}", variant.branch);
+    if run_git(project_path, &["show-ref", "--verify", &reference])
+        .await
+        .is_err()
+    {
+        return Err(format!(
+            "Cannot restore isolated checkout: branch '{}' no longer exists. Recover the branch from a surviving ref before resuming this thread.",
+            variant.branch
+        ));
+    }
+    let setup = super::setup::restore_setup(project_path, &variant.slug)
         .await
         .map_err(|e| e.to_string())?;
-    copy_untracked_allowlist(project_path, Path::new(&variant.path)).await;
+    let _ = run_git(project_path, &["worktree", "prune"]).await;
+    super::populate_worktree(
+        project_path,
+        Path::new(&variant.path),
+        &variant.branch,
+        &variant.slug,
+        false,
+        setup,
+    )
+    .await
+    .map_err(|e| format!("could not recreate {}: {e}", variant.path))?;
     Ok(true)
 }
 
 /// Reasons the checkout must be kept; empty means safe to remove.
 async fn blockers(project_path: &str, variant: &ThreadVariant) -> Vec<String> {
-    let mut reasons = Vec::new();
+    let mut reasons = checkout_identity(variant).await;
+    if !reasons.is_empty() {
+        return reasons;
+    }
     if let Err(reason) = process_clear(Path::new(&variant.path)).await {
         return vec![reason];
     }
@@ -147,7 +206,7 @@ async fn status_blockers(project_path: &str, path: &str) -> Result<Vec<String>, 
         REMOTE_TIMEOUT,
     )
     .await?;
-    let mut reasons = Vec::new();
+    let mut reasons = hidden_or_in_progress(path).await?;
     let (mut tracked, mut untracked) = (0usize, 0usize);
     let mut other_ignored = Vec::new();
     for (code, entry) in parse_status(&out) {
@@ -184,6 +243,60 @@ async fn status_blockers(project_path: &str, path: &str) -> Result<Vec<String>, 
     Ok(reasons)
 }
 
+async fn checkout_identity(variant: &ThreadVariant) -> Vec<String> {
+    if super::dependencies_pending(&variant.path) {
+        return vec!["dependency provisioning is still running".into()];
+    }
+    match run_git(&variant.path, &["symbolic-ref", "-q", "HEAD"]).await {
+        Ok(reference) if reference.trim() == format!("refs/heads/{}", variant.branch) => Vec::new(),
+        _ => vec![format!(
+            "HEAD is detached or is not the recorded branch {}; keep this checkout",
+            variant.branch
+        )],
+    }
+}
+
+async fn hidden_or_in_progress(path: &str) -> Result<Vec<String>, String> {
+    let mut reasons = Vec::new();
+    let files = git(path, &["ls-files", "-v", "-z"], &[], REMOTE_TIMEOUT).await?;
+    for entry in files.split('\0').filter(|e| e.len() > 2) {
+        let tag = entry.as_bytes()[0];
+        if tag.is_ascii_lowercase()
+            || (tag == b'S'
+                && fs::symlink_metadata(Path::new(path).join(&entry[2..]))
+                    .await
+                    .is_ok())
+        {
+            reasons.push(format!(
+                "hidden index flags on present file: {}",
+                &entry[2..]
+            ));
+            break;
+        }
+    }
+    let dir = git(
+        path,
+        &["rev-parse", "--absolute-git-dir"],
+        &[],
+        REMOTE_TIMEOUT,
+    )
+    .await?;
+    for marker in [
+        "rebase-merge",
+        "rebase-apply",
+        "MERGE_HEAD",
+        "CHERRY_PICK_HEAD",
+        "REVERT_HEAD",
+        "BISECT_LOG",
+        "sequencer",
+    ] {
+        if Path::new(dir.trim()).join(marker).exists() {
+            reasons.push(format!("Git operation in progress: {marker}"));
+        }
+    }
+    Ok(reasons)
+}
+
 async fn ignored_safe(project: &str, path: &str, entry: &str) -> bool {
     let mut pending = vec![entry.to_string()];
     while let Some(relative) = pending.pop() {
@@ -193,7 +306,10 @@ async fn ignored_safe(project: &str, path: &str, entry: &str) -> bool {
         // Git can collapse storage/framework to one ignored entry. Inspect
         // only ancestors of allowlisted caches; sessions and logs still block.
         let prefix = format!("{}/", relative.trim_end_matches('/'));
-        if !REBUILDABLE.iter().any(|p| p.starts_with(&prefix)) {
+        if !REBUILDABLE
+            .iter()
+            .any(|p| p.trim_start_matches('/').starts_with(&prefix))
+        {
             return false;
         }
         let Ok(mut dir) = fs::read_dir(Path::new(path).join(&relative)).await else {
@@ -241,13 +357,18 @@ fn parse_status(out: &str) -> Vec<(String, String)> {
 fn is_rebuildable(entry: &str) -> bool {
     let segments: Vec<_> = entry.split('/').filter(|p| !p.is_empty()).collect();
     REBUILDABLE.iter().any(|pattern| {
-        let parts: Vec<_> = pattern.split('/').collect();
-        segments.windows(parts.len()).any(|window| window == parts)
+        let parts: Vec<_> = pattern.trim_start_matches('/').split('/').collect();
+        if pattern.starts_with('/') {
+            segments.starts_with(&parts)
+        } else {
+            segments.windows(parts.len()).any(|window| window == parts)
+        }
     })
 }
 
-/// Fail closed if the process inventory cannot be read. Canonical paths handle
-/// macOS's /var versus /private/var aliases. Never follow arbitrary home trees.
+/// Check accessible process cwd and open files from one lsof inventory. An
+/// inventory failure blocks removal, but OS permissions can hide other users'
+/// descriptors even when lsof succeeds. This cannot prove global inactivity.
 async fn process_clear(path: &Path) -> Result<(), String> {
     let path = fs::canonicalize(path)
         .await
@@ -255,24 +376,87 @@ async fn process_clear(path: &Path) -> Result<(), String> {
     let output = timeout(
         Duration::from_secs(30),
         Command::new("lsof")
-            .args(["-d", "cwd", "-Fn"])
+            .args(["-nP", "-Fpn"])
             .kill_on_drop(true)
             .output(),
     )
     .await
     .map_err(|_| "process inventory timed out".to_string())?
     .map_err(|e| format!("process inventory unavailable: {e}"))?;
-    // lsof can exit 1 for unreadable processes. Refuse reclamation rather than
-    // treating a partial inventory as proof of inactivity.
+    // A nonzero exit is not proof of inactivity. A zero exit still covers
+    // only descriptors this daemon user is permitted to inspect.
     if !output.status.success() {
         return Err("process inventory incomplete".into());
     }
     for line in String::from_utf8_lossy(&output.stdout).lines() {
         if let Some(cwd) = line.strip_prefix("n/") {
-            let cwd = std::path::PathBuf::from(format!("/{cwd}"));
-            let cwd = fs::canonicalize(&cwd).await.unwrap_or(cwd);
+            let raw = format!("/{cwd}");
+            let raw = raw.strip_suffix(" (deleted)").unwrap_or(&raw);
+            let normalized = if cfg!(target_os = "macos")
+                && (raw.starts_with("/var/") || raw.starts_with("/tmp/"))
+            {
+                format!("/private{raw}")
+            } else {
+                raw.to_string()
+            };
+            let cwd = std::path::PathBuf::from(normalized);
             if cwd.starts_with(&path) {
-                return Err("a process is running inside the worktree".into());
+                return Err("a process has its cwd or an open file inside the worktree".into());
+            }
+        }
+    }
+    docker_clear(&path).await
+}
+
+async fn docker_clear(path: &Path) -> Result<(), String> {
+    // Inspect local bind mounts when a known local Docker socket is available.
+    // Remote/custom contexts without this signal are a documented blind spot.
+    let configured = std::env::var("DOCKER_HOST").ok();
+    let socket = configured
+        .as_deref()
+        .and_then(|v| v.strip_prefix("unix://"));
+    if !socket.map(Path::new).is_some_and(Path::exists)
+        && !Path::new("/var/run/docker.sock").exists()
+    {
+        return Ok(());
+    }
+    async fn docker(args: &[&str]) -> Result<String, String> {
+        let out = timeout(
+            Duration::from_secs(3),
+            Command::new("docker")
+                .args(args)
+                .kill_on_drop(true)
+                .output(),
+        )
+        .await
+        .map_err(|_| "Docker mount inventory timed out".to_string())?
+        .map_err(|e| format!("Docker mount inventory unavailable: {e}"))?;
+        if !out.status.success() {
+            return Err("Docker mount inventory failed".into());
+        }
+        Ok(String::from_utf8_lossy(&out.stdout).into_owned())
+    }
+    let ids = docker(&["ps", "-q"]).await?;
+    if ids.trim().is_empty() {
+        return Ok(());
+    }
+    let mut args = vec!["inspect", "--format", "{{json .Mounts}}"];
+    args.extend(ids.split_whitespace());
+    let mounts = docker(&args).await?;
+    for line in mounts.lines() {
+        let mounts: Vec<serde_json::Value> =
+            serde_json::from_str(line).map_err(|_| "invalid Docker mount inventory".to_string())?;
+        for mount in mounts {
+            if mount.get("Type").and_then(|v| v.as_str()) != Some("bind") {
+                continue;
+            }
+            if let Some(source) = mount.get("Source").and_then(|v| v.as_str()) {
+                let source = fs::canonicalize(source)
+                    .await
+                    .unwrap_or_else(|_| source.into());
+                if path.starts_with(&source) || source.starts_with(path) {
+                    return Err("a running Docker container bind-mounts this checkout".into());
+                }
             }
         }
     }
@@ -780,5 +964,187 @@ mod tests {
         std::fs::create_dir_all(root.join("sessions")).unwrap();
         std::fs::write(root.join("sessions/session"), "session").unwrap();
         assert!(!ignored_safe(f.project_str(), &v.path, "storage/").await);
+    }
+    #[tokio::test]
+    async fn restore_failure_and_interrupted_checkout_never_admit_an_empty_tree() {
+        let f = Fixture::new();
+        let v = f.variant("failed");
+        git_sync(&f.project, &["worktree", "remove", &v.path]);
+        let config = f._root.path().join("bad.json");
+        std::fs::write(&config, "not json").unwrap();
+        git_sync(
+            &f.project,
+            &[
+                "config",
+                "falcondeck.worktreeSetup",
+                config.to_str().unwrap(),
+            ],
+        );
+        assert!(restore(f.project_str(), &v).await.is_err());
+        assert!(!Path::new(&v.path).exists());
+        git_sync(
+            &f.project,
+            &["config", "--unset", "falcondeck.worktreeSetup"],
+        );
+        assert_eq!(restore(f.project_str(), &v).await, Ok(true));
+        git_sync(&f.project, &["worktree", "remove", &v.path]);
+        // Simulate the old implementation crashing after add --no-checkout.
+        git_sync(
+            &f.project,
+            &["worktree", "add", "--no-checkout", &v.path, &v.branch],
+        );
+        assert!(
+            restore(f.project_str(), &v)
+                .await
+                .unwrap_err()
+                .contains("not populated")
+        );
+    }
+
+    #[tokio::test]
+    async fn failed_provision_rolls_back_checkout_and_new_branch() {
+        let f = Fixture::new();
+        std::fs::write(f.project.join("local.txt"), "source work stays on main").unwrap();
+        git_sync(&f.project, &["add", "."]);
+        git_sync(&f.project, &["commit", "-m", "local source work"]);
+        let setup = super::super::setup::Setup {
+            patterns: Some("\0".into()),
+            ..Default::default()
+        };
+        // An invalid OS argument forces sparse setup to fail after the private
+        // worktree and its new branch have already been added.
+        let dest = f.variants.join("new");
+        assert!(
+            super::super::populate_worktree(
+                f.project_str(),
+                &dest,
+                "falcondeck/rollback",
+                "rollback",
+                true,
+                setup
+            )
+            .await
+            .is_err()
+        );
+        assert!(!dest.exists());
+        assert!(git_sync(&f.project, &["branch", "--list", "falcondeck/rollback"]).is_empty());
+    }
+
+    #[tokio::test]
+    async fn detached_and_changed_branches_are_never_reclaimed() {
+        let f = Fixture::new();
+        let v = f.variant("identity");
+        git_sync(Path::new(&v.path), &["switch", "-c", "different"]);
+        assert!(
+            matches!(reclaim_if_safe(f.project_str(), &v).await, Reclaim::Kept(ref r) if r.iter().any(|s| s.contains("recorded branch")))
+        );
+        git_sync(Path::new(&v.path), &["switch", "--detach"]);
+        assert!(
+            matches!(reclaim_if_safe(f.project_str(), &v).await, Reclaim::Kept(ref r) if r.iter().any(|s| s.contains("detached")))
+        );
+        assert!(Path::new(&v.path).exists());
+    }
+
+    #[tokio::test]
+    async fn hidden_edits_and_every_in_progress_operation_block_reclamation() {
+        let f = Fixture::new();
+        let v = f.variant("hidden");
+        let path = Path::new(&v.path);
+        for flag in ["--assume-unchanged", "--skip-worktree"] {
+            git_sync(path, &["update-index", flag, "a.txt"]);
+            std::fs::write(path.join("a.txt"), "hidden work").unwrap();
+            assert!(
+                matches!(reclaim_if_safe(f.project_str(), &v).await, Reclaim::Kept(ref why) if why.iter().any(|s| s.contains("hidden index"))),
+                "{flag}"
+            );
+            git_sync(path, &["update-index", "--no-assume-unchanged", "a.txt"]);
+            git_sync(path, &["update-index", "--no-skip-worktree", "a.txt"]);
+            git_sync(path, &["restore", "a.txt"]);
+        }
+        let dir = git_sync(path, &["rev-parse", "--absolute-git-dir"]);
+        for marker in [
+            "rebase-merge",
+            "rebase-apply",
+            "MERGE_HEAD",
+            "CHERRY_PICK_HEAD",
+            "REVERT_HEAD",
+            "BISECT_LOG",
+            "sequencer",
+        ] {
+            let file = Path::new(&dir).join(marker);
+            std::fs::write(&file, "in progress").unwrap();
+            assert!(
+                hidden_or_in_progress(&v.path)
+                    .await
+                    .unwrap()
+                    .iter()
+                    .any(|s| s.contains(marker)),
+                "{marker}"
+            );
+            assert!(
+                matches!(reclaim_if_safe(f.project_str(), &v).await, Reclaim::Kept(_)),
+                "{marker}"
+            );
+            assert!(path.exists());
+            std::fs::remove_file(file).unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn open_file_from_another_cwd_blocks_reclamation() {
+        let f = Fixture::new();
+        let v = f.variant("open-file");
+        let mut tail = Command::new("tail")
+            .args(["-f", &format!("{}/a.txt", v.path)])
+            .current_dir("/")
+            .stdout(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        // Reading the first line proves tail has opened its input.
+        use tokio::io::{AsyncBufReadExt, BufReader};
+        let mut line = String::new();
+        BufReader::new(tail.stdout.take().unwrap())
+            .read_line(&mut line)
+            .await
+            .unwrap();
+        let result = reclaim_if_safe(f.project_str(), &v).await;
+        tail.kill().await.unwrap();
+        tail.wait().await.unwrap();
+        assert!(
+            matches!(result, Reclaim::Kept(ref why) if why.iter().any(|s| s.contains("open file")))
+        );
+    }
+
+    #[test]
+    fn nested_dist_target_and_vendor_may_contain_user_work() {
+        for path in [
+            "reports/dist/q3-final-analysis.md",
+            "reports/target/results",
+            "reports/vendor/research",
+        ] {
+            assert!(!is_rebuildable(path), "{path}");
+        }
+        for path in [
+            "dist/bundle.js",
+            "target/debug/binary",
+            "vendor/autoload.php",
+            "frontend/dist/index.js",
+        ] {
+            assert!(is_rebuildable(path), "{path}");
+        }
+    }
+
+    #[tokio::test]
+    async fn deleted_branch_has_an_actionable_restore_error() {
+        let f = Fixture::new();
+        let v = f.variant("missing-branch");
+        git_sync(&f.project, &["worktree", "remove", &v.path]);
+        git_sync(&f.project, &["branch", "-D", &v.branch]);
+        let error = restore(f.project_str(), &v).await.unwrap_err();
+        assert!(
+            error.contains("no longer exists") && error.contains(&v.branch),
+            "{error}"
+        );
+        assert!(!Path::new(&v.path).exists());
     }
 }

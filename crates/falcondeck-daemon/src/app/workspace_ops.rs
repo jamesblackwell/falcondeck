@@ -898,6 +898,11 @@ fn carry_over_live_threads(
     previous: HashMap<String, ManagedThread>,
 ) {
     for (thread_id, mut thread) in previous {
+        if let Some(rebuilt) = hydrated.get_mut(&thread_id) {
+            // Native hydration cannot know this daemon-owned marker. Preserve
+            // the latest value, including cancellation after connect began.
+            rebuilt.variant_reap = thread.variant_reap.clone();
+        }
         let keep_live = matches!(
             thread.summary.status,
             ThreadStatus::Running | ThreadStatus::WaitingForInput
@@ -957,6 +962,7 @@ fn restore_persisted_title_state(
     hydrated_title: &str,
     title_is_provider_preview: bool,
 ) {
+    managed.variant_reap = state.variant_reap.clone();
     managed.manual_title = state.manual_title;
     // FalconDeck-owned titles outlive provider previews. Older state could
     // incorrectly mark the preview itself as generated, so only preserve a
@@ -1311,8 +1317,12 @@ async fn start_thread_internal(
         Err(error) => {
             // Nothing will ever reference this checkout now, so it would be
             // orphaned on disk with no thread to clean it up.
-            if let Some(variant) = variant.as_ref() {
-                crate::variant::remove(&workspace_path, variant).await;
+            if let Some(variant) = variant.clone() {
+                let project = workspace_path.clone();
+                app.spawn_background_task(async move {
+                    let _ = crate::variant::wait_dependencies(&variant.path).await;
+                    crate::variant::remove(&project, &variant).await;
+                });
             }
             return Err(error);
         }
@@ -1399,6 +1409,7 @@ async fn start_thread_internal(
     let thread = app
         .thread_summary(&request.workspace_id, &thread.id)
         .await?;
+    app.watch_variant_dependencies(&request.workspace_id, &thread.id).await;
     app.emit(
         Some(request.workspace_id),
         Some(thread.id.clone()),
@@ -1587,9 +1598,7 @@ pub(super) async fn reclaim_archived_variant(
     workspace_id: &str,
     thread_id: &str,
 ) -> Option<crate::variant::Reclaim> {
-    let gate = app.variant_gate(workspace_id, thread_id).await;
-    let _guard = gate.lock().await;
-    let (variant, workspace_path) = {
+    let (variant, workspace_path, activity) = {
         let workspaces = app.inner.workspaces.lock().await;
         let workspace = workspaces.get(workspace_id)?;
         let thread = workspace.threads.get(thread_id)?;
@@ -1607,9 +1616,24 @@ pub(super) async fn reclaim_archived_variant(
         (
             thread.summary.variant.clone()?,
             workspace.summary.path.clone(),
+            thread.summary.updated_at,
         )
     };
-    let outcome = crate::variant::reclaim_if_safe(&workspace_path, &variant).await;
+    let assessment = crate::variant::assess(&workspace_path, &variant).await;
+    let gate = app.variant_gate(workspace_id, thread_id).await;
+    let _guard = gate.lock().await;
+    {
+        let ws = app.inner.workspaces.lock().await;
+        let t = ws.get(workspace_id)?.threads.get(thread_id)?;
+        if !t.summary.is_archived || t.summary.updated_at != activity
+            || t.summary.variant.as_ref() != Some(&variant)
+            || matches!(t.summary.status, ThreadStatus::Running | ThreadStatus::WaitingForInput)
+            || !t.queued_requests.is_empty() || !t.summary.queued_turns.is_empty() || t.dispatching_request.is_some() { return None; }
+    }
+    let outcome = match assessment {
+        Ok(ticket) => crate::variant::finish_reclaim(&workspace_path, &variant, ticket).await,
+        Err(result) => result,
+    };
     match &outcome {
         crate::variant::Reclaim::Removed => {
             tracing::info!(thread_id, path = %variant.path, "reclaimed isolated copy of archived thread");
@@ -1727,13 +1751,15 @@ fn latest_unarchived_thread_id(workspace: &ManagedWorkspace) -> Option<String> {
 /// Drops a thread and, if it ran in an isolated copy, the checkout behind it.
 ///
 /// Archiving deliberately does not do this: it is reversible, and an
-/// unarchived thread whose checkout had been deleted would have nowhere to
-/// run. Deletion is the terminal action, so it is where cleanup belongs.
+/// Checkout cleanup is gated and runs off the RPC path; retained work stays
+/// available on disk even after the daemon drops this thread's metadata.
 pub(super) async fn delete_thread(
     app: &AppState,
     workspace_id: &str,
     thread_id: &str,
 ) -> Result<(), DaemonError> {
+    let gate = app.variant_gate(workspace_id, thread_id).await;
+    let guard = gate.lock_owned().await;
     let (variant, workspace_path) = {
         let mut workspaces = app.inner.workspaces.lock().await;
         let workspace = workspaces
@@ -1750,9 +1776,14 @@ pub(super) async fn delete_thread(
         (thread.summary.variant, workspace.summary.path.clone())
     };
 
-    if let Some(variant) = variant.as_ref() {
-        crate::variant::remove(&workspace_path, variant).await;
+    if let Some(variant) = variant {
+        app.spawn_background_task(async move {
+            let _guard = guard;
+            let _ = crate::variant::wait_dependencies(&variant.path).await;
+            crate::variant::remove(&workspace_path, &variant).await;
+        });
     }
+
 
     app.emit(
         Some(workspace_id.to_string()),
@@ -1780,26 +1811,16 @@ pub(super) async fn unarchive_thread(
         .threads
         .get_mut(thread_id)
         .ok_or_else(|| DaemonError::NotFound("thread not found".to_string()))?;
-    thread.summary.is_archived = false;
-    let restore_target = thread
-        .summary
-        .variant
-        .clone()
-        .map(|variant| (variant, workspace.summary.path.clone()));
+    let has_variant = thread.summary.variant.is_some();
     drop(workspaces);
-    // Archiving may have reclaimed the isolated copy; bring it back before
-    // anyone can send a turn into a working directory that no longer exists.
-    if let Some((variant, workspace_path)) = restore_target {
-        match crate::variant::restore(&workspace_path, &variant).await {
-            Ok(true) => {
-                tracing::info!(thread_id, path = %variant.path, "restored isolated copy for unarchived thread")
-            }
-            Ok(false) => {}
-            Err(error) => {
-                tracing::warn!(thread_id, %error, "could not restore isolated copy for unarchived thread")
-            }
-        }
+    if has_variant {
+        app.restore_variant_for_turn(workspace_id, thread_id).await
+            .map_err(|e| DaemonError::Rpc(format!("Could not unarchive thread: {e}")))?;
     }
+    app.with_managed_thread_mut(workspace_id, thread_id, |thread| {
+        thread.summary.is_archived = false;
+        thread.variant_reap = None;
+    }).await?;
     let summary = app.thread_summary(workspace_id, thread_id).await?;
     app.emit(
         Some(workspace_id.to_string()),
@@ -2458,6 +2479,7 @@ async fn try_enqueue_turn(
     request: &SendTurnRequest,
     normalized_inputs: &[TurnInputItem],
     agent: Option<&mut AgentMessage>,
+    preparing: bool,
 ) -> Result<Option<CommandResponse>, DaemonError> {
     let (queued_summary, queue_report) = {
         let mut workspaces = app.inner.workspaces.lock().await;
@@ -2467,7 +2489,7 @@ async fn try_enqueue_turn(
         let Some(thread) = workspace.threads.get_mut(&request.thread_id) else {
             return Ok(None);
         };
-        if request.resume_interrupted {
+        if request.resume_interrupted && !preparing {
             return if thread_is_busy(&thread.summary.status) {
                 Err(DaemonError::BadRequest(
                     "that session is already running a turn; wait for it to finish before resuming"
@@ -2487,9 +2509,10 @@ async fn try_enqueue_turn(
         {
             return Ok(None);
         }
-        if !thread_is_busy(&thread.summary.status) {
+        if !thread_is_busy(&thread.summary.status) && !preparing {
             return Ok(None);
         }
+        thread.variant_reap = None;
         let running_for = thread.turn_started_at.map(|at| Utc::now() - at);
         if let Some(agent) = agent.as_deref()
             && let Some(earlier) = merge_agent_message(thread, agent)
@@ -2530,7 +2553,8 @@ async fn try_enqueue_turn(
                 queued_at: Utc::now(),
                 held_reason: None,
             };
-            thread.queued_requests.push(super::QueuedTurnRequest {
+            let queued = super::QueuedTurnRequest {
+                preparing_variant: preparing,
                 id,
                 request: stored,
                 summary: summary.clone(),
@@ -2538,8 +2562,15 @@ async fn try_enqueue_turn(
                     thread_id: agent.sender_thread_id.clone(),
                     messages: 1,
                 }),
-            });
-            thread.summary.queued_turns.push(summary);
+            };
+            let first_preparing = thread.queued_requests.first().is_some_and(|q| q.preparing_variant);
+            if preparing && !thread_is_busy(&thread.summary.status) && !first_preparing {
+                thread.queued_requests.insert(0, queued);
+                thread.summary.queued_turns.insert(0, summary);
+            } else {
+                thread.queued_requests.push(queued);
+                thread.summary.queued_turns.push(summary);
+            }
             thread.summary.updated_at = Utc::now();
             let report = QueueReport {
                 earlier_from_sender: 0,
@@ -2563,7 +2594,7 @@ async fn try_enqueue_turn(
     );
     Ok(Some(CommandResponse {
         ok: true,
-        message: Some("queued".to_string()),
+        message: Some(if preparing { "Preparing isolated checkout dependencies; turn queued".to_string() } else { "queued".to_string() }),
     }))
 }
 
@@ -3058,6 +3089,11 @@ impl AppState {
             if app.is_shutting_down() {
                 return;
             }
+            let dependency_path = {
+                let ws = app.inner.workspaces.lock().await;
+                ws.get(&workspace_id).and_then(|w| w.threads.get(&thread_id)).and_then(|t| t.summary.variant.as_ref()).map(|v| v.path.clone())
+            };
+            if let Some(path) = dependency_path { let _ = crate::variant::wait_dependencies(&path).await; }
             let next = {
                 let mut workspaces = app.inner.workspaces.lock().await;
                 let Some(workspace) = workspaces.get_mut(&workspace_id) else {
@@ -3090,7 +3126,10 @@ impl AppState {
                     }
                     return;
                 }
-                let next = thread.queued_requests.remove(0);
+                let mut next = thread.queued_requests.remove(0);
+                // Once dispatch starts, a crash must hold this outbox entry
+                // for explicit recovery just like any other in-flight turn.
+                next.preparing_variant = false;
                 thread
                     .summary
                     .queued_turns
@@ -3356,7 +3395,13 @@ async fn send_turn_with_startup_mode(
     if let Some(steered) = try_steer_turn(app, &request, &inputs).await? {
         return Ok(steered);
     }
-    if let Some(queued) = try_enqueue_turn(app, &request, &inputs, agent).await? {
+    let preparing = {
+        let ws = app.inner.workspaces.lock().await;
+        ws.get(&request.workspace_id).and_then(|w| w.threads.get(&request.thread_id))
+            .and_then(|t| t.summary.variant.as_ref()).is_some_and(|v| crate::variant::dependencies_pending(&v.path))
+    };
+    if let Some(queued) = try_enqueue_turn(app, &request, &inputs, agent, preparing).await? {
+        if preparing { app.dispatch_next_queued_turn(&request.workspace_id, &request.thread_id); }
         return Ok(queued);
     }
 
@@ -3455,6 +3500,7 @@ async fn send_turn_with_startup_mode(
             approval_policy = permission_mode.to_string();
         }
         managed.summary.provider = provider.clone();
+        managed.variant_reap = None;
         managed.summary.status = ThreadStatus::Running;
         managed.turn_started_at = Some(Utc::now());
         managed.summary.last_error = None;
@@ -4038,6 +4084,8 @@ pub(super) async fn start_review(
     let _guard = gate.lock().await;
     app.restore_variant_for_turn(&request.workspace_id, &request.thread_id)
         .await?;
+    app.with_managed_thread_mut(&request.workspace_id, &request.thread_id, |t| t.variant_reap = None).await?;
+    app.persist_local_state().await?;
     let provider = app
         .thread_provider(&request.workspace_id, &request.thread_id)
         .await?;
@@ -4091,6 +4139,9 @@ pub(super) async fn compact_thread(
     app: &AppState,
     mut request: CompactThreadRequest,
 ) -> Result<CommandResponse, DaemonError> {
+    let gate = app.variant_gate(&request.workspace_id, &request.thread_id).await;
+    let _guard = gate.lock().await;
+    app.restore_variant_for_turn(&request.workspace_id, &request.thread_id).await?;
     request.instructions = request
         .instructions
         .take()
@@ -4131,6 +4182,8 @@ pub(super) async fn compact_thread(
         )));
     }
 
+    app.with_managed_thread_mut(&request.workspace_id, &request.thread_id, |t| t.variant_reap = None).await?;
+    app.persist_local_state().await?;
     let started = app
         .upsert_thread(&request.workspace_id, &request.thread_id, |summary| {
             summary.status = ThreadStatus::Running;
@@ -4204,11 +4257,19 @@ pub(super) async fn remove_workspace(
 
     // Isolated checkouts are only reachable through their thread; dropping the
     // project without them would strand every one of them on disk.
-    for thread in removed.threads.values() {
-        if let Some(variant) = thread.summary.variant.as_ref() {
-            crate::variant::remove(&removed.summary.path, variant).await;
+    let variants: Vec<_> = removed.threads.values().filter_map(|t| t.summary.variant.clone().map(|v| (t.summary.id.clone(), v))).collect();
+    let project = removed.summary.path.clone();
+    let cleanup_app = app.clone(); let cleanup_workspace = workspace_id.to_string();
+    app.spawn_background_task(async move {
+        // Deliberately serial in the background: remote checks must not fan out
+        // over hundreds of branches or delay the workspace-removal RPC.
+        for (thread, variant) in variants {
+            let gate = cleanup_app.variant_gate(&cleanup_workspace, &thread).await;
+            let _guard = gate.lock().await;
+            let _ = crate::variant::wait_dependencies(&variant.path).await;
+            crate::variant::remove(&project, &variant).await;
         }
-    }
+    });
 
     let normalized_path = normalize_workspace_path(&removed.summary.path);
     app.inner
@@ -5976,7 +6037,8 @@ fn queued_turn_is_held(thread: &ManagedThread) -> bool {
     matches!(
         thread.summary.status,
         ThreadStatus::Running | ThreadStatus::WaitingForInput
-    ) || is_shutdown_interrupted(&thread.summary.status, thread.summary.last_error.as_deref())
+    ) || (is_shutdown_interrupted(&thread.summary.status, thread.summary.last_error.as_deref())
+        && !thread.queued_requests.first().is_some_and(|q| q.preparing_variant))
         || thread.queued_requests.is_empty()
         || thread.dispatching_request.is_some()
 }
@@ -6690,6 +6752,7 @@ mod tests {
     #[test]
     fn reconnecting_a_live_thread_keeps_persisted_queued_turns() {
         let queued = super::super::QueuedTurnRequest {
+                    preparing_variant: false,
             id: "queued-1".to_string(),
             request: SendTurnRequest {
                 workspace_id: "workspace-1".to_string(),
@@ -6757,6 +6820,7 @@ mod tests {
             last_read_seq: 0,
             last_agent_activity_seq: 0,
             variant: None,
+            variant_reap: None,
             agent: ThreadAgentParams::default(),
             queued_requests: Vec::new(),
             goal: None,
@@ -6982,6 +7046,7 @@ mod tests {
         let mut thread = managed_thread("thread-1", ThreadStatus::Error);
         thread.summary.last_error = Some(SHUTDOWN_INTERRUPTED_TURN_ERROR.to_string());
         thread.queued_requests.push(super::QueuedTurnRequest {
+            preparing_variant: false,
             id: "queued-1".to_string(),
             request: SendTurnRequest {
                 workspace_id: "workspace-1".to_string(),
@@ -7502,6 +7567,7 @@ mod tests {
             .unwrap();
             (
                 super::super::QueuedTurnRequest {
+                    preparing_variant: false,
                     id: id.to_string(),
                     request,
                     summary: summary.clone(),
@@ -7596,6 +7662,7 @@ mod tests {
             thread
                 .queued_requests
                 .push(super::super::QueuedTurnRequest {
+                    preparing_variant: false,
                     id: "queued-1".to_string(),
                     request: SendTurnRequest {
                         workspace_id: "workspace-1".to_string(),
@@ -8843,4 +8910,384 @@ mod tests {
         );
         assert_eq!(queued_attachment_preview_mime_type(b"not an image"), None);
     }
+    struct VariantFixture {
+        root: tempfile::TempDir,
+        project: std::path::PathBuf,
+        variant: falcondeck_core::ThreadVariant,
+        app: AppState,
+    }
+
+    impl VariantFixture {
+        fn git_at(path: &std::path::Path, args: &[&str]) -> String {
+            let out = std::process::Command::new("git")
+                .args(args)
+                .current_dir(path)
+                .env("GIT_CONFIG_GLOBAL", "/dev/null")
+                .output()
+                .unwrap();
+            assert!(
+                out.status.success(),
+                "git {args:?}: {}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+            String::from_utf8(out.stdout).unwrap().trim().to_string()
+        }
+
+        async fn new() -> Self {
+            let root = tempdir().unwrap();
+            let project = root.path().join("project");
+            std::fs::create_dir(&project).unwrap();
+            let origin = root.path().join("origin.git");
+            Self::git_at(
+                root.path(),
+                &["init", "--bare", "-b", "main", origin.to_str().unwrap()],
+            );
+            Self::git_at(&project, &["init", "-b", "main"]);
+            Self::git_at(&project, &["config", "user.name", "Test"]);
+            Self::git_at(&project, &["config", "user.email", "test@example.com"]);
+            std::fs::write(project.join("a.txt"), "one\n").unwrap();
+            Self::git_at(&project, &["add", "."]);
+            Self::git_at(&project, &["commit", "-m", "fixture"]);
+            Self::git_at(
+                &project,
+                &["remote", "add", "origin", origin.to_str().unwrap()],
+            );
+            Self::git_at(&project, &["push", "origin", "main"]);
+            let variant = crate::variant::create_in_root(
+                project.to_str().unwrap(),
+                "prepared",
+                &root.path().join("variants"),
+            )
+            .await
+            .unwrap();
+            let app = AppState::new_with_state_path(
+                "test".into(),
+                HashMap::new(),
+                root.path().join("state.json"),
+            );
+            seed_workspace_with_thread(&app, "workspace-1", "thread-1").await;
+            {
+                let mut ws = app.inner.workspaces.lock().await;
+                let workspace = ws.get_mut("workspace-1").unwrap();
+                workspace.summary.path = project.to_string_lossy().into_owned();
+                let t = workspace.threads.get_mut("thread-1").unwrap();
+                t.summary.status = ThreadStatus::Idle;
+                t.summary.variant = Some(variant.clone());
+            }
+            Self {
+                root,
+                project,
+                variant,
+                app,
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn variant_eligibility_survives_restart_without_enrolling_legacy_threads() {
+        let f = VariantFixture::new().await;
+        let legacy = crate::variant::create_in_root(
+            f.project.to_str().unwrap(),
+            "legacy",
+            &f.root.path().join("variants"),
+        )
+        .await
+        .unwrap();
+        {
+            let mut ws = f.app.inner.workspaces.lock().await;
+            let w = ws.get_mut("workspace-1").unwrap();
+            let mut summary = w.threads["thread-1"].summary.clone();
+            summary.id = "legacy-thread".into();
+            summary.variant = Some(legacy.clone());
+            w.threads
+                .insert("legacy-thread".into(), ManagedThread::new(summary));
+        }
+        // A replayed old completion is not a new live turn and cannot enroll it.
+        f.app.schedule_variant_reap("workspace-1", "thread-1").await;
+        assert!(
+            f.app.inner.workspaces.lock().await["workspace-1"].threads["thread-1"]
+                .variant_reap
+                .is_none()
+        );
+        let completed = Utc::now();
+        f.app
+            .with_managed_thread_mut("workspace-1", "thread-1", |t| {
+                t.turn_started_at = Some(Utc::now());
+                t.summary.updated_at = completed;
+            })
+            .await
+            .unwrap();
+        f.app.schedule_variant_reap("workspace-1", "thread-1").await;
+        let saved = f.app.inner.workspaces.lock().await["workspace-1"].threads["thread-1"]
+            .variant_reap
+            .clone()
+            .unwrap();
+        assert_eq!(
+            saved.eligible_after - completed,
+            chrono::Duration::hours(72)
+        );
+        let restarted = AppState::new_with_state_path(
+            "test".into(),
+            HashMap::new(),
+            f.root.path().join("state.json"),
+        );
+        restarted.restore_local_state().await.unwrap();
+        assert_eq!(
+            restarted.inner.workspaces.lock().await["workspace-1"].threads["thread-1"]
+                .variant_reap
+                .as_ref(),
+            Some(&saved)
+        );
+        // Metadata refreshes during reconnect do not cancel persisted eligibility.
+        restarted
+            .with_thread_mut("workspace-1", "thread-1", |t| t.updated_at = Utc::now())
+            .await
+            .unwrap();
+        restarted
+            .variant_maintenance_tick(completed + chrono::Duration::hours(73))
+            .await;
+        assert!(!std::path::Path::new(&f.variant.path).exists());
+        assert!(
+            std::path::Path::new(&legacy.path).exists(),
+            "old clean/pushed copies without an eligible-after time must remain"
+        );
+        assert!(
+            restarted
+                .thread_summary("workspace-1", "thread-1")
+                .await
+                .is_ok()
+        );
+        assert!(
+            restarted
+                .workspace_file("workspace-1", Some("thread-1"), "a.txt")
+                .await
+                .is_ok()
+        );
+        assert_eq!(
+            std::fs::read_to_string(std::path::Path::new(&f.variant.path).join("a.txt")).unwrap(),
+            "one\n"
+        );
+    }
+
+    #[tokio::test]
+    async fn variant_file_commit_ship_and_compact_restore_and_take_the_gate() {
+        let f = VariantFixture::new().await;
+        let root = std::path::Path::new(&f.variant.path);
+        let gate = f.app.variant_gate("workspace-1", "thread-1").await;
+        let held = gate.lock().await;
+        assert!(
+            tokio::time::timeout(
+                std::time::Duration::from_millis(10),
+                f.app
+                    .workspace_file("workspace-1", Some("thread-1"), "a.txt")
+            )
+            .await
+            .is_err()
+        );
+        assert!(
+            tokio::time::timeout(
+                std::time::Duration::from_millis(10),
+                compact_thread(
+                    &f.app,
+                    falcondeck_core::CompactThreadRequest {
+                        workspace_id: "workspace-1".into(),
+                        thread_id: "thread-1".into(),
+                        instructions: None
+                    }
+                )
+            )
+            .await
+            .is_err()
+        );
+        drop(held);
+        VariantFixture::git_at(&f.project, &["worktree", "remove", &f.variant.path]);
+        let result = f
+            .app
+            .git_commit(&falcondeck_core::GitCommitRequest {
+                workspace_id: "workspace-1".into(),
+                thread_id: "thread-1".into(),
+                message: None,
+            })
+            .await
+            .unwrap();
+        assert!(
+            !result.committed,
+            "a restored tree must not stage deletion of every file"
+        );
+        assert!(root.join("a.txt").exists());
+        VariantFixture::git_at(&f.project, &["worktree", "remove", &f.variant.path]);
+        let result = f
+            .app
+            .ship_thread(&falcondeck_core::ShipThreadRequest {
+                workspace_id: "workspace-1".into(),
+                thread_id: "thread-1".into(),
+                mode: falcondeck_core::ShipThreadMode::Merge,
+            })
+            .await
+            .unwrap();
+        assert!(result.pushed);
+        assert!(root.join("a.txt").exists());
+        VariantFixture::git_at(&f.project, &["worktree", "remove", &f.variant.path]);
+        let error = compact_thread(
+            &f.app,
+            falcondeck_core::CompactThreadRequest {
+                workspace_id: "workspace-1".into(),
+                thread_id: "thread-1".into(),
+                instructions: None,
+            },
+        )
+        .await
+        .unwrap_err();
+        assert!(error.to_string().contains("no provider session"));
+        assert!(root.join("a.txt").exists());
+    }
+
+    #[tokio::test]
+    async fn variant_preparation_uses_the_durable_queue_and_surfaces_cold_fallback() {
+        let f = VariantFixture::new().await;
+        let completed = crate::variant::dependency_test_job(&f.variant.path);
+        f.app
+            .watch_variant_dependencies("workspace-1", "thread-1")
+            .await;
+        let request: SendTurnRequest = serde_json::from_value(serde_json::json!({
+            "workspace_id": "workspace-1", "thread_id": "thread-1",
+            "inputs": [{"type":"text", "text":"keep this authored prompt"}]
+        }))
+        .unwrap();
+        let response = tokio::time::timeout(
+            std::time::Duration::from_millis(500),
+            try_enqueue_turn(&f.app, &request, &request.inputs, None, true),
+        )
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+        assert!(response.message.unwrap().contains("Preparing"));
+        f.app.dispatch_next_queued_turn("workspace-1", "thread-1");
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        {
+            let ws = f.app.inner.workspaces.lock().await;
+            let t = &ws["workspace-1"].threads["thread-1"];
+            assert_eq!(t.summary.status, ThreadStatus::Idle);
+            assert!(t.dispatching_request.is_none());
+            assert_eq!(t.queued_requests.len(), 1);
+            assert!(t.queued_requests[0].preparing_variant);
+        }
+        let disk = std::fs::read_to_string(f.root.path().join("state.json")).unwrap();
+        assert!(disk.contains("keep this authored prompt") && disk.contains("preparing_variant"));
+        // Keep the fake provider busy so the completed job cannot launch a real CLI.
+        f.app
+            .with_thread_mut("workspace-1", "thread-1", |t| {
+                t.status = ThreadStatus::Running
+            })
+            .await
+            .unwrap();
+        let mut events = f.app.inner.broadcaster.subscribe();
+        completed
+            .send(Some(vec![
+                "Lockfile differs from source: dependencies were not cloned; install normally."
+                    .into(),
+            ]))
+            .unwrap();
+        let observed = tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            loop {
+                let _ = events.recv().await;
+                if f.app
+                    .inner
+                    .operational_conditions
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .values()
+                    .any(|c| c.message.contains("Lockfile differs"))
+                {
+                    break;
+                }
+            }
+        })
+        .await;
+        assert!(
+            observed.is_ok(),
+            "cold fallback must be visible, including a job that completes quickly"
+        );
+    }
+
+    #[tokio::test]
+    async fn variant_delete_gates_cleanup_without_waiting_for_the_remote_in_the_rpc() {
+        let f = VariantFixture::new().await;
+        let helper = f.root.path().join("slow-ssh.sh");
+        std::fs::write(&helper, "#!/bin/sh\nsleep 2\nexit 1\n").unwrap();
+        VariantFixture::git_at(
+            &f.project,
+            &[
+                "config",
+                "core.sshCommand",
+                &format!("sh {}", helper.display()),
+            ],
+        );
+        VariantFixture::git_at(
+            &f.project,
+            &[
+                "remote",
+                "set-url",
+                "origin",
+                "ssh://example.invalid/project.git",
+            ],
+        );
+        tokio::time::timeout(
+            std::time::Duration::from_millis(500),
+            delete_thread(&f.app, "workspace-1", "thread-1"),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        let gate = f.app.variant_gate("workspace-1", "thread-1").await;
+        let _guard = tokio::time::timeout(std::time::Duration::from_secs(15), gate.lock())
+            .await
+            .unwrap();
+        assert!(
+            std::path::Path::new(&f.variant.path).exists(),
+            "unverified remote must keep checkout after thread deletion"
+        );
+    }
+
+    #[tokio::test]
+    async fn variant_unarchive_surfaces_missing_branch_and_stays_archived() {
+        let f = VariantFixture::new().await;
+        VariantFixture::git_at(&f.project, &["worktree", "remove", &f.variant.path]);
+        VariantFixture::git_at(&f.project, &["branch", "-D", &f.variant.branch]);
+        f.app
+            .with_thread_mut("workspace-1", "thread-1", |t| t.is_archived = true)
+            .await
+            .unwrap();
+        let error = unarchive_thread(&f.app, "workspace-1", "thread-1")
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("no longer exists"));
+        assert!(
+            f.app
+                .thread_summary("workspace-1", "thread-1")
+                .await
+                .unwrap()
+                .is_archived
+        );
+        assert!(!std::path::Path::new(&f.variant.path).exists());
+    }
+
+    #[test]
+    fn variant_reap_marker_and_cancellation_survive_a_stale_reconnect_snapshot() {
+        let now = Utc::now();
+        let marker = super::super::variant_lifecycle::Eligibility {
+            completed_at: now, eligible_after: now + chrono::Duration::hours(72),
+        };
+        for live in [Some(marker.clone()), None] {
+            let mut previous = managed_thread("thread-1", ThreadStatus::Idle);
+            previous.variant_reap = live.clone();
+            let mut stale = managed_thread("thread-1", ThreadStatus::Idle);
+            stale.variant_reap = if live.is_some() { None } else { Some(marker.clone()) };
+            let mut hydrated = HashMap::from([("thread-1".to_string(), stale)]);
+            carry_over_live_threads(&mut hydrated, HashMap::from([("thread-1".to_string(), previous)]));
+            assert_eq!(hydrated["thread-1"].variant_reap, live);
+        }
+    }
+
 }

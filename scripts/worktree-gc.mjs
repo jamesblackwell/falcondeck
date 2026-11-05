@@ -18,9 +18,10 @@
 // and skips standalone clones, REVIEW and ACTIVE entries entirely.
 
 import { execFile } from 'node:child_process';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, lstatSync, realpathSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { randomUUID } from 'node:crypto';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, lstatSync, realpathSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
-import { basename, dirname, join, sep } from 'node:path';
+import { basename, dirname, isAbsolute, join, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
 
@@ -29,7 +30,7 @@ const run = promisify(execFile);
 export const DEFAULTS = {
   minAgeDays: 3,
   activeHours: 24,
-  rebuildable: ['node_modules', 'vendor', 'target', '.next', 'dist', '.phpunit.cache', '.react-router', '__pycache__', '.pytest_cache', 'bootstrap/cache', 'storage/framework/cache', 'storage/framework/views'],
+  rebuildable: ['node_modules', '/vendor', '/target', '.next', '/dist', '/frontend/dist', '.phpunit.cache', '.react-router', '__pycache__', '.pytest_cache', '/bootstrap/cache', '/storage/framework/cache', '/storage/framework/views'],
   envAllowlist: ['.env*', '.envrc', '*.local.*'],
   top: 10,
   jobs: 4,
@@ -93,8 +94,9 @@ export function parseArgs(argv) {
 export function isRebuildable(path, rebuildable = DEFAULTS.rebuildable) {
   const segments = path.split('/').filter(Boolean);
   return rebuildable.some((name) => {
-    const parts = name.split('/');
-    for (let i = 0; i + parts.length <= segments.length; i += 1) {
+    const anchored = name.startsWith('/');
+    const parts = name.replace(/^\//, '').split('/');
+    for (let i = 0; i + parts.length <= segments.length && (!anchored || i === 0); i += 1) {
       if (parts.every((part, j) => segments[i + j] === part)) return true;
     }
     return false;
@@ -175,6 +177,9 @@ export function classify(entry, opts, now = Date.now()) {
       reasons.push(`non-rebuildable ignored: ${ignoredOther.slice(0, 3).join(', ')}${ignoredOther.length > 3 ? ` +${ignoredOther.length - 3}` : ''}`);
     }
     if (entry.locked) reasons.push('worktree is locked');
+    if (entry.branchMismatch) reasons.push('HEAD is detached or differs from the recorded variant branch');
+    if (entry.hiddenIndex) reasons.push('present file has assume-unchanged or skip-worktree flag');
+    if (entry.inProgress) reasons.push('Git operation in progress');
   }
   if (ageMs < opts.minAgeDays * DAY) reasons.push(`younger than ${opts.minAgeDays}d`);
   return { class: reasons.length ? 'REVIEW' : 'SAFE', reasons, ignoredOther };
@@ -253,6 +258,8 @@ function directoriesAt(root, depth) {
   return found;
 }
 
+function present(path) { try { lstatSync(path); return true; } catch { return false; } }
+
 function hasGit(path) {
   return existsSync(join(path, '.git'));
 }
@@ -292,19 +299,30 @@ export function loadOwners(statePath) {
         archived: archived.has(thread.thread_id),
         updatedAt: thread.updated_at ? Date.parse(thread.updated_at) : 0,
         workspace: workspace.path,
+        branch: thread.variant.branch,
       });
     }
   }
   return owners;
 }
 
-async function processCwds() {
+async function processPaths() {
   try {
-    const { stdout } = await run('lsof', ['-d', 'cwd', '-Fn'], { maxBuffer: 64 * 1024 * 1024, timeout: 60_000 });
+    const { stdout } = await run('lsof', ['-nP', '-Fpn'], { maxBuffer: 64 * 1024 * 1024, timeout: 60_000 });
     return stdout.split('\n').filter((l) => l.startsWith('n/')).map((l) => l.slice(1));
   } catch (error) {
     throw new Error('process inventory unavailable or incomplete; refusing cleanup');
   }
+}
+
+async function dockerMounts() {
+  const socket = process.env.DOCKER_HOST?.replace(/^unix:\/\//, '');
+  if (!(socket && existsSync(socket)) && !existsSync('/var/run/docker.sock')) return [];
+  const options = { timeout: 3000, maxBuffer: 16 * 1024 * 1024 };
+  const { stdout: ids } = await run('docker', ['ps', '-q'], options);
+  if (!ids.trim()) return [];
+  const { stdout } = await run('docker', ['inspect', '--format', '{{json .Mounts}}', ...ids.trim().split(/\s+/)], options);
+  return stdout.trim().split('\n').flatMap((line) => JSON.parse(line)).filter((m) => m.Type === 'bind').map((m) => m.Source);
 }
 
 async function duBytes(path) {
@@ -387,8 +405,8 @@ export async function inspect({ path, source }, ctx) {
   const { opts, owners, cwds } = ctx;
   const owner = owners.get(path) ?? null;
   const base = { path, source, owner, sizeBytes: 0, dirty: [], ignoredAll: [], ignoredOther: [], unpushed: 0, locked: false };
-  const canonical = (p) => { try { return realpathSync(p); } catch { return p; } };
-  base.liveProcess = cwds.some((cwd) => canonical(cwd) === canonical(path) || canonical(cwd).startsWith(canonical(path) + sep));
+  const canonical = (p) => process.platform === 'darwin' ? p.replace(/^\/var\//, '/private/var/').replace(/^\/tmp\//, '/private/tmp/') : p;
+  base.liveProcess = (ctx.mounts ?? []).some((mount) => canonical(path) === canonical(mount) || canonical(path).startsWith(canonical(mount) + sep)) || cwds.some((cwd) => canonical(cwd) === canonical(path) || canonical(cwd).startsWith(canonical(path) + sep));
 
   if (!hasGit(path)) {
     return { ...base, kind: 'orphan', repo: basename(dirname(path)), branch: null, mtimeMs: mtimeOf(path) };
@@ -397,7 +415,9 @@ export async function inspect({ path, source }, ctx) {
   const entry = { ...base, kind };
   try {
     const gitDir = (await git(path, ['rev-parse', '--absolute-git-dir'])).trim();
+    entry.gitDir = gitDir;
     const commonRaw = (await git(path, ['rev-parse', '--path-format=absolute', '--git-common-dir'])).trim();
+    entry.commonDir = commonRaw;
     const mainRoot = basename(commonRaw) === '.git' ? dirname(commonRaw) : commonRaw;
     entry.repo = basename(mainRoot).replace(/\.git$/, '');
     if (kind === 'clone') {
@@ -407,8 +427,13 @@ export async function inspect({ path, source }, ctx) {
     entry.repoPath = mainRoot;
     entry.branch = (await git(path, ['symbolic-ref', '-q', '--short', 'HEAD'], { allowFail: true }))?.trim() || null;
     entry.headSha = (await git(path, ['rev-parse', 'HEAD'])).trim();
+    entry.branchMismatch = !entry.branch || Boolean(owner?.branch && owner.branch !== entry.branch);
+    const flags = await git(path, ['ls-files', '-v', '-z']);
+    entry.hiddenIndex = flags.split('\0').some((e) => /^[a-z] /.test(e) || /^S /.test(e) && present(join(path, e.slice(2))));
+    entry.inProgress = ['rebase-merge', 'rebase-apply', 'MERGE_HEAD', 'CHERRY_PICK_HEAD', 'REVERT_HEAD', 'BISECT_LOG', 'sequencer'].some((p) => existsSync(join(gitDir, p)));
     entry.locked = existsSync(join(gitDir, 'locked'));
 
+    entry.indexSnapshot = flags;
     entry.statusSnapshot = await git(path, ['status', '--porcelain=v1', '-z', '--untracked-files=normal', '--ignored=traditional']);
     const status = parseStatusZ(entry.statusSnapshot);
     // The daemon copies the project's env files (the allowlist) into every
@@ -421,7 +446,7 @@ export async function inspect({ path, source }, ctx) {
     const expand = (rel) => {
       if (isRebuildable(rel, opts.rebuildable) || identicalToProject(rel)) return [rel];
       const prefix = rel.replace(/\/$/, '') + '/';
-      if (!opts.rebuildable.some((p) => p.startsWith(prefix))) return [rel];
+      if (!opts.rebuildable.some((p) => p.replace(/^\//, '').startsWith(prefix))) return [rel];
       try {
         if (!lstatSync(join(path, rel)).isDirectory()) return [rel];
         return readdirSync(join(path, rel)).flatMap((name) => expand(prefix + name));
@@ -483,12 +508,14 @@ async function pool(items, jobs, fn) {
 export async function collect(opts, { log = () => {} } = {}) {
   const statePath = opts.state ?? join(homedir(), '.falcondeck', 'daemon-state.json');
   const owners = loadOwners(statePath);
-  const cwds = await processCwds();
+  const cwds = await processPaths();
+  const mounts = await dockerMounts();
+  cwds.push(...mounts);
   const candidates = discover(opts);
   log(`found ${candidates.length} candidate checkouts; inspecting`);
   const now = Date.now();
   const entries = await pool(candidates, opts.jobs, async (candidate, index) => {
-    const entry = await inspect(candidate, { opts, owners, cwds });
+    const entry = await inspect(candidate, { opts, owners, cwds, mounts });
     entry.sizeBytes = await duBytes(candidate.path);
     Object.assign(entry, classify(entry, opts, now));
     log(`[${index + 1}/${candidates.length}] ${entry.class} ${candidate.path}`);
@@ -593,6 +620,43 @@ export function render(result, opts) {
 
 // ---------------------------------------------------------------------- apply
 
+// Mirrors setup::load: do not turn invalid project settings into a durable
+// recipe just before deleting the only populated checkout.
+export function validateSetup(setup) {
+  if (!setup || typeof setup !== 'object' || Array.isArray(setup)) throw new Error('invalid worktree setup object');
+  for (const key of Object.keys(setup)) {
+    if (!['sparse_exclude', 'dependency_roots', 'sparse_hint'].includes(key)) throw new Error(`unknown worktree setup field: ${key}`);
+  }
+  const relative = (p) => typeof p === 'string' && p.length > 0 && !isAbsolute(p)
+    && p !== '.' && !p.startsWith('./') && !p.split('/').includes('..') && !p.includes('\0');
+  for (const key of ['sparse_exclude', 'dependency_roots']) {
+    if (setup[key] !== undefined && (!Array.isArray(setup[key]) || setup[key].some((p) => !(key === 'dependency_roots' && p === '.') && !relative(p)))) {
+      throw new Error(`invalid worktree setup paths: ${key}`);
+    }
+  }
+  if (setup.sparse_hint !== undefined && typeof setup.sparse_hint !== 'string') throw new Error('invalid worktree sparse hint');
+  return setup;
+}
+
+async function saveRecipe(entry) {
+  if (entry.source !== 'variant') return;
+  const file = join(entry.commonDir, 'falcondeck-variants', basename(entry.path) + '.json');
+  let recipe;
+  if (existsSync(file)) recipe = JSON.parse(readFileSync(file, 'utf8'));
+  else {
+    const config = (await git(entry.repoPath, ['config', '--local', '--get', 'falcondeck.worktreeSetup'], { allowFail: true }))?.trim();
+    if (config && !isAbsolute(config)) throw new Error('worktree setup config must be an absolute JSON path');
+    recipe = { setup: config ? JSON.parse(readFileSync(config, 'utf8')) : { sparse_exclude: [], dependency_roots: [], sparse_hint: '' } };
+  }
+  validateSetup(recipe.setup);
+  const active = (await git(entry.path, ['config', '--worktree', '--bool', 'core.sparseCheckout'], { allowFail: true }))?.trim() === 'true';
+  recipe.patterns = active ? readFileSync(join(entry.gitDir, 'info/sparse-checkout'), 'utf8') : null;
+  mkdirSync(dirname(file), { recursive: true });
+  const temp = file + '.' + randomUUID() + '.tmp';
+  writeFileSync(temp, JSON.stringify(recipe));
+  renameSync(temp, file);
+}
+
 export async function apply(result, opts, { log = console.log } = {}) {
   const removed = [];
   const skipped = [];
@@ -605,7 +669,7 @@ export async function apply(result, opts, { log = console.log } = {}) {
       continue;
     }
     // Re-assess right before removal: state may have changed since the scan.
-    const fresh = await inspect({ path: entry.path, source: entry.source }, { opts, owners: loadOwners(opts.state ?? join(homedir(), '.falcondeck', 'daemon-state.json')), cwds: await processCwds() });
+    const fresh = await inspect({ path: entry.path, source: entry.source }, { opts, owners: loadOwners(opts.state ?? join(homedir(), '.falcondeck', 'daemon-state.json')), cwds: await processPaths(), mounts: await dockerMounts() });
     Object.assign(fresh, classify(fresh, opts));
     const freshBlocker = removalBlocker(fresh, opts);
     if (freshBlocker) {
@@ -613,14 +677,24 @@ export async function apply(result, opts, { log = console.log } = {}) {
       continue;
     }
     try {
-      const cwds = await processCwds();
+      const cwds = await processPaths();
+      const mounts = await dockerMounts();
       const path = realpathSync(entry.path);
-      if (cwds.some((cwd) => { try { cwd = realpathSync(cwd); } catch {} return cwd === path || cwd.startsWith(path + sep); })
+      const owner = loadOwners(opts.state ?? join(homedir(), '.falcondeck', 'daemon-state.json')).get(entry.path) ?? null;
+      const current = { ...fresh, owner, mtimeMs: Math.max(fresh.mtimeMs, owner?.updatedAt ?? 0) };
+      Object.assign(current, classify(current, opts));
+      if (removalBlocker(current, opts)) { skipped.push({ path: entry.path, reason: 'thread ownership/activity changed during assessment' }); continue; }
+      if (mounts.some((mount) => path === mount || path.startsWith(mount + sep) || mount.startsWith(path + sep)) || cwds.some((cwd) => { if (process.platform === 'darwin') cwd = cwd.replace(/^\/var\//, '/private/var/').replace(/^\/tmp\//, '/private/tmp/'); return cwd === path || cwd.startsWith(path + sep); })
         || (await git(path, ['rev-parse', 'HEAD'])).trim() !== fresh.headSha
+        || (await git(path, ['symbolic-ref', '-q', '--short', 'HEAD'], { allowFail: true }))?.trim() !== fresh.branch
+        || await git(path, ['ls-files', '-v', '-z']) !== fresh.indexSnapshot
+        || fresh.indexSnapshot.split('\0').some((e) => /^[a-z] /.test(e) || /^S /.test(e) && present(join(path, e.slice(2))))
+        || ['rebase-merge', 'rebase-apply', 'MERGE_HEAD', 'CHERRY_PICK_HEAD', 'REVERT_HEAD', 'BISECT_LOG', 'sequencer'].some((p) => existsSync(join(fresh.gitDir, p)))
         || await git(path, ['status', '--porcelain=v1', '-z', '--untracked-files=normal', '--ignored=traditional']) !== fresh.statusSnapshot) {
         skipped.push({ path: entry.path, reason: 'checkout or processes changed during assessment' });
         continue;
       }
+      await saveRecipe(fresh);
       await git(entry.repoPath, ['worktree', 'remove', entry.path], { timeout: 30 * 60_000 });
       repos.add(entry.repoPath);
       removed.push({ path: entry.path, repo: entry.repo, branch: entry.branch, headSha: entry.headSha, bytes: entry.sizeBytes, threadId: entry.owner?.threadId ?? null });
@@ -646,7 +720,7 @@ const HELP = `Usage: worktree-gc [--apply] [--format text|markdown|json] [option
   --apply                   remove SAFE worktrees (default is a dry run)
   --include-open-threads    with --apply, also remove SAFE worktrees whose thread is not archived
   --no-fetch                do not contact remotes (then nothing is SAFE)
-  --rebuildable-preset P    strict (default: node_modules vendor target .next dist) | generated (adds framework caches, test output)
+  --rebuildable-preset P    strict (default: dependency/framework caches; root vendor, target, dist and frontend/dist) | generated (broader manual preset)
   --min-age-days N          SAFE age threshold (default ${DEFAULTS.minAgeDays})
   --active-hours N          ACTIVE recency window (default ${DEFAULTS.activeHours})
   --top N                   REVIEW rows to highlight (default ${DEFAULTS.top})

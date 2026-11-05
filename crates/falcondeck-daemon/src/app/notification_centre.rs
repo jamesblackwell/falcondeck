@@ -148,7 +148,7 @@ impl AppState {
             thread_id,
         } = &event
         {
-            self.schedule_variant_reap(workspace_id, thread_id);
+            self.schedule_variant_reap(workspace_id, thread_id).await;
         }
         let notice = matches!(event, AttentionEvent::Notice(_));
         let replaces = match &event {
@@ -498,7 +498,7 @@ impl AppState {
     }
 
     /// Clients refetch on this, as they do for reviews.
-    async fn emit_notifications_changed(&self) {
+    pub(super) async fn emit_notifications_changed(&self) {
         self.emit_control_state_change(ControlStateChanged {
             store_revision: self.control().store_revision().await,
             domains: vec![ControlDomain::Notifications],

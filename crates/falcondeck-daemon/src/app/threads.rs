@@ -3264,6 +3264,7 @@ impl ManagedThread {
             && !is_provisional_thread_title(&summary.title);
         Self {
             summary,
+            variant_reap: None,
             claude_history: None,
             items: Vec::new(),
             assistant_items: HashMap::new(),
@@ -4342,6 +4343,7 @@ mod tests {
         let mut thread = cached_codex_streaming_thread();
         thread.summary.last_error = Some("Old error".to_string());
         let queued = super::super::QueuedTurnRequest {
+            preparing_variant: false,
             id: "queued-1".to_string(),
             request: serde_json::from_value(json!({
                 "workspace_id": "workspace-1", "thread_id": "thread-isolated", "inputs": []

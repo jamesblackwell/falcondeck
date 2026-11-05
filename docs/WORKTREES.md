@@ -65,8 +65,10 @@ Run in: ◉ Project folder   ○ Isolated copy
 ### 2. The mechanism: lean worktrees
 
 The daemon uses `git worktree add` and copies a small allowlist of untracked
-environment files (`.env*`, `.envrc`, `*.local.*`). It deliberately does not
-carry ignored dependencies or build outputs into the isolated checkout.
+environment files (`.env*`, `.envrc`, `*.local.*`). By default it does not
+carry ignored dependencies or build outputs into the isolated checkout. Projects
+can opt into exclusion-based sparse checkout and warm pnpm dependency cloning;
+see `WORKTREE-LIFECYCLE.md` for configuration, restore, and safety rules.
 
 The original APFS copy-on-write implementation avoided copying file contents,
 but still replicated every filesystem entry. Repositories with large Cargo,

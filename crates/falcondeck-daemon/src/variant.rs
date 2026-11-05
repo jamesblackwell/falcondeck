@@ -19,6 +19,7 @@ use crate::error::DaemonError;
 mod reclaim;
 mod setup;
 pub use reclaim::{Reclaim, reclaim_if_safe, restore};
+pub(crate) use reclaim::{assess, finish_reclaim};
 pub(crate) use setup::hint as sparse_hint;
 
 /// Untracked files carried into a worktree-backed variant.
@@ -101,15 +102,13 @@ pub(crate) async fn create_in_root(
             destination.display()
         )));
     }
-    setup::load(project_path).await?;
+    let setup = setup::load(project_path).await?;
 
     let branch = format!("{BRANCH_PREFIX}{slug}");
     let destination_str = destination.to_string_lossy().to_string();
     let base_branch = current_branch(project_path).await;
 
-    add_worktree(project_path, &destination, &branch).await?;
-    setup::provision(project_path, &destination).await?;
-    copy_untracked_allowlist(project_path, &destination).await;
+    populate_worktree(project_path, &destination, &branch, slug, true, setup).await?;
 
     Ok(ThreadVariant {
         slug: slug.to_string(),
@@ -118,6 +117,210 @@ pub(crate) async fn create_in_root(
         kind: ThreadVariantKind::Worktree,
         base_branch,
     })
+}
+
+/// Populate a private worktree before publishing its path. Only this function's
+/// fresh staging tree may be rolled back with force; reclamation never uses it.
+async fn populate_worktree(
+    project: &str,
+    destination: &Path,
+    branch: &str,
+    slug: &str,
+    new_branch: bool,
+    setup: setup::Setup,
+) -> Result<(), DaemonError> {
+    let parent = destination
+        .parent()
+        .ok_or_else(|| DaemonError::Rpc("variant path has no parent".into()))?;
+    fs::create_dir_all(parent)
+        .await
+        .map_err(|e| DaemonError::Rpc(e.to_string()))?;
+    let staging = parent.join(format!(".{slug}-provision-{}", Uuid::new_v4()));
+    let stage = staging.to_string_lossy();
+    if new_branch
+        && run_git(
+            project,
+            &["show-ref", "--verify", &format!("refs/heads/{branch}")],
+        )
+        .await
+        .is_ok()
+    {
+        return Err(DaemonError::BadRequest(format!(
+            "isolated branch already exists: {branch}"
+        )));
+    }
+    let starting_head = run_git(project, &["rev-parse", "HEAD"]).await?;
+    let added = if new_branch {
+        add_worktree(project, &staging, branch).await
+    } else {
+        run_git(
+            project,
+            &["worktree", "add", "--no-checkout", &stage, branch],
+        )
+        .await
+        .map(|_| ())
+    };
+    if let Err(error) = added {
+        let _ = run_git(project, &["worktree", "remove", "--force", &stage]).await;
+        if new_branch {
+            discard_new_branch(project, branch, starting_head.trim()).await;
+        }
+        return Err(error);
+    }
+    let result = async {
+        setup::provision(project, &staging, &setup).await?;
+        populated(&stage).await.map_err(DaemonError::Rpc)?;
+        copy_untracked_allowlist(project, &staging).await;
+        setup::save_setup(project, slug, &staging, setup.clone()).await?;
+        run_git(
+            project,
+            &["worktree", "move", &stage, &destination.to_string_lossy()],
+        )
+        .await?;
+        Ok::<_, DaemonError>(())
+    }
+    .await;
+    if let Err(error) = result {
+        // This path was never handed to a thread or user. It may have an
+        // incomplete index after a failed checkout, so plain remove can refuse.
+        let _ = run_git(project, &["worktree", "remove", "--force", &stage]).await;
+        if new_branch {
+            discard_new_branch(project, branch, starting_head.trim()).await;
+        }
+        return Err(error);
+    }
+    start_dependencies(project, destination, setup).await;
+    Ok(())
+}
+
+async fn discard_new_branch(project: &str, branch: &str, starting_head: &str) {
+    let reference = format!("refs/heads/{branch}");
+    let Ok(listed) = run_git(project, &["worktree", "list", "--porcelain"]).await else {
+        return;
+    };
+    if listed
+        .lines()
+        .any(|line| line == format!("branch {reference}"))
+    {
+        return;
+    }
+    // Only discard our unchanged duplicate while the source HEAD still keeps
+    // its commits. A concurrently moved ref or unique tip is retained.
+    if run_git(
+        project,
+        &["merge-base", "--is-ancestor", starting_head, "HEAD"],
+    )
+    .await
+    .is_ok()
+    {
+        let _ = run_git(project, &["update-ref", "-d", &reference, starting_head]).await;
+    }
+}
+
+pub(crate) async fn populated(path: &str) -> Result<(), String> {
+    let root = Path::new(path);
+    if !root.join(".git").exists() {
+        return Err(format!(
+            "isolated checkout at {path} is incomplete (missing .git); restore it before continuing"
+        ));
+    }
+    let top = run_git(path, &["rev-parse", "--show-toplevel"])
+        .await
+        .map_err(|e| e.to_string())?;
+    if fs::canonicalize(top.trim()).await.ok() != fs::canonicalize(root).await.ok() {
+        return Err(format!(
+            "isolated checkout at {path} has incomplete Git registration"
+        ));
+    }
+    let files = run_git(path, &["ls-tree", "-r", "--name-only", "-z", "HEAD"])
+        .await
+        .map_err(|e| e.to_string())?;
+    if !files.is_empty()
+        && !files
+            .split('\0')
+            .filter(|p| !p.is_empty())
+            .any(|p| root.join(p).symlink_metadata().is_ok())
+    {
+        return Err(format!(
+            "isolated checkout at {path} is not populated; refusing to run with every tracked file missing"
+        ));
+    }
+    Ok(())
+}
+
+type DependencyJob = tokio::sync::watch::Receiver<Option<Vec<String>>>;
+fn dependency_jobs() -> &'static std::sync::Mutex<std::collections::HashMap<PathBuf, DependencyJob>>
+{
+    static JOBS: std::sync::OnceLock<
+        std::sync::Mutex<std::collections::HashMap<PathBuf, DependencyJob>>,
+    > = std::sync::OnceLock::new();
+    JOBS.get_or_init(Default::default)
+}
+
+async fn start_dependencies(project: &str, path: &Path, setup: setup::Setup) {
+    if setup.dependency_roots.is_empty() {
+        return;
+    }
+    let (tx, rx) = tokio::sync::watch::channel(None);
+    dependency_jobs()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .insert(path.to_owned(), rx);
+    let project = project.to_string();
+    let path = path.to_owned();
+    tokio::spawn(async move {
+        static SLOTS: std::sync::OnceLock<tokio::sync::Semaphore> = std::sync::OnceLock::new();
+        let slots = SLOTS.get_or_init(|| tokio::sync::Semaphore::new(1));
+        let _slot = slots.acquire().await;
+        let messages = setup::dependencies(&project, &path, &setup).await;
+        let _ = tx.send(Some(messages));
+    });
+}
+
+#[cfg(test)]
+pub(crate) fn dependency_test_job(path: &str) -> tokio::sync::watch::Sender<Option<Vec<String>>> {
+    let (tx, rx) = tokio::sync::watch::channel(None);
+    dependency_jobs()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .insert(path.into(), rx);
+    tx
+}
+
+pub(crate) fn has_dependency_job(path: &str) -> bool {
+    dependency_jobs()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .contains_key(Path::new(path))
+}
+
+pub(crate) fn dependencies_pending(path: &str) -> bool {
+    dependency_jobs()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .get(Path::new(path))
+        .is_some_and(|job| job.borrow().is_none() && job.has_changed().is_ok())
+}
+
+pub(crate) async fn wait_dependencies(path: &str) -> Vec<String> {
+    let job = dependency_jobs()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .get(Path::new(path))
+        .cloned();
+    let Some(mut job) = job else {
+        return Vec::new();
+    };
+    loop {
+        if let Some(messages) = job.borrow().clone() {
+            return messages;
+        }
+        if job.changed().await.is_err() {
+            return vec![
+                "Dependency provisioning was interrupted; run the project's normal install.".into(),
+            ];
+        }
+    }
 }
 
 /// Tries safe reclamation after thread deletion. Unsafe checkouts are retained;
@@ -312,6 +515,7 @@ fn match_glob(pattern: &str, name: &str) -> bool {
 
 async fn run_git(cwd: &str, args: &[&str]) -> Result<String, DaemonError> {
     let output = Command::new("git")
+        .kill_on_drop(true)
         .args(args)
         .current_dir(cwd)
         .output()
@@ -549,5 +753,21 @@ mod tests {
             !matches.iter().any(|entry| entry.contains("node_modules")),
             "ignored directories must stay collapsed: {matches:?}"
         );
+    }
+    #[tokio::test]
+    async fn closed_dependency_job_falls_back_without_requeuing_forever() {
+        let root = tempdir().unwrap();
+        let path = root.path().to_str().unwrap();
+        let sender = dependency_test_job(path);
+        assert!(dependencies_pending(path));
+        drop(sender);
+        assert!(!dependencies_pending(path));
+        let result = tokio::time::timeout(
+            std::time::Duration::from_millis(100),
+            wait_dependencies(path),
+        )
+        .await
+        .unwrap();
+        assert!(result.iter().any(|m| m.contains("interrupted")));
     }
 }
