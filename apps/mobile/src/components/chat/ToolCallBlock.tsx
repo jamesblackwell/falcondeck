@@ -399,11 +399,16 @@ function TruncatedOutputNotice({
   totalBytes,
   onRetry,
 }: {
-  status: "idle" | "loading" | "ready" | "error";
+  status: "idle" | "loading" | "ready" | "error" | "too_large";
   totalBytes: number;
   onRetry: () => void;
 }) {
   const { theme } = useUnistyles();
+  if (status === "too_large") {
+    return <Text variant="caption" size="xs" color="secondary" accessibilityRole="text">
+      Too large to load here. Open this tool on the Mac.
+    </Text>;
+  }
   if (status === "error") {
     return (
       <Pressable

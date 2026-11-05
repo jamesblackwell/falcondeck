@@ -128,6 +128,9 @@ export function stripFileLocation(token: string) {
  * once and shortens it for display, keeping the full path for links.
  */
 export function describeToolCall(item: ToolCallLabelSource): ToolCallDescription {
+  if (item.detail?.kind === 'dynamic' && item.detail.namespace === 'claude' && /^(agent|task)$/i.test(item.tool_kind ?? '')) {
+    return { label: item.title.trim(), path: null, namesPath: false }
+  }
   const notable = notableToolAction(item)
   if (notable) {
     return { label: notable.label, path: null, namesPath: false }
@@ -221,7 +224,7 @@ function isToolSearchKind(kind: string | null | undefined) {
  */
 export function toolCallReadsAsProse(item: ToolCallLabelSource) {
   return (
-    item.detail?.kind === 'mcp' || isMcpToolKind(item.tool_kind) || isToolSearchKind(item.tool_kind)
+    (item.detail?.kind === 'dynamic' && item.detail.namespace === 'claude' && /^(agent|task)$/i.test(item.tool_kind ?? '')) || item.detail?.kind === 'mcp' || isMcpToolKind(item.tool_kind) || isToolSearchKind(item.tool_kind)
   )
 }
 
@@ -233,7 +236,7 @@ export function toolCallAgentTitle(item: ToolCallLabelSource) {
   const detail = item.detail
   if (detail?.kind === 'dynamic' && isToolSearchKind(item.tool_kind)) {
     const query = argumentString(detail, ['query'])
-    return query ? `Search tools: ${query}` : item.title
+    return query ? `Search tools: ${query.length > 4000 ? query.slice(0, 3999) + '…' : query}` : item.title
   }
   const wire = /^mcp__(.+)__(.+)$/.exec((item.tool_kind ?? '').trim())
   if (wire) {
@@ -282,6 +285,7 @@ export function unwrapAgentCommand(title: string) {
 
 /** Commits, pushes, and breakouts — or null when this is ordinary tool work. */
 export function notableToolAction(item: ToolCallLabelSource): NotableToolAction | null {
+  if (item.detail?.kind === 'dynamic' && item.detail.namespace === 'claude' && /^(agent|task)$/i.test(item.tool_kind ?? '')) return null
   if (isBreakoutItem(item)) {
     return { kind: 'breakout', label: breakoutLabel(item) }
   }

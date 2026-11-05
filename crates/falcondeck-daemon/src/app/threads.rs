@@ -99,7 +99,9 @@ fn codex_thread_is_idle_for_release(thread: &ManagedThread) -> bool {
 /// Only Codex sets `parentThreadId`, and only on `spawn_agent` children.
 fn is_idle_codex_subagent(read: &Value) -> bool {
     let thread = &read["thread"];
-    thread["parentThreadId"].as_str().is_some_and(|id| !id.is_empty())
+    thread["parentThreadId"]
+        .as_str()
+        .is_some_and(|id| !id.is_empty())
         && thread["status"]["type"] == "idle"
 }
 
@@ -1869,18 +1871,19 @@ impl AppState {
                                 // against what the process last reported.
                                 if let Some(models) = result_turn_model_usage(&value) {
                                     if !models.is_empty() {
-                                        let cumulative =
-                                            result_model_usage_is_cumulative(&value);
+                                        let cumulative = result_model_usage_is_cumulative(&value);
                                         let tier = result_usage_service_tier(&value);
                                         let calls = result_num_turns(&value);
-                                        if let Some((input, cached)) = self.record_claude_turn_usage(
-                                            &workspace_id,
-                                            &thread_id,
-                                            &models,
-                                            cumulative,
-                                            tier,
-                                            calls,
-                                        ) {
+                                        if let Some((input, cached)) = self
+                                            .record_claude_turn_usage(
+                                                &workspace_id,
+                                                &thread_id,
+                                                &models,
+                                                cumulative,
+                                                tier,
+                                                calls,
+                                            )
+                                        {
                                             self.control()
                                                 .record_claude_run_usage(
                                                     &workspace_id,
@@ -2029,7 +2032,7 @@ impl AppState {
                                     title: title.clone(),
                                     tool_kind: tool_kind.clone(),
                                     status: "running".to_string(),
-                                    output: None,
+                                    output: Some(entry.summary()),
                                     exit_code: None,
                                     display: Box::new(tool_display_metadata(
                                         &title, &tool_kind, "running", None, None,
@@ -3041,6 +3044,8 @@ impl AppState {
 
         if update_existing && let Some(index) = existing_index {
             let previous = thread.items[index].clone();
+            super::conversation_helpers::preserve_claude_evidence(&previous, &mut item);
+            sanitize_conversation_item(&mut item);
             thread.items[index] = item.clone();
             if track_attention {
                 self.analytics_updated_item(thread, &previous, &item);
@@ -3799,7 +3804,8 @@ fn refresh_last_message_preview(thread: &mut ManagedThread) {
     if let Some((text, lifecycle, created_at)) = newest
         && lifecycle != ContentLifecycle::Error
     {
-        thread.summary.last_message_preview = Some(super::conversation_helpers::truncate_preview(text, 160));
+        thread.summary.last_message_preview =
+            Some(super::conversation_helpers::truncate_preview(text, 160));
         thread.summary.last_message_at = Some(created_at);
     }
 }

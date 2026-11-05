@@ -1858,6 +1858,7 @@ function AppInner() {
       .threadDetail(selectedWorkspaceId, selectedThreadId, {
         mode: "tail",
         limit: THREAD_DETAIL_TAIL_LIMIT,
+        tool_output_bytes: 2048,
       })
       .then((detail) => {
         if (!cancelled) setThreadDetail(detail);
@@ -1897,6 +1898,7 @@ function AppInner() {
         mode: "before",
         before_item_id: beforeItemId,
         limit: THREAD_DETAIL_OLDER_PAGE_LIMIT,
+        tool_output_bytes: 2048,
       })
       .then((page) => {
         setThreadDetail((current) => {
@@ -6445,6 +6447,11 @@ function AppInner() {
               onOpenDetails={handleOpenExtensionToolDetails}
             >
               <DesktopConversationPane
+                loadToolItem={async (itemId) => {
+                  const client = apiFor(selectedWorkspaceId);
+                  if (!client || !selectedWorkspaceId || !selectedThreadId) throw new Error("Task unavailable");
+                  return client.threadItem(selectedWorkspaceId, selectedThreadId, itemId);
+                }}
               selectedWorkspace={selectedWorkspace}
               selectedThread={selectedThread}
               selectedWorkspaceId={selectedWorkspaceId}

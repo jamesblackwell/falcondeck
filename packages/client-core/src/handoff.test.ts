@@ -1,6 +1,7 @@
+import { normalizeConversationItem } from './normalization';
 import { describe, expect, it } from "vitest";
 
-import { boundHandoffTranscript, buildHandoffPrompt } from "./handoff";
+import { boundHandoffTranscript, buildHandoffPrompt, buildForkPrompt } from "./handoff";
 
 describe("handoff context", () => {
   it.each([
@@ -193,3 +194,26 @@ describe("handoff context", () => {
     expect(prompt.length).toBeLessThan(600_000);
   });
 });
+
+it.each([buildHandoffPrompt, buildForkPrompt])('keeps newly captured Claude evidence out of model context', build => {
+  const item = normalizeConversationItem({ kind: 'tool_call', id: 'c', title: 'Bash', tool_kind: 'Bash', status: 'completed', output: 'ordinary output',
+    detail: { kind: 'dynamic', namespace: 'claude', tool: 'Bash', arguments: { command: 'private-new-command' }, claude: { result: { internal: 'private-new-result' }, calls: [{ id: 'a', title: 'Read', tool_kind: 'Read', status: 'completed', arguments: { body: 'private-new-child' }, output: 'private-child-output' }] } }, created_at: '2026-11-05T12:00:00Z' })
+  const prompt = build({ items: [item], sourceTitle: 'Example' })
+  expect(prompt).toContain('ordinary output')
+  expect(prompt).not.toContain('private-new-')
+  expect(prompt).not.toContain('private-child-output')
+})
+
+it.each([buildHandoffPrompt, buildForkPrompt])('caps MCP argument strings before serializing model context', build => {
+  const item = normalizeConversationItem({ kind: 'tool_call', id: 'm', title: 'MCP call', tool_kind: 'mcpToolCall', status: 'completed', output: 'answer',
+    detail: { kind: 'mcp', server: 'test', tool: 'call', arguments: { nested: ['x'.repeat(4000) + 'end-of-large-argument'] }, result: null }, created_at: '2026-11-05T12:00:00Z' })
+  const prompt = build({ items: [item], sourceTitle: 'Example' })
+  expect(prompt).toContain('answer')
+  expect(prompt).not.toContain('end-of-large-argument')
+})
+
+it.each([buildHandoffPrompt, buildForkPrompt])('also bounds ToolSearch arguments used as model-facing titles', build => {
+  const item = normalizeConversationItem({ kind: 'tool_call', id: 's', title: 'Search tools', tool_kind: 'ToolSearch', status: 'completed',
+    detail: { kind: 'dynamic', namespace: 'claude', tool: 'ToolSearch', arguments: { query: 'x'.repeat(4000) + 'end-of-large-query' } }, created_at: '2026-11-05T12:00:00Z' })
+  expect(build({ items: [item], sourceTitle: 'Example' })).not.toContain('end-of-large-query')
+})

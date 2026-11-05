@@ -129,6 +129,8 @@ const AttachmentCard = memo(function AttachmentCard({
             onError={() => setFailedUrl(url)}
           />
         </Pressable>
+      ) : fullItem.status === "too_large" ? (
+        <Text variant="caption" color="secondary">Too large to load here. Open this attachment on the Mac.</Text>
       ) : fetching ? (
         <View
           style={styles.unavailable}

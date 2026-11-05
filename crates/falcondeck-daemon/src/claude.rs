@@ -2015,6 +2015,7 @@ fn parse_session_file(path: &Path) -> Option<ParsedSessionFile> {
     let mut item_index = HydratedItemIndex::default();
     let mut tool_identity = HashMap::<String, (String, String)>::new();
     let mut tool_inputs = ClaudeToolInputs::default();
+    let mut child_links = HashMap::<String, String>::new();
 
     for line in reader.lines().map_while(Result::ok) {
         let Ok(value) = serde_json::from_str::<Value>(&line) else {
@@ -2141,31 +2142,15 @@ fn parse_session_file(path: &Path) -> Option<ParsedSessionFile> {
                 }
                 tool_inputs.record(&tool_event.id, &tool_kind, tool_event.input.as_ref());
                 tool_inputs.record_result(&tool_event.id, &value);
-                let mut detail = tool_inputs.detail(&tool_event.id, &tool_kind);
-                // Native Claude keeps child activity in a sibling subagents file.
-                // Read only the provider's agent id, never an arbitrary result path.
+                let detail = tool_inputs.detail(&tool_event.id, &tool_kind);
                 if matches!(tool_kind.to_ascii_lowercase().as_str(), "agent" | "task")
                     && let Some(agent_id) = value
-                        .pointer("/toolUseResult/agentId")
+                        .get("toolUseResult")
+                        .or_else(|| value.get("tool_use_result"))
+                        .and_then(|v| v.get("agentId"))
                         .and_then(Value::as_str)
-                    && !agent_id.is_empty()
-                    && agent_id
-                        .bytes()
-                        .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
                 {
-                    let child_path = path
-                        .with_extension("")
-                        .join("subagents")
-                        .join(format!("agent-{agent_id}.jsonl"));
-                    if let Ok(file) = fs::File::open(child_path) {
-                        let mut activity = ClaudeSubagentActivity::default();
-                        for line in BufReader::new(file).lines().map_while(Result::ok) {
-                            if let Ok(child) = serde_json::from_str::<Value>(&line) {
-                                activity.record(&child);
-                            }
-                        }
-                        activity.apply(&mut detail);
-                    }
+                    child_links.insert(tool_event.id.clone(), format!("agent-{agent_id}"));
                 }
                 upsert_hydrated_tool_call(
                     &mut items,
@@ -2199,6 +2184,64 @@ fn parse_session_file(path: &Path) -> Option<ParsedSessionFile> {
                 previous_turn_id: None,
                 created_at,
             });
+        }
+    }
+
+    // Running/interrupted agents may never write a parent result. Claude's
+    // sidecar metadata supplies the tool-use join key independently of completion.
+    let child_dir = path.with_extension("").join("subagents");
+    if let Ok(entries) = fs::read_dir(&child_dir) {
+        for entry in entries.flatten() {
+            let name = entry.file_name().to_string_lossy().to_string();
+            let Some(stem) = name.strip_suffix(".meta.json") else {
+                continue;
+            };
+            if !entry.file_type().is_ok_and(|kind| kind.is_file()) {
+                continue;
+            }
+            if let Ok(text) = fs::read_to_string(entry.path())
+                && let Ok(meta) = serde_json::from_str::<Value>(&text)
+                && let Some(tool_id) = meta.get("toolUseId").and_then(Value::as_str)
+            {
+                child_links.insert(tool_id.to_string(), stem.to_string());
+            }
+        }
+    }
+    for (tool_id, stem) in child_links {
+        if stem.is_empty()
+            || !stem
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_'))
+        {
+            continue;
+        }
+        let Some(index) = item_index.tool_calls.get(&tool_id).copied() else {
+            continue;
+        };
+        let child_path = child_dir.join(format!("{stem}.jsonl"));
+        let Ok(file) = fs::File::open(&child_path) else {
+            continue;
+        };
+        let mut activity = ClaudeSubagentActivity::default();
+        for line in BufReader::new(file).lines().map_while(Result::ok) {
+            if let Ok(child) = serde_json::from_str::<Value>(&line) {
+                activity.record(&child);
+            }
+        }
+        if let Some(ConversationItem::ToolCall {
+            detail,
+            output,
+            status,
+            ..
+        }) = items.get_mut(index)
+        {
+            let mut owned = detail.take().map(|d| *d);
+            activity.apply(&mut owned);
+            *detail = owned.map(Box::new);
+            if status == "running" {
+                *output = Some(activity.summary());
+            }
+            crate::app::conversation_helpers::settle_claude_children(detail, status);
         }
     }
 
@@ -2489,6 +2532,56 @@ impl StringExt for String {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    #[ignore = "local-only benchmark; reads only the explicitly selected native session"]
+    fn claude_transcript_local_benchmark() {
+        let path = std::env::var("CLAUDE_PARITY_BENCHMARK").expect("set local benchmark path");
+        for _ in 0..3 {
+            let start = std::time::Instant::now();
+            let session = parse_session_file(Path::new(&path)).expect("parse native session");
+            let elapsed = start.elapsed();
+            let bytes = serde_json::to_vec(&session.thread.items).unwrap().len();
+            eprintln!(
+                "local benchmark: json_bytes={bytes} hydrate_ms={}",
+                elapsed.as_millis()
+            );
+        }
+    }
+
+    #[test]
+    fn hydrates_running_claude_children_from_sidecar_without_a_parent_result() {
+        let dir = tempfile::tempdir().unwrap();
+        let id = "d8d541a7-85d2-4e5d-a3aa-67b678be577e";
+        let path = dir.path().join(format!("{id}.jsonl"));
+        let child_dir = path.with_extension("").join("subagents");
+        fs::create_dir_all(&child_dir).unwrap();
+        fs::write(&path, json!({"sessionId":id,"cwd":"/tmp/project","type":"assistant","message":{"id":"m","content":[{"type":"tool_use","id":"p","name":"Agent","input":{"description":"Example","prompt":"Inspect fixtures"}}]}}).to_string()).unwrap();
+        fs::write(
+            child_dir.join("agent-child.meta.json"),
+            json!({"toolUseId":"p", "description":"Example", "agentType":"Explore"}).to_string(),
+        )
+        .unwrap();
+        fs::write(child_dir.join("agent-child.jsonl"), json!({"type":"assistant","message":{"content":[{"type":"tool_use","id":"c","name":"Bash","input":{"command":"echo example"}}]}}).to_string()).unwrap();
+        let thread = hydrate_thread_from_file(&path, "/tmp/project").unwrap();
+        let ConversationItem::ToolCall {
+            detail: Some(detail),
+            output,
+            ..
+        } = &thread.items[0]
+        else {
+            panic!("missing tool")
+        };
+        assert!(output.as_deref().unwrap().contains("Sub-agent activity"));
+        let ToolCallDetail::Dynamic {
+            claude: Some(evidence),
+            ..
+        } = detail.as_ref()
+        else {
+            panic!("missing evidence")
+        };
+        assert_eq!(evidence.calls[0].arguments["command"], "echo example");
+    }
 
     #[test]
     fn hydrates_claude_child_calls_and_preserves_final_report() {

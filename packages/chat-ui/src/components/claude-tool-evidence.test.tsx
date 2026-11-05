@@ -1,5 +1,6 @@
+import { ToolItemLoaderContext } from '../lib/tool-item-loader'
 import { fireEvent, render, screen } from '@testing-library/react'
-import { expect, it } from 'vitest'
+import { expect, it, vi } from 'vitest'
 import type { ConversationItem } from '@falcondeck/client-core'
 import { MessageCard } from './message'
 
@@ -15,7 +16,7 @@ export const claudeAgentFixture: Extract<ConversationItem, { kind: 'tool_call' }
 it('keeps the parent title and exposes prompt, real child summary and final report on opening', () => {
   render(<MessageCard item={claudeAgentFixture} />)
   expect(screen.queryByText('Final report')).not.toBeInTheDocument()
-  fireEvent.click(screen.getByRole('button', { name: /Inspect disk usage/ }))
+  fireEvent.click(screen.getByRole('button', { name: /Agent: Inspect disk usage/ }))
   expect(screen.getByText('Final report')).toBeInTheDocument()
   expect(screen.getByText('Largest directory: fixtures.')).toBeInTheDocument()
   expect(screen.getByText(/Find large fixture directories/)).toBeInTheDocument()
@@ -27,4 +28,20 @@ it('keeps the parent title and exposes prompt, real child summary and final repo
   expect(screen.getByText('42 fixtures')).toBeInTheDocument()
   expect(screen.getByText(/Measure fixture directories/)).toBeInTheDocument()
   expect(screen.queryByText('code')).not.toBeInTheDocument()
+})
+
+it('loads capped desktop/web evidence on expansion and exposes a terminal oversized state', async () => {
+  const loader = vi.fn().mockResolvedValue(claudeAgentFixture)
+  const truncated = { ...claudeAgentFixture, output: 'Sub-agent activity', display: { ...claudeAgentFixture.display, output_total_bytes: 100_000 },
+    detail: { kind: 'dynamic' as const, tool: 'Agent', namespace: 'claude', arguments: null, content_items: [], success: null, duration_ms: null, claude: null } }
+  const view = render(<ToolItemLoaderContext.Provider value={loader}><MessageCard item={truncated} /></ToolItemLoaderContext.Provider>)
+  expect(loader).not.toHaveBeenCalled()
+  fireEvent.click(screen.getByRole('button', { name: /Agent: Inspect disk usage/ }))
+  expect(await screen.findByText('Largest directory: fixtures.')).toBeInTheDocument()
+  expect(loader).toHaveBeenCalledTimes(1)
+  view.unmount()
+  loader.mockRejectedValue(new Error('ITEM_TOO_LARGE: Too large to load here'))
+  render(<ToolItemLoaderContext.Provider value={loader}><MessageCard item={{ ...truncated, id: 'large' }} defaultOpen /></ToolItemLoaderContext.Provider>)
+  expect(await screen.findByText('Too large to load here. Open this tool on the Mac.')).toBeInTheDocument()
+  expect(screen.queryByText("Couldn't load tool details. Retry")).not.toBeInTheDocument()
 })

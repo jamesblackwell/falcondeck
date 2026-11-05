@@ -1,3 +1,4 @@
+import { ToolItemLoaderContext, type ToolItemLoader } from "../lib/tool-item-loader";
 import {
   memo,
   useCallback,
@@ -217,6 +218,7 @@ function LiveAgentStatus({ label }: { label: string }) {
 }
 
 export const Conversation = memo(function Conversation({
+  loadToolItem,
   threadKey = null,
   items,
   preferences = null,
@@ -243,6 +245,7 @@ export const Conversation = memo(function Conversation({
   onQuoteSelection,
   readAloud,
 }: {
+  loadToolItem?: ToolItemLoader;
   threadKey?: string | null;
   items: ConversationItem[];
   preferences?: FalconDeckPreferences | null;
@@ -1191,6 +1194,7 @@ export const Conversation = memo(function Conversation({
   }, [smoothScrollToBottom]);
 
   return (
+    <ToolItemLoaderContext.Provider value={loadToolItem}>
     <FileDiffProvider
       onOpenFile={onOpenFile}
       workspaceRoot={workspaceRoot}
@@ -1422,5 +1426,6 @@ export const Conversation = memo(function Conversation({
         </LocalPathProvider>
       </WebLinkProvider>
     </FileDiffProvider>
+    </ToolItemLoaderContext.Provider>
   );
 });

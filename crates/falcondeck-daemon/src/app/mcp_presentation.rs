@@ -669,7 +669,8 @@ pub(crate) fn agent_tool_title<'a>(
         Some(ToolCallDetail::Mcp { server, tool, .. }) => Cow::Owned(wire_title(server, tool)),
         Some(ToolCallDetail::Dynamic { arguments, .. }) if is_tool_search_kind(tool_kind) => {
             argument(Some(arguments), "query").map_or(Cow::Borrowed(title), |query| {
-                Cow::Owned(format!("Search tools: {query}"))
+                let bounded: String = query.chars().take(4_000).collect();
+                Cow::Owned(format!("Search tools: {bounded}"))
             })
         }
         _ => parse_mcp_tool_name(tool_kind).map_or(Cow::Borrowed(title), |(server, tool)| {

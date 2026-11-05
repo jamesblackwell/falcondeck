@@ -10,6 +10,7 @@ import {
   isDaemonRpcReady,
   normalizeDaemonSnapshot,
   normalizeThreadDetail,
+  normalizeConversationItem,
   normalizeSavedPrompts,
   normalizeSkillSummaries,
   normalizeThreadHandle,
@@ -249,6 +250,7 @@ export type WorkspaceScopedApi = {
     requestId: string,
     response: InteractiveResponsePayload,
   ): Promise<{ ok: boolean; message?: string | null }>
+  threadItem(workspaceId: string, threadId: string, itemId: string): Promise<ConversationItem>
   threadDetail(
     workspaceId: string,
     threadId: string,
@@ -720,6 +722,7 @@ export class HostConnection {
           requestId,
           response,
         }),
+      threadItem: async (workspaceId, threadId, itemId) => normalizeConversationItem(await this.rpc('thread.item', { workspace_id: workspaceId, thread_id: threadId, item_id: itemId })),
       threadDetail: (workspaceId, threadId, request) =>
         this.threadDetail(workspaceId, threadId, request),
       connectWorkspace: async (path) => {

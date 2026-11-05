@@ -1421,12 +1421,16 @@ impl AppState {
                 )
                 .map_err(|e| e.to_string()),
                 "sync.extensions" => {
-                    let thread_ids = params.get("thread_ids").and_then(Value::as_array).map(|ids| {
-                        ids.iter()
-                            .filter_map(Value::as_str)
-                            .map(str::to_owned)
-                            .collect::<Vec<_>>()
-                    });
+                    let thread_ids =
+                        params
+                            .get("thread_ids")
+                            .and_then(Value::as_array)
+                            .map(|ids| {
+                                ids.iter()
+                                    .filter_map(Value::as_str)
+                                    .map(str::to_owned)
+                                    .collect::<Vec<_>>()
+                            });
                     serde_json::to_value(
                         self.sync_index_extensions(&required(&["token"])?, thread_ids.as_deref())
                             .await?,
@@ -2001,8 +2005,8 @@ impl AppState {
                     let item_id = required(&["itemId", "item_id"])?;
                     self.thread_item(&workspace_id, &thread_id, &item_id)
                         .await
-                        .and_then(|item| serde_json::to_value(item).map_err(DaemonError::from))
                         .map_err(|error| error.to_string())
+                        .and_then(super::workspace_ops::bounded_remote_thread_item)
                 }
                 "thread.update" => {
                     let request = UpdateThreadRequest {
@@ -2068,7 +2072,9 @@ impl AppState {
                     .map_err(|error| format!("invalid routing preview: {error}"))?;
                     self.preview_route(request)
                         .await
-                        .and_then(|decision| serde_json::to_value(decision).map_err(DaemonError::from))
+                        .and_then(|decision| {
+                            serde_json::to_value(decision).map_err(DaemonError::from)
+                        })
                         .map_err(|error| error.to_string())
                 }
                 "workspace.connect" => {
@@ -3886,7 +3892,10 @@ mod tests {
             state_dir.join("daemon-state.json"),
         );
         for method in ["file.stat", "file.read_range"] {
-            assert!(REMOTE_RPC_METHODS.contains(&method), "{method} must be registered");
+            assert!(
+                REMOTE_RPC_METHODS.contains(&method),
+                "{method} must be registered"
+            );
             assert!(remote_rpc_is_read_only(method));
         }
         let page = artifacts.join("index.html");

@@ -1,3 +1,4 @@
+import { normalizeConversationItem } from "./normalization";
 import type { Ticket, TicketFilters, CreateTicketArgs, UpdateTicketArgs } from "./tickets";
 import type { Review, ReviewFilters, RespondReviewArgs } from "./reviews";
 import type {
@@ -796,12 +797,19 @@ export function createDaemonApiClient(baseUrl: string) {
         ),
       );
     },
+    async threadItem(workspaceId: string, threadId: string, itemId: string) {
+      return normalizeConversationItem(await parseJson<unknown>(await fetch(
+        `${baseUrl}/api/workspaces/${encodeURIComponent(workspaceId)}/threads/${encodeURIComponent(threadId)}/items/${encodeURIComponent(itemId)}`,
+      )));
+    },
     async threadDetail(
       workspaceId: string,
       threadId: string,
       request: Omit<ThreadDetailRequest, "workspace_id" | "thread_id"> = {},
     ) {
       const params = new URLSearchParams();
+      if (request.tool_output_bytes != null) params.set("tool_output_bytes", String(request.tool_output_bytes));
+      if (request.inline_images != null) params.set("inline_images", String(request.inline_images));
       if (request.mode) params.set("mode", request.mode);
       if (request.limit != null) params.set("limit", String(request.limit));
       if (request.before_item_id)

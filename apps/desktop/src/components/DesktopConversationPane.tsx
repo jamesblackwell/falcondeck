@@ -62,6 +62,7 @@ type DesktopConversationPaneProps = {
   hasOlderMessages?: boolean;
   isLoadingOlderMessages?: boolean;
   onLoadOlderMessages?: () => void;
+  loadToolItem?: (itemId: string) => Promise<ConversationItem>;
   interactiveRequests: InteractiveRequest[];
   operationalConditions: readonly OperationalCondition[];
   onDismissOperationalCondition: (
@@ -138,6 +139,7 @@ export function DesktopConversationPane({
   hasOlderMessages = false,
   isLoadingOlderMessages = false,
   onLoadOlderMessages,
+  loadToolItem,
   interactiveRequests,
   operationalConditions,
   onDismissOperationalCondition,
@@ -240,6 +242,7 @@ export function DesktopConversationPane({
       </CollapseRegion>
       <ConversationFindBar requestKey={findRequestKey} />
       <Conversation
+        loadToolItem={loadToolItem}
         threadKey={
           selectedThreadId
             ? `${selectedWorkspaceId ?? "workspace"}:${selectedThreadId}`

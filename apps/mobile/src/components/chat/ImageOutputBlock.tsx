@@ -114,6 +114,8 @@ export const ImageOutputBlock = memo(function ImageOutputBlock({
                 Loading image…
               </Text>
             </View>
+          ) : fullItem.status === "too_large" ? (
+            <Text variant="caption" color="secondary">Too large to load here. Open this image on the Mac.</Text>
           ) : fetchFailed ? (
             <Pressable
               style={styles.placeholder}

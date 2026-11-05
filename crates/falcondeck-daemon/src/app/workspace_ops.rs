@@ -5658,6 +5658,35 @@ pub(super) async fn thread_item(
     Ok(super::conversation_helpers::with_renderable_attachment_previews(item).await)
 }
 
+/// Wire-only projection: bound every replacement without trimming daemon state.
+pub(super) fn project_live_tool_event(event: &mut UnifiedEvent) {
+    if let UnifiedEvent::ConversationItemAdded { item }
+    | UnifiedEvent::ConversationItemUpdated { item } = event
+    {
+        if matches!(item, ConversationItem::ToolCall { tool_kind, detail: Some(detail), .. }
+            if tool_kind.starts_with("mcp__") || matches!(detail.as_ref(), falcondeck_core::ToolCallDetail::Dynamic { namespace: Some(namespace), .. } if namespace == "claude"))
+        {
+            *item = with_tool_output_capped(item, 2048);
+        }
+    }
+}
+
+/// At typical mobile relay throughput this stays well inside the RPC deadline.
+pub(super) fn bounded_remote_thread_item(item: ConversationItem) -> Result<Value, String> {
+    const MAX_ITEM_BYTES: usize = 512 * 1024;
+    let value = serde_json::to_value(item).map_err(|error| error.to_string())?;
+    if serde_json::to_vec(&value)
+        .map_err(|error| error.to_string())?
+        .len()
+        > MAX_ITEM_BYTES
+    {
+        return Err(
+            "ITEM_TOO_LARGE: Too large to load here. Open this tool on the Mac.".to_string(),
+        );
+    }
+    Ok(value)
+}
+
 /// The workspace summary without its catalogs. Every page used to repeat the
 /// agents' skill and model lists (~260 KB on a busy workspace) although page
 /// consumers only read the workspace id.
@@ -5750,7 +5779,7 @@ const MIN_TOOL_OUTPUT_CAP_BYTES: usize = 512;
 /// records the untruncated length on the display metadata. Items at or under
 /// the cap are returned untouched (no marker), so clients only fetch on demand
 /// for the outputs that were actually cut.
-fn with_tool_output_capped(item: &ConversationItem, cap: usize) -> ConversationItem {
+pub(super) fn with_tool_output_capped(item: &ConversationItem, cap: usize) -> ConversationItem {
     let cap = cap.max(MIN_TOOL_OUTPUT_CAP_BYTES);
     let ConversationItem::ToolCall {
         id,
@@ -5794,7 +5823,7 @@ fn with_tool_output_capped(item: &ConversationItem, cap: usize) -> ConversationI
     if total <= cap {
         return item.clone();
     }
-    let projected_detail = if pageable && counter.0 > cap {
+    let projected_detail = if pageable {
         match detail.as_deref() {
             Some(falcondeck_core::ToolCallDetail::Dynamic {
                 tool,
@@ -5840,12 +5869,8 @@ fn with_tool_output_capped(item: &ConversationItem, cap: usize) -> ConversationI
         tool_kind: tool_kind.clone(),
         status: status.clone(),
         output: output.as_ref().map(|output| {
-            let budget = if pageable && counter.0 <= cap {
-                cap.saturating_sub(counter.0)
-            } else {
-                cap
-            };
-            let mut end = budget.min(output.len());
+            // Keep the legacy activity/output preview when detail is omitted.
+            let mut end = cap.min(output.len());
             while !output.is_char_boundary(end) {
                 end -= 1;
             }
@@ -8181,6 +8206,75 @@ mod tests {
         assert!(detail.has_older);
         assert!(detail.is_partial);
         assert_eq!(detail.oldest_item_id.as_deref(), Some("tool-5"));
+    }
+
+    #[test]
+    fn claude_live_event_bytes_are_linear_and_remote_items_are_bounded() {
+        fn item(calls: usize) -> ConversationItem {
+            let mut detail = super::super::mcp_presentation::claude_tool_detail(
+                "Agent",
+                Some(&json!({"prompt":"x".repeat(4096)})),
+            )
+            .unwrap();
+            if let falcondeck_core::ToolCallDetail::Dynamic {
+                claude: Some(evidence),
+                ..
+            } = &mut detail
+            {
+                evidence.calls = (0..calls)
+                    .map(|index| falcondeck_core::ClaudeNestedCall {
+                        id: index.to_string(),
+                        title: "echo example".into(),
+                        tool_kind: "Bash".into(),
+                        status: "completed".into(),
+                        arguments: json!({"command":"echo example"}),
+                        output: Some("x".repeat(1024)),
+                    })
+                    .collect();
+            }
+            ConversationItem::ToolCall {
+                id: "p".into(),
+                title: "Agent: Example".into(),
+                tool_kind: "Agent".into(),
+                status: "running".into(),
+                output: Some("Sub-agent activity:\n· Bash: echo example [completed]".into()),
+                exit_code: None,
+                display: Box::default(),
+                detail: Some(Box::new(detail)),
+                created_at: Utc::now(),
+                completed_at: None,
+            }
+        }
+        let total = |count| {
+            (1..=count)
+                .map(|n| {
+                    let source = item(n);
+                    let mut event = UnifiedEvent::ConversationItemUpdated {
+                        item: source.clone(),
+                    };
+                    project_live_tool_event(&mut event);
+                    let bytes = serde_json::to_vec(&event).unwrap().len();
+                    assert!(bytes < 4096);
+                    if let UnifiedEvent::ConversationItemUpdated { item: projected } = event {
+                        assert!(matches!(
+                            projected,
+                            ConversationItem::ToolCall {
+                                output: Some(_),
+                                ..
+                            }
+                        ));
+                    }
+                    bytes
+                })
+                .sum::<usize>()
+        };
+        assert!(total(128) <= total(64) * 21 / 10);
+        assert!(
+            bounded_remote_thread_item(item(1024))
+                .unwrap_err()
+                .starts_with("ITEM_TOO_LARGE")
+        );
+        assert!(bounded_remote_thread_item(item(1)).is_ok());
     }
 
     #[test]

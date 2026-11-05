@@ -1,3 +1,4 @@
+import { useToolItem } from "../lib/tool-item-loader";
 import { ClaudeToolEvidence } from "./claude-tool-evidence";
 import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
@@ -1351,7 +1352,7 @@ const NOTABLE_TOOL_STYLE = {
 } as const;
 
 function ToolCallMessage({
-  item,
+  item: sourceItem,
   defaultOpen = false,
   expansionMode = "default",
   suppressReadOnlyDetail = false,
@@ -1364,8 +1365,10 @@ function ToolCallMessage({
   const [open, setOpen] = useExpansionState(
     defaultOpen,
     expansionMode,
-    item.id,
+    sourceItem.id,
   );
+  const loadedTool = useToolItem(sourceItem, open || toolLifecycle(sourceItem) === "awaiting_approval");
+  const item = loadedTool.item;
   const openFileDiff = useOpenFileDiff();
   const hasOutput = Boolean(item.output);
   const commandDetail =
@@ -1459,6 +1462,11 @@ function ToolCallMessage({
 
   const detail = detailAvailable ? (
     <div className="space-y-2">
+      {loadedTool.status === "too_large" ? <p role="status">Too large to load here. Open this tool on the Mac.</p> : null}
+      {loadedTool.status === "loading" ? <p role="status">Loading full tool details…</p> : null}
+      {loadedTool.status === "error" ? <button className="fd-focus" onClick={loadedTool.refresh}>Couldn't load tool details. Retry</button> : null}
+      {loadedTool.status === "ready" && sourceItem.display.output_total_bytes && !sourceItem.completed_at ? <button className="fd-focus" onClick={loadedTool.refresh}>Refresh tool details</button> : null}
+
       {testSummary ? <TestRunSummary summary={testSummary} /> : null}
       {commandDetail && hasStructuredDetail ? (
         <div className="space-y-1 rounded-[var(--fd-radius-md)] border border-border-subtle bg-surface-2/50 px-3 py-2 text-[length:var(--fd-text-xs)] text-fg-muted">

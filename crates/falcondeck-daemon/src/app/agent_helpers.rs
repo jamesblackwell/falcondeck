@@ -746,11 +746,7 @@ pub(crate) fn extract_claude_tool_events(value: &Value) -> Vec<ClaudeToolEvent> 
                     Some("tool_use" | "tool_result")
                 )
             })
-            .filter_map(|block| {
-                let mut single = value.clone();
-                single["message"]["content"] = json!([block]);
-                extract_claude_tool_event(&single)
-            })
+            .filter_map(|block| extract_claude_tool_event_with_block(value, Some(block)))
             .collect();
     }
     extract_claude_tool_event(value).into_iter().collect()
@@ -775,7 +771,13 @@ impl ClaudeSubagentActivity {
                     call.title = event.title.unwrap_or_else(|| call.title.clone());
                 }
                 call.status = event.status;
-                if should_suppress_tool_output(&call.title, &call.tool_kind) {
+                if should_suppress_tool_output(&call.title, &call.tool_kind)
+                    || call
+                        .arguments
+                        .get("command")
+                        .and_then(Value::as_str)
+                        .is_some_and(|c| should_suppress_tool_output(c, &call.tool_kind))
+                {
                     call.output = None;
                 } else if event.output.is_some() {
                     call.output = event.output;
@@ -783,7 +785,13 @@ impl ClaudeSubagentActivity {
             } else {
                 let title = event.title.unwrap_or_else(|| "Claude tool".to_string());
                 let tool_kind = event.tool_kind.unwrap_or_default();
-                let suppressed = should_suppress_tool_output(&title, &tool_kind);
+                let suppressed = should_suppress_tool_output(&title, &tool_kind)
+                    || event
+                        .input
+                        .as_ref()
+                        .and_then(|v| v.get("command"))
+                        .and_then(Value::as_str)
+                        .is_some_and(|c| should_suppress_tool_output(c, &tool_kind));
                 self.calls.push(falcondeck_core::ClaudeNestedCall {
                     id: event.id,
                     title,
@@ -794,6 +802,23 @@ impl ClaudeSubagentActivity {
                 });
             }
         }
+    }
+
+    pub(crate) fn summary(&self) -> String {
+        let mut lines = vec!["Sub-agent activity:".to_string()];
+        let skipped = self.calls.len().saturating_sub(8);
+        if skipped > 0 {
+            lines.push(format!("… {skipped} earlier calls; expand for details"));
+        }
+        for call in self.calls.iter().skip(skipped) {
+            lines.push(format!(
+                "· {}: {} [{}]",
+                call.tool_kind,
+                call.title.chars().take(120).collect::<String>(),
+                call.status
+            ));
+        }
+        lines.join("\n")
     }
 
     pub(crate) fn apply(&self, detail: &mut Option<ToolCallDetail>) {
@@ -808,21 +833,30 @@ impl ClaudeSubagentActivity {
 }
 
 pub(crate) fn extract_claude_tool_event(value: &Value) -> Option<ClaudeToolEvent> {
+    extract_claude_tool_event_with_block(value, None)
+}
+
+fn extract_claude_tool_event_with_block(
+    value: &Value,
+    selected: Option<&Value>,
+) -> Option<ClaudeToolEvent> {
     let top_level_type = extract_string(value, &["type"]);
     let event = claude_event_value(value);
     let event_type =
         extract_string(event, &["type", "event"]).or_else(|| top_level_type.clone())?;
 
     if top_level_type.as_deref() == Some("user") {
-        let tool_result = value
-            .get("message")
-            .and_then(|message| message.get("content"))
-            .and_then(Value::as_array)
-            .and_then(|items| {
-                items
-                    .iter()
-                    .find(|item| extract_string(item, &["type"]).as_deref() == Some("tool_result"))
-            })?;
+        let tool_result = selected.or_else(|| {
+            value
+                .get("message")
+                .and_then(|message| message.get("content"))
+                .and_then(Value::as_array)
+                .and_then(|items| {
+                    items.iter().find(|item| {
+                        extract_string(item, &["type"]).as_deref() == Some("tool_result")
+                    })
+                })
+        })?;
         let id = extract_string(tool_result, &["tool_use_id", "toolUseId", "id"])
             .unwrap_or_else(|| format!("tool-{}", Uuid::new_v4().simple()));
         let title = claude_tool_result_title(value, tool_result);
@@ -890,15 +924,17 @@ pub(crate) fn extract_claude_tool_event(value: &Value) -> Option<ClaudeToolEvent
     }
 
     if top_level_type.as_deref() == Some("assistant") {
-        let tool_use = value
-            .get("message")
-            .and_then(|message| message.get("content"))
-            .and_then(Value::as_array)
-            .and_then(|items| {
-                items
-                    .iter()
-                    .find(|item| extract_string(item, &["type"]).as_deref() == Some("tool_use"))
-            });
+        let tool_use = selected.or_else(|| {
+            value
+                .get("message")
+                .and_then(|message| message.get("content"))
+                .and_then(Value::as_array)
+                .and_then(|items| {
+                    items
+                        .iter()
+                        .find(|item| extract_string(item, &["type"]).as_deref() == Some("tool_use"))
+                })
+        });
         if let Some(tool_use) = tool_use {
             let id = extract_string(tool_use, &["id"])
                 .unwrap_or_else(|| format!("tool-{}", Uuid::new_v4().simple()));
@@ -997,7 +1033,11 @@ impl ClaudeToolInputs {
             let path = self
                 .inputs
                 .get(id)
-                .and_then(|v| v.get("file_path").or_else(|| v.get("path")))
+                .and_then(|v| {
+                    v.get("file_path")
+                        .or_else(|| v.get("path"))
+                        .or_else(|| v.get("command"))
+                })
                 .and_then(Value::as_str)
                 .unwrap_or_default();
             if !should_suppress_tool_output(path, tool_kind) {
@@ -1022,7 +1062,9 @@ impl ClaudeToolInputs {
             .get("toolUseResult")
             .or_else(|| value.get("tool_use_result"))
         {
-            self.results.insert(id.to_string(), result.clone());
+            if let Some(metadata) = claude_result_metadata(result) {
+                self.results.insert(id.to_string(), metadata);
+            }
         }
     }
 
@@ -1030,6 +1072,44 @@ impl ClaudeToolInputs {
         self.inputs.clear();
         self.results.clear();
     }
+}
+
+/// Keep result metadata without duplicating output, file bodies, or invocation
+/// arguments. Build from borrowed fields so even transient ingestion stays small.
+fn claude_result_metadata(result: &Value) -> Option<Value> {
+    let object = result.as_object()?;
+    let mut metadata = serde_json::Map::new();
+    for (key, value) in object {
+        if matches!(
+            key.as_str(),
+            "stdout"
+                | "stderr"
+                | "content"
+                | "originalFile"
+                | "original_file"
+                | "oldString"
+                | "newString"
+                | "prompt"
+                | "description"
+        ) {
+            continue;
+        }
+        if key == "file" {
+            if let Some(file) = value.as_object() {
+                let file = file
+                    .iter()
+                    .filter(|(k, _)| !matches!(k.as_str(), "content" | "base64"))
+                    .map(|(k, v)| (k.clone(), v.clone()))
+                    .collect::<serde_json::Map<_, _>>();
+                if !file.is_empty() {
+                    metadata.insert(key.clone(), Value::Object(file));
+                }
+            }
+        } else {
+            metadata.insert(key.clone(), value.clone());
+        }
+    }
+    (!metadata.is_empty()).then_some(Value::Object(metadata))
 }
 
 /// Title and kind for a tool event, given what the `tool_use` already said. A
@@ -1158,6 +1238,26 @@ pub(crate) fn claude_tool_exit_code(value: &Value) -> Option<i32> {
         .and_then(|n| i32::try_from(n).ok())
 }
 
+/// Older daemon builds persisted an empty hook receipt for every stop. Do not
+/// propagate those receipts to a model when reading existing stored history.
+pub(crate) fn is_empty_claude_hook_receipt(message: &str) -> bool {
+    let Some(payload) = message.strip_prefix("Claude hook output: ") else {
+        return false;
+    };
+    let Ok(value) = serde_json::from_str::<Value>(payload) else {
+        return false;
+    };
+    let empty = |v: Option<&Value>| {
+        v.is_none_or(|v| {
+            v.is_null()
+                || v.as_str() == Some("")
+                || v.as_array().is_some_and(Vec::is_empty)
+                || v.as_object().is_some_and(serde_json::Map::is_empty)
+        })
+    };
+    value.get("context").is_some() && empty(value.get("context")) && empty(value.get("errors"))
+}
+
 pub(crate) fn extract_claude_service_message(value: &Value) -> Option<String> {
     let event_type = extract_string(claude_event_value(value), &["type", "event"])
         .or_else(|| extract_string(value, &["type"]))?;
@@ -1214,9 +1314,12 @@ pub(crate) fn extract_claude_service_message(value: &Value) -> Option<String> {
                 .get("hookErrors")
                 .and_then(Value::as_array)
                 .filter(|v| !v.is_empty());
-            let context = value
-                .get("hookAdditionalContext")
-                .filter(|v| !v.is_null() && v.as_str() != Some(""));
+            let context = value.get("hookAdditionalContext").filter(|v| {
+                !v.is_null()
+                    && v.as_str() != Some("")
+                    && !v.as_array().is_some_and(Vec::is_empty)
+                    && !v.as_object().is_some_and(serde_json::Map::is_empty)
+            });
             if errors.is_some() || context.is_some() {
                 return Some(format!(
                     "Claude hook output: {}",
@@ -1500,7 +1603,9 @@ fn claude_tool_result_title(value: &Value, tool_result: &Value) -> Option<String
 }
 
 fn claude_tool_result_output(value: &Value, tool_result: &Value) -> Option<String> {
-    let result = value.get("toolUseResult");
+    let result = value
+        .get("toolUseResult")
+        .or_else(|| value.get("tool_use_result"));
     // Bash's structured streams are more precise than its rendered content.
     if result.is_some_and(|r| r.get("stdout").is_some() || r.get("stderr").is_some()) {
         let r = result?;
@@ -1557,6 +1662,15 @@ fn stringify_claude_value(value: Option<&Value>) -> Option<String> {
             }
         }
         Value::Object(object) => {
+            // Image blocks have their own image item. Do not duplicate the
+            // encoded bytes as JSON text when a Read has no textual content.
+            if let Some(encoded) = object
+                .get("file")
+                .and_then(|file| file.get("base64"))
+                .and_then(Value::as_str)
+            {
+                return Some(format!("Image read ({} encoded bytes)", encoded.len()));
+            }
             if let Some(file_content) = object
                 .get("file")
                 .and_then(|file| extract_string(file, &["content"]))
@@ -1728,6 +1842,26 @@ mod service_message_tests {
     use serde_json::json;
 
     #[test]
+    fn claude_empty_stop_hooks_and_duplicate_result_bodies_are_omitted() {
+        let stop = json!({"type":"system", "subtype":"stop_hook_summary", "hookAdditionalContext":[], "hookErrors":[], "hookInfos":[{"command":"example", "durationMs":1}], "hookCount":1});
+        assert_eq!(extract_claude_service_message(&stop), None);
+        let result = json!({"stdout":"body", "stderr":"warning", "originalFile":"before", "oldString":"old", "newString":"new", "content":"body", "file":{"content":"body", "base64":"duplicate-image", "filePath":"file.rs", "numLines":3}, "backgroundTaskId":"bg"});
+        assert_eq!(
+            claude_result_metadata(&result).unwrap(),
+            json!({"file":{"filePath":"file.rs", "numLines":3}, "backgroundTaskId":"bg"})
+        );
+        assert_eq!(
+            stringify_claude_value(Some(&json!({"file":{"base64":"binary"}}))),
+            Some("Image read (6 encoded bytes)".into())
+        );
+        let snake = json!({"type":"user", "tool_use_result":{"stdout":"out", "stderr":"warning"}, "message":{"content":[{"type":"tool_result", "tool_use_id":"b", "content":"out"}]}});
+        assert_eq!(
+            extract_claude_tool_event(&snake).unwrap().output.as_deref(),
+            Some("out\nStderr:\nwarning")
+        );
+    }
+
+    #[test]
     fn claude_subagent_retains_parallel_calls_results_and_parent_input() {
         let mut activity = ClaudeSubagentActivity::default();
         let calls = json!({"type":"assistant", "message":{"content":[
@@ -1775,17 +1909,47 @@ mod service_message_tests {
     #[test]
     fn claude_skill_bodies_do_not_leak_through_result_metadata() {
         let mut inputs = ClaudeToolInputs::default();
-        inputs.record("s", "Read", Some(&json!({"file_path":"/example/.agents/skills/test/SKILL.md"})));
-        inputs.record_result("s", &json!({"toolUseResult":{"file":{"content":"instruction body"}}}));
-        let Some(ToolCallDetail::Dynamic { claude: Some(evidence), .. }) = inputs.detail("s", "Read") else { panic!("missing detail") };
+        inputs.record(
+            "s",
+            "Read",
+            Some(&json!({"file_path":"/example/.agents/skills/test/SKILL.md"})),
+        );
+        inputs.record_result(
+            "s",
+            &json!({"toolUseResult":{"file":{"content":"instruction body"}}}),
+        );
+        let Some(ToolCallDetail::Dynamic {
+            claude: Some(evidence),
+            ..
+        }) = inputs.detail("s", "Read")
+        else {
+            panic!("missing detail")
+        };
         assert_eq!(evidence.result, None);
         let mut activity = ClaudeSubagentActivity::default();
         activity.record(&json!({"type":"assistant","message":{"content":[{"type":"tool_use","id":"s","name":"Read","input":{"file_path":"/example/.agents/skills/test/SKILL.md"}}]}}));
         activity.record(&json!({"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"s","content":"instruction body"}]}}));
         let mut detail = inputs.detail("parent", "Agent");
         activity.apply(&mut detail);
-        let Some(ToolCallDetail::Dynamic { claude: Some(evidence), .. }) = detail else { panic!("missing child detail") };
+        let Some(ToolCallDetail::Dynamic {
+            claude: Some(evidence),
+            ..
+        }) = detail
+        else {
+            panic!("missing child detail")
+        };
         assert_eq!(evidence.calls[0].output, None);
+        inputs.record(
+            "bash",
+            "Bash",
+            Some(&json!({"command":"cat /example/SKILL.md"})),
+        );
+        inputs.record_result("bash", &json!({"toolUseResult":{"stdout":"instruction body", "originalFile":"instruction body", "content":"instruction body"}}));
+        assert!(
+            !serde_json::to_string(&inputs.detail("bash", "Bash"))
+                .unwrap()
+                .contains("instruction body")
+        );
     }
 
     #[test]

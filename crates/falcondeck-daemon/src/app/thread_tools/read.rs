@@ -205,6 +205,10 @@ pub(super) async fn view(
 }
 
 fn selected(item: &ConversationItem, args: &ViewArgs) -> bool {
+    if matches!(item, ConversationItem::Service { message, .. } if crate::app::agent_helpers::is_empty_claude_hook_receipt(message))
+    {
+        return false;
+    }
     if let Some(role) = args.role {
         return match item {
             ConversationItem::UserMessage { .. } => role == Role::User,
@@ -551,6 +555,12 @@ fn expand(
     offset: usize,
     cap: usize,
 ) -> Result<String, DaemonError> {
+    if matches!(item, ConversationItem::Service { message, .. } if crate::app::agent_helpers::is_empty_claude_hook_receipt(message))
+    {
+        return Err(DaemonError::BadRequest(
+            "Item has no user-visible hook output".into(),
+        ));
+    }
     let (heading, body) = item_parts(item, true);
     if offset > body.chars().count() {
         return Err(DaemonError::BadRequest(
@@ -573,4 +583,26 @@ fn expand(
         ),
         cap,
     ))
+}
+
+#[cfg(test)]
+mod claude_receipt_tests {
+    use super::*;
+    #[test]
+    fn empty_legacy_claude_stop_receipts_never_enter_model_reads() {
+        let item = ConversationItem::Service {
+            id: "empty-hook".into(),
+            level: falcondeck_core::ServiceLevel::Info,
+            message: "Claude hook output: {\"context\":[],\"errors\":null}".into(),
+            created_at: chrono::Utc::now(),
+        };
+        assert!(expand("thread", &item, 0, DEFAULT_CHARS).is_err());
+        assert!(!selected(
+            &item,
+            &ViewArgs {
+                include_tools: true,
+                ..Default::default()
+            }
+        ));
+    }
 }

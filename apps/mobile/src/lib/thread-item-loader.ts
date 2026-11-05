@@ -27,7 +27,7 @@ import { conversationItemBytes } from './conversation-item-size';
 type ToolCallItem = Extract<ConversationItem, { kind: "tool_call" }>;
 type ImageItem = Extract<ConversationItem, { kind: "image" }>;
 
-export type FullItemStatus = "idle" | "loading" | "ready" | "error";
+export type FullItemStatus = "idle" | "loading" | "ready" | "error" | "too_large";
 
 const RESOLVED_CACHE_LIMIT = 48;
 const RESOLVED_CACHE_BYTES = 8 * 1024 * 1024;
@@ -37,6 +37,7 @@ const inflight = new Map<string, Promise<ConversationItem | null>>();
 const resolved = new Map<string, ConversationItem>();
 let resolvedBytes = 0;
 const failed = new Set<string>();
+const tooLarge = new Set<string>();
 const listeners = new Set<() => void>();
 let transferSlots = { scope: "", active: 0, waiting: [] as (() => void)[] };
 
@@ -169,6 +170,7 @@ export function loadFullThreadItem(
   const relaySessionId = relay.sessionId;
   const relayUrl = relay.relayUrl;
   const cacheKey = key(relayUrl, relaySessionId, workspaceId, threadId, itemId);
+  if (tooLarge.has(cacheKey)) return Promise.resolve(null);
   const cached = resolved.get(cacheKey);
   if (cached) {
     if (applyResolved(threadId, cached)) {
@@ -232,7 +234,10 @@ export function loadFullThreadItem(
       }
       return item;
     } catch (error) {
-      if (ownsSession()) failed.add(cacheKey);
+      if (ownsSession()) {
+        if (String(error).includes("ITEM_TOO_LARGE")) tooLarge.add(cacheKey);
+        else failed.add(cacheKey);
+      }
       throw error;
     } finally {
       releaseTransferSlot(slots);
@@ -251,10 +256,12 @@ export function resetThreadItemLoaderForTests() {
   resolved.clear();
   resolvedBytes = 0;
   failed.clear();
+  tooLarge.clear();
   transferSlots = { scope: "", active: 0, waiting: [] };
 }
 
 function statusFor(cacheKey: string): FullItemStatus {
+  if (tooLarge.has(cacheKey)) return "too_large";
   if (inflight.has(cacheKey)) return "loading";
   if (resolved.has(cacheKey)) return "ready";
   if (failed.has(cacheKey)) return "error";
@@ -285,14 +292,14 @@ export function useFullThreadItem(
 
   useEffect(() => {
     if (!needed || !workspaceId || !threadId || !cacheKey) return;
-    if (failed.has(cacheKey)) return;
+    if (failed.has(cacheKey) || tooLarge.has(cacheKey)) return;
     loadFullThreadItem(workspaceId, threadId, itemId).catch(() => {
       // Surfaced through `status`; the renderer offers a retry.
     });
   }, [cacheKey, itemId, needed, threadId, workspaceId]);
 
   const retry = useCallback(() => {
-    if (!workspaceId || !threadId || !cacheKey) return;
+    if (!workspaceId || !threadId || !cacheKey || tooLarge.has(cacheKey)) return;
     failed.delete(cacheKey);
     notify();
     loadFullThreadItem(workspaceId, threadId, itemId).catch(() => {});

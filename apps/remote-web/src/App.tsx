@@ -2351,6 +2351,7 @@ function RemoteApp() {
       thread_id: selectedThreadId,
       mode: "tail",
       limit: THREAD_DETAIL_TAIL_LIMIT,
+      tool_output_bytes: 2048,
     })
       .then((detail) => {
         if (cancelled) return;
@@ -2410,6 +2411,7 @@ function RemoteApp() {
       mode: "before",
       before_item_id: beforeItemId,
       limit: THREAD_DETAIL_OLDER_PAGE_LIMIT,
+      tool_output_bytes: 2048,
     })
       .then((rawPage) => {
         const page = normalizeThreadDetail(rawPage);
@@ -5452,6 +5454,7 @@ function RemoteApp() {
                   onOpenDetails={setExtensionToolDetail}
                 >
                   <Conversation
+                  loadToolItem={(itemId) => callRpc<ConversationItem>("thread.item", { workspace_id: selectedWorkspaceId, thread_id: selectedThreadId, item_id: itemId })}
                   threadKey={
                     selectedThreadId
                       ? `${selectedWorkspaceId ?? "workspace"}:${selectedThreadId}`

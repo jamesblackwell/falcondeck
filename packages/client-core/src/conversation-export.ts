@@ -202,12 +202,28 @@ function shouldIncludeToolDetails(
 ): boolean {
   if (!item.detail) return false;
   if (ctx.mode !== "handoff") return true;
+  if (item.detail.kind === "dynamic" && item.detail.namespace === "claude") return false;
   // Claude's MCP detail exists so people can debug a friendly row. A handoff
   // never carried those arguments, and a task prompt can run to pages.
   if (toolCallReadsAsProse(item) && !isCodexToolDetail(item)) return false;
   // Command execution is already the title plus output; the JSON is cwd,
   // duration, process id, and a duplicated command.
   return item.detail.kind !== "command_execution";
+}
+
+// Keep invocation arguments bounded when serializing context for another model.
+// Human exports and the daemon's local evidence remain lossless.
+function modelBoundedArguments(value: unknown): unknown {
+  if (typeof value === "string") return value.length > 4000 ? value.slice(0, 3999) + "…" : value;
+  if (Array.isArray(value)) return value.map(modelBoundedArguments);
+  if (value && typeof value === "object") return Object.fromEntries(Object.entries(value).map(([key, child]) => [key, modelBoundedArguments(child)]));
+  return value;
+}
+
+function serializedToolDetail(item: Extract<ConversationItem, { kind: "tool_call" }>, ctx: MarkdownContext): string {
+  const detail = item.detail;
+  return formatInspectableValue(ctx.mode === "handoff" && detail?.kind === "mcp"
+    ? { ...detail, arguments: modelBoundedArguments(detail.arguments) } : detail).text;
 }
 
 function isCodexToolDetail(
@@ -456,7 +472,7 @@ function itemMarkdown(item: ConversationItem, ctx: MarkdownContext): string {
             ? null
             : "_No tool output was supplied._",
         keepDetails
-          ? `### Tool details\n\n${codeFence(formatInspectableValue(item.detail).text, "json")}`
+          ? `### Tool details\n\n${codeFence(serializedToolDetail(item, ctx), "json")}`
           : null,
       ]
         .filter(Boolean)

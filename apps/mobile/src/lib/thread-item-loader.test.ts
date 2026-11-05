@@ -103,6 +103,14 @@ describe("loadFullThreadItem", () => {
     vi.restoreAllMocks();
   });
 
+  it("does not retry an oversized item after the bounded daemon response", async () => {
+    const rpc = vi.fn().mockRejectedValue(new Error("ITEM_TOO_LARGE: Too large to load here. Open this tool on the Mac."));
+    useRelayStore.setState({ sessionId: "session-1", _callRpc: rpc } as never);
+    await expect(loadFullThreadItem("workspace-1", "thread-1", "tool-1")).rejects.toThrow("ITEM_TOO_LARGE");
+    expect(await loadFullThreadItem("workspace-1", "thread-1", "tool-1")).toBeNull();
+    expect(rpc).toHaveBeenCalledTimes(1);
+  });
+
   it("loads omitted Claude arguments and child evidence even when output itself is short", async () => {
     const full = { ...toolCall("tool-1", "Report"), detail: {
       kind: "dynamic", namespace: "claude", tool: "Agent", arguments: { prompt: "x".repeat(10_000) }, content_items: [], success: true, duration_ms: null,

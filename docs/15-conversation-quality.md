@@ -1148,13 +1148,18 @@ Task/Agent titles belong to the parent invocation. Child starts, assistant echoe
 and results update one child identity rather than duplicate or retitle the parent.
 The final report and background completion preserve the child evidence. Native
 hydration reads the provider's sibling subagent file only by validated agent id;
-child histories are not a new conversation store. Sessions with subagent files
+child histories are not a new conversation store. Metadata sidecars join running
+and interrupted agents by `toolUseId` even without a final parent result. Terminal
+parents settle unresolved children as interrupted; later-turn background completion
+preserves existing arguments and child evidence when monitor-local maps have reset.
+Sessions with subagent files
 bypass the parent-file cache because child files change independently and are not
 covered by its memory budget.
 
-Default collapsed mode shows Claude builtin tools as compact individual rows,
-with one expansion to the output/report, full arguments and child summaries.
-Child arguments/output have their own disclosure and mount only when requested.
+Default collapsed mode retains work-session folding, including failed calls;
+Claude builtins do not break out or auto-expand merely because they failed.
+The richer rows appear inside the expanded fold and in expanded mode. Child
+arguments/output have their own disclosure and mount only when requested.
 Explicit compact/hide-read-only preferences still apply. Thinking and assistant
 prose retain their provider order; assistant records containing both prose and
 parallel tools must preserve every block. Edit result hunks get a diff preview;
@@ -1165,9 +1170,12 @@ inspectable in Arguments/Result details. Output frames say Output or Final repor
 Claude MCP argument arrays. If the detail cannot fit, retain its identifying
 metadata but omit arguments/evidence from the page. `display.output_total_bytes`
 then measures the full output plus pageable detail, not just the output string.
-The marker also applies to argument-only truncation. `thread.item` returns the
-uncapped authoritative item; native clients load it only on expansion, dedupe
-requests, bound their cache by bytes, and offer retry on failure. Display caps
+The marker also applies to argument-only truncation. Local `thread.item` returns
+the authoritative item. Remote `thread.item` limits the serialized response to
+512 KiB; an oversized item returns `ITEM_TOO_LARGE` with a clear Mac-only fallback,
+not a response that times out and retries. Native clients treat that state as
+terminal, while transient errors still offer retry. Requests are expansion-driven,
+deduplicated and cached by bytes. Display caps
 continue to say when copy contains more than the rendered preview.
 
 Meaningful hook output, retry notices and compaction boundaries survive native
@@ -1181,3 +1189,26 @@ durations or historical child files are not inferred. Turn token/cost accounting
 continues through the existing usage surface rather than duplicate per-token
 transcript rows. See the local audit in
 [Claude transcript parity](research/claude-transcript-parity/audit.md).
+
+Live Claude tool and MCP updates use a 2 KiB evidence/output projection at the
+central event emission boundary, including background and settlement updates.
+Daemon state retains the full item; a bounded legacy activity summary remains
+in `output` for older clients. Replacing a parent cannot repeatedly ship its
+entire accumulated child tree. Page and event caps are transport limits, not
+redaction. The paired mobile client stores received items in memory; its encrypted
+MMKV checkpoint keeps a contiguous history suffix capped at 64 KiB per thread.
+Individual fields inside that suffix are not redacted. Explicit item inspection
+may load full sensitive arguments while within the remote response limit.
+
+Claude result metadata excludes duplicate stdout/stderr/content, complete original
+files, and input fields already captured in arguments. Read counts/paths and edit
+hunks remain. Explicit skill paths in builtin Bash commands are covered by the
+same output suppression as direct reads; this is not a general secrets detector.
+
+Human exports retain evidence. Handoff/fork serialization explicitly excludes
+`dynamic` details in the `claude` namespace; model-facing MCP argument strings
+remain capped at 4,000 characters. Model thread reads omit the new structured
+evidence and filter legacy empty hook receipts. This corrects an initial transcript
+implementation regression; it does not change agent tool execution or invocation
+inputs. Provider-reported Bash exit/duration fields are generally absent in native
+JSONL and must not reserve empty UI or be inferred from timing.

@@ -63,7 +63,7 @@ pub(crate) fn should_suppress_tool_output(title: &str, kind: &str) -> bool {
         || normalized_title.contains("/skill.md")
         || normalized_title
             .split(|character: char| character.is_whitespace() || matches!(character, '/' | ':'))
-            .any(|part| part == "skill.md")
+            .any(|part| part.trim_matches(['\'', '"', '`', ';', '(', ')']) == "skill.md")
         || matches!(
             normalized_kind.as_str(),
             "skill" | "skill_load" | "skillload" | "load_skill"
@@ -88,8 +88,16 @@ pub(crate) fn sanitize_conversation_item(item: &mut ConversationItem) {
         return;
     };
 
-    if should_suppress_tool_output(title, tool_kind) {
+    let command_is_skill = matches!(detail.as_deref(), Some(ToolCallDetail::Dynamic { arguments, .. }) if arguments.get("command").and_then(Value::as_str).is_some_and(|c| should_suppress_tool_output(c, tool_kind)));
+    if should_suppress_tool_output(title, tool_kind) || command_is_skill {
         *output = None;
+        if let Some(ToolCallDetail::Dynamic {
+            claude: Some(evidence),
+            ..
+        }) = detail.as_deref_mut()
+        {
+            evidence.result = None;
+        }
         **display = tool_display_metadata(title, tool_kind, status, *exit_code, None);
     }
     display.provider_output_summary = match detail.as_deref() {
@@ -1514,6 +1522,114 @@ fn is_transient_tool_status(status: &str) -> bool {
 
 /// Closes transient tool calls with the actual turn outcome. Terminal tool
 /// notifications remain authoritative and are never overwritten.
+pub(crate) fn settle_claude_children(
+    detail: &mut Option<Box<ToolCallDetail>>,
+    status: &str,
+) -> bool {
+    if is_transient_tool_status(status) {
+        return false;
+    }
+    let Some(ToolCallDetail::Dynamic {
+        claude: Some(evidence),
+        ..
+    }) = detail.as_deref_mut()
+    else {
+        return false;
+    };
+    let mut changed = false;
+    for call in &mut evidence.calls {
+        if is_transient_tool_status(&call.status) {
+            call.status = if matches!(status, "failed" | "error" | "interrupted" | "cancelled") {
+                status
+            } else {
+                "interrupted"
+            }
+            .to_string();
+            changed = true;
+        }
+    }
+    changed
+}
+
+/// Turn monitors may reset before a background completion arrives. An empty
+/// incoming detail must never erase already authoritative arguments/children.
+pub(super) fn preserve_claude_evidence(previous: &ConversationItem, item: &mut ConversationItem) {
+    let (
+        ConversationItem::ToolCall {
+            title: old_title,
+            tool_kind: old_kind,
+            detail: old_detail,
+            ..
+        },
+        ConversationItem::ToolCall {
+            title,
+            tool_kind,
+            detail,
+            status,
+            ..
+        },
+    ) = (previous, item)
+    else {
+        return;
+    };
+    let Some(ToolCallDetail::Dynamic {
+        namespace: Some(namespace),
+        ..
+    }) = old_detail.as_deref()
+    else {
+        return;
+    };
+    if namespace != "claude" {
+        return;
+    }
+    let missing_input = match detail.as_deref() {
+        None => true,
+        Some(ToolCallDetail::Dynamic { arguments, .. }) => {
+            arguments.is_null() || arguments.as_object().is_some_and(serde_json::Map::is_empty)
+        }
+        _ => false,
+    };
+    if missing_input {
+        *title = old_title.clone();
+        *tool_kind = old_kind.clone();
+    }
+    match (old_detail.as_deref(), detail.as_deref_mut()) {
+        (
+            Some(ToolCallDetail::Dynamic {
+                arguments: old_args,
+                claude: old_evidence,
+                ..
+            }),
+            Some(ToolCallDetail::Dynamic {
+                arguments, claude, ..
+            }),
+        ) => {
+            if arguments.is_null() || arguments.as_object().is_some_and(serde_json::Map::is_empty) {
+                *arguments = old_args.clone();
+            }
+            if let Some(old) = old_evidence {
+                let evidence = claude.get_or_insert_with(Default::default);
+                let incoming = std::mem::take(&mut evidence.calls);
+                evidence.calls = old.calls.clone();
+                for call in incoming {
+                    if let Some(previous) = evidence.calls.iter_mut().find(|old| old.id == call.id)
+                    {
+                        *previous = call;
+                    } else {
+                        evidence.calls.push(call);
+                    }
+                }
+                if evidence.result.is_none() {
+                    evidence.result = old.result.clone();
+                }
+            }
+        }
+        (_, None) => *detail = old_detail.clone(),
+        _ => {}
+    }
+    settle_claude_children(detail, status);
+}
+
 pub(super) fn settle_tool_call_items(
     items: &mut [ConversationItem],
     settled_at: chrono::DateTime<Utc>,
@@ -1521,6 +1637,16 @@ pub(super) fn settle_tool_call_items(
 ) -> Vec<ConversationItem> {
     let mut updated = Vec::new();
     for item in items {
+        let children_changed = if let ConversationItem::ToolCall { detail, status, .. } = item {
+            let terminal = if is_transient_tool_status(status) {
+                settlement.status()
+            } else {
+                status.as_str()
+            };
+            settle_claude_children(detail, terminal)
+        } else {
+            false
+        };
         match item {
             ConversationItem::ToolCall {
                 status,
@@ -1574,7 +1700,11 @@ pub(super) fn settle_tool_call_items(
                 *completed_at = Some(settled_at);
                 updated.push(item.clone());
             }
-            _ => {}
+            _ => {
+                if children_changed {
+                    updated.push(item.clone());
+                }
+            }
         }
     }
     updated
@@ -1815,10 +1945,7 @@ The conversation may have moved on from that name. Write a title that reflects t
                 ..
             } => Some(format!(
                 "Tool: {}{}",
-                truncate_preview(
-                    &agent_tool_title(title, tool_kind, detail.as_deref()),
-                    120
-                ),
+                truncate_preview(&agent_tool_title(title, tool_kind, detail.as_deref()), 120),
                 output
                     .as_deref()
                     .filter(|value| !value.trim().is_empty())
@@ -4254,6 +4381,115 @@ mod tool_settlement_tests {
             created_at: Utc::now(),
             completed_at: None,
         }
+    }
+
+    #[test]
+    fn claude_children_settle_and_survive_later_turn_completion() {
+        let mut item = tool_item("running");
+        if let ConversationItem::ToolCall {
+            title,
+            tool_kind,
+            detail,
+            ..
+        } = &mut item
+        {
+            *title = "Agent: Example".into();
+            *tool_kind = "Agent".into();
+            let mut value = super::super::mcp_presentation::claude_tool_detail(
+                "Agent",
+                Some(&json!({"prompt":"delegated prompt"})),
+            )
+            .unwrap();
+            if let ToolCallDetail::Dynamic {
+                claude: Some(evidence),
+                ..
+            } = &mut value
+            {
+                evidence.calls.push(falcondeck_core::ClaudeNestedCall {
+                    id: "child".into(),
+                    title: "echo example".into(),
+                    tool_kind: "Bash".into(),
+                    status: "running".into(),
+                    arguments: json!({"command":"echo example"}),
+                    output: None,
+                });
+            }
+            *detail = Some(Box::new(value));
+        }
+        let mut interrupted = vec![item.clone()];
+        settle_tool_call_items(&mut interrupted, Utc::now(), ToolSettlement::Interrupted);
+        let ConversationItem::ToolCall {
+            detail: Some(detail),
+            ..
+        } = &interrupted[0]
+        else {
+            panic!("tool expected")
+        };
+        let ToolCallDetail::Dynamic {
+            claude: Some(evidence),
+            ..
+        } = detail.as_ref()
+        else {
+            panic!("evidence expected")
+        };
+        assert_eq!(evidence.calls[0].status, "interrupted");
+        let mut completed = tool_item("completed");
+        preserve_claude_evidence(&item, &mut completed);
+        let ConversationItem::ToolCall {
+            detail: Some(detail),
+            ..
+        } = completed
+        else {
+            panic!("lost evidence")
+        };
+        let ToolCallDetail::Dynamic {
+            arguments,
+            claude: Some(evidence),
+            ..
+        } = detail.as_ref()
+        else {
+            panic!("lost evidence")
+        };
+        assert_eq!(arguments["prompt"], "delegated prompt");
+        assert_eq!(evidence.calls.len(), 1);
+        assert_eq!(evidence.calls[0].status, "interrupted");
+        let mut partial = item.clone();
+        if let ConversationItem::ToolCall {
+            detail: Some(detail),
+            ..
+        } = &mut partial
+        {
+            if let ToolCallDetail::Dynamic {
+                claude: Some(evidence),
+                ..
+            } = detail.as_mut()
+            {
+                evidence.calls[0].id = "later-child".into();
+            }
+        }
+        preserve_claude_evidence(&item, &mut partial);
+        let ConversationItem::ToolCall {
+            detail: Some(detail),
+            ..
+        } = partial
+        else {
+            panic!("tool")
+        };
+        let ToolCallDetail::Dynamic {
+            claude: Some(evidence),
+            ..
+        } = detail.as_ref()
+        else {
+            panic!("evidence")
+        };
+        assert_eq!(
+            evidence
+                .calls
+                .iter()
+                .map(|call| call.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["child", "later-child"]
+        );
     }
 
     #[test]

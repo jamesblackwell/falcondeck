@@ -475,3 +475,12 @@ fn the_ai_title_prompt_never_sees_friendly_titles_or_their_arguments() {
         assert!(!prompt.contains("Secret brief text"));
     }
 }
+
+#[test]
+fn model_facing_tool_search_titles_do_not_leak_uncapped_arguments() {
+    let query = format!("{}end-of-large-query", "x".repeat(4_000));
+    let detail = claude_tool_detail("ToolSearch", Some(&json!({"query":query}))).unwrap();
+    let title = agent_tool_title("Search tools", "ToolSearch", Some(&detail));
+    assert!(!title.contains("end-of-large-query"));
+    assert!(title.chars().count() <= 4_014);
+}

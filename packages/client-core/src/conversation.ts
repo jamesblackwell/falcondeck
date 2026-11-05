@@ -2072,7 +2072,6 @@ export function deriveConversationPresentation(
         // already narrates any failure that mattered. The auto-expand-errors
         // preference still governs the summarizing modes.
         const mustSurface =
-          (item.detail?.kind === "dynamic" && item.detail.namespace === "claude") ||
           hasProviderArtifacts ||
           (item.display.artifact_kind === "approval_related" &&
             preferences.conversation.auto_expand.approvals) ||
