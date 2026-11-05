@@ -1176,6 +1176,127 @@ for line in sys.stdin:
     session.shutdown().await.unwrap();
 }
 
+async fn retire_bot_workspace_id(app: &AppState) {
+    let mut preferences = app.inner.preferences.lock().await;
+    preferences.bots[0].workspace_id = "workspace-retired".into();
+    crate::app::storage::persist_preferences(&app.inner.preferences_path, &preferences)
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn sends_to_a_bot_with_a_retired_workspace_id_reach_its_thread() {
+    let (app, _temp) = fixture().await;
+    promote(&app).await;
+    retire_bot_workspace_id(&app).await;
+    app.with_thread_mut("workspace-1", "thread-1", |t| {
+        t.status = ThreadStatus::Running
+    })
+    .await
+    .unwrap();
+    let request: falcondeck_core::SendTurnRequest = serde_json::from_value(json!({
+        "workspace_id": "workspace-retired", "thread_id": "thread-1",
+        "inputs": [{"type":"text","text":"For the bot"}], "steer": false
+    }))
+    .unwrap();
+    let sent = app.send_turn(request).await.unwrap();
+    assert_eq!(sent.message.as_deref(), Some("queued"));
+    let workspaces = app.inner.workspaces.lock().await;
+    let queued = &workspaces["workspace-1"].threads["thread-1"].queued_requests;
+    assert_eq!(queued.len(), 1);
+    assert_eq!(queued[0].request.thread_id, "thread-1");
+    assert_eq!(queued[0].request.workspace_id, "workspace-1");
+}
+
+#[tokio::test]
+async fn sends_with_a_retired_workspace_id_stay_on_their_thread() {
+    let (app, _temp) = fixture().await;
+    app.with_thread_mut("workspace-1", "thread-1", |t| {
+        t.status = ThreadStatus::Running
+    })
+    .await
+    .unwrap();
+    let request: falcondeck_core::SendTurnRequest = serde_json::from_value(json!({
+        "workspace_id": "workspace-retired", "thread_id": "thread-1",
+        "inputs": [{"type":"text","text":"Hello"}], "steer": false
+    }))
+    .unwrap();
+    app.send_turn(request).await.unwrap();
+    let workspaces = app.inner.workspaces.lock().await;
+    let queued = &workspaces["workspace-1"].threads["thread-1"].queued_requests;
+    assert_eq!(queued[0].request.workspace_id, "workspace-1");
+    drop(workspaces);
+
+    let unknown: falcondeck_core::SendTurnRequest = serde_json::from_value(json!({
+        "workspace_id": "workspace-retired", "thread_id": "thread-unknown",
+        "inputs": [{"type":"text","text":"Hello"}], "steer": false
+    }))
+    .unwrap();
+    assert!(matches!(
+        app.send_turn(unknown).await,
+        Err(DaemonError::NotFound(_))
+    ));
+}
+
+#[tokio::test]
+async fn startup_repairs_a_retired_bot_workspace_id_on_a_lazy_workspace() {
+    let temp = tempfile::tempdir().unwrap();
+    let state_path = temp.path().join("daemon-state.json");
+    let folder = temp.path().join("bots/bot-1");
+    std::fs::create_dir_all(folder.join("space")).unwrap();
+    let folder = folder.canonicalize().unwrap();
+    let persisted = |provider: &str, id: &str, thread: &str, path: &std::path::Path| {
+        json!({"id": id, "path": path, "current_thread_id": thread,
+            "thread_states": [{"thread_id": thread, "provider": provider}]})
+    };
+    std::fs::write(
+        &state_path,
+        json!({"workspaces": [persisted("claude", "workspace-live", "thread-home", &folder)]})
+            .to_string(),
+    )
+    .unwrap();
+    let setup = AppState::new_with_state_path("test".into(), HashMap::new(), state_path.clone());
+    let profile = |id: &str, thread: &str, dedicated: bool, space: &std::path::Path| {
+        serde_json::from_value::<BotProfile>(json!({
+            "id": id, "name": id, "workspace_id": "workspace-retired",
+            "dedicated_workspace": dedicated, "thread_id": thread,
+            "space_path": space, "instructions": "",
+        }))
+        .unwrap()
+    };
+    let bots = vec![
+        // Found through its thread, and through its folder with no thread record.
+        profile("by-thread", "thread-home", false, std::path::Path::new("/elsewhere")),
+        profile("by-folder", "thread-unhydrated", true, &folder.join("space")),
+        profile("lost", "thread-unknown", false, std::path::Path::new("/elsewhere")),
+    ];
+    let preferences = falcondeck_core::FalconDeckPreferences {
+        bots,
+        ..Default::default()
+    };
+    crate::app::storage::persist_preferences(&setup.inner.preferences_path, &preferences)
+        .await
+        .unwrap();
+
+    let app = AppState::new_with_state_path("test".into(), HashMap::new(), state_path);
+    app.restore_local_state().await.unwrap();
+
+    assert!(
+        app.inner
+            .lazy_workspaces
+            .lock()
+            .await
+            .contains("workspace-live")
+    );
+    let saved = crate::app::storage::load_preferences(&app.inner.preferences_path)
+        .await
+        .unwrap();
+    let ids: Vec<_> = saved.bots.iter().map(|b| b.workspace_id.as_str()).collect();
+    assert_eq!(ids, ["workspace-live", "workspace-live", "workspace-retired"]);
+    assert_eq!(app.preferences().await.bots, saved.bots);
+    app.shutdown().await.unwrap();
+}
+
 #[tokio::test]
 async fn bot_sends_do_not_wait_on_bot_mutations() {
     let (app, _temp) = fixture().await;

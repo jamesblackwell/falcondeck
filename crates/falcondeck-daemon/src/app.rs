@@ -1784,6 +1784,8 @@ impl AppState {
             }
         }
 
+        self.repair_bot_workspace_ids().await;
+
         // This is the recovery UX boundary: every persisted thread is now in
         // memory, including honest shutdown-interruption markers. Publish one
         // complete snapshot instead of cloning and broadcasting the growing

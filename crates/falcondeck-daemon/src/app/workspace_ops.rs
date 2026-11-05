@@ -2699,6 +2699,8 @@ pub(super) async fn steer_queued_turn(
     };
 
     let mut request = queued.request.clone();
+    // Sent by hand, so a retired workspace id is rebound rather than held.
+    request.workspace_id = workspace_id.to_string();
     request.steer = true;
     // Already normalized at queue time — re-normalizing would re-materialize
     // attachments that are on disk.
@@ -3058,6 +3060,18 @@ impl AppState {
                 if queued_turn_is_held(thread) {
                     return;
                 }
+                // A retired workspace id means this entry outlived a workspace
+                // change, possibly by days. Its prompt may no longer be wanted,
+                // so it waits at the head of the queue for a person to steer or
+                // remove. Everything behind it waits too: order is the contract.
+                if thread.queued_requests[0].request.workspace_id != workspace_id {
+                    tracing::warn!(
+                        thread = %thread_id,
+                        queued = %thread.queued_requests[0].id,
+                        "queued turn carries a retired workspace id; left queued for review"
+                    );
+                    return;
+                }
                 let next = thread.queued_requests.remove(0);
                 thread
                     .summary
@@ -3235,8 +3249,19 @@ async fn send_turn_with_startup_mode(
             request.sandbox_mode = None;
             request.service_tier = None;
         }
+        // The profile's id can outlive the workspace; the home thread cannot.
+        if let Some(workspace_id) = app.bot_workspace(&bot).await {
+            request.workspace_id = workspace_id;
+        } else {
+            request.workspace_id = bot.workspace_id;
+        }
         request.thread_id = bot.thread_id;
-        request.workspace_id = bot.workspace_id;
+    } else if let Some(workspace_id) = app
+        .workspace_holding_thread(&request.workspace_id, &request.thread_id)
+        .await
+    {
+        // Same thread, current address: clients can hold a retired workspace id.
+        request.workspace_id = workspace_id;
     }
     if app.is_shutting_down() {
         return Err(DaemonError::BadRequest(
@@ -7285,6 +7310,82 @@ mod tests {
         assert!(handle.thread.is_pinned);
         assert!(!handle.thread.is_pinned_in_project);
         assert_eq!(handle.thread.updated_at, original_updated_at);
+    }
+
+    #[tokio::test]
+    async fn queued_turn_with_a_retired_workspace_id_waits_for_a_person() {
+        let temp_dir = tempdir().unwrap();
+        let app = AppState::new_with_state_path(
+            "test".to_string(),
+            HashMap::new(),
+            temp_dir.path().join("daemon-state.json"),
+        );
+        seed_workspace_with_thread(&app, "workspace-1", "thread-1").await;
+        let queued = |id: &str, workspace_id: &str| {
+            let summary = falcondeck_core::QueuedTurnSummary {
+                id: id.to_string(),
+                preview: "old launch prompt".to_string(),
+                text: "old launch prompt".to_string(),
+                attachment_count: 0,
+                queued_at: Utc::now(),
+            };
+            let request = serde_json::from_value(serde_json::json!({
+                "workspace_id": workspace_id, "thread_id": "thread-1",
+                "inputs": [{"type": "text", "text": "old launch prompt"}],
+            }))
+            .unwrap();
+            (
+                super::super::QueuedTurnRequest {
+                    id: id.to_string(),
+                    request,
+                    summary: summary.clone(),
+                    agent_sender: None,
+                },
+                summary,
+            )
+        };
+        let touched_at = {
+            let mut workspaces = app.inner.workspaces.lock().await;
+            let thread = workspaces
+                .get_mut("workspace-1")
+                .unwrap()
+                .threads
+                .get_mut("thread-1")
+                .unwrap();
+            for (request, summary) in [
+                queued("queued-stale", "workspace-retired"),
+                queued("queued-behind", "workspace-1"),
+            ] {
+                thread.queued_requests.push(request);
+                thread.summary.queued_turns.push(summary);
+            }
+            thread.summary.status = ThreadStatus::Idle;
+            thread.summary.updated_at
+        };
+
+        app.dispatch_next_queued_turn("workspace-1", "thread-1");
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+        let workspaces = app.inner.workspaces.lock().await;
+        let thread = &workspaces["workspace-1"].threads["thread-1"];
+        let ids = |queued: Vec<&String>| queued.into_iter().cloned().collect::<Vec<_>>();
+        let expected = vec!["queued-stale".to_string(), "queued-behind".to_string()];
+        assert_eq!(
+            ids(thread.queued_requests.iter().map(|q| &q.id).collect()),
+            expected
+        );
+        assert_eq!(
+            ids(thread.summary.queued_turns.iter().map(|q| &q.id).collect()),
+            expected
+        );
+        assert_eq!(
+            thread.queued_requests[0].request.workspace_id,
+            "workspace-retired"
+        );
+        // A dispatch attempt pops the head and stamps the thread, even when it
+        // later fails and restores it. Neither may happen here.
+        assert_eq!(thread.summary.updated_at, touched_at);
+        assert!(thread.dispatching_request.is_none());
     }
 
     #[tokio::test]

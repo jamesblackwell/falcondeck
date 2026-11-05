@@ -175,6 +175,119 @@ impl AppState {
             .cloned()
     }
 
+    /// The workspace that really holds `thread`, when `workspace_id` does not.
+    pub(super) async fn workspace_holding_thread(
+        &self,
+        workspace_id: &str,
+        thread: &str,
+    ) -> Option<String> {
+        let workspaces = self.inner.workspaces.lock().await;
+        if workspaces
+            .get(workspace_id)
+            .is_some_and(|workspace| workspace.threads.contains_key(thread))
+        {
+            return None;
+        }
+        workspaces
+            .iter()
+            .find(|(_, workspace)| workspace.threads.contains_key(thread))
+            .map(|(id, _)| id.clone())
+    }
+
+    /// Where a bot lives now: the workspace holding its home thread, then the
+    /// recorded id, then its dedicated folder. Lazy workspaces count, because
+    /// their placeholders carry persisted threads, and closed ones count as
+    /// saved entries. A thread the placeholder has not hydrated yet is why the
+    /// folder is consulted before giving up.
+    pub(super) async fn bot_workspace(&self, bot: &BotProfile) -> Option<String> {
+        let folder = bot
+            .dedicated_workspace
+            .then(|| Path::new(&bot.space_path).parent())
+            .flatten()
+            .map(|path| normalize_workspace_path(&path.to_string_lossy()));
+        {
+            let workspaces = self.inner.workspaces.lock().await;
+            let holds = |id: &String| {
+                workspaces
+                    .get(id)
+                    .is_some_and(|workspace| workspace.threads.contains_key(&bot.thread_id))
+            };
+            if holds(&bot.workspace_id) {
+                return Some(bot.workspace_id.clone());
+            }
+            if let Some(id) = workspaces.keys().find(|id| holds(id)) {
+                return Some(id.clone());
+            }
+            if workspaces.contains_key(&bot.workspace_id) {
+                return Some(bot.workspace_id.clone());
+            }
+            if let Some((id, _)) = workspaces
+                .iter()
+                .find(|(_, workspace)| folder.as_deref() == Some(&workspace.summary.path))
+            {
+                return Some(id.clone());
+            }
+        }
+        self.inner
+            .saved_workspaces
+            .lock()
+            .await
+            .values()
+            .find(|workspace| {
+                folder.as_deref() == Some(&workspace.path)
+                    || workspace
+                        .thread_states
+                        .iter()
+                        .any(|thread| thread.thread_id == bot.thread_id)
+            })
+            .and_then(|workspace| workspace.id.clone())
+    }
+
+    /// Corrects bot profiles whose workspace id has been retired. Runs once
+    /// the persisted workspaces are registered and before anything can use a
+    /// profile, so every reader of `workspace_id` sees the live value.
+    pub(super) async fn repair_bot_workspace_ids(&self) {
+        let mut repairs = HashMap::new();
+        for bot in self.preferences().await.bots {
+            match self.bot_workspace(&bot).await {
+                Some(id) if id != bot.workspace_id => {
+                    tracing::warn!(
+                        bot = %bot.name, stale = %bot.workspace_id, repaired = %id,
+                        "repaired bot workspace id"
+                    );
+                    repairs.insert(bot.id, id);
+                }
+                Some(_) => {}
+                None => tracing::warn!(
+                    bot = %bot.name, workspace = %bot.workspace_id, thread = %bot.thread_id,
+                    "bot workspace not found; profile left unchanged"
+                ),
+            }
+        }
+        if repairs.is_empty() {
+            return;
+        }
+        let mut preferences = self.inner.preferences.lock().await;
+        let mut next = preferences.clone();
+        for bot in &mut next.bots {
+            if let Some(id) = repairs.remove(&bot.id) {
+                bot.workspace_id = id;
+            }
+        }
+        if let Err(error) = persist_preferences(&self.inner.preferences_path, &next).await {
+            tracing::warn!(%error, "failed to persist repaired bot workspace ids");
+        }
+        // Applied either way: this boot's readers need the live id, and the
+        // next start repeats the repair if the write failed.
+        *preferences = next.clone();
+        drop(preferences);
+        self.emit(
+            None,
+            None,
+            UnifiedEvent::PreferencesUpdated { preferences: next },
+        );
+    }
+
     pub(super) async fn thread_workspace(&self, thread: &str) -> Result<String, DaemonError> {
         if self.is_cloud_thread(thread) {
             return self
