@@ -26,6 +26,7 @@ typedef NS_ENUM(int32_t, FDEventKind) {
   FDEventUnreadableRetained = 16,
   FDEventQuickRewrite = 17,
   FDEventDiscarded = 18,
+  FDEventCorruptedRetained = 19,
 };
 
 #endif

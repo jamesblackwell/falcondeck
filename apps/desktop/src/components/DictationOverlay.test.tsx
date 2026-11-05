@@ -149,6 +149,17 @@ describe("DictationOverlay", () => {
     expect(screen.getByRole("button", { name: "Discard recording" })).toBeInTheDocument();
   });
 
+  it("says a damaged take is corrupted and offers no retry", async () => {
+    render(<DictationOverlay />);
+    await emit("falcondeck://dictation-state", {
+      state: "corrupted", error: "The recording looks corrupted, so no transcription engine can read it.", retainedAudio: false,
+    });
+    expect(screen.getByText("Recording looks corrupted")).toBeInTheDocument();
+    expect(screen.getByText(/no transcription engine can read it/)).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Retry transcription" })).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Dismiss" })).toBeInTheDocument();
+  });
+
   it("prioritizes copying when the recovery clipboard write failed", async () => {
     render(<DictationOverlay initialEvent={{ state: "copy_failed", text: "Recovered words", error: "Clipboard copy failed", retainedAudio: true }} subscribeToEvents={false} />);
     expect(screen.getByText("Couldn't copy")).toBeInTheDocument();

@@ -24,6 +24,10 @@ const MAX_ENTRIES: usize = 200;
 /// Legacy recordings do not carry the native recorder's measured duration.
 /// Keep the old byte estimate as a migration fallback for those entries only.
 const BYTES_PER_SECOND: f64 = 4_000.0;
+/// The unmodified capture, kept beside the M4A only when it looked wrong.
+const RAW_CAPTURE_EXTENSION: &str = "caf";
+const REPAIRED_COPY_SUFFIX: &str = ".repaired.caf";
+const REPAIRED_COPY_MAX_AGE_MS: u64 = 60 * 60 * 1000;
 
 fn valid_duration(seconds: Option<f64>) -> Option<f64> {
     seconds.filter(|value| value.is_finite() && *value > 0.0)
@@ -38,15 +42,28 @@ pub struct DictationHistoryEntry {
     pub recorded_at_ms: u64,
     pub duration_seconds: f64,
     pub bytes: u64,
-    /// "system" or "open_router" — which engine produced this transcript.
+    /// The engine the recording was made with: "system", "open_router" or
+    /// "parakeet". Default retries key off this, so a one-off retry on another
+    /// engine does not change it.
     pub provider: String,
     pub model: Option<String>,
+    /// The engine `model` ran on, when a history retry differs from `provider`.
+    /// Cloud and local Parakeet share one model id, so the id cannot say.
+    #[serde(default)]
+    pub attempt_provider: Option<String>,
     pub text: Option<String>,
     pub error: Option<String>,
     /// False once the audio itself is gone (discarded, or cleared by macOS),
     /// which is what tells the UI a retry is no longer possible.
     #[serde(default)]
     pub audio_available: bool,
+    /// The audio is damaged, so no engine can transcribe it. The UI offers no
+    /// retry for these.
+    #[serde(default)]
+    pub capture_corrupted: bool,
+    /// The raw capture is still on disk for recovery or diagnosis.
+    #[serde(default)]
+    pub raw_capture_available: bool,
 }
 
 pub struct RecordingOutcome<'a> {
@@ -96,9 +113,14 @@ fn owns_recording(temp_dir: &Path, path: &Path) -> bool {
         )
 }
 
+pub fn raw_capture_path(path: &Path) -> PathBuf {
+    path.with_extension(RAW_CAPTURE_EXTENSION)
+}
+
 fn remove_recording(temp_dir: &Path, path: &Path) {
     if owns_recording(temp_dir, path) {
         let _ = std::fs::remove_file(path);
+        let _ = std::fs::remove_file(raw_capture_path(path));
     }
 }
 
@@ -137,6 +159,7 @@ fn prune_entries(temp_dir: &Path, entries: &mut Vec<DictationHistoryEntry>, rete
             return false;
         }
         entry.audio_available = path.is_file();
+        entry.raw_capture_available = raw_capture_path(&path).is_file();
         true
     });
     if entries.len() > MAX_ENTRIES {
@@ -177,7 +200,7 @@ pub fn record(
     outcome: RecordingOutcome<'_>,
     retention_hours: u32,
 ) -> bool {
-    record_with_policy(temp_dir, path, outcome, retention_hours, false)
+    record_with_policy(temp_dir, path, outcome, retention_hours, false, false)
 }
 
 /// Pending filing can finish after the transcription's detached final write.
@@ -201,6 +224,32 @@ pub fn record_pending(
         },
         retention_hours,
         true,
+        false,
+    )
+}
+
+/// Files audio that no engine can transcribe, with `message` as its error.
+pub fn record_corrupted(
+    temp_dir: &Path,
+    path: &Path,
+    duration_seconds: Option<f64>,
+    provider: &str,
+    message: String,
+    retention_hours: u32,
+) -> bool {
+    record_with_policy(
+        temp_dir,
+        path,
+        RecordingOutcome {
+            duration_seconds,
+            provider,
+            model: None,
+            text: None,
+            error: Some(message),
+        },
+        retention_hours,
+        false,
+        true,
     )
 }
 
@@ -210,6 +259,7 @@ fn record_with_policy(
     outcome: RecordingOutcome<'_>,
     retention_hours: u32,
     only_if_missing: bool,
+    capture_corrupted: bool,
 ) -> bool {
     if retention_hours == 0
         || !owns_recording(temp_dir, path)
@@ -233,9 +283,12 @@ fn record_with_policy(
         bytes,
         provider: outcome.provider.to_string(),
         model: outcome.model,
+        attempt_provider: None,
         text: outcome.text,
         error: outcome.error,
         audio_available: true,
+        capture_corrupted,
+        raw_capture_available: raw_capture_path(path).is_file(),
     };
     with_entries(temp_dir, retention_hours, |entries| {
         // A retry re-files the same recording; keep one row per recording so
@@ -245,9 +298,11 @@ fn record_with_policy(
             Some(existing) => {
                 existing.provider = entry.provider;
                 existing.model = entry.model;
+                existing.attempt_provider = None;
                 existing.text = entry.text;
                 existing.error = entry.error;
                 existing.bytes = entry.bytes;
+                existing.capture_corrupted = entry.capture_corrupted;
                 // A retry may come from an older native bridge that cannot
                 // report media duration. Preserve the measurement already in
                 // the index instead of replacing it with a byte estimate.
@@ -266,6 +321,7 @@ fn record_with_policy(
 pub fn record_retry(
     temp_dir: &Path,
     id: &str,
+    attempt_provider: &str,
     model: Option<String>,
     text: Option<String>,
     error: Option<String>,
@@ -273,9 +329,30 @@ pub fn record_retry(
 ) -> Option<DictationHistoryEntry> {
     with_entries(temp_dir, retention_hours, |entries| {
         let entry = entries.iter_mut().find(|entry| entry.id == id)?;
+        entry.attempt_provider = Some(attempt_provider.to_string());
         entry.model = model;
+        // Audio an engine just read was not corrupted after all.
+        if error.is_none() {
+            entry.capture_corrupted = false;
+        }
         entry.text = text;
         entry.error = error;
+        Some(entry.clone())
+    })
+}
+
+/// Flags a kept recording found to be damaged after it was filed. Its earlier
+/// transcript stays, shown as an attempt rather than as a result.
+pub fn mark_corrupted(
+    temp_dir: &Path,
+    id: &str,
+    message: String,
+    retention_hours: u32,
+) -> Option<DictationHistoryEntry> {
+    with_entries(temp_dir, retention_hours, |entries| {
+        let entry = entries.iter_mut().find(|entry| entry.id == id)?;
+        entry.capture_corrupted = true;
+        entry.error = Some(message);
         Some(entry.clone())
     })
 }
@@ -323,7 +400,27 @@ pub fn clear(temp_dir: &Path) -> usize {
 /// would break the promise the settings screen makes. The window doubles as
 /// the safety margin: an in-flight recording keeps a fresh mtime while it is
 /// being written, so a >=1 hour cutoff can never touch it.
+/// A repaired copy only lives for one export, so any older one was stranded by
+/// a crash. Nothing else owns it, whatever the retention setting.
+fn sweep_repaired_copies(temp_dir: &Path) {
+    let cutoff = now_ms().saturating_sub(REPAIRED_COPY_MAX_AGE_MS);
+    let Ok(items) = std::fs::read_dir(temp_dir) else {
+        return;
+    };
+    for item in items.flatten() {
+        let path = item.path();
+        let repaired = path
+            .file_name()
+            .and_then(|value| value.to_str())
+            .is_some_and(|name| name.ends_with(REPAIRED_COPY_SUFFIX));
+        if repaired && owns_recording(temp_dir, &path) && file_recorded_at_ms(&path) < cutoff {
+            let _ = std::fs::remove_file(&path);
+        }
+    }
+}
+
 fn sweep_orphans(temp_dir: &Path, entries: &[DictationHistoryEntry], retention_hours: u32) {
+    sweep_repaired_copies(temp_dir);
     if retention_hours == 0 {
         // With history off the native recorder owns deletion, and a failed
         // recording is deliberately retained for the overlay's Retry.
@@ -545,6 +642,7 @@ mod tests {
         let updated = record_retry(
             &dir,
             "falcondeck-dictation-one",
+            "open_router",
             Some("model-b".into()),
             Some("second time lucky".into()),
             None,
@@ -554,6 +652,201 @@ mod tests {
         assert_eq!(updated.text.as_deref(), Some("second time lucky"));
         assert_eq!(updated.error, None);
         assert_eq!(entries(&dir, 6).len(), 1);
+    }
+
+    #[test]
+    fn a_local_retry_records_its_engine_without_changing_the_recording_provider() {
+        let (dir, _guard) = fresh_dir("retry-engine");
+        let path = write_recording(&dir, "one", 1_000);
+        record(
+            &dir,
+            &path,
+            outcome(
+                None,
+                "open_router",
+                Some("nvidia/parakeet-tdt-0.6b-v3".into()),
+                Some("short wrong phrase".into()),
+                None,
+            ),
+            6,
+        );
+        let updated = record_retry(
+            &dir,
+            "falcondeck-dictation-one",
+            "parakeet",
+            Some("nvidia/parakeet-tdt-0.6b-v3".into()),
+            Some("short wrong phrase".into()),
+            Some("Parakeet could not find speech.".into()),
+            6,
+        )
+        .expect("entry");
+        assert_eq!(updated.attempt_provider.as_deref(), Some("parakeet"));
+        assert_eq!(updated.provider, "open_router");
+        // A failed retry keeps the earlier text beside its error, which is how
+        // the UI knows to label it as an earlier attempt.
+        assert_eq!(updated.text.as_deref(), Some("short wrong phrase"));
+        assert!(updated.error.is_some());
+
+        // A later native filing is a fresh attempt on the recording's engine.
+        record(
+            &dir,
+            &path,
+            outcome(
+                None,
+                "open_router",
+                Some("model-b".into()),
+                Some("ok".into()),
+                None,
+            ),
+            6,
+        );
+        assert_eq!(entries(&dir, 6)[0].attempt_provider, None);
+    }
+
+    #[test]
+    fn index_entries_written_before_these_fields_still_load() {
+        let (dir, _guard) = fresh_dir("legacy-index");
+        let path = write_recording(&dir, "one", 1_000);
+        std::fs::write(
+            index_path(&dir),
+            serde_json::to_vec(&serde_json::json!([{
+                "id": "falcondeck-dictation-one",
+                "path": path,
+                "recordedAtMs": now_ms(),
+                "durationSeconds": 1.0,
+                "bytes": 1000,
+                "provider": "open_router",
+                "model": "m",
+                "text": null,
+                "error": null,
+                "audioAvailable": true,
+            }]))
+            .unwrap(),
+        )
+        .unwrap();
+        let listed = entries(&dir, 6);
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].attempt_provider, None);
+        assert!(!listed[0].capture_corrupted);
+        assert!(!listed[0].raw_capture_available);
+    }
+
+    #[test]
+    fn a_corrupted_take_keeps_its_raw_capture_until_the_entry_goes() {
+        let (dir, _guard) = fresh_dir("corrupted");
+        let path = write_recording(&dir, "one", 1_000);
+        let raw = path.with_extension("caf");
+        std::fs::write(&raw, b"raw pcm").unwrap();
+        assert!(record_corrupted(
+            &dir,
+            &path,
+            Some(120.0),
+            "open_router",
+            "The recording looks corrupted.".into(),
+            6
+        ));
+        let listed = entries(&dir, 6);
+        assert!(listed[0].capture_corrupted);
+        assert!(listed[0].raw_capture_available);
+        assert_eq!(listed[0].duration_seconds, 120.0);
+
+        // The sweep treats the raw capture as belonging to its entry.
+        let old = SystemTime::now() - std::time::Duration::from_secs(2 * 60 * 60);
+        std::fs::File::options()
+            .write(true)
+            .open(&raw)
+            .and_then(|file| file.set_modified(old))
+            .expect("set mtime");
+        prune(&dir, 1);
+        assert!(raw.is_file());
+
+        assert!(delete(&dir, 6, "falcondeck-dictation-one"));
+        assert!(!path.is_file() && !raw.is_file());
+    }
+
+    #[test]
+    fn a_successful_retry_lifts_the_corrupted_mark_and_a_failed_one_does_not() {
+        let (dir, _guard) = fresh_dir("corrupted-lifted");
+        let path = write_recording(&dir, "one", 1_000);
+        record_corrupted(&dir, &path, Some(1.0), "system", "Corrupted.".into(), 6);
+        let id = entries(&dir, 6)[0].id.clone();
+
+        let failed = record_retry(&dir, &id, "parakeet", None, None, Some("No".into()), 6);
+        assert!(failed.unwrap().capture_corrupted);
+
+        let read = record_retry(&dir, &id, "parakeet", None, Some("Hi".into()), None, 6);
+        assert!(!read.unwrap().capture_corrupted);
+    }
+
+    #[test]
+    fn a_stranded_repaired_copy_goes_even_with_history_off() {
+        let (dir, _guard) = fresh_dir("repaired-sweep");
+        let stranded = dir.join("falcondeck-dictation-one.repaired.caf");
+        let fresh = dir.join("falcondeck-dictation-two.repaired.caf");
+        let retained = dir.join("falcondeck-dictation-three.caf");
+        for path in [&stranded, &fresh, &retained] {
+            std::fs::write(path, b"pcm").unwrap();
+        }
+        let old = SystemTime::now() - std::time::Duration::from_secs(2 * 60 * 60);
+        for path in [&stranded, &retained] {
+            std::fs::File::options()
+                .write(true)
+                .open(path)
+                .and_then(|file| file.set_modified(old))
+                .expect("set mtime");
+        }
+        prune(&dir, 0);
+        assert!(!stranded.is_file());
+        // The second may still be exporting; the third may be waiting on Retry.
+        assert!(fresh.is_file() && retained.is_file());
+    }
+
+    #[test]
+    fn expiry_and_clearing_remove_a_kept_raw_capture_too() {
+        let (dir, _guard) = fresh_dir("raw-expiry");
+        let first = write_recording(&dir, "one", 1_000);
+        let second = write_recording(&dir, "two", 1_000);
+        for path in [&first, &second] {
+            std::fs::write(path.with_extension("caf"), b"raw").unwrap();
+            record(
+                &dir,
+                path,
+                outcome(None, "system", None, Some("hi".into()), None),
+                6,
+            );
+        }
+        with_entries(&dir, 6, |entries| {
+            let entry = entries.iter_mut().find(|e| e.id.ends_with("one")).unwrap();
+            entry.recorded_at_ms -= 2 * 60 * 60 * 1000;
+        });
+        assert_eq!(entries(&dir, 1).len(), 1);
+        assert!(!first.with_extension("caf").is_file());
+        assert_eq!(clear(&dir), 1);
+        assert!(!second.with_extension("caf").is_file());
+    }
+
+    #[test]
+    fn marking_a_filed_recording_corrupted_keeps_its_earlier_text() {
+        let (dir, _guard) = fresh_dir("mark-corrupted");
+        let path = write_recording(&dir, "one", 1_000);
+        record(
+            &dir,
+            &path,
+            outcome(
+                None,
+                "open_router",
+                Some("m".into()),
+                Some("So".into()),
+                None,
+            ),
+            6,
+        );
+        let updated =
+            mark_corrupted(&dir, "falcondeck-dictation-one", "damaged".into(), 6).expect("entry");
+        assert!(updated.capture_corrupted);
+        assert_eq!(updated.text.as_deref(), Some("So"));
+        assert_eq!(updated.error.as_deref(), Some("damaged"));
+        assert!(mark_corrupted(&dir, "missing", "damaged".into(), 6).is_none());
     }
 
     #[test]

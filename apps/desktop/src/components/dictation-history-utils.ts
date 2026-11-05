@@ -1,3 +1,24 @@
+import type { DictationHistoryEntry } from "../dictation";
+
+// The "Retry using" value for local Parakeet. Cloud model ids never start with
+// this, and the cloud also offers a model called nvidia/parakeet-tdt-0.6b-v3.
+export const LOCAL_PARAKEET_RETRY = "local:parakeet";
+
+// Spells out where the audio went, because a bare nvidia/parakeet-... id reads
+// the same for the cloud model and the local one.
+export function transcriptionEngineLabel(
+  entry: Pick<DictationHistoryEntry, "attemptProvider" | "model" | "provider">,
+): string {
+  switch (entry.attemptProvider ?? entry.provider) {
+    case "parakeet":
+      return "Parakeet on this Mac";
+    case "open_router":
+      return entry.model ? `OpenRouter: ${entry.model}` : "OpenRouter";
+    default:
+      return "Apple Speech";
+  }
+}
+
 export function retentionSummary(hours: number): string {
   if (hours <= 0) {
     return "Recordings are deleted as soon as a transcript is pasted. Nothing is kept to retry.";
