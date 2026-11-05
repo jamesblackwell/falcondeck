@@ -176,9 +176,9 @@ fn approval() -> AttentionPush {
 
 async fn held_ids(app: &AppState) -> Vec<Option<String>> {
     let mut ids = vec![];
-    while let Some(held) = app.next_held_push().await {
-        ids.push(held.push.notification_id.clone());
-        app.push_delivered(held.push.kind).await;
+    while let Some(push) = app.next_held_push().await {
+        ids.push(push.notification_id.clone());
+        app.push_written().await;
     }
     ids
 }
@@ -227,8 +227,8 @@ async fn a_review_the_relay_will_not_take_waits_for_the_socket() {
     app.deliver_acknowledged(review()).await;
     let waiting = counters(&app).await;
     assert_eq!((waiting.held, waiting.delivered), (1, 0));
-    let held = app.next_held_push().await.unwrap();
-    assert_eq!(held.push.review_id.as_deref(), Some("R-1"));
+    let push = app.next_held_push().await.unwrap();
+    assert_eq!(push.review_id.as_deref(), Some("R-1"));
 }
 
 /// The reviewer's repro: nothing took the push, and a bridge coming back does
@@ -265,7 +265,7 @@ async fn a_bridge_dropped_unread_loses_nothing_and_claims_nothing() {
 }
 
 #[tokio::test]
-async fn a_failed_write_goes_back_first_with_its_age() {
+async fn a_failed_write_keeps_its_place_and_its_age() {
     let directory = tempfile::tempdir().unwrap();
     let app = app_with_relay("http://127.0.0.1:9", &directory).await;
     app.deliver_attention(approval()).await;
@@ -275,8 +275,8 @@ async fn a_failed_write_goes_back_first_with_its_age() {
     })
     .await;
     age_held_pushes(&app, 50).await;
-    let held = app.next_held_push().await.unwrap();
-    app.return_held_push(held).await;
+    assert!(app.next_held_push().await.is_some());
+    app.push_unwritten().await;
     assert_eq!(counters(&app).await.held, 2);
     age_held_pushes(&app, 11).await;
     assert_eq!(held_ids(&app).await, Vec::<Option<String>>::new());
@@ -301,7 +301,7 @@ async fn held_pushes_are_bounded_newest_first_and_counted_when_dropped() {
     let waiting = counters(&app).await;
     assert_eq!((waiting.held, waiting.evicted), (MAX_HELD_PUSHES as u64, 3));
     let first = app.next_held_push().await.unwrap();
-    assert_eq!(first.push.notification_id.as_deref(), Some("N-3"));
+    assert_eq!(first.notification_id.as_deref(), Some("N-3"));
 }
 
 fn completion(id: usize) -> AttentionPush {
@@ -369,34 +369,75 @@ async fn a_full_queue_drops_the_oldest_of_equal_rank() {
     assert_eq!(held_ids(&app).await[0].as_deref(), Some("C-1"));
 }
 
-/// The queue refilled during the write, and the failed push is the oldest.
 #[tokio::test]
-async fn a_failed_write_loses_a_tie_to_a_full_queue() {
-    let directory = tempfile::tempdir().unwrap();
-    let app = app_with_relay("http://127.0.0.1:9", &directory).await;
-    for index in 0..MAX_HELD_PUSHES {
-        app.deliver_attention(completion(index)).await;
-    }
-    let failed = app.next_held_push().await.unwrap();
-    app.deliver_attention(completion(MAX_HELD_PUSHES)).await;
-    app.return_held_push(failed).await;
-    let ids = held_ids(&app).await;
-    assert_eq!(ids.len(), MAX_HELD_PUSHES);
-    assert_eq!(ids[0].as_deref(), Some("C-1"), "the newer ones stay");
-    assert_eq!(counters_for(&app, "turn-complete").await.evicted, 1);
-}
-
-#[tokio::test]
-async fn a_failed_approval_still_beats_a_full_queue_of_completions() {
+async fn a_claimed_push_is_offered_once_until_its_write_settles() {
     let directory = tempfile::tempdir().unwrap();
     let app = app_with_relay("http://127.0.0.1:9", &directory).await;
     app.deliver_attention(approval()).await;
-    let failed = app.next_held_push().await.unwrap();
+    assert!(app.next_held_push().await.is_some());
+    assert_eq!(counters(&app).await.held, 1, "queued until it is written");
+    assert!(app.next_held_push().await.is_none(), "no second writer");
+    app.push_unwritten().await;
+    assert!(app.next_held_push().await.is_some(), "free again");
+    app.push_written().await;
+    let done = counters(&app).await;
+    assert_eq!((done.held, done.delivered), (0, 1));
+    assert!(app.next_held_push().await.is_none());
+}
+
+#[tokio::test]
+async fn a_push_being_written_cannot_be_evicted_or_expired() {
+    let directory = tempfile::tempdir().unwrap();
+    let app = app_with_relay("http://127.0.0.1:9", &directory).await;
     for index in 0..MAX_HELD_PUSHES {
-        app.deliver_attention(completion(index)).await;
+        app.deliver_attention(AttentionPush {
+            notification_id: Some(format!("N-{index}")),
+            ..approval()
+        })
+        .await;
     }
-    app.return_held_push(failed).await;
-    assert_eq!(held_ids(&app).await[0].as_deref(), Some("N-1"));
+    assert!(app.next_held_push().await.is_some());
+    age_held_pushes(&app, HELD_PUSH_TTL_MINUTES + 1).await;
+    expire_held_locked(&mut *app.inner.remote.lock().await, Utc::now());
+    let left = counters(&app).await;
+    assert_eq!((left.held, left.expired), (1, MAX_HELD_PUSHES as u64 - 1));
+    for index in 0..MAX_HELD_PUSHES {
+        app.deliver_attention(AttentionPush {
+            notification_id: Some(format!("M-{index}")),
+            ..approval()
+        })
+        .await;
+    }
+    app.push_written().await;
+    let done = counters(&app).await;
+    assert_eq!(
+        (done.delivered, done.evicted, done.held),
+        (1, 1, MAX_HELD_PUSHES as u64 - 1),
+        "M-0 made way when the queue filled, not the one being written"
+    );
+}
+
+#[tokio::test]
+async fn an_expired_push_never_costs_a_fresh_one_its_place() {
+    let directory = tempfile::tempdir().unwrap();
+    let app = app_with_relay("http://127.0.0.1:9", &directory).await;
+    for index in 0..MAX_HELD_PUSHES {
+        app.deliver_attention(AttentionPush {
+            notification_id: Some(format!("N-{index}")),
+            ..approval()
+        })
+        .await;
+    }
+    age_held_pushes(&app, HELD_PUSH_TTL_MINUTES + 1).await;
+    // The lowest rank there is: anything live would have turned it away.
+    app.deliver_attention(completion(0)).await;
+    assert_eq!(held_ids(&app).await, [Some("C-0".to_string())]);
+    let completions = counters_for(&app, "turn-complete").await;
+    assert_eq!(completions.evicted, 0);
+    assert_eq!(
+        counters_for(&app, "approval").await.expired,
+        MAX_HELD_PUSHES as u64
+    );
 }
 
 async fn counters_for(app: &AppState, kind: &str) -> falcondeck_core::AttentionDeliveryCounter {
@@ -564,6 +605,77 @@ async fn next_frame(
         .unwrap()
 }
 
+async fn live_session(
+    app: &AppState,
+    url: String,
+) -> tokio::task::JoinHandle<Result<(), RemoteBridgeError>> {
+    let app = app.clone();
+    let mut pairing = test_pairing();
+    pairing.device_id = Some("device".to_string());
+    pairing.expires_at = Utc::now() + chrono::Duration::hours(1);
+    tokio::spawn(async move {
+        let (_commands, mut commands) = tokio::sync::mpsc::unbounded_channel();
+        let mut retry = RemoteBridgeRetry::default();
+        app.connect_remote_session(
+            url,
+            "daemon".to_string(),
+            "session".to_string(),
+            pairing,
+            None,
+            &mut commands,
+            &mut retry,
+        )
+        .await
+    })
+}
+
+async fn claimed(app: &AppState) -> bool {
+    let remote = app.inner.remote.lock().await;
+    let front = remote.held_pushes.queue.front();
+    front.is_some_and(|held| held.writing)
+}
+
+/// Revoking a device or rotating keys aborts the session mid-write.
+#[tokio::test]
+async fn an_aborted_session_leaves_its_push_queued_and_it_goes_out_once() {
+    let (url, mut frames) = relay_socket().await;
+    let directory = tempfile::tempdir().unwrap();
+    let app = app_with_relay(&url, &directory).await;
+    app.set_desktop_activity(false);
+    let gate = Arc::new(tokio::sync::Semaphore::new(0));
+    app.inner.remote.lock().await.held_pushes.write_gate = Some(gate.clone());
+    app.deliver_attention(approval()).await;
+
+    let session = live_session(&app, url.clone()).await;
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        while !claimed(&app).await {
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("the session never picked the push up");
+    session.abort();
+    let _ = session.await;
+    let stuck = counters(&app).await;
+    assert_eq!((stuck.held, stuck.delivered), (1, 0), "counted, not lost");
+
+    gate.add_permits(1);
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        while claimed(&app).await {
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("the drain never gave the push back");
+    let next = live_session(&app, url).await;
+    assert_eq!(next_frame(&mut frames).await["notification_id"], "N-1");
+    let silence = tokio::time::timeout(std::time::Duration::from_millis(300), frames.recv());
+    assert!(silence.await.is_err(), "it went out once");
+    next.abort();
+    let done = counters(&app).await;
+    assert_eq!((done.held, done.delivered), (0, 1));
+}
+
 #[tokio::test]
 async fn a_live_session_writes_what_waited_and_what_comes_next() {
     let (url, mut frames) = relay_socket().await;
@@ -580,26 +692,7 @@ async fn a_live_session_writes_what_waited_and_what_comes_next() {
     .await;
     assert!(app.inner.notifications.resolve(key, Utc::now()).await);
 
-    let session = {
-        let app = app.clone();
-        let mut pairing = test_pairing();
-        pairing.device_id = Some("device".to_string());
-        pairing.expires_at = Utc::now() + chrono::Duration::hours(1);
-        tokio::spawn(async move {
-            let (_commands, mut commands) = tokio::sync::mpsc::unbounded_channel();
-            let mut retry = RemoteBridgeRetry::default();
-            app.connect_remote_session(
-                url,
-                "daemon".to_string(),
-                "session".to_string(),
-                pairing,
-                None,
-                &mut commands,
-                &mut retry,
-            )
-            .await
-        })
-    };
+    let session = live_session(&app, url).await;
     let first = next_frame(&mut frames).await;
     assert_eq!(
         first["notification_id"], "N-waited",

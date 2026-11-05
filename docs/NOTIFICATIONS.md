@@ -106,7 +106,9 @@ from there, so a bridge that dies or reconnects cannot take a push with it. The
 queue holds 16, each for up to an hour by the wall clock (`Instant` stops while a
 Mac sleeps). When it is full, completions go first, then errors and ordinary
 notices; approvals, questions, reviews and `high` notices go last, oldest first in
-each group. A failed write puts the push back at the front with its age.
+each group, after anything expired. A push stays queued until it is written, so a
+failed write keeps its place and its age, and an aborted session loses nothing. The
+write runs beside the session, so a slow socket does not stop it reading.
 
 Each push is decided again as it goes out. One whose record was settled meanwhile
 is dropped: answered, for a request or review, since opening a thread only reads

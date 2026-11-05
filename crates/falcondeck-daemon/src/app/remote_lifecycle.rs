@@ -220,6 +220,9 @@ pub(super) struct HeldPush {
     pub(super) push: AttentionPush,
     /// When it was first held. A failed write does not restart the clock.
     held_at: DateTime<Utc>,
+    /// A drain has claimed it. It stays queued and counted until the write
+    /// settles, and nothing else may offer, evict or expire it meanwhile.
+    writing: bool,
 }
 
 impl HeldPush {
@@ -228,14 +231,17 @@ impl HeldPush {
     }
 }
 
-/// The one queue in front of the socket. A push stays here until a live
-/// session has written it, so a bridge that dies cannot take any with it.
+/// The one queue in front of the socket. A push stays here until it has been
+/// written, so a bridge that dies cannot take any with it.
 #[derive(Default)]
 pub(super) struct HeldPushes {
     queue: std::collections::VecDeque<HeldPush>,
     /// Tells the live session to write. One permit however many are waiting,
     /// and it survives until the next session if none is live.
     wake: Arc<tokio::sync::Notify>,
+    /// Stands in for a socket too slow to take a barrier.
+    #[cfg(test)]
+    pub(super) write_gate: Option<Arc<tokio::sync::Semaphore>>,
 }
 
 impl HeldPushes {
@@ -353,13 +359,9 @@ fn count_push(
     *tally += 1;
 }
 
-fn queue_held(remote: &mut RemoteBridgeState, held: HeldPush, oldest_first: bool) {
+fn queue_held(remote: &mut RemoteBridgeState, held: HeldPush) {
     attention_counter(&mut remote.attention, held.push.kind).held += 1;
-    if oldest_first {
-        remote.held_pushes.queue.push_front(held);
-    } else {
-        remote.held_pushes.queue.push_back(held);
-    }
+    remote.held_pushes.queue.push_back(held);
 }
 
 fn take_held(remote: &mut RemoteBridgeState) -> Option<HeldPush> {
@@ -385,9 +387,8 @@ fn push_rank(push: &AttentionPush) -> u8 {
 }
 
 /// Makes room for `incoming` by dropping the lowest-ranked push, oldest first.
-/// False when `incoming` is itself the one to drop. A failed write coming back
-/// is older than anything queued, so it loses a tie where a new push wins one.
-fn make_room(remote: &mut RemoteBridgeState, incoming: &AttentionPush, returning: bool) -> bool {
+/// False when `incoming` is itself the one to drop.
+fn make_room(remote: &mut RemoteBridgeState, incoming: &AttentionPush) -> bool {
     if remote.held_pushes.queue.len() < MAX_HELD_PUSHES {
         return true;
     }
@@ -396,16 +397,13 @@ fn make_room(remote: &mut RemoteBridgeState, incoming: &AttentionPush, returning
         .queue
         .iter()
         .enumerate()
+        .filter(|(_, held)| !held.writing)
         .min_by_key(|(_, held)| push_rank(&held.push))
         .map(|(index, held)| (index, push_rank(&held.push)));
     let Some((index, rank)) = lowest else {
         return true;
     };
-    let keep = if returning {
-        push_rank(incoming) > rank
-    } else {
-        push_rank(incoming) >= rank
-    };
+    let keep = push_rank(incoming) >= rank;
     let dropped = if keep {
         take_held_at(remote, index).map_or(incoming.kind, |held| held.push.kind)
     } else {
@@ -423,19 +421,20 @@ fn hold_locked(remote: &mut RemoteBridgeState, held: HeldPush) {
         count_push(&mut remote.attention, held.push.kind, PushOutcome::Lost);
         return;
     }
-    if make_room(remote, &held.push, false) {
-        queue_held(remote, held, false);
+    expire_held_locked(remote, Utc::now());
+    if make_room(remote, &held.push) {
+        queue_held(remote, held);
     }
 }
 
 fn expire_held_locked(remote: &mut RemoteBridgeState, now: DateTime<Utc>) {
-    while remote
+    while let Some(index) = remote
         .held_pushes
         .queue
-        .front()
-        .is_some_and(|held| held.expired(now))
+        .iter()
+        .position(|held| !held.writing && held.expired(now))
     {
-        if let Some(held) = take_held(remote) {
+        if let Some(held) = take_held_at(remote, index) {
             tracing::warn!(kind = held.push.kind, "attention push expired while held");
             count_push(&mut remote.attention, held.push.kind, PushOutcome::Expired);
         }
@@ -573,21 +572,28 @@ impl AppState {
         let held = HeldPush {
             push,
             held_at: Utc::now(),
+            writing: false,
         };
         hold_locked(&mut remote, held);
         remote.held_pushes.wake.notify_one();
     }
 
-    /// The next push still worth saying, decided as it goes out rather than
-    /// when it was queued: he may have answered it or come back to the Mac.
-    pub(super) async fn next_held_push(&self) -> Option<HeldPush> {
+    /// Claims the next push still worth saying, decided as it goes out rather
+    /// than when it was queued: he may have answered it or come back to the Mac.
+    /// The caller settles the claim with `push_written` or `push_unwritten`.
+    pub(super) async fn next_held_push(&self) -> Option<AttentionPush> {
         loop {
-            let held = {
+            let push = {
                 let mut remote = self.inner.remote.lock().await;
                 expire_held_locked(&mut remote, Utc::now());
-                take_held(&mut remote)?
+                let front = remote.held_pushes.queue.front_mut()?;
+                if front.writing {
+                    // An earlier session's drain still has it.
+                    return None;
+                }
+                front.writing = true;
+                front.push.clone()
             };
-            let push = &held.push;
             let settled = match &push.notification_id {
                 Some(id) => self.inner.notifications.is_settled(id).await,
                 None => false,
@@ -600,21 +606,34 @@ impl AppState {
                     .refusal()
             };
             let Some(outcome) = outcome else {
-                return Some(held);
+                return Some(push);
             };
             tracing::info!(kind = push.kind, ?outcome, "held attention push dropped");
-            let mut remote = self.inner.remote.lock().await;
-            count_push(&mut remote.attention, push.kind, outcome);
+            self.settle_claimed_push(outcome).await;
         }
     }
 
-    /// The write failed: back to the front, with its age, for the next session.
-    pub(super) async fn return_held_push(&self, held: HeldPush) {
+    pub(super) async fn push_written(&self) {
+        self.settle_claimed_push(PushOutcome::Delivered).await;
+    }
+
+    /// The write failed: it keeps its place and its age for the next session.
+    pub(super) async fn push_unwritten(&self) {
         let mut remote = self.inner.remote.lock().await;
-        if remote.pairing.is_none() {
-            count_push(&mut remote.attention, held.push.kind, PushOutcome::Lost);
-        } else if make_room(&mut remote, &held.push, true) {
-            queue_held(&mut remote, held, true);
+        if let Some(front) = remote.held_pushes.queue.front_mut() {
+            front.writing = false;
+        }
+        remote.held_pushes.wake.notify_one();
+    }
+
+    /// Forgetting the pairing may have taken the claimed push already.
+    async fn settle_claimed_push(&self, outcome: PushOutcome) {
+        let mut remote = self.inner.remote.lock().await;
+        let claimed = remote.held_pushes.queue.front();
+        if claimed.is_some_and(|held| held.writing)
+            && let Some(held) = take_held(&mut remote)
+        {
+            count_push(&mut remote.attention, held.push.kind, outcome);
         }
     }
 

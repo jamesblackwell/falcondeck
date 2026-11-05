@@ -742,8 +742,9 @@ mod tests {
     /// What a live session would write.
     async fn pushed(app: &AppState) -> Vec<(String, Option<String>)> {
         let mut pushes = vec![];
-        while let Some(held) = app.next_held_push().await {
-            pushes.push((held.push.kind.to_string(), held.push.preview));
+        while let Some(push) = app.next_held_push().await {
+            app.push_written().await;
+            pushes.push((push.kind.to_string(), push.preview));
         }
         pushes
     }
@@ -1386,8 +1387,9 @@ mod notice_tests {
     /// What a live session would write.
     async fn pushes(app: &AppState) -> Vec<AttentionPush> {
         let mut pushes = vec![];
-        while let Some(held) = app.next_held_push().await {
-            pushes.push(held.push);
+        while let Some(push) = app.next_held_push().await {
+            app.push_written().await;
+            pushes.push(push);
         }
         pushes
     }
@@ -1403,8 +1405,9 @@ mod notice_tests {
     async fn next_push(app: &AppState) -> AttentionPush {
         tokio::time::timeout(std::time::Duration::from_secs(5), async {
             loop {
-                if let Some(held) = app.next_held_push().await {
-                    return held.push;
+                if let Some(push) = app.next_held_push().await {
+                    app.push_written().await;
+                    return push;
                 }
                 tokio::time::sleep(std::time::Duration::from_millis(10)).await;
             }

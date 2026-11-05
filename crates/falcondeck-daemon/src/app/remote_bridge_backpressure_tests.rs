@@ -44,6 +44,7 @@ async fn a_push_stuck_behind_the_socket_is_not_delivered() {
     assert!(stalled.is_err(), "the write is still waiting on the socket");
     let remote = app.inner.remote.lock().await;
     assert_eq!(remote.attention["approval"].delivered, 0);
+    assert_eq!(remote.attention["approval"].held, 1, "still queued");
 }
 
 struct AbortOnDrop<T>(tokio::task::JoinHandle<T>);
@@ -59,6 +60,7 @@ enum ProbeEvent {
         registrations: usize,
     },
     BulkWindowFilled,
+    Notify,
     RpcReply {
         request_id: String,
         ok: bool,
@@ -91,11 +93,18 @@ fn preferences_request(request_id: &str, data_key: &[u8; 32]) -> String {
     .unwrap()
 }
 
-#[tokio::test]
-async fn saturated_event_queue_keeps_encrypted_rpc_and_heartbeats_alive() {
+struct ProbeRelay {
+    url: String,
+    events: mpsc::Receiver<ProbeEvent>,
+    requests: broadcast::Sender<String>,
+    registrations: Arc<AtomicUsize>,
+    _server: AbortOnDrop<()>,
+}
+
+async fn probe_relay() -> ProbeRelay {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let relay_url = format!("http://{}", listener.local_addr().unwrap());
-    let (event_tx, mut events) = mpsc::channel(8);
+    let (event_tx, events) = mpsc::channel(8);
     let registration_count = Arc::new(AtomicUsize::new(0));
     let relay_registration_count = registration_count.clone();
     let (request_tx, _) = broadcast::channel::<String>(4);
@@ -191,6 +200,7 @@ async fn saturated_event_queue_keeps_encrypted_rpc_and_heartbeats_alive() {
                                     result,
                                     registrations: registration_count.load(Ordering::SeqCst),
                                 },
+                                RelayClientMessage::Notify { .. } => ProbeEvent::Notify,
                                 _ => continue,
                             };
                             if event_tx.send(event).await.is_err() {
@@ -201,19 +211,24 @@ async fn saturated_event_queue_keeps_encrypted_rpc_and_heartbeats_alive() {
                 }
             }),
         );
-    let _server = AbortOnDrop(tokio::spawn(async move {
-        axum::serve(listener, relay).await.unwrap();
-    }));
-    let temp = tempfile::tempdir().unwrap();
-    let app = AppState::new_with_state_path(
-        "test".into(),
-        Default::default(),
-        temp.path().join("state.json"),
-    );
-    let expected_preferences = serde_json::to_value(app.preferences().await).unwrap();
-    let data_key = [7; 32];
+    ProbeRelay {
+        url: relay_url,
+        events,
+        requests: request_tx,
+        registrations: registration_count,
+        _server: AbortOnDrop(tokio::spawn(async move {
+            axum::serve(listener, relay).await.unwrap();
+        })),
+    }
+}
+
+fn probe_bridge(
+    app: &AppState,
+    relay_url: String,
+    data_key: [u8; 32],
+) -> AbortOnDrop<Result<(), String>> {
     let bridge_app = app.clone();
-    let mut bridge = AbortOnDrop(tokio::spawn(async move {
+    AbortOnDrop(tokio::spawn(async move {
         let pairing = RemotePairingState {
             pairing_id: "pairing".into(),
             pairing_code: String::new(),
@@ -242,7 +257,27 @@ async fn saturated_event_queue_keeps_encrypted_rpc_and_heartbeats_alive() {
                     message
                 }
             })
-    }));
+    }))
+}
+
+#[tokio::test]
+async fn saturated_event_queue_keeps_encrypted_rpc_and_heartbeats_alive() {
+    let ProbeRelay {
+        url,
+        mut events,
+        requests: request_tx,
+        registrations: registration_count,
+        _server,
+    } = probe_relay().await;
+    let temp = tempfile::tempdir().unwrap();
+    let app = AppState::new_with_state_path(
+        "test".into(),
+        Default::default(),
+        temp.path().join("state.json"),
+    );
+    let expected_preferences = serde_json::to_value(app.preferences().await).unwrap();
+    let data_key = [7; 32];
+    let mut bridge = probe_bridge(&app, url, data_key);
 
     let response_deadline = Duration::from_secs(5);
     assert!(matches!(
@@ -328,4 +363,83 @@ async fn saturated_event_queue_keeps_encrypted_rpc_and_heartbeats_alive() {
         !bridge.0.is_finished(),
         "the bridge disconnected despite a responsive relay"
     );
+}
+
+/// A barrier can wait behind a busy link, or for as long as its 30 second
+/// limit. The phone's requests and the heartbeat do not wait with it.
+#[tokio::test]
+async fn a_stalled_push_keeps_rpc_and_heartbeats_alive() {
+    let ProbeRelay {
+        url,
+        mut events,
+        requests,
+        registrations,
+        _server,
+    } = probe_relay().await;
+    let temp = tempfile::tempdir().unwrap();
+    let app = AppState::new_with_state_path(
+        "test".into(),
+        Default::default(),
+        temp.path().join("state.json"),
+    );
+    crate::app::remote_lifecycle::pair_for_tests(&app).await;
+    app.set_desktop_activity(false);
+    let gate = Arc::new(tokio::sync::Semaphore::new(0));
+    app.inner.remote.lock().await.held_pushes.write_gate = Some(gate.clone());
+    let data_key = [7; 32];
+    let mut bridge = probe_bridge(&app, url, data_key);
+
+    let deadline = Duration::from_secs(5);
+    assert!(matches!(
+        next_probe_event(&mut events, &mut bridge, deadline).await,
+        ProbeEvent::Ping { .. }
+    ));
+    app.deliver_attention(crate::app::remote_lifecycle::AttentionPush {
+        kind: "approval",
+        ..Default::default()
+    })
+    .await;
+    requests
+        .send(preferences_request("during-push", &data_key))
+        .unwrap();
+    assert!(matches!(
+        next_probe_event(&mut events, &mut bridge, deadline).await,
+        ProbeEvent::RpcReply { request_id, ok: true, .. } if request_id == "during-push"
+    ));
+    let count = registrations.load(Ordering::SeqCst);
+    assert!(matches!(
+        next_probe_event(&mut events, &mut bridge, Duration::from_secs(18)).await,
+        ProbeEvent::Ping { .. }
+    ));
+    timeout(Duration::from_secs(1), async {
+        while registrations.load(Ordering::SeqCst) == count {
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        }
+    })
+    .await
+    .expect("the heartbeat did not run while the push was stalled");
+    let waiting = {
+        let remote = app.inner.remote.lock().await;
+        remote.attention["approval"].clone()
+    };
+    assert_eq!((waiting.held, waiting.delivered), (1, 0));
+
+    gate.add_permits(1);
+    assert!(matches!(
+        next_probe_event(&mut events, &mut bridge, deadline).await,
+        ProbeEvent::Notify
+    ));
+    timeout(deadline, async {
+        loop {
+            let remote = app.inner.remote.lock().await;
+            if remote.attention["approval"].delivered == 1 {
+                break;
+            }
+            drop(remote);
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("the written push was never counted");
+    assert!(!bridge.0.is_finished(), "the session survived the stall");
 }

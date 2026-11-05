@@ -677,6 +677,7 @@ impl AppState {
         let mut coalesce_flush = tokio::time::interval(EVENT_COALESCE_INTERVAL);
         coalesce_flush.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         let mut pending_delivery: Option<BoxFuture<'static, Result<(), String>>> = None;
+        let mut push_drain: Option<tokio::task::JoinHandle<Result<(), String>>> = None;
         let mut snapshot_pending = false;
         loop {
             if pending_delivery.is_none() && snapshot_pending {
@@ -754,8 +755,20 @@ impl AppState {
                     // reconnect (the websocket can remain healthy throughout).
                     register_remote_rpc_methods(&mut writer).await?;
                 }
-                _ = push_wake.notified() => {
-                    self.write_held_pushes(&writer).await?;
+                result = async {
+                    match push_drain.as_mut() {
+                        Some(drain) => drain.await,
+                        None => std::future::pending().await,
+                    }
+                } => {
+                    push_drain = None;
+                    match result {
+                        Ok(written) => written?,
+                        Err(error) => tracing::warn!(%error, "attention push drain stopped"),
+                    }
+                }
+                _ = push_wake.notified(), if push_drain.is_none() => {
+                    push_drain = Some(self.spawn_push_drain(&writer));
                 }
                 command = command_rx.recv() => {
                     if let Some(command) = command {
@@ -771,6 +784,9 @@ impl AppState {
                                 key_generation = key_generation.wrapping_add(1);
                                 writer.advance_generation();
                                 pending_delivery = None;
+                                // Its barrier was just invalidated, which is not a
+                                // broken socket. The push goes out on the next wake.
+                                push_drain = None;
                                 coalescer.drain();
                                 snapshot_pending = false;
                                 pairing = *next_pairing;
@@ -941,31 +957,58 @@ impl AppState {
         }
     }
 
+    /// Waiting on a barrier here would stop the session reading from the relay,
+    /// so the drain runs beside it. It is a task of its own because a session
+    /// can be aborted at any await: a drain cannot, so a push is never left
+    /// written but still queued, which would send it twice. Losing the session
+    /// closes the transport, which ends the wait.
+    fn spawn_push_drain(
+        &self,
+        writer: &RelayWriter,
+    ) -> tokio::task::JoinHandle<Result<(), String>> {
+        let app = self.clone();
+        let writer = writer.clone();
+        tokio::spawn(async move { app.write_held_pushes(&writer).await })
+    }
+
     /// Everything waiting and still worth saying. A push counts as delivered
-    /// once written; one the socket refuses goes back for the next session.
+    /// once written; one the socket refuses stays queued for the next session.
     async fn write_held_pushes(&self, writer: &RelayWriter) -> Result<(), String> {
-        while let Some(held) = self.next_held_push().await {
-            let push = &held.push;
+        while let Some(push) = self.next_held_push().await {
             let message = RelayClientMessage::Notify {
                 kind: push.kind.to_string(),
                 workspace_id: push.workspace_id.clone(),
                 thread_id: push.thread_id.clone(),
-                thread_title: self.push_title(push).await,
+                thread_title: self.push_title(&push).await,
                 message_preview: push.preview.clone(),
                 review_id: push.review_id.clone(),
                 notification_id: push.notification_id.clone(),
                 report_id: push.report_id.clone(),
                 ignore_presence: push.ignore_presence,
             };
+            #[cfg(test)]
+            {
+                let gate = self
+                    .inner
+                    .remote
+                    .lock()
+                    .await
+                    .held_pushes
+                    .write_gate
+                    .clone();
+                if let Some(gate) = gate {
+                    let _ = gate.acquire().await;
+                }
+            }
             if let Err(error) = send_relay_message(writer, &message).await {
                 tracing::warn!(
                     kind = push.kind,
                     "attention push held: the socket write failed"
                 );
-                self.return_held_push(held).await;
+                self.push_unwritten().await;
                 return Err(error);
             }
-            self.push_delivered(push.kind).await;
+            self.push_written().await;
         }
         Ok(())
     }
