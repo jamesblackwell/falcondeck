@@ -530,6 +530,9 @@ async fn a_failed_load_never_writes_over_the_saved_files() {
     app.fail_local_restore(&error.to_string());
 
     assert!(app.wait_for_persisted_state().await.is_err());
+    let reported = app.snapshot().await.restore_error.unwrap();
+    assert!(reported.contains("falcondeck.json"), "{reported}");
+    assert!(app.create_chat().await.is_err());
     let connected = app
         .connect_workspace(ConnectWorkspaceRequest {
             path: folder.to_string_lossy().into_owned(),
@@ -597,4 +600,56 @@ async fn a_failure_after_the_load_keeps_saving() {
     app.mark_persisted_state_loaded();
     app.fail_local_restore("late step failed");
     assert!(app.persist_local_state().await.is_ok());
+}
+
+#[tokio::test]
+async fn a_corrupt_state_file_fails_the_load_and_names_it() {
+    let temp = tempfile::tempdir().unwrap();
+    let state_path = temp.path().join("daemon-state.json");
+    std::fs::write(&state_path, "{not json").unwrap();
+    let app = AppState::new_with_state_path("test".into(), HashMap::new(), state_path.clone());
+    app.begin_local_restore();
+
+    let error = app.restore_local_state().await.unwrap_err();
+    app.fail_local_restore(&error.to_string());
+
+    let reported = app.snapshot().await.restore_error.unwrap();
+    assert!(reported.contains("daemon-state.json"), "{reported}");
+    app.shutdown().await.unwrap();
+    assert_eq!(std::fs::read(state_path).unwrap(), b"{not json");
+}
+
+/// A full disk: every file reads, no write lands.
+#[tokio::test]
+async fn a_readable_state_survives_failed_writes_at_boot() {
+    let temp = tempfile::tempdir().unwrap();
+    let state_dir = temp.path().join("state");
+    std::fs::create_dir(&state_dir).unwrap();
+    let state_path = state_dir.join("daemon-state.json");
+    let project = temp.path().join("project");
+    std::fs::create_dir(&project).unwrap();
+    let project = project.canonicalize().unwrap();
+    std::fs::write(
+        &state_path,
+        json!({"workspaces": [{"id": "workspace-saved", "path": project}]}).to_string(),
+    )
+    .unwrap();
+    let app = AppState::new_with_state_path("test".into(), HashMap::new(), state_path);
+    std::fs::write(&app.inner.preferences_path, "{}").unwrap();
+    let writable = std::fs::metadata(&state_dir).unwrap().permissions();
+    std::fs::set_permissions(&state_dir, std::fs::Permissions::from_mode(0o555)).unwrap();
+    app.begin_local_restore();
+
+    let restored = app.restore_local_state().await;
+    let connected = app.wait_for_persisted_state().await;
+    let snapshot = app.snapshot().await;
+    std::fs::set_permissions(&state_dir, writable).unwrap();
+
+    restored.unwrap();
+    connected.unwrap();
+    assert_eq!(snapshot.restore_error, None);
+    assert_eq!(snapshot.workspaces.len(), 1);
+    assert_eq!(snapshot.workspaces[0].id, "workspace-saved");
+    assert_eq!(snapshot.restore_phase, falcondeck_core::DaemonRestorePhase::Ready);
+    app.shutdown().await.unwrap();
 }

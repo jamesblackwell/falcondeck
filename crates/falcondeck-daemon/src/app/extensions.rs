@@ -171,7 +171,9 @@ impl ExtensionRegistry {
     }
 
     pub(super) async fn restore(&mut self) -> Result<(), DaemonError> {
-        self.ensure_bundled_assets().await?;
+        let bundled_assets = self.ensure_bundled_assets().await;
+        // Read the saved state even if those failed: a later save would
+        // otherwise write defaults over it.
         self.persisted = match tokio::fs::read_to_string(&self.state_path).await {
             Ok(contents) => serde_json::from_str(&contents)?,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
@@ -181,8 +183,12 @@ impl ExtensionRegistry {
         };
         migrate_scratch_pad_to_notes(&mut self.persisted);
         retire_bundled_extensions(&mut self.persisted);
+        bundled_assets?;
         self.discover().await?;
-        self.persist().await
+        if let Err(error) = self.persist().await {
+            tracing::error!(%error, "failed to rewrite extension state at startup");
+        }
+        Ok(())
     }
 
     async fn ensure_bundled_assets(&self) -> Result<(), DaemonError> {

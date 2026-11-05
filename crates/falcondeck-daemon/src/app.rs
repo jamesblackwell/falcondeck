@@ -794,7 +794,17 @@ pub(crate) struct LocalRestoreGuard(AppState);
 
 impl Drop for LocalRestoreGuard {
     fn drop(&mut self) {
-        self.0.fail_local_restore("restore stopped before it finished");
+        if !self.0.fail_local_restore("restore stopped before it finished") {
+            return;
+        }
+        // Clients are still showing the loading state; tell them it ended.
+        if let Ok(runtime) = tokio::runtime::Handle::try_current() {
+            let app = self.0.clone();
+            runtime.spawn(async move {
+                let snapshot = app.snapshot().await;
+                app.emit(None, None, UnifiedEvent::Snapshot { snapshot });
+            });
+        }
     }
 }
 
@@ -1715,9 +1725,21 @@ impl AppState {
         crate::acp::known_provider_ids(&self.inner.state_path).contains(&provider.to_string())
     }
 
+    /// The state is loaded by now, so a failed write costs at most this write.
+    /// Stopping here would skip reconnecting projects and starting schedules.
+    async fn persist_during_restore(&self) {
+        if let Err(error) = self.persist_local_state().await {
+            tracing::error!(%error, "failed to persist state during restore");
+        }
+    }
+
     pub async fn restore_local_state(&self) -> Result<(), DaemonError> {
         self.start_cloud_observer();
-        self.inner.extensions.lock().await.restore().await?;
+        // Only the two files below can fail the load. Everything else here is
+        // recoverable, and a full disk must not empty the app.
+        if let Err(error) = self.inner.extensions.lock().await.restore().await {
+            tracing::error!(%error, "failed to restore extensions");
+        }
         if let Err(error) = self
             .control()
             .retire_owned_automations(extensions::RETIRED_MISSIONS_ID)
@@ -1730,14 +1752,23 @@ impl AppState {
             );
         }
         self.sync_extension_event_workers().await;
-        let preferences = load_preferences(&self.inner.preferences_path).await?;
+        let unreadable = |path: &PathBuf, error: DaemonError| {
+            DaemonError::Process(format!("{}: {error}", path.display()))
+        };
+        let preferences = load_preferences(&self.inner.preferences_path)
+            .await
+            .map_err(|error| unreadable(&self.inner.preferences_path, error))?;
         {
             let mut current = self.inner.preferences.lock().await;
             *current = preferences.clone();
         }
-        persist_preferences(&self.inner.preferences_path, &preferences).await?;
+        if let Err(error) = persist_preferences(&self.inner.preferences_path, &preferences).await {
+            tracing::error!(%error, "failed to rewrite preferences at startup");
+        }
 
-        let mut persisted = load_persisted_app_state(&self.inner.state_path).await?;
+        let mut persisted = load_persisted_app_state(&self.inner.state_path)
+            .await
+            .map_err(|error| unreadable(&self.inner.state_path, error))?;
         let definitions = self.control().automations_snapshot().await;
         let bot_thread_ids = preferences.bots.iter()
             .flat_map(|bot| std::iter::once(&bot.thread_id).chain(&bot.previous_thread_ids))
@@ -1831,21 +1862,21 @@ impl AppState {
                     remote.relay_url
                 );
                 self.clear_remote_bridge_state().await;
-                self.persist_local_state().await?;
+                self.persist_during_restore().await;
             } else if remote.device_id.is_none() && remote.expires_at <= Utc::now() {
                 tracing::info!(
                     "skipping expired persisted remote pairing {}",
                     remote.pairing_id
                 );
                 self.clear_remote_bridge_state().await;
-                self.persist_local_state().await?;
+                self.persist_during_restore().await;
             } else if let Some(reason) = invalid_persisted_remote_reason(&remote) {
                 tracing::info!(
                     "discarding persisted remote pairing {}: {reason}",
                     remote.pairing_id
                 );
                 self.clear_remote_bridge_state().await;
-                self.persist_local_state().await?;
+                self.persist_during_restore().await;
             } else if let Err(error) = self.resume_remote_bridge(remote.clone()).await {
                 tracing::warn!("failed to restore remote bridge: {error}");
                 // Keep the un-resumed pairing so persistence round-trips it;
@@ -1858,18 +1889,20 @@ impl AppState {
                     current.last_error = Some(format!("failed to restore remote pairing: {error}"));
                 }
             } else if should_migrate_secure_storage {
-                self.persist_local_state().await?;
+                self.persist_during_restore().await;
             }
         }
 
         // Restore the remote bridge before reconnecting workspaces. Workspace
         // reconnects can persist state; starting them first could race with
         // remote restoration and overwrite a valid pairing with `remote: null`.
-        self.restore_scheduled_tasks().await?;
+        if let Err(error) = self.restore_scheduled_tasks().await {
+            tracing::error!(%error, "failed to restore scheduled tasks");
+        }
         scheduled_tasks::migrate_compatible(self).await;
         // Lazy projects never reach connect's persistence path. Save their
         // identities and interruption markers after remote state is restored.
-        self.persist_local_state().await?;
+        self.persist_during_restore().await;
         self.restore_bot_watches().await;
         // Interrupted projects become actionable first. Unrelated harness
         // probes must not hold the recovery dialog's Continue action behind
@@ -2275,16 +2308,24 @@ impl AppState {
     /// Ends a restore that never loaded the state files, so clients stop
     /// waiting. A failure after a successful load changes nothing: memory is
     /// complete, and refusing writes would lose the session's work.
-    pub(crate) fn fail_local_restore(&self, reason: &str) {
+    pub(crate) fn fail_local_restore(&self, reason: &str) -> bool {
         {
             let mut gate = self.saved_state_gate();
             if *gate != SavedStateGate::Loading {
-                return;
+                return false;
             }
             *gate = SavedStateGate::Failed(reason.to_string());
         }
         tracing::error!(%reason, "saved state did not load; refusing to write it this run");
         self.finish_local_restore();
+        true
+    }
+
+    fn saved_state_failure(&self) -> Option<String> {
+        match &*self.saved_state_gate() {
+            SavedStateGate::Failed(reason) => Some(reason.clone()),
+            _ => None,
+        }
     }
 
     /// Refuses a write that would replace state files this process never read.
@@ -2896,6 +2937,7 @@ impl AppState {
         DaemonSnapshot {
             daemon: self.inner.daemon.clone(),
             restore_phase: self.local_restore_phase(),
+            restore_error: self.saved_state_failure(),
             workspaces: workspace_list,
             library_workspaces,
             threads,

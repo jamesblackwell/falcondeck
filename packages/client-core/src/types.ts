@@ -1610,6 +1610,8 @@ export type DaemonSnapshot = {
   };
   /** Whether persisted session summaries are complete enough for recovery UX. */
   restore_phase?: DaemonRestorePhase;
+  /** Why saved state could not be loaded this run. Older daemons omit it. */
+  restore_error?: string;
   workspaces: WorkspaceSummary[];
   /**
    * Projects known to the daemon but not currently open. Older daemons omit

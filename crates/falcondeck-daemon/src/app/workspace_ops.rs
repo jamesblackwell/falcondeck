@@ -152,6 +152,7 @@ pub(super) async fn create_chat_at(
     app: &AppState,
     path: PathBuf,
 ) -> Result<WorkspaceSummary, DaemonError> {
+    app.wait_for_persisted_state().await?;
     std::fs::create_dir_all(&path).map_err(|error| {
         DaemonError::Process(format!("failed to create casual chat folder: {error}"))
     })?;

@@ -1674,6 +1674,9 @@ export function normalizeDaemonSnapshot(
       },
     },
     ...(restorePhase ? { restore_phase: restorePhase } : {}),
+    ...(typeof snapshot.restore_error === "string"
+      ? { restore_error: snapshot.restore_error }
+      : {}),
     workspaces: Array.isArray(snapshot.workspaces)
       ? snapshot.workspaces.map((workspace) =>
           normalizeWorkspaceSummary(workspace),

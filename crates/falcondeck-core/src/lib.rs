@@ -1311,6 +1311,10 @@ pub struct DaemonSnapshot {
     /// retain their previous workspace-status readiness heuristic.
     #[serde(default)]
     pub restore_phase: DaemonRestorePhase,
+    /// Why saved state could not be loaded. Set for the whole run: the daemon
+    /// is empty and refuses to write the files until it restarts cleanly.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub restore_error: Option<String>,
     /// Known connected workspaces.
     pub workspaces: Vec<WorkspaceSummary>,
     /// Projects that are known but not open in the sidebar. Thin catalog only:
@@ -6580,6 +6584,7 @@ mod tests {
                 capabilities: DaemonCapabilities::default(),
             },
             restore_phase: DaemonRestorePhase::Ready,
+            restore_error: None,
             workspaces: Vec::new(),
             library_workspaces: Vec::new(),
             threads: Vec::new(),

@@ -212,6 +212,7 @@ import { PanelToggles } from "./components/PanelToggles";
 import { ProjectImportOverlay } from "./components/ProjectImportOverlay";
 import { ResumeStoppedThreadsDialog } from "./components/ResumeStoppedThreadsDialog";
 import { StartupRestoreOverlay } from "./components/StartupRestoreOverlay";
+import { SavedStateErrorBanner } from "./components/SavedStateErrorBanner";
 import { UsageDialog } from "./components/UsageDialog";
 import { OnboardingWizard } from "./components/OnboardingWizard";
 import {
@@ -6821,6 +6822,9 @@ function AppInner() {
       />
       {snapshot?.restore_phase === "loading_persisted_state" ? (
         <StartupRestoreOverlay />
+      ) : null}
+      {snapshot?.restore_error ? (
+        <SavedStateErrorBanner error={snapshot.restore_error} />
       ) : null}
       {isImportingProjectSessions ? <ProjectImportOverlay /> : null}
       {isOnboardingActive ? (
