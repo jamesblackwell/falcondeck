@@ -4334,6 +4334,7 @@ mod tests {
                 text: "Later".to_string(),
                 attachment_count: 0,
                 queued_at: Utc::now(),
+                held_reason: None,
             },
             agent_sender: None,
         };

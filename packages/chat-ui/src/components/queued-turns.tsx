@@ -311,8 +311,18 @@ function QueuedTurnChip({
               className="h-8 w-8 shrink-0 rounded-[var(--fd-radius-sm)] border border-border-default bg-surface-3 object-cover"
             />
           ) : null}
-          <span className="min-w-0 flex-1 truncate text-[length:var(--fd-text-sm)] font-medium text-fg-primary">
-            {label}
+          <span className="min-w-0 flex-1">
+            <span className="block truncate text-[length:var(--fd-text-sm)] font-medium text-fg-primary">
+              {label}
+            </span>
+            {queued.held_reason ? (
+              <span
+                title={queued.held_reason}
+                className="block truncate text-[length:var(--fd-text-xs)] text-fg-muted"
+              >
+                {queued.held_reason}
+              </span>
+            ) : null}
           </span>
           {queued.attachment_count ? (
             <span className="flex items-center gap-0.5 text-[length:var(--fd-text-xs)] text-fg-muted">

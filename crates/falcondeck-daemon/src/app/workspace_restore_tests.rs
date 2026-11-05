@@ -440,3 +440,36 @@ fn archived_interruptions_stay_lazy_but_queued_work_is_restored() {
     })).unwrap();
     assert!(needs_startup_connection(&queued));
 }
+
+#[tokio::test]
+async fn a_connect_during_startup_keeps_the_persisted_workspace_id() {
+    let temp = tempfile::tempdir().unwrap();
+    let state_path = temp.path().join("daemon-state.json");
+    let folder = temp.path().join("project");
+    std::fs::create_dir(&folder).unwrap();
+    let folder = folder.canonicalize().unwrap();
+    std::fs::write(
+        &state_path,
+        serde_json::json!({"workspaces": [{"id": "workspace-persisted", "path": folder}]})
+            .to_string(),
+    )
+    .unwrap();
+    let app = AppState::new_with_state_path("test".into(), HashMap::new(), state_path);
+    app.begin_local_restore();
+
+    // A due automation connects its path before the state file has loaded.
+    let early = tokio::spawn({
+        let app = app.clone();
+        let path = folder.to_string_lossy().into_owned();
+        async move { app.resolve_or_connect_workspace_path(&path).await }
+    });
+    sleep(Duration::from_millis(100)).await;
+    assert!(!early.is_finished());
+    app.restore_local_state().await.unwrap();
+
+    let snapshot = app.snapshot().await;
+    assert_eq!(snapshot.workspaces.len(), 1);
+    assert_eq!(snapshot.workspaces[0].id, "workspace-persisted");
+    early.abort();
+    app.shutdown().await.unwrap();
+}

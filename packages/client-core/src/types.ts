@@ -1149,6 +1149,8 @@ export type QueuedTurnSummary = {
   text?: string;
   attachment_count?: number;
   queued_at: string;
+  /** Why the daemon will not dispatch this turn on its own, if it won't. */
+  held_reason?: string;
 };
 
 /** Execution location is fixed when a task is created. */

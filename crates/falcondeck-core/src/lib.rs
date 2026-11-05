@@ -4482,6 +4482,9 @@ pub struct QueuedTurnSummary {
     pub attachment_count: usize,
     /// When the turn was queued.
     pub queued_at: chrono::DateTime<Utc>,
+    /// Why the daemon will not dispatch this turn on its own, if it won't.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub held_reason: Option<String>,
 }
 
 /// Attention state derived from thread activity.

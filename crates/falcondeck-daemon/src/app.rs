@@ -2251,6 +2251,18 @@ impl AppState {
             .unwrap_or_else(|poisoned| poisoned.into_inner()) = DaemonRestorePhase::Ready;
     }
 
+    /// Workspace ids live in the persisted state, and the scheduler and API
+    /// start before it loads. Anything that connects a path sooner finds no
+    /// record, mints a fresh id, and restoration then adopts that id for the
+    /// path, stranding every stored reference to the old one.
+    pub(crate) async fn wait_for_persisted_state(&self) {
+        while self.local_restore_phase() == DaemonRestorePhase::LoadingPersistedState
+            && !self.is_shutting_down()
+        {
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+    }
+
     fn local_restore_phase(&self) -> DaemonRestorePhase {
         *self
             .inner
@@ -4011,6 +4023,7 @@ impl AppState {
         &self,
         request: ConnectWorkspaceRequest,
     ) -> Result<WorkspaceSummary, DaemonError> {
+        self.wait_for_persisted_state().await;
         workspace_ops::connect_workspace(self, request).await
     }
 
@@ -4057,6 +4070,7 @@ impl AppState {
         request: ConnectWorkspaceRequest,
         persisted_workspace: Option<&PersistedWorkspaceState>,
     ) -> Result<WorkspaceSummary, DaemonError> {
+        self.wait_for_persisted_state().await;
         let path = normalize_workspace_path(request.path.trim());
         let registered_id = self
             .inner

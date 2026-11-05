@@ -2522,6 +2522,7 @@ async fn try_enqueue_turn(
                 text,
                 attachment_count,
                 queued_at: Utc::now(),
+                held_reason: None,
             };
             thread.queued_requests.push(super::QueuedTurnRequest {
                 id,
@@ -3070,6 +3071,14 @@ impl AppState {
                         queued = %thread.queued_requests[0].id,
                         "queued turn carries a retired workspace id; left queued for review"
                     );
+                    let summary = mark_queue_held(thread, &workspace_id).then(|| thread.summary.clone());
+                    drop(workspaces);
+                    if let Some(summary) = summary {
+                        if let Err(error) = app.persist_local_state().await {
+                            tracing::warn!(%error, thread = %thread_id, "failed to persist held queue");
+                        }
+                        publish_queued_thread_summary(&app, &workspace_id, &thread_id, summary).await;
+                    }
                     return;
                 }
                 let next = thread.queued_requests.remove(0);
@@ -5809,6 +5818,32 @@ fn native_opencode_transcript_needs_hydration(thread: &ManagedThread) -> bool {
         && (thread.items.is_empty() || !thread.native_transcript_synced)
 }
 
+/// Says why a queue stopped, on each entry, so clients can show it. Returns
+/// whether anything changed.
+fn mark_queue_held(thread: &mut ManagedThread, workspace_id: &str) -> bool {
+    let mut changed = false;
+    for queued in &mut thread.queued_requests {
+        let reason = if queued.request.workspace_id == workspace_id {
+            "Waiting behind a held message. Sends automatically once that message is gone."
+        } else {
+            "Held: queued before this project's ID changed, so it won't send on its own. Steer it during a turn, or remove it."
+        };
+        if queued.summary.held_reason.as_deref() != Some(reason) {
+            queued.summary.held_reason = Some(reason.to_string());
+            changed = true;
+        }
+        if let Some(summary) = thread
+            .summary
+            .queued_turns
+            .iter_mut()
+            .find(|summary| summary.id == queued.id)
+        {
+            summary.held_reason = Some(reason.to_string());
+        }
+    }
+    changed
+}
+
 fn queued_turn_is_held(thread: &ManagedThread) -> bool {
     matches!(
         thread.summary.status,
@@ -6553,6 +6588,7 @@ mod tests {
                 text: "steer this".to_string(),
                 attachment_count: 0,
                 queued_at: Utc::now(),
+                held_reason: None,
             },
             agent_sender: None,
         };
@@ -6844,6 +6880,7 @@ mod tests {
                 text: "follow up".to_string(),
                 attachment_count: 0,
                 queued_at: Utc::now(),
+                held_reason: None,
             },
             agent_sender: None,
         });
@@ -7328,6 +7365,7 @@ mod tests {
                 text: "old launch prompt".to_string(),
                 attachment_count: 0,
                 queued_at: Utc::now(),
+                held_reason: None,
             };
             let request = serde_json::from_value(serde_json::json!({
                 "workspace_id": workspace_id, "thread_id": "thread-1",
@@ -7382,6 +7420,14 @@ mod tests {
             thread.queued_requests[0].request.workspace_id,
             "workspace-retired"
         );
+        let reasons = thread
+            .summary
+            .queued_turns
+            .iter()
+            .map(|queued| queued.held_reason.as_deref().unwrap())
+            .collect::<Vec<_>>();
+        assert!(reasons[0].starts_with("Held:"), "{reasons:?}");
+        assert!(reasons[1].starts_with("Waiting behind"), "{reasons:?}");
         // A dispatch attempt pops the head and stamps the thread, even when it
         // later fails and restores it. Neither may happen here.
         assert_eq!(thread.summary.updated_at, touched_at);
@@ -7443,6 +7489,7 @@ mod tests {
                         text: "original words".to_string(),
                         attachment_count: 1,
                         queued_at: Utc::now(),
+                        held_reason: None,
                     },
                     agent_sender: None,
                 });
@@ -7455,6 +7502,7 @@ mod tests {
                     text: "original words".to_string(),
                     attachment_count: 1,
                     queued_at: Utc::now(),
+                    held_reason: None,
                 });
         }
 

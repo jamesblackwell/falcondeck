@@ -498,7 +498,8 @@ function sameQueuedTurns(
       turn.preview === next[index]?.preview &&
       (turn.text ?? null) === (next[index]?.text ?? null) &&
       (turn.attachment_count ?? 0) === (next[index]?.attachment_count ?? 0) &&
-      turn.queued_at === next[index]?.queued_at,
+      turn.queued_at === next[index]?.queued_at &&
+      (turn.held_reason ?? null) === (next[index]?.held_reason ?? null),
   );
 }
 

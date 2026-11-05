@@ -7648,6 +7648,7 @@ async fn archive_all_threads_updates_once_and_is_idempotent() {
             text: "Follow up".to_string(),
             attachment_count: 0,
             queued_at: Utc::now(),
+            held_reason: None,
         });
 
     app.inner.workspaces.lock().await.insert(

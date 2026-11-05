@@ -45,6 +45,8 @@ async fn scheduler_loop(app: AppState) {
     // Run ids with a live executor task. Kept in shared state so executors
     // deregister themselves when the provider turn settles.
     let in_flight: Arc<StdMutex<HashSet<String>>> = Arc::new(StdMutex::new(HashSet::new()));
+    // A catch-up run at boot needs the workspaces and bots it targets.
+    app.wait_for_persisted_state().await;
     loop {
         if app.is_shutting_down() {
             return;
