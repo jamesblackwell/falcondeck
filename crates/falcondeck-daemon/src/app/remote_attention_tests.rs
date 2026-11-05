@@ -355,12 +355,7 @@ async fn a_completion_cannot_push_out_a_queue_of_approvals() {
     assert_eq!(ids.len(), MAX_HELD_PUSHES);
     assert_eq!(ids[0].as_deref(), Some("N-0"));
     assert!(ids.iter().all(|id| id.as_deref() != Some("C-0")));
-    let status = build_remote_status_response(&*app.inner.remote.lock().await);
-    let completions = status
-        .attention
-        .iter()
-        .find(|counter| counter.kind == "turn-complete")
-        .unwrap();
+    let completions = counters_for(&app, "turn-complete").await;
     assert_eq!((completions.evicted, completions.held), (1, 0));
 }
 
@@ -372,6 +367,45 @@ async fn a_full_queue_drops_the_oldest_of_equal_rank() {
         app.deliver_attention(completion(index)).await;
     }
     assert_eq!(held_ids(&app).await[0].as_deref(), Some("C-1"));
+}
+
+/// The queue refilled during the write, and the failed push is the oldest.
+#[tokio::test]
+async fn a_failed_write_loses_a_tie_to_a_full_queue() {
+    let directory = tempfile::tempdir().unwrap();
+    let app = app_with_relay("http://127.0.0.1:9", &directory).await;
+    for index in 0..MAX_HELD_PUSHES {
+        app.deliver_attention(completion(index)).await;
+    }
+    let failed = app.next_held_push().await.unwrap();
+    app.deliver_attention(completion(MAX_HELD_PUSHES)).await;
+    app.return_held_push(failed).await;
+    let ids = held_ids(&app).await;
+    assert_eq!(ids.len(), MAX_HELD_PUSHES);
+    assert_eq!(ids[0].as_deref(), Some("C-1"), "the newer ones stay");
+    assert_eq!(counters_for(&app, "turn-complete").await.evicted, 1);
+}
+
+#[tokio::test]
+async fn a_failed_approval_still_beats_a_full_queue_of_completions() {
+    let directory = tempfile::tempdir().unwrap();
+    let app = app_with_relay("http://127.0.0.1:9", &directory).await;
+    app.deliver_attention(approval()).await;
+    let failed = app.next_held_push().await.unwrap();
+    for index in 0..MAX_HELD_PUSHES {
+        app.deliver_attention(completion(index)).await;
+    }
+    app.return_held_push(failed).await;
+    assert_eq!(held_ids(&app).await[0].as_deref(), Some("N-1"));
+}
+
+async fn counters_for(app: &AppState, kind: &str) -> falcondeck_core::AttentionDeliveryCounter {
+    let status = build_remote_status_response(&*app.inner.remote.lock().await);
+    status
+        .attention
+        .into_iter()
+        .find(|counter| counter.kind == kind)
+        .unwrap_or_default()
 }
 
 #[tokio::test]

@@ -385,8 +385,9 @@ fn push_rank(push: &AttentionPush) -> u8 {
 }
 
 /// Makes room for `incoming` by dropping the lowest-ranked push, oldest first.
-/// False when `incoming` is itself the one to drop.
-fn make_room(remote: &mut RemoteBridgeState, incoming: &AttentionPush) -> bool {
+/// False when `incoming` is itself the one to drop. A failed write coming back
+/// is older than anything queued, so it loses a tie where a new push wins one.
+fn make_room(remote: &mut RemoteBridgeState, incoming: &AttentionPush, returning: bool) -> bool {
     if remote.held_pushes.queue.len() < MAX_HELD_PUSHES {
         return true;
     }
@@ -400,15 +401,19 @@ fn make_room(remote: &mut RemoteBridgeState, incoming: &AttentionPush) -> bool {
     let Some((index, rank)) = lowest else {
         return true;
     };
-    let dropped = if push_rank(incoming) < rank {
-        incoming.kind
+    let keep = if returning {
+        push_rank(incoming) > rank
     } else {
-        let oldest = take_held_at(remote, index);
-        oldest.map_or(incoming.kind, |held| held.push.kind)
+        push_rank(incoming) >= rank
+    };
+    let dropped = if keep {
+        take_held_at(remote, index).map_or(incoming.kind, |held| held.push.kind)
+    } else {
+        incoming.kind
     };
     tracing::warn!(kind = dropped, "attention push dropped for a newer one");
     count_push(&mut remote.attention, dropped, PushOutcome::Evicted);
-    push_rank(incoming) >= rank
+    keep
 }
 
 /// Only with a pairing to deliver to. A full queue keeps what matters most.
@@ -418,7 +423,7 @@ fn hold_locked(remote: &mut RemoteBridgeState, held: HeldPush) {
         count_push(&mut remote.attention, held.push.kind, PushOutcome::Lost);
         return;
     }
-    if make_room(remote, &held.push) {
+    if make_room(remote, &held.push, false) {
         queue_held(remote, held, false);
     }
 }
@@ -608,7 +613,7 @@ impl AppState {
         let mut remote = self.inner.remote.lock().await;
         if remote.pairing.is_none() {
             count_push(&mut remote.attention, held.push.kind, PushOutcome::Lost);
-        } else if make_room(&mut remote, &held.push) {
+        } else if make_room(&mut remote, &held.push, true) {
             queue_held(&mut remote, held, true);
         }
     }
