@@ -1,3 +1,4 @@
+import { ClaudeToolEvidence } from "./ClaudeToolEvidence";
 import {
   memo,
   useCallback,
@@ -454,7 +455,10 @@ function ToolDetailBody({ item }: { item: ToolCall }) {
         <McpDetail detail={detail} itemId={item.id} />
       ) : null}
       {detail?.kind === "dynamic" ? (
-        <DynamicDetail detail={detail} itemId={item.id} />
+        detail.namespace === "claude" ? <>
+          {item.output ? <CodeBlock label={/^(agent|task)$/i.test(detail.tool) ? "Final report" : "Output"} code={item.output} /> : null}
+          <ClaudeToolEvidence detail={detail} />
+        </> : <DynamicDetail detail={detail} itemId={item.id} />
       ) : null}
       {detail?.kind === "collab_agent" ? (
         <CollabDetail detail={detail} />
@@ -466,8 +470,8 @@ function ToolDetailBody({ item }: { item: ToolCall }) {
       {detail?.kind === "guardian_review" ? (
         <GuardianReviewDetail detail={detail} />
       ) : null}
-      {item.output && !structuredHasText ? (
-        <CodeBlock code={item.output} />
+      {item.output && !structuredHasText && !(detail?.kind === "dynamic" && detail.namespace === "claude") ? (
+        <CodeBlock code={item.output} label={detail?.kind === "dynamic" && /^(agent|task)$/i.test(detail.tool) ? "Final report" : "Output"} />
       ) : null}
     </>
   );

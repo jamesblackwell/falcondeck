@@ -21,10 +21,10 @@ use super::{
     AppState, ManagedThread, ManagedWorkspace, PendingServerRequest,
     SHUTDOWN_INTERRUPTED_TURN_ERROR,
     agent_helpers::{
-        ClaudeToolInputs, SUBAGENT_ACTIVITY_KEPT_STEPS, append_claude_text_delta,
-        claude_parent_tool_use_id, claude_stream_message_id, claude_tool_result_image_items,
-        extract_claude_error, extract_claude_service_message, extract_claude_text_chunk,
-        extract_claude_thinking_chunk, extract_claude_tool_event, format_subagent_activity,
+        ClaudeSubagentActivity, ClaudeToolInputs, append_claude_text_delta,
+        claude_parent_tool_use_id, claude_stream_message_id, claude_tool_exit_code,
+        claude_tool_result_image_items, extract_claude_error, extract_claude_service_message,
+        extract_claude_text_chunk, extract_claude_thinking_chunk, extract_claude_tool_events,
         is_claude_message_start, is_claude_text_block_start, merge_claude_assistant_text,
         resolve_claude_tool_identity,
     },
@@ -1593,8 +1593,9 @@ impl AppState {
         let mut assistant_block_break_pending = false;
         let mut tool_identity = HashMap::<String, (String, String)>::new();
         let mut tool_inputs = ClaudeToolInputs::default();
-        // Sub-agent step log per spawning tool call: (kept steps, dropped count).
-        let mut subagent_steps = HashMap::<String, (Vec<String>, usize)>::new();
+        // Lossless child evidence per spawning tool; never merge child prose into the main reply.
+        let mut subagent_steps = HashMap::<String, ClaudeSubagentActivity>::new();
+        let mut subagent_roots = HashMap::<String, String>::new();
         let mut background_tasks = HashSet::<String>::new();
         // Every task the CLI still lists, blocking or not. A backgrounded
         // shell command does not hold the turn open, but it does mean the
@@ -1903,9 +1904,9 @@ impl AppState {
                                         .record_claude_run_usage(
                                             &workspace_id,
                                             &thread_id,
-                                            input.saturating_add(
-                                                count("cache_creation_input_tokens"),
-                                            ),
+                                            input.saturating_add(count(
+                                                "cache_creation_input_tokens",
+                                            )),
                                             count("cache_read_input_tokens"),
                                         )
                                         .await;
@@ -1957,6 +1958,10 @@ impl AppState {
                                         tool_identity.get(&tool_id).cloned().unwrap_or_else(|| {
                                             ("Sub-agent".to_string(), "Agent".to_string())
                                         });
+                                    let mut detail = tool_inputs.detail(&tool_id, &tool_kind);
+                                    if let Some(activity) = subagent_steps.get(&tool_id) {
+                                        activity.apply(&mut detail);
+                                    }
                                     let item = ConversationItem::ToolCall {
                                         id: tool_id,
                                         title: title.clone(),
@@ -1971,7 +1976,7 @@ impl AppState {
                                             None,
                                             task.summary.as_deref(),
                                         )),
-                                        detail: None,
+                                        detail: detail.map(Box::new),
                                         created_at: Utc::now(),
                                         completed_at: Some(Utc::now()),
                                     };
@@ -1996,56 +2001,47 @@ impl AppState {
                             // call that spawned it. It must stay out of the main
                             // transcript paths — its prose would merge into the
                             // assistant's reply and its tool calls would render as
-                            // main-loop work. Instead, fold each tool start into a
-                            // step log on the spawning tool call's card; the
-                            // parent's own tool_result later replaces the log with
-                            // the sub-agent's report.
+                            // main-loop work. Retain every child call and result
+                            // as evidence on its root parent, alongside the report.
+                            // Text deltas do not rewrite the whole evidence tree.
                             if let Some(parent_id) = claude_parent_tool_use_id(&value) {
-                                let parent_id = parent_id.to_string();
-                                let step = extract_claude_tool_event(&value)
-                                    .filter(|event| event.status == "running")
-                                    .and_then(|event| event.title);
-                                if let Some(step) = step {
-                                    let entry =
-                                        subagent_steps.entry(parent_id.clone()).or_default();
-                                    entry.0.push(step);
-                                    if entry.0.len() > SUBAGENT_ACTIVITY_KEPT_STEPS {
-                                        entry.0.remove(0);
-                                        entry.1 += 1;
-                                    }
-                                    let output = format_subagent_activity(&entry.0, entry.1);
-                                    saw_agent_output = true;
-                                    let (title, tool_kind) =
-                                        tool_identity.get(&parent_id).cloned().unwrap_or_else(
-                                            || ("Sub-agent".to_string(), "Task".to_string()),
-                                        );
-                                    let item = ConversationItem::ToolCall {
-                                        id: parent_id,
-                                        title: title.clone(),
-                                        tool_kind: tool_kind.clone(),
-                                        status: "running".to_string(),
-                                        output: Some(output.clone()),
-                                        exit_code: None,
-                                        display: Box::new(tool_display_metadata(
-                                            &title,
-                                            &tool_kind,
-                                            "running",
-                                            None,
-                                            Some(&output),
-                                        )),
-                                        detail: None,
-                                        created_at: Utc::now(),
-                                        completed_at: None,
-                                    };
-                                    let _ = self
-                                        .push_conversation_item(
-                                            &workspace_id,
-                                            &thread_id,
-                                            item,
-                                            true,
-                                        )
-                                        .await;
+                                let parent_id = subagent_roots
+                                    .get(parent_id)
+                                    .cloned()
+                                    .unwrap_or_else(|| parent_id.to_string());
+                                let events = extract_claude_tool_events(&value);
+                                if events.is_empty() {
+                                    continue;
                                 }
+                                for event in events {
+                                    subagent_roots.insert(event.id, parent_id.clone());
+                                }
+                                let entry = subagent_steps.entry(parent_id.clone()).or_default();
+                                entry.record(&value);
+                                let (title, tool_kind) =
+                                    tool_identity.get(&parent_id).cloned().unwrap_or_else(|| {
+                                        ("Sub-agent".to_string(), "Agent".to_string())
+                                    });
+                                let mut detail = tool_inputs.detail(&parent_id, &tool_kind);
+                                entry.apply(&mut detail);
+                                let item = ConversationItem::ToolCall {
+                                    id: parent_id,
+                                    title: title.clone(),
+                                    tool_kind: tool_kind.clone(),
+                                    status: "running".to_string(),
+                                    output: None,
+                                    exit_code: None,
+                                    display: Box::new(tool_display_metadata(
+                                        &title, &tool_kind, "running", None, None,
+                                    )),
+                                    detail: detail.map(Box::new),
+                                    created_at: Utc::now(),
+                                    completed_at: None,
+                                };
+                                saw_agent_output = true;
+                                let _ = self
+                                    .push_conversation_item(&workspace_id, &thread_id, item, true)
+                                    .await;
                                 continue;
                             }
                             // The CLI must confirm the session FalconDeck
@@ -2165,62 +2161,68 @@ impl AppState {
                                 let _ = self
                                     .push_conversation_item(&workspace_id, &thread_id, item, true)
                                     .await;
-                            } else if let Some(tool_event) = extract_claude_tool_event(&value) {
-                                saw_agent_output = true;
-                                let known_identity = tool_identity.get(&tool_event.id).cloned();
-                                let (title, tool_kind) = resolve_claude_tool_identity(
-                                    tool_event.title,
-                                    tool_event.tool_kind,
-                                    known_identity.as_ref(),
-                                );
-                                tool_inputs.record(
-                                    &tool_event.id,
-                                    &tool_kind,
-                                    tool_event.input.as_ref(),
-                                );
-                                let tool_detail = tool_inputs.detail(&tool_event.id, &tool_kind);
-                                if tool_event.status == "running" {
-                                    tool_identity.insert(
-                                        tool_event.id.clone(),
-                                        (title.clone(), tool_kind.clone()),
+                            }
+                            let tool_events = extract_claude_tool_events(&value);
+                            if !tool_events.is_empty() {
+                                for tool_event in tool_events {
+                                    saw_agent_output = true;
+                                    let known_identity = tool_identity.get(&tool_event.id).cloned();
+                                    let (title, tool_kind) = resolve_claude_tool_identity(
+                                        tool_event.title.clone(),
+                                        tool_event.tool_kind,
+                                        if tool_event.input.as_ref().is_some_and(|v| {
+                                            v.as_object().is_some_and(|v| !v.is_empty())
+                                        }) {
+                                            None
+                                        } else {
+                                            known_identity.as_ref()
+                                        },
                                     );
-                                    running_tool_titles
-                                        .insert(tool_event.id.clone(), title.clone());
-                                } else {
-                                    running_tool_titles.remove(&tool_event.id);
-                                }
-                                let completed_at = if tool_event.status == "running" {
-                                    None
-                                } else {
-                                    Some(Utc::now())
-                                };
-                                let tool_id = tool_event.id.clone();
-                                let item = ConversationItem::ToolCall {
-                                    id: tool_event.id,
-                                    title: title.clone(),
-                                    tool_kind: tool_kind.clone(),
-                                    status: tool_event.status.clone(),
-                                    output: tool_event.output.clone(),
-                                    exit_code: None,
-                                    display: Box::new(tool_display_metadata(
-                                        &title,
+                                    tool_inputs.record(
+                                        &tool_event.id,
                                         &tool_kind,
-                                        &tool_event.status,
-                                        None,
-                                        tool_event.output.as_deref(),
-                                    )),
-                                    detail: tool_detail.map(Box::new),
-                                    created_at: Utc::now(),
-                                    completed_at,
-                                };
-                                let _ = self
-                                    .push_conversation_item(&workspace_id, &thread_id, item, true)
-                                    .await;
-                                for item in claude_tool_result_image_items(
-                                    &tool_id,
-                                    &title,
-                                    &tool_event.images,
-                                ) {
+                                        tool_event.input.as_ref(),
+                                    );
+                                    tool_inputs.record_result(&tool_event.id, &value);
+                                    let mut tool_detail =
+                                        tool_inputs.detail(&tool_event.id, &tool_kind);
+                                    if let Some(activity) = subagent_steps.get(&tool_event.id) {
+                                        activity.apply(&mut tool_detail);
+                                    }
+                                    if tool_event.status == "running" {
+                                        tool_identity.insert(
+                                            tool_event.id.clone(),
+                                            (title.clone(), tool_kind.clone()),
+                                        );
+                                        running_tool_titles
+                                            .insert(tool_event.id.clone(), title.clone());
+                                    } else {
+                                        running_tool_titles.remove(&tool_event.id);
+                                    }
+                                    let completed_at = if tool_event.status == "running" {
+                                        None
+                                    } else {
+                                        Some(Utc::now())
+                                    };
+                                    let tool_id = tool_event.id.clone();
+                                    let item = ConversationItem::ToolCall {
+                                        id: tool_event.id,
+                                        title: title.clone(),
+                                        tool_kind: tool_kind.clone(),
+                                        status: tool_event.status.clone(),
+                                        output: tool_event.output.clone(),
+                                        exit_code: claude_tool_exit_code(&value),
+                                        display: Box::new(tool_display_metadata(
+                                            &title,
+                                            &tool_kind,
+                                            &tool_event.status,
+                                            claude_tool_exit_code(&value),
+                                            tool_event.output.as_deref(),
+                                        )),
+                                        detail: tool_detail.map(Box::new),
+                                        created_at: Utc::now(),
+                                        completed_at,
+                                    };
                                     let _ = self
                                         .push_conversation_item(
                                             &workspace_id,
@@ -2229,6 +2231,20 @@ impl AppState {
                                             true,
                                         )
                                         .await;
+                                    for item in claude_tool_result_image_items(
+                                        &tool_id,
+                                        &title,
+                                        &tool_event.images,
+                                    ) {
+                                        let _ = self
+                                            .push_conversation_item(
+                                                &workspace_id,
+                                                &thread_id,
+                                                item,
+                                                true,
+                                            )
+                                            .await;
+                                    }
                                 }
                             } else if compaction_item.is_none()
                                 && let Some(message) = extract_claude_service_message(&value)
@@ -2296,6 +2312,7 @@ impl AppState {
                                         tool_identity.clear();
                                         tool_inputs.clear();
                                         subagent_steps.clear();
+                                        subagent_roots.clear();
                                         background_tasks.clear();
                                         background_task_tools.clear();
                                         // `outstanding_tasks` deliberately
@@ -4032,9 +4049,7 @@ mod tests {
 
     #[test]
     fn releases_only_idle_codex_subagents() {
-        let read = |parent: Value, status: &str| {
-            json!({"thread": {"id": "t", "parentThreadId": parent, "status": {"type": status}}})
-        };
+        let read = |parent: Value, status: &str| json!({"thread": {"id": "t", "parentThreadId": parent, "status": {"type": status}}});
         assert!(is_idle_codex_subagent(&read(json!("p"), "idle")));
         assert!(!is_idle_codex_subagent(&read(json!("p"), "active")));
         assert!(!is_idle_codex_subagent(&read(Value::Null, "idle")));

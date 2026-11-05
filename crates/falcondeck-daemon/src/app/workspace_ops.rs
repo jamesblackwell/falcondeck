@@ -5752,41 +5752,111 @@ const MIN_TOOL_OUTPUT_CAP_BYTES: usize = 512;
 /// for the outputs that were actually cut.
 fn with_tool_output_capped(item: &ConversationItem, cap: usize) -> ConversationItem {
     let cap = cap.max(MIN_TOOL_OUTPUT_CAP_BYTES);
-    if let ConversationItem::ToolCall {
+    let ConversationItem::ToolCall {
         id,
         title,
         tool_kind,
         status,
-        output: Some(output),
+        output,
         exit_code,
         display,
         detail,
         created_at,
         completed_at,
     } = item
-        && output.len() > cap
-    {
-        let total = output.len() as u64;
-        let mut end = cap;
-        while end > 0 && !output.is_char_boundary(end) {
-            end -= 1;
+    else {
+        return item.clone();
+    };
+    // Count without allocating a second copy of a potentially multi-MB argument
+    // object. Arguments and child evidence share the page's output budget.
+    #[derive(Default)]
+    struct ByteCounter(usize);
+    impl std::io::Write for ByteCounter {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.0 += bytes.len();
+            Ok(bytes.len())
         }
-        let mut display = display.clone();
-        display.output_total_bytes = Some(total);
-        return ConversationItem::ToolCall {
-            id: id.clone(),
-            title: title.clone(),
-            tool_kind: tool_kind.clone(),
-            status: status.clone(),
-            output: Some(output[..end].to_string()),
-            exit_code: *exit_code,
-            display,
-            detail: detail.clone(),
-            created_at: *created_at,
-            completed_at: *completed_at,
-        };
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
     }
-    item.clone()
+    let pageable = matches!(detail.as_deref(),
+        Some(falcondeck_core::ToolCallDetail::Dynamic { namespace: Some(namespace), .. }) if namespace == "claude")
+        || matches!(
+            detail.as_deref(),
+            Some(falcondeck_core::ToolCallDetail::Mcp { .. })
+        );
+    let mut counter = ByteCounter::default();
+    if pageable {
+        let _ = serde_json::to_writer(&mut counter, &detail);
+    }
+    let total = output.as_ref().map_or(0, String::len) + counter.0;
+    if total <= cap {
+        return item.clone();
+    }
+    let projected_detail = if pageable && counter.0 > cap {
+        match detail.as_deref() {
+            Some(falcondeck_core::ToolCallDetail::Dynamic {
+                tool,
+                namespace,
+                success,
+                duration_ms,
+                ..
+            }) => Some(Box::new(falcondeck_core::ToolCallDetail::Dynamic {
+                tool: tool.clone(),
+                namespace: namespace.clone(),
+                arguments: Value::Null,
+                content_items: Vec::new(),
+                success: *success,
+                duration_ms: *duration_ms,
+                claude: None,
+            })),
+            Some(falcondeck_core::ToolCallDetail::Mcp {
+                server,
+                tool,
+                error,
+                duration_ms,
+                app_context,
+                ..
+            }) => Some(Box::new(falcondeck_core::ToolCallDetail::Mcp {
+                server: server.clone(),
+                tool: tool.clone(),
+                arguments: Value::Null,
+                result: None,
+                error: error.clone(),
+                duration_ms: *duration_ms,
+                app_context: app_context.clone(),
+            })),
+            _ => None,
+        }
+    } else {
+        detail.clone()
+    };
+    let mut display = display.clone();
+    display.output_total_bytes = Some(total as u64);
+    ConversationItem::ToolCall {
+        id: id.clone(),
+        title: title.clone(),
+        tool_kind: tool_kind.clone(),
+        status: status.clone(),
+        output: output.as_ref().map(|output| {
+            let budget = if pageable && counter.0 <= cap {
+                cap.saturating_sub(counter.0)
+            } else {
+                cap
+            };
+            let mut end = budget.min(output.len());
+            while !output.is_char_boundary(end) {
+                end -= 1;
+            }
+            output[..end].to_string()
+        }),
+        exit_code: *exit_code,
+        display,
+        detail: projected_detail,
+        created_at: *created_at,
+        completed_at: *completed_at,
+    }
 }
 
 fn project_thread_detail_item(
@@ -5831,7 +5901,9 @@ fn refresh_queue_hold(thread: &mut ManagedThread, workspace_id: &str) -> bool {
     for queued in &mut thread.queued_requests {
         let reason = if queued.request.workspace_id != workspace_id {
             blocked = true;
-            Some("Held: queued before this project's ID changed, so it won't send on its own. Steer it during a turn, or remove it.")
+            Some(
+                "Held: queued before this project's ID changed, so it won't send on its own. Steer it during a turn, or remove it.",
+            )
         } else if blocked {
             Some("Waiting behind a held message. Sends automatically once that message is gone.")
         } else {
@@ -8109,6 +8181,59 @@ mod tests {
         assert!(detail.has_older);
         assert!(detail.is_partial);
         assert_eq!(detail.oldest_item_id.as_deref(), Some("tool-5"));
+    }
+
+    #[test]
+    fn claude_detail_pages_bound_arguments_children_and_mcp_arrays_without_losing_source() {
+        let mut inputs = super::super::agent_helpers::ClaudeToolInputs::default();
+        inputs.record("p", "Agent", Some(&json!({"prompt": "é".repeat(20_000)})));
+        let mut detail = inputs.detail("p", "Agent");
+        let mut activity = super::super::agent_helpers::ClaudeSubagentActivity::default();
+        activity.record(&json!({"type":"assistant","message":{"content":[{"type":"tool_use","id":"c","name":"Bash","input":{"command":"x".repeat(10_000)}}]}}));
+        activity.apply(&mut detail);
+        let mut item = ConversationItem::ToolCall {
+            id: "p".into(),
+            title: "Agent: Inspect files".into(),
+            tool_kind: "Agent".into(),
+            status: "completed".into(),
+            output: Some("report".into()),
+            exit_code: None,
+            display: Box::default(),
+            detail: detail.map(Box::new),
+            created_at: Utc::now(),
+            completed_at: None,
+        };
+        for mcp in [false, true] {
+            if mcp {
+                if let ConversationItem::ToolCall { detail, .. } = &mut item {
+                    *detail = super::super::mcp_presentation::claude_tool_detail(
+                        "mcp__test__call",
+                        Some(&json!({"many": vec!["short"; 10_000]})),
+                    )
+                    .map(Box::new);
+                }
+            }
+            let capped = with_tool_output_capped(&item, 512);
+            assert!(serde_json::to_vec(&capped).unwrap().len() < 2000);
+            let ConversationItem::ToolCall {
+                display, detail, ..
+            } = capped
+            else {
+                unreachable!()
+            };
+            assert!(display.output_total_bytes.unwrap() > 40_000);
+            assert!(serde_json::to_vec(&detail).unwrap().len() < 512);
+            // An uncapped item fetch recovers the exact original arguments/evidence.
+            assert_eq!(with_tool_output_capped(&item, 1_000_000), item);
+            let request: ThreadDetailRequest = serde_json::from_value(
+                json!({"workspace_id":"w", "thread_id":"t", "tool_output_bytes":512}),
+            )
+            .unwrap();
+            assert_eq!(
+                project_thread_detail_item(&item, &request),
+                with_tool_output_capped(&item, 512)
+            );
+        }
     }
 
     #[test]

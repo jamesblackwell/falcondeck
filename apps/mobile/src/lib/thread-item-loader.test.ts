@@ -103,6 +103,20 @@ describe("loadFullThreadItem", () => {
     vi.restoreAllMocks();
   });
 
+  it("loads omitted Claude arguments and child evidence even when output itself is short", async () => {
+    const full = { ...toolCall("tool-1", "Report"), detail: {
+      kind: "dynamic", namespace: "claude", tool: "Agent", arguments: { prompt: "x".repeat(10_000) }, content_items: [], success: true, duration_ms: null,
+      claude: { result: null, calls: [{ id: "child", title: "du -sk *", tool_kind: "Bash", status: "completed", arguments: { command: "du -sk *" }, output: "42" }] },
+    } };
+    const rpc = vi.fn().mockResolvedValue(full);
+    useRelayStore.setState({ sessionId: "session-1", _callRpc: rpc } as never);
+    await loadFullThreadItem("workspace-1", "thread-1", "tool-1");
+    const item = useSessionStore.getState().threadItems["thread-1"]![0]!;
+    expect(toolOutputIsTruncated(item as never)).toBe(false);
+    expect(item.kind === "tool_call" && item.detail?.kind === "dynamic" && item.detail.claude?.calls[0]?.output).toBe("42");
+    expect(rpc).toHaveBeenCalledWith("thread.item", expect.objectContaining({ item_id: "tool-1" }), expect.objectContaining({ requestIdPrefix: "mobile-item" }));
+  });
+
   it("swaps the full item into the transcript once and dedupes concurrent calls", async () => {
     const rpc = vi.fn().mockResolvedValue(toolCall("tool-1", "the whole output"));
     useRelayStore.setState({ sessionId: "session-1", _callRpc: rpc } as never);

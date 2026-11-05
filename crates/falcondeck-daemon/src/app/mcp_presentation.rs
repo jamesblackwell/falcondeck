@@ -15,10 +15,6 @@ use serde_json::{Map, Value};
 
 /// A long subject would push the rest of the row off a phone screen.
 const SUBJECT_MAX_CHARS: usize = 80;
-/// Tool arguments are kept for debugging, not replay. `falcondeck_notify` bodies
-/// run to 64 KB and thread pages are capped for slow relays, so one string may
-/// not outweigh the page it sits in. The session file keeps the full text.
-const ARGUMENT_STRING_MAX_CHARS: usize = 4_000;
 /// How many names a `select:` tool search spells out before summarising.
 const TOOL_SEARCH_MAX_NAMES: usize = 3;
 
@@ -619,18 +615,18 @@ pub(crate) fn claude_tool_detail(tool_kind: &str, input: Option<&Value>) -> Opti
         return Some(ToolCallDetail::Mcp {
             server: server.to_string(),
             tool: tool.to_string(),
-            arguments: input.map(bounded_arguments).unwrap_or(Value::Null),
+            arguments: input.cloned().unwrap_or(Value::Null),
             result: None,
             error: None,
             duration_ms: None,
             app_context: None,
         });
     }
-    is_tool_search_kind(tool_kind).then_some(())?;
     Some(ToolCallDetail::Dynamic {
         tool: tool_kind.to_string(),
-        namespace: None,
-        arguments: bounded_arguments(input?),
+        namespace: Some("claude".to_string()),
+        arguments: input.cloned().unwrap_or(Value::Null),
+        claude: Some(Default::default()),
         content_items: Vec::new(),
         success: None,
         duration_ms: None,
@@ -639,25 +635,7 @@ pub(crate) fn claude_tool_detail(tool_kind: &str, input: Option<&Value>) -> Opti
 
 /// Whether a Claude tool's input is worth keeping until its result arrives.
 pub(crate) fn keeps_claude_tool_input(tool_kind: &str) -> bool {
-    parse_mcp_tool_name(tool_kind).is_some() || is_tool_search_kind(tool_kind)
-}
-
-fn bounded_arguments(value: &Value) -> Value {
-    match value {
-        Value::String(text) if text.chars().count() > ARGUMENT_STRING_MAX_CHARS => {
-            let mut cut: String = text.chars().take(ARGUMENT_STRING_MAX_CHARS - 1).collect();
-            cut.push('…');
-            Value::String(cut)
-        }
-        Value::Array(values) => Value::Array(values.iter().map(bounded_arguments).collect()),
-        Value::Object(object) => Value::Object(
-            object
-                .iter()
-                .map(|(key, value)| (key.clone(), bounded_arguments(value)))
-                .collect(),
-        ),
-        other => other.clone(),
-    }
+    !tool_kind.is_empty()
 }
 
 /// The title an agent should see when it reads a transcript. Stored titles are

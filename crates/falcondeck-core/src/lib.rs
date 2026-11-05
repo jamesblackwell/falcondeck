@@ -849,6 +849,34 @@ pub struct ConversationAutoExpandPreferencesPatch {
     pub failed_tests: Option<bool>,
 }
 
+/// Lossless Claude tool evidence, fetched with the full item when a detail page is capped.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub struct ClaudeToolEvidence {
+    #[serde(default)]
+    /// Ordered child tool calls, keyed by provider identity.
+    pub calls: Vec<ClaudeNestedCall>,
+    #[serde(default)]
+    /// Complete provider-native result metadata.
+    pub result: Option<Value>,
+}
+
+/// A tool call belonging to a Claude Task/Agent invocation.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ClaudeNestedCall {
+    /// Stable provider tool-use identity.
+    pub id: String,
+    /// Compact tool summary.
+    pub title: String,
+    /// Provider tool name.
+    pub tool_kind: String,
+    /// Provider tool lifecycle.
+    pub status: String,
+    /// Full provider arguments.
+    pub arguments: Value,
+    /// Full textual result.
+    pub output: Option<String>,
+}
+
 /// Tool-call display metadata derived by the daemon.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ToolCallDisplay {
@@ -882,9 +910,9 @@ pub struct ToolCallDisplay {
     /// Cheap provider-output signals for transcript grouping and collapsed rows.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provider_output_summary: Option<ToolProviderOutputSummary>,
-    /// Set only when a detail window truncated `output` (see
-    /// `ThreadDetailRequest::tool_output_bytes`); holds the untruncated byte
-    /// length so clients can offer the full text on demand.
+    /// Set when a detail window caps output or pageable tool evidence (see
+    /// `ThreadDetailRequest::tool_output_bytes`); holds their combined original
+    /// byte length so clients can fetch the full item on demand.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub output_total_bytes: Option<u64>,
     /// The task this call acted on, for clients that can link it. `title`
@@ -1094,6 +1122,9 @@ pub enum ToolCallDetail {
         /// Provider success flag, when terminal.
         #[serde(default)]
         success: Option<bool>,
+        /// Claude-only evidence; additive so older clients retain the ordinary tool output.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        claude: Option<ClaudeToolEvidence>,
         /// Provider-reported duration in milliseconds.
         #[serde(default)]
         duration_ms: Option<u64>,
@@ -2694,7 +2725,7 @@ pub struct ThreadDetailRequest {
     /// fetch the renderable item on demand through `thread.item`.
     #[serde(default)]
     pub inline_images: Option<bool>,
-    /// Optional byte cap for captured tool output in the returned window.
+    /// Optional byte cap for captured output and pageable tool detail in the returned window.
     /// Truncated items carry `display.output_total_bytes`; `thread.item`
     /// returns the full output.
     #[serde(default)]

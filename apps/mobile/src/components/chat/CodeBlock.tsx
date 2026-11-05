@@ -8,6 +8,7 @@ import { useClipboardCopy } from '@/hooks/useClipboardCopy'
 
 interface CodeBlockProps {
   code: string
+  label?: string
   language?: string
   previewLines?: number
 }
@@ -18,13 +19,14 @@ const MAX_EXPANDED_LINES = 400
 
 export const CodeBlock = memo(function CodeBlock({
   code,
+  label,
   language,
   previewLines = DEFAULT_PREVIEW_LINES,
 }: CodeBlockProps) {
   const { theme } = useUnistyles()
   const [expanded, setExpanded] = useState(false)
   const isDiff = language === 'diff'
-  const headerLabel = language ?? 'code'
+  const headerLabel = label ?? language ?? 'code'
   const displayCode = useMemo(() => code.slice(0, MAX_RENDERED_CHARS), [code])
   const lines = useMemo(() => displayCode.split('\n'), [displayCode])
   const expandedLineCount = Math.min(lines.length, MAX_EXPANDED_LINES)

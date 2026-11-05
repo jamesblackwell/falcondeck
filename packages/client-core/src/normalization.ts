@@ -1297,6 +1297,13 @@ export function normalizeConversationItem(value: unknown): ConversationItem {
             : detail?.kind === "dynamic" && typeof detail.tool === "string"
               ? {
                   kind: "dynamic",
+                  claude: detail.claude ? {
+                    result: detail.claude.result ?? null,
+                    calls: Array.isArray(detail.claude.calls) ? detail.claude.calls.filter(
+                      (call) => call && typeof call.id === "string" && typeof call.title === "string"
+                        && typeof call.tool_kind === "string" && typeof call.status === "string",
+                    ) : [],
+                  } : null,
                   tool: detail.tool,
                   namespace:
                     typeof detail.namespace === "string"

@@ -1,3 +1,4 @@
+import { ClaudeToolEvidence } from "./claude-tool-evidence";
 import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   AlertTriangle,
@@ -1520,7 +1521,12 @@ function ToolCallMessage({
           />
         </div>
       ) : null}
-      {dynamicDetail ? (
+      {dynamicDetail?.namespace === "claude" ? (
+        <>
+          {hasOutput ? <CodeBlock label={/^(agent|task)$/i.test(dynamicDetail.tool) ? "Final report" : "Output"} code={item.output ?? ""} /> : null}
+          <ClaudeToolEvidence detail={dynamicDetail} />
+        </>
+      ) : dynamicDetail ? (
         <div className="space-y-2 rounded-[var(--fd-radius-md)] border border-border-subtle bg-surface-2/50 px-3 py-2 text-[length:var(--fd-text-xs)] text-fg-muted">
           <div className="flex flex-wrap gap-x-4 gap-y-1">
             {dynamicDetail.namespace ? (
@@ -1746,9 +1752,10 @@ function ToolCallMessage({
           ) : null}
         </div>
       ) : null}
-      {showGenericOutput ? (
+      {showGenericOutput && dynamicDetail?.namespace !== "claude" ? (
         <CodeBlock
           code={item.output ?? ""}
+          label={dynamicDetail?.namespace === "claude" && /^(agent|task)$/i.test(dynamicDetail.tool) ? "Final report" : "Output"}
           language={null}
           filePath={outputFilePath}
         />

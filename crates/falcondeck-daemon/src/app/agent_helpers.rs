@@ -11,9 +11,7 @@ use crate::{
     app::{
         conversation_helpers::{should_suppress_tool_output, synthesize_tool_title},
         harness_user_text::falcondeck_skill_path_preamble,
-        mcp_presentation::{
-            claude_tool_detail, keeps_claude_tool_input, parse_mcp_tool_name, tool_search_title,
-        },
+        mcp_presentation::{claude_tool_detail, keeps_claude_tool_input, tool_search_title},
     },
     codex::extract_string,
     skills::{canonical_skill_alias, slash_command_aliases_in_text},
@@ -737,28 +735,76 @@ pub(crate) fn claude_parent_tool_use_id(value: &Value) -> Option<&str> {
     value.get("parent_tool_use_id").and_then(Value::as_str)
 }
 
-/// Most recent steps a sub-agent has taken, rendered as the spawning tool
-/// call's live output so the card has something truthful to show while the
-/// sub-agent works out of view.
-pub(crate) const SUBAGENT_ACTIVITY_KEPT_STEPS: usize = 24;
-
-pub(crate) fn format_subagent_activity(steps: &[String], dropped: usize) -> String {
-    let mut lines = Vec::with_capacity(steps.len() + 2);
-    lines.push("Sub-agent activity:".to_string());
-    if dropped > 0 {
-        lines.push(format!(
-            "… {dropped} earlier step{} hidden",
-            plural_s(dropped)
-        ));
+/// Collect every tool block, including parallel calls in one assistant message.
+pub(crate) fn extract_claude_tool_events(value: &Value) -> Vec<ClaudeToolEvent> {
+    if let Some(content) = value.pointer("/message/content").and_then(Value::as_array) {
+        return content
+            .iter()
+            .filter(|block| {
+                matches!(
+                    block.get("type").and_then(Value::as_str),
+                    Some("tool_use" | "tool_result")
+                )
+            })
+            .filter_map(|block| {
+                let mut single = value.clone();
+                single["message"]["content"] = json!([block]);
+                extract_claude_tool_event(&single)
+            })
+            .collect();
     }
-    for step in steps {
-        lines.push(format!("· {step}"));
-    }
-    lines.join("\n")
+    extract_claude_tool_event(value).into_iter().collect()
 }
 
-fn plural_s(count: usize) -> &'static str {
-    if count == 1 { "" } else { "s" }
+/// Stable per-child identities prevent start/echo/result duplicates. Nothing is
+/// evicted: mobile projects this evidence out of bounded thread.detail pages.
+#[derive(Default)]
+pub(crate) struct ClaudeSubagentActivity {
+    calls: Vec<falcondeck_core::ClaudeNestedCall>,
+}
+
+impl ClaudeSubagentActivity {
+    pub(crate) fn record(&mut self, value: &Value) {
+        for event in extract_claude_tool_events(value) {
+            if let Some(call) = self.calls.iter_mut().find(|call| call.id == event.id) {
+                if let Some(input) = event
+                    .input
+                    .filter(|v| v.as_object().is_none_or(|v| !v.is_empty()))
+                {
+                    call.arguments = input;
+                    call.title = event.title.unwrap_or_else(|| call.title.clone());
+                }
+                call.status = event.status;
+                if should_suppress_tool_output(&call.title, &call.tool_kind) {
+                    call.output = None;
+                } else if event.output.is_some() {
+                    call.output = event.output;
+                }
+            } else {
+                let title = event.title.unwrap_or_else(|| "Claude tool".to_string());
+                let tool_kind = event.tool_kind.unwrap_or_default();
+                let suppressed = should_suppress_tool_output(&title, &tool_kind);
+                self.calls.push(falcondeck_core::ClaudeNestedCall {
+                    id: event.id,
+                    title,
+                    tool_kind,
+                    status: event.status,
+                    arguments: event.input.unwrap_or(Value::Null),
+                    output: if suppressed { None } else { event.output },
+                });
+            }
+        }
+    }
+
+    pub(crate) fn apply(&self, detail: &mut Option<ToolCallDetail>) {
+        if let Some(ToolCallDetail::Dynamic {
+            claude: Some(evidence),
+            ..
+        }) = detail
+        {
+            evidence.calls = self.calls.clone();
+        }
+    }
 }
 
 pub(crate) fn extract_claude_tool_event(value: &Value) -> Option<ClaudeToolEvent> {
@@ -918,11 +964,13 @@ pub(crate) struct ClaudeToolEvent {
     pub images: Vec<ClaudeToolResultImage>,
 }
 
-/// Arguments of in-flight MCP and tool-search calls. Claude sends them once, on
-/// the `tool_use`, but the row is rewritten when the result lands, so its label
-/// and detail need them again then.
+/// Arguments and result metadata for Claude calls. Complete assistant echoes
+/// supply the input after an empty streamed start; results must preserve it.
 #[derive(Debug, Default)]
-pub(crate) struct ClaudeToolInputs(HashMap<String, Value>);
+pub(crate) struct ClaudeToolInputs {
+    inputs: HashMap<String, Value>,
+    results: HashMap<String, Value>,
+}
 
 impl ClaudeToolInputs {
     /// `content_block_start` carries an empty `{}`, which must not replace the
@@ -933,16 +981,54 @@ impl ClaudeToolInputs {
                 input.as_object().is_none_or(|object| !object.is_empty()) && !input.is_null()
             })
         {
-            self.0.insert(id.to_string(), input.clone());
+            self.inputs.insert(id.to_string(), input.clone());
         }
     }
 
     pub(crate) fn detail(&self, id: &str, tool_kind: &str) -> Option<ToolCallDetail> {
-        claude_tool_detail(tool_kind, self.0.get(id))
+        let mut detail = claude_tool_detail(tool_kind, self.inputs.get(id));
+        if let Some(ToolCallDetail::Dynamic {
+            claude: Some(evidence),
+            duration_ms,
+            success,
+            ..
+        }) = &mut detail
+        {
+            let path = self
+                .inputs
+                .get(id)
+                .and_then(|v| v.get("file_path").or_else(|| v.get("path")))
+                .and_then(Value::as_str)
+                .unwrap_or_default();
+            if !should_suppress_tool_output(path, tool_kind) {
+                evidence.result = self.results.get(id).cloned();
+            }
+            *duration_ms = evidence
+                .result
+                .as_ref()
+                .and_then(|r| r.get("durationMs").or_else(|| r.get("totalDurationMs")))
+                .and_then(Value::as_u64);
+            *success = evidence
+                .result
+                .as_ref()
+                .and_then(|r| r.get("success"))
+                .and_then(Value::as_bool);
+        }
+        detail
+    }
+
+    pub(crate) fn record_result(&mut self, id: &str, value: &Value) {
+        if let Some(result) = value
+            .get("toolUseResult")
+            .or_else(|| value.get("tool_use_result"))
+        {
+            self.results.insert(id.to_string(), result.clone());
+        }
     }
 
     pub(crate) fn clear(&mut self) {
-        self.0.clear();
+        self.inputs.clear();
+        self.results.clear();
     }
 }
 
@@ -956,7 +1042,7 @@ pub(crate) fn resolve_claude_tool_identity(
 ) -> (String, String) {
     if let Some((known_title, known_kind)) = known.filter(|(_, kind)| keeps_claude_tool_input(kind))
     {
-        let title = if parse_mcp_tool_name(known_kind).is_some() {
+        let title = if !known_title.is_empty() {
             known_title.clone()
         } else {
             title.unwrap_or_else(|| known_title.clone())
@@ -1062,9 +1148,28 @@ pub(crate) fn claude_tool_result_image_items(
         .collect()
 }
 
-pub(super) fn extract_claude_service_message(value: &Value) -> Option<String> {
+pub(crate) fn claude_tool_exit_code(value: &Value) -> Option<i32> {
+    let result = value
+        .get("toolUseResult")
+        .or_else(|| value.get("tool_use_result"));
+    result
+        .and_then(|r| r.get("exitCode").or_else(|| r.get("exit_code")))
+        .and_then(Value::as_i64)
+        .and_then(|n| i32::try_from(n).ok())
+}
+
+pub(crate) fn extract_claude_service_message(value: &Value) -> Option<String> {
     let event_type = extract_string(claude_event_value(value), &["type", "event"])
         .or_else(|| extract_string(value, &["type"]))?;
+    if event_type == "attachment" {
+        let attachment = value.get("attachment")?;
+        let kind = attachment.get("type").and_then(Value::as_str)?;
+        return matches!(
+            kind,
+            "hook_blocking_error" | "hook_success" | "read_truncation_notice" | "task_status"
+        )
+        .then(|| format!("Claude {}: {}", kind.replace('_', " "), attachment));
+    }
     if !matches!(event_type.as_str(), "system" | "status" | "result") {
         return None;
     }
@@ -1077,6 +1182,52 @@ pub(super) fn extract_claude_service_message(value: &Value) -> Option<String> {
         && value.get("subtype").and_then(Value::as_str) == Some("task_notification")
     {
         return None;
+    }
+    if event_type == "system" {
+        let subtype = value
+            .get("subtype")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        if subtype == "hook_response" {
+            return Some(format!(
+                "Claude hook output: {}",
+                json!({
+                    "hook": value.get("hook_name"), "stdout": value.get("stdout"),
+                    "stderr": value.get("stderr"), "output": value.get("output"), "exit_code": value.get("exit_code"),
+                })
+            ));
+        }
+        if subtype == "api_error" {
+            return Some(format!(
+                "Claude retry {}/{} in {} ms: {}",
+                value.get("retryAttempt").unwrap_or(&Value::Null),
+                value.get("maxRetries").unwrap_or(&Value::Null),
+                value.get("retryInMs").unwrap_or(&Value::Null),
+                value
+                    .pointer("/error/message")
+                    .and_then(Value::as_str)
+                    .unwrap_or("API request failed")
+            ));
+        }
+        if subtype == "stop_hook_summary" {
+            let errors = value
+                .get("hookErrors")
+                .and_then(Value::as_array)
+                .filter(|v| !v.is_empty());
+            let context = value
+                .get("hookAdditionalContext")
+                .filter(|v| !v.is_null() && v.as_str() != Some(""));
+            if errors.is_some() || context.is_some() {
+                return Some(format!(
+                    "Claude hook output: {}",
+                    json!({"errors": errors, "context": context})
+                ));
+            }
+            return None; // Successful silent hooks are lifecycle bookkeeping.
+        }
+        if let Some(text) = extract_string(value, &["content"]) {
+            return Some(text);
+        }
     }
     extract_string(claude_event_value(value), &["message", "status", "summary"])
         .or_else(|| extract_string(value, &["message", "status", "summary"]))
@@ -1349,9 +1500,21 @@ fn claude_tool_result_title(value: &Value, tool_result: &Value) -> Option<String
 }
 
 fn claude_tool_result_output(value: &Value, tool_result: &Value) -> Option<String> {
-    stringify_claude_value(value.get("toolUseResult"))
-        .or_else(|| extract_string(tool_result, &["content", "text"]))
+    let result = value.get("toolUseResult");
+    // Bash's structured streams are more precise than its rendered content.
+    if result.is_some_and(|r| r.get("stdout").is_some() || r.get("stderr").is_some()) {
+        let r = result?;
+        let stdout = r.get("stdout").and_then(Value::as_str).unwrap_or_default();
+        let stderr = r.get("stderr").and_then(Value::as_str).unwrap_or_default();
+        return Some(if stderr.is_empty() {
+            stdout.to_string()
+        } else {
+            format!("{stdout}\nStderr:\n{stderr}")
+        });
+    }
+    extract_string(tool_result, &["content", "text"])
         .or_else(|| stringify_claude_value(tool_result.get("content")))
+        .or_else(|| stringify_claude_value(result))
 }
 
 fn synthesize_claude_tool_title(
@@ -1437,7 +1600,7 @@ fn stringify_claude_value(value: Option<&Value>) -> Option<String> {
             }
 
             if parts.is_empty() {
-                None
+                serde_json::to_string_pretty(&object_value).ok()
             } else {
                 Some(parts.join("\n").trim().to_string())
             }
@@ -1563,6 +1726,89 @@ pub(super) fn parse_thread_isolation(params: &serde_json::Value) -> ThreadIsolat
 mod service_message_tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn claude_subagent_retains_parallel_calls_results_and_parent_input() {
+        let mut activity = ClaudeSubagentActivity::default();
+        let calls = json!({"type":"assistant", "message":{"content":[
+            {"type":"tool_use","id":"a","name":"Bash","input":{"command":"du -sk *", "description":"Measure files"}},
+            {"type":"tool_use","id":"b","name":"Read","input":{"file_path":"src/main.rs"}}
+        ]}});
+        activity.record(&calls);
+        activity.record(&calls); // assistant echoes update, never duplicate
+        activity.record(&json!({"type":"user","message":{"content":[
+            {"type":"tool_result","tool_use_id":"a","content":"42 files"},
+            {"type":"tool_result","tool_use_id":"b","content":"permission denied","is_error":true}
+        ]}}));
+        let mut inputs = ClaudeToolInputs::default();
+        inputs.record(
+            "parent",
+            "Agent",
+            Some(&json!({"description":"Inspect space", "prompt":"Find large files"})),
+        );
+        let mut detail = inputs.detail("parent", "Agent");
+        activity.apply(&mut detail);
+        let Some(ToolCallDetail::Dynamic {
+            arguments,
+            claude: Some(evidence),
+            ..
+        }) = detail
+        else {
+            panic!("missing Claude evidence")
+        };
+        assert_eq!(arguments["prompt"], "Find large files");
+        assert_eq!(evidence.calls.len(), 2);
+        assert_eq!(evidence.calls[0].arguments["command"], "du -sk *");
+        assert_eq!(evidence.calls[0].status, "completed");
+        assert_eq!(evidence.calls[0].output.as_deref(), Some("42 files"));
+        assert_eq!(evidence.calls[1].status, "failed");
+        assert_eq!(
+            resolve_claude_tool_identity(
+                Some("du -sk *".into()),
+                Some("Bash".into()),
+                Some(&("Agent: Inspect space".into(), "Agent".into()))
+            ),
+            ("Agent: Inspect space".into(), "Agent".into())
+        );
+    }
+
+    #[test]
+    fn claude_skill_bodies_do_not_leak_through_result_metadata() {
+        let mut inputs = ClaudeToolInputs::default();
+        inputs.record("s", "Read", Some(&json!({"file_path":"/example/.agents/skills/test/SKILL.md"})));
+        inputs.record_result("s", &json!({"toolUseResult":{"file":{"content":"instruction body"}}}));
+        let Some(ToolCallDetail::Dynamic { claude: Some(evidence), .. }) = inputs.detail("s", "Read") else { panic!("missing detail") };
+        assert_eq!(evidence.result, None);
+        let mut activity = ClaudeSubagentActivity::default();
+        activity.record(&json!({"type":"assistant","message":{"content":[{"type":"tool_use","id":"s","name":"Read","input":{"file_path":"/example/.agents/skills/test/SKILL.md"}}]}}));
+        activity.record(&json!({"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"s","content":"instruction body"}]}}));
+        let mut detail = inputs.detail("parent", "Agent");
+        activity.apply(&mut detail);
+        let Some(ToolCallDetail::Dynamic { claude: Some(evidence), .. }) = detail else { panic!("missing child detail") };
+        assert_eq!(evidence.calls[0].output, None);
+    }
+
+    #[test]
+    fn claude_preserves_result_metadata_stderr_and_retry_notices() {
+        let value = json!({"type":"user","toolUseResult":{"stdout":"out", "stderr":"warning", "exitCode":2, "durationMs":100, "backgroundTaskId":"bg"},"message":{"content":[{"type":"tool_result","tool_use_id":"a", "content":"output", "is_error":true}]}});
+        let event = extract_claude_tool_event(&value).unwrap();
+        assert_eq!(event.status, "failed");
+        assert_eq!(event.output.as_deref(), Some("out\nStderr:\nwarning"));
+        assert_eq!(claude_tool_exit_code(&value), Some(2));
+        let mut inputs = ClaudeToolInputs::default();
+        inputs.record_result("a", &value);
+        let Some(ToolCallDetail::Dynamic {
+            claude: Some(evidence),
+            duration_ms,
+            ..
+        }) = inputs.detail("a", "Bash")
+        else {
+            panic!("missing metadata")
+        };
+        assert_eq!(duration_ms, Some(100));
+        assert_eq!(evidence.result.unwrap()["backgroundTaskId"], "bg");
+        assert!(extract_claude_service_message(&json!({"type":"system", "subtype":"api_error", "retryAttempt":1, "maxRetries":3, "retryInMs":1000, "error":{"message":"rate limited"}})).unwrap().contains("retry 1/3"));
+    }
 
     #[test]
     fn hook_lifecycle_chatter_is_filtered_from_service_messages() {
@@ -1868,26 +2114,6 @@ mod subagent_stream_tests {
         // A null tag (serializers love emitting it) is not sub-agent traffic.
         let null_tag = json!({ "type": "assistant", "parent_tool_use_id": null });
         assert_eq!(claude_parent_tool_use_id(&null_tag), None);
-    }
-
-    #[test]
-    fn activity_log_reports_kept_and_dropped_steps() {
-        let steps = vec![
-            "Bash: cargo test".to_string(),
-            "Read src/lib.rs".to_string(),
-        ];
-        assert_eq!(
-            format_subagent_activity(&steps, 0),
-            "Sub-agent activity:\n· Bash: cargo test\n· Read src/lib.rs"
-        );
-        assert_eq!(
-            format_subagent_activity(&steps[..1], 1),
-            "Sub-agent activity:\n… 1 earlier step hidden\n· Bash: cargo test"
-        );
-        assert_eq!(
-            format_subagent_activity(&steps[..1], 3),
-            "Sub-agent activity:\n… 3 earlier steps hidden\n· Bash: cargo test"
-        );
     }
 
     #[test]

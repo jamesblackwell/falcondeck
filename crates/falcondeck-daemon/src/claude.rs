@@ -29,9 +29,10 @@ use crate::agent_binary::{
 };
 use crate::app::agent_helpers::attachment_reference_text;
 use crate::app::agent_helpers::{
-    ClaudeToolInputs, append_claude_text_delta, claude_tool_result_image_items,
-    extract_claude_assistant_message_id, extract_claude_text_chunk, extract_claude_thinking_chunk,
-    extract_claude_tool_event, extract_claude_user_message_images,
+    ClaudeSubagentActivity, ClaudeToolInputs, append_claude_text_delta, claude_tool_exit_code,
+    claude_tool_result_image_items, extract_claude_assistant_message_id,
+    extract_claude_service_message, extract_claude_text_chunk, extract_claude_thinking_chunk,
+    extract_claude_tool_events, extract_claude_user_message_images,
     extract_claude_user_message_text, merge_claude_assistant_text, resolve_claude_tool_identity,
 };
 use crate::app::conversation_helpers::tool_display_metadata;
@@ -337,7 +338,11 @@ impl ClaudeRuntime {
             hooks_enabled,
             control_mcp: builtin.control.is_some(),
             extensions_mcp: builtin.extensions.is_some(),
-            autocompact_tokens: resolved_autocompact_window(model_id, autocompact_tokens, autocompact_override),
+            autocompact_tokens: resolved_autocompact_window(
+                model_id,
+                autocompact_tokens,
+                autocompact_override,
+            ),
         };
         // Clear any interrupt aimed at earlier turns; interrupts arriving from
         // here on target this spawn and are re-checked after insertion below.
@@ -1408,7 +1413,11 @@ fn autocompact_window(model_id: Option<&str>, tokens: u32) -> Option<u32> {
     }
 }
 
-fn resolved_autocompact_window(model_id: Option<&str>, global: u32, explicit: Option<u32>) -> Option<u32> {
+fn resolved_autocompact_window(
+    model_id: Option<&str>,
+    global: u32,
+    explicit: Option<u32>,
+) -> Option<u32> {
     explicit.or_else(|| autocompact_window(model_id, global))
 }
 
@@ -1943,16 +1952,24 @@ fn hydrate_thread_from_file(path: &Path, workspace_path: &str) -> Option<Hydrate
             let modified = metadata.modified().ok();
             let len = metadata.len();
             let cache = SESSION_FILE_CACHE.get_or_init(Default::default);
-            if let Some(thread) = cache
-                .lock()
-                .ok()
-                .and_then(|mut cache| cache.get_thread(path, modified, len, workspace_path))
+            let has_subagents = path.with_extension("").join("subagents").is_dir();
+            if !has_subagents
+                && let Some(thread) = cache
+                    .lock()
+                    .ok()
+                    .and_then(|mut cache| cache.get_thread(path, modified, len, workspace_path))
             {
                 return thread;
             }
             let session = parse_session_file(path);
             if let Ok(mut cache) = cache.lock() {
-                cache.insert(path, modified, len, &session);
+                // Child files change independently of their parent's mtime and
+                // are not covered by the parent-file cache's byte budget.
+                if has_subagents {
+                    cache.remove(path);
+                } else {
+                    cache.insert(path, modified, len, &session);
+                }
             }
             session
         }
@@ -2037,6 +2054,33 @@ fn parse_session_file(path: &Path) -> Option<ParsedSessionFile> {
         .or(updated_at);
         let created_at = extract_datetime(&value, &["created_at", "createdAt", "timestamp"])
             .unwrap_or_else(Utc::now);
+        if value.get("type").and_then(Value::as_str) == Some("system")
+            && value.get("subtype").and_then(Value::as_str) == Some("compact_boundary")
+        {
+            items.push(ConversationItem::ContextCompaction {
+                id: extract_string(&value, &["uuid"])
+                    .unwrap_or_else(|| format!("claude-compaction-{}", items.len())),
+                lifecycle: falcondeck_core::ToolLifecycle::Succeeded,
+                created_at,
+                completed_at: Some(created_at),
+            });
+            continue;
+        }
+        if matches!(
+            value.get("type").and_then(Value::as_str),
+            Some("system" | "attachment")
+        ) {
+            if let Some(message) = extract_claude_service_message(&value) {
+                items.push(ConversationItem::Service {
+                    id: extract_string(&value, &["uuid"])
+                        .unwrap_or_else(|| format!("claude-service-{}", items.len())),
+                    level: falcondeck_core::ServiceLevel::Info,
+                    message,
+                    created_at,
+                });
+            }
+            continue;
+        }
         // isMeta marks Claude-internal bookkeeping (caveats, command
         // envelopes, compaction notes) recorded in the session file; it is not
         // transcript content and must not seed items, titles, or previews.
@@ -2074,34 +2118,72 @@ fn parse_session_file(path: &Path) -> Option<ParsedSessionFile> {
                 chunk.is_delta,
                 &chunk.citations,
             );
-            continue;
         }
-        if let Some(tool_event) = extract_claude_tool_event(&value) {
-            let known_identity = tool_identity.get(&tool_event.id).cloned();
-            let (title, tool_kind) = resolve_claude_tool_identity(
-                tool_event.title,
-                tool_event.tool_kind,
-                known_identity.as_ref(),
-            );
-            if tool_event.status == "running" {
-                tool_identity.insert(tool_event.id.clone(), (title.clone(), tool_kind.clone()));
-            }
-            tool_inputs.record(&tool_event.id, &tool_kind, tool_event.input.as_ref());
-            upsert_hydrated_tool_call(
-                &mut items,
-                &mut item_index.tool_calls,
-                &tool_event.id,
-                &title,
-                &tool_kind,
-                &tool_event.status,
-                tool_event.output.as_deref(),
-                tool_inputs.detail(&tool_event.id, &tool_kind),
-                created_at,
-            );
-            for image_item in
-                claude_tool_result_image_items(&tool_event.id, &title, &tool_event.images)
-            {
-                items.push(image_item);
+        let tool_events = extract_claude_tool_events(&value);
+        if !tool_events.is_empty() {
+            for tool_event in tool_events {
+                let known_identity = tool_identity.get(&tool_event.id).cloned();
+                let (title, tool_kind) = resolve_claude_tool_identity(
+                    tool_event.title,
+                    tool_event.tool_kind,
+                    if tool_event
+                        .input
+                        .as_ref()
+                        .is_some_and(|v| v.as_object().is_some_and(|v| !v.is_empty()))
+                    {
+                        None
+                    } else {
+                        known_identity.as_ref()
+                    },
+                );
+                if tool_event.status == "running" {
+                    tool_identity.insert(tool_event.id.clone(), (title.clone(), tool_kind.clone()));
+                }
+                tool_inputs.record(&tool_event.id, &tool_kind, tool_event.input.as_ref());
+                tool_inputs.record_result(&tool_event.id, &value);
+                let mut detail = tool_inputs.detail(&tool_event.id, &tool_kind);
+                // Native Claude keeps child activity in a sibling subagents file.
+                // Read only the provider's agent id, never an arbitrary result path.
+                if matches!(tool_kind.to_ascii_lowercase().as_str(), "agent" | "task")
+                    && let Some(agent_id) = value
+                        .pointer("/toolUseResult/agentId")
+                        .and_then(Value::as_str)
+                    && !agent_id.is_empty()
+                    && agent_id
+                        .bytes()
+                        .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+                {
+                    let child_path = path
+                        .with_extension("")
+                        .join("subagents")
+                        .join(format!("agent-{agent_id}.jsonl"));
+                    if let Ok(file) = fs::File::open(child_path) {
+                        let mut activity = ClaudeSubagentActivity::default();
+                        for line in BufReader::new(file).lines().map_while(Result::ok) {
+                            if let Ok(child) = serde_json::from_str::<Value>(&line) {
+                                activity.record(&child);
+                            }
+                        }
+                        activity.apply(&mut detail);
+                    }
+                }
+                upsert_hydrated_tool_call(
+                    &mut items,
+                    &mut item_index.tool_calls,
+                    &tool_event.id,
+                    &title,
+                    &tool_kind,
+                    &tool_event.status,
+                    tool_event.output.as_deref(),
+                    detail,
+                    claude_tool_exit_code(&value),
+                    created_at,
+                );
+                for image_item in
+                    claude_tool_result_image_items(&tool_event.id, &title, &tool_event.images)
+                {
+                    items.push(image_item);
+                }
             }
             continue;
         }
@@ -2293,10 +2375,11 @@ fn upsert_hydrated_tool_call(
     status: &str,
     output: Option<&str>,
     detail: Option<ToolCallDetail>,
+    exit_code: Option<i32>,
     created_at: DateTime<Utc>,
 ) {
     let mut title = title.to_string();
-    let mut display = tool_display_metadata(&title, tool_kind, status, None, output);
+    let mut display = tool_display_metadata(&title, tool_kind, status, exit_code, output);
     present_tool_call(&mut title, tool_kind, output, &mut display, detail.as_ref());
     let completed_at = if status == "running" {
         None
@@ -2309,6 +2392,7 @@ fn upsert_hydrated_tool_call(
         tool_kind: existing_kind,
         status: existing_status,
         output: existing_output,
+        exit_code: existing_exit_code,
         display: existing_display,
         detail: existing_detail,
         completed_at: existing_completed_at,
@@ -2319,6 +2403,7 @@ fn upsert_hydrated_tool_call(
         *existing_kind = tool_kind.to_string();
         *existing_status = status.to_string();
         *existing_output = output.map(ToOwned::to_owned);
+        *existing_exit_code = exit_code;
         **existing_display = display;
         *existing_detail = detail.map(Box::new);
         *existing_completed_at = completed_at;
@@ -2332,9 +2417,9 @@ fn upsert_hydrated_tool_call(
         tool_kind: tool_kind.to_string(),
         status: status.to_string(),
         output: output.map(ToOwned::to_owned),
-        exit_code: None,
+        exit_code,
         display: Box::new(display),
-        detail: None,
+        detail: detail.map(Box::new),
         created_at,
         completed_at,
     });
@@ -2406,11 +2491,76 @@ mod tests {
     use serde_json::json;
 
     #[test]
+    fn hydrates_claude_child_calls_and_preserves_final_report() {
+        let dir = tempfile::tempdir().unwrap();
+        let id = "d8d541a7-85d2-4e5d-a3aa-67b678be577e";
+        let path = dir.path().join(format!("{id}.jsonl"));
+        let child_dir = path.with_extension("").join("subagents");
+        fs::create_dir_all(&child_dir).unwrap();
+        fs::write(child_dir.join("agent-child.jsonl"), [
+            json!({"type":"assistant","message":{"content":[{"type":"tool_use","id":"c","name":"Bash","input":{"command":"du -sk *"}}]}}),
+            json!({"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"c","content":"42"}]}}),
+        ].iter().map(Value::to_string).collect::<Vec<_>>().join("\n")).unwrap();
+        fs::write(&path, [
+            json!({"sessionId":id,"cwd":"/tmp/project","type":"assistant","message":{"id":"msg", "content":[{"type":"text","text":"Checking."},{"type":"tool_use","id":"p","name":"Agent","input":{"description":"Inspect space","prompt":"Measure usage"}}]}}),
+            json!({"sessionId":id,"cwd":"/tmp/project","type":"user","toolUseResult":{"agentId":"child","totalTokens":123},"message":{"content":[{"type":"tool_result","tool_use_id":"p","content":"Final report."}]}}),
+            json!({"sessionId":id,"cwd":"/tmp/project","type":"system","subtype":"compact_boundary","uuid":"compact"}),
+        ].iter().map(Value::to_string).collect::<Vec<_>>().join("\n")).unwrap();
+        let thread = hydrate_thread_from_file(&path, "/tmp/project").unwrap();
+        let call = thread
+            .items
+            .iter()
+            .find(|i| matches!(i, ConversationItem::ToolCall { .. }))
+            .unwrap();
+        let ConversationItem::ToolCall {
+            title,
+            output,
+            detail,
+            ..
+        } = call
+        else {
+            unreachable!()
+        };
+        assert_eq!(title, "Agent: Inspect space");
+        assert_eq!(output.as_deref(), Some("Final report."));
+        let Some(ToolCallDetail::Dynamic {
+            arguments,
+            claude: Some(evidence),
+            ..
+        }) = detail.as_deref()
+        else {
+            panic!("no child evidence")
+        };
+        assert_eq!(arguments["prompt"], "Measure usage");
+        assert_eq!(evidence.calls.len(), 1);
+        assert_eq!(evidence.calls[0].status, "completed");
+        assert_eq!(evidence.calls[0].output.as_deref(), Some("42"));
+        assert!(
+            thread
+                .items
+                .iter()
+                .any(|i| matches!(i, ConversationItem::ContextCompaction { .. }))
+        );
+    }
+
+    #[test]
     fn explicit_task_compaction_overrides_global_and_full_context_exemption() {
-        assert_eq!(resolved_autocompact_window(Some("opus[1m]"), 300_000, Some(100_000)), Some(100_000));
-        assert_eq!(resolved_autocompact_window(Some("sonnet"), 300_000, Some(100_000)), Some(100_000));
-        assert_eq!(resolved_autocompact_window(Some("sonnet"), 300_000, None), Some(300_000));
-        assert_eq!(resolved_autocompact_window(Some("opus[1m]"), 300_000, None), None);
+        assert_eq!(
+            resolved_autocompact_window(Some("opus[1m]"), 300_000, Some(100_000)),
+            Some(100_000)
+        );
+        assert_eq!(
+            resolved_autocompact_window(Some("sonnet"), 300_000, Some(100_000)),
+            Some(100_000)
+        );
+        assert_eq!(
+            resolved_autocompact_window(Some("sonnet"), 300_000, None),
+            Some(300_000)
+        );
+        assert_eq!(
+            resolved_autocompact_window(Some("opus[1m]"), 300_000, None),
+            None
+        );
     }
 
     #[test]

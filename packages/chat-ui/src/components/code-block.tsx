@@ -17,6 +17,7 @@ const MAX_EXPANDED_LINES = 1_000
 
 export const CodeBlock = memo(function CodeBlock({
   code,
+  label,
   language,
   filePath = null,
   previewLines = DEFAULT_PREVIEW_LINES,
@@ -24,6 +25,7 @@ export const CodeBlock = memo(function CodeBlock({
   bare = false,
 }: {
   code: string
+  label?: string
   language?: string | null
   /** File the code came from; its extension picks the grammar when `language` is absent. */
   filePath?: string | null
@@ -77,7 +79,7 @@ export const CodeBlock = memo(function CodeBlock({
     >
       {bare ? null : (
         <div className="flex items-center justify-between border-b border-border-subtle px-3 py-1.5 text-[length:var(--fd-text-xs)] text-fg-muted">
-          <span className="min-w-0 truncate">{filePath ?? language ?? resolvedLanguage ?? 'code'}</span>
+          <span className="min-w-0 truncate">{label ?? filePath ?? language ?? resolvedLanguage ?? 'code'}</span>
           <div className="flex shrink-0 items-center gap-2">
             {(lines.length > previewLineCount || displayLimited) && previewLines > 0 ? (
               <span className="tabular-nums">

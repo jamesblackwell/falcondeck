@@ -411,16 +411,16 @@ fn raw_tool_name_and_arguments_stay_in_the_detail() {
 }
 
 #[test]
-fn long_argument_strings_are_bounded() {
-    let body = "x".repeat(ARGUMENT_STRING_MAX_CHARS + 50);
+fn long_argument_strings_are_lossless_until_page_projection() {
+    let body = "x".repeat(4_050);
     let Some(ToolCallDetail::Mcp { arguments, .. }) =
         claude_tool_detail(CREATE, Some(&json!({"prompt": body, "nested": ["short"]})))
     else {
         panic!("expected an MCP detail");
     };
     let prompt = arguments["prompt"].as_str().unwrap();
-    assert_eq!(prompt.chars().count(), ARGUMENT_STRING_MAX_CHARS);
-    assert!(prompt.ends_with('…'));
+    assert_eq!(prompt.chars().count(), 4_050);
+    assert_eq!(prompt, body);
     assert_eq!(arguments["nested"], json!(["short"]));
 }
 

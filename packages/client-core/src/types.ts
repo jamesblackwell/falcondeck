@@ -993,6 +993,15 @@ export type ToolMcpAppContext = {
   template_id: string | null;
 };
 
+export interface ClaudeNestedCall {
+  id: string;
+  title: string;
+  tool_kind: string;
+  status: string;
+  arguments: unknown;
+  output?: string | null;
+}
+
 export type ToolOutputContentItem =
   { kind: "text"; text: string } | { kind: "image"; url: string };
 
@@ -1028,6 +1037,8 @@ export type ToolCallDetail =
     }
   | {
       kind: "dynamic";
+      /** Optional Claude evidence. Omitted in bounded thread pages. */
+      claude?: { calls: ClaudeNestedCall[]; result: unknown } | null;
       tool: string;
       namespace: string | null;
       arguments: unknown;
@@ -1985,7 +1996,8 @@ export type ThreadDetailRequest = {
    * renderable item with `thread.item`. Older daemons ignore it. */
   inline_images?: boolean | null;
   /** Byte cap for tool output in the page; truncated items carry
-   * `display.output_total_bytes`. Older daemons ignore it. */
+   * `display.output_total_bytes`. Includes pageable arguments and Claude child
+   * evidence. Older daemons ignore it. */
   tool_output_bytes?: number | null;
   /** `true` keeps a tail page at `limit` items instead of growing to the
    * start of the latest turn. Older daemons ignore it. */

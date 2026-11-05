@@ -663,8 +663,9 @@ no id. Connector rows Codex already names from `appContext` are left alone.
 
 Claude's stream carries only a wire name, so Claude MCP and ToolSearch calls now
 get a synthesized `Mcp` or `Dynamic` detail to keep the raw tool and arguments in
-the expanded view. Argument strings there are capped at 4,000 characters; the
-session file has the rest.
+the expanded view. Claude arguments are retained losslessly; bounded detail pages
+cap the aggregate arguments, child evidence and output instead of irreversibly
+shortening individual strings. Opening a capped item fetches its full detail.
 
 The words are for people. Classification ignores MCP titles, because a task's
 name can contain "npm test". `agent_tool_title` (daemon) and `toolCallAgentTitle`
@@ -1134,3 +1135,49 @@ A conversation change is not complete until its affected rows above have:
 
 Record deliberate parity exceptions in this file with the provider/platform
 capability that requires them. A missing implementation is not a parity exception.
+
+## Claude transcript evidence
+
+Claude builtin tools use the existing `dynamic` detail with namespace `claude`.
+Its optional `claude` evidence carries provider result metadata and ordered child
+calls (identity, tool, summary, arguments, status and output). This is an additive
+field on an existing variant: older clients still show the ordinary title and
+output. MCP keeps its established variant and friendly labels.
+
+Task/Agent titles belong to the parent invocation. Child starts, assistant echoes
+and results update one child identity rather than duplicate or retitle the parent.
+The final report and background completion preserve the child evidence. Native
+hydration reads the provider's sibling subagent file only by validated agent id;
+child histories are not a new conversation store. Sessions with subagent files
+bypass the parent-file cache because child files change independently and are not
+covered by its memory budget.
+
+Default collapsed mode shows Claude builtin tools as compact individual rows,
+with one expansion to the output/report, full arguments and child summaries.
+Child arguments/output have their own disclosure and mount only when requested.
+Explicit compact/hide-read-only preferences still apply. Thinking and assistant
+prose retain their provider order; assistant records containing both prose and
+parallel tools must preserve every block. Edit result hunks get a diff preview;
+paths, read/search counts, todo/plan payloads and remaining result fields stay
+inspectable in Arguments/Result details. Output frames say Output or Final report.
+
+`tool_output_bytes` bounds the combined output and pageable detail, including
+Claude MCP argument arrays. If the detail cannot fit, retain its identifying
+metadata but omit arguments/evidence from the page. `display.output_total_bytes`
+then measures the full output plus pageable detail, not just the output string.
+The marker also applies to argument-only truncation. `thread.item` returns the
+uncapped authoritative item; native clients load it only on expansion, dedupe
+requests, bound their cache by bytes, and offer retry on failure. Display caps
+continue to say when copy contains more than the rendered preview.
+
+Meaningful hook output, retry notices and compaction boundaries survive native
+history hydration as well as live rendering. Silent successful hook bookkeeping,
+API request snapshots, model-injected instructions, skill bodies, native command
+XML and internal queue/cache bookkeeping remain omitted deliberately. Skill
+bodies must not leak back through structured result metadata. Provider-owned
+persisted-output paths and original result metadata remain inspectable; arbitrary
+result paths are not automatically read as files. Missing provider exit codes,
+durations or historical child files are not inferred. Turn token/cost accounting
+continues through the existing usage surface rather than duplicate per-token
+transcript rows. See the local audit in
+[Claude transcript parity](research/claude-transcript-parity/audit.md).

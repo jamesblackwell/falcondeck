@@ -1000,6 +1000,7 @@ pub(crate) fn codex_tool_call_detail(item: &Value) -> Option<ToolCallDetail> {
             })
         }
         "dynamicToolCall" | "dynamic_tool_call" => Some(ToolCallDetail::Dynamic {
+            claude: None,
             tool: item.get("tool")?.as_str()?.to_string(),
             namespace: item
                 .get("namespace")
