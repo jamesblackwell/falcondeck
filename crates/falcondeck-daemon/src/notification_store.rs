@@ -538,16 +538,15 @@ impl NotificationStore {
         Self::counts(&state.file)
     }
 
-    /// Whether James has dealt with a record: answering one also reads it.
-    pub(crate) async fn is_read(&self, id: &str) -> bool {
+    /// Whether James has dealt with a record. Reading settles most, but an
+    /// open request or review still waits on him: opening its thread reads it.
+    pub(crate) async fn is_settled(&self, id: &str) -> bool {
         let mut guard = self.state.lock().await;
         let state = &mut *guard;
         self.ensure_loaded(state).await;
-        state
-            .file
-            .records
-            .iter()
-            .any(|stored| stored.record.id == id && stored.record.is_read())
+        state.file.records.iter().any(|stored| {
+            stored.record.id == id && stored.record.is_read() && !stored.record.is_waiting()
+        })
     }
 
     /// One record with its body.
@@ -813,8 +812,8 @@ mod tests {
         let (first, second) = (first.record().clone(), second.record().clone());
         store.retire_open("input:w:0:", Some(second.seq), now).await;
         store.retire_open("input:w:0:", Some(first.seq), now).await;
-        assert!(store.is_read(&first.id).await);
-        assert!(!store.is_read(&second.id).await);
+        assert!(store.is_settled(&first.id).await);
+        assert!(!store.is_settled(&second.id).await);
         assert_eq!(store.status().await.needs_you_count, 1);
     }
 

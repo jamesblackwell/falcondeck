@@ -12,6 +12,40 @@ use falcondeck_core::{
 
 use super::*;
 
+/// `delivered` means written: a push stuck behind the socket has not gone.
+#[tokio::test]
+async fn a_push_stuck_behind_the_socket_is_not_delivered() {
+    let temp = tempfile::tempdir().unwrap();
+    let app = AppState::new_with_state_path(
+        "test".into(),
+        Default::default(),
+        temp.path().join("state.json"),
+    );
+    crate::app::remote_lifecycle::pair_for_tests(&app).await;
+    app.set_desktop_activity(false);
+    let sink = Box::pin(futures_util::sink::unfold((), |(), _text: String| async {
+        std::future::pending::<Result<(), String>>().await
+    }));
+    let stream = futures_util::stream::pending::<Result<String, String>>();
+    let (transport, _incoming, _guard) =
+        falcondeck_core::relay_transport::spawn_transport(sink, stream, true);
+    let writer = RelayWriter {
+        transport,
+        full_snapshots_required: false,
+        lean_events: false,
+    };
+    app.deliver_attention(crate::app::remote_lifecycle::AttentionPush {
+        kind: "approval",
+        ..Default::default()
+    })
+    .await;
+    let write = app.write_held_pushes(&writer);
+    let stalled = tokio::time::timeout(Duration::from_millis(200), write).await;
+    assert!(stalled.is_err(), "the write is still waiting on the socket");
+    let remote = app.inner.remote.lock().await;
+    assert_eq!(remote.attention["approval"].delivered, 0);
+}
+
 struct AbortOnDrop<T>(tokio::task::JoinHandle<T>);
 
 impl<T> Drop for AbortOnDrop<T> {

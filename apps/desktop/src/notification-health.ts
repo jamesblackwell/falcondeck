@@ -82,7 +82,7 @@ export function describeDesktopTest(shown: boolean, permission: DesktopPermissio
 /** One sentence per kind, leaving out the reasons that did not happen. */
 export function describeAttention(counters: AttentionDeliveryCounter[]): string[] {
   return counters.map((counter) => {
-    const parts = [`${counter.delivered} delivered`]
+    const parts = [`${counter.delivered ?? counter.sent ?? 0} delivered`]
     if (counter.held) parts.push(`${counter.held} waiting for the relay`)
     if (counter.settled) parts.push(`${counter.settled} answered or read before they could go`)
     if (counter.suppressed_desktop_active) {

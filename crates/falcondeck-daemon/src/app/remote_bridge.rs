@@ -3233,11 +3233,13 @@ async fn send_relay_message(
             | RelayClientMessage::RpcRegister { .. }
             | RelayClientMessage::RpcUnregister { .. }
     );
+    // A push counts as delivered, so it has to reach the socket, not the queue.
     if matches!(
         message,
-        RelayClientMessage::Update {
-            body: RelayUpdateBody::SessionBootstrap { .. }
-        }
+        RelayClientMessage::Notify { .. }
+            | RelayClientMessage::Update {
+                body: RelayUpdateBody::SessionBootstrap { .. }
+            }
     ) {
         writer.send_barrier(payload).await
     } else if control {

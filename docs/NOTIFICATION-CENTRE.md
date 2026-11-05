@@ -52,9 +52,9 @@ nothing and does not push again, including one already folded into a thread's ro
 A key names one event, and lasts as long as the record, so a provider's own id is
 never enough:
 
-- A **request** key carries the request's `created_at`. Codex and ACP ids are
-  JSON-RPC ids that restart at 0 with each process, so an old key must not match a
-  new approval. Resolving reads `created_at` from the transcript card, the newest
+- A **request** key carries the request's `created_at`. Codex ids are JSON-RPC
+  ids that restart at 0 with each process, so an old key must not match a new
+  approval. Resolving reads `created_at` from the transcript card, the newest
   with that id.
 - A **completion** key carries the turn and the answer it ended on. A Claude turn
   settles at its result and again when the process goes, which is one event. A

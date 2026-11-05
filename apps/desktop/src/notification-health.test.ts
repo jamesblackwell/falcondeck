@@ -91,6 +91,15 @@ describe('notification health copy', () => {
     ).toEqual(['Approvals: 2 delivered, 3 not sent because you were at the Mac.'])
   })
 
+  it('reads an older daemon, which reports sent', () => {
+    expect(
+      describeAttention([
+        { kind: 'approval', sent: 2, suppressed_desktop_active: 0, suppressed_preferences: 0, last_at: null },
+        { kind: 'review', suppressed_desktop_active: 0, suppressed_preferences: 0, last_at: null },
+      ]),
+    ).toEqual(['Approvals: 2 delivered.', 'Reviews: 0 delivered.'])
+  })
+
   it('names every way a push can end, and what is still waiting', () => {
     expect(
       describeAttention([

@@ -98,7 +98,8 @@ async fn wait_for_runs(
     automation_id: &str,
     minimum: usize,
 ) -> Vec<Value> {
-    for _ in 0..100 {
+    // Long enough for a loaded machine: this returns as soon as the runs settle.
+    for _ in 0..300 {
         let runs = runs_for(client, base_url, automation_id).await;
         if runs.len() >= minimum
             && runs
@@ -218,7 +219,9 @@ async fn queue_one_holds_the_occurrence_until_the_active_run_finishes() {
     panic!("queued occurrence never reached a terminal state");
 }
 
-/// An interval anchored so the next occurrence is `seconds` away.
+/// An interval anchored so the next occurrence is `seconds` away. Occurrences
+/// floor to whole seconds, so allow for that and for creating the automation:
+/// one that is already due when it is created waits for the next interval.
 fn due_in(seconds: i64) -> Value {
     let anchor = chrono::Utc::now() - chrono::Duration::seconds(3600 - seconds);
     json!({
@@ -238,7 +241,7 @@ async fn due_automation_dispatches_exactly_once() {
     std::fs::create_dir_all(&workspace).unwrap();
     let workspace = workspace.display().to_string();
 
-    let automation = create_automation(&client, &daemon.base_url(), &workspace, due_in(1)).await;
+    let automation = create_automation(&client, &daemon.base_url(), &workspace, due_in(3)).await;
     let id = automation["id"].as_str().unwrap().to_string();
 
     let runs = wait_for_runs(&client, &daemon.base_url(), &id, 1).await;

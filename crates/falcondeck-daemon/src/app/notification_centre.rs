@@ -84,8 +84,8 @@ impl AttentionEvent {
 }
 
 /// One request event. A provider's request id alone does not identify it:
-/// Codex and ACP ids are JSON-RPC ids that restart at 0 with each process, and
-/// these keys outlive it by 90 days. `created_at` is minted once per event and
+/// Codex ids are JSON-RPC ids that restart at 0 with each process, and these
+/// keys outlive it by 90 days. `created_at` is minted once per event and
 /// travels with the transcript card, which is how resolving finds it again.
 fn input_key(workspace_id: &str, request_id: &str, created_at: DateTime<Utc>) -> String {
     let at = created_at.to_rfc3339_opts(SecondsFormat::Nanos, true);
@@ -895,7 +895,7 @@ mod tests {
         .len()
     }
 
-    /// Codex and ACP ids are JSON-RPC ids: each new process starts again at 0.
+    /// Codex ids are JSON-RPC ids: each new process starts again at 0.
     #[tokio::test]
     async fn a_new_process_reusing_an_answered_request_id_still_alerts() {
         let (app, _temp) = fixture().await;

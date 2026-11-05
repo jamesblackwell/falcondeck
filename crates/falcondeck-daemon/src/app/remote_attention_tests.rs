@@ -304,6 +304,76 @@ async fn held_pushes_are_bounded_newest_first_and_counted_when_dropped() {
     assert_eq!(first.push.notification_id.as_deref(), Some("N-3"));
 }
 
+fn completion(id: usize) -> AttentionPush {
+    AttentionPush {
+        kind: "turn-complete",
+        notification_id: Some(format!("C-{id}")),
+        ..AttentionPush::default()
+    }
+}
+
+#[tokio::test]
+async fn a_full_queue_gives_up_completions_before_what_waits_on_james() {
+    let directory = tempfile::tempdir().unwrap();
+    let app = app_with_relay("http://127.0.0.1:9", &directory).await;
+    app.deliver_attention(approval()).await;
+    // A kind that stays on the socket; what ranks it is `ignore_presence`.
+    app.deliver_attention(AttentionPush {
+        kind: "turn-error",
+        notification_id: Some("high".to_string()),
+        ignore_presence: true,
+        ..AttentionPush::default()
+    })
+    .await;
+    for index in 0..MAX_HELD_PUSHES {
+        app.deliver_attention(completion(index)).await;
+    }
+    let ids = held_ids(&app).await;
+    assert_eq!(ids.len(), MAX_HELD_PUSHES);
+    assert_eq!(ids[0].as_deref(), Some("N-1"), "the approval survives");
+    assert_eq!(ids[1].as_deref(), Some("high"), "so does the high notice");
+    assert_eq!(
+        ids[2].as_deref(),
+        Some("C-2"),
+        "the oldest completions went"
+    );
+}
+
+#[tokio::test]
+async fn a_completion_cannot_push_out_a_queue_of_approvals() {
+    let directory = tempfile::tempdir().unwrap();
+    let app = app_with_relay("http://127.0.0.1:9", &directory).await;
+    for index in 0..MAX_HELD_PUSHES {
+        app.deliver_attention(AttentionPush {
+            notification_id: Some(format!("N-{index}")),
+            ..approval()
+        })
+        .await;
+    }
+    app.deliver_attention(completion(0)).await;
+    let ids = held_ids(&app).await;
+    assert_eq!(ids.len(), MAX_HELD_PUSHES);
+    assert_eq!(ids[0].as_deref(), Some("N-0"));
+    assert!(ids.iter().all(|id| id.as_deref() != Some("C-0")));
+    let status = build_remote_status_response(&*app.inner.remote.lock().await);
+    let completions = status
+        .attention
+        .iter()
+        .find(|counter| counter.kind == "turn-complete")
+        .unwrap();
+    assert_eq!((completions.evicted, completions.held), (1, 0));
+}
+
+#[tokio::test]
+async fn a_full_queue_drops_the_oldest_of_equal_rank() {
+    let directory = tempfile::tempdir().unwrap();
+    let app = app_with_relay("http://127.0.0.1:9", &directory).await;
+    for index in 0..=MAX_HELD_PUSHES {
+        app.deliver_attention(completion(index)).await;
+    }
+    assert_eq!(held_ids(&app).await[0].as_deref(), Some("C-1"));
+}
+
 #[tokio::test]
 async fn forgetting_the_pairing_loses_what_was_held_and_says_so() {
     let directory = tempfile::tempdir().unwrap();
@@ -352,6 +422,23 @@ async fn a_request_answered_while_held_never_pushes() {
     assert!(app.next_held_push().await.is_none());
     let done = counters(&app).await;
     assert_eq!((done.settled, done.delivered, done.held), (1, 0, 0));
+}
+
+/// Opening a thread reads its input rows, which does not answer them.
+#[tokio::test]
+async fn a_request_read_but_unanswered_still_pushes() {
+    let directory = tempfile::tempdir().unwrap();
+    let app = app_with_relay("http://127.0.0.1:9", &directory).await;
+    let key = "input:workspace-1:0:2026-11-04T00:00:00Z";
+    app.deliver_attention(recorded_request(&app, key).await)
+        .await;
+    let store = &app.inner.notifications;
+    assert!(
+        store
+            .mark_thread_read("workspace-1", "thread-1", Utc::now())
+            .await
+    );
+    assert!(app.next_held_push().await.is_some());
 }
 
 #[tokio::test]

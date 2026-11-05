@@ -103,14 +103,17 @@ double-alert.
 
 Every socket push goes through one queue in memory, and a live session writes it
 from there, so a bridge that dies or reconnects cannot take a push with it. The
-queue keeps the newest 16, each for up to an hour by the wall clock (`Instant` stops
-while a Mac sleeps). A failed write puts the push back at the front with its age.
+queue holds 16, each for up to an hour by the wall clock (`Instant` stops while a
+Mac sleeps). When it is full, completions go first, then errors and ordinary
+notices; approvals, questions, reviews and `high` notices go last, oldest first in
+each group. A failed write puts the push back at the front with its age.
 
-Each push is decided again as it goes out. One whose record was answered or read
-meanwhile is dropped, and preferences and desktop presence are checked as they are
-at first; `high` notices and reviews skip presence as usual. A push the session has
-written can still die with the socket. A restart forgets the queue; the record
-stays.
+Each push is decided again as it goes out. One whose record was settled meanwhile
+is dropped: answered, for a request or review, since opening a thread only reads
+those and they still wait on James; read, for anything else. Preferences and
+desktop presence are checked as they are at first; `high` notices and reviews skip
+presence as usual. Written means the socket took it, so a push can still die with
+the connection after that. A restart forgets the queue; the record stays.
 
 ## Preferences
 
@@ -190,10 +193,6 @@ From the review of the delivery and centre work (November 2026), left for later:
   the relay to more users.
 - **Low: an unusable store is quiet.** If `notifications.json` is unusable the daemon
   runs from memory with only a log line, and records are lost at each restart.
-- **Low: shared store path.** Dev and packaged daemons share
-  `~/.falcondeck/notifications`, so running both would clobber records, and one
-  starting settles the other's open requests.
-  `agent-control.json` already shares that directory the same way.
 - **Low: per-thread notice budgets.** Each task thread has its own budget, so spawned
   threads get around the per-sender limit of 2 `high` a day. The 30 a day across all
   agents still bounds it, but those can arrive in minutes.

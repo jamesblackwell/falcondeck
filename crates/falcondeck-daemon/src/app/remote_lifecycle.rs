@@ -363,33 +363,64 @@ fn queue_held(remote: &mut RemoteBridgeState, held: HeldPush, oldest_first: bool
 }
 
 fn take_held(remote: &mut RemoteBridgeState) -> Option<HeldPush> {
-    let held = remote.held_pushes.queue.pop_front()?;
+    take_held_at(remote, 0)
+}
+
+fn take_held_at(remote: &mut RemoteBridgeState, index: usize) -> Option<HeldPush> {
+    let held = remote.held_pushes.queue.remove(index)?;
     let counter = attention_counter(&mut remote.attention, held.push.kind);
     counter.held = counter.held.saturating_sub(1);
     Some(held)
 }
 
-/// Only with a pairing to deliver to, and the newest are the ones kept.
+/// What is given up first when the queue is full. Something waiting on James
+/// outranks news about work that has finished.
+fn push_rank(push: &AttentionPush) -> u8 {
+    match push.kind {
+        "turn-complete" => 0,
+        "approval" | "question" | "review" => 2,
+        _ if push.ignore_presence => 2,
+        _ => 1,
+    }
+}
+
+/// Makes room for `incoming` by dropping the lowest-ranked push, oldest first.
+/// False when `incoming` is itself the one to drop.
+fn make_room(remote: &mut RemoteBridgeState, incoming: &AttentionPush) -> bool {
+    if remote.held_pushes.queue.len() < MAX_HELD_PUSHES {
+        return true;
+    }
+    let lowest = remote
+        .held_pushes
+        .queue
+        .iter()
+        .enumerate()
+        .min_by_key(|(_, held)| push_rank(&held.push))
+        .map(|(index, held)| (index, push_rank(&held.push)));
+    let Some((index, rank)) = lowest else {
+        return true;
+    };
+    let dropped = if push_rank(incoming) < rank {
+        incoming.kind
+    } else {
+        let oldest = take_held_at(remote, index);
+        oldest.map_or(incoming.kind, |held| held.push.kind)
+    };
+    tracing::warn!(kind = dropped, "attention push dropped for a newer one");
+    count_push(&mut remote.attention, dropped, PushOutcome::Evicted);
+    push_rank(incoming) >= rank
+}
+
+/// Only with a pairing to deliver to. A full queue keeps what matters most.
 fn hold_locked(remote: &mut RemoteBridgeState, held: HeldPush) {
     if remote.pairing.is_none() {
         tracing::warn!(kind = held.push.kind, "attention push lost: nothing paired");
         count_push(&mut remote.attention, held.push.kind, PushOutcome::Lost);
         return;
     }
-    if remote.held_pushes.queue.len() >= MAX_HELD_PUSHES
-        && let Some(oldest) = take_held(remote)
-    {
-        tracing::warn!(
-            kind = oldest.push.kind,
-            "attention push dropped for a newer one"
-        );
-        count_push(
-            &mut remote.attention,
-            oldest.push.kind,
-            PushOutcome::Evicted,
-        );
+    if make_room(remote, &held.push) {
+        queue_held(remote, held, false);
     }
-    queue_held(remote, held, false);
 }
 
 fn expire_held_locked(remote: &mut RemoteBridgeState, now: DateTime<Utc>) {
@@ -553,7 +584,7 @@ impl AppState {
             };
             let push = &held.push;
             let settled = match &push.notification_id {
-                Some(id) => self.inner.notifications.is_read(id).await,
+                Some(id) => self.inner.notifications.is_settled(id).await,
                 None => false,
             };
             let outcome = if settled {
@@ -577,9 +608,7 @@ impl AppState {
         let mut remote = self.inner.remote.lock().await;
         if remote.pairing.is_none() {
             count_push(&mut remote.attention, held.push.kind, PushOutcome::Lost);
-        } else if remote.held_pushes.queue.len() >= MAX_HELD_PUSHES {
-            count_push(&mut remote.attention, held.push.kind, PushOutcome::Evicted);
-        } else {
+        } else if make_room(&mut remote, &held.push) {
             queue_held(&mut remote, held, true);
         }
     }
