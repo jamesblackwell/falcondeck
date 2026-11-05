@@ -1251,6 +1251,7 @@ impl AppState {
                 || (previous.enabled && !prefs.enabled);
             (prefs, restart, next)
         };
+        self.ensure_saved_state_writable()?;
         super::storage::persist_preferences(&self.inner.preferences_path, &updated).await?;
         *preferences = updated.clone();
         if restart {

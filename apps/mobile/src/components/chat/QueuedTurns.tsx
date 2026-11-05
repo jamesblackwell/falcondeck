@@ -108,7 +108,7 @@ const QueuedTurnRow = memo(function QueuedTurnRow({
         style={styles.rowMain}
         disabled={isPending}
         accessibilityRole="button"
-        accessibilityLabel={`Queued message: ${label}`}
+        accessibilityLabel={`Queued message: ${label}${queued.held_reason ? `. ${queued.held_reason}` : ''}`}
         accessibilityHint="Opens actions for this queued message"
         accessibilityState={{ disabled: isPending }}
         onPress={onOpenActions}
@@ -128,9 +128,16 @@ const QueuedTurnRow = memo(function QueuedTurnRow({
           />
         ) : null}
 
-        <Text variant="label" color="primary" numberOfLines={1} style={styles.label}>
-          {label}
-        </Text>
+        <View style={styles.label}>
+          <Text variant="label" color="primary" numberOfLines={1}>
+            {label}
+          </Text>
+          {queued.held_reason ? (
+            <Text variant="caption" size="xs" color="muted" numberOfLines={2}>
+              {queued.held_reason}
+            </Text>
+          ) : null}
+        </View>
 
         {attachmentCount > 0 ? (
           <View style={styles.attachments}>

@@ -2607,6 +2607,8 @@ pub(super) async fn remove_queued_turn(
                 .summary
                 .queued_turns
                 .retain(|queued| queued.id != queued_id);
+            // Only the label: removing a message never dispatches another.
+            refresh_queue_hold(thread, workspace_id);
             thread.summary.updated_at = Utc::now();
             (thread.summary.clone(), true)
         }
@@ -3071,7 +3073,8 @@ impl AppState {
                         queued = %thread.queued_requests[0].id,
                         "queued turn carries a retired workspace id; left queued for review"
                     );
-                    let summary = mark_queue_held(thread, &workspace_id).then(|| thread.summary.clone());
+                    let summary = refresh_queue_hold(thread, &workspace_id)
+                        .then(|| thread.summary.clone());
                     drop(workspaces);
                     if let Some(summary) = summary {
                         if let Err(error) = app.persist_local_state().await {
@@ -5818,18 +5821,23 @@ fn native_opencode_transcript_needs_hydration(thread: &ManagedThread) -> bool {
         && (thread.items.is_empty() || !thread.native_transcript_synced)
 }
 
-/// Says why a queue stopped, on each entry, so clients can show it. Returns
+/// Says why each queued entry will not send on its own, so clients can show
+/// it. Live entries are only blocked by a stale one ahead of them. Returns
 /// whether anything changed.
-fn mark_queue_held(thread: &mut ManagedThread, workspace_id: &str) -> bool {
+fn refresh_queue_hold(thread: &mut ManagedThread, workspace_id: &str) -> bool {
     let mut changed = false;
+    let mut blocked = false;
     for queued in &mut thread.queued_requests {
-        let reason = if queued.request.workspace_id == workspace_id {
-            "Waiting behind a held message. Sends automatically once that message is gone."
+        let reason = if queued.request.workspace_id != workspace_id {
+            blocked = true;
+            Some("Held: queued before this project's ID changed, so it won't send on its own. Steer it during a turn, or remove it.")
+        } else if blocked {
+            Some("Waiting behind a held message. Sends automatically once that message is gone.")
         } else {
-            "Held: queued before this project's ID changed, so it won't send on its own. Steer it during a turn, or remove it."
+            None
         };
-        if queued.summary.held_reason.as_deref() != Some(reason) {
-            queued.summary.held_reason = Some(reason.to_string());
+        if queued.summary.held_reason.as_deref() != reason {
+            queued.summary.held_reason = reason.map(str::to_string);
             changed = true;
         }
         if let Some(summary) = thread
@@ -5838,7 +5846,7 @@ fn mark_queue_held(thread: &mut ManagedThread, workspace_id: &str) -> bool {
             .iter_mut()
             .find(|summary| summary.id == queued.id)
         {
-            summary.held_reason = Some(reason.to_string());
+            summary.held_reason = reason.map(str::to_string);
         }
     }
     changed
@@ -7431,6 +7439,20 @@ mod tests {
         // A dispatch attempt pops the head and stamps the thread, even when it
         // later fails and restores it. Neither may happen here.
         assert_eq!(thread.summary.updated_at, touched_at);
+        assert!(thread.dispatching_request.is_none());
+        drop(workspaces);
+
+        // With the stale head gone the label clears, and nothing dispatches.
+        app.remove_queued_turn("workspace-1", "thread-1", "queued-stale")
+            .await
+            .unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        let workspaces = app.inner.workspaces.lock().await;
+        let thread = &workspaces["workspace-1"].threads["thread-1"];
+        assert_eq!(thread.queued_requests.len(), 1);
+        assert_eq!(thread.queued_requests[0].id, "queued-behind");
+        assert_eq!(thread.queued_requests[0].summary.held_reason, None);
+        assert_eq!(thread.summary.queued_turns[0].held_reason, None);
         assert!(thread.dispatching_request.is_none());
     }
 

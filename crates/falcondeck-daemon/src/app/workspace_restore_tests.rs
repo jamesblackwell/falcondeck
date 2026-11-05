@@ -1,4 +1,8 @@
-use std::{collections::HashMap, os::unix::fs::PermissionsExt, path::Path};
+use std::{
+    collections::HashMap,
+    os::unix::fs::PermissionsExt,
+    path::{Path, PathBuf},
+};
 
 use falcondeck_core::AgentProvider;
 use serde_json::json;
@@ -472,4 +476,125 @@ async fn a_connect_during_startup_keeps_the_persisted_workspace_id() {
     assert_eq!(snapshot.workspaces[0].id, "workspace-persisted");
     early.abort();
     app.shutdown().await.unwrap();
+}
+
+fn seeded_state(temp: &Path) -> (AppState, PathBuf, Vec<u8>) {
+    let state_path = temp.join("daemon-state.json");
+    let saved = serde_json::json!({"workspaces": [
+        {"id": "workspace-a", "path": temp.join("a")},
+        {"id": "workspace-b", "path": temp.join("b")},
+    ], "remote": {"pairing_id": "kept"}})
+    .to_string()
+    .into_bytes();
+    std::fs::write(&state_path, &saved).unwrap();
+    let app = AppState::new_with_state_path("test".into(), HashMap::new(), state_path.clone());
+    (app, state_path, saved)
+}
+
+#[tokio::test]
+async fn shutting_down_before_the_load_keeps_the_state_file() {
+    let temp = tempfile::tempdir().unwrap();
+    let (app, state_path, saved) = seeded_state(temp.path());
+    app.begin_local_restore();
+
+    assert!(app.persist_local_state().await.is_err());
+    app.shutdown().await.unwrap();
+
+    assert_eq!(std::fs::read(state_path).unwrap(), saved);
+}
+
+#[tokio::test]
+async fn shutdown_fails_a_connect_waiting_for_the_load() {
+    let temp = tempfile::tempdir().unwrap();
+    let (app, _state_path, _saved) = seeded_state(temp.path());
+    app.begin_local_restore();
+    let waiter = tokio::spawn({
+        let app = app.clone();
+        async move { app.wait_for_persisted_state().await }
+    });
+    app.shutdown().await.unwrap();
+    assert!(waiter.await.unwrap().is_err());
+}
+
+#[tokio::test]
+async fn a_failed_load_never_writes_over_the_saved_files() {
+    let temp = tempfile::tempdir().unwrap();
+    let folder = temp.path().join("project");
+    std::fs::create_dir(&folder).unwrap();
+    let (app, state_path, saved) = seeded_state(temp.path());
+    let preferences_path = app.inner.preferences_path.clone();
+    std::fs::write(&preferences_path, "{not json").unwrap();
+    app.begin_local_restore();
+
+    let error = app.restore_local_state().await.unwrap_err();
+    app.fail_local_restore(&error.to_string());
+
+    assert!(app.wait_for_persisted_state().await.is_err());
+    let connected = app
+        .connect_workspace(ConnectWorkspaceRequest {
+            path: folder.to_string_lossy().into_owned(),
+            kind: Default::default(),
+        })
+        .await;
+    assert!(connected.is_err());
+    assert!(
+        app.resolve_or_connect_workspace_path(&folder.to_string_lossy())
+            .await
+            .is_err()
+    );
+    assert!(app.persist_local_state().await.is_err());
+    assert!(
+        app.update_preferences(Default::default()).await.is_err(),
+        "preferences would replace the unreadable file"
+    );
+    app.shutdown().await.unwrap();
+
+    assert!(app.snapshot().await.workspaces.is_empty());
+    assert_eq!(std::fs::read(state_path).unwrap(), saved);
+    assert_eq!(std::fs::read(preferences_path).unwrap(), b"{not json");
+}
+
+#[tokio::test]
+async fn a_panicking_restore_fails_waiters_and_keeps_the_gate_shut() {
+    let temp = tempfile::tempdir().unwrap();
+    let (app, state_path, saved) = seeded_state(temp.path());
+    app.begin_local_restore();
+    let waiter = tokio::spawn({
+        let app = app.clone();
+        async move { app.wait_for_persisted_state().await }
+    });
+
+    let restore = tokio::spawn({
+        let app = app.clone();
+        async move {
+            let _guard = app.local_restore_guard();
+            panic!("restore failed");
+        }
+    });
+    assert!(restore.await.is_err());
+
+    assert!(
+        timeout(Duration::from_secs(5), waiter)
+            .await
+            .unwrap()
+            .unwrap()
+            .is_err()
+    );
+    assert!(app.persist_local_state().await.is_err());
+    assert_eq!(
+        app.snapshot().await.restore_phase,
+        falcondeck_core::DaemonRestorePhase::Ready
+    );
+    app.shutdown().await.unwrap();
+    assert_eq!(std::fs::read(state_path).unwrap(), saved);
+}
+
+#[tokio::test]
+async fn a_failure_after_the_load_keeps_saving() {
+    let temp = tempfile::tempdir().unwrap();
+    let (app, _state_path, _saved) = seeded_state(temp.path());
+    app.begin_local_restore();
+    app.mark_persisted_state_loaded();
+    app.fail_local_restore("late step failed");
+    assert!(app.persist_local_state().await.is_ok());
 }

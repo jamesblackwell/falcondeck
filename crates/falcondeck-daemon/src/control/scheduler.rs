@@ -46,7 +46,10 @@ async fn scheduler_loop(app: AppState) {
     // deregister themselves when the provider turn settles.
     let in_flight: Arc<StdMutex<HashSet<String>>> = Arc::new(StdMutex::new(HashSet::new()));
     // A catch-up run at boot needs the workspaces and bots it targets.
-    app.wait_for_persisted_state().await;
+    if let Err(error) = app.wait_for_persisted_state().await {
+        tracing::warn!(%error, "automation scheduler not started");
+        return;
+    }
     loop {
         if app.is_shutting_down() {
             return;

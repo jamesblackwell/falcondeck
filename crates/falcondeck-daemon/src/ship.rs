@@ -1,8 +1,12 @@
 //! Land an isolated thread's branch: commit leftovers, then PR or merge.
 
+use std::collections::HashMap;
+
 use falcondeck_core::{GitCommitResponse, ShipThreadMode, ShipThreadResponse, ThreadVariant};
 use tokio::process::Command;
 
+use crate::acp::apply_provider_environment;
+use crate::agent_binary::resolve_agent_binary;
 use crate::error::DaemonError;
 use crate::git::git_status;
 
@@ -164,7 +168,11 @@ async fn create_pull_request(
     draft: bool,
     gh: &str,
 ) -> Result<String, DaemonError> {
-    let mut command = Command::new(gh);
+    // A packaged app has launchd's PATH, which omits Homebrew; gh also reads
+    // its token from the login environment.
+    let executable = resolve_agent_binary("gh", gh).executable;
+    let mut command = Command::new(&executable);
+    apply_provider_environment(&mut command, &executable, &HashMap::new()).await;
     command
         .args([
             "pr", "create", "--base", base, "--head", head, "--title", title, "--body", "",
@@ -288,6 +296,36 @@ mod tests {
                 log.display()
             ),
         )
+    }
+
+    /// Runs in a child process because resolution reads HOME and PATH.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn bare_gh_is_found_with_launchd_path() {
+        if std::env::var_os("FALCONDECK_GH_SPAWN_CHILD").is_some() {
+            let cwd = std::env::var("HOME").unwrap();
+            let url = create_pull_request(&cwd, "main", "topic", "Title", false, GH_PROGRAM)
+                .await
+                .unwrap();
+            assert_eq!(url, "https://github.com/example/repo/pull/1");
+            return;
+        }
+        let home = tempdir().unwrap();
+        let bin = home.path().join(".local/bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        write_gh_stub(&bin);
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "ship::tests::bare_gh_is_found_with_launchd_path"])
+            .env("FALCONDECK_GH_SPAWN_CHILD", "1")
+            .env("HOME", home.path())
+            .env("PATH", "/usr/bin:/bin:/usr/sbin:/sbin")
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stdout)
+        );
     }
 
     #[tokio::test]

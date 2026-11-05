@@ -95,6 +95,7 @@ impl AppState {
                 }
             }
         }
+        self.ensure_saved_state_writable()?;
         persist_preferences(&self.inner.preferences_path, &next).await?;
         *preferences = next.clone();
         drop(preferences);

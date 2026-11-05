@@ -57,6 +57,22 @@ describe('queuedTurnLabel', () => {
   })
 })
 
+describe('held queued turns', () => {
+  it('shows why a turn will not send on its own', () => {
+    const reason = "Held: it won't send on its own."
+    const renderer = renderComponent(
+      <QueuedTurns
+        queuedTurns={[queued({ held_reason: reason })]}
+        canSteer={false}
+        onRemove={async () => {}}
+        onSteer={async () => {}}
+        onEdit={async () => {}}
+      />,
+    )
+    expect(textOf(renderer)).toContain(reason)
+  })
+})
+
 describe('queuedTurnActions', () => {
   it('offers edit, steer and remove', () => {
     expect(queuedTurnActions(true).map((item) => item.value)).toEqual(['edit', 'steer', 'remove'])

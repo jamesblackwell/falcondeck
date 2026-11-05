@@ -21,6 +21,7 @@ struct QueuedMessagesView: View {
                         Text(queued["text"].string.nonempty ?? queued["preview"].string).font(.footnote).lineLimit(3)
                         let count = queued["attachment_count"].int
                         if count > 0 { Text("\(count) \(count == 1 ? "attachment" : "attachments")").font(.caption).foregroundStyle(FD.secondary) }
+                        if let held = queued["held_reason"].string.nonempty { Text(held).font(.caption).foregroundStyle(FD.secondary) }
                     }
                     Spacer(minLength: 0)
                     if queued["pending"].bool { ActivityDiamond().frame(width: 44, height: 44) }

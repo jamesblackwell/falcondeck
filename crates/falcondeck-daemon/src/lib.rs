@@ -263,6 +263,7 @@ pub async fn spawn_embedded(config: DaemonConfig) -> Result<EmbeddedDaemonHandle
     let restore_state = state.clone();
     let restore_task = config.background_restore.then(|| {
         tokio::spawn(async move {
+            let _restore_guard = restore_state.local_restore_guard();
             // Prior daemons that died ungracefully strand their agent children:
             // an `opencode serve` holds ~80-90MB forever, and an ACP agent holds
             // both memory and the binary version it was started on. Reap them
@@ -274,6 +275,7 @@ pub async fn spawn_embedded(config: DaemonConfig) -> Result<EmbeddedDaemonHandle
             }
             if let Err(error) = restore_state.restore_local_state().await {
                 tracing::warn!("failed to restore daemon local state: {error}");
+                restore_state.fail_local_restore(&error.to_string());
                 restore_state.finish_local_restore();
                 restore_state.emit_event(
                     None,

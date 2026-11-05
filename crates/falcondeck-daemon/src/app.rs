@@ -325,6 +325,8 @@ struct InnerState {
     /// Per-path gates prevent simultaneous first-time connect requests from
     /// spawning duplicate provider bootstraps for one workspace.
     workspace_connect_gates: Mutex<WorkspaceConnectGates>,
+    /// Whether this process may write the state files it loads at startup.
+    saved_state_gate: StdMutex<SavedStateGate>,
     /// Saved sidebar projects whose providers have not been needed this boot.
     lazy_workspaces: Mutex<HashSet<String>>,
     /// Shared by startup, timeout retries, and on-demand workspace discovery.
@@ -778,6 +780,24 @@ struct RemotePairingState {
     data_key: [u8; 32],
 }
 
+/// Memory only replaces the state files once it holds what they hold. Until
+/// then a persist would write an empty daemon over a populated one.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum SavedStateGate {
+    Open,
+    Loading,
+    Failed(String),
+}
+
+/// Fails the load if restore panics or is cancelled before it finishes.
+pub(crate) struct LocalRestoreGuard(AppState);
+
+impl Drop for LocalRestoreGuard {
+    fn drop(&mut self) {
+        self.0.fail_local_restore("restore stopped before it finished");
+    }
+}
+
 #[derive(Debug, serde::Serialize, serde::Deserialize, Default)]
 struct PersistedAppState {
     #[serde(default, deserialize_with = "deserialize_persisted_workspaces")]
@@ -1093,6 +1113,7 @@ impl AppState {
                 acp_hydration_gates: Mutex::new(HashMap::new()),
                 codex_runtime_gates: Mutex::new(HashMap::new()),
                 workspace_connect_gates: Mutex::new(HashMap::new()),
+                saved_state_gate: StdMutex::new(SavedStateGate::Open),
                 lazy_workspaces: Mutex::new(HashSet::new()),
                 workspace_start_slots: Semaphore::new(
                     workspace_restore::WORKSPACE_RESTORE_CONCURRENCY,
@@ -2230,9 +2251,57 @@ impl AppState {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner()) =
             DaemonRestorePhase::LoadingPersistedState;
+        *self.saved_state_gate() = SavedStateGate::Loading;
+    }
+
+    fn saved_state_gate(&self) -> std::sync::MutexGuard<'_, SavedStateGate> {
+        self.inner
+            .saved_state_gate
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    fn open_saved_state_gate(&self) {
+        let mut gate = self.saved_state_gate();
+        if *gate == SavedStateGate::Loading {
+            *gate = SavedStateGate::Open;
+        }
+    }
+
+    pub(crate) fn local_restore_guard(&self) -> LocalRestoreGuard {
+        LocalRestoreGuard(self.clone())
+    }
+
+    /// Ends a restore that never loaded the state files, so clients stop
+    /// waiting. A failure after a successful load changes nothing: memory is
+    /// complete, and refusing writes would lose the session's work.
+    pub(crate) fn fail_local_restore(&self, reason: &str) {
+        {
+            let mut gate = self.saved_state_gate();
+            if *gate != SavedStateGate::Loading {
+                return;
+            }
+            *gate = SavedStateGate::Failed(reason.to_string());
+        }
+        tracing::error!(%reason, "saved state did not load; refusing to write it this run");
+        self.finish_local_restore();
+    }
+
+    /// Refuses a write that would replace state files this process never read.
+    pub(crate) fn ensure_saved_state_writable(&self) -> Result<(), DaemonError> {
+        match &*self.saved_state_gate() {
+            SavedStateGate::Open => Ok(()),
+            SavedStateGate::Loading => Err(DaemonError::Conflict(
+                "saved state has not loaded yet".to_string(),
+            )),
+            SavedStateGate::Failed(reason) => Err(DaemonError::Process(format!(
+                "saved state failed to load: {reason}"
+            ))),
+        }
     }
 
     fn mark_persisted_state_loaded(&self) {
+        self.open_saved_state_gate();
         let mut phase = self
             .inner
             .restore_phase
@@ -2244,6 +2313,8 @@ impl AppState {
     }
 
     pub(crate) fn finish_local_restore(&self) {
+        // Reached still loading only when this daemon never restores.
+        self.open_saved_state_gate();
         *self
             .inner
             .restore_phase
@@ -2255,12 +2326,14 @@ impl AppState {
     /// start before it loads. Anything that connects a path sooner finds no
     /// record, mints a fresh id, and restoration then adopts that id for the
     /// path, stranding every stored reference to the old one.
-    pub(crate) async fn wait_for_persisted_state(&self) {
-        while self.local_restore_phase() == DaemonRestorePhase::LoadingPersistedState
-            && !self.is_shutting_down()
-        {
+    pub(crate) async fn wait_for_persisted_state(&self) -> Result<(), DaemonError> {
+        while *self.saved_state_gate() == SavedStateGate::Loading {
+            if self.is_shutting_down() {
+                return Err(DaemonError::Process("daemon is shutting down".to_string()));
+            }
             tokio::time::sleep(std::time::Duration::from_millis(20)).await;
         }
+        self.ensure_saved_state_writable()
     }
 
     fn local_restore_phase(&self) -> DaemonRestorePhase {
@@ -2470,7 +2543,15 @@ impl AppState {
             )
             .await;
         }
-        let persist_result = self.persist_local_state().await;
+        // Nothing was loaded, so there is nothing of this run's to save and
+        // nothing to report: the files on disk are the state.
+        let persist_result = match self.ensure_saved_state_writable() {
+            Ok(()) => self.persist_local_state().await,
+            Err(error) => {
+                tracing::warn!(%error, "skipped the final daemon-state persist");
+                Ok(())
+            }
+        };
         scheduled_result.and(persist_result)
     }
 
@@ -3663,6 +3744,7 @@ impl AppState {
             apply_preferences_patch(&mut next, request);
             next
         };
+        self.ensure_saved_state_writable()?;
         persist_preferences(&self.inner.preferences_path, &updated).await?;
         *preferences = updated.clone();
         drop(preferences);
@@ -3898,6 +3980,7 @@ impl AppState {
     ) -> Result<falcondeck_core::ImportBackupResponse, DaemonError> {
         let mut response = falcondeck_core::ImportBackupResponse::default();
 
+        self.ensure_saved_state_writable()?;
         // 1. Preferences
         let mut preferences = self.inner.preferences.lock().await;
         let mut prefs = request.backup.daemon.preferences;
@@ -4023,7 +4106,7 @@ impl AppState {
         &self,
         request: ConnectWorkspaceRequest,
     ) -> Result<WorkspaceSummary, DaemonError> {
-        self.wait_for_persisted_state().await;
+        self.wait_for_persisted_state().await?;
         workspace_ops::connect_workspace(self, request).await
     }
 
@@ -4070,7 +4153,7 @@ impl AppState {
         request: ConnectWorkspaceRequest,
         persisted_workspace: Option<&PersistedWorkspaceState>,
     ) -> Result<WorkspaceSummary, DaemonError> {
-        self.wait_for_persisted_state().await;
+        self.wait_for_persisted_state().await?;
         let path = normalize_workspace_path(request.path.trim());
         let registered_id = self
             .inner
@@ -4499,6 +4582,7 @@ impl AppState {
     }
 
     async fn persist_local_state(&self) -> Result<(), DaemonError> {
+        self.ensure_saved_state_writable()?;
         let _persistence_guard = self.inner.persistence.lock().await;
         let saved_workspaces = self.inner.saved_workspaces.lock().await.clone();
         let mut persisted_workspaces = HashMap::new();

@@ -326,6 +326,7 @@ impl AppState {
         let mut preferences = self.inner.preferences.lock().await;
         let mut next = preferences.clone();
         next.bots = bots;
+        self.ensure_saved_state_writable()?;
         persist_preferences(&self.inner.preferences_path, &next).await?;
         *preferences = next.clone();
         drop(preferences);

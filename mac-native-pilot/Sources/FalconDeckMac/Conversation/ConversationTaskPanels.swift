@@ -89,7 +89,10 @@ struct ConversationTaskPanels: View {
                     ForEach(Array(queued.enumerated()), id: \.element) { index, item in
                         HStack(spacing: 9) {
                             Text("\(index + 1)").font(NativePreferences.shared.font(size: 12, surface: "code")).foregroundStyle(FDTheme.subtle)
-                            Text(item["preview"].string.isEmpty ? "Attachment" : item["preview"].string).font(NativePreferences.shared.font(size: 14, surface: "chat")).lineLimit(2).frame(maxWidth: .infinity, alignment: .leading)
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text(item["preview"].string.isEmpty ? "Attachment" : item["preview"].string).font(NativePreferences.shared.font(size: 14, surface: "chat")).lineLimit(2)
+                                if !item["held_reason"].string.isEmpty { Text(item["held_reason"].string).font(NativePreferences.shared.font(size: 12)).foregroundStyle(FDTheme.subtle) }
+                            }.frame(maxWidth: .infinity, alignment: .leading)
                             if item["attachment_count"].int > 0 { Label("\(item["attachment_count"].int)", systemImage: "paperclip").font(NativePreferences.shared.font(size: 12)) }
                             Menu {
                                 Button("Edit message") { queuedText = item["text"].string.isEmpty ? item["preview"].string : item["text"].string; editingQueue = item }
