@@ -131,6 +131,7 @@ mod threads;
 mod title_suggestions;
 mod utility_model;
 mod workspace_ops;
+mod variant_lifecycle;
 mod workspace_restore;
 
 use agent_helpers::*;
@@ -311,6 +312,8 @@ struct InnerState {
     sequence: AtomicU64,
     broadcaster: broadcast::Sender<Arc<CachedEnvelope>>,
     workspaces: Mutex<HashMap<String, ManagedWorkspace>>,
+    variant_gates: Mutex<AcpHydrationGates>,
+    variant_disk_low: AtomicBool,
     /// Resolved sidebar icon bytes keyed by workspace id.
     workspace_icons: Mutex<HashMap<String, crate::workspace_icons::CachedWorkspaceIcon>>,
     /// Per-workspace/provider gates prevent background metadata hydration and
@@ -1137,6 +1140,8 @@ impl AppState {
                 saved_workspaces: Mutex::new(HashMap::new()),
                 persistence: Mutex::new(()),
                 interactive_requests: Mutex::new(HashMap::new()),
+                variant_gates: Mutex::new(HashMap::new()),
+                variant_disk_low: AtomicBool::new(false),
                 service_notices: StdMutex::new(Vec::new()),
                 operational_conditions: StdMutex::new(HashMap::new()),
                 plugin_refresh_attempts: StdMutex::new(HashMap::new()),

@@ -1280,6 +1280,7 @@ async fn start_thread_internal(
     let variant = match request.isolation {
         ThreadIsolation::ProjectFolder => None,
         ThreadIsolation::Isolated => {
+            app.check_variant_disk(&request.workspace_id).await;
             Some(crate::variant::create(&workspace_path, &crate::variant::new_slug()).await?)
         }
     };
@@ -1586,6 +1587,8 @@ pub(super) async fn reclaim_archived_variant(
     workspace_id: &str,
     thread_id: &str,
 ) -> Option<crate::variant::Reclaim> {
+    let gate = app.variant_gate(workspace_id, thread_id).await;
+    let _guard = gate.lock().await;
     let (variant, workspace_path) = {
         let workspaces = app.inner.workspaces.lock().await;
         let workspace = workspaces.get(workspace_id)?;
@@ -1767,6 +1770,8 @@ pub(super) async fn unarchive_thread(
     workspace_id: &str,
     thread_id: &str,
 ) -> Result<ThreadSummary, DaemonError> {
+    let gate = app.variant_gate(workspace_id, thread_id).await;
+    let _guard = gate.lock().await;
     let mut workspaces = app.inner.workspaces.lock().await;
     let workspace = workspaces
         .get_mut(workspace_id)
@@ -3313,6 +3318,14 @@ async fn send_turn_with_startup_mode(
             ));
         }
     }
+    let variant_gate = app
+        .variant_gate(&request.workspace_id, &request.thread_id)
+        .await;
+    let _variant_guard = variant_gate.lock().await;
+    let sparse_hint = app
+        .restore_variant_for_turn(&request.workspace_id, &request.thread_id)
+        .await?;
+    app.check_variant_disk(&request.workspace_id).await;
     app.connect_workspace_on_demand(&request.workspace_id)
         .await?;
     // Keep an ACP transcript-replay gate alive through provider startup. A
@@ -3511,6 +3524,10 @@ async fn send_turn_with_startup_mode(
         (Some(bot), None) => Some(bot),
         (None, Some(handoff)) => Some(handoff.to_string()),
         (None, None) => None,
+    };
+    let turn_context = match (turn_context, sparse_hint) {
+        (Some(a), Some(b)) => Some(format!("{a}\n\n{b}")),
+        (a, b) => a.or(b),
     };
     let harness_inputs = match turn_context.as_deref() {
         Some(context) => super::harness_user_text::with_handoff_context(&inputs, context),
@@ -4015,6 +4032,12 @@ pub(super) async fn start_review(
     app: &AppState,
     request: StartReviewRequest,
 ) -> Result<CommandResponse, DaemonError> {
+    let gate = app
+        .variant_gate(&request.workspace_id, &request.thread_id)
+        .await;
+    let _guard = gate.lock().await;
+    app.restore_variant_for_turn(&request.workspace_id, &request.thread_id)
+        .await?;
     let provider = app
         .thread_provider(&request.workspace_id, &request.thread_id)
         .await?;

@@ -4,11 +4,9 @@
 //! under `~/.falcondeck/variants/<project>/<slug>/` on the machine that owns
 //! the workspace — so remote hosts get isolation without any extra plumbing.
 //!
-//! Variants use `git worktree` so ignored build outputs never get replicated.
-//! Copy-on-write clones avoid copying file contents but still duplicate every
-//! filesystem entry; large Cargo, Xcode, and dependency trees made creation,
-//! deletion, and disk accounting prohibitively expensive. A small allowlist of
-//! environment files is copied into the otherwise tracked-only worktree.
+//! Variants use Git worktrees with optional per-project sparse checkout and
+//! copy-on-write dependency provisioning. Other ignored build state is omitted;
+//! only a small environment-file allowlist is copied by default.
 
 use std::path::{Path, PathBuf};
 
@@ -19,7 +17,9 @@ use uuid::Uuid;
 use crate::error::DaemonError;
 
 mod reclaim;
+mod setup;
 pub use reclaim::{Reclaim, reclaim_if_safe, restore};
+pub(crate) use setup::hint as sparse_hint;
 
 /// Untracked files carried into a worktree-backed variant.
 const UNTRACKED_ALLOWLIST: &[&str] = &[".env*", ".envrc", "*.local.*"];
@@ -95,14 +95,20 @@ pub(crate) async fn create_in_root(
             DaemonError::Rpc(format!("failed to create the variants directory: {error}"))
         })?;
     }
-    // A leftover from a crashed creation would poison worktree creation.
-    let _ = fs::remove_dir_all(&destination).await;
+    if destination.exists() {
+        return Err(DaemonError::BadRequest(format!(
+            "isolated copy already exists: {}",
+            destination.display()
+        )));
+    }
+    setup::load(project_path).await?;
 
     let branch = format!("{BRANCH_PREFIX}{slug}");
     let destination_str = destination.to_string_lossy().to_string();
     let base_branch = current_branch(project_path).await;
 
     add_worktree(project_path, &destination, &branch).await?;
+    setup::provision(project_path, &destination).await?;
     copy_untracked_allowlist(project_path, &destination).await;
 
     Ok(ThreadVariant {
@@ -114,8 +120,8 @@ pub(crate) async fn create_in_root(
     })
 }
 
-/// Deletes a variant's checkout. Best-effort by design: the thread it backed
-/// is going away either way, and a failure here must not block that.
+/// Tries safe reclamation after thread deletion. Unsafe checkouts are retained;
+/// a failure must not block deleting the thread record.
 ///
 /// The branch is deliberately left behind — it holds the work, and merge-back
 /// has not shipped yet, so deleting it would be the only way to lose an
@@ -126,30 +132,11 @@ pub async fn remove(project_path: &str, variant: &ThreadVariant) {
     if variant.kind == ThreadVariantKind::Clone {
         preserve_clone_branch(project_path, variant).await;
     }
-    if variant.kind == ThreadVariantKind::Worktree {
-        let removed = run_git(
-            project_path,
-            &["worktree", "remove", "--force", &variant.path],
-        )
-        .await;
-        if let Err(error) = removed {
-            tracing::warn!(
-                path = %variant.path,
-                %error,
-                "git worktree remove failed; deleting the directory and pruning instead"
-            );
-            let _ = fs::remove_dir_all(&variant.path).await;
+    match reclaim_if_safe(project_path, variant).await {
+        Reclaim::Removed => {}
+        Reclaim::Kept(reasons) => {
+            tracing::info!(path = %variant.path, reasons = %reasons.join("; "), "kept isolated copy after thread deletion")
         }
-        // Prunes the administrative entry whether or not `remove` succeeded,
-        // so the project repo never keeps a record of a checkout that is gone.
-        let _ = run_git(project_path, &["worktree", "prune"]).await;
-        return;
-    }
-
-    if let Err(error) = fs::remove_dir_all(&variant.path).await
-        && error.kind() != std::io::ErrorKind::NotFound
-    {
-        tracing::warn!(path = %variant.path, %error, "failed to delete variant checkout");
     }
 }
 
@@ -213,7 +200,15 @@ async fn add_worktree(
     let destination = destination.to_string_lossy().to_string();
     run_git(
         project_path,
-        &["worktree", "add", "-b", branch, &destination, "HEAD"],
+        &[
+            "worktree",
+            "add",
+            "--no-checkout",
+            "-b",
+            branch,
+            &destination,
+            "HEAD",
+        ],
     )
     .await
     .map(|_| ())
@@ -328,6 +323,34 @@ async fn run_git(cwd: &str, args: &[&str]) -> Result<String, DaemonError> {
         ));
     }
     Ok(String::from_utf8_lossy(&output.stdout).to_string())
+}
+
+/// Actual filesystem availability, so APFS shared extents are counted once.
+pub(crate) async fn available_disk(path: &Path) -> Option<u64> {
+    let path = path.to_owned();
+    tokio::task::spawn_blocking(move || {
+        #[cfg(unix)]
+        {
+            use std::os::unix::ffi::OsStrExt;
+            let path = std::ffi::CString::new(path.as_os_str().as_bytes()).ok()?;
+            let mut stat = std::mem::MaybeUninit::<libc::statvfs>::uninit();
+            // SAFETY: path is NUL-terminated and stat points to writable storage.
+            if unsafe { libc::statvfs(path.as_ptr(), stat.as_mut_ptr()) } != 0 {
+                return None;
+            }
+            // SAFETY: statvfs succeeded and initialized stat.
+            let stat = unsafe { stat.assume_init() };
+            Some((stat.f_bavail as u64).saturating_mul(stat.f_frsize as u64))
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = path;
+            None
+        }
+    })
+    .await
+    .ok()
+    .flatten()
 }
 
 #[cfg(test)]
@@ -456,7 +479,11 @@ mod tests {
         };
         remove(repo_path, &variant).await;
 
-        assert!(!clone.exists(), "checkout must be deleted");
+        assert!(
+            clone.exists(),
+            "legacy clone must be retained for manual review"
+        );
+
         let subject = run_git(
             repo_path,
             &["log", "-1", "--format=%s", "falcondeck/test1234"],

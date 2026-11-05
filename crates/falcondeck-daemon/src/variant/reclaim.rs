@@ -23,7 +23,20 @@ use super::{copy_untracked_allowlist, matches_allowlist, run_git};
 
 /// Directories a build or install recreates; ignored files inside them never
 /// block reclaiming.
-const REBUILDABLE: &[&str] = &["node_modules", "vendor", "target", ".next", "dist"];
+const REBUILDABLE: &[&str] = &[
+    "node_modules",
+    "vendor",
+    "target",
+    ".next",
+    "dist",
+    ".phpunit.cache",
+    ".react-router",
+    "__pycache__",
+    ".pytest_cache",
+    "bootstrap/cache",
+    "storage/framework/cache",
+    "storage/framework/views",
+];
 
 const REMOTE_TIMEOUT: Duration = Duration::from_secs(120);
 const FETCH_TIMEOUT: Duration = Duration::from_secs(600);
@@ -48,9 +61,24 @@ pub async fn reclaim_if_safe(project_path: &str, variant: &ThreadVariant) -> Rec
         let _ = run_git(project_path, &["worktree", "prune"]).await;
         return Reclaim::Removed;
     }
+    let head = run_git(&variant.path, &["rev-parse", "HEAD"]).await.ok();
     let blockers = blockers(project_path, variant).await;
     if !blockers.is_empty() {
         return Reclaim::Kept(blockers);
+    }
+    // Remote verification can be slow; recheck local state and processes at
+    // the destructive boundary as well as before the network call.
+    let mut fresh = status_blockers(project_path, &variant.path)
+        .await
+        .unwrap_or_else(|e| vec![e]);
+    if let Err(reason) = process_clear(Path::new(&variant.path)).await {
+        fresh.push(reason);
+    }
+    if head.is_none() || run_git(&variant.path, &["rev-parse", "HEAD"]).await.ok() != head {
+        fresh.push("HEAD changed during assessment".into());
+    }
+    if !fresh.is_empty() {
+        return Reclaim::Kept(fresh);
     }
     if let Err(error) = run_git(project_path, &["worktree", "remove", &variant.path]).await {
         return Reclaim::Kept(vec![format!("git worktree remove refused: {error}")]);
@@ -70,10 +98,19 @@ pub async fn restore(project_path: &str, variant: &ThreadVariant) -> Result<bool
     let _ = run_git(project_path, &["worktree", "prune"]).await;
     run_git(
         project_path,
-        &["worktree", "add", &variant.path, &variant.branch],
+        &[
+            "worktree",
+            "add",
+            "--no-checkout",
+            &variant.path,
+            &variant.branch,
+        ],
     )
     .await
     .map_err(|error| format!("could not recreate {}: {error}", variant.path))?;
+    super::setup::provision(project_path, Path::new(&variant.path))
+        .await
+        .map_err(|e| e.to_string())?;
     copy_untracked_allowlist(project_path, Path::new(&variant.path)).await;
     Ok(true)
 }
@@ -81,6 +118,9 @@ pub async fn restore(project_path: &str, variant: &ThreadVariant) -> Result<bool
 /// Reasons the checkout must be kept; empty means safe to remove.
 async fn blockers(project_path: &str, variant: &ThreadVariant) -> Vec<String> {
     let mut reasons = Vec::new();
+    if let Err(reason) = process_clear(Path::new(&variant.path)).await {
+        return vec![reason];
+    }
     match status_blockers(project_path, &variant.path).await {
         Ok(found) => reasons.extend(found),
         Err(error) => return vec![format!("could not read git status: {error}")],
@@ -113,7 +153,7 @@ async fn status_blockers(project_path: &str, path: &str) -> Result<Vec<String>, 
     for (code, entry) in parse_status(&out) {
         match code.as_str() {
             "!!" => {
-                if !ignored_is_benign(&entry) {
+                if !ignored_safe(project_path, path, &entry).await {
                     other_ignored.push(entry);
                 }
             }
@@ -144,6 +184,40 @@ async fn status_blockers(project_path: &str, path: &str) -> Result<Vec<String>, 
     Ok(reasons)
 }
 
+async fn ignored_safe(project: &str, path: &str, entry: &str) -> bool {
+    let mut pending = vec![entry.to_string()];
+    while let Some(relative) = pending.pop() {
+        if is_rebuildable(&relative) || identical_to_project(project, path, &relative).await {
+            continue;
+        }
+        // Git can collapse storage/framework to one ignored entry. Inspect
+        // only ancestors of allowlisted caches; sessions and logs still block.
+        let prefix = format!("{}/", relative.trim_end_matches('/'));
+        if !REBUILDABLE.iter().any(|p| p.starts_with(&prefix)) {
+            return false;
+        }
+        let Ok(mut dir) = fs::read_dir(Path::new(path).join(&relative)).await else {
+            return false;
+        };
+        loop {
+            match dir.next_entry().await {
+                Ok(Some(child)) => {
+                    let Ok(kind) = child.file_type().await else {
+                        return false;
+                    };
+                    if kind.is_symlink() {
+                        return false;
+                    }
+                    pending.push(format!("{prefix}{}", child.file_name().to_string_lossy()));
+                }
+                Ok(None) => break,
+                Err(_) => return false,
+            }
+        }
+    }
+    true
+}
+
 /// `(XY, path)` pairs from `status --porcelain=v1 -z`; a rename or copy
 /// entry carries its source path as a following field, which is skipped.
 fn parse_status(out: &str) -> Vec<(String, String)> {
@@ -164,15 +238,45 @@ fn parse_status(out: &str) -> Vec<(String, String)> {
 
 /// Ignored entries that never block: env-file copies the daemon made at
 /// creation (the project folder holds the original) and rebuildable output.
-fn ignored_is_benign(entry: &str) -> bool {
-    let name = entry.trim_end_matches('/').rsplit('/').next().unwrap_or("");
-    matches_allowlist(name) || is_rebuildable(entry)
+fn is_rebuildable(entry: &str) -> bool {
+    let segments: Vec<_> = entry.split('/').filter(|p| !p.is_empty()).collect();
+    REBUILDABLE.iter().any(|pattern| {
+        let parts: Vec<_> = pattern.split('/').collect();
+        segments.windows(parts.len()).any(|window| window == parts)
+    })
 }
 
-fn is_rebuildable(entry: &str) -> bool {
-    entry
-        .split('/')
-        .any(|segment| REBUILDABLE.contains(&segment))
+/// Fail closed if the process inventory cannot be read. Canonical paths handle
+/// macOS's /var versus /private/var aliases. Never follow arbitrary home trees.
+async fn process_clear(path: &Path) -> Result<(), String> {
+    let path = fs::canonicalize(path)
+        .await
+        .map_err(|e| format!("process check: {e}"))?;
+    let output = timeout(
+        Duration::from_secs(30),
+        Command::new("lsof")
+            .args(["-d", "cwd", "-Fn"])
+            .kill_on_drop(true)
+            .output(),
+    )
+    .await
+    .map_err(|_| "process inventory timed out".to_string())?
+    .map_err(|e| format!("process inventory unavailable: {e}"))?;
+    // lsof can exit 1 for unreadable processes. Refuse reclamation rather than
+    // treating a partial inventory as proof of inactivity.
+    if !output.status.success() {
+        return Err("process inventory incomplete".into());
+    }
+    for line in String::from_utf8_lossy(&output.stdout).lines() {
+        if let Some(cwd) = line.strip_prefix("n/") {
+            let cwd = std::path::PathBuf::from(format!("/{cwd}"));
+            let cwd = fs::canonicalize(&cwd).await.unwrap_or(cwd);
+            if cwd.starts_with(&path) {
+                return Err("a process is running inside the worktree".into());
+            }
+        }
+    }
+    Ok(())
 }
 
 /// An untracked allowlisted file passes only when byte-identical to the
@@ -466,13 +570,13 @@ mod tests {
 
     #[test]
     fn benign_ignored_entries_are_env_copies_and_rebuildable_output() {
-        assert!(ignored_is_benign(".env"));
-        assert!(ignored_is_benign("frontend/.env.local"));
-        assert!(ignored_is_benign("apps/web/node_modules/"));
-        assert!(ignored_is_benign("target/"));
-        assert!(!ignored_is_benign(".idea/"));
-        assert!(!ignored_is_benign("storage/app/uploads/"));
-        assert!(!ignored_is_benign("node_modules_backup/"));
+        assert!(!is_rebuildable(".env"));
+        assert!(!is_rebuildable("frontend/.env.local"));
+        assert!(is_rebuildable("apps/web/node_modules/"));
+        assert!(is_rebuildable("target/"));
+        assert!(!is_rebuildable(".idea/"));
+        assert!(!is_rebuildable("storage/app/uploads/"));
+        assert!(!is_rebuildable("node_modules_backup/"));
     }
 
     #[test]
@@ -565,7 +669,10 @@ mod tests {
         std::fs::write(f.project.join(".env"), "KEY=1\n").unwrap();
         let v = f.variant("env");
         std::fs::write(Path::new(&v.path).join(".env"), "KEY=2\n").unwrap();
-        assert_eq!(reclaim_if_safe(f.project_str(), &v).await, Reclaim::Removed);
+        assert!(matches!(
+            reclaim_if_safe(f.project_str(), &v).await,
+            Reclaim::Kept(_)
+        ));
     }
 
     #[tokio::test]
@@ -622,5 +729,56 @@ mod tests {
         assert!(Path::new(&v.path).join(".env").exists());
         // Already present: nothing to do.
         assert_eq!(restore(f.project_str(), &v).await, Ok(false));
+    }
+    #[tokio::test]
+    async fn process_inside_worktree_refuses_reclaim() {
+        let f = Fixture::new();
+        let v = f.variant("process");
+        let mut child = Command::new("sleep")
+            .arg("30")
+            .current_dir(&v.path)
+            .spawn()
+            .unwrap();
+        let outcome = reclaim_if_safe(f.project_str(), &v).await;
+        child.kill().await.unwrap();
+        child.wait().await.unwrap();
+        assert!(
+            matches!(outcome, Reclaim::Kept(ref why) if why.iter().any(|r| r.contains("process"))),
+            "{outcome:?}"
+        );
+        assert!(Path::new(&v.path).exists());
+    }
+
+    #[test]
+    fn framework_cache_allowlist_does_not_include_sessions_or_logs() {
+        for path in [
+            ".phpunit.cache/result",
+            "frontend/.react-router/types",
+            "bootstrap/cache/packages.php",
+            "storage/framework/cache/x",
+            "storage/framework/views/a.php",
+        ] {
+            assert!(is_rebuildable(path), "{path}");
+        }
+        for path in [
+            "storage/framework/sessions/session",
+            "storage/logs/laravel.log",
+            "storage/app/file",
+            "bootstrap/cache-backup/x",
+        ] {
+            assert!(!is_rebuildable(path), "{path}");
+        }
+    }
+    #[tokio::test]
+    async fn collapsed_framework_directory_keeps_sessions_but_allows_compiled_cache() {
+        let f = Fixture::new();
+        let v = f.variant("collapsed");
+        let root = Path::new(&v.path).join("storage/framework");
+        std::fs::create_dir_all(root.join("cache")).unwrap();
+        std::fs::write(root.join("cache/generated"), "cache").unwrap();
+        assert!(ignored_safe(f.project_str(), &v.path, "storage/").await);
+        std::fs::create_dir_all(root.join("sessions")).unwrap();
+        std::fs::write(root.join("sessions/session"), "session").unwrap();
+        assert!(!ignored_safe(f.project_str(), &v.path, "storage/").await);
     }
 }

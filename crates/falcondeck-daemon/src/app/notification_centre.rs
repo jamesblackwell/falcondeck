@@ -143,6 +143,13 @@ impl AppState {
         &self,
         event: AttentionEvent,
     ) -> AttentionOutcome {
+        if let AttentionEvent::TurnComplete {
+            workspace_id,
+            thread_id,
+        } = &event
+        {
+            self.schedule_variant_reap(workspace_id, thread_id);
+        }
         let notice = matches!(event, AttentionEvent::Notice(_));
         let replaces = match &event {
             AttentionEvent::Request(request) => {

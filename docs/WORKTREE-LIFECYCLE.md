@@ -1,106 +1,160 @@
 # Worktree lifecycle and disk hygiene
 
-Status: shipped 2026-10-30. Design background is in `WORKTREES.md`.
+An isolated thread owns a Git worktree and branch under
+`~/.falcondeck/variants/<project>/<slug>/`. History belongs to the native agent;
+removing the checkout never deletes the thread or branch.
 
-## Why this exists
+## Provisioning
 
-An isolated thread gets a variant: a `git worktree` under
-`~/.falcondeck/variants/<project>/<slug>/` on branch `falcondeck/<slug>`
-(`crates/falcondeck-daemon/src/variant.rs`). A Quizgecko worktree is about
-2 GB once dependencies are installed. On 30 Oct 2026 the variants directory
-held 91 GB across 55 checkouts and the Mac had 11 GB free.
+Projects use full checkouts with no dependencies copied by default. Opt in with
+an external JSON file and a repository-local Git setting:
 
-The leak had one cause: **archiving a thread only set `is_archived`**.
-Only `delete_thread` removed the checkout, and people archive far more than
-they delete. `WORKTREES.md` promised "archiving offers variant cleanup" but
-it was never built. Other worktrees (Codex under `~/.codex/worktrees`, ad-hoc
-`/private/tmp` checkouts) have no FalconDeck owner at all.
+```sh
+git config --local falcondeck.worktreeSetup /absolute/path/to/worktree-setup.json
+```
 
-## What removes a variant now
+Example for a large pnpm project:
+
+```json
+{
+  "sparse_exclude": [
+    "data/qbank", "docs/research", "docs/marketing", "docs/help-center"
+  ],
+  "dependency_roots": ["frontend"],
+  "sparse_hint": "QBank and Curriculum services import data/qbank. Before working on those services, run git sparse-checkout add data/qbank."
+}
+```
+
+This is per repository, shared by its worktrees, and contains no project-specific
+paths in the daemon's production policy. The file can live outside the project
+(e.g. in `~/.falcondeck/`). No configuration means no sparse checkout or warm
+install. Paths must be relative directories; `"."` is allowed for a dependency
+root. Configuration errors fail creation visibly.
+
+Creation and restore both use `git worktree add --no-checkout`, configure
+cone-mode sparse checkout, check out HEAD, then provision dependencies and the
+small env-file allowlist (`.env*`, `.envrc`, `*.local.*`). Sparse selection includes
+all other tracked directories and ancestor files. The example keeps
+`docs/reports` and `docs/development`, including gate receipts. Git enables
+`extensions.worktreeConfig` and stores sparse settings in the new worktree's
+config. Integration tests verify the main checkout and an existing full variant
+retain their files and clean status, and merging main from a sparse worktree
+works even when the merge changes excluded files.
+
+Every dispatched turn in a configured sparse variant receives a context hint
+explaining missing directories and how to restore them:
+
+```sh
+git sparse-checkout add data/qbank  # add one directory in this worktree
+git sparse-checkout disable        # materialize the full tree
+```
+
+Restoration reapplies the current project configuration, so a per-worktree
+manual addition needs to be repeated after reclamation.
+
+### Warm dependencies
+
+For each configured dependency root, FalconDeck tries the project folder's warm
+`node_modules`. It requires byte-identical package manifests, lockfiles, npm
+configuration and workspace descriptors in the project and new checkout, plus
+a pnpm installed-lock receipt (`node_modules/.pnpm/lock.yaml`) identical to the
+source lockfile. Missing/mismatched/stale receipts cause a cold fallback. npm and
+yarn installs currently use that fallback because they do not supply the pnpm
+receipt this implementation verifies. No package manager or lifecycle script is
+run automatically; the agent uses the project's normal install when cold.
+
+On macOS files use APFS `clonefile`; on other platforms `cp --reflink=always`
+is attempted. Failure (including unsupported/cross-volume clones) removes the
+partial staging directory and leaves dependencies absent, never a full-copy
+fallback. Relative symlinks must stay within node_modules; absolute or escaping
+links reject the warm tree. Textual source paths in generated pnpm bin shims
+are relocated to the destination. Binary files containing source paths reject
+the warm tree. Source inputs and the cloned receipt are checked again before
+publishing the staged directory. The source is read only. Clone contents can
+subsequently diverge without modifying the source.
+
+Use filesystem available bytes (`statvfs` or `df`), not `du`, to measure savings:
+`du` counts APFS clones in full. The ignored Rust test
+`variant::setup::measurement::measure_fresh_variant` measures a full checkout
+with physically copied dependencies versus a sparse checkout with cloned deps,
+in a throwaway shared clone. Set `FALCONDECK_MEASURE_PROJECT` to the source
+repository and run it with `--ignored --nocapture`. It never changes the source
+repository or real variant registrations.
+
+## Reclamation
 
 | Event | Behaviour |
 |---|---|
-| Thread deleted | Checkout force-removed (unchanged). The branch is kept. |
-| Thread archived (single or "archive all") | The daemon tries `reclaim_if_safe` in the background. Safe: checkout removed, branch kept. Not safe: checkout kept and the reasons are logged (`kept isolated copy of archived thread`). |
-| Thread unarchived | If the checkout was reclaimed, it is recreated at the same path from the kept branch (`git worktree add <path> <branch>`) and the env-file allowlist is copied again. |
-| Anything else (idle threads, no owner) | `scripts/worktree-gc.mjs`. Never automatic. |
+| Archive (single or all) | Try safe reclamation in the background; log retained reasons. |
+| Successful turn completion | Schedule one attempt after **72 hours** without further thread activity. |
+| Unarchive, send/resume turn, start review | Restore a missing checkout from its kept branch before provider startup. |
+| Delete thread | Try the same safe reclamation; retain unsafe checkouts and log reasons. Legacy clones are kept for manual review, with committed branches preserved in the project when possible. |
+| Daemon startup | No backlog sweep and no restored cleanup timers. |
 
-Threads that are running, waiting for input, or have queued turns are skipped.
-Open (unarchived) threads are never reclaimed: their working directory must
-exist to resume them.
+A successful turn alone does not establish that work is finished. The 72-hour
+grace avoids churn during short pauses. At the deadline the completion timestamp
+must still match; the thread must be idle, unpinned, with no queued or dispatching
+request. A later turn or update cancels eligibility. Dirty or unpushed work is
+always retained. Timers are intentionally ephemeral: a daemon restart cancels
+them; a subsequent successful turn can schedule a new attempt. Nothing inventories
+or sweeps the existing backlog. The first removal run over it remains a human
+decision after reading a dry-run report.
 
-There is deliberately no background sweep of the existing backlog: the first
-deletion run over old worktrees is a human decision made with the dry-run
-table in front of them.
+Admission, unarchive and reclamation use a per-thread gate so a resumed turn
+cannot race cleanup. Restoration failures stop turn dispatch instead of sending
+the provider a missing working directory. Checkout removal retains variant
+metadata and all native thread history.
 
-## The SAFE rules
+### Safety rules (daemon and script)
 
-A checkout is reclaimed only if all of these hold. The daemon
-(`variant/reclaim.rs`) and the script (`scripts/worktree-gc.mjs`) implement
-the same rules; change them together.
+`variant/reclaim.rs` and `scripts/worktree-gc.mjs` implement the same file/remote
+rules; change them together:
 
-1. `git status` is clean. Untracked files block, except allowlisted env files
-   (`.env*`, `.envrc`, `*.local.*`) that are byte-identical to the project
-   folder's copy.
-2. Every commit is on `origin`. A commit counts when its SHA is reachable from
-   a live `origin` branch, or when `git cherry` finds a patch-equivalent commit
-   on the default branch or the same-named branch (rebased and cherry-picked
-   copies count; squash merges do not, and are kept).
-3. Ignored files are limited to rebuildable directories (`node_modules`,
-   `vendor`, `target`, `.next`, `dist`) and allowlisted env-file copies (the
-   daemon put them there; the original is in the project folder).
-4. `git worktree remove` is run without `--force`, so git re-checks
-   cleanliness itself. The script additionally requires the checkout to be
-   older than 3 days and its owner thread not running.
+1. Tracked and untracked work must be clean. Both ignored and untracked env
+   files pass only when byte-identical to the project's copy.
+2. Every commit must be reachable from a live `origin` branch or patch-equivalent
+   on the remote default/same-named branch. Unreachable remotes block removal.
+   `ls-remote` plus scratch object storage verify this without changing refs,
+   FETCH_HEAD, config or the inspected index.
+3. Ignored files must be regenerable: `node_modules`, `vendor`, `target`, `.next`,
+   `dist`, `.phpunit.cache`, `.react-router`, `__pycache__`, `.pytest_cache`,
+   `bootstrap/cache`, `storage/framework/cache`, `storage/framework/views`.
+   Collapsed ignored ancestors are inspected so **sessions, logs, uploads, and
+   other unknown files still block removal**. This closes the earlier cache
+   allowlist gap without treating all Laravel storage as disposable.
+4. No process may have its cwd in the checkout or a descendant. `lsof -d cwd`
+   checks this explicitly; a failed/incomplete inventory blocks cleanup.
+   Canonical paths account for macOS `/var` and `/private/var` aliases.
+5. Local status, HEAD and processes are checked again after remote verification,
+   immediately before `git worktree remove` without `--force`. Branches survive.
+   As with any filesystem inspection, an unrelated external process can still
+   change state after the final check; Git performs its own cleanliness check.
 
-The remote is read live with `git ls-remote`, and the objects behind the tips
-are fetched into a scratch object directory (`GIT_OBJECT_DIRECTORY`, with the
-repo's objects as alternates). No refs, `FETCH_HEAD`, config or index of the
-inspected repository are written. If the remote cannot be reached, nothing is
-reclaimed.
-
-Known gap: the strict rebuildable list keeps most Quizgecko worktrees, because
-they carry framework caches (`.phpunit.cache`, `bootstrap/cache`,
-`storage/framework`, `.react-router`). `worktree-gc --rebuildable-preset
-generated` shows the effect of widening it; widening is one constant in each
-implementation (`GENERATED_PRESET` / `REBUILDABLE`).
-
-## The cleanup script
+The script also requires three days of age and skips open owner threads unless
+`--include-open-threads` is explicitly given. It defaults to a dry run:
 
 ```sh
-node scripts/worktree-gc.mjs                       # dry run (default)
-node scripts/worktree-gc.mjs --format markdown     # report for sharing
-node scripts/worktree-gc.mjs --apply               # remove SAFE only
-node scripts/disk-hogs.mjs --top 10                # other big consumers, read-only
+node scripts/worktree-gc.mjs --format markdown
+node scripts/worktree-gc.mjs --apply  # human decision; never run automatically
 ```
 
-It lists every worktree under `~/.falcondeck/variants`, `~/.codex/worktrees`
-and `/private/tmp`, with path, repo, size, last activity, clean/dirty,
-unpushed commits, non-rebuildable ignored files and the owning thread, and
-classes each:
+The optional `--rebuildable-preset generated` remains a broader manual preview;
+its additional paths are not the daemon's automatic policy. Apply rechecks
+safety and writes an audit log under `~/.falcondeck/worktree-gc/`.
 
-- **ACTIVE**: thread running, a process has its cwd inside, or modified in
-  the last 24 h.
-- **SAFE**: the rules above and older than 3 days.
-- **REVIEW**: everything else, with the reasons.
+Archiving **does** try to free the folder; it is not an unconditional removal.
+On 5 Nov 2026, the running daemon logged Quizgecko archive removals at 14:17Z and
+15:17Z, and earlier retained entries explicitly named framework caches and
+unpushed commits. A read-only state/filesystem check during this work found 43
+archived Quizgecko variant threads: 5 retained checkouts and 38 absent paths.
+No existing variants were removed or changed for this investigation.
 
-`--apply` removes SAFE worktrees with `git worktree remove` (never `--force`,
-never `rm -rf`), then `git worktree prune`. It re-assesses each entry just
-before removing it, skips standalone clones, and skips SAFE worktrees whose
-thread is still open unless `--include-open-threads` is given (removing them
-breaks resuming the thread until the daemon restores the copy). Every run
-writes an audit log to `~/.falcondeck/worktree-gc/` with each removed path,
-branch and HEAD sha. Branches are kept, so removal is recoverable.
+## Disk warning
 
-"Last activity" is the newest of the git metadata (HEAD, index, reflog),
-modified tracked/untracked files, and the owning thread's `updated_at`. The
-checkout root's own mtime is only used when no thread owns the copy, because
-other tools touch it.
-
-## Follow-ups (not built)
-
-- Surface retained copies in the UI ("kept because 3 commits are unpushed").
-  Needs a design packet.
-- Reclaim idle open threads after N days, which also needs restore on turn
-  start, not only on unarchive.
-- Run the script on a schedule once the first manual run has been approved.
+Before creating an isolated checkout and when admitting a turn, check actual
+available space on the FalconDeck data volume. Below 25 GiB, show one persistent
+operational warning in the clients' service/operational notices. Repeated low
+checks do not emit more warnings. A check at or above 25 GiB clears it and rearms
+it for the next crossing. The latch lasts for the daemon session; after restart
+a still-low disk gets one current warning again. There are no periodic scans or
+push notifications for these checks.

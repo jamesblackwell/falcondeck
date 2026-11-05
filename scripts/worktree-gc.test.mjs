@@ -40,7 +40,9 @@ test('rebuildable dirs and the env allowlist', () => {
   assert.ok(isRebuildable('target/'));
   assert.ok(!isRebuildable('storage/logs/'));
   assert.ok(!isRebuildable('node_modules_backup/'));
-  assert.ok(!isRebuildable('bootstrap/cache/x.php'));
+  assert.ok(isRebuildable('bootstrap/cache/x.php'));
+  assert.ok(!isRebuildable('storage/framework/sessions/user'));
+  assert.ok(isRebuildable('storage/framework/views/a.php'));
   assert.ok(isRebuildable('bootstrap/cache/x.php', GENERATED_PRESET));
   assert.ok(!isRebuildable('bootstrap/app.php', GENERATED_PRESET));
   assert.ok(!isRebuildable('storage/app/uploads/', GENERATED_PRESET));
@@ -203,12 +205,12 @@ test('dirty tree, untracked file and non-rebuildable ignored dir are all REVIEW'
   assert.match(entry.reasons.join(';'), /non-rebuildable ignored/);
 });
 
-test('ignored env copies are machine-local; untracked allowlisted files must match the project', async () => {
+test('ignored and untracked env copies must match the project', async () => {
   writeFileSync(join(project, '.env'), 'KEY=1\n');
   writeFileSync(join(project, 'app.local.json'), '{"a":1}\n');
   const ignoredEnv = worktree('env-ignored', 'falcondeck/env-ignored');
   writeFileSync(join(ignoredEnv, '.env'), 'KEY=2\n');
-  assert.equal((await assess(ignoredEnv)).class, 'SAFE');
+  assert.equal((await assess(ignoredEnv)).class, 'REVIEW');
 
   const same = worktree('local-same', 'falcondeck/local-same');
   writeFileSync(join(same, 'app.local.json'), '{"a":1}\n');
@@ -285,4 +287,16 @@ test('runs when invoked through a symlinked path', () => {
   execFileSync('ln', ['-s', dirname(fileURLToPath(import.meta.url)), link]);
   const out = execFileSync('node', [join(link, 'worktree-gc.mjs'), '--help'], { encoding: 'utf8' });
   assert.match(out, /Usage: worktree-gc/);
+});
+
+test('collapsed ignored framework caches pass but sessions remain protected', async () => {
+  const path = worktree('framework', 'falcondeck/framework');
+  writeFileSync(join(path, '.gitignore'), 'storage/\n');
+  sh(path, 'add', '.gitignore'); sh(path, 'commit', '-m', 'ignore framework'); sh(path, 'push', 'origin', 'falcondeck/framework');
+  mkdirSync(join(path, 'storage/framework/cache'), { recursive: true });
+  writeFileSync(join(path, 'storage/framework/cache/generated'), 'cache');
+  assert.equal((await assess(path)).class, 'SAFE');
+  mkdirSync(join(path, 'storage/framework/sessions'), { recursive: true });
+  writeFileSync(join(path, 'storage/framework/sessions/session'), 'session');
+  assert.equal((await assess(path)).class, 'REVIEW');
 });

@@ -9813,6 +9813,98 @@ async fn archiving_reclaims_safe_variants_and_unarchive_restores_them() {
             .unwrap()
             .is_archived
     );
+    // Successful completion alone does not imply that a checkout is disposable.
+    let completed = Utc::now() - chrono::Duration::hours(73);
+    {
+        let mut ws = app.inner.workspaces.lock().await;
+        ws.get_mut(&workspace_id)
+            .unwrap()
+            .threads
+            .get_mut("thread-safe")
+            .unwrap()
+            .summary
+            .updated_at = completed;
+        ws.get_mut(&workspace_id)
+            .unwrap()
+            .threads
+            .get_mut("thread-work")
+            .unwrap()
+            .summary
+            .updated_at = completed;
+    }
+    assert!(
+        app.reap_finished_variant(
+            &workspace_id,
+            "thread-safe",
+            completed,
+            completed + chrono::Duration::hours(71)
+        )
+        .await
+        .is_none(),
+        "grace period must keep checkout"
+    );
+    assert!(safe_path.exists());
+    assert!(
+        app.reap_finished_variant(
+            &workspace_id,
+            "thread-safe",
+            completed - chrono::Duration::seconds(1),
+            Utc::now()
+        )
+        .await
+        .is_none(),
+        "activity after completion cancels cleanup"
+    );
+    assert!(
+        matches!(
+            app.reap_finished_variant(&workspace_id, "thread-work", completed, Utc::now())
+                .await,
+            Some(crate::variant::Reclaim::Kept(_))
+        ),
+        "unpushed commits must keep checkout"
+    );
+    std::fs::write(safe_path.join("a.txt"), "dirty").unwrap();
+    assert!(
+        matches!(
+            app.reap_finished_variant(&workspace_id, "thread-safe", completed, Utc::now())
+                .await,
+            Some(crate::variant::Reclaim::Kept(_))
+        ),
+        "dirty checkout must remain"
+    );
+    git_in(&safe_path, &["restore", "a.txt"]);
+    let mut process = tokio::process::Command::new("sleep")
+        .arg("30")
+        .current_dir(&safe_path)
+        .spawn()
+        .unwrap();
+    let result = app
+        .reap_finished_variant(&workspace_id, "thread-safe", completed, Utc::now())
+        .await;
+    process.kill().await.unwrap();
+    process.wait().await.unwrap();
+    assert!(
+        matches!(result, Some(crate::variant::Reclaim::Kept(_))),
+        "process must keep checkout"
+    );
+    assert_eq!(
+        app.reap_finished_variant(&workspace_id, "thread-safe", completed, Utc::now())
+            .await,
+        Some(crate::variant::Reclaim::Removed)
+    );
+    assert!(
+        app.thread_summary(&workspace_id, "thread-safe")
+            .await
+            .is_ok(),
+        "thread history remains addressable"
+    );
+    app.restore_variant_for_turn(&workspace_id, "thread-safe")
+        .await
+        .unwrap();
+    assert!(
+        safe_path.join("a.txt").exists(),
+        "resuming an open reaped thread restores checkout"
+    );
 }
 
 #[tokio::test]

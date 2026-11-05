@@ -29,7 +29,7 @@ const run = promisify(execFile);
 export const DEFAULTS = {
   minAgeDays: 3,
   activeHours: 24,
-  rebuildable: ['node_modules', 'vendor', 'target', '.next', 'dist'],
+  rebuildable: ['node_modules', 'vendor', 'target', '.next', 'dist', '.phpunit.cache', '.react-router', '__pycache__', '.pytest_cache', 'bootstrap/cache', 'storage/framework/cache', 'storage/framework/views'],
   envAllowlist: ['.env*', '.envrc', '*.local.*'],
   top: 10,
   jobs: 4,
@@ -303,8 +303,7 @@ async function processCwds() {
     const { stdout } = await run('lsof', ['-d', 'cwd', '-Fn'], { maxBuffer: 64 * 1024 * 1024, timeout: 60_000 });
     return stdout.split('\n').filter((l) => l.startsWith('n/')).map((l) => l.slice(1));
   } catch (error) {
-    // lsof exits 1 when some processes are unreadable but still prints the rest.
-    return (error.stdout ?? '').split('\n').filter((l) => l.startsWith('n/')).map((l) => l.slice(1));
+    throw new Error('process inventory unavailable or incomplete; refusing cleanup');
   }
 }
 
@@ -388,7 +387,8 @@ export async function inspect({ path, source }, ctx) {
   const { opts, owners, cwds } = ctx;
   const owner = owners.get(path) ?? null;
   const base = { path, source, owner, sizeBytes: 0, dirty: [], ignoredAll: [], ignoredOther: [], unpushed: 0, locked: false };
-  base.liveProcess = cwds.some((cwd) => cwd === path || cwd.startsWith(path + sep));
+  const canonical = (p) => { try { return realpathSync(p); } catch { return p; } };
+  base.liveProcess = cwds.some((cwd) => canonical(cwd) === canonical(path) || canonical(cwd).startsWith(canonical(path) + sep));
 
   if (!hasGit(path)) {
     return { ...base, kind: 'orphan', repo: basename(dirname(path)), branch: null, mtimeMs: mtimeOf(path) };
@@ -409,7 +409,8 @@ export async function inspect({ path, source }, ctx) {
     entry.headSha = (await git(path, ['rev-parse', 'HEAD'])).trim();
     entry.locked = existsSync(join(gitDir, 'locked'));
 
-    const status = parseStatusZ(await git(path, ['status', '--porcelain=v1', '-z', '--untracked-files=normal', '--ignored=traditional']));
+    entry.statusSnapshot = await git(path, ['status', '--porcelain=v1', '-z', '--untracked-files=normal', '--ignored=traditional']);
+    const status = parseStatusZ(entry.statusSnapshot);
     // The daemon copies the project's env files (the allowlist) into every
     // variant, so ignored matches are machine-local copies, not work: the
     // original lives in the project folder. Untracked (not ignored) files only
@@ -417,7 +418,16 @@ export async function inspect({ path, source }, ctx) {
     const identicalToProject = (rel) =>
       matchesAllowlist(basename(rel), opts.envAllowlist) && sameFile(join(path, rel), join(mainRoot, rel));
     entry.dirty = [...status.tracked, ...status.untracked.filter((p) => !identicalToProject(p))];
-    entry.ignoredAll = status.ignored.filter((p) => !matchesAllowlist(basename(p), opts.envAllowlist));
+    const expand = (rel) => {
+      if (isRebuildable(rel, opts.rebuildable) || identicalToProject(rel)) return [rel];
+      const prefix = rel.replace(/\/$/, '') + '/';
+      if (!opts.rebuildable.some((p) => p.startsWith(prefix))) return [rel];
+      try {
+        if (!lstatSync(join(path, rel)).isDirectory()) return [rel];
+        return readdirSync(join(path, rel)).flatMap((name) => expand(prefix + name));
+      } catch { return [rel]; }
+    };
+    entry.ignoredAll = status.ignored.flatMap(expand).filter((p) => !identicalToProject(p));
 
     const snap = await remoteSnapshot(commonRaw, opts.fetch);
     if (!snap) entry.unpushed = null;
@@ -603,6 +613,14 @@ export async function apply(result, opts, { log = console.log } = {}) {
       continue;
     }
     try {
+      const cwds = await processCwds();
+      const path = realpathSync(entry.path);
+      if (cwds.some((cwd) => { try { cwd = realpathSync(cwd); } catch {} return cwd === path || cwd.startsWith(path + sep); })
+        || (await git(path, ['rev-parse', 'HEAD'])).trim() !== fresh.headSha
+        || await git(path, ['status', '--porcelain=v1', '-z', '--untracked-files=normal', '--ignored=traditional']) !== fresh.statusSnapshot) {
+        skipped.push({ path: entry.path, reason: 'checkout or processes changed during assessment' });
+        continue;
+      }
       await git(entry.repoPath, ['worktree', 'remove', entry.path], { timeout: 30 * 60_000 });
       repos.add(entry.repoPath);
       removed.push({ path: entry.path, repo: entry.repo, branch: entry.branch, headSha: entry.headSha, bytes: entry.sizeBytes, threadId: entry.owner?.threadId ?? null });
