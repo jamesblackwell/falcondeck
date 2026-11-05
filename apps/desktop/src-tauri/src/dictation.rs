@@ -314,6 +314,7 @@ unsafe extern "C" {
     );
     fn fd_dictation_retained_recording_path() -> *mut std::ffi::c_char;
     fn fd_dictation_retained_recording_duration_seconds() -> f64;
+    fn fd_dictation_retained_recording_provider() -> i32;
     fn fd_dictation_audio_devices_json() -> *mut std::ffi::c_char;
     fn fd_dictation_temp_directory() -> *mut std::ffi::c_char;
     fn fd_dictation_free_string(value: *mut std::ffi::c_char);
@@ -937,6 +938,18 @@ fn corrupted_overlay_message(filed: bool) -> String {
     format!("{CORRUPTED_RECORDING_MESSAGE} {next}")
 }
 
+/// The provider a take was recorded with, as the native side numbers them. The
+/// setting may have changed since, so it is only the fallback.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+fn native_provider_name(native: i32, configured: DictationProvider) -> &'static str {
+    match native {
+        0 => DictationProvider::System.history_name(),
+        1 => DictationProvider::OpenRouter.history_name(),
+        2 => DictationProvider::Parakeet.history_name(),
+        _ => configured.history_name(),
+    }
+}
+
 /// Where a history retry runs. `Local` must never touch the network: choosing
 /// it is how a writer keeps a recording off the cloud.
 #[derive(Debug, PartialEq, Eq)]
@@ -946,9 +959,11 @@ enum RetryRoute {
 }
 
 /// An explicit engine always wins. Without one, a Parakeet recording stays
-/// local unless a cloud model was chosen, and anything else uses the cloud.
+/// local unless a cloud model was chosen, and so does any recording while the
+/// Voice setting is Parakeet. Anything else uses the cloud.
 fn retry_route(
     recording_provider: &str,
+    voice_provider: &str,
     engine: Option<&str>,
     model: Option<String>,
     configured_model: &str,
@@ -958,7 +973,9 @@ fn retry_route(
         Some(_) => return Err("That transcription engine is not available.".into()),
         None => {}
     }
-    if recording_provider == PARAKEET_ENGINE && model.is_none() {
+    if model.is_none()
+        && (recording_provider == PARAKEET_ENGINE || voice_provider == PARAKEET_ENGINE)
+    {
         return Ok(RetryRoute::Local);
     }
     let model = model
@@ -969,6 +986,12 @@ fn retry_route(
         return Err("The transcription model is invalid.".into());
     }
     Ok(RetryRoute::Cloud(model))
+}
+
+/// "Try anyway" overrides the corruption check, which can be wrong, but only on
+/// this Mac: the override must never send a suspect recording to the cloud.
+fn overrides_corruption_check(force: bool, route: &RetryRoute) -> bool {
+    force && *route == RetryRoute::Local
 }
 
 /// Decodes a kept recording to see whether it is damaged. Recordings filed
@@ -999,6 +1022,7 @@ pub async fn dictation_history_retry(
     id: String,
     model: Option<String>,
     engine: Option<String>,
+    force: Option<bool>,
 ) -> Result<dictation_history::DictationHistoryEntry, String> {
     let config = current_dictation_config()?;
     let retention_hours = config.history_retention_hours;
@@ -1007,18 +1031,27 @@ pub async fn dictation_history_retry(
         .ok_or_else(|| "That recording is no longer available.".to_string())?;
     let path = PathBuf::from(&entry.path);
     validate_recording_path(&path)?;
-    let route = retry_route(&entry.provider, engine.as_deref(), model, &config.model)?;
-    if entry.capture_corrupted {
-        return Err(CORRUPTED_RECORDING_MESSAGE.into());
-    }
-    if recording_looks_corrupted(&path).await {
-        dictation_history::mark_corrupted(
-            &temp_dir,
-            &id,
-            CORRUPTED_RECORDING_MESSAGE.into(),
-            retention_hours,
-        );
-        return Err(CORRUPTED_RECORDING_MESSAGE.into());
+    let route = retry_route(
+        &entry.provider,
+        config.provider.history_name(),
+        engine.as_deref(),
+        model,
+        &config.model,
+    )?;
+    if !overrides_corruption_check(force.unwrap_or(false), &route) {
+        if entry.capture_corrupted {
+            return Err(CORRUPTED_RECORDING_MESSAGE.into());
+        }
+        if recording_looks_corrupted(&path).await {
+            dictation_history::mark_corrupted(
+                &temp_dir,
+                &id,
+                CORRUPTED_RECORDING_MESSAGE.into(),
+                retention_hours,
+            );
+            notify_history_changed();
+            return Err(CORRUPTED_RECORDING_MESSAGE.into());
+        }
     }
     let (attempt_provider, model) = match route {
         RetryRoute::Local => (PARAKEET_ENGINE, crate::parakeet::MODEL.to_string()),
@@ -1073,6 +1106,7 @@ pub async fn dictation_history_retry(
                 model: Some(model),
                 text: Some(text),
                 error: None,
+                capture_corrupted: false,
                 audio_available: path.is_file(),
                 ..entry
             }))
@@ -2190,40 +2224,53 @@ pub extern "C" fn fd_dictation_emit(kind: i32, payload: *const std::ffi::c_char)
         // raw capture, so a new take can start. Without one, history is off and
         // the raw capture waits on the overlay's Discard.
         event_kind::CORRUPTED_RETAINED => {
-            let filed = !payload.is_empty();
             let _ = CURRENT_RECORDING.write().map(|mut current| current.take());
-            if filed {
-                let recording = native_recorded_audio(PathBuf::from(payload));
-                if let Ok(config) = current_dictation_config() {
-                    tauri::async_runtime::spawn_blocking(move || {
-                        dictation_history::record_corrupted(
+            SESSION_GENERATION.fetch_add(1, Ordering::AcqRel);
+            // Both read the native take, so before anything completes it.
+            let recording =
+                (!payload.is_empty()).then(|| native_recorded_audio(PathBuf::from(payload)));
+            let recorded_with = unsafe { fd_dictation_retained_recording_provider() };
+            let config = current_dictation_config();
+            tauri::async_runtime::spawn(async move {
+                // The take leaves the overlay only once history really has it.
+                let filed = match (recording, config) {
+                    (Some(recording), Ok(config)) => run_history_op(move || {
+                        let filed = dictation_history::record_corrupted(
                             &dictation_temp_dir(),
                             &recording.path,
                             recording.duration_seconds,
-                            config.provider.history_name(),
+                            native_provider_name(recorded_with, config.provider),
                             CORRUPTED_RECORDING_MESSAGE.to_string(),
                             config.history_retention_hours,
                         );
                         notify_history_changed();
-                    });
-                }
-                unsafe {
-                    fd_dictation_mark_completed();
-                }
-                clear_rewrite_session();
-            }
-            SESSION_GENERATION.fetch_add(1, Ordering::AcqRel);
-            show_overlay(&app, "corrupted", false);
-            emit_event(
-                &app,
-                DictationEvent {
-                    state: "corrupted",
-                    text: None,
-                    error: Some(corrupted_overlay_message(filed)),
-                    retained_audio: !filed,
-                    mode: None,
-                },
-            );
+                        filed
+                    })
+                    .await
+                    .unwrap_or(false),
+                    _ => false,
+                };
+                let finish_app = app.clone();
+                let _ = app.run_on_main_thread(move || {
+                    if filed {
+                        unsafe {
+                            fd_dictation_mark_completed();
+                        }
+                        clear_rewrite_session();
+                    }
+                    show_overlay(&finish_app, "corrupted", false);
+                    emit_event(
+                        &finish_app,
+                        DictationEvent {
+                            state: "corrupted",
+                            text: None,
+                            error: Some(corrupted_overlay_message(filed)),
+                            retained_audio: !filed,
+                            mode: None,
+                        },
+                    );
+                });
+            });
         }
         event_kind::UNREADABLE_RETAINED => {
             SESSION_GENERATION.fetch_add(1, Ordering::AcqRel);
@@ -2289,9 +2336,10 @@ pub extern "C" fn fd_dictation_emit(kind: i32, payload: *const std::ffi::c_char)
 #[cfg(test)]
 mod tests {
     use super::{
-        dictation_audio_devices, measured_recording_duration, parse_audio_level, permission_label,
-        retry_route, rewrite_instruction, transcription_error_is_missing_speech,
-        validate_local_daemon_url, validate_recording_path, RetryRoute,
+        dictation_audio_devices, measured_recording_duration, native_provider_name,
+        overrides_corruption_check, parse_audio_level, permission_label, retry_route,
+        rewrite_instruction, transcription_error_is_missing_speech, validate_local_daemon_url,
+        validate_recording_path, DictationProvider, RetryRoute,
     };
 
     #[cfg(target_os = "macos")]
@@ -2311,15 +2359,67 @@ mod tests {
     }
 
     #[test]
+    fn default_retry_stays_local_while_voice_is_parakeet() {
+        for provider in ["open_router", "system", "parakeet"] {
+            assert_eq!(
+                retry_route(provider, "parakeet", None, None, "cloud/model"),
+                Ok(RetryRoute::Local)
+            );
+        }
+        // Naming a cloud model is still an explicit choice.
+        assert_eq!(
+            retry_route(
+                "system",
+                "parakeet",
+                None,
+                Some("cloud/x".into()),
+                "cloud/model"
+            ),
+            Ok(RetryRoute::Cloud("cloud/x".into()))
+        );
+    }
+
+    #[test]
+    fn only_a_local_retry_can_override_the_corruption_check() {
+        assert!(overrides_corruption_check(true, &RetryRoute::Local));
+        assert!(!overrides_corruption_check(false, &RetryRoute::Local));
+        assert!(!overrides_corruption_check(
+            true,
+            &RetryRoute::Cloud("cloud/model".into())
+        ));
+    }
+
+    #[test]
+    fn a_corrupted_take_files_under_its_own_provider() {
+        assert_eq!(
+            native_provider_name(0, DictationProvider::Parakeet),
+            "system"
+        );
+        assert_eq!(
+            native_provider_name(1, DictationProvider::System),
+            "open_router"
+        );
+        assert_eq!(
+            native_provider_name(2, DictationProvider::System),
+            "parakeet"
+        );
+        assert_eq!(
+            native_provider_name(-1, DictationProvider::Parakeet),
+            "parakeet"
+        );
+    }
+
+    #[test]
     fn choosing_local_parakeet_is_local_for_every_recording_and_any_model() {
         for provider in ["open_router", "system", "parakeet"] {
             assert_eq!(
-                retry_route(provider, Some("parakeet"), None, "cloud/model"),
+                retry_route(provider, "system", Some("parakeet"), None, "cloud/model"),
                 Ok(RetryRoute::Local)
             );
             assert_eq!(
                 retry_route(
                     provider,
+                    "system",
                     Some("parakeet"),
                     Some("cloud/other".into()),
                     "cloud/model"
@@ -2332,25 +2432,32 @@ mod tests {
     #[test]
     fn retries_without_an_engine_keep_their_existing_routes() {
         assert_eq!(
-            retry_route("parakeet", None, None, "cloud/model"),
+            retry_route("parakeet", "system", None, None, "cloud/model"),
             Ok(RetryRoute::Local)
         );
         assert_eq!(
-            retry_route("parakeet", None, Some("cloud/other".into()), "cloud/model"),
+            retry_route(
+                "parakeet",
+                "system",
+                None,
+                Some("cloud/other".into()),
+                "cloud/model"
+            ),
             Ok(RetryRoute::Cloud("cloud/other".into()))
         );
         assert_eq!(
-            retry_route("open_router", None, None, "cloud/model"),
+            retry_route("open_router", "open_router", None, None, "cloud/model"),
             Ok(RetryRoute::Cloud("cloud/model".into()))
         );
         assert_eq!(
-            retry_route("system", None, Some("  ".into()), "cloud/model"),
+            retry_route("system", "system", None, Some("  ".into()), "cloud/model"),
             Ok(RetryRoute::Cloud("cloud/model".into()))
         );
         // The cloud Parakeet id is still a cloud model when picked as a model.
         assert_eq!(
             retry_route(
                 "open_router",
+                "system",
                 None,
                 Some(crate::parakeet::MODEL.into()),
                 "cloud/model"
@@ -2361,8 +2468,22 @@ mod tests {
 
     #[test]
     fn invalid_retry_requests_are_refused_rather_than_sent_to_the_cloud() {
-        assert!(retry_route("open_router", Some("whisper"), None, "cloud/model").is_err());
-        assert!(retry_route("open_router", None, Some("x".repeat(201)), "cloud/model").is_err());
+        assert!(retry_route(
+            "open_router",
+            "system",
+            Some("whisper"),
+            None,
+            "cloud/model"
+        )
+        .is_err());
+        assert!(retry_route(
+            "open_router",
+            "system",
+            None,
+            Some("x".repeat(201)),
+            "cloud/model"
+        )
+        .is_err());
     }
 
     #[cfg(target_os = "macos")]

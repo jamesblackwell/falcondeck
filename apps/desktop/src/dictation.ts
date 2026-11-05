@@ -486,12 +486,14 @@ export async function retryDictationHistoryEntry(
   id: string,
   model?: string,
   engine?: "parakeet",
+  force?: boolean,
 ): Promise<DictationHistoryEntry> {
   const { invoke } = await import("@tauri-apps/api/core");
   return invoke<DictationHistoryEntry>("dictation_history_retry", {
     id,
     model: model ?? null,
     engine: engine ?? null,
+    force: force ?? null,
   });
 }
 

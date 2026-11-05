@@ -26,6 +26,8 @@ const MAX_ENTRIES: usize = 200;
 const BYTES_PER_SECOND: f64 = 4_000.0;
 /// The unmodified capture, kept beside the M4A only when it looked wrong.
 const RAW_CAPTURE_EXTENSION: &str = "caf";
+const REPAIRED_COPY_SUFFIX: &str = ".repaired.caf";
+const REPAIRED_COPY_MAX_AGE_MS: u64 = 60 * 60 * 1000;
 
 fn valid_duration(seconds: Option<f64>) -> Option<f64> {
     seconds.filter(|value| value.is_finite() && *value > 0.0)
@@ -329,6 +331,10 @@ pub fn record_retry(
         let entry = entries.iter_mut().find(|entry| entry.id == id)?;
         entry.attempt_provider = Some(attempt_provider.to_string());
         entry.model = model;
+        // Audio an engine just read was not corrupted after all.
+        if error.is_none() {
+            entry.capture_corrupted = false;
+        }
         entry.text = text;
         entry.error = error;
         Some(entry.clone())
@@ -394,7 +400,27 @@ pub fn clear(temp_dir: &Path) -> usize {
 /// would break the promise the settings screen makes. The window doubles as
 /// the safety margin: an in-flight recording keeps a fresh mtime while it is
 /// being written, so a >=1 hour cutoff can never touch it.
+/// A repaired copy only lives for one export, so any older one was stranded by
+/// a crash. Nothing else owns it, whatever the retention setting.
+fn sweep_repaired_copies(temp_dir: &Path) {
+    let cutoff = now_ms().saturating_sub(REPAIRED_COPY_MAX_AGE_MS);
+    let Ok(items) = std::fs::read_dir(temp_dir) else {
+        return;
+    };
+    for item in items.flatten() {
+        let path = item.path();
+        let repaired = path
+            .file_name()
+            .and_then(|value| value.to_str())
+            .is_some_and(|name| name.ends_with(REPAIRED_COPY_SUFFIX));
+        if repaired && owns_recording(temp_dir, &path) && file_recorded_at_ms(&path) < cutoff {
+            let _ = std::fs::remove_file(&path);
+        }
+    }
+}
+
 fn sweep_orphans(temp_dir: &Path, entries: &[DictationHistoryEntry], retention_hours: u32) {
+    sweep_repaired_copies(temp_dir);
     if retention_hours == 0 {
         // With history off the native recorder owns deletion, and a failed
         // recording is deliberately retained for the overlay's Retry.
@@ -736,6 +762,43 @@ mod tests {
 
         assert!(delete(&dir, 6, "falcondeck-dictation-one"));
         assert!(!path.is_file() && !raw.is_file());
+    }
+
+    #[test]
+    fn a_successful_retry_lifts_the_corrupted_mark_and_a_failed_one_does_not() {
+        let (dir, _guard) = fresh_dir("corrupted-lifted");
+        let path = write_recording(&dir, "one", 1_000);
+        record_corrupted(&dir, &path, Some(1.0), "system", "Corrupted.".into(), 6);
+        let id = entries(&dir, 6)[0].id.clone();
+
+        let failed = record_retry(&dir, &id, "parakeet", None, None, Some("No".into()), 6);
+        assert!(failed.unwrap().capture_corrupted);
+
+        let read = record_retry(&dir, &id, "parakeet", None, Some("Hi".into()), None, 6);
+        assert!(!read.unwrap().capture_corrupted);
+    }
+
+    #[test]
+    fn a_stranded_repaired_copy_goes_even_with_history_off() {
+        let (dir, _guard) = fresh_dir("repaired-sweep");
+        let stranded = dir.join("falcondeck-dictation-one.repaired.caf");
+        let fresh = dir.join("falcondeck-dictation-two.repaired.caf");
+        let retained = dir.join("falcondeck-dictation-three.caf");
+        for path in [&stranded, &fresh, &retained] {
+            std::fs::write(path, b"pcm").unwrap();
+        }
+        let old = SystemTime::now() - std::time::Duration::from_secs(2 * 60 * 60);
+        for path in [&stranded, &retained] {
+            std::fs::File::options()
+                .write(true)
+                .open(path)
+                .and_then(|file| file.set_modified(old))
+                .expect("set mtime");
+        }
+        prune(&dir, 0);
+        assert!(!stranded.is_file());
+        // The second may still be exporting; the third may be waiting on Retry.
+        assert!(fresh.is_file() && retained.is_file());
     }
 
     #[test]

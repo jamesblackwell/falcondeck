@@ -113,12 +113,17 @@ export function DictationHistoryCard({
   const localParakeetInstalled = Boolean(parakeetStatus?.installed);
   const retryLocally = retryModel === LOCAL_PARAKEET_RETRY;
 
-  const retry = async (entry: DictationHistoryEntry) => {
+  const defaultRetryIsLocal = (entry: DictationHistoryEntry) =>
+    entry.provider === "parakeet" || settings.provider === "parakeet";
+
+  const retry = async (entry: DictationHistoryEntry, tryAnyway = false) => {
     setBusyId(entry.id);
     try {
-      const updated = retryLocally
-        ? await retryDictationHistoryEntry(entry.id, undefined, "parakeet")
-        : await retryDictationHistoryEntry(entry.id, retryModel || (entry.provider === "parakeet" ? undefined : settings.model));
+      const updated = tryAnyway
+        ? await retryDictationHistoryEntry(entry.id, undefined, "parakeet", true)
+        : retryLocally
+          ? await retryDictationHistoryEntry(entry.id, undefined, "parakeet")
+          : await retryDictationHistoryEntry(entry.id, retryModel || (defaultRetryIsLocal(entry) ? undefined : settings.model));
       setEntries((current) =>
         current.map((item) => (item.id === updated.id ? updated : item)),
       );
@@ -229,7 +234,7 @@ export function DictationHistoryCard({
           <Field
             label="Retry using"
             htmlFor="dictation-retry-model"
-            hint="Parakeet on this Mac keeps the audio local. OpenRouter models, including OpenRouter's Parakeet, send it to the cloud and never fall back to another model."
+            hint="Parakeet on this Mac keeps the audio local, but transcript cleanup still sends the text to OpenRouter. OpenRouter models, including OpenRouter's Parakeet, send the audio to the cloud and never fall back to another model."
           >
             <select
               id="dictation-retry-model"
@@ -237,7 +242,7 @@ export function DictationHistoryCard({
               value={retryModel}
               onChange={(event) => setRetryModel(event.target.value)}
             >
-              <option value="">Default retry (Parakeet recordings stay local)</option>
+              <option value="">{settings.provider === "parakeet" ? "Default retry (stays local)" : "Default retry (Parakeet recordings stay local)"}</option>
               {/* Stays listed if the model is removed while selected: quietly
                   dropping the choice would send audio to the cloud instead. */}
               {localParakeetInstalled || retryLocally ? (
@@ -272,7 +277,7 @@ export function DictationHistoryCard({
             {entries.map((entry) => {
               const failed = Boolean(entry.error);
               const corrupted = entry.captureCorrupted;
-              const retriesLocally = retryLocally || (entry.provider === "parakeet" && !retryModel);
+              const retriesLocally = retryLocally || (defaultRetryIsLocal(entry) && !retryModel);
               const retryBlocked = retryLocally && !localParakeetInstalled;
               // A failed retry keeps the text it could not replace. It belongs
               // to an earlier attempt and must not read as this one's result.
@@ -316,7 +321,10 @@ export function DictationHistoryCard({
                 )}
                 {corrupted ? (
                   <p className="mt-1 text-[length:var(--fd-text-xs)] text-fg-muted">
-                    Retrying won't help, so please dictate it again.
+                    This probably can't be transcribed, so please dictate it again.
+                    {localParakeetInstalled && entry.audioAvailable
+                      ? " Try anyway runs it through Parakeet on this Mac."
+                      : ""}
                     {entry.rawCaptureAvailable
                       ? " The raw capture stays on this Mac until this recording expires."
                       : ""}
@@ -333,7 +341,23 @@ export function DictationHistoryCard({
                   </div>
                 ) : null}
                 <div className="mt-2.5 flex flex-wrap items-center gap-2">
-                  {corrupted ? null : (
+                  {corrupted ? (
+                    localParakeetInstalled ? (
+                      <Button
+                        size="sm"
+                        variant="secondary"
+                        disabled={!entry.audioAvailable || busyId !== null}
+                        onClick={() => void retry(entry, true)}
+                      >
+                        {busyId === entry.id ? (
+                          <ActivityDiamond size="sm" />
+                        ) : (
+                          <RotateCcw aria-hidden="true" className="h-3.5 w-3.5" />
+                        )}
+                        Try anyway
+                      </Button>
+                    ) : null
+                  ) : (
                   <Button
                     size="sm"
                     variant="secondary"

@@ -125,7 +125,7 @@ describe("DictationHistoryCard", () => {
     fireEvent.change(await screen.findByLabelText("Retry using"), { target: { value: "local:parakeet" } });
     expect(retry).toBeEnabled();
     fireEvent.click(retry);
-    await waitFor(() => expect(retryCalls()).toEqual([{ command: "dictation_history_retry", args: { id: history[0].id, model: null, engine: "parakeet" } }]));
+    await waitFor(() => expect(retryCalls()).toEqual([{ command: "dictation_history_retry", args: { id: history[0].id, model: null, engine: "parakeet", force: null } }]));
     expect(await screen.findByText("Parakeet on this Mac")).toBeInTheDocument();
   });
 
@@ -168,7 +168,7 @@ describe("DictationHistoryCard", () => {
     render(<DictationHistoryCard baseUrl="http://127.0.0.1:1" onToast={() => {}} />);
     await screen.findByRole("option", { name: "Parakeet on this Mac (local)" });
     fireEvent.click(await screen.findByRole("button", { name: "Retry" }));
-    await waitFor(() => expect(retryCalls()).toEqual([{ command: "dictation_history_retry", args: { id: history[0].id, model: "cloud/preferred", engine: null } }]));
+    await waitFor(() => expect(retryCalls()).toEqual([{ command: "dictation_history_retry", args: { id: history[0].id, model: "cloud/preferred", engine: null, force: null } }]));
   });
 
   it("labels the text beside a failed retry as an earlier attempt", async () => {
@@ -186,6 +186,42 @@ describe("DictationHistoryCard", () => {
     render(<DictationHistoryCard baseUrl="http://127.0.0.1:1" onToast={() => {}} />);
     expect(await screen.findByText("OpenRouter is rate limited")).toBeInTheDocument();
     expect(screen.queryByText("Earlier attempt, not a confirmed result")).not.toBeInTheDocument();
+  });
+
+  it("lets a corrupted recording be tried anyway, only on this Mac", async () => {
+    parakeetInstalled = true;
+    history = [entry({ error: "Corrupted.", captureCorrupted: true })];
+    retryResult = () => ({ ...history[0], attemptProvider: "parakeet", text: "It was fine", error: null, captureCorrupted: false });
+    render(<DictationHistoryCard baseUrl={null} onToast={() => {}} />);
+    fireEvent.click(await screen.findByRole("button", { name: "Try anyway" }));
+    await waitFor(() => expect(retryCalls()).toEqual([{ command: "dictation_history_retry", args: { id: history[0].id, model: null, engine: "parakeet", force: true } }]));
+    expect(await screen.findByText("It was fine")).toBeInTheDocument();
+    expect(screen.queryByText("Recording corrupted")).not.toBeInTheDocument();
+  });
+
+  it("offers no way to try a corrupted recording without local Parakeet", async () => {
+    history = [entry({ error: "Corrupted.", captureCorrupted: true })];
+    render(<DictationHistoryCard baseUrl="http://127.0.0.1:1" onToast={() => {}} />);
+    expect(await screen.findByText("Recording corrupted")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Try anyway" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Retry" })).not.toBeInTheDocument();
+  });
+
+  it("keeps Default retry local for an Apple take while Voice is Parakeet", async () => {
+    writeDictationSettings({ ...DEFAULT_DICTATION_SETTINGS, provider: "parakeet", model: "cloud/preferred" });
+    history = [entry({ provider: "system", model: null })];
+    retryResult = () => ({ ...history[0], attemptProvider: "parakeet", text: "Local", error: null });
+    render(<DictationHistoryCard baseUrl={null} onToast={() => {}} />);
+    const retry = await screen.findByRole("button", { name: "Retry" });
+    expect(retry).toBeEnabled();
+    fireEvent.click(retry);
+    await waitFor(() => expect(retryCalls()).toEqual([{ command: "dictation_history_retry", args: { id: history[0].id, model: null, engine: null, force: null } }]));
+  });
+
+  it("says transcript cleanup still uses OpenRouter when the audio stays local", async () => {
+    history = [entry()];
+    render(<DictationHistoryCard baseUrl="http://127.0.0.1:1" onToast={() => {}} />);
+    expect(await screen.findByText(/transcript cleanup still sends the text to OpenRouter/)).toBeInTheDocument();
   });
 
   it("offers no retry for a corrupted recording and says the raw capture is kept", async () => {
@@ -213,14 +249,14 @@ describe("DictationHistoryCard", () => {
     const retry = await screen.findByRole("button", { name: "Retry" });
     expect(retry).toBeEnabled();
     fireEvent.click(retry);
-    await waitFor(() => expect(invocations.find(call => call.command === "dictation_history_retry")).toEqual({ command: "dictation_history_retry", args: { id: history[0].id, model: null, engine: null } }));
+    await waitFor(() => expect(invocations.find(call => call.command === "dictation_history_retry")).toEqual({ command: "dictation_history_retry", args: { id: history[0].id, model: null, engine: null, force: null } }));
   });
   it("retries a Whisper fallback with the preferred cloud model", async () => {
     history = [entry({ model: "openai/whisper-large-v3-turbo:nitro", text: "So" })];
     writeDictationSettings({ ...DEFAULT_DICTATION_SETTINGS, model: "nvidia/parakeet-tdt-0.6b-v3", fallbackModel: "openai/whisper-large-v3-turbo" });
     render(<DictationHistoryCard baseUrl="http://127.0.0.1:4123" onToast={() => {}} />);
     fireEvent.click(await screen.findByRole("button", { name: "Retry" }));
-    await waitFor(() => expect(invocations.find(call => call.command === "dictation_history_retry")).toEqual({ command: "dictation_history_retry", args: { id: history[0].id, model: "nvidia/parakeet-tdt-0.6b-v3", engine: null } }));
+    await waitFor(() => expect(invocations.find(call => call.command === "dictation_history_retry")).toEqual({ command: "dictation_history_retry", args: { id: history[0].id, model: "nvidia/parakeet-tdt-0.6b-v3", engine: null, force: null } }));
   });
 
   it("says how long recordings are kept, and says so plainly when they are not", () => {
@@ -266,6 +302,7 @@ describe("DictationHistoryCard", () => {
         // Retry starts over with the preferred model, even after a fallback.
         model: DEFAULT_DICTATION_SETTINGS.model,
         engine: null,
+        force: null,
       },
     });
   });

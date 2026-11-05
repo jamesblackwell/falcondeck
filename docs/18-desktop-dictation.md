@@ -198,7 +198,7 @@ Requesting 16 kHz Int16 from `AVCaptureAudioFileOutput` does not guarantee the
 CAF says so. On 5 Nov 2026 a 120 s take from the Studio Display Microphone was
 exported as 44.1 kHz. CoreAudio's log shows the 16 kHz Int16 converter set up as
 usual, and the M4A's frame count at 3 bytes per frame equals exactly 120 s of
-16 kHz Int16. So the CAF held good samples under a `desc` chunk naming the
+16 kHz Int16. So the CAF held 16 kHz Int16 bytes under a `desc` chunk naming the
 device's 44.1 kHz 24-bit format. A 30 Oct take has the same signature and implies
 200 s by the same arithmetic, though its device and session log no longer exist.
 
@@ -206,8 +206,15 @@ Each pair of 24-bit frames reads as noise in one and a sample's high byte in the
 other, so a normal take at -35 dBFS came out as -10 dBFS full-band noise, about
 65 kbps, and a quarter of its true length. Rebuilding that CAF from a good take
 gives 44.1 kHz, 63 kbps and -9.5 dBFS against the real take's 44.1 kHz, 65 kbps
-and -10 dBFS. AAC then destroys what was left: the real M4As cannot be
-recovered, but the CAF never needed to be lost, because its samples were intact.
+and -10 dBFS. AAC then destroys what was left, so the real M4As cannot be
+recovered.
+
+The samples were probably not perfectly aligned either. Both damaged M4As swap
+which 24-bit frames are noisy every 88,000 or 133,000 bytes or so, 34 and 57
+times, and a clean mislabel through the same export never does. That fits a
+byte slipping on a roughly 6.95 s cycle of 16 kHz audio. It is inferred from the
+M4As: no real CAF from a bad take has been kept yet, so how the bytes actually
+went wrong is unconfirmed.
 
 What makes AVFoundation write that header is unknown. Long takes alone do not
 do it: 95, 125 and 205 s captures with this exact configuration on the Zoom
@@ -216,31 +223,61 @@ audio I/O. So every finished CAF is checked, whatever the cause:
 
 - Its `desc` is compared with the requested format, and up to 60 one-second
   windows are measured. A window is noise-like above 0.1 RMS with lag-1
-  correlation under 0.6; a take is noisy when 75% of its windows are. Across 39
-  real takes no window met that test, and the two damaged takes scored 97-98%.
-- A noisy take whose `desc` is wrong is reinterpreted as the requested format in
-  a copy. Only the 32 `desc` bytes change. If the copy is no longer noisy it is
-  exported, and the take carries on normally.
-- Audio in an unexpected format that is not noisy is exported as it stands. Its
-  bytes mean what the header says, so reinterpreting them would destroy it.
-- Anything still noisy is corrupted: there is no transcription, and the overlay
-  says so with no Retry. With history on, the take is filed as "Recording
-  corrupted" and new takes can start. With history off, the CAF waits on the
-  overlay's Discard.
+  correlation under 0.6; a take is noisy when 75% of at least 3 windows are, so
+  a short take is not condemned on a loud second. Across 52 real takes none was
+  noisy, and the two damaged takes scored 97-98%.
+- The length is compared too, because a quiet take can be mislabelled without
+  sounding noisy. A take is mislabelled when its data bytes / 32,000 match the
+  wall-clock length (within 5%, at least 0.5 s) and the length its header implies
+  does not. `recordedDuration` cannot be the reference: it reported 29 s for the
+  120 s take. Wall-clock time is unknown for a take restored after a relaunch,
+  and then only noise can trigger a repair.
+- A noisy or mislabelled take with a wrong `desc` is rewritten in a copy as the
+  requested format. Each 4 ms block is read at both byte alignments, because
+  aligned sound moves in small steps and misaligned bytes do not. A swap to the
+  other alignment held for 12 ms is a slip, and one byte is dropped there. A
+  block mostly at the rails, or with empty low bytes, is ignored, because those
+  read smoother misaligned. It takes at least two swaps, because audio with empty low bytes
+  reads as swapped throughout. The copy is used only if at most 2% of its windows
+  are noisy, and then the take carries on normally with the copy's length, for
+  history and for the transcription request. A single real slip is therefore
+  not realigned, and in a quiet take the gate may not see what is left.
+- Audio in an unexpected format whose length fits its header and is not noisy is
+  exported as it stands. Its bytes mean what the header says, so reinterpreting
+  them would destroy it.
+- Anything else noisy or mislabelled is corrupted: there is no transcription, and
+  the overlay says so with no Retry. With history on, the take is filed as
+  "Recording corrupted" and new takes can start. With history off, the CAF waits
+  on the overlay's Discard.
+- If the disk cannot take the copy, nothing is known about the audio, so the take
+  stays on the overlay's Retry rather than being called corrupted.
 
-When the format or content looked wrong and history is on, the unmodified CAF
-stays beside the M4A as `falcondeck-dictation-<uuid>.caf`, and goes when the
-entry is deleted or expires. To recover one by hand, take the bytes after the
-`data` chunk's 4-byte edit count as 16 kHz mono Int16 little-endian. With history
-off, a repaired take's CAF is deleted once exported, because "Don't keep
-recordings" has to stay true of a take that transcribed.
+Realignment is proven only on real speech with simulated slips, at the measured
+cycle: at 1/16 of normal level and above, each 2 s segment correlated 0.97 or
+better with the original and 34 slips were found out of 34. The same speech with
+no slips, quantized to 8 bits or clipped hard, gave no false slips. How a real
+CAF behaves is unknown until one is kept.
+
+Whenever the CAF's format is not the requested one, the unmodified CAF stays
+beside the M4A as `falcondeck-dictation-<uuid>.caf`. With history on it goes when
+the entry is deleted or expires. To recover one by hand, take the bytes after the
+`data` chunk's 4-byte edit count as 16 kHz mono Int16 little-endian, and expect
+to realign byte parity segment by segment.
+
+This applies with history off too, and that has a privacy consequence: while
+such a take is pending, "Don't keep recordings" does not hold for it. Its raw
+audio sits unencrypted in the temporary directory, surviving a relaunch, until
+the take transcribes or is discarded. A take that transcribes is then deleted as
+usual. A repaired copy lives only for its export; a stranded one is swept after
+an hour whatever the retention setting.
 
 Every take logs to the unified log (subsystem `com.falcondeck.desktop`,
 category `dictation-capture`): device name, device format at start and end, CAF
 format, data bytes, expected, recorded and elapsed seconds, noise share and the
-verdict. Default-level unified logs here can age out within hours, so anomalous
-takes also append that line to `~/.falcondeck/logs/dictation-capture.log`. No
-audio content is logged.
+verdict, including any slips. Default-level unified logs here can age out within
+hours, so anomalous takes also append that line to
+`~/.falcondeck/logs/dictation-capture.log` (mode 0600, rotated to `.1` past
+256 KB). No audio content is logged.
 
 ## Optional Parakeet
 
@@ -381,7 +418,8 @@ moving durable conversation state into the desktop shell.
 
 Recording history retries start with the configured preferred cloud model,
 not the fallback model that may have produced the bad transcript. Local
-Parakeet entries continue to retry locally unless a cloud model is selected.
+Parakeet entries continue to retry locally unless a cloud model is selected, and
+while the Voice setting is Parakeet so does every entry, Apple takes included.
 
 When Parakeet is downloaded, the Retry using list offers **Parakeet on this Mac
 (local)** for every recording. That choice sends `engine: "parakeet"` to
@@ -399,6 +437,12 @@ transcript so it is not lost, but shows it under "Earlier attempt, not a
 confirmed result", with the copy button renamed to match. Rows flagged corrupted
 offer no Retry. Older recordings are decoded before each retry, which flags
 damaged ones instead of sending them to an engine.
+
+The corruption check can be wrong, so with Parakeet downloaded a corrupted row
+offers **Try anyway**. It sends `force: true`, which the command honours only on
+the local route, and a transcript clears the corrupted mark. Without Parakeet
+the row has no retry at all, because nothing may push a suspect take to the
+cloud.
 
 Cloud history retries send `no_fallback: true` to `/api/speech/transcribe`
 (and the equivalent `speech.transcribe` RPC). The daemon uses exactly the
