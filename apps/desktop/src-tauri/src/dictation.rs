@@ -344,6 +344,7 @@ unsafe extern "C" {
     #[cfg(test)]
     fn fd_dictation_test_recording_duration_is_usable(duration_seconds: f64) -> bool;
     fn fd_dictation_recording_looks_corrupted(path: *const std::ffi::c_char) -> bool;
+    fn fd_dictation_best_capture_reading(path: *const std::ffi::c_char) -> *mut std::ffi::c_char;
     #[cfg(test)]
     fn fd_dictation_test_capture_check_contract() -> i32;
     #[cfg(test)]
@@ -1013,6 +1014,33 @@ async fn recording_looks_corrupted(_path: &Path) -> bool {
     false
 }
 
+/// What "Try anyway" should read: the kept raw capture, repaired if that helps.
+/// `None` when there is no usable one, which leaves the M4A.
+#[cfg(target_os = "macos")]
+async fn best_capture_reading(raw: PathBuf) -> Option<PathBuf> {
+    if !raw.is_file() {
+        return None;
+    }
+    let raw = CString::new(raw.to_string_lossy().as_bytes()).ok()?;
+    tauri::async_runtime::spawn_blocking(move || unsafe {
+        let value = fd_dictation_best_capture_reading(raw.as_ptr());
+        if value.is_null() {
+            return None;
+        }
+        let best = CStr::from_ptr(value).to_string_lossy().into_owned();
+        fd_dictation_free_string(value);
+        Some(PathBuf::from(best))
+    })
+    .await
+    .ok()
+    .flatten()
+}
+
+#[cfg(not(target_os = "macos"))]
+async fn best_capture_reading(_raw: PathBuf) -> Option<PathBuf> {
+    None
+}
+
 /// Transcribes a kept recording again, optionally with a different model or
 /// engine. This is the whole reason recordings are kept: a transcript that came
 /// back wrong is worth another attempt, and re-recording is not.
@@ -1038,7 +1066,8 @@ pub async fn dictation_history_retry(
         model,
         &config.model,
     )?;
-    if !overrides_corruption_check(force.unwrap_or(false), &route) {
+    let overridden = overrides_corruption_check(force.unwrap_or(false), &route);
+    if !overridden {
         if entry.capture_corrupted {
             return Err(CORRUPTED_RECORDING_MESSAGE.into());
         }
@@ -1058,12 +1087,22 @@ pub async fn dictation_history_retry(
         RetryRoute::Cloud(model) => ("open_router", model),
     };
     let result = if attempt_provider == PARAKEET_ENGINE {
-        crate::parakeet::transcribe(&app, &path)
+        let raw = dictation_history::raw_capture_path(&path);
+        let source = if overridden {
+            best_capture_reading(raw.clone()).await
+        } else {
+            None
+        };
+        let result = crate::parakeet::transcribe(&app, source.as_deref().unwrap_or(&path))
             .await
             .map(|text| Transcription {
                 text,
                 model: model.clone(),
-            })
+            });
+        if let Some(copy) = source.filter(|source| *source != raw) {
+            let _ = tokio::fs::remove_file(copy).await;
+        }
+        result
     } else {
         let daemon_url = config
             .daemon_url

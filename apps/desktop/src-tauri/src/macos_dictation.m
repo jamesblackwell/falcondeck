@@ -556,12 +556,16 @@ static BOOL FDWriteRepairedCopy(NSURL *url, NSURL *copy, const FDCafLayout *layo
   return [rebuilt writeToURL:copy options:0 error:nil];
 }
 
+static NSURL *FDRepairedCopyURL(NSURL *url) {
+  return [[url URLByDeletingPathExtension]
+      URLByAppendingPathExtension:@"repaired.caf"];
+}
+
 // Writes a corrected copy of `url` and keeps it only if it decodes almost free
 // of noise, so a partly repaired take never reaches an engine. Alignment is
 // checked first because this noise test cannot see slips in a quiet take.
 static NSURL *FDRepairedCopy(NSURL *url, const FDCafLayout *layout, FDCaptureCheck *check) {
-  NSURL *copy = [[url URLByDeletingPathExtension]
-      URLByAppendingPathExtension:@"repaired.caf"];
+  NSURL *copy = FDRepairedCopyURL(url);
   NSUInteger slips = 0;
   if (!FDWriteRepairedCopy(url, copy, layout, &slips)) {
     [NSFileManager.defaultManager removeItemAtURL:copy error:nil];
@@ -575,6 +579,25 @@ static NSURL *FDRepairedCopy(NSURL *url, const FDCafLayout *layout, FDCaptureChe
   }
   [NSFileManager.defaultManager removeItemAtURL:copy error:nil];
   return nil;
+}
+
+// For a writer overriding the check: the raw capture read the best available
+// way, without the repair gate. The M4A cannot do this, because it was exported
+// under the bad header. Returns `url`, or a repaired copy the caller deletes.
+static NSURL *FDBestReadingOfCapture(NSURL *url) {
+  FDCafLayout layout = {0};
+  if (!FDReadCafLayout(url, &layout)) return nil;
+  if (FDCafIsRequestedFormat(&layout) || layout.formatID != kAudioFormatLinearPCM) {
+    return url;
+  }
+  NSURL *copy = FDRepairedCopyURL(url);
+  NSUInteger slips = 0;
+  if (FDWriteRepairedCopy(url, copy, &layout, &slips) && FDRecordingIsReadable(copy) &&
+      FDNoiseShare(FDMeasureNoise(copy)) <= FDNoiseShare(FDMeasureNoise(url))) {
+    return copy;
+  }
+  [NSFileManager.defaultManager removeItemAtURL:copy error:nil];
+  return url;
 }
 
 static BOOL FDLengthsAgree(double seconds, double elapsedSeconds) {
@@ -3165,6 +3188,10 @@ static BOOL FDRecordingIsReadable(NSURL *url) {
   NSString *attempt = [text copy];
   dispatch_async(dispatch_get_main_queue(), ^{
     if ([self pasteText:attempt attemptTargetedFirst:YES]) {
+      // PASTE_FAILED left the take here, so with history off nothing else will.
+      if (!self.retainRecordings && self.recordingURL) {
+        FDRemoveRecording(self.recordingURL);
+      }
       [self setRetainedRecordingURL:nil provider:0];
       FDEmit(FDEventCompleted, attempt);
     } else {
@@ -3408,6 +3435,14 @@ bool fd_dictation_recording_looks_corrupted(const char *path) {
     if (!path) return false;
     NSString *value = [NSString stringWithUTF8String:path];
     return value && FDAudioLooksCorrupted([NSURL fileURLWithPath:value]);
+  }
+}
+
+char *fd_dictation_best_capture_reading(const char *path) {
+  @autoreleasepool {
+    NSString *value = path ? [NSString stringWithUTF8String:path] : nil;
+    NSURL *best = value ? FDBestReadingOfCapture([NSURL fileURLWithPath:value]) : nil;
+    return best ? strdup(best.path.UTF8String) : NULL;
   }
 }
 
@@ -3719,6 +3754,20 @@ int32_t fd_dictation_test_capture_check_contract(void) {
           ![[NSData dataWithContentsOfURL:caf] isEqual:before]) {
         failure = 14;
       }
+    }
+
+    // 19. Overriding the check reads the raw capture, repaired but ungated.
+    if (!failure) {
+      NSMutableData *partly = [voice mutableCopy];
+      [partly replaceBytesInRange:NSMakeRange(partly.length / 2, partly.length / 2)
+                        withBytes:[noise subdataWithRange:NSMakeRange(0, partly.length / 2)].bytes];
+      FDTestWriteCaf(caf, partly, 44100, 24, NO);
+      NSURL *best = FDBestReadingOfCapture(caf);
+      AVAudioFile *read = best ? [[AVAudioFile alloc] initForReading:best error:nil] : nil;
+      BOOL repaired = ![best isEqual:caf] && read.fileFormat.sampleRate == FDCaptureSampleRate;
+      if (![best isEqual:caf]) [NSFileManager.defaultManager removeItemAtURL:best error:nil];
+      FDTestWriteCaf(caf, noise, 16000, 16, NO);
+      if (!repaired || ![FDBestReadingOfCapture(caf) isEqual:caf]) failure = 19;
     }
 
     // 15. A short take is not condemned on a couple of windows.

@@ -121,7 +121,7 @@ export function DictationHistoryCard({
     try {
       const updated = tryAnyway
         ? await retryDictationHistoryEntry(entry.id, undefined, "parakeet", true)
-        : retryLocally
+        : retryLocally || (settings.provider === "parakeet" && !retryModel)
           ? await retryDictationHistoryEntry(entry.id, undefined, "parakeet")
           : await retryDictationHistoryEntry(entry.id, retryModel || (defaultRetryIsLocal(entry) ? undefined : settings.model));
       setEntries((current) =>

@@ -420,6 +420,8 @@ Recording history retries start with the configured preferred cloud model,
 not the fallback model that may have produced the bad transcript. Local
 Parakeet entries continue to retry locally unless a cloud model is selected, and
 while the Voice setting is Parakeet so does every entry, Apple takes included.
+The card names the engine outright in that case, because a rejected
+`configure_dictation` would leave Rust's copy of the setting out of date.
 
 When Parakeet is downloaded, the Retry using list offers **Parakeet on this Mac
 (local)** for every recording. That choice sends `engine: "parakeet"` to
@@ -440,7 +442,10 @@ damaged ones instead of sending them to an engine.
 
 The corruption check can be wrong, so with Parakeet downloaded a corrupted row
 offers **Try anyway**. It sends `force: true`, which the command honours only on
-the local route, and a transcript clears the corrupted mark. Without Parakeet
+the local route, and a transcript clears the corrupted mark. The M4A was exported
+under the bad header, so when the raw CAF is still there Parakeet reads that
+instead: repaired without the 2% gate, unless the repair is noisier than the CAF
+as it stands. Without Parakeet
 the row has no retry at all, because nothing may push a suspect take to the
 cloud.
 

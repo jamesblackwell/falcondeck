@@ -113,7 +113,7 @@ fn owns_recording(temp_dir: &Path, path: &Path) -> bool {
         )
 }
 
-fn raw_capture_path(path: &Path) -> PathBuf {
+pub fn raw_capture_path(path: &Path) -> PathBuf {
     path.with_extension(RAW_CAPTURE_EXTENSION)
 }
 

@@ -215,7 +215,20 @@ describe("DictationHistoryCard", () => {
     const retry = await screen.findByRole("button", { name: "Retry" });
     expect(retry).toBeEnabled();
     fireEvent.click(retry);
-    await waitFor(() => expect(retryCalls()).toEqual([{ command: "dictation_history_retry", args: { id: history[0].id, model: null, engine: null, force: null } }]));
+    // Named outright: Rust's copy of the Voice setting may have been rejected.
+    await waitFor(() => expect(retryCalls()).toEqual([{ command: "dictation_history_retry", args: { id: history[0].id, model: null, engine: "parakeet", force: null } }]));
+  });
+
+  it("lets a chosen cloud model override Voice being Parakeet", async () => {
+    writeDictationSettings({ ...DEFAULT_DICTATION_SETTINGS, provider: "parakeet", model: "cloud/preferred" });
+    history = [entry({ provider: "system", model: null })];
+    retryResult = () => ({ ...history[0], attemptProvider: "open_router", text: "Cloud", error: null });
+    vi.spyOn(globalThis, "fetch").mockResolvedValueOnce(new Response(JSON.stringify([{ id: "cloud/other", name: "Other" }])));
+    render(<DictationHistoryCard baseUrl="http://127.0.0.1:1" onToast={() => {}} />);
+    await screen.findByRole("option", { name: "Other" });
+    fireEvent.change(await screen.findByLabelText("Retry using"), { target: { value: "cloud/other" } });
+    fireEvent.click(await screen.findByRole("button", { name: "Retry" }));
+    await waitFor(() => expect(retryCalls()).toEqual([{ command: "dictation_history_retry", args: { id: history[0].id, model: "cloud/other", engine: null, force: null } }]));
   });
 
   it("says transcript cleanup still uses OpenRouter when the audio stays local", async () => {
