@@ -2346,7 +2346,7 @@ fn strip_ansi(line: &str) -> String {
     cleaned
 }
 
-async fn apply_provider_environment(
+pub(crate) async fn apply_provider_environment(
     command: &mut Command,
     executable: &str,
     provider_env: &HashMap<String, String>,

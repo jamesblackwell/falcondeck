@@ -21,7 +21,8 @@ use tokio::{
 };
 use uuid::Uuid;
 
-use crate::agent_binary::strip_terminal_advertising_env;
+use crate::acp::apply_provider_environment;
+use crate::agent_binary::{resolve_agent_binary, strip_terminal_advertising_env};
 use crate::error::DaemonError;
 
 mod forms;
@@ -117,13 +118,16 @@ impl OpenCodeRuntime {
             configured_args
         };
         let password = Uuid::new_v4().simple().to_string();
-        let mut command = Command::new(binary);
+        // A packaged app inherits launchd's PATH, which omits per-user installs
+        // such as ~/.opencode/bin.
+        let executable = resolve_agent_binary(binary, binary).executable;
+        let mut command = Command::new(&executable);
+        apply_provider_environment(&mut command, &executable, env).await;
         command
             .args(configured_args)
             .args(["serve", "--port", "0", "--hostname", "127.0.0.1"])
             .args(["--print-logs", "--log-level", "error"])
             .current_dir(cwd)
-            .envs(env)
             // These must follow the user-supplied environment: allowing a
             // provider config to replace either value would expose an
             // unauthenticated or unexpectedly credentialed local server.
@@ -146,7 +150,7 @@ impl OpenCodeRuntime {
         strip_terminal_advertising_env(&mut command);
         let mut child = command.spawn().map_err(|error| {
             DaemonError::Process(format!(
-                "failed to start OpenCode server '{}': {error}",
+                "failed to start OpenCode server '{}' (resolved to '{executable}'): {error}",
                 configured_command.join(" ")
             ))
         })?;
@@ -1190,6 +1194,79 @@ mod tests {
         server.abort();
         let runtime = started.expect("startup diagnostics must not block the listening banner");
         runtime.shutdown().await;
+    }
+
+    /// A packaged app has launchd's PATH, so the bare configured name must be
+    /// found in a known install location. Runs in a child process because
+    /// resolution reads HOME and PATH.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn bare_command_starts_from_a_known_location_with_launchd_path() {
+        use std::os::unix::fs::PermissionsExt;
+        if std::env::var_os("FALCONDECK_OPENCODE_SPAWN_CHILD").is_some() {
+            let cwd = std::env::var("HOME").unwrap();
+            let provider_env = HashMap::from([
+                ("OPENCODE_PASSWORD".to_string(), "from-config".to_string()),
+                ("PROVIDER_VALUE".to_string(), "from-config".to_string()),
+                ("PATH".to_string(), "/from/config".to_string()),
+            ]);
+            let error = OpenCodeRuntime::spawn(&["opencode".into(), "acp".into()], &cwd, &provider_env)
+                .await
+                .err()
+                .expect("the fake server exits without a port");
+            assert!(error.to_string().contains("exited before reporting its port"));
+            return;
+        }
+        let home = tempfile::tempdir().unwrap();
+        let bin = home.path().join(".opencode/bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        let fake = bin.join("opencode");
+        std::fs::write(
+            &fake,
+            "#!/bin/sh\n/usr/bin/printf '%s|%s|%s|%s' \"$*\" \"$PROVIDER_VALUE\" \"$PATH\" \"$OPENCODE_PASSWORD\" > \"$HOME/started\"\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "opencode::tests::bare_command_starts_from_a_known_location_with_launchd_path",
+            ])
+            .env("FALCONDECK_OPENCODE_SPAWN_CHILD", "1")
+            .env("HOME", home.path())
+            .env("PATH", "/usr/bin:/bin:/usr/sbin:/sbin")
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stdout)
+        );
+        let started = std::fs::read_to_string(home.path().join("started")).unwrap();
+        let fields: Vec<_> = started.split('|').collect();
+        assert!(fields[0].starts_with("serve --port 0"), "{started}");
+        // Provider configuration wins, except for the server credentials.
+        assert_eq!(fields[1], "from-config");
+        assert_eq!(fields[2], "/from/config");
+        assert_ne!(fields[3], "from-config");
+        assert_eq!(fields[3].len(), 32);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_missing_binary_is_named_in_the_start_error() {
+        let error = OpenCodeRuntime::spawn(
+            &["/nonexistent/opencode".into(), "acp".into()],
+            "/tmp",
+            &HashMap::new(),
+        )
+        .await
+        .err()
+        .unwrap();
+        assert!(
+            error.to_string().contains("resolved to '/nonexistent/opencode'"),
+            "{error}"
+        );
     }
 
     #[cfg(unix)]
