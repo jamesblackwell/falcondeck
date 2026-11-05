@@ -129,9 +129,15 @@ export type DictationHistoryEntry = {
   bytes: number;
   provider: DictationProvider;
   model: string | null;
+  // The engine `model` ran on, when a history retry used a different one.
+  attemptProvider: DictationProvider | null;
   text: string | null;
   error: string | null;
   audioAvailable: boolean;
+  // The audio is damaged, so no engine can transcribe it.
+  captureCorrupted: boolean;
+  // The raw capture is still on this Mac for recovery or diagnosis.
+  rawCaptureAvailable: boolean;
 };
 
 export type DictationAudioDevice = {
@@ -475,14 +481,17 @@ export async function readDictationHistory(): Promise<DictationHistoryEntry[]> {
 }
 
 // Transcribes a kept recording again, optionally with a different model.
+// `engine: "parakeet"` runs locally and never sends the audio anywhere.
 export async function retryDictationHistoryEntry(
   id: string,
   model?: string,
+  engine?: "parakeet",
 ): Promise<DictationHistoryEntry> {
   const { invoke } = await import("@tauri-apps/api/core");
   return invoke<DictationHistoryEntry>("dictation_history_retry", {
     id,
     model: model ?? null,
+    engine: engine ?? null,
   });
 }
 

@@ -1,6 +1,7 @@
 #import <AppKit/AppKit.h>
 #import <ApplicationServices/ApplicationServices.h>
 #import <AVFoundation/AVFoundation.h>
+#import <AudioToolbox/CAFFile.h>
 #import <Carbon/Carbon.h>
 #import <IOKit/hidsystem/IOLLEvent.h>
 #import <Speech/Speech.h>
@@ -238,6 +239,286 @@ static os_log_t FDPasteLog(void) {
     log = os_log_create("com.falcondeck.desktop", "dictation-paste");
   });
   return log;
+}
+
+static BOOL FDRecordingIsReadable(NSURL *url);
+
+static os_log_t FDCaptureLog(void) {
+  static os_log_t log;
+  static dispatch_once_t onceToken;
+  dispatch_once(&onceToken, ^{
+    log = os_log_create("com.falcondeck.desktop", "dictation-capture");
+  });
+  return log;
+}
+
+// The format requested in -startRecordingAsRewrite: and written to the CAF.
+static const double FDCaptureSampleRate = 16000;
+static const UInt32 FDCaptureBytesPerFrame = 2;
+// A CAF can hold good 16 kHz Int16 samples under a `desc` chunk naming the
+// device's own format. Decoded as written, each 24-bit frame's top byte is
+// half low sample bytes, so a normal take at -35 dBFS becomes -10 dBFS noise.
+// Calibrated on 39 real takes and 2 damaged ones: no one-second window of
+// speech exceeded 0.08 RMS, and audible windows kept a lag-1 correlation above
+// 0.9, while damaged windows sit near 0.3 RMS with correlation 0-0.4.
+static const double FDNoiseWindowMinimumRMS = 0.1;
+static const double FDNoiseWindowMaximumCorrelation = 0.6;
+static const double FDNoiseTakeMinimumShare = 0.75;
+// Spread across the take, so the check costs the same for a long recording.
+static const AVAudioFrameCount FDNoiseMaximumWindows = 60;
+
+typedef struct {
+  double sampleRate;
+  UInt32 formatID;
+  UInt32 formatFlags;
+  UInt32 bytesPerPacket;
+  UInt32 channels;
+  UInt32 bitsPerChannel;
+  unsigned long long descriptionOffset;
+  unsigned long long dataBytes;
+} FDCafLayout;
+
+static UInt32 FDReadBigEndian32(const uint8_t *bytes) {
+  return (UInt32)bytes[0] << 24 | (UInt32)bytes[1] << 16 |
+         (UInt32)bytes[2] << 8 | bytes[3];
+}
+
+static int64_t FDReadBigEndian64(const uint8_t *bytes) {
+  return (int64_t)((uint64_t)FDReadBigEndian32(bytes) << 32 |
+                   FDReadBigEndian32(bytes + 4));
+}
+
+// Reads the CAF's own description. AVAudioFile reports the same values, but
+// repairing the file needs to know where they live.
+static BOOL FDReadCafLayout(NSURL *url, FDCafLayout *layout) {
+  NSFileHandle *file = [NSFileHandle fileHandleForReadingFromURL:url error:nil];
+  if (!file) return NO;
+  unsigned long long size = 0;
+  if (![file seekToEndReturningOffset:&size error:nil] ||
+      ![file seekToOffset:0 error:nil]) {
+    return NO;
+  }
+  NSData *header = [file readDataUpToLength:8 error:nil];
+  if (header.length != 8 || memcmp(header.bytes, "caff", 4) != 0) return NO;
+  unsigned long long offset = 8;
+  BOOL foundDescription = NO;
+  while (offset + 12 <= size) {
+    if (![file seekToOffset:offset error:nil]) return NO;
+    NSData *chunk = [file readDataUpToLength:12 error:nil];
+    if (chunk.length != 12) return NO;
+    const uint8_t *bytes = chunk.bytes;
+    int64_t chunkSize = FDReadBigEndian64(bytes + 4);
+    unsigned long long body = offset + 12;
+    if (memcmp(bytes, "desc", 4) == 0) {
+      NSData *description = [file readDataUpToLength:32 error:nil];
+      if (description.length != 32) return NO;
+      const uint8_t *fields = description.bytes;
+      uint64_t rateBits = (uint64_t)FDReadBigEndian64(fields);
+      memcpy(&layout->sampleRate, &rateBits, sizeof(double));
+      layout->formatID = FDReadBigEndian32(fields + 8);
+      layout->formatFlags = FDReadBigEndian32(fields + 12);
+      layout->bytesPerPacket = FDReadBigEndian32(fields + 16);
+      layout->channels = FDReadBigEndian32(fields + 24);
+      layout->bitsPerChannel = FDReadBigEndian32(fields + 28);
+      layout->descriptionOffset = body;
+      foundDescription = YES;
+    } else if (memcmp(bytes, "data", 4) == 0) {
+      // A size of -1 means the writer never closed the chunk. Four bytes of
+      // edit count precede the samples.
+      unsigned long long available = size > body + 4 ? size - body - 4 : 0;
+      unsigned long long declared =
+          chunkSize > 4 ? (unsigned long long)chunkSize - 4 : available;
+      layout->dataBytes = MIN(available, declared);
+      return foundDescription;
+    }
+    if (chunkSize < 0) return NO;
+    offset = body + (unsigned long long)chunkSize;
+  }
+  return NO;
+}
+
+static BOOL FDCafIsRequestedFormat(const FDCafLayout *layout) {
+  return layout->sampleRate == FDCaptureSampleRate &&
+         layout->formatID == kAudioFormatLinearPCM && layout->channels == 1 &&
+         layout->bitsPerChannel == 16 &&
+         layout->bytesPerPacket == FDCaptureBytesPerFrame &&
+         (layout->formatFlags & kCAFLinearPCMFormatFlagIsFloat) == 0 &&
+         (layout->formatFlags & kCAFLinearPCMFormatFlagIsLittleEndian) != 0;
+}
+
+// Reports the share of sampled one-second windows that are loud and
+// uncorrelated. Speech and room noise are correlated from sample to sample;
+// damaged samples are not.
+static double FDAudioNoiseShare(NSURL *url) {
+  AVAudioFile *file = [[AVAudioFile alloc] initForReading:url error:nil];
+  if (!file || file.length <= 0) return 0;
+  double rate = file.processingFormat.sampleRate;
+  AVAudioFrameCount windowFrames = (AVAudioFrameCount)MAX(rate, 1);
+  AVAudioPCMBuffer *buffer =
+      [[AVAudioPCMBuffer alloc] initWithPCMFormat:file.processingFormat
+                                    frameCapacity:windowFrames];
+  if (!buffer) return 0;
+  AVAudioFramePosition stride =
+      MAX((AVAudioFramePosition)windowFrames, file.length / FDNoiseMaximumWindows);
+  NSUInteger windows = 0;
+  NSUInteger noisyWindows = 0;
+  for (AVAudioFramePosition start = 0; start < file.length; start += stride) {
+    file.framePosition = start;
+    if (![file readIntoBuffer:buffer frameCount:windowFrames error:nil] ||
+        buffer.frameLength < 2) {
+      break;
+    }
+    const float *samples = buffer.floatChannelData[0];
+    double energy = 0, correlation = 0, mean = 0;
+    for (AVAudioFrameCount i = 0; i < buffer.frameLength; i++) mean += samples[i];
+    mean /= buffer.frameLength;
+    double previous = samples[0] - mean;
+    energy = previous * previous;
+    for (AVAudioFrameCount i = 1; i < buffer.frameLength; i++) {
+      double sample = samples[i] - mean;
+      energy += sample * sample;
+      correlation += sample * previous;
+      previous = sample;
+    }
+    double rms = sqrt(energy / buffer.frameLength);
+    double normalized = energy > 0 ? correlation / energy : 1;
+    windows += 1;
+    if (rms > FDNoiseWindowMinimumRMS &&
+        fabs(normalized) < FDNoiseWindowMaximumCorrelation) {
+      noisyWindows += 1;
+    }
+  }
+  return windows > 0 ? (double)noisyWindows / windows : 0;
+}
+
+static BOOL FDAudioLooksCorrupted(NSURL *url) {
+  return FDAudioNoiseShare(url) >= FDNoiseTakeMinimumShare;
+}
+
+// The result of checking a finished CAF before it is compressed.
+@interface FDCaptureCheck : NSObject
+// The file to compress: the CAF itself, or a repaired copy of it.
+@property(nonatomic, strong) NSURL *exportURL;
+@property(nonatomic) BOOL formatMatched;
+@property(nonatomic) BOOL repaired;
+@property(nonatomic) BOOL corrupted;
+@property(nonatomic) double noiseShare;
+@property(nonatomic, copy) NSString *fileFormat;
+@property(nonatomic) unsigned long long dataBytes;
+@end
+
+@implementation FDCaptureCheck
+@end
+
+// Writes a copy of `url` whose description names the format the samples were
+// captured in. Only the 32 description bytes differ, and `url` is not touched.
+static NSURL *FDCopyWithRequestedFormat(NSURL *url, const FDCafLayout *layout) {
+  NSURL *copy = [[url URLByDeletingPathExtension]
+      URLByAppendingPathExtension:@"repaired.caf"];
+  [NSFileManager.defaultManager removeItemAtURL:copy error:nil];
+  if (![NSFileManager.defaultManager copyItemAtURL:url toURL:copy error:nil]) {
+    return nil;
+  }
+  union {
+    double value;
+    uint64_t bits;
+  } rate = {.value = FDCaptureSampleRate};
+  uint32_t description[8];
+  description[0] = CFSwapInt32HostToBig((uint32_t)(rate.bits >> 32));
+  description[1] = CFSwapInt32HostToBig((uint32_t)rate.bits);
+  description[2] = CFSwapInt32HostToBig(kAudioFormatLinearPCM);
+  description[3] = CFSwapInt32HostToBig(kCAFLinearPCMFormatFlagIsLittleEndian);
+  description[4] = CFSwapInt32HostToBig(FDCaptureBytesPerFrame);
+  description[5] = CFSwapInt32HostToBig(1);
+  description[6] = CFSwapInt32HostToBig(1);
+  description[7] = CFSwapInt32HostToBig(16);
+  NSFileHandle *file = [NSFileHandle fileHandleForWritingToURL:copy error:nil];
+  BOOL wrote = file && [file seekToOffset:layout->descriptionOffset error:nil] &&
+      [file writeData:[NSData dataWithBytes:description length:sizeof(description)]
+                error:nil] &&
+      [file closeAndReturnError:nil];
+  if (!wrote) {
+    [NSFileManager.defaultManager removeItemAtURL:copy error:nil];
+    return nil;
+  }
+  return copy;
+}
+
+static FDCaptureCheck *FDCheckCapture(NSURL *url) {
+  FDCaptureCheck *check = [FDCaptureCheck new];
+  check.exportURL = url;
+  FDCafLayout layout = {0};
+  BOOL parsed = FDReadCafLayout(url, &layout);
+  check.formatMatched = parsed && FDCafIsRequestedFormat(&layout);
+  check.dataBytes = layout.dataBytes;
+  check.fileFormat = parsed
+      ? [NSString stringWithFormat:@"%.0f Hz %u-bit %u ch flags=%u",
+                                   layout.sampleRate, layout.bitsPerChannel,
+                                   layout.channels, layout.formatFlags]
+      : @"unparsed";
+  check.noiseShare = FDAudioNoiseShare(url);
+  BOOL noisy = check.noiseShare >= FDNoiseTakeMinimumShare;
+  // Only a noisy take is reinterpreted: real audio in an unexpected format
+  // reads correctly as it stands, and these same bytes would be nonsense.
+  if (parsed && !check.formatMatched && noisy &&
+      layout.formatID == kAudioFormatLinearPCM) {
+    NSURL *copy = FDCopyWithRequestedFormat(url, &layout);
+    if (copy && FDRecordingIsReadable(copy) && !FDAudioLooksCorrupted(copy)) {
+      check.exportURL = copy;
+      check.repaired = YES;
+      return check;
+    }
+    if (copy) [NSFileManager.defaultManager removeItemAtURL:copy error:nil];
+  }
+  check.corrupted = noisy;
+  return check;
+}
+
+// One line per anomalous take, outside the unified log, whose default-level
+// messages can age out within hours. Holds formats and names, never audio.
+static void FDAppendCaptureAnomaly(NSString *line) {
+  NSString *directory =
+      [NSHomeDirectory() stringByAppendingPathComponent:@".falcondeck/logs"];
+  [NSFileManager.defaultManager createDirectoryAtPath:directory
+                          withIntermediateDirectories:YES
+                                           attributes:nil
+                                                error:nil];
+  NSString *path =
+      [directory stringByAppendingPathComponent:@"dictation-capture.log"];
+  if (![NSFileManager.defaultManager fileExistsAtPath:path]) {
+    [NSFileManager.defaultManager createFileAtPath:path contents:nil attributes:nil];
+  }
+  // The error-returning calls: the throwing ones would raise on a full disk,
+  // and a diagnostic must not cost the take it is describing.
+  NSFileHandle *file = [NSFileHandle fileHandleForWritingToURL:[NSURL fileURLWithPath:path]
+                                                         error:nil];
+  if (![file seekToEndReturningOffset:nil error:nil]) return;
+  [file writeData:[[line stringByAppendingString:@"\n"]
+                      dataUsingEncoding:NSUTF8StringEncoding]
+            error:nil];
+  [file closeAndReturnError:nil];
+}
+
+static NSString *FDDeviceFormatDescription(AVCaptureDevice *device) {
+  CMFormatDescriptionRef format = device.activeFormat.formatDescription;
+  const AudioStreamBasicDescription *stream =
+      format ? CMAudioFormatDescriptionGetStreamBasicDescription(format) : NULL;
+  if (!stream) return @"unknown";
+  return [NSString stringWithFormat:@"%.0f Hz %u-bit %u ch", stream->mSampleRate,
+                                    stream->mBitsPerChannel,
+                                    stream->mChannelsPerFrame];
+}
+
+// Deletes a take. A kept raw capture has no other owner once history is off or
+// the writer has discarded the recording.
+static void FDRemoveRecording(NSURL *url) {
+  [NSFileManager.defaultManager removeItemAtURL:url error:nil];
+  if (![url.pathExtension isEqualToString:@"caf"]) {
+    [NSFileManager.defaultManager
+        removeItemAtURL:[[url URLByDeletingPathExtension]
+                            URLByAppendingPathExtension:@"caf"]
+                  error:nil];
+  }
 }
 
 // The AX element and its owning PID must come from the same query. Reading the
@@ -603,6 +884,13 @@ static BOOL FDTranscriptRangeMatches(NSString *value, NSString *original, CFRang
 @property(nonatomic, strong) dispatch_source_t audioLevelTimer;
 @property(nonatomic, strong) NSURL *recordingURL;
 @property(nonatomic) NSTimeInterval recordingDurationSeconds;
+// Diagnostics for the capture check. Absent when a take is restored after a
+// relaunch.
+@property(nonatomic, copy) NSString *captureDeviceName;
+@property(nonatomic, copy) NSString *captureDeviceStartFormat;
+@property(nonatomic, copy) NSString *captureDeviceEndFormat;
+@property(nonatomic) NSTimeInterval captureStartedAt;
+@property(nonatomic) NSTimeInterval captureElapsedSeconds;
 @property(nonatomic, strong) SFSpeechRecognizer *speechRecognizer
     API_AVAILABLE(macos(10.15));
 @property(nonatomic, strong) SFSpeechRecognitionTask *speechTask
@@ -1417,6 +1705,11 @@ static CGEventRef FDEventTapCallback(CGEventTapProxy proxy, CGEventType type,
   self.recordingProvider = self.provider;
   self.recording = YES;
   self.fileOutputActive = NO;
+  self.captureDeviceName = device.localizedName;
+  self.captureDeviceStartFormat = FDDeviceFormatDescription(device);
+  self.captureDeviceEndFormat = nil;
+  self.captureElapsedSeconds = 0;
+  self.captureStartedAt = NSProcessInfo.processInfo.systemUptime;
   // Surface the overlay before the microphone is warm: -startRunning blocks
   // for hundreds of milliseconds and previously gated all recording feedback.
   FDEmit(FDEventRecording, rewrite ? @"rewrite" : @"");
@@ -1611,6 +1904,12 @@ static CGEventRef FDEventTapCallback(CGEventTapProxy proxy, CGEventType type,
     self.stopping = NO;
     NSURL *url = self.recordingURL ?: outputFileURL;
     NSTimeInterval duration = CMTimeGetSeconds(output.recordedDuration);
+    self.captureElapsedSeconds =
+        NSProcessInfo.processInfo.systemUptime - self.captureStartedAt;
+    AVCaptureDeviceInput *input = (AVCaptureDeviceInput *)finishedSession.inputs.firstObject;
+    if ([input isKindOfClass:AVCaptureDeviceInput.class]) {
+      self.captureDeviceEndFormat = FDDeviceFormatDescription(input.device);
+    }
     if (self.cancelling) {
       self.cancelling = NO;
       if (self.discarding) {
@@ -1690,6 +1989,35 @@ static BOOL FDRecordingIsReadable(NSURL *url) {
   return file && file.length > 0 && file.processingFormat.sampleRate > 0;
 }
 
+// Logged for every take, and to a file when it looks wrong, so the next
+// mismatch shows which device and format produced it.
+- (void)logCaptureCheck:(FDCaptureCheck *)check url:(NSURL *)url {
+  NSString *summary = [NSString stringWithFormat:
+      @"take=%@ device=\"%@\" deviceFormatStart=\"%@\" deviceFormatEnd=\"%@\" "
+      @"fileFormat=\"%@\" dataBytes=%llu expectedSeconds=%.2f recordedSeconds=%.2f "
+      @"elapsedSeconds=%.2f noiseShare=%.2f repaired=%d corrupted=%d",
+      url.URLByDeletingPathExtension.lastPathComponent,
+      self.captureDeviceName ?: @"unknown",
+      self.captureDeviceStartFormat ?: @"unknown",
+      self.captureDeviceEndFormat ?: @"unknown", check.fileFormat, check.dataBytes,
+      check.dataBytes / (FDCaptureSampleRate * FDCaptureBytesPerFrame),
+      self.recordingDurationSeconds, self.captureElapsedSeconds,
+      check.noiseShare, check.repaired, check.corrupted];
+  BOOL anomalous = !check.formatMatched || check.corrupted;
+  os_log_with_type(FDCaptureLog(), anomalous ? OS_LOG_TYPE_ERROR : OS_LOG_TYPE_DEFAULT,
+                   "capture %{public}@", summary);
+  if (anomalous) {
+    NSString *time = [NSISO8601DateFormatter stringFromDate:NSDate.date
+                                                   timeZone:NSTimeZone.localTimeZone
+                                              formatOptions:NSISO8601DateFormatWithInternetDateTime];
+    FDAppendCaptureAnomaly([NSString stringWithFormat:@"%@ %@", time, summary]);
+  }
+}
+
+- (void)reportCorruptedRecording {
+  FDEmit(FDEventCorruptedRetained, @"");
+}
+
 - (void)prepareRecordingForTranscription:(NSURL *)url provider:(FDProvider)provider {
   if (!FDRecordingIsReadable(url)) {
     FDEmit(FDEventUnreadableRetained,
@@ -1698,15 +2026,34 @@ static BOOL FDRecordingIsReadable(NSURL *url) {
   }
   if ([url.pathExtension isEqualToString:@"caf"]) {
     if (self.recordingExport) return;
+    FDCaptureCheck *check = FDCheckCapture(url);
+    [self logCaptureCheck:check url:url];
+    // Without history nothing would ever expire the kept raw capture, so a
+    // damaged take stays on the overlay's Discard instead of being filed.
+    if (check.corrupted && !self.retainRecordings) {
+      [self reportCorruptedRecording];
+      return;
+    }
+    NSURL *source = check.exportURL;
+    void (^removeRepairedCopy)(void) = ^{
+      if (![source isEqual:url]) {
+        [NSFileManager.defaultManager removeItemAtURL:source error:nil];
+      }
+    };
     NSURL *compressedURL = [[url URLByDeletingPathExtension]
         URLByAppendingPathExtension:@"m4a"];
     // A previous interrupted export may have left an incomplete destination.
     [NSFileManager.defaultManager removeItemAtURL:compressedURL error:nil];
     AVAssetExportSession *export = [[AVAssetExportSession alloc]
-        initWithAsset:[AVURLAsset URLAssetWithURL:url options:nil]
+        initWithAsset:[AVURLAsset URLAssetWithURL:source options:nil]
            presetName:AVAssetExportPresetAppleM4A];
     if (!export) {
-      FDEmit(FDEventFailedRetained, @"Could not prepare the saved audio. Retry transcription to try again.");
+      removeRepairedCopy();
+      if (check.corrupted) {
+        [self reportCorruptedRecording];
+      } else {
+        FDEmit(FDEventFailedRetained, @"Could not prepare the saved audio. Retry transcription to try again.");
+      }
       return;
     }
     export.outputURL = compressedURL;
@@ -1714,6 +2061,7 @@ static BOOL FDRecordingIsReadable(NSURL *url) {
     self.recordingExport = export;
     [export exportAsynchronouslyWithCompletionHandler:^{
       dispatch_async(dispatch_get_main_queue(), ^{
+        removeRepairedCopy();
         if (self.recordingExport != export || ![self.recordingURL isEqual:url]) {
           [NSFileManager.defaultManager removeItemAtURL:compressedURL error:nil];
           return;
@@ -1721,13 +2069,26 @@ static BOOL FDRecordingIsReadable(NSURL *url) {
         self.recordingExport = nil;
         if (export.status != AVAssetExportSessionStatusCompleted ||
             !FDRecordingIsReadable(compressedURL)) {
-          FDEmit(FDEventFailedRetained, @"Could not prepare the saved audio. Retry transcription to try again.");
+          if (check.corrupted) {
+            [self reportCorruptedRecording];
+          } else {
+            FDEmit(FDEventFailedRetained, @"Could not prepare the saved audio. Retry transcription to try again.");
+          }
           return;
         }
         NSTimeInterval duration = self.recordingDurationSeconds;
         [self setRetainedRecordingURL:compressedURL provider:provider];
         [self setRecordingDurationSeconds:duration];
-        [NSFileManager.defaultManager removeItemAtURL:url error:nil];
+        if (check.corrupted) {
+          // The take stays as an M4A so history can list it, and the CAF stays
+          // because it is the only copy with intact samples.
+          FDEmit(FDEventCorruptedRetained, compressedURL.path);
+          return;
+        }
+        BOOL keepRawCapture = self.retainRecordings && !check.formatMatched;
+        if (!keepRawCapture) {
+          [NSFileManager.defaultManager removeItemAtURL:url error:nil];
+        }
         [self prepareRecordingForTranscription:compressedURL provider:provider];
       });
     }];
@@ -1830,9 +2191,7 @@ static BOOL FDRecordingIsReadable(NSURL *url) {
         FDEmit(FDEventPasteFailed, text);
         return;
       }
-      if (!self.retainRecordings) {
-        [[NSFileManager defaultManager] removeItemAtURL:url error:nil];
-      }
+      if (!self.retainRecordings) FDRemoveRecording(url);
       [self setRetainedRecordingURL:nil provider:0];
       FDEmit(FDEventCompleted, text);
     });
@@ -2593,7 +2952,7 @@ static BOOL FDRecordingIsReadable(NSURL *url) {
     self.speechRecognizer = nil;
   }
   if (self.recordingURL) {
-    [[NSFileManager defaultManager] removeItemAtURL:self.recordingURL error:nil];
+    FDRemoveRecording(self.recordingURL);
     [self setRetainedRecordingURL:nil provider:0];
   }
   [self clearRewriteSession];
@@ -2602,7 +2961,7 @@ static BOOL FDRecordingIsReadable(NSURL *url) {
 
 - (void)markLastRecordingCompleted {
   if (!self.retainRecordings && self.recordingURL) {
-    [[NSFileManager defaultManager] removeItemAtURL:self.recordingURL error:nil];
+    FDRemoveRecording(self.recordingURL);
   }
   [self setRetainedRecordingURL:nil provider:0];
   [self clearRewriteSession];
@@ -2652,6 +3011,16 @@ static BOOL FDRecordingIsReadable(NSURL *url) {
     FDEmit(FDEventUnreadableRetained,
            @"The app stopped before this recording was finalized. Its audio cannot be read. Discard it to record again.");
     return;
+  }
+  if ([url.pathExtension isEqualToString:@"caf"]) {
+    FDCaptureCheck *check = FDCheckCapture(url);
+    if (![check.exportURL isEqual:url]) {
+      [NSFileManager.defaultManager removeItemAtURL:check.exportURL error:nil];
+    }
+    if (check.corrupted) {
+      [self reportCorruptedRecording];
+      return;
+    }
   }
   FDEmit(FDEventFailedRetained,
          @"A recording is waiting to be transcribed. Retry or discard it from "
@@ -2835,6 +3204,170 @@ bool fd_dictation_test_recovery_audio_contract(void) {
     [NSFileManager.defaultManager removeItemAtURL:caf error:nil];
     [NSFileManager.defaultManager removeItemAtURL:invalid error:nil];
     return result;
+  }
+}
+
+bool fd_dictation_recording_looks_corrupted(const char *path) {
+  @autoreleasepool {
+    if (!path) return false;
+    NSString *value = [NSString stringWithUTF8String:path];
+    return value && FDAudioLooksCorrupted([NSURL fileURLWithPath:value]);
+  }
+}
+
+typedef NS_ENUM(int32_t, FDTestSignal) {
+  FDTestSignalVoiceLike = 0,
+  FDTestSignalWhiteNoise = 1,
+};
+
+static NSData *FDTestSamples(FDTestSignal signal, NSUInteger frames, double rate) {
+  NSMutableData *data = [NSMutableData dataWithLength:frames * sizeof(int16_t)];
+  int16_t *samples = data.mutableBytes;
+  uint32_t seed = 0x2545F491;
+  for (NSUInteger i = 0; i < frames; i++) {
+    seed ^= seed << 13;
+    seed ^= seed >> 17;
+    seed ^= seed << 5;
+    if (signal == FDTestSignalWhiteNoise) {
+      samples[i] = (int16_t)(seed & 0xFFFF);
+      continue;
+    }
+    // A quiet harmonic stack, near the -35 dBFS of a real take, with dither.
+    double t = i / rate;
+    double envelope = 0.5 + 0.5 * sin(2 * M_PI * 3 * t);
+    double voice = sin(2 * M_PI * 140 * t) + 0.6 * sin(2 * M_PI * 420 * t) +
+                   0.3 * sin(2 * M_PI * 1100 * t);
+    samples[i] = (int16_t)(envelope * voice * 900 + (int)(seed % 21) - 10);
+  }
+  return data;
+}
+
+// Writes `samples` verbatim under whatever description it is told to claim.
+static BOOL FDTestWriteCaf(NSURL *url, NSData *samples, double rate, UInt32 bits) {
+  union {
+    double value;
+    uint64_t bits;
+  } claimedRate = {.value = rate};
+  uint32_t bytesPerFrame = bits / 8;
+  uint32_t description[8] = {
+      CFSwapInt32HostToBig((uint32_t)(claimedRate.bits >> 32)),
+      CFSwapInt32HostToBig((uint32_t)claimedRate.bits),
+      CFSwapInt32HostToBig(kAudioFormatLinearPCM),
+      CFSwapInt32HostToBig(kCAFLinearPCMFormatFlagIsLittleEndian),
+      CFSwapInt32HostToBig(bytesPerFrame), CFSwapInt32HostToBig(1),
+      CFSwapInt32HostToBig(1), CFSwapInt32HostToBig(bits)};
+  NSMutableData *file = [NSMutableData dataWithBytes:"caff\0\1\0\0" length:8];
+  uint64_t descriptionSize = CFSwapInt64HostToBig(sizeof(description));
+  [file appendBytes:"desc" length:4];
+  [file appendBytes:&descriptionSize length:8];
+  [file appendBytes:description length:sizeof(description)];
+  uint64_t dataSize = CFSwapInt64HostToBig(samples.length + 4);
+  uint32_t editCount = 0;
+  [file appendBytes:"data" length:4];
+  [file appendBytes:&dataSize length:8];
+  [file appendBytes:&editCount length:4];
+  [file appendData:samples];
+  return [file writeToURL:url atomically:NO];
+}
+
+// No microphone: returns 0, or the number of the first case that failed. Each
+// fixture is byte-built, because the bad header cannot be produced on demand.
+int32_t fd_dictation_test_capture_check_contract(void) {
+  @autoreleasepool {
+    NSString *directory = [NSTemporaryDirectory()
+        stringByAppendingPathComponent:NSUUID.UUID.UUIDString];
+    [NSFileManager.defaultManager createDirectoryAtPath:directory
+                            withIntermediateDirectories:YES
+                                             attributes:nil
+                                                  error:nil];
+    NSURL *caf = [NSURL fileURLWithPath:[directory stringByAppendingPathComponent:@"take.caf"]];
+    NSData *voice = FDTestSamples(FDTestSignalVoiceLike, 16000 * 5, 16000);
+    NSData *noise = FDTestSamples(FDTestSignalWhiteNoise, 16000 * 5, 16000);
+    int32_t failure = 0;
+
+    // 1. The requested format needs no help.
+    FDTestWriteCaf(caf, voice, 16000, 16);
+    FDCaptureCheck *check = FDCheckCapture(caf);
+    if (!check.formatMatched || check.repaired || check.corrupted ||
+        ![check.exportURL isEqual:caf]) {
+      failure = 1;
+    }
+
+    // 2. Good samples under the device's description, as in the real takes.
+    if (!failure) {
+      FDTestWriteCaf(caf, voice, 44100, 24);
+      NSData *before = [NSData dataWithContentsOfURL:caf];
+      check = FDCheckCapture(caf);
+      AVAudioFile *fixed = check.repaired
+          ? [[AVAudioFile alloc] initForReading:check.exportURL error:nil]
+          : nil;
+      if (check.formatMatched || !check.repaired || check.corrupted ||
+          fixed.fileFormat.sampleRate != 16000 || fixed.length != 16000 * 5 ||
+          ![[NSData dataWithContentsOfURL:caf] isEqual:before]) {
+        failure = 2;
+      }
+      // The repaired copy holds the original samples, not a resampled guess.
+      if (!failure) {
+        NSData *repaired = [NSData dataWithContentsOfURL:check.exportURL];
+        NSData *tail = [repaired subdataWithRange:NSMakeRange(
+            repaired.length - voice.length, voice.length)];
+        if (![tail isEqual:voice]) failure = 3;
+      }
+      if (![check.exportURL isEqual:caf]) {
+        [NSFileManager.defaultManager removeItemAtURL:check.exportURL error:nil];
+      }
+    }
+
+    // 4. Real audio in an unexpected format stays as it is.
+    if (!failure) {
+      FDTestWriteCaf(caf, FDTestSamples(FDTestSignalVoiceLike, 44100 * 5, 44100), 44100, 16);
+      check = FDCheckCapture(caf);
+      if (check.formatMatched || check.repaired || check.corrupted ||
+          ![check.exportURL isEqual:caf]) {
+        failure = 4;
+      }
+    }
+
+    // 5. Noise in the right format cannot be rescued by a new description.
+    if (!failure) {
+      FDTestWriteCaf(caf, noise, 16000, 16);
+      check = FDCheckCapture(caf);
+      if (!check.formatMatched || check.repaired || !check.corrupted) failure = 5;
+    }
+
+    // 6. Nor can noise that stays noise once reinterpreted.
+    if (!failure) {
+      FDTestWriteCaf(caf, noise, 44100, 24);
+      check = FDCheckCapture(caf);
+      NSString *copy = [directory stringByAppendingPathComponent:@"take.repaired.caf"];
+      if (check.repaired || !check.corrupted ||
+          [NSFileManager.defaultManager fileExistsAtPath:copy]) {
+        failure = 6;
+      }
+    }
+
+    // 7. A damaged M4A from before this check is caught by the retry guard.
+    if (!failure) {
+      FDTestWriteCaf(caf, voice, 44100, 24);
+      NSURL *m4a = [NSURL fileURLWithPath:[directory stringByAppendingPathComponent:@"take.m4a"]];
+      AVAssetExportSession *export = [[AVAssetExportSession alloc]
+          initWithAsset:[AVURLAsset URLAssetWithURL:caf options:nil]
+             presetName:AVAssetExportPresetAppleM4A];
+      export.outputURL = m4a;
+      export.outputFileType = AVFileTypeAppleM4A;
+      dispatch_semaphore_t done = dispatch_semaphore_create(0);
+      [export exportAsynchronouslyWithCompletionHandler:^{
+        dispatch_semaphore_signal(done);
+      }];
+      dispatch_semaphore_wait(done, dispatch_time(DISPATCH_TIME_NOW, 20 * NSEC_PER_SEC));
+      if (!FDRecordingIsReadable(m4a) ||
+          !fd_dictation_recording_looks_corrupted(m4a.path.UTF8String)) {
+        failure = 7;
+      }
+    }
+
+    [NSFileManager.defaultManager removeItemAtPath:directory error:nil];
+    return failure;
   }
 }
 

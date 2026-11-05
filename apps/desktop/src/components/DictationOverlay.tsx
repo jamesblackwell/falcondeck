@@ -14,6 +14,7 @@ type DictationState =
   | "failed"
   | "copy_failed"
   | "unrecoverable"
+  | "corrupted"
   | "recovered"
   | "fixed"
   | "fix_failed"
@@ -209,7 +210,7 @@ export function DictationOverlay({
     };
   }, [subscribeToEvents]);
 
-  const unrecoverable = event.state === "unrecoverable";
+  const unrecoverable = event.state === "unrecoverable" || event.state === "corrupted";
   const recovered = event.state === "recovered";
   const fixed = event.state === "fixed";
   const readyToPaste = recovered || fixed;
@@ -268,6 +269,7 @@ export function DictationOverlay({
     cancelled: "Cancelled",
     recovered: rewrite ? "Rewrite copied" : "Transcript copied",
     unrecoverable: "Recording interrupted",
+    corrupted: "Recording looks corrupted",
     copy_failed: "Couldn't copy",
     failed: pasteFailed ? "Couldn't paste" : rewrite ? "Rewrite needs attention" : "Dictation needs attention",
   }[event.state];

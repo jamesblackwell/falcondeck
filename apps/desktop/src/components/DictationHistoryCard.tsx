@@ -21,10 +21,13 @@ import {
   type DictationHistoryEntry,
 } from "../dictation";
 import { isTauriDesktop } from "../api";
+import { useParakeetStatus } from "../parakeet";
 import {
+  LOCAL_PARAKEET_RETRY,
   formatRecordedAt,
   formatRecordingLength,
   retentionSummary,
+  transcriptionEngineLabel,
 } from "./dictation-history-utils";
 import type { DictationSetupToast } from "./DictationSetup";
 
@@ -53,6 +56,7 @@ export function DictationHistoryCard({
   const [entries, setEntries] = useState<DictationHistoryEntry[]>([]);
   const [models, setModels] = useState<SpeechModel[]>([]);
   const [retryModel, setRetryModel] = useState("");
+  const { status: parakeetStatus } = useParakeetStatus();
   const [busyId, setBusyId] = useState<string | null>(null);
   const [now, setNow] = useState(0);
 
@@ -106,10 +110,15 @@ export function DictationHistoryCard({
       .catch(() => setModels([]));
   }, [baseUrl]);
 
+  const localParakeetInstalled = Boolean(parakeetStatus?.installed);
+  const retryLocally = retryModel === LOCAL_PARAKEET_RETRY;
+
   const retry = async (entry: DictationHistoryEntry) => {
     setBusyId(entry.id);
     try {
-      const updated = await retryDictationHistoryEntry(entry.id, retryModel || (entry.provider === "parakeet" ? undefined : settings.model));
+      const updated = retryLocally
+        ? await retryDictationHistoryEntry(entry.id, undefined, "parakeet")
+        : await retryDictationHistoryEntry(entry.id, retryModel || (entry.provider === "parakeet" ? undefined : settings.model));
       setEntries((current) =>
         current.map((item) => (item.id === updated.id ? updated : item)),
       );
@@ -220,7 +229,7 @@ export function DictationHistoryCard({
           <Field
             label="Retry using"
             htmlFor="dictation-retry-model"
-            hint="Retries use the preferred model without automatic fallback. Parakeet recordings stay local unless you choose an OpenRouter model."
+            hint="Parakeet on this Mac keeps the audio local. OpenRouter models, including OpenRouter's Parakeet, send it to the cloud and never fall back to another model."
           >
             <select
               id="dictation-retry-model"
@@ -228,15 +237,24 @@ export function DictationHistoryCard({
               value={retryModel}
               onChange={(event) => setRetryModel(event.target.value)}
             >
-              <option value="">Default retry (Parakeet stays local)</option>
-              {retryModel && !models.some((model) => model.id === retryModel) ? (
-                <option value={retryModel}>{retryModel}</option>
-              ) : null}
-              {models.map((model) => (
-                <option key={model.id} value={model.id}>
-                  {model.name}
+              <option value="">Default retry (Parakeet recordings stay local)</option>
+              {/* Stays listed if the model is removed while selected: quietly
+                  dropping the choice would send audio to the cloud instead. */}
+              {localParakeetInstalled || retryLocally ? (
+                <option value={LOCAL_PARAKEET_RETRY}>
+                  {localParakeetInstalled ? "Parakeet on this Mac (local)" : "Parakeet on this Mac (not downloaded)"}
                 </option>
-              ))}
+              ) : null}
+              <optgroup label="OpenRouter (cloud)">
+                {retryModel && !retryLocally && !models.some((model) => model.id === retryModel) ? (
+                  <option value={retryModel}>{retryModel}</option>
+                ) : null}
+                {models.map((model) => (
+                  <option key={model.id} value={model.id}>
+                    {model.name}
+                  </option>
+                ))}
+              </optgroup>
             </select>
           </Field>
         ) : null}
@@ -251,7 +269,15 @@ export function DictationHistoryCard({
           />
         ) : (
           <ul className="flex flex-col gap-2">
-            {entries.map((entry) => (
+            {entries.map((entry) => {
+              const failed = Boolean(entry.error);
+              const corrupted = entry.captureCorrupted;
+              const retriesLocally = retryLocally || (entry.provider === "parakeet" && !retryModel);
+              const retryBlocked = retryLocally && !localParakeetInstalled;
+              // A failed retry keeps the text it could not replace. It belongs
+              // to an earlier attempt and must not read as this one's result.
+              const earlierAttempt = failed && Boolean(entry.text?.trim()) ? entry.text : null;
+              return (
               <li
                 key={entry.id}
                 className="rounded-[var(--fd-radius-lg)] border border-border-subtle bg-surface-2 px-3.5 py-3"
@@ -262,36 +288,56 @@ export function DictationHistoryCard({
                   </span>
                   <span aria-hidden="true">·</span>
                   <span>{formatRecordingLength(entry.durationSeconds)}</span>
-                  {entry.model ? (
-                    <Badge variant="default">{entry.model}</Badge>
-                  ) : (
-                    <Badge variant="default">{entry.provider === "parakeet" ? "Parakeet" : entry.provider === "open_router" ? "OpenRouter" : "Apple Speech"}</Badge>
-                  )}
-                  {entry.error ? (
+                  <Badge variant="default">{transcriptionEngineLabel(entry)}</Badge>
+                  {corrupted ? (
+                    <Badge variant="danger" dot>
+                      Recording corrupted
+                    </Badge>
+                  ) : failed ? (
                     <Badge variant="danger" dot>
                       Failed
                     </Badge>
+                  ) : null}
+                  {entry.rawCaptureAvailable && !corrupted ? (
+                    <Badge variant="default">Recovered capture</Badge>
                   ) : null}
                   {!entry.audioAvailable ? (
                     <Badge variant="warning">Audio deleted</Badge>
                   ) : null}
                 </div>
-                <p
-                  className={
-                    entry.error && !entry.text
-                      ? "mt-1.5 text-[length:var(--fd-text-sm)] text-danger"
-                      : "mt-1.5 line-clamp-3 text-[length:var(--fd-text-sm)] text-fg-primary"
-                  }
-                >
-                  {entry.text !== null && !entry.text.trim() && !entry.error ? "Words removed by dictionary" : entry.text ?? entry.error ?? "No transcript"}
-                </p>
+                {failed ? (
+                  <p className="mt-1.5 text-[length:var(--fd-text-sm)] text-danger">
+                    {earlierAttempt && !corrupted ? `This retry failed: ${entry.error}` : entry.error}
+                  </p>
+                ) : (
+                  <p className="mt-1.5 line-clamp-3 text-[length:var(--fd-text-sm)] text-fg-primary">
+                    {entry.text !== null && !entry.text.trim() ? "Words removed by dictionary" : entry.text ?? "No transcript"}
+                  </p>
+                )}
+                {corrupted ? (
+                  <p className="mt-1 text-[length:var(--fd-text-xs)] text-fg-muted">
+                    Retrying won't help, so please dictate it again.
+                    {entry.rawCaptureAvailable
+                      ? " The raw capture stays on this Mac until this recording expires."
+                      : ""}
+                  </p>
+                ) : null}
+                {earlierAttempt ? (
+                  <div className="mt-1.5 rounded-[var(--fd-radius-md)] bg-surface-1 px-2.5 py-2">
+                    <p className="text-[length:var(--fd-text-xs)] font-medium text-fg-muted">
+                      Earlier attempt, not a confirmed result
+                    </p>
+                    <p className="mt-0.5 line-clamp-3 text-[length:var(--fd-text-sm)] text-fg-secondary">
+                      {earlierAttempt}
+                    </p>
+                  </div>
+                ) : null}
                 <div className="mt-2.5 flex flex-wrap items-center gap-2">
+                  {corrupted ? null : (
                   <Button
                     size="sm"
                     variant="secondary"
-                    disabled={
-                      !entry.audioAvailable || busyId !== null || (!baseUrl && (entry.provider !== "parakeet" || Boolean(retryModel)))
-                    }
+                    disabled={!entry.audioAvailable || busyId !== null || retryBlocked || (!baseUrl && !retriesLocally)}
                     onClick={() => void retry(entry)}
                   >
                     {busyId === entry.id ? (
@@ -301,13 +347,14 @@ export function DictationHistoryCard({
                     )}
                     Retry
                   </Button>
+                  )}
                   {entry.text ? (
                     <Button
                       size="sm"
                       variant="ghost"
                       onClick={() => void copy(entry)}
                     >
-                      Copy transcript
+                      {earlierAttempt ? "Copy earlier attempt" : "Copy transcript"}
                     </Button>
                   ) : null}
                   <Button
@@ -320,7 +367,8 @@ export function DictationHistoryCard({
                   </Button>
                 </div>
               </li>
-            ))}
+              );
+            })}
           </ul>
         )
       ) : null}

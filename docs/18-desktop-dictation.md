@@ -109,8 +109,9 @@ AVFoundation, ApplicationServices, and Speech. The bridge:
 2. records 16 kHz mono PCM audio from the selected `AVCaptureDevice` to a
    unique CAF file in the macOS temporary directory. CAF remains readable if
    the process exits before the writer closes. Before transcription, the
-   bridge exports a compressed M4A, validates it, persists its recovery path,
-   then deletes the CAF source;
+   bridge checks the capture (see Capture check), exports a compressed M4A,
+   validates it, persists its recovery path, then deletes the CAF source
+   unless the capture looked wrong;
 3. sends lifecycle events to the Rust shell;
 4. transcribes with `SFSpeechURLRecognitionRequest`, or hands the temporary file
    to Rust for the daemon's OpenRouter endpoint;
@@ -191,6 +192,56 @@ An orderly quit stops capture without treating it as a cancellation.
   writes replace the index atomically; a delayed pending write cannot erase a
   completed outcome. Abandoned CAF files are swept after the retention window.
 
+## Capture check
+
+Requesting 16 kHz Int16 from `AVCaptureAudioFileOutput` does not guarantee the
+CAF says so. On 5 Nov 2026 a 120 s take from the Studio Display Microphone was
+exported as 44.1 kHz. CoreAudio's log shows the 16 kHz Int16 converter set up as
+usual, and the M4A's frame count at 3 bytes per frame equals exactly 120 s of
+16 kHz Int16. So the CAF held good samples under a `desc` chunk naming the
+device's 44.1 kHz 24-bit format. A 30 Oct take has the same signature and implies
+200 s by the same arithmetic, though its device and session log no longer exist.
+
+Each pair of 24-bit frames reads as noise in one and a sample's high byte in the
+other, so a normal take at -35 dBFS came out as -10 dBFS full-band noise, about
+65 kbps, and a quarter of its true length. Rebuilding that CAF from a good take
+gives 44.1 kHz, 63 kbps and -9.5 dBFS against the real take's 44.1 kHz, 65 kbps
+and -10 dBFS. AAC then destroys what was left: the real M4As cannot be
+recovered, but the CAF never needed to be lost, because its samples were intact.
+
+What makes AVFoundation write that header is unknown. Long takes alone do not
+do it: 95, 125 and 205 s captures with this exact configuration on the Zoom
+virtual device all closed correctly, as did takes while another client started
+audio I/O. So every finished CAF is checked, whatever the cause:
+
+- Its `desc` is compared with the requested format, and up to 60 one-second
+  windows are measured. A window is noise-like above 0.1 RMS with lag-1
+  correlation under 0.6; a take is noisy when 75% of its windows are. Across 39
+  real takes no window met that test, and the two damaged takes scored 97-98%.
+- A noisy take whose `desc` is wrong is reinterpreted as the requested format in
+  a copy. Only the 32 `desc` bytes change. If the copy is no longer noisy it is
+  exported, and the take carries on normally.
+- Audio in an unexpected format that is not noisy is exported as it stands. Its
+  bytes mean what the header says, so reinterpreting them would destroy it.
+- Anything still noisy is corrupted: there is no transcription, and the overlay
+  says so with no Retry. With history on, the take is filed as "Recording
+  corrupted" and new takes can start. With history off, the CAF waits on the
+  overlay's Discard.
+
+When the format or content looked wrong and history is on, the unmodified CAF
+stays beside the M4A as `falcondeck-dictation-<uuid>.caf`, and goes when the
+entry is deleted or expires. To recover one by hand, take the bytes after the
+`data` chunk's 4-byte edit count as 16 kHz mono Int16 little-endian. With history
+off, a repaired take's CAF is deleted once exported, because "Don't keep
+recordings" has to stay true of a take that transcribed.
+
+Every take logs to the unified log (subsystem `com.falcondeck.desktop`,
+category `dictation-capture`): device name, device format at start and end, CAF
+format, data bytes, expected, recorded and elapsed seconds, noise share and the
+verdict. Default-level unified logs here can age out within hours, so anomalous
+takes also append that line to `~/.falcondeck/logs/dictation-capture.log`. No
+audio content is logged.
+
 ## Optional Parakeet
 
 Settings → Voice → Transcription has three engines: Apple Speech (default),
@@ -212,7 +263,9 @@ Recording starts prewarming the installed model; inference loads local files
 without network fallback. Optional transcript cleanup and voice rewrite still
 use OpenRouter, as they do with Apple Speech. Failed or retained Parakeet
 recordings retry locally by default. Explicitly choosing an OpenRouter retry
-model sends that retained audio to the chosen cloud provider.
+model sends that retained audio to the chosen cloud provider. Once the model is
+downloaded, Recording history offers Parakeet on this Mac for any recording,
+whichever engine made it, without changing the Voice setting.
 
 Advanced options set the idle lifetime to 0–60 minutes (15 by default). Zero
 unloads after each operation and skips recording-start prewarming. Disabling
@@ -317,12 +370,36 @@ moving durable conversation state into the desktop shell.
     export it again. An older incomplete M4A should offer Discard without Retry.
 16. Deny a clipboard write after a successful retry; confirm the transcript
     stays visible with a working Copy action rather than reporting ASR failure.
+17. Dictate for more than two minutes on the Studio Display Microphone, several
+    times. Confirm each transcript is right, and check
+    `~/.falcondeck/logs/dictation-capture.log` for any repaired take.
+18. With OpenRouter selected and Parakeet downloaded, choose Parakeet on this Mac
+    in Retry using, disconnect the network, and retry a recording; confirm the
+    transcript arrives and the badge reads Parakeet on this Mac.
 
 ## History retry model selection
 
 Recording history retries start with the configured preferred cloud model,
 not the fallback model that may have produced the bad transcript. Local
 Parakeet entries continue to retry locally unless a cloud model is selected.
+
+When Parakeet is downloaded, the Retry using list offers **Parakeet on this Mac
+(local)** for every recording. That choice sends `engine: "parakeet"` to
+`dictation_history_retry`, which goes through `crate::parakeet::transcribe` and
+never reads the daemon URL, so the audio stays local even if the recording was
+made through OpenRouter and even if a local attempt fails. Optional transcript
+cleanup still sends the resulting text to OpenRouter, as it does for dictation.
+A one-off retry does not change the recording's `provider`, so its default retry
+route stays the same; `attemptProvider` records where the latest attempt ran.
+
+OpenRouter also offers `nvidia/parakeet-tdt-0.6b-v3`, the same id as the local
+model, so history badges name the engine (`Parakeet on this Mac`, `OpenRouter:
+<model>`) rather than showing a bare id. A failed retry keeps the earlier
+transcript so it is not lost, but shows it under "Earlier attempt, not a
+confirmed result", with the copy button renamed to match. Rows flagged corrupted
+offer no Retry. Older recordings are decoded before each retry, which flags
+damaged ones instead of sending them to an engine.
+
 Cloud history retries send `no_fallback: true` to `/api/speech/transcribe`
 (and the equivalent `speech.transcribe` RPC). The daemon uses exactly the
 requested model and returns its error or empty-transcription failure rather
