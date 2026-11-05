@@ -2,10 +2,16 @@ use falcondeck_core::{ToolActivityKind, ToolMcpAppContext};
 use serde_json::{Value, json};
 
 use super::*;
-use crate::app::conversation_helpers::{sanitize_conversation_item, tool_display_metadata};
+use crate::app::conversation_helpers::{
+    build_ai_thread_title_prompt, build_refresh_ai_thread_title_prompt, sanitize_conversation_item,
+    tool_display_metadata,
+};
 use falcondeck_core::ConversationItem;
 
 const CREATE: &str = "mcp__falcondeck-extensions__falcondeck_create_thread";
+/// Real ids are `<harness>-thread-<32 hex>`.
+const THREAD_ONE: &str = "claude-thread-1106205bfe054a9c989fb55868d1c6ee";
+const THREAD_TWO: &str = "claude-thread-33a3f3222da64e50a061a042016d642e";
 const CREATED: &str =
     "# Created thread\n\n- Id: claude-thread-861795\n- Parent: claude-thread-b492\n";
 
@@ -193,17 +199,41 @@ fn a_bot_name_is_the_subject_until_the_result_resolves_it() {
 }
 
 #[test]
+fn a_bot_named_like_a_thread_is_still_a_bot() {
+    let message = "mcp__falcondeck-extensions__falcondeck_message_thread";
+    for name in [
+        "thread-keeper",
+        "my-thread-bot",
+        "thread-abc",
+        "bad-thread-abc",
+    ] {
+        let args = json!({"thread_id": name, "message": "hello"});
+        let (title, link) = present(message, "running", Some(args), None);
+        assert_eq!(title, format!("Messaging {name}"));
+        assert_eq!(link, None, "{name}");
+    }
+    let view = "mcp__falcondeck-extensions__falcondeck_view_thread";
+    for id in [THREAD_ONE, "01a1a173-f7d2-7c72-89ac-37a4c501446b"] {
+        let args = json!({"thread_id": id});
+        assert!(
+            present(view, "running", Some(args), None).1.is_some(),
+            "{id}"
+        );
+    }
+}
+
+#[test]
 fn only_a_single_summary_target_links() {
     let summary = "mcp__falcondeck-extensions__falcondeck_thread_summary";
-    let one = json!({"thread_ids": ["claude-thread-1"]});
-    let many = json!({"thread_ids": ["claude-thread-1", "claude-thread-2"]});
+    let one = json!({"thread_ids": [THREAD_ONE]});
+    let many = json!({"thread_ids": [THREAD_ONE, THREAD_TWO]});
     assert!(present(summary, "completed", Some(one), None).1.is_some());
     assert!(present(summary, "completed", Some(many), None).1.is_none());
 }
 
 #[test]
 fn errored_calls_read_as_failed_and_do_not_link() {
-    let args = json!({"title": "Fix login", "thread_id": "claude-thread-1"});
+    let args = json!({"title": "Fix login", "thread_id": THREAD_ONE});
     let (flagged, link) = present(CREATE, "failed", Some(args.clone()), Some("boom"));
     assert_eq!(flagged, "Couldn't create task: Fix login");
     assert_eq!(link, None);
@@ -217,7 +247,7 @@ fn errored_calls_read_as_failed_and_do_not_link() {
 
 #[test]
 fn calls_that_never_ran_take_no_tense_and_no_link() {
-    let args = json!({"thread_id": "claude-thread-1"});
+    let args = json!({"thread_id": THREAD_ONE});
     let interrupt = "mcp__falcondeck-extensions__falcondeck_view_thread";
     for status in ["denied", "interrupted"] {
         let (title, link) = present(interrupt, status, Some(args.clone()), None);
@@ -417,4 +447,31 @@ fn old_payloads_without_a_link_still_deserialize_and_new_ones_stay_additive() {
     assert_eq!(old.thread_link, None);
     let encoded = serde_json::to_value(ToolCallDisplay::default()).unwrap();
     assert!(encoded.get("thread_link").is_none());
+}
+
+#[test]
+fn the_ai_title_prompt_never_sees_friendly_titles_or_their_arguments() {
+    let args = json!({"title": "Secret brief text"});
+    let (title, _) = present(CREATE, "completed", Some(args.clone()), None);
+    let items = [ConversationItem::ToolCall {
+        id: "tool".to_string(),
+        title: title.clone(),
+        tool_kind: CREATE.to_string(),
+        status: "completed".to_string(),
+        output: None,
+        exit_code: None,
+        display: Box::default(),
+        detail: claude_tool_detail(CREATE, Some(&args)).map(Box::new),
+        created_at: chrono::Utc::now(),
+        completed_at: None,
+    }];
+    let prompts = [
+        build_ai_thread_title_prompt(&items, "style"),
+        build_refresh_ai_thread_title_prompt(&items, "Current name", "style"),
+    ];
+    for prompt in prompts {
+        assert!(prompt.contains("Tool: falcondeck-extensions · falcondeck create thread"));
+        assert!(!prompt.contains(&title));
+        assert!(!prompt.contains("Secret brief text"));
+    }
 }

@@ -1424,7 +1424,10 @@ function ToolCallMessage({
   const threadTarget = toolThreadTarget(item, threadTitle);
   const { label: describedLabel, filePath, labelNamesFile } = useMemo(() => {
     const described = describeToolCall(item);
-    const wantsPath = touchesFile || activityKind === "read";
+    // Kinds ending in `_thread` classify as reads, but a task's name is not a
+    // file the call opened.
+    const wantsPath =
+      (touchesFile || activityKind === "read") && !toolCallReadsAsProse(item);
     return {
       label: described.label,
       filePath: wantsPath

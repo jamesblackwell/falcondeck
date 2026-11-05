@@ -18,7 +18,7 @@ use tracing::debug;
 use uuid::Uuid;
 
 use super::mcp_presentation::{
-    is_mcp_tool_kind, mcp_name_title, present_tool_call, tool_search_title,
+    agent_tool_title, is_mcp_tool_kind, mcp_name_title, present_tool_call, tool_search_title,
 };
 
 const RENDERABLE_IMAGE_URL_PREFIXES: [&str; 5] =
@@ -1806,9 +1806,18 @@ The conversation may have moved on from that name. Write a title that reflects t
             ConversationItem::AssistantMessage { text, .. } => {
                 Some(format!("Assistant: {}", truncate_preview(text, 900)))
             }
-            ConversationItem::ToolCall { title, output, .. } => Some(format!(
+            ConversationItem::ToolCall {
+                title,
+                tool_kind,
+                output,
+                detail,
+                ..
+            } => Some(format!(
                 "Tool: {}{}",
-                truncate_preview(title, 120),
+                truncate_preview(
+                    &agent_tool_title(title, tool_kind, detail.as_deref()),
+                    120
+                ),
                 output
                     .as_deref()
                     .filter(|value| !value.trim().is_empty())

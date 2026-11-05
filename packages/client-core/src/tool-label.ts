@@ -133,6 +133,12 @@ export function describeToolCall(item: ToolCallLabelSource): ToolCallDescription
     return { label: notable.label, path: null, namesPath: false }
   }
 
+  // A sentence may quote a task's name. A path in it is not what the call
+  // touched, so it stays whole and links to nothing.
+  if (toolCallReadsAsProse(item)) {
+    return { label: item.title.trim(), path: null, namesPath: false }
+  }
+
   const title = unwrapAgentCommand(item.title.trim())
   const url = URL_TITLE_RE.exec(title)
   if (url) {

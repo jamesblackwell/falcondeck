@@ -28,6 +28,13 @@ static RESULT_THREAD_ID_RE: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"(?m)^\s*-\s*Id:\s*`?([A-Za-z0-9._:-]+)`?\s*$").expect("valid thread id regex")
 });
 
+static THREAD_ID_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(
+        r"(?i)^(?:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}|[a-z0-9]+-thread-[0-9a-f]{16,})$",
+    )
+    .expect("valid thread id shape regex")
+});
+
 /// Where the call has got to, as far as its wording is concerned.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum McpPhase {
@@ -329,15 +336,11 @@ fn subject_text(value: &str) -> Option<String> {
 }
 
 /// A task id rather than a bot's name. `falcondeck_message_thread` takes
-/// either, and a bot name must not become a link that finds nothing.
+/// either, and a bot name must not become a link that finds nothing, so this
+/// accepts only the two shapes daemons mint: a UUID, or `<harness>-thread-<hex>`.
+/// Anything else stays plain text, which is the safe way to be wrong.
 fn is_thread_id(value: &str) -> bool {
-    let well_formed = !value.is_empty()
-        && value
-            .chars()
-            .all(|character| character.is_ascii_alphanumeric() || "._:-".contains(character));
-    let lower = value.to_ascii_lowercase();
-    let uuid_shaped = lower.len() >= 32 && lower.chars().all(|c| c.is_ascii_hexdigit() || c == '-');
-    well_formed && (uuid_shaped || lower.contains("thread"))
+    THREAD_ID_RE.is_match(value)
 }
 
 fn argument_thread_id(arguments: Option<&Value>) -> Option<&str> {

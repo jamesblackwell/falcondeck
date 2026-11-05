@@ -250,10 +250,18 @@ describe('MCP tool rows', () => {
     expect(toolCallReadsAsProse({ title: 'git status', tool_kind: 'commandExecution' })).toBe(false)
   })
 
-  it('leaves a friendly title that quotes a URL or path readable', () => {
-    expect(toolCallLabel({ title: 'Created task: Fix src/app.ts' })).toBe(
-      'Created task: Fix src/app.ts',
-    )
+  it('leaves a friendly title that quotes a URL or path whole', () => {
+    const kind = 'mcp__falcondeck-extensions__falcondeck_create_thread'
+    for (const title of [
+      'Create task: Fix apps/desktop/src/App.tsx',
+      'Created task: read https://example.com/docs/page.html',
+    ]) {
+      expect(describeToolCall({ title, tool_kind: kind })).toEqual({
+        label: title,
+        path: null,
+        namesPath: false,
+      })
+    }
   })
 
   it('gives agents the tool that ran, not the friendly title', () => {
