@@ -97,6 +97,7 @@ mod claude_startup_measurement;
 mod cloud_threads;
 mod computer_use;
 pub(crate) mod conversation_helpers;
+pub(crate) mod mcp_presentation;
 mod extension_events;
 mod extension_host;
 mod extensions;

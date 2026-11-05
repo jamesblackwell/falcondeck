@@ -643,6 +643,35 @@ the authoritative result only when its detail is opened. History from older
 daemons omits the field and falls back to the same conservative raw-result scan;
 the summary never replaces, reorders, or truncates the provider result.
 
+### MCP row labels
+
+`crates/falcondeck-daemon/src/app/mcp_presentation.rs` is the one place MCP calls
+get their wording. `sanitize_conversation_item` runs it on every tool call before
+the call enters daemon state, and Claude session hydration calls it directly.
+It rebuilds the title from the kind, detail, lifecycle and output, so it can run
+again whenever the status moves. FalconDeck's own tools read as sentences
+("Creating task: X", "Created task: X", "Couldn't create task: X", plain "Create
+task" if denied or interrupted); other servers read as `Sentry · Search issues`;
+`select:` tool searches read as "Loading tool: Create task".
+
+`title` stays a plain string, so older clients and the Swift apps show the words
+without any change. `display.thread_link` is additive: the task id, the words
+before its name, and the name the call used. Desktop, remote web and Expo swap in
+the task's current title and add an "Open task" link beside the row's toggle.
+Failed, denied and interrupted calls carry no link, and neither does a call with
+no id. Connector rows Codex already names from `appContext` are left alone.
+
+Claude's stream carries only a wire name, so Claude MCP and ToolSearch calls now
+get a synthesized `Mcp` or `Dynamic` detail to keep the raw tool and arguments in
+the expanded view. Argument strings there are capped at 4,000 characters; the
+session file has the rest.
+
+The words are for people. Classification ignores MCP titles, because a task's
+name can contain "npm test". `agent_tool_title` (daemon) and `toolCallAgentTitle`
+(client handoffs) keep giving other agents the wire name. OpenCode and ACP rows
+with an `mcp__` name get the plain form ("Create task"), since those paths have
+no detail to link from.
+
 Opening a provider call prioritizes its error, ordered result content, and
 artifacts before technical invocation arguments. Arguments remain lossless and
 copyable behind a nested accessible disclosure whose closed label reports a

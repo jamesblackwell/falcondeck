@@ -963,6 +963,17 @@ export type ToolCallDisplay = {
   /** Present only when a detail page truncated `output`; the untruncated
    * byte length. `thread.item` returns the full text. */
   output_total_bytes?: number | null;
+  /** The task this call acted on. Absent on older daemons and on calls that
+   * name no task, failed, or never ran; `title` reads in full either way. */
+  thread_link?: ToolThreadLink | null;
+};
+
+export type ToolThreadLink = {
+  thread_id: string;
+  /** Words before the task's name, such as `Created task:`. */
+  lead: string;
+  /** Name the call gave the task. Prefer the task's current title. */
+  subject: string | null;
 };
 
 export type ToolCommandAction = {

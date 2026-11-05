@@ -2724,6 +2724,7 @@ fn extracts_nested_claude_tool_use_and_result_events() {
             id: "toolu_123".to_string(),
             title: Some("Find files".to_string()),
             tool_kind: Some("Glob".to_string()),
+            input: None,
             status: "running".to_string(),
             output: None,
             images: Vec::new()
@@ -2747,6 +2748,7 @@ fn extracts_nested_claude_tool_use_and_result_events() {
             id: "toolu_123".to_string(),
             title: None,
             tool_kind: None,
+            input: None,
             status: "completed".to_string(),
             output: Some("match".to_string()),
             images: Vec::new()
@@ -2843,11 +2845,11 @@ fn tools_that_are_not_file_work_still_say_what_they_did() {
     // action it is.
     assert_eq!(
         title("mcp__claude_ai_Gmail__search_threads", json!({})).as_deref(),
-        Some("Gmail · search threads")
+        Some("Gmail · Search threads")
     );
     assert_eq!(
         title("mcp__notion__search", json!({})).as_deref(),
-        Some("notion · search")
+        Some("Notion · Search")
     );
 
     // A todo update is plan bookkeeping, so it must not earn the bordered card

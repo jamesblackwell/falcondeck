@@ -6421,6 +6421,11 @@ function AppInner() {
                   variant: "danger",
                 });
               }}
+              threadTitle={(threadId) => {
+                const host = remoteHosts.hostForWorkspace(selectedWorkspaceId);
+                const source = host ? host.snapshot : snapshot;
+                return resolveThreadLinkTarget(threadId, source?.threads ?? [])?.title;
+              }}
             >
             <ExtensionAgentToolUiProvider
               apps={extensionApps}

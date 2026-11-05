@@ -29,13 +29,15 @@ use crate::agent_binary::{
 };
 use crate::app::agent_helpers::attachment_reference_text;
 use crate::app::agent_helpers::{
-    append_claude_text_delta, claude_tool_result_image_items, extract_claude_assistant_message_id,
-    extract_claude_text_chunk, extract_claude_thinking_chunk, extract_claude_tool_event,
-    extract_claude_user_message_images, extract_claude_user_message_text,
-    merge_claude_assistant_text,
+    ClaudeToolInputs, append_claude_text_delta, claude_tool_result_image_items,
+    extract_claude_assistant_message_id, extract_claude_text_chunk, extract_claude_thinking_chunk,
+    extract_claude_tool_event, extract_claude_user_message_images,
+    extract_claude_user_message_text, merge_claude_assistant_text, resolve_claude_tool_identity,
 };
 use crate::app::conversation_helpers::tool_display_metadata;
+use crate::app::mcp_presentation::present_tool_call;
 use crate::error::DaemonError;
+use falcondeck_core::ToolCallDetail;
 
 mod auth_cache;
 mod history;
@@ -1995,6 +1997,7 @@ fn parse_session_file(path: &Path) -> Option<ParsedSessionFile> {
     let mut items = Vec::new();
     let mut item_index = HydratedItemIndex::default();
     let mut tool_identity = HashMap::<String, (String, String)>::new();
+    let mut tool_inputs = ClaudeToolInputs::default();
 
     for line in reader.lines().map_while(Result::ok) {
         let Ok(value) = serde_json::from_str::<Value>(&line) else {
@@ -2075,21 +2078,15 @@ fn parse_session_file(path: &Path) -> Option<ParsedSessionFile> {
         }
         if let Some(tool_event) = extract_claude_tool_event(&value) {
             let known_identity = tool_identity.get(&tool_event.id).cloned();
-            let title = tool_event
-                .title
-                .or_else(|| known_identity.as_ref().map(|(title, _)| title.clone()))
-                .unwrap_or_else(|| "Claude tool".to_string());
-            let tool_kind = tool_event
-                .tool_kind
-                .or_else(|| {
-                    known_identity
-                        .as_ref()
-                        .map(|(_, tool_kind)| tool_kind.clone())
-                })
-                .unwrap_or_else(|| title.clone());
+            let (title, tool_kind) = resolve_claude_tool_identity(
+                tool_event.title,
+                tool_event.tool_kind,
+                known_identity.as_ref(),
+            );
             if tool_event.status == "running" {
                 tool_identity.insert(tool_event.id.clone(), (title.clone(), tool_kind.clone()));
             }
+            tool_inputs.record(&tool_event.id, &tool_kind, tool_event.input.as_ref());
             upsert_hydrated_tool_call(
                 &mut items,
                 &mut item_index.tool_calls,
@@ -2098,6 +2095,7 @@ fn parse_session_file(path: &Path) -> Option<ParsedSessionFile> {
                 &tool_kind,
                 &tool_event.status,
                 tool_event.output.as_deref(),
+                tool_inputs.detail(&tool_event.id, &tool_kind),
                 created_at,
             );
             for image_item in
@@ -2294,9 +2292,12 @@ fn upsert_hydrated_tool_call(
     tool_kind: &str,
     status: &str,
     output: Option<&str>,
+    detail: Option<ToolCallDetail>,
     created_at: DateTime<Utc>,
 ) {
-    let display = tool_display_metadata(title, tool_kind, status, None, output);
+    let mut title = title.to_string();
+    let mut display = tool_display_metadata(&title, tool_kind, status, None, output);
+    present_tool_call(&mut title, tool_kind, output, &mut display, detail.as_ref());
     let completed_at = if status == "running" {
         None
     } else {
@@ -2309,15 +2310,17 @@ fn upsert_hydrated_tool_call(
         status: existing_status,
         output: existing_output,
         display: existing_display,
+        detail: existing_detail,
         completed_at: existing_completed_at,
         ..
     }) = item_index.get(id).and_then(|index| items.get_mut(*index))
     {
-        *existing_title = title.to_string();
+        *existing_title = title;
         *existing_kind = tool_kind.to_string();
         *existing_status = status.to_string();
         *existing_output = output.map(ToOwned::to_owned);
         **existing_display = display;
+        *existing_detail = detail.map(Box::new);
         *existing_completed_at = completed_at;
         return;
     }
@@ -2788,6 +2791,102 @@ mod tests {
         cache.prune_missing_files();
         assert!(cache.entries.is_empty());
         assert_eq!(cache.source_bytes, 0);
+    }
+
+    #[test]
+    fn hydrated_mcp_calls_read_as_people_would_say_them() {
+        let dir = tempfile::tempdir().unwrap();
+        let session_path = dir.path().join("session.jsonl");
+        let line = |kind: &str, content: Value| {
+            json!({
+                "session_id": "11111111-1111-4111-8111-111111111111",
+                "cwd": "/tmp/project",
+                "type": kind,
+                "message": { "id": "msg_1", "role": kind, "content": content },
+                "created_at": "2026-03-19T10:00:01Z"
+            })
+            .to_string()
+        };
+        let raw = "mcp__falcondeck-extensions__falcondeck_create_thread";
+        fs::write(
+            &session_path,
+            [
+                line(
+                    "user",
+                    json!([{ "type": "text", "text": "Start a task" }]),
+                ),
+                line(
+                    "assistant",
+                    json!([{
+                        "type": "tool_use",
+                        "id": "toolu_search",
+                        "name": "ToolSearch",
+                        "input": { "query": format!("select:{raw}") }
+                    }, {
+                        "type": "tool_use",
+                        "id": "toolu_create",
+                        "name": raw,
+                        "input": { "title": "Fix login", "prompt": "Fix it" }
+                    }]),
+                ),
+                line(
+                    "assistant",
+                    json!([{
+                        "type": "tool_use",
+                        "id": "toolu_create",
+                        "name": raw,
+                        "input": { "title": "Fix login", "prompt": "Fix it" }
+                    }]),
+                ),
+                json!({
+                    "session_id": "11111111-1111-4111-8111-111111111111",
+                    "cwd": "/tmp/project",
+                    "type": "user",
+                    "message": { "role": "user", "content": [{
+                        "type": "tool_result",
+                        "tool_use_id": "toolu_create",
+                        "content": "{\"ok\":true,\"result\":\"# Created thread\\n\\n- Id: claude-thread-9\\n\"}"
+                    }] },
+                    "toolUseResult": "{\"ok\":true,\"result\":\"# Created thread\\n\\n- Id: claude-thread-9\\n\"}",
+                    "created_at": "2026-03-19T10:00:02Z"
+                })
+                .to_string(),
+            ]
+            .join("\n"),
+        )
+        .unwrap();
+
+        let hydrated = hydrate_thread_from_file(&session_path, "/tmp/project").unwrap();
+        let created = hydrated
+            .items
+            .iter()
+            .find_map(|item| match item {
+                ConversationItem::ToolCall {
+                    id,
+                    title,
+                    display,
+                    detail,
+                    tool_kind,
+                    ..
+                } if id == "toolu_create" => Some((title, display, detail, tool_kind)),
+                _ => None,
+            })
+            .expect("the MCP call hydrates");
+        assert_eq!(created.0, "Created task: Fix login");
+        assert_eq!(created.3, raw);
+        assert_eq!(
+            created
+                .1
+                .thread_link
+                .as_ref()
+                .map(|link| link.thread_id.as_str()),
+            Some("claude-thread-9")
+        );
+        assert!(matches!(
+            created.2.as_deref(),
+            Some(ToolCallDetail::Mcp { tool, arguments, .. })
+                if tool == "falcondeck_create_thread" && arguments["prompt"] == "Fix it"
+        ));
     }
 
     #[test]

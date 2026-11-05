@@ -653,3 +653,55 @@ describe("conversation Markdown export", () => {
     expect(markdown).not.toContain("skills are available");
   });
 });
+
+describe("friendly MCP rows in a handoff", () => {
+  const friendly: Extract<ConversationItem, { kind: "tool_call" }> = {
+    kind: "tool_call",
+    id: "tool-mcp",
+    title: "Created task: Fix login",
+    tool_kind: "mcp__falcondeck-extensions__falcondeck_create_thread",
+    status: "completed",
+    output: "- Id: claude-thread-1",
+    exit_code: null,
+    display: {
+      is_read_only: false,
+      has_side_effect: true,
+      is_error: false,
+      lifecycle: "succeeded",
+      artifact_kind: "none",
+      activity_kind: "other",
+      history_mode: "full",
+      summary_hint: null,
+    },
+    detail: {
+      kind: "mcp",
+      server: "falcondeck-extensions",
+      tool: "falcondeck_create_thread",
+      arguments: { prompt: "the long brief" },
+      result: null,
+      error: null,
+      duration_ms: null,
+      app_context: null,
+    },
+    created_at: "2026-11-05T10:00:00Z",
+    completed_at: "2026-11-05T10:00:01Z",
+  };
+
+  it("keeps naming the tool, and leaves out the debug arguments", () => {
+    const markdown = conversationItemsToMarkdown([friendly], {
+      mode: "handoff",
+    });
+    expect(markdown).toContain(
+      "## Tool — falcondeck-extensions · falcondeck create thread",
+    );
+    expect(markdown).not.toContain("Created task");
+    expect(markdown).not.toContain("the long brief");
+  });
+
+  it("exports the row as the reader saw it", () => {
+    const markdown = conversationItemsToMarkdown([friendly], {
+      mode: "export",
+    });
+    expect(markdown).toContain("## Tool — Created task: Fix login");
+  });
+});

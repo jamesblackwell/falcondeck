@@ -887,6 +887,22 @@ pub struct ToolCallDisplay {
     /// length so clients can offer the full text on demand.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub output_total_bytes: Option<u64>,
+    /// The task this call acted on, for clients that can link it. `title`
+    /// still reads in full without it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thread_link: Option<ToolThreadLink>,
+}
+
+/// A task named by a tool call, and how to word the row around it.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ToolThreadLink {
+    /// Target task, the same id as `falcondeck://thread/<id>`.
+    pub thread_id: String,
+    /// Words before the task's name, such as `Created task:`.
+    pub lead: String,
+    /// Name the call itself gave the task. Clients prefer its current title.
+    #[serde(default)]
+    pub subject: Option<String>,
 }
 
 /// Provider-independent counts derived without decoding the retained raw output.
@@ -1183,6 +1199,7 @@ impl Default for ToolCallDisplay {
             test_summary: None,
             provider_output_summary: None,
             output_total_bytes: None,
+            thread_link: None,
         }
     }
 }

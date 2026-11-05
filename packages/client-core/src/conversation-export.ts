@@ -21,7 +21,11 @@ import { planStepPresentation } from "./plan";
 import { formatDurationMs, isSafeExternalUrl } from "./provider-output";
 import { safeArtifactFilename } from "./artifact-presentation";
 import { serviceMessagePresentation } from "./service-message";
-import { unwrapShellCommand } from "./tool-label";
+import {
+  toolCallAgentTitle,
+  toolCallReadsAsProse,
+  unwrapShellCommand,
+} from "./tool-label";
 import type { ConversationCitation, ConversationItem } from "./types";
 import { webSearchActionLabel } from "./web-search";
 
@@ -198,9 +202,18 @@ function shouldIncludeToolDetails(
 ): boolean {
   if (!item.detail) return false;
   if (ctx.mode !== "handoff") return true;
+  // Claude's MCP detail exists so people can debug a friendly row. A handoff
+  // never carried those arguments, and a task prompt can run to pages.
+  if (toolCallReadsAsProse(item) && !isCodexToolDetail(item)) return false;
   // Command execution is already the title plus output; the JSON is cwd,
   // duration, process id, and a duplicated command.
   return item.detail.kind !== "command_execution";
+}
+
+function isCodexToolDetail(
+  item: Extract<ConversationItem, { kind: "tool_call" }>,
+) {
+  return !/^(?:mcp__|toolsearch$)/i.test(item.tool_kind);
 }
 
 function handoffFileSummary(
@@ -427,7 +440,7 @@ function itemMarkdown(item: ConversationItem, ctx: MarkdownContext): string {
       const lifecycle = toolLifecycle(item);
       const title =
         ctx.mode === "handoff"
-          ? compactHandoffTitle(item.title, ctx.workspaceRoot)
+          ? compactHandoffTitle(toolCallAgentTitle(item), ctx.workspaceRoot)
           : item.title;
       const keepDetails = shouldIncludeToolDetails(item, ctx);
       const keepExit =

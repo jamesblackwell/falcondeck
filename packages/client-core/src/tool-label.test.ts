@@ -4,8 +4,11 @@ import {
   compactFilePath,
   describeToolCall,
   notableToolAction,
+  toolCallAgentTitle,
   toolCallFilePath,
   toolCallLabel,
+  toolCallReadsAsProse,
+  toolThreadTarget,
 } from './tool-label'
 
 describe('tool call labels', () => {
@@ -194,5 +197,87 @@ describe('notable tool actions', () => {
     expect(notableToolAction({ title: 'Execute `git status --short`' })).toBeNull()
     expect(notableToolAction({ title: 'npm test' })).toBeNull()
     expect(notableToolAction({ title: 'Read /repo/src/app.tsx' })).toBeNull()
+  })
+})
+
+describe('MCP tool rows', () => {
+  const link = { thread_id: 'claude-thread-1', lead: 'Created task:', subject: 'Fix login' }
+  const display = {
+    is_read_only: false,
+    has_side_effect: true,
+    is_error: false,
+    artifact_kind: 'none',
+    activity_kind: 'other',
+    history_mode: 'full',
+    summary_hint: null,
+    thread_link: link,
+  } as const
+  const created = { title: 'Created task: Fix login', display }
+
+  it('uses the current title when the task has been renamed', () => {
+    expect(toolThreadTarget(created, () => 'Fix the login page')).toEqual({
+      threadId: 'claude-thread-1',
+      href: 'falcondeck://thread/claude-thread-1',
+      label: 'Created task: Fix the login page',
+    })
+  })
+
+  it('falls back to the name the call used, then to the title', () => {
+    expect(toolThreadTarget(created, () => null)?.label).toBe('Created task: Fix login')
+    expect(
+      toolThreadTarget({
+        title: 'Viewing task',
+        display: { ...display, thread_link: { ...link, lead: 'Viewing task', subject: null } },
+      })?.label,
+    ).toBe('Viewing task')
+  })
+
+  it('stays plain text without a link, or with an id a link cannot carry', () => {
+    expect(toolThreadTarget({ title: 'Created task' })).toBeNull()
+    expect(
+      toolThreadTarget({
+        title: 'Created task',
+        display: { ...display, thread_link: { ...link, thread_id: '../secret path' } },
+      }),
+    ).toBeNull()
+  })
+
+  it('sets MCP and tool search rows as prose, and commands as code', () => {
+    expect(
+      toolCallReadsAsProse({ title: 'Listed tasks', tool_kind: 'mcp__falcondeck__list' }),
+    ).toBe(true)
+    expect(toolCallReadsAsProse({ title: 'Loaded tool: Read', tool_kind: 'ToolSearch' })).toBe(true)
+    expect(toolCallReadsAsProse({ title: 'git status', tool_kind: 'commandExecution' })).toBe(false)
+  })
+
+  it('leaves a friendly title that quotes a URL or path readable', () => {
+    expect(toolCallLabel({ title: 'Created task: Fix src/app.ts' })).toBe(
+      'Created task: Fix src/app.ts',
+    )
+  })
+
+  it('gives agents the tool that ran, not the friendly title', () => {
+    expect(
+      toolCallAgentTitle({
+        title: 'Created task: Fix login',
+        tool_kind: 'mcp__falcondeck-extensions__falcondeck_create_thread',
+      }),
+    ).toBe('falcondeck-extensions · falcondeck create thread')
+    expect(
+      toolCallAgentTitle({
+        title: 'Loaded tool: Read',
+        tool_kind: 'ToolSearch',
+        detail: {
+          kind: 'dynamic',
+          tool: 'ToolSearch',
+          namespace: null,
+          arguments: { query: 'select:Read' },
+          content_items: [],
+          success: null,
+          duration_ms: null,
+        },
+      }),
+    ).toBe('Search tools: select:Read')
+    expect(toolCallAgentTitle({ title: 'Read /a.ts', tool_kind: 'Read' })).toBe('Read /a.ts')
   })
 })

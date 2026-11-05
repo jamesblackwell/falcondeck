@@ -21,11 +21,12 @@ use super::{
     AppState, ManagedThread, ManagedWorkspace, PendingServerRequest,
     SHUTDOWN_INTERRUPTED_TURN_ERROR,
     agent_helpers::{
-        SUBAGENT_ACTIVITY_KEPT_STEPS, append_claude_text_delta, claude_parent_tool_use_id,
-        claude_stream_message_id, claude_tool_result_image_items, extract_claude_error,
-        extract_claude_service_message, extract_claude_text_chunk, extract_claude_thinking_chunk,
-        extract_claude_tool_event, format_subagent_activity, is_claude_message_start,
-        is_claude_text_block_start, merge_claude_assistant_text,
+        ClaudeToolInputs, SUBAGENT_ACTIVITY_KEPT_STEPS, append_claude_text_delta,
+        claude_parent_tool_use_id, claude_stream_message_id, claude_tool_result_image_items,
+        extract_claude_error, extract_claude_service_message, extract_claude_text_chunk,
+        extract_claude_thinking_chunk, extract_claude_tool_event, format_subagent_activity,
+        is_claude_message_start, is_claude_text_block_start, merge_claude_assistant_text,
+        resolve_claude_tool_identity,
     },
     conversation_helpers::{
         TRANSIENT_PROVIDER_ERROR_MESSAGE, TURN_RECEIPT_ID_PREFIX, ToolSettlement,
@@ -1591,6 +1592,7 @@ impl AppState {
         // starts a fresh paragraph rather than continuing the previous one.
         let mut assistant_block_break_pending = false;
         let mut tool_identity = HashMap::<String, (String, String)>::new();
+        let mut tool_inputs = ClaudeToolInputs::default();
         // Sub-agent step log per spawning tool call: (kept steps, dropped count).
         let mut subagent_steps = HashMap::<String, (Vec<String>, usize)>::new();
         let mut background_tasks = HashSet::<String>::new();
@@ -2166,20 +2168,17 @@ impl AppState {
                             } else if let Some(tool_event) = extract_claude_tool_event(&value) {
                                 saw_agent_output = true;
                                 let known_identity = tool_identity.get(&tool_event.id).cloned();
-                                let title = tool_event
-                                    .title
-                                    .or_else(|| {
-                                        known_identity.as_ref().map(|(title, _)| title.clone())
-                                    })
-                                    .unwrap_or_else(|| "Claude tool".to_string());
-                                let tool_kind = tool_event
-                                    .tool_kind
-                                    .or_else(|| {
-                                        known_identity
-                                            .as_ref()
-                                            .map(|(_, tool_kind)| tool_kind.clone())
-                                    })
-                                    .unwrap_or_else(|| title.clone());
+                                let (title, tool_kind) = resolve_claude_tool_identity(
+                                    tool_event.title,
+                                    tool_event.tool_kind,
+                                    known_identity.as_ref(),
+                                );
+                                tool_inputs.record(
+                                    &tool_event.id,
+                                    &tool_kind,
+                                    tool_event.input.as_ref(),
+                                );
+                                let tool_detail = tool_inputs.detail(&tool_event.id, &tool_kind);
                                 if tool_event.status == "running" {
                                     tool_identity.insert(
                                         tool_event.id.clone(),
@@ -2210,7 +2209,7 @@ impl AppState {
                                         None,
                                         tool_event.output.as_deref(),
                                     )),
-                                    detail: None,
+                                    detail: tool_detail.map(Box::new),
                                     created_at: Utc::now(),
                                     completed_at,
                                 };
@@ -2295,6 +2294,7 @@ impl AppState {
                                         assistant_block_break_pending = false;
                                         active_compaction = None;
                                         tool_identity.clear();
+                                        tool_inputs.clear();
                                         subagent_steps.clear();
                                         background_tasks.clear();
                                         background_task_tools.clear();

@@ -17,6 +17,10 @@ use serde_json::{Value, json};
 use tracing::debug;
 use uuid::Uuid;
 
+use super::mcp_presentation::{
+    is_mcp_tool_kind, mcp_name_title, present_tool_call, tool_search_title,
+};
+
 const RENDERABLE_IMAGE_URL_PREFIXES: [&str; 5] =
     ["data:", "http://", "https://", "blob:", "asset:"];
 /// Desktop screenshots can be hundreds of KB. Capping data URLs keeps the
@@ -45,6 +49,10 @@ pub(crate) fn cap_synced_image_url(url: String) -> Option<String> {
 /// transcript. Keep the activity row, but never retain or transport the full
 /// markdown body when an agent reads or loads one.
 pub(crate) fn should_suppress_tool_output(title: &str, kind: &str) -> bool {
+    // An MCP title can quote a task's name; it says nothing about skill files.
+    if is_mcp_tool_kind(kind) {
+        return false;
+    }
     let normalized_title = title.to_ascii_lowercase();
     let normalized_kind = kind.to_ascii_lowercase();
 
@@ -90,6 +98,13 @@ pub(crate) fn sanitize_conversation_item(item: &mut ConversationItem) {
         }
         _ => None,
     };
+    present_tool_call(
+        title,
+        tool_kind,
+        output.as_deref(),
+        display,
+        detail.as_deref(),
+    );
 }
 
 fn mcp_provider_output_summary(result: Option<&Value>) -> ToolProviderOutputSummary {
@@ -1135,6 +1150,8 @@ pub(crate) fn codex_tool_call_title(item: &Value) -> Option<String> {
                 context.and_then(|value| optional_json_string(value, "actionName", "action_name"));
             match (app, action) {
                 (Some(app), Some(action)) => Some(format!("{app} · {action}")),
+                // `sanitize_conversation_item` rewords this once the item has
+                // a lifecycle; until then it is the call's only name.
                 _ => Some(format!(
                     "{} · {}",
                     item.get("server")?.as_str()?,
@@ -1512,6 +1529,7 @@ pub(super) fn settle_tool_call_items(
                 output,
                 exit_code,
                 display,
+                detail,
                 ..
             } if is_transient_tool_status(status) => {
                 *status = settlement.status().to_string();
@@ -1520,6 +1538,13 @@ pub(super) fn settle_tool_call_items(
                 **display =
                     tool_display_metadata(title, tool_kind, status, *exit_code, output.as_deref());
                 display.output_total_bytes = output_total_bytes;
+                present_tool_call(
+                    title,
+                    tool_kind,
+                    output.as_deref(),
+                    display,
+                    detail.as_deref(),
+                );
                 updated.push(item.clone());
             }
             ConversationItem::FileChange {
@@ -2628,7 +2653,7 @@ pub(crate) fn synthesize_tool_title(
     input: Option<&Value>,
     result: Option<&Value>,
 ) -> Option<String> {
-    if let Some(title) = mcp_tool_title(name) {
+    if let Some(title) = mcp_name_title(name, input) {
         return Some(title);
     }
 
@@ -2654,7 +2679,16 @@ pub(crate) fn synthesize_tool_title(
         "websearch" | "web_search" => ("Search web:", &["query"], "Search web"),
         // A sub-agent's own summary of its errand beats the word "Agent".
         "agent" | "task" | "spawn_agent" => ("Agent:", &["description", "subagent_type"], "Agent"),
-        "search_tool" => ("Search tools:", &["query"], "Search tools"),
+        "search_tool" => {
+            return Some(
+                tool_argument(input, &["query"])
+                    .or_else(|| tool_argument(result, &["query"]))
+                    .map_or_else(
+                        || "Search tools".to_string(),
+                        |query| tool_search_title(&query),
+                    ),
+            );
+        }
         "slashcommand" => ("Run", &["command"], "Run command"),
         "todowrite" | "todo_write" => ("Update plan", &[], "Update plan"),
         "todoread" | "todo_read" => ("Read plan", &[], "Read plan"),
@@ -2689,24 +2723,6 @@ pub(crate) fn synthesize_tool_title(
         Some(subject) if label.is_empty() => truncate_preview(&subject, TOOL_TITLE_MAX_CHARS),
         Some(subject) => truncate_preview(&format!("{label} {subject}"), TOOL_TITLE_MAX_CHARS),
         None => bare.to_string(),
-    })
-}
-
-/// Reads an MCP tool's wire name as the server and action it really is:
-/// `mcp__claude_ai_Gmail__search_threads` is `Gmail · search threads`. Codex
-/// already ships this shape through its `Mcp` detail; Claude only sends the
-/// mangled name, and a transcript should not have to spell it out.
-fn mcp_tool_title(name: &str) -> Option<String> {
-    let rest = name.strip_prefix("mcp__")?;
-    let (server, tool) = rest.rsplit_once("__")?;
-    // Connector servers carry a `claude_ai_` namespace that names the host,
-    // not the app the user is thinking about.
-    let server = server.strip_prefix("claude_ai_").unwrap_or(server);
-    let humanize = |value: &str| value.replace('_', " ");
-    Some(match (humanize(server).trim(), humanize(tool).trim()) {
-        ("", tool) => tool.to_string(),
-        (server, "") => server.to_string(),
-        (server, tool) => format!("{server} · {tool}"),
     })
 }
 
@@ -3014,6 +3030,10 @@ pub(crate) fn tool_display_metadata(
     exit_code: Option<i32>,
     output: Option<&str>,
 ) -> ToolCallDisplay {
+    // An MCP title is written for people and can quote a task's name, so it
+    // must not be read as a description of the work: "Created task: run npm
+    // test" is not a test run.
+    let title = if is_mcp_tool_kind(kind) { "" } else { title };
     let normalized_title = title.to_ascii_lowercase();
     let command_line = unwrap_agent_command(&normalized_title);
     let normalized_kind = kind.to_ascii_lowercase();
@@ -3105,6 +3125,7 @@ pub(crate) fn tool_display_metadata(
         test_summary,
         provider_output_summary: None,
         output_total_bytes: None,
+        thread_link: None,
     }
 }
 
@@ -3426,7 +3447,11 @@ fn classify_tool_activity_kind(
         || command_line.starts_with("web search")
     {
         ToolActivityKind::WebSearch
-    } else if normalized_kind.contains("toolsearch") || command_line.starts_with("search tools") {
+    } else if normalized_kind.contains("toolsearch")
+        || command_line.starts_with("search tools")
+        || command_line.starts_with("loading tool")
+        || command_line.starts_with("loaded tool")
+    {
         ToolActivityKind::Search
     } else if normalized_kind.contains("imageview")
         || normalized_kind.contains("image_view")

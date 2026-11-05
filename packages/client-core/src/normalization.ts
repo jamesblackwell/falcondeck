@@ -1,4 +1,5 @@
 import { normalizeControlStateChanged } from "./control";
+import { isMcpToolKind } from "./tool-label";
 import { normalizeWorkspaceColors } from "./workspace-colors";
 import {
   normalizeWorkspaceIcons,
@@ -38,6 +39,7 @@ import type {
   ThreadSummary,
   ThreadTokenUsage,
   ToolCallDisplay,
+  ToolThreadLink,
   ToolLifecycle,
   WorkspaceAgentSummary,
   WorkspaceSummary,
@@ -317,6 +319,8 @@ export function normalizeInteractiveRequest(
 }
 
 function shouldSuppressSkillToolOutput(title: string, kind: string) {
+  // An MCP title can quote a task's name; it says nothing about skill files.
+  if (isMcpToolKind(kind)) return false;
   const normalizedTitle = title.toLowerCase().replaceAll("\\", "/");
   const normalizedKind = kind.toLowerCase();
 
@@ -2259,6 +2263,22 @@ export function normalizeToolCallDisplay(value: unknown): ToolCallDisplay {
     display.output_total_bytes > 0
       ? { output_total_bytes: display.output_total_bytes }
       : {}),
+    ...(normalizeToolThreadLink(display.thread_link) ?? {}),
+  };
+}
+
+function normalizeToolThreadLink(value: unknown) {
+  if (!value || typeof value !== "object") return null;
+  const link = value as Partial<ToolThreadLink>;
+  if (typeof link.thread_id !== "string" || typeof link.lead !== "string") {
+    return null;
+  }
+  return {
+    thread_link: {
+      thread_id: link.thread_id,
+      lead: link.lead,
+      subject: typeof link.subject === "string" ? link.subject : null,
+    },
   };
 }
 

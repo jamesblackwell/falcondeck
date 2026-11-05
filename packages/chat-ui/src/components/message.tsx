@@ -1,6 +1,7 @@
 import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   AlertTriangle,
+  ArrowUpRight,
   Ban,
   BookOpen,
   ChevronDown,
@@ -71,6 +72,8 @@ import {
   describeToolCall,
   notableToolAction,
   toolCallLabel,
+  toolCallReadsAsProse,
+  toolThreadTarget,
   toolLifecycle,
   toolLifecycleLabel,
   webSearchActionLabel,
@@ -84,6 +87,7 @@ import {
   type ThinkingDisplay,
   type ToolActivitySummary,
   type ToolTestSummary,
+  type ToolThreadTarget,
   type WorkSessionEntry,
 } from "@falcondeck/client-core";
 import {
@@ -100,6 +104,11 @@ import {
 } from "../lib/file-diff-context";
 import { useLocalPathHandler } from "../lib/local-path-context";
 import { extractFilePath, fileBaseName } from "../lib/tool-file-path";
+import {
+  ThreadLinkAnchor,
+  useThreadLinksAvailable,
+  useThreadTitleLookup,
+} from "../lib/thread-link-context";
 import { WebLinkAnchor } from "../lib/web-link-context";
 import { CodeBlock } from "./code-block";
 import { DiffBlock } from "./diff-block";
@@ -1228,7 +1237,9 @@ function ToolCallCompactRow({
   item: Extract<ConversationItem, { kind: "tool_call" }>;
 }) {
   const lifecycleLabel = toolLifecycleLabel(toolLifecycle(item));
-  const label = toolCallLabel(item);
+  const threadTitle = useThreadTitleLookup();
+  const threadTarget = toolThreadTarget(item, threadTitle);
+  const label = threadTarget?.label ?? toolCallLabel(item);
   const notable = notableToolAction(item);
   const notableStyle = notable ? NOTABLE_TOOL_STYLE[notable.kind] : null;
   return (
@@ -1248,12 +1259,44 @@ function ToolCallCompactRow({
         />
       ) : null}
       <span
-        className="flex-1 truncate font-mono text-[length:var(--fd-text-xs)]"
+        className={cn(
+          "flex-1 truncate text-[length:var(--fd-text-xs)]",
+          !toolCallReadsAsProse(item) && "font-mono",
+        )}
         title={item.title}
       >
         {label}
       </span>
+      {threadTarget ? (
+        <ToolThreadOpenLink target={threadTarget} name={label} />
+      ) : null}
     </div>
+  );
+}
+
+/**
+ * Sibling of the row's trigger, like the diff link: a link inside the toggle
+ * button would be invalid markup and would swallow the click.
+ */
+function ToolThreadOpenLink({
+  target,
+  name,
+}: {
+  target: ToolThreadTarget;
+  name: string;
+}) {
+  if (!useThreadLinksAvailable()) return null;
+  return (
+    <span className="flex shrink-0 items-center" title={name}>
+      <ThreadLinkAnchor
+        threadId={target.threadId}
+        href={target.href}
+        className="fd-focus inline-flex items-center gap-0.5 rounded-[var(--fd-radius-sm)] text-[length:var(--fd-text-2xs)] text-accent underline-offset-2 hover:underline"
+      >
+        Open task
+        <ArrowUpRight aria-hidden="true" className="h-3 w-3" />
+      </ThreadLinkAnchor>
+    </span>
   );
 }
 
@@ -1377,7 +1420,9 @@ function ToolCallMessage({
   // The header shows the file's name, so links and highlighting work from the
   // full path the label shortened away. Both come from one pass over the
   // title, keyed on it so a streaming tool's output deltas cost nothing.
-  const { label, filePath, labelNamesFile } = useMemo(() => {
+  const threadTitle = useThreadTitleLookup();
+  const threadTarget = toolThreadTarget(item, threadTitle);
+  const { label: describedLabel, filePath, labelNamesFile } = useMemo(() => {
     const described = describeToolCall(item);
     const wantsPath = touchesFile || activityKind === "read";
     return {
@@ -1390,6 +1435,7 @@ function ToolCallMessage({
     // eslint-disable-next-line react-hooks/exhaustive-deps -- the title, detail
     // and head of the output are all describeToolCall reads.
   }, [activityKind, item.title, item.output, item.detail, touchesFile]);
+  const label = threadTarget?.label ?? describedLabel;
   // Output highlighting is only safe when the file names the language: a shell
   // command's output has nothing to do with the path that appears in it.
   const outputFilePath =
@@ -1738,7 +1784,8 @@ function ToolCallMessage({
       ) : null}
       <span
         className={cn(
-          "flex-1 truncate font-mono text-[length:var(--fd-text-xs)]",
+          "flex-1 truncate text-[length:var(--fd-text-xs)]",
+          !toolCallReadsAsProse(item) && "font-mono",
           notableStyle && notableStyle.tone,
           (lifecycle === "failed" || lifecycle === "denied") && "text-danger",
         )}
@@ -1847,6 +1894,9 @@ function ToolCallMessage({
             </div>
           )}
           {fileLink}
+          {threadTarget ? (
+            <ToolThreadOpenLink target={threadTarget} name={label} />
+          ) : null}
         </div>
         <Collapsible.Content className="overflow-hidden data-[state=closed]:animate-collapse data-[state=open]:animate-expand">
           {detail ? (

@@ -4,6 +4,7 @@
 //! already in memory. Native transcripts load only with `hydrate: true`.
 use super::glance::{self, Glance, RowContext, ago};
 use super::*;
+use crate::app::mcp_presentation::agent_tool_title;
 use chrono::DateTime;
 use falcondeck_core::{InteractiveRequest, InteractiveRequestKind};
 use std::sync::LazyLock;
@@ -488,12 +489,14 @@ fn digest(items: &[ConversationItem], since: Option<DateTime<Utc>>, root: &str) 
             }
             ConversationItem::ToolCall {
                 title,
+                tool_kind,
                 status,
                 exit_code,
                 output,
                 detail,
                 ..
             } => {
+                let title = &*agent_tool_title(title, tool_kind, detail.as_deref());
                 let result = outcome(status, *exit_code);
                 if result == "failed" && in_latest_turn {
                     d.failed_tools += 1;

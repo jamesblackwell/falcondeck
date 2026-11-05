@@ -1,8 +1,8 @@
-use std::path::Path;
+use std::{collections::HashMap, path::Path};
 
 use falcondeck_core::{
     AgentProvider, ConversationCitation, ConversationCitationLocator, ImageInput,
-    SelectedSkillReference, SkillSummary, ThreadIsolation, TurnInputItem,
+    SelectedSkillReference, SkillSummary, ThreadIsolation, ToolCallDetail, TurnInputItem,
 };
 use serde_json::{Value, json};
 use uuid::Uuid;
@@ -11,6 +11,9 @@ use crate::{
     app::{
         conversation_helpers::{should_suppress_tool_output, synthesize_tool_title},
         harness_user_text::falcondeck_skill_path_preamble,
+        mcp_presentation::{
+            claude_tool_detail, keeps_claude_tool_input, parse_mcp_tool_name, tool_search_title,
+        },
     },
     codex::extract_string,
     skills::{canonical_skill_alias, slash_command_aliases_in_text},
@@ -806,6 +809,7 @@ pub(crate) fn extract_claude_tool_event(value: &Value) -> Option<ClaudeToolEvent
             id,
             title: title.clone(),
             tool_kind: title,
+            input: None,
             status: if failed {
                 "failed"
             } else if is_async_launch {
@@ -832,6 +836,7 @@ pub(crate) fn extract_claude_tool_event(value: &Value) -> Option<ClaudeToolEvent
             id,
             tool_kind: name.or_else(|| Some(title.clone())),
             title: Some(title),
+            input: content_block.get("input").cloned(),
             status: "running".to_string(),
             output: None,
             images: Vec::new(),
@@ -857,6 +862,7 @@ pub(crate) fn extract_claude_tool_event(value: &Value) -> Option<ClaudeToolEvent
                 id,
                 tool_kind: name.or_else(|| Some(title.clone())),
                 title: Some(title),
+                input: tool_use.get("input").cloned(),
                 status: "running".to_string(),
                 output: None,
                 images: Vec::new(),
@@ -892,6 +898,7 @@ pub(crate) fn extract_claude_tool_event(value: &Value) -> Option<ClaudeToolEvent
         id,
         tool_kind: name.or_else(|| Some(title.clone())),
         title: Some(title),
+        input: event.get("input").cloned(),
         status: status.to_string(),
         output,
         images: claude_tool_result_images(value, event),
@@ -903,10 +910,66 @@ pub(crate) struct ClaudeToolEvent {
     pub id: String,
     pub title: Option<String>,
     pub tool_kind: Option<String>,
+    /// The call's arguments, on events that carry them.
+    pub input: Option<Value>,
     pub status: String,
     pub output: Option<String>,
     /// Base64 images carried by the tool_result (screenshots, image reads).
     pub images: Vec<ClaudeToolResultImage>,
+}
+
+/// Arguments of in-flight MCP and tool-search calls. Claude sends them once, on
+/// the `tool_use`, but the row is rewritten when the result lands, so its label
+/// and detail need them again then.
+#[derive(Debug, Default)]
+pub(crate) struct ClaudeToolInputs(HashMap<String, Value>);
+
+impl ClaudeToolInputs {
+    /// `content_block_start` carries an empty `{}`, which must not replace the
+    /// real input or read as one.
+    pub(crate) fn record(&mut self, id: &str, tool_kind: &str, input: Option<&Value>) {
+        if keeps_claude_tool_input(tool_kind)
+            && let Some(input) = input.filter(|input| {
+                input.as_object().is_none_or(|object| !object.is_empty()) && !input.is_null()
+            })
+        {
+            self.0.insert(id.to_string(), input.clone());
+        }
+    }
+
+    pub(crate) fn detail(&self, id: &str, tool_kind: &str) -> Option<ToolCallDetail> {
+        claude_tool_detail(tool_kind, self.0.get(id))
+    }
+
+    pub(crate) fn clear(&mut self) {
+        self.0.clear();
+    }
+}
+
+/// Title and kind for a tool event, given what the `tool_use` already said. A
+/// result's own fields describe its payload: an MCP result with a `query` key
+/// must not retitle the row or replace the kind its label is derived from.
+pub(crate) fn resolve_claude_tool_identity(
+    title: Option<String>,
+    tool_kind: Option<String>,
+    known: Option<&(String, String)>,
+) -> (String, String) {
+    if let Some((known_title, known_kind)) = known.filter(|(_, kind)| keeps_claude_tool_input(kind))
+    {
+        let title = if parse_mcp_tool_name(known_kind).is_some() {
+            known_title.clone()
+        } else {
+            title.unwrap_or_else(|| known_title.clone())
+        };
+        return (title, known_kind.clone());
+    }
+    let title = title
+        .or_else(|| known.map(|(title, _)| title.clone()))
+        .unwrap_or_else(|| "Claude tool".to_string());
+    let tool_kind = tool_kind
+        .or_else(|| known.map(|(_, tool_kind)| tool_kind.clone()))
+        .unwrap_or_else(|| title.clone());
+    (title, tool_kind)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1259,7 +1322,7 @@ fn claude_tool_result_title(value: &Value, tool_result: &Value) -> Option<String
         .get("toolUseResult")
         .and_then(|result| extract_string(result, &["query"]))
     {
-        return Some(format!("Search tools: {query}"));
+        return Some(tool_search_title(&query));
     }
 
     if let Some(file_path) = value
@@ -1304,7 +1367,7 @@ fn synthesize_claude_tool_title(
         "toolsearch" => input
             .and_then(|input| extract_string(input, &["query"]))
             .or_else(|| result.and_then(|result| extract_string(result, &["query"])))
-            .map(|query| format!("Search tools: {query}"))
+            .map(|query| tool_search_title(&query))
             .unwrap_or_else(|| "Search tools".to_string()),
         "skill" => input
             .and_then(|input| extract_string(input, &["skill"]))

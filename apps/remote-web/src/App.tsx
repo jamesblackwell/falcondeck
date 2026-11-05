@@ -5440,6 +5440,9 @@ function RemoteApp() {
                     if (target) handleSelectThread(target.workspace_id, target.id);
                     else setError("This task is no longer available on your computer.");
                   }}
+                  threadTitle={(threadId) =>
+                    resolveThreadLinkTarget(threadId, snapshot?.threads ?? [])?.title
+                  }
                 >
                 <ExtensionAgentToolUiProvider
                   apps={extensionApps}

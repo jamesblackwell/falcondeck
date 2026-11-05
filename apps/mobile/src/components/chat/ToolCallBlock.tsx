@@ -6,7 +6,7 @@ import {
   useState,
   useSyncExternalStore,
 } from "react";
-import { Pressable, View } from "react-native";
+import { Alert, Pressable, View } from "react-native";
 import { Image } from "expo-image";
 import { StyleSheet, useUnistyles } from "react-native-unistyles";
 import Animated from "react-native-reanimated";
@@ -38,15 +38,21 @@ import {
   summarizeMcpArtifacts,
   summarizeParsedMcpArtifacts,
   notableToolAction,
+  resolveThreadLinkTarget,
   toolCallLabel,
+  toolCallReadsAsProse,
   toolLifecycle,
   toolLifecycleLabel,
+  toolThreadTarget,
   type ConversationItem,
   type ToolTestSummary,
+  type ToolThreadTarget,
 } from "@falcondeck/client-core";
 
 import { ActivityDiamond, Text } from "@/components/ui";
 import { mediaAudioPlayer } from "@/lib/media-audio-player";
+import { openThreadLink } from "@/lib/thread-link";
+import { useSessionStore } from "@/store/session-store";
 import {
   toolOutputIsTruncated,
   useFullThreadItem,
@@ -67,6 +73,35 @@ interface ToolCallBlockProps {
   variant?: "card" | "row";
   /** Set when the card renders inside a work session, which owns the inset. */
   nested?: boolean;
+}
+
+/** Text, not a Pressable: it sits inside the card's own Pressable header. */
+function ToolThreadOpenLink({
+  target,
+  label,
+}: {
+  target: ToolThreadTarget;
+  label: string;
+}) {
+  return (
+    <Text
+      color="accent"
+      size="xs"
+      accessibilityRole="link"
+      accessibilityLabel={`Open task. ${label}`}
+      accessibilityHint="Opens this task in FalconDeck"
+      onPress={() => {
+        openThreadLink(target.threadId).catch((error: unknown) => {
+          Alert.alert(
+            "Could not open task",
+            error instanceof Error ? error.message : "Please try again.",
+          );
+        });
+      }}
+    >
+      Open task
+    </Text>
+  );
 }
 
 export const ToolCallBlock = memo(function ToolCallBlock({
@@ -184,11 +219,21 @@ export const ToolCallBlock = memo(function ToolCallBlock({
   const hasContent =
     (Boolean(item.output) || hasStructuredDetail) && !suppressDetail;
   const testBadgeLabel = testSummary ? testSummaryHeadline(testSummary) : null;
-  const label = useMemo(
+  const describedLabel = useMemo(
     () => toolCallLabel(item),
     // eslint-disable-next-line react-hooks/exhaustive-deps -- title, detail, kind and the head of the output are all toolCallLabel reads.
     [item.title, item.output, item.detail, item.tool_kind],
   );
+  const linkedThreadId = item.display.thread_link?.thread_id ?? null;
+  const linkedThreadTitle = useSessionStore((state) =>
+    linkedThreadId
+      ? resolveThreadLinkTarget(linkedThreadId, state.snapshot?.threads ?? [])
+          ?.title
+      : null,
+  );
+  const threadTarget = toolThreadTarget(item, () => linkedThreadTitle);
+  const label = threadTarget?.label ?? describedLabel;
+  const titleVariant = toolCallReadsAsProse(item) ? "caption" : "mono";
   const notable = notableToolAction(item);
   const notableColor =
     notable?.kind === "push"
@@ -218,7 +263,7 @@ export const ToolCallBlock = memo(function ToolCallBlock({
           <NotableIcon accessible={false} size={14} color={notableColor} />
         ) : null}
         <Text
-          variant="mono"
+          variant={titleVariant}
           color="tertiary"
           size="xs"
           style={[styles.title, notableColor ? { color: notableColor } : null]}
@@ -226,6 +271,7 @@ export const ToolCallBlock = memo(function ToolCallBlock({
         >
           {label}
         </Text>
+        {threadTarget ? <ToolThreadOpenLink target={threadTarget} label={label} /> : null}
       </View>
     );
   }
@@ -276,7 +322,7 @@ export const ToolCallBlock = memo(function ToolCallBlock({
           <NotableIcon accessible={false} size={14} color={notableColor} />
         ) : null}
         <Text
-          variant="mono"
+          variant={titleVariant}
           color="tertiary"
           size="xs"
           style={[styles.title, notableColor ? { color: notableColor } : null]}
@@ -284,6 +330,7 @@ export const ToolCallBlock = memo(function ToolCallBlock({
         >
           {label}
         </Text>
+        {threadTarget ? <ToolThreadOpenLink target={threadTarget} label={label} /> : null}
         {awaitingApproval ? (
           <Text variant="caption" color="warning" size="2xs" weight="semibold">
             Awaiting approval

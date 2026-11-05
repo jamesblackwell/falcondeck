@@ -1,10 +1,11 @@
+import { parseThreadLink } from './thread-link'
 import type { ConversationItem } from './types'
 
 type ToolCallItem = Extract<ConversationItem, { kind: 'tool_call' }>
 
 /** Enough of a tool call to label it; keeps callers free of the full item shape. */
 export type ToolCallLabelSource = Pick<ToolCallItem, 'title'> &
-  Partial<Pick<ToolCallItem, 'output' | 'detail' | 'tool_kind'>>
+  Partial<Pick<ToolCallItem, 'output' | 'detail' | 'tool_kind' | 'display'>>
 
 export type ToolCallDescription = {
   /** Header text: the verb plus the file's name, never a screen-wide path. */
@@ -159,6 +160,84 @@ export function describeToolCall(item: ToolCallLabelSource): ToolCallDescription
 /** Header text alone, for callers with nowhere to put the path. */
 export function toolCallLabel(item: ToolCallLabelSource) {
   return describeToolCall(item).label
+}
+
+export type ToolThreadTarget = {
+  threadId: string
+  /** `falcondeck://thread/<id>`, for anchors and copy-link. */
+  href: string
+  /** The header with the task's current title in it. */
+  label: string
+}
+
+/**
+ * The task a tool row points at, worded with its current title when the caller
+ * knows it. The daemon only knows what the call itself said, and a task may
+ * have been renamed since. Null means plain text: no id, a failed call, or a
+ * daemon too old to send one.
+ */
+export function toolThreadTarget(
+  item: ToolCallLabelSource,
+  threadTitle?: ((threadId: string) => string | null | undefined) | null,
+): ToolThreadTarget | null {
+  const link = item.display?.thread_link
+  if (!link) return null
+  const href = `falcondeck://thread/${encodeURIComponent(link.thread_id)}`
+  const threadId = parseThreadLink(href)
+  if (!threadId) return null
+  const name = threadTitle?.(threadId)?.trim() || link.subject
+  return {
+    threadId,
+    href,
+    label: name ? collapseHeaderDetail(`${link.lead} ${name}`) : item.title.trim(),
+  }
+}
+
+/** `mcp__server__tool`, or Codex's own MCP item kinds. */
+export function isMcpToolKind(kind: string | null | undefined) {
+  const normalized = (kind ?? '').trim().toLowerCase()
+  return (
+    normalized.startsWith('mcp__') ||
+    normalized === 'mcp' ||
+    normalized === 'mcptoolcall' ||
+    normalized === 'mcp_tool_call'
+  )
+}
+
+function isToolSearchKind(kind: string | null | undefined) {
+  const normalized = (kind ?? '').trim().toLowerCase()
+  return normalized === 'toolsearch' || normalized === 'search_tool'
+}
+
+/**
+ * Whether the header is a sentence rather than code. Commands and paths want a
+ * monospace face; "Created task: Fix login" does not.
+ */
+export function toolCallReadsAsProse(item: ToolCallLabelSource) {
+  return (
+    item.detail?.kind === 'mcp' || isMcpToolKind(item.tool_kind) || isToolSearchKind(item.tool_kind)
+  )
+}
+
+/**
+ * The name to give another agent. Titles are reworded for people, but a
+ * handoff is model input and keeps naming the tool that ran.
+ */
+export function toolCallAgentTitle(item: ToolCallLabelSource) {
+  const detail = item.detail
+  if (detail?.kind === 'dynamic' && isToolSearchKind(item.tool_kind)) {
+    const query = argumentString(detail, ['query'])
+    return query ? `Search tools: ${query}` : item.title
+  }
+  const wire = /^mcp__(.+)__(.+)$/.exec((item.tool_kind ?? '').trim())
+  if (wire) {
+    const server = wire[1].replace(/^claude_ai_/, '').replace(/_/g, ' ')
+    return `${server} · ${wire[2].replace(/_/g, ' ')}`
+  }
+  if (detail?.kind === 'mcp' && !detail.app_context?.action_name) {
+    return `${detail.server} · ${detail.tool}`
+  }
+  return item.title
 }
 
 /** The file a tool call acted on, at full length. */

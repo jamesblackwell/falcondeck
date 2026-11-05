@@ -947,3 +947,46 @@ describe("provider-native tool output", () => {
     ).toHaveLength(0);
   });
 });
+
+describe("MCP tool rows", () => {
+  const created = {
+    ...tool("mcp-1", "Created task: Fix login", {
+      kind: "mcp",
+      server: "falcondeck-extensions",
+      tool: "falcondeck_create_thread",
+      arguments: { title: "Fix login" },
+      result: null,
+      error: null,
+      duration_ms: null,
+      app_context: null,
+    }),
+    tool_kind: "mcp__falcondeck-extensions__falcondeck_create_thread",
+  };
+
+  it("offers the task when the call names one", () => {
+    const linked = {
+      ...created,
+      display: {
+        ...created.display,
+        thread_link: {
+          thread_id: "claude-thread-1",
+          lead: "Created task:",
+          subject: "Fix login",
+        },
+      },
+    };
+    const rendered = renderComponent(
+      <ToolCallBlock item={linked} defaultOpen={false} suppressDetail={false} />,
+    );
+    expect(textOf(rendered)).toContain("Created task: Fix login");
+    expect(textOf(rendered)).toContain("Open task");
+  });
+
+  it("is plain text when it does not, with the raw tool in the details", () => {
+    const rendered = renderComponent(
+      <ToolCallBlock item={created} defaultOpen suppressDetail={false} />,
+    );
+    expect(textOf(rendered)).not.toContain("Open task");
+    expect(textOf(rendered)).toContain("falcondeck_create_thread");
+  });
+});

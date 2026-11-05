@@ -1,5 +1,6 @@
 //! Compact, searchable projections of native thread history.
 use super::*;
+use crate::app::mcp_presentation::agent_tool_title;
 use std::borrow::Cow;
 
 const DEFAULT_CHARS: usize = 6000;
@@ -245,18 +246,22 @@ pub(crate) fn item_parts(item: &ConversationItem, detailed: bool) -> (String, Co
         ConversationItem::CodeReview { content, .. } => ("Code review", content.as_str()),
         ConversationItem::ToolCall {
             title,
+            tool_kind,
             output,
             exit_code,
             detail,
             ..
         } => {
+            let title = agent_tool_title(title, tool_kind, detail.as_deref());
             let exit = exit_code
                 .filter(|code| *code != 0)
                 .map(|code| format!(" (exit {code})"))
                 .unwrap_or_default();
             return (
-                format!("Tool — {}{exit}", line(title, 100)),
-                tool_body(title, detail, output.as_deref().unwrap_or("")),
+                format!("Tool — {}{exit}", line(&title, 100)),
+                tool_body(&title, detail, output.as_deref().unwrap_or(""))
+                    .into_owned()
+                    .into(),
             );
         }
         ConversationItem::Artifact { artifact, .. } => {
@@ -334,13 +339,18 @@ fn match_offset(query: &regex::Regex, item: &ConversationItem, body: &str) -> Op
         return Some(body[..found.start()].chars().count().saturating_sub(120));
     }
     let title = match item {
-        ConversationItem::ToolCall { title, .. } => Some(title.as_str()),
-        ConversationItem::Artifact { artifact, .. } => Some(artifact.title.as_str()),
-        ConversationItem::Image { title, .. } => title.as_deref(),
+        ConversationItem::ToolCall {
+            title,
+            tool_kind,
+            detail,
+            ..
+        } => Some(agent_tool_title(title, tool_kind, detail.as_deref())),
+        ConversationItem::Artifact { artifact, .. } => Some(Cow::Borrowed(artifact.title.as_str())),
+        ConversationItem::Image { title, .. } => title.as_deref().map(Cow::Borrowed),
         _ => None,
     };
     title
-        .is_some_and(|title| query.is_match(title))
+        .is_some_and(|title| query.is_match(&title))
         .then_some(0)
 }
 
