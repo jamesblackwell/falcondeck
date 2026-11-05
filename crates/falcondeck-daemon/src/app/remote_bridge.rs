@@ -974,7 +974,7 @@ impl AppState {
     /// Everything waiting and still worth saying. A push counts as delivered
     /// once written; one the socket refuses stays queued for the next session.
     async fn write_held_pushes(&self, writer: &RelayWriter) -> Result<(), String> {
-        while let Some(push) = self.next_held_push().await {
+        while let Some((push, claim)) = self.next_held_push().await {
             let message = RelayClientMessage::Notify {
                 kind: push.kind.to_string(),
                 workspace_id: push.workspace_id.clone(),
@@ -1005,10 +1005,10 @@ impl AppState {
                     kind = push.kind,
                     "attention push held: the socket write failed"
                 );
-                self.push_unwritten().await;
+                self.push_unwritten(claim).await;
                 return Err(error);
             }
-            self.push_written().await;
+            self.push_written(claim).await;
         }
         Ok(())
     }

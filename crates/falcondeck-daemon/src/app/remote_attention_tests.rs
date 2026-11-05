@@ -176,9 +176,9 @@ fn approval() -> AttentionPush {
 
 async fn held_ids(app: &AppState) -> Vec<Option<String>> {
     let mut ids = vec![];
-    while let Some(push) = app.next_held_push().await {
+    while let Some((push, claim)) = app.next_held_push().await {
         ids.push(push.notification_id.clone());
-        app.push_written().await;
+        app.push_written(claim).await;
     }
     ids
 }
@@ -227,7 +227,7 @@ async fn a_review_the_relay_will_not_take_waits_for_the_socket() {
     app.deliver_acknowledged(review()).await;
     let waiting = counters(&app).await;
     assert_eq!((waiting.held, waiting.delivered), (1, 0));
-    let push = app.next_held_push().await.unwrap();
+    let (push, _) = app.next_held_push().await.unwrap();
     assert_eq!(push.review_id.as_deref(), Some("R-1"));
 }
 
@@ -275,8 +275,8 @@ async fn a_failed_write_keeps_its_place_and_its_age() {
     })
     .await;
     age_held_pushes(&app, 50).await;
-    assert!(app.next_held_push().await.is_some());
-    app.push_unwritten().await;
+    let (_, claim) = app.next_held_push().await.unwrap();
+    app.push_unwritten(claim).await;
     assert_eq!(counters(&app).await.held, 2);
     age_held_pushes(&app, 11).await;
     assert_eq!(held_ids(&app).await, Vec::<Option<String>>::new());
@@ -300,7 +300,7 @@ async fn held_pushes_are_bounded_newest_first_and_counted_when_dropped() {
     }
     let waiting = counters(&app).await;
     assert_eq!((waiting.held, waiting.evicted), (MAX_HELD_PUSHES as u64, 3));
-    let first = app.next_held_push().await.unwrap();
+    let (first, _) = app.next_held_push().await.unwrap();
     assert_eq!(first.notification_id.as_deref(), Some("N-3"));
 }
 
@@ -374,15 +374,38 @@ async fn a_claimed_push_is_offered_once_until_its_write_settles() {
     let directory = tempfile::tempdir().unwrap();
     let app = app_with_relay("http://127.0.0.1:9", &directory).await;
     app.deliver_attention(approval()).await;
-    assert!(app.next_held_push().await.is_some());
+    let (_, claim) = app.next_held_push().await.unwrap();
     assert_eq!(counters(&app).await.held, 1, "queued until it is written");
     assert!(app.next_held_push().await.is_none(), "no second writer");
-    app.push_unwritten().await;
-    assert!(app.next_held_push().await.is_some(), "free again");
-    app.push_written().await;
+    app.push_unwritten(claim).await;
+    let (_, claim) = app.next_held_push().await.unwrap();
+    app.push_written(claim).await;
     let done = counters(&app).await;
     assert_eq!((done.held, done.delivered), (0, 1));
     assert!(app.next_held_push().await.is_none());
+}
+
+/// A drain outlives its session, so it can finish after the pairing went and
+/// a new drain has claimed what is queued now.
+#[tokio::test]
+async fn a_stale_drain_cannot_touch_the_next_drains_claim() {
+    let directory = tempfile::tempdir().unwrap();
+    let app = app_with_relay("http://127.0.0.1:9", &directory).await;
+    app.deliver_attention(approval()).await;
+    let (_, stale) = app.next_held_push().await.unwrap();
+    app.clear_remote_bridge_state().await;
+    pair_for_tests(&app).await;
+    app.deliver_attention(approval()).await;
+    let (_, current) = app.next_held_push().await.unwrap();
+    assert_ne!(stale, current);
+
+    app.push_written(stale).await;
+    assert_eq!(counters(&app).await.delivered, 0, "not this drain's push");
+    app.push_unwritten(stale).await;
+    assert!(app.next_held_push().await.is_none(), "still claimed");
+    app.push_written(current).await;
+    let done = counters(&app).await;
+    assert_eq!((done.delivered, done.held, done.lost), (1, 0, 1));
 }
 
 #[tokio::test]
@@ -396,7 +419,7 @@ async fn a_push_being_written_cannot_be_evicted_or_expired() {
         })
         .await;
     }
-    assert!(app.next_held_push().await.is_some());
+    let (_, claim) = app.next_held_push().await.unwrap();
     age_held_pushes(&app, HELD_PUSH_TTL_MINUTES + 1).await;
     expire_held_locked(&mut *app.inner.remote.lock().await, Utc::now());
     let left = counters(&app).await;
@@ -408,7 +431,7 @@ async fn a_push_being_written_cannot_be_evicted_or_expired() {
         })
         .await;
     }
-    app.push_written().await;
+    app.push_written(claim).await;
     let done = counters(&app).await;
     assert_eq!(
         (done.delivered, done.evicted, done.held),
@@ -632,7 +655,7 @@ async fn live_session(
 async fn claimed(app: &AppState) -> bool {
     let remote = app.inner.remote.lock().await;
     let front = remote.held_pushes.queue.front();
-    front.is_some_and(|held| held.writing)
+    front.is_some_and(|held| held.claim.is_some())
 }
 
 /// Revoking a device or rotating keys aborts the session mid-write.

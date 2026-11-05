@@ -220,9 +220,9 @@ pub(super) struct HeldPush {
     pub(super) push: AttentionPush,
     /// When it was first held. A failed write does not restart the clock.
     held_at: DateTime<Utc>,
-    /// A drain has claimed it. It stays queued and counted until the write
+    /// The drain writing it. It stays queued and counted until the write
     /// settles, and nothing else may offer, evict or expire it meanwhile.
-    writing: bool,
+    claim: Option<u64>,
 }
 
 impl HeldPush {
@@ -236,6 +236,7 @@ impl HeldPush {
 #[derive(Default)]
 pub(super) struct HeldPushes {
     queue: std::collections::VecDeque<HeldPush>,
+    next_claim: u64,
     /// Tells the live session to write. One permit however many are waiting,
     /// and it survives until the next session if none is live.
     wake: Arc<tokio::sync::Notify>,
@@ -397,7 +398,7 @@ fn make_room(remote: &mut RemoteBridgeState, incoming: &AttentionPush) -> bool {
         .queue
         .iter()
         .enumerate()
-        .filter(|(_, held)| !held.writing)
+        .filter(|(_, held)| held.claim.is_none())
         .min_by_key(|(_, held)| push_rank(&held.push))
         .map(|(index, held)| (index, push_rank(&held.push)));
     let Some((index, rank)) = lowest else {
@@ -432,7 +433,7 @@ fn expire_held_locked(remote: &mut RemoteBridgeState, now: DateTime<Utc>) {
         .held_pushes
         .queue
         .iter()
-        .position(|held| !held.writing && held.expired(now))
+        .position(|held| held.claim.is_none() && held.expired(now))
     {
         if let Some(held) = take_held_at(remote, index) {
             tracing::warn!(kind = held.push.kind, "attention push expired while held");
@@ -572,7 +573,7 @@ impl AppState {
         let held = HeldPush {
             push,
             held_at: Utc::now(),
-            writing: false,
+            claim: None,
         };
         hold_locked(&mut remote, held);
         remote.held_pushes.wake.notify_one();
@@ -581,18 +582,22 @@ impl AppState {
     /// Claims the next push still worth saying, decided as it goes out rather
     /// than when it was queued: he may have answered it or come back to the Mac.
     /// The caller settles the claim with `push_written` or `push_unwritten`.
-    pub(super) async fn next_held_push(&self) -> Option<AttentionPush> {
+    pub(super) async fn next_held_push(&self) -> Option<(AttentionPush, u64)> {
         loop {
-            let push = {
+            let (push, claim) = {
                 let mut remote = self.inner.remote.lock().await;
                 expire_held_locked(&mut remote, Utc::now());
-                let front = remote.held_pushes.queue.front_mut()?;
-                if front.writing {
+                let held = &mut remote.held_pushes;
+                let claim = held.next_claim;
+                let front = held.queue.front_mut()?;
+                if front.claim.is_some() {
                     // An earlier session's drain still has it.
                     return None;
                 }
-                front.writing = true;
-                front.push.clone()
+                front.claim = Some(claim);
+                let push = front.push.clone();
+                held.next_claim += 1;
+                (push, claim)
             };
             let settled = match &push.notification_id {
                 Some(id) => self.inner.notifications.is_settled(id).await,
@@ -606,31 +611,35 @@ impl AppState {
                     .refusal()
             };
             let Some(outcome) = outcome else {
-                return Some(push);
+                return Some((push, claim));
             };
             tracing::info!(kind = push.kind, ?outcome, "held attention push dropped");
-            self.settle_claimed_push(outcome).await;
+            self.settle_claimed_push(claim, outcome).await;
         }
     }
 
-    pub(super) async fn push_written(&self) {
-        self.settle_claimed_push(PushOutcome::Delivered).await;
+    pub(super) async fn push_written(&self, claim: u64) {
+        self.settle_claimed_push(claim, PushOutcome::Delivered)
+            .await;
     }
 
     /// The write failed: it keeps its place and its age for the next session.
-    pub(super) async fn push_unwritten(&self) {
+    pub(super) async fn push_unwritten(&self, claim: u64) {
         let mut remote = self.inner.remote.lock().await;
-        if let Some(front) = remote.held_pushes.queue.front_mut() {
-            front.writing = false;
+        if let Some(front) = remote.held_pushes.queue.front_mut()
+            && front.claim == Some(claim)
+        {
+            front.claim = None;
         }
         remote.held_pushes.wake.notify_one();
     }
 
-    /// Forgetting the pairing may have taken the claimed push already.
-    async fn settle_claimed_push(&self, outcome: PushOutcome) {
+    /// Forgetting the pairing may have taken the claimed push already, and a
+    /// drain outlives its session, so the front may be another drain's by now.
+    async fn settle_claimed_push(&self, claim: u64, outcome: PushOutcome) {
         let mut remote = self.inner.remote.lock().await;
-        let claimed = remote.held_pushes.queue.front();
-        if claimed.is_some_and(|held| held.writing)
+        let front = remote.held_pushes.queue.front();
+        if front.is_some_and(|held| held.claim == Some(claim))
             && let Some(held) = take_held(&mut remote)
         {
             count_push(&mut remote.attention, held.push.kind, outcome);
