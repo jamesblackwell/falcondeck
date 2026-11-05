@@ -681,6 +681,45 @@ async fn a_corrupt_scheduled_store_is_reported_and_left_alone() {
 }
 
 #[tokio::test]
+async fn a_rejected_scheduled_task_keeps_its_contents_out_of_the_report() {
+    let temp = tempfile::tempdir().unwrap();
+    let state_path = temp.path().join("daemon-state.json");
+    let app = AppState::new_with_state_path("test".into(), HashMap::new(), state_path);
+    let store = app.inner.scheduled_tasks_path.clone();
+    let contents = serde_json::json!({
+        "version": 1,
+        "tasks": { "scheduled-1": { "detail": {
+            "id": "scheduled-1",
+            "title": "Valid JSON, rejected rule",
+            "prompt_preview": "Check",
+            "status": "active",
+            "schedule": {
+                "kind": "recurring",
+                "rrule": "FREQ=DAILY;PRIVATE_MARKER=1",
+                "timezone": "UTC"
+            },
+            "workspace_id": "workspace-1",
+            "provider": "codex",
+            "updated_at": "2026-08-13T08:00:00Z",
+            "prompt": "Check",
+            "model_id": "gpt-test",
+            "isolation": "project_folder",
+            "created_at": "2026-08-13T08:00:00Z"
+        }, "runs": [] } }
+    })
+    .to_string();
+    std::fs::write(&store, &contents).unwrap();
+
+    app.restore_scheduled_tasks().await.unwrap();
+
+    let reported = app.snapshot().await.restore_error.unwrap();
+    assert!(!reported.contains("PRIVATE_MARKER"), "{reported}");
+    assert_eq!(reported, format!("{}: could not be loaded", store.display()));
+    app.shutdown().await.ok();
+    assert_eq!(std::fs::read_to_string(store).unwrap(), contents);
+}
+
+#[tokio::test]
 async fn a_failed_scheduled_rewrite_at_boot_is_not_fatal() {
     let temp = tempfile::tempdir().unwrap();
     let state_dir = temp.path().join("state");

@@ -109,9 +109,10 @@ fn validate_preferences_shape(value: &Value) -> Result<(), DaemonError> {
     check::<falcondeck_core::RoutingPreferences>(value, "routing")
 }
 
-/// A load failure fit to leave this machine. serde quotes the values it
-/// rejects and these files hold secrets-adjacent state, so a JSON error keeps
-/// only its position. The detail stays in the local log.
+/// A load failure fit to leave this machine. Error text can quote file
+/// contents (serde and validation both do) and these files hold
+/// secrets-adjacent state, so report only the path and a fixed reason. The
+/// detail stays in the local log.
 pub(super) fn load_failure_message(path: &Path, error: &DaemonError) -> String {
     tracing::error!(path = %path.display(), %error, "failed to load a saved file");
     match error {
@@ -121,7 +122,8 @@ pub(super) fn load_failure_message(path: &Path, error: &DaemonError) -> String {
             json.line(),
             json.column()
         ),
-        other => format!("{}: {other}", path.display()),
+        DaemonError::Io(io) => format!("{}: could not be read ({})", path.display(), io.kind()),
+        _ => format!("{}: could not be loaded", path.display()),
     }
 }
 
@@ -1164,6 +1166,28 @@ mod tests {
         assert_eq!(
             reported,
             "/state/daemon-state.json: invalid JSON at line 1, column 14"
+        );
+    }
+
+    #[test]
+    fn other_load_failures_report_only_a_generic_reason() {
+        let path = Path::new("/state/scheduled-tasks.json");
+        for error in [
+            DaemonError::BadRequest("RRULE field PRIVATE_MARKER is not supported".to_string()),
+            DaemonError::NotFound("PRIVATE_MARKER".to_string()),
+            DaemonError::Conflict("PRIVATE_MARKER".to_string()),
+            DaemonError::Rpc("PRIVATE_MARKER".to_string()),
+            DaemonError::Process("PRIVATE_MARKER".to_string()),
+        ] {
+            assert_eq!(
+                load_failure_message(path, &error),
+                "/state/scheduled-tasks.json: could not be loaded"
+            );
+        }
+        let denied = std::io::Error::new(std::io::ErrorKind::PermissionDenied, "PRIVATE_MARKER");
+        assert_eq!(
+            load_failure_message(path, &denied.into()),
+            "/state/scheduled-tasks.json: could not be read (permission denied)"
         );
     }
 
