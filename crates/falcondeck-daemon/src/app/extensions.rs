@@ -154,6 +154,9 @@ pub(super) struct ExtensionRegistry {
     packages: HashMap<String, ExtensionPackage>,
     persisted: PersistedExtensionState,
     manages_bundled_root: bool,
+    /// Set when the saved state could not be read. Memory then holds defaults,
+    /// so every write is refused rather than replacing the file with them.
+    load_failed: Option<String>,
 }
 
 impl ExtensionRegistry {
@@ -167,6 +170,7 @@ impl ExtensionRegistry {
             packages: HashMap::new(),
             persisted: PersistedExtensionState::default(),
             manages_bundled_root,
+            load_failed: None,
         }
     }
 
@@ -174,13 +178,20 @@ impl ExtensionRegistry {
         let bundled_assets = self.ensure_bundled_assets().await;
         // Read the saved state even if those failed: a later save would
         // otherwise write defaults over it.
-        self.persisted = match tokio::fs::read_to_string(&self.state_path).await {
-            Ok(contents) => serde_json::from_str(&contents)?,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                PersistedExtensionState::default()
-            }
-            Err(error) => return Err(error.into()),
-        };
+        let saved: Result<PersistedExtensionState, DaemonError> =
+            match tokio::fs::read_to_string(&self.state_path).await {
+                Ok(contents) => serde_json::from_str(&contents).map_err(Into::into),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                    Ok(PersistedExtensionState::default())
+                }
+                Err(error) => Err(error.into()),
+            };
+        self.persisted = saved.inspect_err(|error| {
+            self.load_failed = Some(super::storage::load_failure_message(
+                &self.state_path,
+                error,
+            ));
+        })?;
         migrate_scratch_pad_to_notes(&mut self.persisted);
         retire_bundled_extensions(&mut self.persisted);
         bundled_assets?;
@@ -421,6 +432,7 @@ impl ExtensionRegistry {
         catalog.sort_by(|left, right| left.name.cmp(&right.name));
         ExtensionSnapshot {
             catalog,
+            load_error: self.load_failed.clone(),
             views: self
                 .persisted
                 .views
@@ -589,6 +601,7 @@ impl ExtensionRegistry {
         &mut self,
         data: falcondeck_core::ExtensionsBackupData,
     ) -> Result<usize, DaemonError> {
+        self.ensure_state_loaded()?;
         let mut count = 0;
         for (id, enabled) in data.enabled {
             self.persisted.enabled.insert(id, enabled);
@@ -909,7 +922,17 @@ impl ExtensionRegistry {
         self.persist_state(&self.persisted).await
     }
 
+    fn ensure_state_loaded(&self) -> Result<(), DaemonError> {
+        match &self.load_failed {
+            Some(error) => Err(DaemonError::Process(format!(
+                "extension state did not load: {error}"
+            ))),
+            None => Ok(()),
+        }
+    }
+
     async fn persist_state(&self, state: &PersistedExtensionState) -> Result<(), DaemonError> {
+        self.ensure_state_loaded()?;
         write_atomically(&self.state_path, serde_json::to_vec_pretty(state)?).await
     }
 }
@@ -2007,6 +2030,50 @@ mod tests {
                 .expect("external catalog should remain"),
             r#"{"packages":[]}"#
         );
+    }
+
+    #[tokio::test]
+    async fn unreadable_extension_state_refuses_every_write() {
+        let state_dir = tempfile::tempdir().expect("temporary state directory");
+        let state_path = state_dir.path().join("extensions-state.json");
+        let mut registry = ExtensionRegistry::new(&state_dir.path().join("daemon-state.json"));
+        registry.restore().await.expect("first restore");
+        let extension = NOTES_ID;
+
+        let corrupt = r#"{"enabled": "secret-value"}"#;
+        std::fs::write(&state_path, corrupt).unwrap();
+        assert!(registry.restore().await.is_err());
+
+        let reported = registry.snapshot().load_error.expect("visible error");
+        assert!(reported.contains("extensions-state.json"), "{reported}");
+        assert!(!reported.contains("secret-value"), "{reported}");
+        let before = registry.persisted.enabled.clone();
+        assert!(
+            registry
+                .restore_backup_data(falcondeck_core::ExtensionsBackupData {
+                    enabled: HashMap::from([("imported".to_string(), true)]),
+                    ..Default::default()
+                })
+                .await
+                .is_err()
+        );
+        assert_eq!(registry.persisted.enabled, before);
+        assert!(
+            registry
+                .update_permission(extension, "storage", true)
+                .await
+                .is_err()
+        );
+        let storage = BTreeMap::from([("saved".to_string(), Value::from("note"))]);
+        assert!(
+            registry
+                .commit_action(extension, storage, Vec::new())
+                .await
+                .is_err()
+        );
+        let enabled = registry.summaries[extension].enabled;
+        assert!(registry.update_enabled(extension, !enabled).await.is_err());
+        assert_eq!(std::fs::read_to_string(&state_path).unwrap(), corrupt);
     }
 
     #[cfg(unix)]

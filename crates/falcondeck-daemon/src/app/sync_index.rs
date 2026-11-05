@@ -159,6 +159,7 @@ fn scope_extensions(
     }
     Ok(ExtensionSnapshot {
         catalog: extensions.catalog.clone(),
+        load_error: extensions.load_error.clone(),
         views: extensions
             .views
             .iter()
@@ -1033,6 +1034,7 @@ mod tests {
         };
         let all = ExtensionSnapshot {
             catalog: Vec::new(),
+            load_error: None,
             views: vec![
                 view(None),
                 view(Some(("workspace", "w"))),

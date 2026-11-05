@@ -1905,6 +1905,9 @@ export function normalizeExtensionSnapshot(value: unknown): ExtensionSnapshot {
     };
   };
   return {
+    ...(typeof snapshot.load_error === "string"
+      ? { load_error: snapshot.load_error }
+      : {}),
     catalog: Array.isArray(snapshot.catalog)
       ? snapshot.catalog.flatMap((candidate) => {
           if (

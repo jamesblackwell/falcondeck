@@ -653,3 +653,50 @@ async fn a_readable_state_survives_failed_writes_at_boot() {
     assert_eq!(snapshot.restore_phase, falcondeck_core::DaemonRestorePhase::Ready);
     app.shutdown().await.unwrap();
 }
+
+#[tokio::test]
+async fn a_corrupt_scheduled_store_is_reported_and_left_alone() {
+    let temp = tempfile::tempdir().unwrap();
+    let state_path = temp.path().join("daemon-state.json");
+    let app = AppState::new_with_state_path("test".into(), HashMap::new(), state_path);
+    let store = app.inner.scheduled_tasks_path.clone();
+    std::fs::write(&store, "{\"version\": \"secret-value\"}").unwrap();
+
+    app.restore_scheduled_tasks().await.unwrap();
+
+    let reported = app.snapshot().await.restore_error.unwrap();
+    assert!(reported.contains("scheduled-tasks.json"), "{reported}");
+    assert!(!reported.contains("secret-value"), "{reported}");
+    assert!(app.persist_local_state().await.is_ok());
+    assert!(
+        super::super::scheduled_tasks::persist_registry(&app)
+            .await
+            .is_err()
+    );
+    app.shutdown().await.ok();
+    assert_eq!(
+        std::fs::read_to_string(store).unwrap(),
+        "{\"version\": \"secret-value\"}"
+    );
+}
+
+#[tokio::test]
+async fn a_failed_scheduled_rewrite_at_boot_is_not_fatal() {
+    let temp = tempfile::tempdir().unwrap();
+    let state_dir = temp.path().join("state");
+    std::fs::create_dir(&state_dir).unwrap();
+    let app = AppState::new_with_state_path(
+        "test".into(),
+        HashMap::new(),
+        state_dir.join("daemon-state.json"),
+    );
+    let writable = std::fs::metadata(&state_dir).unwrap().permissions();
+    std::fs::set_permissions(&state_dir, std::fs::Permissions::from_mode(0o555)).unwrap();
+
+    let restored = app.restore_scheduled_tasks().await;
+    let reported = app.snapshot().await.restore_error;
+    std::fs::set_permissions(&state_dir, writable).unwrap();
+
+    restored.unwrap();
+    assert_eq!(reported, None);
+}

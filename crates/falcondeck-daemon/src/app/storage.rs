@@ -70,12 +70,58 @@ pub(super) async fn load_preferences(path: &PathBuf) -> Result<FalconDeckPrefere
     match fs::read_to_string(path).await {
         Ok(contents) => {
             let value: Value = serde_json::from_str(&contents)?;
+            validate_preferences_shape(&value)?;
             Ok(merge_preferences_from_value(value))
         }
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
             Ok(FalconDeckPreferences::default())
         }
         Err(error) => Err(DaemonError::Io(error)),
+    }
+}
+
+/// The merge below forgives junk field by field, and startup writes its result
+/// back. That is fine for a setting, but it would erase these collections, so
+/// they must parse or the load fails. Details go to the local log only: serde
+/// quotes the values it rejects.
+fn validate_preferences_shape(value: &Value) -> Result<(), DaemonError> {
+    fn check<T: serde::de::DeserializeOwned>(
+        value: &Value,
+        field: &str,
+    ) -> Result<(), DaemonError> {
+        let Some(stored) = value.get(field) else {
+            return Ok(());
+        };
+        serde_json::from_value::<T>(stored.clone())
+            .map(|_| ())
+            .map_err(|error| {
+                tracing::error!(%field, %error, "saved preferences field did not parse");
+                DaemonError::BadRequest(format!("\"{field}\" is not in the expected format"))
+            })
+    }
+    if !value.is_object() {
+        return Err(DaemonError::BadRequest(
+            "preferences are not a JSON object".to_string(),
+        ));
+    }
+    check::<Vec<falcondeck_core::BotProfile>>(value, "bots")?;
+    check::<Vec<falcondeck_core::ProjectFolder>>(value, "project_folders")?;
+    check::<falcondeck_core::RoutingPreferences>(value, "routing")
+}
+
+/// A load failure fit to leave this machine. serde quotes the values it
+/// rejects and these files hold secrets-adjacent state, so a JSON error keeps
+/// only its position. The detail stays in the local log.
+pub(super) fn load_failure_message(path: &Path, error: &DaemonError) -> String {
+    tracing::error!(path = %path.display(), %error, "failed to load a saved file");
+    match error {
+        DaemonError::Json(json) => format!(
+            "{}: invalid JSON at line {}, column {}",
+            path.display(),
+            json.line(),
+            json.column()
+        ),
+        other => format!("{}: {other}", path.display()),
     }
 }
 
@@ -1081,6 +1127,45 @@ mod tests {
     use serde_json::json;
 
     use crate::app::PersistedWorkspaceState;
+
+    #[tokio::test]
+    async fn collections_that_do_not_parse_fail_the_load_without_quoting_values() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("falcondeck.json");
+        for contents in [
+            "null",
+            "[]",
+            r#"{"bots": [{"id": "only-an-id-secret-value"}]}"#,
+            r#"{"bots": null}"#,
+            r#"{"project_folders": [{"id": 7}]}"#,
+            r#"{"project_folders": "secret-value"}"#,
+            r#"{"routing": "secret-value"}"#,
+        ] {
+            std::fs::write(&path, contents).unwrap();
+            let error = load_preferences(&path).await.unwrap_err();
+            let reported = load_failure_message(&path, &error);
+            assert!(!reported.contains("secret-value"), "{contents}: {reported}");
+        }
+        for contents in [
+            r#"{}"#,
+            r#"{"bots": [], "project_folders": []}"#,
+            r#"{"max_agent_children": "junk", "workspace_order": 3}"#,
+        ] {
+            std::fs::write(&path, contents).unwrap();
+            load_preferences(&path).await.unwrap();
+        }
+    }
+
+    #[test]
+    fn json_load_failures_report_only_a_position() {
+        let error: serde_json::Error = serde_json::from_str::<u32>("\"secret-value\"").unwrap_err();
+        assert!(error.to_string().contains("secret-value"));
+        let reported = load_failure_message(Path::new("/state/daemon-state.json"), &error.into());
+        assert_eq!(
+            reported,
+            "/state/daemon-state.json: invalid JSON at line 1, column 14"
+        );
+    }
 
     #[tokio::test]
     async fn an_early_workspace_write_preserves_pairing_while_secrets_are_loading() {

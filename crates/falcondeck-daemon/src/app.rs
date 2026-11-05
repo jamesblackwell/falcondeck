@@ -393,6 +393,8 @@ struct InnerState {
     /// Makes the lightweight task-store restore a readiness prerequisite and
     /// prevents the slower general restore from loading it over live edits.
     scheduled_tasks_restored: OnceCell<()>,
+    /// Set when scheduled-tasks.json could not be read, which refuses writes to it.
+    scheduled_load_error: StdMutex<Option<String>>,
     scheduled_mutation: Mutex<()>,
     /// Wakes the single scheduler loop after definition changes.
     scheduled_notify: Notify,
@@ -794,7 +796,9 @@ pub(crate) struct LocalRestoreGuard(AppState);
 
 impl Drop for LocalRestoreGuard {
     fn drop(&mut self) {
-        if !self.0.fail_local_restore("restore stopped before it finished") {
+        if !self.0.fail_local_restore(
+            "Loading stopped unexpectedly. See ~/.falcondeck/logs/daemon.log for details.",
+        ) {
             return;
         }
         // Clients are still showing the loading state; tell them it ended.
@@ -1155,6 +1159,7 @@ impl AppState {
                 computer_use,
                 scheduled_tasks: Mutex::new(scheduled_tasks::ScheduledTaskRegistry::default()),
                 scheduled_tasks_restored: OnceCell::new(),
+                scheduled_load_error: StdMutex::new(None),
                 scheduled_mutation: Mutex::new(()),
                 scheduled_notify: Notify::new(),
                 scheduled_scheduler_started: AtomicBool::new(false),
@@ -1735,8 +1740,9 @@ impl AppState {
 
     pub async fn restore_local_state(&self) -> Result<(), DaemonError> {
         self.start_cloud_observer();
-        // Only the two files below can fail the load. Everything else here is
-        // recoverable, and a full disk must not empty the app.
+        // Only falcondeck.json and daemon-state.json fail the whole load. The
+        // extension and scheduled-task stores refuse writes on their own, and
+        // a full disk must not empty the app.
         if let Err(error) = self.inner.extensions.lock().await.restore().await {
             tracing::error!(%error, "failed to restore extensions");
         }
@@ -1753,7 +1759,7 @@ impl AppState {
         }
         self.sync_extension_event_workers().await;
         let unreadable = |path: &PathBuf, error: DaemonError| {
-            DaemonError::Process(format!("{}: {error}", path.display()))
+            DaemonError::Process(load_failure_message(path, &error))
         };
         let preferences = load_preferences(&self.inner.preferences_path)
             .await
@@ -2324,7 +2330,12 @@ impl AppState {
     fn saved_state_failure(&self) -> Option<String> {
         match &*self.saved_state_gate() {
             SavedStateGate::Failed(reason) => Some(reason.clone()),
-            _ => None,
+            _ => self
+                .inner
+                .scheduled_load_error
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .clone(),
         }
     }
 

@@ -6825,6 +6825,11 @@ function AppInner() {
       ) : null}
       {snapshot?.restore_error ? (
         <SavedStateErrorBanner error={snapshot.restore_error} />
+      ) : snapshot?.extensions?.load_error ? (
+        <SavedStateErrorBanner
+          title="FalconDeck couldn't load your extensions"
+          error={snapshot.extensions.load_error}
+        />
       ) : null}
       {isImportingProjectSessions ? <ProjectImportOverlay /> : null}
       {isOnboardingActive ? (

@@ -200,6 +200,17 @@ fn validate_schedule_for_restore(schedule: &ScheduledTaskSchedule) -> Result<(),
 }
 
 pub(super) async fn persist_registry(app: &AppState) -> Result<(), DaemonError> {
+    if let Some(error) = app
+        .inner
+        .scheduled_load_error
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .clone()
+    {
+        return Err(DaemonError::Process(format!(
+            "scheduled tasks did not load: {error}"
+        )));
+    }
     let _persistence = app.inner.persistence.lock().await;
     let payload = {
         let registry = app.inner.scheduled_tasks.lock().await;
@@ -215,9 +226,23 @@ pub(super) async fn persist_registry(app: &AppState) -> Result<(), DaemonError> 
 
 pub(super) async fn restore(app: &AppState) -> Result<(), DaemonError> {
     let _mutation = app.inner.scheduled_mutation.lock().await;
-    let registry = load_registry(&app.inner.scheduled_tasks_path, Utc::now()).await?;
-    *app.inner.scheduled_tasks.lock().await = registry;
-    persist_registry(app).await?;
+    // Neither failure may stop the daemon. An unreadable store stays untouched
+    // and is reported; a failed rewrite of a good one costs nothing.
+    match load_registry(&app.inner.scheduled_tasks_path, Utc::now()).await {
+        Ok(registry) => *app.inner.scheduled_tasks.lock().await = registry,
+        Err(error) => {
+            *app.inner
+                .scheduled_load_error
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(
+                super::storage::load_failure_message(&app.inner.scheduled_tasks_path, &error),
+            );
+            return Ok(());
+        }
+    }
+    if let Err(error) = persist_registry(app).await {
+        tracing::error!(%error, "failed to rewrite scheduled tasks at startup");
+    }
     Ok(())
 }
 

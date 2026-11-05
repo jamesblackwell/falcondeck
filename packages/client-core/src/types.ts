@@ -1880,6 +1880,8 @@ export type ExtensionView = {
 export type ExtensionSnapshot = {
   catalog: ExtensionSummary[];
   views: ExtensionView[];
+  /** Why saved extension state could not be read. */
+  load_error?: string;
 };
 
 export type InvokeExtensionActionPayload = {

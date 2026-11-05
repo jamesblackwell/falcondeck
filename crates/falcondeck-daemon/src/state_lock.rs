@@ -116,8 +116,19 @@ fn try_lock(file: &File) -> io::Result<()> {
 mod tests {
     use super::*;
 
+    /// The cross-process test starts child processes, and a child forked
+    /// before its exec briefly holds every lock this process has open.
+    static SERIAL: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    fn serial() -> std::sync::MutexGuard<'static, ()> {
+        SERIAL
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
     #[test]
     fn same_state_path_rejects_a_second_owner() {
+        let _serial = serial();
         let directory = tempfile::tempdir().unwrap();
         let state_path = directory.path().join("daemon-state.json");
         let _owner = StateLock::acquire(&state_path).unwrap();
@@ -130,6 +141,7 @@ mod tests {
 
     #[test]
     fn dropping_owner_releases_the_lock_without_removing_the_file() {
+        let _serial = serial();
         let directory = tempfile::tempdir().unwrap();
         let state_path = directory.path().join("daemon-state.json");
         let owner = StateLock::acquire(&state_path).unwrap();
@@ -141,6 +153,7 @@ mod tests {
 
     #[test]
     fn independent_state_paths_can_be_owned_concurrently() {
+        let _serial = serial();
         let directory = tempfile::tempdir().unwrap();
 
         let _first = StateLock::acquire(&directory.path().join("first/state.json")).unwrap();
@@ -149,6 +162,7 @@ mod tests {
 
     #[test]
     fn different_state_filenames_cannot_share_auxiliary_stores() {
+        let _serial = serial();
         let directory = tempfile::tempdir().unwrap();
         let _first = StateLock::acquire(&directory.path().join("first.json")).unwrap();
 
@@ -160,6 +174,7 @@ mod tests {
 
     #[test]
     fn an_older_runtime_state_file_lock_prevents_a_new_owner() {
+        let _serial = serial();
         let directory = tempfile::tempdir().unwrap();
         let state_path = directory.path().join("daemon-state.json");
         let legacy_path = directory.path().join("daemon-state.json.lock");
@@ -181,6 +196,7 @@ mod tests {
 
     #[test]
     fn reserved_lock_filename_is_rejected_without_overwriting_state() {
+        let _serial = serial();
         let directory = tempfile::tempdir().unwrap();
         let state_path = directory.path().join(".").join("daemon-runtime.lock");
         let contents = "{\"workspaces\":[]}";
@@ -195,6 +211,7 @@ mod tests {
 
     #[test]
     fn another_process_is_rejected_until_the_owner_exits() {
+        let _serial = serial();
         let directory = tempfile::tempdir().unwrap();
         let state_path = directory.path().join("daemon-state.json");
         let owner = StateLock::acquire(&state_path).unwrap();
@@ -243,6 +260,7 @@ mod tests {
 
     #[test]
     fn stale_pid_metadata_does_not_prevent_acquiring_an_unowned_lock() {
+        let _serial = serial();
         let directory = tempfile::tempdir().unwrap();
         let state_path = directory.path().join("daemon-state.json");
         std::fs::write(lock_path(&state_path), "pid=1\n").unwrap();
@@ -257,6 +275,7 @@ mod tests {
 
     #[test]
     fn lock_file_is_shared_by_the_state_directory() {
+        let _serial = serial();
         assert_eq!(
             lock_path(Path::new("/tmp/config/daemon-state.json")),
             Path::new("/tmp/config/daemon-runtime.lock")
@@ -266,6 +285,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn lock_file_permissions_are_owner_only() {
+        let _serial = serial();
         use std::os::unix::fs::PermissionsExt;
 
         let directory = tempfile::tempdir().unwrap();

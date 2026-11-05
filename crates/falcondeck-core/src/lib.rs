@@ -1624,6 +1624,9 @@ pub struct ExtensionSnapshot {
     pub catalog: Vec<ExtensionSummary>,
     /// Latest non-secret view state published by enabled extensions.
     pub views: Vec<ExtensionView>,
+    /// Why saved extension state could not be read; all extensions are hidden.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub load_error: Option<String>,
 }
 
 /// Client-visible state for an installed extension.
