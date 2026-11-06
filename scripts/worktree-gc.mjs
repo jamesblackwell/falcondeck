@@ -315,14 +315,28 @@ async function processPaths() {
   }
 }
 
+export async function inspectDockerMounts(ids, inspect) {
+  const mounts = [];
+  for (const id of ids.trim().split(/\s+/).filter(Boolean)) {
+    try {
+      const { stdout } = await inspect(id);
+      mounts.push(...stdout.trim().split('\n').filter(Boolean).flatMap((line) => JSON.parse(line)));
+    } catch (error) {
+      if (!String(error.stderr ?? '').toLowerCase().includes('no such object')) throw error;
+    }
+  }
+  return mounts.filter((m) => m.Type === 'bind').map((m) => m.Source);
+}
+
 async function dockerMounts() {
   const socket = process.env.DOCKER_HOST?.replace(/^unix:\/\//, '');
   if (!(socket && existsSync(socket)) && !existsSync('/var/run/docker.sock')) return [];
-  const options = { timeout: 3000, maxBuffer: 16 * 1024 * 1024 };
+  // Include standard Docker install locations for launchd's short PATH.
+  const options = { timeout: 3000, maxBuffer: 16 * 1024 * 1024,
+    env: { ...process.env, PATH: `${process.env.PATH ?? ''}:/usr/local/bin:/opt/homebrew/bin` } };
   const { stdout: ids } = await run('docker', ['ps', '-q'], options);
   if (!ids.trim()) return [];
-  const { stdout } = await run('docker', ['inspect', '--format', '{{json .Mounts}}', ...ids.trim().split(/\s+/)], options);
-  return stdout.trim().split('\n').flatMap((line) => JSON.parse(line)).filter((m) => m.Type === 'bind').map((m) => m.Source);
+  return inspectDockerMounts(ids, (id) => run('docker', ['inspect', '--format', '{{json .Mounts}}', id], options));
 }
 
 async function duBytes(path) {
@@ -425,6 +439,7 @@ export async function inspect({ path, source }, ctx) {
       entry.repo = (url ? basename(url).replace(/\.git$/, '') : basename(dirname(path))) || entry.repo;
     }
     entry.repoPath = mainRoot;
+    await readRecipe(entry);
     entry.branch = (await git(path, ['symbolic-ref', '-q', '--short', 'HEAD'], { allowFail: true }))?.trim() || null;
     entry.headSha = (await git(path, ['rev-parse', 'HEAD'])).trim();
     entry.branchMismatch = !entry.branch || Boolean(owner?.branch && owner.branch !== entry.branch);
@@ -569,7 +584,7 @@ export function render(result, opts) {
   const entries = [...result.entries].sort((a, b) => b.sizeBytes - a.sizeBytes);
   const summary = summarize(entries);
   if (opts.format === 'json') {
-    return JSON.stringify({ generatedAt: result.generatedAt, summary, entries }, null, 2);
+    return JSON.stringify({ generatedAt: result.generatedAt, summary, entries: entries.map(({ indexSnapshot, statusSnapshot, ...entry }) => entry) }, null, 2);
   }
   const md = opts.format === 'markdown';
   const heading = (text) => (md ? `\n### ${text}\n` : `\n${text}\n${'='.repeat(text.length)}`);
@@ -638,7 +653,7 @@ export function validateSetup(setup) {
   return setup;
 }
 
-async function saveRecipe(entry) {
+async function readRecipe(entry) {
   if (entry.source !== 'variant') return;
   const file = join(entry.commonDir, 'falcondeck-variants', basename(entry.path) + '.json');
   let recipe;
@@ -651,6 +666,13 @@ async function saveRecipe(entry) {
   validateSetup(recipe.setup);
   const active = (await git(entry.path, ['config', '--worktree', '--bool', 'core.sparseCheckout'], { allowFail: true }))?.trim() === 'true';
   recipe.patterns = active ? readFileSync(join(entry.gitDir, 'info/sparse-checkout'), 'utf8') : null;
+  return { file, recipe };
+}
+
+async function saveRecipe(entry) {
+  const planned = await readRecipe(entry);
+  if (!planned) return;
+  const { file, recipe } = planned;
   mkdirSync(dirname(file), { recursive: true });
   const temp = file + '.' + randomUUID() + '.tmp';
   writeFileSync(temp, JSON.stringify(recipe));

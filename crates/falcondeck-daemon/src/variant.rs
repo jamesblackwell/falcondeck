@@ -18,6 +18,8 @@ use crate::error::DaemonError;
 
 mod reclaim;
 mod setup;
+#[cfg(test)]
+pub(crate) use reclaim::test_no_docker_mounts;
 pub use reclaim::{Reclaim, reclaim_if_safe, restore};
 pub(crate) use reclaim::{assess, finish_reclaim};
 pub(crate) use setup::hint as sparse_hint;
@@ -135,8 +137,14 @@ async fn populate_worktree(
     fs::create_dir_all(parent)
         .await
         .map_err(|e| DaemonError::Rpc(e.to_string()))?;
-    let staging = parent.join(format!(".{slug}-provision-{}", Uuid::new_v4()));
+    // A crash can leave the branch checked out in its unpublished staging
+    // directory. Reuse that checkout, preserving its branch even on failure.
+    let recovered = recover_staging(project, parent, slug, branch).await?;
+    let staging = recovered
+        .clone()
+        .unwrap_or_else(|| parent.join(format!(".{slug}-provision-{}", Uuid::new_v4())));
     let stage = staging.to_string_lossy();
+    let new_branch = new_branch && recovered.is_none();
     if new_branch
         && run_git(
             project,
@@ -150,7 +158,9 @@ async fn populate_worktree(
         )));
     }
     let starting_head = run_git(project, &["rev-parse", "HEAD"]).await?;
-    let added = if new_branch {
+    let added = if recovered.is_some() {
+        Ok(())
+    } else if new_branch {
         add_worktree(project, &staging, branch).await
     } else {
         run_git(
@@ -191,6 +201,73 @@ async fn populate_worktree(
     }
     start_dependencies(project, destination, setup).await;
     Ok(())
+}
+
+/// Only the exact slug's registered private staging is recoverable. Never
+/// reset a staging tree containing edits or an active process. Reusing it
+/// avoids deleting an unpushed branch left by an interrupted create.
+async fn recover_staging(
+    project: &str,
+    parent: &Path,
+    slug: &str,
+    branch: &str,
+) -> Result<Option<PathBuf>, DaemonError> {
+    let listed = run_git(project, &["worktree", "list", "--porcelain"]).await?;
+    let prefix = format!(".{slug}-provision-");
+    for record in listed.split("\n\n") {
+        let Some(path) = record.lines().find_map(|l| l.strip_prefix("worktree ")) else {
+            continue;
+        };
+        let path = PathBuf::from(path);
+        let Some(suffix) = path
+            .file_name()
+            .and_then(|p| p.to_str())
+            .and_then(|p| p.strip_prefix(&prefix))
+        else {
+            continue;
+        };
+        if path.parent() != fs::canonicalize(parent).await.ok().as_deref()
+            || Uuid::parse_str(suffix).is_err()
+            || !record
+                .lines()
+                .any(|l| l == format!("branch refs/heads/{branch}"))
+        {
+            continue;
+        }
+        reclaim::process_clear(&path)
+            .await
+            .map_err(DaemonError::Rpc)?;
+        let mut files = fs::read_dir(&path)
+            .await
+            .map_err(|e| DaemonError::Rpc(e.to_string()))?;
+        let mut empty = true;
+        while let Some(file) = files
+            .next_entry()
+            .await
+            .map_err(|e| DaemonError::Rpc(e.to_string()))?
+        {
+            if file.file_name() != ".git" {
+                empty = false;
+                break;
+            }
+        }
+        // A --no-checkout staging tree has no files and legitimately reports
+        // all tracked paths deleted. Any populated staging must be clean.
+        if !empty {
+            let blockers = reclaim::status_blockers(project, &path.to_string_lossy())
+                .await
+                .map_err(DaemonError::Rpc)?;
+            if !blockers.is_empty() {
+                return Err(DaemonError::Rpc(format!(
+                    "Interrupted staging requires review: {}: {}",
+                    path.display(),
+                    blockers.join("; ")
+                )));
+            }
+        }
+        return Ok(Some(path));
+    }
+    Ok(None)
 }
 
 async fn discard_new_branch(project: &str, branch: &str, starting_head: &str) {
@@ -292,6 +369,18 @@ pub(crate) fn has_dependency_job(path: &str) -> bool {
         .lock()
         .unwrap_or_else(|e| e.into_inner())
         .contains_key(Path::new(path))
+}
+
+/// The durable queue is the restart receipt; jobs themselves are in memory.
+pub(crate) fn interrupt_missing_dependency_job(path: &str) {
+    let (_, rx) = tokio::sync::watch::channel(Some(vec![
+        "Dependency provisioning was interrupted by a daemon restart; node_modules may be incomplete. Run the project's normal install before using dependencies.".to_string()
+    ]));
+    dependency_jobs()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .entry(path.into())
+        .or_insert(rx);
 }
 
 pub(crate) fn dependencies_pending(path: &str) -> bool {
@@ -580,6 +669,70 @@ mod tests {
         run_git(path.to_str().unwrap(), &["commit", "-m", "initial"])
             .await
             .unwrap();
+    }
+
+    #[tokio::test]
+    async fn create_recovers_only_its_own_crashed_staging_and_branch() {
+        let root = tempdir().unwrap();
+        test_no_docker_mounts(root.path());
+        let project = root.path().join("project");
+        fs::create_dir(&project).await.unwrap();
+        init_repo(&project).await;
+        let variants = root.path().join("variants");
+        let parent = variants.join("project");
+        fs::create_dir_all(&parent).await.unwrap();
+        let stage = parent.join(format!(".crashed-provision-{}", Uuid::new_v4()));
+        let other = parent.join(format!(".other-provision-{}", Uuid::new_v4()));
+        fs::create_dir(&other).await.unwrap();
+        fs::write(other.join("untouched"), "other thread")
+            .await
+            .unwrap();
+        run_git(
+            project.to_str().unwrap(),
+            &[
+                "worktree",
+                "add",
+                "--no-checkout",
+                "-b",
+                "falcondeck/crashed",
+                stage.to_str().unwrap(),
+            ],
+        )
+        .await
+        .unwrap();
+        let head = run_git(
+            project.to_str().unwrap(),
+            &["rev-parse", "falcondeck/crashed"],
+        )
+        .await
+        .unwrap();
+        let variant = create_in_root(project.to_str().unwrap(), "crashed", &variants)
+            .await
+            .unwrap();
+        assert!(!stage.exists());
+        assert!(Path::new(&variant.path).join("README.md").exists());
+        assert!(other.join("untouched").exists());
+        assert_eq!(
+            run_git(&variant.path, &["rev-parse", "HEAD"])
+                .await
+                .unwrap(),
+            head
+        );
+        assert!(
+            run_git(
+                project.to_str().unwrap(),
+                &["worktree", "list", "--porcelain"]
+            )
+            .await
+            .unwrap()
+            .contains(
+                fs::canonicalize(&variant.path)
+                    .await
+                    .unwrap()
+                    .to_str()
+                    .unwrap()
+            )
+        );
     }
 
     #[test]

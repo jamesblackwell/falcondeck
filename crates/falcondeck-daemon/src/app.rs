@@ -1870,6 +1870,7 @@ impl AppState {
         // complete snapshot instead of cloning and broadcasting the growing
         // 1,000+ thread list once per workspace.
         self.mark_persisted_state_loaded();
+        self.recover_variant_preparations().await;
         self.emit(
             None,
             None,

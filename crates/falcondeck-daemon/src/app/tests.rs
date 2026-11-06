@@ -9671,6 +9671,7 @@ async fn wait_until(mut condition: impl FnMut() -> bool) -> bool {
 #[tokio::test]
 async fn archiving_reclaims_safe_variants_and_unarchive_restores_them() {
     let temp = tempdir().unwrap();
+    crate::variant::test_no_docker_mounts(temp.path());
     let origin = temp.path().join("origin.git");
     let project = temp.path().join("project");
     let variants = temp.path().join("variants");

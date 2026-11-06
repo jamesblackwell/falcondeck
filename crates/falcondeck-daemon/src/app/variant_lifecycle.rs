@@ -71,19 +71,45 @@ impl AppState {
         Ok(crate::variant::sparse_hint(&project, &variant.path).await)
     }
 
+    pub(super) async fn recover_variant_preparations(&self) {
+        let preparing = {
+            let ws = self.inner.workspaces.lock().await;
+            ws.iter()
+                .flat_map(|(workspace, w)| {
+                    w.threads
+                        .iter()
+                        .filter(|(_, t)| t.queued_requests.iter().any(|q| q.preparing_variant))
+                        .map(move |(thread, _)| (workspace.clone(), thread.clone()))
+                })
+                .collect::<Vec<_>>()
+        };
+        for (workspace, thread) in preparing {
+            self.watch_variant_dependencies(&workspace, &thread).await;
+        }
+    }
+
     pub(super) async fn watch_variant_dependencies(&self, workspace: &str, thread: &str) {
-        let path = {
+        let target = {
             let ws = self.inner.workspaces.lock().await;
             ws.get(workspace)
                 .and_then(|w| w.threads.get(thread))
-                .and_then(|t| t.summary.variant.as_ref())
-                .map(|v| v.path.clone())
+                .and_then(|t| {
+                    t.summary.variant.as_ref().map(|v| {
+                        (
+                            v.path.clone(),
+                            t.queued_requests.iter().any(|q| q.preparing_variant),
+                        )
+                    })
+                })
         };
-        let Some(path) = path else {
+        let Some((path, preparing)) = target else {
             return;
         };
         if !crate::variant::has_dependency_job(&path) {
-            return;
+            if !preparing {
+                return;
+            }
+            crate::variant::interrupt_missing_dependency_job(&path);
         }
         let key = (workspace.to_string(), thread.to_string());
         if !self

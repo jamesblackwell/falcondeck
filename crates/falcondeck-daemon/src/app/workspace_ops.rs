@@ -1619,6 +1619,9 @@ pub(super) async fn reclaim_archived_variant(
             thread.summary.updated_at,
         )
     };
+    // Archive may race background dependency provisioning. Wait outside the
+    // gate, then re-check archive/activity before any removal.
+    let _ = crate::variant::wait_dependencies(&variant.path).await;
     let assessment = crate::variant::assess(&workspace_path, &variant).await;
     let gate = app.variant_gate(workspace_id, thread_id).await;
     let _guard = gate.lock().await;
@@ -2563,14 +2566,9 @@ async fn try_enqueue_turn(
                     messages: 1,
                 }),
             };
-            let first_preparing = thread.queued_requests.first().is_some_and(|q| q.preparing_variant);
-            if preparing && !thread_is_busy(&thread.summary.status) && !first_preparing {
-                thread.queued_requests.insert(0, queued);
-                thread.summary.queued_turns.insert(0, summary);
-            } else {
-                thread.queued_requests.push(queued);
-                thread.summary.queued_turns.push(summary);
-            }
+            // Preparation never changes FIFO order, including a held head.
+            thread.queued_requests.push(queued);
+            thread.summary.queued_turns.push(summary);
             thread.summary.updated_at = Utc::now();
             let report = QueueReport {
                 earlier_from_sender: 0,
@@ -3089,6 +3087,7 @@ impl AppState {
             if app.is_shutting_down() {
                 return;
             }
+            app.watch_variant_dependencies(&workspace_id, &thread_id).await;
             let dependency_path = {
                 let ws = app.inner.workspaces.lock().await;
                 ws.get(&workspace_id).and_then(|w| w.threads.get(&thread_id)).and_then(|t| t.summary.variant.as_ref()).map(|v| v.path.clone())
@@ -8935,6 +8934,7 @@ mod tests {
 
         async fn new() -> Self {
             let root = tempdir().unwrap();
+            crate::variant::test_no_docker_mounts(root.path());
             let project = root.path().join("project");
             std::fs::create_dir(&project).unwrap();
             let origin = root.path().join("origin.git");
@@ -9140,6 +9140,103 @@ mod tests {
         .unwrap_err();
         assert!(error.to_string().contains("no provider session"));
         assert!(root.join("a.txt").exists());
+    }
+
+    #[tokio::test]
+    async fn variant_preparation_appends_behind_a_held_queue_head() {
+        let f = VariantFixture::new().await;
+        let request: SendTurnRequest = serde_json::from_value(serde_json::json!({
+            "workspace_id": "workspace-1", "thread_id": "thread-1",
+            "inputs": [{"type":"text", "text":"first"}]
+        }))
+        .unwrap();
+        try_enqueue_turn(&f.app, &request, &request.inputs, None, true)
+            .await
+            .unwrap();
+        f.app
+            .with_managed_thread_mut("workspace-1", "thread-1", |t| {
+                t.queued_requests[0].preparing_variant = false;
+                t.queued_requests[0].request.workspace_id = "retired-workspace".into();
+                t.queued_requests[0].summary.held_reason = Some("retired workspace".into());
+            })
+            .await
+            .unwrap();
+        let mut second = request.clone();
+        second.inputs =
+            serde_json::from_value(serde_json::json!([{ "type": "text", "text": "second" }]))
+                .unwrap();
+        try_enqueue_turn(&f.app, &second, &second.inputs, None, true)
+            .await
+            .unwrap();
+        let ws = f.app.inner.workspaces.lock().await;
+        let t = &ws["workspace-1"].threads["thread-1"];
+        assert_eq!(
+            t.queued_requests[0].request.workspace_id,
+            "retired-workspace"
+        );
+        assert_eq!(t.queued_requests[1].summary.text, "second");
+        assert!(!t.queued_requests[0].preparing_variant);
+    }
+
+    #[tokio::test]
+    async fn variant_preparation_interrupted_by_restart_has_a_visible_warning() {
+        let f = VariantFixture::new().await;
+        let request: SendTurnRequest = serde_json::from_value(serde_json::json!({
+            "workspace_id": "workspace-1", "thread_id": "thread-1",
+            "inputs": [{"type":"text", "text":"survives restart"}]
+        }))
+        .unwrap();
+        try_enqueue_turn(&f.app, &request, &request.inputs, None, true)
+            .await
+            .unwrap();
+        assert!(!crate::variant::has_dependency_job(&f.variant.path));
+        let restarted = AppState::new_with_state_path(
+            "test".into(),
+            HashMap::new(),
+            f.root.path().join("state.json"),
+        );
+        restarted.restore_local_state().await.unwrap();
+        assert!(crate::variant::has_dependency_job(&f.variant.path));
+        restarted
+            .finish_variant_dependencies("workspace-1", "thread-1", &f.variant.path)
+            .await;
+        assert!(
+            restarted
+                .inner
+                .operational_conditions
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .values()
+                .any(|c| c.message.contains("interrupted by a daemon restart"))
+        );
+        assert!(!crate::variant::dependencies_pending(&f.variant.path));
+    }
+
+    #[tokio::test]
+    async fn variant_archive_retries_after_dependency_preparation() {
+        let f = VariantFixture::new().await;
+        let completed = crate::variant::dependency_test_job(&f.variant.path);
+        f.app
+            .with_thread_mut("workspace-1", "thread-1", |t| t.is_archived = true)
+            .await
+            .unwrap();
+        let app = f.app.clone();
+        let mut archived =
+            tokio::spawn(
+                async move { reclaim_archived_variant(&app, "workspace-1", "thread-1").await },
+            );
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(20), &mut archived)
+                .await
+                .is_err()
+        );
+        assert!(std::path::Path::new(&f.variant.path).exists());
+        completed.send(Some(Vec::new())).unwrap();
+        assert_eq!(
+            archived.await.unwrap(),
+            Some(crate::variant::Reclaim::Removed)
+        );
+        assert!(!std::path::Path::new(&f.variant.path).exists());
     }
 
     #[tokio::test]

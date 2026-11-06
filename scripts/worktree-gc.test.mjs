@@ -12,6 +12,8 @@ import {
   classify,
   cleanup,
   inspect,
+  inspectDockerMounts,
+  render,
   isRebuildable,
   matchesAllowlist,
   parseArgs,
@@ -349,7 +351,7 @@ test('setup recipes reject invalid settings rather than poisoning restore', () =
   for (const value of [null, [], { unknown: true }, { sparse_exclude: null }, { sparse_exclude: ['/absolute'] }, { dependency_roots: ['../outside'] }, { sparse_hint: 1 }]) assert.throws(() => validateSetup(value));
 });
 
-test('apply keeps a checkout when project settings cannot produce a valid restore recipe', async () => {
+test('dry run and apply keep a checkout with an invalid restore recipe', async () => {
   const path = worktree('invalid-recipe', 'falcondeck/invalid-recipe');
   const config = join(sandbox, 'invalid-setup.json');
   writeFileSync(config, JSON.stringify({ unknown_setting: true }));
@@ -357,15 +359,36 @@ test('apply keeps a checkout when project settings cannot produce a valid restor
   const previousHome = process.env.HOME;
   try {
     const entry = await assess(path);
-    assert.equal(entry.class, 'SAFE');
+    assert.equal(entry.class, 'REVIEW');
+    assert.match(entry.error, /unknown worktree setup field/);
     process.env.HOME = sandbox;
     const result = await apply({ entries: [entry] }, { ...opts, minAgeDays: 0, activeHours: 0 }, { log: () => {} });
     assert.equal(result.removed.length, 0);
-    assert.equal(result.failed.length, 1);
-    assert.match(result.failed[0].reason, /unknown worktree setup field/);
+    assert.equal(result.failed.length, 0);
     assert.equal(existsSync(path), true);
   } finally {
     process.env.HOME = previousHome;
     sh(project, 'config', '--unset', 'falcondeck.worktreeSetup');
   }
+});
+
+
+test('Docker inspection tolerates a vanished id but keeps checking other ids', async () => {
+  const seen = [];
+  const mounts = await inspectDockerMounts('gone\nlive\n', async (id) => {
+    seen.push(id);
+    if (id === 'gone') throw Object.assign(new Error('exit 1'), { stderr: 'Error: No such object: gone' });
+    return { stdout: JSON.stringify([{ Type: 'bind', Source: '/checkout' }]) };
+  });
+  assert.deepEqual(seen, ['gone', 'live']);
+  assert.deepEqual(mounts, ['/checkout']);
+  await assert.rejects(inspectDockerMounts('live', async () => { throw new Error('daemon unavailable'); }), /daemon unavailable/);
+});
+
+test('JSON omits private assessment snapshots without mutating removal tickets', () => {
+  const entry = { class: 'REVIEW', reasons: [], sizeBytes: 0, indexSnapshot: 'huge index', statusSnapshot: 'huge status' };
+  const result = JSON.parse(render({ generatedAt: new Date().toISOString(), entries: [entry] }, { format: 'json' }));
+  assert.equal('indexSnapshot' in result.entries[0], false);
+  assert.equal('statusSnapshot' in result.entries[0], false);
+  assert.equal(entry.indexSnapshot, 'huge index');
 });

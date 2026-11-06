@@ -192,7 +192,7 @@ async fn blockers(project_path: &str, variant: &ThreadVariant) -> Vec<String> {
     reasons
 }
 
-async fn status_blockers(project_path: &str, path: &str) -> Result<Vec<String>, String> {
+pub(super) async fn status_blockers(project_path: &str, path: &str) -> Result<Vec<String>, String> {
     let out = git(
         path,
         &[
@@ -369,7 +369,7 @@ fn is_rebuildable(entry: &str) -> bool {
 /// Check accessible process cwd and open files from one lsof inventory. An
 /// inventory failure blocks removal, but OS permissions can hide other users'
 /// descriptors even when lsof succeeds. This cannot prove global inactivity.
-async fn process_clear(path: &Path) -> Result<(), String> {
+pub(super) async fn process_clear(path: &Path) -> Result<(), String> {
     let path = fs::canonicalize(path)
         .await
         .map_err(|e| format!("process check: {e}"))?;
@@ -405,7 +405,33 @@ async fn process_clear(path: &Path) -> Result<(), String> {
             }
         }
     }
+    #[cfg(test)]
+    if test_docker_roots()
+        .lock()
+        .unwrap()
+        .iter()
+        .any(|root| path.starts_with(root))
+    {
+        return Ok(());
+    }
     docker_clear(&path).await
+}
+
+// Explicit fixture-only dependency injection: safety tests still inspect real
+// process descriptors, but do not depend on the user's live Docker daemon.
+#[cfg(test)]
+fn test_docker_roots() -> &'static std::sync::Mutex<Vec<std::path::PathBuf>> {
+    static ROOTS: std::sync::OnceLock<std::sync::Mutex<Vec<std::path::PathBuf>>> =
+        std::sync::OnceLock::new();
+    ROOTS.get_or_init(|| std::sync::Mutex::new(Vec::new()))
+}
+
+#[cfg(test)]
+pub(crate) fn test_no_docker_mounts(root: &Path) {
+    test_docker_roots()
+        .lock()
+        .unwrap()
+        .push(std::fs::canonicalize(root).unwrap());
 }
 
 async fn docker_clear(path: &Path) -> Result<(), String> {
@@ -424,6 +450,7 @@ async fn docker_clear(path: &Path) -> Result<(), String> {
         let out = timeout(
             Duration::from_secs(3),
             Command::new("docker")
+                .envs(crate::agent_binary::desktop_login_shell_environment().await)
                 .args(args)
                 .kill_on_drop(true)
                 .output(),
@@ -432,7 +459,8 @@ async fn docker_clear(path: &Path) -> Result<(), String> {
         .map_err(|_| "Docker mount inventory timed out".to_string())?
         .map_err(|e| format!("Docker mount inventory unavailable: {e}"))?;
         if !out.status.success() {
-            return Err("Docker mount inventory failed".into());
+            let stderr = String::from_utf8_lossy(&out.stderr);
+            return Err(format!("Docker mount inventory failed: {stderr}"));
         }
         Ok(String::from_utf8_lossy(&out.stdout).into_owned())
     }
@@ -440,27 +468,53 @@ async fn docker_clear(path: &Path) -> Result<(), String> {
     if ids.trim().is_empty() {
         return Ok(());
     }
-    let mut args = vec!["inspect", "--format", "{{json .Mounts}}"];
-    args.extend(ids.split_whitespace());
-    let mounts = docker(&args).await?;
-    for line in mounts.lines() {
-        let mounts: Vec<serde_json::Value> =
-            serde_json::from_str(line).map_err(|_| "invalid Docker mount inventory".to_string())?;
-        for mount in mounts {
-            if mount.get("Type").and_then(|v| v.as_str()) != Some("bind") {
-                continue;
-            }
-            if let Some(source) = mount.get("Source").and_then(|v| v.as_str()) {
-                let source = fs::canonicalize(source)
-                    .await
-                    .unwrap_or_else(|_| source.into());
-                if path.starts_with(&source) || source.starts_with(path) {
-                    return Err("a running Docker container bind-mounts this checkout".into());
-                }
+    let mounts = inspect_docker_mounts(&ids, |id| async move {
+        docker(&["inspect", "--format", "{{json .Mounts}}", &id]).await
+    })
+    .await?;
+    docker_mounts_clear(path, mounts).await
+}
+
+async fn docker_mounts_clear(path: &Path, mounts: Vec<serde_json::Value>) -> Result<(), String> {
+    for mount in mounts {
+        if mount.get("Type").and_then(|v| v.as_str()) != Some("bind") {
+            continue;
+        }
+        if let Some(source) = mount.get("Source").and_then(|v| v.as_str()) {
+            let source = fs::canonicalize(source)
+                .await
+                .unwrap_or_else(|_| source.into());
+            if path.starts_with(&source) || source.starts_with(path) {
+                return Err("a running Docker container bind-mounts this checkout".into());
             }
         }
     }
     Ok(())
+}
+
+async fn inspect_docker_mounts<F, Fut>(
+    ids: &str,
+    mut inspect: F,
+) -> Result<Vec<serde_json::Value>, String>
+where
+    F: FnMut(String) -> Fut,
+    Fut: std::future::Future<Output = Result<String, String>>,
+{
+    let mut mounts = Vec::new();
+    for id in ids.split_whitespace() {
+        let output = match inspect(id.to_string()).await {
+            Ok(output) => output,
+            Err(error) if error.to_ascii_lowercase().contains("no such object") => continue,
+            Err(error) => return Err(error),
+        };
+        for line in output.lines() {
+            mounts.extend(
+                serde_json::from_str::<Vec<serde_json::Value>>(line)
+                    .map_err(|_| "invalid Docker mount inventory".to_string())?,
+            );
+        }
+    }
+    Ok(mounts)
 }
 
 /// An untracked allowlisted file passes only when byte-identical to the
@@ -677,6 +731,7 @@ mod tests {
     impl Fixture {
         fn new() -> Self {
             let root = tempdir().unwrap();
+            test_no_docker_mounts(root.path());
             let origin = root.path().join("origin.git");
             let project = root.path().join("project");
             let variants = root.path().join("variants");
@@ -896,6 +951,78 @@ mod tests {
         assert_eq!(
             reclaim_if_safe(f.project_str(), &gone).await,
             Reclaim::Removed
+        );
+    }
+
+    #[tokio::test]
+    async fn docker_inventory_skips_only_vanished_containers() {
+        let mut seen = Vec::new();
+        let mounts = inspect_docker_mounts("gone live", |id| {
+            seen.push(id.clone());
+            async move {
+                if id == "gone" {
+                    Err("Error: No such object: gone".to_string())
+                } else {
+                    Ok(r#"[{"Type":"bind","Source":"/checkout"}]"#.to_string())
+                }
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(seen, ["gone", "live"]);
+        assert_eq!(mounts[0]["Source"], "/checkout");
+        assert!(
+            docker_mounts_clear(Path::new("/checkout/thread"), mounts.clone())
+                .await
+                .is_err()
+        );
+        assert!(
+            docker_mounts_clear(Path::new("/other-checkout"), mounts)
+                .await
+                .is_ok()
+        );
+        assert!(
+            inspect_docker_mounts("live", |_| async { Err("permission denied".into()) })
+                .await
+                .is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn restore_recovers_crashed_staging_but_refuses_edits() {
+        let f = Fixture::new();
+        let v = f.variant("crashed");
+        git_sync(&f.project, &["worktree", "remove", &v.path]);
+        let stage = f
+            .variants
+            .join(format!(".crashed-provision-{}", uuid::Uuid::new_v4()));
+        git_sync(
+            &f.project,
+            &[
+                "worktree",
+                "add",
+                "--no-checkout",
+                stage.to_str().unwrap(),
+                &v.branch,
+            ],
+        );
+        assert_eq!(restore(f.project_str(), &v).await, Ok(true));
+        assert!(!stage.exists());
+        assert!(Path::new(&v.path).join("a.txt").exists());
+        git_sync(
+            &f.project,
+            &["worktree", "move", &v.path, stage.to_str().unwrap()],
+        );
+        std::fs::write(stage.join("a.txt"), "uncommitted work").unwrap();
+        assert!(
+            restore(f.project_str(), &v)
+                .await
+                .unwrap_err()
+                .contains("requires review")
+        );
+        assert_eq!(
+            std::fs::read_to_string(stage.join("a.txt")).unwrap(),
+            "uncommitted work"
         );
     }
 

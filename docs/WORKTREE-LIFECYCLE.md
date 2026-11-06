@@ -71,9 +71,13 @@ Tracked-file provisioning is transactional:
 Only the unpublished staging worktree can be force-removed during rollback;
 this is not the reclamation path. Failed creation also drops its newly created
 branch. A pre-existing branch is never treated as a creation rollback target.
-A crash can strand a private staging registration, but cannot publish a blank
-working directory. Such a registration is retained for inspection rather than
-removed by a backlog sweep.
+After a crash, create/restore recover only that slug's registered
+`.slug-provision-<uuid>` staging worktree. They reuse its branch, finish setup,
+and move it into place, so neither staging nor a duplicate branch is left
+behind. A populated staging tree with edits, hidden index flags, an operation
+in progress, or a live process is retained with an error requiring review.
+Other slugs and unrelated paths are untouched. This is request-time recovery,
+not a backlog sweep.
 
 An existing folder is not sufficient proof of a restored checkout: Git must
 identify that folder as the worktree and a non-empty HEAD cannot have every
@@ -115,7 +119,14 @@ are prepared. A notice shows preparation/fallback state. Turns sent during
 preparation are committed to the existing durable queue, return a clear queued
 response, and wait before provider dispatch. The persisted `preparing_variant`
 flag distinguishes this accepted outbox work from a turn interrupted after
-provider dispatch; that flag is cleared at the dispatch boundary.
+provider dispatch; that flag is cleared at the dispatch boundary. Queue order
+is preserved even when the existing head is held. If that flag survives a
+restart without its in-memory provisioning job, recovery records an interrupted
+job and shows a warning that `node_modules` may be incomplete and the project's
+normal install is needed. It does not silently treat the lost job as successful.
+Archiving during preparation waits for the job in the background, then checks
+archive/activity and every safety rule again; unarchive or new activity cancels
+that removal attempt.
 
 ## Reclamation
 
@@ -237,3 +248,13 @@ the notification centre, visible across projects, without a push on every check.
 The crossing key is kept beside daemon state and reused across restarts, so
 repeated low checks deduplicate. Re-arm only at **30 GiB or above**, resolving
 the prior crossing. This hysteresis avoids warnings flapping near 25 GiB.
+
+### Inventory reliability
+
+Docker bind-mount inventory uses the daemon's desktop login-shell environment.
+The standalone GC tool includes `/usr/local/bin` and `/opt/homebrew/bin` in its
+Docker search path. Both inspect running container IDs separately: an ID that
+vanishes with `No such object` is skipped; other inventory failures still keep
+the checkout. GC dry runs validate the same restore recipe as apply. JSON
+reports omit internal index/status snapshots, which remain in memory for final
+removal checks.
