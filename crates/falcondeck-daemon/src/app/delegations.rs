@@ -638,8 +638,17 @@ impl AppState {
             .collect();
         let ready = self.local_restore_phase() == DaemonRestorePhase::Ready;
         let present: HashSet<_> = self.inner.workspaces.lock().await.keys().cloned().collect();
+        let by_thread: HashMap<_, _> = observations.values().map(|o| (o.summary.id.as_str(), o)).collect();
         self.edit_delegations(|l| {
             let now = Utc::now();
+            for r in l.reports.iter_mut().filter(|r| r.input_key.is_some()) {
+                if let Some(observation) = by_thread.get(r.thread.as_str()) {
+                    if observation.summary.status != ThreadStatus::WaitingForInput || observation.input_key.is_some() && r.input_key != observation.input_key {
+                        r.urgent = false;
+                        r.wake = false;
+                    }
+                }
+            }
             let mut reports = Vec::new();
             for t in &mut l.tasks {
                 if !t.closed && !t.stale_reported && now-t.created >= ChronoDuration::days(7) {
@@ -655,12 +664,6 @@ impl AppState {
                 };
                 if let Some(observation) = observation {
                     t.missing_since = None;
-                    for r in l.reports.iter_mut().filter(|r| r.bot_id == t.bot_id && r.thread == t.thread && r.input_key.is_some()) {
-                        if observation.summary.status != ThreadStatus::WaitingForInput || observation.input_key.is_some() && r.input_key != observation.input_key {
-                            r.urgent = false;
-                            r.wake = false;
-                        }
-                    }
                     if observation.summary.status == ThreadStatus::WaitingForInput && observation.input_key.is_some() && t.input_key != observation.input_key {
                         t.input_key = observation.input_key.clone();
                         t.last_state = "new input request".into();
