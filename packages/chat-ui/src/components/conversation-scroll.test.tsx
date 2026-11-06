@@ -266,11 +266,13 @@ describe("Conversation scrolling", () => {
     const offsetHeight = vi.spyOn(HTMLElement.prototype, "offsetHeight", "get");
     offsetHeight.mockReturnValue(1200);
     act(() => resize());
+    // Opening schedules a two-frame pin; let it finish first.
+    flushFrames();
     flushFrames();
     offsetHeight.mockReturnValue(700);
     act(() => resize());
     const floor = scroll.querySelector<HTMLElement>("[data-conversation-scroll-floor]")!;
-    return { scroll, floor, now };
+    return { scroll, floor, now, offsetHeight };
   }
 
   it.each([
@@ -299,6 +301,26 @@ describe("Conversation scrolling", () => {
     now.mockReturnValue(100);
     flushFrames();
     expect(scroll.scrollTop).toBe(480);
+  });
+
+  it("never raises the floor when content regrows mid-release", () => {
+    const { floor, now, offsetHeight } = startRelease();
+    now.mockReturnValue(100);
+    flushFrames();
+    const reached = Number.parseFloat(floor.style.height);
+    expect(reached).toBeGreaterThan(750);
+
+    offsetHeight.mockReturnValue(750);
+    act(() => resize());
+    let previous = reached;
+    for (const time of [101, 116, 200, 400]) {
+      now.mockReturnValue(time);
+      flushFrames();
+      const height = Number.parseFloat(floor.style.height);
+      expect(height).toBeLessThanOrEqual(previous);
+      previous = height;
+    }
+    expect(floor.style.height).toBe("750px");
   });
 
   it("keeps pinning a release nobody interrupted", () => {
