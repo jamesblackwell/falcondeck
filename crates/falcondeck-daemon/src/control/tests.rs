@@ -691,7 +691,10 @@ async fn create_timed_once(service: &ControlService) -> falcondeck_core::control
         .0;
     assert!(response.ok, "{:?}", response.error);
     let data = response.data.unwrap();
-    service.automation(data["id"].as_str().unwrap()).await.unwrap()
+    service
+        .automation(data["id"].as_str().unwrap())
+        .await
+        .unwrap()
 }
 
 async fn rearm_once(service: &ControlService, id: &str) -> falcondeck_core::control::Automation {
@@ -711,7 +714,10 @@ async fn rearm_once(service: &ControlService, id: &str) -> falcondeck_core::cont
         .0;
     assert!(response.ok, "{:?}", response.error);
     let data = response.data.unwrap();
-    service.automation(data["id"].as_str().unwrap()).await.unwrap()
+    service
+        .automation(data["id"].as_str().unwrap())
+        .await
+        .unwrap()
 }
 
 #[tokio::test]
@@ -767,7 +773,7 @@ async fn once_completion_preserves_a_rearm_for_success_failure_and_cancellation(
                     .await
                     .unwrap();
                 let after = service.automation(&original.id).await.unwrap();
-                if edit == "rearm" {
+                if edit == "rearm" && !manual {
                     assert_eq!(
                         after.state,
                         AutomationState::Enabled,
@@ -840,88 +846,320 @@ async fn once_restore_cancellation_and_misfires_preserve_rearmed_occurrences() {
     for rearmed in [false, true] {
         for missed in [false, true] {
             for replay in [false, true] {
-                for legacy in [false, true] {
-                    let (dir, service) = service().await;
-                    let original = create_timed_once(&service).await;
-                    let run = service
-                        .enqueue_run(
-                            &original.id,
-                            original.next_run_at,
-                            super::service::RunSource::Scheduled,
-                        )
-                        .await
-                        .unwrap();
-                    service
-                        .mark_run_running(&run.id, "ws", "thread")
-                        .await
-                        .unwrap();
-                    if rearmed {
-                        rearm_once(&service, &original.id).await;
-                    }
-                    let path = dir.path().join("agent-control.json");
-                    let mut state = store::load(&path).await.unwrap();
-                    if legacy {
-                        // Old persisted records omit the new snapshot field.
-                        state.runs[0].definition_trigger = None;
-                    }
-                    let automation = &mut state.automations[0];
-                    automation.misfire_policy = if replay {
-                        falcondeck_core::control::AutomationMisfirePolicy::RunOnce
-                    } else {
-                        falcondeck_core::control::AutomationMisfirePolicy::Skip
-                    };
-                    if rearmed && missed {
-                        let at = Utc::now() - Duration::minutes(10);
-                        automation.trigger =
-                            falcondeck_core::control::AutomationTrigger::Once { run_at: at };
-                        automation.next_run_at = Some(at);
-                    }
-                    let next = automation.next_run_at;
-                    store::persist(&path, &state).await.unwrap();
-                    let restored = ControlService::new(path);
-                    restored.restore().await.unwrap();
-                    let after = restored.automation(&original.id).await.unwrap();
-                    if rearmed && (!missed || replay) {
-                        assert_eq!(after.state, AutomationState::Enabled);
-                        assert!(after.next_run_at.is_some());
-                        if !missed {
-                            assert_eq!(after.next_run_at, next);
-                        } else {
-                            // Startup replay may run now rather than at the trigger's original timestamp.
-                            let retry = restored
-                                .enqueue_run(
-                                    &after.id,
-                                    after.next_run_at,
-                                    super::service::RunSource::Scheduled,
-                                )
-                                .await
-                                .unwrap();
-                            restored
-                                .finish_run(&retry.id, AutomationRunStatus::Failed, None, None)
-                                .await
-                                .unwrap();
-                            assert_eq!(
-                                restored.automation(&after.id).await.unwrap().state,
-                                AutomationState::Completed
-                            );
-                        }
-                    } else {
-                        assert_eq!(
-                            after.state,
-                            AutomationState::Completed,
-                            "rearmed={rearmed}, missed={missed}, replay={replay}"
-                        );
-                        assert_eq!(after.next_run_at, None);
-                    }
-                    assert_eq!(
-                        after.latest_outcome.unwrap().status,
-                        AutomationRunStatus::Cancelled
-                    );
-                    assert!(after.last_run_at.is_some());
+                let (dir, service) = service().await;
+                let original = create_timed_once(&service).await;
+                let run = service
+                    .enqueue_run(
+                        &original.id,
+                        original.next_run_at,
+                        super::service::RunSource::Scheduled,
+                    )
+                    .await
+                    .unwrap();
+                service
+                    .mark_run_running(&run.id, "ws", "thread")
+                    .await
+                    .unwrap();
+                if rearmed {
+                    rearm_once(&service, &original.id).await;
                 }
+                let path = dir.path().join("agent-control.json");
+                let mut state = store::load(&path).await.unwrap();
+                let automation = &mut state.automations[0];
+                automation.misfire_policy = if replay {
+                    falcondeck_core::control::AutomationMisfirePolicy::RunOnce
+                } else {
+                    falcondeck_core::control::AutomationMisfirePolicy::Skip
+                };
+                if rearmed && missed {
+                    let at = Utc::now() - Duration::minutes(10);
+                    automation.trigger =
+                        falcondeck_core::control::AutomationTrigger::Once { run_at: at };
+                    automation.next_run_at = Some(at);
+                }
+                let next = automation.next_run_at;
+                store::persist(&path, &state).await.unwrap();
+                let restored = ControlService::new(path);
+                restored.restore().await.unwrap();
+                let after = restored.automation(&original.id).await.unwrap();
+                if rearmed && (!missed || replay) {
+                    assert_eq!(after.state, AutomationState::Enabled);
+                    assert!(after.next_run_at.is_some());
+                    if !missed {
+                        assert_eq!(after.next_run_at, next);
+                    } else {
+                        // Startup replay may run now rather than at the trigger's original timestamp.
+                        let retry = restored
+                            .enqueue_run(
+                                &after.id,
+                                after.next_run_at,
+                                super::service::RunSource::Scheduled,
+                            )
+                            .await
+                            .unwrap();
+                        if let falcondeck_core::control::AutomationTrigger::Once { run_at } =
+                            after.trigger
+                        {
+                            assert_eq!(retry.scheduled_for, Some(run_at));
+                        }
+                        restored
+                            .finish_run(&retry.id, AutomationRunStatus::Failed, None, None)
+                            .await
+                            .unwrap();
+                        assert_eq!(
+                            restored.automation(&after.id).await.unwrap().state,
+                            AutomationState::Completed
+                        );
+                    }
+                } else {
+                    assert_eq!(
+                        after.state,
+                        AutomationState::Completed,
+                        "rearmed={rearmed}, missed={missed}, replay={replay}"
+                    );
+                    assert_eq!(after.next_run_at, None);
+                }
+                assert_eq!(
+                    after.latest_outcome.unwrap().status,
+                    AutomationRunStatus::Cancelled
+                );
+                assert!(after.last_run_at.is_some());
             }
         }
     }
+}
+
+#[tokio::test]
+async fn legacy_manual_once_renamed_or_edited_during_a_run_completes_on_restart() {
+    for field in ["name", "task"] {
+        let (dir, service) = service().await;
+        let original = create_timed_once(&service).await;
+        let run = service
+            .enqueue_run(
+                &original.id,
+                None,
+                super::service::RunSource::Manual {
+                    origin: ControlOrigin::DesktopUi,
+                },
+            )
+            .await
+            .unwrap();
+        service
+            .mark_run_running(&run.id, "ws", "thread")
+            .await
+            .unwrap();
+        let mut patch = json!({"automation_id":original.id});
+        if field == "name" {
+            patch["name"] = json!("Renamed while running");
+        } else {
+            patch["task"] = serde_json::to_value(&original.task).unwrap();
+            patch["task"]["instruction"] = json!("Updated instruction");
+        }
+        let response = service
+            .execute(
+                execute_request(
+                    registry::ops::AUTOMATION_UPDATE,
+                    patch,
+                    Some(original.revision),
+                ),
+                &desktop(),
+                &ControlDeps::none(),
+            )
+            .await
+            .0;
+        assert!(response.ok, "{:?}", response.error);
+        let path = dir.path().join("agent-control.json");
+        // This is the existing run shape, including absent scheduled_for on
+        // manual runs; no new run metadata is required for restoration.
+        let written = tokio::fs::read(&path).await.unwrap();
+        let wire: Value = serde_json::from_slice(&written).unwrap();
+        assert!(wire["runs"][0].get("definition_trigger").is_none());
+        let decoded: store::PersistedControlState = serde_json::from_slice(&written).unwrap();
+        assert_eq!(decoded.runs[0].scheduled_for, None);
+        let restored = ControlService::new(path);
+        restored.restore().await.unwrap();
+        let after = restored.automation(&original.id).await.unwrap();
+        assert_eq!(after.state, AutomationState::Completed, "{field}");
+        assert_eq!(after.next_run_at, None);
+        assert_eq!(
+            after.latest_outcome.unwrap().status,
+            AutomationRunStatus::Cancelled
+        );
+    }
+}
+
+#[tokio::test]
+async fn legacy_terminal_once_skips_settle_on_restore() {
+    for status in [
+        AutomationRunStatus::SkippedOverlap,
+        AutomationRunStatus::SkippedDependency,
+    ] {
+        let (dir, service) = service().await;
+        let original = create_timed_once(&service).await;
+        service
+            .enqueue_run(
+                &original.id,
+                original.next_run_at,
+                super::service::RunSource::Scheduled,
+            )
+            .await
+            .unwrap();
+        let path = dir.path().join("agent-control.json");
+        let mut saved = store::load(&path).await.unwrap();
+        // Older completion paths recorded a terminal skip but left the
+        // exhausted once definition enabled. Preserve that on-disk shape.
+        saved.runs[0].status = status;
+        saved.runs[0].finished_at = Some(Utc::now());
+        assert_eq!(saved.automations[0].state, AutomationState::Enabled);
+        assert_eq!(saved.automations[0].next_run_at, None);
+        store::persist(&path, &saved).await.unwrap();
+        let restored = ControlService::new(path);
+        restored.restore().await.unwrap();
+        let after = restored.automation(&original.id).await.unwrap();
+        assert_eq!(after.state, AutomationState::Completed, "{status:?}");
+        assert_eq!(after.next_run_at, None);
+        assert_eq!(
+            restored.runs_since(original.created_at).await[0].status,
+            status
+        );
+    }
+}
+
+#[tokio::test]
+async fn once_completion_respects_same_time_rearm_pause_and_non_once_edits() {
+    for edit in ["same_time", "pause", "interval"] {
+        let (_dir, service) = service().await;
+        let original = create_timed_once(&service).await;
+        let run = service
+            .enqueue_run(
+                &original.id,
+                original.next_run_at,
+                super::service::RunSource::Scheduled,
+            )
+            .await
+            .unwrap();
+        service
+            .mark_run_running(&run.id, "ws", "thread")
+            .await
+            .unwrap();
+        let (operation, args) = match edit {
+            "same_time" => (
+                registry::ops::AUTOMATION_UPDATE,
+                json!({"automation_id":original.id,"trigger":original.trigger}),
+            ),
+            "pause" => (
+                registry::ops::AUTOMATION_PAUSE,
+                json!({"automation_id":original.id}),
+            ),
+            _ => (
+                registry::ops::AUTOMATION_UPDATE,
+                json!({"automation_id":original.id,"trigger":{"kind":"interval","every_seconds":3600,"anchor_at":Utc::now().to_rfc3339()}}),
+            ),
+        };
+        let response = service
+            .execute(
+                execute_request(operation, args, Some(original.revision)),
+                &desktop(),
+                &ControlDeps::none(),
+            )
+            .await
+            .0;
+        assert!(response.ok, "{:?}", response.error);
+        let before = service.automation(&original.id).await.unwrap();
+        service
+            .finish_run(
+                &run.id,
+                AutomationRunStatus::Succeeded,
+                Some("done".into()),
+                None,
+            )
+            .await
+            .unwrap();
+        let after = service.automation(&original.id).await.unwrap();
+        match edit {
+            "same_time" => {
+                assert_eq!(after.state, AutomationState::Completed);
+                assert_eq!(after.next_run_at, None);
+            }
+            "pause" => assert_eq!(after.state, AutomationState::Paused),
+            _ => {
+                assert_eq!(after.state, AutomationState::Enabled);
+                assert_eq!(after.next_run_at, before.next_run_at);
+            }
+        }
+        assert_eq!(
+            after.latest_outcome.unwrap().status,
+            AutomationRunStatus::Succeeded
+        );
+        assert!(after.last_run_at.is_some());
+    }
+}
+
+#[tokio::test]
+async fn rearmed_once_dependency_skip_completes_only_its_own_occurrence() {
+    let (_dir, service) = service().await;
+    let original = create_timed_once(&service).await;
+    let old = service
+        .enqueue_run(
+            &original.id,
+            original.next_run_at,
+            super::service::RunSource::Scheduled,
+        )
+        .await
+        .unwrap();
+    service
+        .mark_run_running(&old.id, "ws", "thread")
+        .await
+        .unwrap();
+    let rearmed = rearm_once(&service, &original.id).await;
+    service.skip_run_dependency(&old.id, "gmail").await.unwrap();
+    let after = service.automation(&original.id).await.unwrap();
+    assert_eq!(after.state, AutomationState::Enabled);
+    assert_eq!(after.next_run_at, rearmed.next_run_at);
+    assert_eq!(
+        after.latest_outcome.unwrap().status,
+        AutomationRunStatus::SkippedDependency
+    );
+    let current = service
+        .enqueue_run(
+            &original.id,
+            after.next_run_at,
+            super::service::RunSource::Scheduled,
+        )
+        .await
+        .unwrap();
+    service
+        .skip_run_dependency(&current.id, "gmail")
+        .await
+        .unwrap();
+    let after = service.automation(&original.id).await.unwrap();
+    assert_eq!(after.state, AutomationState::Completed);
+    assert_eq!(after.next_run_at, None);
+}
+
+#[tokio::test]
+async fn a_stale_scheduled_dispatch_keeps_its_original_occurrence() {
+    let (_dir, service) = service().await;
+    let original = create_timed_once(&service).await;
+    // The schedule may be edited between the scheduler reading a due time
+    // and enqueueing it. Do not relabel that old dispatch as the new wake.
+    let rearmed = rearm_once(&service, &original.id).await;
+    let run = service
+        .enqueue_run(
+            &original.id,
+            original.next_run_at,
+            super::service::RunSource::Scheduled,
+        )
+        .await
+        .unwrap();
+    assert_eq!(run.scheduled_for, original.next_run_at);
+    service
+        .finish_run(&run.id, AutomationRunStatus::Succeeded, None, None)
+        .await
+        .unwrap();
+    let after = service.automation(&original.id).await.unwrap();
+    assert_eq!(after.state, AutomationState::Enabled);
+    assert_eq!(after.next_run_at, rearmed.next_run_at);
 }
 
 #[tokio::test]

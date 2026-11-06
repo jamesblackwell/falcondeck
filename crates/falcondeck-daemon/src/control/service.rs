@@ -400,6 +400,16 @@ impl ControlService {
             if automation.state != AutomationState::Enabled {
                 continue;
             }
+            if automation.next_run_at.is_none()
+                && !next
+                    .runs
+                    .iter()
+                    .any(|run| run.automation_id == automation.id && !run.status.is_terminal())
+            {
+                // Heal legacy once schedules already consumed by a terminal
+                // skip, without replaying them after restart.
+                store::complete_once(automation, now);
+            }
             let dispatched: BTreeSet<String> = next.occurrence_keys.iter().cloned().collect();
             match automations::reconcile_misfire(automation, now, &dispatched) {
                 Ok(automations::MisfirePlan::UpToDate) => {}
@@ -1552,8 +1562,16 @@ impl ControlService {
                 run_as_bot: automation.target.run_as_bot.clone(),
                 status: AutomationRunStatus::Queued,
                 trigger,
-                scheduled_for,
-                definition_trigger: Some(automation.trigger.clone()),
+                // Misfire RunOnce dispatches immediately, but a once run still
+                // belongs to the trigger's original occurrence, not "now".
+                scheduled_for: scheduled_for.map(|at| match automation.trigger {
+                    falcondeck_core::control::AutomationTrigger::Once { run_at }
+                        if Some(at) == automation.next_run_at =>
+                    {
+                        run_at
+                    }
+                    _ => at,
+                }),
                 queued_at: now,
                 started_at: None,
                 finished_at: None,

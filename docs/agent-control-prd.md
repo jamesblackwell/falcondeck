@@ -1884,10 +1884,20 @@ On daemon restoration:
 
 After an execution attempt (including failure or cancellation), a one-time automation
 transitions to `completed` only if that run still belongs to its current once occurrence.
-Rearming it with a different `run_at` during an older run preserves the new enabled
-schedule; the older run still records its last-run time and outcome. This also applies
-to daemon-stopped cancellation during restore. A rearmed occurrence consumed by
+For scheduled runs, rearming it with a different `run_at` during an older run
+preserves the new enabled schedule; the older run still records its last-run time
+and outcome. This also applies to daemon-stopped cancellation during restore.
+A rearmed occurrence consumed by
 `skip` concurrency or skipped by startup misfire policy is completed rather than retried.
+A rearmed wake that arrives while the older run is still running is spent as a skip
+under the `skip` policy. Rearm beyond the current run or use `queue_one` to retain it.
+
+Manual `run_now` runs have no `scheduled_for`, so they retain the original behavior:
+finishing a manual run completes an enabled one-time definition even if it was
+rearmed during that run. Scheduled once runs retain their original `run_at` in
+`scheduled_for`, including immediate startup `run_once` misfire replays.
+No persisted run fields or shared types are added. The store format is unchanged
+and remains readable using the types at `db61e5e7`.
 
 It is retained for inspection until deleted.
 

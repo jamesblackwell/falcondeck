@@ -363,15 +363,9 @@ pub(super) fn record_run_completion(
             .map(bounded_preview),
     });
     if let AutomationTrigger::Once { run_at } = &automation.trigger {
-        let same_occurrence = match &run.definition_trigger {
-            Some(AutomationTrigger::Once { run_at: claimed }) => claimed == run_at,
-            Some(_) => false,
-            // Older persisted runs have no snapshot. Preserve a pending wake
-            // after an intervening edit rather than risk consuming a rearm.
-            None => {
-                automation.next_run_at.is_none() || automation.revision == run.automation_revision
-            }
-        };
+        // Missing scheduled_for includes legacy manual runs: preserve their
+        // original completion behavior, irrespective of definition revisions.
+        let same_occurrence = run.scheduled_for.is_none_or(|claimed| claimed == *run_at);
         if same_occurrence {
             complete_once(automation, now);
         }

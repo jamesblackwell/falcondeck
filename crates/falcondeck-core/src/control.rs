@@ -543,10 +543,6 @@ pub struct AutomationRun {
     /// Occurrence time this run was scheduled for, if any.
     #[serde(default)]
     pub scheduled_for: Option<DateTime<Utc>>,
-    /// Definition trigger captured at enqueue, independent of later rearming
-    /// and restore-time misfire dispatch timestamps. Absent on older runs.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub definition_trigger: Option<AutomationTrigger>,
 
     /// When the run entered the queue.
     pub queued_at: DateTime<Utc>,
