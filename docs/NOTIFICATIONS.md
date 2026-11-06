@@ -148,20 +148,47 @@ conversations. Other event switches and presence rules still apply.
 The daemon marks the source at admission, not from message wording or a
 client-supplied field. `attention.reply_to_user` is persisted with the thread and
 queued request, survives provider hydration, and is retained by resumes/retries.
-User steering upgrades the running logical turn; automatic input cannot downgrade
-it. A later provider wake without admission starts automatic work. Completion
+User steering upgrades the running logical turn before the provider is released;
+a definite provider rejection rolls back only that input's provisional claim.
+Uncertain transport outcomes keep human eligibility. Concurrent
+accepted human input is retained. Review responses, question answers, approvals
+and plan feedback delivered by James use the same human attribution; an agent's
+answer to its child does not. Editing a queued entry makes it user-authored and
+clears its old agent sender, including merged entries. Removing/reordering a
+queue or steering an unedited entry changes delivery timing, not authorship.
+Automatic input cannot downgrade a human turn. A later provider wake without admission starts automatic work. Completion
 pushes capture the marker so a newer turn cannot change an older queued reply.
-Missing old markers count as automatic on bot homes. Provenance is restored from
+Missing old per-turn markers count as automatic on bot homes. Legacy queued
+entries are different: when the source marker is absent, an entry without an
+agent sender counts as James's; one with an agent sender stays automatic.
+Explicit saved source values always win. Provenance is restored from
 daemon state and, for legacy gaps, unambiguous analytics `delegate` creation
 records. Later bot messages and generic handoffs never establish ownership.
 
-The option defaults off, including old configs that omit it. Enable it in
+The option defaults off, including old configs that omit it. While off, the old
+completion notability rules remain unchanged: bot scheduled/no-action runs,
+parent-watched completions and queued work do not gain records or pushes merely
+because the thread is a bot. Enable it in
 Settings → Notifications. It changes phone delivery only: centre records/counts,
 parent messages, bot wake-ups and desktop alerts keep their own policies. Native
 iOS connected alerts use the same daemon-owned per-turn marker; RN has no
 connected local-alert fallback. Native Mac alerts are desktop alerts and are
 unchanged. The report-back branch's `is_report_turn` centre noise veto is separate;
 its report sender must use `send_automatic_turn` when the branches reconcile.
+
+An ordinary child question whose parent is already unavailable remains eligible
+when it is raised. If the parent disappears after the question was suppressed,
+this branch does not re-fire it. The separate outcome-tracking work supplies a
+two-hour needs-input escalation for tracked tasks; untracked questions remain in
+the centre. This is an accepted limit, not a lifecycle re-evaluation service.
+
+For the reviewed 476-row historical sample, the conservative remaining source
+eligibility ceiling is **340/476 (71.4%)**. The earlier 204/476 figure was only a
+scenario, not an upper bound: mixed turns retain human eligibility, and latest
+incoming-message labels cannot prove that a turn was wholly automatic. The
+54/476 (11.3%) lower scenario assumes all unknown bot-home turns were automatic.
+These are coalesced notification-centre rows, not push receipts or a prediction
+of future delivery. The durable marker resolves attribution for new work.
 
 Desktop also has a device-local turn-complete chime, off by default, under
 Settings → General → Sounds. It plays on this computer when a thread leaves

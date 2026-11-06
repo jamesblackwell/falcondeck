@@ -1376,6 +1376,51 @@ pub(in crate::app) mod tests {
     }
 
     #[tokio::test]
+    async fn editing_a_merged_agent_queue_entry_makes_it_a_user_message() {
+        let (app, _temp) = fixture().await;
+        let id = created_id(
+            &app.invoke_extension_tool(call(CREATE, json!({})))
+                .await
+                .unwrap(),
+        );
+        app.with_thread_mut("workspace-1", &id, |t| t.status = ThreadStatus::Running)
+            .await
+            .unwrap();
+        for text in ["First update", "Later update"] {
+            app.invoke_extension_tool(call(MESSAGE, json!({"thread_id":id,"message":text})))
+                .await
+                .unwrap();
+        }
+        let queue_id = {
+            let workspaces = app.inner.workspaces.lock().await;
+            let q = &workspaces["workspace-1"].threads[&id].queued_requests[0];
+            assert_eq!(q.agent_sender.as_ref().unwrap().messages, 2);
+            assert!(!q.replies_to_user());
+            q.id.clone()
+        };
+        app.edit_queued_turn("workspace-1", &id, &queue_id, "James's replacement")
+            .await
+            .unwrap();
+        app.invoke_extension_tool(call(
+            MESSAGE,
+            json!({"thread_id":id,"message":"A new automatic update"}),
+        ))
+        .await
+        .unwrap();
+        let workspaces = app.inner.workspaces.lock().await;
+        let q = &workspaces["workspace-1"].threads[&id].queued_requests;
+        assert_eq!(
+            q.len(),
+            2,
+            "later agent input cannot merge into the user's edited text"
+        );
+        assert!(q[0].replies_to_user());
+        assert!(q[0].agent_sender.is_none());
+        assert_eq!(q[0].summary.text, "James's replacement");
+        assert!(!q[1].replies_to_user());
+    }
+
+    #[tokio::test]
     async fn queued_agent_message_reports_how_long_the_turn_has_run() {
         let (app, _temp) = fixture().await;
         let id = created_id(

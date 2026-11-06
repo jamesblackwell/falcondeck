@@ -834,6 +834,8 @@ impl AppState {
             && thread.summary.status == ThreadStatus::Running
         {
             thread.summary.attention.reply_to_user = false;
+            thread.reply_source_pending.clear();
+            thread.reply_source_base = false;
         }
         if thread.summary.updated_at == before {
             thread.summary.updated_at = now;
@@ -3297,6 +3299,8 @@ impl ManagedThread {
             transient_retry_in_flight: false,
             pending_handoff_context: None,
             turn_started_at: None,
+            reply_source_pending: HashSet::new(),
+            reply_source_base: false,
         }
     }
 
@@ -4350,7 +4354,7 @@ mod tests {
         let mut thread = cached_codex_streaming_thread();
         thread.summary.last_error = Some("Old error".to_string());
         let queued = super::super::QueuedTurnRequest {
-            reply_to_user: false,
+            reply_to_user: Some(false),
             preparing_variant: false,
             id: "queued-1".to_string(),
             request: serde_json::from_value(json!({

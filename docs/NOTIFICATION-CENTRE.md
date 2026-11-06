@@ -281,3 +281,9 @@ Origin and per-turn source survive restart and provider hydration; only
 unambiguous analytics creation records backfill old origins. Desktop alerts,
 bot wake-ups and child-to-parent reporting are unaffected. Existing centre noise
 rules remain separate from delivery preferences.
+
+With the filter off, prior notability remains unchanged; opting out does not add
+bot scheduled/no-action, watched-parent or queued-work records. With it on,
+automatic bot completions can remain here without a phone alert. Already
+suppressed questions are not re-issued when a parent later becomes unavailable;
+tracked tasks rely on the separate two-hour urgent-outcome escalation.

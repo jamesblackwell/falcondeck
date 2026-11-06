@@ -2330,6 +2330,14 @@ async fn try_steer_turn(
         return Ok(None);
     };
 
+    let source_claim = if reply_to_user {
+        Some(
+            app.begin_user_reply(&request.workspace_id, &request.thread_id)
+                .await?,
+        )
+    } else {
+        None
+    };
     if let Err(error) = ProviderRuntime::for_provider(&provider)
         .steer(
             app,
@@ -2349,11 +2357,25 @@ async fn try_steer_turn(
         )
         .await
     {
+        if let Some(claim) = source_claim {
+            app.finish_user_reply(
+                &request.workspace_id,
+                &request.thread_id,
+                claim,
+                !super::reply_source::definite_input_rejection(&error),
+            )
+            .await?;
+        }
         return if steer_error_downgrades_to_queue(&error) {
             Ok(None)
         } else {
             Err(error)
         };
+    }
+
+    if let Some(claim) = source_claim {
+        app.finish_user_reply(&request.workspace_id, &request.thread_id, claim, true)
+            .await?;
     }
 
     // Appended only once the message is actually in the agent's input: a
@@ -2375,7 +2397,6 @@ async fn try_steer_turn(
     let summary = app
         .upsert_thread(&request.workspace_id, &request.thread_id, |thread| {
             thread.updated_at = Utc::now();
-            thread.attention.reply_to_user |= reply_to_user;
         })
         .await?;
     app.persist_local_state().await?;
@@ -2570,7 +2591,7 @@ async fn try_enqueue_turn(
                 held_reason: None,
             };
             let queued = super::QueuedTurnRequest {
-                reply_to_user,
+                reply_to_user: Some(reply_to_user),
                 preparing_variant: preparing,
                 id,
                 request: stored,
@@ -2758,7 +2779,7 @@ pub(super) async fn steer_queued_turn(
     // attachments that are on disk.
     let inputs = request.inputs.clone();
 
-    let outcome = try_steer_turn(app, &request, &inputs, queued.reply_to_user).await;
+    let outcome = try_steer_turn(app, &request, &inputs, queued.replies_to_user()).await;
     let error = match outcome {
         Ok(Some(response)) => {
             app.persist_local_state().await?;
@@ -2852,6 +2873,10 @@ pub(super) async fn edit_queued_turn(
                 },
             ),
         }
+        // Editing replaces the queued author's text with James's own input.
+        // It must no longer merge with later messages from the old agent sender.
+        queued.reply_to_user = Some(true);
+        queued.agent_sender = None;
         queued.summary.preview = text.chars().take(140).collect::<String>();
         queued.summary.text = text.to_string();
         if let Some(entry) = thread
@@ -3153,7 +3178,7 @@ impl AppState {
             };
             let (next, summary) = next;
             publish_queued_thread_summary(&app, &workspace_id, &thread_id, summary).await;
-            match send_turn_waiting_for_provider_start(&app, next.request.clone(), next.reply_to_user).await {
+            match send_turn_waiting_for_provider_start(&app, next.request.clone(), next.replies_to_user()).await {
                 Ok(_) => {
                     let mut workspaces = app.inner.workspaces.lock().await;
                     if let Some(thread) = workspaces
@@ -3532,6 +3557,8 @@ async fn send_turn_with_startup_mode(
         managed.summary.status = ThreadStatus::Running;
         if !request.resume_interrupted && !is_transient_retry {
             managed.summary.attention.reply_to_user = reply_to_user;
+            managed.reply_source_pending.clear();
+            managed.reply_source_base = reply_to_user;
         }
         managed.turn_started_at = Some(Utc::now());
         managed.summary.last_error = None;
@@ -4534,6 +4561,51 @@ async fn discard_unanswerable_interactive_request(
 }
 
 pub(super) async fn respond_to_interactive_request(
+    app: &AppState,
+    workspace_id: String,
+    request_id: String,
+    response: InteractiveResponsePayload,
+) -> Result<CommandResponse, DaemonError> {
+    respond_to_interactive_request_with_source(app, workspace_id, request_id, response, true).await
+}
+
+pub(super) async fn respond_to_interactive_request_with_source(
+    app: &AppState,
+    workspace_id: String,
+    request_id: String,
+    response: InteractiveResponsePayload,
+    reply_to_user: bool,
+) -> Result<CommandResponse, DaemonError> {
+    let pending = app
+        .inner
+        .interactive_requests
+        .lock()
+        .await
+        .get(&(workspace_id.clone(), request_id.clone()))
+        .cloned()
+        .ok_or_else(|| DaemonError::NotFound("interactive request not found".into()))?;
+    validate_interactive_response(&pending.request, &response)?;
+    let source_claim = match (reply_to_user, pending.request.thread_id.as_deref()) {
+        (true, Some(thread)) => Some((
+            thread.to_string(),
+            app.begin_user_reply(&workspace_id, thread).await?,
+        )),
+        _ => None,
+    };
+    let result =
+        respond_to_interactive_request_inner(app, workspace_id.clone(), request_id, response).await;
+    if let Some((thread, claim)) = source_claim {
+        let keep_source = result
+            .as_ref()
+            .err()
+            .is_none_or(|error| !super::reply_source::definite_input_rejection(error));
+        app.finish_user_reply(&workspace_id, &thread, claim, keep_source)
+            .await?;
+    }
+    result
+}
+
+async fn respond_to_interactive_request_inner(
     app: &AppState,
     workspace_id: String,
     request_id: String,
@@ -6783,7 +6855,7 @@ mod tests {
     #[test]
     fn reconnecting_a_live_thread_keeps_persisted_queued_turns() {
         let queued = super::super::QueuedTurnRequest {
-            reply_to_user: false,
+            reply_to_user: Some(false),
             preparing_variant: false,
             id: "queued-1".to_string(),
             request: SendTurnRequest {
@@ -7108,7 +7180,7 @@ mod tests {
         let mut thread = managed_thread("thread-1", ThreadStatus::Error);
         thread.summary.last_error = Some(SHUTDOWN_INTERRUPTED_TURN_ERROR.to_string());
         thread.queued_requests.push(super::QueuedTurnRequest {
-            reply_to_user: false,
+            reply_to_user: Some(false),
             preparing_variant: false,
             id: "queued-1".to_string(),
             request: SendTurnRequest {
@@ -7630,7 +7702,7 @@ mod tests {
             .unwrap();
             (
                 super::super::QueuedTurnRequest {
-                    reply_to_user: false,
+                    reply_to_user: Some(false),
                     preparing_variant: false,
                     id: id.to_string(),
                     request,
@@ -7726,7 +7798,7 @@ mod tests {
             thread
                 .queued_requests
                 .push(super::super::QueuedTurnRequest {
-                    reply_to_user: false,
+                    reply_to_user: Some(false),
                     preparing_variant: false,
                     id: "queued-1".to_string(),
                     request: SendTurnRequest {

@@ -6684,6 +6684,14 @@ async fn claude_pre_tool_use_approval_round_trips_through_interactive_requests()
     .await
     .unwrap();
 
+    assert!(
+        app.thread_summary("workspace-1", "thread-1")
+            .await
+            .unwrap()
+            .attention
+            .reply_to_user,
+        "a human approval is user-originated input before the hook resumes"
+    );
     let response = hook_task.await.unwrap();
     assert_eq!(
         response["hookSpecificOutput"]["permissionDecision"],
@@ -6898,6 +6906,14 @@ async fn claude_ask_user_question_is_never_auto_allowed() {
     .await
     .unwrap();
 
+    assert!(
+        app.thread_summary("workspace-1", "thread-1")
+            .await
+            .unwrap()
+            .attention
+            .reply_to_user,
+        "James's direct response must keep reply eligibility"
+    );
     let response = hook_task.await.unwrap();
     assert_eq!(
         response["hookSpecificOutput"]["permissionDecision"],
@@ -7015,6 +7031,14 @@ async fn claude_exit_plan_mode_rejection_denies_with_feedback() {
     .await
     .unwrap();
 
+    assert!(
+        app.thread_summary("workspace-1", "thread-1")
+            .await
+            .unwrap()
+            .attention
+            .reply_to_user,
+        "James's direct response must keep reply eligibility"
+    );
     let response = hook_task.await.unwrap();
     assert_eq!(response["hookSpecificOutput"]["permissionDecision"], "deny");
     let reason = response["hookSpecificOutput"]["permissionDecisionReason"]
@@ -10093,4 +10117,142 @@ async fn startup_backfills_legacy_origins_and_persists_model_and_home_guards() {
         assert_eq!(again.origin, thread.origin);
         assert_eq!(again.agent.model_id, thread.agent.model_id);
     }
+}
+
+#[test]
+fn legacy_queued_reply_source_preserves_unattributed_user_work() {
+    let old = json!({"id":"q", "request":{"workspace_id":"w","thread_id":"t","inputs":[]},
+        "summary":{"id":"q","preview":"queued","queued_at":Utc::now()}});
+    let decode = |value| serde_json::from_value::<super::QueuedTurnRequest>(value).unwrap();
+    assert!(decode(old.clone()).replies_to_user());
+    let mut agent = old.clone();
+    agent["agent_sender"] = json!({"thread_id":"parent","messages":2});
+    assert!(!decode(agent.clone()).replies_to_user());
+    agent["reply_to_user"] = json!(true);
+    assert!(decode(agent).replies_to_user());
+    let mut explicit = old;
+    explicit["reply_to_user"] = json!(false);
+    assert!(!decode(explicit).replies_to_user());
+}
+
+#[tokio::test]
+async fn review_feedback_is_a_user_reply_even_when_wrapped_by_the_server() {
+    let temp = tempdir().unwrap();
+    let (app, workspace) = busy_thread_app(
+        &temp,
+        AgentProvider::CLAUDE,
+        falcondeck_core::AgentCapabilitySummary::default(),
+    )
+    .await;
+    let review: falcondeck_core::reviews::Review = serde_json::from_value(json!({
+        "id":"R-human", "title":"Decision", "ask":"Proceed?", "recommendation":"Yes", "body":"", "status":"changes_requested", "items":[],
+        "source_thread_id":"thread-steer", "source_workspace_id":workspace,
+        "created_by":{"name":"Agent","context":{"origin":"mcp"}},
+        "overall_note":"Please change the approach.", "created_at":Utc::now(),"updated_at":Utc::now()
+    })).unwrap();
+    assert!(matches!(
+        app.deliver_review_response(&review).await,
+        falcondeck_core::reviews::ReviewDelivery::Delivered { .. }
+    ));
+    let workspaces = app.inner.workspaces.lock().await;
+    let queue = &workspaces[&workspace].threads["thread-steer"].queued_requests;
+    assert_eq!(queue.len(), 1);
+    assert!(queue[0].replies_to_user());
+    assert!(
+        queue[0]
+            .summary
+            .text
+            .contains("Please change the approach.")
+    );
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn human_steer_completion_before_provider_ack_keeps_phone_eligibility() {
+    let temp = tempdir().unwrap();
+    let (app, workspace) = busy_thread_app(
+        &temp,
+        AgentProvider::CODEX,
+        falcondeck_core::AgentCapabilitySummary::codex(),
+    )
+    .await;
+    app.mutate_bot(falcondeck_core::BotMutation::Create {
+        name: "Coordinator".into(),
+        instructions: String::new(),
+        provider: None,
+        model_id: None,
+        thread_id: Some("thread-steer".into()),
+    })
+    .await
+    .unwrap();
+    app.update_preferences(serde_json::from_value(json!({"notifications":{"only_push_from_bots":true,"suppress_when_desktop_active":false}})).unwrap()).await.unwrap();
+    super::remote_lifecycle::pair_for_tests(&app).await;
+    let cli = temp.path().join("codex-steer-race");
+    let script = r#"#!/usr/bin/env python3
+import json, pathlib, sys, time
+root = pathlib.Path(__ROOT__)
+for line in sys.stdin:
+    r = json.loads(line)
+    if 'id' not in r: continue
+    method = r.get('method')
+    if method == 'turn/steer':
+        print(json.dumps({'method':'turn/completed','params':{'threadId':'thread-steer','turn':{'id':'turn-steer-active','status':'completed'}}}), flush=True)
+        while not (root / 'accept-steer').exists():
+            if not root.exists(): sys.exit(0)
+            time.sleep(0.01)
+    result = {'data':[]} if method in ['thread/list','model/list','skills/list','collaborationMode/list'] else {}
+    print(json.dumps({'id':r['id'],'result':result}), flush=True)
+"#.replace("__ROOT__", &serde_json::to_string(&temp.path().to_string_lossy()).unwrap());
+    std::fs::write(&cli, script).unwrap();
+    std::fs::set_permissions(&cli, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let project = temp.path().join("project-steer");
+    let bootstrap = crate::codex::CodexSession::connect(
+        workspace.clone(),
+        project.to_string_lossy().into_owned(),
+        cli.to_string_lossy().into_owned(),
+        app.clone(),
+    )
+    .await
+    .unwrap();
+    app.inner
+        .workspaces
+        .lock()
+        .await
+        .get_mut(&workspace)
+        .unwrap()
+        .codex_session = Some(bootstrap.session.activate());
+    let send = tokio::spawn({
+        let app = app.clone();
+        let workspace = workspace.clone();
+        async move {
+            let review = serde_json::from_value(json!({
+                "id":"R-steer", "title":"Decision", "ask":"Proceed?", "recommendation":"Yes",
+                "body":"", "status":"changes_requested", "items":[],
+                "source_thread_id":"thread-steer", "source_workspace_id":workspace,
+                "created_by":{"name":"Agent","context":{"origin":"mcp"}},
+                "overall_note":"Please adjust the approach.", "created_at":Utc::now(),"updated_at":Utc::now()
+            })).unwrap();
+            app.deliver_review_response(&review).await
+        }
+    });
+    let (push, claim) = tokio::time::timeout(TokioDuration::from_secs(5), async {
+        loop {
+            if let Some(push) = app.next_held_push().await {
+                break push;
+            }
+            sleep(TokioDuration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("completion must stay eligible while provider acknowledgement is pending");
+    assert_eq!(push.completion_reply_to_user, Some(true));
+    assert!(
+        !send.is_finished(),
+        "the provider has not acknowledged the steer"
+    );
+    app.push_written(claim).await;
+    std::fs::write(temp.path().join("accept-steer"), "").unwrap();
+    assert!(matches!(send.await.unwrap(),
+        falcondeck_core::reviews::ReviewDelivery::Delivered { .. }));
+    app.shutdown().await.unwrap();
 }

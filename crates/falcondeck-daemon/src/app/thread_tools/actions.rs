@@ -397,7 +397,7 @@ impl AppState {
                     })
                     .collect();
                 // Validation of ids and non-empty answers is the shared UI path's.
-                self.respond_to_interactive_request(
+                self.answer_agent_question(
                     workspace.into(),
                     request.request_id.clone(),
                     InteractiveResponsePayload::Question { answers },
@@ -1035,6 +1035,14 @@ mod tests {
             .unwrap(),
         );
         assert!(result.contains("Request: plain"), "{result}");
+        assert!(
+            !app.thread_summary("workspace-1", &id)
+                .await
+                .unwrap()
+                .attention
+                .reply_to_user,
+            "an agent answering its child's question is not James's input"
+        );
         match receiver.await.unwrap() {
             crate::claude::ClaudeHookReply::QuestionAnswers(answers) => {
                 assert_eq!(answers["q1"], vec!["Postgres".to_string()])

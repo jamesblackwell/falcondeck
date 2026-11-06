@@ -114,6 +114,7 @@ mod provider_runtime;
 mod provider_usage;
 mod remote_bridge;
 mod remote_lifecycle;
+mod reply_source;
 mod reviews;
 mod rewrite_models;
 mod runtime_health;
@@ -576,6 +577,11 @@ struct ManagedThread {
     /// When the current turn was dispatched. In-memory only: after a daemon
     /// restart the age of an already-running turn is unknown.
     turn_started_at: Option<chrono::DateTime<Utc>>,
+    /// Provisional human inputs crossing a provider boundary. The public marker
+    /// is persisted before delivery; these claims prevent one rejection from
+    /// erasing another accepted human response.
+    reply_source_pending: HashSet<Uuid>,
+    reply_source_base: bool,
 }
 
 #[derive(Clone)]
@@ -588,8 +594,9 @@ struct RealtimeTranscriptState {
 /// A send accepted while the thread was busy, held until the active turn ends.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
 struct QueuedTurnRequest {
-    #[serde(default)]
-    reply_to_user: bool,
+    /// Legacy queues without sender attribution are presumed user-authored.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    reply_to_user: Option<bool>,
     /// Accepted while the variant was being provisioned; this is explicit
     /// admission, including a resume that may proceed after dependencies finish.
     #[serde(default)]
@@ -601,6 +608,12 @@ struct QueuedTurnRequest {
     /// so a later message from the same sender merges into this entry.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     agent_sender: Option<QueuedAgentSender>,
+}
+
+impl QueuedTurnRequest {
+    fn replies_to_user(&self) -> bool {
+        self.reply_to_user.unwrap_or(self.agent_sender.is_none())
+    }
 }
 
 /// The agent thread behind a queued message and how many of its messages the
@@ -4510,8 +4523,36 @@ impl AppState {
                 .respond_to_cloud_request(&workspace_id, thread_id, native_request_id, response)
                 .await;
         }
-        workspace_ops::respond_to_interactive_request(self, workspace_id, request_id, response)
-            .await
+        workspace_ops::respond_to_interactive_request(
+            self,
+            workspace_id,
+            request_id,
+            response,
+        )
+        .await
+    }
+
+    pub(super) async fn answer_agent_question(
+        &self,
+        workspace_id: String,
+        request_id: String,
+        response: InteractiveResponsePayload,
+    ) -> Result<CommandResponse, DaemonError> {
+        if let Some((thread_id, native_request_id)) = request_id.split_once('/')
+            && self.is_cloud_thread(thread_id)
+        {
+            return self
+                .respond_to_cloud_request(&workspace_id, thread_id, native_request_id, response)
+                .await;
+        }
+        workspace_ops::respond_to_interactive_request_with_source(
+            self,
+            workspace_id,
+            request_id,
+            response,
+            false,
+        )
+        .await
     }
 
     pub async fn collaboration_modes(

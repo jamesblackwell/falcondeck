@@ -135,6 +135,18 @@ fn completion_is_notable(
     )
 }
 
+/// Preserve the existing noise policy exactly unless the push filter is enabled.
+fn completion_is_recordable(
+    summary: &ThreadSummary,
+    reply: Option<&str>,
+    parent_is_watching: bool,
+    run: Option<&RunTurn>,
+    bot: bool,
+    quiet_automatic_work: bool,
+) -> bool {
+    completion_is_notable(summary, reply, parent_is_watching, run) || (quiet_automatic_work && bot)
+}
+
 impl AppState {
     /// Records the event, then delivers it. Every attention event goes through
     /// here. Noise produces neither a record nor a push; a repeat of an event
@@ -301,13 +313,15 @@ impl AppState {
             .control()
             .run_for_turn(&thread_id, summary.latest_turn_id.as_deref())
             .await;
-        let notable = completion_is_notable(
+        let recordable = completion_is_recordable(
             &summary,
             reply.as_deref(),
             self.parent_watches_completion(&thread_id),
             run.as_ref(),
+            self.bot_for_thread(&thread_id).await.is_some(),
+            self.preferences().await.notifications.only_push_from_bots,
         );
-        if !notable && self.bot_for_thread(&thread_id).await.is_none() {
+        if !recordable {
             return None;
         }
         let bot = self.bot_for_thread(&thread_id).await.map(|bot| bot.name);
@@ -1676,6 +1690,95 @@ mod tests {
             false,
             Some(&quiet(Some("NO_ACTION")))
         ));
+    }
+
+    #[test]
+    fn filter_off_keeps_old_notability_for_every_bot_noise_case() {
+        let mut queued = summary(None);
+        queued.queued_turns.push(
+            serde_json::from_value(json!({
+                "id":"q","preview":"queued","queued_at":Utc::now()
+            }))
+            .unwrap(),
+        );
+        let bot_run = summary(Some(ThreadOrigin::Automation {
+            automation_id: "a".into(),
+            bot_id: Some("bot".into()),
+            name: "run".into(),
+        }));
+        let ordinary_run = summary(Some(ThreadOrigin::Automation {
+            automation_id: "a".into(),
+            bot_id: None,
+            name: "run".into(),
+        }));
+        let cases = [
+            (bot_run, "Done", false, Some(RunTurn { quiet_marker: None })),
+            (
+                ordinary_run,
+                "NO_ACTION",
+                false,
+                Some(RunTurn {
+                    quiet_marker: Some("NO_ACTION".into()),
+                }),
+            ),
+            (summary(None), "Done", true, None),
+            (queued, "Done", false, None),
+        ];
+        for (summary, reply, watched, run) in cases {
+            let old = completion_is_notable(&summary, Some(reply), watched, run.as_ref());
+            assert!(!old);
+            assert_eq!(
+                completion_is_recordable(&summary, Some(reply), watched, run.as_ref(), true, false),
+                old
+            );
+            assert!(completion_is_recordable(
+                &summary,
+                Some(reply),
+                watched,
+                run.as_ref(),
+                true,
+                true
+            ));
+        }
+    }
+
+    #[tokio::test]
+    async fn filter_off_does_not_add_centre_records_or_pushes_for_queued_bot_work() {
+        let (app, _temp) = fixture().await;
+        bridge(&app).await;
+        app.set_desktop_activity(false);
+        app.mutate_bot(falcondeck_core::BotMutation::Create {
+            name: "Coordinator".into(),
+            instructions: String::new(),
+            provider: None,
+            model_id: None,
+            thread_id: Some("thread-1".into()),
+        })
+        .await
+        .unwrap();
+        reply(&app, "Automatic result").await;
+        app.with_thread_mut("workspace-1", "thread-1", |t| {
+            t.queued_turns.push(
+                serde_json::from_value(json!({"id":"q","preview":"queued","queued_at":Utc::now()}))
+                    .unwrap(),
+            );
+        })
+        .await
+        .unwrap();
+        finish(&app).await;
+        assert!(history(&app).await.is_empty());
+        assert!(pushed(&app).await.is_empty());
+        set_notifications(
+            &app,
+            NotificationPreferencesPatch {
+                only_push_from_bots: Some(true),
+                ..Default::default()
+            },
+        )
+        .await;
+        finish(&app).await;
+        assert_eq!(history(&app).await.len(), 1);
+        assert!(pushed(&app).await.is_empty());
     }
 
     #[tokio::test]

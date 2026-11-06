@@ -143,3 +143,13 @@ from saved state; unambiguous analytics creation records can repair legacy gaps.
 The daemon gates both initial delivery and queued/retried sends. Clients that
 synthesize connected phone alerts must respect the authoritative marker and
 restored origin. Centre counts and desktop alerts remain independent.
+
+Human review responses and interactive replies carry user attribution before
+provider acceptance, with per-input rollback on rejection. The daemon’s persisted queued source
+markers are nullable (these are not client-supplied fields): omitted plus no `agent_sender` means user input; omitted
+plus an agent sender means automatic input. Explicit true/false always wins.
+A human queue edit writes true and clears the old sender; reorder/remove do not
+change attribution. The preference being off preserves existing notability.
+
+A question already suppressed is not re-issued if its parent later disappears;
+the separate two-hour outcome escalation covers tracked tasks after integration.

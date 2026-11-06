@@ -3976,6 +3976,13 @@ impl AppState {
         &self,
         workspaces: &mut [PersistedWorkspaceState],
     ) {
+        if !workspaces
+            .iter()
+            .flat_map(|workspace| &workspace.thread_states)
+            .any(|thread| thread.origin.is_none())
+        {
+            return;
+        }
         let dir = self.inner.analytics.dir.clone();
         let parents = tokio::task::spawn_blocking(move || dispatch_parents(&dir))
             .await
