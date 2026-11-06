@@ -260,6 +260,54 @@ describe("Conversation scrolling", () => {
     expect(floor.style.height).toBe("500px");
   });
 
+  function startRelease() {
+    const now = vi.spyOn(performance, "now").mockReturnValue(0);
+    const scroll = openThread();
+    const offsetHeight = vi.spyOn(HTMLElement.prototype, "offsetHeight", "get");
+    offsetHeight.mockReturnValue(1200);
+    act(() => resize());
+    flushFrames();
+    offsetHeight.mockReturnValue(700);
+    act(() => resize());
+    const floor = scroll.querySelector<HTMLElement>("[data-conversation-scroll-floor]")!;
+    return { scroll, floor, now };
+  }
+
+  it.each([
+    ["touch", (el: HTMLElement) => fireEvent.touchStart(el)],
+    ["scrollbar mouse", (el: HTMLElement) => fireEvent.mouseDown(el)],
+    ["wheel", (el: HTMLElement) => fireEvent.wheel(el, { deltaY: 3 })],
+    ["keyboard", (el: HTMLElement) => fireEvent.keyDown(el, { key: "ArrowUp" })],
+  ])("lets %s take the scroll position from a floor release", (_, input) => {
+    const { scroll, floor, now } = startRelease();
+    input(scroll);
+    scroll.scrollTop = 480;
+    now.mockReturnValue(100);
+    flushFrames();
+    expect(scroll.scrollTop).toBe(480);
+
+    // The floor still comes down, with nobody pinning against it.
+    now.mockReturnValue(1000);
+    flushFrames();
+    expect(floor.style.height).toBe("700px");
+    expect(scroll.scrollTop).toBe(480);
+  });
+
+  it("stands down for scrolling no event has reported yet", () => {
+    const { scroll, now } = startRelease();
+    scroll.scrollTop = 480;
+    now.mockReturnValue(100);
+    flushFrames();
+    expect(scroll.scrollTop).toBe(480);
+  });
+
+  it("keeps pinning a release nobody interrupted", () => {
+    const { scroll, now } = startRelease();
+    now.mockReturnValue(100);
+    flushFrames();
+    expect(scroll.scrollTop).toBe(500);
+  });
+
   it("drops the floor at once for reduced motion", () => {
     vi.stubGlobal("matchMedia", () => ({ matches: true }));
     const scroll = openThread();

@@ -300,7 +300,13 @@ export const Conversation = memo(function Conversation({
   const scrollFloorRef = useRef<HTMLDivElement>(null);
   const floorTargetRef = useRef(0);
   const floorReleaseFrameRef = useRef<number | null>(null);
-  const floorReleaseRef = useRef({ from: 0, start: 0, target: 0 });
+  const floorReleaseRef = useRef({
+    from: 0,
+    start: 0,
+    target: 0,
+    /** Set once the reader takes over: the floor keeps easing, unpinned. */
+    handsOff: false,
+  });
   const pinToBottomFrameRef = useRef<number | null>(null);
   const scrollPositionsRef = useRef(new Map<string, SavedScrollPosition>());
   const activeThreadKeyRef = useRef<string | null>(threadKey);
@@ -569,7 +575,13 @@ export const Conversation = memo(function Conversation({
     release.start = performance.now();
     release.target = floorTargetRef.current;
     if (running) return;
+    release.handsOff = false;
     const step = (now: number) => {
+      // Read before the floor moves, which can itself clamp scrollTop. Any
+      // difference here is scrolling no scroll event has reported yet.
+      if (Math.abs(el.scrollTop - lastScrollTopRef.current) > 1) {
+        release.handsOff = true;
+      }
       const t = Math.min(
         1,
         Math.max(0, now - release.start) / FLOOR_RELEASE_DURATION_MS,
@@ -577,7 +589,7 @@ export const Conversation = memo(function Conversation({
       const eased = 1 - (1 - t) ** 3;
       const height = release.from + (release.target - release.from) * eased;
       floor.style.height = `${height}px`;
-      if (stickyToBottomRef.current) {
+      if (stickyToBottomRef.current && !release.handsOff) {
         el.scrollTop = Math.max(0, el.scrollHeight - el.clientHeight);
         programmaticScrollTopRef.current = el.scrollTop;
         lastScrollTopRef.current = el.scrollTop;
@@ -1140,6 +1152,7 @@ export const Conversation = memo(function Conversation({
 
     const cancel = () => {
       cancelSmoothScroll();
+      floorReleaseRef.current.handsOff = true;
       if (pinToBottomFrameRef.current !== null) {
         window.cancelAnimationFrame(pinToBottomFrameRef.current);
         pinToBottomFrameRef.current = null;
@@ -1154,10 +1167,12 @@ export const Conversation = memo(function Conversation({
     el.addEventListener("wheel", wheel, { passive: true });
     el.addEventListener("touchstart", cancel, { passive: true });
     el.addEventListener("mousedown", cancel);
+    el.addEventListener("keydown", cancel);
     return () => {
       el.removeEventListener("wheel", wheel);
       el.removeEventListener("touchstart", cancel);
       el.removeEventListener("mousedown", cancel);
+      el.removeEventListener("keydown", cancel);
     };
   }, [cancelSmoothScroll]);
 
