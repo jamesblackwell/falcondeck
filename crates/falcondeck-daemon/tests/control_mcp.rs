@@ -668,12 +668,15 @@ async fn disabled_interface_surfaces_as_a_tool_error() {
 #[tokio::test]
 async fn daemon_unreachable_at_startup_exits_with_a_message() {
     falcondeck_daemon::disable_real_provider_binaries_for_tests();
-    // Reserve then drop a port so nothing listens on it.
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let addr = listener.local_addr().unwrap();
-    drop(listener);
+    // Reserve without listening until the child exits. Releasing the port
+    // first lets a concurrent daemon bind it and make MCP wait for input.
+    let reserved = tokio::net::TcpSocket::new_v4().unwrap();
+    reserved.bind("127.0.0.1:0".parse().unwrap()).unwrap();
+    let addr = reserved.local_addr().unwrap();
+    assert!(tokio::net::TcpListener::bind(addr).await.is_err());
 
     assert_startup_refusal(&format!("http://{addr}"), "cannot reach the daemon").await;
+    drop(reserved);
 }
 
 #[tokio::test]
