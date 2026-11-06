@@ -3321,6 +3321,7 @@ pub(super) async fn steer_acp_turn(
         context.as_deref(),
     )
     .await?;
+    let mut interject_uncertain = false;
     if runtime.supports_interject() {
         match runtime
             .interject(&session_id, &content.text, content.blocks.clone())
@@ -3328,6 +3329,7 @@ pub(super) async fn steer_acp_turn(
         {
             Ok(()) => return Ok(()),
             Err(error) => {
+                interject_uncertain = !super::reply_source::definite_input_rejection(&error);
                 // The probe treats any non-"method not found" reply as
                 // support, including Grok builds that accept the method
                 // then reject a live session. Cancel-and-re-prompt still
@@ -3340,7 +3342,26 @@ pub(super) async fn steer_acp_turn(
             }
         }
     }
-    runtime.steer_with_cancel(&session_id, content.blocks).await
+    let fallback = runtime.steer_with_cancel(&session_id, content.blocks).await;
+    acp_steer_outcome(interject_uncertain, fallback)
+}
+
+/// A local fallback refusal cannot establish what happened to an earlier
+/// vendor request. Keep that uncertainty visible to reply attribution and
+/// prevent the generic steer handler from re-sending it as a fresh turn.
+fn acp_steer_outcome(
+    interject_uncertain: bool,
+    fallback: Result<(), DaemonError>,
+) -> Result<(), DaemonError> {
+    match fallback {
+        Err(error) if interject_uncertain => {
+            tracing::warn!(%error, "ACP fallback steering failed after an unconfirmed interject");
+            Err(DaemonError::Rpc(
+                "ACP interject admission is unconfirmed and fallback steering failed; check the existing turn before resending".into(),
+            ))
+        }
+        outcome => outcome,
+    }
 }
 
 struct AcpTurnContent {
@@ -3731,6 +3752,43 @@ mod tests {
         runtime.shutdown().await;
     }
 
+    #[test]
+    fn uncertain_interject_survives_a_local_fallback_refusal() {
+        use super::{DaemonError, acp_steer_outcome};
+        let first = DaemonError::AcpRequestTimeout {
+            provider: "grok".into(),
+            method: "x.ai/interject".into(),
+            timeout_seconds: 30,
+        };
+        let uncertain = !super::super::reply_source::definite_input_rejection(&first);
+        assert!(uncertain);
+        for refusal in [
+            "no active ACP turn to steer",
+            "the turn is being interrupted",
+        ] {
+            let error = acp_steer_outcome(uncertain, Err(DaemonError::BadRequest(refusal.into())))
+                .unwrap_err();
+            assert!(matches!(&error, DaemonError::Rpc(_)));
+            assert!(!super::super::reply_source::definite_input_rejection(
+                &error
+            ));
+            assert!(
+                !super::super::workspace_ops::steer_error_downgrades_to_queue(&error),
+                "unknown admission must not trigger a fresh send"
+            );
+        }
+        let before_attempt = acp_steer_outcome(
+            false,
+            Err(DaemonError::BadRequest(
+                "no active ACP session to steer".into(),
+            )),
+        )
+        .unwrap_err();
+        assert!(super::super::reply_source::definite_input_rejection(
+            &before_attempt
+        ));
+        assert!(acp_steer_outcome(uncertain, Ok(())).is_ok());
+    }
     #[test]
     fn replayed_acp_metadata_preserves_the_activity_timestamp() {
         let activity = Utc::now() - chrono::Duration::days(2);
