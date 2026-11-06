@@ -471,18 +471,26 @@ Only an explicit user action in a terminal should initiate sign-in.
 
 Antigravity status reads credential presence from
 `$HOME/.gemini/antigravity-cli/antigravity-oauth-token` (the nested `token`
-object). Missing or unrecognized files mean unknown, because keyring, Gemini
-API-key and ADC authentication can still work. Turns do not use that file as an
-admission gate. A CLI-reported authentication failure becomes a clear login
-required error and updates the workspace account status.
+object) and checks configured `GEMINI_API_KEY`, `GOOGLE_API_KEY`, or
+`GOOGLE_APPLICATION_CREDENTIALS` environment authentication. Missing or
+unrecognized sources mean unknown. Credential presence is not proof that the
+server will accept them. A CLI-reported authentication failure becomes a clear
+login-required error and updates the workspace account status.
 
-Metadata never runs `/usage` or `/skills`. With file credentials present, model
-discovery can run `agy models` once per 24 hours, with concurrent refreshes
-serialized. Results and failed-attempt timestamps persist in
-`~/.cache/falcondeck/agy-models.json`; refresh failures use that catalog before
-falling back to the current curated list. A missing credential file uses the
-cache/fallback without launching discovery. The default must exist in the
-returned catalog. The fallback tracks Google's
+Turns require a usable token file (an access token with a future expiry or a
+refresh token, including an expired access token) or one of those explicit
+environment credential sources. Otherwise FalconDeck refuses the launch and
+explains how to sign in or configure a key/ADC credential file. **Keyring-only
+sign-in is currently unsupported:** a controlled signed-out check showed that
+`AGY_CLI_NONINTERACTIVE_HEADLESS=1` plus `setsid` still invokes `open` for Google
+OAuth and waits for authentication. The browser opener was stubbed during that
+check. Do not remove the credential gate based on the headless setting.
+
+Metadata never runs `agy`, including `/usage`, `/skills`, or `models`.
+It reads a matching existing catalog from `~/.cache/falcondeck/agy-models.json`,
+then falls back to the current curated list. There are no background CLI
+refreshes, including after cache misses or failures. The default must exist in
+the returned catalog. The fallback tracks Google's
 [model availability](https://antigravity.google/docs/models/).
 
 Filesystem skill discovery includes `~/.gemini/config/skills`, each
@@ -494,12 +502,13 @@ Antigravity CLI's credential store.
 
 Every native Antigravity spawn sets `AGY_CLI_NONINTERACTIVE_HEADLESS=1` and on
 Unix starts a new session without the daemon's controlling terminal, including
-turns, model discovery, conformance, inventory/version/help and local upgrade
-shells. Redirected stdin alone does not establish the CLI's documented
+turns, explicit conformance, inventory/version/help and local upgrade shells.
+These settings are best-effort and do not replace the credential gate.
+Redirected stdin alone does not establish the CLI's documented
 [headless authentication behavior](https://antigravity.google/docs/cli/headless/).
-Remote Antigravity inventory/update commands use Python's `os.setsid` before
-exec and require Python 3 rather than falling back to a potentially interactive
-launch. Custom ACP commands wrapping `agy` remain outside this native contract.
+Remote Antigravity inventory/update commands use Python's
+`subprocess.call(..., start_new_session=True)` and require Python 3 rather than
+falling back to a potentially interactive launch. Custom ACP commands wrapping `agy` remain outside this native contract.
 
 Plain `cargo test` must not execute installed provider CLIs, regardless of HOME.
 Unit tests enable the provider guard at compile time. Integration tests call

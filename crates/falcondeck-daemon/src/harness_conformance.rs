@@ -1057,7 +1057,7 @@ pub async fn probe_agy(options: &ProbeOptions) -> Report {
         report.push(
             "model catalog",
             CheckStatus::Skipped,
-            "No file credentials; skipping discovery (keyring/API-key/ADC turns remain available)",
+            "No verifiable credential source; skipping model discovery",
         );
     } else if discovered.is_empty() {
         report.push(
@@ -1123,6 +1123,10 @@ async fn agy_stream_turn(
     conversation_id: Option<&str>,
     prompt: &str,
 ) -> Result<AgyTurnOutcome, String> {
+    if agy::read_auth_status(&options.agy_bin).await.status != falcondeck_core::AccountStatus::Ready
+    {
+        return Err("Antigravity needs saved credentials or GEMINI_API_KEY / GOOGLE_API_KEY / GOOGLE_APPLICATION_CREDENTIALS; keyring-only sign-in is unsafe in headless mode".into());
+    }
     let resolved = resolve_agent_binary("agy", &options.agy_bin);
     let mut command = Command::new(&resolved.executable);
     agy::configure_headless(&mut command);

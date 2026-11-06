@@ -4107,6 +4107,7 @@ printf '%s\n' '{"event":"result","result":{"status":"ERROR","error":"authenticat
             summary, codex_session: None, claude_runtime: None, agy_runtime: Some(bootstrap.runtime.clone()),
             opencode_runtime: None, acp_runtimes: HashMap::new(), threads: HashMap::from([(thread_id.clone(), thread)]),
         });
+        bootstrap.runtime.permit_stub_turn_for_test();
         let spawned = bootstrap.runtime.spawn_turn(&thread_id, None, "fixture", &[], None, None, None, None, temp.path().to_str().unwrap()).await.unwrap();
         app.monitor_agy_turn("workspace-1".into(), thread_id.clone(), spawned.generation, spawned.stdout, spawned.stderr, false).await;
         let thread = app.thread_summary("workspace-1", &thread_id).await.unwrap();
