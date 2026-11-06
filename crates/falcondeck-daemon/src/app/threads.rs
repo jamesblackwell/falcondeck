@@ -3025,6 +3025,7 @@ impl AppState {
         update_existing: bool,
         track_attention: bool,
     ) -> Result<(), DaemonError> {
+        if super::agent_helpers::is_silent_claude_hook_item(&item) { return Ok(()); }
         sanitize_conversation_item(&mut item);
         let mut workspaces = self.inner.workspaces.lock().await;
         let workspace = workspaces
@@ -3320,7 +3321,7 @@ impl ManagedThread {
         self.plan_items.clear();
         self.tool_items.clear();
         self.other_items.clear();
-        for (index, item) in items.into_iter().enumerate() {
+        for (index, item) in items.into_iter().filter(|item| !super::agent_helpers::is_silent_claude_hook_item(item)).enumerate() {
             let id = conversation_item_identity(&item).to_string();
             match &item {
                 ConversationItem::AssistantMessage { .. } => {

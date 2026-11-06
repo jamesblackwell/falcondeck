@@ -1233,3 +1233,10 @@ evidence and filter legacy empty hook receipts. This corrects an initial transcr
 implementation regression; it does not change agent tool execution or invocation
 inputs. Provider-reported Bash exit/duration fields are generally absent in native
 JSONL and must not reserve empty UI or be inferred from timing.
+
+Silent successful Claude hooks are bookkeeping: `hook_response` with exit 0 and
+blank stdout/stderr/output, and empty `hook_success` attachments, produce no row.
+Failures remain visible even without output. Meaningful hook responses show the
+hook name and text. Legacy empty JSON receipts (including stop summaries) are
+filtered on daemon restore/replay, paging/item reads, cached client presentation
+and transcript/model exports. This does not remove meaningful output or failures.

@@ -1,3 +1,4 @@
+import { isEmptyClaudeHookReceipt } from "./service-message";
 import type { ConversationItem, ServiceLevel } from "./types";
 
 /** Harness-injected XML envelopes that ride the user role. */
@@ -295,7 +296,7 @@ function isSkillPreambleEchoOf(previous: string, raw: string): boolean {
   return stripped.text === typed || stripped.text === "";
 }
 
-/** Rewrites or drops user-role items so renderers never see harness XML. */
+/** Removes harness bookkeeping and projects user-role XML for rendering/export. */
 export function projectHarnessUserItems(
   items: readonly ConversationItem[],
 ): ConversationItem[] {
@@ -304,6 +305,10 @@ export function projectHarnessUserItems(
   let next: ConversationItem[] | null = null;
   for (let index = 0; index < items.length; index += 1) {
     const item = items[index]!;
+    if (item.kind === "service" && isEmptyClaudeHookReceipt(item.message)) {
+      next ??= items.slice(0, index);
+      continue;
+    }
     if (item.kind !== "user_message") {
       next?.push(item);
       continue;

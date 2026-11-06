@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 
-import { serviceMessagePresentation } from './service-message'
+import { isEmptyClaudeHookReceipt, serviceMessagePresentation } from './service-message'
 
 const raw = JSON.stringify({
   timestamp: '2026-08-09T05:02:59.293394Z',
@@ -91,4 +91,18 @@ describe('serviceMessagePresentation', () => {
     expect(presentation.rawDetail).toBe(raw)
     expect(presentation.classification).toBeNull()
   })
+})
+
+
+it('recognizes stored silent hooks but retains failed and meaningful receipts', () => {
+  for (const [payload, silent] of [
+    [{ exit_code: 0, hook: 'UserPromptSubmit', stdout: ' \n', stderr: '', output: '' }, true],
+    [{ exit_code: 2, stdout: '', stderr: '', output: '' }, false],
+    [{ exit_code: 0, stdout: 'Important' }, false],
+    [{ context: [], errors: null }, true],
+    [{ context: [], errors: ['failure'] }, false],
+    [{ context: [], errors: [''] }, false],
+  ] as const) expect(isEmptyClaudeHookReceipt('Claude hook output: ' + JSON.stringify(payload))).toBe(silent)
+  expect(isEmptyClaudeHookReceipt('Claude hook success: {"content":"  "}')).toBe(true)
+  expect(isEmptyClaudeHookReceipt('Claude hook output: invalid JSON')).toBe(false)
 })

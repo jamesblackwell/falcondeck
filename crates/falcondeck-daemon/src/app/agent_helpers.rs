@@ -1238,24 +1238,50 @@ pub(crate) fn claude_tool_exit_code(value: &Value) -> Option<i32> {
         .and_then(|n| i32::try_from(n).ok())
 }
 
-/// Older daemon builds persisted an empty hook receipt for every stop. Do not
-/// propagate those receipts to a model when reading existing stored history.
+fn empty_hook_value(value: Option<&Value>) -> bool {
+    value.is_none_or(|v| v.is_null() || v.as_str().is_some_and(|s| s.trim().is_empty())
+        || v.as_array().is_some_and(Vec::is_empty)
+        || v.as_object().is_some_and(serde_json::Map::is_empty))
+}
+
+fn silent_hook_payload(value: &Value, success: bool) -> bool {
+    if !value.is_object() { return false; }
+    let exit = value.get("exit_code").or_else(|| value.get("exitCode")).and_then(Value::as_i64);
+    if exit.is_some_and(|code| code != 0) { return false; }
+    let empty = ["stdout", "stderr", "output", "content", "message", "text", "context", "errors", "error"]
+        .iter().all(|key| empty_hook_value(value.get(*key)));
+    empty && (success || exit == Some(0) || value.get("context").is_some())
+}
+
+/// Also recognizes receipts persisted before silent hooks were filtered.
 pub(crate) fn is_empty_claude_hook_receipt(message: &str) -> bool {
-    let Some(payload) = message.strip_prefix("Claude hook output: ") else {
-        return false;
-    };
-    let Ok(value) = serde_json::from_str::<Value>(payload) else {
-        return false;
-    };
-    let empty = |v: Option<&Value>| {
-        v.is_none_or(|v| {
-            v.is_null()
-                || v.as_str() == Some("")
-                || v.as_array().is_some_and(Vec::is_empty)
-                || v.as_object().is_some_and(serde_json::Map::is_empty)
-        })
-    };
-    value.get("context").is_some() && empty(value.get("context")) && empty(value.get("errors"))
+    let (payload, success) = if let Some(payload) = message.strip_prefix("Claude hook output: ") {
+        (payload, false)
+    } else if let Some(payload) = message.strip_prefix("Claude hook success: ") {
+        (payload, true)
+    } else { return false; };
+    serde_json::from_str::<Value>(payload).is_ok_and(|value| silent_hook_payload(&value, success))
+}
+
+pub(crate) fn is_silent_claude_hook_item(item: &falcondeck_core::ConversationItem) -> bool {
+    matches!(item, falcondeck_core::ConversationItem::Service { message, .. } if is_empty_claude_hook_receipt(message))
+}
+
+fn hook_message(value: &Value, success: bool) -> Option<String> {
+    if silent_hook_payload(value, success) { return None; }
+    let hook = extract_string(value, &["hook_name", "hookName", "hook"]).unwrap_or_else(|| "output".into());
+    let mut parts = Vec::new();
+    for key in ["output", "stdout", "stderr", "content", "message", "text"] {
+        if let Some(text) = stringify_claude_value(value.get(key)) {
+            if !parts.contains(&text) { parts.push(text); }
+        }
+    }
+    let exit = value.get("exit_code").or_else(|| value.get("exitCode")).and_then(Value::as_i64);
+    let failure = exit.filter(|code| *code != 0).map(|code| format!(" failed (exit {code})")).unwrap_or_default();
+    if parts.is_empty() && failure.is_empty() {
+        return Some(format!("Claude hook output: {value}")); // Retain unfamiliar non-text evidence.
+    }
+    Some(format!("Claude hook {hook}{failure}{}{}", if parts.is_empty() { "" } else { ": " }, parts.join("\n")))
 }
 
 pub(crate) fn extract_claude_service_message(value: &Value) -> Option<String> {
@@ -1264,6 +1290,7 @@ pub(crate) fn extract_claude_service_message(value: &Value) -> Option<String> {
     if event_type == "attachment" {
         let attachment = value.get("attachment")?;
         let kind = attachment.get("type").and_then(Value::as_str)?;
+        if kind == "hook_success" { return hook_message(attachment, true); }
         return matches!(
             kind,
             "hook_blocking_error" | "hook_success" | "read_truncation_notice" | "task_status"
@@ -1289,13 +1316,7 @@ pub(crate) fn extract_claude_service_message(value: &Value) -> Option<String> {
             .and_then(Value::as_str)
             .unwrap_or_default();
         if subtype == "hook_response" {
-            return Some(format!(
-                "Claude hook output: {}",
-                json!({
-                    "hook": value.get("hook_name"), "stdout": value.get("stdout"),
-                    "stderr": value.get("stderr"), "output": value.get("output"), "exit_code": value.get("exit_code"),
-                })
-            ));
+            return hook_message(value, false);
         }
         if subtype == "api_error" {
             return Some(format!(
@@ -1840,6 +1861,41 @@ pub(super) fn parse_thread_isolation(params: &serde_json::Value) -> ThreadIsolat
 mod service_message_tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn silent_hooks_filter_success_and_preserve_failures_and_text() {
+        for hook in ["SessionStart:resume", "UserPromptSubmit"] {
+            let mut event = json!({"type":"system", "subtype":"hook_response", "hook_name":hook,
+                "exit_code":0, "stdout":" \n", "stderr":"\t", "output":""});
+            assert_eq!(extract_claude_service_message(&event), None);
+            event["exit_code"] = json!(2);
+            assert!(extract_claude_service_message(&event).unwrap().contains("failed (exit 2)"));
+            event["exit_code"] = json!(0); event["stdout"] = json!("Useful output");
+            assert_eq!(extract_claude_service_message(&event).unwrap(), format!("Claude hook {hook}: Useful output"));
+        }
+        let mut attachment = json!({"type":"attachment", "attachment":{"type":"hook_success", "hookName":"SessionStart", "content":"  "}});
+        assert_eq!(extract_claude_service_message(&attachment), None);
+        attachment["attachment"]["content"] = json!("Ready");
+        assert_eq!(extract_claude_service_message(&attachment).as_deref(), Some("Claude hook SessionStart: Ready"));
+        attachment["attachment"]["content"] = json!(""); attachment["attachment"]["exit_code"] = json!(1);
+        assert!(extract_claude_service_message(&attachment).unwrap().contains("failed"));
+    }
+
+    #[test]
+    fn silent_hooks_recognize_both_stored_shapes_without_hiding_errors() {
+        for receipt in [
+            "Claude hook output: {\"context\":[],\"errors\":null}",
+            "Claude hook output: {\"exit_code\":0,\"hook\":\"UserPromptSubmit\",\"stdout\":\" \",\"stderr\":\"\",\"output\":\"\"}",
+            "Claude hook success: {\"type\":\"hook_success\",\"content\":\" \"}",
+        ] { assert!(is_empty_claude_hook_receipt(receipt), "{receipt}"); }
+        for receipt in [
+            "Claude hook output: {\"exit_code\":1,\"output\":\"\"}",
+            "Claude hook output: {\"exit_code\":0,\"stdout\":\"Important\"}",
+            "Claude hook output: {\"context\":[],\"errors\":[\"failure\"]}",
+            r#"Claude hook output: {"context":[],"errors":[""]}"#,
+            "Claude hook output: not JSON",
+        ] { assert!(!is_empty_claude_hook_receipt(receipt), "{receipt}"); }
+    }
 
     #[test]
     fn claude_empty_stop_hooks_and_duplicate_result_bodies_are_omitted() {

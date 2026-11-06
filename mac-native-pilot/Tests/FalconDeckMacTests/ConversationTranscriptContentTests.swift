@@ -2,6 +2,27 @@ import XCTest
 @testable import FalconDeckMac
 
 final class ConversationTranscriptContentTests: XCTestCase {
+    func testSilentHookReceiptsStayHiddenInCachedNativeGroupsAndExports() {
+        let silent = Message(.object(["id": .string("silent"), "kind": .string("service"),
+            "message": .string("Claude hook output: {\"exit_code\":0,\"stdout\":\" \",\"stderr\":\"\",\"output\":\"\"}")]))
+        let failed = Message(.object(["id": .string("failed"), "kind": .string("service"),
+            "message": .string("Claude hook output: {\"exit_code\":2,\"output\":\"\"}")]))
+        let legacy = Message(.object(["id": .string("legacy"), "kind": .string("service"),
+            "message": .string("Claude hook output: {\"context\":[],\"errors\":null}")]))
+        for mode in ["collapsed", "expanded"] {
+            let preferences = JSON.object(["conversation": .object(["tool_details_mode": .string(mode)])])
+            for streaming in [true, false] {
+                XCTAssertEqual(ConversationTranscriptGroups.groups(messages: [silent, legacy, failed], preferences: preferences, isStreaming: streaming).flatMap { $0 }.map(\.id), ["failed"])
+            }
+        }
+        let emptyError = Message(.object(["kind": .string("service"), "message": .string("Claude hook output: {\"context\":[],\"errors\":[\"\"]}")]))
+        XCTAssertFalse(emptyError.isSilentClaudeHookReceipt)
+        let exported = ConversationExport.markdown([silent, legacy, failed], title: "Hooks", partial: false)
+        XCTAssertFalse(exported.contains("context"))
+        XCTAssertFalse(exported.contains("\"exit_code\":0"))
+        XCTAssertTrue(exported.contains("\"exit_code\":2"))
+    }
+
     func testEmptyAndSummaryOnlyThoughtsAreLabelsInEveryThinkingMode() {
         for content: JSON in [.null, .string(""), .string(" \n ")] {
             let thought = Message(.object([

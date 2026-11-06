@@ -4,14 +4,15 @@ import Foundation
 /// artifacts and changes keep their own selectable transcript rows.
 enum ConversationTranscriptGroups {
     static func groups(messages: [Message], preferences source: JSON, thinkingDisplay: String? = nil, isStreaming: Bool = true) -> [[Message]] {
+        let visible = messages.filter { !$0.isSilentClaudeHookReceipt }
         var preferences = TranscriptPresentation.conversationPreferences(source)
         if let thinkingDisplay { preferences = preferences.setting("thinking_display", .string(thinkingDisplay)) }
         let mode = TranscriptPresentation.toolMode(preferences)
         // Providers can omit a final lifecycle update before the next item.
         // Settle old thoughts even when tools are shown without grouping.
-        let settled = messages.enumerated().map { index, original in
+        let settled = visible.enumerated().map { index, original in
             var message = original
-            if message.kind == "reasoning", message.streaming, index < messages.count - 1 || !isStreaming {
+            if message.kind == "reasoning", message.streaming, index < visible.count - 1 || !isStreaming {
                 message.raw = message.raw.setting("lifecycle", .string("complete"))
             }
             return message

@@ -5838,7 +5838,7 @@ pub(super) async fn thread_item(
         let item = thread
             .items
             .iter()
-            .find(|item| conversation_item_id(item) == item_id)
+            .find(|item| conversation_item_id(item) == item_id && !super::agent_helpers::is_silent_claude_hook_item(item))
             .cloned()
             .ok_or_else(|| DaemonError::NotFound("conversation item not found".to_string()))?;
         (item, thread.summary.clone())
@@ -6192,6 +6192,12 @@ pub(super) fn thread_detail_window(
     items: &[ConversationItem],
     request: &ThreadDetailRequest,
 ) -> Result<ThreadDetailWindow, DaemonError> {
+    // Defensive for direct/cloud projections as well as restored ManagedThread items.
+    let filtered;
+    let items = if items.iter().any(super::agent_helpers::is_silent_claude_hook_item) {
+        filtered = items.iter().filter(|item| !super::agent_helpers::is_silent_claude_hook_item(item)).cloned().collect::<Vec<_>>();
+        filtered.as_slice()
+    } else { items };
     const DEFAULT_TAIL_LIMIT: usize = 150;
     const DEFAULT_BEFORE_LIMIT: usize = 100;
     const MAX_PAGE_SIZE: usize = 500;
@@ -6746,6 +6752,26 @@ mod tests {
         let mut thread = hydrated_thread(thread_id, "preview");
         thread.summary.status = status;
         ManagedThread::with_items(thread.summary, thread.items)
+    }
+
+    #[test]
+    fn silent_hooks_drop_restored_rows_and_leave_page_cursors_usable() {
+        let silent = ConversationItem::Service {
+            id: "silent".into(), level: falcondeck_core::ServiceLevel::Info,
+            message: r#"Claude hook output: {"exit_code":0,"stdout":" ","stderr":"","output":""}"#.into(),
+            created_at: Utc::now(),
+        };
+        let items = vec![assistant_message("first"), silent, assistant_message("last")];
+        let restored = ManagedThread::with_items(managed_thread("t", ThreadStatus::Idle).summary, items.clone());
+        assert_eq!(restored.items.len(), 2);
+        assert_eq!(restored.assistant_items.get("last"), Some(&1));
+        let mut request: ThreadDetailRequest = serde_json::from_value(json!({"workspace_id":"w", "thread_id":"t", "mode":"tail", "limit":1, "strict_limit":true})).unwrap();
+        let tail = thread_detail_window(&items, &request).unwrap();
+        assert_eq!(tail.oldest_item_id.as_deref(), Some("last"));
+        request.mode = ThreadDetailMode::Before; request.before_item_id = tail.oldest_item_id;
+        let older = thread_detail_window(&items, &request).unwrap();
+        assert_eq!(older.oldest_item_id.as_deref(), Some("first"));
+        assert!(!older.has_older);
     }
 
     #[test]

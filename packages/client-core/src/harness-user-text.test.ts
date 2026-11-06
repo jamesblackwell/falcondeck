@@ -5,6 +5,7 @@ import {
   projectHarnessUserItems,
   projectHarnessUserText,
 } from "./harness-user-text";
+import { conversationItemsToMarkdown } from "./conversation-export";
 import { normalizePreferences } from "./normalization";
 import type { ConversationItem } from "./types";
 
@@ -308,4 +309,24 @@ describe('automation message provenance', () => {
     }
     expect(projectHarnessUserText(`Explain this marker: ${automationEnvelope}`)).not.toHaveProperty('automated');
   });
+});
+
+
+it('removes cached hook noise from live/settled desktop/mobile presentation and model exports', () => {
+  const items = [
+    { kind: 'service', id: 'old', level: 'info', message: 'Claude hook output: {"context":[],"errors":null}', created_at: '' },
+    { kind: 'service', id: 'new', level: 'info', message: 'Claude hook output: {"exit_code":0,"stdout":" ","stderr":"","output":""}', created_at: '' },
+    { kind: 'service', id: 'failed', level: 'error', message: 'Claude hook output: {"exit_code":1,"output":""}', created_at: '' },
+  ] as ConversationItem[];
+  expect(projectHarnessUserItems(items).map(item => item.id)).toEqual(['failed']);
+  for (const mode of ['collapsed', 'expanded'] as const) for (const streaming of [true, false]) {
+    const preferences = normalizePreferences({ conversation: { tool_details_mode: mode } });
+    const rendered = deriveConversationPresentation(items, preferences, { is_streaming: streaming });
+    expect(JSON.stringify(rendered)).not.toContain('"id":"old"');
+    expect(JSON.stringify(rendered)).not.toContain('"id":"new"');
+    expect(JSON.stringify(rendered)).toContain('"id":"failed"');
+  }
+  const markdown = conversationItemsToMarkdown(items, { mode: 'handoff' });
+  expect(markdown).not.toContain('context'); expect(markdown).not.toContain('"exit_code":0');
+  expect(markdown).toContain('"exit_code":1');
 });

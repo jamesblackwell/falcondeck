@@ -589,20 +589,24 @@ fn expand(
 mod claude_receipt_tests {
     use super::*;
     #[test]
-    fn empty_legacy_claude_stop_receipts_never_enter_model_reads() {
-        let item = ConversationItem::Service {
-            id: "empty-hook".into(),
-            level: falcondeck_core::ServiceLevel::Info,
-            message: "Claude hook output: {\"context\":[],\"errors\":null}".into(),
-            created_at: chrono::Utc::now(),
-        };
-        assert!(expand("thread", &item, 0, DEFAULT_CHARS).is_err());
-        assert!(!selected(
-            &item,
-            &ViewArgs {
-                include_tools: true,
-                ..Default::default()
-            }
-        ));
+    fn silent_hooks_never_enter_model_reads() {
+        for message in ["Claude hook output: {\"context\":[],\"errors\":null}",
+            "Claude hook output: {\"exit_code\":0,\"stdout\":\" \",\"stderr\":\"\",\"output\":\"\"}",
+            "Claude hook success: {\"content\":\"\"}"] {
+            let item = ConversationItem::Service {
+                id: "empty-hook".into(),
+                level: falcondeck_core::ServiceLevel::Info,
+                message: message.into(),
+                created_at: chrono::Utc::now(),
+            };
+            assert!(expand("thread", &item, 0, DEFAULT_CHARS).is_err());
+            assert!(!selected(
+                &item,
+                &ViewArgs {
+                    include_tools: true,
+                    ..Default::default()
+                }
+            ));
+        }
     }
 }

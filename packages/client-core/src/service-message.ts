@@ -133,3 +133,21 @@ export function serviceMessagePresentation(
     classification: 'codex_skill_icon_invalid',
   }
 }
+
+
+/** Legacy cached receipts must not reappear in a transcript or model export. */
+export function isEmptyClaudeHookReceipt(message: string): boolean {
+  const prefix = ['Claude hook output: ', 'Claude hook success: '].find(prefix => message.startsWith(prefix))
+  if (!prefix) return false
+  try {
+    const value = JSON.parse(message.slice(prefix.length))
+    if (!value || typeof value !== 'object' || Array.isArray(value)) return false
+    const exit = value.exit_code ?? value.exitCode
+    if (exit != null && exit !== 0) return false
+    const empty = (value: unknown): boolean => value == null || (typeof value === 'string' && !value.trim())
+      || (Array.isArray(value) && value.length === 0)
+      || (typeof value === 'object' && Object.keys(value as object).length === 0)
+    return (prefix === 'Claude hook success: ' || exit === 0 || 'context' in value)
+      && ['stdout', 'stderr', 'output', 'content', 'message', 'text', 'context', 'errors', 'error'].every(key => empty(value[key]))
+  } catch { return false }
+}

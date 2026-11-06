@@ -135,6 +135,28 @@ struct Message: Identifiable, Sendable, Equatable {
         default: "system"
         }
     }
+    var isSilentClaudeHookReceipt: Bool {
+        guard kind == "service" else { return false }
+        let prefixes = ["Claude hook output: ", "Claude hook success: "]
+        guard let prefix = prefixes.first(where: { text.hasPrefix($0) }),
+              let data = String(text.dropFirst(prefix.count)).data(using: .utf8),
+              let payload = try? JSONDecoder().decode(JSON.self, from: data),
+              case .object = payload else { return false }
+        let exit = payload["exit_code"] == .null ? payload["exitCode"] : payload["exit_code"]
+        guard exit == .null || exit == .number(0) else { return false }
+        func empty(_ value: JSON) -> Bool {
+            switch value {
+            case .null: true
+            case .string(let text): text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            case .array(let values): values.isEmpty
+            case .object(let fields): fields.isEmpty
+            default: false
+            }
+        }
+        return (prefix == prefixes[1] || exit == .number(0) || payload.fields["context"] != nil)
+            && ["stdout", "stderr", "output", "content", "message", "text", "context", "errors", "error"].allSatisfy { empty(payload[$0]) }
+    }
+
     var text: String {
         switch kind {
         case "reasoning": raw["summary"].string.isEmpty ? raw["content"].string : raw["summary"].string
