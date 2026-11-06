@@ -4211,6 +4211,7 @@ printf '%s\n' '{{"event":"result","result":{{"status":"SUCCESS","response":"fixt
         let mut thread = isolated_codex_thread();
         thread.summary.provider = AgentProvider::AGY;
         thread.summary.native_session_id = None;
+        thread.summary.variant = None;
         thread.summary.agent.model_id = Some("stored-unlisted-model".into());
         thread.requires_resume = false;
         let thread_id = thread.summary.id.clone();
