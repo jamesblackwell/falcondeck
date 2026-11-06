@@ -744,7 +744,7 @@ impl AppState {
             "inputs": [{"type":"text","text":text}], "steer": false
         }));
         let result = match request {
-            Ok(request) => self.send_turn(request).await,
+            Ok(request) => self.send_automatic_turn(request).await,
             Err(error) => Err(error.into()),
         };
         if let Err(error) = result {

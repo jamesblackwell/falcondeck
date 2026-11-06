@@ -794,6 +794,7 @@ export function normalizeThreadSummary(
     last_error: thread.last_error ?? null,
     agent: normalizeThreadAgent(thread.agent ?? thread.codex),
     attention: {
+      reply_to_user: thread.attention?.reply_to_user ?? false,
       level: thread.attention?.level ?? "none",
       badge_label: thread.attention?.badge_label ?? null,
       unread: thread.attention?.unread ?? false,

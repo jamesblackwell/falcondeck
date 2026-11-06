@@ -126,7 +126,7 @@ Notification preferences are daemon-owned and included in snapshots and
 - completed turns;
 - approvals and questions;
 - failed turns;
-- only push messages from bots (off by default);
+- quiet automatic bot work (off by default);
 - only push when away from desktop (two minutes without Mac input). Reviews
   ignore this one.
 
@@ -134,20 +134,34 @@ These gate delivery, never the record. Reviews follow approvals and questions;
 agent notices follow the master switch and the dispatched-thread push filter,
 and a `high` notice also ignores the away-from-desktop rule.
 
-“Only push messages from bots” silences phone pushes from every `AgentSpawn`
-thread, including nested dispatches and explicit notices from those threads.
-Bot home threads, bot scheduled run threads (for events that already push), and
-threads the user starts retain their existing policy. Approvals, MCP prompts,
-secret questions and reviews still push because only the user can decide them;
-ordinary child questions can be answered by the creating agent and stay quiet.
-Other switches and presence rules still apply. The option defaults off, including
-when an older config omits it, to avoid silently changing an existing install.
-Enable it in Settings → Notifications on desktop or mobile.
+“Quiet automatic bot work” filters phone delivery. Bot-home completions push
+only when the logical turn includes a message sent directly by the user, from
+any client. Automatic child updates, wake/report turns, peer messages and
+scheduled bot runs remain in the centre without a completion push. Explicit
+bot notices, reviews, human-only decisions and bot-home errors remain eligible.
+Every `AgentSpawn` generation stays quiet, including explicit/high child notices,
+except for decisions that need the user. An ordinary child question remains
+eligible if its parent is missing, archived, errored, paused or otherwise unavailable.
+Threads with fully unknown provenance keep pushing, protecting user-created
+conversations. Other event switches and presence rules still apply.
 
-The filter changes phone delivery only. The centre still records and counts
-suppressed items, and parent messages and bot wake-ups are unchanged. Desktop
-native alerts have their own client policy and do not use this filter. Native
-iOS connected alerts apply the same source filter as relay pushes.
+The daemon marks the source at admission, not from message wording or a
+client-supplied field. `attention.reply_to_user` is persisted with the thread and
+queued request, survives provider hydration, and is retained by resumes/retries.
+User steering upgrades the running logical turn; automatic input cannot downgrade
+it. A later provider wake without admission starts automatic work. Completion
+pushes capture the marker so a newer turn cannot change an older queued reply.
+Missing old markers count as automatic on bot homes. Provenance is restored from
+daemon state and, for legacy gaps, unambiguous analytics `delegate` creation
+records. Later bot messages and generic handoffs never establish ownership.
+
+The option defaults off, including old configs that omit it. Enable it in
+Settings → Notifications. It changes phone delivery only: centre records/counts,
+parent messages, bot wake-ups and desktop alerts keep their own policies. Native
+iOS connected alerts use the same daemon-owned per-turn marker; RN has no
+connected local-alert fallback. Native Mac alerts are desktop alerts and are
+unchanged. The report-back branch's `is_report_turn` centre noise veto is separate;
+its report sender must use `send_automatic_turn` when the branches reconcile.
 
 Desktop also has a device-local turn-complete chime, off by default, under
 Settings → General → Sounds. It plays on this computer when a thread leaves

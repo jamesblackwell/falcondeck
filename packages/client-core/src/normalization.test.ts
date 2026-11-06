@@ -1353,3 +1353,12 @@ describe("dispatched-thread push preference", () => {
     }
   });
 });
+
+
+describe("daemon-owned turn reply source", () => {
+  it("preserves explicit markers and treats old snapshots as unknown", () => {
+    expect(normalizeThreadSummary({}).attention.reply_to_user).toBe(false);
+    expect(normalizeThreadSummary({ attention: { reply_to_user: true } }).attention.reply_to_user).toBe(true);
+    expect(normalizeThreadSummary({ attention: { reply_to_user: false } }).attention.reply_to_user).toBe(false);
+  });
+});

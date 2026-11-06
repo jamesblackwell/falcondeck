@@ -100,8 +100,8 @@ export default function NotificationSettingsScreen() {
 
       <SettingsSection title="Delivery">
         <PreferenceSwitch
-          label="Only push messages from bots"
-          description="Silence dispatched tasks. Your own threads and decisions that need you still push. Notification history stays the same."
+          label="Quiet automatic bot work"
+          description="Push replies to you, bot notices, errors and decisions that need you. Dispatched tasks and automatic bot replies stay quiet. Your own threads and notification history stay the same."
           value={current.only_push_from_bots}
           disabled={isUpdating || !masterEnabled}
           onValueChange={(value) => void update({ only_push_from_bots: value })}

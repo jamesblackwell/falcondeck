@@ -828,6 +828,13 @@ impl AppState {
         let before = thread.summary.updated_at;
         let previous_status = thread.summary.status.clone();
         updater(&mut thread.summary);
+        // A provider can wake itself for background work without a daemon send.
+        // Explicit admission already set Running and the durable source marker.
+        if matches!(previous_status, ThreadStatus::Idle | ThreadStatus::Error)
+            && thread.summary.status == ThreadStatus::Running
+        {
+            thread.summary.attention.reply_to_user = false;
+        }
         if thread.summary.updated_at == before {
             thread.summary.updated_at = now;
         }
@@ -1231,7 +1238,7 @@ impl AppState {
             }
         }
         let result = self
-            .send_turn(SendTurnRequest {
+            .send_automatic_turn(SendTurnRequest {
                 workspace_id: workspace_id.to_string(),
                 thread_id: thread_id.to_string(),
                 inputs: vec![TurnInputItem::Text {
@@ -4343,6 +4350,7 @@ mod tests {
         let mut thread = cached_codex_streaming_thread();
         thread.summary.last_error = Some("Old error".to_string());
         let queued = super::super::QueuedTurnRequest {
+            reply_to_user: false,
             preparing_variant: false,
             id: "queued-1".to_string(),
             request: serde_json::from_value(json!({

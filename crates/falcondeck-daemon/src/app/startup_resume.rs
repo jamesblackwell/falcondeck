@@ -94,7 +94,7 @@ impl AppState {
             };
             // The normal resume path verifies the native session and refuses
             // blank replacements. Failed sessions keep their recovery notice.
-            if let Err(error) = self.send_turn(request).await {
+            if let Err(error) = self.send_automatic_turn(request).await {
                 tracing::warn!(%thread_id, "automatic session resume failed: {error}");
             }
         }

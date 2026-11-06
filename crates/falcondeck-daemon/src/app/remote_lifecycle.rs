@@ -269,6 +269,8 @@ pub(super) struct AttentionPush {
     pub ignore_presence: bool,
     /// An input request that the creating agent cannot answer on James's behalf.
     pub requires_user: bool,
+    /// Captured at completion; a queued push must not consult a newer turn.
+    pub completion_reply_to_user: Option<bool>,
 }
 
 const AGENT_NOTICE_KIND: &str = "agent-notice";
@@ -472,25 +474,40 @@ impl AppState {
 
     async fn push_policy(&self, push: &AttentionPush) -> AttentionPolicy {
         let preferences = self.preferences().await.notifications;
-        if preferences.only_push_from_bots
-            && !matches!(push.kind, "approval" | "review")
-            && !(push.kind == "question" && push.requires_user)
-            && let (Some(workspace), Some(thread)) = (&push.workspace_id, &push.thread_id)
-            && self.bot_for_thread(thread).await.is_none()
-            && self
-                .thread_summary(workspace, thread)
-                .await
-                .is_ok_and(|summary| {
-                    matches!(
-                        summary.origin,
-                        Some(falcondeck_core::ThreadOrigin::AgentSpawn { .. })
-                    )
-                })
-        {
-            // Every generation keeps AgentSpawn provenance, including children
-            // of bot scheduled runs. Bot home/run threads and James's threads
-            // keep their existing policy. This gate is after centre recording.
-            return AttentionPolicy::OffByPreference;
+        if preferences.only_push_from_bots {
+            if let (Some(workspace), Some(thread)) = (&push.workspace_id, &push.thread_id) {
+                if let Ok(summary) = self.thread_summary(workspace, thread).await {
+                    let bot = self.bot_for_thread(thread).await.is_some()
+                        || matches!(
+                            &summary.origin,
+                            Some(falcondeck_core::ThreadOrigin::Automation {
+                                bot_id: Some(_),
+                                ..
+                            })
+                        );
+                    if push.kind == "turn-complete"
+                        && bot
+                        && !push
+                            .completion_reply_to_user
+                            .unwrap_or(summary.attention.reply_to_user)
+                    {
+                        return AttentionPolicy::OffByPreference;
+                    }
+                    let user_decision = matches!(push.kind, "approval" | "review")
+                        || (push.kind == "question"
+                            && (push.requires_user
+                                || !self.dispatched_parent_available(&summary).await));
+                    if !bot
+                        && !user_decision
+                        && matches!(
+                            summary.origin,
+                            Some(falcondeck_core::ThreadOrigin::AgentSpawn { .. })
+                        )
+                    {
+                        return AttentionPolicy::OffByPreference;
+                    }
+                }
+            }
         }
         let desktop_active = preferences.suppress_when_desktop_active
             && !push.ignore_presence

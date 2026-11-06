@@ -531,7 +531,7 @@ pub(crate) async fn execute_run(app: &AppState, run_id: &str) {
         precheck_evidence
     );
     let response = app
-        .send_turn(automation_turn_request(
+        .send_automatic_turn(automation_turn_request(
             &automation,
             &workspace.id,
             &resolved,

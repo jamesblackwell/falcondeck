@@ -4787,6 +4787,7 @@ async fn mark_thread_unread_walks_read_seq_back_behind_agent_activity() {
             project_pinned_thread_ids: Vec::new(),
             in_sidebar: true,
             thread_states: vec![super::PersistedThreadState {
+                reply_to_user: false,
                 thread_id: "thread-1".to_string(),
                 updated_at: Some(Utc::now()),
                 provider: Some(AgentProvider::CLAUDE),
@@ -4884,6 +4885,7 @@ async fn restored_caught_up_thread_app(
             project_pinned_thread_ids: Vec::new(),
             in_sidebar: true,
             thread_states: vec![super::PersistedThreadState {
+                reply_to_user: false,
                 thread_id: "thread-1".to_string(),
                 updated_at: Some(Utc::now()),
                 provider: Some(AgentProvider::CLAUDE),
@@ -5096,6 +5098,7 @@ async fn restore_seeds_sequence_counter_past_persisted_attention_seqs() {
             project_pinned_thread_ids: Vec::new(),
             in_sidebar: true,
             thread_states: vec![super::PersistedThreadState {
+                reply_to_user: false,
                 thread_id: "thread-1".to_string(),
                 updated_at: Some(Utc::now()),
                 provider: Some(AgentProvider::CLAUDE),
@@ -5165,6 +5168,7 @@ async fn transcript_replay_does_not_flip_a_read_thread_unread() {
             project_pinned_thread_ids: Vec::new(),
             in_sidebar: true,
             thread_states: vec![super::PersistedThreadState {
+                reply_to_user: false,
                 thread_id: "thread-1".to_string(),
                 updated_at: Some(Utc::now()),
                 provider: Some(AgentProvider::OPENCODE),
@@ -5295,6 +5299,7 @@ async fn restore_keeps_workspace_visible_when_reconnect_fails() {
             project_pinned_thread_ids: Vec::new(),
             in_sidebar: true,
             thread_states: vec![super::PersistedThreadState {
+                reply_to_user: false,
                 thread_id: "thread-1".to_string(),
                 updated_at: Some(thread_updated_at),
                 provider: Some(AgentProvider::CLAUDE),
@@ -5492,6 +5497,7 @@ async fn persist_local_state_merges_saved_workspaces_with_live_workspaces() {
                 project_pinned_thread_ids: Vec::new(),
                 in_sidebar: true,
                 thread_states: vec![super::PersistedThreadState {
+                    reply_to_user: false,
                     thread_id: "thread-a".to_string(),
                     updated_at: None,
                     provider: Some(AgentProvider::CODEX),
@@ -5529,6 +5535,7 @@ async fn persist_local_state_merges_saved_workspaces_with_live_workspaces() {
                 project_pinned_thread_ids: Vec::new(),
                 in_sidebar: true,
                 thread_states: vec![super::PersistedThreadState {
+                    reply_to_user: false,
                     thread_id: "thread-b".to_string(),
                     updated_at: None,
                     provider: Some(AgentProvider::CLAUDE),

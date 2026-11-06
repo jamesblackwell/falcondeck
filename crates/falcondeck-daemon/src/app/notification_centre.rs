@@ -274,7 +274,7 @@ impl AppState {
         };
         let push = AttentionPush {
             kind: if question { "question" } else { "approval" },
-            requires_user: super::thread_tools::request_requires_user(&request),
+            requires_user: self.request_requires_user(&request).await,
             workspace_id: Some(workspace_id),
             thread_id,
             ..AttentionPush::default()
@@ -307,7 +307,7 @@ impl AppState {
             self.parent_watches_completion(&thread_id),
             run.as_ref(),
         );
-        if !notable {
+        if !notable && self.bot_for_thread(&thread_id).await.is_none() {
             return None;
         }
         let bot = self.bot_for_thread(&thread_id).await.map(|bot| bot.name);
@@ -334,6 +334,7 @@ impl AppState {
         };
         let push = AttentionPush {
             kind: "turn-complete",
+            completion_reply_to_user: Some(summary.attention.reply_to_user),
             workspace_id: Some(workspace_id),
             thread_id: Some(thread_id),
             preview: reply,
@@ -828,6 +829,11 @@ mod tests {
         })
         .await
         .unwrap();
+        app.with_thread_mut("workspace-1", "thread-1", |t| {
+            t.attention.reply_to_user = true
+        })
+        .await
+        .unwrap();
         reply(&app, "Finished.").await;
         finish(&app).await;
         assert_eq!(pushed(&app).await.len(), 1, "bot home thread");
@@ -893,6 +899,142 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn bot_phone_completions_follow_durable_user_source_and_capture_it_for_queues() {
+        let (app, _temp) = fixture().await;
+        bridge(&app).await;
+        app.set_desktop_activity(false);
+        set_notifications(
+            &app,
+            NotificationPreferencesPatch {
+                only_push_from_bots: Some(true),
+                ..Default::default()
+            },
+        )
+        .await;
+        app.mutate_bot(falcondeck_core::BotMutation::Create {
+            name: "Coordinator".into(),
+            instructions: String::new(),
+            provider: None,
+            model_id: None,
+            thread_id: Some("thread-1".into()),
+        })
+        .await
+        .unwrap();
+        reply(&app, "Automatic update.").await;
+        finish(&app).await;
+        assert!(pushed(&app).await.is_empty());
+        app.with_thread_mut("workspace-1", "thread-1", |t| {
+            t.attention.reply_to_user = true
+        })
+        .await
+        .unwrap();
+        reply(&app, "Reply to James.").await;
+        finish(&app).await;
+        // The next automatic turn must not change eligibility of the queued reply.
+        app.with_thread_mut("workspace-1", "thread-1", |t| {
+            t.attention.reply_to_user = false
+        })
+        .await
+        .unwrap();
+        assert_eq!(pushed(&app).await.len(), 1);
+        app.record_and_deliver_attention(AttentionEvent::turn("workspace-1", "thread-1", true))
+            .await;
+        assert_eq!(
+            pushed(&app).await.len(),
+            1,
+            "home errors always remain eligible"
+        );
+        assert_eq!(
+            history(&app).await.len(),
+            2,
+            "completion and error remain recorded"
+        );
+        let request = serde_json::from_value(json!({"workspace_id":"workspace-1", "thread_id":"thread-1", "inputs":[{"type":"text","text":"Hello"}]})).unwrap();
+        let _ = app.send_turn(request).await; // Missing harness fixture still exercises admission and persistence.
+        assert!(
+            app.thread_summary("workspace-1", "thread-1")
+                .await
+                .unwrap()
+                .attention
+                .reply_to_user
+        );
+        let stored = super::super::storage::load_persisted_app_state(&app.inner.state_path)
+            .await
+            .unwrap();
+        assert!(
+            stored
+                .workspaces
+                .iter()
+                .flat_map(|w| &w.thread_states)
+                .find(|t| t.thread_id == "thread-1")
+                .unwrap()
+                .reply_to_user
+        );
+        let request = serde_json::from_value(json!({"workspace_id":"workspace-1", "thread_id":"thread-1", "inputs":[{"type":"text","text":"Automatic wake"}]})).unwrap();
+        let _ = app.send_automatic_turn(request).await;
+        assert!(
+            !app.thread_summary("workspace-1", "thread-1")
+                .await
+                .unwrap()
+                .attention
+                .reply_to_user
+        );
+    }
+
+    #[tokio::test]
+    async fn orphan_questions_keep_phone_eligibility() {
+        let (app, _temp) = fixture().await;
+        let mut summary = app.thread_summary("workspace-1", "thread-1").await.unwrap();
+        summary.id = "parent".into();
+        app.inner
+            .workspaces
+            .lock()
+            .await
+            .get_mut("workspace-1")
+            .unwrap()
+            .threads
+            .insert("parent".into(), ManagedThread::new(summary));
+        app.with_thread_mut("workspace-1", "thread-1", |t| {
+            t.origin = Some(ThreadOrigin::AgentSpawn {
+                parent_thread_id: "parent".into(),
+                dispatched_at: None,
+            })
+        })
+        .await
+        .unwrap();
+        let mut question = request("q");
+        question.kind = InteractiveRequestKind::Question;
+        assert!(!app.request_requires_user(&question).await);
+        app.with_thread_mut("workspace-1", "parent", |t| t.is_archived = true)
+            .await
+            .unwrap();
+        assert!(app.request_requires_user(&question).await);
+        app.with_thread_mut("workspace-1", "parent", |t| t.is_archived = false)
+            .await
+            .unwrap();
+        app.mutate_bot(falcondeck_core::BotMutation::Create {
+            name: "Parent".into(),
+            instructions: String::new(),
+            provider: None,
+            model_id: None,
+            thread_id: Some("parent".into()),
+        })
+        .await
+        .unwrap();
+        app.inner.preferences.lock().await.bots[0].status = falcondeck_core::BotStatus::Paused;
+        assert!(app.request_requires_user(&question).await);
+        app.inner
+            .workspaces
+            .lock()
+            .await
+            .get_mut("workspace-1")
+            .unwrap()
+            .threads
+            .remove("parent");
+        assert!(app.request_requires_user(&question).await);
+    }
+
+    #[tokio::test]
     async fn bot_only_push_rechecks_dispatched_work_already_queued() {
         let (app, _temp) = fixture().await;
         bridge(&app).await;
@@ -950,6 +1092,17 @@ mod tests {
         })
         .await
         .unwrap();
+        let mut parent = app.thread_summary("workspace-1", "thread-1").await.unwrap();
+        parent.id = "parent".into();
+        parent.origin = None;
+        app.inner
+            .workspaces
+            .lock()
+            .await
+            .get_mut("workspace-1")
+            .unwrap()
+            .threads
+            .insert("parent".into(), ManagedThread::new(parent));
         let approval = request("approval");
         app.record_and_deliver_attention(AttentionEvent::request(&approval))
             .await;

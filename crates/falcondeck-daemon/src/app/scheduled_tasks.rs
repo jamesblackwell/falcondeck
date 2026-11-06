@@ -1313,7 +1313,7 @@ async fn dispatch_turn_if_run_is_active(
         }
     }
 
-    let response = app.send_turn(request).await?;
+    let response = app.send_automatic_turn(request).await?;
 
     // A pause/delete may win while the provider call is in flight. Recheck
     // after dispatch and interrupt in the caller if ownership disappeared;

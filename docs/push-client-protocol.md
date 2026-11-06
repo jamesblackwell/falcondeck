@@ -124,14 +124,22 @@ are distinct from shared daemon event preferences.
 References: [Apple request format](https://developer.apple.com/documentation/usernotifications/sending-notification-requests-to-apns),
 [Apple token connections](https://developer.apple.com/documentation/usernotifications/establishing-a-token-based-connection-to-apns).
 
-## Dispatched-thread preference
+## Automatic-work preference and turn source
 
-`preferences.notifications.only_push_from_bots` is an optional-on-read boolean
-(default `false`) and accepts partial preference patches. It is daemon-owned and
-synced to all clients. The daemon applies it before relay push delivery and when
-draining queued pushes. `AgentSpawn` threads, including nested children, are
-silenced except for approvals, reviews and questions only the user can answer
-(MCP prompts and secret answers). Bot home/run threads and user-created threads
-retain existing policy. High-importance child notices do not bypass this filter.
-Centre records/counts and desktop alerts are unchanged. Clients that synthesize
-phone alerts from connected events must apply the same source filter.
+`preferences.notifications.only_push_from_bots` is optional on read (default
+`false`) and accepts partial patches. The daemon owns and syncs it. The source
+marker `thread.attention.reply_to_user` is additive (default `false`), daemon-owned,
+and means the current logical turn includes directly submitted user input.
+It survives persistence, queue dispatch, provider hydration and interrupted resume;
+automatic input cannot downgrade an already user-initiated turn.
+
+When enabled, bot-home/run completions require that marker. Explicit bot notices,
+bot-home errors and user-only decisions remain eligible. `AgentSpawn` threads,
+including nested children and high notices, stay quiet except approvals, reviews,
+MCP/secret prompts and ordinary questions with an unavailable parent. Fully unknown
+provenance keeps eligibility to protect user-created threads. Source is restored
+from saved state; unambiguous analytics creation records can repair legacy gaps.
+
+The daemon gates both initial delivery and queued/retried sends. Clients that
+synthesize connected phone alerts must respect the authoritative marker and
+restored origin. Centre counts and desktop alerts remain independent.

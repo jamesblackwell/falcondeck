@@ -266,12 +266,18 @@ whole store.
   rest open the thread.
 - Older clients ignore the `notifications` control domain and the new push fields.
 
-### Dispatched-thread push filter
+### Automatic-work push filter
 
-The shared `notifications.only_push_from_bots` setting defaults off for old and
-new configs. When enabled, dispatched threads still record and count here;
-only phone delivery changes. Bot home/run threads and user-created threads keep
-their existing delivery rules. Child approvals, MCP prompts, secret questions
-and reviews remain eligible for push because they require a user decision.
-Ordinary child questions, completions, errors and notices stay quiet on phones.
-Desktop alerts and child-to-parent reporting are unaffected.
+`notifications.only_push_from_bots` (Settings → Notifications → Quiet automatic
+bot work) defaults off. With it on, dispatched work still records/counts here but
+stays quiet on phones. Bot-home completions push only for turns marked by the
+daemon as replies to directly sent user input (`attention.reply_to_user`).
+Automatic home turns and bot scheduled runs remain recorded without a push.
+Explicit bot notices, bot-home errors, reviews and user-only decisions remain
+eligible. Ordinary child questions also push if their creating parent is unavailable.
+Unknown provenance preserves eligibility for the user's own threads.
+
+Origin and per-turn source survive restart and provider hydration; only
+unambiguous analytics creation records backfill old origins. Desktop alerts,
+bot wake-ups and child-to-parent reporting are unaffected. Existing centre noise
+rules remain separate from delivery preferences.

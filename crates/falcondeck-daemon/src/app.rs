@@ -588,6 +588,8 @@ struct RealtimeTranscriptState {
 /// A send accepted while the thread was busy, held until the active turn ends.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
 struct QueuedTurnRequest {
+    #[serde(default)]
+    reply_to_user: bool,
     /// Accepted while the variant was being provisioned; this is explicit
     /// admission, including a resume that may proceed after dependencies finish.
     #[serde(default)]
@@ -932,6 +934,8 @@ fn backfill_automation_origins(
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
 struct PersistedThreadState {
+    #[serde(default)]
+    reply_to_user: bool,
     thread_id: String,
     #[serde(default)]
     updated_at: Option<chrono::DateTime<Utc>>,
@@ -1797,9 +1801,14 @@ impl AppState {
             .await
             .map_err(|error| unreadable(&self.inner.state_path, error))?;
         let definitions = self.control().automations_snapshot().await;
-        let bot_thread_ids = preferences.bots.iter()
+        let bot_thread_ids = preferences
+            .bots
+            .iter()
             .flat_map(|bot| std::iter::once(&bot.thread_id).chain(&bot.previous_thread_ids))
-            .cloned().collect();
+            .cloned()
+            .collect();
+        self.backfill_dispatch_origins(&mut persisted.workspaces)
+            .await;
         backfill_automation_origins(&mut persisted.workspaces, &definitions, &bot_thread_ids);
         // Clients can mutate lazy projects as soon as the first snapshot is
         // published. Keep the pairing durable while its keychain read is pending.
@@ -2058,6 +2067,7 @@ impl AppState {
                 last_error: thread_last_error.or_else(|| workspace_last_error.clone()),
                 agent: state.agent.clone(),
                 attention: ThreadAttention {
+                    reply_to_user: state.reply_to_user,
                     last_read_seq: state.last_read_seq,
                     last_agent_activity_seq: state.last_agent_activity_seq,
                     ..ThreadAttention::default()
@@ -4374,6 +4384,16 @@ impl AppState {
         workspace_ops::send_turn(self, request).await
     }
 
+    pub(crate) async fn send_automatic_turn(
+        &self,
+        request: SendTurnRequest,
+    ) -> Result<CommandResponse, DaemonError> {
+        if self.is_cloud_thread(&request.thread_id) {
+            return self.send_turn(request).await;
+        }
+        workspace_ops::send_automatic_turn(self, request).await
+    }
+
     pub async fn update_thread(
         &self,
         request: UpdateThreadRequest,
@@ -4701,6 +4721,7 @@ impl AppState {
                     handoff_from: thread.summary.handoff_from.clone(),
                     handoff_context: thread.pending_handoff_context.clone(),
                     origin: thread.summary.origin.clone(),
+                    reply_to_user: thread.summary.attention.reply_to_user,
                     title: Some(thread.summary.title.clone()),
                     manual_title: thread.manual_title,
                     ai_title_generated: thread.ai_title_generated,

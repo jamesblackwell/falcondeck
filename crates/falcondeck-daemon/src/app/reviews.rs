@@ -83,7 +83,7 @@ impl AppState {
             "steer": true
         }))
         .map_err(|error| error.to_string())?;
-        self.send_turn(request)
+        self.send_automatic_turn(request)
             .await
             .map(|_| ())
             .map_err(|error| error.to_string())

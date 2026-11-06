@@ -155,8 +155,8 @@ struct NativeNotificationsSettingsView: View {
                     Toggle("Completed turns", isOn: sharedBool("notify_on_turn_complete"))
                     Toggle("Approvals and questions", isOn: sharedBool("notify_on_input_required"))
                     Toggle("Failed turns", isOn: sharedBool("notify_on_error"))
-                    Toggle("Only push messages from bots", isOn: sharedBool("only_push_from_bots", defaultValue: false))
-                    Text("Dispatched tasks stay quiet on your phone, except decisions that need you. Your own threads and desktop alerts stay the same.").font(.caption).foregroundStyle(.secondary)
+                    Toggle("Quiet automatic bot work", isOn: sharedBool("only_push_from_bots", defaultValue: false))
+                    Text("Phone alerts include replies to you, bot notices, errors and decisions that need you. Dispatched tasks and automatic bot replies stay quiet. Your own threads and desktop alerts stay the same.").font(.caption).foregroundStyle(.secondary)
                     Toggle("Only push when away from desktop", isOn: sharedBool("suppress_when_desktop_active"))
                 }.disabled(!sharedBool("enabled").wrappedValue)
             } header: { Text("Alerts") } footer: { Text("These choices are shared with paired devices. Phone alerts can wait until two minutes without keyboard or mouse activity on this Mac.") }

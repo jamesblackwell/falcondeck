@@ -3933,3 +3933,93 @@ mod tests {
         assert_eq!(months.last().unwrap(), &month_of(Utc::now()));
     }
 }
+
+/// Only creation events establish provenance. Agent messages and handoffs never do.
+fn dispatch_parents(dir: &Path) -> HashMap<String, (String, DateTime<Utc>)> {
+    let mut parents = HashMap::new();
+    let mut ambiguous = HashSet::new();
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return parents;
+    };
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        if !name.starts_with("events-") || !name.ends_with(".jsonl") {
+            continue;
+        }
+        let Ok(file) = std::fs::File::open(entry.path()) else {
+            continue;
+        };
+        for line in std::io::BufReader::new(file).lines().map_while(Result::ok) {
+            if let Ok(Record::Delegate {
+                t, parent, child, ..
+            }) = serde_json::from_str(&line)
+            {
+                if parent == child || parent.is_empty() || child.is_empty() {
+                    continue;
+                }
+                if let Some((previous, _)) = parents.get(&child) {
+                    if previous != &parent {
+                        ambiguous.insert(child.clone());
+                    }
+                }
+                parents.entry(child).or_insert((parent, t));
+            }
+        }
+    }
+    parents.retain(|child, _| !ambiguous.contains(child));
+    parents
+}
+
+impl AppState {
+    pub(super) async fn backfill_dispatch_origins(
+        &self,
+        workspaces: &mut [PersistedWorkspaceState],
+    ) {
+        let dir = self.inner.analytics.dir.clone();
+        let parents = tokio::task::spawn_blocking(move || dispatch_parents(&dir))
+            .await
+            .unwrap_or_default();
+        for workspace in workspaces {
+            for state in &mut workspace.thread_states {
+                if state.origin.is_none() {
+                    if let Some((parent, at)) = parents.get(&state.thread_id) {
+                        state.origin = Some(falcondeck_core::ThreadOrigin::AgentSpawn {
+                            parent_thread_id: parent.clone(),
+                            dispatched_at: Some(*at),
+                        });
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod dispatch_provenance_tests {
+    use super::*;
+    #[test]
+    fn only_unambiguous_creation_records_backfill_origins() {
+        let temp = tempfile::tempdir().unwrap();
+        let now = Utc::now();
+        let records = [
+            json!({"e":"delegate", "t":now,"parent":"home","child":"child","n":1}),
+            json!({"e":"delegate", "t":now,"parent":"child","child":"nested","n":1}),
+            json!({"e":"delegate", "t":now,"parent":"other","child":"nested","n":1}),
+            json!({"e":"agent", "t":now,"from":"home","to":"james-thread","n":1,"d":"live","ack":true,"x":"message"}),
+        ];
+        std::fs::write(
+            temp.path().join("events-2026-11.jsonl"),
+            records
+                .iter()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>()
+                .join("\n"),
+        )
+        .unwrap();
+        let parents = dispatch_parents(temp.path());
+        assert_eq!(parents["child"].0, "home");
+        assert!(!parents.contains_key("nested"));
+        assert!(!parents.contains_key("james-thread"));
+    }
+}

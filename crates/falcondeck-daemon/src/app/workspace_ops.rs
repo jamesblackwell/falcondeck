@@ -655,6 +655,8 @@ pub(super) async fn connect_workspace_internal(
                 thread.summary.is_pinned_in_project = true;
             }
             if let Some(state) = persisted_thread_states.get(&thread.summary.id) {
+                thread.summary.origin = state.origin.clone().or(thread.summary.origin.clone());
+                thread.summary.attention.reply_to_user = state.reply_to_user;
                 if let Some(provider) = state.provider.clone() {
                     thread.summary.provider = provider;
                 }
@@ -1054,6 +1056,10 @@ pub(super) fn merge_hydrated_threads_with_persisted_state(
                 );
             }
         }
+        if let Some(state) = persisted_thread_states.get(&thread.summary.id) {
+            thread.summary.origin = state.origin.clone().or(thread.summary.origin.clone());
+            thread.summary.attention.reply_to_user = state.reply_to_user;
+        }
         match session_owners.get(thread.summary.id.as_str()) {
             Some(owner) => {
                 adopted_transcripts.insert(owner.thread_id.clone(), thread);
@@ -1126,7 +1132,7 @@ pub(super) fn merge_hydrated_threads_with_persisted_state(
                 native_session_id: state.native_session_id.clone(),
                 provider_transport: state.provider_transport.clone(),
                 handoff_from: state.handoff_from.clone(),
-                origin: None,
+                origin: state.origin.clone(),
                 status: restored_status.clone(),
                 updated_at: state
                     .updated_at
@@ -1149,7 +1155,10 @@ pub(super) fn merge_hydrated_threads_with_persisted_state(
                 last_tool: None,
                 last_error: restored_last_error,
                 agent: state.agent.clone(),
-                attention: ThreadAttention::default(),
+                attention: ThreadAttention {
+                    reply_to_user: state.reply_to_user,
+                    ..Default::default()
+                },
                 is_archived: false,
                 is_pinned: false,
                 is_pinned_in_project: false,
@@ -2282,6 +2291,7 @@ async fn try_steer_turn(
     app: &AppState,
     request: &SendTurnRequest,
     normalized_inputs: &[TurnInputItem],
+    reply_to_user: bool,
 ) -> Result<Option<CommandResponse>, DaemonError> {
     if !request.steer {
         return Ok(None);
@@ -2365,8 +2375,10 @@ async fn try_steer_turn(
     let summary = app
         .upsert_thread(&request.workspace_id, &request.thread_id, |thread| {
             thread.updated_at = Utc::now();
+            thread.attention.reply_to_user |= reply_to_user;
         })
         .await?;
+    app.persist_local_state().await?;
     app.emit(
         Some(request.workspace_id.clone()),
         Some(request.thread_id.clone()),
@@ -2483,6 +2495,7 @@ async fn try_enqueue_turn(
     normalized_inputs: &[TurnInputItem],
     agent: Option<&mut AgentMessage>,
     preparing: bool,
+    reply_to_user: bool,
 ) -> Result<Option<CommandResponse>, DaemonError> {
     let (queued_summary, queue_report) = {
         let mut workspaces = app.inner.workspaces.lock().await;
@@ -2557,6 +2570,7 @@ async fn try_enqueue_turn(
                 held_reason: None,
             };
             let queued = super::QueuedTurnRequest {
+                reply_to_user,
                 preparing_variant: preparing,
                 id,
                 request: stored,
@@ -2744,7 +2758,7 @@ pub(super) async fn steer_queued_turn(
     // attachments that are on disk.
     let inputs = request.inputs.clone();
 
-    let outcome = try_steer_turn(app, &request, &inputs).await;
+    let outcome = try_steer_turn(app, &request, &inputs, queued.reply_to_user).await;
     let error = match outcome {
         Ok(Some(response)) => {
             app.persist_local_state().await?;
@@ -3139,7 +3153,7 @@ impl AppState {
             };
             let (next, summary) = next;
             publish_queued_thread_summary(&app, &workspace_id, &thread_id, summary).await;
-            match send_turn_waiting_for_provider_start(&app, next.request.clone()).await {
+            match send_turn_waiting_for_provider_start(&app, next.request.clone(), next.reply_to_user).await {
                 Ok(_) => {
                     let mut workspaces = app.inner.workspaces.lock().await;
                     if let Some(thread) = workspaces
@@ -3188,7 +3202,14 @@ pub(super) async fn send_turn(
     app: &AppState,
     request: SendTurnRequest,
 ) -> Result<CommandResponse, DaemonError> {
-    send_turn_with_startup_mode(app, request, false, None).await
+    send_turn_with_startup_mode(app, request, false, None, true).await
+}
+
+pub(super) async fn send_automatic_turn(
+    app: &AppState,
+    request: SendTurnRequest,
+) -> Result<CommandResponse, DaemonError> {
+    send_turn_with_startup_mode(app, request, false, None, false).await
 }
 
 /// Sends a message another thread authored through the agent messaging tool.
@@ -3200,7 +3221,7 @@ pub(super) async fn send_agent_message(
     request: SendTurnRequest,
     agent: &mut AgentMessage,
 ) -> Result<CommandResponse, DaemonError> {
-    send_turn_with_startup_mode(app, request, false, Some(agent)).await
+    send_turn_with_startup_mode(app, request, false, Some(agent), false).await
 }
 
 /// Verifies and attaches the exact provider session before an interrupted
@@ -3273,8 +3294,9 @@ async fn prepare_interrupted_resume(
 async fn send_turn_waiting_for_provider_start(
     app: &AppState,
     request: SendTurnRequest,
+    reply_to_user: bool,
 ) -> Result<CommandResponse, DaemonError> {
-    send_turn_with_startup_mode(app, request, true, None).await
+    send_turn_with_startup_mode(app, request, true, None, reply_to_user).await
 }
 
 async fn send_turn_with_startup_mode(
@@ -3282,6 +3304,7 @@ async fn send_turn_with_startup_mode(
     request: SendTurnRequest,
     wait_for_startup: bool,
     agent: Option<&mut AgentMessage>,
+    reply_to_user: bool,
 ) -> Result<CommandResponse, DaemonError> {
     // Shared, so sends to different bots (and slow provider starts) never
     // serialize behind each other; only a harness switch excludes them.
@@ -3391,16 +3414,22 @@ async fn send_turn_with_startup_mode(
     // the last turn. Retire those offers before anything else happens.
     app.retire_composer_suggestions(&request.thread_id).await;
 
-    if let Some(steered) = try_steer_turn(app, &request, &inputs).await? {
+    if let Some(steered) = try_steer_turn(app, &request, &inputs, reply_to_user).await? {
         return Ok(steered);
     }
     let preparing = {
         let ws = app.inner.workspaces.lock().await;
-        ws.get(&request.workspace_id).and_then(|w| w.threads.get(&request.thread_id))
-            .and_then(|t| t.summary.variant.as_ref()).is_some_and(|v| crate::variant::dependencies_pending(&v.path))
+        ws.get(&request.workspace_id)
+            .and_then(|w| w.threads.get(&request.thread_id))
+            .and_then(|t| t.summary.variant.as_ref())
+            .is_some_and(|v| crate::variant::dependencies_pending(&v.path))
     };
-    if let Some(queued) = try_enqueue_turn(app, &request, &inputs, agent, preparing).await? {
-        if preparing { app.dispatch_next_queued_turn(&request.workspace_id, &request.thread_id); }
+    if let Some(queued) =
+        try_enqueue_turn(app, &request, &inputs, agent, preparing, reply_to_user).await?
+    {
+        if preparing {
+            app.dispatch_next_queued_turn(&request.workspace_id, &request.thread_id);
+        }
         return Ok(queued);
     }
 
@@ -3501,6 +3530,9 @@ async fn send_turn_with_startup_mode(
         managed.summary.provider = provider.clone();
         managed.variant_reap = None;
         managed.summary.status = ThreadStatus::Running;
+        if !request.resume_interrupted && !is_transient_retry {
+            managed.summary.attention.reply_to_user = reply_to_user;
+        }
         managed.turn_started_at = Some(Utc::now());
         managed.summary.last_error = None;
         managed.summary.agent.model_id = request.model_id.clone().or(managed
@@ -6751,7 +6783,8 @@ mod tests {
     #[test]
     fn reconnecting_a_live_thread_keeps_persisted_queued_turns() {
         let queued = super::super::QueuedTurnRequest {
-                    preparing_variant: false,
+            reply_to_user: false,
+            preparing_variant: false,
             id: "queued-1".to_string(),
             request: SendTurnRequest {
                 workspace_id: "workspace-1".to_string(),
@@ -6801,8 +6834,38 @@ mod tests {
         );
     }
 
+    #[test]
+    fn phone_policy_metadata_survives_bare_and_provider_hydration_after_restart() {
+        let mut state = persisted_thread("thread-1", Some("thread-1"));
+        state.origin = Some(falcondeck_core::ThreadOrigin::AgentSpawn {
+            parent_thread_id: "parent".into(),
+            dispatched_at: None,
+        });
+        state.reply_to_user = true;
+        state.status = Some(ThreadStatus::Running);
+        let state: PersistedThreadState =
+            serde_json::from_slice(&serde_json::to_vec(&state).unwrap()).unwrap();
+        let states = HashMap::from([("thread-1".into(), state.clone())]);
+        for provider_threads in [vec![], vec![hydrated_thread("thread-1", "preview")]] {
+            let restored = merge_hydrated_threads_with_persisted_state(
+                provider_threads,
+                &states,
+                "workspace-1",
+                None,
+                Utc::now(),
+            );
+            let restored = restored
+                .iter()
+                .find(|t| t.summary.id == "thread-1")
+                .unwrap();
+            assert_eq!(restored.summary.origin, state.origin);
+            assert!(restored.summary.attention.reply_to_user);
+        }
+    }
+
     fn persisted_thread(thread_id: &str, session_id: Option<&str>) -> PersistedThreadState {
         PersistedThreadState {
+            reply_to_user: false,
             thread_id: thread_id.to_string(),
             updated_at: Some(Utc::now()),
             provider: Some(AgentProvider::CLAUDE),
@@ -7045,6 +7108,7 @@ mod tests {
         let mut thread = managed_thread("thread-1", ThreadStatus::Error);
         thread.summary.last_error = Some(SHUTDOWN_INTERRUPTED_TURN_ERROR.to_string());
         thread.queued_requests.push(super::QueuedTurnRequest {
+            reply_to_user: false,
             preparing_variant: false,
             id: "queued-1".to_string(),
             request: SendTurnRequest {
@@ -7566,6 +7630,7 @@ mod tests {
             .unwrap();
             (
                 super::super::QueuedTurnRequest {
+                    reply_to_user: false,
                     preparing_variant: false,
                     id: id.to_string(),
                     request,
@@ -7661,6 +7726,7 @@ mod tests {
             thread
                 .queued_requests
                 .push(super::super::QueuedTurnRequest {
+                    reply_to_user: false,
                     preparing_variant: false,
                     id: "queued-1".to_string(),
                     request: SendTurnRequest {
@@ -9150,7 +9216,7 @@ mod tests {
             "inputs": [{"type":"text", "text":"first"}]
         }))
         .unwrap();
-        try_enqueue_turn(&f.app, &request, &request.inputs, None, true)
+        try_enqueue_turn(&f.app, &request, &request.inputs, None, true, true)
             .await
             .unwrap();
         f.app
@@ -9165,7 +9231,7 @@ mod tests {
         second.inputs =
             serde_json::from_value(serde_json::json!([{ "type": "text", "text": "second" }]))
                 .unwrap();
-        try_enqueue_turn(&f.app, &second, &second.inputs, None, true)
+        try_enqueue_turn(&f.app, &second, &second.inputs, None, true, true)
             .await
             .unwrap();
         let ws = f.app.inner.workspaces.lock().await;
@@ -9186,7 +9252,7 @@ mod tests {
             "inputs": [{"type":"text", "text":"survives restart"}]
         }))
         .unwrap();
-        try_enqueue_turn(&f.app, &request, &request.inputs, None, true)
+        try_enqueue_turn(&f.app, &request, &request.inputs, None, true, true)
             .await
             .unwrap();
         assert!(!crate::variant::has_dependency_job(&f.variant.path));
@@ -9253,7 +9319,7 @@ mod tests {
         .unwrap();
         let response = tokio::time::timeout(
             std::time::Duration::from_millis(500),
-            try_enqueue_turn(&f.app, &request, &request.inputs, None, true),
+            try_enqueue_turn(&f.app, &request, &request.inputs, None, true, true),
         )
         .await
         .unwrap()

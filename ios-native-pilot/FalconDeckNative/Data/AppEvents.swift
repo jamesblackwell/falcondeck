@@ -121,15 +121,25 @@ struct RecentEventSequences {
 
     // Connected native alerts bypass the daemon's relay push gate. Apply the
     // same source rule here so they cannot reintroduce dispatched-task noise.
-    func permitsDispatchedPhoneAlert(_ thread: JSON, request: JSON = .null) -> Bool {
-        guard preferences["notifications"]["only_push_from_bots"] == .bool(true),
-              thread["origin"]["kind"].string == "agent_spawn" else { return true }
-        let id = thread["id"].string
-        if modelBotOwnsThread(id) { return true }
+    func permitsDispatchedPhoneAlert(_ thread: JSON, request: JSON = .null, failed: Bool = false) -> Bool {
+        guard preferences["notifications"]["only_push_from_bots"] == .bool(true) else { return true }
+        let bot = modelBotOwnsThread(thread["id"].string) || thread["origin"]["bot_id"] != .null
+        if bot {
+            return request != .null || failed || thread["attention"]["reply_to_user"] == .bool(true)
+        }
+        guard thread["origin"]["kind"].string == "agent_spawn" else { return true }
         guard request != .null else { return false }
-        return request["kind"].string != "question"
+        if request["kind"].string != "question"
             || request["method"].string == "mcpServer/elicitation/request"
-            || request["questions"].array.contains { $0["is_secret"] == .bool(true) }
+            || request["questions"].array.contains(where: { $0["is_secret"] == .bool(true) }) { return true }
+        let parentID = thread["origin"]["parent_thread_id"].string
+        guard let parent = pendingSummaries[parentID] ?? tasks.first(where: { $0.id == parentID })?.raw,
+              !parent["is_archived"].bool, parent["status"].string != "error" else { return true }
+        let resting = preferences["bots"].array.contains { bot in
+            (bot["thread_id"].string == parentID || bot["previous_thread_ids"].array.contains { $0.string == parentID })
+                && ["paused", "archived"].contains(bot["status"].string)
+        }
+        return resting
     }
 
     private func modelBotOwnsThread(_ id: String) -> Bool {
@@ -148,7 +158,7 @@ struct RecentEventSequences {
             let old = pendingSummaries[id] ?? tasks.first(where: { $0.id == id })?.raw ?? .null
             if !rebase, old["status"].string == "running", ["idle", "error"].contains(raw["status"].string), (!foreground ? !push.registered : selection != .task(id)), preferences["notifications"]["enabled"] != .bool(false) {
                 let failed = raw["status"].string == "error"
-                if preferences["notifications"][failed ? "notify_on_error" : "notify_on_turn_complete"] != .bool(false), permitsDispatchedPhoneAlert(raw) {
+                if preferences["notifications"][failed ? "notify_on_error" : "notify_on_turn_complete"] != .bool(false), permitsDispatchedPhoneAlert(raw, failed: failed) {
                     announceTask(title: raw["title"].string.nonempty ?? "FalconDeck", body: failed ? raw["last_error"].string : raw["last_message_preview"].string.nonempty ?? "Task completed", taskID: id, workspaceID: raw["workspace_id"].string)
                 }
             }

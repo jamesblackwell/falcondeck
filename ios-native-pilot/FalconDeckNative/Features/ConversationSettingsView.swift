@@ -69,8 +69,8 @@ struct NotificationSettingsView: View {
             } header: { Text("Notify me about") } footer: { Text("These event preferences are stored on your computer and apply to all paired clients. Connected native alerts cannot detect desktop activity.") }.listRowBackground(FD.surface)
                 .disabled(pending || (!model.demo && !model.connected))
             Section {
-                Toggle("Only push messages from bots", isOn: preference("only_push_from_bots", defaultValue: false))
-            } header: { Text("Phone delivery") } footer: { Text("Silence dispatched tasks. Your own threads and decisions that need you still push. Notification history stays the same.") }.listRowBackground(FD.surface)
+                Toggle("Quiet automatic bot work", isOn: preference("only_push_from_bots", defaultValue: false))
+            } header: { Text("Phone delivery") } footer: { Text("Push replies to you, bot notices, errors and decisions that need you. Dispatched tasks and automatic bot replies stay quiet. Your own threads and notification history stay the same.") }.listRowBackground(FD.surface)
                 .disabled(pending || (!model.demo && !model.connected))
             if let error { Text(error).foregroundStyle(FD.danger) }
         }.scrollContentBackground(.hidden).background(FD.background).navigationTitle("Notifications")

@@ -4552,6 +4552,10 @@ pub struct QueuedTurnSummary {
 /// Attention state derived from thread activity.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 pub struct ThreadAttention {
+    /// Whether the current logical turn includes input sent directly by the user.
+    /// Daemon-owned; false for unknown/automatic turns. Survives queueing and restart.
+    #[serde(default)]
+    pub reply_to_user: bool,
     /// High-level attention category.
     #[serde(default)]
     pub level: ThreadAttentionLevel,

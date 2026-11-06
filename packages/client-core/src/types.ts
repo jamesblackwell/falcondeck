@@ -1149,6 +1149,8 @@ export type ThreadPlan = {
 };
 
 export type ThreadAttention = {
+  /** Daemon-owned: this logical turn includes input sent directly by the user. */
+  reply_to_user?: boolean;
   level: ThreadAttentionLevel;
   badge_label: string | null;
   unread: boolean;

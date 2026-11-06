@@ -559,7 +559,7 @@ impl AppState {
                 let result = if target_summary.execution_target
                     == falcondeck_core::ThreadExecutionTarget::Cloud
                 {
-                    self.send_turn(request).await?
+                    self.send_automatic_turn(request).await?
                 } else {
                     workspace_ops::send_agent_message(self, request, &mut message).await?
                 };
@@ -816,7 +816,7 @@ impl AppState {
                     let request: SendTurnRequest = serde_json::from_value(
                         json!({"workspace_id": workspace, "thread_id": id, "inputs":[{"type":"text","text":prompt}]}),
                     )?;
-                    match self.send_turn(request).await {
+                    match self.send_automatic_turn(request).await {
                         Ok(_) => markdown.push_str("- First prompt dispatched. Check progress with falcondeck_view_thread.\n"),
                         Err(error) => markdown.push_str(&format!("- First prompt failed: {}. The thread was created.\n", line(&error.to_string(), 1000))),
                     }
@@ -2547,7 +2547,39 @@ printf '%s\n' '{{"type":"result","subtype":"success","result":"done","session_id
     }
 }
 
-/// Reuse the answer tool boundary: ordinary child questions can go to their parent.
-pub(super) fn request_requires_user(request: &InteractiveRequest) -> bool {
-    actions::answerable(request).is_err()
+impl AppState {
+    pub(super) async fn dispatched_parent_available(&self, summary: &ThreadSummary) -> bool {
+        let Some(falcondeck_core::ThreadOrigin::AgentSpawn {
+            parent_thread_id, ..
+        }) = &summary.origin
+        else {
+            return false;
+        };
+        let Ok(workspace) = self.thread_workspace(parent_thread_id).await else {
+            return false;
+        };
+        let Ok(parent) = self.thread_summary(&workspace, parent_thread_id).await else {
+            return false;
+        };
+        if parent.is_archived || parent.status == ThreadStatus::Error {
+            return false;
+        }
+        !self
+            .bot_for_thread(parent_thread_id)
+            .await
+            .is_some_and(|bot| bot.status.is_resting())
+    }
+
+    pub(super) async fn request_requires_user(&self, request: &InteractiveRequest) -> bool {
+        if actions::answerable(request).is_err() {
+            return true;
+        }
+        let Some(id) = request.thread_id.as_deref() else {
+            return true;
+        };
+        let Ok(summary) = self.thread_summary(&request.workspace_id, id).await else {
+            return true;
+        };
+        !self.dispatched_parent_available(&summary).await
+    }
 }

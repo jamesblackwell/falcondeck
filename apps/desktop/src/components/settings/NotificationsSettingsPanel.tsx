@@ -146,8 +146,8 @@ export function NotificationsSettingsPanel({
             }
           />
           <SwitchRow
-            title="Only push messages from bots"
-            description="Silence dispatched tasks on your phone. Your own threads and decisions that need you still push. Desktop alerts and notification history stay the same."
+            title="Quiet automatic bot work"
+            description="Push replies to you, bot notices, errors and decisions that need you. Dispatched tasks and automatic bot replies stay quiet. Your own threads, desktop alerts and notification history stay the same."
             checked={current.notifications.only_push_from_bots}
             disabled={!current.notifications.enabled}
             onCheckedChange={(next) =>
