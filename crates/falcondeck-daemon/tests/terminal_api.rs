@@ -273,8 +273,20 @@ async fn terminal_http_and_websocket_round_trip() {
         .unwrap();
     assert_eq!(closed.status(), reqwest::StatusCode::OK);
 
-    let frame = next_frame(&mut socket).await;
-    assert!(matches!(frame, TerminalServerFrame::TerminalExited { .. }));
+    // Output/status frames already queued on the socket can precede exit.
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            match next_frame(&mut socket).await {
+                TerminalServerFrame::TerminalExited { .. } => break,
+                TerminalServerFrame::TerminalOutput { .. }
+                | TerminalServerFrame::TerminalReplay { .. }
+                | TerminalServerFrame::TerminalStatus { .. } => {}
+                frame => panic!("expected terminal exit, got {frame:?}"),
+            }
+        }
+    })
+    .await
+    .expect("closing the terminal should emit exit");
 
     // The list is empty again once the exit watcher reaped the session.
     let mut listed_empty = false;
