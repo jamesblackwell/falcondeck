@@ -1085,8 +1085,9 @@ pub async fn probe_agy(options: &ProbeOptions) -> Report {
     );
 
     if options.live {
+        let fallback = agy::curated_models();
         let candidates = agy_live_candidates(if discovered.is_empty() {
-            &agy::curated_models()
+            &fallback
         } else {
             &discovered
         });
