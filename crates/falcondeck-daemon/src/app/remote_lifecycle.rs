@@ -267,6 +267,8 @@ pub(super) struct AttentionPush {
     /// High-importance notices also push while James is at the Mac, and to a
     /// device that only looks connected.
     pub ignore_presence: bool,
+    /// An input request that the creating agent cannot answer on James's behalf.
+    pub requires_user: bool,
 }
 
 const AGENT_NOTICE_KIND: &str = "agent-notice";
@@ -448,38 +450,17 @@ impl AppState {
     /// take waits for the next connection. The only caller is
     /// `record_and_deliver_attention`, so anything pushed is also stored.
     pub(super) async fn deliver_attention(&self, push: AttentionPush) {
-        let AttentionPush {
-            kind,
-            workspace_id,
-            thread_id,
-            preview,
-            review_id,
-            title,
-            notification_id,
-            report_id,
-            ignore_presence,
-        } = push;
-        let policy = self.push_policy(kind, ignore_presence).await;
+        let policy = self.push_policy(&push).await;
+        let kind = push.kind;
         // A notice with a report is as easy to lose as a review, and a retry is
         // as safe: the relay dedupes a notice by its own id.
-        let http_eligible = review_id.is_some() || kind == AGENT_NOTICE_KIND;
+        let http_eligible = push.review_id.is_some() || kind == AGENT_NOTICE_KIND;
         let http_route = http_eligible && self.relay_session_target().await.is_some();
         tracing::info!(kind, ?policy, http_route, "attention event");
         if let Some(refusal) = policy.refusal() {
             count_push(&mut self.inner.remote.lock().await.attention, kind, refusal);
             return;
         }
-        let push = AttentionPush {
-            kind,
-            workspace_id,
-            thread_id,
-            preview,
-            review_id,
-            title,
-            notification_id,
-            report_id,
-            ignore_presence,
-        };
         if http_route {
             // A tool call must not wait on the relay.
             let app = self.clone();
@@ -489,12 +470,32 @@ impl AppState {
         }
     }
 
-    async fn push_policy(&self, kind: &str, ignore_presence: bool) -> AttentionPolicy {
+    async fn push_policy(&self, push: &AttentionPush) -> AttentionPolicy {
         let preferences = self.preferences().await.notifications;
+        if preferences.only_push_from_bots
+            && !matches!(push.kind, "approval" | "review")
+            && !(push.kind == "question" && push.requires_user)
+            && let (Some(workspace), Some(thread)) = (&push.workspace_id, &push.thread_id)
+            && self.bot_for_thread(thread).await.is_none()
+            && self
+                .thread_summary(workspace, thread)
+                .await
+                .is_ok_and(|summary| {
+                    matches!(
+                        summary.origin,
+                        Some(falcondeck_core::ThreadOrigin::AgentSpawn { .. })
+                    )
+                })
+        {
+            // Every generation keeps AgentSpawn provenance, including children
+            // of bot scheduled runs. Bot home/run threads and James's threads
+            // keep their existing policy. This gate is after centre recording.
+            return AttentionPolicy::OffByPreference;
+        }
         let desktop_active = preferences.suppress_when_desktop_active
-            && !ignore_presence
+            && !push.ignore_presence
             && self.desktop_is_active();
-        attention_policy(kind, &preferences, desktop_active)
+        attention_policy(push.kind, &preferences, desktop_active)
     }
 
     /// A socket write proves nothing: the bridge reconnects often enough that
@@ -522,6 +523,14 @@ impl AppState {
             );
             for delay in NOTIFY_RETRY_DELAYS {
                 tokio::time::sleep(delay).await;
+                if let Some(refusal) = self.push_policy(&push).await.refusal() {
+                    count_push(
+                        &mut self.inner.remote.lock().await.attention,
+                        push.kind,
+                        refusal,
+                    );
+                    return;
+                }
                 let response = reqwest::Client::new()
                     .post(&url)
                     .bearer_auth(&daemon_token)
@@ -606,9 +615,7 @@ impl AppState {
             let outcome = if settled {
                 Some(PushOutcome::Settled)
             } else {
-                self.push_policy(push.kind, push.ignore_presence)
-                    .await
-                    .refusal()
+                self.push_policy(&push).await.refusal()
             };
             let Some(outcome) = outcome else {
                 return Some((push, claim));

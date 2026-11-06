@@ -265,3 +265,13 @@ whole store.
   routes by content: a review opens the review, a notice opens its report, the
   rest open the thread.
 - Older clients ignore the `notifications` control domain and the new push fields.
+
+### Dispatched-thread push filter
+
+The shared `notifications.only_push_from_bots` setting defaults off for old and
+new configs. When enabled, dispatched threads still record and count here;
+only phone delivery changes. Bot home/run threads and user-created threads keep
+their existing delivery rules. Child approvals, MCP prompts, secret questions
+and reviews remain eligible for push because they require a user decision.
+Ordinary child questions, completions, errors and notices stay quiet on phones.
+Desktop alerts and child-to-parent reporting are unaffected.

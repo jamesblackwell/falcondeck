@@ -2546,3 +2546,8 @@ printf '%s\n' '{{"type":"result","subtype":"success","result":"done","session_id
         assert_eq!(super::bot_short_name("Libra"), "Libra");
     }
 }
+
+/// Reuse the answer tool boundary: ordinary child questions can go to their parent.
+pub(super) fn request_requires_user(request: &InteractiveRequest) -> bool {
+    actions::answerable(request).is_err()
+}

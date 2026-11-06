@@ -620,6 +620,9 @@ pub struct NotificationPreferences {
     /// Notify when an agent turn fails.
     #[serde(default = "default_true")]
     pub notify_on_error: bool,
+    /// Suppress pushes from dispatched threads, except decisions only the user can make.
+    #[serde(default)]
+    pub only_push_from_bots: bool,
     /// Suppress remote-device pushes while the user has recently used the desktop.
     #[serde(default = "default_true")]
     pub suppress_when_desktop_active: bool,
@@ -632,6 +635,7 @@ impl Default for NotificationPreferences {
             notify_on_turn_complete: true,
             notify_on_input_required: true,
             notify_on_error: true,
+            only_push_from_bots: false,
             suppress_when_desktop_active: true,
         }
     }
@@ -799,6 +803,9 @@ pub struct NotificationPreferencesPatch {
     /// Optional failed-turn notification update.
     #[serde(default)]
     pub notify_on_error: Option<bool>,
+    /// Optional dispatched-thread push suppression update.
+    #[serde(default)]
+    pub only_push_from_bots: Option<bool>,
     /// Optional desktop-active suppression update.
     #[serde(default)]
     pub suppress_when_desktop_active: Option<bool>,

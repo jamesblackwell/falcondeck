@@ -119,6 +119,25 @@ struct RecentEventSequences {
         schedulePreviewSave()
     }
 
+    // Connected native alerts bypass the daemon's relay push gate. Apply the
+    // same source rule here so they cannot reintroduce dispatched-task noise.
+    func permitsDispatchedPhoneAlert(_ thread: JSON, request: JSON = .null) -> Bool {
+        guard preferences["notifications"]["only_push_from_bots"] == .bool(true),
+              thread["origin"]["kind"].string == "agent_spawn" else { return true }
+        let id = thread["id"].string
+        if modelBotOwnsThread(id) { return true }
+        guard request != .null else { return false }
+        return request["kind"].string != "question"
+            || request["method"].string == "mcpServer/elicitation/request"
+            || request["questions"].array.contains { $0["is_secret"] == .bool(true) }
+    }
+
+    private func modelBotOwnsThread(_ id: String) -> Bool {
+        preferences["bots"].array.contains { bot in
+            bot["thread_id"].string == id || bot["previous_thread_ids"].array.contains { $0.string == id }
+        }
+    }
+
     func applyEnvelope(_ envelope: JSON, rebase: Bool = false) {
         guard !demo, let seq = envelope["seq"].optionalInt, rebase || receivedEventSequences.insert(seq) else { return }
         let event = envelope["event"], id = envelope["thread_id"].string
@@ -129,7 +148,7 @@ struct RecentEventSequences {
             let old = pendingSummaries[id] ?? tasks.first(where: { $0.id == id })?.raw ?? .null
             if !rebase, old["status"].string == "running", ["idle", "error"].contains(raw["status"].string), (!foreground ? !push.registered : selection != .task(id)), preferences["notifications"]["enabled"] != .bool(false) {
                 let failed = raw["status"].string == "error"
-                if preferences["notifications"][failed ? "notify_on_error" : "notify_on_turn_complete"] != .bool(false) {
+                if preferences["notifications"][failed ? "notify_on_error" : "notify_on_turn_complete"] != .bool(false), permitsDispatchedPhoneAlert(raw) {
                     announceTask(title: raw["title"].string.nonempty ?? "FalconDeck", body: failed ? raw["last_error"].string : raw["last_message_preview"].string.nonempty ?? "Task completed", taskID: id, workspaceID: raw["workspace_id"].string)
                 }
             }
@@ -159,7 +178,7 @@ struct RecentEventSequences {
         case "preferences-updated": preferences = event["preferences"]
         case "interactive-request":
             let request = event["request"]
-            if !rebase, !requests.contains(where: { $0["request_id"] == request["request_id"] }), (!foreground ? !push.registered : selection != .task(id)), preferences["notifications"]["enabled"] != .bool(false), preferences["notifications"]["notify_on_input_required"] != .bool(false) {
+            if !rebase, !requests.contains(where: { $0["request_id"] == request["request_id"] }), (!foreground ? !push.registered : selection != .task(id)), preferences["notifications"]["enabled"] != .bool(false), preferences["notifications"]["notify_on_input_required"] != .bool(false), permitsDispatchedPhoneAlert(pendingSummaries[id] ?? tasks.first(where: { $0.id == id })?.raw ?? .null, request: request) {
                 announceTask(title: "Input needed", body: request["title"].string, taskID: id, workspaceID: request["workspace_id"].string)
             }
             requests.removeAll { $0["request_id"] == request["request_id"] }; requests.append(request)

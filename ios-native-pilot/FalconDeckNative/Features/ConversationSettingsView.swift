@@ -68,12 +68,16 @@ struct NotificationSettingsView: View {
                 Toggle("Failed turns", isOn: preference("notify_on_error"))
             } header: { Text("Notify me about") } footer: { Text("These event preferences are stored on your computer and apply to all paired clients. Connected native alerts cannot detect desktop activity.") }.listRowBackground(FD.surface)
                 .disabled(pending || (!model.demo && !model.connected))
+            Section {
+                Toggle("Only push messages from bots", isOn: preference("only_push_from_bots", defaultValue: false))
+            } header: { Text("Phone delivery") } footer: { Text("Silence dispatched tasks. Your own threads and decisions that need you still push. Notification history stays the same.") }.listRowBackground(FD.surface)
+                .disabled(pending || (!model.demo && !model.connected))
             if let error { Text(error).foregroundStyle(FD.danger) }
         }.scrollContentBackground(.hidden).background(FD.background).navigationTitle("Notifications")
             .onAppear { model.synchronizePush() }
     }
-    private func preference(_ key: String) -> Binding<Bool> {
-        Binding(get: { model.preferences["notifications"][key] == .null ? true : model.preferences["notifications"][key].bool }, set: { value in
+    private func preference(_ key: String, defaultValue: Bool = true) -> Binding<Bool> {
+        Binding(get: { model.preferences["notifications"][key] == .null ? defaultValue : model.preferences["notifications"][key].bool }, set: { value in
             guard !pending else { return }; pending = true
             Task {
                 defer { pending = false }

@@ -123,3 +123,15 @@ are distinct from shared daemon event preferences.
 
 References: [Apple request format](https://developer.apple.com/documentation/usernotifications/sending-notification-requests-to-apns),
 [Apple token connections](https://developer.apple.com/documentation/usernotifications/establishing-a-token-based-connection-to-apns).
+
+## Dispatched-thread preference
+
+`preferences.notifications.only_push_from_bots` is an optional-on-read boolean
+(default `false`) and accepts partial preference patches. It is daemon-owned and
+synced to all clients. The daemon applies it before relay push delivery and when
+draining queued pushes. `AgentSpawn` threads, including nested children, are
+silenced except for approvals, reviews and questions only the user can answer
+(MCP prompts and secret answers). Bot home/run threads and user-created threads
+retain existing policy. High-importance child notices do not bypass this filter.
+Centre records/counts and desktop alerts are unchanged. Clients that synthesize
+phone alerts from connected events must apply the same source filter.

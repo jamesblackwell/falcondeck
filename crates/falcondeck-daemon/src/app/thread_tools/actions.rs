@@ -166,7 +166,7 @@ fn is_child_of(thread: &ThreadSummary, parent: &str) -> bool {
 }
 
 /// Approvals stay in FalconDeck UI; so do MCP elicitations and secret answers.
-fn answerable(request: &InteractiveRequest) -> Result<(), &'static str> {
+pub(super) fn answerable(request: &InteractiveRequest) -> Result<(), &'static str> {
     if request.kind != InteractiveRequestKind::Question {
         return Err("approvals and plan approvals stay in FalconDeck UI");
     }

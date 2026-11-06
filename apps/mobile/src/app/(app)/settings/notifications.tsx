@@ -100,6 +100,13 @@ export default function NotificationSettingsScreen() {
 
       <SettingsSection title="Delivery">
         <PreferenceSwitch
+          label="Only push messages from bots"
+          description="Silence dispatched tasks. Your own threads and decisions that need you still push. Notification history stays the same."
+          value={current.only_push_from_bots}
+          disabled={isUpdating || !masterEnabled}
+          onValueChange={(value) => void update({ only_push_from_bots: value })}
+        />
+        <PreferenceSwitch
           label="Only push when away from desktop"
           description="Send phone alerts after two minutes without keyboard or mouse activity on your Mac, even if FalconDeck is left open."
           value={current.suppress_when_desktop_active}

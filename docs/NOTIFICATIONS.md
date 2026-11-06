@@ -126,12 +126,28 @@ Notification preferences are daemon-owned and included in snapshots and
 - completed turns;
 - approvals and questions;
 - failed turns;
+- only push messages from bots (off by default);
 - only push when away from desktop (two minutes without Mac input). Reviews
   ignore this one.
 
 These gate delivery, never the record. Reviews follow approvals and questions;
-agent notices follow the master switch only, and a `high` notice also ignores the
-away-from-desktop rule.
+agent notices follow the master switch and the dispatched-thread push filter,
+and a `high` notice also ignores the away-from-desktop rule.
+
+“Only push messages from bots” silences phone pushes from every `AgentSpawn`
+thread, including nested dispatches and explicit notices from those threads.
+Bot home threads, bot scheduled run threads (for events that already push), and
+threads the user starts retain their existing policy. Approvals, MCP prompts,
+secret questions and reviews still push because only the user can decide them;
+ordinary child questions can be answered by the creating agent and stay quiet.
+Other switches and presence rules still apply. The option defaults off, including
+when an older config omits it, to avoid silently changing an existing install.
+Enable it in Settings → Notifications on desktop or mobile.
+
+The filter changes phone delivery only. The centre still records and counts
+suppressed items, and parent messages and bot wake-ups are unchanged. Desktop
+native alerts have their own client policy and do not use this filter. Native
+iOS connected alerts apply the same source filter as relay pushes.
 
 Desktop also has a device-local turn-complete chime, off by default, under
 Settings → General → Sounds. It plays on this computer when a thread leaves

@@ -396,6 +396,8 @@ export type NotificationPreferences = {
   notify_on_turn_complete: boolean;
   notify_on_input_required: boolean;
   notify_on_error: boolean;
+  /** Silence dispatched-thread pushes except decisions only the user can make. */
+  only_push_from_bots: boolean;
   /** Suppress phone pushes until the desktop user has been inactive for two minutes. */
   suppress_when_desktop_active: boolean;
 };

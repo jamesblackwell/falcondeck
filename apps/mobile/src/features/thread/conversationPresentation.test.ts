@@ -26,6 +26,7 @@ const preferences: FalconDeckPreferences = {
     notify_on_turn_complete: true,
     notify_on_input_required: true,
     notify_on_error: true,
+    only_push_from_bots: false,
     suppress_when_desktop_active: true,
   },
 }

@@ -274,6 +274,7 @@ impl AppState {
         };
         let push = AttentionPush {
             kind: if question { "question" } else { "approval" },
+            requires_user: super::thread_tools::request_requires_user(&request),
             workspace_id: Some(workspace_id),
             thread_id,
             ..AttentionPush::default()
@@ -803,6 +804,208 @@ mod tests {
             "turn_id": null, "item_id": null, "questions": [], "created_at": Utc::now()
         }))
         .unwrap()
+    }
+
+    #[tokio::test]
+    async fn bot_only_push_keeps_home_runs_and_james_threads_but_not_dispatched_work() {
+        let (app, _temp) = fixture().await;
+        bridge(&app).await;
+        app.set_desktop_activity(false);
+        set_notifications(
+            &app,
+            NotificationPreferencesPatch {
+                only_push_from_bots: Some(true),
+                ..Default::default()
+            },
+        )
+        .await;
+        app.mutate_bot(falcondeck_core::BotMutation::Create {
+            name: "Coordinator".into(),
+            instructions: String::new(),
+            provider: None,
+            model_id: None,
+            thread_id: Some("thread-1".into()),
+        })
+        .await
+        .unwrap();
+        reply(&app, "Finished.").await;
+        finish(&app).await;
+        assert_eq!(pushed(&app).await.len(), 1, "bot home thread");
+
+        let mut parent = "thread-1".to_string();
+        for label in ["child", "nested child"] {
+            let result = app
+                .invoke_thread_tool(
+                    "falcondeck_create_thread",
+                    &json!({"title": label, "notify_parent": false}),
+                    Some(&parent),
+                    None,
+                )
+                .await
+                .unwrap();
+            let child = result
+                .result
+                .as_str()
+                .unwrap()
+                .lines()
+                .find_map(|s| s.strip_prefix("- Id: "))
+                .unwrap()
+                .to_string();
+            let workspace = app.thread_workspace(&child).await.unwrap();
+            app.record_and_deliver_attention(AttentionEvent::turn(&workspace, &child, false))
+                .await;
+            app.record_and_deliver_attention(AttentionEvent::turn(&workspace, &child, true))
+                .await;
+            assert!(pushed(&app).await.is_empty(), "{label}");
+            parent = child;
+        }
+        assert_eq!(
+            history(&app).await.len(),
+            5,
+            "all dispatched events stay in the centre"
+        );
+        assert_eq!(app.inner.notifications.status().await.unread_count, 5);
+        // Return the fixture thread to an ordinary user-owned conversation.
+        app.inner.preferences.lock().await.bots.clear();
+
+        app.with_thread_mut("workspace-1", "thread-1", |t| t.origin = None)
+            .await
+            .unwrap();
+        reply(&app, "James's own thread.").await;
+        finish(&app).await;
+        assert_eq!(pushed(&app).await.len(), 1);
+        app.with_thread_mut("workspace-1", "thread-1", |t| {
+            t.origin = Some(ThreadOrigin::Automation {
+                automation_id: "a".into(),
+                bot_id: Some("b".into()),
+                name: "Bot run".into(),
+            });
+        })
+        .await
+        .unwrap();
+        app.record_and_deliver_attention(AttentionEvent::turn("workspace-1", "thread-1", true))
+            .await;
+        assert_eq!(
+            pushed(&app).await.len(),
+            1,
+            "bot's own run keeps existing event policy"
+        );
+    }
+
+    #[tokio::test]
+    async fn bot_only_push_rechecks_dispatched_work_already_queued() {
+        let (app, _temp) = fixture().await;
+        bridge(&app).await;
+        app.set_desktop_activity(false);
+        app.with_thread_mut("workspace-1", "thread-1", |t| {
+            t.origin = Some(ThreadOrigin::AgentSpawn {
+                parent_thread_id: "parent".into(),
+                dispatched_at: None,
+            });
+        })
+        .await
+        .unwrap();
+        reply(&app, "Finished before the setting changed.").await;
+        finish(&app).await;
+        set_notifications(
+            &app,
+            NotificationPreferencesPatch {
+                only_push_from_bots: Some(true),
+                ..Default::default()
+            },
+        )
+        .await;
+        assert!(pushed(&app).await.is_empty());
+        assert_eq!(history(&app).await.len(), 1);
+        let status = app.remote_status().await;
+        assert_eq!(
+            status
+                .attention
+                .iter()
+                .find(|c| c.kind == "turn-complete")
+                .unwrap()
+                .suppressed_preferences,
+            1
+        );
+    }
+
+    #[tokio::test]
+    async fn bot_only_push_preserves_human_decisions_and_silences_parent_answerable_questions() {
+        let (app, _temp) = fixture().await;
+        bridge(&app).await;
+        app.set_desktop_activity(false);
+        set_notifications(
+            &app,
+            NotificationPreferencesPatch {
+                only_push_from_bots: Some(true),
+                ..Default::default()
+            },
+        )
+        .await;
+        app.with_thread_mut("workspace-1", "thread-1", |t| {
+            t.origin = Some(ThreadOrigin::AgentSpawn {
+                parent_thread_id: "parent".into(),
+                dispatched_at: None,
+            });
+        })
+        .await
+        .unwrap();
+        let approval = request("approval");
+        app.record_and_deliver_attention(AttentionEvent::request(&approval))
+            .await;
+        assert_eq!(pushed(&app).await.len(), 1, "approval waits on James");
+        let mut question = request("ordinary");
+        question.kind = InteractiveRequestKind::Question;
+        app.record_and_deliver_attention(AttentionEvent::request(&question))
+            .await;
+        assert!(
+            pushed(&app).await.is_empty(),
+            "parent can answer an ordinary question"
+        );
+        question.request_id = "mcp".into();
+        question.method = conversation_helpers::MCP_ELICITATION_METHOD.into();
+        app.record_and_deliver_attention(AttentionEvent::request(&question))
+            .await;
+        assert_eq!(pushed(&app).await.len(), 1, "MCP prompt waits on James");
+        question.request_id = "secret".into();
+        question.method = "item/tool/requestUserInput".into();
+        question.questions = serde_json::from_value(json!([{
+            "id": "token", "header": "Token", "question": "Enter token", "is_secret": true,
+            "options": [], "is_other": false
+        }]))
+        .unwrap();
+        app.record_and_deliver_attention(AttentionEvent::request(&question))
+            .await;
+        assert_eq!(pushed(&app).await.len(), 1, "secret answer waits on James");
+        let review: Review = serde_json::from_value(json!({
+            "id": "R-child", "revision": 1, "title": "Decision", "ask": "Proceed?",
+            "recommendation": "Yes", "body": "", "status": "open", "items": [],
+            "created_by": {"name": "Agent", "context": {"origin": "mcp", "thread_id": "thread-1"}},
+            "created_at": Utc::now(), "updated_at": Utc::now()
+        }))
+        .unwrap();
+        app.record_and_deliver_attention(AttentionEvent::Review(Box::new(review)))
+            .await;
+        assert_eq!(pushed(&app).await.len(), 1, "review waits on James");
+        assert_eq!(history(&app).await.len(), 5);
+        question.questions.clear();
+        set_notifications(
+            &app,
+            NotificationPreferencesPatch {
+                only_push_from_bots: Some(false),
+                ..Default::default()
+            },
+        )
+        .await;
+        question.request_id = "ordinary-again".into();
+        question.method = "item/tool/requestUserInput".into();
+        app.record_and_deliver_attention(AttentionEvent::request(&question))
+            .await;
+        assert_eq!(
+            pushed(&app).await.len(),
+            1,
+            "switch off restores child pushes"
+        );
     }
 
     #[tokio::test]
@@ -1437,6 +1640,24 @@ mod notice_tests {
     async fn a_notice_reaches_the_phone_and_the_centre() {
         let (app, _temp) = fixture().await;
         bridge(&app).await;
+        app.update_preferences(falcondeck_core::UpdatePreferencesRequest {
+            notifications: Some(falcondeck_core::NotificationPreferencesPatch {
+                only_push_from_bots: Some(true),
+                ..Default::default()
+            }),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+        app.mutate_bot(falcondeck_core::BotMutation::Create {
+            name: "Coordinator".into(),
+            instructions: String::new(),
+            provider: None,
+            model_id: None,
+            thread_id: Some("thread-1".into()),
+        })
+        .await
+        .unwrap();
         app.set_desktop_activity(false);
         let sent = notify(
             &app,
@@ -1466,6 +1687,38 @@ mod notice_tests {
         assert_eq!(preview.as_deref(), Some("All green."));
         assert_eq!(notification_id.as_deref(), Some("N-1"));
         assert_eq!(report_id, None);
+    }
+
+    #[tokio::test]
+    async fn bot_only_push_silences_even_high_notices_from_dispatched_threads() {
+        let (app, _temp) = fixture().await;
+        bridge(&app).await;
+        app.set_desktop_activity(false);
+        app.update_preferences(falcondeck_core::UpdatePreferencesRequest {
+            notifications: Some(falcondeck_core::NotificationPreferencesPatch {
+                only_push_from_bots: Some(true),
+                ..Default::default()
+            }),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+        app.with_thread_mut("workspace-1", "thread-1", |t| {
+            t.origin = Some(ThreadOrigin::AgentSpawn {
+                parent_thread_id: "parent".into(),
+                dispatched_at: None,
+            });
+        })
+        .await
+        .unwrap();
+        notify(
+            &app,
+            json!({"title": "Finished", "summary": "Done.", "importance": "high"}),
+        )
+        .await
+        .unwrap();
+        assert!(pushes(&app).await.is_empty());
+        assert_eq!(records(&app).await.len(), 1);
     }
 
     #[tokio::test]

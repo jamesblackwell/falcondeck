@@ -1342,3 +1342,14 @@ describe("agent child limit preference", () => {
     }
   });
 });
+
+
+describe("dispatched-thread push preference", () => {
+  it("preserves older clients and round-trips the opt-in", () => {
+    expect(normalizePreferences({}).notifications.only_push_from_bots).toBe(false);
+    for (const enabled of [true, false]) {
+      expect(normalizePreferences({ notifications: { only_push_from_bots: enabled } })
+        .notifications.only_push_from_bots).toBe(enabled);
+    }
+  });
+});

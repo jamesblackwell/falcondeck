@@ -370,6 +370,7 @@ const DEFAULT_NOTIFICATION_PREFERENCES = {
   notify_on_turn_complete: true,
   notify_on_input_required: true,
   notify_on_error: true,
+  only_push_from_bots: false,
   suppress_when_desktop_active: true,
 } as const;
 
@@ -2467,6 +2468,7 @@ export function normalizePreferences(value: unknown): FalconDeckPreferences {
       notify_on_turn_complete: notifications.notify_on_turn_complete ?? true,
       notify_on_input_required: notifications.notify_on_input_required ?? true,
       notify_on_error: notifications.notify_on_error ?? true,
+      only_push_from_bots: notifications.only_push_from_bots ?? false,
       suppress_when_desktop_active:
         notifications.suppress_when_desktop_active ?? true,
     },

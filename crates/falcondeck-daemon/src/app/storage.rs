@@ -399,6 +399,12 @@ pub(super) fn merge_preferences_from_value(value: Value) -> FalconDeckPreference
             preferences.notifications.notify_on_error = value;
         }
         if let Some(value) = notifications
+            .get("only_push_from_bots")
+            .and_then(Value::as_bool)
+        {
+            preferences.notifications.only_push_from_bots = value;
+        }
+        if let Some(value) = notifications
             .get("suppress_when_desktop_active")
             .and_then(Value::as_bool)
         {
@@ -624,6 +630,9 @@ pub(super) fn apply_preferences_patch(
         }
         if let Some(value) = notifications.notify_on_error {
             preferences.notifications.notify_on_error = value;
+        }
+        if let Some(value) = notifications.only_push_from_bots {
+            preferences.notifications.only_push_from_bots = value;
         }
         if let Some(value) = notifications.suppress_when_desktop_active {
             preferences.notifications.suppress_when_desktop_active = value;
@@ -1609,6 +1618,30 @@ mod tests {
     }
 
     #[test]
+    fn old_notification_preferences_keep_existing_push_behaviour() {
+        let old = serde_json::json!({"enabled": true, "notify_on_turn_complete": true,
+            "notify_on_input_required": true, "notify_on_error": true,
+            "suppress_when_desktop_active": false});
+        let prefs: falcondeck_core::NotificationPreferences = serde_json::from_value(old).unwrap();
+        assert!(!prefs.only_push_from_bots);
+        assert!(
+            !merge_preferences_from_value(serde_json::json!({"notifications": {"enabled": true}}))
+                .notifications
+                .only_push_from_bots
+        );
+        assert!(
+            merge_preferences_from_value(
+                serde_json::json!({"notifications": {"only_push_from_bots": true}})
+            )
+            .notifications
+            .only_push_from_bots
+        );
+        let patch: falcondeck_core::NotificationPreferencesPatch =
+            serde_json::from_value(serde_json::json!({"enabled": false})).unwrap();
+        assert_eq!(patch.only_push_from_bots, None);
+    }
+
+    #[test]
     fn applies_notification_patch_without_requiring_conversation_patch() {
         let mut preferences = FalconDeckPreferences::default();
         apply_preferences_patch(
@@ -1619,12 +1652,14 @@ mod tests {
                     notify_on_turn_complete: Some(false),
                     notify_on_input_required: None,
                     notify_on_error: Some(false),
+                    only_push_from_bots: Some(true),
                     suppress_when_desktop_active: Some(false),
                 }),
                 ..UpdatePreferencesRequest::default()
             },
         );
 
+        assert!(preferences.notifications.only_push_from_bots);
         assert!(!preferences.notifications.enabled);
         assert!(!preferences.notifications.notify_on_turn_complete);
         assert!(preferences.notifications.notify_on_input_required);

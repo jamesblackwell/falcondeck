@@ -146,6 +146,15 @@ export function NotificationsSettingsPanel({
             }
           />
           <SwitchRow
+            title="Only push messages from bots"
+            description="Silence dispatched tasks on your phone. Your own threads and decisions that need you still push. Desktop alerts and notification history stay the same."
+            checked={current.notifications.only_push_from_bots}
+            disabled={!current.notifications.enabled}
+            onCheckedChange={(next) =>
+              onUpdatePreferences({ notifications: { only_push_from_bots: next } })
+            }
+          />
+          <SwitchRow
             title="Only push when away from desktop"
             description="Hold phone alerts until two minutes without keyboard or mouse activity on your Mac, even if FalconDeck is left open. Reviews always reach your phone, and desktop alerts still appear."
             checked={current.notifications.suppress_when_desktop_active}
