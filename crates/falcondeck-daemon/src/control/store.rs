@@ -330,13 +330,69 @@ pub fn compact(state: &mut PersistedControlState, now: DateTime<Utc>) {
     }
 }
 
-/// Marks in-flight runs cancelled at restore time.
+/// Completes a consumed one-time schedule. Call only for its current occurrence.
+pub(super) fn complete_once(automation: &mut Automation, now: DateTime<Utc>) {
+    if automation.state == falcondeck_core::control::AutomationState::Enabled
+        && matches!(
+            automation.trigger,
+            falcondeck_core::control::AutomationTrigger::Once { .. }
+        )
+    {
+        automation.state = falcondeck_core::control::AutomationState::Completed;
+        automation.next_run_at = None;
+        automation.updated_at = now;
+        automation.revision += 1;
+    }
+}
+
+/// Record every finished attempt, but let it consume only its own once trigger.
+pub(super) fn record_run_completion(
+    automation: &mut Automation,
+    run: &AutomationRun,
+    now: DateTime<Utc>,
+) {
+    use falcondeck_core::control::{AutomationOutcomeSummary, AutomationTrigger};
+    automation.last_run_at = Some(now);
+    automation.latest_outcome = Some(AutomationOutcomeSummary {
+        status: run.status,
+        finished_at: now,
+        preview: run
+            .outcome_preview
+            .as_deref()
+            .or_else(|| run.error.as_ref().map(|error| error.message.as_str()))
+            .map(bounded_preview),
+    });
+    if let AutomationTrigger::Once { run_at } = &automation.trigger {
+        let same_occurrence = match &run.definition_trigger {
+            Some(AutomationTrigger::Once { run_at: claimed }) => claimed == run_at,
+            Some(_) => false,
+            // Older persisted runs have no snapshot. Preserve a pending wake
+            // after an intervening edit rather than risk consuming a rearm.
+            None => {
+                automation.next_run_at.is_none() || automation.revision == run.automation_revision
+            }
+        };
+        if same_occurrence {
+            complete_once(automation, now);
+        }
+    }
+}
+
+/// Marks in-flight runs cancelled at restore time, using the same occurrence
+/// ownership rule as normal completion before reconciling missed schedules.
 pub fn cancel_in_flight_runs(state: &mut PersistedControlState, now: DateTime<Utc>) {
     for run in &mut state.runs {
         if !run.status.is_terminal() {
             run.status = AutomationRunStatus::Cancelled;
             run.finished_at = Some(now);
             run.outcome_preview = Some("Daemon stopped before the run completed".to_string());
+            if let Some(automation) = state
+                .automations
+                .iter_mut()
+                .find(|automation| automation.id == run.automation_id)
+            {
+                record_run_completion(automation, run, now);
+            }
         }
     }
 }

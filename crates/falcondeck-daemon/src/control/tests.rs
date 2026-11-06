@@ -677,6 +677,253 @@ async fn once_automations_complete_after_a_run() {
     let _ = run_id;
 }
 
+async fn create_timed_once(service: &ControlService) -> falcondeck_core::control::Automation {
+    let mut args = create_arguments();
+    args["trigger"] =
+        json!({"kind":"once", "run_at": (Utc::now() + Duration::hours(2)).to_rfc3339()});
+    let response = service
+        .execute(
+            execute_request(registry::ops::AUTOMATION_CREATE, args, None),
+            &desktop(),
+            &ControlDeps::none(),
+        )
+        .await
+        .0;
+    assert!(response.ok, "{:?}", response.error);
+    let data = response.data.unwrap();
+    service.automation(data["id"].as_str().unwrap()).await.unwrap()
+}
+
+async fn rearm_once(service: &ControlService, id: &str) -> falcondeck_core::control::Automation {
+    let automation = service.automation(id).await.unwrap();
+    let next = automation.next_run_at.unwrap_or(Utc::now()) + Duration::hours(4);
+    let response = service
+        .execute(
+            execute_request(
+                registry::ops::AUTOMATION_UPDATE,
+                json!({"automation_id":id, "trigger":{"kind":"once", "run_at":next.to_rfc3339()}}),
+                Some(automation.revision),
+            ),
+            &mcp(Some("codex")),
+            &ControlDeps::none(),
+        )
+        .await
+        .0;
+    assert!(response.ok, "{:?}", response.error);
+    let data = response.data.unwrap();
+    service.automation(data["id"].as_str().unwrap()).await.unwrap()
+}
+
+#[tokio::test]
+async fn once_completion_preserves_a_rearm_for_success_failure_and_cancellation() {
+    for manual in [false, true] {
+        for edit in ["none", "rename", "rearm"] {
+            for status in [
+                AutomationRunStatus::Succeeded,
+                AutomationRunStatus::Failed,
+                AutomationRunStatus::Cancelled,
+            ] {
+                let (_dir, service) = service().await;
+                let original = create_timed_once(&service).await;
+                let run = service
+                    .enqueue_run(
+                        &original.id,
+                        (!manual).then_some(original.next_run_at.unwrap()),
+                        if manual {
+                            super::service::RunSource::Manual {
+                                origin: ControlOrigin::DesktopUi,
+                            }
+                        } else {
+                            super::service::RunSource::Scheduled
+                        },
+                    )
+                    .await
+                    .unwrap();
+                service
+                    .mark_run_running(&run.id, "ws", "thread")
+                    .await
+                    .unwrap();
+                if edit == "rearm" {
+                    rearm_once(&service, &original.id).await;
+                }
+                if edit == "rename" {
+                    let response = service
+                        .execute(
+                            execute_request(
+                                registry::ops::AUTOMATION_UPDATE,
+                                json!({"automation_id":original.id,"name":"Renamed"}),
+                                Some(original.revision),
+                            ),
+                            &desktop(),
+                            &ControlDeps::none(),
+                        )
+                        .await
+                        .0;
+                    assert!(response.ok, "{:?}", response.error);
+                }
+                let before = service.automation(&original.id).await.unwrap();
+                service
+                    .finish_run(&run.id, status, Some("attempt finished".into()), None)
+                    .await
+                    .unwrap();
+                let after = service.automation(&original.id).await.unwrap();
+                if edit == "rearm" {
+                    assert_eq!(
+                        after.state,
+                        AutomationState::Enabled,
+                        "manual={manual}, {status:?}"
+                    );
+                    assert_eq!(after.next_run_at, before.next_run_at);
+                    assert_eq!(after.revision, before.revision);
+                } else {
+                    assert_eq!(after.state, AutomationState::Completed);
+                    assert_eq!(after.next_run_at, None);
+                }
+                assert!(after.last_run_at.is_some());
+                assert_eq!(after.latest_outcome.unwrap().status, status);
+            }
+        }
+    }
+}
+
+#[tokio::test]
+async fn rearmed_once_overlap_skip_consumes_only_the_new_occurrence() {
+    let (_dir, service) = service().await;
+    let original = create_timed_once(&service).await;
+    let old = service
+        .enqueue_run(
+            &original.id,
+            original.next_run_at,
+            super::service::RunSource::Scheduled,
+        )
+        .await
+        .unwrap();
+    service
+        .mark_run_running(&old.id, "ws", "thread")
+        .await
+        .unwrap();
+    let armed = rearm_once(&service, &original.id).await;
+    let skipped = service
+        .enqueue_run(
+            &original.id,
+            armed.next_run_at,
+            super::service::RunSource::Scheduled,
+        )
+        .await
+        .unwrap();
+    assert_eq!(skipped.status, AutomationRunStatus::SkippedOverlap);
+    let consumed = service.automation(&original.id).await.unwrap();
+    assert_eq!(consumed.state, AutomationState::Completed);
+    assert_eq!(consumed.next_run_at, None);
+    assert_eq!(
+        consumed.latest_outcome.unwrap().status,
+        AutomationRunStatus::SkippedOverlap
+    );
+    // The old run must not consume a third wake armed after the skip either.
+    let next = rearm_once(&service, &original.id).await;
+    service
+        .finish_run(
+            &old.id,
+            AutomationRunStatus::Succeeded,
+            Some("old done".into()),
+            None,
+        )
+        .await
+        .unwrap();
+    let after = service.automation(&original.id).await.unwrap();
+    assert_eq!(after.state, AutomationState::Enabled);
+    assert_eq!(after.next_run_at, next.next_run_at);
+}
+
+#[tokio::test]
+async fn once_restore_cancellation_and_misfires_preserve_rearmed_occurrences() {
+    for rearmed in [false, true] {
+        for missed in [false, true] {
+            for replay in [false, true] {
+                for legacy in [false, true] {
+                    let (dir, service) = service().await;
+                    let original = create_timed_once(&service).await;
+                    let run = service
+                        .enqueue_run(
+                            &original.id,
+                            original.next_run_at,
+                            super::service::RunSource::Scheduled,
+                        )
+                        .await
+                        .unwrap();
+                    service
+                        .mark_run_running(&run.id, "ws", "thread")
+                        .await
+                        .unwrap();
+                    if rearmed {
+                        rearm_once(&service, &original.id).await;
+                    }
+                    let path = dir.path().join("agent-control.json");
+                    let mut state = store::load(&path).await.unwrap();
+                    if legacy {
+                        // Old persisted records omit the new snapshot field.
+                        state.runs[0].definition_trigger = None;
+                    }
+                    let automation = &mut state.automations[0];
+                    automation.misfire_policy = if replay {
+                        falcondeck_core::control::AutomationMisfirePolicy::RunOnce
+                    } else {
+                        falcondeck_core::control::AutomationMisfirePolicy::Skip
+                    };
+                    if rearmed && missed {
+                        let at = Utc::now() - Duration::minutes(10);
+                        automation.trigger =
+                            falcondeck_core::control::AutomationTrigger::Once { run_at: at };
+                        automation.next_run_at = Some(at);
+                    }
+                    let next = automation.next_run_at;
+                    store::persist(&path, &state).await.unwrap();
+                    let restored = ControlService::new(path);
+                    restored.restore().await.unwrap();
+                    let after = restored.automation(&original.id).await.unwrap();
+                    if rearmed && (!missed || replay) {
+                        assert_eq!(after.state, AutomationState::Enabled);
+                        assert!(after.next_run_at.is_some());
+                        if !missed {
+                            assert_eq!(after.next_run_at, next);
+                        } else {
+                            // Startup replay may run now rather than at the trigger's original timestamp.
+                            let retry = restored
+                                .enqueue_run(
+                                    &after.id,
+                                    after.next_run_at,
+                                    super::service::RunSource::Scheduled,
+                                )
+                                .await
+                                .unwrap();
+                            restored
+                                .finish_run(&retry.id, AutomationRunStatus::Failed, None, None)
+                                .await
+                                .unwrap();
+                            assert_eq!(
+                                restored.automation(&after.id).await.unwrap().state,
+                                AutomationState::Completed
+                            );
+                        }
+                    } else {
+                        assert_eq!(
+                            after.state,
+                            AutomationState::Completed,
+                            "rearmed={rearmed}, missed={missed}, replay={replay}"
+                        );
+                        assert_eq!(after.next_run_at, None);
+                    }
+                    assert_eq!(
+                        after.latest_outcome.unwrap().status,
+                        AutomationRunStatus::Cancelled
+                    );
+                    assert!(after.last_run_at.is_some());
+                }
+            }
+        }
+    }
+}
+
 #[tokio::test]
 async fn concurrency_policies_skip_queue_and_allow() {
     let (_dir, service) = service().await;

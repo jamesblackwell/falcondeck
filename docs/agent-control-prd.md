@@ -1882,7 +1882,12 @@ On daemon restoration:
 
 ### 23.5 One-time automations
 
-After a successful or failed execution attempt, a one-time automation transitions to `completed`.
+After an execution attempt (including failure or cancellation), a one-time automation
+transitions to `completed` only if that run still belongs to its current once occurrence.
+Rearming it with a different `run_at` during an older run preserves the new enabled
+schedule; the older run still records its last-run time and outcome. This also applies
+to daemon-stopped cancellation during restore. A rearmed occurrence consumed by
+`skip` concurrency or skipped by startup misfire policy is completed rather than retried.
 
 It is retained for inspection until deleted.
 

@@ -405,6 +405,9 @@ impl ControlService {
                 Ok(automations::MisfirePlan::UpToDate) => {}
                 Ok(automations::MisfirePlan::Advance(occurrence)) => {
                     automation.next_run_at = occurrence.map(|occurrence| occurrence.at);
+                    if automation.next_run_at.is_none() {
+                        store::complete_once(automation, now);
+                    }
                 }
                 Err(error) => {
                     // A definition that no longer validates keeps its stored
@@ -1550,6 +1553,7 @@ impl ControlService {
                 status: AutomationRunStatus::Queued,
                 trigger,
                 scheduled_for,
+                definition_trigger: Some(automation.trigger.clone()),
                 queued_at: now,
                 started_at: None,
                 finished_at: None,
@@ -1597,6 +1601,14 @@ impl ControlService {
                     automation_mut.last_run_at = Some(now);
                 }
             }
+            if run.status.is_terminal()
+                && let Some(automation) = state
+                    .automations
+                    .iter_mut()
+                    .find(|automation| automation.id == run.automation_id)
+            {
+                store::record_run_completion(automation, &run, now);
+            }
             Ok((run, vec![ControlDomain::Runs, ControlDomain::Automations]))
         })
         .await
@@ -1625,6 +1637,9 @@ impl ControlService {
             }
             let next = automations::advance_after(automation, now, &dispatched)?;
             automation.next_run_at = next.map(|next| next.at);
+            if automation.next_run_at.is_none() {
+                store::complete_once(automation, now);
+            }
             Ok(((), vec![ControlDomain::Automations]))
         })
         .await
@@ -1708,35 +1723,12 @@ impl ControlService {
             run.finished_at = Some(now);
             run.outcome_preview = preview.as_deref().map(store::bounded_preview);
             run.error = error.map(store::bounded_error_detail);
-            let automation_id = run.automation_id.clone();
-            let summary = run
-                .outcome_preview
-                .clone()
-                .or_else(|| run.error.as_ref().map(|error| error.message.clone()));
             if let Some(automation) = state
                 .automations
                 .iter_mut()
-                .find(|automation| automation.id == automation_id)
+                .find(|automation| automation.id == run.automation_id)
             {
-                automation.last_run_at = Some(now);
-                automation.latest_outcome =
-                    Some(falcondeck_core::control::AutomationOutcomeSummary {
-                        status,
-                        finished_at: now,
-                        preview: summary.map(|preview| store::bounded_preview(&preview)),
-                    });
-                // One-time automations complete after an execution attempt,
-                // successful or not.
-                if matches!(
-                    automation.trigger,
-                    falcondeck_core::control::AutomationTrigger::Once { .. }
-                ) && automation.state == AutomationState::Enabled
-                {
-                    automation.state = AutomationState::Completed;
-                    automation.next_run_at = None;
-                    automation.updated_at = now;
-                    automation.revision += 1;
-                }
+                store::record_run_completion(automation, run, now);
             }
             Ok(((), vec![ControlDomain::Runs, ControlDomain::Automations]))
         })
@@ -1798,21 +1790,13 @@ impl ControlService {
         run_id: &str,
         connector: &str,
     ) -> Result<(), ControlError> {
-        let run_id = run_id.to_string();
-        let connector = connector.to_string();
-        self.mutate(move |state, now| {
-            let run = state
-                .runs
-                .iter_mut()
-                .find(|run| run.id == run_id)
-                .ok_or_else(|| ControlError::resource_not_found("run", &run_id))?;
-            run.status = AutomationRunStatus::SkippedDependency;
-            run.finished_at = Some(now);
-            run.outcome_preview = Some(format!("Required connector {connector:?} is unavailable"));
-            Ok(((), vec![ControlDomain::Runs]))
-        })
+        self.finish_run(
+            run_id,
+            AutomationRunStatus::SkippedDependency,
+            Some(format!("Required connector {connector:?} is unavailable")),
+            None,
+        )
         .await
-        .map(|((), _)| ())
     }
 
     /// Fails a queued or running run when dispatch itself errors.

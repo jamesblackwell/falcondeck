@@ -490,6 +490,7 @@ fn legacy_run(
         status,
         trigger,
         scheduled_for: Some(run.scheduled_for),
+        definition_trigger: None,
         queued_at: run.started_at.unwrap_or(run.scheduled_for),
         started_at: run.started_at,
         finished_at: run.completed_at.or(terminal.then_some(now)),

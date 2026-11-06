@@ -139,6 +139,7 @@ export type AutomationRun = {
   status: AutomationRunStatus;
   trigger: AutomationRunTrigger;
   scheduled_for?: string | null;
+  definition_trigger?: AutomationTrigger | null;
   queued_at: string;
   started_at?: string | null;
   finished_at?: string | null;
