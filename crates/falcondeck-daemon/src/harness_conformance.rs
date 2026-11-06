@@ -1004,9 +1004,26 @@ async fn probe_claude_stream(options: &ProbeOptions, report: &mut Report) {
 }
 
 /// Antigravity is the same stream-json subprocess shape as Claude, with its
-/// own event names (`init` / `step_update` / `result`) and a live catalog.
+/// own event names (`init` / `step_update` / `result`) and a local catalog.
 pub async fn probe_agy(options: &ProbeOptions) -> Report {
+    let account = agy::read_auth_status(&options.agy_bin).await;
+    probe_agy_with_account(options, account).await
+}
+
+async fn probe_agy_with_account(
+    options: &ProbeOptions,
+    account: falcondeck_core::AccountSummary,
+) -> Report {
     let mut report = Report::new("Antigravity");
+    if account.status != falcondeck_core::AccountStatus::Ready {
+        report.push(
+            "authentication admission",
+            CheckStatus::Warning,
+            agy::AUTH_SETUP_MESSAGE,
+        );
+        return report;
+    }
+
     if !binary_installed("agy", &options.agy_bin) {
         skip_or_fail_missing(&mut report, options.skip_missing, &options.agy_bin);
         return report;
@@ -1029,51 +1046,16 @@ pub async fn probe_agy(options: &ProbeOptions) -> Report {
         agy::REQUIRED_CLI_FLAGS,
     );
 
-    let account = agy::read_auth_status(&options.agy_bin).await;
-    let models_output = if account.status == falcondeck_core::AccountStatus::Ready {
-        let resolved = resolve_agent_binary("agy", &options.agy_bin);
-        let mut command = Command::new(&resolved.executable);
-        agy::configure_headless(&mut command);
-        command
-            .arg("models")
-            .stdin(Stdio::null())
-            .kill_on_drop(true)
-            .output()
-            .await
-            .ok()
-            .filter(|output| output.status.success())
-            .map(|output| String::from_utf8_lossy(&output.stdout).to_string())
-    } else {
-        None
-    };
-    let discovered = models_output
-        .as_deref()
-        .map(agy::parse_models_table)
-        .unwrap_or_default();
-    // `list_models` falls back to the curated table when `agy models` is empty,
-    // which is the quiet failure: the picker still looks populated. Assert on
-    // the parser's reading of the live table, not the fallback.
-    if account.status != falcondeck_core::AccountStatus::Ready {
-        report.push(
-            "model catalog",
-            CheckStatus::Skipped,
-            "No verifiable credential source; skipping model discovery",
-        );
-    } else if discovered.is_empty() {
-        report.push(
-            "model catalog",
-            CheckStatus::Fail,
-            "`agy models` produced no rows; the daemon would fall back to the curated list",
-        );
-    } else {
-        report.push(
-            "model catalog",
-            CheckStatus::Pass,
-            format!("{} model(s)", discovered.len()),
-        );
-    }
+    let discovered = agy::curated_models();
+    report.push(
+        "model catalog",
+        CheckStatus::Pass,
+        format!(
+            "{} locally curated model(s); no CLI discovery",
+            discovered.len()
+        ),
+    );
 
-    let account = agy::read_auth_status(&options.agy_bin).await;
     report.push(
         "account",
         match account.status {
@@ -1085,12 +1067,7 @@ pub async fn probe_agy(options: &ProbeOptions) -> Report {
     );
 
     if options.live {
-        let fallback = agy::curated_models();
-        let candidates = agy_live_candidates(if discovered.is_empty() {
-            &fallback
-        } else {
-            &discovered
-        });
+        let candidates = agy_live_candidates(&discovered);
         probe_agy_stream(options, &candidates, &mut report).await;
     } else {
         report.push(
@@ -1125,7 +1102,7 @@ async fn agy_stream_turn(
 ) -> Result<AgyTurnOutcome, String> {
     if agy::read_auth_status(&options.agy_bin).await.status != falcondeck_core::AccountStatus::Ready
     {
-        return Err("Antigravity needs saved credentials or GEMINI_API_KEY / GOOGLE_API_KEY / GOOGLE_APPLICATION_CREDENTIALS; keyring-only sign-in is unsafe in headless mode".into());
+        return Err(agy::AUTH_SETUP_MESSAGE.into());
     }
     let resolved = resolve_agent_binary("agy", &options.agy_bin);
     let mut command = Command::new(&resolved.executable);
@@ -1522,6 +1499,46 @@ pub async fn run_cli(args: impl IntoIterator<Item = String>) -> i32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn agy_conformance_uses_shared_admission_before_any_cli_probe() {
+        use std::os::unix::fs::PermissionsExt;
+        let temp = tempfile::tempdir().unwrap();
+        let token = temp.path().join("token");
+        let settings = temp.path().join("settings.json");
+        let marker = temp.path().join("calls");
+        let binary = temp.path().join("agy");
+        let flags = agy::REQUIRED_CLI_FLAGS.join(" ");
+        std::fs::write(&binary, format!("#!/bin/sh\necho \"$*\" >> '{}'\nif [ \"$1\" = --version ]; then echo 1.0.0; else echo '{}'; fi\n", marker.display(), flags)).unwrap();
+        std::fs::set_permissions(&binary, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let mut options = ProbeOptions::parse(Vec::new());
+        options.agy_bin = binary.to_string_lossy().into_owned();
+        let denied = agy::auth_status_from_inputs(&token, &settings, |key| {
+            (key == "GEMINI_API_KEY").then(|| "fixture".into())
+        });
+        probe_agy_with_account(&options, denied).await;
+        assert!(
+            !marker.exists(),
+            "conformance bypassed authentication admission"
+        );
+        std::fs::write(&settings, r#"{"modelProvider":"gemini"}"#).unwrap();
+        let admitted = agy::auth_status_from_inputs(&token, &settings, |key| {
+            (key == "GEMINI_API_KEY").then(|| "fixture".into())
+        });
+        assert!(
+            !probe_agy_with_account(&options, admitted)
+                .await
+                .has_failures()
+        );
+        assert_eq!(
+            std::fs::read_to_string(marker)
+                .unwrap()
+                .lines()
+                .collect::<Vec<_>>(),
+            ["--version", "--help"]
+        );
+    }
 
     #[test]
     fn options_default_to_the_standard_binaries_and_skip_missing() {

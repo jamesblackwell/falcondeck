@@ -393,7 +393,7 @@ impl AppState {
             let result = if host == LOCAL_HOST {
                 let result = run_local_upgrade(&upgrade_command).await;
                 match result {
-                    Ok(output) if matches!(harness.id, "codex" | "claude" | "opencode" | "agy") => {
+                    Ok(output) if matches!(harness.id, "codex" | "claude" | "opencode") => {
                         let resolved =
                             crate::agent_binary::resolve_agent_binary(harness.bin, harness.bin);
                         match probe_binary_version(&resolved.executable).await {
@@ -909,6 +909,12 @@ fn shell_quote(value: &str) -> String {
 }
 
 async fn collect_extra_installs(primary: &str, bin: &str) -> Vec<HarnessInstallCopy> {
+    if bin == "agy"
+        && crate::agy::read_auth_status("agy").await.status != falcondeck_core::AccountStatus::Ready
+    {
+        return Vec::new();
+    }
+
     let extras: Vec<String> = crate::agent_binary::list_installed_agent_binaries(bin)
         .into_iter()
         .filter(|path| path != primary)
@@ -929,6 +935,26 @@ async fn collect_extra_installs(primary: &str, bin: &str) -> Vec<HarnessInstallC
         .collect()
 }
 
+async fn allow_agy_inventory(summary: &mut HarnessSummary) -> bool {
+    let direct_agy = summary.id == "agy"
+        || summary.resolved_path.as_deref().is_some_and(|path| {
+            Path::new(path)
+                .file_name()
+                .is_some_and(|name| name == "agy")
+        });
+    if !direct_agy {
+        return true;
+    }
+    let account = crate::agy::read_auth_status("agy").await;
+    if account.status == falcondeck_core::AccountStatus::Ready {
+        return true;
+    }
+    summary.auth_verdict = HarnessAuthVerdict::Unavailable;
+    summary.account_status = Some(account.label);
+    summary.last_checked_at = Some(checked_at());
+    false
+}
+
 async fn probe_local_harness(harness: &KnownHarness) -> HarnessSummary {
     let resolution = crate::agent_binary::resolve_agent_binary(harness.bin, harness.bin);
     let mut summary = harness.summary();
@@ -938,6 +964,9 @@ async fn probe_local_harness(harness: &KnownHarness) -> HarnessSummary {
         // binary never spawns a shell.
         summary.failure = Some(missing_binary_failure(&summary.label, &summary.bin));
         summary.last_checked_at = Some(checked_at());
+        return summary;
+    }
+    if !allow_agy_inventory(&mut summary).await {
         return summary;
     }
     // Version and auth probes are independent; run them concurrently.
@@ -979,6 +1008,9 @@ async fn probe_configured_bin(summary: &mut HarnessSummary, bin: &str) {
     if !summary.installed {
         summary.failure = Some(missing_binary_failure(&summary.label, &summary.bin));
         summary.last_checked_at = Some(checked_at());
+        return;
+    }
+    if !allow_agy_inventory(summary).await {
         return;
     }
     let version = if summary.id == "unreal" {
@@ -1224,6 +1256,14 @@ fn json_from_auth_output(output: &str) -> Option<serde_json::Value> {
 }
 
 async fn run_with_timeout(executable: &str, args: &[&str]) -> Result<ProbeOutput, ProbeFailure> {
+    if Path::new(executable)
+        .file_name()
+        .is_some_and(|name| name == "agy")
+        && crate::agy::read_auth_status("agy").await.status != falcondeck_core::AccountStatus::Ready
+    {
+        return Err(ProbeFailure::CouldNotStart);
+    }
+
     let resolved = crate::agent_binary::resolve_agent_binary(executable, executable);
     let mut command = TokioCommand::new(&resolved.executable);
     crate::agy::configure_headless(&mut command);
@@ -1533,7 +1573,7 @@ fn remote_probe_script() -> String {
           if (parent === dir) process.exit(1);
           dir = parent;
         }' "$1" ;;
-    agy|*/agy) AGY_CLI_NONINTERACTIVE_HEADLESS=1 python3 -c 'import subprocess,sys; sys.exit(subprocess.call(sys.argv[1:], start_new_session=True))' "$1" --version ;;
+    agy|*/agy) return 0 ;; # Path-only remote inventory; no unverified CLI execution.
     hermes|*/hermes) "$1" acp --version ;;
     unreal-agent-runner|*/unreal-agent-runner) return 0 ;;
     *) "$1" --version ;;
@@ -1634,6 +1674,19 @@ mod tests {
         );
         assert!(summary.failure.as_deref().unwrap().contains("Repair"));
         assert!(!summary.failure.as_deref().unwrap().contains("private"));
+    }
+
+    #[tokio::test]
+    async fn agy_inventory_is_gated_and_remote_inventory_never_executes_it() {
+        let mut summary = KNOWN_HARNESSES
+            .iter()
+            .find(|harness| harness.id == "agy")
+            .unwrap()
+            .summary();
+        assert!(!allow_agy_inventory(&mut summary).await);
+        assert_eq!(summary.auth_verdict, HarnessAuthVerdict::Unavailable);
+        assert!(remote_probe_script().contains("agy|*/agy) return 0"));
+        assert!(!remote_probe_script().contains("AGY_CLI_NONINTERACTIVE_HEADLESS"));
     }
 
     #[test]
@@ -1993,10 +2046,18 @@ INSTALL
         let script = remote_probe_script();
         // Exercise the real inventory loop, without probing other installed
         // agents or running their authentication commands on the test host.
-        let inventory = script.split("\nif command -v").next().unwrap().replace(
-            "for bin do",
-            "for bin do\n  [ \"$bin\" = hermes ] || continue",
-        ).replace("/opt/homebrew/bin/$bin /usr/local/bin/$bin /usr/bin/$bin", "");
+        let inventory = script
+            .split("\nif command -v")
+            .next()
+            .unwrap()
+            .replace(
+                "for bin do",
+                "for bin do\n  [ \"$bin\" = hermes ] || continue",
+            )
+            .replace(
+                "/opt/homebrew/bin/$bin /usr/local/bin/$bin /usr/bin/$bin",
+                "",
+            );
         let output = tokio::process::Command::new("/bin/sh")
             .args(["-c", &inventory])
             .env_clear()

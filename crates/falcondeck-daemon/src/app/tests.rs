@@ -15,6 +15,24 @@ use falcondeck_core::{
 };
 
 #[tokio::test]
+async fn default_test_apps_do_not_share_or_read_the_user_state_directory() {
+    let first = AppState::new("test".into(), HashMap::new());
+    let second = AppState::new("test".into(), HashMap::new());
+    assert_ne!(first.inner.state_path, second.inner.state_path);
+    assert!(first.inner.state_path.starts_with(std::env::temp_dir()));
+    if let Some(home) = std::env::var_os("HOME") {
+        assert!(
+            !first
+                .inner
+                .state_path
+                .starts_with(PathBuf::from(home).join(".falcondeck"))
+        );
+    }
+    first.shutdown().await.unwrap();
+    second.shutdown().await.unwrap();
+}
+
+#[tokio::test]
 async fn snapshots_expose_the_local_restore_boundary() {
     let temp = tempdir().unwrap();
     let app = AppState::new_with_state_path(

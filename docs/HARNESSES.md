@@ -368,3 +368,18 @@ the daemon implementation is `crates/falcondeck-daemon/src/app/provider_usage.rs
   action so probing, registry concurrency, and cached latest-version state
   remain daemon-owned. Failed background checks stay silent and still consume
   the daily attempt, preventing offline launches from creating retry storms.
+
+
+## Antigravity probe safety
+
+AGY local inventory version probes require the shared saved-token/API-key/ADC
+admission policy documented in [ADAPTERS.md](ADAPTERS.md#background-authentication-and-provider-test-isolation).
+When it cannot establish those prerequisites, inventory reports the executable
+path without launching it. Remote inventory is path-only for AGY. Conformance
+checks use the same gate before version/help and never run `agy models`.
+
+AGY upgrades start only from explicit upgrade/install/repair HTTP/RPC requests
+(onboarding or Settings buttons, including a user-started Upgrade all queue).
+There is no automatic AGY update timer or startup update, and successful upgrades
+do not run an automatic AGY version verification. Headless/session-detached
+launches are retained, but version/help/update have not been proven OAuth-free.

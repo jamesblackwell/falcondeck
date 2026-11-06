@@ -150,7 +150,7 @@ pub struct AgyRuntime {
     turn_locks: Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
     next_turn_generation: std::sync::atomic::AtomicU64,
     #[cfg(test)]
-    test_auth_permitted: std::sync::atomic::AtomicBool,
+    test_auth_inputs: std::sync::Mutex<Option<(PathBuf, PathBuf, HashMap<String, String>)>>,
 }
 
 impl AgyRuntime {
@@ -167,7 +167,7 @@ impl AgyRuntime {
             turn_locks: Mutex::new(HashMap::new()),
             next_turn_generation: std::sync::atomic::AtomicU64::new(1),
             #[cfg(test)]
-            test_auth_permitted: std::sync::atomic::AtomicBool::new(false),
+            test_auth_inputs: std::sync::Mutex::new(None),
         });
 
         let executable = resolved.executable.clone();
@@ -191,9 +191,13 @@ impl AgyRuntime {
     }
 
     #[cfg(test)]
-    pub(crate) fn permit_stub_turn_for_test(&self) {
-        self.test_auth_permitted
-            .store(true, std::sync::atomic::Ordering::Relaxed);
+    pub(crate) fn set_auth_inputs_for_test(
+        &self,
+        token: PathBuf,
+        settings: PathBuf,
+        environment: HashMap<String, String>,
+    ) {
+        *self.test_auth_inputs.lock().unwrap() = Some((token, settings, environment));
     }
 
     pub fn workspace_path(&self) -> &str {
@@ -224,12 +228,18 @@ impl AgyRuntime {
     ) -> Result<AgyTurnSpawn, DaemonError> {
         let permitted = read_auth_status(&self.agy_bin).await.status == AccountStatus::Ready;
         #[cfg(test)]
-        let permitted = permitted
-            || self
-                .test_auth_permitted
-                .load(std::sync::atomic::Ordering::Relaxed);
+        let permitted = self
+            .test_auth_inputs
+            .lock()
+            .unwrap()
+            .as_ref()
+            .map(|(token, settings, environment)| {
+                auth_status_from_inputs(token, settings, |key| environment.get(key).cloned()).status
+                    == AccountStatus::Ready
+            })
+            .unwrap_or(permitted);
         if !permitted {
-            return Err(DaemonError::BadRequest("Antigravity needs saved credentials or environment authentication before FalconDeck can launch it safely. Run `agy` in a terminal to sign in, or set GEMINI_API_KEY, GOOGLE_API_KEY, or GOOGLE_APPLICATION_CREDENTIALS. Keyring-only sign-in is currently unsupported.".into()));
+            return Err(DaemonError::BadRequest(AUTH_SETUP_MESSAGE.into()));
         }
         let turn_lock = self.turn_lock(thread_id).await;
         let _turn_guard = turn_lock.lock().await;
@@ -578,7 +588,7 @@ async fn provider_probes(
 ) -> (AccountSummary, Vec<ModelSummary>, Vec<SkillSummary>) {
     (
         read_auth_status(executable).await,
-        cached_models(executable).await,
+        curated_models(),
         Vec::new(),
     )
 }
@@ -715,32 +725,52 @@ pub(crate) fn credential_account(raw: &str) -> AccountSummary {
     }
 }
 
-fn environment_auth_available(mut get: impl FnMut(&str) -> Option<String>) -> bool {
-    [
-        "GEMINI_API_KEY",
-        "GOOGLE_API_KEY",
-        "GOOGLE_APPLICATION_CREDENTIALS",
-    ]
-    .iter()
-    .any(|name| get(name).is_some_and(|value| !value.trim().is_empty()))
+pub(crate) const AUTH_SETUP_MESSAGE: &str = "Antigravity cannot start safely without configured authentication. Run `agy` in a terminal to save a token, or set GEMINI_API_KEY and modelProvider=\"gemini\" in ~/.gemini/antigravity-cli/settings.json, or set AGY_ADC_AUTH=true with GOOGLE_APPLICATION_CREDENTIALS. Keyring-only sign-in is unsupported.";
+
+/// The shared admission policy. Paths and environment are explicit so tests
+/// exercise the production rules without changing HOME or using real secrets.
+pub(crate) fn auth_status_from_inputs(
+    token_path: &std::path::Path,
+    settings_path: &std::path::Path,
+    mut get_env: impl FnMut(&str) -> Option<String>,
+) -> AccountSummary {
+    let raw = fs::read_to_string(token_path).unwrap_or_default();
+    let token = credential_account(&raw);
+    if token.status == AccountStatus::Ready {
+        return token;
+    }
+    let adc = get_env("AGY_ADC_AUTH").as_deref() == Some("true")
+        && get_env("GOOGLE_APPLICATION_CREDENTIALS").is_some_and(|value| !value.trim().is_empty());
+    let gemini = get_env("GEMINI_API_KEY").is_some_and(|value| !value.trim().is_empty())
+        && fs::read_to_string(settings_path)
+            .ok()
+            .and_then(|raw| serde_json::from_str::<Value>(&raw).ok())
+            .is_some_and(|settings| {
+                settings.get("modelProvider").and_then(Value::as_str) == Some("gemini")
+            });
+    if adc || gemini {
+        return AccountSummary {
+            status: AccountStatus::Ready,
+            label: "Antigravity authentication configured".into(),
+        };
+    }
+    AccountSummary {
+        status: AccountStatus::Unknown,
+        label: format!("Sign-in may be needed. {AUTH_SETUP_MESSAGE}"),
+    }
 }
 
 pub async fn read_auth_status(_agy_bin: &str) -> AccountSummary {
-    // Tests must never depend on the developer's credentials.
-    let raw = if crate::agent_binary::provider_test_mode() {
-        None
-    } else {
-        oauth_path().and_then(|path| fs::read_to_string(path).ok())
-    };
-    if !crate::agent_binary::provider_test_mode()
-        && environment_auth_available(|key| env::var(key).ok())
-    {
-        return AccountSummary {
-            status: AccountStatus::Ready,
-            label: "Antigravity environment authentication configured".into(),
-        };
+    // Unit/integration tests must opt in to explicit fixture inputs rather
+    // than admitting a process from the developer's HOME or environment.
+    if crate::agent_binary::provider_test_mode() {
+        return credential_account("");
     }
-    credential_account(raw.as_deref().unwrap_or(""))
+    let Some(token_path) = oauth_path() else {
+        return credential_account("");
+    };
+    let settings_path = token_path.with_file_name("settings.json");
+    auth_status_from_inputs(&token_path, &settings_path, |key| env::var(key).ok())
 }
 
 /// Request headless behavior and detach the CLI from the controlling terminal.
@@ -860,36 +890,14 @@ pub fn curated_models() -> Vec<ModelSummary> {
          gemini-4-argon-low\tGemini 4 Argon (Low)\n\
          claude-sonnet-5-5\tClaude Sonnet 5.5 (Thinking)\n\
          claude-opus-5-5\tClaude Opus 5.5 (Thinking)\n\
-         gpt-oss-120b-maas\tGPT-OSS 120B (Medium)\n",
+         gpt-oss-120b-maas\tGPT-OSS 120B (Medium)\n\
+         gemini-3.7-flash-high\tGemini 3.7 Flash (High)\n\
+         gemini-3.7-flash-medium\tGemini 3.7 Flash (Medium)\n\
+         gemini-3.7-flash-low\tGemini 3.7 Flash (Low)\n\
+         gemini-3.1-pro-high\tGemini 3.1 Pro (High)\n\
+         claude-sonnet-4-6\tClaude Sonnet 4.6 (Thinking)\n\
+         claude-opus-4-6-thinking\tClaude Opus 4.6 (Thinking)\n",
     )
-}
-
-#[derive(serde::Serialize, serde::Deserialize)]
-struct ModelCache {
-    executable: String,
-    attempted_at: DateTime<Utc>,
-    models: Vec<ModelSummary>,
-}
-
-fn model_cache_path() -> Option<PathBuf> {
-    Some(PathBuf::from(env::var_os("HOME")?).join(".cache/falcondeck/agy-models.json"))
-}
-
-async fn cached_models(executable: &str) -> Vec<ModelSummary> {
-    model_cache_path()
-        .map(|path| cached_models_at(executable, &path))
-        .unwrap_or_else(curated_models)
-}
-
-fn cached_models_at(executable: &str, path: &std::path::Path) -> Vec<ModelSummary> {
-    // Read-only: even headless/session-detached agy can invoke a browser on
-    // missing credentials, so background discovery must never spawn it.
-    fs::read(path)
-        .ok()
-        .and_then(|bytes| serde_json::from_slice::<ModelCache>(&bytes).ok())
-        .filter(|cache| cache.executable == executable && !cache.models.is_empty())
-        .map(|cache| cache.models)
-        .unwrap_or_else(curated_models)
 }
 
 pub(crate) fn authentication_required(message: &str) -> bool {
@@ -1206,44 +1214,106 @@ mod tests {
     use super::*;
 
     #[test]
-    fn model_catalog_uses_disk_cache_or_current_fallback_without_processes() {
+    fn admission_matches_cli_authentication_modes_using_explicit_inputs() {
         let temp = tempfile::tempdir().unwrap();
-        let cache = temp.path().join("catalog.json");
-        assert!(
-            cached_models_at("agy", &cache)
-                .iter()
-                .any(|model| model.id == "gemini-3.8-flash-medium" && model.is_default)
-        );
-        let entry = ModelCache {
-            executable: "agy".into(),
-            attempted_at: Utc::now(),
-            models: parse_models_table("fixture-model\tFixture Model\n"),
+        let token = temp.path().join("token");
+        let settings = temp.path().join("settings.json");
+        let status = |values: &[(&str, &str)]| {
+            auth_status_from_inputs(&token, &settings, |key| {
+                values
+                    .iter()
+                    .find(|(name, _)| *name == key)
+                    .map(|(_, value)| value.to_string())
+            })
+            .status
         };
-        fs::write(&cache, serde_json::to_vec(&entry).unwrap()).unwrap();
-        assert_eq!(cached_models_at("agy", &cache)[0].id, "fixture-model");
-        assert_ne!(
-            cached_models_at("another-install", &cache)[0].id,
-            "fixture-model"
+        assert_eq!(status(&[]), AccountStatus::Unknown);
+        assert_eq!(
+            status(&[("GOOGLE_API_KEY", "ignored")]),
+            AccountStatus::Unknown
         );
+        assert_eq!(
+            status(&[("GEMINI_API_KEY", "fixture")]),
+            AccountStatus::Unknown
+        );
+        fs::write(&settings, "malformed").unwrap();
+        assert_eq!(
+            status(&[("GEMINI_API_KEY", "fixture")]),
+            AccountStatus::Unknown
+        );
+        fs::write(&settings, r#"{"modelProvider":"other"}"#).unwrap();
+        assert_eq!(
+            status(&[("GEMINI_API_KEY", "fixture")]),
+            AccountStatus::Unknown
+        );
+        fs::write(&settings, r#"{"modelProvider":"gemini"}"#).unwrap();
+        assert_eq!(
+            status(&[("GOOGLE_API_KEY", "ignored")]),
+            AccountStatus::Unknown
+        );
+        assert_eq!(status(&[("GEMINI_API_KEY", " ")]), AccountStatus::Unknown);
+        assert_eq!(
+            status(&[("GEMINI_API_KEY", "fixture")]),
+            AccountStatus::Ready
+        );
+        fs::remove_file(&settings).unwrap();
+        fs::create_dir(&settings).unwrap(); // A settings read error must fail closed.
+        assert_eq!(
+            status(&[("GEMINI_API_KEY", "fixture")]),
+            AccountStatus::Unknown
+        );
+        assert_eq!(
+            status(&[("GOOGLE_APPLICATION_CREDENTIALS", "/fixture/adc.json")]),
+            AccountStatus::Unknown
+        );
+        assert_eq!(status(&[("AGY_ADC_AUTH", "true")]), AccountStatus::Unknown);
+        assert_eq!(
+            status(&[
+                ("AGY_ADC_AUTH", "1"),
+                ("GOOGLE_APPLICATION_CREDENTIALS", "/fixture/adc.json")
+            ]),
+            AccountStatus::Unknown
+        );
+        assert_eq!(
+            status(&[
+                ("AGY_ADC_AUTH", "true"),
+                ("GOOGLE_APPLICATION_CREDENTIALS", "/fixture/adc.json")
+            ]),
+            AccountStatus::Ready
+        );
+        fs::write(&token, "malformed").unwrap();
+        assert_eq!(status(&[]), AccountStatus::Unknown);
+        fs::write(
+            &token,
+            r#"{"token":{"access_token":"fixture","expiry":"2000-01-01T00:00:00Z"}}"#,
+        )
+        .unwrap();
+        assert_eq!(status(&[]), AccountStatus::Unknown);
+        fs::write(&token, r#"{"token":{"access_token":"fixture","refresh_token":"fixture","expiry":"2000-01-01T00:00:00Z"}}"#).unwrap();
+        assert_eq!(status(&[]), AccountStatus::Ready);
+        fs::write(&token, json!({"token":{"access_token":"fixture", "expiry":(Utc::now()+chrono::Duration::hours(1)).to_rfc3339()}}).to_string()).unwrap();
+        assert_eq!(status(&[]), AccountStatus::Ready);
     }
 
     #[test]
-    fn environment_auth_requires_a_nonempty_supported_credential_variable() {
-        for key in [
-            "GEMINI_API_KEY",
-            "GOOGLE_API_KEY",
-            "GOOGLE_APPLICATION_CREDENTIALS",
+    fn curated_catalog_keeps_supported_models_and_an_available_default() {
+        let models = curated_models();
+        for id in [
+            "gemini-3.8-flash-medium",
+            "gemini-3.7-flash-medium",
+            "gemini-3.1-pro-high",
+            "claude-sonnet-4-6",
+            "claude-opus-4-6-thinking",
+            "claude-sonnet-5-5",
         ] {
-            assert!(environment_auth_available(
-                |name| (name == key).then(|| "fixture".into())
-            ));
+            assert!(models.iter().any(|model| model.id == id));
         }
-        assert!(!environment_auth_available(|_| None));
-        assert!(!environment_auth_available(|_| Some(" ".into())));
-        assert!(!environment_auth_available(|name| (name
-            == "GOOGLE_CLOUD_PROJECT")
-            .then(|| "project".into())));
-        assert_eq!(credential_account(r#"{"token":{"access_token":"fixture","refresh_token":"fixture","expiry":"2000-01-01T00:00:00Z"}}"#).status, AccountStatus::Ready);
+        assert_eq!(models.iter().filter(|model| model.is_default).count(), 1);
+        assert!(
+            models
+                .iter()
+                .any(|model| model.id == "gemini-3.8-flash-medium" && model.is_default)
+        );
     }
 
     #[test]
@@ -1318,7 +1388,15 @@ mod tests {
             matches!(refused, Err(DaemonError::BadRequest(message)) if message.contains("GEMINI_API_KEY"))
         );
         assert!(!marker.exists());
-        boot.runtime.permit_stub_turn_for_test();
+        let token = temp.path().join("fixture-token");
+        let settings = temp.path().join("settings.json");
+        boot.runtime
+            .set_auth_inputs_for_test(token.clone(), settings, HashMap::new());
+        fs::write(
+            &token,
+            r#"{"token":{"access_token":"fixture","refresh_token":"fixture"}}"#,
+        )
+        .unwrap();
         let spawned = boot
             .runtime
             .spawn_turn(
@@ -1326,7 +1404,7 @@ mod tests {
                 None,
                 "hello",
                 &[],
-                None,
+                Some("stored-unlisted-model"),
                 None,
                 None,
                 None,
@@ -1339,7 +1417,11 @@ mod tests {
             .finish_turn("test", spawned.unwrap().generation)
             .await
             .unwrap();
-        assert!(marker.exists());
+        assert!(
+            fs::read_to_string(marker)
+                .unwrap()
+                .contains("stored-unlisted-model")
+        );
     }
 
     #[cfg(unix)]
@@ -1375,7 +1457,7 @@ mod tests {
             turn_locks: Mutex::new(HashMap::new()),
             next_turn_generation: std::sync::atomic::AtomicU64::new(1),
             #[cfg(test)]
-            test_auth_permitted: std::sync::atomic::AtomicBool::new(false),
+            test_auth_inputs: std::sync::Mutex::new(None),
         };
 
         // This checks a real timing contract: idle runtime shutdown must not

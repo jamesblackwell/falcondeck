@@ -1060,7 +1060,16 @@ enum RemoteBridgeCommand {
 
 impl AppState {
     pub fn new(version: String, provider_bins: HashMap<AgentProvider, String>) -> Self {
-        Self::new_with_state_path(version, provider_bins, default_state_path())
+        // Tests keep the real HOME, but implicit app construction must never
+        // load the user's providers.json or overwrite their daemon state.
+        let path = if crate::agent_binary::provider_test_mode() {
+            std::env::temp_dir()
+                .join(format!("falcondeck-test-state-{}", Uuid::new_v4()))
+                .join("daemon-state.json")
+        } else {
+            default_state_path()
+        };
+        Self::new_with_state_path(version, provider_bins, path)
     }
 
     pub fn new_with_state_path(

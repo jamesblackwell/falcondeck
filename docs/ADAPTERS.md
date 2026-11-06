@@ -469,29 +469,45 @@ initiate interactive sign-in. Null stdin and print mode do not enforce this:
 Antigravity can start browser OAuth from read-only print-mode slash commands.
 Only an explicit user action in a terminal should initiate sign-in.
 
-Antigravity status reads credential presence from
-`$HOME/.gemini/antigravity-cli/antigravity-oauth-token` (the nested `token`
-object) and checks configured `GEMINI_API_KEY`, `GOOGLE_API_KEY`, or
-`GOOGLE_APPLICATION_CREDENTIALS` environment authentication. Missing or
-unrecognized sources mean unknown. Credential presence is not proof that the
-server will accept them. A CLI-reported authentication failure becomes a clear
-login-required error and updates the workspace account status.
+Antigravity status and process admission use the same explicit-input rule,
+matching the CLI's [authentication contract](https://antigravity.google/docs/install/):
 
-Turns require a usable token file (an access token with a future expiry or a
-refresh token, including an expired access token) or one of those explicit
-environment credential sources. Otherwise FalconDeck refuses the launch and
-explains how to sign in or configure a key/ADC credential file. **Keyring-only
-sign-in is currently unsupported:** a controlled signed-out check showed that
-`AGY_CLI_NONINTERACTIVE_HEADLESS=1` plus `setsid` still invokes `open` for Google
-OAuth and waits for authentication. The browser opener was stubbed during that
-check. Do not remove the credential gate based on the headless setting.
+- A usable `~/.gemini/antigravity-cli/antigravity-oauth-token` with an access
+  token and either a future expiry or a refresh token. Expired access tokens
+  with a refresh token are admitted.
+- A nonempty `GEMINI_API_KEY` **and** a readable, valid
+  `~/.gemini/antigravity-cli/settings.json` with `modelProvider: "gemini"`.
+- Exact `AGY_ADC_AUTH=true` **and** nonempty `GOOGLE_APPLICATION_CREDENTIALS`.
 
-Metadata never runs `agy`, including `/usage`, `/skills`, or `models`.
-It reads a matching existing catalog from `~/.cache/falcondeck/agy-models.json`,
-then falls back to the current curated list. There are no background CLI
-refreshes, including after cache misses or failures. The default must exist in
-the returned catalog. The fallback tracks Google's
-[model availability](https://antigravity.google/docs/models/).
+`GOOGLE_API_KEY` is ignored by agy and never admits a launch. A key without its
+provider setting, an ADC path without the ADC mode, and settings read/parse
+failures in API-key mode fail closed. Missing sources mean unknown; a refused
+turn explains how to configure authentication. Credential presence is not proof
+that the server will accept them. A CLI-reported authentication failure becomes
+a clear login-required error and updates the workspace account status.
+
+**Keyring-only sign-in is currently unsupported:** a controlled signed-out check
+showed that `AGY_CLI_NONINTERACTIVE_HEADLESS=1` plus `setsid` still invokes `open`
+for Google OAuth and waits for authentication. The browser opener was stubbed
+during that check. Do not remove the credential gate based on the headless
+setting. Do not claim that version/help/update commands skip OAuth without proof.
+
+Metadata and conformance model enumeration use only the curated catalog; no
+`agy models`, `/usage`, or `/skills` process is launched. The old disk model cache
+is neither read nor written. The catalog includes current models and supported
+enterprise Gemini 3.7/3.1 and Claude 4.6 options, while keeping Gemini 3.8 Flash
+Medium as the default. Stored thread model IDs pass through unchanged, including
+IDs outside the curated list. Availability follows Google's
+[model reference](https://antigravity.google/docs/models/).
+
+Native process entry points:
+
+| Call | When it runs | Admission |
+| --- | --- | --- |
+| `--version` | Local Harnesses inventory/refresh, including cached-overview expiry and extra-copy checks | The same authentication rule; otherwise path-only status. Remote inventory is always path-only for agy. |
+| `--version`, `--help` | Explicit harness conformance command | The same rule before any process; never used for model discovery. |
+| Print-mode turn | Explicit turn start/resume/model switch, or an admitted scheduled turn | The same rule before launching the child; steering writes only to an existing child. |
+| `update` / installer | Explicit upgrade/install/repair HTTP or RPC request from onboarding/Settings, including user-started Upgrade all | No daemon startup/timer upgrade path. No automatic agy version verification after it. These mutating user actions have not been proven OAuth-free. |
 
 Filesystem skill discovery includes `~/.gemini/config/skills`, each
 `~/.gemini/config/plugins/<plugin>/skills`, `~/.gemini/antigravity-cli/skills`,
@@ -506,11 +522,15 @@ turns, explicit conformance, inventory/version/help and local upgrade shells.
 These settings are best-effort and do not replace the credential gate.
 Redirected stdin alone does not establish the CLI's documented
 [headless authentication behavior](https://antigravity.google/docs/cli/headless/).
-Remote Antigravity inventory/update commands use Python's
+Remote Antigravity updates use Python's
 `subprocess.call(..., start_new_session=True)` and require Python 3 rather than
-falling back to a potentially interactive launch. Custom ACP commands wrapping `agy` remain outside this native contract.
+falling back to a potentially interactive launch. Remote inventory never runs agy. Custom ACP commands wrapping `agy` remain outside this native contract.
 
 Plain `cargo test` must not execute installed provider CLIs, regardless of HOME.
+Test runs retain the real HOME and put failing provider/browser stubs first on
+PATH. Implicit `AppState::new` uses a unique state directory under the test
+TMPDIR so it cannot load the user's providers.json or overwrite daemon state;
+the runner owns and removes that dedicated TMPDIR after the run.
 Unit tests enable the provider guard at compile time. Integration tests call
 `disable_real_provider_binaries_for_tests()` before constructing a daemon;
 spawned daemon fixtures pass `FALCONDECK_TEST_NO_PROVIDERS=1`. Only that exact

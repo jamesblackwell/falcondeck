@@ -4087,13 +4087,26 @@ mod tests {
         use std::os::unix::fs::PermissionsExt;
         let temp = tempdir().unwrap();
         let executable = temp.path().join("agy");
-        std::fs::write(&executable, r#"#!/bin/sh
+        std::fs::write(
+            &executable,
+            r#"#!/bin/sh
 read -r line
 printf '%s\n' '{"event":"result","result":{"status":"ERROR","error":"authentication required"}}'
-"#).unwrap();
+"#,
+        )
+        .unwrap();
         std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o700)).unwrap();
-        let bootstrap = AgyRuntime::connect(temp.path().to_string_lossy().into_owned(), executable.to_string_lossy().into_owned()).await.unwrap();
-        let app = AppState::new_with_state_path("test".into(), HashMap::new(), temp.path().join("state.json"));
+        let bootstrap = AgyRuntime::connect(
+            temp.path().to_string_lossy().into_owned(),
+            executable.to_string_lossy().into_owned(),
+        )
+        .await
+        .unwrap();
+        let app = AppState::new_with_state_path(
+            "test".into(),
+            HashMap::new(),
+            temp.path().join("state.json"),
+        );
         let mut thread = isolated_codex_thread();
         thread.summary.provider = AgentProvider::AGY;
         thread.summary.status = ThreadStatus::Running;
@@ -4102,21 +4115,168 @@ printf '%s\n' '{"event":"result","result":{"status":"ERROR","error":"authenticat
             "id": "workspace-1", "path": temp.path(), "status": "ready", "default_provider": "agy",
             "agents": [{"provider": "agy", "account": bootstrap.account}],
             "connected_at": "2026-11-06T00:00:00Z", "updated_at": "2026-11-06T00:00:00Z"
-        })).unwrap();
-        app.inner.workspaces.lock().await.insert("workspace-1".into(), crate::app::ManagedWorkspace {
-            summary, codex_session: None, claude_runtime: None, agy_runtime: Some(bootstrap.runtime.clone()),
-            opencode_runtime: None, acp_runtimes: HashMap::new(), threads: HashMap::from([(thread_id.clone(), thread)]),
-        });
-        bootstrap.runtime.permit_stub_turn_for_test();
-        let spawned = bootstrap.runtime.spawn_turn(&thread_id, None, "fixture", &[], None, None, None, None, temp.path().to_str().unwrap()).await.unwrap();
-        app.monitor_agy_turn("workspace-1".into(), thread_id.clone(), spawned.generation, spawned.stdout, spawned.stderr, false).await;
+        }))
+        .unwrap();
+        app.inner.workspaces.lock().await.insert(
+            "workspace-1".into(),
+            crate::app::ManagedWorkspace {
+                summary,
+                codex_session: None,
+                claude_runtime: None,
+                agy_runtime: Some(bootstrap.runtime.clone()),
+                opencode_runtime: None,
+                acp_runtimes: HashMap::new(),
+                threads: HashMap::from([(thread_id.clone(), thread)]),
+            },
+        );
+        let token = temp.path().join("fixture-token");
+        std::fs::write(
+            &token,
+            r#"{"token":{"access_token":"fixture","refresh_token":"fixture"}}"#,
+        )
+        .unwrap();
+        bootstrap.runtime.set_auth_inputs_for_test(
+            token,
+            temp.path().join("settings.json"),
+            HashMap::new(),
+        );
+        let spawned = bootstrap
+            .runtime
+            .spawn_turn(
+                &thread_id,
+                None,
+                "fixture",
+                &[],
+                None,
+                None,
+                None,
+                None,
+                temp.path().to_str().unwrap(),
+            )
+            .await
+            .unwrap();
+        app.monitor_agy_turn(
+            "workspace-1".into(),
+            thread_id.clone(),
+            spawned.generation,
+            spawned.stdout,
+            spawned.stderr,
+            false,
+        )
+        .await;
         let thread = app.thread_summary("workspace-1", &thread_id).await.unwrap();
         assert_eq!(thread.status, ThreadStatus::Error);
         assert!(thread.last_error.unwrap().contains("login required"));
-        assert_eq!(app.snapshot().await.workspaces[0].agents[0].account.status, falcondeck_core::AccountStatus::NeedsAuth);
+        assert_eq!(
+            app.snapshot().await.workspaces[0].agents[0].account.status,
+            falcondeck_core::AccountStatus::NeedsAuth
+        );
         app.shutdown().await.unwrap();
     }
 
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn agy_send_turn_recovers_after_auth_refusal_and_keeps_stored_model_id() {
+        use std::os::unix::fs::PermissionsExt;
+        let temp = tempdir().unwrap();
+        let executable = temp.path().join("agy");
+        let calls = temp.path().join("calls");
+        let script = format!(
+            r#"#!/bin/sh
+printf '%s\n' "$*" >> '{}'
+read -r line
+printf '%s\n' '{{"event":"result","result":{{"status":"SUCCESS","response":"fixture"}}}}'
+"#,
+            calls.display()
+        );
+        std::fs::write(&executable, script).unwrap();
+        std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let bootstrap = AgyRuntime::connect(
+            temp.path().to_string_lossy().into_owned(),
+            executable.to_string_lossy().into_owned(),
+        )
+        .await
+        .unwrap();
+        let token = temp.path().join("token");
+        bootstrap.runtime.set_auth_inputs_for_test(
+            token.clone(),
+            temp.path().join("settings.json"),
+            HashMap::new(),
+        );
+        let app = AppState::new_with_state_path(
+            "test".into(),
+            HashMap::new(),
+            temp.path().join("state.json"),
+        );
+        let mut thread = isolated_codex_thread();
+        thread.summary.provider = AgentProvider::AGY;
+        thread.summary.native_session_id = None;
+        thread.summary.agent.model_id = Some("stored-unlisted-model".into());
+        thread.requires_resume = false;
+        let thread_id = thread.summary.id.clone();
+        let summary = serde_json::from_value(json!({
+            "id": "workspace-1", "path": temp.path(), "status": "ready", "default_provider": "agy",
+            "agents": [{"provider": "agy", "account": bootstrap.account}],
+            "connected_at": "2026-11-06T00:00:00Z", "updated_at": "2026-11-06T00:00:00Z"
+        }))
+        .unwrap();
+        app.inner.workspaces.lock().await.insert(
+            "workspace-1".into(),
+            crate::app::ManagedWorkspace {
+                summary,
+                codex_session: None,
+                claude_runtime: None,
+                agy_runtime: Some(bootstrap.runtime.clone()),
+                opencode_runtime: None,
+                acp_runtimes: HashMap::new(),
+                threads: HashMap::from([(thread_id.clone(), thread)]),
+            },
+        );
+        let request = || {
+            serde_json::from_value(json!({ "workspace_id": "workspace-1", "thread_id": thread_id, "inputs": [{"type":"text", "text":"fixture"}] })).unwrap()
+        };
+        let refused = app.send_turn(request()).await;
+        assert!(
+            matches!(refused, Err(DaemonError::BadRequest(message)) if message.contains("modelProvider"))
+        );
+        assert_eq!(
+            app.thread_summary("workspace-1", &thread_id)
+                .await
+                .unwrap()
+                .status,
+            ThreadStatus::Error
+        );
+        assert!(!calls.exists());
+        std::fs::write(
+            &token,
+            r#"{"token":{"access_token":"fixture","refresh_token":"fixture"}}"#,
+        )
+        .unwrap();
+        assert!(app.send_turn(request()).await.unwrap().ok);
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                let thread = app.thread_summary("workspace-1", &thread_id).await.unwrap();
+                if thread.status == ThreadStatus::Idle {
+                    break;
+                }
+                assert_ne!(
+                    thread.status,
+                    ThreadStatus::Error,
+                    "{:?}",
+                    thread.last_error
+                );
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .unwrap();
+        assert!(
+            std::fs::read_to_string(calls)
+                .unwrap()
+                .contains("stored-unlisted-model")
+        );
+        app.shutdown().await.unwrap();
+    }
     #[test]
     fn releases_only_idle_codex_subagents() {
         let read = |parent: Value, status: &str| {
