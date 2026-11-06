@@ -979,10 +979,13 @@ impl AppState {
             let name = bot.map(|b| b.name.as_str()).unwrap_or("FalconDeck");
             let notice = super::notification_centre::AgentNotice {
                 title: format!("{name} needs help with delegated work"),
-                summary: format!(
-                    "{} has delegated work it has not received. Check the task and resume or redirect it. {}",
-                    name,
-                    short(&alert.text, 350)
+                summary: short(
+                    &format!(
+                        "{}: {}. Check the task; the bot has not received its outcome.",
+                        short(name, 40),
+                        short(&alert.text, 100)
+                    ),
+                    200,
                 ),
                 body: Some(alert.text.clone()),
                 importance: falcondeck_core::notifications::NotificationImportance::High,
