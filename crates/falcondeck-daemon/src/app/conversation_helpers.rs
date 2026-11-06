@@ -56,6 +56,37 @@ pub(crate) fn should_suppress_tool_output(title: &str, kind: &str) -> bool {
     let normalized_title = title.to_ascii_lowercase();
     let normalized_kind = kind.to_ascii_lowercase();
 
+    if matches!(normalized_kind.as_str(),
+        "bash" | "shell" | "command" | "command_execution" | "exec" | "exec_command")
+    {
+        // Recognize direct reader operands, not filenames in comments or labels.
+        // This is deliberately a conservative heuristic, not a shell interpreter.
+        static WORDS: LazyLock<Regex> = LazyLock::new(||
+            Regex::new(r#""([^"]*)"|'([^']*)'|([^\s]+)"#).expect("valid shell word regex"));
+        return normalized_title.split([';', '|', '&', '\n']).any(|segment| {
+            let words: Vec<_> = WORDS.captures_iter(segment)
+                .filter_map(|word| word.get(1).or_else(|| word.get(2)).or_else(|| word.get(3)))
+                .map(|word| word.as_str())
+                .take_while(|word| !word.starts_with('#'))
+                .collect();
+            let Some(program) = words.first().and_then(|word| word.rsplit('/').next()) else { return false; };
+            matches!(program, "cat" | "bat" | "head" | "tail" | "more" | "less" | "sed" | "awk")
+                && words.iter().skip(1).filter(|word| !word.starts_with('-')).any(|word|
+                    word.rsplit('/').next() == Some("skill.md")
+                    || word.contains(".agents/skills/") || word.contains(".codex/skills/")
+                    || word.contains(".claude/commands/"))
+        });
+    }
+    // Result records can lack a tool kind. Defer shell commands to the
+    // invocation-aware check rather than treating a filename mention as a read.
+    if normalized_kind.is_empty()
+        && normalized_title.contains(char::is_whitespace)
+        && !normalized_title.starts_with("read ")
+        && !normalized_title.starts_with("load skill")
+    {
+        return false;
+    }
+
     normalized_title.starts_with("load skill")
         || normalized_title.contains(".agents/skills/")
         || normalized_title.contains(".codex/skills/")
@@ -89,7 +120,8 @@ pub(crate) fn sanitize_conversation_item(item: &mut ConversationItem) {
     };
 
     let command_is_skill = matches!(detail.as_deref(), Some(ToolCallDetail::Dynamic { arguments, .. }) if arguments.get("command").and_then(Value::as_str).is_some_and(|c| should_suppress_tool_output(c, tool_kind)));
-    if should_suppress_tool_output(title, tool_kind) || command_is_skill {
+    if status != "failed" && exit_code.is_none_or(|code| code == 0)
+        && (should_suppress_tool_output(title, tool_kind) || command_is_skill) {
         *output = None;
         if let Some(ToolCallDetail::Dynamic {
             claude: Some(evidence),
@@ -1945,7 +1977,10 @@ The conversation may have moved on from that name. Write a title that reflects t
                 ..
             } => Some(format!(
                 "Tool: {}{}",
-                truncate_preview(&agent_tool_title(title, tool_kind, detail.as_deref()), 120),
+                truncate_preview(
+                    &agent_tool_title(title, tool_kind, detail.as_deref()),
+                    120
+                ),
                 output
                     .as_deref()
                     .filter(|value| !value.trim().is_empty())
@@ -4381,6 +4416,25 @@ mod tool_settlement_tests {
             created_at: Utc::now(),
             completed_at: None,
         }
+    }
+
+    #[test]
+    fn skill_suppression_only_removes_successful_reads() {
+        for command in ["git diff -- SKILL.md", "echo SKILL.md", "rg SKILL.md .", "git status -- .agents/skills/example", "cat README.md # SKILL.md", "cat SKILL.md.bak"] {
+            assert!(!should_suppress_tool_output(command, "Bash"), "{command}");
+            assert!(!should_suppress_tool_output(command, ""), "{command}");
+        }
+        for command in ["cat /example/SKILL.md", "cd /example && cat 'SKILL.md'", "sed -n '1,80p' /example/SKILL.md"] {
+            assert!(should_suppress_tool_output(command, "Bash"), "{command}");
+        }
+        let mut failed = tool_item("failed");
+        if let ConversationItem::ToolCall { title, tool_kind, output, detail, .. } = &mut failed {
+            *title = "cat missing/SKILL.md".into(); *tool_kind = "Bash".into();
+            *output = Some("No such file".into());
+            *detail = super::super::mcp_presentation::claude_tool_detail("Bash", Some(&json!({"command":"cat missing/SKILL.md"}))).map(Box::new);
+        }
+        sanitize_conversation_item(&mut failed);
+        assert!(matches!(failed, ConversationItem::ToolCall { output: Some(ref text), .. } if text == "No such file"));
     }
 
     #[test]

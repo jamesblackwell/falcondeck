@@ -68,15 +68,10 @@ fn workspace_kind_for_path(path: &str) -> falcondeck_core::WorkspaceKind {
 }
 
 fn is_bot_workspace_path(path: &Path) -> bool {
-    path.file_name()
-        .and_then(|name| name.to_str())
+    path.file_name().and_then(|name| name.to_str())
         .and_then(|name| name.strip_prefix("bot-"))
         .is_some_and(|id| Uuid::parse_str(id).is_ok())
-        && path
-            .parent()
-            .and_then(Path::file_name)
-            .and_then(|name| name.to_str())
-            == Some("bots")
+        && path.parent().and_then(Path::file_name).and_then(|name| name.to_str()) == Some("bots")
 }
 
 use crate::{
@@ -94,38 +89,38 @@ use crate::{
 };
 
 mod acp_threads;
-pub(crate) mod agent_helpers;
 mod analytics;
-mod bots;
+pub(crate) mod agent_helpers;
 mod claude_history;
 #[cfg(all(test, unix))]
 mod claude_startup_measurement;
 mod cloud_threads;
 mod computer_use;
 pub(crate) mod conversation_helpers;
+pub(crate) mod mcp_presentation;
 mod extension_events;
 mod extension_host;
 mod extensions;
 pub(crate) mod harness_manager;
 mod harness_user_text;
 pub(crate) mod host_provisioning;
-pub(crate) mod mcp_presentation;
 mod notification_centre;
 mod notifications;
 mod opencode_threads;
 mod project_folders;
+mod bots;
+pub(crate) mod recovery;
 mod provider_runtime;
 mod provider_usage;
-pub(crate) mod recovery;
 mod remote_bridge;
 mod remote_lifecycle;
 mod reviews;
 mod rewrite_models;
-mod routing;
 mod runtime_health;
 mod scheduled_tasks;
 mod snapshot_projection;
 mod speech;
+mod routing;
 mod speech_audio;
 mod startup_resume;
 pub(crate) mod storage;
@@ -907,12 +902,7 @@ fn backfill_automation_origins(
             }
             let owner = owners[0];
             // A later interactive model selection must keep winning over a legacy pin.
-            if owner
-                .target
-                .model_id
-                .as_ref()
-                .is_some_and(|pin| thread.agent.model_id.as_ref() != Some(pin))
-            {
+            if owner.target.model_id.as_ref().is_some_and(|pin| thread.agent.model_id.as_ref() != Some(pin)) {
                 tracing::warn!(thread_id = %thread.thread_id, automation_id = %owner.id,
                     "legacy automation model pin differs from thread model; leaving origin unset");
                 continue;
@@ -1349,26 +1339,13 @@ impl AppState {
     }
 
     /// Latest reported context counters, without cloning conversations.
-    pub(crate) fn thread_context_tokens(
-        &self,
-        thread_id: &str,
-        provider: &AgentProvider,
-    ) -> Option<u64> {
-        let usage = self
-            .inner
-            .thread_token_usage
-            .lock()
-            .unwrap_or_else(|p| p.into_inner());
+    pub(crate) fn thread_context_tokens(&self, thread_id: &str, provider: &AgentProvider) -> Option<u64> {
+        let usage = self.inner.thread_token_usage.lock().unwrap_or_else(|p| p.into_inner());
         let usage = usage.get(thread_id)?;
         let context = usage.last.as_ref().unwrap_or(&usage.total);
         // Codex includes cache reads in input_tokens; Claude reports them separately.
-        Some(if *provider == AgentProvider::CODEX {
-            context.input_tokens
-        } else {
-            context
-                .input_tokens
-                .saturating_add(context.cached_input_tokens)
-        })
+        Some(if *provider == AgentProvider::CODEX { context.input_tokens }
+            else { context.input_tokens.saturating_add(context.cached_input_tokens) })
     }
 
     /// Whether this target reuses a bot's expensive home conversation.
@@ -1421,11 +1398,8 @@ impl AppState {
                         crate::control::ControlError::invalid_arguments(format!("target: {error}"))
                     })?;
             let bot_home = self.automation_targets_bot_home(&target).await;
-            let advice = tokio::task::spawn_blocking(move || {
-                crate::control::automations::cadence_advice(&trigger, &target, bot_home, Utc::now())
-            })
-            .await
-            .map_err(|error| crate::control::ControlError::internal(error.to_string()))??;
+            let advice = tokio::task::spawn_blocking(move || crate::control::automations::cadence_advice(&trigger, &target, bot_home, Utc::now()))
+                .await.map_err(|error| crate::control::ControlError::internal(error.to_string()))??;
             return Ok(falcondeck_core::control::ControlGetResponse {
                 resource: request.resource,
                 data: serde_json::json!(advice),
@@ -1599,16 +1573,14 @@ impl AppState {
             return None;
         }
         match prefs.backend {
-            ComputerUseBackend::CuaDriver => {
-                match self.inner.computer_use.ensure_ready(prefs).await {
-                    Ok(Some(_)) => Some(ComputerUseContext::CuaDriver),
-                    Ok(None) => None,
-                    Err(error) => {
-                        tracing::warn!(%error, "computer-use context not injected");
-                        None
-                    }
+            ComputerUseBackend::CuaDriver => match self.inner.computer_use.ensure_ready(prefs).await {
+                Ok(Some(_)) => Some(ComputerUseContext::CuaDriver),
+                Ok(None) => None,
+                Err(error) => {
+                    tracing::warn!(%error, "computer-use context not injected");
+                    None
                 }
-            }
+            },
             ComputerUseBackend::AgentDesktop => self
                 .inner
                 .computer_use
@@ -1805,12 +1777,9 @@ impl AppState {
             .await
             .map_err(|error| unreadable(&self.inner.state_path, error))?;
         let definitions = self.control().automations_snapshot().await;
-        let bot_thread_ids = preferences
-            .bots
-            .iter()
+        let bot_thread_ids = preferences.bots.iter()
             .flat_map(|bot| std::iter::once(&bot.thread_id).chain(&bot.previous_thread_ids))
-            .cloned()
-            .collect();
+            .cloned().collect();
         backfill_automation_origins(&mut persisted.workspaces, &definitions, &bot_thread_ids);
         // Clients can mutate lazy projects as soon as the first snapshot is
         // published. Keep the pairing durable while its keychain read is pending.
@@ -4217,18 +4186,8 @@ impl AppState {
         &self,
         workspace_id: &str,
     ) -> Result<falcondeck_core::CommandResponse, DaemonError> {
-        if self
-            .inner
-            .preferences
-            .lock()
-            .await
-            .bots
-            .iter()
-            .any(|bot| bot.workspace_id == workspace_id)
-        {
-            return Err(DaemonError::Conflict(
-                "Delete this project's bots before removing the project".into(),
-            ));
+        if self.inner.preferences.lock().await.bots.iter().any(|bot| bot.workspace_id == workspace_id) {
+            return Err(DaemonError::Conflict("Delete this project's bots before removing the project".into()));
         }
         workspace_ops::remove_workspace(self, workspace_id).await
     }
@@ -4237,18 +4196,8 @@ impl AppState {
         &self,
         workspace_id: &str,
     ) -> Result<falcondeck_core::CommandResponse, DaemonError> {
-        if self
-            .inner
-            .preferences
-            .lock()
-            .await
-            .bots
-            .iter()
-            .any(|b| b.workspace_id == workspace_id)
-        {
-            return Err(DaemonError::Conflict(
-                "This project hosts a bot's home conversation".into(),
-            ));
+        if self.inner.preferences.lock().await.bots.iter().any(|b| b.workspace_id == workspace_id) {
+            return Err(DaemonError::Conflict("This project hosts a bot's home conversation".into()));
         }
         workspace_ops::close_workspace(self, workspace_id).await
     }
@@ -5141,12 +5090,7 @@ impl AppState {
         }
     }
 
-    fn emit(
-        &self,
-        workspace_id: Option<String>,
-        thread_id: Option<String>,
-        mut event: UnifiedEvent,
-    ) {
+    fn emit(&self, workspace_id: Option<String>, thread_id: Option<String>, mut event: UnifiedEvent) {
         workspace_ops::project_live_tool_event(&mut event);
         let extension_event = extension_events::lifecycle_event(
             workspace_id.as_deref(),

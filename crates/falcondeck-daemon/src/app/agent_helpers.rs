@@ -771,12 +771,12 @@ impl ClaudeSubagentActivity {
                     call.title = event.title.unwrap_or_else(|| call.title.clone());
                 }
                 call.status = event.status;
-                if should_suppress_tool_output(&call.title, &call.tool_kind)
+                if call.status != "failed" && (should_suppress_tool_output(&call.title, &call.tool_kind)
                     || call
                         .arguments
                         .get("command")
                         .and_then(Value::as_str)
-                        .is_some_and(|c| should_suppress_tool_output(c, &call.tool_kind))
+                        .is_some_and(|c| should_suppress_tool_output(c, &call.tool_kind)))
                 {
                     call.output = None;
                 } else if event.output.is_some() {
@@ -785,13 +785,13 @@ impl ClaudeSubagentActivity {
             } else {
                 let title = event.title.unwrap_or_else(|| "Claude tool".to_string());
                 let tool_kind = event.tool_kind.unwrap_or_default();
-                let suppressed = should_suppress_tool_output(&title, &tool_kind)
+                let suppressed = event.status != "failed" && (should_suppress_tool_output(&title, &tool_kind)
                     || event
                         .input
                         .as_ref()
                         .and_then(|v| v.get("command"))
                         .and_then(Value::as_str)
-                        .is_some_and(|c| should_suppress_tool_output(c, &tool_kind));
+                        .is_some_and(|c| should_suppress_tool_output(c, &tool_kind)));
                 self.calls.push(falcondeck_core::ClaudeNestedCall {
                     id: event.id,
                     title,
@@ -1904,6 +1904,19 @@ mod service_message_tests {
             ),
             ("Agent: Inspect space".into(), "Agent".into())
         );
+    }
+
+    #[test]
+    fn claude_child_skill_mentions_and_failed_reads_retain_output() {
+        let mut activity = ClaudeSubagentActivity::default();
+        for (id, command, failed, output) in [
+            ("diff", "git diff -- SKILL.md", false, "fixture diff"),
+            ("failed", "cat missing/SKILL.md", true, "No such file"),
+        ] {
+            activity.record(&json!({"type":"assistant","message":{"content":[{"type":"tool_use","id":id,"name":"Bash","input":{"command":command}}]}}));
+            activity.record(&json!({"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":id,"is_error":failed,"content":output}]}}));
+            assert_eq!(activity.calls.last().unwrap().output.as_deref(), Some(output));
+        }
     }
 
     #[test]

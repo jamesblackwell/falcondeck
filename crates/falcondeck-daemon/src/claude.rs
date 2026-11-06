@@ -338,11 +338,7 @@ impl ClaudeRuntime {
             hooks_enabled,
             control_mcp: builtin.control.is_some(),
             extensions_mcp: builtin.extensions.is_some(),
-            autocompact_tokens: resolved_autocompact_window(
-                model_id,
-                autocompact_tokens,
-                autocompact_override,
-            ),
+            autocompact_tokens: resolved_autocompact_window(model_id, autocompact_tokens, autocompact_override),
         };
         // Clear any interrupt aimed at earlier turns; interrupts arriving from
         // here on target this spawn and are re-checked after insertion below.
@@ -1413,11 +1409,7 @@ fn autocompact_window(model_id: Option<&str>, tokens: u32) -> Option<u32> {
     }
 }
 
-fn resolved_autocompact_window(
-    model_id: Option<&str>,
-    global: u32,
-    explicit: Option<u32>,
-) -> Option<u32> {
+fn resolved_autocompact_window(model_id: Option<&str>, global: u32, explicit: Option<u32>) -> Option<u32> {
     explicit.or_else(|| autocompact_window(model_id, global))
 }
 

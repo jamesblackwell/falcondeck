@@ -1,5 +1,7 @@
-import { act, fireEvent, render } from "@testing-library/react";
+import { act, fireEvent, render, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+
+import { normalizeConversationItem, type ConversationItem } from "@falcondeck/client-core";
 
 import { Conversation } from "./conversation";
 
@@ -91,6 +93,36 @@ describe("Conversation scrolling", () => {
     scroll.getBoundingClientRect = () => ({ top: 0, left: 0, width: 800, height: 500 }) as DOMRect;
     document.elementFromPoint = () => block;
   }
+
+  it("holds the reader when an expanded tool above them fetches its full body", async () => {
+    let resolve!: (value: ConversationItem) => void;
+    const loader = vi.fn(() => new Promise<ConversationItem>(done => { resolve = done; }));
+    const tool = normalizeConversationItem({
+      kind: "tool_call" as const, id: "fetch-above", title: "Agent: Example", tool_kind: "Agent", status: "completed",
+      output: "Preview", created_at: "2026-09-07T10:00:00Z", display: { output_total_bytes: 9000 },
+      detail: { kind: "dynamic" as const, namespace: "claude", tool: "Agent", arguments: null },
+    });
+    const { container, getByRole } = render(<Conversation threadKey="fetched-reader" loadToolItem={loader} items={[
+      tool, { kind: "assistant_message", id: "reader", text: "Reader paragraph", created_at: "2026-09-07T10:00:01Z" },
+    ]} />);
+    const scroll = container.querySelector("[data-conversation-transcript]")!.parentElement!;
+    let blockTop = 420;
+    const paragraph = scroll.querySelector('[data-conversation-block-id="assistant_message:reader"] p')!;
+    paragraph.getBoundingClientRect = () => ({ top: blockTop - scroll.scrollTop }) as DOMRect;
+    scroll.getBoundingClientRect = () => ({ top: 0, left: 0, width: 800, height: 500 }) as DOMRect;
+    document.elementFromPoint = () => paragraph;
+    scroll.scrollTop = 300;
+    fireEvent.scroll(scroll);
+    // Expanding starts a request; replacing its preview then grows content above the anchor.
+    fireEvent.click(getByRole('button', { name: 'Expand all' }));
+    fireEvent.click(getByRole('button', { name: /Toggle Agent: Example details/ }));
+    await waitFor(() => expect(loader).toHaveBeenCalledTimes(1));
+    blockTop += 160;
+    await act(async () => resolve(normalizeConversationItem({ ...tool, output: "Fetched full output", display: {} })));
+    expect(scroll.scrollTop).toBe(460);
+    expect(paragraph.getBoundingClientRect().top).toBe(120);
+    delete (document as { elementFromPoint?: unknown }).elementFromPoint;
+  });
 
   it("holds a detached reader's content still when height changes above it", () => {
     const scroll = openThread();

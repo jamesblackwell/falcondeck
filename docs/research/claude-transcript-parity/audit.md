@@ -38,7 +38,7 @@ CLI visibility below distinguishes provider evidence from terminal-only controls
 | Token / cost lines | Usage accounted outside transcript; native cost-state ignored as prose | Existing usage surface retained; no duplicate per-token transcript rows. Agent result token/duration metadata remains inspectable |
 | Default tool visibility | Collapsed work-session group, including failures | Existing folded behaviour restored. Rich evidence appears inside the fold or expanded mode; no new default per-call rows or auto-opened failures |
 | Explicit compact / hide read-only / thinking settings | Can hide details | Deliberately honored; these are explicit presentation preferences, not data deletion |
-| Skill bodies and injected system/context plumbing | Suppressed before storage/transport | Deliberately suppressed, including structured Claude result metadata; instructions/catalogues are not useful transcript output |
+| Skill bodies and injected system/context plumbing | Broad skill-path suppression | Successful direct reads/skill loads and recognized Bash reads remain suppressed, including duplicate metadata. Filename mentions and failed-read diagnostics stay visible; this is not general shell analysis |
 | Output page cap | Output-only, UTF-8 safe; detail arguments bypassed cap | Combined output/detail budget; explicit original-byte marker; full item on demand, including arguments-only truncation |
 | Claude MCP arguments | Each string silently cut at 4,000 chars; arrays unbounded | Lossless source arguments; aggregate detail page budget. Existing MCP labels retained |
 | Render cap | Line/character preview, full copy | Unchanged deliberate performance cap, explicit notice and complete copy available |
@@ -94,7 +94,7 @@ aggregate sizes/counts and synthetic regression fixtures only.
 | Empty stop-hook rows | Empty arrays/objects rejected; legacy empty receipts excluded by model thread reads |
 | Default fold regression | Restored the existing collapsed fold, including failed calls; richer content stays inside it |
 | Duplicated result bodies | Strip stdout/stderr/content/originalFile, repeated inputs and image base64 before retaining result metadata; preserve Read counts/paths, dimensions and patch hunks. Image bytes stay in image items, not a duplicate JSON text output |
-| Oversized remote item RPC | 512 KiB serialized limit; terminal too-large state directs the reader to the Mac; no automatic retry loop |
+| Oversized remote item RPC | 512 KiB serialized tool-call limit; images/attachments retain their existing route; terminal too-large state directs the reader to the Mac; no automatic retry loop |
 | Restart/interrupt/later-turn lifecycle | Sidecar toolUseId association, nested settlement, and previous-evidence merge at item upsert |
 | Bash skill-body leak | Full explicit command checked, in addition to file/path arguments; duplicate stdout is not stored in result metadata |
 | Legacy clients | Retain a bounded textual activity log in parent output |
@@ -145,7 +145,7 @@ Mac-local full-item loading remains available. No merge, deploy or restart.
 
 Fixed-copy benchmark (same native parent and sibling files, three runs each):
 
-| Version | Hydrated item JSON | Median hydration |
+| Version | Hydrated item JSON | Median hydration (debug) |
 | --- | ---: | ---: |
 | Base `5b98f932` | 15,218,750 bytes (14.51 MiB) | 3,093 ms |
 | Corrected branch | 18,949,534 bytes (18.07 MiB) | 3,624 ms |
@@ -153,8 +153,11 @@ Fixed-copy benchmark (same native parent and sibling files, three runs each):
 The corrected history is 24.5% larger and takes 17.2% longer than base because it
 now retains child arguments/results and other previously discarded evidence.
 The first corrected implementation on this fixed copy was 88,357,901 bytes;
-removing duplicate image bodies brought that down by 78.6%. These are serialized
-item sizes and wall-clock parse times, not process RSS. The private fixed copy
+the combined metadata and body stripping brought that down by 78.6%. This does
+not isolate the image-only contribution. These are serialized
+item sizes and debug-build wall-clock parse times, not process RSS or release
+performance. Independent review reports release hydration around 350 ms; that
+was not a matched release benchmark in this audit. The private fixed copy
 and all path pointers are removed after measurement.
 
 Final focused Rust validation after lifecycle/image fixes: 162 Claude tests
@@ -166,3 +169,62 @@ passed. A serial App.activity comparison used isolated base packages and shared
 third-party dependencies: base and branch both produced the same two failures
 (Plugins and Cloud tasks), with ten passes. The extra settings failure seen in
 the full desktop run passed on both focused runs.
+
+## Final re-review follow-up (6 November 2026)
+
+Rebased onto `9ed27f48` (reader anchoring). The remote 512 KiB bound applies only
+to tool calls; images and user attachments retain their existing full-item route.
+Tests cover 700 KB image and attachment bodies alongside an oversized rejected tool.
+Human exports of projected rows explicitly mark truncated output/details and their
+original byte count. MCP handoff/fork caps apply to result strings as well as
+arguments; local evidence is retained. Null-argument MCP previews keep their daemon
+friendly title on desktop. Unrelated Rust formatting changes were reverted.
+
+Bash suppression in both daemon and client normalization targets explicit skill read commands (cat/bat/head/tail/more/less/
+sed/awk), not filename mentions in git diff/status, search, echo, comments or backup filenames. Failed reads
+retain diagnostics. This is a presentation heuristic, not shell execution analysis
+or general secret redaction.
+
+Known issue F5: during hydration, a background Agent's still-running child can
+briefly appear interrupted before subsequent activity updates it. This round leaves
+that lifecycle nuance unchanged.
+
+Fetched expansion above a detached reader changes the transcript subtree. Main's
+MutationObserver invokes holdReaderAnchor before paint, and ResizeObserver covers
+the height change (including a native details toggle). A fetched-row regression
+checks that growth is cancelled by the scroll offset and the reader paragraph stays
+at the same viewport position. Engines with native overflow anchoring keep native
+anchoring, with the existing WebKit fallback unchanged.
+
+### Re-review validation
+
+Heavy commands ran only in the permitted London half-hour windows, at nice 10;
+Cargo used four jobs and the shared target. The final Rust/JS checks ran at 13:30–13:45. A detached one-shot command started the Rust run.
+Rust used initially empty temporary HOME directories, with agent/XDG home overrides
+removed and Cargo/Rustup caches explicitly reused. No native session data was copied.
+
+- Core: all 825 Vitest tests passed. Chat-ui: all 246 passed, including the real
+  Conversation fetched-row expansion/reader-anchor regression.
+- Mobile: full run 1,425 passed and one intermittent relay-recovery assertion failed.
+  The first isolated run also failed at a different timing assertion; an unchanged
+  recheck passed all 14 tests. Isolated base `9ed27f48` also passed all 14. The test
+  advances only one millisecond around asynchronous crypto/index requests; no relay
+  recovery code was changed here.
+- Core and mobile typechecks passed. Chat-ui reports only the same three baseline
+  test typing errors (bot-sidebar exact option and prompt-input selection methods).
+- Rust core: 51 unit tests and 63 integration tests passed. Daemon unit run:
+  1,847 passed, eight ignored, one state-lock test failed; that unmodified test
+  passed on its isolated rerun. All new bounds and skill-output regressions passed.
+- Daemon integration cases were all exercised with the isolated HOME. ACP 8,
+  control API 10, scheduler 8, HTTP 12, startup resume 2, terminal 2 and workspace
+  reconnect 4 passed (one reconnect benchmark ignored). Control MCP initially
+  passed 7 with one six-second startup timeout; its isolated retry passed. Unreal
+  ACP initially hit its ten-second adapter deadline; its isolated retry passed.
+  HTTP bootstrap and terminal now pass, unlike the previous real-HOME attempts.
+  `--no-fail-fast` was used for the remaining targets after initial failures.
+- `.agents/skills/autoreview/scripts/autoreview --mode local --stream-engine-output`:
+  clean at the default P0 threshold after the final daemon/client operand checks.
+  `git diff --check` passed.
+
+The public base worktree, private test HOME directories, detached timer and owned
+Cargo/Vite output are removed after validation. No merge, deploy or app restart.

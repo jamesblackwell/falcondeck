@@ -856,7 +856,7 @@ pub struct ClaudeToolEvidence {
     /// Ordered child tool calls, keyed by provider identity.
     pub calls: Vec<ClaudeNestedCall>,
     #[serde(default)]
-    /// Complete provider-native result metadata.
+    /// Nonduplicated provider-native result metadata.
     pub result: Option<Value>,
 }
 

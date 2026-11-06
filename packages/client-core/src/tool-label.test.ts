@@ -289,3 +289,10 @@ describe('MCP tool rows', () => {
     expect(toolCallAgentTitle({ title: 'Read /a.ts', tool_kind: 'Read' })).toBe('Read /a.ts')
   })
 })
+
+
+it('keeps a friendly live MCP label when argument details were projected to null', () => {
+  expect(describeToolCall({ title: 'Reading task: Example', tool_kind: 'mcp__falcondeck__falcondeck_view_thread',
+    detail: { kind: 'mcp', server: 'falcondeck', tool: 'falcondeck_view_thread', arguments: null, result: null, error: null, duration_ms: null, app_context: null },
+  }).label).toBe('Reading task: Example')
+})

@@ -705,3 +705,14 @@ describe("friendly MCP rows in a handoff", () => {
     expect(markdown).toContain("## Tool — Created task: Fix login");
   });
 });
+
+
+it('marks live projected tool output and details as truncated in human exports', () => {
+  const item = {
+    kind: 'tool_call', id: 'preview', title: 'Agent: Example', tool_kind: 'Agent', status: 'running',
+    output: 'Sub-agent activity', created_at, display: { output_total_bytes: 9000 },
+  } as ConversationItem;
+  const markdown = conversationItemsToMarkdown([item]);
+  expect(markdown).toContain('Truncated tool preview');
+  expect(markdown).toContain('9000 bytes');
+});

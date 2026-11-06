@@ -211,19 +211,19 @@ function shouldIncludeToolDetails(
   return item.detail.kind !== "command_execution";
 }
 
-// Keep invocation arguments bounded when serializing context for another model.
-// Human exports and the daemon's local evidence remain lossless.
-function modelBoundedArguments(value: unknown): unknown {
+// Keep MCP context strings bounded when serializing context for another model.
+// Local evidence stays lossless; exports mark any projected previews.
+function modelBoundedValue(value: unknown): unknown {
   if (typeof value === "string") return value.length > 4000 ? value.slice(0, 3999) + "…" : value;
-  if (Array.isArray(value)) return value.map(modelBoundedArguments);
-  if (value && typeof value === "object") return Object.fromEntries(Object.entries(value).map(([key, child]) => [key, modelBoundedArguments(child)]));
+  if (Array.isArray(value)) return value.map(modelBoundedValue);
+  if (value && typeof value === "object") return Object.fromEntries(Object.entries(value).map(([key, child]) => [key, modelBoundedValue(child)]));
   return value;
 }
 
 function serializedToolDetail(item: Extract<ConversationItem, { kind: "tool_call" }>, ctx: MarkdownContext): string {
   const detail = item.detail;
   return formatInspectableValue(ctx.mode === "handoff" && detail?.kind === "mcp"
-    ? { ...detail, arguments: modelBoundedArguments(detail.arguments) } : detail).text;
+    ? { ...detail, arguments: modelBoundedValue(detail.arguments), result: modelBoundedValue(detail.result) } : detail).text;
 }
 
 function isCodexToolDetail(
@@ -466,6 +466,9 @@ function itemMarkdown(item: ConversationItem, ctx: MarkdownContext): string {
         `## Tool — ${oneLine(title, "Tool call")}`,
         statusLine(toolLifecycleLabel(lifecycle), item.created_at, ctx),
         keepExit ? `Exit code: ${item.exit_code}` : null,
+        item.display?.output_total_bytes
+          ? `_Truncated tool preview; full output and details total ${item.display.output_total_bytes} bytes. Open the tool on the Mac for the complete content._`
+          : null,
         item.output
           ? codeFence(item.output, "text")
           : ctx.mode === "handoff"

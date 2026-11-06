@@ -324,6 +324,19 @@ function shouldSuppressSkillToolOutput(title: string, kind: string) {
   const normalizedTitle = title.toLowerCase().replaceAll("\\", "/");
   const normalizedKind = kind.toLowerCase();
 
+  if (["bash", "shell", "command", "command_execution", "exec", "exec_command"].includes(normalizedKind)) {
+    return normalizedTitle.split(/[;|&\n]/).some(segment => {
+      const words = Array.from(segment.matchAll(/"([^"]*)"|'([^']*)'|([^\s]+)/g),
+        word => word[1] ?? word[2] ?? word[3]);
+      const comment = words.findIndex(word => word.startsWith("#"));
+      if (comment >= 0) words.length = comment;
+      const program = words[0]?.split("/").at(-1);
+      return ["cat", "bat", "head", "tail", "more", "less", "sed", "awk"].includes(program ?? "")
+        && words.slice(1).filter(word => !word.startsWith("-")).some(word =>
+          word.split("/").at(-1) === "skill.md" || word.includes(".agents/skills/")
+          || word.includes(".codex/skills/") || word.includes(".claude/commands/"));
+    });
+  }
   return (
     normalizedTitle.startsWith("load skill") ||
     normalizedTitle.includes(".agents/skills/") ||
@@ -1221,7 +1234,8 @@ export function normalizeConversationItem(value: unknown): ConversationItem {
     const detail = item.detail;
     return {
       ...item,
-      output: shouldSuppressSkillToolOutput(item.title, item.tool_kind)
+      output: item.status !== "failed" && (item.exit_code == null || item.exit_code === 0)
+        && shouldSuppressSkillToolOutput(item.title, item.tool_kind)
         ? null
         : item.output,
       display: correctMisclassifiedApproval(

@@ -1171,8 +1171,8 @@ Claude MCP argument arrays. If the detail cannot fit, retain its identifying
 metadata but omit arguments/evidence from the page. `display.output_total_bytes`
 then measures the full output plus pageable detail, not just the output string.
 The marker also applies to argument-only truncation. Local `thread.item` returns
-the authoritative item. Remote `thread.item` limits the serialized response to
-512 KiB; an oversized item returns `ITEM_TOO_LARGE` with a clear Mac-only fallback,
+the authoritative item. Remote `thread.item` limits serialized tool-call responses to
+512 KiB; images and user attachments keep their existing route. An oversized tool returns `ITEM_TOO_LARGE` with a clear Mac-only fallback,
 not a response that times out and retries. Native clients treat that state as
 terminal, while transient errors still offer retry. Requests are expansion-driven,
 deduplicated and cached by bytes. Display caps
@@ -1202,11 +1202,13 @@ may load full sensitive arguments while within the remote response limit.
 
 Claude result metadata excludes duplicate stdout/stderr/content, complete original
 files, and input fields already captured in arguments. Read counts/paths and edit
-hunks remain. Explicit skill paths in builtin Bash commands are covered by the
-same output suppression as direct reads; this is not a general secrets detector.
+hunks remain. Explicit skill read commands in builtin Bash use the same suppression as direct
+reads. Mere mentions (git diff/status, search, echo) and failed-read diagnostics
+remain visible; this is not a general secrets detector.
 
-Human exports retain evidence. Handoff/fork serialization explicitly excludes
-`dynamic` details in the `claude` namespace; model-facing MCP argument strings
+Human exports mark projected tool previews as truncated, including the original
+combined byte count; exporting a projected row does not imply a complete output. Handoff/fork serialization explicitly excludes
+`dynamic` details in the `claude` namespace; model-facing MCP argument and result strings
 remain capped at 4,000 characters. Model thread reads omit the new structured
 evidence and filter legacy empty hook receipts. This corrects an initial transcript
 implementation regression; it does not change agent tool execution or invocation

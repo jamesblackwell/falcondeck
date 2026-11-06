@@ -204,12 +204,14 @@ it.each([buildHandoffPrompt, buildForkPrompt])('keeps newly captured Claude evid
   expect(prompt).not.toContain('private-child-output')
 })
 
-it.each([buildHandoffPrompt, buildForkPrompt])('caps MCP argument strings before serializing model context', build => {
+it.each([buildHandoffPrompt, buildForkPrompt])('caps MCP argument and result strings before serializing model context', build => {
   const item = normalizeConversationItem({ kind: 'tool_call', id: 'm', title: 'MCP call', tool_kind: 'mcpToolCall', status: 'completed', output: 'answer',
-    detail: { kind: 'mcp', server: 'test', tool: 'call', arguments: { nested: ['x'.repeat(4000) + 'end-of-large-argument'] }, result: null }, created_at: '2026-11-05T12:00:00Z' })
+    detail: { kind: 'mcp', server: 'test', tool: 'call', arguments: { nested: ['x'.repeat(4000) + 'end-of-large-argument'] }, result: { content: ['y'.repeat(9000) + 'end-of-large-result'] } }, created_at: '2026-11-05T12:00:00Z' })
   const prompt = build({ items: [item], sourceTitle: 'Example' })
   expect(prompt).toContain('answer')
   expect(prompt).not.toContain('end-of-large-argument')
+  expect(prompt).not.toContain('end-of-large-result')
+  expect(prompt).not.toContain('y'.repeat(4001))
 })
 
 it.each([buildHandoffPrompt, buildForkPrompt])('also bounds ToolSearch arguments used as model-facing titles', build => {

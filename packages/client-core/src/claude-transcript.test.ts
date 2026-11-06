@@ -30,3 +30,17 @@ it('keeps thirty Claude reads and one failure in the existing collapsed fold', (
   expect(blocks.map(block => block.kind)).toEqual(['item', 'work_session', 'item'])
   expect(blocks[1]?.kind === 'work_session' && blocks[1].items).toHaveLength(31)
 })
+
+
+it.each([
+  ['git diff -- SKILL.md', 'completed', 'fixture diff'],
+  ['echo SKILL.md', 'completed', 'SKILL.md'],
+  ['cat README.md # SKILL.md', 'completed', 'readme'],
+  ['cat SKILL.md.bak', 'completed', 'backup'],
+  ['cat missing/SKILL.md', 'failed', 'No such file'],
+  ['cat /example/SKILL.md', 'completed', null],
+])('preserves Bash filename mentions and failed-read diagnostics: %s', (title, status, expected) => {
+  const item = normalizeConversationItem({ kind: 'tool_call', id: 'skill-command', title, tool_kind: 'Bash', status,
+    output: expected ?? 'skill body', created_at: '2026-11-06T12:00:00Z' });
+  expect(item.kind === 'tool_call' ? item.output : undefined).toBe(expected);
+});

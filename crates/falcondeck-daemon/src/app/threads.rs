@@ -99,9 +99,7 @@ fn codex_thread_is_idle_for_release(thread: &ManagedThread) -> bool {
 /// Only Codex sets `parentThreadId`, and only on `spawn_agent` children.
 fn is_idle_codex_subagent(read: &Value) -> bool {
     let thread = &read["thread"];
-    thread["parentThreadId"]
-        .as_str()
-        .is_some_and(|id| !id.is_empty())
+    thread["parentThreadId"].as_str().is_some_and(|id| !id.is_empty())
         && thread["status"]["type"] == "idle"
 }
 
@@ -1871,19 +1869,18 @@ impl AppState {
                                 // against what the process last reported.
                                 if let Some(models) = result_turn_model_usage(&value) {
                                     if !models.is_empty() {
-                                        let cumulative = result_model_usage_is_cumulative(&value);
+                                        let cumulative =
+                                            result_model_usage_is_cumulative(&value);
                                         let tier = result_usage_service_tier(&value);
                                         let calls = result_num_turns(&value);
-                                        if let Some((input, cached)) = self
-                                            .record_claude_turn_usage(
-                                                &workspace_id,
-                                                &thread_id,
-                                                &models,
-                                                cumulative,
-                                                tier,
-                                                calls,
-                                            )
-                                        {
+                                        if let Some((input, cached)) = self.record_claude_turn_usage(
+                                            &workspace_id,
+                                            &thread_id,
+                                            &models,
+                                            cumulative,
+                                            tier,
+                                            calls,
+                                        ) {
                                             self.control()
                                                 .record_claude_run_usage(
                                                     &workspace_id,
@@ -1907,9 +1904,9 @@ impl AppState {
                                         .record_claude_run_usage(
                                             &workspace_id,
                                             &thread_id,
-                                            input.saturating_add(count(
-                                                "cache_creation_input_tokens",
-                                            )),
+                                            input.saturating_add(
+                                                count("cache_creation_input_tokens"),
+                                            ),
                                             count("cache_read_input_tokens"),
                                         )
                                         .await;
@@ -3804,8 +3801,7 @@ fn refresh_last_message_preview(thread: &mut ManagedThread) {
     if let Some((text, lifecycle, created_at)) = newest
         && lifecycle != ContentLifecycle::Error
     {
-        thread.summary.last_message_preview =
-            Some(super::conversation_helpers::truncate_preview(text, 160));
+        thread.summary.last_message_preview = Some(super::conversation_helpers::truncate_preview(text, 160));
         thread.summary.last_message_at = Some(created_at);
     }
 }
@@ -4055,7 +4051,9 @@ mod tests {
 
     #[test]
     fn releases_only_idle_codex_subagents() {
-        let read = |parent: Value, status: &str| json!({"thread": {"id": "t", "parentThreadId": parent, "status": {"type": status}}});
+        let read = |parent: Value, status: &str| {
+            json!({"thread": {"id": "t", "parentThreadId": parent, "status": {"type": status}}})
+        };
         assert!(is_idle_codex_subagent(&read(json!("p"), "idle")));
         assert!(!is_idle_codex_subagent(&read(json!("p"), "active")));
         assert!(!is_idle_codex_subagent(&read(Value::Null, "idle")));

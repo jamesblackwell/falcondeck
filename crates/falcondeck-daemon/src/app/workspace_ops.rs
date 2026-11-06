@@ -5674,8 +5674,9 @@ pub(super) fn project_live_tool_event(event: &mut UnifiedEvent) {
 /// At typical mobile relay throughput this stays well inside the RPC deadline.
 pub(super) fn bounded_remote_thread_item(item: ConversationItem) -> Result<Value, String> {
     const MAX_ITEM_BYTES: usize = 512 * 1024;
+    let is_tool = matches!(item, ConversationItem::ToolCall { .. });
     let value = serde_json::to_value(item).map_err(|error| error.to_string())?;
-    if serde_json::to_vec(&value)
+    if is_tool && serde_json::to_vec(&value)
         .map_err(|error| error.to_string())?
         .len()
         > MAX_ITEM_BYTES
@@ -5926,9 +5927,7 @@ fn refresh_queue_hold(thread: &mut ManagedThread, workspace_id: &str) -> bool {
     for queued in &mut thread.queued_requests {
         let reason = if queued.request.workspace_id != workspace_id {
             blocked = true;
-            Some(
-                "Held: queued before this project's ID changed, so it won't send on its own. Steer it during a turn, or remove it.",
-            )
+            Some("Held: queued before this project's ID changed, so it won't send on its own. Steer it during a turn, or remove it.")
         } else if blocked {
             Some("Waiting behind a held message. Sends automatically once that message is gone.")
         } else {
@@ -8275,6 +8274,23 @@ mod tests {
                 .starts_with("ITEM_TOO_LARGE")
         );
         assert!(bounded_remote_thread_item(item(1)).is_ok());
+        let image = ConversationItem::Image {
+            id: "large-image".into(), title: None,
+            image: falcondeck_core::ConversationImage {
+                id: "asset".into(), name: None, mime_type: Some("image/png".into()),
+                url: format!("data:image/png;base64,{}", "a".repeat(700_000)),
+                local_path: None, alt_text: None,
+            }, lifecycle: falcondeck_core::ContentLifecycle::Complete, created_at: Utc::now(),
+        };
+        let loaded = bounded_remote_thread_item(image).unwrap();
+        assert!(loaded["image"]["url"].as_str().unwrap().len() > 700_000);
+        let attachment = ConversationItem::UserMessage {
+            id: "attached".into(), text: String::new(),
+            attachments: vec![ImageInput { id: "asset".into(), name: None, mime_type: Some("image/png".into()), url: "a".repeat(700_000), local_path: None }],
+            turn_id: None, previous_turn_id: None, created_at: Utc::now(),
+        };
+        let loaded = bounded_remote_thread_item(attachment).unwrap();
+        assert_eq!(loaded["attachments"][0]["url"].as_str().unwrap().len(), 700_000);
     }
 
     #[test]
