@@ -1,22 +1,14 @@
 //! Human input attribution across a non-transactional provider boundary.
 use super::*;
 
-/// Transport failures do not prove rejection: the provider may already have
-/// consumed a human input. Preserve eligibility in that uncertain case.
+/// Only typed local refusals prove that input was not delivered. Generic RPC,
+/// process and transport errors do not retain a provider's admission status;
+/// unknown outcomes must keep human attribution, regardless of their wording.
 pub(super) fn definite_input_rejection(error: &DaemonError) -> bool {
-    match error {
-        DaemonError::BadRequest(_) | DaemonError::NotFound(_) | DaemonError::Conflict(_) => true,
-        DaemonError::Rpc(message) => ![
-            "failed to send",
-            "disconnected",
-            "no longer running",
-            "did not respond",
-            "shutting down",
-        ]
-        .iter()
-        .any(|transport| message.contains(transport)),
-        _ => false,
-    }
+    matches!(
+        error,
+        DaemonError::BadRequest(_) | DaemonError::NotFound(_) | DaemonError::Conflict(_)
+    )
 }
 
 impl AppState {
@@ -97,7 +89,13 @@ mod tests {
 
     #[test]
     fn ambiguous_delivery_does_not_erase_human_attribution() {
-        assert!(definite_input_rejection(&DaemonError::Rpc(
+        assert!(definite_input_rejection(&DaemonError::BadRequest(
+            "no active Codex turn to steer".into()
+        )));
+        assert!(!definite_input_rejection(&DaemonError::Rpc(
+            "future provider returned an unknown admission outcome".into()
+        )));
+        assert!(!definite_input_rejection(&DaemonError::Rpc(
             "expectedTurnId does not match".into()
         )));
         assert!(!definite_input_rejection(&DaemonError::Rpc(
@@ -106,6 +104,35 @@ mod tests {
         assert!(!definite_input_rejection(&DaemonError::Process(
             "timed out writing to claude turn".into()
         )));
+    }
+
+    #[tokio::test]
+    async fn unconfirmed_opencode_admission_preserves_human_source() {
+        let error = DaemonError::Rpc(
+            "OpenCode prompt admission could not be confirmed; do not resend with a new message id"
+                .into(),
+        );
+        assert!(!definite_input_rejection(&error));
+        let (app, _temp) = fixture().await;
+        let claim = app
+            .begin_user_reply("workspace-1", "thread-1")
+            .await
+            .unwrap();
+        app.finish_user_reply(
+            "workspace-1",
+            "thread-1",
+            claim,
+            !definite_input_rejection(&error),
+        )
+        .await
+        .unwrap();
+        assert!(
+            app.thread_summary("workspace-1", "thread-1")
+                .await
+                .unwrap()
+                .attention
+                .reply_to_user
+        );
     }
 
     #[tokio::test]
