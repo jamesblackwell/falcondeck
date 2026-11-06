@@ -283,6 +283,7 @@ async fn serve_unhealthy() -> std::net::SocketAddr {
 
 #[tokio::test]
 async fn modern_flow_discover_list_and_call() {
+    falcondeck_daemon::disable_real_provider_binaries_for_tests();
     let dir = tempfile::tempdir().unwrap();
     let daemon = spawn_daemon(&dir).await;
     let mut mcp = spawn_mcp(&daemon.base_url()).await;
@@ -418,6 +419,7 @@ async fn modern_flow_discover_list_and_call() {
 
 #[tokio::test]
 async fn legacy_initialize_flow_works() {
+    falcondeck_daemon::disable_real_provider_binaries_for_tests();
     let dir = tempfile::tempdir().unwrap();
     let daemon = spawn_daemon(&dir).await;
     let mut mcp = spawn_mcp(&daemon.base_url()).await;
@@ -494,6 +496,7 @@ async fn legacy_initialize_flow_works() {
 
 #[tokio::test]
 async fn protocol_errors_are_transport_level_and_deterministic() {
+    falcondeck_daemon::disable_real_provider_binaries_for_tests();
     let dir = tempfile::tempdir().unwrap();
     let daemon = spawn_daemon(&dir).await;
     let mut mcp = spawn_mcp(&daemon.base_url()).await;
@@ -553,6 +556,7 @@ async fn protocol_errors_are_transport_level_and_deterministic() {
 
 #[tokio::test]
 async fn disabled_interface_surfaces_as_a_tool_error() {
+    falcondeck_daemon::disable_real_provider_binaries_for_tests();
     let dir = tempfile::tempdir().unwrap();
     let daemon = spawn_daemon(&dir).await;
     let base_url = daemon.base_url();
@@ -663,6 +667,7 @@ async fn disabled_interface_surfaces_as_a_tool_error() {
 
 #[tokio::test]
 async fn daemon_unreachable_at_startup_exits_with_a_message() {
+    falcondeck_daemon::disable_real_provider_binaries_for_tests();
     // Reserve then drop a port so nothing listens on it.
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
@@ -673,12 +678,14 @@ async fn daemon_unreachable_at_startup_exits_with_a_message() {
 
 #[tokio::test]
 async fn unhealthy_daemon_at_startup_exits_with_a_message() {
+    falcondeck_daemon::disable_real_provider_binaries_for_tests();
     let addr = serve_unhealthy().await;
     assert_startup_refusal(&format!("http://{addr}"), "is not healthy").await;
 }
 
 #[tokio::test]
 async fn daemon_unreachable_during_a_call_is_a_tool_error() {
+    falcondeck_daemon::disable_real_provider_binaries_for_tests();
     let dir = tempfile::tempdir().unwrap();
     let daemon = spawn_daemon(&dir).await;
     let base_url = daemon.base_url();
@@ -718,6 +725,7 @@ async fn daemon_unreachable_during_a_call_is_a_tool_error() {
 
 #[tokio::test]
 async fn full_conversation_creates_an_automation_through_the_tools() {
+    falcondeck_daemon::disable_real_provider_binaries_for_tests();
     let dir = tempfile::tempdir().unwrap();
     let workspace = dir.path().join("quizgecko");
     std::fs::create_dir_all(&workspace).unwrap();

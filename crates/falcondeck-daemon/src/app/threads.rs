@@ -2924,6 +2924,18 @@ impl AppState {
             )
             .await;
         }
+        if turn_error.as_deref().is_some_and(agy::authentication_required) {
+            let account = agy::login_required_account();
+            turn_error = Some(account.label.clone());
+            if let Some(workspace) = self.inner.workspaces.lock().await.get_mut(&workspace_id) {
+                if let Some(agent) = workspace.summary.agents.iter_mut().find(|agent| agent.provider == AgentProvider::AGY) {
+                    agent.account = account;
+                }
+            }
+        }
+        if turn_error.as_deref().is_some_and(agy::authentication_required) {
+            self.emit(Some(workspace_id.clone()), None, UnifiedEvent::Snapshot { snapshot: self.snapshot().await });
+        }
         if resume_interrupted && !was_interrupted && !resume_session_confirmed {
             let detail = turn_error.clone().unwrap_or_else(|| {
                 "Antigravity ended without confirming the saved session identity".to_string()
@@ -4068,6 +4080,41 @@ mod tests {
     use super::*;
     use serde_json::json;
     use tempfile::tempdir;
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn agy_authentication_failure_updates_thread_error_and_account() {
+        use std::os::unix::fs::PermissionsExt;
+        let temp = tempdir().unwrap();
+        let executable = temp.path().join("agy");
+        std::fs::write(&executable, r#"#!/bin/sh
+read -r line
+printf '%s\n' '{"event":"result","result":{"status":"ERROR","error":"authentication required"}}'
+"#).unwrap();
+        std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let bootstrap = AgyRuntime::connect(temp.path().to_string_lossy().into_owned(), executable.to_string_lossy().into_owned()).await.unwrap();
+        let app = AppState::new_with_state_path("test".into(), HashMap::new(), temp.path().join("state.json"));
+        let mut thread = isolated_codex_thread();
+        thread.summary.provider = AgentProvider::AGY;
+        thread.summary.status = ThreadStatus::Running;
+        let thread_id = thread.summary.id.clone();
+        let summary = serde_json::from_value(json!({
+            "id": "workspace-1", "path": temp.path(), "status": "ready", "default_provider": "agy",
+            "agents": [{"provider": "agy", "account": bootstrap.account}],
+            "connected_at": "2026-11-06T00:00:00Z", "updated_at": "2026-11-06T00:00:00Z"
+        })).unwrap();
+        app.inner.workspaces.lock().await.insert("workspace-1".into(), crate::app::ManagedWorkspace {
+            summary, codex_session: None, claude_runtime: None, agy_runtime: Some(bootstrap.runtime.clone()),
+            opencode_runtime: None, acp_runtimes: HashMap::new(), threads: HashMap::from([(thread_id.clone(), thread)]),
+        });
+        let spawned = bootstrap.runtime.spawn_turn(&thread_id, None, "fixture", &[], None, None, None, None, temp.path().to_str().unwrap()).await.unwrap();
+        app.monitor_agy_turn("workspace-1".into(), thread_id.clone(), spawned.generation, spawned.stdout, spawned.stderr, false).await;
+        let thread = app.thread_summary("workspace-1", &thread_id).await.unwrap();
+        assert_eq!(thread.status, ThreadStatus::Error);
+        assert!(thread.last_error.unwrap().contains("login required"));
+        assert_eq!(app.snapshot().await.workspaces[0].agents[0].account.status, falcondeck_core::AccountStatus::NeedsAuth);
+        app.shutdown().await.unwrap();
+    }
 
     #[test]
     fn releases_only_idle_codex_subagents() {

@@ -393,7 +393,7 @@ impl AppState {
             let result = if host == LOCAL_HOST {
                 let result = run_local_upgrade(&upgrade_command).await;
                 match result {
-                    Ok(output) if matches!(harness.id, "codex" | "claude" | "opencode") => {
+                    Ok(output) if matches!(harness.id, "codex" | "claude" | "opencode" | "agy") => {
                         let resolved =
                             crate::agent_binary::resolve_agent_binary(harness.bin, harness.bin);
                         match probe_binary_version(&resolved.executable).await {
@@ -700,6 +700,7 @@ impl AppState {
 async fn run_local_upgrade(upgrade_command: &str) -> Result<String, String> {
     let shell = env::var("SHELL").unwrap_or_else(|_| "/bin/sh".to_string());
     let mut command = TokioCommand::new(shell);
+    crate::agy::configure_headless(&mut command);
     command
         .arg("-l")
         .arg("-c")
@@ -743,7 +744,7 @@ fn agy_upgrade_command_for_host(host: &str) -> String {
         );
     }
     format!(
-        r#"p=$(command -v agy 2>/dev/null) || true; if [ -n "$p" ]; then "$p" update; else {AGY_NATIVE_INSTALL}; fi"#,
+        r#"p=$(command -v agy 2>/dev/null) || true; if [ -n "$p" ]; then AGY_CLI_NONINTERACTIVE_HEADLESS=1 python3 -c 'import subprocess,sys; sys.exit(subprocess.call(sys.argv[1:], start_new_session=True))' "$p" update; else {AGY_NATIVE_INSTALL}; fi"#,
     )
 }
 
@@ -1225,6 +1226,7 @@ fn json_from_auth_output(output: &str) -> Option<serde_json::Value> {
 async fn run_with_timeout(executable: &str, args: &[&str]) -> Result<ProbeOutput, ProbeFailure> {
     let resolved = crate::agent_binary::resolve_agent_binary(executable, executable);
     let mut command = TokioCommand::new(&resolved.executable);
+    crate::agy::configure_headless(&mut command);
     command.args(args).kill_on_drop(true);
     let output = timeout(PROBE_TIMEOUT, command.output())
         .await
@@ -1531,6 +1533,7 @@ fn remote_probe_script() -> String {
           if (parent === dir) process.exit(1);
           dir = parent;
         }' "$1" ;;
+    agy|*/agy) AGY_CLI_NONINTERACTIVE_HEADLESS=1 python3 -c 'import subprocess,sys; sys.exit(subprocess.call(sys.argv[1:], start_new_session=True))' "$1" --version ;;
     hermes|*/hermes) "$1" acp --version ;;
     unreal-agent-runner|*/unreal-agent-runner) return 0 ;;
     *) "$1" --version ;;
@@ -1840,7 +1843,7 @@ INSTALL
 
         let directory = tempfile::tempdir().unwrap();
         let binary = directory.path().join("agy copy's binary");
-        std::fs::write(&binary, "#!/bin/sh\nprintf '%s\\n' \"$1\"\n").unwrap();
+        std::fs::write(&binary, "#!/bin/sh\ntest \"$AGY_CLI_NONINTERACTIVE_HEADLESS\" = 1 || exit 24\nif (: </dev/tty) 2>/dev/null; then exit 25; fi\nprintf '%s\\n' \"$1\"\n").unwrap();
         std::fs::set_permissions(&binary, std::fs::Permissions::from_mode(0o755)).unwrap();
         let mut summary = KNOWN_HARNESSES
             .iter()
@@ -1993,7 +1996,7 @@ INSTALL
         let inventory = script.split("\nif command -v").next().unwrap().replace(
             "for bin do",
             "for bin do\n  [ \"$bin\" = hermes ] || continue",
-        );
+        ).replace("/opt/homebrew/bin/$bin /usr/local/bin/$bin /usr/bin/$bin", "");
         let output = tokio::process::Command::new("/bin/sh")
             .args(["-c", &inventory])
             .env_clear()

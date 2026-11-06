@@ -212,10 +212,6 @@ impl AgyRuntime {
         sandbox_mode: Option<&str>,
         cwd: &str,
     ) -> Result<AgyTurnSpawn, DaemonError> {
-        let account = read_auth_status(&self.agy_bin).await;
-        if account.status != AccountStatus::Ready {
-            return Err(DaemonError::BadRequest(account.label));
-        }
         let turn_lock = self.turn_lock(thread_id).await;
         let _turn_guard = turn_lock.lock().await;
 
@@ -563,7 +559,7 @@ async fn provider_probes(
 ) -> (AccountSummary, Vec<ModelSummary>, Vec<SkillSummary>) {
     (
         read_auth_status(executable).await,
-        curated_models(),
+        cached_models(executable).await,
         Vec::new(),
     )
 }
@@ -689,12 +685,12 @@ pub(crate) fn credential_account(raw: &str) -> AccountSummary {
         status: if ready {
             AccountStatus::Ready
         } else {
-            AccountStatus::NeedsAuth
+            AccountStatus::Unknown
         },
         label: if ready {
             "Antigravity credentials available"
         } else {
-            "Antigravity login required. Run `agy` in a terminal to sign in."
+            "Antigravity sign-in may be needed; credentials may be stored in the system keyring or environment."
         }
         .to_string(),
     }
@@ -710,8 +706,8 @@ pub async fn read_auth_status(_agy_bin: &str) -> AccountSummary {
     credential_account(raw.as_deref().unwrap_or(""))
 }
 
-/// The CLI's headless auth override prevents browser OAuth if credentials are
-/// revoked between our preflight and the child reading them.
+/// Disable interactive authentication for every native CLI child, including
+/// credentials stored in the keyring or environment rather than the token file.
 pub(crate) fn configure_headless(command: &mut Command) {
     command.env("AGY_CLI_NONINTERACTIVE_HEADLESS", "1");
     // Piped stdio alone still inherits the daemon's controlling terminal.
@@ -773,6 +769,7 @@ pub fn parse_models_table(stdout: &str) -> Vec<ModelSummary> {
 
 fn pick_default_model(models: &mut [ModelSummary]) -> Option<&mut ModelSummary> {
     let preferred = [
+        "gemini-3.8-flash-medium",
         "gemini-3.7-flash-medium",
         "gemini-3.6-flash-medium",
         "gemini-3.5-flash-medium",
@@ -815,14 +812,125 @@ fn default_efforts() -> Vec<ReasoningEffortSummary> {
 }
 
 pub fn curated_models() -> Vec<ModelSummary> {
+    // https://antigravity.google/docs/models/ (2026-11-06).
     parse_models_table(
-        "gemini-3.7-flash-high\tGemini 3.7 Flash (High)\n\
-         gemini-3.7-flash-medium\tGemini 3.7 Flash (Medium)\n\
-         gemini-3.7-flash-low\tGemini 3.7 Flash (Low)\n\
-         gemini-3.1-pro-high\tGemini 3.1 Pro (High)\n\
-         claude-sonnet-4-6\tClaude Sonnet 4.6 (Thinking)\n\
-         claude-opus-4-6-thinking\tClaude Opus 4.6 (Thinking)\n",
+        "gemini-3.8-flash-high\tGemini 3.8 Flash (High)\n\
+         gemini-3.8-flash-medium\tGemini 3.8 Flash (Medium)\n\
+         gemini-3.8-flash-low\tGemini 3.8 Flash (Low)\n\
+         gemini-4-argon-high\tGemini 4 Argon (High)\n\
+         gemini-4-argon-medium\tGemini 4 Argon (Medium)\n\
+         gemini-4-argon-low\tGemini 4 Argon (Low)\n\
+         claude-sonnet-5-5\tClaude Sonnet 5.5 (Thinking)\n\
+         claude-opus-5-5\tClaude Opus 5.5 (Thinking)\n\
+         gpt-oss-120b-maas\tGPT-OSS 120B (Medium)\n",
     )
+}
+
+#[derive(serde::Serialize, serde::Deserialize)]
+struct ModelCache {
+    executable: String,
+    attempted_at: DateTime<Utc>,
+    models: Vec<ModelSummary>,
+}
+
+fn model_cache_path() -> Option<PathBuf> {
+    Some(PathBuf::from(env::var_os("HOME")?).join(".cache/falcondeck/agy-models.json"))
+}
+
+async fn cached_models(executable: &str) -> Vec<ModelSummary> {
+    let Some(path) = model_cache_path() else {
+        return curated_models();
+    };
+    cached_models_at(
+        executable,
+        &path,
+        read_auth_status(executable).await.status == AccountStatus::Ready,
+    )
+    .await
+}
+
+async fn cached_models_at(
+    executable: &str,
+    path: &std::path::Path,
+    credentials_present: bool,
+) -> Vec<ModelSummary> {
+    type MemoryCache = HashMap<(String, PathBuf), (tokio::time::Instant, Vec<ModelSummary>)>;
+    static GATE: std::sync::OnceLock<Mutex<MemoryCache>> = std::sync::OnceLock::new();
+    let mut memory = GATE.get_or_init(|| Mutex::new(HashMap::new())).lock().await;
+    let key = (executable.to_string(), path.to_path_buf());
+    if let Some((attempted, models)) = memory.get(&key)
+        && attempted.elapsed() < std::time::Duration::from_secs(24 * 60 * 60)
+    {
+        return models.clone();
+    }
+    let prior = fs::read(&path)
+        .ok()
+        .and_then(|bytes| serde_json::from_slice::<ModelCache>(&bytes).ok())
+        .filter(|cache| cache.executable == executable);
+    let fallback = prior
+        .as_ref()
+        .filter(|cache| !cache.models.is_empty())
+        .map(|cache| cache.models.clone())
+        .unwrap_or_else(curated_models);
+    // Cache failures too, across daemon restarts and metadata refreshes. No
+    // startup herd, signed-out probe, or repeated discovery from status paths.
+    if prior.as_ref().is_some_and(|cache| {
+        Utc::now().signed_duration_since(cache.attempted_at) < chrono::Duration::hours(24)
+    }) || !credentials_present
+    {
+        return fallback;
+    }
+    let resolved = resolve_agent_binary("agy", executable);
+    let mut command = Command::new(&resolved.executable);
+    configure_headless(&mut command);
+    command
+        .arg("models")
+        .stdin(Stdio::null())
+        .kill_on_drop(true);
+    let models =
+        match tokio::time::timeout(std::time::Duration::from_secs(8), command.output()).await {
+            Ok(Ok(output)) if output.status.success() => {
+                let parsed = parse_models_table(&String::from_utf8_lossy(&output.stdout));
+                if parsed.is_empty() { fallback } else { parsed }
+            }
+            _ => fallback,
+        };
+    memory.insert(key, (tokio::time::Instant::now(), models.clone()));
+    let cache = ModelCache {
+        executable: executable.into(),
+        attempted_at: Utc::now(),
+        models: models.clone(),
+    };
+    if let Some(parent) = path.parent() {
+        let _ = fs::create_dir_all(parent);
+    }
+    if let Ok(bytes) = serde_json::to_vec(&cache) {
+        let temporary = path.with_extension("tmp");
+        if fs::write(&temporary, bytes).is_ok() {
+            let _ = fs::rename(temporary, &path);
+        }
+    }
+    models
+}
+
+pub(crate) fn authentication_required(message: &str) -> bool {
+    let message = message.to_ascii_lowercase();
+    [
+        "authentication required",
+        "not authenticated",
+        "unauthenticated",
+        "please sign in",
+        "login required",
+    ]
+    .iter()
+    .any(|needle| message.contains(needle))
+}
+
+pub(crate) fn login_required_account() -> AccountSummary {
+    AccountSummary {
+        status: AccountStatus::NeedsAuth,
+        label: "Antigravity login required. Run `agy` in a terminal to sign in.".into(),
+    }
 }
 
 pub fn hydrate_threads(workspace_path: &str) -> Vec<HydratedAgyThread> {
@@ -1118,6 +1226,64 @@ pub fn tool_step_title(step_type: &str, tool_name: Option<&str>, subagent: Optio
 mod tests {
     use super::*;
 
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn authenticated_models_are_persisted_and_probed_only_once() {
+        use std::os::unix::fs::PermissionsExt;
+        let temp = tempfile::tempdir().unwrap();
+        let binary = temp.path().join("agy");
+        let count = temp.path().join("count");
+        let cache = temp.path().join("catalog.json");
+        fs::write(&binary, format!("#!/bin/sh\ntest \"$AGY_CLI_NONINTERACTIVE_HEADLESS\" = 1 || exit 23\nif (: </dev/tty) 2>/dev/null; then exit 24; fi\necho call >> '{}'\nprintf 'custom-model\\tCustom Model\\n'\n", count.display())).unwrap();
+        fs::set_permissions(&binary, fs::Permissions::from_mode(0o700)).unwrap();
+        let bin = binary.to_str().unwrap();
+        assert!(!cached_models_at(bin, &cache, false).await.is_empty());
+        assert!(!count.exists());
+        assert_eq!(
+            cached_models_at(bin, &cache, true).await[0].id,
+            "custom-model"
+        );
+        assert_eq!(
+            cached_models_at(bin, &cache, true).await[0].id,
+            "custom-model"
+        );
+        assert_eq!(
+            cached_models_at(bin, &cache, false).await[0].id,
+            "custom-model"
+        );
+        assert_eq!(fs::read_to_string(&count).unwrap().lines().count(), 1);
+        let persisted: ModelCache = serde_json::from_slice(&fs::read(&cache).unwrap()).unwrap();
+        assert_eq!(persisted.models[0].id, "custom-model");
+        // Failed probes and failed disk writes must not create a retry loop.
+        fs::write(
+            &binary,
+            format!("#!/bin/sh\necho failed >> '{}'\nexit 23\n", count.display()),
+        )
+        .unwrap();
+        let blocked = temp.path().join("not-a-directory");
+        fs::write(&blocked, "fixture").unwrap();
+        for _ in 0..10 {
+            assert!(
+                !cached_models_at(bin, &blocked.join("cache.json"), true)
+                    .await
+                    .is_empty()
+            );
+        }
+        assert_eq!(fs::read_to_string(count).unwrap().lines().count(), 2);
+    }
+
+    #[test]
+    fn reports_only_cli_confirmed_authentication_failures_as_login_required() {
+        assert!(authentication_required("Authentication required"));
+        assert!(!authentication_required("model quota exhausted"));
+        assert_eq!(login_required_account().status, AccountStatus::NeedsAuth);
+        assert!(
+            curated_models()
+                .iter()
+                .any(|m| m.id == "gemini-3.8-flash-medium" && m.is_default)
+        );
+    }
+
     #[test]
     fn credential_presence_uses_cli_token_envelope() {
         for raw in [
@@ -1126,7 +1292,7 @@ mod tests {
             r#"{"access_token":"old-gemini-format"}"#,
             r#"{"token":{"access_token":"fake","expiry":"2000-01-01T00:00:00Z"}}"#,
         ] {
-            assert_eq!(credential_account(raw).status, AccountStatus::NeedsAuth);
+            assert_eq!(credential_account(raw).status, AccountStatus::Unknown);
         }
         let raw = r#"{"token":{"access_token":"fake","refresh_token":"fake"}}"#;
         assert_eq!(credential_account(raw).status, AccountStatus::Ready);
@@ -1134,14 +1300,14 @@ mod tests {
 
     #[cfg(unix)]
     #[tokio::test]
-    async fn signed_out_metadata_and_turn_never_execute_cli_or_browser() {
+    async fn metadata_is_process_free_and_turn_does_not_require_token_file() {
         use std::os::unix::fs::PermissionsExt;
         let temp = tempfile::tempdir().unwrap();
         let marker = temp.path().join("calls");
         let binary = temp.path().join("agy");
         let open = temp.path().join("open");
         let script = format!(
-            "#!/bin/sh\nprintf '%s\\n' \"$*\" >> '{}'\n",
+            "#!/bin/sh\nprintf '%s\\n' \"$*\" >> '{}'\nread -r line\n",
             marker.display()
         );
         for path in [&binary, &open] {
@@ -1156,10 +1322,11 @@ mod tests {
         .unwrap();
         for _ in 0..10 {
             let metadata = boot.runtime.provider_metadata().await;
-            assert_eq!(metadata.account.status, AccountStatus::NeedsAuth);
+            assert_eq!(metadata.account.status, AccountStatus::Unknown);
             assert!(!metadata.models.is_empty());
         }
-        let result = boot
+        assert!(!marker.exists(), "metadata executed the CLI");
+        let spawned = boot
             .runtime
             .spawn_turn(
                 "test",
@@ -1173,13 +1340,14 @@ mod tests {
                 temp.path().to_str().unwrap(),
             )
             .await;
-        assert!(
-            matches!(result, Err(DaemonError::BadRequest(message)) if message.contains("login required"))
-        );
-        assert!(
-            !marker.exists(),
-            "metadata or signed-out turn executed a process"
-        );
+        // Credential absence must not block keyring/API-key/ADC users. The
+        // stub is allowed to start; it has no credentials and never opens UI.
+        assert!(spawned.is_ok());
+        boot.runtime
+            .finish_turn("test", spawned.unwrap().generation)
+            .await
+            .unwrap();
+        assert!(marker.exists());
     }
 
     #[cfg(unix)]

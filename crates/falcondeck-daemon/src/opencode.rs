@@ -148,6 +148,7 @@ impl OpenCodeRuntime {
         // (`register_server_process`/`reap_orphaned_servers`) is for.
         command.kill_on_drop(true);
         strip_terminal_advertising_env(&mut command);
+        crate::agent_binary::validate_provider_command(&mut command)?;
         let mut child = command.spawn().map_err(|error| {
             DaemonError::Process(format!(
                 "failed to start OpenCode server '{}' (resolved to '{executable}'): {error}",

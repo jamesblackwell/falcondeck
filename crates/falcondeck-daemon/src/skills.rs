@@ -102,6 +102,47 @@ enum SkillDirLayout {
     ClaudeCommands,
 }
 
+fn agy_skill_roots(workspace: &Path, home: Option<&Path>) -> Vec<SkillScanRoot> {
+    let mut roots = Vec::new();
+    let mut add = |dir: PathBuf, source_kind| {
+        roots.push(SkillScanRoot {
+            dir,
+            source_kind,
+            providers: vec![AgentProvider::AGY],
+            layout: SkillDirLayout::AgentsSkills,
+        })
+    };
+    // Include parent shared skills through the nearest repository boundary.
+    // Never walk past the repo root into unrelated projects or the filesystem.
+    let repository = workspace.ancestors().find(|dir| dir.join(".git").exists());
+    if let Some(repository) = repository {
+        for parent in workspace.ancestors().skip(1) {
+            if !parent.starts_with(repository) {
+                break;
+            }
+            add(parent.join(".agents/skills"), SkillSourceKind::ProjectFile);
+            if parent == repository {
+                break;
+            }
+        }
+    }
+    if let Some(home) = home {
+        for dir in [
+            ".gemini/config/skills",
+            ".gemini/antigravity-cli/skills",
+            ".gemini/skills",
+        ] {
+            add(home.join(dir), SkillSourceKind::HomeFile);
+        }
+        if let Ok(plugins) = fs::read_dir(home.join(".gemini/config/plugins")) {
+            for plugin in plugins.flatten() {
+                add(plugin.path().join("skills"), SkillSourceKind::HomeFile);
+            }
+        }
+    }
+    roots
+}
+
 pub fn discover_file_backed_skills(workspace_path: &str) -> Vec<SkillSummary> {
     let mut entries = Vec::new();
 
@@ -115,6 +156,10 @@ pub fn discover_file_backed_skills(workspace_path: &str) -> Vec<SkillSummary> {
             layout: SkillDirLayout::AgentsSkills,
         });
     }
+    roots.extend(agy_skill_roots(
+        Path::new(workspace_path),
+        home_dir().as_deref(),
+    ));
     for root in roots {
         match root.layout {
             SkillDirLayout::AgentsSkills => entries.extend(scan_agents_skill_dir(
@@ -545,6 +590,45 @@ pub(crate) fn parse_markdown_metadata(content: &str) -> MarkdownMetadata {
 mod tests {
     use super::*;
     use falcondeck_core::SkillAvailability;
+
+    #[test]
+    fn agy_discovers_global_plugin_and_parent_repository_skills() {
+        let temp = tempfile::tempdir().unwrap();
+        let home = temp.path().join("home");
+        let repo = temp.path().join("repo");
+        let nested = repo.join("child/nested");
+        fs::create_dir_all(repo.join(".git")).unwrap();
+        fs::create_dir_all(&nested).unwrap();
+        let locations = [
+            home.join(".gemini/config/skills"),
+            home.join(".gemini/config/plugins/test/skills"),
+            home.join(".gemini/antigravity-cli/skills"),
+            home.join(".gemini/skills"),
+            repo.join(".agents/skills"),
+            repo.join("child/.agents/skills"),
+        ];
+        for (index, dir) in locations.iter().enumerate() {
+            let skill = dir.join(format!("skill-{index}"));
+            fs::create_dir_all(&skill).unwrap();
+            fs::write(
+                skill.join("SKILL.md"),
+                "---\nname: fixture\ndescription: fixture\n---\nBody",
+            )
+            .unwrap();
+        }
+        let entries: Vec<_> = super::agy_skill_roots(&nested, Some(&home))
+            .into_iter()
+            .flat_map(|root| {
+                super::scan_agents_skill_dir(&root.dir, root.source_kind, &root.providers)
+            })
+            .collect();
+        assert_eq!(entries.len(), 6);
+        assert!(
+            entries
+                .iter()
+                .all(|skill| skill.providers.contains(&AgentProvider::AGY))
+        );
+    }
 
     #[test]
     fn canonical_alias_collapses_separators() {

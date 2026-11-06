@@ -87,6 +87,7 @@ fn repo_root() -> PathBuf {
 
 #[tokio::test]
 async fn health_and_snapshot_routes_work_with_cors() {
+    falcondeck_daemon::disable_real_provider_binaries_for_tests();
     let daemon = spawn_embedded(test_config()).await.unwrap();
     let client = reqwest::Client::new();
 
@@ -154,6 +155,7 @@ async fn health_and_snapshot_routes_work_with_cors() {
 
 #[tokio::test]
 async fn turn_route_accepts_json_bodies_above_axums_default_limit() {
+    falcondeck_daemon::disable_real_provider_binaries_for_tests();
     let daemon = spawn_embedded(test_config()).await.unwrap();
     let client = reqwest::Client::new();
     let response = client
@@ -183,6 +185,7 @@ async fn turn_route_accepts_json_bodies_above_axums_default_limit() {
 
 #[tokio::test]
 async fn extension_permission_grants_are_explicit_and_persisted() {
+    falcondeck_daemon::disable_real_provider_binaries_for_tests();
     let temp_dir = tempfile::tempdir().unwrap();
     let state_path = temp_dir.path().join("daemon-state.json");
     let mut daemon = spawn_embedded(test_config_with_state_path(state_path.clone()))
@@ -272,6 +275,7 @@ async fn extension_permission_grants_are_explicit_and_persisted() {
 
 #[tokio::test]
 async fn scheduled_task_routes_are_host_scoped_and_validate_workspaces() {
+    falcondeck_daemon::disable_real_provider_binaries_for_tests();
     let daemon = spawn_embedded(test_config()).await.unwrap();
     let client = reqwest::Client::new();
 
@@ -312,6 +316,7 @@ async fn scheduled_task_routes_are_host_scoped_and_validate_workspaces() {
 
 #[tokio::test]
 async fn legacy_scheduled_task_migrates_to_control_on_restart() {
+    falcondeck_daemon::disable_real_provider_binaries_for_tests();
     let temp_dir = tempfile::tempdir().unwrap();
     let state_path = temp_dir.path().join("daemon-state.json");
     let mut daemon = spawn_embedded(test_config_with_state_path(state_path.clone()))
@@ -422,6 +427,7 @@ async fn legacy_scheduled_task_migrates_to_control_on_restart() {
 
 #[tokio::test]
 async fn rejects_requests_with_non_loopback_host_headers() {
+    falcondeck_daemon::disable_real_provider_binaries_for_tests();
     let daemon = spawn_embedded(test_config()).await.unwrap();
     let client = reqwest::Client::new();
 
@@ -462,6 +468,7 @@ async fn rejects_requests_with_non_loopback_host_headers() {
 
 #[tokio::test]
 async fn connect_workspace_bootstraps_stub_codex() {
+    falcondeck_daemon::disable_real_provider_binaries_for_tests();
     let daemon = spawn_embedded(test_config()).await.unwrap();
     let client = reqwest::Client::new();
     let response = client
@@ -512,6 +519,7 @@ async fn connect_workspace_bootstraps_stub_codex() {
 
 #[tokio::test]
 async fn remote_pairing_streams_snapshot_updates_into_the_relay() {
+    falcondeck_daemon::disable_real_provider_binaries_for_tests();
     let relay_dir = tempfile::tempdir().unwrap();
     let relay_base = spawn_relay(&relay_dir).await;
     let mut daemon = spawn_embedded(test_config()).await.unwrap();
@@ -601,6 +609,7 @@ async fn remote_pairing_streams_snapshot_updates_into_the_relay() {
 
 #[tokio::test]
 async fn trusted_remote_reconnects_after_daemon_restart_without_repairing() {
+    falcondeck_daemon::disable_real_provider_binaries_for_tests();
     let relay_dir = tempfile::tempdir().unwrap();
     let daemon_dir = tempfile::tempdir().unwrap();
     let state_path = daemon_dir.path().join("daemon-state.json");
@@ -690,6 +699,7 @@ async fn trusted_remote_reconnects_after_daemon_restart_without_repairing() {
 
 #[tokio::test]
 async fn additional_remote_pairings_reuse_the_session_and_publish_a_new_bootstrap() {
+    falcondeck_daemon::disable_real_provider_binaries_for_tests();
     let relay_dir = tempfile::tempdir().unwrap();
     let relay_base = spawn_relay(&relay_dir).await;
     let mut daemon = spawn_embedded(test_config()).await.unwrap();
@@ -778,6 +788,7 @@ async fn additional_remote_pairings_reuse_the_session_and_publish_a_new_bootstra
 
 #[tokio::test]
 async fn revoking_remote_device_rotates_the_key_only_for_remaining_devices() {
+    falcondeck_daemon::disable_real_provider_binaries_for_tests();
     let relay_dir = tempfile::tempdir().unwrap();
     let relay_base = spawn_relay(&relay_dir).await;
     let mut daemon = spawn_embedded(test_config()).await.unwrap();
@@ -889,6 +900,7 @@ async fn revoking_remote_device_rotates_the_key_only_for_remaining_devices() {
 
 #[tokio::test]
 async fn keyless_trusted_client_can_request_a_fresh_bootstrap_over_the_ephemeral_channel() {
+    falcondeck_daemon::disable_real_provider_binaries_for_tests();
     use futures_util::SinkExt;
 
     let relay_dir = tempfile::tempdir().unwrap();

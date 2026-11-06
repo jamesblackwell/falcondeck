@@ -252,10 +252,12 @@ fn skip_or_fail_missing(report: &mut Report, skip_missing: bool, bin: &str) {
     }
 }
 
-async fn binary_version(bin: &str, arg: &str) -> Option<String> {
-    let resolved = resolve_agent_binary(bin, bin);
-    let output = Command::new(&resolved.executable)
-        .arg(arg)
+async fn agy_binary_version(bin: &str) -> Option<String> {
+    let resolved = resolve_agent_binary("agy", bin);
+    let mut command = Command::new(&resolved.executable);
+    agy::configure_headless(&mut command);
+    let output = command
+        .arg("--version")
         .stdin(Stdio::null())
         .output()
         .await
@@ -266,9 +268,23 @@ async fn binary_version(bin: &str, arg: &str) -> Option<String> {
         .then(|| String::from_utf8_lossy(&output.stdout).trim().to_string())
 }
 
+async fn binary_version(bin: &str, arg: &str) -> Option<String> {
+    let resolved = resolve_agent_binary(bin, bin);
+    let mut command = Command::new(&resolved.executable);
+    let output = command.arg(arg).stdin(Stdio::null()).output().await.ok()?;
+    output
+        .status
+        .success()
+        .then(|| String::from_utf8_lossy(&output.stdout).trim().to_string())
+}
+
 async fn help_text(bin_name: &str, configured: &str) -> Option<String> {
     let resolved = resolve_agent_binary(bin_name, configured);
-    let output = Command::new(&resolved.executable)
+    let mut command = Command::new(&resolved.executable);
+    if bin_name == "agy" {
+        agy::configure_headless(&mut command);
+    }
+    let output = command
         .arg("--help")
         .stdin(Stdio::null())
         .output()
@@ -995,7 +1011,7 @@ pub async fn probe_agy(options: &ProbeOptions) -> Report {
         skip_or_fail_missing(&mut report, options.skip_missing, &options.agy_bin);
         return report;
     }
-    report.version = binary_version(&options.agy_bin, "--version").await;
+    report.version = agy_binary_version(&options.agy_bin).await;
     if report.version.is_none() {
         report.push(
             "binary responds",
@@ -1014,21 +1030,22 @@ pub async fn probe_agy(options: &ProbeOptions) -> Report {
     );
 
     let account = agy::read_auth_status(&options.agy_bin).await;
-    if account.status != falcondeck_core::AccountStatus::Ready {
-        report.push("account", CheckStatus::Warning, account.label);
-        return report;
-    }
-    let resolved = resolve_agent_binary("agy", &options.agy_bin);
-    let mut command = Command::new(&resolved.executable);
-    agy::configure_headless(&mut command);
-    let models_output = command
-        .arg("models")
-        .stdin(Stdio::null())
-        .output()
-        .await
-        .ok()
-        .filter(|output| output.status.success())
-        .map(|output| String::from_utf8_lossy(&output.stdout).to_string());
+    let models_output = if account.status == falcondeck_core::AccountStatus::Ready {
+        let resolved = resolve_agent_binary("agy", &options.agy_bin);
+        let mut command = Command::new(&resolved.executable);
+        agy::configure_headless(&mut command);
+        command
+            .arg("models")
+            .stdin(Stdio::null())
+            .kill_on_drop(true)
+            .output()
+            .await
+            .ok()
+            .filter(|output| output.status.success())
+            .map(|output| String::from_utf8_lossy(&output.stdout).to_string())
+    } else {
+        None
+    };
     let discovered = models_output
         .as_deref()
         .map(agy::parse_models_table)
@@ -1036,7 +1053,13 @@ pub async fn probe_agy(options: &ProbeOptions) -> Report {
     // `list_models` falls back to the curated table when `agy models` is empty,
     // which is the quiet failure: the picker still looks populated. Assert on
     // the parser's reading of the live table, not the fallback.
-    if discovered.is_empty() {
+    if account.status != falcondeck_core::AccountStatus::Ready {
+        report.push(
+            "model catalog",
+            CheckStatus::Skipped,
+            "No file credentials; skipping discovery (keyring/API-key/ADC turns remain available)",
+        );
+    } else if discovered.is_empty() {
         report.push(
             "model catalog",
             CheckStatus::Fail,
@@ -1062,7 +1085,11 @@ pub async fn probe_agy(options: &ProbeOptions) -> Report {
     );
 
     if options.live {
-        let candidates = agy_live_candidates(&discovered);
+        let candidates = agy_live_candidates(if discovered.is_empty() {
+            &agy::curated_models()
+        } else {
+            &discovered
+        });
         probe_agy_stream(options, &candidates, &mut report).await;
     } else {
         report.push(
@@ -1096,10 +1123,6 @@ async fn agy_stream_turn(
     prompt: &str,
 ) -> Result<AgyTurnOutcome, String> {
     let resolved = resolve_agent_binary("agy", &options.agy_bin);
-    let account = agy::read_auth_status(&options.agy_bin).await;
-    if account.status != falcondeck_core::AccountStatus::Ready {
-        return Err(account.label);
-    }
     let mut command = Command::new(&resolved.executable);
     agy::configure_headless(&mut command);
     command
@@ -1219,9 +1242,10 @@ async fn agy_stream_turn(
 
 fn agy_live_candidates(discovered: &[falcondeck_core::ModelSummary]) -> Vec<String> {
     let mut candidates = Vec::new();
-    // Prefer medium over low: this account's flash-low quota is exhausted while
-    // medium still runs. Both are current Gemini 3.7 cheap-tier ids.
+    // Prefer current inexpensive Flash models for explicit live qualification.
     for needle in [
+        "gemini-3.8-flash-medium",
+        "gemini-3.8-flash-low",
         "gemini-3.7-flash-medium",
         "gemini-3.7-flash-low",
         "claude-sonnet",

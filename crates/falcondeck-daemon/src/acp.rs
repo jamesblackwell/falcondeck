@@ -2249,6 +2249,7 @@ async fn probe_cursor_cli_models(config: &AcpProviderConfig) -> Vec<ModelSummary
     // strip defensively anyway.
     command.env("NO_COLOR", "1");
     command.arg("--list-models");
+    if crate::agent_binary::validate_provider_command(&mut command).is_err() { return Vec::new(); }
     let output = match timeout(ACP_SETUP_TIMEOUT, command.output()).await {
         Ok(Ok(output)) if output.status.success() => output,
         Ok(Ok(output)) => {
@@ -2398,6 +2399,7 @@ impl AcpRuntime {
         #[cfg(unix)]
         command.process_group(0);
 
+        crate::agent_binary::validate_provider_command(&mut command)?;
         let mut child = command.spawn().map_err(|error| {
             DaemonError::Process(format!(
                 "failed to start ACP provider '{}' ({}): {error}",
@@ -5437,7 +5439,11 @@ require('node:readline').createInterface({{ input: process.stdin }}).on('line', 
         let config = AcpProviderConfig {
             id: "initialize-error-fixture".to_string(),
             label: "Initialize error fixture".to_string(),
-            command: vec!["node".to_string(), "--eval".to_string(), script],
+            command: {
+                let fixture = directory.path().join("initialize-error.js");
+                std::fs::write(&fixture, script).unwrap();
+                vec!["node".into(), fixture.to_string_lossy().into_owned()]
+            },
             env: HashMap::new(),
             transport: ProviderTransport::default(),
         };

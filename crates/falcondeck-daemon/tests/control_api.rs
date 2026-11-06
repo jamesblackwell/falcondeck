@@ -46,6 +46,7 @@ async fn register_workspace(
 
 #[tokio::test]
 async fn search_route_discovers_capabilities() {
+    falcondeck_daemon::disable_real_provider_binaries_for_tests();
     let (daemon, _dir) = spawn().await;
     let client = Client::new();
     let response: ControlSearchResponse = client
@@ -67,6 +68,7 @@ async fn search_route_discovers_capabilities() {
 
 #[tokio::test]
 async fn get_route_reads_settings_and_automations() {
+    falcondeck_daemon::disable_real_provider_binaries_for_tests();
     let (daemon, dir) = spawn().await;
     let client = Client::new();
     let workspace = dir.path().join("quizgecko");
@@ -153,6 +155,7 @@ async fn get_route_reads_settings_and_automations() {
 
 #[tokio::test]
 async fn execute_route_runs_lifecycle_with_revisions() {
+    falcondeck_daemon::disable_real_provider_binaries_for_tests();
     let (daemon, dir) = spawn().await;
     let client = Client::new();
     let workspace = dir.path().join("repo");
@@ -254,6 +257,7 @@ async fn execute_route_runs_lifecycle_with_revisions() {
 
 #[tokio::test]
 async fn control_state_survives_a_daemon_restart() {
+    falcondeck_daemon::disable_real_provider_binaries_for_tests();
     let dir = tempfile::tempdir().unwrap();
     let state_path = dir.path().join("daemon-state.json");
     let workspace = dir.path().join("repo");
@@ -313,6 +317,7 @@ async fn control_state_survives_a_daemon_restart() {
 
 #[tokio::test]
 async fn mcp_origin_headers_are_enforced_against_settings() {
+    falcondeck_daemon::disable_real_provider_binaries_for_tests();
     let (daemon, dir) = spawn().await;
     let client = Client::new();
     let workspace = dir.path().join("repo");
@@ -403,6 +408,7 @@ async fn mcp_origin_headers_are_enforced_against_settings() {
 
 #[tokio::test]
 async fn invalid_origin_context_is_rejected() {
+    falcondeck_daemon::disable_real_provider_binaries_for_tests();
     let (daemon, _dir) = spawn().await;
     let client = Client::new();
     let response = client
@@ -429,6 +435,7 @@ async fn invalid_origin_context_is_rejected() {
 
 #[tokio::test]
 async fn unknown_operations_cannot_be_executed_by_guessing_paths() {
+    falcondeck_daemon::disable_real_provider_binaries_for_tests();
     let (daemon, _dir) = spawn().await;
     let client = Client::new();
     let response: ControlExecuteResponse = client
@@ -449,6 +456,7 @@ async fn unknown_operations_cannot_be_executed_by_guessing_paths() {
 
 #[tokio::test]
 async fn automation_targets_must_be_registered_workspaces() {
+    falcondeck_daemon::disable_real_provider_binaries_for_tests();
     let (daemon, dir) = spawn().await;
     let client = Client::new();
     let workspace = dir.path().join("unregistered-repo");
@@ -501,6 +509,7 @@ async fn automation_targets_must_be_registered_workspaces() {
 
 #[tokio::test]
 async fn pagination_and_filters_over_the_http_route() {
+    falcondeck_daemon::disable_real_provider_binaries_for_tests();
     let (daemon, dir) = spawn().await;
     let client = Client::new();
     let workspace = dir.path().join("repo");
@@ -564,6 +573,7 @@ async fn pagination_and_filters_over_the_http_route() {
 
 #[tokio::test]
 async fn loopback_host_protection_covers_control_routes() {
+    falcondeck_daemon::disable_real_provider_binaries_for_tests();
     let (daemon, _dir) = spawn().await;
     let client = Client::new();
     let response = client

@@ -469,35 +469,49 @@ initiate interactive sign-in. Null stdin and print mode do not enforce this:
 Antigravity can start browser OAuth from read-only print-mode slash commands.
 Only an explicit user action in a terminal should initiate sign-in.
 
-Antigravity metadata reads credential presence from
+Antigravity status reads credential presence from
 `$HOME/.gemini/antigravity-cli/antigravity-oauth-token` (the nested `token`
-object), uses the curated model catalog, and merges filesystem skills through
-the existing workspace skill discovery. It does not run `/usage`, `/skills`, or
-`agy models`. Usage calls the quota API with the existing access token; expired
-credentials report expired without refreshing or signing in. Gemini CLI's
-`oauth_creds.json` is not Antigravity CLI's credential store. Credential presence
-is not proof that the server will accept a token.
+object). Missing or unrecognized files mean unknown, because keyring, Gemini
+API-key and ADC authentication can still work. Turns do not use that file as an
+admission gate. A CLI-reported authentication failure becomes a clear login
+required error and updates the workspace account status.
 
-Native Antigravity turns check credentials before spawning and set
-`AGY_CLI_NONINTERACTIVE_HEADLESS=1` to suppress interactive authentication if
-credentials become invalid. On Unix, these children also start a new session
-without the daemon's controlling terminal, as required by the CLI's documented
+Metadata never runs `/usage` or `/skills`. With file credentials present, model
+discovery can run `agy models` once per 24 hours, with concurrent refreshes
+serialized. Results and failed-attempt timestamps persist in
+`~/.cache/falcondeck/agy-models.json`; refresh failures use that catalog before
+falling back to the current curated list. A missing credential file uses the
+cache/fallback without launching discovery. The default must exist in the
+returned catalog. The fallback tracks Google's
+[model availability](https://antigravity.google/docs/models/).
+
+Filesystem skill discovery includes `~/.gemini/config/skills`, each
+`~/.gemini/config/plugins/<plugin>/skills`, `~/.gemini/antigravity-cli/skills`,
+`~/.gemini/skills`, and parent `.agents/skills` through the nearest repository
+root. Usage calls the quota API with the existing access token; expired tokens
+report expired without starting sign-in. Gemini CLI's `oauth_creds.json` is not
+Antigravity CLI's credential store.
+
+Every native Antigravity spawn sets `AGY_CLI_NONINTERACTIVE_HEADLESS=1` and on
+Unix starts a new session without the daemon's controlling terminal, including
+turns, model discovery, conformance, inventory/version/help and local upgrade
+shells. Redirected stdin alone does not establish the CLI's documented
 [headless authentication behavior](https://antigravity.google/docs/cli/headless/).
-Conformance print-mode runs use the same guard.
-Do not remove it based on the assumption that redirected stdin prevents OAuth.
-The switch is present in the installed CLI; automated coverage checks its
-propagation using a stub, without running a signed-out real CLI.
+Remote Antigravity inventory/update commands use Python's `os.setsid` before
+exec and require Python 3 rather than falling back to a potentially interactive
+launch. Custom ACP commands wrapping `agy` remain outside this native contract.
 
 Plain `cargo test` must not execute installed provider CLIs, regardless of HOME.
-The shared resolver restricts provider resolution in unit and Cargo integration
-test executables to script fixtures in temporary directories or `tests/fixtures`.
-Discovery tests may find those fixtures through PATH or known locations, but
-never launch a login shell. Node/Python/Deno and shell fixture interpreters,
-`echo`, and system true/false may resolve; installed
-native binaries and symlinks to installed providers are refused. Integration
-tests that spawn a daemon binary must pass `FALCONDECK_TEST_NO_PROVIDERS=1` to
-that child. Keep all provider launch/probe paths behind this resolver, including
-CLI auth checks and upgrade version verification. Do not add direct real-CLI
-availability checks to tests. Use recording provider and browser-opener stubs;
-real harness qualification belongs in the explicit conformance command, outside
+Unit tests enable the provider guard at compile time. Integration tests call
+`disable_real_provider_binaries_for_tests()` before constructing a daemon;
+spawned daemon fixtures pass `FALCONDECK_TEST_NO_PROVIDERS=1`. Only that exact
+environment value activates the runtime guard; directory names do not.
+
+The resolver accepts temporary/repository fixture scripts and never launches a
+login shell in test mode. At provider spawn boundaries, interpreters require an
+explicit absolute fixture script. Inline `-c`/`--eval` programs, interpreter
+flags and installed provider scripts are refused. An interpreter resolving on
+PATH is not authorization to run its configured arguments. Keep new launch
+paths behind both checks. Use recording provider and browser-opener stubs;
+real harness qualification belongs in the explicit conformance command outside
 `cargo test`.

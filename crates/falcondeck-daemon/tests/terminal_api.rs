@@ -42,6 +42,7 @@ async fn assert_websocket_forbidden(url: String, origin: Option<&str>) {
 
 #[tokio::test]
 async fn local_websockets_reject_missing_and_untrusted_origins() {
+    falcondeck_daemon::disable_real_provider_binaries_for_tests();
     let daemon = spawn_embedded(test_config()).await.unwrap();
     let ws_base = daemon.base_url().replace("http://", "ws://");
 
@@ -152,6 +153,7 @@ fn frame_text(frame: &TerminalServerFrame) -> String {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn terminal_http_and_websocket_round_trip() {
+    falcondeck_daemon::disable_real_provider_binaries_for_tests();
     // Keep the login shell deterministic across machines. SAFETY: test-only.
     unsafe { std::env::set_var("SHELL", "/bin/sh") };
     let daemon = spawn_embedded(test_config()).await.unwrap();

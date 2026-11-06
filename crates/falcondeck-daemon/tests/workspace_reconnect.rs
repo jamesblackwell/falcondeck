@@ -150,6 +150,7 @@ async fn ready(app: &AppState) {
 
 #[tokio::test]
 async fn restore_starts_only_interrupted_projects_and_preserves_all_sessions() {
+    falcondeck_daemon::disable_real_provider_binaries_for_tests();
     let (temp, app) = fixture(true, 8).await;
     app.restore_local_state().await.unwrap();
     timeout(Duration::from_secs(5), async {
@@ -206,6 +207,7 @@ fn set_interrupted(root: &Path, interrupted: bool) {
 
 #[tokio::test]
 async fn interrupted_restore_still_limits_discovery_to_four_projects() {
+    falcondeck_daemon::disable_real_provider_binaries_for_tests();
     let (temp, app) = fixture(true, 8).await;
     set_interrupted(temp.path(), true);
     app.restore_local_state().await.unwrap();
@@ -227,6 +229,7 @@ async fn interrupted_restore_still_limits_discovery_to_four_projects() {
 
 #[tokio::test]
 async fn ninety_one_idle_projects_start_no_servers_and_connect_once_on_use() {
+    falcondeck_daemon::disable_real_provider_binaries_for_tests();
     let (temp, app) = fixture(false, 91).await;
     set_interrupted(temp.path(), false);
     app.restore_local_state().await.unwrap();
@@ -299,6 +302,7 @@ async fn ninety_one_idle_projects_start_no_servers_and_connect_once_on_use() {
 
 #[tokio::test]
 async fn lazy_legacy_workspace_ids_survive_a_restart_without_starting_providers() {
+    falcondeck_daemon::disable_real_provider_binaries_for_tests();
     let (temp, app) = fixture(false, 1).await;
     set_interrupted(temp.path(), false);
     let state_path = temp.path().join("state.json");
@@ -329,6 +333,7 @@ async fn lazy_legacy_workspace_ids_survive_a_restart_without_starting_providers(
 #[tokio::test]
 #[ignore = "controlled reconnect latency measurement; run with --ignored --nocapture"]
 async fn measure_eight_workspace_reconnect() {
+    falcondeck_daemon::disable_real_provider_binaries_for_tests();
     for sample in 0..3 {
         let (temp, app) = fixture(false, 8).await;
         set_interrupted(temp.path(), true);

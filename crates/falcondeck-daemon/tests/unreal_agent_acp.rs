@@ -60,6 +60,7 @@ async fn receive(lines: &mut Lines<BufReader<ChildStdout>>, id: i64) -> Vec<Valu
 
 #[tokio::test]
 async fn prompt_cancel_and_reload_native_history() {
+    falcondeck_daemon::disable_real_provider_binaries_for_tests();
     let workspace = tempfile::tempdir().unwrap();
     let (mut child, mut lines) = start_adapter();
     send(&mut child, 1, "initialize", json!({})).await;

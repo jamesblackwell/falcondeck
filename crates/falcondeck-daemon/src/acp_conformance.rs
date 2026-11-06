@@ -459,16 +459,18 @@ impl AdapterProcess {
             .first()
             .ok_or_else(|| ProbeError::Usage("adapter command is empty".to_string()))?;
         let resolved = crate::agent_binary::resolve_agent_binary(executable, executable);
-        let mut child = Command::new(&resolved.executable)
+        let mut command = Command::new(&resolved.executable);
+        command
             .args(&options.command[1..])
             .envs(&options.env)
             .current_dir(&options.cwd)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
-            .kill_on_drop(true)
-            .spawn()
-            .map_err(ProbeError::Spawn)?;
+            .kill_on_drop(true);
+        crate::agent_binary::validate_provider_command(&mut command)
+            .map_err(|e| ProbeError::Usage(e.to_string()))?;
+        let mut child = command.spawn().map_err(ProbeError::Spawn)?;
         let stdin = child.stdin.take().ok_or_else(|| {
             ProbeError::InvalidResponse("adapter process has no stdin".to_string())
         })?;

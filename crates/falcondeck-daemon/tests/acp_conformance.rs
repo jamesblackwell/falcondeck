@@ -28,6 +28,7 @@ fn status(report: &Report, name: &str) -> CheckStatus {
 
 #[tokio::test]
 async fn live_probe_exercises_permission_cancel_resume_and_unknown_events() {
+    falcondeck_daemon::disable_real_provider_binaries_for_tests();
     let cwd = tempfile::tempdir().expect("temporary workspace should be created");
     let report = run_probe(
         &options("normal", cwd.path().to_path_buf())
@@ -64,6 +65,7 @@ async fn live_probe_exercises_permission_cancel_resume_and_unknown_events() {
 /// token cost, which is what stops such a check from being run.
 #[tokio::test]
 async fn live_probe_selects_legacy_model_before_prompting() {
+    falcondeck_daemon::disable_real_provider_binaries_for_tests();
     let cwd = tempfile::tempdir().expect("temporary workspace should be created");
     let report =
         run_probe(&options("legacy-model", cwd.path().to_path_buf()).with_live_checks(true)).await;
@@ -76,6 +78,7 @@ async fn live_probe_selects_legacy_model_before_prompting() {
 
 #[tokio::test]
 async fn handshake_probe_discovers_the_catalog_without_prompting() {
+    falcondeck_daemon::disable_real_provider_binaries_for_tests();
     let cwd = tempfile::tempdir().expect("temporary workspace should be created");
     let report = run_probe(&options("normal", cwd.path().to_path_buf())).await;
 
@@ -88,6 +91,7 @@ async fn handshake_probe_discovers_the_catalog_without_prompting() {
 
 #[tokio::test]
 async fn protocol_mismatch_is_a_failed_check() {
+    falcondeck_daemon::disable_real_provider_binaries_for_tests();
     let cwd = tempfile::tempdir().expect("temporary workspace should be created");
     let report = run_probe(&options("protocol-mismatch", cwd.path().to_path_buf())).await;
 
@@ -97,6 +101,7 @@ async fn protocol_mismatch_is_a_failed_check() {
 
 #[tokio::test]
 async fn malformed_stdout_is_reported_without_panicking() {
+    falcondeck_daemon::disable_real_provider_binaries_for_tests();
     let cwd = tempfile::tempdir().expect("temporary workspace should be created");
     let report = run_probe(&options("malformed", cwd.path().to_path_buf())).await;
 
@@ -106,6 +111,7 @@ async fn malformed_stdout_is_reported_without_panicking() {
 
 #[tokio::test]
 async fn adapter_exit_is_reported_without_panicking() {
+    falcondeck_daemon::disable_real_provider_binaries_for_tests();
     let cwd = tempfile::tempdir().expect("temporary workspace should be created");
     let report = run_probe(&options("exit", cwd.path().to_path_buf())).await;
 
@@ -115,6 +121,7 @@ async fn adapter_exit_is_reported_without_panicking() {
 
 #[tokio::test]
 async fn request_error_preserves_adapter_message() {
+    falcondeck_daemon::disable_real_provider_binaries_for_tests();
     let cwd = tempfile::tempdir().expect("temporary workspace should be created");
     let report = run_probe(&options("request-error", cwd.path().to_path_buf())).await;
 
@@ -128,6 +135,7 @@ async fn request_error_preserves_adapter_message() {
 
 #[tokio::test]
 async fn request_timeout_becomes_a_failed_check() {
+    falcondeck_daemon::disable_real_provider_binaries_for_tests();
     let cwd = tempfile::tempdir().expect("temporary workspace should be created");
     let report = run_probe(
         &ProbeOptions::new(fixture_command("timeout"), cwd.path().to_path_buf())

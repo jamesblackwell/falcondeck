@@ -111,6 +111,7 @@ fn requests(root: &Path) -> Vec<Value> {
 
 #[tokio::test]
 async fn startup_resumes_only_shutdown_sessions_without_a_ui_and_survives_one_failure() {
+    falcondeck_daemon::disable_real_provider_binaries_for_tests();
     let (temp, app) = restored_app(None).await;
     timeout(Duration::from_secs(10), async {
         loop {
@@ -180,6 +181,7 @@ async fn startup_resumes_only_shutdown_sessions_without_a_ui_and_survives_one_fa
 
 #[tokio::test]
 async fn startup_keeps_old_installs_and_explicit_opt_out_on_manual_recovery() {
+    falcondeck_daemon::disable_real_provider_binaries_for_tests();
     for preferences in [
         json!({"version": 1}),
         json!({"auto_resume_interrupted_sessions": false}),

@@ -115,6 +115,7 @@ async fn wait_for_runs(
 
 #[tokio::test]
 async fn queue_one_holds_the_occurrence_until_the_active_run_finishes() {
+    falcondeck_daemon::disable_real_provider_binaries_for_tests();
     // A bare AppState (no spawned scheduler loop) keeps the run states
     // deterministic while the dispatch gate is exercised directly.
     let dir = tempfile::tempdir().unwrap();
@@ -235,6 +236,7 @@ fn due_in(seconds: i64) -> Value {
 
 #[tokio::test]
 async fn due_automation_dispatches_exactly_once() {
+    falcondeck_daemon::disable_real_provider_binaries_for_tests();
     let (daemon, dir) = spawn().await;
     let client = Client::new();
     let workspace = dir.path().join("repo");
@@ -263,6 +265,7 @@ async fn due_automation_dispatches_exactly_once() {
 
 #[tokio::test]
 async fn allow_policy_overlaps_occurrences() {
+    falcondeck_daemon::disable_real_provider_binaries_for_tests();
     // A bare AppState keeps run states deterministic while the claim gate
     // is exercised directly.
     let dir = tempfile::tempdir().unwrap();
@@ -369,6 +372,7 @@ async fn allow_policy_overlaps_occurrences() {
 
 #[tokio::test]
 async fn scheduler_does_not_dispatch_paused_automations() {
+    falcondeck_daemon::disable_real_provider_binaries_for_tests();
     let (daemon, dir) = spawn().await;
     let client = Client::new();
     let workspace = dir.path().join("repo");
@@ -407,6 +411,7 @@ async fn scheduler_does_not_dispatch_paused_automations() {
 
 #[tokio::test]
 async fn missing_required_connector_skips_the_run() {
+    falcondeck_daemon::disable_real_provider_binaries_for_tests();
     let (daemon, dir) = spawn().await;
     let client = Client::new();
     let workspace_dir = dir.path().join("repo");
@@ -458,6 +463,7 @@ async fn missing_required_connector_skips_the_run() {
 
 #[tokio::test]
 async fn manual_run_now_dispatches_through_the_scheduler() {
+    falcondeck_daemon::disable_real_provider_binaries_for_tests();
     let (daemon, dir) = spawn().await;
     let client = Client::new();
     let workspace = dir.path().join("repo");
@@ -502,6 +508,7 @@ async fn manual_run_now_dispatches_through_the_scheduler() {
 
 #[tokio::test]
 async fn once_automation_completes_after_its_run() {
+    falcondeck_daemon::disable_real_provider_binaries_for_tests();
     let (daemon, dir) = spawn().await;
     let client = Client::new();
     let workspace = dir.path().join("repo");
@@ -539,6 +546,7 @@ async fn once_automation_completes_after_its_run() {
 
 #[tokio::test]
 async fn overlap_policy_records_one_skip_while_running() {
+    falcondeck_daemon::disable_real_provider_binaries_for_tests();
     // A standalone service (no scheduler loop) so the running occurrence
     // stays put deterministically while the second one is evaluated.
     let dir = tempfile::tempdir().unwrap();

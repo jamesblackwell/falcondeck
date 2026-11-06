@@ -67,14 +67,68 @@ pub(crate) fn agent_binary_available_cached(bin_name: &str, configured: &str) ->
     available
 }
 
-/// Also covers integration-test executables (their library is built without
-/// cfg(test)). Spawned daemon fixtures carry the explicit guard instead.
+static TEST_PROVIDER_GUARD: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+/// Integration tests explicitly opt in before constructing a daemon.
+#[doc(hidden)]
+pub fn disable_real_provider_binaries_for_tests() {
+    TEST_PROVIDER_GUARD.store(true, std::sync::atomic::Ordering::Relaxed);
+}
+
 pub(crate) fn provider_test_mode() -> bool {
     cfg!(test)
-        || env::var_os("FALCONDECK_TEST_NO_PROVIDERS").is_some()
-        || env::current_exe()
-            .ok()
-            .is_some_and(|path| path.parent().and_then(Path::file_name) == Some(OsStr::new("deps")))
+        || TEST_PROVIDER_GUARD.load(std::sync::atomic::Ordering::Relaxed)
+        || env::var("FALCONDECK_TEST_NO_PROVIDERS").is_ok_and(|v| v == "1")
+}
+
+fn fixture_script(path: &Path) -> bool {
+    let Ok(canonical) = path.canonicalize() else {
+        return false;
+    };
+    let Ok(temp) = env::temp_dir().canonicalize() else {
+        return false;
+    };
+    path.is_absolute()
+        && canonical.is_file()
+        && (canonical.starts_with(temp)
+            || canonical.starts_with(Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures")))
+}
+
+/// An interpreter is not a test fixture. Validate its script at the final
+/// provider spawn boundary, after all configured arguments have been added.
+pub(crate) fn validate_provider_command(
+    command: &mut TokioCommand,
+) -> Result<(), crate::error::DaemonError> {
+    if !provider_test_mode() {
+        return Ok(());
+    }
+    // Inherited/configured interpreter preload hooks must not bypass the
+    // explicit script check in a test process.
+    for name in [
+        "NODE_OPTIONS",
+        "NODE_PATH",
+        "PYTHONPATH",
+        "PYTHONSTARTUP",
+        "BASH_ENV",
+        "ENV",
+    ] {
+        command.env_remove(name);
+    }
+    let command = command.as_std();
+    let name = Path::new(command.get_program())
+        .file_name()
+        .and_then(OsStr::to_str);
+    if matches!(
+        name,
+        Some("node" | "python3" | "deno" | "sh" | "bash" | "echo")
+    ) {
+        let script = command.get_args().next().map(Path::new);
+        if !script.is_some_and(fixture_script) {
+            return Err(crate::error::DaemonError::Process("provider tests require an explicit fixture script; interpreter flags and inline code are disabled".into()));
+        }
+    }
+    Ok(())
 }
 
 fn test_fixture_binary(configured: &str) -> bool {
@@ -138,6 +192,18 @@ pub fn resolve_agent_binary(bin_name: &str, configured: &str) -> AgentBinaryReso
             },
             diagnostics: ResolutionDiagnostics {
                 configured: configured.to_string(),
+                ..Default::default()
+            },
+        };
+    }
+
+    if provider_test_mode() {
+        return AgentBinaryResolution {
+            executable: resolve_from_path(configured)
+                .unwrap_or_else(|| "/__falcondeck_tests__/real-provider-disabled".into()),
+            source: BinaryResolutionSource::Path,
+            diagnostics: ResolutionDiagnostics {
+                configured: configured.into(),
                 ..Default::default()
             },
         };
@@ -550,9 +616,33 @@ mod tests {
     };
 
     use super::{
-        ResolutionDiagnostics, build_preferred_command_path, command_output_with_timeout,
-        known_location_paths, missing_binary_message, parse_login_shell_environment,
+        ResolutionDiagnostics, TokioCommand, build_preferred_command_path,
+        command_output_with_timeout, known_location_paths, missing_binary_message,
+        parse_login_shell_environment,
     };
+
+    #[test]
+    fn interpreters_require_explicit_fixture_scripts() {
+        for (interpreter, args) in [
+            (
+                "node",
+                vec!["--eval", "require('child_process').spawn('agy')"],
+            ),
+            ("sh", vec!["-c", "agy"]),
+            ("python3", vec!["-c", "import os; os.system('agy')"]),
+            ("deno", vec!["run", "/installed/provider.js"]),
+        ] {
+            let mut command = TokioCommand::new(interpreter);
+            command.args(args);
+            assert!(super::validate_provider_command(&mut command).is_err());
+        }
+        let temp = tempfile::tempdir().unwrap();
+        let script = temp.path().join("fixture.js");
+        std::fs::write(&script, "console.log('fixture')").unwrap();
+        let mut command = TokioCommand::new("node");
+        command.arg(script);
+        assert!(super::validate_provider_command(&mut command).is_ok());
+    }
 
     #[test]
     fn test_probes_cannot_resolve_installed_provider_binaries() {

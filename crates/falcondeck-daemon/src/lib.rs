@@ -9,6 +9,8 @@ pub mod acp_conformance;
 pub mod acp_protocol;
 mod activity;
 mod agent_binary;
+#[doc(hidden)]
+pub use agent_binary::disable_real_provider_binaries_for_tests;
 mod agent_context;
 mod agent_orphans;
 mod agy;
