@@ -63,6 +63,9 @@ import {
 const AUTO_SCROLL_THRESHOLD = 40;
 const JUMP_THRESHOLD = 200;
 const SMOOTH_SCROLL_DURATION_MS = 320;
+/// Real shrinkage this big eases out instead of landing in a single frame.
+const EASED_SHRINK_THRESHOLD_PX = 16;
+const FLOOR_RELEASE_DURATION_MS = 240;
 /// Keep a few lines of the previous reply above a just-sent user message,
 /// including room for the reply's actions and the gap between messages.
 const TAIL_TURN_TOP_GAP = 112;
@@ -173,6 +176,13 @@ function offsetTopWithin(element: HTMLElement, ancestor: HTMLElement) {
     return top;
   };
   return toRoot(element) - toRoot(ancestor);
+}
+
+function prefersReducedMotion() {
+  return (
+    typeof window.matchMedia === "function" &&
+    window.matchMedia("(prefers-reduced-motion: reduce)").matches
+  );
 }
 
 function clampScrollTop(scrollTop: number, element: HTMLDivElement) {
@@ -288,6 +298,8 @@ export const Conversation = memo(function Conversation({
   const contentRef = useRef<HTMLDivElement>(null);
   const tailSpacerRef = useRef<HTMLDivElement>(null);
   const scrollFloorRef = useRef<HTMLDivElement>(null);
+  const floorTargetRef = useRef(0);
+  const floorReleaseFrameRef = useRef<number | null>(null);
   const pinToBottomFrameRef = useRef<number | null>(null);
   const scrollPositionsRef = useRef(new Map<string, SavedScrollPosition>());
   const activeThreadKeyRef = useRef<string | null>(threadKey);
@@ -534,6 +546,39 @@ export const Conversation = memo(function Conversation({
     [threadKey],
   );
 
+  const cancelFloorRelease = useCallback(() => {
+    if (floorReleaseFrameRef.current === null) return;
+    window.cancelAnimationFrame(floorReleaseFrameRef.current);
+    floorReleaseFrameRef.current = null;
+  }, []);
+
+  /// When content really shrinks (a turn's live rows folding away), the tail
+  /// has to come down to meet the viewport. Easing the floor there moves the
+  /// view over a few frames rather than dropping it in one. The target is
+  /// re-read each frame, so content that regrows mid-release is respected.
+  const startFloorRelease = useCallback(() => {
+    if (floorReleaseFrameRef.current !== null) return;
+    const el = scrollRef.current;
+    const floor = scrollFloorRef.current;
+    if (!el || !floor) return;
+    const from = Number.parseFloat(floor.style.height) || 0;
+    const start = performance.now();
+    const step = (now: number) => {
+      const t = Math.min(1, (now - start) / FLOOR_RELEASE_DURATION_MS);
+      const eased = 1 - (1 - t) ** 3;
+      const height = from + (floorTargetRef.current - from) * eased;
+      floor.style.height = `${height}px`;
+      if (stickyToBottomRef.current) {
+        el.scrollTop = Math.max(0, el.scrollHeight - el.clientHeight);
+        programmaticScrollTopRef.current = el.scrollTop;
+        lastScrollTopRef.current = el.scrollTop;
+      }
+      floorReleaseFrameRef.current =
+        t < 1 ? window.requestAnimationFrame(step) : null;
+    };
+    floorReleaseFrameRef.current = window.requestAnimationFrame(step);
+  }, []);
+
   /// Sizes the spacer under the transcript so the latest turn — the last user
   /// message and everything after it — sits below a little previous context.
   /// While the reply is shorter
@@ -543,7 +588,7 @@ export const Conversation = memo(function Conversation({
   /// is gone and ordinary tail-following takes over. Sized synchronously
   /// (never via state) so callers can pin against the new scrollHeight in
   /// the same layout pass.
-  const syncTailSpacer = useCallback(() => {
+  const syncTailSpacer = useCallback((easeShrink = false) => {
     const scroll = scrollRef.current;
     const content = contentRef.current;
     const spacer = tailSpacerRef.current;
@@ -572,11 +617,22 @@ export const Conversation = memo(function Conversation({
     // while the scroller's overflow still lacks their height. This floor sits
     // outside the flow and only moves here, after layout has settled.
     const floor = scrollFloorRef.current;
-    if (floor) {
-      const floorHeight = `${content.offsetHeight + Math.max(0, height)}px`;
-      if (floor.style.height !== floorHeight) floor.style.height = floorHeight;
+    if (!floor) return;
+    const target = content.offsetHeight + Math.max(0, height);
+    floorTargetRef.current = target;
+    const current = Number.parseFloat(floor.style.height) || 0;
+    if (
+      easeShrink &&
+      current - target >= EASED_SHRINK_THRESHOLD_PX &&
+      !prefersReducedMotion()
+    ) {
+      startFloorRelease();
+      return;
     }
-  }, []);
+    cancelFloorRelease();
+    const floorHeight = `${target}px`;
+    if (floor.style.height !== floorHeight) floor.style.height = floorHeight;
+  }, [cancelFloorRelease, startFloorRelease]);
 
   /// Every scroll position this component sets goes through here so the
   /// echoing scroll event can be told apart from reader input.
@@ -595,12 +651,18 @@ export const Conversation = memo(function Conversation({
       readerAnchorRef.current = captureReaderAnchor(el);
       return;
     }
-    const drift = readerAnchorDrift(anchor, el);
-    if (drift === null) {
+    const moved = readerAnchorDrift(anchor, el);
+    if (moved === null) {
       readerAnchorRef.current = captureReaderAnchor(el);
-    } else if (Math.abs(drift) >= 0.5) {
-      writeScrollTop(el, el.scrollTop + drift);
+      return;
     }
+    // The reader may have scrolled since their last scroll event. That
+    // movement is theirs: only what remains is layout drift.
+    const unreported = el.scrollTop - lastScrollTopRef.current;
+    const drift = moved + unreported;
+    if (Math.abs(drift) < 0.5) return;
+    anchor.top -= unreported;
+    writeScrollTop(el, el.scrollTop + drift);
   }, [writeScrollTop]);
 
   const cancelSmoothScroll = useCallback(() => {
@@ -639,10 +701,7 @@ export const Conversation = memo(function Conversation({
     syncTailSpacer();
     const target = () => Math.max(0, el.scrollHeight - el.clientHeight);
     const from = el.scrollTop;
-    const prefersReducedMotion =
-      typeof window.matchMedia === "function" &&
-      window.matchMedia("(prefers-reduced-motion: reduce)").matches;
-    if (prefersReducedMotion || target() - from <= 1) {
+    if (prefersReducedMotion() || target() - from <= 1) {
       scrollToBottom();
       return;
     }
@@ -677,7 +736,7 @@ export const Conversation = memo(function Conversation({
   const pinToBottomNow = useCallback(() => {
     const el = scrollRef.current;
     if (!el) return;
-    syncTailSpacer();
+    syncTailSpacer(true);
     writeScrollTop(el, Math.max(0, el.scrollHeight - el.clientHeight));
     stickyToBottomRef.current = true;
     readerDistanceRef.current = 0;
@@ -1009,7 +1068,7 @@ export const Conversation = memo(function Conversation({
     const observer = new ResizeObserver(() => {
       // The spacer sits beside the transcript, not inside it, so sizing it
       // here does not feed back into this observer.
-      syncTailSpacer();
+      syncTailSpacer(true);
       if (smoothScrollFrameRef.current !== null) {
         persistScrollPosition();
         return;
@@ -1028,8 +1087,23 @@ export const Conversation = memo(function Conversation({
     observer.observe(content);
     observer.observe(scroll);
 
+    // Height can move between blocks with the total unchanged, which the
+    // observer above cannot see. Commits land here before paint.
+    const mutations = new MutationObserver(() => {
+      if (stickyToBottomRef.current || smoothScrollFrameRef.current !== null) {
+        return;
+      }
+      holdReaderAnchor();
+    });
+    mutations.observe(content, {
+      childList: true,
+      subtree: true,
+      characterData: true,
+    });
+
     return () => {
       observer.disconnect();
+      mutations.disconnect();
     };
   }, [
     holdReaderAnchor,
@@ -1039,6 +1113,16 @@ export const Conversation = memo(function Conversation({
     syncTailSpacer,
     threadKey,
   ]);
+
+  // The observers above stand down while a thread loads, so nothing else
+  // would shrink a floor left by the thread before it.
+  useLayoutEffect(() => {
+    if (!isLoading) return;
+    cancelFloorRelease();
+    floorTargetRef.current = 0;
+    readerAnchorRef.current = null;
+    if (scrollFloorRef.current) scrollFloorRef.current.style.height = "";
+  }, [cancelFloorRelease, isLoading, threadKey]);
 
   // Any real scroll input takes the position back from a running glide.
   useEffect(() => {
@@ -1074,8 +1158,9 @@ export const Conversation = memo(function Conversation({
         window.cancelAnimationFrame(pinToBottomFrameRef.current);
       }
       cancelSmoothScroll();
+      cancelFloorRelease();
     };
-  }, [cancelSmoothScroll]);
+  }, [cancelFloorRelease, cancelSmoothScroll]);
 
   const jumpToBottom = useCallback(() => {
     smoothScrollToBottom();

@@ -35,10 +35,15 @@ export const scenarios = {
   'tool-above': 'reader=start&tools=expanded&liveToolAbove=1',
   'expand-above': 'reader=start&expandAbove=1',
   'late-image': 'reader=history&lateImage=13000',
+  'end-follow': 'reader=none&longTurn=1&thought=1',
+  'end-follow-refresh': 'reader=none&longTurn=1&thought=1&endRefresh=same',
+  'end-follow-remount': 'reader=none&longTurn=1&thought=1&endRefresh=new',
+  'end-fold': 'reader=none&longTurn=1&thought=1&tools=auto&endFold=1',
+  'end-parked': 'reader=mid&longTurn=1&tools=auto&endFold=1&parkThroughEnd=1',
+  'end-fold-return': 'reader=start&longTurn=1&tools=auto&endFold=1',
+  redistribute: 'reader=history&redistribute=1',
   'long-climb': 'reader=climb&history=200',
   'long-follow': 'reader=none&history=200',
-  'long-climb-eager': 'reader=climb&history=200&eager=1',
-  'long-follow-eager': 'reader=none&history=200&eager=1',
 }
 
 const names = only ? only.split(',') : Object.keys(scenarios)

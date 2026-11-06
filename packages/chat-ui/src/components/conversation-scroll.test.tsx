@@ -147,6 +147,132 @@ describe("Conversation scrolling", () => {
     delete (document as { elementFromPoint?: unknown }).elementFromPoint;
   });
 
+  it("keeps a reader's scroll that arrives before its scroll event", () => {
+    const scroll = openThread();
+    anchoredBlock(scroll, () => 420);
+    scroll.scrollTop = 300;
+    fireEvent.scroll(scroll);
+
+    scroll.scrollTop = 280;
+    act(() => resize());
+    expect(scroll.scrollTop).toBe(280);
+    delete (document as { elementFromPoint?: unknown }).elementFromPoint;
+  });
+
+  it("applies only the layout drift when it lands mid-scroll", () => {
+    const scroll = openThread();
+    let blockTop = 420;
+    anchoredBlock(scroll, () => blockTop);
+    scroll.scrollTop = 300;
+    fireEvent.scroll(scroll);
+
+    scroll.scrollTop = 280;
+    blockTop = 430;
+    act(() => resize());
+    expect(scroll.scrollTop).toBe(290);
+
+    // The echo must neither undo that nor re-apply the reader's movement.
+    fireEvent.scroll(scroll);
+    expect(scroll.scrollTop).toBe(290);
+    delete (document as { elementFromPoint?: unknown }).elementFromPoint;
+  });
+
+  it("holds the reader when height moves between blocks with no resize", async () => {
+    const scroll = openThread();
+    let blockTop = 420;
+    anchoredBlock(scroll, () => blockTop);
+    scroll.scrollTop = 300;
+    fireEvent.scroll(scroll);
+
+    blockTop = 460;
+    await act(async () => {
+      scroll
+        .querySelector("[data-conversation-transcript]")!
+        .append(document.createElement("div"));
+    });
+    expect(scroll.scrollTop).toBe(340);
+    delete (document as { elementFromPoint?: unknown }).elementFromPoint;
+  });
+
+  it("clears the previous thread's floor while the next one loads", () => {
+    const items = [
+      { kind: "assistant_message" as const, id: "a1", text: "Reply", created_at: "2026-09-07T10:00:00Z" },
+    ];
+    const { container, rerender } = render(<Conversation threadKey="long" items={items} />);
+    const floor = container.querySelector<HTMLElement>("[data-conversation-scroll-floor]")!;
+    vi.spyOn(HTMLElement.prototype, "offsetHeight", "get").mockReturnValue(1200);
+    act(() => resize());
+    expect(floor.style.height).toBe("1200px");
+
+    rerender(<Conversation threadKey="short" items={[]} isLoading />);
+    expect(floor.style.height).toBe("");
+  });
+
+  it("eases real shrinkage so the tail never lands in one frame", () => {
+    vi.spyOn(performance, "now").mockReturnValue(0);
+    const scroll = openThread();
+    const offsetHeight = vi.spyOn(HTMLElement.prototype, "offsetHeight", "get");
+    offsetHeight.mockReturnValue(1200);
+    act(() => resize());
+    flushFrames();
+    const floor = scroll.querySelector<HTMLElement>("[data-conversation-scroll-floor]")!;
+
+    offsetHeight.mockReturnValue(700);
+    act(() => resize());
+    expect(floor.style.height).toBe("1200px");
+
+    vi.spyOn(performance, "now").mockReturnValue(100);
+    flushFrames();
+    const halfway = Number.parseFloat(floor.style.height);
+    expect(halfway).toBeLessThan(1200);
+    expect(halfway).toBeGreaterThan(700);
+
+    vi.spyOn(performance, "now").mockReturnValue(1000);
+    flushFrames();
+    expect(floor.style.height).toBe("700px");
+  });
+
+  it("drops the floor at once for reduced motion", () => {
+    vi.stubGlobal("matchMedia", () => ({ matches: true }));
+    const scroll = openThread();
+    const offsetHeight = vi.spyOn(HTMLElement.prototype, "offsetHeight", "get");
+    offsetHeight.mockReturnValue(1200);
+    act(() => resize());
+    offsetHeight.mockReturnValue(700);
+    act(() => resize());
+    const floor = scroll.querySelector<HTMLElement>("[data-conversation-scroll-floor]")!;
+    expect(floor.style.height).toBe("700px");
+  });
+
+  it("holds the scrollable height through the finished message's swap", () => {
+    const item = {
+      kind: "assistant_message" as const,
+      id: "a1",
+      text: "Reply",
+      lifecycle: "streaming" as const,
+      created_at: "2026-09-07T10:00:00Z",
+    };
+    const { container, rerender } = render(
+      <Conversation threadKey="end" items={[item]} isThinking />,
+    );
+    const offsetHeight = vi.spyOn(HTMLElement.prototype, "offsetHeight", "get");
+    offsetHeight.mockReturnValue(1200);
+    act(() => resize());
+    const floor = container.querySelector<HTMLElement>("[data-conversation-scroll-floor]")!;
+    expect(floor.style.height).toBe("1200px");
+
+    // Mid-swap the transcript is transiently short. Only the settled size
+    // reported by the observer may move the floor, so a commit must not.
+    offsetHeight.mockReturnValue(300);
+    rerender(
+      <Conversation threadKey="end" items={[{ ...item, lifecycle: "complete" }]} />,
+    );
+    expect(floor.style.height).toBe("1200px");
+    expect(floor.parentElement).toBe(
+      container.querySelector("[data-conversation-transcript]")!.parentElement,
+    );
+  });
+
   it("leaves anchoring to engines that do it natively", () => {
     vi.stubGlobal("CSS", { supports: () => true });
     const scroll = openThread();
@@ -196,9 +322,9 @@ describe("Conversation scrolling", () => {
     const floor = scroll.querySelector<HTMLElement>("[data-conversation-scroll-floor]")!;
     expect(floor.style.height).toBe("1200px");
 
-    // Real shrinkage must release the floor, or the tail would hang in space.
-    vi.spyOn(HTMLElement.prototype, "offsetHeight", "get").mockReturnValue(900);
+    // A small settle needs no easing, but must still release the floor.
+    vi.spyOn(HTMLElement.prototype, "offsetHeight", "get").mockReturnValue(1190);
     act(() => resize());
-    expect(floor.style.height).toBe("900px");
+    expect(floor.style.height).toBe("1190px");
   });
 });

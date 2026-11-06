@@ -1043,11 +1043,18 @@ view still, all in `Conversation` and `lib/reader-anchor.ts`:
   transcript ended just after the first new block. No script reads or writes
   scroll in that window. The out-of-flow `data-conversation-scroll-floor` holds
   the scrollable height at its last settled value and moves only from the
-  ResizeObserver, so that layout has nothing to clamp against. Real shrinkage
-  still releases it before paint.
+  ResizeObserver, so that layout has nothing to clamp against. Left unprotected
+  this is the turn-end jump: the final message swaps to its finished markup and
+  a reader at the tail lands on that message's first block, with following off.
+  Real shrinkage of 16 px or more eases the floor down over 240 ms, so the tail
+  meets the viewport over several frames. Reduced Motion drops it at once, and a
+  thread that starts loading clears it.
 - **Reader anchor.** Used only where the engine has no `overflow-anchor`; on top
-  of native anchoring it would move the content twice. A detached reader's top visible element is captured on each
-  scroll and restored from the ResizeObserver, before paint. The scroll handler
+  of native anchoring it would move the content twice. A detached reader's top
+  visible element is captured on each scroll and restored before paint, from the
+  ResizeObserver and from a MutationObserver that sees height moving between
+  blocks with the total unchanged. Scroll the reader has made but `onScroll` has
+  not reported yet is theirs and is never corrected away. The scroll handler
   also cancels movement beyond its own scroll delta, because a height change can
   land in the handler's forced layout. Replaced elements are found again by text; if they cannot be, nothing is corrected.
 - **Eager layout in WebKit.** `content-visibility` blocks resolve to their real
@@ -1055,8 +1062,11 @@ view still, all in `Conversation` and `lib/reader-anchor.ts`:
   during one. `@supports not (overflow-anchor: auto)` keeps them laid out.
 
 `useStreamingText` with `{ paced: true }` spreads each ~100 ms wire burst across
-display frames, draining the backlog over 180 ms with a 45 characters/s floor (the
-native client's numbers). Completion, replacement and Reduce Motion show the real
+display frames. The drain rate is the backlog divided by 180 ms with a 45
+characters/s floor (the native client's numbers), so the backlog decays with a
+180 ms time constant: steady streaming trails the wire by about that much, a
+single 300-character burst finishes in under a second, and a million-character
+burst takes about 2 s. Completion, replacement and Reduce Motion show the real
 text at once; a hidden webview falls back to a 120 ms timer. Web clients get this
 through `MessageMarkdown`. Expo keeps the unpaced 50 ms cadence until it has been
 measured on a device, since it would add a Markdown parse per frame on the phone.
@@ -1072,7 +1082,16 @@ window is offscreen and never activates:
 Run scenarios once with `--only`; a full pass takes about ten minutes. Confirm the
 `wheels` column shows delivered events before trusting a parked number.
 
-Measured in WKWebView on macOS 26, production build, one run each, 5 Nov 2026:
+Turn end measured in WKWebView on macOS 26, 6 Nov 2026, against 5b98f932:
+
+| Reader at turn end | Base | Fixed |
+| --- | ---: | ---: |
+| At the tail, long final message | 2,052 px jump, left 3,086 px behind | 8 px eased step, on the tail |
+| At the tail, 212 px of live rows fold | 1,928 px jump, left 3,086 px behind | 36 px eased step, on the tail |
+| Parked in a message as it completes | 217 px jump | 0 px |
+| Parked, height moves past them, total unchanged | 128 px jump | 0 px |
+
+Earlier table, measured 5 Nov on the previous revision of these fixes:
 
 | Scenario | Unprompted upward leap | Parked reader drift | Jumps while scrolling up | Left behind with no input |
 | --- | ---: | ---: | ---: | ---: |

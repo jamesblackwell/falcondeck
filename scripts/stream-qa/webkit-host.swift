@@ -120,6 +120,18 @@ window.ignoresMouseEvents = true
 window.orderBack(nil)
 host.webView = webView
 host.window = window
+// Report what the window server actually holds, so a run proves it was hidden.
+DispatchQueue.main.asyncAfter(deadline: .now() + 2) {
+  let windows =
+    CGWindowListCopyWindowInfo([.optionAll], kCGNullWindowID) as? [[String: Any]] ?? []
+  for info in windows where (info[kCGWindowOwnerPID as String] as? Int32) == getpid() {
+    let line =
+      "window-audit alpha=\(info[kCGWindowAlpha as String] ?? "?") "
+      + "onscreen=\(info[kCGWindowIsOnscreen as String] ?? false) "
+      + "bounds=\(info[kCGWindowBounds as String] ?? "?")\n"
+    FileHandle.standardError.write(Data(line.utf8))
+  }
+}
 webView.load(URLRequest(url: url))
 DispatchQueue.main.asyncAfter(deadline: .now() + 180) {
   FileHandle.standardError.write(Data("timed out\n".utf8))

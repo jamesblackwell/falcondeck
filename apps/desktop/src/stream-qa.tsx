@@ -16,7 +16,7 @@ import { initAppearance, ToastProvider } from "@falcondeck/ui";
 import "./index.css";
 
 type Reader = "start" | "mid" | "history" | "near" | "climb" | "none";
-type ToolMode = "collapsed" | "expanded";
+type ToolMode = "collapsed" | "expanded" | "auto";
 type Sample = {
   t: number;
   scrollTop: number;
@@ -50,6 +50,14 @@ const params = {
   parkThroughEnd: search.get("parkThroughEnd") === "1",
   /** Stream a thought that auto-collapses when the work starts. */
   thought: search.get("thought") === "1",
+  /** Tools and a commentary update before the replies, as a long turn has. */
+  longTurn: search.get("longTurn") === "1",
+  /** Live rows and an open thought still on screen when the turn ends. */
+  endFold: search.get("endFold") === "1",
+  /** A tail refresh after turn end: `same` keeps ids, `new` remounts blocks. */
+  endRefresh: search.get("endRefresh"),
+  /** Height moves between blocks either side of a parked reader. */
+  redistribute: search.get("redistribute") === "1",
   /** Lay out every block eagerly: compares the cost of deferral. */
   eager: search.get("eager") === "1",
 };
@@ -553,6 +561,23 @@ async function run() {
     }
   }
 
+  if (params.longTurn) {
+    for (let i = 0; i < 4; i += 1) {
+      const running = tool(`work-${i}`, `Read file-${i}.ts`, "read", "running", null);
+      pushItem(running);
+      await sleep(120 / params.speed);
+      setItem(`work-${i}`, finished(running, "ok"));
+    }
+    pushItem({
+      kind: "assistant_message",
+      id: "progress",
+      phase: "commentary",
+      text: paragraph(random, 2),
+      lifecycle: "complete",
+      created_at: nextAt(),
+    });
+  }
+
   const first = tool("live-t1", 'rg "scrollTop" packages', "command", "running", null);
   pushItem(first);
   await sleep(250 / params.speed);
@@ -614,6 +639,28 @@ async function run() {
   }
   if (params.reader !== "none") await readerGoesUp();
 
+  if (params.redistribute) {
+    await sleep(800);
+    mark("redistribute");
+    const above = view.items.find((item) => item.id === "a1");
+    const below = view.items.find(
+      (item) => item.id === `a${params.history - 1}`,
+    );
+    const moved = `\n\n${paragraph(rng(5), 3)}`;
+    if (above?.kind === "assistant_message" && below?.kind === "assistant_message") {
+      setView({
+        items: view.items.map((item) =>
+          item.id === above.id
+            ? { ...above, text: above.text + moved }
+            : item.id === below.id
+              ? { ...below, text: below.text.slice(0, -moved.length) }
+              : item,
+        ),
+      });
+    }
+    await sleep(400);
+  }
+
   if (params.expandAbove) {
     await sleep(600);
     mark("expand-above");
@@ -672,16 +719,51 @@ async function run() {
   }
   await m2Stream;
   await sleep(200);
+  if (params.endFold) {
+    for (let i = 0; i < 5; i += 1) {
+      pushItem(
+        tool(`fold-${i}`, `npm run check-${i}`, "command", "running", "working\n".repeat(6)),
+      );
+    }
+    pushItem({
+      kind: "reasoning",
+      id: "fold-thought",
+      summary: null,
+      content: paragraph(random, 8),
+      lifecycle: "streaming",
+      created_at: nextAt(),
+    });
+    await sleep(1200);
+  }
   mark("turn-end-tail");
 
-  const endItems = view.items.map((item) =>
-    item.kind === "assistant_message" && item.lifecycle === "streaming"
-      ? { ...item, lifecycle: "complete" as const }
-      : item,
-  );
+  const endItems = view.items.map((item) => {
+    if (item.kind === "assistant_message" && item.lifecycle === "streaming") {
+      return { ...item, lifecycle: "complete" as const };
+    }
+    if (item.kind === "reasoning" && item.lifecycle === "streaming") {
+      return { ...item, lifecycle: "complete" as const, duration_ms: 1200 };
+    }
+    if (item.kind === "tool_call" && item.status === "running") {
+      return finished(item, item.output ?? "");
+    }
+    return item;
+  });
   setView({ items: endItems, isThinking: false });
   mark("turn-end");
-  await sleep(1200);
+  if (params.endRefresh) {
+    await sleep(350);
+    setView({
+      items: view.items.map((item) => ({
+        ...item,
+        id:
+          params.endRefresh === "new" && item.id.startsWith("m")
+            ? `${item.id}-hydrated`
+            : item.id,
+      })),
+    });
+  }
+  await sleep(1400);
   mark("run-end");
   recording = false;
   await nextFrame();
@@ -774,6 +856,11 @@ function summarize() {
     (s) => s.t >= timeOf("following-check") && s.t <= timeOf("turn-end-tail"),
   );
 
+  const endWindow = samples.filter(
+    (s) => s.t >= timeOf("turn-end-tail") && s.t <= timeOf("run-end"),
+  );
+  const endSteps = endWindow.slice(1).map((s, i) => s.scrollTop - endWindow[i]!.scrollTop);
+  const last = samples.at(-1);
   const firstMark = Math.min(timeOf("gesture-start"), timeOf("turn-end"));
   const upwardLeaps = samples.filter((s, i) => {
     if (i === 0 || s.t < timeOf("m1-start")) return false;
@@ -830,6 +917,20 @@ function summarize() {
         }),
       ),
     ),
+    /** What the reader sees from the moment the turn ends. */
+    end: {
+      /** Largest single-frame move of the view, up or down. */
+      maxFrameScrollPx: round(Math.max(0, ...endSteps.map(Math.abs))),
+      /** Largest single-frame on-screen move of the centre block. */
+      maxBlockStepPx: round(Math.max(0, ...endWindow.map((s) => Math.abs(s.blockStep)))),
+      shrinkPx: round(
+        Math.max(0, (endWindow[0]?.scrollHeight ?? 0) - (last?.scrollHeight ?? 0)),
+      ),
+      finalDistancePx: round(
+        last ? last.scrollHeight - last.scrollTop - last.clientHeight : 0,
+      ),
+      jumpButtonShown: Boolean(last?.jump),
+    },
     following: {
       /** No input yet: any gap here means following stopped by itself. */
       maxDistanceUnattended: round(
