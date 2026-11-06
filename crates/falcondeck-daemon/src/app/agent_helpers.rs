@@ -1244,13 +1244,24 @@ fn empty_hook_value(value: Option<&Value>) -> bool {
         || v.as_object().is_some_and(serde_json::Map::is_empty))
 }
 
+fn hook_exit(value: &Value) -> Option<&Value> {
+    value.get("exit_code").filter(|v| !v.is_null())
+        .or_else(|| value.get("exitCode").filter(|v| !v.is_null()))
+}
+
+fn hook_has_decision(value: &Value) -> bool {
+    (value.get("outcome").is_some() && value.get("outcome").and_then(Value::as_str) != Some("success"))
+        || ["decision", "reason", "additionalContext", "systemMessage"].iter()
+            .any(|key| !empty_hook_value(value.get(*key)))
+}
+
 fn silent_hook_payload(value: &Value, success: bool) -> bool {
     if !value.is_object() { return false; }
-    let exit = value.get("exit_code").or_else(|| value.get("exitCode")).and_then(Value::as_i64);
-    if exit.is_some_and(|code| code != 0) { return false; }
+    let exit = hook_exit(value);
+    if exit.is_some_and(|code| code.as_f64() != Some(0.0)) || hook_has_decision(value) { return false; }
     let empty = ["stdout", "stderr", "output", "content", "message", "text", "context", "errors", "error"]
         .iter().all(|key| empty_hook_value(value.get(*key)));
-    empty && (success || exit == Some(0) || value.get("context").is_some())
+    empty && (success || exit.is_some() || value.get("context").is_some())
 }
 
 /// Also recognizes receipts persisted before silent hooks were filtered.
@@ -1269,17 +1280,21 @@ pub(crate) fn is_silent_claude_hook_item(item: &falcondeck_core::ConversationIte
 
 fn hook_message(value: &Value, success: bool) -> Option<String> {
     if silent_hook_payload(value, success) { return None; }
-    let hook = extract_string(value, &["hook_name", "hookName", "hook"]).unwrap_or_else(|| "output".into());
+    let hook = extract_string(value, &["hook_name", "hookName", "hook"]).unwrap_or_else(|| "response".into());
+    // Preserve decisions and malformed exits verbatim, even alongside stream text.
+    if hook_has_decision(value) || hook_exit(value).is_some_and(|code| code.as_i64().is_none() && code.as_f64() != Some(0.0)) {
+        return Some(format!("Claude hook output: {value}"));
+    }
     let mut parts = Vec::new();
     for key in ["output", "stdout", "stderr", "content", "message", "text"] {
         if let Some(text) = stringify_claude_value(value.get(key)) {
             if !parts.contains(&text) { parts.push(text); }
         }
     }
-    let exit = value.get("exit_code").or_else(|| value.get("exitCode")).and_then(Value::as_i64);
+    let exit = hook_exit(value).and_then(Value::as_i64);
     let failure = exit.filter(|code| *code != 0).map(|code| format!(" failed (exit {code})")).unwrap_or_default();
     if parts.is_empty() && failure.is_empty() {
-        return Some(format!("Claude hook output: {value}")); // Retain unfamiliar non-text evidence.
+        return Some(format!("Claude hook output: {value}")); // Already non-silent: keep packets without display text or an integer failure verbatim.
     }
     Some(format!("Claude hook {hook}{failure}{}{}", if parts.is_empty() { "" } else { ": " }, parts.join("\n")))
 }
@@ -1331,6 +1346,9 @@ pub(crate) fn extract_claude_service_message(value: &Value) -> Option<String> {
             ));
         }
         if subtype == "stop_hook_summary" {
+            if hook_has_decision(value) || hook_exit(value).is_some_and(|code| code.as_f64() != Some(0.0)) {
+                return hook_message(value, false);
+            }
             let errors = value
                 .get("hookErrors")
                 .and_then(Value::as_array)
@@ -1861,6 +1879,42 @@ pub(super) fn parse_thread_isolation(params: &serde_json::Value) -> ThreadIsolat
 mod service_message_tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn silent_hooks_preserve_unknown_exits_and_hook_decisions() {
+        for (payload, silent) in [
+            ("{\"context\":[],\"exit_code\":\"1\"}", false),
+            ("{\"context\":[],\"exit_code\":1.5}", false),
+            ("{\"context\":[],\"exit_code\":true}", false),
+            ("{\"context\":[],\"exit_code\":18446744073709551616}", false),
+            ("{\"context\":[],\"exit_code\":null,\"exitCode\":2}", false),
+            ("{\"context\":[],\"exitCode\":\"1\"}", false),
+            ("{\"context\":[],\"exit_code\":null,\"exitCode\":0}", true),
+            ("{\"context\":[]}", true),
+            ("{\"context\":[],\"exit_code\":0,\"outcome\":\"error\"}", false),
+            ("{\"context\":[],\"exit_code\":0,\"outcome\":null}", false),
+            ("{\"context\":[],\"exit_code\":0,\"outcome\":\"success\"}", true),
+            ("{\"context\":[],\"exit_code\":0,\"decision\":\"block\"}", false),
+            ("{\"context\":[],\"exit_code\":0,\"reason\":\"denied\"}", false),
+            ("{\"context\":[],\"exit_code\":0,\"additionalContext\":\"details\"}", false),
+            ("{\"context\":[],\"exit_code\":0,\"systemMessage\":\"notice\"}", false),
+            ("{\"context\":[],\"exit_code\":0,\"decision\":\" \",\"reason\":\"\",\"additionalContext\":null,\"systemMessage\":[]}", true),
+            ("{\"context\":[],\"exit_code\":0,\"unrelated_metadata\":{\"durationMs\":1}}", true),
+        ] {
+            for prefix in ["Claude hook output: ", "Claude hook success: "] {
+                assert_eq!(is_empty_claude_hook_receipt(&format!("{prefix}{payload}")), silent, "{payload}");
+            }
+            for subtype in ["hook_response", "stop_hook_summary"] {
+                let mut event: Value = serde_json::from_str(payload).unwrap();
+                event["type"] = json!("system"); event["subtype"] = json!(subtype);
+                assert_eq!(extract_claude_service_message(&event).is_none(), silent, "{subtype}: {payload}");
+            }
+        }
+        let receipt = extract_claude_service_message(&json!({"type":"system", "subtype":"hook_response", "exit_code":0,
+            "stdout":r#"{"context":[],"errors":null}"#})).unwrap();
+        assert!(receipt.starts_with("Claude hook response: "));
+        assert!(!is_empty_claude_hook_receipt(&receipt));
+    }
 
     #[test]
     fn silent_hooks_filter_success_and_preserve_failures_and_text() {

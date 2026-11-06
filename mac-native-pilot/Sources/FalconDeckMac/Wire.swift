@@ -141,7 +141,7 @@ struct Message: Identifiable, Sendable, Equatable {
         guard let prefix = prefixes.first(where: { text.hasPrefix($0) }),
               let data = String(text.dropFirst(prefix.count)).data(using: .utf8),
               let payload = try? JSONDecoder().decode(JSON.self, from: data),
-              case .object = payload else { return false }
+              case .object(let fields) = payload else { return false }
         let exit = payload["exit_code"] == .null ? payload["exitCode"] : payload["exit_code"]
         guard exit == .null || exit == .number(0) else { return false }
         func empty(_ value: JSON) -> Bool {
@@ -153,7 +153,9 @@ struct Message: Identifiable, Sendable, Equatable {
             default: false
             }
         }
-        return (prefix == prefixes[1] || exit == .number(0) || payload.fields["context"] != nil)
+        if fields["outcome"] != nil && payload["outcome"] != .string("success") { return false }
+        if ["decision", "reason", "additionalContext", "systemMessage"].contains(where: { !empty(payload[$0]) }) { return false }
+        return (prefix == prefixes[1] || exit == .number(0) || fields["context"] != nil)
             && ["stdout", "stderr", "output", "content", "message", "text", "context", "errors", "error"].allSatisfy { empty(payload[$0]) }
     }
 

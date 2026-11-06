@@ -106,3 +106,28 @@ it('recognizes stored silent hooks but retains failed and meaningful receipts', 
   expect(isEmptyClaudeHookReceipt('Claude hook success: {"content":"  "}')).toBe(true)
   expect(isEmptyClaudeHookReceipt('Claude hook output: invalid JSON')).toBe(false)
 })
+
+
+it('preserves unknown exits and explicit hook decisions without surfacing unrelated metadata', () => {
+  for (const [payload, silent] of [
+            ["{\"context\":[],\"exit_code\":\"1\"}", false],
+            ["{\"context\":[],\"exit_code\":1.5}", false],
+            ["{\"context\":[],\"exit_code\":true}", false],
+            ["{\"context\":[],\"exit_code\":18446744073709551616}", false],
+            ["{\"context\":[],\"exit_code\":null,\"exitCode\":2}", false],
+            ["{\"context\":[],\"exitCode\":\"1\"}", false],
+            ["{\"context\":[],\"exit_code\":null,\"exitCode\":0}", true],
+            ["{\"context\":[]}", true],
+            ["{\"context\":[],\"exit_code\":0,\"outcome\":\"error\"}", false],
+            ["{\"context\":[],\"exit_code\":0,\"outcome\":null}", false],
+            ["{\"context\":[],\"exit_code\":0,\"outcome\":\"success\"}", true],
+            ["{\"context\":[],\"exit_code\":0,\"decision\":\"block\"}", false],
+            ["{\"context\":[],\"exit_code\":0,\"reason\":\"denied\"}", false],
+            ["{\"context\":[],\"exit_code\":0,\"additionalContext\":\"details\"}", false],
+            ["{\"context\":[],\"exit_code\":0,\"systemMessage\":\"notice\"}", false],
+            ["{\"context\":[],\"exit_code\":0,\"decision\":\" \",\"reason\":\"\",\"additionalContext\":null,\"systemMessage\":[]}", true],
+            ["{\"context\":[],\"exit_code\":0,\"unrelated_metadata\":{\"durationMs\":1}}", true],
+  ] as const) for (const prefix of ['Claude hook output: ', 'Claude hook success: ']) {
+    expect(isEmptyClaudeHookReceipt(prefix + payload), payload).toBe(silent)
+  }
+})

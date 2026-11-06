@@ -1240,3 +1240,9 @@ Failures remain visible even without output. Meaningful hook responses show the
 hook name and text. Legacy empty JSON receipts (including stop summaries) are
 filtered on daemon restore/replay, paging/item reads, cached client presentation
 and transcript/model exports. This does not remove meaningful output or failures.
+
+Hook receipts remain visible for malformed or non-zero exits (`exit_code`, falling
+back to `exitCode` when null), non-success `outcome`, and meaningful `decision`,
+`reason`, `additionalContext` or `systemMessage`. Unrelated metadata alone does not
+make a silent success visible. macOS, iOS and shared TS caches use the same rule;
+iOS applies it before both transcript grouping and exports.

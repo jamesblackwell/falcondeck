@@ -2,6 +2,33 @@ import XCTest
 @testable import FalconDeckMac
 
 final class ConversationTranscriptContentTests: XCTestCase {
+    func testHookExitAndDecisionEvidenceIsNeverSilent() {
+        for (payload, silent) in [
+            ("{\"context\":[],\"exit_code\":\"1\"}", false),
+            ("{\"context\":[],\"exit_code\":1.5}", false),
+            ("{\"context\":[],\"exit_code\":true}", false),
+            ("{\"context\":[],\"exit_code\":18446744073709551616}", false),
+            ("{\"context\":[],\"exit_code\":null,\"exitCode\":2}", false),
+            ("{\"context\":[],\"exitCode\":\"1\"}", false),
+            ("{\"context\":[],\"exit_code\":null,\"exitCode\":0}", true),
+            ("{\"context\":[]}", true),
+            ("{\"context\":[],\"exit_code\":0,\"outcome\":\"error\"}", false),
+            ("{\"context\":[],\"exit_code\":0,\"outcome\":null}", false),
+            ("{\"context\":[],\"exit_code\":0,\"outcome\":\"success\"}", true),
+            ("{\"context\":[],\"exit_code\":0,\"decision\":\"block\"}", false),
+            ("{\"context\":[],\"exit_code\":0,\"reason\":\"denied\"}", false),
+            ("{\"context\":[],\"exit_code\":0,\"additionalContext\":\"details\"}", false),
+            ("{\"context\":[],\"exit_code\":0,\"systemMessage\":\"notice\"}", false),
+            ("{\"context\":[],\"exit_code\":0,\"decision\":\" \",\"reason\":\"\",\"additionalContext\":null,\"systemMessage\":[]}", true),
+            ("{\"context\":[],\"exit_code\":0,\"unrelated_metadata\":{\"durationMs\":1}}", true),
+        ] {
+            for prefix in ["Claude hook output: ", "Claude hook success: "] {
+                let row = Message(.object(["kind": .string("service"), "message": .string(prefix + payload)]))
+                XCTAssertEqual(row.isSilentClaudeHookReceipt, silent, payload)
+            }
+        }
+    }
+
     func testSilentHookReceiptsStayHiddenInCachedNativeGroupsAndExports() {
         let silent = Message(.object(["id": .string("silent"), "kind": .string("service"),
             "message": .string("Claude hook output: {\"exit_code\":0,\"stdout\":\" \",\"stderr\":\"\",\"output\":\"\"}")]))

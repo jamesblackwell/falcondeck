@@ -147,6 +147,8 @@ export function isEmptyClaudeHookReceipt(message: string): boolean {
     const empty = (value: unknown): boolean => value == null || (typeof value === 'string' && !value.trim())
       || (Array.isArray(value) && value.length === 0)
       || (typeof value === 'object' && Object.keys(value as object).length === 0)
+    if ('outcome' in value && value.outcome !== 'success') return false
+    if (['decision', 'reason', 'additionalContext', 'systemMessage'].some(key => !empty(value[key]))) return false
     return (prefix === 'Claude hook success: ' || exit === 0 || 'context' in value)
       && ['stdout', 'stderr', 'output', 'content', 'message', 'text', 'context', 'errors', 'error'].every(key => empty(value[key]))
   } catch { return false }

@@ -66,6 +66,7 @@ enum UserTextProjection {
     static func messages(_ items: [Message]) -> [Message] {
         var visible: [Message] = []
         for item in items {
+            if item.isSilentClaudeHookReceipt { continue }
             guard item.kind == "user_message" else { visible.append(item); continue }
             let cached = item.userProjection ?? Cached(item.text)
             switch cached.result {
