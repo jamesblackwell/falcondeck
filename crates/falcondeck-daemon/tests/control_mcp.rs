@@ -239,7 +239,9 @@ async fn assert_startup_refusal(url: &str, stderr_needle: &str) {
         .stderr(std::process::Stdio::piped())
         .kill_on_drop(true);
     let child = command.spawn().expect("spawn falcondeck-daemon mcp");
-    let output = tokio::time::timeout(std::time::Duration::from_secs(6), child.wait_with_output())
+    // Include process startup and scheduling as well as the three-second
+    // health request timeout. A valid refusal can take over six seconds.
+    let output = tokio::time::timeout(std::time::Duration::from_secs(15), child.wait_with_output())
         .await
         .unwrap_or_else(|_| panic!("mcp stayed up against {url}"))
         .expect("mcp output");
