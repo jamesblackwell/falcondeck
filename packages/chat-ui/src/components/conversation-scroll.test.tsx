@@ -232,6 +232,34 @@ describe("Conversation scrolling", () => {
     expect(floor.style.height).toBe("700px");
   });
 
+  it("eases a second collapse from wherever the first release has reached", () => {
+    const now = vi.spyOn(performance, "now").mockReturnValue(0);
+    const scroll = openThread();
+    const offsetHeight = vi.spyOn(HTMLElement.prototype, "offsetHeight", "get");
+    offsetHeight.mockReturnValue(1200);
+    act(() => resize());
+    flushFrames();
+    const floor = scroll.querySelector<HTMLElement>("[data-conversation-scroll-floor]")!;
+
+    offsetHeight.mockReturnValue(1000);
+    act(() => resize());
+    now.mockReturnValue(200);
+    flushFrames();
+    const reached = Number.parseFloat(floor.style.height);
+
+    offsetHeight.mockReturnValue(500);
+    act(() => resize());
+    now.mockReturnValue(216);
+    flushFrames();
+    const next = Number.parseFloat(floor.style.height);
+    expect(reached - next).toBeLessThan(150);
+    expect(next).toBeLessThanOrEqual(reached);
+
+    now.mockReturnValue(1000);
+    flushFrames();
+    expect(floor.style.height).toBe("500px");
+  });
+
   it("drops the floor at once for reduced motion", () => {
     vi.stubGlobal("matchMedia", () => ({ matches: true }));
     const scroll = openThread();

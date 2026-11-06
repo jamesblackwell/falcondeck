@@ -300,6 +300,7 @@ export const Conversation = memo(function Conversation({
   const scrollFloorRef = useRef<HTMLDivElement>(null);
   const floorTargetRef = useRef(0);
   const floorReleaseFrameRef = useRef<number | null>(null);
+  const floorReleaseRef = useRef({ from: 0, start: 0, target: 0 });
   const pinToBottomFrameRef = useRef<number | null>(null);
   const scrollPositionsRef = useRef(new Map<string, SavedScrollPosition>());
   const activeThreadKeyRef = useRef<string | null>(threadKey);
@@ -554,19 +555,27 @@ export const Conversation = memo(function Conversation({
 
   /// When content really shrinks (a turn's live rows folding away), the tail
   /// has to come down to meet the viewport. Easing the floor there moves the
-  /// view over a few frames rather than dropping it in one. The target is
-  /// re-read each frame, so content that regrows mid-release is respected.
+  /// view over a few frames rather than dropping it in one.
   const startFloorRelease = useCallback(() => {
-    if (floorReleaseFrameRef.current !== null) return;
     const el = scrollRef.current;
     const floor = scrollFloorRef.current;
     if (!el || !floor) return;
-    const from = Number.parseFloat(floor.style.height) || 0;
-    const start = performance.now();
+    const release = floorReleaseRef.current;
+    const running = floorReleaseFrameRef.current !== null;
+    if (running && release.target === floorTargetRef.current) return;
+    // A new target, such as a second row collapsing mid-release, restarts the
+    // curve from where the floor is now rather than snapping to the new end.
+    release.from = Number.parseFloat(floor.style.height) || 0;
+    release.start = performance.now();
+    release.target = floorTargetRef.current;
+    if (running) return;
     const step = (now: number) => {
-      const t = Math.min(1, (now - start) / FLOOR_RELEASE_DURATION_MS);
+      const t = Math.min(
+        1,
+        Math.max(0, now - release.start) / FLOOR_RELEASE_DURATION_MS,
+      );
       const eased = 1 - (1 - t) ** 3;
-      const height = from + (floorTargetRef.current - from) * eased;
+      const height = release.from + (release.target - release.from) * eased;
       floor.style.height = `${height}px`;
       if (stickyToBottomRef.current) {
         el.scrollTop = Math.max(0, el.scrollHeight - el.clientHeight);
