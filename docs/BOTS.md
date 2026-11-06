@@ -277,7 +277,8 @@ and stable per-bot staggering, not a UTC-midnight fan-out.
 
 When an urgent outcome has not reached an accepted home turn after two hours,
 the daemon raises one durable notification to James. Several such outcomes are
-coalesced per bot. It names the bot, task and required check, is attributed to
+coalesced per bot, sweeping all pending urgent outcomes into at most one alert
+per hour. Answered input requests are retired before escalation. It names the bot, task and required check, is attributed to
 the actual bot home, and remains phone-eligible under bot-only push. Master
 notification preferences still apply. Paused, archived, capped or unavailable
 homes do not prevent this escalation. Receipt, acknowledgement and escalation
@@ -316,6 +317,8 @@ Upgrade registration uses restored creation ancestry and recorded delegation
 or message relationships, including scheduled-run children and reused threads.
 A message watch does not change a reused thread's creation ownership. Metadata
 cannot recover unrecorded intent: re-message older work that still needs a watch.
+Archived threads are excluded. Historical idle tasks produce one quiet count per
+bot, without a wake or daily reminder; they do not request an outcome review.
 An unreadable ledger is quarantined, James gets one recovery notice, and each
 bot gets one recovery report instructing it to check/re-message pending work.
 Historical upgrade notifications are not replayed after quarantine.
@@ -327,5 +330,16 @@ the worker's ordinary notification, and peer home replies remain James-visible.
 
 Normal completion batching adds no immediate wake under defaults. Attention
 outcomes and one daily unresolved digest can add paid turns, within the shared
-three/hour, six/day cap. Historical intent is absent from old thread history,
+three/hour, six/day cap. Failed wake sends retry no more than hourly. Historical intent is absent from old thread history,
 so a precise retrospective wake estimate is not defensible.
+
+### Known delivery limits
+
+Pending reports force provider startup acknowledgement, so a direct message to
+that home also waits for ACP startup. Escalation deliberately includes resting
+bots. A deleted bot currently falls back to the name FalconDeck and an empty
+home source. An unresolved task can cost one digest wake per day until resolved.
+An accepted turn that immediately dies has already cleared its reports' wake
+and escalation eligibility: later home turns still carry them, and the home
+error follows the normal notification path. These limits are deferred, rather
+than guarantees of durable execution after provider acceptance.

@@ -58,10 +58,12 @@ struct Report {
     attempts: u8,
     next_attempt: Option<DateTime<Utc>>,
     urgent: bool,
+    input_key: Option<String>,
     accepted: Option<DateTime<Utc>>,
     injections: u8,
     escalated: bool,
     recovery: bool,
+    historical: bool,
 }
 
 #[derive(Default, Clone, Serialize, Deserialize, PartialEq)]
@@ -72,6 +74,7 @@ pub(super) struct Ledger {
     // Old date map is retained for loading the first implementation.
     daily: HashMap<String, chrono::NaiveDate>,
     daily_sent: HashMap<String, DateTime<Utc>>,
+    escalation_sent: HashMap<String, DateTime<Utc>>,
     attempts: HashMap<String, Vec<DateTime<Utc>>>,
     expired: HashMap<String, usize>,
     upgraded: bool,
@@ -99,6 +102,35 @@ struct Observation {
     input_key: Option<String>,
 }
 
+fn decode_ledger(bytes: &[u8]) -> Result<Ledger, serde_json::Error> {
+    let value: serde_json::Value = serde_json::from_slice(bytes)?;
+    let mut ledger: Ledger = serde_json::from_value(value.clone())?;
+    if let Some(reports) = value.get("reports").and_then(|v| v.as_array()) {
+        for (report, raw) in ledger.reports.iter_mut().zip(reports) {
+            if raw.get("urgent").is_none() {
+                report.urgent = [
+                    "failed/interrupted:",
+                    "needs input",
+                    "waiting deadline passed",
+                    "task deleted",
+                ]
+                .iter()
+                .any(|text| report.text.contains(text));
+            }
+        }
+    }
+    // Older builds stored delivery only on the alert. Preserve their hourly
+    // boundary when upgrading, rather than immediately sending another push.
+    for alert in ledger.alerts.iter().filter(|a| a.delivered) {
+        ledger
+            .escalation_sent
+            .entry(alert.bot_id.clone())
+            .and_modify(|at| *at = (*at).max(alert.created))
+            .or_insert(alert.created);
+    }
+    Ok(ledger)
+}
+
 impl AppState {
     fn delegation_path(&self) -> PathBuf {
         self.inner.state_path.with_extension("delegations.json")
@@ -107,7 +139,7 @@ impl AppState {
     async fn delegation_store(&self) -> Result<&Mutex<Ledger>, DaemonError> {
         self.inner.delegations.get_or_try_init(|| async {
             let mut ledger: Ledger = match tokio::fs::read(self.delegation_path()).await {
-                Ok(bytes) => match serde_json::from_slice(&bytes) {
+                Ok(bytes) => match decode_ledger(&bytes) {
                     Ok(value) => value,
                     Err(error) => {
                         // Keep the evidence, never make unrelated startup or bot
@@ -131,9 +163,6 @@ impl AppState {
                 Err(e) => return Err(e.into()),
             };
             ledger.tasks.retain(|t| !t.id.is_empty() && !t.thread.is_empty() && !t.bot_id.is_empty());
-            for report in &mut ledger.reports {
-                report.urgent |= ["failed/interrupted:", "needs input", "waiting deadline passed", "task deleted"].iter().any(|text| report.text.contains(text));
-            }
             for task in &mut ledger.tasks {
                 // Old ordinary idle records must not become perpetual reminders.
                 if !task.active && task.waiting.is_none() && (task.last_state.starts_with("finished (") || task.last_state == "turn ended; completion unverified") {
@@ -441,7 +470,7 @@ impl AppState {
                     s.status,
                     ThreadStatus::Running | ThreadStatus::WaitingForInput
                 ) || is_shutdown_interrupted(&s.status, s.last_error.as_deref());
-                if !live && (s.is_archived || at < Utc::now() - ChronoDuration::days(7)) {
+                if s.is_archived || !live && at < Utc::now() - ChronoDuration::days(7) {
                     return None;
                 }
                 Some((owner, s.clone()))
@@ -449,6 +478,7 @@ impl AppState {
             .collect();
         self.edit_delegations(|l| {
             let mut recovered = Vec::new();
+            let mut idle_counts: HashMap<String, usize> = HashMap::new();
             for (bot, s) in children {
                 if l.tasks.iter().any(|t| t.bot_id == bot && t.thread == s.id) {
                     continue;
@@ -471,20 +501,21 @@ impl AppState {
                     last_state: if inflight {
                         "upgrade recovered in-flight work".into()
                     } else {
-                        "upgrade found an idle task; verify its latest outcome".into()
+                        "historical idle task at upgrade".into()
                     },
                     ..Default::default()
                 };
                 if !inflight {
-                    recovered.push(report_for(
-                        &task,
-                        Some(&s),
-                        None,
-                        s.status == ThreadStatus::Error,
-                        Utc::now(),
-                    ));
+                    *idle_counts.entry(task.bot_id.clone()).or_default() += 1;
                 }
                 l.tasks.push(task);
+            }
+            for (bot_id, count) in idle_counts {
+                recovered.push(Report {
+                    id: Uuid::new_v4().to_string(), bot_id,
+                    text: format!("Upgrade registered {count} historical idle tasks. No action requested; active work is tracked separately."),
+                    historical: true, created: Utc::now(), ..Default::default()
+                });
             }
             merge_reports(l, recovered);
             l.upgraded = true;
@@ -624,6 +655,12 @@ impl AppState {
                 };
                 if let Some(observation) = observation {
                     t.missing_since = None;
+                    for r in l.reports.iter_mut().filter(|r| r.bot_id == t.bot_id && r.thread == t.thread && r.input_key.is_some()) {
+                        if observation.summary.status != ThreadStatus::WaitingForInput || observation.input_key.is_some() && r.input_key != observation.input_key {
+                            r.urgent = false;
+                            r.wake = false;
+                        }
+                    }
                     if observation.summary.status == ThreadStatus::WaitingForInput && observation.input_key.is_some() && t.input_key != observation.input_key {
                         t.input_key = observation.input_key.clone();
                         t.last_state = "new input request".into();
@@ -661,7 +698,9 @@ impl AppState {
     pub(super) async fn poll_delegations(&self, restarting: bool) -> Result<(), DaemonError> {
         self.poll_observations(restarting).await?;
         self.daily_delegation_summary().await?;
-        self.escalate_delegations().await?;
+        if let Err(error) = self.escalate_delegations().await {
+            tracing::warn!(%error, "delegation escalation failed; continuing wake delivery");
+        }
         self.deliver_delegation_wakes().await
     }
 
@@ -858,7 +897,7 @@ impl AppState {
                     for r in l.reports.iter_mut().filter(|r| {
                         r.bot_id == bot.id && r.wake && r.accepted.is_none() && r.injections < 3
                     }) {
-                        r.next_attempt = Some(now + ChronoDuration::minutes(5));
+                        r.next_attempt = Some(now + ChronoDuration::minutes(60));
                     }
                     true
                 })
@@ -896,7 +935,7 @@ impl AppState {
             let now = Utc::now();
             let mut oldest: HashMap<String, DateTime<Utc>> = HashMap::new();
             for (bot, at) in l.tasks.iter().filter(|t| !t.closed).map(|t| (&t.bot_id, t.created))
-                .chain(l.reports.iter().filter(|r| !r.thread.is_empty()).map(|r| (&r.bot_id, r.created))) {
+                .chain(l.reports.iter().filter(|r| !r.thread.is_empty() && !r.historical).map(|r| (&r.bot_id, r.created))) {
                 oldest.entry(bot.clone()).and_modify(|old| *old = (*old).min(at)).or_insert(at);
             }
             for (bot, first) in oldest {
@@ -905,7 +944,7 @@ impl AppState {
                 let due = l.daily_sent.get(&bot).map(|t| *t + ChronoDuration::days(1))
                     .unwrap_or(first + ChronoDuration::days(1) + ChronoDuration::minutes(stagger as i64));
                 if now < due { continue; }
-                let pending = l.reports.iter().filter(|r| r.bot_id == bot && !r.thread.is_empty()).count();
+                let pending = l.reports.iter().filter(|r| r.bot_id == bot && !r.thread.is_empty() && !r.historical).count();
                 let mut tasks: Vec<_> = l.tasks.iter().filter(|t| t.bot_id == bot && !t.closed).collect();
                 tasks.sort_by_key(|t| std::cmp::Reverse(t.changed));
                 let text = tasks.iter().take(10).map(|t| format!("- [{}]: {}{}", t.thread, if t.active { "turn pending" } else { &t.last_state }, if now-t.created >= ChronoDuration::days(7) { "; open more than seven days: check progress" } else { "" })).collect::<Vec<_>>().join("\n");
@@ -918,6 +957,30 @@ impl AppState {
     async fn escalate_delegations(&self) -> Result<(), DaemonError> {
         self.edit_delegations(|l| {
             let now = Utc::now();
+            // Refresh refused outbox entries: answered approvals must not escape
+            // later as stale alerts. Recovery notices have no report IDs.
+            for a in l
+                .alerts
+                .iter_mut()
+                .filter(|a| !a.delivered && !a.reports.is_empty())
+            {
+                let pending: Vec<_> = l
+                    .reports
+                    .iter()
+                    .filter(|r| {
+                        r.bot_id == a.bot_id && r.urgent && r.accepted.is_none() && !r.escalated
+                    })
+                    .collect();
+                a.reports = pending.iter().map(|r| r.id.clone()).collect();
+                a.text = pending
+                    .iter()
+                    .map(|r| r.text.as_str())
+                    .collect::<Vec<_>>()
+                    .join("\n");
+            }
+            l.alerts.retain(|a| {
+                a.delivered || !a.reports.is_empty() || a.id.starts_with("tracking-recovery:")
+            });
             let claimed: HashSet<_> = l
                 .alerts
                 .iter()
@@ -936,6 +999,13 @@ impl AppState {
                 .map(|r| r.bot_id.clone())
                 .collect();
             for bot in bots {
+                if l.escalation_sent
+                    .get(&bot)
+                    .is_some_and(|at| now - *at < ChronoDuration::hours(1))
+                    || l.alerts.iter().any(|a| a.bot_id == bot && !a.delivered)
+                {
+                    continue;
+                }
                 let reports: Vec<_> = l
                     .reports
                     .iter()
@@ -944,7 +1014,6 @@ impl AppState {
                             && r.urgent
                             && r.accepted.is_none()
                             && !r.escalated
-                            && now - r.created >= ChronoDuration::hours(2)
                             && !claimed.contains(&r.id)
                     })
                     .collect();
@@ -975,6 +1044,17 @@ impl AppState {
             .collect::<Vec<_>>();
         let bots = self.preferences().await.bots;
         for alert in alerts {
+            if self
+                .delegation_store()
+                .await?
+                .lock()
+                .await
+                .escalation_sent
+                .get(&alert.bot_id)
+                .is_some_and(|at| Utc::now() - *at < ChronoDuration::hours(1))
+            {
+                continue;
+            }
             let bot = bots.iter().find(|b| b.id == alert.bot_id);
             let name = bot.map(|b| b.name.as_str()).unwrap_or("FalconDeck");
             let notice = super::notification_centre::AgentNotice {
@@ -1003,11 +1083,11 @@ impl AppState {
                 )
                 .await;
             if let super::notification_centre::AttentionOutcome::Refused(reason) = recorded {
-                return Err(DaemonError::Process(format!(
-                    "escalation remains pending: {reason:?}"
-                )));
+                tracing::warn!(?reason, alert_id = %alert.id, "delegation escalation refused; leaving pending");
+                continue;
             }
             self.edit_delegations(|l| {
+                l.escalation_sent.insert(alert.bot_id.clone(), Utc::now());
                 if let Some(a) = l.alerts.iter_mut().find(|a| a.id == alert.id) {
                     a.delivered = true;
                 }
@@ -1275,6 +1355,7 @@ fn report_for(
         ),
         wake: urgent || t.delivery == ResultDelivery::Wake && t.closed,
         urgent,
+        input_key: (t.last_state == "needs input").then(|| t.input_key.clone().unwrap_or_default()),
         created: now,
         ..Default::default()
     }
@@ -2491,6 +2572,208 @@ mod tests {
                 .iter()
                 .any(|r| r.urgent && r.text.contains("seven days"))
         );
+    }
+
+    #[tokio::test]
+    async fn upgrade_idle_history_is_one_quiet_line_and_archived_work_is_excluded() {
+        let (app, _temp) = fixture().await;
+        bot(&app).await;
+        let s = target(&app).await;
+        for (id, state, archived) in [
+            ("idle-old", ThreadStatus::Idle, false),
+            ("error-old", ThreadStatus::Error, false),
+            ("archived", ThreadStatus::Running, true),
+        ] {
+            let mut child = s.clone();
+            child.id = id.into();
+            child.status = state;
+            child.is_archived = archived;
+            child.origin = Some(ThreadOrigin::AgentSpawn {
+                parent_thread_id: "thread-1".into(),
+                dispatched_at: None,
+            });
+            app.inner
+                .workspaces
+                .lock()
+                .await
+                .get_mut("workspace-1")
+                .unwrap()
+                .threads
+                .insert(id.into(), ManagedThread::new(child));
+        }
+        app.upgrade_delegations().await.unwrap();
+        app.edit_delegations(|l| {
+            for r in &mut l.reports {
+                r.created = Utc::now() - ChronoDuration::days(2);
+            }
+        })
+        .await
+        .unwrap();
+        app.daily_delegation_summary().await.unwrap();
+        let l = app.delegation_store().await.unwrap().lock().await;
+        assert_eq!(l.reports.len(), 1);
+        assert!(l.reports[0].text.contains("2 historical idle tasks"));
+        assert!(!l.reports[0].wake && !l.reports[0].urgent);
+        assert!(!l.tasks.iter().any(|t| t.thread == "archived"));
+    }
+
+    #[test]
+    fn urgency_migration_only_reads_legacy_reports() {
+        let ledger = decode_ledger(
+            br#"{"reports":[
+            {"id":"modern","text":"signup needs input validation","urgent":false},
+            {"id":"legacy","text":"needs input"}
+        ]}"#,
+        )
+        .unwrap();
+        assert!(!ledger.reports[0].urgent);
+        assert!(ledger.reports[1].urgent);
+        let restarted = decode_ledger(&serde_json::to_vec(&ledger).unwrap()).unwrap();
+        assert!(!restarted.reports[0].urgent);
+    }
+
+    #[tokio::test]
+    async fn refused_alert_does_not_abort_poll_or_wake_delivery() {
+        let (app, temp) = fixture().await;
+        let b = bot(&app).await;
+        app.persist_local_state().await.unwrap();
+        app.edit_delegations(|l| {
+            l.reports.push(Report {
+                id: "refused".into(),
+                bot_id: b.id.clone(),
+                thread: "reused".into(),
+                text: "failed/interrupted: provider unavailable".into(),
+                urgent: true,
+                wake: true,
+                created: Utc::now() - ChronoDuration::hours(3),
+                ..Default::default()
+            })
+        })
+        .await
+        .unwrap();
+        let dir = app.inner.state_path.parent().unwrap().join("notifications");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("notifications.json"), "invalid json").unwrap();
+        let restored = AppState::new_with_state_path(
+            "test".into(),
+            HashMap::from([(
+                AgentProvider::CLAUDE,
+                temp.path().join("missing").display().to_string(),
+            )]),
+            app.inner.state_path.clone(),
+        );
+        // The explicit poll owns the test; do not start a competing timer.
+        restored
+            .inner
+            .delegation_monitor_started
+            .store(true, Ordering::Release);
+        restored.restore_local_state().await.unwrap();
+        restored.finish_local_restore();
+        restored.poll_delegations(false).await.unwrap();
+        let l = restored.delegation_store().await.unwrap().lock().await;
+        assert!(l.alerts.iter().any(|a| !a.delivered));
+        assert!(
+            l.reports.iter().any(|r| r.next_attempt.is_some()),
+            "refusal prevented wake dispatch"
+        );
+    }
+
+    #[tokio::test]
+    async fn staggered_escalations_are_hourly_and_sweep_pending_across_restart() {
+        let (app, _temp) = fixture().await;
+        let b = bot(&app).await;
+        for id in ["first", "second", "third"] {
+            app.edit_delegations(|l| {
+                l.reports.push(Report {
+                    id: id.into(),
+                    bot_id: b.id.clone(),
+                    thread: id.into(),
+                    text: format!("{id} failed"),
+                    urgent: true,
+                    created: Utc::now() - ChronoDuration::hours(3),
+                    ..Default::default()
+                })
+            })
+            .await
+            .unwrap();
+            app.escalate_delegations().await.unwrap();
+        }
+        assert_eq!(
+            app.delegation_store()
+                .await
+                .unwrap()
+                .lock()
+                .await
+                .alerts
+                .len(),
+            1
+        );
+        let restored = AppState::new_with_state_path(
+            "test".into(),
+            HashMap::new(),
+            app.inner.state_path.clone(),
+        );
+        *restored.inner.preferences.lock().await = app.preferences().await;
+        restored.escalate_delegations().await.unwrap();
+        assert_eq!(
+            restored
+                .delegation_store()
+                .await
+                .unwrap()
+                .lock()
+                .await
+                .alerts
+                .len(),
+            1
+        );
+        restored
+            .edit_delegations(|l| {
+                l.escalation_sent
+                    .insert(b.id.clone(), Utc::now() - ChronoDuration::hours(1));
+                l.reports.push(Report {
+                    id: "fresh".into(),
+                    bot_id: b.id.clone(),
+                    thread: "fresh".into(),
+                    text: "fresh failure".into(),
+                    urgent: true,
+                    created: Utc::now(),
+                    ..Default::default()
+                });
+            })
+            .await
+            .unwrap();
+        restored.escalate_delegations().await.unwrap();
+        let l = restored.delegation_store().await.unwrap().lock().await;
+        assert_eq!(l.alerts.len(), 2);
+        let swept = &l.alerts[1].reports;
+        assert_eq!(swept.len(), 3);
+        assert!(swept.contains(&"fresh".to_string()));
+    }
+
+    #[tokio::test]
+    async fn answered_input_does_not_escalate() {
+        let (app, _temp) = fixture().await;
+        let b = bot(&app).await;
+        let s = target(&app).await;
+        track(&app, &b, &s, ResultDelivery::Batch).await;
+        status(&app, ThreadStatus::WaitingForInput).await;
+        app.poll_observations(false).await.unwrap();
+        app.edit_delegations(|l| {
+            l.reports[0].created = Utc::now() - ChronoDuration::hours(3);
+        })
+        .await
+        .unwrap();
+        status(&app, ThreadStatus::Running).await;
+        app.poll_observations(false).await.unwrap();
+        app.escalate_delegations().await.unwrap();
+        assert!(app
+            .delegation_store()
+            .await
+            .unwrap()
+            .lock()
+            .await
+            .alerts
+            .is_empty());
     }
 
     #[tokio::test]
