@@ -1080,35 +1080,54 @@ window is offscreen and never activates:
     node scripts/stream-qa/run.mjs --label after --engines webkit --only near,read-start
     node scripts/stream-qa/report.mjs after
 
-Run scenarios once with `--only`; a full pass takes about ten minutes. Confirm the
+Run scenarios once with `--only`; a full pass takes about fifteen minutes per build. Confirm the
 `wheels` column shows delivered events before trusting a parked number.
 
-Turn end measured in WKWebView on macOS 26, 6 Nov 2026, against 5b98f932:
+Measured in WKWebView on macOS 26, 6 Nov 2026, one run each, 9ed27f48 against
+5b98f932, while other work kept the load average near 110. Turn end:
 
 | Reader at turn end | Base | Fixed |
 | --- | ---: | ---: |
-| At the tail, long final message | 2,052 px jump, left 3,086 px behind | 8 px eased step, on the tail |
-| At the tail, 212 px of live rows fold | 1,928 px jump, left 3,086 px behind | 36 px eased step, on the tail |
+| Back at the tail, long final message | 2,052 px jump, left 3,086 px behind | 7 px eased step, on the tail |
+| Following throughout, long turn | Following lost mid-turn, 7,542 px behind | 7 px eased step, on the tail |
+| Back at the tail, 212 px of live rows fold | 1,928 px jump, left 3,086 px behind | 70 px first frame, on the tail |
+| Following throughout, 238 px of rows fold | Following lost mid-turn, 7,888 px behind | 76 px first frame, on the tail |
 | Parked in a message as it completes | 217 px jump | 0 px |
+| Parked while live rows fold below | 72 px drift | 0 px |
 | Parked, height moves past them, total unchanged | 128 px jump | 0 px |
 
-Earlier table, measured 5 Nov on the previous revision of these fixes:
+The fold release is time-based, so a late first frame takes a larger first step:
+32-36 px on a quiet machine, 39-76 px under this load.
 
-| Scenario | Unprompted upward leap | Parked reader drift | Jumps while scrolling up | Left behind with no input |
-| --- | ---: | ---: | ---: | ---: |
-| Read start of message, return | 2,052 → 42 px | 217 → 0 px | 1 → 0 | 505 → 121 px |
-| Near the tail | 2,052 → 42 px | 495 → 0 px | 1 → 0 | 505 → 80 px |
-| Parked through turn end | 217 → 0 px | 217 → 0 px | 1 → 0 | 505 → 80 px |
-| Thought collapses, no input | 218 → 42 px | n/a | n/a | 7,584 → 99 px |
-| Tool output above reader | 2,124 → 42 px | 0 → 0 px | 0 → 0 | 1,353 → 121 px |
-| 1,000 blocks, climb history | 120 → 0 px | n/a | 38 (393 px) → 0 | 505 → 99 px |
-| 1,000 blocks, following | 662 → 42 px | n/a | n/a | 7,285 → 157 px |
+Streaming:
 
-Streaming the 7 KB message went from 8.9 to 58 paints a second, from 35 (max 65)
-to 5.3 characters a paint (max 28 outside long threads). Frame p50 stayed 17 ms,
-p95 18-19 ms. Mounting 1,000 blocks took about 100 ms longer. The remaining 42 px
-is a real settle: the finished message is shorter than its streamed blocks. Gaps
-around 100 px are one sample taken before the same frame's pin.
+| Scenario | Unprompted upward leap | Parked reader drift | Left behind with no input |
+| --- | ---: | ---: | ---: |
+| Read start of message, return | 2,052 → 9 px | 217 → 0 px | 505 → 80 px |
+| Read middle of message | 2,124 → 7 px | 0 → 0 px | 505 → 121 px |
+| Read older history | 2,124 → 8 px | 0 → 0 px | 483 → 124 px |
+| Near the tail | 2,081 → 13 px | 495 → 0 px | 505 → 80 px |
+| Parked through turn end | 217 → 0 px | 217 → 0 px | 505 → 80 px |
+| Thought collapses, no input | 218 → 17 px | n/a | 7,584 → 157 px |
+| Expanded tool rows | 2,124 → 8 px | 0 → 0 px | 1,036 → 181 px |
+| Tool output above reader | 2,124 → 9 px | 0 → 0 px | 1,331 → 99 px |
+| Row expanded above reader | 2,052 → 9 px | 145 → 0 px | 505 → 80 px |
+| Late image | 2,252 → 11 px | 0 → 0 px | 505 → 80 px |
+| 1,000 blocks, climb history | 120 → 0 px | n/a | 505 → 99 px |
+| 1,000 blocks, following | 662 → 7 px | n/a | 7,285 → 157 px |
+
+Climbing 1,000 blocks went from 38 content jumps (393 px) to none. The `blk jumps`
+column also counts the reader's own wheel steps above 40 px, where the scroll
+delta equals the block step; read it against `dTop` in the samples before calling
+it a regression, and expect such steps more often while paced text paints.
+
+Streaming the 7 KB message went from 8.9 to 50-58 paints a second, and from 35
+(max 106) to 5.3-6.2 characters a paint (max 49). Frame p50 stayed 17 ms and p95
+18-21 ms on both builds. Mounting 1,000 blocks took 493 ms against 506 ms; an
+earlier quiet run measured about 100 ms slower, so treat that difference as noise
+here. Leaps of 42 px and under are a real settle: the finished message is shorter
+than its streamed blocks. Gaps around 100 px, and the single 458 px sample when
+tool rows land at once, are one sample taken before the same frame's pin.
 
 Attachment previews are owned by stable attachment identity but always derive
 their URL, label, and availability from the current authoritative message or
