@@ -445,7 +445,7 @@ export async function inspect({ path, source }, ctx) {
     entry.branchMismatch = !entry.branch || Boolean(owner?.branch && owner.branch !== entry.branch);
     const flags = await git(path, ['ls-files', '-v', '-z']);
     entry.hiddenIndex = flags.split('\0').some((e) => /^[a-z] /.test(e) || /^S /.test(e) && present(join(path, e.slice(2))));
-    entry.inProgress = ['rebase-merge', 'rebase-apply', 'MERGE_HEAD', 'CHERRY_PICK_HEAD', 'REVERT_HEAD', 'BISECT_LOG', 'sequencer'].some((p) => existsSync(join(gitDir, p)));
+    entry.inProgress = ['rebase-merge', 'rebase-apply', 'MERGE_HEAD', 'CHERRY_PICK_HEAD', 'REVERT_HEAD', 'BISECT_LOG', 'sequencer', 'index.lock'].some((p) => present(join(gitDir, p)));
     entry.locked = existsSync(join(gitDir, 'locked'));
 
     entry.indexSnapshot = flags;
@@ -711,7 +711,7 @@ export async function apply(result, opts, { log = console.log } = {}) {
         || (await git(path, ['symbolic-ref', '-q', '--short', 'HEAD'], { allowFail: true }))?.trim() !== fresh.branch
         || await git(path, ['ls-files', '-v', '-z']) !== fresh.indexSnapshot
         || fresh.indexSnapshot.split('\0').some((e) => /^[a-z] /.test(e) || /^S /.test(e) && present(join(path, e.slice(2))))
-        || ['rebase-merge', 'rebase-apply', 'MERGE_HEAD', 'CHERRY_PICK_HEAD', 'REVERT_HEAD', 'BISECT_LOG', 'sequencer'].some((p) => existsSync(join(fresh.gitDir, p)))
+        || ['rebase-merge', 'rebase-apply', 'MERGE_HEAD', 'CHERRY_PICK_HEAD', 'REVERT_HEAD', 'BISECT_LOG', 'sequencer', 'index.lock'].some((p) => present(join(fresh.gitDir, p)))
         || await git(path, ['status', '--porcelain=v1', '-z', '--untracked-files=normal', '--ignored=traditional']) !== fresh.statusSnapshot) {
         skipped.push({ path: entry.path, reason: 'checkout or processes changed during assessment' });
         continue;

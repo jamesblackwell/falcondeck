@@ -338,7 +338,7 @@ test('detached and mismatched owner branches block removal', async () => {
 test('in-progress git operations cannot be classified SAFE', async () => {
   const path = worktree('operations', 'falcondeck/operations');
   const dir = sh(path, 'rev-parse', '--absolute-git-dir');
-  for (const marker of ['rebase-merge', 'rebase-apply', 'MERGE_HEAD', 'CHERRY_PICK_HEAD', 'REVERT_HEAD', 'BISECT_LOG', 'sequencer']) {
+  for (const marker of ['rebase-merge', 'rebase-apply', 'MERGE_HEAD', 'CHERRY_PICK_HEAD', 'REVERT_HEAD', 'BISECT_LOG', 'sequencer', 'index.lock']) {
     const file = join(dir, marker);
     writeFileSync(file, 'in progress');
     assert.equal((await assess(path)).class, 'REVIEW', marker);

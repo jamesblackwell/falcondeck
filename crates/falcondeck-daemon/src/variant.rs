@@ -171,7 +171,9 @@ async fn populate_worktree(
         .map(|_| ())
     };
     if let Err(error) = added {
-        let _ = run_git(project, &["worktree", "remove", "--force", &stage]).await;
+        if recovered.is_none() {
+            let _ = run_git(project, &["worktree", "remove", "--force", &stage]).await;
+        }
         if new_branch {
             discard_new_branch(project, branch, starting_head.trim()).await;
         }
@@ -196,6 +198,12 @@ async fn populate_worktree(
     }
     .await;
     if let Err(error) = result {
+        if recovered.is_some() {
+            return Err(DaemonError::Rpc(format!(
+                "Provisioning recovered staging failed at {stage}: {error}. Pre-existing staging was retained for review."
+            )));
+        }
+        // Only staging created in this call may be force-removed.
         // This path was never handed to a thread or user. It may have an
         // incomplete index after a failed checkout, so plain remove can refuse.
         let _ = run_git(project, &["worktree", "remove", "--force", &stage]).await;
@@ -809,7 +817,24 @@ mod tests {
         if kind != "uninitialized" {
             run_git(stage_str, &["read-tree", "HEAD"]).await.unwrap();
         }
+        let mut pending_index = None;
         match kind {
+            "index-lock" => {
+                let git_dir = run_git(stage_str, &["rev-parse", "--absolute-git-dir"])
+                    .await
+                    .unwrap();
+                let git_dir = Path::new(git_dir.trim());
+                fs::write(stage.join("README.md"), "unique pending index work\n")
+                    .await
+                    .unwrap();
+                run_git(stage_str, &["add", "README.md"]).await.unwrap();
+                let pending = fs::read(git_dir.join("index")).await.unwrap();
+                run_git(stage_str, &["read-tree", "HEAD"]).await.unwrap();
+                fs::remove_file(stage.join("README.md")).await.unwrap();
+                let lock = git_dir.join("index.lock");
+                fs::write(&lock, &pending).await.unwrap();
+                pending_index = Some((lock, pending));
+            }
             "edit" | "add" => {
                 let file = if kind == "edit" {
                     "README.md"
@@ -859,7 +884,7 @@ mod tests {
             "{error}"
         );
         assert!(
-            error.contains(if kind == "merge" {
+            error.contains(if kind == "merge" || kind == "index-lock" {
                 "operation in progress"
             } else {
                 "index must match"
@@ -880,6 +905,22 @@ mod tests {
                 .unwrap(),
             changes_before
         );
+        if let Some((lock, pending)) = pending_index {
+            assert!(error.contains("index.lock"));
+            assert_eq!(fs::read(&lock).await.unwrap(), pending);
+            let shown = Command::new("git")
+                .current_dir(&stage)
+                .env("GIT_INDEX_FILE", &lock)
+                .args(["show", ":README.md"])
+                .output()
+                .await
+                .unwrap();
+            assert!(shown.status.success());
+            assert_eq!(
+                String::from_utf8(shown.stdout).unwrap(),
+                "unique pending index work\n"
+            );
+        }
         if kind == "edit" || kind == "add" {
             let file = if kind == "edit" {
                 ":README.md"
@@ -891,6 +932,11 @@ mod tests {
                 "unique work exists only in the index\n"
             );
         }
+    }
+
+    #[tokio::test]
+    async fn empty_staging_retains_a_pending_replacement_index() {
+        assert_empty_staging_is_retained("index-lock").await;
     }
 
     #[tokio::test]

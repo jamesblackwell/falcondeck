@@ -69,19 +69,23 @@ Tracked-file provisioning is transactional:
 5. Publish with `git worktree move` to the thread's final path.
 6. Start optional dependency cloning in the background.
 
-Only the unpublished staging worktree can be force-removed during rollback;
+Only an unpublished staging worktree created in the current call can be
+force-removed during rollback;
 this is not the reclamation path. Failed creation also drops its newly created
 branch. A pre-existing branch is never treated as a creation rollback target.
 After a crash, create/restore recover only that slug's registered
 `.slug-provision-<uuid>` staging worktree. They reuse its branch, finish setup,
 and move it into place, so neither staging nor a duplicate branch is left
 behind. Recovery first verifies the exact branch and tip, an index matching
-HEAD, and no hidden index flags or operation in progress, even when only `.git`
+HEAD, and no hidden index flags, `index.lock` in its own Git directory, or
+operation in progress, even when only `.git`
 exists on disk. Staged edits, additions and deletions are retained with a clear
 review error. An uninitialized index that does not match HEAD is also retained;
 filesystem emptiness alone is never proof of safety. Populated staging must
 additionally have no working-tree edits, and live processes block recovery.
-Other slugs and unrelated paths are untouched. This is request-time recovery,
+A provisioning failure in recovered staging always retains that checkout and
+branch with a clear review error; rollback never force-removes pre-existing
+staging. Other slugs and unrelated paths are untouched. This is request-time recovery,
 not a backlog sweep.
 
 An existing folder is not sufficient proof of a restored checkout: Git must

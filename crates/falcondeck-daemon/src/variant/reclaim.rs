@@ -289,8 +289,12 @@ pub(super) async fn hidden_or_in_progress(path: &str) -> Result<Vec<String>, Str
         "REVERT_HEAD",
         "BISECT_LOG",
         "sequencer",
+        "index.lock",
     ] {
-        if Path::new(dir.trim()).join(marker).exists() {
+        if fs::symlink_metadata(Path::new(dir.trim()).join(marker))
+            .await
+            .is_ok()
+        {
             reasons.push(format!("Git operation in progress: {marker}"));
         }
     }
@@ -1159,6 +1163,52 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn failed_provision_keeps_pre_existing_recovered_staging() {
+        let f = Fixture::new();
+        let v = f.variant("recoverfail");
+        let stage = f
+            .variants
+            .join(format!(".recoverfail-provision-{}", uuid::Uuid::new_v4()));
+        git_sync(
+            &f.project,
+            &["worktree", "move", &v.path, stage.to_str().unwrap()],
+        );
+        let head = git_sync(&stage, &["rev-parse", "HEAD"]);
+        let index = git_sync(&stage, &["ls-files", "--stage", "-z"]);
+        let setup = super::super::setup::Setup {
+            patterns: Some("\0".into()),
+            ..Default::default()
+        };
+        let error = super::super::populate_worktree(
+            f.project_str(),
+            Path::new(&v.path),
+            &v.branch,
+            &v.slug,
+            false,
+            setup,
+        )
+        .await
+        .unwrap_err()
+        .to_string();
+        assert!(
+            error.contains("Pre-existing staging was retained"),
+            "{error}"
+        );
+        assert!(stage.join(".git").exists());
+        assert!(!Path::new(&v.path).exists());
+        assert_eq!(
+            std::fs::read_to_string(stage.join("a.txt")).unwrap(),
+            "one\n"
+        );
+        assert_eq!(git_sync(&stage, &["rev-parse", "HEAD"]), head);
+        assert_eq!(git_sync(&stage, &["ls-files", "--stage", "-z"]), index);
+        assert!(
+            git_sync(&f.project, &["worktree", "list", "--porcelain"])
+                .contains(stage.canonicalize().unwrap().to_str().unwrap())
+        );
+    }
+
+    #[tokio::test]
     async fn detached_and_changed_branches_are_never_reclaimed() {
         let f = Fixture::new();
         let v = f.variant("identity");
@@ -1198,6 +1248,7 @@ mod tests {
             "REVERT_HEAD",
             "BISECT_LOG",
             "sequencer",
+            "index.lock",
         ] {
             let file = Path::new(&dir).join(marker);
             std::fs::write(&file, "in progress").unwrap();
