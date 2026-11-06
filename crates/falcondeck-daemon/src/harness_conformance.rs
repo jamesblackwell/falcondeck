@@ -1013,8 +1013,15 @@ pub async fn probe_agy(options: &ProbeOptions) -> Report {
         agy::REQUIRED_CLI_FLAGS,
     );
 
+    let account = agy::read_auth_status(&options.agy_bin).await;
+    if account.status != falcondeck_core::AccountStatus::Ready {
+        report.push("account", CheckStatus::Warning, account.label);
+        return report;
+    }
     let resolved = resolve_agent_binary("agy", &options.agy_bin);
-    let models_output = Command::new(&resolved.executable)
+    let mut command = Command::new(&resolved.executable);
+    agy::configure_headless(&mut command);
+    let models_output = command
         .arg("models")
         .stdin(Stdio::null())
         .output()
@@ -1089,7 +1096,12 @@ async fn agy_stream_turn(
     prompt: &str,
 ) -> Result<AgyTurnOutcome, String> {
     let resolved = resolve_agent_binary("agy", &options.agy_bin);
+    let account = agy::read_auth_status(&options.agy_bin).await;
+    if account.status != falcondeck_core::AccountStatus::Ready {
+        return Err(account.label);
+    }
     let mut command = Command::new(&resolved.executable);
+    agy::configure_headless(&mut command);
     command
         .arg("--input-format")
         .arg("stream-json")

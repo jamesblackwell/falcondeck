@@ -67,8 +67,82 @@ pub(crate) fn agent_binary_available_cached(bin_name: &str, configured: &str) ->
     available
 }
 
+/// Also covers integration-test executables (their library is built without
+/// cfg(test)). Spawned daemon fixtures carry the explicit guard instead.
+pub(crate) fn provider_test_mode() -> bool {
+    cfg!(test)
+        || env::var_os("FALCONDECK_TEST_NO_PROVIDERS").is_some()
+        || env::current_exe()
+            .ok()
+            .is_some_and(|path| path.parent().and_then(Path::file_name) == Some(OsStr::new("deps")))
+}
+
+fn test_fixture_binary(configured: &str) -> bool {
+    let path = Path::new(configured);
+    if matches!(
+        configured,
+        "/usr/bin/false" | "/bin/false" | "/bin/true" | "/usr/bin/true"
+    ) {
+        return true;
+    }
+    // Accept only script fixtures; reject installed scripts, symlinks to
+    // installed providers, and copied native provider executables.
+    let Ok(canonical) = path.canonicalize() else {
+        return false;
+    };
+    let Ok(temp) = env::temp_dir().canonicalize() else {
+        return false;
+    };
+    let fixtures = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures");
+    if !path.is_absolute() || !(canonical.starts_with(temp) || canonical.starts_with(fixtures)) {
+        return false;
+    }
+    use std::io::Read;
+    let mut header = [0; 2];
+    std::fs::File::open(canonical)
+        .and_then(|mut file| file.read_exact(&mut header))
+        .is_ok()
+        && header == *b"#!"
+}
+
 pub fn resolve_agent_binary(bin_name: &str, configured: &str) -> AgentBinaryResolution {
     let configured = configured.trim();
+    let fixture_interpreter = matches!(
+        Path::new(bin_name).file_name().and_then(OsStr::to_str),
+        Some("node" | "python3" | "deno" | "sh" | "echo")
+    );
+    if provider_test_mode() && !fixture_interpreter {
+        let explicit = Path::new(configured).is_absolute();
+        let fixture = if explicit {
+            (test_fixture_binary(configured) || !Path::new(configured).exists())
+                .then(|| configured.to_string())
+        } else {
+            // Discovery tests may install a script into their temporary HOME.
+            // Inspect candidates, but never start a login shell or accept a
+            // real installation as a fallback.
+            env::var_os("PATH")
+                .into_iter()
+                .flat_map(|paths| env::split_paths(&paths).collect::<Vec<_>>())
+                .map(|dir| dir.join(bin_name))
+                .chain(known_location_paths(bin_name))
+                .filter_map(|path| normalize_existing_path(&path))
+                .find(|path| test_fixture_binary(path))
+        };
+        return AgentBinaryResolution {
+            executable: fixture
+                .unwrap_or_else(|| "/__falcondeck_tests__/real-provider-disabled".to_string()),
+            source: if explicit {
+                BinaryResolutionSource::Configured
+            } else {
+                BinaryResolutionSource::Unknown
+            },
+            diagnostics: ResolutionDiagnostics {
+                configured: configured.to_string(),
+                ..Default::default()
+            },
+        };
+    }
+
     let mut diagnostics = ResolutionDiagnostics {
         configured: configured.to_string(),
         ..ResolutionDiagnostics::default()
@@ -223,7 +297,10 @@ pub(crate) async fn desktop_login_shell_environment() -> &'static HashMap<OsStri
 
     ENVIRONMENT
         .get_or_init(|| async {
-            if !cfg!(target_os = "macos") || env::var_os("__CFBundleIdentifier").is_none() {
+            if provider_test_mode()
+                || !cfg!(target_os = "macos")
+                || env::var_os("__CFBundleIdentifier").is_none()
+            {
                 return HashMap::new();
             }
             capture_login_shell_environment().await.unwrap_or_default()
@@ -353,6 +430,9 @@ fn resolve_from_known_locations(
 /// every matching PATH entry. Used to surface unused dual installs (native
 /// `~/.local/bin` vs Homebrew npm) without changing which copy we launch.
 pub fn list_installed_agent_binaries(bin_name: &str) -> Vec<String> {
+    if provider_test_mode() {
+        return Vec::new();
+    }
     let mut seen = std::collections::BTreeSet::new();
     for path in known_location_paths(bin_name) {
         if let Some(canonical) = normalize_existing_path(&path) {
@@ -475,6 +555,29 @@ mod tests {
     };
 
     #[test]
+    fn test_probes_cannot_resolve_installed_provider_binaries() {
+        for provider in [
+            "agy",
+            "claude",
+            "codex",
+            "cursor-agent",
+            "opencode",
+            "agent",
+            "hermes",
+        ] {
+            let resolved = super::resolve_agent_binary(provider, provider);
+            assert!(
+                !Path::new(&resolved.executable).exists(),
+                "real {provider} escaped test guard"
+            );
+            assert!(!resolved.diagnostics.searched_path);
+            assert!(!resolved.diagnostics.searched_login_shell);
+        }
+        let resolved = super::resolve_agent_binary("provider", "/bin/ls");
+        assert!(!Path::new(&resolved.executable).exists());
+    }
+
+    #[test]
     fn missing_binary_message_includes_checked_sources() {
         let diagnostics = ResolutionDiagnostics {
             configured: "claude".to_string(),
@@ -546,7 +649,7 @@ mod tests {
         let install = directory.path().join("Hermes profile");
         std::fs::create_dir(&install).unwrap();
         let binary = install.join("hermes");
-        std::fs::write(&binary, "fixture").unwrap();
+        std::fs::write(&binary, "#!/bin/sh\nexit 0\n").unwrap();
         let resolution = super::resolve_agent_binary("hermes", binary.to_str().unwrap());
         assert_eq!(resolution.source, super::BinaryResolutionSource::Configured);
         assert_eq!(

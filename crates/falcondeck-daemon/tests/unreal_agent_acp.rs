@@ -11,6 +11,7 @@ fn start_adapter() -> (Child, Lines<BufReader<ChildStdout>>) {
     let fixture =
         Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/unreal_agent_runner.mjs");
     let mut child = Command::new(env!("CARGO_BIN_EXE_falcondeck-daemon"))
+        .env("FALCONDECK_TEST_NO_PROVIDERS", "1")
         .arg("mcp-unreal-agent-acp")
         .env("UNREAL_AGENT_RUNNER_BIN", fixture)
         .stdin(Stdio::piped())

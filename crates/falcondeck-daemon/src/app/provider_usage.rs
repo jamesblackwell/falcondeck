@@ -10,7 +10,7 @@
 //! `~/.grok/auth.json`, Cursor Agent queries the dashboard Connect-RPC usage
 //! endpoints with the token from the CLI's keychain entry (macOS) or
 //! `~/.cursor/auth.json`, Antigravity queries Cloud Code quota endpoints
-//! with the token from `~/.gemini/oauth_creds.json`, Z.AI coding-plan usage is
+//! with the token from `~/.gemini/antigravity-cli/antigravity-oauth-token`, Z.AI coding-plan usage is
 //! read from `GET /api/monitor/usage/quota/limit` with the API key OpenCode
 //! stores under `zai-coding-plan` (or `ZAI_CODING_PLAN_API_KEY`), and
 //! OpenRouter spend is read from `GET /api/v1/key` with the key OpenCode
@@ -1734,11 +1734,7 @@ struct AgyCredentials {
 }
 
 fn agy_oauth_path() -> Option<PathBuf> {
-    Some(
-        PathBuf::from(std::env::var_os("HOME")?)
-            .join(".gemini")
-            .join("oauth_creds.json"),
-    )
+    crate::agy::oauth_path()
 }
 
 fn agy_accounts_path() -> Option<PathBuf> {
@@ -1751,15 +1747,16 @@ fn agy_accounts_path() -> Option<PathBuf> {
 
 fn parse_agy_oauth(raw: &str) -> Option<AgyCredentials> {
     let value: Value = serde_json::from_str(raw).ok()?;
-    let access_token = non_empty_string(json_field(&value, "access_token", "accessToken"))?;
-    let expires_at = json_u64(json_field(&value, "expiry_date", "expiryDate")).and_then(|millis| {
-        i64::try_from(millis)
-            .ok()
-            .and_then(DateTime::<Utc>::from_timestamp_millis)
-    });
+    let token = value.get("token")?;
+    let access_token = non_empty_string(token.get("access_token"))?;
+    let expires_at = token
+        .get("expiry")
+        .and_then(Value::as_str)
+        .and_then(|s| DateTime::parse_from_rfc3339(s).ok())
+        .map(|date| date.with_timezone(&Utc));
     Some(AgyCredentials {
         access_token,
-        account_email: None,
+        account_email: non_empty_string(value.get("id_token_email")),
         expires_at,
     })
 }
@@ -1895,7 +1892,7 @@ async fn fetch_agy_usage() -> ProviderUsage {
     let Some(mut credentials) = parse_agy_oauth(&raw) else {
         return ProviderUsage::Unauthenticated;
     };
-    credentials.account_email = read_agy_account_email().await;
+    credentials.account_email = credentials.account_email.or(read_agy_account_email().await);
     if credentials
         .expires_at
         .is_some_and(|expires_at| Utc::now() >= expires_at)
@@ -4074,16 +4071,16 @@ mod tests {
 
     fn future_agy_oauth() -> String {
         json!({
-            "access_token": "agy-token",
-            "expiry_date": (Utc::now() + chrono::Duration::hours(1)).timestamp_millis(),
+            "token": { "access_token": "agy-token",
+            "expiry": (Utc::now() + chrono::Duration::hours(1)).to_rfc3339() },
         })
         .to_string()
     }
 
     fn past_agy_oauth() -> String {
         json!({
-            "access_token": "agy-token",
-            "expiry_date": (Utc::now() - chrono::Duration::hours(1)).timestamp_millis(),
+            "token": { "access_token": "agy-token",
+            "expiry": (Utc::now() - chrono::Duration::hours(1)).to_rfc3339() },
         })
         .to_string()
     }

@@ -7339,7 +7339,8 @@ require('node:readline').createInterface({{ input: process.stdin }}).on('line', 
     #[test]
     fn bundled_unreal_adapter_uses_the_configured_runner_for_visibility() {
         let dir = tempfile::tempdir().unwrap();
-        let runner = std::env::current_exe().unwrap();
+        let runner = dir.path().join("runner");
+        std::fs::write(&runner, "#!/bin/sh\nexit 0\n").unwrap();
         std::fs::write(
             dir.path().join("providers.json"),
             json!({ "providers": {

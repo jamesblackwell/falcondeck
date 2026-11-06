@@ -10,9 +10,9 @@
 use std::{
     collections::{HashMap, HashSet},
     env, fs,
-    path::{Path, PathBuf},
+    path::PathBuf,
     process::Stdio,
-    sync::{Arc, OnceLock},
+    sync::Arc,
 };
 
 use crate::agent_binary::{
@@ -24,8 +24,8 @@ use crate::error::DaemonError;
 use chrono::{DateTime, Utc};
 use falcondeck_core::{
     AccountStatus, AccountSummary, AgentCapabilitySummary, AgentProvider, ImageInput, ModelSummary,
-    ReasoningEffortSummary, SkillAvailability, SkillSourceKind, SkillSummary, ThreadAgentParams,
-    ThreadAttention, ThreadStatus, ThreadSummary,
+    ReasoningEffortSummary, SkillSummary, ThreadAgentParams, ThreadAttention, ThreadStatus,
+    ThreadSummary,
 };
 use serde_json::{Value, json};
 use tokio::{
@@ -36,11 +36,6 @@ use tokio::{
 const INTERRUPT_GRACE: tokio::time::Duration = tokio::time::Duration::from_secs(5);
 const EXIT_GRACE: tokio::time::Duration = tokio::time::Duration::from_secs(10);
 const WRITE_TIMEOUT: tokio::time::Duration = tokio::time::Duration::from_secs(10);
-/// Each catalog probe is a full `agy` print-mode run that normally finishes in
-/// ~3s. The timeout is also the ceiling a workspace connect can stall on one
-/// probe, so keep it tight; a timed-out probe degrades to curated models /
-/// unknown auth and the next refresh retries.
-const PROBE_TIMEOUT: tokio::time::Duration = tokio::time::Duration::from_secs(8);
 /// Maximum time a daemon shutdown gives an active Antigravity turn to finish
 /// after SIGTERM. This is a ceiling, not a required delay.
 const SHUTDOWN_GRACE: tokio::time::Duration = tokio::time::Duration::from_millis(500);
@@ -50,8 +45,7 @@ const PRINT_TIMEOUT: &str = "24h";
 
 /// Command-line flags a turn or catalog probe depends on.
 ///
-/// Keep this in step with `spawn_turn`, `list_models`, and the auth/skills
-/// print-mode calls. A CLI that drops `--effort` or `--conversation` does not
+/// Keep this in step with `spawn_turn`. A CLI that drops `--effort` or `--conversation` does not
 /// necessarily fail: the flag is ignored and resume or reasoning silently
 /// stops applying. `harness_conformance` checks the installed binary still
 /// advertises every one.
@@ -175,7 +169,7 @@ impl AgyRuntime {
         let executable = resolved.executable.clone();
         let hydrate_path = workspace_path.clone();
         let ((account, models, skills), threads) =
-            tokio::join!(cached_provider_probes(&executable), async {
+            tokio::join!(provider_probes(&executable), async {
                 tokio::task::spawn_blocking(move || hydrate_threads(&hydrate_path))
                     .await
                     .unwrap_or_default()
@@ -218,6 +212,10 @@ impl AgyRuntime {
         sandbox_mode: Option<&str>,
         cwd: &str,
     ) -> Result<AgyTurnSpawn, DaemonError> {
+        let account = read_auth_status(&self.agy_bin).await;
+        if account.status != AccountStatus::Ready {
+            return Err(DaemonError::BadRequest(account.label));
+        }
         let turn_lock = self.turn_lock(thread_id).await;
         let _turn_guard = turn_lock.lock().await;
 
@@ -238,6 +236,7 @@ impl AgyRuntime {
         let input_line = build_stream_json_input(prompt, images);
         let resolved = resolve_agent_binary("agy", &self.agy_bin);
         let mut command = Command::new(&resolved.executable);
+        configure_headless(&mut command);
         command
             .arg("--input-format")
             .arg("stream-json")
@@ -546,9 +545,8 @@ impl AgyRuntime {
     }
 
     pub async fn provider_metadata(&self) -> AgyProviderMetadata {
-        // The user just selected the provider (or logged in), so a cached
-        // catalog would defeat the refresh; probe fresh and repopulate.
-        let (account, models, skills) = refresh_provider_probes(&self.agy_bin).await;
+        // Read credentials afresh so sign-in and sign-out are visible immediately.
+        let (account, models, skills) = provider_probes(&self.agy_bin).await;
         AgyProviderMetadata {
             account,
             models,
@@ -558,71 +556,16 @@ impl AgyRuntime {
     }
 }
 
-/// The account/model/skill probes describe the installed CLI, not any one
-/// workspace, yet each spawns an `agy` run costing seconds. One daemon-wide
-/// entry keeps every workspace connect after the first from re-paying that
-/// cost; `provider_metadata` bypasses and repopulates it so a fresh login is
-/// not stuck behind the TTL.
-const PROBE_CACHE_TTL: tokio::time::Duration = tokio::time::Duration::from_secs(300);
-
-struct ProbeCacheEntry {
-    executable: String,
-    taken_at: tokio::time::Instant,
-    account: AccountSummary,
-    models: Vec<ModelSummary>,
-    skills: Vec<SkillSummary>,
-}
-
-static PROBE_CACHE: OnceLock<Mutex<Option<ProbeCacheEntry>>> = OnceLock::new();
-
-fn probe_cache() -> &'static Mutex<Option<ProbeCacheEntry>> {
-    PROBE_CACHE.get_or_init(|| Mutex::new(None))
-}
-
-async fn cached_provider_probes(
+// No process or credential cache: every status read reflects the current HOME
+// and sign-out immediately. Catalogs are local fallback data.
+async fn provider_probes(
     executable: &str,
 ) -> (AccountSummary, Vec<ModelSummary>, Vec<SkillSummary>) {
-    // The lock is held across the probe run so concurrent connects (every
-    // restored workspace at daemon startup) share one CLI run instead of
-    // spawning a herd.
-    let mut cache = probe_cache().lock().await;
-    if let Some(entry) = cache.as_ref()
-        && entry.executable == executable
-        && entry.taken_at.elapsed() < PROBE_CACHE_TTL
-    {
-        return (
-            entry.account.clone(),
-            entry.models.clone(),
-            entry.skills.clone(),
-        );
-    }
-    run_and_store_provider_probes(&mut cache, executable).await
-}
-
-async fn refresh_provider_probes(
-    executable: &str,
-) -> (AccountSummary, Vec<ModelSummary>, Vec<SkillSummary>) {
-    let mut cache = probe_cache().lock().await;
-    run_and_store_provider_probes(&mut cache, executable).await
-}
-
-async fn run_and_store_provider_probes(
-    cache: &mut Option<ProbeCacheEntry>,
-    executable: &str,
-) -> (AccountSummary, Vec<ModelSummary>, Vec<SkillSummary>) {
-    let (account, models, skills) = tokio::join!(
-        read_auth_status(executable),
-        list_models(executable),
-        list_skills(executable)
-    );
-    *cache = Some(ProbeCacheEntry {
-        executable: executable.to_string(),
-        taken_at: tokio::time::Instant::now(),
-        account: account.clone(),
-        models: models.clone(),
-        skills: skills.clone(),
-    });
-    (account, models, skills)
+    (
+        read_auth_status(executable).await,
+        curated_models(),
+        Vec::new(),
+    )
 }
 
 fn default_capabilities() -> AgentCapabilitySummary {
@@ -720,134 +663,67 @@ fn request_graceful_stop(child: &mut Child) -> std::io::Result<bool> {
     }
 }
 
-pub async fn read_auth_status(agy_bin: &str) -> AccountSummary {
-    let resolved = resolve_agent_binary("agy", agy_bin);
-    if !Path::new(&resolved.executable).is_file() {
-        return AccountSummary {
-            status: AccountStatus::Unknown,
-            label: "Antigravity CLI not installed".to_string(),
-        };
-    }
-
-    let mut command = Command::new(&resolved.executable);
-    command
-        .arg("-p")
-        .arg("/usage")
-        .arg("--output-format")
-        .arg("json")
-        .arg("--print-timeout")
-        .arg("30s")
-        .stdin(Stdio::null())
-        .kill_on_drop(true);
-    if let Some(path) = preferred_command_path(&resolved.executable) {
-        command.env("PATH", path);
-    }
-    let output = tokio::time::timeout(PROBE_TIMEOUT, command.output()).await;
-    match output {
-        Ok(Ok(output)) => {
-            parse_usage_account(&output.stdout, &output.stderr, output.status.success())
-        }
-        Ok(Err(_)) => AccountSummary {
-            status: AccountStatus::Unknown,
-            label: "Antigravity not available".to_string(),
-        },
-        Err(_) => AccountSummary {
-            status: AccountStatus::Unknown,
-            label: "Antigravity auth status check timed out".to_string(),
-        },
-    }
+pub(crate) fn oauth_path() -> Option<PathBuf> {
+    Some(
+        PathBuf::from(env::var_os("HOME")?).join(".gemini/antigravity-cli/antigravity-oauth-token"),
+    )
 }
 
-fn parse_usage_account(stdout: &[u8], stderr: &[u8], success: bool) -> AccountSummary {
-    let stdout_text = String::from_utf8_lossy(stdout);
-    let stderr_text = String::from_utf8_lossy(stderr);
-    let combined = format!("{stdout_text}\n{stderr_text}").to_ascii_lowercase();
-    if combined.contains("authentication required")
-        || combined.contains("please sign in")
-        || combined.contains("not authenticated")
-    {
-        return AccountSummary {
-            status: AccountStatus::NeedsAuth,
-            label: "Antigravity login required. Run `agy` in a terminal to sign in.".to_string(),
-        };
-    }
-    if let Ok(value) = serde_json::from_slice::<Value>(stdout)
-        && value
-            .get("status")
-            .and_then(Value::as_str)
-            .is_some_and(|status| status.eq_ignore_ascii_case("success"))
-    {
-        return AccountSummary {
-            status: AccountStatus::Ready,
-            label: "Antigravity ready".to_string(),
-        };
-    }
-    if success {
-        return AccountSummary {
-            status: AccountStatus::Ready,
-            label: "Antigravity ready".to_string(),
-        };
-    }
+pub(crate) fn credential_account(raw: &str) -> AccountSummary {
+    let ready = serde_json::from_str::<Value>(raw)
+        .ok()
+        .is_some_and(|value| {
+            let token = &value["token"];
+            token["access_token"]
+                .as_str()
+                .is_some_and(|s| !s.trim().is_empty())
+                && (token["refresh_token"]
+                    .as_str()
+                    .is_some_and(|s| !s.trim().is_empty())
+                    || token["expiry"]
+                        .as_str()
+                        .and_then(|s| DateTime::parse_from_rfc3339(s).ok())
+                        .is_some_and(|expiry| expiry > Utc::now()))
+        });
     AccountSummary {
-        status: AccountStatus::Unknown,
-        label: "Antigravity auth status unavailable".to_string(),
+        status: if ready {
+            AccountStatus::Ready
+        } else {
+            AccountStatus::NeedsAuth
+        },
+        label: if ready {
+            "Antigravity credentials available"
+        } else {
+            "Antigravity login required. Run `agy` in a terminal to sign in."
+        }
+        .to_string(),
     }
 }
 
-async fn list_models(agy_bin: &str) -> Vec<ModelSummary> {
-    let resolved = resolve_agent_binary("agy", agy_bin);
-    if !Path::new(&resolved.executable).is_file() {
-        return curated_models();
-    }
-    let mut command = Command::new(&resolved.executable);
-    command
-        .arg("models")
-        .stdin(Stdio::null())
-        .kill_on_drop(true);
-    if let Some(path) = preferred_command_path(&resolved.executable) {
-        command.env("PATH", path);
-    }
-    let output = tokio::time::timeout(PROBE_TIMEOUT, command.output()).await;
-    match output {
-        Ok(Ok(output)) if output.status.success() => {
-            let parsed = parse_models_table(&String::from_utf8_lossy(&output.stdout));
-            if parsed.is_empty() {
-                curated_models()
-            } else {
-                parsed
+pub async fn read_auth_status(_agy_bin: &str) -> AccountSummary {
+    // Tests must never depend on the developer's credentials.
+    let raw = if crate::agent_binary::provider_test_mode() {
+        None
+    } else {
+        oauth_path().and_then(|path| fs::read_to_string(path).ok())
+    };
+    credential_account(raw.as_deref().unwrap_or(""))
+}
+
+/// The CLI's headless auth override prevents browser OAuth if credentials are
+/// revoked between our preflight and the child reading them.
+pub(crate) fn configure_headless(command: &mut Command) {
+    command.env("AGY_CLI_NONINTERACTIVE_HEADLESS", "1");
+    // Piped stdio alone still inherits the daemon's controlling terminal.
+    // The documented non-interactive auth behavior requires no terminal.
+    #[cfg(unix)]
+    unsafe {
+        command.pre_exec(|| {
+            if libc::setsid() == -1 {
+                return Err(std::io::Error::last_os_error());
             }
-        }
-        _ => curated_models(),
-    }
-}
-
-async fn list_skills(agy_bin: &str) -> Vec<SkillSummary> {
-    let resolved = resolve_agent_binary("agy", agy_bin);
-    if !Path::new(&resolved.executable).is_file() {
-        return Vec::new();
-    }
-    let mut command = Command::new(&resolved.executable);
-    command
-        .arg("-p")
-        .arg("/skills")
-        .arg("--output-format")
-        .arg("json")
-        .arg("--print-timeout")
-        .arg("30s")
-        .stdin(Stdio::null())
-        .kill_on_drop(true);
-    if let Some(path) = preferred_command_path(&resolved.executable) {
-        command.env("PATH", path);
-    }
-    let output = tokio::time::timeout(PROBE_TIMEOUT, command.output()).await;
-    match output {
-        Ok(Ok(output)) if output.status.success() => {
-            serde_json::from_slice::<Value>(&output.stdout)
-                .ok()
-                .map(|value| parse_skills_payload(&value))
-                .unwrap_or_default()
-        }
-        _ => Vec::new(),
+            Ok(())
+        });
     }
 }
 
@@ -947,44 +823,6 @@ pub fn curated_models() -> Vec<ModelSummary> {
          claude-sonnet-4-6\tClaude Sonnet 4.6 (Thinking)\n\
          claude-opus-4-6-thinking\tClaude Opus 4.6 (Thinking)\n",
     )
-}
-
-pub fn parse_skills_payload(value: &Value) -> Vec<SkillSummary> {
-    let skills = value
-        .pointer("/command/data/skills")
-        .and_then(Value::as_array)
-        .cloned()
-        .unwrap_or_default();
-    skills
-        .iter()
-        .filter_map(|skill| {
-            let name = skill.get("name").and_then(Value::as_str)?.trim();
-            if name.is_empty() {
-                return None;
-            }
-            Some(SkillSummary {
-                id: format!("agy-skill-{name}"),
-                label: name.to_string(),
-                alias: format!("/{name}"),
-                availability: skill_availability_agy(),
-                providers: vec![AgentProvider::AGY],
-                source_kind: SkillSourceKind::ProviderNative,
-                source_path: skill
-                    .get("path")
-                    .and_then(Value::as_str)
-                    .map(str::to_string),
-                description: skill
-                    .get("description")
-                    .and_then(Value::as_str)
-                    .map(str::to_string),
-                provider_translations: Default::default(),
-            })
-        })
-        .collect()
-}
-
-fn skill_availability_agy() -> SkillAvailability {
-    falcondeck_core::skill_availability_from_providers(&[AgentProvider::AGY])
 }
 
 pub fn hydrate_threads(workspace_path: &str) -> Vec<HydratedAgyThread> {
@@ -1280,6 +1118,93 @@ pub fn tool_step_title(step_type: &str, tool_name: Option<&str>, subagent: Optio
 mod tests {
     use super::*;
 
+    #[test]
+    fn credential_presence_uses_cli_token_envelope() {
+        for raw in [
+            "",
+            "{}",
+            r#"{"access_token":"old-gemini-format"}"#,
+            r#"{"token":{"access_token":"fake","expiry":"2000-01-01T00:00:00Z"}}"#,
+        ] {
+            assert_eq!(credential_account(raw).status, AccountStatus::NeedsAuth);
+        }
+        let raw = r#"{"token":{"access_token":"fake","refresh_token":"fake"}}"#;
+        assert_eq!(credential_account(raw).status, AccountStatus::Ready);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn signed_out_metadata_and_turn_never_execute_cli_or_browser() {
+        use std::os::unix::fs::PermissionsExt;
+        let temp = tempfile::tempdir().unwrap();
+        let marker = temp.path().join("calls");
+        let binary = temp.path().join("agy");
+        let open = temp.path().join("open");
+        let script = format!(
+            "#!/bin/sh\nprintf '%s\\n' \"$*\" >> '{}'\n",
+            marker.display()
+        );
+        for path in [&binary, &open] {
+            fs::write(path, &script).unwrap();
+            fs::set_permissions(path, fs::Permissions::from_mode(0o700)).unwrap();
+        }
+        let boot = AgyRuntime::connect(
+            temp.path().to_string_lossy().into_owned(),
+            binary.to_string_lossy().into_owned(),
+        )
+        .await
+        .unwrap();
+        for _ in 0..10 {
+            let metadata = boot.runtime.provider_metadata().await;
+            assert_eq!(metadata.account.status, AccountStatus::NeedsAuth);
+            assert!(!metadata.models.is_empty());
+        }
+        let result = boot
+            .runtime
+            .spawn_turn(
+                "test",
+                None,
+                "hello",
+                &[],
+                None,
+                None,
+                None,
+                None,
+                temp.path().to_str().unwrap(),
+            )
+            .await;
+        assert!(
+            matches!(result, Err(DaemonError::BadRequest(message)) if message.contains("login required"))
+        );
+        assert!(
+            !marker.exists(),
+            "metadata or signed-out turn executed a process"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn headless_child_receives_auth_guard() {
+        let temp = tempfile::tempdir().unwrap();
+        let marker = temp.path().join("arguments");
+        let mut command = Command::new("/bin/sh");
+        command.args([
+            "-c",
+            "if (: </dev/tty) 2>/dev/null; then exit 1; fi; test \"$AGY_CLI_NONINTERACTIVE_HEADLESS\" = 1 && printf '%s' \"$*\" > \"$1\"",
+            "stub-agy",
+            marker.to_str().unwrap(),
+            "--input-format",
+            "stream-json",
+        ]);
+        configure_headless(&mut command);
+        assert!(command.status().await.unwrap().success());
+        assert!(
+            fs::read_to_string(marker)
+                .unwrap()
+                .contains("--input-format stream-json")
+        );
+    }
+
     #[tokio::test]
     async fn shutting_down_an_idle_runtime_skips_the_grace_period() {
         let runtime = AgyRuntime {
@@ -1504,28 +1429,5 @@ mod tests {
             effort_flag(Some("claude-sonnet-4-6"), Some("high")),
             Some("high")
         );
-    }
-
-    #[test]
-    fn skills_payload_uses_the_agy_provider() {
-        let value = serde_json::json!({
-            "command": {
-                "name": "skills",
-                "data": {
-                    "skills": [{
-                        "name": "antigravity-guide",
-                        "description": "Guide",
-                        "path": "/tmp/SKILL.md",
-                        "builtin": true
-                    }]
-                }
-            }
-        });
-        let skills = parse_skills_payload(&value);
-        assert_eq!(skills.len(), 1);
-        assert_eq!(skills[0].alias, "/antigravity-guide");
-        assert_eq!(skills[0].providers, vec![AgentProvider::AGY]);
-        assert!(skills[0].supports_provider(&AgentProvider::AGY));
-        assert!(!skills[0].supports_provider(&AgentProvider::CLAUDE));
     }
 }

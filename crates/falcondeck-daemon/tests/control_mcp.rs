@@ -18,6 +18,7 @@ struct McpChild {
 impl McpChild {
     fn spawn(daemon_url: &str, extra_env: BTreeMap<String, String>) -> Self {
         let mut command = Command::new(env!("CARGO_BIN_EXE_falcondeck-daemon"));
+        command.env("FALCONDECK_TEST_NO_PROVIDERS", "1");
         command.arg("mcp");
         command.env("FALCONDECK_DAEMON_URL", daemon_url);
         for (key, value) in extra_env {
@@ -230,6 +231,7 @@ async fn spawn_mcp_with(
 
 async fn assert_startup_refusal(url: &str, stderr_needle: &str) {
     let mut command = Command::new(env!("CARGO_BIN_EXE_falcondeck-daemon"));
+    command.env("FALCONDECK_TEST_NO_PROVIDERS", "1");
     command
         .arg("mcp")
         .env("FALCONDECK_DAEMON_URL", url)

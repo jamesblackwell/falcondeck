@@ -20,15 +20,34 @@ fn test_config() -> DaemonConfig {
     let temp_dir = tempfile::tempdir().unwrap();
     let state_path = temp_dir.path().join("daemon-state.json");
     let _ = temp_dir.keep();
-    DaemonConfig {
-        bind_addr: "127.0.0.1:0".parse().unwrap(),
-        state_path: Some(state_path),
-        ..DaemonConfig::default()
-    }
+    test_config_with_state_path(state_path)
 }
 
 fn test_config_with_state_path(state_path: PathBuf) -> DaemonConfig {
+    let binary = state_path.parent().unwrap().join("stub-codex");
+    std::fs::write(
+        &binary,
+        r#"#!/usr/bin/env python3
+import json, sys
+for line in sys.stdin:
+    request = json.loads(line)
+    if 'id' not in request: continue
+    method = request.get('method')
+    result = {}
+    if method == 'account/read': result = {'account': {'type': 'chatgpt'}}
+    elif method == 'model/list': result = {'data': [{'id': 'stub-model', 'isDefault': True}]}
+    elif method in ('thread/list', 'skills/list', 'collaborationMode/list'): result = {'data': []}
+    print(json.dumps({'id': request['id'], 'result': result}), flush=True)
+"#,
+    )
+    .unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&binary, std::fs::Permissions::from_mode(0o700)).unwrap();
+    }
     DaemonConfig {
+        codex_bin: binary.to_string_lossy().into_owned(),
         bind_addr: "127.0.0.1:0".parse().unwrap(),
         state_path: Some(state_path),
         ..DaemonConfig::default()
@@ -293,13 +312,6 @@ async fn scheduled_task_routes_are_host_scoped_and_validate_workspaces() {
 
 #[tokio::test]
 async fn legacy_scheduled_task_migrates_to_control_on_restart() {
-    if std::process::Command::new("codex")
-        .arg("--version")
-        .output()
-        .is_err()
-    {
-        return;
-    }
     let temp_dir = tempfile::tempdir().unwrap();
     let state_path = temp_dir.path().join("daemon-state.json");
     let mut daemon = spawn_embedded(test_config_with_state_path(state_path.clone()))
@@ -449,15 +461,7 @@ async fn rejects_requests_with_non_loopback_host_headers() {
 }
 
 #[tokio::test]
-async fn connect_workspace_bootstraps_codex_when_available() {
-    if std::process::Command::new("codex")
-        .arg("--version")
-        .output()
-        .is_err()
-    {
-        return;
-    }
-
+async fn connect_workspace_bootstraps_stub_codex() {
     let daemon = spawn_embedded(test_config()).await.unwrap();
     let client = reqwest::Client::new();
     let response = client

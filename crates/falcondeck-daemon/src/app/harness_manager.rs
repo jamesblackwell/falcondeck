@@ -1223,7 +1223,8 @@ fn json_from_auth_output(output: &str) -> Option<serde_json::Value> {
 }
 
 async fn run_with_timeout(executable: &str, args: &[&str]) -> Result<ProbeOutput, ProbeFailure> {
-    let mut command = TokioCommand::new(executable);
+    let resolved = crate::agent_binary::resolve_agent_binary(executable, executable);
+    let mut command = TokioCommand::new(&resolved.executable);
     command.args(args).kill_on_drop(true);
     let output = timeout(PROBE_TIMEOUT, command.output())
         .await

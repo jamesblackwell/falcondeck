@@ -461,3 +461,43 @@ question banner. Notification methods (`cursor/update_todos`, `cursor/task`,
 The 2025 beta (`cursor-agent --version` prints a bare commit hash) has no
 `acp` subcommand and cannot be used as a FalconDeck provider. Upgrade it
 before configuring Cursor.
+
+## Background authentication and provider test isolation
+
+Status, usage, catalog discovery, restore, and upgrade verification must never
+initiate interactive sign-in. Null stdin and print mode do not enforce this:
+Antigravity can start browser OAuth from read-only print-mode slash commands.
+Only an explicit user action in a terminal should initiate sign-in.
+
+Antigravity metadata reads credential presence from
+`$HOME/.gemini/antigravity-cli/antigravity-oauth-token` (the nested `token`
+object), uses the curated model catalog, and merges filesystem skills through
+the existing workspace skill discovery. It does not run `/usage`, `/skills`, or
+`agy models`. Usage calls the quota API with the existing access token; expired
+credentials report expired without refreshing or signing in. Gemini CLI's
+`oauth_creds.json` is not Antigravity CLI's credential store. Credential presence
+is not proof that the server will accept a token.
+
+Native Antigravity turns check credentials before spawning and set
+`AGY_CLI_NONINTERACTIVE_HEADLESS=1` to suppress interactive authentication if
+credentials become invalid. On Unix, these children also start a new session
+without the daemon's controlling terminal, as required by the CLI's documented
+[headless authentication behavior](https://antigravity.google/docs/cli/headless/).
+Conformance print-mode runs use the same guard.
+Do not remove it based on the assumption that redirected stdin prevents OAuth.
+The switch is present in the installed CLI; automated coverage checks its
+propagation using a stub, without running a signed-out real CLI.
+
+Plain `cargo test` must not execute installed provider CLIs, regardless of HOME.
+The shared resolver restricts provider resolution in unit and Cargo integration
+test executables to script fixtures in temporary directories or `tests/fixtures`.
+Discovery tests may find those fixtures through PATH or known locations, but
+never launch a login shell. Node/Python/Deno and shell fixture interpreters,
+`echo`, and system true/false may resolve; installed
+native binaries and symlinks to installed providers are refused. Integration
+tests that spawn a daemon binary must pass `FALCONDECK_TEST_NO_PROVIDERS=1` to
+that child. Keep all provider launch/probe paths behind this resolver, including
+CLI auth checks and upgrade version verification. Do not add direct real-CLI
+availability checks to tests. Use recording provider and browser-opener stubs;
+real harness qualification belongs in the explicit conformance command, outside
+`cargo test`.

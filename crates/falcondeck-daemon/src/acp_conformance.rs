@@ -458,7 +458,8 @@ impl AdapterProcess {
             .command
             .first()
             .ok_or_else(|| ProbeError::Usage("adapter command is empty".to_string()))?;
-        let mut child = Command::new(executable)
+        let resolved = crate::agent_binary::resolve_agent_binary(executable, executable);
+        let mut child = Command::new(&resolved.executable)
             .args(&options.command[1..])
             .envs(&options.env)
             .current_dir(&options.cwd)
@@ -1408,14 +1409,20 @@ mod tests {
         let dir =
             std::env::temp_dir().join(format!("falcondeck-probe-{}", Uuid::new_v4().simple()));
         std::fs::create_dir_all(&dir).expect("scratch dir");
+        let pi = dir.join("pi-acp");
+        let grok = dir.join("grok");
+        for path in [&pi, &grok] {
+            std::fs::write(path, "#!/bin/sh\nexit 0\n").unwrap();
+        }
         std::fs::write(
             dir.join("providers.json"),
-            r#"{ "providers": {
-                   "pi": { "command": ["pi-acp"], "env": { "OPENROUTER_API_KEY": "secret" } },
-                   "grok": { "command": ["grok", "agent", "stdio"] }
-                 } }"#,
+            serde_json::json!({ "providers": {
+                "pi": { "command": [pi], "env": { "OPENROUTER_API_KEY": "secret" } },
+                "grok": { "command": [grok, "agent", "stdio"] }
+            }})
+            .to_string(),
         )
-        .expect("write providers.json");
+        .expect("write fixture config");
 
         let mut providers = configured_provider_commands(&dir);
         providers.sort_by(|left, right| left.0.cmp(&right.0));
@@ -1423,7 +1430,10 @@ mod tests {
 
         assert_eq!(providers.len(), 2);
         assert_eq!(providers[0].0, "grok");
-        assert_eq!(providers[0].1, ["grok", "agent", "stdio"]);
+        assert_eq!(
+            providers[0].1,
+            [grok.to_string_lossy().as_ref(), "agent", "stdio"]
+        );
         assert!(providers[0].2.is_empty());
         assert_eq!(providers[1].0, "pi");
         assert_eq!(

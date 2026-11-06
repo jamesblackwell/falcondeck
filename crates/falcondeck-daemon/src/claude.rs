@@ -1623,6 +1623,8 @@ pub async fn list_models() -> Vec<ModelSummary> {
 pub async fn read_auth_status(claude_bin: &str) -> AccountSummary {
     // `claude auth status` can hang on network checks; never let it block
     // workspace connect or the periodic metadata refresh.
+    let resolved = resolve_agent_binary("claude", claude_bin);
+    let claude_bin = resolved.executable.as_str();
     let mut command = Command::new(claude_bin);
     command
         .arg("auth")
