@@ -1275,8 +1275,7 @@ async fn startup_repairs_a_retired_bot_workspace_id_on_a_lazy_workspace() {
         .unwrap();
 
     let app = AppState::new_with_state_path("test".into(), HashMap::new(), state_path);
-    // This coordination test does not exercise main's 300-second disk timer,
-    // which currently delays shutdown until its next tick.
+    // Keep this coordination test independent of disk-inventory notices.
     app.inner.variant_maintenance_started.store(true, std::sync::atomic::Ordering::Release);
     tokio::time::timeout(std::time::Duration::from_secs(10), app.restore_local_state()).await.expect("startup restore stalled").unwrap();
 
