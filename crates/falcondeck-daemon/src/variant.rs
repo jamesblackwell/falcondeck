@@ -178,6 +178,11 @@ async fn populate_worktree(
         return Err(error);
     }
     let result = async {
+        if recovered.is_none() {
+            // Leave an explicit HEAD index before provisioning. A recovery
+            // never assumes that an absent working tree means no staged work.
+            run_git(&stage, &["read-tree", "HEAD"]).await?;
+        }
         setup::provision(project, &staging, &setup).await?;
         populated(&stage).await.map_err(DaemonError::Rpc)?;
         copy_untracked_allowlist(project, &staging).await;
@@ -234,6 +239,45 @@ async fn recover_staging(
         {
             continue;
         }
+        let stage = path.to_string_lossy();
+        let reference = format!("refs/heads/{branch}");
+        let expected = run_git(project, &["rev-parse", "--verify", &reference]).await?;
+        let actual = run_git(&stage, &["rev-parse", "HEAD"]).await?;
+        let actual_ref = run_git(&stage, &["symbolic-ref", "-q", "HEAD"]).await?;
+        let mut blockers = reclaim::hidden_or_in_progress(&stage)
+            .await
+            .map_err(DaemonError::Rpc)?;
+        if actual_ref.trim() != reference || actual.trim() != expected.trim() {
+            blockers.push("HEAD differs from the expected variant branch tip".into());
+        }
+        if run_git(
+            &stage,
+            &[
+                "diff",
+                "--cached",
+                "--quiet",
+                "--no-ext-diff",
+                "--no-textconv",
+                "--ignore-submodules=none",
+                expected.trim(),
+                "--",
+            ],
+        )
+        .await
+        .is_err()
+        {
+            blockers.push(
+                "staged changes or an uninitialized index; index must match the variant branch tip"
+                    .into(),
+            );
+        }
+        if !blockers.is_empty() {
+            return Err(DaemonError::Rpc(format!(
+                "Interrupted staging requires review: {}: {}. Staging was retained.",
+                path.display(),
+                blockers.join("; ")
+            )));
+        }
         reclaim::process_clear(&path)
             .await
             .map_err(DaemonError::Rpc)?;
@@ -251,8 +295,8 @@ async fn recover_staging(
                 break;
             }
         }
-        // A --no-checkout staging tree has no files and legitimately reports
-        // all tracked paths deleted. Any populated staging must be clean.
+        // With a verified HEAD index, an empty --no-checkout tree only has
+        // working-tree deletions. Any populated staging must also be clean.
         if !empty {
             let blockers = reclaim::status_blockers(project, &path.to_string_lossy())
                 .await
@@ -700,6 +744,9 @@ mod tests {
         )
         .await
         .unwrap();
+        run_git(stage.to_str().unwrap(), &["read-tree", "HEAD"])
+            .await
+            .unwrap();
         let head = run_git(
             project.to_str().unwrap(),
             &["rev-parse", "falcondeck/crashed"],
@@ -733,6 +780,142 @@ mod tests {
                     .unwrap()
             )
         );
+    }
+
+    async fn assert_empty_staging_is_retained(kind: &str) {
+        let root = tempdir().unwrap();
+        test_no_docker_mounts(root.path());
+        let project = root.path().join("project");
+        fs::create_dir(&project).await.unwrap();
+        init_repo(&project).await;
+        let variants = root.path().join("variants");
+        let parent = variants.join("project");
+        fs::create_dir_all(&parent).await.unwrap();
+        let stage = parent.join(format!(".index-only-provision-{}", Uuid::new_v4()));
+        let stage_str = stage.to_str().unwrap();
+        run_git(
+            project.to_str().unwrap(),
+            &[
+                "worktree",
+                "add",
+                "--no-checkout",
+                "-b",
+                "falcondeck/index-only",
+                stage_str,
+            ],
+        )
+        .await
+        .unwrap();
+        if kind != "uninitialized" {
+            run_git(stage_str, &["read-tree", "HEAD"]).await.unwrap();
+        }
+        match kind {
+            "edit" | "add" => {
+                let file = if kind == "edit" {
+                    "README.md"
+                } else {
+                    "unique-staged.md"
+                };
+                fs::write(stage.join(file), "unique work exists only in the index\n")
+                    .await
+                    .unwrap();
+                run_git(stage_str, &["add", file]).await.unwrap();
+                fs::remove_file(stage.join(file)).await.unwrap();
+            }
+            "delete" => {
+                run_git(stage_str, &["rm", "--cached", "README.md"])
+                    .await
+                    .unwrap();
+            }
+            "merge" => {
+                let git_dir = run_git(stage_str, &["rev-parse", "--absolute-git-dir"])
+                    .await
+                    .unwrap();
+                let head = run_git(stage_str, &["rev-parse", "HEAD"]).await.unwrap();
+                fs::write(Path::new(git_dir.trim()).join("MERGE_HEAD"), head)
+                    .await
+                    .unwrap();
+            }
+            "uninitialized" => {}
+            _ => panic!("unknown fixture"),
+        }
+        let contents: Vec<_> = std::fs::read_dir(&stage)
+            .unwrap()
+            .map(|e| e.unwrap().file_name())
+            .collect();
+        assert_eq!(contents, [std::ffi::OsString::from(".git")]);
+        let index_before = run_git(stage_str, &["ls-files", "--stage", "-z"])
+            .await
+            .unwrap();
+        let changes_before = run_git(stage_str, &["diff", "--cached", "--binary", "HEAD"])
+            .await
+            .unwrap();
+        let error = create_in_root(project.to_str().unwrap(), "index-only", &variants)
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains("Interrupted staging requires review"),
+            "{error}"
+        );
+        assert!(
+            error.contains(if kind == "merge" {
+                "operation in progress"
+            } else {
+                "index must match"
+            }),
+            "{error}"
+        );
+        assert!(stage.exists());
+        assert!(!parent.join("index-only").exists());
+        assert_eq!(
+            run_git(stage_str, &["ls-files", "--stage", "-z"])
+                .await
+                .unwrap(),
+            index_before
+        );
+        assert_eq!(
+            run_git(stage_str, &["diff", "--cached", "--binary", "HEAD"])
+                .await
+                .unwrap(),
+            changes_before
+        );
+        if kind == "edit" || kind == "add" {
+            let file = if kind == "edit" {
+                ":README.md"
+            } else {
+                ":unique-staged.md"
+            };
+            assert_eq!(
+                run_git(stage_str, &["show", file]).await.unwrap(),
+                "unique work exists only in the index\n"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn empty_staging_retains_a_staged_edit() {
+        assert_empty_staging_is_retained("edit").await;
+    }
+
+    #[tokio::test]
+    async fn empty_staging_retains_a_staged_new_file() {
+        assert_empty_staging_is_retained("add").await;
+    }
+
+    #[tokio::test]
+    async fn empty_staging_retains_a_staged_delete() {
+        assert_empty_staging_is_retained("delete").await;
+    }
+
+    #[tokio::test]
+    async fn empty_staging_retains_an_in_progress_operation() {
+        assert_empty_staging_is_retained("merge").await;
+    }
+
+    #[tokio::test]
+    async fn empty_staging_retains_an_uninitialized_index() {
+        assert_empty_staging_is_retained("uninitialized").await;
     }
 
     #[test]

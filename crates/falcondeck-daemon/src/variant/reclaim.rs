@@ -256,7 +256,7 @@ async fn checkout_identity(variant: &ThreadVariant) -> Vec<String> {
     }
 }
 
-async fn hidden_or_in_progress(path: &str) -> Result<Vec<String>, String> {
+pub(super) async fn hidden_or_in_progress(path: &str) -> Result<Vec<String>, String> {
     let mut reasons = Vec::new();
     let files = git(path, &["ls-files", "-v", "-z"], &[], REMOTE_TIMEOUT).await?;
     for entry in files.split('\0').filter(|e| e.len() > 2) {
@@ -1006,6 +1006,7 @@ mod tests {
                 &v.branch,
             ],
         );
+        git_sync(&stage, &["read-tree", "HEAD"]);
         assert_eq!(restore(f.project_str(), &v).await, Ok(true));
         assert!(!stage.exists());
         assert!(Path::new(&v.path).join("a.txt").exists());

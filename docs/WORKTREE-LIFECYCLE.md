@@ -61,7 +61,8 @@ main with a new full variant, new directories, commit-all, merge, and add-back.
 Tracked-file provisioning is transactional:
 
 1. Validate setup and, on restore, verify the kept branch still exists.
-2. `git worktree add --no-checkout` at a private sibling staging path.
+2. `git worktree add --no-checkout` at a private sibling staging path, then
+   initialize its index with `git read-tree HEAD`.
 3. Apply the saved sparse selection and check out HEAD.
 4. Verify the checkout is populated, copy the environment-file allowlist, and
    save its recipe.
@@ -74,8 +75,12 @@ branch. A pre-existing branch is never treated as a creation rollback target.
 After a crash, create/restore recover only that slug's registered
 `.slug-provision-<uuid>` staging worktree. They reuse its branch, finish setup,
 and move it into place, so neither staging nor a duplicate branch is left
-behind. A populated staging tree with edits, hidden index flags, an operation
-in progress, or a live process is retained with an error requiring review.
+behind. Recovery first verifies the exact branch and tip, an index matching
+HEAD, and no hidden index flags or operation in progress, even when only `.git`
+exists on disk. Staged edits, additions and deletions are retained with a clear
+review error. An uninitialized index that does not match HEAD is also retained;
+filesystem emptiness alone is never proof of safety. Populated staging must
+additionally have no working-tree edits, and live processes block recovery.
 Other slugs and unrelated paths are untouched. This is request-time recovery,
 not a backlog sweep.
 
