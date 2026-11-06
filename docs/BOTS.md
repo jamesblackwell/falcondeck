@@ -293,7 +293,8 @@ approval in the same turn. `finished` closes work; a bot's declaration does not
 wake itself merely to acknowledge the declaration.
 
 An unmarked idle turn is completion unverified. Its same-turn background-resume
-watch lasts seven days; a longer job must declare its wait before parking.
+watch lasts up to seven days within the 200 closed-record cap. Pending jobs
+must declare their wait before parking to retain an open watch.
 Open running/waiting tasks never expire or get evicted by capacity limits. Work
 open more than seven days generates one urgent progress check and remains
 tracked. Closed metadata lasts seven days, capped at 200 records per bot.
