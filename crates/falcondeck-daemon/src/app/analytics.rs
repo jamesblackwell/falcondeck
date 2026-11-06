@@ -2775,6 +2775,19 @@ impl AppState {
         }
     }
 
+    /// Reporting relationships are not creation ownership. In particular an
+    /// Agent edge can recover a watch on a reused user thread without changing
+    /// its ThreadOrigin or notification provenance.
+    pub(super) async fn delegation_relationships(&self) -> Vec<(String, String, DateTime<Utc>, bool)> {
+        self.analytics().flush().await;
+        let dir = self.analytics().dir.clone();
+        tokio::task::spawn_blocking(move || read_records(&dir, Utc::now() - chrono::Duration::days(366)).into_iter().filter_map(|r| match r {
+            Record::Delegate { parent, child, t, .. } => Some((parent, child, t, true)),
+            Record::Agent { from, to, t, .. } => Some((from, to, t, false)),
+            _ => None,
+        }).collect()).await.unwrap_or_default()
+    }
+
     pub async fn analytics_thread(
         &self,
         thread_id: String,

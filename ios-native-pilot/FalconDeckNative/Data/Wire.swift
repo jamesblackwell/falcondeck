@@ -120,6 +120,8 @@ struct AgentTask: Identifiable, Hashable, Sendable {
     var latestTurnID: String { raw["latest_turn_id"].string }
     var running: Bool { status == "running" }
     var awaitingInput: Bool { ["waiting_for_input", "awaiting_approval"].contains(status) || raw["attention"]["pending_approval_count"].int + raw["attention"]["pending_question_count"].int > 0 }
+    var waiting: Bool { status == "idle" && !working && !awaitingInput && raw["attention"]["badge_label"].string == "Waiting" && !raw["attention"]["task_wait"]["reason"].string.isEmpty }
+    var waitLabel: String { "Waiting" }
     var needsAttention: Bool { awaitingInput || status == "error" }
     init(_ v: JSON) {
         raw = v

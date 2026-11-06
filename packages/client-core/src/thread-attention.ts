@@ -57,9 +57,10 @@ export function deriveThreadAttentionPresentation(
         request.kind === 'question',
     ).length
 
-  const badgeLabel =
-    thread.attention.badge_label ??
-    (pendingApprovalCount + pendingQuestionCount > 0 ? 'Awaiting response' : null)
+  const waiting = thread.status === 'idle' && !isThreadWorking(thread) && pendingApprovalCount + pendingQuestionCount === 0
+    && Boolean(thread.attention.task_wait && Date.parse(thread.attention.task_wait.deadline) > Date.now())
+  const badgeLabel = thread.status === 'waiting_for_input' || pendingApprovalCount + pendingQuestionCount > 0 ? 'Awaiting response'
+    : waiting ? 'Waiting' : null
   const unread =
     thread.attention.unread ||
     thread.attention.last_agent_activity_seq > thread.attention.last_read_seq
@@ -68,13 +69,13 @@ export function deriveThreadAttentionPresentation(
 
   return {
     level,
-    badgeLabel: level === 'awaiting_response' ? badgeLabel : null,
+    badgeLabel: (level === 'awaiting_response' || waiting) ? badgeLabel : null,
     unread,
     pendingApprovalCount,
     pendingQuestionCount,
     showSpinner: level === 'running',
     showUnreadDot: level === 'unread',
-    showBadge: level === 'awaiting_response' && Boolean(badgeLabel),
+    showBadge: (level === 'awaiting_response' || waiting) && Boolean(badgeLabel),
     indicatorTone:
       level === 'error'
         ? 'danger'
@@ -98,7 +99,7 @@ function resolveThreadAttentionLevel(
   pendingQuestionCount: number,
 ): ThreadAttentionLevel {
   if (thread.status === 'error' || thread.attention.level === 'error') return 'error'
-  if (pendingApprovalCount + pendingQuestionCount > 0) return 'awaiting_response'
+  if (thread.status === 'waiting_for_input' || pendingApprovalCount + pendingQuestionCount > 0) return 'awaiting_response'
   if (isThreadWorking(thread)) return 'running'
   if (thread.attention.unread || thread.attention.last_agent_activity_seq > thread.attention.last_read_seq) return 'unread'
   return 'none'

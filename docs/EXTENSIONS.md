@@ -1182,29 +1182,21 @@ Each calls an operation the UI already uses; none adds new stored state.
   request and reply (or error), and pending requests with the request and
   question ids that answering needs.
 
-`falcondeck_create_thread` also accepts `title`, `folder` / `create_folder`
-(resolved after cap admission, so a rejected call creates nothing), and
-`notify_parent`. Agent guidance leaves `notify_parent` false for routine work
-and reserves it for critical updates requiring attention or notifications the
-user explicitly requests. Long-running work alone does not justify enabling it.
-With `notify_parent`, a daemon watcher on the event stream
-queues a labelled notice to the parent (normal `send_turn`, `steer: false`)
-when the child first enters `waiting_for_input` and when it stops running after
-having run. The parent therefore wakes on completion instead of polling.
-Completions for the same workspace and parent are combined within a fixed
-500 ms window. Input requests flush that parent's pending batch immediately.
-Each child appears once per batch with its title, thread id, current status,
-nonempty preview or error, and any pending request details. Delivery rechecks
-the child so a resumed turn does not produce a stale stop notice. Later turns
-can still notify the parent; idle updates alone do not generate more notices.
-Subscriptions live only in memory: a daemon restart ends the child's turn and
-the parent's turn too. Notices are skipped during shutdown and for archived
-parents.
+`falcondeck_create_thread` also accepts `title`, `folder` / `create_folder`,
+and the legacy `notify_parent`. Both create and message accept `result_delivery`
+(`batch` by default, or `wake` for actionable plain completions). Failures,
+input requests, interruption and overdue deadlines request a bounded wake
+regardless of completion policy. Nearby reports coalesce. Bot homes acknowledge
+actual receipt through `falcondeck_acknowledge_results`; admission, asynchronous
+ACP startup and fresh scheduled-run threads cannot consume their outbox.
 
-Bot-created children are watched automatically for errors and input requests,
-including after daemon restart. These automatic watches do not report successful
-turn endings. Bots must explicitly enable `notify_parent` for completion notices,
-and that opt-in does not survive a restart.
+The daemon persists a coordination metadata outbox, not conversation
+history. Optional ledger corruption is quarantined/logged without stopping
+workspace restore or bot turns. Upgrade registers in-flight and recent bot
+children. See [BOTS.md](BOTS.md#durable-delegated-outcomes) for bounds, retries,
+waiting declarations and retention. Non-bot `notify_parent` callers keep their
+legacy session-local watcher. Notifications to James remain available when the
+owning bot is paused; peer bot home replies are never suppressed by tracking.
 
 Workspace scope remains the authorization boundary for ordinary task callers.
 Bots have an explicit user-created identity with broader coordination authority.
@@ -1219,3 +1211,19 @@ Extension-owned automation creates and updates reject this field: the existing
 `automations:manage-owned` permission does not grant unattended shell execution.
 The shared run-status enum adds terminal `skipped_precheck`; this grants no new
 extension authority or access to core schedules.
+
+### Built-in coordination outcomes
+
+Bot calls to `falcondeck_create_thread` and `falcondeck_message_thread` accept
+`result_delivery: "batch" | "wake"` (default `batch`). The daemon persists
+tracking and its report outbox independently of conversation history. The
+built-in `falcondeck_task_state` tool declares explicit waiting deadlines or
+finished work. This requires an attached caller; tasks can declare their own
+state, and bots can manage tasks whose outcomes they track.
+`ThreadAttention.task_wait` is optional (`reason`, `deadline`) for older clients.
+Open tasks retain tracking. Unread closed results participate in the daily
+fallback. Urgent outcomes unreceived by an accepted home turn for two hours
+escalate once to James, grouped by bot and attributed to the home. Failed sends
+spend no paid-turn budget. Full context details stop after three accepted
+presentations; acknowledgement removes the reports.
+See [BOTS.md](BOTS.md#durable-delegated-outcomes) for recovery and delivery rules.

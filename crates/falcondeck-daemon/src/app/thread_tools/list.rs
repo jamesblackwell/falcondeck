@@ -49,7 +49,7 @@ enum Detail {
 enum Status {
     Idle,
     Running,
-    #[serde(alias = "waiting")]
+    Waiting,
     WaitingForInput,
     #[serde(alias = "failed")]
     Error,
@@ -90,12 +90,12 @@ pub(super) struct ListArgs {
 }
 
 pub(super) fn schema() -> Value {
-    let status = json!({"type":"string", "enum":["idle","running","waiting_for_input","error","awaiting_approval"]});
+    let status = json!({"type":"string", "enum":["idle","running","waiting","waiting_for_input","error","awaiting_approval"]});
     json!({
         "limit": {"type":"integer", "minimum":1, "maximum":100, "default":DEFAULT_LIMIT},
         "offset": {"type":"integer", "minimum":0, "description":"Next page: pass the returned offset with the same filters."},
         "detail": {"type":"string", "enum":["brief","normal"], "default":"normal", "description":"brief drops the Asked/Latest lines."},
-        "status": {"anyOf":[status, {"type":"array", "items":status, "minItems":1}], "description":"Match any. awaiting_approval = pending approval or question."},
+        "status": {"anyOf":[status, {"type":"array", "items":status, "minItems":1}], "description":"Match any. waiting = a declared idle wait; waiting_for_input = an actual input request. awaiting_approval = pending approval or question."},
         "updated_since": {"type":"string", "description":"RFC 3339, YYYY-MM-DD, or an age like 30m, 24h, 7d."},
         "updated_before": {"type":"string"},
         "query": {"type":"string", "minLength":1, "maxLength":256, "description":"Case-insensitive literal match on title, id, and message excerpts."},
@@ -180,6 +180,7 @@ fn status_matches(summary: &ThreadSummary, status: Status, pending: bool) -> boo
     match status {
         Status::Idle => summary.status == ThreadStatus::Idle,
         Status::Running => summary.status == ThreadStatus::Running,
+        Status::Waiting => summary.status == ThreadStatus::Idle && summary.attention.task_wait.as_ref().is_some_and(|w| w.deadline > Utc::now()) && !pending && summary.attention.background_task_count == 0,
         Status::WaitingForInput => summary.status == ThreadStatus::WaitingForInput,
         Status::Error => summary.status == ThreadStatus::Error,
         Status::AwaitingApproval => pending,
@@ -285,7 +286,8 @@ pub(super) async fn list(
     };
 
     app.refresh_excerpts().await;
-    let cloud_threads = app.cloud_manager().thread_summaries().await?;
+    let mut cloud_threads = app.cloud_manager().thread_summaries().await?;
+    for thread in &mut cloud_threads { app.project_delegation_wait(thread).await; }
     let counts = app.attention_counts().await;
     let pending_of = |workspace: &String, id: &String| {
         counts
@@ -667,6 +669,18 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn declared_wait_filter_is_separate_from_input_and_running_work() {
+        let (app,_temp)=fixture().await;
+        seed(&app,3,|i,t| {
+            if i==1 { t.status=ThreadStatus::WaitingForInput; }
+            else { t.attention.task_wait=Some(falcondeck_core::TaskWait {reason:"build".into(),deadline:Utc::now()+Duration::hours(1)}); }
+            if i==2 {t.status=ThreadStatus::Running;}
+        }).await;
+        assert_eq!(ids(&list_text(&app,json!({"status":"waiting"})).await),["t00"]);
+        assert_eq!(ids(&list_text(&app,json!({"status":"waiting_for_input"})).await),["t01"]);
+    }
+
+    #[tokio::test]
     async fn filters_combine_and_reject_bad_input() {
         let (app, _temp) = fixture().await;
         seed(&app, 7, |i, t| match i {
@@ -716,7 +730,7 @@ mod tests {
             assert_eq!(ids(&text), expected, "{arguments}: {text}");
         };
         check(json!({"status":"running"}), &["t00"]).await;
-        check(json!({"status":["failed","waiting"]}), &["t01", "t02"]).await;
+        check(json!({"status":["failed","waiting_for_input"]}), &["t01", "t02"]).await;
         check(json!({"status":"awaiting_approval"}), &["t01"]).await;
         check(
             json!({"has_pending_approval":false, "provider":"CODEX"}),

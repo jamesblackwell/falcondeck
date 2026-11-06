@@ -385,10 +385,26 @@ impl NotificationStore {
         new: NewNotification,
         now: DateTime<Utc>,
     ) -> Result<Recorded, NoticeRefused> {
+        self.record_notice_with_policy(new, now, true).await
+    }
+
+    /// Daemon-owned recovery/escalation has its own durable event key and is
+    /// not an agent's discretionary notice quota. Body persistence is shared.
+    pub(crate) async fn record_system_notice(&self, new: NewNotification, now: DateTime<Utc>) -> Result<Recorded, NoticeRefused> {
+        self.record_notice_with_policy(new, now, false).await
+    }
+
+    async fn record_notice_with_policy(&self, new: NewNotification, now: DateTime<Utc>, enforce_limits: bool) -> Result<Recorded, NoticeRefused> {
         let mut guard = self.state.lock().await;
         let state = &mut *guard;
         self.ensure_loaded(state).await;
         self.prune(state, now).await;
+        if let Some(key) = new.dedupe_key.as_deref() {
+            if let Some(existing) = state.file.records.iter().find(|s| s.dedupe_key.as_deref() == Some(key)) {
+                return Ok(Recorded::Duplicate(Box::new(existing.record.clone())));
+            }
+        }
+        if enforce_limits {
         let notices = || {
             state
                 .file
@@ -473,6 +489,7 @@ impl NotificationStore {
         });
         if let Some(refused) = refused {
             return Err(refused);
+        }
         }
         // Ids restart when the index could not be loaded, so writing a body
         // here could overwrite a report the preserved index still points at.

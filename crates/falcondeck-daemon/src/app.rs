@@ -109,6 +109,7 @@ mod notifications;
 mod opencode_threads;
 mod project_folders;
 mod bots;
+mod delegations;
 pub(crate) mod recovery;
 mod provider_runtime;
 mod provider_usage;
@@ -372,7 +373,12 @@ struct InnerState {
     thread_search_scan: Mutex<()>,
     /// Serializes child admission through first-turn dispatch.
     agent_spawn_gate: Mutex<()>,
-    /// Children whose settles notify their parent; `None` until the watcher starts.
+    /// Durable bot delegation metadata, loaded independently of daemon state.
+    delegations: OnceCell<Mutex<delegations::Ledger>>,
+    delegation_monitor_started: AtomicBool,
+    delegation_persistence: Mutex<()>,
+    delegation_sends: StdMutex<HashSet<String>>,
+    /// Legacy session-local child watches.
     agent_spawn_watches: StdMutex<Option<HashMap<String, thread_tools::ChildWatch>>>,
     /// Active realtime transcript parts keyed by (thread id, provider role).
     realtime_transcripts: StdMutex<HashMap<(String, String), RealtimeTranscriptState>>,
@@ -1184,6 +1190,10 @@ impl AppState {
                 thread_search_scanned_at: StdMutex::new(None),
                 thread_search_scan: Mutex::new(()),
                 agent_spawn_gate: Mutex::new(()),
+                delegations: OnceCell::new(),
+                delegation_monitor_started: AtomicBool::new(false),
+                delegation_persistence: Mutex::new(()),
+                delegation_sends: StdMutex::new(HashSet::new()),
                 agent_spawn_watches: StdMutex::new(None),
                 realtime_transcripts: StdMutex::new(HashMap::new()),
                 claude_approvals: Mutex::new(HashMap::new()),
@@ -1955,6 +1965,10 @@ impl AppState {
         // identities and interruption markers after remote state is restored.
         self.persist_during_restore().await;
         self.restore_bot_watches().await;
+        if let Err(error) = self.restore_delegations().await {
+            tracing::error!(%error, "delegation recovery failed; continuing workspace restore");
+            self.start_delegation_monitor();
+        }
         // Interrupted projects become actionable first. Unrelated harness
         // probes must not hold the recovery dialog's Continue action behind
         // every project the user has ever opened.
@@ -2811,12 +2825,13 @@ impl AppState {
 
     async fn snapshot_projection(&self, compact: bool) -> DaemonSnapshot {
         self.start_cloud_observer();
-        let cloud_threads = self
+        let mut cloud_threads = self
             .cloud_manager()
             .thread_summaries()
             .await
             .unwrap_or_default();
-        for thread in &cloud_threads {
+        for thread in &mut cloud_threads {
+            self.project_delegation_wait(thread).await;
             self.seed_cloud_sequence(thread);
         }
         // Reading providers.json resolves each configured binary, and a

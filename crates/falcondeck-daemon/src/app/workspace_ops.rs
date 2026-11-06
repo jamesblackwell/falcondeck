@@ -3622,7 +3622,8 @@ async fn send_turn_with_startup_mode(
     };
     // Inject current bot instructions on every dispatched turn, including native
     // resumes after compaction. Keep these out of the user's transcript bubble.
-    let bot_context = app.bot_context(&request.thread_id).await;
+    let (outcomes, outcome_ids) = app.delegation_context(&request.thread_id).await.unwrap_or_default();
+    let bot_context = app.bot_context(&request.thread_id).await.map(|context| format!("{context}{outcomes}"));
     let turn_context = match (bot_context, handoff_context.as_deref()) {
         (Some(bot), Some(handoff)) => Some(format!("{bot}\n\n{handoff}")),
         (Some(bot), None) => Some(bot),
@@ -3730,6 +3731,7 @@ async fn send_turn_with_startup_mode(
                 requested_reasoning_effort: request.reasoning_effort.as_deref(),
                 service_tier: request.service_tier.as_deref(),
                 wait_for_startup: wait_for_startup
+                    || !outcome_ids.is_empty()
                     || request.resume_interrupted
                     || is_transient_retry,
                 resume_interrupted: request.resume_interrupted,
@@ -3780,6 +3782,8 @@ async fn send_turn_with_startup_mode(
         app.schedule_codex_thread_release_if_idle(&request.workspace_id, &request.thread_id);
         return Err(error);
     }
+
+    app.accepted_delegation_context(&request.thread_id, &outcome_ids, request.user_item_id.as_deref().is_some_and(|id| id.starts_with("user-delegation-report-"))).await;
 
     if handoff_context.is_some() {
         let mut carried = false;

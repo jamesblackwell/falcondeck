@@ -38,6 +38,7 @@ pub(super) enum AttentionEvent {
     Review(Box<Review>),
     /// An agent has something to say. No decision needed.
     Notice(Box<AgentNotice>),
+    DelegationAlert { notice: Box<AgentNotice>, key: String },
 }
 
 /// A notice from `falcondeck_notify`, after validation.
@@ -163,6 +164,7 @@ impl AppState {
             self.schedule_variant_reap(workspace_id, thread_id).await;
         }
         let notice = matches!(event, AttentionEvent::Notice(_));
+        let system_notice = matches!(event, AttentionEvent::DelegationAlert { .. });
         let replaces = match &event {
             AttentionEvent::Request(request) => {
                 Some(input_key_prefix(&request.workspace_id, &request.request_id))
@@ -173,7 +175,12 @@ impl AppState {
             return AttentionOutcome::Noise;
         };
         let now = Utc::now();
-        let recorded = if notice {
+        let recorded = if system_notice {
+            match self.inner.notifications.record_system_notice(new, now).await {
+                Ok(recorded) => recorded,
+                Err(refused) => return AttentionOutcome::Refused(refused),
+            }
+        } else if notice {
             match self.inner.notifications.record_notice(new, now).await {
                 Ok(recorded) => recorded,
                 Err(refused) => return AttentionOutcome::Refused(refused),
@@ -226,6 +233,11 @@ impl AppState {
             } => Some(self.error_record(workspace_id, thread_id).await),
             AttentionEvent::Review(review) => Some(self.review_record(&review)),
             AttentionEvent::Notice(notice) => Some(notice_record(*notice)),
+            AttentionEvent::DelegationAlert { notice, key } => {
+                let (mut record, push) = notice_record(*notice);
+                record.dedupe_key = Some(key);
+                Some((record, push))
+            }
         }
     }
 
@@ -300,15 +312,18 @@ impl AppState {
         thread_id: String,
     ) -> Option<(NewNotification, AttentionPush)> {
         // Never hydrate native history for a notification.
-        let (summary, reply, answer_id) = {
+        let (summary, reply, answer_id, report_turn) = {
             let workspaces = self.inner.workspaces.lock().await;
             let thread = workspaces.get(&workspace_id)?.threads.get(&thread_id)?;
             (
                 thread.summary.clone(),
                 notification_message_preview(&thread.items),
                 latest_answer_id(&thread.items),
+                super::delegations::is_report_turn(&thread.items),
             )
         };
+        // A user turn keeps its reply even if it absorbs a later report.
+        if report_turn && !summary.attention.reply_to_user { return None; }
         let run = self
             .control()
             .run_for_turn(&thread_id, summary.latest_turn_id.as_deref())
@@ -316,7 +331,7 @@ impl AppState {
         let recordable = completion_is_recordable(
             &summary,
             reply.as_deref(),
-            self.parent_watches_completion(&thread_id),
+            self.parent_watches_completion(&thread_id, summary.latest_turn_id.as_deref()).await,
             run.as_ref(),
             self.bot_for_thread(&thread_id).await.is_some(),
             self.preferences().await.notifications.only_push_from_bots,

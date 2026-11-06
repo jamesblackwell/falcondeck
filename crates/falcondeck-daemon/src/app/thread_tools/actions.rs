@@ -501,16 +501,15 @@ impl AppState {
     }
 
     /// Whether a parent asked to hear when this child finishes.
-    pub(in crate::app) fn parent_watches_completion(&self, child: &str) -> bool {
-        let watches = self
-            .inner
-            .agent_spawn_watches
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
-        watches
-            .as_ref()
-            .and_then(|watches| watches.get(child))
-            .is_some_and(|watch| watch.notify_on_completion)
+    pub(in crate::app) async fn parent_watches_completion(&self, child: &str, turn: Option<&str>) -> bool {
+        let legacy = {
+            let watches = self.inner.agent_spawn_watches.lock().unwrap_or_else(|e| e.into_inner());
+            watches.as_ref().and_then(|w| w.get(child)).filter(|w| w.notify_on_completion).map(|w| w.parent_thread_id.clone())
+        };
+        if let Some(parent) = legacy {
+            if !self.bot_for_thread(&parent).await.is_some_and(|b| b.status.is_resting()) && self.bot_for_thread(child).await.is_none() { return true; }
+        }
+        self.bot_tracks_completion(child, turn).await
     }
 
     /// Registers a child before its first dispatch; the watcher subscribes
@@ -1102,7 +1101,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn bot_children_only_report_attention_unless_completion_is_requested() {
+    async fn bot_children_keep_batched_outcomes_while_parent_is_busy() {
         let (app, _temp) = fixture().await;
         app.mutate_bot(falcondeck_core::BotMutation::Create {
             name: "Coordinator".into(),
@@ -1122,40 +1121,24 @@ mod tests {
         let requested = child(&app, json!({"notify_parent":true})).await;
         for id in [&quiet, &requested] {
             set_status(&app, id, ThreadStatus::Running).await;
+            app.poll_delegations(false).await.unwrap();
             set_status(&app, id, ThreadStatus::Idle).await;
         }
-        let notices = wait_for_notices(&app, "thread-1", 1).await;
-        assert!(notices[0].contains(&requested), "{notices:?}");
-        assert!(!notices[0].contains(&quiet), "{notices:?}");
-
-        add_request(
-            &app,
-            &quiet,
-            "question-1",
-            InteractiveRequestKind::Question,
-            false,
-        )
-        .await;
+        app.poll_delegations(false).await.unwrap();
+        let (context, _) = app.delegation_context("thread-1").await.unwrap();
+        assert!(context.contains(&quiet) && context.contains(&requested));
+        assert!(queued_notices(&app, "thread-1").await.is_empty(), "A busy bot reads reports with its next turn, without queued paid wakes");
+        add_request(&app, &quiet, "question-1", InteractiveRequestKind::Question, false).await;
         set_status(&app, &quiet, ThreadStatus::WaitingForInput).await;
-        let notices = wait_for_notices(&app, "thread-1", 2).await;
-        assert!(notices[1].contains("needs input"), "{notices:?}");
-        app.inner
-            .interactive_requests
-            .lock()
-            .await
-            .remove(&("workspace-1".into(), "question-1".into()));
+        app.poll_delegations(false).await.unwrap();
+        assert!(app.delegation_context("thread-1").await.unwrap().0.contains("needs input"));
+        app.inner.interactive_requests.lock().await.remove(&("workspace-1".into(), "question-1".into()));
         set_status(&app, &quiet, ThreadStatus::Running).await;
+        app.poll_delegations(false).await.unwrap();
         set_status(&app, &quiet, ThreadStatus::Error).await;
-        let notices = wait_for_notices(&app, "thread-1", 3).await;
-        assert!(notices[2].contains("failed (error)"), "{notices:?}");
-
-        // An error resolved during batching must not become an idle notice.
-        app.with_thread_mut("workspace-1", &quiet, |t| t.status = ThreadStatus::Idle)
-            .await
-            .unwrap();
-        app.notify_parent("workspace-1", "thread-1", &[(quiet, Settle::Finished)])
-            .await;
-        assert_eq!(queued_notices(&app, "thread-1").await.len(), 3);
+        app.poll_delegations(false).await.unwrap();
+        assert!(app.delegation_context("thread-1").await.unwrap().0.contains("failed/interrupted"));
+        assert!(queued_notices(&app, "thread-1").await.is_empty());
     }
 
     #[tokio::test]
@@ -1513,12 +1496,11 @@ mod switch_tests {
         app.with_thread_mut("workspace-1", home, |t| t.status = ThreadStatus::Running)
             .await
             .unwrap();
-        app.notify_parent(
-            "workspace-1",
-            "thread-1",
-            &[(worker.clone(), Settle::Finished)],
-        )
-        .await;
+        app.with_thread_mut("workspace-1", &worker, |t| t.status = ThreadStatus::Running).await.unwrap();
+        app.poll_delegations(false).await.unwrap();
+        app.with_thread_mut("workspace-1", &worker, |t| t.status = ThreadStatus::Idle).await.unwrap();
+        app.poll_delegations(false).await.unwrap();
+        assert!(app.delegation_context(home).await.unwrap().0.contains(&worker));
         let mut message = call(
             super::super::MESSAGE,
             json!({"thread_id":"thread-1", "message":"A decision for the coordinator"}),
@@ -1527,11 +1509,6 @@ mod switch_tests {
         app.invoke_extension_tool(message).await.unwrap();
         let workspaces = app.inner.workspaces.lock().await;
         let queued = &workspaces["workspace-1"].threads[home].queued_requests;
-        assert!(
-            queued
-                .iter()
-                .any(|q| q.summary.text.contains("child updates"))
-        );
         assert!(
             queued
                 .iter()

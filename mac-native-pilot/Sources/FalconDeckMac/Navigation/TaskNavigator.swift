@@ -394,10 +394,12 @@ struct TaskNavigationRow: View {
                 if task.isCloud {
                     Image(systemName: "cloud").accessibilityLabel("Cloud")
                 }
-                if task.running {
+                if task.waiting {
+                    Text("·"); Text(task.statusLabel).foregroundStyle(FDTheme.warning)
+                } else if task.running {
                     Text("·"); Text("Working").foregroundStyle(FDTheme.accent)
                 } else if task.awaitingInput {
-                    Text("·"); Text(FDTheme.statusLabel(task.status)).foregroundStyle(FDTheme.warning)
+                    Text("·"); Text(task.statusLabel).foregroundStyle(FDTheme.warning)
                 }
                 Spacer(minLength: 2)
                 if let age = NativeDates.shortRelative(iso: task.updatedAt) {

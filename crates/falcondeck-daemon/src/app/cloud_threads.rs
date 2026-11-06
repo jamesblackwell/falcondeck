@@ -125,8 +125,9 @@ impl AppState {
 
     pub(super) async fn publish_cloud_summary(&self, thread_id: &str) {
         if let Ok(threads) = self.cloud_manager().thread_summaries().await
-            && let Some(thread) = threads.into_iter().find(|thread| thread.id == thread_id)
+            && let Some(mut thread) = threads.into_iter().find(|thread| thread.id == thread_id)
         {
+            self.project_delegation_wait(&mut thread).await;
             self.emit(
                 Some(thread.workspace_id.clone()),
                 Some(thread_id.into()),
@@ -342,6 +343,7 @@ impl AppState {
     }
 
     async fn observe_cloud_detail(&self, mut detail: CloudJobDetail) {
+        self.project_delegation_wait(&mut detail.detail.thread).await;
         self.seed_cloud_sequence(&detail.detail.thread);
         let id = detail.detail.thread.id.clone();
         let workspace_id = detail.detail.thread.workspace_id.clone();

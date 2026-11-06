@@ -233,3 +233,33 @@ describe('pending requests missing from the summary', () => {
     expect(presentation.level).toBe('none')
   })
 })
+
+it('shows only a live idle wait and clears expired waiting', () => {
+  const waiting = thread({ attention: { ...thread().attention, task_wait: {
+    reason: 'external build', deadline: '2099-01-01T00:00:00Z',
+  } } })
+  expect(deriveThreadAttentionPresentation(waiting)).toMatchObject({
+    showSpinner: false, showBadge: true, badgeLabel: 'Waiting',
+  })
+  waiting.attention.task_wait!.deadline = '2000-01-01T00:00:00Z'
+  expect(deriveThreadAttentionPresentation(waiting)).toMatchObject({ showBadge: false, badgeLabel: null })
+})
+
+for (const state of ['running', 'input', 'background'] as const) {
+  it(`does not let a declared wait mask ${state}`, () => {
+    const value = thread({ status: state === 'running' ? 'running' : 'idle' })
+    value.attention.task_wait = { reason: 'build', deadline: '2099-01-01T00:00:00Z' }
+    if (state === 'input') value.attention.pending_question_count = 1
+    if (state === 'background') value.attention.background_task_count = 1
+    expect(deriveThreadAttentionPresentation(value)).toMatchObject(
+      state === 'input'
+        ? { level: 'awaiting_response', badgeLabel: 'Awaiting response' }
+        : { level: 'running', badgeLabel: null, showSpinner: true },
+    )
+  })
+}
+
+it('keeps restored input status visible before pending request hydration', () => {
+  expect(deriveThreadAttentionPresentation(thread({ status: 'waiting_for_input' })))
+    .toMatchObject({ level: 'awaiting_response', badgeLabel: 'Awaiting response', showBadge: true })
+})

@@ -3247,12 +3247,13 @@ async fn run_acp_turn_startup(
     )
     .await?;
 
+    let (started_tx, started_rx) = tokio::sync::oneshot::channel();
     let task_app = app.clone();
     let workspace_id = workspace_id.to_string();
     let thread_id = thread_id.to_string();
     app.spawn_background_task(async move {
         let app = task_app;
-        let outcome = runtime.prompt(&session_id, content.blocks).await;
+        let outcome = runtime.prompt_with_start_notice(&session_id, content.blocks, Some(started_tx)).await;
         let (status, error) = match &outcome {
             Ok(stop_reason) if stop_reason == "cancelled" => (ThreadStatus::Idle, None),
             // The TurnEnded handler may have flagged this prompt as a
@@ -3285,7 +3286,7 @@ async fn run_acp_turn_startup(
         app.maybe_schedule_ai_thread_title(workspace_id, thread_id)
             .await;
     });
-    Ok(())
+    started_rx.await.map_err(|_| DaemonError::Process("ACP prompt failed before provider admission".into()))
 }
 
 /// Injects a message into a running ACP turn. Providers with a compatible

@@ -122,13 +122,8 @@ existing task resolve its owning workspace automatically. List and changes
 calls without a project span every project, so "what is going on?" takes one
 call. The per-turn context lists only the twelve most recently active projects
 (path and id), since it is repeated on every turn. Ordinary tasks remain workspace-scoped. The concurrent
-children limit (`max_agent_children`, default five, Settings → General → Parallel tasks per agent) counts all projects together. Bot-created tasks automatically
-report errors or requests for input to their home conversation. Successful turn
-endings stay silent unless the bot explicitly enables `notify_parent` when
-creating the task. The bot can return immediately while workers run and read
-summaries at natural checkpoints. Watches rebuilt from persisted task origins
-on daemon restart report only errors and requests for input; completion opt-ins
-last only for the current daemon session.
+children limit (`max_agent_children`, default five, Settings → General → Parallel tasks per agent) counts all projects together. Bot delegations and follow-ups now have durable daemon-owned outcome tracking.
+See “Durable delegated outcomes” below for delivery levels and waiting semantics.
 
 “Allow this bot to start tasks through FalconDeck” is enforced when its
 coordination tool is invoked. This is a FalconDeck capability restriction, not
@@ -244,3 +239,92 @@ without inference when local home/task/ticket state is unchanged. Leave it off
 for external monitors: a website, metric or disk can change independently.
 Run history includes provider input/cache token counts when reported; missing
 counts mean unavailable, not zero.
+
+## Durable delegated outcomes
+
+Bot calls to create and message register daemon-owned interest, including reused
+threads and follow-ups to other bots' workers. Creation without a prompt waits
+for its first turn. `daemon-state.delegations.json` is an atomic, owner-only
+coordination outbox; native harnesses still own conversation history.
+
+`result_delivery` is `batch` by default on both tools. It controls **plain
+completions** only: next home turn for `batch`, or a batched wake for `wake`.
+A follow-up preserves an existing stronger wake setting. Failures, input
+requests, interruptions and overdue deadlines request wakes under either policy.
+A synchronous dispatch rejection is returned directly to the calling bot and
+leaves an informational report; it does not add a duplicate wake.
+`notify_parent: true` retains its legacy completion opt-in. Non-bot callers keep
+the older session-local watcher. Paused and archived bots are never woken.
+
+Only the bot's current home receives reports. `falcondeck_acknowledge_results`
+removes the supplied report_ids after reading; fresh scheduled runs cannot take
+home reports. Native provider startup must succeed with those reports in its
+context before receipt is recorded. ACP waits for startup for such a turn.
+Failed sends retain the outbox and retry with a five-minute cooldown without
+spending the paid-turn budget. One accepted report turn stops immediate retries.
+A home turn dying before acknowledgement still leaves its reports available.
+Delivery and retention are bounded; there is no exactly-once guarantee.
+
+Automatic accepted report turns share a three/hour, six/day budget per bot.
+Dispatch runs independently of the monitor. After 30 seconds its lease expires,
+but the owned send continues through provider admission and cleanup; cancelling
+that future could otherwise strand a home on Running. Report details appear in
+at most three accepted home contexts, then collapse to a short pending count.
+Exhausted details do not outrank new results. A daily digest covers open work
+and unacknowledged outcomes at least 24 hours old, including closed batch
+completions, failures, missed deadlines and deleted tasks. It uses a rolling day
+and stable per-bot staggering, not a UTC-midnight fan-out.
+
+When an urgent outcome has not reached an accepted home turn after two hours,
+the daemon raises one durable notification to James. Several such outcomes are
+coalesced per bot. It names the bot, task and required check, is attributed to
+the actual bot home, and remains phone-eligible under bot-only push. Master
+notification preferences still apply. Paused, archived, capped or unavailable
+homes do not prevent this escalation. Receipt, acknowledgement and escalation
+are separate states. A report already acknowledged needs no escalation.
+
+A task declares `falcondeck_task_state` with `state: waiting`, reason, and a
+future RFC3339 deadline. Polling a wait does not wake the coordinator. A reported
+idle wait is not re-interrupted on restart. A missed deadline emits one urgent
+outcome, clears the wait and closes that interval. Renew the wait or explicitly
+re-message before continuing. Declaring a wait on a terminal finished task
+returns an error. Each distinct input request is urgent, including a second
+approval in the same turn. `finished` closes work; a bot's declaration does not
+wake itself merely to acknowledge the declaration.
+
+An unmarked idle turn is completion unverified. Its same-turn background-resume
+watch lasts seven days; a longer job must declare its wait before parking.
+Open running/waiting tasks never expire or get evicted by capacity limits. Work
+open more than seven days generates one urgent progress check and remains
+tracked. Closed metadata lasts seven days, capped at 200 records per bot.
+Ordinary reports expire after seven days; unreceived urgent reports remain
+until received or escalated. Retention losses appear in home context.
+Tracking storage failure does not reject a message: dispatch continues and a
+deduplicated notification identifies the lost watch.
+
+Arm a timed wake before parking for a job or time. If the harness has no
+background wake, use a one-time daemon automation in the current thread. If
+scheduling is unavailable, explicitly hand resumption to the owner. A detached
+shell process alone cannot resume an agent. Inspect external jobs before
+retrying side effects. Tracking adds no automatic worker retry. Report wakes
+also never replace a shutdown-interrupted home, even with auto-resume off:
+James's explicit resume decision is preserved and the two-hour escalation is
+the fallback. Configured native recovery remains free to resume it.
+
+Upgrade registration uses restored creation ancestry and recorded delegation
+or message relationships, including scheduled-run children and reused threads.
+A message watch does not change a reused thread's creation ownership. Metadata
+cannot recover unrecorded intent: re-message older work that still needs a watch.
+An unreadable ledger is quarantined, James gets one recovery notice, and each
+bot gets one recovery report instructing it to check/re-message pending work.
+Historical upgrade notifications are not replayed after quarantine.
+
+Internal report completions stay quiet. A direct-user turn that absorbs a later
+report keeps its user-reply notification. Real bot-home errors remain eligible;
+only routine internal report noise is suppressed. Paused owner bots never hide
+the worker's ordinary notification, and peer home replies remain James-visible.
+
+Normal completion batching adds no immediate wake under defaults. Attention
+outcomes and one daily unresolved digest can add paid turns, within the shared
+three/hour, six/day cap. Historical intent is absent from old thread history,
+so a precise retrospective wake estimate is not defensible.

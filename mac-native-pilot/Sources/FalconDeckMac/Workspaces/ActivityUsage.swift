@@ -182,7 +182,7 @@ struct NativeActivityView: View {
                     HStack {
                         Text(FDTheme.providerName(task.provider))
                         Text("·")
-                        Text(section == .recent ? FDTheme.statusLabel(task.status) : section.rawValue)
+                        Text(section == .recent ? task.statusLabel : section.rawValue)
                         Spacer(minLength: 4)
                         if let age = NativeDates.shortRelative(iso: task.updatedAt) {
                             Text(age).monospacedDigit().help("Last updated " + NativeDates.absoluteLabel(iso: task.updatedAt))

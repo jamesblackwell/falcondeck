@@ -286,6 +286,7 @@ async fn bot_cross_project_delegation_retains_parent_and_counts_children_globall
             Some(child.id.clone()),
             UnifiedEvent::ThreadUpdated { thread },
         );
+        app.poll_delegations(false).await.unwrap();
     }
     tokio::time::sleep(std::time::Duration::from_secs(1)).await;
     assert!(
@@ -305,15 +306,10 @@ async fn bot_cross_project_delegation_retains_parent_and_counts_children_globall
         Some(child.id.clone()),
         UnifiedEvent::ThreadUpdated { thread: waiting },
     );
-    tokio::time::timeout(std::time::Duration::from_secs(3), async {
-        loop {
-            let has_receipt = app.inner.workspaces.lock().await["workspace-1"].threads["thread-1"].queued_requests.iter()
-                .flat_map(|queued| &queued.request.inputs)
-                .any(|input| matches!(input, falcondeck_core::TurnInputItem::Text { text, .. } if text.contains(&child.id)));
-            if has_receipt { break; }
-            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
-        }
-    }).await.expect("Cross-project workers needing input must notify the bot's home workspace");
+    app.poll_delegations(false).await.unwrap();
+    let context = app.delegation_context("thread-1").await.unwrap().0;
+    assert!(context.contains(&child.id) && context.contains("needs input"));
+    assert!(app.inner.workspaces.lock().await["workspace-1"].threads["thread-1"].queued_requests.is_empty(), "Batch delivery must not wake a busy bot");
 }
 
 #[tokio::test]
@@ -1279,7 +1275,10 @@ async fn startup_repairs_a_retired_bot_workspace_id_on_a_lazy_workspace() {
         .unwrap();
 
     let app = AppState::new_with_state_path("test".into(), HashMap::new(), state_path);
-    app.restore_local_state().await.unwrap();
+    // This coordination test does not exercise main's 300-second disk timer,
+    // which currently delays shutdown until its next tick.
+    app.inner.variant_maintenance_started.store(true, std::sync::atomic::Ordering::Release);
+    tokio::time::timeout(std::time::Duration::from_secs(10), app.restore_local_state()).await.expect("startup restore stalled").unwrap();
 
     assert!(
         app.inner
@@ -1294,7 +1293,7 @@ async fn startup_repairs_a_retired_bot_workspace_id_on_a_lazy_workspace() {
     let ids: Vec<_> = saved.bots.iter().map(|b| b.workspace_id.as_str()).collect();
     assert_eq!(ids, ["workspace-live", "workspace-live", "workspace-retired"]);
     assert_eq!(app.preferences().await.bots, saved.bots);
-    app.shutdown().await.unwrap();
+    tokio::time::timeout(std::time::Duration::from_secs(10), app.shutdown()).await.expect("shutdown stalled after lazy bot repair").unwrap();
 }
 
 #[tokio::test]

@@ -376,6 +376,7 @@ struct SidebarView: View {
                 // Work a bot dispatched carries that bot's mark.
                 if let bot = model.dispatchingBot(of: task), let icon = model.botIcons[bot.id] { BotMark(icon: icon, size: 11).accessibilityHidden(true) }
                 Spacer(minLength: 4)
+                if task.waiting { Text(task.waitLabel).font(.caption2).foregroundStyle(FD.warning) }
                 TaskStageMark(task: task).font(.caption2)
                 if let stamp = RelativeStamp.short(task.updatedAt, now: MinuteClock.shared.now) {
                     Text(stamp).font(.caption2.monospacedDigit()).foregroundStyle(FD.muted).fixedSize()
@@ -385,7 +386,7 @@ struct SidebarView: View {
             .background(model.selection == .task(task.id) ? FD.raised : .clear, in: .rect(cornerRadius: 8))
             .contentShape(.rect)
         }.buttonStyle(.plain).accessibilityIdentifier("sidebar-task-\(task.id)")
-            .accessibilityValue("\(spawnDepth > 0 ? "Spawned task, " : "")\(task.provider.capitalized), \(task.awaitingInput ? "Needs input" : task.working ? "Running" : task.unread ? "Unread" : "Ready")")
+            .accessibilityValue("\(spawnDepth > 0 ? "Spawned task, " : "")\(task.provider.capitalized), \(task.waiting ? task.waitLabel : task.awaitingInput ? "Needs input" : task.working ? "Running" : task.unread ? "Unread" : "Ready")")
             .accessibilityAddTraits(model.selection == .task(task.id) ? .isSelected : [])
             .contextMenu { TaskStageMenu(task: task); TaskActions(task: task) }
             .swipeActions(edge: .leading) { TaskReadButton(task: task).tint(FD.accent) }

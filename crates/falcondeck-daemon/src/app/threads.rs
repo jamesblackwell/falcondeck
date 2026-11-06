@@ -930,7 +930,9 @@ impl AppState {
         thread_id: &str,
     ) -> Result<ThreadSummary, DaemonError> {
         if self.is_cloud_thread(thread_id) {
-            return self.require_cloud_thread(workspace_id, thread_id).await;
+            let mut summary = self.require_cloud_thread(workspace_id, thread_id).await?;
+            self.project_delegation_wait(&mut summary).await;
+            return Ok(summary);
         }
         let workspaces = self.inner.workspaces.lock().await;
         let workspace = workspaces
@@ -3642,7 +3644,7 @@ pub(super) fn refresh_thread_attention(
     let unread = thread.attention.last_agent_activity_seq > thread.attention.last_read_seq;
     let level = if matches!(thread.status, ThreadStatus::Error) {
         ThreadAttentionLevel::Error
-    } else if pending_approval_count + pending_question_count > 0 {
+    } else if thread.status == ThreadStatus::WaitingForInput || pending_approval_count + pending_question_count > 0 {
         ThreadAttentionLevel::AwaitingResponse
     } else if matches!(thread.status, ThreadStatus::Running) {
         ThreadAttentionLevel::Running
@@ -3653,8 +3655,13 @@ pub(super) fn refresh_thread_attention(
     };
 
     thread.attention.level = level;
-    thread.attention.badge_label = if pending_approval_count + pending_question_count > 0 {
+    thread.attention.badge_label = if thread.status == ThreadStatus::WaitingForInput || pending_approval_count + pending_question_count > 0 {
         Some("Awaiting response".to_string())
+    } else if thread.status == ThreadStatus::Idle
+        && thread.attention.background_task_count == 0
+        && thread.attention.task_wait.as_ref().is_some_and(|w| w.deadline > Utc::now())
+    {
+        Some("Waiting".to_string())
     } else {
         None
     };

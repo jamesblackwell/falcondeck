@@ -3646,6 +3646,15 @@ impl AcpRuntime {
         session_id: &str,
         content: Vec<Value>,
     ) -> Result<String, DaemonError> {
+        self.prompt_with_start_notice(session_id, content, None).await
+    }
+
+    pub(crate) async fn prompt_with_start_notice(
+        &self,
+        session_id: &str,
+        content: Vec<Value>,
+        mut started: Option<oneshot::Sender<()>>,
+    ) -> Result<String, DaemonError> {
         self.served_prompt.store(true, Ordering::Release);
         let mut content = if content.is_empty() {
             vec![json!({ "type": "text", "text": "[empty prompt]" })]
@@ -3691,6 +3700,9 @@ impl AcpRuntime {
                 )
                 .await;
             if begun.is_ok() {
+                // Only a written session/prompt confirms provider admission.
+                // Creating a session or spawning this future is not receipt.
+                if let Some(started) = started.take() { let _ = started.send(()); }
                 // A steer that stacked behind the previous, already-cancelled
                 // prompt still needs its own cancel; otherwise this prompt
                 // runs to completion before the queued input lands.
@@ -6237,6 +6249,23 @@ require('node:readline').createInterface({{ input: process.stdin }}).on('line', 
             result.is_err(),
             "Hermes must report lost native context rather than substitute a new session: {result:?}"
         );
+    }
+
+    #[tokio::test]
+    async fn prompt_start_notice_requires_a_written_request_not_a_live_session() {
+        let (runtime, mut events) = steer_fixture_runtime().await;
+        let id = runtime.ensure_session("receipt", None, env!("CARGO_MANIFEST_DIR"), None, &Default::default(), None, None).await.unwrap();
+        let (tx,rx) = oneshot::channel();
+        let r=runtime.clone();let session=id.clone();
+        let prompt=tokio::spawn(async move {r.prompt_with_start_notice(&session,vec![json!({"type":"text","text":"hold this prompt"})],Some(tx)).await});
+        timeout(Duration::from_secs(2),rx).await.unwrap().unwrap();
+        wait_for_message_delta(&mut events,"SEEN:hold this prompt").await;
+        runtime.cancel(&id).await.unwrap();
+        let _=prompt.await;
+        runtime.shutdown().await;
+        let (tx,rx)=oneshot::channel();
+        assert!(runtime.prompt_with_start_notice(&id,vec![],Some(tx)).await.is_err());
+        assert!(rx.await.is_err(),"closed provider falsely confirmed receipt");
     }
 
     #[tokio::test]

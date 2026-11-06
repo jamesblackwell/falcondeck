@@ -149,6 +149,9 @@ pub(super) fn state(summary: &ThreadSummary) -> String {
         }
         return format!("awaiting_approval ({})", parts.join(", "));
     }
+    if let Some(wait) = &attention.task_wait && summary.status == ThreadStatus::Idle && wait.deadline > Utc::now() {
+        return format!("waiting{}: {} (deadline {})", if wait.deadline <= Utc::now() { " overdue" } else { "" }, line(&wait.reason, 120), wait.deadline);
+    }
     status_name(&summary.status).to_string()
 }
 

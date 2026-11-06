@@ -4556,6 +4556,9 @@ pub struct ThreadAttention {
     /// Daemon-owned; false for unknown/automatic turns. Survives queueing and restart.
     #[serde(default)]
     pub reply_to_user: bool,
+    /// Explicit pending work with a daemon-monitored deadline.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub task_wait: Option<TaskWait>,
     /// High-level attention category.
     #[serde(default)]
     pub level: ThreadAttentionLevel,
@@ -4582,6 +4585,15 @@ pub struct ThreadAttention {
     /// Last event sequence acknowledged by the user.
     #[serde(default)]
     pub last_read_seq: u64,
+}
+
+/// Explicit wait declared by a delegated task or its coordinator.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct TaskWait {
+    /// What remains pending; no completion inference is made from prose.
+    pub reason: String,
+    /// Deadline after which the coordinator receives an overdue report.
+    pub deadline: DateTime<Utc>,
 }
 
 /// Badge-level attention category for a thread.

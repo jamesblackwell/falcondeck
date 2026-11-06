@@ -89,7 +89,27 @@ history never disagree: these turns no longer push either.
 | Spawned child nobody is watching | Yes | Nobody else will say so |
 | No written reply | Yes, "Finished." | A missed completion costs more than one odd row |
 
-Errors and input requests always belong, in any thread.
+Errors and input requests always belong, in any thread. Real bot-home errors
+remain eligible even when an automatic report triggered the turn.
+
+### Tracked work and report turns
+
+The daemon's delegated-outcome outbox reports worker results to a bot's current
+home. An available watching bot can suppress the worker's ordinary completion;
+a paused/unavailable owner cannot. A batch completion still gets the next-day
+fallback if the home stays idle. See [BOTS.md](BOTS.md#durable-delegated-outcomes).
+
+Routine replies to internal report turns do not create completion notices.
+Direct-user provenance takes precedence: a user's running turn that absorbs an
+automatic report keeps its reply notification. Scheduled no-action runs stay
+quiet, and an automatic report does not mark itself as direct-user input.
+
+Urgent outcomes unreceived by an accepted home turn for two hours create one
+system notice per report, grouped per bot and attributed to its real home.
+These bypass agent notice quotas, use durable notification deduplication, and
+remain phone-eligible under bot-only push; master off preferences still apply.
+Quarantine and tracking-write failures also create deduplicated recovery notices.
+Reports are not acknowledged merely because a notice was recorded or read.
 
 Being at the desk does not stop a record. It stops being unread: a client
 showing the thread marks it read, which reads the record too.

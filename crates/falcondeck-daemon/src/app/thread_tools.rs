@@ -15,6 +15,8 @@ pub(super) use actions::ChildWatch;
 const LIST: &str = "falcondeck_list_threads";
 const VIEW: &str = "falcondeck_view_thread";
 const CREATE: &str = "falcondeck_create_thread";
+const ACK: &str = "falcondeck_acknowledge_results";
+const TASK_STATE: &str = "falcondeck_task_state";
 const MESSAGE: &str = "falcondeck_message_thread";
 const SUMMARY: &str = "falcondeck_thread_summary";
 const CHANGES: &str = "falcondeck_thread_changes";
@@ -24,13 +26,15 @@ const MAX_ITEMS: usize = 100;
 
 pub(super) fn is_builtin(name: &str) -> bool {
     actions::is_action(name)
-        || matches!(name, LIST | VIEW | CREATE | MESSAGE | SUMMARY | CHANGES | NOTIFY)
+        || matches!(name, LIST | VIEW | CREATE | MESSAGE | SUMMARY | CHANGES | NOTIFY | TASK_STATE | ACK)
 }
 
 /// `max_children` is the configured per-parent child limit, stated in the create tool's description.
 pub(super) fn catalog(max_children: u32) -> Vec<ExtensionAgentTool> {
     let create_description = format!("Start a local or cloud thread and optionally send its first prompt; returns without waiting. execution_target=cloud uses the configured sandbox with the project's current files. At most {max_children} active {} per parent (a user setting). Context defaults to none; briefing passes your summary, transcript_tail your recent transcript.", if max_children == 1 { "child" } else { "children" });
     [
+        (ACK, "Acknowledge outcomes", "Confirm receipt of daemon reports after reading them. Only the current bot home may acknowledge its report_ids; scheduled run threads cannot consume home reports. This does not declare tasks finished.", json!({"report_ids":{"type":"array","items":{"type":"string"},"minItems":0,"maxItems":100}}), vec!["report_ids"]),
+        (TASK_STATE, "Declare task state", "Declare waiting with reason and RFC3339 deadline, or finished. Tasks may declare their own state; bots may declare state for tasks they started or messaged. A wait is durable and flags the bot at its deadline; it does not itself resume the task. Arm a timed background wake before parking for a time or job, then declare waiting. Harnesses without background wakes should use a one-time current-thread automation; if unavailable, tell the owner to arrange resumption. Never silently end a turn with work pending.", json!({"thread_id":{"type":"string"}, "state":{"type":"string","enum":["waiting","finished"]}, "reason":{"type":"string","maxLength":500}, "deadline":{"type":"string","format":"date-time"}}), vec!["state"]),
         (LIST, "List threads", "Start here to see what is being worked on. One compact row per thread, newest activity first (default 20): status, age, provider, flags, and what it was last asked and last said. The header counts running, blocked, and recently active threads. Excludes you. Filter by status, time, query, parent, provider, folder, or pin; page with offset. Never loads transcripts.", list::schema(), vec![]),
         (CHANGES, "Thread changes", "Threads active since a time, same rows as list plus what changed (messages, files, commits, checks) when the transcript is loaded. Blocked threads first. Pass the returned Now as since next time to poll without repeats.", json!({
             "since": {"type":"string", "minLength":1, "description":"RFC 3339, YYYY-MM-DD, or an age like 15m, 2h, 1d."},
@@ -60,6 +64,7 @@ pub(super) fn catalog(max_children: u32) -> Vec<ExtensionAgentTool> {
         (MESSAGE, "Message thread", "Send a message to another thread or a bot, labelled with your id and title. It reaches the receiver's active turn now so it can act on it; an idle thread starts a turn. Only when the receiver cannot take input mid-turn does the message wait in its queue, and your queued messages to one thread merge into a single entry (newest last), so send a correction as a short follow-up that says what changed. Returns on admission, not on reply.", json!({
             "thread_id": {"type":"string", "minLength":1, "description":"Thread id, or a bot's name (bots are listed in falcondeck_list_threads)."},
             "message": {"type":"string", "minLength":1, "maxLength":24000, "description":"Readable prose with normal spaces between words."},
+            "result_delivery": {"type":"string","enum":["wake","batch"],"default":"batch","description":"Plain completions: batch next turn, or wake when action is needed. Failures, input requests, interruption and overdue deadlines always request a bounded wake. A follow-up preserves an existing wake setting."},
             "delivery": {"type":"string", "enum":["steer","queue"], "description":"Deprecated and ignored; messages always steer when the receiver can take them."}
         }), vec!["thread_id", "message"]),
         (NOTIFY, "Notify James", "Tell James something important happened when no decision is needed: a finished launch, a failed deploy you already handled, a result he asked to hear about. It reaches his phone as a push and stays in his notification centre, and body becomes a Markdown report he can read there. Rare by design: do not use it for progress, ordinary completions or anything your final reply already says. In a thread created for a bot's scheduled run the final reply does not alert him, so use this there for what he must hear. If you need him to decide, publish a review instead. Limits per sender: 3 an hour, 10 a day, 2 high a day; 30 a day across all agents, the last 5 kept for high. Pushes are not end-to-end encrypted, so keep secrets out of title and summary; body is encrypted.", json!({
@@ -80,7 +85,8 @@ pub(super) fn catalog(max_children: u32) -> Vec<ExtensionAgentTool> {
             "context": {"type":"string", "enum":["none","briefing","transcript_tail"], "default":"none"},
             "folder": {"type":"string", "minLength":1, "description":"Project folder id or exact name."},
             "create_folder": {"type":"boolean", "default":false},
-            "notify_parent": {"type":"boolean", "default":false, "description":"Message you whenever it stops or needs input (lost on daemon restart). Leave false unless critical or requested; bot tasks always report errors and input requests."}
+            "notify_parent": {"type":"boolean", "default":false, "description":"Legacy completion notification opt-in. For bots, true selects result_delivery=wake unless result_delivery is explicit."},
+            "result_delivery": {"type":"string","enum":["wake","batch"],"default":"batch","description":"Plain completions: batch next turn, or wake when action is needed. Failures, input requests, interruption and overdue deadlines always request a bounded wake. Tracking survives restart and follow-ups preserve wake. Peer bot completions use batch to avoid loops."}
         }), vec![]),
     ].into_iter().chain(actions::catalog()).map(|(name,title,description,properties,required)| ExtensionAgentTool {
         name: name.into(), extension_id: "falcondeck".into(), tool_id: name.trim_start_matches("falcondeck_").into(), title: title.into(), description: description.into(),
@@ -121,6 +127,7 @@ struct CreateArgs {
     create_folder: bool,
     #[serde(default)]
     notify_parent: bool,
+    result_delivery: Option<delegations::ResultDelivery>,
 }
 
 #[derive(Deserialize, Default)]
@@ -136,6 +143,8 @@ enum MessageDelivery {
 struct MessageArgs {
     thread_id: String,
     message: String,
+    #[serde(default)]
+    result_delivery: delegations::ResultDelivery,
     /// Accepted for compatibility with callers that still pass it. Agent
     /// messages always steer; the queue is only the fallback.
     #[serde(default)]
@@ -479,6 +488,38 @@ impl AppState {
             vec![workspace.clone()]
         };
         match name {
+            ACK => {
+                #[derive(Deserialize)]
+                #[serde(deny_unknown_fields)]
+                struct AckArgs { report_ids: Vec<String> }
+                let a: AckArgs = args(arguments)?;
+                if a.report_ids.len() > 100 { return Err(DaemonError::BadRequest("report_ids must contain at most 100 ids".into())); }
+                self.acknowledge_bot_delegations(parent, &a.report_ids).await?;
+                Ok(response("Outcome receipt recorded.".into()))
+            }
+            TASK_STATE => {
+                #[derive(Deserialize)]
+                #[serde(deny_unknown_fields)]
+                struct StateArgs { thread_id: Option<String>, state: String, reason: Option<String>, deadline: Option<chrono::DateTime<Utc>> }
+                let a: StateArgs = args(arguments)?;
+                let target = a.thread_id.as_deref().unwrap_or(parent);
+                if target != parent && !self.owns_delegation(bot.as_ref().map(|b| b.id.as_str()), target).await? {
+                    return Err(DaemonError::BadRequest("Only the task itself or a tracking bot can declare its state".into()));
+                }
+                let waiting = match a.state.as_str() {
+                    "waiting" => {
+                        let reason = a.reason.filter(|r| !r.trim().is_empty() && r.chars().count() <= 500)
+                            .ok_or_else(|| DaemonError::BadRequest("waiting requires a reason (1–500 characters)".into()))?;
+                        let deadline = a.deadline.filter(|d| *d > Utc::now())
+                            .ok_or_else(|| DaemonError::BadRequest("waiting requires a future deadline".into()))?;
+                        Some(falcondeck_core::TaskWait { reason, deadline })
+                    }
+                    "finished" => None,
+                    _ => return Err(DaemonError::BadRequest("state must be waiting or finished".into())),
+                };
+                self.declare_task_wait_by(&workspace, target, waiting, bot.as_ref().filter(|b| b.thread_id == parent).map(|b| b.id.as_str())).await?;
+                Ok(response(format!("Task {target}: {} declared (daemon persisted).", a.state)))
+            }
             LIST => Ok(response(
                 list::list(self, &scope, parent, args(arguments)?).await?,
             )),
@@ -556,13 +597,23 @@ impl AppState {
                     body: a.message.clone(),
                     queued: None,
                 };
+                let tracking = if let Some(bot) = &bot {
+                    let delivery = if self.bot_for_thread(&a.thread_id).await.is_some() {
+                        delegations::ResultDelivery::Batch
+                    } else { a.result_delivery };
+                    self.track_delegation(&bot.id, &target_summary, delivery).await.map_err(|error| { tracing::error!(%error, "could not persist message tracking; dispatch continues"); error }).ok()
+                } else { None };
                 let result = if target_summary.execution_target
                     == falcondeck_core::ThreadExecutionTarget::Cloud
                 {
-                    self.send_automatic_turn(request).await?
+                    self.send_automatic_turn(request).await
                 } else {
-                    workspace_ops::send_agent_message(self, request, &mut message).await?
+                    workspace_ops::send_agent_message(self, request, &mut message).await
                 };
+                if let Some(id) = tracking {
+                    match &result { Ok(_) => self.admit_delegation(&id).await.unwrap_or_else(|e| tracing::error!(%e, "could not persist tracking admission")), Err(error) => self.reject_delegation(&id, &error.to_string()).await.unwrap_or_else(|e| tracing::error!(%e, "could not persist tracking failure")) }
+                }
+                let result = result?;
                 self.analytics_agent_message(
                     parent,
                     &a.thread_id,
@@ -780,7 +831,7 @@ impl AppState {
                     })
                     .await?;
                 }
-                if a.notify_parent || bot.is_some() {
+                if a.notify_parent && bot.is_none() {
                     self.watch_child(&workspace, &id, coordinator, a.notify_parent);
                 }
                 self.persist_local_state().await?;
@@ -808,8 +859,12 @@ impl AppState {
                 if a.notify_parent {
                     markdown.push_str("- This thread will be notified when the child stops running or needs input.\n");
                 } else if bot.is_some() {
-                    markdown.push_str("- This thread will be notified only if the child fails or needs input; successful stops stay silent.\n");
+                    markdown.push_str("- Outcomes are daemon tracked; result_delivery defaults to batch (next bot turn).\n");
                 }
+                let tracking = if let Some(bot) = &bot && retry.is_none() {
+                    let delivery = a.result_delivery.unwrap_or(if a.notify_parent { delegations::ResultDelivery::Wake } else { delegations::ResultDelivery::Batch });
+                    self.track_delegation(&bot.id, &self.thread_summary(&workspace, &id).await?, delivery).await.map_err(|error| { tracing::error!(%error, "could not persist creation tracking; dispatch continues"); error }).ok()
+                } else { None };
                 if retry.is_some() {
                     markdown.push_str("- Existing cloud thread returned for this retry key. The first prompt was not replayed; inspect its state before sending another message.\n");
                 } else if let Some(prompt) = a.prompt {
@@ -817,11 +872,18 @@ impl AppState {
                         json!({"workspace_id": workspace, "thread_id": id, "inputs":[{"type":"text","text":prompt}]}),
                     )?;
                     match self.send_automatic_turn(request).await {
-                        Ok(_) => markdown.push_str("- First prompt dispatched. Check progress with falcondeck_view_thread.\n"),
-                        Err(error) => markdown.push_str(&format!("- First prompt failed: {}. The thread was created.\n", line(&error.to_string(), 1000))),
+                        Ok(_) => {
+                            if let Some(id) = &tracking { self.admit_delegation(id).await.unwrap_or_else(|e| tracing::error!(%e, "could not persist tracking admission")); }
+                            markdown.push_str("- First prompt dispatched. Check progress with falcondeck_view_thread.\n");
+                        }
+                        Err(error) => {
+                            if let Some(id) = &tracking { self.reject_delegation(id, &error.to_string()).await.unwrap_or_else(|e| tracing::error!(%e, "could not persist tracking failure")); }
+                            markdown.push_str(&format!("- First prompt failed: {}. The thread was created.\n", line(&error.to_string(), 1000)));
+                        }
                     }
                 } else {
-                    markdown.push_str("- No first prompt supplied; thread is idle.\n");
+                    if let Some(id) = tracking { self.await_first_delegated_turn(&id).await.unwrap_or_else(|e| tracing::error!(%e, "could not persist tracking admission")); }
+                    markdown.push_str("- No first prompt supplied; tracking awaits its first turn.\n");
                 }
                 Ok(response(markdown))
             }
@@ -1187,7 +1249,7 @@ pub(in crate::app) mod tests {
 
         (app, temp_dir)
     }
-    pub(super) fn call(
+    pub(in crate::app) fn call(
         name: &str,
         arguments: Value,
     ) -> falcondeck_core::InvokeExtensionToolRequest {
@@ -1227,7 +1289,7 @@ pub(in crate::app) mod tests {
             .unwrap()
             .items = items;
     }
-    pub(super) fn created_id(result: &ExtensionToolResponse) -> String {
+    pub(in crate::app) fn created_id(result: &ExtensionToolResponse) -> String {
         result
             .result
             .as_str()

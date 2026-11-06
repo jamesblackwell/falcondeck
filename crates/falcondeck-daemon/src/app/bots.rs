@@ -121,36 +121,7 @@ impl AppState {
                 }
             }
         }
-        let parents: HashSet<_> = self
-            .inner
-            .preferences
-            .lock()
-            .await
-            .bots
-            .iter()
-            .flat_map(|b| std::iter::once(b.thread_id.clone()).chain(b.previous_thread_ids.clone()))
-            .collect();
-        let children: Vec<_> = self
-            .inner
-            .workspaces
-            .lock()
-            .await
-            .values()
-            .flat_map(|ws| ws.threads.values())
-            .filter_map(|t| match &t.summary.origin {
-                Some(falcondeck_core::ThreadOrigin::AgentSpawn {
-                    parent_thread_id, ..
-                }) if parents.contains(parent_thread_id) && !t.summary.is_archived => Some((
-                    t.summary.workspace_id.clone(),
-                    t.summary.id.clone(),
-                    parent_thread_id.clone(),
-                )),
-                _ => None,
-            })
-            .collect();
-        for (workspace, child, parent) in children {
-            self.watch_child(&workspace, &child, &parent, false);
-        }
+
     }
 
     pub(crate) async fn bot_for_thread(&self, thread: &str) -> Option<BotProfile> {

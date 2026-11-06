@@ -403,7 +403,7 @@ struct NativeInspectorView: View {
                     if let task = store.selectedTask {
                         infoRow("Agent", symbol: "sparkles", value: FDTheme.providerName(task.provider))
                         if !task.modelID.isEmpty { infoRow("Model", symbol: "cpu", value: task.modelID) }
-                        infoRow("Status", symbol: "circle.dotted", value: FDTheme.statusLabel(task.status))
+                        infoRow("Status", symbol: "circle.dotted", value: task.statusLabel)
                         infoRow("Task ID", symbol: "number", value: task.id, copy: true)
                     }
                 }
