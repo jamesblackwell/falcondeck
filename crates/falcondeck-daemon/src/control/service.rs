@@ -401,13 +401,14 @@ impl ControlService {
                 continue;
             }
             if automation.next_run_at.is_none()
+                && matches!(automation.trigger, falcondeck_core::control::AutomationTrigger::Once { run_at } if run_at <= now)
                 && !next
                     .runs
                     .iter()
                     .any(|run| run.automation_id == automation.id && !run.status.is_terminal())
             {
-                // Heal legacy once schedules already consumed by a terminal
-                // skip, without replaying them after restart.
+                // Heal consumed legacy once schedules only after their due
+                // time; a missing next_run_at alone does not prove exhaustion.
                 store::complete_once(automation, now);
             }
             let dispatched: BTreeSet<String> = next.occurrence_keys.iter().cloned().collect();

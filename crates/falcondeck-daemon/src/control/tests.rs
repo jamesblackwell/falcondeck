@@ -989,6 +989,27 @@ async fn legacy_manual_once_renamed_or_edited_during_a_run_completes_on_restart(
 }
 
 #[tokio::test]
+async fn restore_keeps_a_future_once_without_next_run_enabled() {
+    let (dir, service) = service().await;
+    let original = create_timed_once(&service).await;
+    let path = dir.path().join("agent-control.json");
+    let mut saved = store::load(&path).await.unwrap();
+    saved.automations[0].trigger = falcondeck_core::control::AutomationTrigger::Once {
+        run_at: "2099-11-05T09:00:00Z".parse().unwrap(),
+    };
+    saved.automations[0].next_run_at = None;
+    assert!(saved.runs.is_empty());
+    store::persist(&path, &saved).await.unwrap();
+    let restored = ControlService::new(path);
+    restored.restore().await.unwrap();
+    let after = restored.automation(&original.id).await.unwrap();
+    assert_eq!(after.state, AutomationState::Enabled);
+    assert_eq!(after.trigger, saved.automations[0].trigger);
+    assert_eq!(after.next_run_at, None);
+    assert_eq!(after.revision, original.revision);
+}
+
+#[tokio::test]
 async fn legacy_terminal_once_skips_settle_on_restore() {
     for status in [
         AutomationRunStatus::SkippedOverlap,
@@ -1008,6 +1029,10 @@ async fn legacy_terminal_once_skips_settle_on_restore() {
         let mut saved = store::load(&path).await.unwrap();
         // Older completion paths recorded a terminal skip but left the
         // exhausted once definition enabled. Preserve that on-disk shape.
+        let due_at = Utc::now() - Duration::hours(1);
+        saved.automations[0].trigger =
+            falcondeck_core::control::AutomationTrigger::Once { run_at: due_at };
+        saved.runs[0].scheduled_for = Some(due_at);
         saved.runs[0].status = status;
         saved.runs[0].finished_at = Some(Utc::now());
         assert_eq!(saved.automations[0].state, AutomationState::Enabled);
