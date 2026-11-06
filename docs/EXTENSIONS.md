@@ -1223,7 +1223,8 @@ state, and bots can manage tasks whose outcomes they track.
 `ThreadAttention.task_wait` is optional (`reason`, `deadline`) for older clients.
 Open tasks retain tracking. Unread closed results participate in the daily
 fallback. Urgent outcomes unreceived by an accepted home turn for two hours
-escalate once to James, grouped by bot and attributed to the home. Failed sends
+escalate once to James, attributed to the home and grouped into at most one
+alert per bot per rolling hour. Answered input requests no longer escalate. Failed sends
 spend no paid-turn budget. Full context details stop after three accepted
 presentations; acknowledgement removes the reports.
 See [BOTS.md](BOTS.md#durable-delegated-outcomes) for recovery and delivery rules.

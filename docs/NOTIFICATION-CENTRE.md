@@ -104,8 +104,11 @@ Direct-user provenance takes precedence: a user's running turn that absorbs an
 automatic report keeps its reply notification. Scheduled no-action runs stay
 quiet, and an automatic report does not mark itself as direct-user input.
 
-Urgent outcomes unreceived by an accepted home turn for two hours create one
-system notice per report, grouped per bot and attributed to its real home.
+Urgent outcomes unreceived by an accepted home turn for two hours create a
+system notice attributed to the real bot home. Each bot gets at most one such
+notice per rolling hour, sweeping all pending urgent outcomes; each report is
+escalated once. Answered input requests are excluded. A refused notice remains
+pending without stopping other alerts or bot wake delivery.
 These bypass agent notice quotas, use durable notification deduplication, and
 remain phone-eligible under bot-only push; master off preferences still apply.
 Quarantine and tracking-write failures also create deduplicated recovery notices.
