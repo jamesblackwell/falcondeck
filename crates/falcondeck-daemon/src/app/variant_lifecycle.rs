@@ -219,7 +219,11 @@ impl AppState {
             let mut tick = tokio::time::interval(std::time::Duration::from_secs(300));
             tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
             loop {
-                tick.tick().await;
+                tokio::select! {
+                    biased;
+                    () = app.wait_for_shutdown() => return,
+                    _ = tick.tick() => {}
+                }
                 if app.is_shutting_down() {
                     return;
                 }
@@ -386,6 +390,42 @@ impl AppState {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn shutdown_wakes_variant_maintenance_between_ticks() {
+        let root = tempfile::tempdir().unwrap();
+        let app = AppState::new_with_state_path(
+            "test".into(),
+            HashMap::new(),
+            root.path().join("state.json"),
+        );
+        // Hold the empty cleanup worker so its registration proves the
+        // immediate tick finished and maintenance reached its interval wait.
+        let workspaces = app.inner.workspaces.lock().await;
+        app.start_variant_maintenance();
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            loop {
+                if app
+                    .inner
+                    .background_tasks
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .len()
+                    >= 2
+                {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("maintenance must complete its initial tick");
+        drop(workspaces);
+        tokio::time::timeout(std::time::Duration::from_secs(2), app.shutdown())
+            .await
+            .expect("shutdown must wake maintenance without its 300-second tick")
+            .unwrap();
+    }
 
     #[tokio::test]
     async fn low_disk_warning_emits_once_per_crossing() {
