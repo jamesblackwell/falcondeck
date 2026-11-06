@@ -132,6 +132,10 @@ pub(crate) struct SearchableThread {
 
 /// Session roots scanned for transcripts, newest-writing providers first.
 fn session_roots() -> Vec<PathBuf> {
+    // Daemon tests keep the real HOME; only explicit fixture roots may be scanned.
+    if crate::agent_binary::provider_test_mode() {
+        return Vec::new();
+    }
     let Some(home) = env::var_os("HOME").map(PathBuf::from) else {
         return Vec::new();
     };
@@ -750,6 +754,11 @@ fn lowercase_byte_offset_to_char_index(text: &str, offset: usize) -> usize {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn default_session_roots_are_disabled_in_tests() {
+        assert!(super::session_roots().is_empty());
+    }
+
     use super::*;
 
     fn claude_line(text: &str) -> String {

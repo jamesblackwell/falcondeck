@@ -544,3 +544,6 @@ PATH is not authorization to run its configured arguments. Keep new launch
 paths behind both checks. Use recording provider and browser-opener stubs;
 real harness qualification belongs in the explicit conformance command outside
 `cargo test`.
+
+Default provider transcript indexing is also disabled in provider test mode.
+Search fixtures use explicit roots, so retaining real HOME does not scan user sessions.
