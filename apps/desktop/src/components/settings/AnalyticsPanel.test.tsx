@@ -343,8 +343,21 @@ describe('AnalyticsPanel', () => {
     const rules = [{ id: 'failed_spend', group: 'result', label: 'Spent, then failed', definition: 'A turn', flagged: 340, estimated_usd: 900 }]
     stubDaemon(threadUsage, { ...cacheReport, rules })
     render(<AnalyticsPanel baseUrl="http://daemon" onToast={vi.fn()} />)
-    expect(await screen.findByText('Showing the top 3 of 340. The totals above cover all of them.')).toBeInTheDocument()
+    expect(await screen.findByText('Showing 3 of 340, the biggest in each category. The totals above cover all of them.')).toBeInTheDocument()
     expect(screen.getAllByText('340')).toHaveLength(2)
+    fireEvent.click(screen.getByRole('button', { name: 'Little result' }))
+    expect(screen.getByText('Showing the top 1 of 340. The totals above cover all of them.')).toBeInTheDocument()
+  })
+
+  it('tells an empty category from one the report left out', async () => {
+    const rules = [{ id: 'context_growing', group: 'bloat', label: 'Growing', definition: 'A turn', flagged: 4, estimated_usd: 1 }]
+    stubDaemon(threadUsage, { ...cacheReport, rules, waste: cacheReport.waste.filter((item) => item.group === 'cache') })
+    render(<AnalyticsPanel baseUrl="http://daemon" onToast={vi.fn()} />)
+    fireEvent.click(await screen.findByRole('button', { name: 'Bloat' }))
+    expect(screen.getByText('4 flagged here, but this report left them out.')).toBeInTheDocument()
+    expect(screen.queryByText(/^Showing/)).not.toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: 'Little result' }))
+    expect(screen.getByText('Nothing flagged here in this period.')).toBeInTheDocument()
   })
 
   it('leads with ranked waste and makes a proven prefix change stand out', async () => {

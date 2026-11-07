@@ -228,7 +228,8 @@ told from new input. They show "New input after a gap" and get no cache flags.
 
 The report reads each file once, with 30 extra days to see past the window
 edge, and computes automation flags from run records without building the
-summary. Waste is capped at 200 items, each hit-rate dimension at 50, home
+summary. Waste keeps 100 items per category, so a costly category cannot empty
+another, each hit-rate dimension keeps 50, home
 threads and overhead at 50, and rebuild tables at 200. Rule counts and dollars
 are taken before the cap and the tiles use them.
 

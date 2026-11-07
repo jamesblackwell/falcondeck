@@ -85,6 +85,7 @@ export function WasteTab({ report, ...links }: { report: AnalyticsCacheReport | 
   const ruleLabel = (id: string) => rules.find((rule) => rule.id === id)?.label
   const all = ruleTotals(rules)
   const cache = ruleTotals(rules, 'cache')
+  const selected = ruleTotals(rules, group).flagged
   const flaggedBy = (id: string) => rules.find((rule) => rule.id === id)?.flagged ?? 0
   const possible = flaggedBy('possible_prefix_change')
   const proven = waste.filter((item) => item.rule === 'prefix_change')
@@ -140,10 +141,17 @@ export function WasteTab({ report, ...links }: { report: AnalyticsCacheReport | 
                 </ul>
               </div>
             ) : (
-              <p className={NOTE}>Nothing flagged here in this period.</p>
+              <p className={NOTE}>
+                {selected ? `${count(selected)} flagged here, but this report left them out.` : 'Nothing flagged here in this period.'}
+              </p>
             )}
-            {all.flagged > waste.length ? (
-              <p className={NOTE}>Showing the top {count(waste.length)} of {count(all.flagged)}. The totals above cover all of them.</p>
+            {rows.length && selected > rows.length ? (
+              <p className={NOTE}>
+                {group === 'all'
+                  ? `Showing ${count(rows.length)} of ${count(selected)}, the biggest in each category.`
+                  : `Showing the top ${count(rows.length)} of ${count(selected)}.`}{' '}
+                The totals above cover all of them.
+              </p>
             ) : null}
           </>
         ) : (

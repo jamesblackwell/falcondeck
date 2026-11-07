@@ -59,7 +59,7 @@ pub(super) const LOOKBACK_DAYS: i64 = 30;
 
 const REBUILD_ROWS: usize = 200;
 /// Report lists are capped; rule counts and totals still cover everything.
-const WASTE_ROWS: usize = 200;
+const WASTE_ROWS_PER_GROUP: usize = 100;
 const HIT_RATE_ROWS: usize = 50;
 const BOT_ROWS: usize = 50;
 
@@ -1539,6 +1539,17 @@ fn priced_list() -> Vec<AnalyticsPrice> {
         .collect()
 }
 
+/// Keeps each group's best rows, so a costly group cannot push another out of
+/// a report whose counts still say it has flags.
+fn cap_per_group(ranked: &mut Vec<AnalyticsWasteItem>) {
+    let mut kept: HashMap<String, usize> = HashMap::new();
+    ranked.retain(|item| {
+        let seen = kept.entry(item.group.clone()).or_default();
+        *seen += 1;
+        *seen <= WASTE_ROWS_PER_GROUP
+    });
+}
+
 pub(super) fn build_report(input: &CacheInput<'_>) -> AnalyticsCacheReport {
     let since = seconds(input.since);
     let threads = build_turns(input.usage, input.records);
@@ -1579,7 +1590,7 @@ pub(super) fn build_report(input: &CacheInput<'_>) -> AnalyticsCacheReport {
             .then(b.estimated_usd.total_cmp(&a.estimated_usd))
     });
     report.rules = rules(&waste);
-    waste.truncate(WASTE_ROWS);
+    cap_per_group(&mut waste);
     report.waste = waste;
     report
 }
@@ -2103,7 +2114,7 @@ mod tests {
     #[test]
     fn report_lists_are_capped_but_rules_count_everything() {
         let since = Utc.timestamp_opt(0, 0).unwrap();
-        let count = WASTE_ROWS + 20;
+        let count = WASTE_ROWS_PER_GROUP + 20;
         let mut usage = Vec::new();
         let mut records = Vec::new();
         for index in 0..count {
@@ -2128,7 +2139,7 @@ mod tests {
             .find(|rule| rule.id == "failed_spend")
             .unwrap();
         assert_eq!(failed.flagged, count as u64);
-        assert_eq!(report.waste.len(), WASTE_ROWS);
+        assert_eq!(report.waste.len(), WASTE_ROWS_PER_GROUP);
         assert!(
             failed.estimated_usd
                 > report
@@ -2143,6 +2154,17 @@ mod tests {
             .filter(|row| row.dimension == "bot")
             .count();
         assert_eq!(bots, HIT_RATE_ROWS);
+    }
+
+    #[test]
+    fn a_costly_group_cannot_push_another_out_of_the_list() {
+        let mut ranked: Vec<_> = (0..WASTE_ROWS_PER_GROUP + 50)
+            .map(|_| item("failed_spend", "result", "estimate"))
+            .collect();
+        ranked.push(item("big_rebuild", "cache", "estimate"));
+        cap_per_group(&mut ranked);
+        assert_eq!(ranked.len(), WASTE_ROWS_PER_GROUP + 1);
+        assert_eq!(ranked[ranked.len() - 1].group, "cache");
     }
 
     fn input<'a>(
