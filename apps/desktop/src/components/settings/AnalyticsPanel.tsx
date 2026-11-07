@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Button, SegmentedControl, SettingsPage, SettingsPageHeader, cn } from '@falcondeck/ui'
 import {
   createDaemonApiClient,
+  type AnalyticsCacheReport,
   type AnalyticsClearTarget,
   type AnalyticsPrompt,
   type AnalyticsSettings,
@@ -12,6 +13,7 @@ import {
 import { RefreshCw } from 'lucide-react'
 
 import { ActivityTab } from './analytics/ActivityTab'
+import { CacheTab } from './analytics/CacheTab'
 import { LoadingTab, NOTE } from './analytics/analytics-ui'
 import {
   ANALYTICS_SETTING_TABS,
@@ -19,6 +21,7 @@ import {
   NO_SCHEDULED_FILTERS,
   NO_THREAD_FILTERS,
   readStoredTab,
+  ruleTotals,
   storeTab,
   type AnalyticsTab,
 } from './analytics/analytics-utils'
@@ -28,6 +31,7 @@ import { RecordingTab } from './analytics/RecordingTab'
 import { ScheduledTab } from './analytics/ScheduledTab'
 import { ThreadsTab } from './analytics/ThreadsTab'
 import { TokensTab } from './analytics/TokensTab'
+import { WasteTab } from './analytics/WasteTab'
 
 export type AnalyticsPanelProps = {
   baseUrl: string | null
@@ -55,6 +59,7 @@ export function AnalyticsPanel({ baseUrl, onToast, onOpenThread, onOpenAutomatio
   const [summary, setSummary] = useState<AnalyticsSummary | null>(null)
   const [status, setStatus] = useState<AnalyticsStatus | null>(null)
   const [threadUsage, setThreadUsage] = useState<AnalyticsUsageReport | null>(null)
+  const [cache, setCache] = useState<AnalyticsCacheReport | null>(null)
   const [prompts, setPrompts] = useState<AnalyticsPrompt[]>([])
   const [query, setQuery] = useState('')
   const [loading, setLoading] = useState(false)
@@ -86,9 +91,13 @@ export function AnalyticsPanel({ baseUrl, onToast, onOpenThread, onOpenAutomatio
       wanted.current ??= nextStatus.settings
       // Older daemons lack the usage endpoint; the tables simply stay empty
       // instead of blanking the whole panel.
-      const report = await api.analyticsUsage(Number(period), 'thread').catch(() => null)
+      const [report, nextCache] = await Promise.all([
+        api.analyticsUsage(Number(period), 'thread').catch(() => null),
+        api.analyticsCache(Number(period)).catch(() => null),
+      ])
       if (id !== loadId.current) return
       setThreadUsage(report)
+      setCache(nextCache)
     } catch (err) {
       if (id === loadId.current) setError(err instanceof Error ? err.message : String(err))
     } finally {
@@ -233,8 +242,20 @@ export function AnalyticsPanel({ baseUrl, onToast, onOpenThread, onOpenAutomatio
           <p className={NOTE}>Connect to the daemon to see analytics.</p>
         ) : !summary ? (
           error ? null : <LoadingTab />
+        ) : tab === 'waste' ? (
+          <WasteTab report={cache} onOpenThread={onOpenThread} onOpenAutomation={onOpenAutomation} />
+        ) : tab === 'cache' ? (
+          <CacheTab report={cache} onOpenThread={onOpenThread} />
         ) : tab === 'overview' ? (
-          <OverviewTab summary={summary} usageTotals={threadUsage?.totals ?? null} />
+          <OverviewTab
+            summary={summary}
+            usageTotals={threadUsage?.totals ?? null}
+            waste={cache?.waste ?? []}
+            flagged={ruleTotals(cache?.rules ?? []).flagged}
+            onOpenWaste={() => selectTab('waste')}
+            onOpenThread={onOpenThread}
+            onOpenAutomation={onOpenAutomation}
+          />
         ) : tab === 'tokens' ? (
           <TokensTab summary={summary} />
         ) : tab === 'threads' ? (

@@ -202,6 +202,7 @@ pub fn router(state: AppState) -> Router {
         .route("/api/analytics/settings", post(update_analytics_settings))
         .route("/api/analytics/summary", get(analytics_summary))
         .route("/api/analytics/usage", get(analytics_usage))
+        .route("/api/analytics/cache", get(analytics_cache))
         .route("/api/analytics/thread", get(analytics_thread))
         .route("/api/analytics/prompts", get(analytics_prompts))
         .route("/api/analytics/clear", post(clear_analytics))
@@ -524,6 +525,16 @@ struct AnalyticsUsageQuery {
     days: Option<u32>,
     #[serde(default)]
     group: Option<String>,
+}
+
+async fn analytics_cache(
+    State(state): State<AppState>,
+    Query(query): Query<AnalyticsUsageQuery>,
+) -> Result<Json<falcondeck_core::AnalyticsCacheReport>, DaemonError> {
+    state
+        .analytics_cache(query.days.unwrap_or(30))
+        .await
+        .map(Json)
 }
 
 async fn analytics_usage(

@@ -9,14 +9,20 @@ import {
   NO_THREAD_FILTERS,
   agentLabel,
   compact,
+  estimate,
   filterAutomations,
   filterOptions,
   filterThreads,
+  filterWaste,
+  gapLabel,
   groupTokens,
   modelLabel,
+  rankCauses,
+  readStoredTab,
   scheduledOutcome,
   topBot,
   topModel,
+  ruleTotals,
 } from './analytics-utils'
 
 const totals = (tokens: number) => ({
@@ -169,4 +175,48 @@ describe('filterOptions', () => {
 it('maps every searchable analytics title to a tab', () => {
   const section = SETTINGS_NAV.find((item) => item.id === 'analytics')!
   expect(section.settings.filter((title) => !ANALYTICS_SETTING_TABS[title])).toEqual([])
+})
+
+describe('waste helpers', () => {
+  const item = (rule: string, group: string, estimated_usd: number) => ({ rule, group, label: rule, reason: '', estimated_usd })
+
+  it('marks every dollar figure as an estimate', () => {
+    expect(estimate(0)).toBe('—')
+    expect(estimate(3.114)).toBe('≈$3.11')
+    expect(estimate(2411.3)).toBe('≈$2,411')
+  })
+
+  it('filters offenders by group', () => {
+    const items = [item('repeat_idle_gap', 'cache', 4), item('no_action', 'result', 2)]
+    expect(filterWaste(items, 'all')).toHaveLength(2)
+    expect(filterWaste(items, 'result').map((row) => row.rule)).toEqual(['no_action'])
+  })
+
+  it('totals rules, which outlast the capped list', () => {
+    const rule = (id: string, group: string, flagged: number, estimated_usd: number) =>
+      ({ id, group, label: id, definition: '', flagged, estimated_usd })
+    const rules = [rule('a', 'cache', 300, 40), rule('b', 'result', 2, 5)]
+    expect(ruleTotals(rules)).toEqual({ flagged: 302, usd: 45 })
+    expect(ruleTotals(rules, 'cache')).toEqual({ flagged: 300, usd: 40 })
+  })
+
+  it('ranks causes by cost with first turns last', () => {
+    const row = (cause: string, estimated_usd: number) => ({ cause, count: 1, tokens: 1, estimated_usd })
+    expect(rankCauses([row('first_turn', 300), row('unclear', 5), row('idle_gap', 190)]).map((cause) => cause.cause)).toEqual([
+      'idle_gap',
+      'unclear',
+      'first_turn',
+    ])
+  })
+
+  it('labels idle gaps', () => {
+    expect(gapLabel(null)).toBe('—')
+    expect(gapLabel(7.6)).toBe('8 min')
+    expect(gapLabel(150)).toBe('2.5 h')
+  })
+
+  it('opens on Waste by default', () => {
+    window.localStorage.removeItem('falcondeck.settings.analytics.tab')
+    expect(readStoredTab()).toBe('waste')
+  })
 })

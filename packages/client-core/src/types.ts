@@ -702,6 +702,103 @@ export type AnalyticsUsageReport = {
   totals: AnalyticsUsageTotals;
   rows: AnalyticsUsageRow[];
 };
+export type AnalyticsWasteItem = {
+  rule: string;
+  /** `cache`, `result` or `bloat`. */
+  group: string;
+  /** `high` when FalconDeck itself likely broke something. */
+  severity?: string;
+  /** `proven`, `estimate` or `possible`. */
+  certainty?: string;
+  label: string;
+  reason: string;
+  estimated_usd: number;
+  occurrences?: number;
+  thread?: string | null;
+  workspace?: string | null;
+  automation?: string | null;
+  bot?: string | null;
+  flags?: string[];
+};
+export type AnalyticsWasteRule = {
+  id: string;
+  group: string;
+  label: string;
+  definition: string;
+  flagged?: number;
+  estimated_usd?: number;
+};
+export type AnalyticsCacheHitRate = {
+  /** `provider`, `model` or `bot`. */
+  dimension: string;
+  key: string;
+  provider?: string | null;
+  fresh_tokens: number;
+  read_tokens: number;
+  write_tokens: number;
+  hit_rate: number;
+};
+export type AnalyticsRebuildCause = { cause: string; count: number; tokens: number; estimated_usd: number };
+export type AnalyticsRebuildGroup = {
+  key: string;
+  label: string;
+  workspace?: string | null;
+  bot?: string | null;
+  count: number;
+  tokens: number;
+  estimated_usd: number;
+  top_cause?: string;
+};
+export type AnalyticsCostMix = {
+  provider: string;
+  fresh_usd: number;
+  write_usd: number;
+  read_usd: number;
+  unpriced_tokens?: number;
+  /** `reported`, or `reported_zero` when the provider always says 0. */
+  write_reporting?: string;
+  recorded_usd?: number;
+};
+export type AnalyticsHomeThreadCache = {
+  thread: string;
+  bot: string;
+  workspace?: string | null;
+  turns: number;
+  context_per_call: number;
+  peak_context: number;
+  median_gap_minutes?: number | null;
+  gaps_under_5: number;
+  gaps_5_to_60: number;
+  gaps_over_60: number;
+  rebuild_tokens: number;
+  rebuild_usd: number;
+};
+export type AnalyticsBotOverhead = { bot: string; turns: number; avg_tokens: number; avg_context: number; share: number };
+export type AnalyticsPrice = {
+  provider: string;
+  model: string;
+  input: number;
+  cache_read: number;
+  cache_write?: number | null;
+  output: number;
+  source: string;
+};
+/** Cache health and waste; every dollar figure is a list-price estimate. */
+export type AnalyticsCacheReport = {
+  days: number;
+  period_cost_usd?: number;
+  waste?: AnalyticsWasteItem[];
+  rules?: AnalyticsWasteRule[];
+  limits?: string[];
+  hit_rates?: AnalyticsCacheHitRate[];
+  rebuilds_by_cause?: AnalyticsRebuildCause[];
+  rebuilds_by_bot?: AnalyticsRebuildGroup[];
+  rebuilds_by_thread?: AnalyticsRebuildGroup[];
+  cost_mix?: AnalyticsCostMix[];
+  home_threads?: AnalyticsHomeThreadCache[];
+  overhead?: AnalyticsBotOverhead[];
+  prices?: AnalyticsPrice[];
+};
 /** Token usage by bot, harness and model, for the Settings table. */
 export type AnalyticsUsage = {
   bot: string | null;

@@ -488,6 +488,15 @@ pub(crate) fn synthetic_permission_requests(pending: &[Value]) -> Vec<ClaudeStre
         .collect()
 }
 
+/// Model named by a `message_start` or assistant line. `message_delta` has none.
+pub(crate) fn message_model(value: &Value) -> Option<&str> {
+    value
+        .get("event")
+        .unwrap_or(value)
+        .pointer("/message/model")
+        .and_then(Value::as_str)
+}
+
 /// Live context snapshot from `message_start` / `message_delta` (and assistant
 /// echoes). `result.usage` is only the last API call, not a turn aggregate, and
 /// is rejected; the turn aggregate lives in `modelUsage` (see
@@ -1192,6 +1201,16 @@ mod tests {
             }
             other => panic!("expected repaired payload, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn message_model_reads_stream_and_assistant_lines() {
+        let start = json!({"type":"stream_event","event":{"type":"message_start","message":{"model":"m"}}});
+        assert_eq!(message_model(&start), Some("m"));
+        let assistant = json!({"type":"assistant","message":{"model":"n"}});
+        assert_eq!(message_model(&assistant), Some("n"));
+        let delta = json!({"type":"stream_event","event":{"type":"message_delta","usage":{}}});
+        assert_eq!(message_model(&delta), None);
     }
 
     #[test]

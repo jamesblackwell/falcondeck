@@ -173,6 +173,99 @@ Agents read the same report with `falcondeck_get` resource `automation.health`
 (`filters.days`, default 7, at most 90). It is answered on the computer only;
 paired remote clients are refused, like the rest of analytics.
 
+## Cache health and waste
+
+`GET /api/analytics/cache?days=N` powers the Waste and Cache tabs. It is built
+at read time by `app/analytics/cache.rs` from usage records (read 30 days past
+the period, so a period's first turn is compared with the turn before it),
+`turn`, `context` and `compact` events, automation runs and existing
+automation flags. Rules, thresholds and prices live in one place at the top of
+that file and are served with the report, so the panel shows what it applied.
+
+A rebuild is a turn whose write exceeds normal growth by at least half the
+thread's previous context, and is at least 20k tokens. It is not a fixed size:
+compactions write about 39k on average and are invisible to any size rule.
+A captured first-call hit is checked first and reads "can't tell", whatever
+else is on record: the cache was warm, so nothing broke it. Otherwise the
+causes, in order: first turn, idle gap of 60 minutes or more (Claude's TTL edge
+is sharp, 98% reads at 55 to 60 minutes and 6% at 60 to 65), recorded
+compaction, model switch, effort switch, then prefix change. A compaction
+partway through a turn whose first call hit therefore reads "can't tell" and
+Repeat compaction undercounts it, which errs towards a missed flag.
+
+Turns are grouped per thread by a stable key, provider plus the id's per-turn
+part: Claude's shared stamp, or the other providers' id without its model
+suffix. Records with no such key join only if they are the same provider,
+under 2 seconds apart and on another model, so two quick turns stay two turns. A
+turn's end is its first record, so a slower model's late record cannot reorder
+the turns around it.
+
+Claude totals include sub-agents, so a large write proves nothing alone. Against
+transcripts, 165 of 168 idle-gap rebuilds were true first-call misses, but one
+of three inferred model switches and the inferred compactions were sub-agent
+writes. So two captures were added: optional `fcr`, `fcw` and `fcm` on the
+carrier usage record (first main-chain call's cache read, write and model) and
+a `compact` event for all providers. A warm first-call miss is a proven prefix
+change only when both turns have the same captured main model and the same
+recorded effort, and no compaction is recorded. A cache miss does not show who
+changed the prefix, or whether the provider dropped the cache, so the report
+blames nobody. With a missed first call but no comparable model or effort, or
+with no first call and a write of 0.8x to 1.2x the context, it reads
+"possible"; anything else reads "can't tell".
+
+Prices are list prices. Claude's come from Anthropic's pricing page: 1-hour
+writes are 2x input, and reads on Opus 5.5 and Sonnet 5.5 are 0.05x, not the
+usual 0.1x. A fit of recorded Claude cost over 3,000 records gives the same
+rates. Haiku 5.5 changes price past 100k tokens per request. Codex and Grok
+rates come from third-party listings; long-context tiers are ignored. Models
+not in the table show tokens and no dollars, which covers OpenCode's plans.
+
+Codex, Grok and OpenCode cache writes are reported as 0, not absent: Codex
+`cache_write_input_tokens` was 0 across 8,345 requests and 1.52B input, Grok
+`cacheCreationTokens` 0 across 160 turns, OpenCode `tokens.cache.write` 0 on
+every top model. New input is billed at the input rate, so a rebuild cannot be
+told from new input. They show "New input after a gap" and get no cache flags.
+
+The report reads each file once, with 30 extra days to see past the window
+edge, and computes automation flags from run records without building the
+summary. Waste keeps 100 items per category, so a costly category cannot empty
+another, each hit-rate dimension keeps 50, home
+threads and overhead at 50, and rebuild tables at 200. Rule counts and dollars
+are taken before the cap and the tiles use them.
+
+Rule counts over the 4 days to 7 November 2026, on $2,411 of list-price usage:
+
+| Rule | Flagged | Estimated |
+| --- | --- | --- |
+| Prefix change (needs new records) | 0 | - |
+| Possible prefix change | 4 | $5 |
+| Repeat idle rebuilds | 11 | $140 |
+| Large rebuild | 1 | $3 |
+| Model or effort switch | 2 | $3 |
+| Repeat compaction (needs new records) | 0 | - |
+| Runs with nothing to do | 3 | $20 |
+| Spent, then failed | 2 | $8 |
+| Quiet bot turns | 1 | $2 |
+| Oversized context | 2 | $25 |
+| Growing without compaction | 5 | $10 |
+
+To recount, run the ignored `report_rule_counts_from_a_real_state_directory`
+test with `FALCONDECK_CACHE_REPORT_HOME` set to a state directory.
+
+Not flagged, on purpose. Heavy tasks with nothing to show: 18 threads over $10
+had no file, commit or task records, yet 12 of them had run `git commit`. `commit` events
+caught 5 of the 27 threads whose transcripts ran `git commit`, so that signal
+needs fixing first. Acknowledgement-only turns: the `ack` flag is set on 2 of
+4,276 agent messages, so Quiet bot turns uses output size and absence of action
+instead. Cancelled runs usually leave no usage record, and failed turns cannot
+be told from interrupted ones.
+
+First turns are 630 rebuilds and $326 over those 4 days, the largest cause. They
+are the price of starting and are shown but not flagged.
+
+A daily or weekly offender summary for bots would be easy: expose this report
+as a `falcondeck_get` resource next to `automation.health`. Not built.
+
 ## API
 
 - `GET /api/analytics`: settings, folder, bytes used, and `usage_health` per
@@ -193,6 +286,7 @@ paired remote clients are refused, like the rest of analytics.
   agent messages, files (with days written by more than one thread), per-bot and
   per-provider turns, user messages per project, and a token-usage rollup by
   bot, harness and model (`usage`).
+- `GET /api/analytics/cache?days=N`: the cache health and waste report above.
 - `GET /api/analytics/usage?days=N&group=bot|provider|model|thread|day`: token
   usage totals for the period, one row per group value plus overall totals.
   `group=thread` rows also carry per-thread detail: bot, workspace and project,

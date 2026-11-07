@@ -2,15 +2,19 @@
    Renders the Settings → Analytics panel against a stubbed daemon with a full
    period of invented data, so tab layouts, bounded tables and filters can be
    checked without live analytics. `?tab=<AnalyticsTab>` picks the tab,
-   `?theme=light|dark` the mode, `?state=loading|empty` the first-run states. */
+   `?theme=light|dark` the mode, `?state=loading|empty` the first-run states,
+   `?state=prefix` adds a proven prefix change, which real records lack so far.
+   The cache report is real-shaped: real figures, names replaced. */
 import { StrictMode } from "react";
 import { createRoot } from "react-dom/client";
 
-import type { AnalyticsStatus, AnalyticsSummary, AnalyticsUsageReport } from "@falcondeck/client-core";
+import type { AnalyticsCacheReport, AnalyticsStatus, AnalyticsSummary, AnalyticsUsageReport } from "@falcondeck/client-core";
 import { ToastProvider, initAppearance, updateAppearance } from "@falcondeck/ui";
 
 import { AnalyticsPanel } from "./components/settings/AnalyticsPanel";
 import { ANALYTICS_TABS } from "./components/settings/analytics/analytics-utils";
+
+import cacheReport from "./analytics-qa-cache.json";
 
 import "./index.css";
 
@@ -167,10 +171,40 @@ const prompts = Array.from({ length: empty ? 0 : 40 }, (_, index) => ({
   text: "Make the analytics panel tidy and usable, with tabs and bounded tables.",
 }));
 
+const cache: AnalyticsCacheReport =
+  fixtureState === "prefix"
+    ? {
+        ...cacheReport,
+        rules: cacheReport.rules.map((rule) =>
+          rule.id === "prefix_change"
+            ? { ...rule, flagged: 1, estimated_usd: 3.3 }
+            : rule,
+        ),
+        waste: [
+          {
+            rule: "prefix_change",
+            group: "cache",
+            severity: "high",
+            certainty: "proven",
+            label: "Juno - CPO",
+            reason:
+              "First call missed a warm cache 2 times: same main model and effort, no compaction recorded, 412k rewritten. The records don't show what changed",
+            estimated_usd: 3.3,
+            occurrences: 2,
+            thread: "thread-home",
+            workspace: "workspace-1",
+          },
+          ...cacheReport.waste,
+        ],
+      }
+    : cacheReport;
+
 window.fetch = async (input) => {
   const url = String(input);
   if (fixtureState === "loading") await new Promise(() => {});
-  const body = url.includes("/summary")
+  const body = url.includes("/cache")
+    ? empty ? { days: 30 } : cache
+    : url.includes("/summary")
     ? empty ? emptySummary : summary
     : url.includes("/usage")
       ? empty ? { ...threads, totals: totals(0), rows: [] } : threads
