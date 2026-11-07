@@ -83,16 +83,61 @@ const XAI: &str = "xAI list price via third-party listings; long-context tier ig
 /// List prices per million tokens. Longest prefix wins; anything not listed
 /// has no estimate rather than an invented one.
 const PRICES: &[(&str, &str, Price, &str)] = &[
-    ("claude", "claude-fable-5-1", price(10.0, 0.25, Some(20.0), 50.0), ANTHROPIC),
-    ("claude", "claude-fable-5", price(10.0, 1.0, Some(20.0), 50.0), ANTHROPIC),
-    ("claude", "claude-opus-5-5", price(4.0, 0.2, Some(8.0), 20.0), ANTHROPIC),
-    ("claude", "claude-opus-5", price(5.0, 0.5, Some(10.0), 25.0), ANTHROPIC),
-    ("claude", "claude-sonnet-5-5", price(2.0, 0.1, Some(4.0), 10.0), ANTHROPIC),
-    ("claude", "claude-sonnet-5", price(2.0, 0.2, Some(4.0), 10.0), ANTHROPIC),
-    ("claude", "claude-haiku-5-5", price(0.1, 0.01, Some(0.2), 0.5), ANTHROPIC),
+    (
+        "claude",
+        "claude-fable-5-1",
+        price(10.0, 0.25, Some(20.0), 50.0),
+        ANTHROPIC,
+    ),
+    (
+        "claude",
+        "claude-fable-5",
+        price(10.0, 1.0, Some(20.0), 50.0),
+        ANTHROPIC,
+    ),
+    (
+        "claude",
+        "claude-opus-5-5",
+        price(4.0, 0.2, Some(8.0), 20.0),
+        ANTHROPIC,
+    ),
+    (
+        "claude",
+        "claude-opus-5",
+        price(5.0, 0.5, Some(10.0), 25.0),
+        ANTHROPIC,
+    ),
+    (
+        "claude",
+        "claude-sonnet-5-5",
+        price(2.0, 0.1, Some(4.0), 10.0),
+        ANTHROPIC,
+    ),
+    (
+        "claude",
+        "claude-sonnet-5",
+        price(2.0, 0.2, Some(4.0), 10.0),
+        ANTHROPIC,
+    ),
+    (
+        "claude",
+        "claude-haiku-5-5",
+        price(0.1, 0.01, Some(0.2), 0.5),
+        ANTHROPIC,
+    ),
     ("codex", "gpt-6.1-sol", price(2.0, 0.1, None, 10.0), OPENAI),
-    ("codex", "gpt-6.1-terra", price(1.0, 0.05, None, 5.0), OPENAI),
-    ("grok", "grok-4.7-build-fast", price(4.0, 1.0, None, 12.0), XAI),
+    (
+        "codex",
+        "gpt-6.1-terra",
+        price(1.0, 0.05, None, 5.0),
+        OPENAI,
+    ),
+    (
+        "grok",
+        "grok-4.7-build-fast",
+        price(4.0, 1.0, None, 12.0),
+        XAI,
+    ),
     ("grok", "grok-4.7-build", price(2.0, 0.5, None, 6.0), XAI),
 ];
 /// Haiku 5.5 costs five times more once a prompt passes 100k tokens.
@@ -166,11 +211,19 @@ impl Turn {
     /// What the turn paid to put tokens in cache. Only Claude reports writes;
     /// elsewhere new input is the nearest measure and is not called a write.
     fn written(&self) -> u64 {
-        if self.reports_writes() { self.write } else { self.fresh }
+        if self.reports_writes() {
+            self.write
+        } else {
+            self.fresh
+        }
     }
 
     fn written_usd(&self) -> f64 {
-        if self.reports_writes() { self.usd.write } else { self.usd.fresh }
+        if self.reports_writes() {
+            self.usd.write
+        } else {
+            self.usd.fresh
+        }
     }
 
     fn reports_writes(&self) -> bool {
@@ -190,8 +243,14 @@ fn prompt(record: &UsageRecord) -> u64 {
 fn turn_events(records: &[Record]) -> HashMap<&str, Vec<(f64, u64, u64, bool)>> {
     let mut events: HashMap<&str, Vec<(f64, u64, u64, bool)>> = HashMap::new();
     for record in records {
-        if let Record::Turn { t, th, ok, ms, ctx, .. } = record {
-            events.entry(th).or_default().push((seconds(*t), *ms, *ctx, *ok));
+        if let Record::Turn {
+            t, th, ok, ms, ctx, ..
+        } = record
+        {
+            events
+                .entry(th)
+                .or_default()
+                .push((seconds(*t), *ms, *ctx, *ok));
         }
     }
     for list in events.values_mut() {
@@ -214,7 +273,8 @@ pub(super) fn build_turns(usage: &[UsageRecord], records: &[Record]) -> Vec<Vec<
         for record in list {
             match groups.last_mut() {
                 Some(group)
-                    if seconds(record.t) - seconds(group[group.len() - 1].t) < SAME_TURN_SECONDS =>
+                    if seconds(record.t) - seconds(group[group.len() - 1].t)
+                        < SAME_TURN_SECONDS =>
                 {
                     group.push(record);
                 }
@@ -222,7 +282,12 @@ pub(super) fn build_turns(usage: &[UsageRecord], records: &[Record]) -> Vec<Vec<
             }
         }
         let thread_events = events.get(thread).map_or(&[][..], Vec::as_slice);
-        threads.push(groups.iter().map(|group| build_turn(group, thread_events)).collect());
+        threads.push(
+            groups
+                .iter()
+                .map(|group| build_turn(group, thread_events))
+                .collect(),
+        );
     }
     threads
 }
@@ -237,7 +302,11 @@ fn build_turn(group: &[&UsageRecord], events: &[(f64, u64, u64, bool)]) -> Turn 
         .iter()
         .filter(|event| (event.0 - end).abs() < TURN_EVENT_SECONDS)
         .min_by(|a, b| (a.0 - end).abs().total_cmp(&(b.0 - end).abs()));
-    let calls = group.iter().filter_map(|record| record.calls).sum::<u64>().max(1);
+    let calls = group
+        .iter()
+        .filter_map(|record| record.calls)
+        .sum::<u64>()
+        .max(1);
     let prompts = group.iter().map(|record| prompt(record)).sum::<u64>();
     let mean_prompt = prompts / calls;
     let mut turn = Turn {
@@ -250,7 +319,10 @@ fn build_turn(group: &[&UsageRecord], events: &[(f64, u64, u64, bool)]) -> Turn 
         start: end - event.map_or(0.0, |event| event.1 as f64 / 1000.0),
         end,
         calls,
-        context: event.map(|event| event.2).filter(|peak| *peak > 0).unwrap_or(mean_prompt),
+        context: event
+            .map(|event| event.2)
+            .filter(|peak| *peak > 0)
+            .unwrap_or(mean_prompt),
         ok: event.is_none_or(|event| event.3),
         first_call: group.iter().find_map(|record| record.first_call()),
         priced: true,
@@ -267,7 +339,13 @@ fn build_turn(group: &[&UsageRecord], events: &[(f64, u64, u64, bool)]) -> Turn 
         let per_call = prompt(record) / record.calls.unwrap_or(calls).max(1);
         match price_for(&record.prov, &record.model, per_call) {
             Some(price) => {
-                let usd = dollars(price, record.uncached_input, record.cr, record.cw, record.out);
+                let usd = dollars(
+                    price,
+                    record.uncached_input,
+                    record.cr,
+                    record.cw,
+                    record.out,
+                );
                 turn.usd.fresh += usd.fresh;
                 turn.usd.write += usd.write;
                 turn.usd.read += usd.read;
@@ -400,7 +478,10 @@ fn compactions(records: &[Record]) -> HashMap<&str, Vec<f64>> {
 fn run_window(run: &AutomationRun) -> Option<(f64, f64)> {
     let start = run.started_at?;
     let finish = run.finished_at?;
-    Some((seconds(start) - WINDOW_SECONDS, seconds(finish) + WINDOW_SECONDS))
+    Some((
+        seconds(start) - WINDOW_SECONDS,
+        seconds(finish) + WINDOW_SECONDS,
+    ))
 }
 
 fn is_finished(status: &AutomationRunStatus) -> bool {
@@ -424,7 +505,10 @@ fn runs_by_thread(runs: &[AutomationRun]) -> HashMap<&str, Vec<&AutomationRun>> 
     found
 }
 
-fn run_of<'a>(turn: &Turn, runs: &HashMap<&str, Vec<&'a AutomationRun>>) -> Option<&'a AutomationRun> {
+fn run_of<'a>(
+    turn: &Turn,
+    runs: &HashMap<&str, Vec<&'a AutomationRun>>,
+) -> Option<&'a AutomationRun> {
     runs.get(turn.thread.as_str())?.iter().copied().find(|run| {
         run_window(run).is_some_and(|(start, end)| turn.end >= start && turn.end <= end)
     })
@@ -446,7 +530,9 @@ pub(super) fn find_rebuilds(threads: &[Vec<Turn>], input: &CacheInput<'_>) -> Ve
             }
             let previous = index.checked_sub(1).map(|at| &turns[at]);
             let from = previous.map_or(turn.start, |previous| previous.end) - WINDOW_SECONDS;
-            let was_compacted = marks.iter().any(|at| *at >= from && *at <= turn.end + WINDOW_SECONDS);
+            let was_compacted = marks
+                .iter()
+                .any(|at| *at >= from && *at <= turn.end + WINDOW_SECONDS);
             let Some(cause) = classify(turn, previous, was_compacted) else {
                 continue;
             };
@@ -473,12 +559,14 @@ fn hit_rates(usage: &[&UsageRecord], labels: &Labels) -> Vec<AnalyticsCacheHitRa
             keys.push(("bot", labels.bot_name(bot), None));
         }
         for (dimension, key, provider) in keys {
-            let row = rows.entry((dimension, key.clone())).or_insert_with(|| AnalyticsCacheHitRate {
-                dimension: dimension.to_string(),
-                key,
-                provider,
-                ..AnalyticsCacheHitRate::default()
-            });
+            let row =
+                rows.entry((dimension, key.clone()))
+                    .or_insert_with(|| AnalyticsCacheHitRate {
+                        dimension: dimension.to_string(),
+                        key,
+                        provider,
+                        ..AnalyticsCacheHitRate::default()
+                    });
             row.fresh_tokens += record.uncached_input;
             row.read_tokens += record.cr;
             row.write_tokens += record.cw;
@@ -487,11 +575,17 @@ fn hit_rates(usage: &[&UsageRecord], labels: &Labels) -> Vec<AnalyticsCacheHitRa
     let mut rows: Vec<_> = rows.into_values().collect();
     for row in &mut rows {
         let whole = row.fresh_tokens + row.read_tokens + row.write_tokens;
-        row.hit_rate = if whole == 0 { 0.0 } else { row.read_tokens as f64 / whole as f64 };
+        row.hit_rate = if whole == 0 {
+            0.0
+        } else {
+            row.read_tokens as f64 / whole as f64
+        };
     }
     rows.sort_by(|a, b| {
-        a.dimension.cmp(&b.dimension).then((b.fresh_tokens + b.read_tokens + b.write_tokens)
-            .cmp(&(a.fresh_tokens + a.read_tokens + a.write_tokens)))
+        a.dimension.cmp(&b.dimension).then(
+            (b.fresh_tokens + b.read_tokens + b.write_tokens)
+                .cmp(&(a.fresh_tokens + a.read_tokens + a.write_tokens)),
+        )
     });
     rows
 }
@@ -499,11 +593,13 @@ fn hit_rates(usage: &[&UsageRecord], labels: &Labels) -> Vec<AnalyticsCacheHitRa
 fn cost_mix(usage: &[&UsageRecord]) -> Vec<AnalyticsCostMix> {
     let mut rows: BTreeMap<&str, AnalyticsCostMix> = BTreeMap::new();
     for record in usage {
-        let row = rows.entry(&record.prov).or_insert_with(|| AnalyticsCostMix {
-            provider: record.prov.clone(),
-            write_reporting: "reported_zero".to_string(),
-            ..AnalyticsCostMix::default()
-        });
+        let row = rows
+            .entry(&record.prov)
+            .or_insert_with(|| AnalyticsCostMix {
+                provider: record.prov.clone(),
+                write_reporting: "reported_zero".to_string(),
+                ..AnalyticsCostMix::default()
+            });
         if record.cw > 0 {
             row.write_reporting = "reported".to_string();
         }
@@ -585,10 +681,12 @@ fn add_rebuild_tables(report: &mut AnalyticsCacheReport, rebuilds: &[Rebuild], l
     let mut causes: BTreeMap<Cause, AnalyticsRebuildCause> = BTreeMap::new();
     let (mut bots, mut threads) = (BTreeMap::new(), BTreeMap::new());
     for rebuild in rebuilds {
-        let row = causes.entry(rebuild.cause).or_insert_with(|| AnalyticsRebuildCause {
-            cause: rebuild.cause.id().to_string(),
-            ..AnalyticsRebuildCause::default()
-        });
+        let row = causes
+            .entry(rebuild.cause)
+            .or_insert_with(|| AnalyticsRebuildCause {
+                cause: rebuild.cause.id().to_string(),
+                ..AnalyticsRebuildCause::default()
+            });
         row.count += 1;
         row.tokens += rebuild.turn.written();
         row.estimated_usd += rebuild.turn.written_usd();
@@ -600,10 +698,18 @@ fn add_rebuild_tables(report: &mut AnalyticsCacheReport, rebuilds: &[Rebuild], l
             add_group(&mut bots, name.clone(), name, rebuild, None);
         }
         let thread = &rebuild.turn.thread;
-        add_group(&mut threads, thread.clone(), labels.title(thread), rebuild, bot);
+        add_group(
+            &mut threads,
+            thread.clone(),
+            labels.title(thread),
+            rebuild,
+            bot,
+        );
     }
     report.rebuilds_by_cause = causes.into_values().collect();
-    report.rebuilds_by_cause.sort_by(|a, b| b.estimated_usd.total_cmp(&a.estimated_usd));
+    report
+        .rebuilds_by_cause
+        .sort_by(|a, b| b.estimated_usd.total_cmp(&a.estimated_usd));
     report.rebuilds_by_bot = finish_groups(bots);
     report.rebuilds_by_thread = finish_groups(threads);
 }
@@ -617,7 +723,9 @@ fn home_threads(
     let mut rows = Vec::new();
     for turns in threads {
         let Some(first) = turns.first() else { continue };
-        let Some(bot) = labels.bots.get(&first.thread) else { continue };
+        let Some(bot) = labels.bots.get(&first.thread) else {
+            continue;
+        };
         let mut row = AnalyticsHomeThreadCache {
             thread: first.thread.clone(),
             bot: bot.clone(),
@@ -633,7 +741,9 @@ fn home_threads(
             prompts += turn.fresh + turn.read + turn.write;
             calls += turn.calls;
             row.peak_context = row.peak_context.max(turn.context);
-            let Some(previous) = index.checked_sub(1).map(|at| &turns[at]) else { continue };
+            let Some(previous) = index.checked_sub(1).map(|at| &turns[at]) else {
+                continue;
+            };
             let gap = ((turn.start - previous.end) / 60.0).max(0.0);
             gaps.push(gap);
             match gap {
@@ -647,7 +757,10 @@ fn home_threads(
         }
         row.context_per_call = prompts / calls.max(1);
         row.median_gap_minutes = median(&mut gaps);
-        for rebuild in rebuilds.iter().filter(|rebuild| rebuild.turn.thread == row.thread) {
+        for rebuild in rebuilds
+            .iter()
+            .filter(|rebuild| rebuild.turn.thread == row.thread)
+        {
             row.rebuild_tokens += rebuild.turn.written();
             row.rebuild_usd += rebuild.turn.written_usd();
         }
@@ -657,7 +770,12 @@ fn home_threads(
     rows
 }
 
-fn overhead(threads: &[Vec<Turn>], records: &[Record], since: f64, labels: &Labels) -> Vec<AnalyticsBotOverhead> {
+fn overhead(
+    threads: &[Vec<Turn>],
+    records: &[Record],
+    since: f64,
+    labels: &Labels,
+) -> Vec<AnalyticsBotOverhead> {
     let mut injected: BTreeMap<String, (u64, u64)> = BTreeMap::new();
     for record in records {
         if let Record::Context { t, th, tok } = record
@@ -691,7 +809,11 @@ fn overhead(threads: &[Vec<Turn>], records: &[Record], since: f64, labels: &Labe
                 turns: *turns,
                 avg_tokens,
                 avg_context,
-                share: if avg_context == 0 { 0.0 } else { avg_tokens as f64 / avg_context as f64 },
+                share: if avg_context == 0 {
+                    0.0
+                } else {
+                    avg_tokens as f64 / avg_context as f64
+                },
             }
         })
         .collect();
@@ -720,7 +842,12 @@ fn plural(count: u64, one: &str) -> String {
 }
 
 /// Where a flag should link: the automation that caused it, else the thread.
-fn point_at(item: &mut AnalyticsWasteItem, turn: &Turn, automation: Option<&(String, String)>, labels: &Labels) {
+fn point_at(
+    item: &mut AnalyticsWasteItem,
+    turn: &Turn,
+    automation: Option<&(String, String)>,
+    labels: &Labels,
+) {
     item.workspace = Some(turn.workspace.clone());
     item.thread = Some(turn.thread.clone());
     item.bot = labels.bot_of(&turn.thread).cloned();
@@ -743,7 +870,9 @@ fn item(rule: &str, group: &str, certainty: &str) -> AnalyticsWasteItem {
 
 /// Rebuilds of one cause grouped by what to fix: the automation that caused
 /// them when there is one, otherwise the thread.
-fn offenders<'a>(rebuilds: impl Iterator<Item = &'a Rebuild>) -> BTreeMap<String, Vec<&'a Rebuild>> {
+fn offenders<'a>(
+    rebuilds: impl Iterator<Item = &'a Rebuild>,
+) -> BTreeMap<String, Vec<&'a Rebuild>> {
     let mut groups: BTreeMap<String, Vec<&Rebuild>> = BTreeMap::new();
     for rebuild in rebuilds {
         let key = rebuild
@@ -776,20 +905,33 @@ fn cache_waste(rebuilds: &[Rebuild], input: &CacheInput<'_>) -> Vec<AnalyticsWas
     let labels = input.labels;
     let mut items = Vec::new();
     let mut repeated: Vec<&Rebuild> = Vec::new();
-    for group in offenders(rebuilds.iter().filter(|rebuild| rebuild.cause == Cause::IdleGap)).values() {
+    for group in offenders(
+        rebuilds
+            .iter()
+            .filter(|rebuild| rebuild.cause == Cause::IdleGap),
+    )
+    .values()
+    {
         let count = group.len() as u64;
         let usd: f64 = group.iter().map(|rebuild| rebuild.turn.written_usd()).sum();
         if count < REPEAT_REBUILDS || usd < REPEAT_REBUILD_USD {
             continue;
         }
         repeated.extend(group.iter().copied());
-        let mut gaps: Vec<f64> = group.iter().filter_map(|rebuild| rebuild.gap_minutes).collect();
+        let mut gaps: Vec<f64> = group
+            .iter()
+            .filter_map(|rebuild| rebuild.gap_minutes)
+            .collect();
         let gap = median(&mut gaps).unwrap_or(0.0);
         let tokens: u64 = group.iter().map(|rebuild| rebuild.turn.write).sum();
         let last = group[group.len() - 1];
         let mut flagged = item("repeat_idle_gap", "cache", "estimate");
         point_at(&mut flagged, &last.turn, last.automation.as_ref(), labels);
-        flagged.flags = automation_flags(input, flagged.automation.as_ref(), &["cache_cold_reuse", "bot_home_frequent"]);
+        flagged.flags = automation_flags(
+            input,
+            flagged.automation.as_ref(),
+            &["cache_cold_reuse", "bot_home_frequent"],
+        );
         let cold = if flagged.flags.iter().any(|flag| flag == "cache_cold_reuse") {
             "; also flagged Cold cache reuse"
         } else {
@@ -809,7 +951,12 @@ fn cache_waste(rebuilds: &[Rebuild], input: &CacheInput<'_>) -> Vec<AnalyticsWas
         let in_repeat = repeated.iter().any(|seen| std::ptr::eq(*seen, rebuild));
         if rebuild.cause == Cause::IdleGap && !in_repeat && usd >= BIG_REBUILD_USD {
             let mut flagged = item("big_rebuild", "cache", "estimate");
-            point_at(&mut flagged, &rebuild.turn, rebuild.automation.as_ref(), labels);
+            point_at(
+                &mut flagged,
+                &rebuild.turn,
+                rebuild.automation.as_ref(),
+                labels,
+            );
             flagged.reason = format!(
                 "One rebuild after {} idle rewrote {}",
                 gap_label(rebuild.gap_minutes.unwrap_or(0.0)),
@@ -821,15 +968,30 @@ fn cache_waste(rebuilds: &[Rebuild], input: &CacheInput<'_>) -> Vec<AnalyticsWas
         }
         if matches!(rebuild.cause, Cause::ModelSwitch | Cause::EffortSwitch) && usd >= SWITCH_USD {
             let mut flagged = item("switch", "cache", "estimate");
-            point_at(&mut flagged, &rebuild.turn, rebuild.automation.as_ref(), labels);
-            let what = if rebuild.cause == Cause::ModelSwitch { "A model" } else { "An effort" };
+            point_at(
+                &mut flagged,
+                &rebuild.turn,
+                rebuild.automation.as_ref(),
+                labels,
+            );
+            let what = if rebuild.cause == Cause::ModelSwitch {
+                "A model"
+            } else {
+                "An effort"
+            };
             flagged.reason = format!("{what} switch rewrote {}", tokens_label(rebuild.turn.write));
             flagged.estimated_usd = usd;
             flagged.occurrences = 1;
             items.push(flagged);
         }
     }
-    for group in offenders(rebuilds.iter().filter(|rebuild| rebuild.cause == Cause::PrefixChange)).values() {
+    for group in offenders(
+        rebuilds
+            .iter()
+            .filter(|rebuild| rebuild.cause == Cause::PrefixChange),
+    )
+    .values()
+    {
         let last = group[group.len() - 1];
         let mut flagged = item("prefix_change", "cache", "proven");
         flagged.severity = "high".to_string();
@@ -861,7 +1023,13 @@ fn cache_waste(rebuilds: &[Rebuild], input: &CacheInput<'_>) -> Vec<AnalyticsWas
         flagged.occurrences = group.len() as u64;
         items.push(flagged);
     }
-    for group in offenders(rebuilds.iter().filter(|rebuild| rebuild.cause == Cause::Compaction)).values() {
+    for group in offenders(
+        rebuilds
+            .iter()
+            .filter(|rebuild| rebuild.cause == Cause::Compaction),
+    )
+    .values()
+    {
         let count = group.len() as u64;
         if count < REPEAT_COMPACTIONS {
             continue;
@@ -899,10 +1067,16 @@ fn result_waste(threads: &[Vec<Turn>], input: &CacheInput<'_>) -> Vec<AnalyticsW
     };
     let mut by_automation: BTreeMap<&str, Vec<&AutomationRun>> = BTreeMap::new();
     for run in input.runs.iter().filter(|run| is_finished(&run.status)) {
-        by_automation.entry(&run.automation_id).or_default().push(run);
+        by_automation
+            .entry(&run.automation_id)
+            .or_default()
+            .push(run);
     }
     for (id, runs) in &mut by_automation {
-        let summary = input.automations.iter().find(|automation| automation.id.as_deref() == Some(*id));
+        let summary = input
+            .automations
+            .iter()
+            .find(|automation| automation.id.as_deref() == Some(*id));
         // A paused automation has already been dealt with.
         if summary.is_some_and(|automation| automation.state == "paused") {
             continue;
@@ -929,9 +1103,16 @@ fn result_waste(threads: &[Vec<Turn>], input: &CacheInput<'_>) -> Vec<AnalyticsW
         flagged.automation = Some((*id).to_string());
         flagged.label = last.automation_name.clone();
         flagged.bot = last.run_as_bot.clone();
-        flagged.flags = automation_flags(input, flagged.automation.as_ref(), &["rarely_useful", "very_frequent"]);
+        flagged.flags = automation_flags(
+            input,
+            flagged.automation.as_ref(),
+            &["rarely_useful", "very_frequent"],
+        );
         flagged.reason = if streak >= NO_ACTION_STREAK {
-            format!("Last {streak} runs found nothing to do; {} of {total} in the period", idle.len())
+            format!(
+                "Last {streak} runs found nothing to do; {} of {total} in the period",
+                idle.len()
+            )
         } else {
             format!("{} of {total} runs found nothing to do", idle.len())
         };
@@ -940,7 +1121,11 @@ fn result_waste(threads: &[Vec<Turn>], input: &CacheInput<'_>) -> Vec<AnalyticsW
         items.push(flagged);
     }
     let runs = runs_by_thread(input.runs);
-    for turn in threads.iter().flatten().filter(|turn| turn.end >= since && !turn.ok) {
+    for turn in threads
+        .iter()
+        .flatten()
+        .filter(|turn| turn.end >= since && !turn.ok)
+    {
         let usd = turn.usd.total();
         if usd < FAILED_USD {
             continue;
@@ -949,7 +1134,10 @@ fn result_waste(threads: &[Vec<Turn>], input: &CacheInput<'_>) -> Vec<AnalyticsW
         let automation = run.map(|run| (run.automation_id.clone(), run.automation_name.clone()));
         let mut flagged = item("failed_spend", "result", "estimate");
         point_at(&mut flagged, turn, automation.as_ref(), labels);
-        flagged.reason = format!("Turn ended without finishing after {} of context read and written", tokens_label(turn.fresh + turn.read + turn.write));
+        flagged.reason = format!(
+            "Turn ended without finishing after {} of context read and written",
+            tokens_label(turn.fresh + turn.read + turn.write)
+        );
         flagged.estimated_usd = usd;
         flagged.occurrences = 1;
         items.push(flagged);
@@ -991,7 +1179,9 @@ fn quiet_turns(threads: &[Vec<Turn>], input: &CacheInput<'_>) -> Vec<AnalyticsWa
         if !input.labels.bots.contains_key(&first.thread) {
             continue;
         }
-        let thread_actions = actions.get(first.thread.as_str()).map_or(&[][..], Vec::as_slice);
+        let thread_actions = actions
+            .get(first.thread.as_str())
+            .map_or(&[][..], Vec::as_slice);
         let quiet: Vec<&Turn> = turns
             .iter()
             .filter(|turn| turn.end >= since && is_quiet(turn, thread_actions))
@@ -1003,9 +1193,8 @@ fn quiet_turns(threads: &[Vec<Turn>], input: &CacheInput<'_>) -> Vec<AnalyticsWa
         }
         let mut flagged = item("quiet_bot_turns", "result", "estimate");
         point_at(&mut flagged, first, None, input.labels);
-        flagged.reason = format!(
-            "{count} home turns replied briefly with no file, commit, task or message",
-        );
+        flagged.reason =
+            format!("{count} home turns replied briefly with no file, commit, task or message",);
         flagged.estimated_usd = usd;
         flagged.occurrences = count;
         items.push(flagged);
@@ -1013,7 +1202,11 @@ fn quiet_turns(threads: &[Vec<Turn>], input: &CacheInput<'_>) -> Vec<AnalyticsWa
     items
 }
 
-fn thread_kind(thread: &str, labels: &Labels, runs: &HashMap<&str, Vec<&AutomationRun>>) -> &'static str {
+fn thread_kind(
+    thread: &str,
+    labels: &Labels,
+    runs: &HashMap<&str, Vec<&AutomationRun>>,
+) -> &'static str {
     if labels.bots.contains_key(thread) {
         "home"
     } else if labels.automations.contains_key(thread) || runs.contains_key(thread) {
@@ -1029,7 +1222,12 @@ fn bloat_waste(threads: &[Vec<Turn>], input: &CacheInput<'_>) -> Vec<AnalyticsWa
     let compacted = compactions(input.records);
     let active: Vec<Vec<&Turn>> = threads
         .iter()
-        .map(|turns| turns.iter().filter(|turn| turn.end >= since).collect::<Vec<_>>())
+        .map(|turns| {
+            turns
+                .iter()
+                .filter(|turn| turn.end >= since)
+                .collect::<Vec<_>>()
+        })
         .filter(|turns: &Vec<&Turn>| !turns.is_empty())
         .collect();
     let peak = |turns: &[&Turn]| turns.iter().map(|turn| turn.context).max().unwrap_or(0);
@@ -1040,7 +1238,10 @@ fn bloat_waste(threads: &[Vec<Turn>], input: &CacheInput<'_>) -> Vec<AnalyticsWa
             .or_default()
             .push(peak(turns) as f64);
     }
-    let sizes: HashMap<&str, usize> = peaks.iter().map(|(kind, list)| (*kind, list.len())).collect();
+    let sizes: HashMap<&str, usize> = peaks
+        .iter()
+        .map(|(kind, list)| (*kind, list.len()))
+        .collect();
     let norms: HashMap<&str, f64> = peaks
         .iter_mut()
         .filter_map(|(kind, list)| Some((*kind, median(list)?)))
@@ -1097,35 +1298,96 @@ fn bloat_waste(threads: &[Vec<Turn>], input: &CacheInput<'_>) -> Vec<AnalyticsWa
 
 fn rules(items: &[AnalyticsWasteItem]) -> Vec<AnalyticsWasteRule> {
     let definitions = [
-        ("prefix_change", "cache", "Prefix change", format!(
-            "A warm Claude turn whose first main-chain call missed the cache, same model and effort, no compaction. Proven; needs records from this build on."
-        )),
-        ("possible_prefix_change", "cache", "Possible prefix change", format!(
-            "On older records: a warm Claude turn that rewrote about the whole context, at least {} tokens. Not proven; an uncaptured compaction looks the same.",
-            tokens_label(POSSIBLE_PREFIX_WRITE),
-        )),
-        ("repeat_idle_gap", "cache", "Repeat idle rebuilds", format!(
-            "{REPEAT_REBUILDS} or more rebuilds after idle gaps past the {TTL_MINUTES:.0}-minute TTL, costing ${REPEAT_REBUILD_USD:.0} or more, on one task or automation."
-        )),
-        ("big_rebuild", "cache", "Large rebuild", format!("One idle-gap rebuild costing ${BIG_REBUILD_USD:.0} or more.")),
-        ("switch", "cache", "Model or effort switch", format!("A switch that rewrote about the whole context, costing ${SWITCH_USD:.0} or more.")),
-        ("repeat_compaction", "cache", "Repeat compaction", format!("{REPEAT_COMPACTIONS} or more recorded compactions that rebuilt the cache on one task.")),
-        ("no_action", "result", "Runs with nothing to do", format!(
-            "An enabled automation with {NO_ACTION_MIN_RUNS}+ runs and {:.0}%+ no action, or the last {NO_ACTION_STREAK}+ runs in a row, spending ${NO_ACTION_USD:.0}+ on them.",
-            NO_ACTION_SHARE * 100.0,
-        )),
-        ("failed_spend", "result", "Spent, then failed", format!("A turn that ended unfinished after costing ${FAILED_USD:.0} or more. Includes turns you interrupted.")),
-        ("quiet_bot_turns", "result", "Quiet bot turns", format!(
-            "{QUIET_MIN_TURNS}+ home turns of at most {QUIET_MAX_CALLS} calls and {QUIET_MAX_OUTPUT} output tokens with no file, commit, task or message, costing ${QUIET_USD:.0}+."
-        )),
-        ("context_outlier", "bloat", "Oversized context", format!(
-            "Peak context over {OUTLIER_MULTIPLE:.0}× the median for home, automation or task threads, and at least {}.",
-            tokens_label(OUTLIER_MIN_CONTEXT),
-        )),
-        ("context_growing", "bloat", "Growing without compaction", format!(
-            "{GROWING_MIN_TURNS}+ turns ending at {} or more, up {GROWING_FACTOR}× or more, with no compaction seen.",
-            tokens_label(GROWING_MIN_CONTEXT),
-        )),
+        (
+            "prefix_change",
+            "cache",
+            "Prefix change",
+            format!(
+                "A warm Claude turn whose first main-chain call missed the cache, same model and effort, no compaction. Proven; needs records from this build on."
+            ),
+        ),
+        (
+            "possible_prefix_change",
+            "cache",
+            "Possible prefix change",
+            format!(
+                "On older records: a warm Claude turn that rewrote about the whole context, at least {} tokens. Not proven; an uncaptured compaction looks the same.",
+                tokens_label(POSSIBLE_PREFIX_WRITE),
+            ),
+        ),
+        (
+            "repeat_idle_gap",
+            "cache",
+            "Repeat idle rebuilds",
+            format!(
+                "{REPEAT_REBUILDS} or more rebuilds after idle gaps past the {TTL_MINUTES:.0}-minute TTL, costing ${REPEAT_REBUILD_USD:.0} or more, on one task or automation."
+            ),
+        ),
+        (
+            "big_rebuild",
+            "cache",
+            "Large rebuild",
+            format!("One idle-gap rebuild costing ${BIG_REBUILD_USD:.0} or more."),
+        ),
+        (
+            "switch",
+            "cache",
+            "Model or effort switch",
+            format!(
+                "A switch that rewrote about the whole context, costing ${SWITCH_USD:.0} or more."
+            ),
+        ),
+        (
+            "repeat_compaction",
+            "cache",
+            "Repeat compaction",
+            format!(
+                "{REPEAT_COMPACTIONS} or more recorded compactions that rebuilt the cache on one task."
+            ),
+        ),
+        (
+            "no_action",
+            "result",
+            "Runs with nothing to do",
+            format!(
+                "An enabled automation with {NO_ACTION_MIN_RUNS}+ runs and {:.0}%+ no action, or the last {NO_ACTION_STREAK}+ runs in a row, spending ${NO_ACTION_USD:.0}+ on them.",
+                NO_ACTION_SHARE * 100.0,
+            ),
+        ),
+        (
+            "failed_spend",
+            "result",
+            "Spent, then failed",
+            format!(
+                "A turn that ended unfinished after costing ${FAILED_USD:.0} or more. Includes turns you interrupted."
+            ),
+        ),
+        (
+            "quiet_bot_turns",
+            "result",
+            "Quiet bot turns",
+            format!(
+                "{QUIET_MIN_TURNS}+ home turns of at most {QUIET_MAX_CALLS} calls and {QUIET_MAX_OUTPUT} output tokens with no file, commit, task or message, costing ${QUIET_USD:.0}+."
+            ),
+        ),
+        (
+            "context_outlier",
+            "bloat",
+            "Oversized context",
+            format!(
+                "Peak context over {OUTLIER_MULTIPLE:.0}× the median for home, automation or task threads, and at least {}.",
+                tokens_label(OUTLIER_MIN_CONTEXT),
+            ),
+        ),
+        (
+            "context_growing",
+            "bloat",
+            "Growing without compaction",
+            format!(
+                "{GROWING_MIN_TURNS}+ turns ending at {} or more, up {GROWING_FACTOR}× or more, with no compaction seen.",
+                tokens_label(GROWING_MIN_CONTEXT),
+            ),
+        ),
     ];
     definitions
         .into_iter()
@@ -1172,7 +1434,11 @@ pub(super) fn build_report(input: &CacheInput<'_>) -> AnalyticsCacheReport {
     let since = seconds(input.since);
     let threads = build_turns(input.usage, input.records);
     let rebuilds = find_rebuilds(&threads, input);
-    let period: Vec<&UsageRecord> = input.usage.iter().filter(|record| record.t >= input.since).collect();
+    let period: Vec<&UsageRecord> = input
+        .usage
+        .iter()
+        .filter(|record| record.t >= input.since)
+        .collect();
     let mut report = AnalyticsCacheReport {
         days: input.days,
         period_cost_usd: threads
@@ -1232,7 +1498,13 @@ mod tests {
             context,
             ok: true,
             priced: true,
-            usd: dollars(price(4.0, 0.2, Some(8.0), 20.0), 0, context.saturating_sub(write), write, 1000),
+            usd: dollars(
+                price(4.0, 0.2, Some(8.0), 20.0),
+                0,
+                context.saturating_sub(write),
+                write,
+                1000,
+            ),
             ..Turn::default()
         }
     }
@@ -1244,15 +1516,36 @@ mod tests {
         assert_eq!((opus.input, opus.read, opus.write), (4.0, 0.2, Some(8.0)));
         let sonnet = price_for("claude", "claude-sonnet-5-5", 50_000).unwrap();
         assert_eq!((sonnet.read, sonnet.write), (0.1, Some(4.0)));
-        assert_eq!(price_for("claude", "claude-sonnet-5", 50_000).unwrap().read, 0.2);
-        assert_eq!(price_for("codex", "gpt-6.1-sol", 50_000).unwrap().write, None);
-        assert_eq!(price_for("grok", "grok-4.7-build-fast", 50_000).unwrap().output, 12.0);
+        assert_eq!(
+            price_for("claude", "claude-sonnet-5", 50_000).unwrap().read,
+            0.2
+        );
+        assert_eq!(
+            price_for("codex", "gpt-6.1-sol", 50_000).unwrap().write,
+            None
+        );
+        assert_eq!(
+            price_for("grok", "grok-4.7-build-fast", 50_000)
+                .unwrap()
+                .output,
+            12.0
+        );
     }
 
     #[test]
     fn haiku_changes_price_past_a_hundred_thousand_tokens() {
-        assert_eq!(price_for("claude", "claude-haiku-5-5", 99_000).unwrap().input, 0.1);
-        assert_eq!(price_for("claude", "claude-haiku-5-5", 101_000).unwrap().input, 0.5);
+        assert_eq!(
+            price_for("claude", "claude-haiku-5-5", 99_000)
+                .unwrap()
+                .input,
+            0.1
+        );
+        assert_eq!(
+            price_for("claude", "claude-haiku-5-5", 101_000)
+                .unwrap()
+                .input,
+            0.5
+        );
     }
 
     #[test]
@@ -1263,8 +1556,17 @@ mod tests {
 
     #[test]
     fn dollars_split_tokens_by_rate() {
-        let usd = dollars(price(4.0, 0.2, Some(8.0), 20.0), 1_000_000, 1_000_000, 1_000_000, 1_000_000);
-        assert_eq!((usd.fresh, usd.read, usd.write, usd.output), (4.0, 0.2, 8.0, 20.0));
+        let usd = dollars(
+            price(4.0, 0.2, Some(8.0), 20.0),
+            1_000_000,
+            1_000_000,
+            1_000_000,
+            1_000_000,
+        );
+        assert_eq!(
+            (usd.fresh, usd.read, usd.write, usd.output),
+            (4.0, 0.2, 8.0, 20.0)
+        );
         assert_eq!(usd.total(), 32.2);
         // A provider with no write price has nothing at the write rate to add.
         let free = dollars(price(2.0, 0.1, None, 10.0), 0, 1_000_000, 0, 0);
@@ -1274,14 +1576,23 @@ mod tests {
     #[test]
     fn small_writes_and_normal_growth_are_not_rebuilds() {
         let previous = turn(200_000, 5000, 0.0, 10.0);
-        assert_eq!(classify(&turn(205_000, 5000, 20.0, 30.0), Some(&previous), false), None);
+        assert_eq!(
+            classify(&turn(205_000, 5000, 20.0, 30.0), Some(&previous), false),
+            None
+        );
         // A large write that is all growth, however big, keeps the cache.
-        assert_eq!(classify(&turn(330_000, 130_000, 20.0, 30.0), Some(&previous), false), None);
+        assert_eq!(
+            classify(&turn(330_000, 130_000, 20.0, 30.0), Some(&previous), false),
+            None
+        );
     }
 
     #[test]
     fn first_turn_needs_a_real_write() {
-        assert_eq!(classify(&turn(30_000, 30_000, 0.0, 1.0), None, false), Some(Cause::FirstTurn));
+        assert_eq!(
+            classify(&turn(30_000, 30_000, 0.0, 1.0), None, false),
+            Some(Cause::FirstTurn)
+        );
         assert_eq!(classify(&turn(9000, 9000, 0.0, 1.0), None, false), None);
     }
 
@@ -1289,9 +1600,15 @@ mod tests {
     fn the_ttl_edge_decides_an_idle_gap() {
         let previous = turn(200_000, 5000, 0.0, 0.0);
         let late = turn(200_000, 200_000, HOUR + 1.0, HOUR + 2.0);
-        assert_eq!(classify(&late, Some(&previous), false), Some(Cause::IdleGap));
+        assert_eq!(
+            classify(&late, Some(&previous), false),
+            Some(Cause::IdleGap)
+        );
         let warm = turn(200_000, 200_000, HOUR - 300.0, HOUR);
-        assert_ne!(classify(&warm, Some(&previous), false), Some(Cause::IdleGap));
+        assert_ne!(
+            classify(&warm, Some(&previous), false),
+            Some(Cause::IdleGap)
+        );
     }
 
     #[test]
@@ -1305,7 +1622,10 @@ mod tests {
     fn a_recorded_compaction_names_the_cause() {
         let previous = turn(200_000, 5000, 0.0, 0.0);
         let compact = turn(80_000, 110_000, 60.0, 90.0);
-        assert_eq!(classify(&compact, Some(&previous), true), Some(Cause::Compaction));
+        assert_eq!(
+            classify(&compact, Some(&previous), true),
+            Some(Cause::Compaction)
+        );
     }
 
     #[test]
@@ -1314,10 +1634,16 @@ mod tests {
         let mut switched = turn(200_000, 190_000, 60.0, 90.0);
         switched.model = "claude-sonnet-5-5".into();
         switched.models = vec!["claude-sonnet-5-5".into()];
-        assert_eq!(classify(&switched, Some(&previous), false), Some(Cause::ModelSwitch));
+        assert_eq!(
+            classify(&switched, Some(&previous), false),
+            Some(Cause::ModelSwitch)
+        );
         // Three times the context cannot be one rewrite: sub-agents wrote it.
         switched.write = 600_000;
-        assert_eq!(classify(&switched, Some(&previous), false), Some(Cause::Unclear));
+        assert_eq!(
+            classify(&switched, Some(&previous), false),
+            Some(Cause::Unclear)
+        );
     }
 
     #[test]
@@ -1325,22 +1651,37 @@ mod tests {
         let previous = turn(200_000, 5000, 0.0, 0.0);
         let mut next = turn(200_000, 190_000, 60.0, 90.0);
         next.effort = Some("high".into());
-        assert_eq!(classify(&next, Some(&previous), false), Some(Cause::EffortSwitch));
+        assert_eq!(
+            classify(&next, Some(&previous), false),
+            Some(Cause::EffortSwitch)
+        );
         // Older records without an effort say nothing about a change.
         next.effort = None;
-        assert_eq!(classify(&next, Some(&previous), false), Some(Cause::PossiblePrefixChange));
+        assert_eq!(
+            classify(&next, Some(&previous), false),
+            Some(Cause::PossiblePrefixChange)
+        );
     }
 
     #[test]
     fn only_a_first_call_miss_proves_a_prefix_change() {
         let previous = turn(200_000, 5000, 0.0, 0.0);
         let mut warm = turn(200_000, 200_000, 60.0, 90.0);
-        assert_eq!(classify(&warm, Some(&previous), false), Some(Cause::PossiblePrefixChange));
+        assert_eq!(
+            classify(&warm, Some(&previous), false),
+            Some(Cause::PossiblePrefixChange)
+        );
         warm.first_call = Some((0, 200_000));
-        assert_eq!(classify(&warm, Some(&previous), false), Some(Cause::PrefixChange));
+        assert_eq!(
+            classify(&warm, Some(&previous), false),
+            Some(Cause::PrefixChange)
+        );
         // The first call hit, so sub-agents or a mid-turn event did the writing.
         warm.first_call = Some((199_000, 500));
-        assert_eq!(classify(&warm, Some(&previous), false), Some(Cause::Unclear));
+        assert_eq!(
+            classify(&warm, Some(&previous), false),
+            Some(Cause::Unclear)
+        );
     }
 
     #[test]
@@ -1349,7 +1690,10 @@ mod tests {
         let mut next = turn(200_000, 190_000, 60.0, 90.0);
         next.models = vec!["claude-sonnet-5-5".into()];
         next.first_call = Some((199_000, 500));
-        assert_eq!(classify(&next, Some(&previous), false), Some(Cause::Unclear));
+        assert_eq!(
+            classify(&next, Some(&previous), false),
+            Some(Cause::Unclear)
+        );
     }
 
     #[test]
@@ -1360,12 +1704,21 @@ mod tests {
         next.fresh = 180_000;
         next.start = 2.0 * HOUR;
         next.end = next.start + 1.0;
-        assert_eq!(classify(&next, Some(&previous), false), Some(Cause::InputAfterGap));
+        assert_eq!(
+            classify(&next, Some(&previous), false),
+            Some(Cause::InputAfterGap)
+        );
         next.start = previous.end + 60.0;
         assert_eq!(classify(&next, Some(&previous), false), None);
     }
 
-    fn record(id: &str, thread: &str, at: i64, model: &str, tokens: (u64, u64, u64, u64)) -> UsageRecord {
+    fn record(
+        id: &str,
+        thread: &str,
+        at: i64,
+        model: &str,
+        tokens: (u64, u64, u64, u64),
+    ) -> UsageRecord {
         UsageRecord {
             t: Utc.timestamp_opt(at, 0).unwrap(),
             id: id.into(),
@@ -1427,7 +1780,10 @@ mod tests {
         let first = &threads[0][0];
         assert_eq!(first.model, "claude-opus-5-5");
         assert_eq!(first.models.len(), 2);
-        assert_eq!((first.write, first.context, first.ok), (21_000, 123_000, false));
+        assert_eq!(
+            (first.write, first.context, first.ok),
+            (21_000, 123_000, false)
+        );
         assert_eq!(first.start, 941.0);
     }
 
@@ -1439,7 +1795,10 @@ mod tests {
         let written = serde_json::to_string(&parsed).unwrap();
         assert!(!written.contains("fcr"));
         let compact = r#"{"e":"compact","t":"2026-11-01T00:00:00Z","th":"t"}"#;
-        assert!(matches!(serde_json::from_str::<Record>(compact).unwrap(), Record::Compact { .. }));
+        assert!(matches!(
+            serde_json::from_str::<Record>(compact).unwrap(),
+            Record::Compact { .. }
+        ));
     }
 
     fn input<'a>(
@@ -1450,7 +1809,15 @@ mod tests {
         automations: &'a [AnalyticsAutomation],
         labels: &'a Labels,
     ) -> CacheInput<'a> {
-        CacheInput { days: 7, since, usage, records, runs, automations, labels }
+        CacheInput {
+            days: 7,
+            since,
+            usage,
+            records,
+            runs,
+            automations,
+            labels,
+        }
     }
 
     fn idle_rebuilds(thread: &str, base: i64, count: i64) -> Vec<UsageRecord> {
@@ -1470,16 +1837,34 @@ mod tests {
     #[test]
     fn a_repeat_idle_offender_is_flagged_with_its_reason_and_rule_count() {
         let labels = labels();
-        let mut usage = vec![record("seed", "t", 1000, "claude-opus-5-5", (1, 300_000, 0, 10))];
+        let mut usage = vec![record(
+            "seed",
+            "t",
+            1000,
+            "claude-opus-5-5",
+            (1, 300_000, 0, 10),
+        )];
         usage.extend(idle_rebuilds("t", 8200, 4));
         let since = Utc.timestamp_opt(5000, 0).unwrap();
         let report = build_report(&input(since, &usage, &[], &[], &[], &labels));
-        let flagged = report.waste.iter().find(|item| item.rule == "repeat_idle_gap").unwrap();
+        let flagged = report
+            .waste
+            .iter()
+            .find(|item| item.rule == "repeat_idle_gap")
+            .unwrap();
         assert_eq!(flagged.occurrences, 4);
         assert_eq!(flagged.thread.as_deref(), Some("t"));
         assert_eq!(flagged.estimated_usd, 9.6);
         assert!(flagged.reason.contains("2.0 h"), "{}", flagged.reason);
-        assert_eq!(report.rules.iter().find(|rule| rule.id == "repeat_idle_gap").unwrap().flagged, 1);
+        assert_eq!(
+            report
+                .rules
+                .iter()
+                .find(|rule| rule.id == "repeat_idle_gap")
+                .unwrap()
+                .flagged,
+            1
+        );
         assert_eq!(report.rebuilds_by_cause[0].cause, "idle_gap");
         assert_eq!(report.rebuilds_by_thread[0].top_cause, "idle_gap");
     }
@@ -1499,19 +1884,36 @@ mod tests {
     #[test]
     fn a_proven_prefix_change_outranks_a_costlier_flag() {
         let labels = labels();
-        let mut usage = vec![record("seed", "t", 1000, "claude-opus-5-5", (1, 100_000, 0, 10))];
+        let mut usage = vec![record(
+            "seed",
+            "t",
+            1000,
+            "claude-opus-5-5",
+            (1, 100_000, 0, 10),
+        )];
         let mut broken = record("broke", "t", 1060, "claude-opus-5-5", (1, 0, 100_000, 10));
         broken.fcr = Some(0);
         broken.fcw = Some(100_000);
         usage.push(broken);
-        usage.push(record("other", "u", 1000, "claude-opus-5-5", (1, 0, 100, 10)));
+        usage.push(record(
+            "other",
+            "u",
+            1000,
+            "claude-opus-5-5",
+            (1, 0, 100, 10),
+        ));
         usage.extend(idle_rebuilds("u", 9000, 4));
         let since = Utc.timestamp_opt(500, 0).unwrap();
         let report = build_report(&input(since, &usage, &[], &[], &[], &labels));
         assert_eq!(report.waste[0].rule, "prefix_change");
         assert_eq!(report.waste[0].severity, "high");
         assert_eq!(report.waste[0].certainty, "proven");
-        assert!(report.waste.iter().any(|item| item.rule == "repeat_idle_gap"));
+        assert!(
+            report
+                .waste
+                .iter()
+                .any(|item| item.rule == "repeat_idle_gap")
+        );
     }
 
     #[test]
@@ -1522,19 +1924,38 @@ mod tests {
         let mut unknown = record("o", "y", 1000, "glm-5.3", (2000, 0, 0, 0));
         unknown.prov = "opencode".into();
         let usage = [
-            record("a", "t", 1000, "claude-opus-5-5", (0, 1_000_000, 1_000_000, 0)),
+            record(
+                "a",
+                "t",
+                1000,
+                "claude-opus-5-5",
+                (0, 1_000_000, 1_000_000, 0),
+            ),
             codex,
             unknown,
         ];
         let since = Utc.timestamp_opt(500, 0).unwrap();
         let report = build_report(&input(since, &usage, &[], &[], &[], &labels));
-        let mix = |name: &str| report.cost_mix.iter().find(|row| row.provider == name).unwrap();
+        let mix = |name: &str| {
+            report
+                .cost_mix
+                .iter()
+                .find(|row| row.provider == name)
+                .unwrap()
+        };
         assert_eq!(mix("claude").write_reporting, "reported");
-        assert_eq!((mix("claude").write_usd, mix("claude").read_usd), (8.0, 0.2));
+        assert_eq!(
+            (mix("claude").write_usd, mix("claude").read_usd),
+            (8.0, 0.2)
+        );
         assert_eq!(mix("codex").write_reporting, "reported_zero");
         assert_eq!((mix("codex").fresh_usd, mix("codex").read_usd), (2.0, 0.9));
         assert_eq!(mix("opencode").unpriced_tokens, 2000);
-        let rate = report.hit_rates.iter().find(|row| row.key == "codex").unwrap();
+        let rate = report
+            .hit_rates
+            .iter()
+            .find(|row| row.key == "codex")
+            .unwrap();
         assert_eq!(rate.hit_rate, 0.9);
     }
 
@@ -1544,13 +1965,24 @@ mod tests {
         let usage: Vec<_> = [1000, 1120, 2000, 10_000]
             .iter()
             .enumerate()
-            .map(|(index, at)| record(&format!("h{index}"), "home", *at, "claude-opus-5-5", (0, 50_000, 0, 10)))
+            .map(|(index, at)| {
+                record(
+                    &format!("h{index}"),
+                    "home",
+                    *at,
+                    "claude-opus-5-5",
+                    (0, 50_000, 0, 10),
+                )
+            })
             .collect();
         let since = Utc.timestamp_opt(500, 0).unwrap();
         let report = build_report(&input(since, &usage, &[], &[], &[], &labels));
         let home = &report.home_threads[0];
         assert_eq!((home.turns, home.context_per_call), (4, 50_000));
-        assert_eq!((home.gaps_under_5, home.gaps_5_to_60, home.gaps_over_60), (1, 1, 1));
+        assert_eq!(
+            (home.gaps_under_5, home.gaps_5_to_60, home.gaps_over_60),
+            (1, 1, 1)
+        );
         assert_eq!(home.bot, "Juno");
     }
 
@@ -1573,14 +2005,18 @@ mod tests {
     fn report_rule_counts_from_a_real_state_directory() {
         let home = std::env::var("FALCONDECK_CACHE_REPORT_HOME").unwrap();
         let home = std::path::Path::new(&home);
-        let days: i64 = std::env::var("FALCONDECK_CACHE_REPORT_DAYS").unwrap_or("4".into()).parse().unwrap();
+        let days: i64 = std::env::var("FALCONDECK_CACHE_REPORT_DAYS")
+            .unwrap_or("4".into())
+            .parse()
+            .unwrap();
         let since = Utc::now() - chrono::Duration::days(days);
         let dir = home.join("analytics");
         let from = since - chrono::Duration::days(LOOKBACK_DAYS);
         let usage = read_usage_records(&dir, from);
         let records = read_records(&dir, from);
         let store: serde_json::Value =
-            serde_json::from_slice(&std::fs::read(home.join("agent-control.json")).unwrap()).unwrap();
+            serde_json::from_slice(&std::fs::read(home.join("agent-control.json")).unwrap())
+                .unwrap();
         let runs: Vec<AutomationRun> = store["runs"]
             .as_array()
             .unwrap()
@@ -1606,19 +2042,39 @@ mod tests {
         labels.titles.clear();
         for bot in prefs["bots"].as_array().unwrap() {
             let name = bot["name"].as_str().unwrap().to_string();
-            labels.bot_names.insert(bot["id"].as_str().unwrap().to_string(), name.clone());
-            let previous = bot["previous_thread_ids"].as_array().cloned().unwrap_or_default();
+            labels
+                .bot_names
+                .insert(bot["id"].as_str().unwrap().to_string(), name.clone());
+            let previous = bot["previous_thread_ids"]
+                .as_array()
+                .cloned()
+                .unwrap_or_default();
             for id in previous.iter().chain([&bot["thread_id"]]) {
-                labels.bots.insert(id.as_str().unwrap().to_string(), name.clone());
+                labels
+                    .bots
+                    .insert(id.as_str().unwrap().to_string(), name.clone());
             }
         }
-        let report = build_report(&input(since, &usage, &records, &runs, &automations, &labels));
+        let report = build_report(&input(
+            since,
+            &usage,
+            &records,
+            &runs,
+            &automations,
+            &labels,
+        ));
         println!("period ${:.2}", report.period_cost_usd);
         for rule in &report.rules {
-            println!("{:<24}{:>4}  ${:.2}", rule.id, rule.flagged, rule.estimated_usd);
+            println!(
+                "{:<24}{:>4}  ${:.2}",
+                rule.id, rule.flagged, rule.estimated_usd
+            );
         }
         for row in &report.rebuilds_by_cause {
-            println!("{:<24}{:>5} {:>12} ${:.2}", row.cause, row.count, row.tokens, row.estimated_usd);
+            println!(
+                "{:<24}{:>5} {:>12} ${:.2}",
+                row.cause, row.count, row.tokens, row.estimated_usd
+            );
         }
         if let Ok(out) = std::env::var("FALCONDECK_CACHE_REPORT_OUT") {
             std::fs::write(out, serde_json::to_vec_pretty(&report).unwrap()).unwrap();
