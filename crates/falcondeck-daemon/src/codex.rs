@@ -2661,7 +2661,7 @@ mod tests {
 
     #[cfg(unix)]
     #[tokio::test]
-    async fn bot_developer_instructions_survive_compact_unsubscribe_and_resume() {
+    async fn bot_developer_instruction_rpc_bytes_stay_identical_through_compact_and_resume() {
         let (directory, session, stdout) = piped_test_session("cat");
         let preferences_path = directory.path().join("falcondeck.json");
         let mut preferences = json!({"bot_system_context_enabled":true,"bots":[{

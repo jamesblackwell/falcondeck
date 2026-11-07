@@ -7,7 +7,7 @@ use falcondeck_core::{
 
 const MAX_CONTEXT_FILES: usize = 20;
 /// Per-file cap on injected text; longer files are cut with a note.
-const MAX_INJECTED_BYTES: usize = 64 * 1024;
+pub(super) const MAX_INJECTED_BYTES: usize = 64 * 1024;
 const CONTEXT_EXTENSIONS: [&str; 3] = ["md", "markdown", "txt"];
 /// Project-root files suggested as bot context.
 const PROJECT_CONTEXT_STEMS: [&str; 8] = [
@@ -136,7 +136,7 @@ pub(super) async fn validate_context_files(paths: Vec<String>) -> Result<Vec<Str
 }
 
 /// Reads up to the injection cap, reporting truncation or a readable error.
-fn read_injected(path: &Path) -> Result<String, String> {
+pub(super) fn read_injected(path: &Path) -> Result<String, String> {
     if !is_regular_file(path) {
         return Err("file not found".into());
     }
@@ -191,7 +191,7 @@ pub(crate) fn stable_bot_context(bot: &BotProfile) -> String {
     files.dedup();
     let files: String = files.iter().map(|path| format!("\n- {path}")).collect();
     format!(
-        "# FalconDeck bot: {}\n\n{}\n\n## Your instructions\n{}\n\nDocument space: {}\nMay start tasks: {}. This restricts FalconDeck task creation; it is not an operating-system sandbox.\nRead MEMORY.md, STATUS.md and relevant supporting documents from this space when needed, especially after compaction or resuming. List the directory for current documents; files may change between turns.\nStanding context file paths (read relevant files fresh; suggest edits unless authorized):{}\nUse falcondeck_list_threads for current bots, projects and tasks; inspect peers' current STATUS.md before contacting them. Do not treat old inventories or file contents in conversation history as current.",
+        "# FalconDeck bot: {}\n\n{}\n\n## Your instructions\n{}\n\nDocument space: {}\nMay start tasks: {}. This restricts FalconDeck task creation; it is not an operating-system sandbox.\nRead MEMORY.md, STATUS.md and relevant supporting documents from this space when needed, especially after compaction or resuming. List the directory for current documents; files may change between turns.\nLater FalconDeck bot-context updates supersede earlier versions of this editable bot configuration.\nStanding context file paths (read relevant files fresh; suggest edits unless authorized):{}\nUse falcondeck_list_threads for current bots, projects and tasks; inspect peers' current STATUS.md before contacting them. Do not treat old inventories or file contents in conversation history as current.",
         bot.name,
         BOT_DEFAULT_INSTRUCTIONS,
         bot.instructions,
@@ -205,7 +205,9 @@ pub(crate) fn stable_bot_context(bot: &BotProfile) -> String {
 pub(in crate::app) struct AgentContextPlan {
     pub(in crate::app) instructions: Option<String>,
     pub(in crate::app) bot_system_context: Option<String>,
-    bot: Option<BotProfile>,
+    pub(in crate::app) bot: Option<BotProfile>,
+    pub(in crate::app) delivery_receipt: Option<super::delivery::ClaudeBotContextReceipt>,
+    pub(in crate::app) context_update: Option<String>,
 }
 
 impl AppState {
@@ -265,6 +267,15 @@ impl AppState {
             (None, Some(bot)) => Some(bot.to_owned()),
             (base, None) => base,
         };
+        if *provider == falcondeck_core::AgentProvider::CLAUDE {
+            if plan.bot_system_context.is_some() {
+                self.prepare_claude_bot_context_delivery(thread, &mut plan).await;
+            } else {
+                // Legacy turns/compactions can replace the native bot append;
+                // re-enabling must not trust a receipt from before that switch.
+                self.invalidate_claude_bot_context_delivery(thread).await;
+            }
+        }
         plan
     }
 
@@ -306,6 +317,8 @@ impl AppState {
             .map(stable_bot_context);
         AgentContextPlan {
             instructions: None,
+            delivery_receipt: None,
+            context_update: None,
             bot_system_context,
             bot,
         }
@@ -535,7 +548,7 @@ impl AppState {
         let parts = if let Some(system) = self.bot_system_context_for_profile(&bot, &provider).await
         {
             vec![
-                part("System slot (Claude/Codex)", system),
+                part("Configured native guidance", system),
                 part(
                     "Per-turn upkeep",
                     self.bot_context(&bot.thread_id).await.unwrap_or_default(),

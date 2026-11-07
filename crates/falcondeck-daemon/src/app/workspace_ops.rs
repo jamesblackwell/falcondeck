@@ -3626,12 +3626,17 @@ async fn send_turn_with_startup_mode(
         )
     };
     let context = app.agent_context_plan(&request.thread_id, &provider).await;
-    // Enabled Claude/Codex bots keep standing guidance in native instructions.
-    // Only fresh upkeep and outcomes join these turns; legacy providers keep the full block.
+    // Claude resume can ignore changed native appends until compaction. Carry
+    // changed configuration once in user input, using the same dispatch snapshot.
     let (outcomes, outcome_ids) = app.delegation_context(&request.thread_id).await.unwrap_or_default();
     let bot_context = app.bot_context_for_plan(&context).await
         .map(|context| format!("{context}{outcomes}"))
         .filter(|context| !context.is_empty());
+    let bot_context = match (bot_context, context.context_update.as_deref()) {
+        (Some(bot), Some(update)) => Some(format!("{bot}\n\n{update}")),
+        (None, Some(update)) => Some(update.to_owned()),
+        (bot, None) => bot,
+    };
     let turn_context = match (bot_context, handoff_context.as_deref()) {
         (Some(bot), Some(handoff)) => Some(format!("{bot}\n\n{handoff}")),
         (Some(bot), None) => Some(bot),
@@ -3725,6 +3730,11 @@ async fn send_turn_with_startup_mode(
         },
     );
 
+    if provider == AgentProvider::CLAUDE {
+        app.with_managed_thread_mut(&request.workspace_id, &request.thread_id, |thread| {
+            thread.pending_bot_context_delivery = context.delivery_receipt.clone();
+        }).await?;
+    }
     let start_result = ProviderRuntime::for_provider(&provider)
         .send_turn(
             app,
@@ -3749,6 +3759,11 @@ async fn send_turn_with_startup_mode(
         .await;
 
     if let Err(error) = start_result {
+        if provider == AgentProvider::CLAUDE {
+            let _ = app.with_managed_thread_mut(&request.workspace_id, &request.thread_id, |thread| {
+                thread.pending_bot_context_delivery = None;
+            }).await;
+        }
         let error_message = error.to_string();
         let failed_at = Utc::now();
         let retained_error = if request.resume_interrupted {

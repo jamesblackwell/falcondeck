@@ -533,6 +533,8 @@ struct ManagedThread {
     requires_resume: bool,
     /// Bot prefix installed in this live Codex subscription; never persisted.
     codex_bot_context: Option<String>,
+    /// Delivery candidate for the active Claude turn; receipt saved only on success.
+    pending_bot_context_delivery: Option<bots::ClaudeBotContextReceipt>,
     /// Whether the daemon's transcript for a native OpenCode thread is known
     /// to match the agent's session storage. False after a restore (items are
     /// not persisted) and after a turn whose end-of-turn projection failed,

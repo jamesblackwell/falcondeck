@@ -151,7 +151,7 @@ impl TurnInput {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct TurnConstruction {
-    /// Changed standing instructions require a new native process.
+    /// Keep launch arguments current; resume may defer append changes until compaction.
     agent_context: Option<String>,
     session_id: String,
     cwd: String,
@@ -3783,7 +3783,7 @@ mod tests {
 
     #[cfg(unix)]
     #[tokio::test]
-    async fn bot_system_bytes_survive_warm_compact_and_idle_resume_and_edits_respawn() {
+    async fn bot_append_arguments_stay_identical_through_warm_compact_and_idle_resume() {
         use tokio::io::AsyncBufReadExt;
         use std::os::unix::fs::PermissionsExt;
         let dir = tempfile::tempdir().unwrap();

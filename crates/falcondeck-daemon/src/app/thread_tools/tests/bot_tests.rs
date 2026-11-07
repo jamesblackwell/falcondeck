@@ -2010,6 +2010,11 @@ log = __LOG__
 with open(log, 'a') as f: f.write(json.dumps({'argv':sys.argv[1:]})+'\n')
 for line in sys.stdin:
     with open(log, 'a') as f: f.write(json.dumps({'input':json.loads(line)})+'\n')
+    import pathlib
+    if pathlib.Path(log).with_name('fail-response').exists():
+        print(json.dumps({'type':'result','subtype':'error_max_turns','errors':['test provider failure'],'is_error':True}), flush=True)
+        continue
+    print(json.dumps({'type':'assistant','message':{'id':'context-assistant','role':'assistant','content':[{'type':'text','text':'done'}]}}), flush=True)
     print(json.dumps({'type':'result','result':'done','is_error':False}), flush=True)
 "#
     }
@@ -2263,4 +2268,273 @@ async fn bot_context_codex_metadata_rpc_does_not_replace_an_active_turns_prefix(
         None
     );
     app.shutdown().await.unwrap();
+}
+
+#[cfg(unix)]
+async fn send_context_turn_and_wait(app: &AppState) {
+    app.send_turn(context_dispatch_request()).await.unwrap();
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        loop {
+            let thread = app.thread_summary("workspace-1", "thread-1").await.unwrap();
+            if thread.status == falcondeck_core::ThreadStatus::Idle {
+                break;
+            }
+            assert_ne!(
+                thread.status,
+                falcondeck_core::ThreadStatus::Error,
+                "{:?}",
+                thread.last_error
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("stub turn should finish and save its delivery receipt");
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn claude_bot_edits_arrive_once_in_user_input_without_compacting() {
+    let (app, temp) = context_dispatch_fixture(AgentProvider::CLAUDE).await;
+    let file = temp.path().join("POLICY.md");
+    std::fs::write(&file, "Initial file policy").unwrap();
+    {
+        let mut prefs = app.inner.preferences.lock().await;
+        prefs.bot_system_context_enabled = true;
+        prefs.bots[0].context_files = vec![file.to_string_lossy().into()];
+    }
+    // Model a live resumed conversation. Existing visible history avoids a real native read.
+    app.with_thread_mut("workspace-1", "thread-1", |thread| {
+        thread.native_session_id = Some("existing-native".into())
+    })
+    .await
+    .unwrap();
+    app.push_conversation_item(
+        "workspace-1",
+        "thread-1",
+        user("prior", "Earlier turn"),
+        true,
+    )
+    .await
+    .unwrap();
+    send_context_turn_and_wait(&app).await;
+    assert!(
+        app.agent_context_plan("thread-1", &AgentProvider::CLAUDE)
+            .await
+            .context_update
+            .is_none()
+    );
+    send_context_turn_and_wait(&app).await;
+    app.inner.preferences.lock().await.bots[0].instructions = "Use the revised bot rule".into();
+    send_context_turn_and_wait(&app).await;
+    send_context_turn_and_wait(&app).await;
+    std::fs::write(&file, "Revised file policy").unwrap();
+    send_context_turn_and_wait(&app).await;
+    send_context_turn_and_wait(&app).await;
+    let rows: Vec<Value> = std::fs::read_to_string(temp.path().join("context-wire.jsonl"))
+        .unwrap()
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    let inputs: Vec<_> = rows
+        .iter()
+        .filter_map(|row| row.get("input"))
+        .map(Value::to_string)
+        .collect();
+    assert_eq!(inputs.len(), 6);
+    assert!(inputs[0].contains("Current standing instructions"));
+    assert!(inputs[0].contains("Initial file policy"));
+    assert!(!inputs[1].contains("falcondeck_bot_context_update"));
+    assert!(inputs[2].contains("Use the revised bot rule"));
+    assert!(!inputs[2].contains("Initial file policy"));
+    assert!(!inputs[3].contains("falcondeck_bot_context_update"));
+    assert!(inputs[4].contains("Revised file policy"));
+    assert!(!inputs[4].contains("Current standing instructions"));
+    assert!(!inputs[5].contains("falcondeck_bot_context_update"));
+    assert!(inputs.iter().all(|input| !input.contains("/compact")));
+    // Sidecar survives restart and contains hashes/session identity only, never text.
+    let receipt_dir = temp.path().join("bot-context-delivery");
+    let receipt_path = std::fs::read_dir(&receipt_dir)
+        .unwrap()
+        .next()
+        .unwrap()
+        .unwrap()
+        .path();
+    let saved = std::fs::read_to_string(&receipt_path).unwrap();
+    assert!(!saved.contains("Revised file policy"));
+    assert!(!saved.contains("Use the revised bot rule"));
+    let daemon_state = std::fs::read_to_string(temp.path().join("daemon-state.json")).unwrap();
+    assert!(!daemon_state.contains("pending_bot_context_delivery"));
+    assert!(!daemon_state.contains("standing_hash"));
+    let preferences = app.preferences().await;
+    let summary = app.thread_summary("workspace-1", "thread-1").await.unwrap();
+    let workspace = app.inner.workspaces.lock().await["workspace-1"]
+        .summary
+        .clone();
+    app.shutdown().await.unwrap();
+    let restarted = AppState::new_with_state_path(
+        "test".into(),
+        HashMap::new(),
+        temp.path().join("daemon-state.json"),
+    );
+    *restarted.inner.preferences.lock().await = preferences;
+    restarted.inner.workspaces.lock().await.insert(
+        "workspace-1".into(),
+        super::super::ManagedWorkspace {
+            summary: workspace,
+            codex_session: None,
+            claude_runtime: None,
+            agy_runtime: None,
+            opencode_runtime: None,
+            acp_runtimes: HashMap::new(),
+            threads: HashMap::from([(
+                "thread-1".into(),
+                super::super::ManagedThread::new(summary),
+            )]),
+        },
+    );
+    assert!(
+        restarted
+            .agent_context_plan("thread-1", &AgentProvider::CLAUDE)
+            .await
+            .context_update
+            .is_none()
+    );
+    restarted.inner.preferences.lock().await.bots[0].instructions =
+        "An unacknowledged revision".into();
+    let failed = restarted
+        .agent_context_plan("thread-1", &AgentProvider::CLAUDE)
+        .await;
+    restarted
+        .with_managed_thread_mut("workspace-1", "thread-1", |thread| {
+            thread.pending_bot_context_delivery = failed.delivery_receipt.clone()
+        })
+        .await
+        .unwrap();
+    restarted
+        .finish_claude_bot_context_delivery("workspace-1", "thread-1", false)
+        .await;
+    assert!(
+        restarted
+            .agent_context_plan("thread-1", &AgentProvider::CLAUDE)
+            .await
+            .context_update
+            .unwrap()
+            .contains("An unacknowledged revision")
+    );
+    assert_eq!(std::fs::read_to_string(&receipt_path).unwrap(), saved);
+    restarted.inner.preferences.lock().await.bots[0].instructions =
+        "Use the revised bot rule".into();
+    let unchanged = restarted
+        .agent_context_plan("thread-1", &AgentProvider::CLAUDE)
+        .await;
+    assert!(unchanged.context_update.is_none());
+    assert!(unchanged.delivery_receipt.is_none());
+    restarted
+        .inner
+        .preferences
+        .lock()
+        .await
+        .bot_system_context_enabled = false;
+    assert!(
+        restarted
+            .agent_context_plan("thread-1", &AgentProvider::CLAUDE)
+            .await
+            .context_update
+            .is_none()
+    );
+    assert!(!receipt_path.exists());
+    restarted
+        .inner
+        .preferences
+        .lock()
+        .await
+        .bot_system_context_enabled = true;
+    assert!(
+        restarted
+            .agent_context_plan("thread-1", &AgentProvider::CLAUDE)
+            .await
+            .context_update
+            .is_some()
+    );
+    restarted.shutdown().await.unwrap();
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn fresh_claude_bot_uses_native_instructions_without_an_initial_duplicate() {
+    let (app, _temp) = context_dispatch_fixture(AgentProvider::CLAUDE).await;
+    app.inner
+        .preferences
+        .lock()
+        .await
+        .bot_system_context_enabled = true;
+    let plan = app
+        .agent_context_plan("thread-1", &AgentProvider::CLAUDE)
+        .await;
+    assert!(plan.context_update.is_none());
+    send_context_turn_and_wait(&app).await;
+    assert!(
+        app.agent_context_plan("thread-1", &AgentProvider::CLAUDE)
+            .await
+            .context_update
+            .is_none()
+    );
+    app.shutdown().await.unwrap();
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn claude_bot_provider_failure_does_not_acknowledge_the_update() {
+    for startup_failure in [false, true] {
+        let (app, temp) = context_dispatch_fixture(AgentProvider::CLAUDE).await;
+        app.inner
+            .preferences
+            .lock()
+            .await
+            .bot_system_context_enabled = true;
+        app.with_thread_mut("workspace-1", "thread-1", |thread| {
+            thread.native_session_id = Some("existing-native".into())
+        })
+        .await
+        .unwrap();
+        app.push_conversation_item(
+            "workspace-1",
+            "thread-1",
+            user("prior", "Earlier turn"),
+            true,
+        )
+        .await
+        .unwrap();
+        if startup_failure {
+            std::fs::remove_file(temp.path().join("context-provider")).unwrap();
+        } else {
+            std::fs::write(temp.path().join("fail-response"), "").unwrap();
+        }
+        let result = app.send_turn(context_dispatch_request()).await;
+        assert_eq!(result.is_err(), startup_failure);
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop {
+                let settled = {
+                    let workspaces = app.inner.workspaces.lock().await;
+                    let thread = &workspaces["workspace-1"].threads["thread-1"];
+                    thread.summary.status != falcondeck_core::ThreadStatus::Running
+                        && thread.pending_bot_context_delivery.is_none()
+                };
+                if settled {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("failed turn must settle without acknowledging configuration");
+        assert!(!temp.path().join("bot-context-delivery").exists());
+        let retry = app
+            .agent_context_plan("thread-1", &AgentProvider::CLAUDE)
+            .await;
+        assert!(retry.context_update.is_some());
+        assert!(retry.delivery_receipt.is_some());
+        app.shutdown().await.unwrap();
+    }
 }

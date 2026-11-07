@@ -1,121 +1,130 @@
 # Stable bot context rollout
 
-Claude and Codex can keep bot guidance in their native system/developer slot
-instead of copying it into every user turn. Both switches default off:
+Both rollout switches default off. Settings → General → Agents → **Stable
+instructions for all bots** sets `bot_system_context_enabled`. The bot editor's
+**Stable bot instructions** sets `system_context_enabled`; omission preserves it.
+The global switch enables every Claude/Codex bot regardless of its individual
+switch. Installing code does not change live preferences. Other providers retain
+legacy per-turn injection.
 
-- Settings → General → Agents → **Stable instructions for all bots** updates
-  `bot_system_context_enabled` through the existing preferences API.
-- The bot editor → Context → **Stable bot instructions** updates
-  `BotMutation::Update.system_context_enabled`. Omission preserves its value.
+## Claude resume limitation and live edits
 
-The global setting enables every supported bot, regardless of its individual
-switch. No live preferences are changed by installing this code. Unsupported
-providers retain the existing complete per-turn context even when enabled.
+Real-CLI testing reported on 7 November 2026 showed that Claude can ignore a new
+or changed `--append-system-prompt` on `--resume`. The changed append became visible
+only after `/compact`. Passing correct argv does **not** prove that the model saw
+the instructions. The earlier claim that a resumed thread immediately rewrites
+its system/cache prefix was incorrect.
+
+Fresh Claude sessions receive standing guidance through `--append-system-prompt`.
+For resumed sessions, FalconDeck also carries changed configuration in a one-off
+`falcondeck_bot_context_update` inside the next normal turn's user input:
+
+- A missing or mismatched delivery receipt causes current standing guidance to be
+  sent once. This covers existing live threads during rollout and changed native
+  session IDs. Fresh sessions avoid a duplicate of their native standing append.
+- Instruction/configuration edits send the current standing block once. Changed
+  attached files send only their changed, bounded contents; unchanged guidance and
+  files are omitted. Detached files produce a removal note. Bodies are capped at
+  64 KB each, with a prompt to read the rest. Truncated-file tail edits are detected
+  using size/modification metadata as well as the bounded contents.
+- Receipts advance only after a successful Claude turn. Failed starts, failures
+  and cancellation do not consume an update. A crash or receipt write failure can
+  cause a safe repeat on retry; it cannot acknowledge undelivered changes.
+- Unchanged successful turns carry no repeated configuration and do not rewrite
+  the receipt. Upkeep, new delegation reports, handoffs and sparse hints still
+  arrive as before. No compaction is forced and no extra model turn is created.
+
+Each dispatch freezes its bot profile, delivery mode, instruction bytes, file
+snapshots and receipt candidate before durable turn persistence. Edits during that
+wait apply on the following dispatch. A running turn keeps its initial snapshot.
+Receipts are saved before the thread becomes idle and queues advance.
+
+The launch append still changes on instruction edits, so a parked Claude process
+is reconstructed with current arguments. This includes generic FalconDeck append
+edits even with both bot switches off. **That updates arguments, not guaranteed
+model-visible system instructions on resume.** The one-off bridge applies to
+enabled bots; legacy bot edits continue to arrive in their full per-turn block.
 
 ## Where each context part goes
 
-| Existing part | Enabled Claude/Codex destination | Reason |
-| --- | --- | --- |
-| Built-in guidance and bot name | System slot | Stable configuration; native compaction retains system/developer instructions. |
-| User's bot instructions | System slot | Standing rules; explicit edits change the next native construction. |
-| Context files | Sorted path manifest in system; contents read on demand | Even an attached file that looks stable can change. No file contents, timestamps, errors or truncation notes enter the prefix. |
-| Attached MEMORY.md and STATUS.md | Same on-demand file policy | Frequently edited working memory must not mutate the system prefix. Guidance points to the bot's document space and asks for relevant fresh reads after resume/compaction. |
-| SHARED.md | Path manifest; size warnings in per-turn upkeep | Shared content changes independently of this bot. |
-| Upkeep | Per-turn input | Missing/stale STATUS and oversized files still produce actionable notes. |
-| Document-space path and task-creation capability | System slot | Configuration, not discovered inventory. Permission enforcement remains daemon-side. |
-| Document filenames | Read/list document space on demand | Creating a note must not change the prefix. |
-| Other bots and resting status | `falcondeck_list_threads` inventory and peers' STATUS files on demand | Never freeze changing status in system text. |
-| Activity-ordered project list | Existing coordination inventory/tools on demand | Activity cannot invalidate the prefix; project name/path locators remain supported. |
-| Delegation outcomes | Per-turn input, existing delivery/acknowledgement path | New reports remain available without repeating standing guidance. |
-| Handoff context and sparse hints | Existing per-turn path | Event/turn-specific information. |
+| Part | Enabled destination |
+| --- | --- |
+| Built-in guidance, bot name and editable instructions | Native system/developer append; Claude also bridges unknown/changed standing configuration once through user input. |
+| Document-space path and task-creation capability | Same standing configuration. Permission enforcement remains daemon-side. |
+| Context-file paths | Sorted standing manifest. File bytes and timestamps never enter the native system append. |
+| Attached context-file contents, including attached MEMORY.md / STATUS.md | Claude: bounded contents on attachment/change only. Codex: read on demand from the manifest. |
+| Bot-space MEMORY.md / STATUS.md that are not attached | Read on demand; standing guidance requests fresh reads when relevant, especially after resume/compaction. |
+| SHARED.md | Same attached-file policy; size warnings remain in upkeep. |
+| Upkeep | Per-turn notes about missing/stale STATUS and oversized files. |
+| Document filenames | List/read document space on demand. |
+| Other bots, resting status and activity-ordered projects | Existing coordination inventory/tools and peers' STATUS files on demand. |
+| Delegation outcomes, handoffs and sparse hints | Existing per-turn delivery/acknowledgement path. |
 
-Attached files are no longer automatically pasted into each enabled turn. The
-standing manifest tells the model to read relevant files fresh and to suggest
-edits unless authorized. This avoids copying changing MEMORY/STATUS into every
-message; their actual reads remain native tool history. The context inspector
-labels system-slot guidance and per-turn upkeep separately.
+Context previews label configured native guidance separately from upkeep. The
+one-off change bridge is additional user input, not a native-system rewrite.
+Previously repeated blocks already in history remain until native compaction;
+this feature does not edit provider transcripts.
 
-## Native lifecycle and first turn
+## Codex: real-provider retention unverified
 
-Claude receives the append through `--append-system-prompt`, including each
-`--resume` after its five-minute parked-process retirement. Unchanged text reuses
-a warm process. Changed append bytes force a new process at the next dispatched
-turn, so a just-enabled bot never loses its rules while reusing an old process.
-An in-progress turn is not restarted merely by changing preferences.
-The same construction comparison intentionally covers the generic FalconDeck
-agent-context append even when both bot switches are off. Editing that append
-refreshes a parked Claude process on its next dispatched turn; unchanged bytes
-continue to reuse it. A running turn keeps its original instructions.
+Codex receives `developerInstructions` on native `thread/start` and `thread/resume`;
+`baseInstructions` is untouched. Fresh homes, switched homes and `run_as_bot`
+automation threads receive the append at creation. Dispatch unsubscribes and
+resumes a loaded thread when its bot append changes because the upstream
+[thread processor](https://github.com/openai/codex/blob/main/codex-rs/app-server/src/request_processors/thread_processor.rs)
+ignores instruction overrides on an already loaded thread. Native compaction uses
+`thread/compact/start`.
 
-Each dispatch snapshots the bot profile, rollout mode and native instruction bytes
-before building its user input. That immutable plan also supplies native spawn/
-resume and Codex's installed-context tracking. Preference edits while durable turn
-persistence is pending apply to the following dispatch, not half of this one.
+**Codex model visibility and retention across real resume/compaction have not
+been verified against a real provider.** Stub tests prove JSON-RPC bytes and
+application dispatch/tracking only. They cannot establish model-level behavior;
+Claude's result shows why this distinction matters. No real Codex call was made
+under the no-real-provider test rule.
 
-Codex receives `developerInstructions` on `thread/start` and `thread/resume`;
-`baseInstructions` remains untouched. Fresh bot homes and `run_as_bot` automation
-threads receive the append at creation. Existing loaded idle threads unsubscribe
-and resume before a turn when their bot append changes: Codex ignores instruction
-overrides on an already loaded thread. Native compaction uses
-`thread/compact/start`; it does not cause a FalconDeck user-context injection.
-A newly created, still-unpersisted Codex thread cannot be unsubscribed safely;
-changing its bot context before its first native turn fails clearly rather than
-silently using the old rules. Create such bots with the global setting already
-enabled, or complete that first turn before changing its context.
+A pre-existing empty, unpersisted Codex thread cannot safely unsubscribe before its
+first turn. Changing its context fails clearly. New and switched homes created
+with the rollout enabled install the intended append at native start.
 
-A daemon restart clears live runtimes/subscriptions. On the next dispatched turn,
-each persisted home and scheduled bot run resolves current settings automatically;
-no per-home migration or manual resume is needed. Existing in-progress work follows
-normal shutdown interruption and saved-session recovery policy. A setting change
-does not itself create a paid turn or rewrite conversation history.
+## Restart, cost and rollback
 
-Switching an existing conversation is expected to cause one full prefix/cache
-rewrite attributable to this changed system append. Later warm turns use the same
-bytes; project activity, peer status and document edits cannot change them. Ordinary
-provider expiry, model changes and native compaction still have their normal costs.
-The old repeated blocks already in history remain until native compaction; this
-feature prevents new copies and does not edit provider transcripts.
+A daemon restart resolves current settings automatically on the next home or
+scheduled bot dispatch. Claude receipts survive restart, so unchanged configuration
+does not repeat solely because the daemon restarted. Existing in-progress work
+follows normal shutdown interruption/recovery. No receipt is committed for an
+interrupted turn. Receipt state is bound to the native session, not just a sidebar ID.
+Observing legacy mode invalidates the receipt so re-enabling cannot trust delivery
+from before a legacy turn or compaction.
 
-Edits to standing instructions take effect at the next dispatched turn by forcing
-the idle native construction to refresh. A running turn continues with its old
-instructions until it ends; five-minute idle retirement and daemon restart also
-pick up edits. A continuously running turn has no fixed refresh deadline.
+For a resumed Claude conversation, enabling or editing this feature is **not an
+expected full cache-prefix rewrite**: the native append may remain unchanged until
+compaction. The change bridge adds one ordinary user-context block to history.
+Its later reads and eventual compaction still have their normal costs, but each
+unchanged turn does not accumulate another copy. Frequent edits to a large attached
+file can still be expensive; only changed files are sent, without forcing the
+roughly $0.60 compaction reported in the investigation.
 
-## Other providers and rollback
+Only optional preferences/profile flags and hash-only receipt sidecars are
+persisted. `bot-context-delivery/` contains native session IDs, standing hashes and
+file-path/hash maps, never instructions, file contents or conversation history.
+There is no new field in AutomationRun, the control store or shared persisted
+thread types. All older daemons ignore the sidecar directory; there is no store
+quarantine or loss of automations. Versions predating the rollout ignore/drop its
+flags and use legacy injection. Rolling back to a version with the native-only
+rollout keeps its flags and restores the Claude live-edit limitation. Disable the
+global and any per-bot rollout flags if legacy delivery is needed on that version.
 
-ACP's upstream schema has an [unstable, negotiated `systemPrompt` capability](https://docs.rs/agent-client-protocol-schema/latest/src/agent_client_protocol_schema/v1/agent.rs.html)
-for new/load/resume. FalconDeck currently sends an optional `instructions` field
-only on `session/new`; it does not negotiate or use that system-prompt lifecycle.
-Grok follows this ACP path with model/permission metadata. Neither gets this rollout.
+## Other providers and verification
 
-Native OpenCode does support a [per-message `system` field](https://docs.opencode.ai/docs/server/#messages).
-FalconDeck's native prompt integration currently sends text/files without a standing
-system append; retention through native compaction/resume has not been verified.
-It and the OpenCode ACP fallback keep legacy injection in this change, as do
-Antigravity and the other ACP harnesses. These are integration limits, not a claim
-that those providers cannot support system instructions.
+ACP's upstream schema has an [unstable negotiated systemPrompt capability](https://docs.rs/agent-client-protocol-schema/latest/src/agent_client_protocol_schema/v1/agent.rs.html).
+This integration currently sends `instructions` only at session creation. Grok
+shares ACP. Native OpenCode supports a [per-message system field](https://docs.opencode.ai/docs/server/#messages),
+but this integration does not wire/prove its standing retention lifecycle.
+ACP/Grok/OpenCode/Antigravity remain on legacy bot injection in this rollout.
 
-Only optional preferences and bot-profile fields are persisted. Their existing
-serde containers accept unknown fields; older daemons ignore these switches and
-return to legacy per-turn injection, with no control-store quarantine. Saving
-preferences on an older daemon may discard the switches. No AutomationRun,
-control-store field or schema version changes are introduced.
-
-## Verification
-
-Stub-level native transport tests cover Claude's actual argv/stdin through warm
-reuse, compaction command/boundary, five-minute idle retirement, `--resume`, and
-instruction edits; Codex's JSON-RPC developer instructions through start, compaction,
-unsubscribe and resume. App-level tests verify stable bytes despite document and
-activity changes, rollout defaults, automation bot identity, and upkeep. Delegation
-coverage runs with the global switch enabled. These tests use no real providers;
-provider-native retention is exercised at the transport boundary, not with paid
-model calls.
-
-Codex's loaded-thread override behavior is documented in its
-[thread processor](https://github.com/openai/codex/blob/main/codex-rs/app-server/src/request_processors/thread_processor.rs).
-
-A read-only rendering of a saved bot profile on 7 November 2026
-measured **8,715 bytes per legacy turn**, **0 bytes of bot context per enabled turn**
-when there were no upkeep warnings or new reports, and **7,189 stable system bytes**.
-New delegation reports, handoffs and upkeep still add their own per-turn bytes.
+Tests check actual Claude stub stdin through initial resume, warm turns, instruction
+edits and attached-file edits: updates arrive once, unchanged turns omit them, and
+no `/compact` is sent. They also cover hash-only receipts across a reconstructed
+app, failed delivery, fresh sessions without duplicate standing text, and immutable
+dispatch snapshots. Existing native argv/RPC tests are transport tests, not proof
+of model retention. Real Claude resume semantics above come from the reported CLI
+experiment; model behavior is not simulated by those transport assertions.

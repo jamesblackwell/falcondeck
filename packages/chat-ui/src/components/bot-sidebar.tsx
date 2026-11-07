@@ -1029,7 +1029,7 @@ function BotEditor({
                 <div className="flex items-start justify-between gap-4">
                   <div className="space-y-1">
                     <p className="text-sm font-medium text-fg-primary">Stable bot instructions</p>
-                    <p className={HINT_CLASS}>Keep Claude and Codex guidance in the system slot. Attached files stay on disk and are read when relevant. The global setting also enables this.</p>
+                    <p className={HINT_CLASS}>Avoid repeating guidance each turn. Claude receives instruction and attached-file updates once per change; Codex resume retention is unverified. The global setting also enables this.</p>
                   </div>
                   <Switch checked={systemContext} onCheckedChange={setSystemContext} label="Stable bot instructions" />
                 </div>

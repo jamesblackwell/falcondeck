@@ -198,7 +198,7 @@ export function GeneralSettingsPanel({
         <SettingList>
           <SwitchRow
             title="Stable instructions for all bots"
-            description="Use the system slot on Claude and Codex instead of repeating bot guidance in each message. Context files stay on disk. Applies on the next dispatched turn."
+            description="Reduce repeated bot guidance. Claude receives instruction and attached-file updates once per change. Codex resume retention remains unverified."
             checked={current.bot_system_context_enabled === true}
             onCheckedChange={(enabled) => onUpdatePreferences({ bot_system_context_enabled: enabled })}
           />

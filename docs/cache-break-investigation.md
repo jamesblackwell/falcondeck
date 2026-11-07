@@ -200,3 +200,9 @@ The optional [stable bot context rollout](bot-system-context.md) moves standing
 Claude/Codex bot guidance into native system/developer instructions. It prevents
 new repeated bot blocks without editing existing provider history. Volatile
 inventories and file contents stay outside the system prefix.
+
+Real-CLI follow-up found that Claude resume can ignore a changed system append
+until compaction. The rollout now sends changed Claude configuration once in user
+input and keeps unchanged turns free of repeats. Codex model retention remains
+unverified; see the rollout document for the distinction between transport tests
+and actual model visibility.

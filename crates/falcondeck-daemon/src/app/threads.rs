@@ -1490,6 +1490,8 @@ impl AppState {
         if !runtime.park_turn(thread_id, turn_generation).await {
             return false;
         }
+        self.finish_claude_bot_context_delivery(workspace_id, thread_id, true)
+            .await;
         let settled_at = Utc::now();
         self.settle_turn_items_with_error(
             workspace_id,
@@ -2553,6 +2555,13 @@ impl AppState {
             )
             .await;
         }
+        self.finish_claude_bot_context_delivery(
+            &workspace_id,
+            &thread_id,
+            saw_result && result_reported_success && turn_error.is_none()
+                && !was_interrupted && saw_agent_output,
+        )
+        .await;
         let final_error = turn_error.clone();
         // One monitor follows a parked process across multiple prompts;
         // its original receipt belongs to the first of those turns.
@@ -3359,6 +3368,7 @@ impl ManagedThread {
             title_is_provider_preview: false,
             requires_resume: false,
             codex_bot_context: None,
+            pending_bot_context_delivery: None,
             native_transcript_synced: false,
             opencode_turn_in_flight: false,
             opencode_interrupt_requested: false,
