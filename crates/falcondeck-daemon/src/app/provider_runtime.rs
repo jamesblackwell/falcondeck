@@ -70,6 +70,7 @@ pub(super) struct StartThreadSpec<'a> {
 /// after the request was folded into it, so its agent params are what the turn
 /// actually runs with.
 pub(super) struct TurnSpec<'a> {
+    pub(super) context: &'a super::bots::AgentContextPlan,
     pub(super) workspace_id: &'a str,
     pub(super) thread_id: &'a str,
     pub(super) thread: &'a ThreadSummary,
@@ -331,7 +332,11 @@ impl ProviderRuntime {
                 )
                 .await?;
                 let session = app
-                    .resume_codex_thread_if_needed(spec.workspace_id, spec.thread_id)
+                    .resume_codex_thread_with_context(
+                        spec.workspace_id,
+                        spec.thread_id,
+                        spec.context,
+                    )
                     .await?;
                 let cwd = spec
                     .thread
@@ -422,9 +427,7 @@ impl ProviderRuntime {
                         Some(spec.thread_id),
                     )
                     .await;
-                let agent_context = app
-                    .thread_agent_context_instructions(&AgentProvider::CLAUDE, spec.thread_id)
-                    .await;
+                let agent_context = spec.context.instructions.as_deref();
                 let autocompact_tokens = app.preferences().await.claude_autocompact_tokens;
                 let spawn = runtime
                     .spawn_turn(
@@ -440,7 +443,7 @@ impl ProviderRuntime {
                         &settings_dir,
                         spec.thread.working_directory(runtime.workspace_path()),
                         &builtin,
-                        agent_context.as_deref(),
+                        agent_context,
                         autocompact_tokens,
                         spec.thread.agent.claude_autocompact_tokens,
                     )
@@ -629,9 +632,13 @@ impl ProviderRuntime {
                     id: None,
                 }];
                 let selected_skills = Vec::<ResolvedSelectedSkill>::new();
+                let context = app
+                    .agent_context_plan(&request.thread_id, &thread.provider)
+                    .await;
                 self.send_turn(
                     app,
                     TurnSpec {
+                        context: &context,
                         workspace_id: &request.workspace_id,
                         thread_id: &request.thread_id,
                         thread,

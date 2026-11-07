@@ -309,7 +309,20 @@ impl AppState {
         workspace_id: &str,
         thread_id: &str,
     ) -> Result<CodexSessionLease, DaemonError> {
-        self.load_codex_thread_if_needed(workspace_id, thread_id, true)
+        let context = self
+            .agent_context_plan(thread_id, &AgentProvider::CODEX)
+            .await;
+        self.load_codex_thread_if_needed(workspace_id, thread_id, Some(&context), false)
+            .await
+    }
+
+    pub(super) async fn resume_codex_thread_with_context(
+        &self,
+        workspace_id: &str,
+        thread_id: &str,
+        context: &super::bots::AgentContextPlan,
+    ) -> Result<CodexSessionLease, DaemonError> {
+        self.load_codex_thread_if_needed(workspace_id, thread_id, Some(context), true)
             .await
     }
 
@@ -318,7 +331,7 @@ impl AppState {
         workspace_id: &str,
         thread_id: &str,
     ) -> Result<CodexSessionLease, DaemonError> {
-        self.load_codex_thread_if_needed(workspace_id, thread_id, false)
+        self.load_codex_thread_if_needed(workspace_id, thread_id, None, false)
             .await
     }
 
@@ -412,19 +425,14 @@ impl AppState {
         &self,
         workspace_id: &str,
         thread_id: &str,
-        resume: bool,
+        context: Option<&super::bots::AgentContextPlan>,
+        refresh_context: bool,
     ) -> Result<CodexSessionLease, DaemonError> {
         let session = self.session_for(workspace_id).await?;
-        // Serializes a resume with idle-unsubscribe for this workspace. A
-        // sender marks the thread running before reaching here, so whichever
-        // side wins the gate leaves one coherent subscription state.
+        // Serialize resume with idle-unsubscribe, keeping the exact dispatch snapshot.
         let _operation = self.codex_runtime_operation_guard(workspace_id).await;
-        let desired_bot_context = if resume {
-            self.bot_system_context(thread_id, &AgentProvider::CODEX)
-                .await
-        } else {
-            None
-        };
+        let resume = context.is_some();
+        let desired_bot_context = context.and_then(|plan| plan.bot_system_context.clone());
         let (mut requires_resume, cwd, summary, context_changed, unpersisted) = {
             let workspaces = self.inner.workspaces.lock().await;
             let workspace = workspaces
@@ -446,7 +454,9 @@ impl AppState {
                 thread.has_unpersisted_codex_start(),
             )
         };
-        if context_changed && !requires_resume {
+        // Metadata/goal RPCs may run during a turn; only dispatch may replace
+        // the context of an already-loaded subscription.
+        if context_changed && !requires_resume && refresh_context {
             if unpersisted {
                 return Err(DaemonError::BadRequest("Bot system context changed on a Codex task with no persisted first turn; create the bot with system context already enabled, or finish its first turn before switching.".into()));
             }
@@ -459,7 +469,13 @@ impl AppState {
         }
         if requires_resume {
             let response = if resume {
-                session.resume_thread(thread_id, &cwd).await?
+                session
+                    .resume_thread(
+                        thread_id,
+                        &cwd,
+                        context.and_then(|plan| plan.instructions.as_deref()),
+                    )
+                    .await?
             } else {
                 session.read_thread_history(thread_id).await?
             };

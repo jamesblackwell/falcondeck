@@ -2341,10 +2341,12 @@ async fn try_steer_turn(
     } else {
         None
     };
+    let context = app.agent_context_plan(&request.thread_id, &provider).await;
     if let Err(error) = ProviderRuntime::for_provider(&provider)
         .steer(
             app,
             TurnSpec {
+                context: &context,
                 workspace_id: &request.workspace_id,
                 thread_id: &request.thread_id,
                 thread: &thread,
@@ -3623,10 +3625,11 @@ async fn send_turn_with_startup_mode(
             handoff_context,
         )
     };
+    let context = app.agent_context_plan(&request.thread_id, &provider).await;
     // Enabled Claude/Codex bots keep standing guidance in native instructions.
     // Only fresh upkeep and outcomes join these turns; legacy providers keep the full block.
     let (outcomes, outcome_ids) = app.delegation_context(&request.thread_id).await.unwrap_or_default();
-    let bot_context = app.bot_context(&request.thread_id).await
+    let bot_context = app.bot_context_for_plan(&context).await
         .map(|context| format!("{context}{outcomes}"))
         .filter(|context| !context.is_empty());
     let turn_context = match (bot_context, handoff_context.as_deref()) {
@@ -3726,6 +3729,7 @@ async fn send_turn_with_startup_mode(
         .send_turn(
             app,
             TurnSpec {
+                context: &context,
                 workspace_id: &request.workspace_id,
                 thread_id: &request.thread_id,
                 thread: &thread,

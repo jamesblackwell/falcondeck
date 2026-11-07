@@ -1976,3 +1976,291 @@ async fn bot_context_rollout_preferences_are_optional_and_persist_updates() {
     assert_eq!(raw["bots"][0]["system_context_enabled"], true);
     app.shutdown().await.unwrap();
 }
+
+#[cfg(unix)]
+async fn context_dispatch_fixture(provider: AgentProvider) -> (AppState, tempfile::TempDir) {
+    use std::os::unix::fs::PermissionsExt;
+    let (app, temp) = fixture().await;
+    let bot = promote(&app).await;
+    let workspace_path = app.workspace_path("workspace-1").await.unwrap();
+    let script = temp.path().join("context-provider");
+    let wire = temp.path().join("context-wire.jsonl");
+    let code = if provider == AgentProvider::CODEX {
+        r#"#!/usr/bin/env python3
+import json, sys
+log = __LOG__
+for line in sys.stdin:
+    request = json.loads(line)
+    with open(log, 'a') as f: f.write(json.dumps(request)+'\n')
+    if 'id' not in request: continue
+    method = request['method']
+    result = {}
+    if method in ('thread/list', 'skills/list', 'model/list', 'collaborationMode/list'):
+        result = {'data': []}
+    elif method == 'thread/resume':
+        result = {'thread': {'id':'thread-1', 'turns':[]}}
+    elif method == 'turn/start':
+        result = {'turn': {'id':'context-turn', 'status':'inProgress'}}
+    print(json.dumps({'id':request['id'], 'result':result}), flush=True)
+"#
+    } else {
+        r#"#!/usr/bin/env python3
+import json, sys
+log = __LOG__
+with open(log, 'a') as f: f.write(json.dumps({'argv':sys.argv[1:]})+'\n')
+for line in sys.stdin:
+    with open(log, 'a') as f: f.write(json.dumps({'input':json.loads(line)})+'\n')
+    print(json.dumps({'type':'result','result':'done','is_error':False}), flush=True)
+"#
+    }
+    .replace(
+        "__LOG__",
+        &serde_json::to_string(wire.to_str().unwrap()).unwrap(),
+    );
+    std::fs::write(&script, code).unwrap();
+    std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o700)).unwrap();
+    app.with_thread_mut("workspace-1", "thread-1", |thread| {
+        thread.provider = provider.clone();
+        thread.native_session_id = None;
+        thread.latest_turn_id = Some("persisted-turn".into());
+    })
+    .await
+    .unwrap();
+    if provider == AgentProvider::CODEX {
+        let bootstrap = crate::codex::CodexSession::connect(
+            "workspace-1".into(),
+            workspace_path,
+            script.to_string_lossy().into(),
+            app.clone(),
+        )
+        .await
+        .unwrap();
+        app.inner
+            .workspaces
+            .lock()
+            .await
+            .get_mut("workspace-1")
+            .unwrap()
+            .codex_session = Some(bootstrap.session.activate());
+    } else {
+        app.inner
+            .workspaces
+            .lock()
+            .await
+            .get_mut("workspace-1")
+            .unwrap()
+            .claude_runtime = Some(crate::claude::ClaudeRuntime::for_test(
+            workspace_path,
+            script.to_string_lossy().into(),
+        ));
+    }
+    assert_eq!(app.preferences().await.bots[0].id, bot.id);
+    (app, temp)
+}
+
+#[cfg(unix)]
+fn context_dispatch_request() -> falcondeck_core::SendTurnRequest {
+    serde_json::from_value(json!({"workspace_id":"workspace-1", "thread_id":"thread-1",
+        "inputs":[{"type":"text", "text":"Context snapshot dispatch"}]}))
+    .unwrap()
+}
+
+#[cfg(unix)]
+async fn context_wire(path: &std::path::Path, ready: impl Fn(&[Value]) -> bool) -> Vec<Value> {
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        loop {
+            let rows: Vec<Value> = std::fs::read_to_string(path)
+                .unwrap_or_default()
+                .lines()
+                .filter_map(|line| serde_json::from_str(line).ok())
+                .collect();
+            if ready(&rows) {
+                return rows;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("stub must receive the dispatched context")
+}
+
+#[cfg(unix)]
+async fn assert_bot_context_dispatch_snapshot(provider: AgentProvider) {
+    for enabled in [true, false] {
+        let (app, temp) = context_dispatch_fixture(provider.clone()).await;
+        app.inner
+            .preferences
+            .lock()
+            .await
+            .bot_system_context_enabled = enabled;
+        // Enabled exercises changed-prefix unsubscribe; legacy exercises restored resume.
+        if provider == AgentProvider::CODEX && !enabled {
+            app.with_managed_thread_mut("workspace-1", "thread-1", |t| t.requires_resume = true)
+                .await
+                .unwrap();
+        }
+        let plan = app.agent_context_plan("thread-1", &provider).await;
+        let old_rule = app.preferences().await.bots[0].instructions.clone();
+        let persistence = app.inner.persistence.lock().await;
+        let send = tokio::spawn({
+            let app = app.clone();
+            async move { app.send_turn(context_dispatch_request()).await }
+        });
+        // The user item is inserted after context assembly, immediately before durable persist.
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+                loop {
+                    let inserted = {
+                        let workspaces = app.inner.workspaces.lock().await;
+                        workspaces["workspace-1"].threads["thread-1"].items.iter().any(|item| {
+                            matches!(item, falcondeck_core::ConversationItem::UserMessage { text, .. }
+                                if text == "Context snapshot dispatch")
+                        })
+                    };
+                    if inserted {
+                        break;
+                    }
+                    tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+                }
+            }).await.expect("dispatch must reach the persistence boundary");
+        assert!(!send.is_finished());
+        {
+            let mut prefs = app.inner.preferences.lock().await;
+            prefs.bot_system_context_enabled = !enabled;
+            prefs.bots[0].instructions = "Changed while dispatch was paused".into();
+        }
+        drop(persistence);
+        tokio::time::timeout(std::time::Duration::from_secs(5), send)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        let rows = context_wire(&temp.path().join("context-wire.jsonl"), |rows| {
+            rows.iter().any(|row| {
+                if provider == AgentProvider::CODEX {
+                    row["method"] == "turn/start"
+                } else {
+                    row.get("input").is_some()
+                }
+            })
+        })
+        .await;
+        let (native, input) = if provider == AgentProvider::CODEX {
+            let resume = rows
+                .iter()
+                .find(|row| row["method"] == "thread/resume")
+                .unwrap();
+            let native = resume["params"]["developerInstructions"].as_str();
+            let input = rows
+                .iter()
+                .find(|row| row["method"] == "turn/start")
+                .unwrap()["params"]["input"]
+                .to_string();
+            assert_eq!(
+                app.inner.workspaces.lock().await["workspace-1"].threads["thread-1"]
+                    .codex_bot_context,
+                plan.bot_system_context
+            );
+            assert_eq!(
+                rows.iter().any(|row| row["method"] == "thread/unsubscribe"),
+                enabled
+            );
+            (native.map(str::to_owned), input)
+        } else {
+            let args = rows.iter().find_map(|row| row["argv"].as_array()).unwrap();
+            let native = args
+                .iter()
+                .position(|arg| arg == "--append-system-prompt")
+                .map(|i| args[i + 1].as_str().unwrap().to_owned());
+            let input =
+                rows.iter().find(|row| row.get("input").is_some()).unwrap()["input"].to_string();
+            (native, input)
+        };
+        assert_eq!(native, plan.instructions);
+        assert_eq!(input.contains(&old_rule), !enabled);
+        assert!(!input.contains("Changed while dispatch was paused"));
+        app.shutdown().await.unwrap();
+    }
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn bot_context_claude_dispatch_snapshot_survives_switch_during_durable_persist() {
+    assert_bot_context_dispatch_snapshot(AgentProvider::CLAUDE).await;
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn bot_context_codex_dispatch_snapshot_survives_switch_during_durable_persist() {
+    assert_bot_context_dispatch_snapshot(AgentProvider::CODEX).await;
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn bot_context_codex_dispatch_refuses_changed_unpersisted_prefix_but_keeps_installed_one() {
+    for installed in [false, true] {
+        let (app, temp) = context_dispatch_fixture(AgentProvider::CODEX).await;
+        app.inner
+            .preferences
+            .lock()
+            .await
+            .bot_system_context_enabled = true;
+        let plan = app
+            .agent_context_plan("thread-1", &AgentProvider::CODEX)
+            .await;
+        app.with_managed_thread_mut("workspace-1", "thread-1", |thread| {
+            thread.summary.latest_turn_id = None;
+            thread.codex_bot_context = installed.then(|| plan.bot_system_context.clone()).flatten();
+        })
+        .await
+        .unwrap();
+        let result = app.send_turn(context_dispatch_request()).await;
+        if installed {
+            result.unwrap();
+            context_wire(&temp.path().join("context-wire.jsonl"), |rows| {
+                rows.iter().any(|row| row["method"] == "turn/start")
+            })
+            .await;
+        } else {
+            assert!(
+                result
+                    .unwrap_err()
+                    .to_string()
+                    .contains("no persisted first turn")
+            );
+        }
+        let rows = std::fs::read_to_string(temp.path().join("context-wire.jsonl")).unwrap();
+        assert!(!rows.contains("thread/unsubscribe"));
+        assert!(!rows.contains("thread/resume"));
+        assert_eq!(rows.contains("turn/start"), installed);
+        app.shutdown().await.unwrap();
+    }
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn bot_context_codex_metadata_rpc_does_not_replace_an_active_turns_prefix() {
+    let (app, temp) = context_dispatch_fixture(AgentProvider::CODEX).await;
+    app.inner
+        .preferences
+        .lock()
+        .await
+        .bot_system_context_enabled = true;
+    app.with_thread_mut("workspace-1", "thread-1", |thread| {
+        thread.status = falcondeck_core::ThreadStatus::Running;
+    })
+    .await
+    .unwrap();
+    let lease = app
+        .resume_codex_thread_if_needed("workspace-1", "thread-1")
+        .await
+        .unwrap();
+    drop(lease);
+    let rows = std::fs::read_to_string(temp.path().join("context-wire.jsonl")).unwrap();
+    assert!(!rows.contains("thread/unsubscribe"));
+    assert!(!rows.contains("thread/resume"));
+    assert_eq!(
+        app.inner.workspaces.lock().await["workspace-1"].threads["thread-1"].codex_bot_context,
+        None
+    );
+    app.shutdown().await.unwrap();
+}

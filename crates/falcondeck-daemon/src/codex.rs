@@ -1186,16 +1186,18 @@ impl CodexSession {
         Ok(())
     }
 
-    pub async fn resume_thread(&self, thread_id: &str, cwd: &str) -> Result<Value, DaemonError> {
-        let instructions = self
-            .state
-            .thread_agent_context_instructions(&AgentProvider::CODEX, thread_id)
-            .await;
+    /// Instructions belong to the caller's immutable context snapshot.
+    pub(crate) async fn resume_thread(
+        &self,
+        thread_id: &str,
+        cwd: &str,
+        instructions: Option<&str>,
+    ) -> Result<Value, DaemonError> {
         let autocompact_tokens = self.state.preferences().await.codex_autocompact_tokens;
         let response = self
             .send_control_request(
                 "thread/resume",
-                thread_resume_params(thread_id, cwd, instructions.as_deref(), autocompact_tokens),
+                thread_resume_params(thread_id, cwd, instructions, autocompact_tokens),
             )
             .await?;
 
@@ -2716,7 +2718,11 @@ mod tests {
             .await
             .unwrap();
         session
-            .resume_thread("thread-1", directory.path().to_str().unwrap())
+            .resume_thread(
+                "thread-1",
+                directory.path().to_str().unwrap(),
+                Some(&system),
+            )
             .await
             .unwrap();
         session
@@ -2731,13 +2737,21 @@ mod tests {
             .await
             .unwrap();
         session
-            .resume_thread("thread-1", directory.path().to_str().unwrap())
+            .resume_thread(
+                "thread-1",
+                directory.path().to_str().unwrap(),
+                Some(&system),
+            )
             .await
             .unwrap();
         // Idle native writer release (also used before retiring app-server).
         session.unsubscribe_thread("thread-1").await.unwrap();
         session
-            .resume_thread("thread-1", directory.path().to_str().unwrap())
+            .resume_thread(
+                "thread-1",
+                directory.path().to_str().unwrap(),
+                Some(&system),
+            )
             .await
             .unwrap();
         preferences["bots"][0]["instructions"] = json!("Edited standing rule");
@@ -2745,9 +2759,18 @@ mod tests {
             .await
             .unwrap();
         session.state.restore_local_state().await.unwrap();
+        let edited = session
+            .state
+            .thread_agent_context_instructions(&AgentProvider::CODEX, "thread-1")
+            .await
+            .unwrap();
         session.unsubscribe_thread("thread-1").await.unwrap();
         session
-            .resume_thread("thread-1", directory.path().to_str().unwrap())
+            .resume_thread(
+                "thread-1",
+                directory.path().to_str().unwrap(),
+                Some(&edited),
+            )
             .await
             .unwrap();
         let rows = captured.lock().await;

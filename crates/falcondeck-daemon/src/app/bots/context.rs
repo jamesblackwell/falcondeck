@@ -201,6 +201,13 @@ pub(crate) fn stable_bot_context(bot: &BotProfile) -> String {
     )
 }
 
+/// Immutable standing-context snapshot shared by input assembly and native startup.
+pub(in crate::app) struct AgentContextPlan {
+    pub(in crate::app) instructions: Option<String>,
+    pub(in crate::app) bot_system_context: Option<String>,
+    bot: Option<BotProfile>,
+}
+
 impl AppState {
     pub(crate) async fn start_thread_as_bot(
         &self,
@@ -232,6 +239,7 @@ impl AppState {
         (global || bot.system_context_enabled).then(|| stable_bot_context(bot))
     }
 
+    #[cfg(test)]
     pub(crate) async fn bot_system_context(
         &self,
         thread: &str,
@@ -241,17 +249,75 @@ impl AppState {
         self.bot_system_context_for_profile(&bot, provider).await
     }
 
+    pub(in crate::app) async fn agent_context_plan(
+        &self,
+        thread: &str,
+        provider: &falcondeck_core::AgentProvider,
+    ) -> AgentContextPlan {
+        let mut plan = self.bot_context_plan(thread, Some(provider)).await;
+        let base = if matches!(provider.as_str(), "claude" | "codex") {
+            self.agent_context_instructions(provider).await
+        } else {
+            None
+        };
+        plan.instructions = match (base, plan.bot_system_context.as_deref()) {
+            (Some(base), Some(bot)) => Some(format!("{base}\n\n{bot}")),
+            (None, Some(bot)) => Some(bot.to_owned()),
+            (base, None) => base,
+        };
+        plan
+    }
+
+    /// Capture bot delivery without provider setup when rendering a context preview.
+    async fn bot_context_plan(
+        &self,
+        thread: &str,
+        provider: Option<&falcondeck_core::AgentProvider>,
+    ) -> AgentContextPlan {
+        let bot_id = self
+            .inner
+            .workspaces
+            .lock()
+            .await
+            .values()
+            .find_map(|ws| ws.threads.get(thread))
+            .and_then(|t| match &t.summary.origin {
+                Some(falcondeck_core::ThreadOrigin::Automation { bot_id, .. }) => bot_id.clone(),
+                _ => None,
+            });
+        // Profile and rollout choice must come from the same preferences read.
+        let (bot, enabled) = {
+            let prefs = self.inner.preferences.lock().await;
+            let bot = prefs
+                .bots
+                .iter()
+                .find(|bot| bot.owns_thread(thread) || bot_id.as_deref() == Some(bot.id.as_str()))
+                .cloned();
+            let enabled = prefs.bot_system_context_enabled
+                || bot.as_ref().is_some_and(|bot| bot.system_context_enabled);
+            (bot, enabled)
+        };
+        let bot_system_context = bot
+            .as_ref()
+            .filter(|_| {
+                enabled
+                    && provider.is_some_and(|provider| matches!(provider.as_str(), "claude" | "codex"))
+            })
+            .map(stable_bot_context);
+        AgentContextPlan {
+            instructions: None,
+            bot_system_context,
+            bot,
+        }
+    }
+
+    #[cfg(test)]
     pub(crate) async fn thread_agent_context_instructions(
         &self,
         provider: &falcondeck_core::AgentProvider,
         thread: &str,
     ) -> Option<String> {
-        let base = self.agent_context_instructions(provider).await;
-        let bot = self.bot_system_context(thread, provider).await;
-        match (base, bot) {
-            (Some(base), Some(bot)) => Some(format!("{base}\n\n{bot}")),
-            (a, b) => a.or(b),
-        }
+        self.agent_context_plan(thread, provider).await.instructions
     }
 
     fn context_folder(&self) -> PathBuf {
@@ -402,7 +468,6 @@ impl AppState {
     }
 
     pub(in crate::app) async fn bot_context(&self, thread: &str) -> Option<String> {
-        let bot = self.bot_for_thread(thread).await?;
         let provider = self
             .inner
             .workspaces
@@ -410,12 +475,16 @@ impl AppState {
             .await
             .values()
             .find_map(|ws| ws.threads.get(thread).map(|t| t.summary.provider.clone()));
-        if let Some(provider) = provider
-            && self
-                .bot_system_context_for_profile(&bot, &provider)
-                .await
-                .is_some()
-        {
+        let plan = self.bot_context_plan(thread, provider.as_ref()).await;
+        self.bot_context_for_plan(&plan).await
+    }
+
+    pub(in crate::app) async fn bot_context_for_plan(
+        &self,
+        plan: &AgentContextPlan,
+    ) -> Option<String> {
+        let bot = plan.bot.as_ref()?;
+        if plan.bot_system_context.is_some() {
             let space = PathBuf::from(&bot.space_path);
             let files = bot.context_files.clone();
             let notes = tokio::task::spawn_blocking(move || {
@@ -448,7 +517,7 @@ impl AppState {
             });
         }
         Some(
-            self.bot_context_parts(&bot)
+            self.bot_context_parts(bot)
                 .await
                 .into_iter()
                 .map(|part| part.text)

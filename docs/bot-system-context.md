@@ -42,6 +42,15 @@ Claude receives the append through `--append-system-prompt`, including each
 a warm process. Changed append bytes force a new process at the next dispatched
 turn, so a just-enabled bot never loses its rules while reusing an old process.
 An in-progress turn is not restarted merely by changing preferences.
+The same construction comparison intentionally covers the generic FalconDeck
+agent-context append even when both bot switches are off. Editing that append
+refreshes a parked Claude process on its next dispatched turn; unchanged bytes
+continue to reuse it. A running turn keeps its original instructions.
+
+Each dispatch snapshots the bot profile, rollout mode and native instruction bytes
+before building its user input. That immutable plan also supplies native spawn/
+resume and Codex's installed-context tracking. Preference edits while durable turn
+persistence is pending apply to the following dispatch, not half of this one.
 
 Codex receives `developerInstructions` on `thread/start` and `thread/resume`;
 `baseInstructions` remains untouched. Fresh bot homes and `run_as_bot` automation
