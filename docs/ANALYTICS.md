@@ -196,7 +196,9 @@ Repeat compaction undercounts it, which errs towards a missed flag.
 Turns are grouped per thread by a stable key, provider plus the id's per-turn
 part: Claude's shared stamp, or the other providers' id without its model
 suffix. Records with no such key join only if they are the same provider,
-under 2 seconds apart and on another model, so two quick turns stay two turns.
+under 2 seconds apart and on another model, so two quick turns stay two turns. A
+turn's end is its first record, so a slower model's late record cannot reorder
+the turns around it.
 
 Claude totals include sub-agents, so a large write proves nothing alone. Against
 transcripts, 165 of 168 idle-gap rebuilds were true first-call misses, but one

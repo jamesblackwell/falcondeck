@@ -328,12 +328,12 @@ pub(super) fn build_turns(usage: &[UsageRecord], records: &[Record]) -> Vec<Vec<
         list.sort_by_key(|record| record.t);
         let thread_events = events.get(thread).map_or(&[][..], Vec::as_slice);
         let mut used = vec![false; thread_events.len()];
-        let mut turns: Vec<Turn> = group_turns(&list)
-            .iter()
-            .map(|group| build_turn(group, thread_events, &mut used))
-            .collect();
-        turns.sort_by(|a, b| a.end.total_cmp(&b.end));
-        threads.push(turns);
+        threads.push(
+            group_turns(&list)
+                .iter()
+                .map(|group| build_turn(group, thread_events, &mut used))
+                .collect(),
+        );
     }
     threads
 }
@@ -357,7 +357,9 @@ fn build_turn(group: &[&UsageRecord], events: &[TurnEvent], used: &mut [bool]) -
         .iter()
         .max_by_key(|record| prompt(record))
         .expect("a turn has at least one record");
-    let end = seconds(group[group.len() - 1].t);
+    // The first record marks the turn's end; a slower model's record for the
+    // same turn may land after the next turn has begun.
+    let end = seconds(group[0].t);
     let event = claim_event(events, used, end);
     let calls = group
         .iter()
@@ -1959,7 +1961,7 @@ mod tests {
             (first.write, first.context, first.ok),
             (21_000, 123_000, false)
         );
-        assert_eq!(first.start, 941.0);
+        assert_eq!(first.start, 940.0);
     }
 
     #[test]
@@ -2038,7 +2040,12 @@ mod tests {
         for item in [&mut a, &mut b, &mut c] {
             item.prov = "opencode".into();
         }
-        assert_eq!(turn_of(&[a, b, c])[0].len(), 2);
+        let turns = turn_of(&[a, b, c]);
+        assert_eq!(turns[0].len(), 2);
+        // The late model record neither reorders the turns nor moves the end.
+        assert_eq!(turns[0][0].models.len(), 2);
+        assert_eq!(turns[0][0].end, 1000.0);
+        assert_eq!(turns[0][1].end, 1001.0);
     }
 
     #[test]
