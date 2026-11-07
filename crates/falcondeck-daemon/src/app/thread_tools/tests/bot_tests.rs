@@ -174,6 +174,7 @@ async fn only_bots_can_coordinate_other_projects_and_creation_can_be_disabled() 
         instructions: "New instructions".into(),
         can_start_threads: false,
         context_files: None,
+        system_context_enabled: None,
         icon: None,
     })
     .await
@@ -201,6 +202,11 @@ async fn only_bots_can_coordinate_other_projects_and_creation_can_be_disabled() 
 async fn bot_cross_project_delegation_retains_parent_and_counts_children_globally() {
     let (app, _temp) = fixture().await;
     promote(&app).await;
+    app.inner
+        .preferences
+        .lock()
+        .await
+        .bot_system_context_enabled = true;
     {
         let mut workspaces = app.inner.workspaces.lock().await;
         let mut summary = workspaces["workspace-1"].summary.clone();
@@ -579,6 +585,7 @@ async fn bot_context_lists_peer_status_files_but_not_its_own() {
         instructions: String::new(),
         can_start_threads: true,
         context_files: Vec::new(),
+        system_context_enabled: false,
         icon: None,
         status: BotStatus::Active,
     });
@@ -607,6 +614,7 @@ async fn context_files_are_read_fresh_into_every_turn_and_reported() {
         instructions: "Coordinate Quizgecko work".into(),
         can_start_threads: true,
         context_files: files,
+        system_context_enabled: None,
         icon: None,
     };
     let paths = vec![
@@ -724,6 +732,7 @@ async fn context_file_editor_is_limited_to_known_files() {
         instructions: String::new(),
         can_start_threads: true,
         context_files: Some(vec![other.clone()]),
+        system_context_enabled: None,
         icon: None,
     })
     .await
@@ -763,6 +772,7 @@ async fn every_bot_gets_a_distinct_icon_and_edits_are_validated() {
         instructions: String::new(),
         can_start_threads: true,
         context_files: Vec::new(),
+        system_context_enabled: false,
         icon: None,
         status: BotStatus::Active,
     });
@@ -772,6 +782,7 @@ async fn every_bot_gets_a_distinct_icon_and_edits_are_validated() {
         instructions: String::new(),
         can_start_threads: true,
         context_files: None,
+        system_context_enabled: None,
         icon,
     };
     app.mutate_bot(update(None)).await.unwrap();
@@ -813,6 +824,7 @@ async fn creating_a_bot_keeps_the_marks_older_bots_already_show() {
         instructions: String::new(),
         can_start_threads: true,
         context_files: Vec::new(),
+        system_context_enabled: false,
         icon: None,
         status: BotStatus::Active,
     });
@@ -846,6 +858,7 @@ async fn bots_can_be_reordered_and_unlisted_ones_keep_their_place() {
         instructions: String::new(),
         can_start_threads: true,
         context_files: Vec::new(),
+        system_context_enabled: false,
         icon: None,
         status: BotStatus::Active,
     };
@@ -1516,6 +1529,7 @@ async fn pausing_or_archiving_a_bot_keeps_it_and_stops_messages() {
         instructions: String::new(),
         can_start_threads: true,
         context_files: Vec::new(),
+        system_context_enabled: false,
         icon: None,
         status: BotStatus::Active,
     });
@@ -1707,5 +1721,258 @@ async fn current_automation_cannot_pin_its_conversations_model_or_effort() {
         let result = app.control().execute(request, &context, &crate::control::ControlDeps { app:Some(&app) }).await.0;
         assert_eq!(result.error.unwrap().field_errors[0].field, format!("target.{pin}"));
     }
+    app.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn bot_system_context_is_stable_and_volatile_content_stays_out() {
+    let (app, temp) = fixture().await;
+    let bot = promote(&app).await;
+    let memory = temp.path().join("MEMORY.md");
+    std::fs::write(&memory, "volatile memory before").unwrap();
+    app.with_thread_mut("workspace-1", "thread-1", |thread| {
+        thread.provider = AgentProvider::CLAUDE;
+    })
+    .await
+    .unwrap();
+    assert!(
+        app.bot_system_context("thread-1", &AgentProvider::CLAUDE)
+            .await
+            .is_none()
+    );
+    {
+        let mut prefs = app.inner.preferences.lock().await;
+        prefs.bots[0].context_files = vec![memory.to_string_lossy().into()];
+        prefs.bots[0].system_context_enabled = true;
+    }
+    let system = app
+        .thread_agent_context_instructions(&AgentProvider::CLAUDE, "thread-1")
+        .await
+        .unwrap();
+    assert!(system.contains(&bot.instructions));
+    assert!(system.contains(memory.to_str().unwrap()));
+    assert!(!system.contains("volatile memory before"));
+    let turn = app.bot_context("thread-1").await.unwrap();
+    assert!(!turn.contains(&bot.instructions));
+    assert!(turn.contains("STATUS.md is missing"));
+    std::fs::write(&memory, "volatile memory after").unwrap();
+    std::fs::write(
+        std::path::Path::new(&bot.space_path).join("STATUS.md"),
+        "new status",
+    )
+    .unwrap();
+    std::fs::write(
+        std::path::Path::new(&bot.space_path).join("New.md"),
+        "new document",
+    )
+    .unwrap();
+    {
+        let mut workspaces = app.inner.workspaces.lock().await;
+        for workspace in workspaces.values_mut() {
+            for thread in workspace.threads.values_mut() {
+                thread.summary.updated_at = Utc::now();
+            }
+        }
+    }
+    {
+        let mut peer = bot.clone();
+        peer.id = "peer".into();
+        peer.thread_id = "peer-thread".into();
+        peer.name = "New peer".into();
+        peer.status = BotStatus::Paused;
+        app.inner.preferences.lock().await.bots.push(peer);
+    }
+    assert_eq!(
+        app.thread_agent_context_instructions(&AgentProvider::CLAUDE, "thread-1")
+            .await
+            .unwrap(),
+        system
+    );
+    assert!(app.bot_context("thread-1").await.unwrap().is_empty());
+    // The global switch also applies to bots with their individual switch off.
+    {
+        let mut prefs = app.inner.preferences.lock().await;
+        prefs.bots[0].system_context_enabled = false;
+        prefs.bot_system_context_enabled = true;
+    }
+    assert_eq!(
+        app.thread_agent_context_instructions(&AgentProvider::CLAUDE, "thread-1")
+            .await
+            .unwrap(),
+        system
+    );
+    for provider in ["grok", "opencode", "agy"] {
+        let provider = AgentProvider::from(provider);
+        assert!(
+            app.bot_system_context("thread-1", &provider)
+                .await
+                .is_none()
+        );
+        app.with_thread_mut("workspace-1", "thread-1", |thread| {
+            thread.provider = provider.clone()
+        })
+        .await
+        .unwrap();
+        assert!(
+            app.bot_context("thread-1")
+                .await
+                .unwrap()
+                .contains("volatile memory after")
+        );
+    }
+    app.inner.preferences.lock().await.bots[0].instructions = "Edited standing instruction".into();
+    assert!(
+        app.bot_system_context("thread-1", &AgentProvider::CODEX)
+            .await
+            .unwrap()
+            .contains("Edited standing instruction")
+    );
+    // Scheduled fresh runs resolve the same identity through the automation origin.
+    app.inner.preferences.lock().await.bots[0].thread_id = "home-elsewhere".into();
+    app.with_thread_mut("workspace-1", "thread-1", |thread| {
+        thread.origin = Some(falcondeck_core::ThreadOrigin::Automation {
+            automation_id: "a".into(),
+            bot_id: Some(bot.id.clone()),
+            name: "Check".into(),
+        });
+    })
+    .await
+    .unwrap();
+    assert!(
+        app.bot_system_context("thread-1", &AgentProvider::CODEX)
+            .await
+            .unwrap()
+            .contains("Edited standing instruction")
+    );
+    app.shutdown().await.unwrap();
+}
+
+/// Explicit opt-in, read-only rendering of a saved profile; never restore live runtimes.
+#[tokio::test]
+#[ignore = "requires explicit paths to saved preferences/state for size measurement"]
+async fn measure_saved_bot_system_context() {
+    let preferences: falcondeck_core::FalconDeckPreferences = serde_json::from_slice(
+        &std::fs::read(std::env::var("FALCONDECK_MEASURE_PREFERENCES").unwrap()).unwrap(),
+    )
+    .unwrap();
+    let state: Value = serde_json::from_slice(
+        &std::fs::read(std::env::var("FALCONDECK_MEASURE_STATE").unwrap()).unwrap(),
+    )
+    .unwrap();
+    let name = std::env::var("FALCONDECK_MEASURE_BOT").unwrap();
+    let bot = preferences
+        .bots
+        .iter()
+        .find(|bot| bot.name == name)
+        .unwrap()
+        .clone();
+    let (app, _temp) = fixture().await;
+    let template = app.thread_summary("workspace-1", "thread-1").await.unwrap();
+    let workspace_template = app.inner.workspaces.lock().await["workspace-1"]
+        .summary
+        .clone();
+    {
+        let mut workspaces = app.inner.workspaces.lock().await;
+        workspaces.clear();
+        for saved in state["workspaces"].as_array().unwrap() {
+            let id = saved["id"].as_str().unwrap().to_owned();
+            let path = saved["path"].as_str().unwrap().to_owned();
+            let mut summary = workspace_template.clone();
+            summary.id = id.clone();
+            summary.path = path;
+            summary.kind = crate::app::workspace_kind_for_path(&summary.path);
+            let mut thread = template.clone();
+            thread.updated_at = saved["thread_states"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter_map(|row| serde_json::from_value(row["updated_at"].clone()).ok())
+                .max()
+                .unwrap_or(template.updated_at);
+            thread.workspace_id = id.clone();
+            thread.id = if id == bot.workspace_id {
+                bot.thread_id.clone()
+            } else {
+                format!("measurement-{id}")
+            };
+            thread.provider = AgentProvider::CLAUDE;
+            let threads =
+                HashMap::from([(thread.id.clone(), super::super::ManagedThread::new(thread))]);
+            workspaces.insert(
+                id,
+                super::super::ManagedWorkspace {
+                    summary,
+                    codex_session: None,
+                    claude_runtime: None,
+                    agy_runtime: None,
+                    opencode_runtime: None,
+                    acp_runtimes: HashMap::new(),
+                    threads,
+                },
+            );
+        }
+    }
+    {
+        let mut prefs = app.inner.preferences.lock().await;
+        prefs.bots = preferences.bots;
+        prefs.bot_system_context_enabled = false;
+        for bot in &mut prefs.bots {
+            bot.system_context_enabled = false;
+        }
+    }
+    let before = app.bot_context(&bot.thread_id).await.unwrap();
+    app.inner
+        .preferences
+        .lock()
+        .await
+        .bot_system_context_enabled = true;
+    let system = app
+        .bot_system_context(&bot.thread_id, &AgentProvider::CLAUDE)
+        .await
+        .unwrap();
+    let after = app.bot_context(&bot.thread_id).await.unwrap();
+    println!(
+        "BOT_SIZE {}",
+        json!({"before_per_turn_bytes":before.len(), "after_per_turn_bytes":after.len(), "system_bytes_once":system.len(), "before_chars":before.chars().count(), "after_chars":after.chars().count()})
+    );
+    assert!(after.len() < before.len());
+    app.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn bot_context_rollout_preferences_are_optional_and_persist_updates() {
+    let (app, _temp) = fixture().await;
+    let bot = promote(&app).await;
+    assert!(!bot.system_context_enabled);
+    assert!(!app.preferences().await.bot_system_context_enabled);
+    let mut update = json!({"action":"update", "id":bot.id,"name":bot.name,
+        "instructions":bot.instructions,"can_start_threads":true,"system_context_enabled":true});
+    app.mutate_bot(serde_json::from_value(update.clone()).unwrap())
+        .await
+        .unwrap();
+    update
+        .as_object_mut()
+        .unwrap()
+        .remove("system_context_enabled");
+    app.mutate_bot(serde_json::from_value(update).unwrap())
+        .await
+        .unwrap();
+    let saved = crate::app::storage::load_preferences(&app.inner.preferences_path)
+        .await
+        .unwrap();
+    assert!(saved.bots[0].system_context_enabled);
+    let mut prefs = saved;
+    crate::app::storage::apply_preferences_patch(
+        &mut prefs,
+        serde_json::from_value(json!({"bot_system_context_enabled":true})).unwrap(),
+    );
+    assert!(prefs.bot_system_context_enabled);
+    // These are optional additions to tolerant preferences/profile containers, not control state.
+    let raw = serde_json::to_value(prefs).unwrap();
+    assert_eq!(raw["bot_system_context_enabled"], true);
+    assert!(
+        crate::app::storage::merge_preferences_from_value(raw.clone()).bot_system_context_enabled
+    );
+    assert_eq!(raw["bots"][0]["system_context_enabled"], true);
     app.shutdown().await.unwrap();
 }

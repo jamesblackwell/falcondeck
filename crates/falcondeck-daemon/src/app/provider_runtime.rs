@@ -54,6 +54,7 @@ pub(super) struct StartedThread {
 
 /// Everything a backend needs to open a new thread.
 pub(super) struct StartThreadSpec<'a> {
+    pub(super) bot_context: Option<&'a str>,
     pub(super) workspace_id: &'a str,
     pub(super) model_id: Option<&'a str>,
     pub(super) sandbox_mode: Option<&'a str>,
@@ -157,7 +158,12 @@ impl ProviderRuntime {
         match self {
             Self::Codex => {
                 let session = app.session_for(spec.workspace_id).await?;
-                let instructions = app.agent_context_instructions(&AgentProvider::CODEX).await;
+                let base = app.agent_context_instructions(&AgentProvider::CODEX).await;
+                let instructions = match (base, spec.bot_context) {
+                    (Some(base), Some(bot)) => Some(format!("{base}\n\n{bot}")),
+                    (None, Some(bot)) => Some(bot.to_owned()),
+                    (base, None) => base,
+                };
                 let autocompact_tokens = app.preferences().await.codex_autocompact_tokens;
                 let result = session
                     .send_request(
@@ -416,7 +422,9 @@ impl ProviderRuntime {
                         Some(spec.thread_id),
                     )
                     .await;
-                let agent_context = app.agent_context_instructions(&AgentProvider::CLAUDE).await;
+                let agent_context = app
+                    .thread_agent_context_instructions(&AgentProvider::CLAUDE, spec.thread_id)
+                    .await;
                 let autocompact_tokens = app.preferences().await.claude_autocompact_tokens;
                 let spawn = runtime
                     .spawn_turn(

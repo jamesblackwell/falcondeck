@@ -409,30 +409,32 @@ impl AppState {
                 let space = root.join("space");
                 tokio::fs::create_dir_all(&space).await?;
                 let dedicated_workspace = existing.is_none();
-                let thread =
-                    if let Some(thread) = existing {
-                        thread
-                    } else {
-                        let workspace = workspace_ops::create_chat_at(self, root.clone()).await?;
-                        let handle = self.start_thread(serde_json::from_value(json!({
-                        "workspace_id": workspace.id, "provider": provider, "model_id": model_id
-                    }))?).await?;
-                        handle.thread
-                    };
-                let bot = BotProfile {
+                let mut bot = BotProfile {
                     id,
                     name: name.trim().into(),
-                    workspace_id: thread.workspace_id.clone(),
+                    workspace_id: String::new(),
                     dedicated_workspace,
-                    thread_id: thread.id.clone(),
+                    thread_id: String::new(),
                     previous_thread_ids: Vec::new(),
                     space_path: space.to_string_lossy().into(),
                     instructions,
                     can_start_threads: true,
                     context_files: Vec::new(),
+                    system_context_enabled: false,
                     icon: None,
                     status: BotStatus::Active,
                 };
+                let thread = if let Some(thread) = existing {
+                    thread
+                } else {
+                    let workspace = workspace_ops::create_chat_at(self, root.clone()).await?;
+                    let handle = self.start_thread_as_bot(serde_json::from_value(json!({
+                        "workspace_id": workspace.id, "provider": provider, "model_id": model_id
+                    }))?, &bot).await?;
+                    handle.thread
+                };
+                bot.workspace_id = thread.workspace_id.clone();
+                bot.thread_id = thread.id.clone();
                 let mut bots = self.inner.preferences.lock().await.bots.clone();
                 // Settle older bots' marks first, as clients already display them.
                 assign_missing_icons(&mut bots);
@@ -461,6 +463,7 @@ impl AppState {
                 instructions,
                 can_start_threads,
                 context_files,
+                system_context_enabled,
                 icon,
             } => {
                 validate_text(&name, &instructions)?;
@@ -475,6 +478,9 @@ impl AppState {
                 bot.name = name.trim().into();
                 bot.instructions = instructions;
                 bot.can_start_threads = can_start_threads;
+                if let Some(enabled) = system_context_enabled {
+                    bot.system_context_enabled = enabled;
+                }
                 if let Some(paths) = context_files {
                     bot.context_files = paths;
                 }

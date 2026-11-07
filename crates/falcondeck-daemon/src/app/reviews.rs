@@ -324,6 +324,7 @@ mod tests {
             instructions: String::new(),
             can_start_threads: true,
             context_files: Vec::new(),
+            system_context_enabled: false,
             icon: None,
             status: BotStatus::Active,
         });

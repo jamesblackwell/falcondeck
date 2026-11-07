@@ -114,6 +114,9 @@ pub struct FalconDeckPreferences {
     /// Named coordinators outside the project hierarchy.
     #[serde(default)]
     pub bots: Vec<BotProfile>,
+    /// Enable stable bot system context for every Claude/Codex bot.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub bot_system_context_enabled: bool,
     /// Schema version for the on-disk preferences file.
     #[serde(default = "default_preferences_version")]
     pub version: u32,
@@ -184,6 +187,7 @@ impl Default for FalconDeckPreferences {
     fn default() -> Self {
         Self {
             bots: Vec::new(),
+            bot_system_context_enabled: false,
             version: default_preferences_version(),
             auto_resume_interrupted_sessions: true,
             max_agent_children: DEFAULT_MAX_AGENT_CHILDREN,
@@ -724,6 +728,9 @@ pub enum ToolDetailsMode {
 /// Partial preferences update payload accepted by the daemon API.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 pub struct UpdatePreferencesRequest {
+    /// Global bot context rollout. Absent leaves it unchanged.
+    #[serde(default)]
+    pub bot_system_context_enabled: Option<bool>,
     /// Atomic project folder edit; does not replace other clients' edits.
     #[serde(default)]
     pub project_folder: Option<ProjectFolderMutation>,

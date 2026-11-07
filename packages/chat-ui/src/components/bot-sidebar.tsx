@@ -611,6 +611,7 @@ function BotEditor({
   const [name, setName] = useState(bot?.name ?? "");
   const [instructions, setInstructions] = useState(bot?.instructions ?? "");
   const [canStart, setCanStart] = useState(bot?.can_start_threads ?? true);
+  const [systemContext, setSystemContext] = useState(bot?.system_context_enabled ?? false);
   const [contextFiles, setContextFiles] = useState(bot?.context_files ?? []);
   const [icon, setIcon] = useState<BotIcon | undefined>(() =>
     bot ? resolveBotIcons(bots).get(bot.id) : undefined,
@@ -695,6 +696,7 @@ function BotEditor({
               name,
               instructions,
               can_start_threads: canStart,
+              ...(systemContext !== (bot.system_context_enabled ?? false) ? { system_context_enabled: systemContext } : {}),
               ...(api.contextFiles ? { context_files: contextFiles } : {}),
               ...(icon ? { icon } : {}),
             }
@@ -1021,6 +1023,15 @@ function BotEditor({
                     label="Allow this bot to start tasks"
                     className="mt-0.5"
                   />
+                </div>
+              </EditorSection>
+              <EditorSection title="Context">
+                <div className="flex items-start justify-between gap-4">
+                  <div className="space-y-1">
+                    <p className="text-sm font-medium text-fg-primary">Stable bot instructions</p>
+                    <p className={HINT_CLASS}>Keep Claude and Codex guidance in the system slot. Attached files stay on disk and are read when relevant. The global setting also enables this.</p>
+                  </div>
+                  <Switch checked={systemContext} onCheckedChange={setSystemContext} label="Stable bot instructions" />
                 </div>
               </EditorSection>
               <BotContextFiles

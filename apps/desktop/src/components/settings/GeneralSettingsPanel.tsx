@@ -196,6 +196,12 @@ export function GeneralSettingsPanel({
         description="Limits and context size for agents and bots."
       >
         <SettingList>
+          <SwitchRow
+            title="Stable instructions for all bots"
+            description="Use the system slot on Claude and Codex instead of repeating bot guidance in each message. Context files stay on disk. Applies on the next dispatched turn."
+            checked={current.bot_system_context_enabled === true}
+            onCheckedChange={(enabled) => onUpdatePreferences({ bot_system_context_enabled: enabled })}
+          />
           <SettingRow
             title="Parallel tasks per agent"
             description={`How many tasks one agent or bot can run at once. Default 5, from ${MIN_MAX_AGENT_CHILDREN} to ${MAX_MAX_AGENT_CHILDREN}.`}

@@ -446,6 +446,7 @@ export type FalconDeckPreferences = {
   claude_autocompact_tokens?: number;
   /** Context size at which Codex conversations compact; null or absent uses Codex's own default. */
   codex_autocompact_tokens?: number | null;
+  bot_system_context_enabled?: boolean;
   /** Review inbox switch. Older daemons omit it, which clients treat as unsupported. */
   review_inbox_enabled?: boolean;
   /** Older daemons omit this until project order has been saved. */
@@ -486,8 +487,9 @@ export type BotProfile = {
   space_path: string;
   instructions: string;
   can_start_threads: boolean;
-  /** Absolute paths of text files read into every turn. Older daemons omit it. */
+  /** Standing text-file paths; legacy mode injects contents each turn. Older daemons omit it. */
   context_files?: string[];
+  system_context_enabled?: boolean;
   /** Sidebar mark; resolve missing ones with `resolveBotIcons`. */
   icon?: import("./bot-icons").BotIcon | null;
   /** Absent on older daemons and on active bots. */
@@ -497,7 +499,7 @@ export type BotProfile = {
 export type BotMutation =
   | { action: "switch_conversation"; id: string; provider: AgentProvider; model_id?: string; reasoning_effort?: string }
   | { action: "create"; name: string; instructions: string; provider?: AgentProvider; model_id?: string; thread_id?: string }
-  | { action: "update"; id: string; name: string; instructions: string; can_start_threads: boolean; context_files?: string[]; icon?: import("./bot-icons").BotIcon }
+  | { action: "update"; id: string; name: string; instructions: string; can_start_threads: boolean; context_files?: string[]; system_context_enabled?: boolean; icon?: import("./bot-icons").BotIcon }
   | { action: "reorder"; ids: string[] }
   | { action: "stop" | "delete"; id: string }
   | { action: "set_status"; id: string; status: "active" | "paused" | "archived" };
@@ -828,6 +830,7 @@ export type UpdatePreferencesPayload = {
   claude_autocompact_tokens?: number;
   /** Integer 100000–1000000, or null to restore Codex's own default. */
   codex_autocompact_tokens?: number | null;
+  bot_system_context_enabled?: boolean;
   review_inbox_enabled?: boolean;
   workspace_order?: string[] | null;
   hidden_workspace_ids?: string[] | null;

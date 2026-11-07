@@ -366,6 +366,17 @@ describe("bot sidebar", () => {
     );
   });
 
+  it("saves the opt-in stable instructions switch", async () => {
+    const transport = api();
+    render(<BotSidebar bots={[bot]} botApi={transport} groups={[]} selectedThreadId={null} onSelectThread={vi.fn()} />);
+    fireEvent.click(screen.getByRole("button", { name: "Edit Assistant" }));
+    fireEvent.click(screen.getByRole("switch", { name: "Stable bot instructions" }));
+    fireEvent.click(screen.getByRole("button", { name: "Save changes" }));
+    await waitFor(() => expect(transport.mutateBot).toHaveBeenCalledWith(expect.objectContaining({
+      action: "update", id: bot.id, system_context_enabled: true,
+    })));
+  });
+
   it("filters documents without changing the open editor", async () => {
     render(<BotSidebar bots={[bot]} botApi={api()} groups={[]} selectedThreadId={null} onSelectThread={vi.fn()} />);
     fireEvent.click(screen.getByRole("button", { name: "Edit Assistant" }));

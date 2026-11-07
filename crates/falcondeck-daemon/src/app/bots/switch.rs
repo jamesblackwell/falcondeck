@@ -58,7 +58,7 @@ impl AppState {
         }
         let same_provider = provider == old.provider;
         let permissions = switched_permissions(&old.agent, &provider, same_provider);
-        let handle = self.start_thread(serde_json::from_value(json!({
+        let handle = self.start_thread_as_bot(serde_json::from_value(json!({
             "workspace_id": bot.workspace_id, "provider": provider, "model_id": model_id,
             "collaboration_mode_id": permissions.collaboration_mode_id,
             "approval_policy": permissions.approval_policy,
@@ -66,7 +66,7 @@ impl AppState {
             "permission_mode": permissions.permission_mode,
             "handoff_from": {"thread_id": old.id, "provider": old.provider, "context_pending": true},
             "handoff_context": briefing
-        }))?).await?;
+        }))?, &bot).await?;
         let new_id = handle.thread.id;
         self.update_thread(serde_json::from_value(json!({
             "workspace_id": bot.workspace_id, "thread_id": new_id,

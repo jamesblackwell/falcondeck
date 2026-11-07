@@ -1037,26 +1037,38 @@ async fn start_automation_thread(
     automation: &falcondeck_core::control::Automation,
     workspace_id: &str,
 ) -> Result<String, String> {
-    let started = app
-        .start_thread(falcondeck_core::StartThreadRequest {
-            execution_target: Default::default(),
-            idempotency_key: None,
-            workspace_id: workspace_id.to_string(),
-            provider: Some(automation.target.provider.clone()),
-            model_id: automation.target.model_id.clone(),
-            collaboration_mode_id: automation.target.collaboration_mode_id.clone(),
-            approval_policy: automation.target.approval_policy.clone(),
-            sandbox_mode: automation.target.sandbox_mode.clone(),
-            permission_mode: automation.target.permission_mode.clone(),
-            isolation: automation
-                .target
-                .isolation
-                .clone()
-                .unwrap_or(falcondeck_core::ThreadIsolation::ProjectFolder),
-            handoff_from: None,
-            handoff_context: None,
-        })
-        .await;
+    let request = falcondeck_core::StartThreadRequest {
+        execution_target: Default::default(),
+        idempotency_key: None,
+        workspace_id: workspace_id.to_string(),
+        provider: Some(automation.target.provider.clone()),
+        model_id: automation.target.model_id.clone(),
+        collaboration_mode_id: automation.target.collaboration_mode_id.clone(),
+        approval_policy: automation.target.approval_policy.clone(),
+        sandbox_mode: automation.target.sandbox_mode.clone(),
+        permission_mode: automation.target.permission_mode.clone(),
+        isolation: automation
+            .target
+            .isolation
+            .clone()
+            .unwrap_or(falcondeck_core::ThreadIsolation::ProjectFolder),
+        handoff_from: None,
+        handoff_context: None,
+    };
+    let bot = match automation.target.run_as_bot.as_deref() {
+        Some(id) => app
+            .preferences()
+            .await
+            .bots
+            .into_iter()
+            .find(|bot| bot.id == id),
+        None => None,
+    };
+    let started = if let Some(bot) = bot {
+        app.start_thread_as_bot(request, &bot).await
+    } else {
+        app.start_thread(request).await
+    };
     let handle = match started {
         Ok(handle) => handle,
         Err(error) => {

@@ -419,7 +419,13 @@ impl AppState {
         // sender marks the thread running before reaching here, so whichever
         // side wins the gate leaves one coherent subscription state.
         let _operation = self.codex_runtime_operation_guard(workspace_id).await;
-        let (requires_resume, cwd, summary) = {
+        let desired_bot_context = if resume {
+            self.bot_system_context(thread_id, &AgentProvider::CODEX)
+                .await
+        } else {
+            None
+        };
+        let (mut requires_resume, cwd, summary, context_changed, unpersisted) = {
             let workspaces = self.inner.workspaces.lock().await;
             let workspace = workspaces
                 .get(workspace_id)
@@ -432,8 +438,25 @@ impl AppState {
                 || workspace.summary.path.clone(),
                 |variant| variant.path.clone(),
             );
-            (thread.requires_resume, cwd, thread.summary.clone())
+            (
+                thread.requires_resume,
+                cwd,
+                thread.summary.clone(),
+                resume && thread.codex_bot_context != desired_bot_context,
+                thread.has_unpersisted_codex_start(),
+            )
         };
+        if context_changed && !requires_resume {
+            if unpersisted {
+                return Err(DaemonError::BadRequest("Bot system context changed on a Codex task with no persisted first turn; create the bot with system context already enabled, or finish its first turn before switching.".into()));
+            }
+            session.unsubscribe_thread(thread_id).await?;
+            self.with_managed_thread_mut(workspace_id, thread_id, |thread| {
+                thread.requires_resume = true
+            })
+            .await?;
+            requires_resume = true;
+        }
         if requires_resume {
             let response = if resume {
                 session.resume_thread(thread_id, &cwd).await?
@@ -455,6 +478,9 @@ impl AppState {
                 && let Some(thread) = workspace.threads.get_mut(thread_id)
             {
                 apply_codex_thread_hydration(thread, hydrated, resume);
+                if resume {
+                    thread.codex_bot_context = desired_bot_context;
+                }
                 true
             } else {
                 false
@@ -3302,6 +3328,7 @@ impl ManagedThread {
             ai_title_attempts: 0,
             title_is_provider_preview: false,
             requires_resume: false,
+            codex_bot_context: None,
             native_transcript_synced: false,
             opencode_turn_in_flight: false,
             opencode_interrupt_requested: false,

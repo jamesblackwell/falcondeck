@@ -70,9 +70,12 @@ pub struct BotProfile {
     /// Whether FalconDeck's coordinator tools may create tasks.
     #[serde(default = "enabled")]
     pub can_start_threads: bool,
-    /// Absolute paths of text files read into every turn, in order.
+    /// Standing text-file paths; legacy mode injects their contents each turn.
     #[serde(default)]
     pub context_files: Vec<String>,
+    /// Opt in to stable system-slot context on Claude/Codex. Absent is off.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub system_context_enabled: bool,
     /// Sidebar mark; older profiles get one assigned on the next bot change.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub icon: Option<BotIcon>,
@@ -193,6 +196,9 @@ pub enum BotMutation {
         /// Replacement context file list; absent keeps the current list.
         #[serde(default)]
         context_files: Option<Vec<String>>,
+        /// Absent preserves the current rollout choice.
+        #[serde(default)]
+        system_context_enabled: Option<bool>,
         /// Replacement sidebar mark; absent keeps the current one.
         #[serde(default)]
         icon: Option<BotIcon>,

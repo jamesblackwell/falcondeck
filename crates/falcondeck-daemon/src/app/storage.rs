@@ -242,6 +242,8 @@ pub(crate) async fn write_atomically(path: &PathBuf, payload: Vec<u8>) -> Result
 
 pub(super) fn merge_preferences_from_value(value: Value) -> FalconDeckPreferences {
     let mut preferences = FalconDeckPreferences::default();
+    preferences.bot_system_context_enabled = value.get("bot_system_context_enabled")
+        .and_then(Value::as_bool).unwrap_or(false);
     preferences.bots = value.get("bots").cloned()
         .and_then(|value| serde_json::from_value(value).ok()).unwrap_or_default();
     // Existing preference files retain manual recovery until the user opts in.
@@ -535,6 +537,9 @@ pub(super) fn apply_preferences_patch(
     preferences: &mut FalconDeckPreferences,
     request: UpdatePreferencesRequest,
 ) {
+    if let Some(enabled) = request.bot_system_context_enabled {
+        preferences.bot_system_context_enabled = enabled;
+    }
     if let Some(enabled) = request.auto_resume_interrupted_sessions {
         preferences.auto_resume_interrupted_sessions = enabled;
     }

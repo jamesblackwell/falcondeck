@@ -531,6 +531,8 @@ struct ManagedThread {
     /// a real title, so the titler needs this flag to know it may replace it.
     title_is_provider_preview: bool,
     requires_resume: bool,
+    /// Bot prefix installed in this live Codex subscription; never persisted.
+    codex_bot_context: Option<String>,
     /// Whether the daemon's transcript for a native OpenCode thread is known
     /// to match the agent's session storage. False after a restore (items are
     /// not persisted) and after a turn whose end-of-turn projection failed,

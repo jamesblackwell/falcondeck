@@ -195,3 +195,8 @@ heartbeats at ≤ 55 min intervals rather than exactly 60.
   - Per-workspace Codex `logs_2.sqlite` (`process_uuid`) only holds about a day of logs, too little to separate respawns statistically.
 - Code traced: `claude.rs` (spawn args), `agent_context.rs`, `app/workspace_ops.rs` (turn assembly), `app/bots/*`, `app/provider_runtime.rs` and `codex.rs` (Codex turn/start, resume), `connectors.rs`, `app/thread_tools.rs`, `control/scheduler.rs`, `app/runtime_health.rs`.
 - No live or billed experiments were needed: the request-shape logs gave a direct diff.
+
+The optional [stable bot context rollout](bot-system-context.md) moves standing
+Claude/Codex bot guidance into native system/developer instructions. It prevents
+new repeated bot blocks without editing existing provider history. Volatile
+inventories and file contents stay outside the system prefix.

@@ -151,6 +151,8 @@ impl TurnInput {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct TurnConstruction {
+    /// Changed standing instructions require a new native process.
+    agent_context: Option<String>,
     session_id: String,
     cwd: String,
     model_id: Option<String>,
@@ -327,6 +329,10 @@ impl ClaudeRuntime {
         let hooks_enabled =
             daemon_base_url.is_some() && claude_approvals_enabled() && !bypassing_permissions;
         let construction = TurnConstruction {
+            agent_context: agent_context
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(str::to_owned),
             session_id: next_session_id.clone(),
             cwd: cwd.to_string(),
             model_id: model_id.map(str::to_string),
@@ -3776,6 +3782,178 @@ mod tests {
     }
 
     #[cfg(unix)]
+    #[tokio::test]
+    async fn bot_system_bytes_survive_warm_compact_and_idle_resume_and_edits_respawn() {
+        use tokio::io::AsyncBufReadExt;
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let script = dir.path().join("stub-claude");
+        let log = dir.path().join("wire.jsonl");
+        let body = r#"#!/usr/bin/env python3
+import json, sys
+log = __LOG__
+with open(log, 'a') as f: f.write(json.dumps({'argv':sys.argv[1:]})+'\n')
+for line in sys.stdin:
+    with open(log, 'a') as f: f.write(json.dumps({'input':json.loads(line)})+'\n')
+    print(json.dumps({'type':'system','subtype':'compact_boundary'}), flush=True)
+    print(json.dumps({'type':'result','result':'ok','is_error':False}), flush=True)
+"#
+        .replace(
+            "__LOG__",
+            &serde_json::to_string(log.to_str().unwrap()).unwrap(),
+        );
+        fs::write(&script, body).unwrap();
+        fs::set_permissions(&script, fs::Permissions::from_mode(0o755)).unwrap();
+        let runtime = ClaudeRuntime::for_test(
+            dir.path().to_string_lossy().into(),
+            script.to_string_lossy().into(),
+        );
+        let system = "Stable bot rules: keep this across compaction.";
+        let first = runtime
+            .spawn_turn(
+                "bot",
+                None,
+                Some("bot-native"),
+                "first",
+                &[],
+                None,
+                None,
+                None,
+                None,
+                dir.path(),
+                dir.path().to_str().unwrap(),
+                &Default::default(),
+                Some(system),
+                100_000,
+                None,
+            )
+            .await
+            .unwrap();
+        let mut reader = tokio::io::BufReader::new(first.stdout.unwrap()).lines();
+        reader.next_line().await.unwrap().unwrap();
+        reader.next_line().await.unwrap().unwrap();
+        runtime.park_turn("bot", first.generation).await;
+        let compact = runtime
+            .spawn_turn(
+                "bot",
+                Some("bot-native"),
+                None,
+                "/compact",
+                &[],
+                None,
+                None,
+                None,
+                None,
+                dir.path(),
+                dir.path().to_str().unwrap(),
+                &Default::default(),
+                Some(system),
+                100_000,
+                None,
+            )
+            .await
+            .unwrap();
+        assert!(
+            compact.stdout.is_none(),
+            "unchanged system text reuses the warm process"
+        );
+        reader.next_line().await.unwrap().unwrap();
+        reader.next_line().await.unwrap().unwrap();
+        runtime.park_turn("bot", compact.generation).await;
+        runtime
+            .active_turns
+            .lock()
+            .await
+            .get_mut("bot")
+            .unwrap()
+            .parked_at = Some(tokio::time::Instant::now() - WARM_IDLE_GRACE);
+        assert!(
+            runtime
+                .retire_parked_turn_if_idle("bot", compact.generation)
+                .await
+        );
+        let resumed = runtime
+            .spawn_turn(
+                "bot",
+                Some("bot-native"),
+                None,
+                "after idle",
+                &[],
+                None,
+                None,
+                None,
+                None,
+                dir.path(),
+                dir.path().to_str().unwrap(),
+                &Default::default(),
+                Some(system),
+                100_000,
+                None,
+            )
+            .await
+            .unwrap();
+        let mut resumed_reader = tokio::io::BufReader::new(resumed.stdout.unwrap()).lines();
+        resumed_reader.next_line().await.unwrap().unwrap();
+        resumed_reader.next_line().await.unwrap().unwrap();
+        runtime.park_turn("bot", resumed.generation).await;
+        let edited = runtime
+            .spawn_turn(
+                "bot",
+                Some("bot-native"),
+                None,
+                "after edit",
+                &[],
+                None,
+                None,
+                None,
+                None,
+                dir.path(),
+                dir.path().to_str().unwrap(),
+                &Default::default(),
+                Some("Edited bot rules"),
+                100_000,
+                None,
+            )
+            .await
+            .unwrap();
+        assert!(
+            edited.stdout.is_some(),
+            "an edit cannot silently keep the old parked process"
+        );
+        let mut edited_reader = tokio::io::BufReader::new(edited.stdout.unwrap()).lines();
+        edited_reader.next_line().await.unwrap().unwrap();
+        edited_reader.next_line().await.unwrap().unwrap();
+        runtime.shutdown().await.unwrap();
+        let rows: Vec<Value> = fs::read_to_string(log)
+            .unwrap()
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
+        let argv: Vec<_> = rows
+            .iter()
+            .filter_map(|row| row["argv"].as_array())
+            .collect();
+        assert_eq!(argv.len(), 3);
+        let system_arg = |args: &Vec<Value>| {
+            args.iter()
+                .position(|arg| arg == "--append-system-prompt")
+                .map(|i| args[i + 1].as_str().unwrap().to_owned())
+                .unwrap()
+        };
+        assert_eq!(system_arg(argv[0]), system);
+        assert_eq!(system_arg(argv[1]), system);
+        assert_eq!(system_arg(argv[2]), "Edited bot rules");
+        assert!(
+            argv[1]
+                .windows(2)
+                .any(|w| w[0] == "--resume" && w[1] == "bot-native")
+        );
+        let inputs: Vec<_> = rows.iter().filter_map(|row| row.get("input")).collect();
+        assert_eq!(inputs.len(), 4);
+        assert!(inputs.iter().all(|row| !row.to_string().contains(system)));
+    }
+
+    #[cfg(unix)]
     async fn parked_fixture(runtime: &ClaudeRuntime, script: &str) -> u32 {
         let mut child = Command::new("/bin/sh")
             .args(["-c", script])
@@ -3795,6 +3973,7 @@ mod tests {
                 child,
                 input,
                 construction: TurnConstruction {
+                    agent_context: None,
                     session_id: "native-session".to_string(),
                     cwd: "/tmp/project".to_string(),
                     model_id: None,

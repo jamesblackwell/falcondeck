@@ -1209,12 +1209,13 @@ pub(super) async fn start_thread(
     app: &AppState,
     request: StartThreadRequest,
 ) -> Result<ThreadHandle, DaemonError> {
-    start_thread_internal(app, request).await
+    start_thread_with_bot_context(app, request, None).await
 }
 
-async fn start_thread_internal(
+pub(crate) async fn start_thread_with_bot_context(
     app: &AppState,
     request: StartThreadRequest,
+    bot_context: Option<String>,
 ) -> Result<ThreadHandle, DaemonError> {
     app.connect_workspace_on_demand(&request.workspace_id)
         .await?;
@@ -1313,6 +1314,7 @@ async fn start_thread_internal(
                 approval_policy: &approval_policy,
                 collaboration_mode_id: request.collaboration_mode_id.as_deref(),
                 cwd,
+                bot_context: bot_context.as_deref(),
             },
         )
         .await;
@@ -1404,6 +1406,7 @@ async fn start_thread_internal(
     }
     workspace.summary.updated_at = now;
     let mut managed = ManagedThread::new(thread.clone());
+    managed.codex_bot_context = bot_context;
     managed.pending_handoff_context = handoff_context;
     let persist_now = managed.pending_handoff_context.is_some();
     workspace.threads.insert(thread_id.clone(), managed);
@@ -3620,10 +3623,12 @@ async fn send_turn_with_startup_mode(
             handoff_context,
         )
     };
-    // Inject current bot instructions on every dispatched turn, including native
-    // resumes after compaction. Keep these out of the user's transcript bubble.
+    // Enabled Claude/Codex bots keep standing guidance in native instructions.
+    // Only fresh upkeep and outcomes join these turns; legacy providers keep the full block.
     let (outcomes, outcome_ids) = app.delegation_context(&request.thread_id).await.unwrap_or_default();
-    let bot_context = app.bot_context(&request.thread_id).await.map(|context| format!("{context}{outcomes}"));
+    let bot_context = app.bot_context(&request.thread_id).await
+        .map(|context| format!("{context}{outcomes}"))
+        .filter(|context| !context.is_empty());
     let turn_context = match (bot_context, handoff_context.as_deref()) {
         (Some(bot), Some(handoff)) => Some(format!("{bot}\n\n{handoff}")),
         (Some(bot), None) => Some(bot),

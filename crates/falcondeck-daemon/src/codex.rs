@@ -1189,7 +1189,7 @@ impl CodexSession {
     pub async fn resume_thread(&self, thread_id: &str, cwd: &str) -> Result<Value, DaemonError> {
         let instructions = self
             .state
-            .agent_context_instructions(&AgentProvider::CODEX)
+            .thread_agent_context_instructions(&AgentProvider::CODEX, thread_id)
             .await;
         let autocompact_tokens = self.state.preferences().await.codex_autocompact_tokens;
         let response = self
@@ -2655,6 +2655,118 @@ mod tests {
             state,
         });
         (directory, session, stdout)
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn bot_developer_instructions_survive_compact_unsubscribe_and_resume() {
+        let (directory, session, stdout) = piped_test_session("cat");
+        let preferences_path = directory.path().join("falcondeck.json");
+        let mut preferences = json!({"bot_system_context_enabled":true,"bots":[{
+            "id":"bot","name":"Coordinator","workspace_id":"workspace-1","dedicated_workspace":false,
+            "thread_id":"thread-1","space_path":directory.path().to_string_lossy(),
+            "instructions":"Stable standing rule","can_start_threads":true
+        }]});
+        tokio::fs::write(&preferences_path, serde_json::to_vec(&preferences).unwrap())
+            .await
+            .unwrap();
+        session.state.restore_local_state().await.unwrap();
+        let captured = Arc::new(Mutex::new(Vec::<Value>::new()));
+        let received = Arc::clone(&captured);
+        let responder = Arc::clone(&session);
+        let server = tokio::spawn(async move {
+            let mut lines = tokio::io::BufReader::new(stdout).lines();
+            while let Some(line) = lines.next_line().await.unwrap() {
+                let request: Value = serde_json::from_str(&line).unwrap();
+                received.lock().await.push(request.clone());
+                let Some(id) = request["id"].as_u64() else {
+                    continue;
+                };
+                let result = if request["method"] == "thread/resume" {
+                    json!({"thread":{"id":"thread-1","turns":[]}})
+                } else {
+                    json!({})
+                };
+                responder
+                    .pending_responses()
+                    .remove(&id)
+                    .unwrap()
+                    .send(Ok(result))
+                    .unwrap();
+            }
+        });
+        let system = session
+            .state
+            .thread_agent_context_instructions(&AgentProvider::CODEX, "thread-1")
+            .await
+            .unwrap();
+        assert!(system.contains("Stable standing rule"));
+        session
+            .send_request(
+                "thread/start",
+                thread_start_params(
+                    directory.path().to_str().unwrap(),
+                    None,
+                    None,
+                    "never",
+                    Some(&system),
+                    None,
+                ),
+            )
+            .await
+            .unwrap();
+        session
+            .resume_thread("thread-1", directory.path().to_str().unwrap())
+            .await
+            .unwrap();
+        session
+            .send_request(
+                "turn/start",
+                json!({"threadId":"thread-1","input":[{"type":"text","text":"first"}]}),
+            )
+            .await
+            .unwrap();
+        session
+            .send_request("thread/compact/start", json!({"threadId":"thread-1"}))
+            .await
+            .unwrap();
+        session
+            .resume_thread("thread-1", directory.path().to_str().unwrap())
+            .await
+            .unwrap();
+        // Idle native writer release (also used before retiring app-server).
+        session.unsubscribe_thread("thread-1").await.unwrap();
+        session
+            .resume_thread("thread-1", directory.path().to_str().unwrap())
+            .await
+            .unwrap();
+        preferences["bots"][0]["instructions"] = json!("Edited standing rule");
+        tokio::fs::write(&preferences_path, serde_json::to_vec(&preferences).unwrap())
+            .await
+            .unwrap();
+        session.state.restore_local_state().await.unwrap();
+        session.unsubscribe_thread("thread-1").await.unwrap();
+        session
+            .resume_thread("thread-1", directory.path().to_str().unwrap())
+            .await
+            .unwrap();
+        let rows = captured.lock().await;
+        let prefixes: Vec<_> = rows
+            .iter()
+            .filter_map(|row| row["params"]["developerInstructions"].as_str())
+            .collect();
+        assert_eq!(prefixes.len(), 5);
+        assert!(prefixes[..4].iter().all(|text| *text == system));
+        assert!(prefixes[4].contains("Edited standing rule"));
+        assert_ne!(prefixes[4], system);
+        assert!(
+            rows.iter()
+                .filter(|row| row["method"] == "turn/start")
+                .all(|row| !row.to_string().contains("Stable standing rule"))
+        );
+        drop(rows);
+        session.shutdown().await.unwrap();
+        server.await.unwrap();
     }
 
     #[cfg(unix)]

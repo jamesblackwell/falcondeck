@@ -1,4 +1,4 @@
-//! Text files the user attaches to bots, read fresh into every bot turn.
+//! Bot guidance: stable native instructions or legacy per-turn file injection.
 use super::*;
 use falcondeck_core::{
     BOT_DEFAULT_INSTRUCTIONS, BotContextReport, BotContextSection, ContextFile, ContextFileContent,
@@ -183,7 +183,77 @@ fn part(label: &str, text: String) -> ContextPart {
     }
 }
 
+/// Only user-controlled configuration belongs in the cached system prefix.
+/// File contents, filesystem metadata and discovery inventories stay outside it.
+pub(crate) fn stable_bot_context(bot: &BotProfile) -> String {
+    let mut files = bot.context_files.clone();
+    files.sort();
+    files.dedup();
+    let files: String = files.iter().map(|path| format!("\n- {path}")).collect();
+    format!(
+        "# FalconDeck bot: {}\n\n{}\n\n## Your instructions\n{}\n\nDocument space: {}\nMay start tasks: {}. This restricts FalconDeck task creation; it is not an operating-system sandbox.\nRead MEMORY.md, STATUS.md and relevant supporting documents from this space when needed, especially after compaction or resuming. List the directory for current documents; files may change between turns.\nStanding context file paths (read relevant files fresh; suggest edits unless authorized):{}\nUse falcondeck_list_threads for current bots, projects and tasks; inspect peers' current STATUS.md before contacting them. Do not treat old inventories or file contents in conversation history as current.",
+        bot.name,
+        BOT_DEFAULT_INSTRUCTIONS,
+        bot.instructions,
+        bot.space_path,
+        bot.can_start_threads,
+        files,
+    )
+}
+
 impl AppState {
+    pub(crate) async fn start_thread_as_bot(
+        &self,
+        request: falcondeck_core::StartThreadRequest,
+        bot: &BotProfile,
+    ) -> Result<falcondeck_core::ThreadHandle, DaemonError> {
+        let provider = request
+            .provider
+            .clone()
+            .unwrap_or(falcondeck_core::AgentProvider::CODEX);
+        let context = self.bot_system_context_for_profile(bot, &provider).await;
+        workspace_ops::start_thread_with_bot_context(self, request, context).await
+    }
+
+    pub(crate) async fn bot_system_context_for_profile(
+        &self,
+        bot: &BotProfile,
+        provider: &falcondeck_core::AgentProvider,
+    ) -> Option<String> {
+        if !matches!(provider.as_str(), "claude" | "codex") {
+            return None;
+        }
+        let global = self
+            .inner
+            .preferences
+            .lock()
+            .await
+            .bot_system_context_enabled;
+        (global || bot.system_context_enabled).then(|| stable_bot_context(bot))
+    }
+
+    pub(crate) async fn bot_system_context(
+        &self,
+        thread: &str,
+        provider: &falcondeck_core::AgentProvider,
+    ) -> Option<String> {
+        let bot = self.bot_for_thread(thread).await?;
+        self.bot_system_context_for_profile(&bot, provider).await
+    }
+
+    pub(crate) async fn thread_agent_context_instructions(
+        &self,
+        provider: &falcondeck_core::AgentProvider,
+        thread: &str,
+    ) -> Option<String> {
+        let base = self.agent_context_instructions(provider).await;
+        let bot = self.bot_system_context(thread, provider).await;
+        match (base, bot) {
+            (Some(base), Some(bot)) => Some(format!("{base}\n\n{bot}")),
+            (a, b) => a.or(b),
+        }
+    }
+
     fn context_folder(&self) -> PathBuf {
         self.inner
             .state_path
@@ -333,6 +403,50 @@ impl AppState {
 
     pub(in crate::app) async fn bot_context(&self, thread: &str) -> Option<String> {
         let bot = self.bot_for_thread(thread).await?;
+        let provider = self
+            .inner
+            .workspaces
+            .lock()
+            .await
+            .values()
+            .find_map(|ws| ws.threads.get(thread).map(|t| t.summary.provider.clone()));
+        if let Some(provider) = provider
+            && self
+                .bot_system_context_for_profile(&bot, &provider)
+                .await
+                .is_some()
+        {
+            let space = PathBuf::from(&bot.space_path);
+            let files = bot.context_files.clone();
+            let notes = tokio::task::spawn_blocking(move || {
+                let mut notes = upkeep_notes(&space, std::time::SystemTime::now());
+                for path in files {
+                    if Path::new(&path).file_name().is_some_and(|name| {
+                        name.to_string_lossy().eq_ignore_ascii_case(SHARED_FILE)
+                    }) {
+                        if let Ok(meta) = std::fs::metadata(&path) {
+                            notes.extend(size_note(
+                                &path,
+                                meta.len(),
+                                SHARED_LIMIT,
+                                "prune stale or long lines",
+                            ));
+                        }
+                    }
+                }
+                notes
+            })
+            .await
+            .unwrap_or_default();
+            return Some(if notes.is_empty() {
+                String::new()
+            } else {
+                format!(
+                    "## Upkeep (from FalconDeck, checked each turn)\n{}",
+                    notes.join("\n")
+                )
+            });
+        }
         Some(
             self.bot_context_parts(&bot)
                 .await
@@ -345,7 +459,22 @@ impl AppState {
     /// What the bot's next turn receives, with a per-part size estimate.
     pub async fn bot_context_report(&self, id: &str) -> Result<BotContextReport, DaemonError> {
         let bot = self.bot(id).await?;
-        let parts = self.bot_context_parts(&bot).await;
+        let provider = self
+            .thread_summary(&bot.workspace_id, &bot.thread_id)
+            .await?
+            .provider;
+        let parts = if let Some(system) = self.bot_system_context_for_profile(&bot, &provider).await
+        {
+            vec![
+                part("System slot (Claude/Codex)", system),
+                part(
+                    "Per-turn upkeep",
+                    self.bot_context(&bot.thread_id).await.unwrap_or_default(),
+                ),
+            ]
+        } else {
+            self.bot_context_parts(&bot).await
+        };
         let text: String = parts.iter().map(|part| part.text.as_str()).collect();
         let sections: Vec<_> = parts
             .into_iter()
