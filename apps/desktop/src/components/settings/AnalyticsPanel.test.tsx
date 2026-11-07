@@ -1,4 +1,4 @@
-import { fireEvent, within, render, screen, waitFor } from '@testing-library/react'
+import { fireEvent, within, render, screen, waitFor, within } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { AnalyticsPanel } from './AnalyticsPanel'
@@ -134,9 +134,65 @@ const summary: AnalyticsSummary = {
   ],
 }
 
-function stubDaemon(usageReport: AnalyticsUsageReport = threadUsage) {
+const cacheReport = {
+  days: 30,
+  period_cost_usd: 200,
+  waste: [
+    {
+      rule: 'prefix_change',
+      group: 'cache',
+      severity: 'high',
+      certainty: 'proven',
+      label: 'Juno - CPO',
+      reason: 'First call missed a warm cache 2 times',
+      estimated_usd: 3,
+      thread: 't-home',
+      workspace: 'ws-1',
+    },
+    {
+      rule: 'repeat_idle_gap',
+      group: 'cache',
+      label: 'Morning digest',
+      reason: 'Cache rebuilt 5 times after idle gaps',
+      estimated_usd: 9,
+      thread: 't-run',
+      workspace: 'ws-1',
+      automation: 'automation-1',
+      flags: ['cache_cold_reuse'],
+    },
+    { rule: 'no_action', group: 'result', label: 'Disk guard', reason: 'Last 32 runs found nothing to do', estimated_usd: 2 },
+  ],
+  rules: [
+    { id: 'repeat_idle_gap', group: 'cache', label: 'Repeat idle rebuilds', definition: '3 or more rebuilds', flagged: 1, estimated_usd: 9 },
+  ],
+  limits: ['Failed turns and turns you interrupted cannot be told apart.'],
+  hit_rates: [
+    { dimension: 'provider', key: 'claude', provider: 'claude', fresh_tokens: 10, read_tokens: 970, write_tokens: 20, hit_rate: 0.97 },
+    { dimension: 'bot', key: 'Juno - CPO', fresh_tokens: 1, read_tokens: 1, write_tokens: 2, hit_rate: 0.25 },
+  ],
+  rebuilds_by_cause: [
+    { cause: 'first_turn', count: 9, tokens: 900, estimated_usd: 90 },
+    { cause: 'unclear', count: 1, tokens: 100, estimated_usd: 1 },
+  ],
+  rebuilds_by_bot: [{ key: 'Juno - CPO', label: 'Juno - CPO', count: 2, tokens: 100, estimated_usd: 1, top_cause: 'idle_gap' }],
+  rebuilds_by_thread: [{ key: 't-9', label: 'Slow task', workspace: 'ws-1', count: 2, tokens: 100, estimated_usd: 1, top_cause: 'unclear' }],
+  cost_mix: [
+    { provider: 'claude', fresh_usd: 1, write_usd: 50, read_usd: 49, write_reporting: 'reported' },
+    { provider: 'codex', fresh_usd: 25, write_usd: 0, read_usd: 75, write_reporting: 'reported_zero' },
+  ],
+  home_threads: [
+    { thread: 't-home', bot: 'Juno - CPO', workspace: 'ws-1', turns: 4, context_per_call: 150_000, peak_context: 300_000, median_gap_minutes: 90, gaps_under_5: 1, gaps_5_to_60: 1, gaps_over_60: 1, rebuild_tokens: 1, rebuild_usd: 4 },
+  ],
+  overhead: [{ bot: 'Juno - CPO', turns: 9, avg_tokens: 6700, avg_context: 134_000, share: 0.05 }],
+  prices: [{ provider: 'claude', model: 'claude-opus-5-5', input: 4, cache_read: 0.2, cache_write: 8, output: 20, source: 'list' }],
+}
+
+function stubDaemon(usageReport: AnalyticsUsageReport = threadUsage, cache: unknown = cacheReport) {
   const fetch = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
     const url = String(input)
+    if (url.includes('/api/analytics/cache')) {
+      return cache ? jsonResponse(cache) : new Response('not found', { status: 404 })
+    }
     if (url.includes('/api/analytics/summary')) return jsonResponse(summary)
     if (url.includes('/api/analytics/usage')) return jsonResponse(usageReport)
     if (url.includes('/api/analytics/prompts')) {
@@ -194,7 +250,8 @@ describe('AnalyticsPanel', () => {
   })
 
   it('leads with headline numbers on the overview', async () => {
-    stubDaemon()
+    window.localStorage.setItem('falcondeck.settings.analytics.tab', 'overview')
+    stubDaemon(threadUsage, { days: 30 })
     render(<AnalyticsPanel baseUrl="http://daemon" onToast={vi.fn()} />)
     expect(await screen.findByText('Total tokens')).toBeInTheDocument()
     // The usage report's totals, not the capped rollup.
@@ -271,12 +328,60 @@ describe('AnalyticsPanel', () => {
   )
 
   it('explains itself before it has data', async () => {
+    window.localStorage.setItem('falcondeck.settings.analytics.tab', 'overview')
     render(<AnalyticsPanel baseUrl={null} onToast={vi.fn()} />)
     expect(screen.getByText('Connect to the daemon to see analytics.')).toBeInTheDocument()
     stubDaemon({ ...threadUsage, rows: [] })
     render(<AnalyticsPanel baseUrl="http://daemon" onToast={vi.fn()} />)
     expect(screen.getByRole('status', { name: 'Loading analytics' })).toBeInTheDocument()
     expect(await screen.findByText('Total tokens')).toBeInTheDocument()
+  })
+
+  it('leads with ranked waste and makes a proven prefix change stand out', async () => {
+    stubDaemon()
+    const onOpenThread = vi.fn()
+    const onOpenAutomation = vi.fn()
+    render(<AnalyticsPanel baseUrl="http://daemon" onToast={vi.fn()} onOpenThread={onOpenThread} onOpenAutomation={onOpenAutomation} />)
+    expect(screen.getAllByRole('tab')[0]).toHaveAttribute('aria-selected', 'true')
+    expect(await screen.findByRole('alert')).toHaveTextContent('changed a prompt prefix')
+    expect(screen.getByText('Last 32 runs found nothing to do')).toBeInTheDocument()
+    expect(screen.getByText('3 or more rebuilds')).toBeInTheDocument()
+    expect(screen.getByText('Failed turns and turns you interrupted cannot be told apart.')).toBeInTheDocument()
+
+    fireEvent.click(screen.getByRole('button', { name: 'Morning digest' }))
+    expect(onOpenAutomation).toHaveBeenCalledWith('automation-1')
+    fireEvent.click(screen.getAllByRole('button', { name: 'Juno - CPO' })[0])
+    expect(onOpenThread).toHaveBeenCalledWith('ws-1', 't-home')
+
+    fireEvent.click(screen.getByRole('button', { name: 'Little result' }))
+    expect(within(screen.getByRole('region', { name: 'Ranked offenders' })).queryByText('Morning digest')).not.toBeInTheDocument()
+  })
+
+  it('labels hit rate and reported-zero writes so neither reads as the whole story', async () => {
+    stubDaemon()
+    render(<AnalyticsPanel baseUrl="http://daemon" onToast={vi.fn()} />)
+    await openTab('Cache')
+    expect(await screen.findByText(/Not the whole story/)).toBeInTheDocument()
+    expect(screen.getByText('Reported as 0')).toBeInTheDocument()
+    expect(screen.getByText(/not that nothing is cached/)).toBeInTheDocument()
+    expect(screen.getByText("Can't tell")).toBeInTheDocument()
+    expect(screen.getByText('5.0%')).toBeInTheDocument()
+  })
+
+  it('shows the biggest waste on the overview and links to the rest', async () => {
+    stubDaemon()
+    render(<AnalyticsPanel baseUrl="http://daemon" onToast={vi.fn()} />)
+    await openTab('Overview')
+    fireEvent.click(await screen.findByRole('button', { name: 'See all 3' }))
+    expect(screen.getByRole('tab', { name: 'Waste' })).toHaveAttribute('aria-selected', 'true')
+  })
+
+  it('stays usable on a daemon without the cache report', async () => {
+    stubDaemon(threadUsage, null)
+    render(<AnalyticsPanel baseUrl="http://daemon" onToast={vi.fn()} />)
+    expect(await screen.findByText('This version of the daemon does not report waste yet.')).toBeInTheDocument()
+    await openTab('Cache')
+    expect(screen.getByText('This version of the daemon does not report cache health yet.')).toBeInTheDocument()
   })
 
   it('filters scheduled tasks and keeps the filters across tabs', async () => {

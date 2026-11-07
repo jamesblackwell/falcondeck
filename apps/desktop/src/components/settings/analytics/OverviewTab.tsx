@@ -1,8 +1,9 @@
 import { useState } from 'react'
-import { SegmentedControl, SettingsSection } from '@falcondeck/ui'
-import type { AnalyticsDay, AnalyticsSummary, AnalyticsUsageTotals } from '@falcondeck/client-core'
+import { Button, SegmentedControl, SettingsSection } from '@falcondeck/ui'
+import type { AnalyticsDay, AnalyticsSummary, AnalyticsUsageTotals, AnalyticsWasteItem } from '@falcondeck/client-core'
 
 import { Stat, TILES } from './analytics-ui'
+import { WasteRow, type WasteLinks } from './WasteTab'
 import { compact, count, percent, scheduledOutcome, shortDate, tokenTotal, topBot, topModel, type Leader } from './analytics-utils'
 
 type DailyMetric = 'user_messages' | 'agent_messages' | 'scheduled' | 'turns' | 'commits'
@@ -64,7 +65,18 @@ function leaderDetail(top: Leader | null, total: number) {
   return top ? `${compact(top.tokens)} tokens · ${percent(top.tokens, total)}` : undefined
 }
 
-export function OverviewTab({ summary, usageTotals }: { summary: AnalyticsSummary; usageTotals: AnalyticsUsageTotals | null }) {
+export function OverviewTab({
+  summary,
+  usageTotals,
+  waste,
+  onOpenWaste,
+  ...links
+}: {
+  summary: AnalyticsSummary
+  usageTotals: AnalyticsUsageTotals | null
+  waste: AnalyticsWasteItem[]
+  onOpenWaste: () => void
+} & WasteLinks) {
   const [metric, setMetric] = useState<DailyMetric>('user_messages')
   const { totals } = summary
   const usage = summary.usage ?? []
@@ -94,6 +106,24 @@ export function OverviewTab({ summary, usageTotals }: { summary: AnalyticsSummar
           detail={outcome.started ? `${percent(outcome.noAction, outcome.started)} of ${count(outcome.started)} scheduled runs` : undefined}
         />
       </div>
+
+      {waste.length ? (
+        <SettingsSection
+          title="Biggest waste"
+          description="The top items from Waste, as estimates."
+          actions={
+            <Button variant="ghost" size="sm" onClick={onOpenWaste}>
+              See all {count(waste.length)}
+            </Button>
+          }
+        >
+          <ul className="divide-y divide-border-subtle">
+            {waste.slice(0, 3).map((item) => (
+              <WasteRow key={`${item.rule}:${item.automation ?? item.thread ?? item.label}`} item={item} {...links} />
+            ))}
+          </ul>
+        </SettingsSection>
+      ) : null}
 
       <SettingsSection title="Daily activity" description="Totals for the selected period.">
         <SegmentedControl

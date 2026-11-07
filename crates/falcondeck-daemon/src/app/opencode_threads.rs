@@ -526,6 +526,7 @@ pub(super) async fn start_opencode_turn(
                     tier: None,
                     effort: None,
                     cost_ticks: None,
+                    first_call: None,
                     id: format!("opencode:{session_id}:{message_id}:{model}"),
                     turn_key: message_id.clone(),
                 });

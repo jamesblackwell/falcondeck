@@ -1489,6 +1489,7 @@ impl AppState {
                         tier: None,
                         effort: None,
                         cost_ticks,
+                        first_call: None,
                         id: format!("{provider}:{turn_key}{suffix}"),
                         turn_key: turn_key.clone(),
                     });

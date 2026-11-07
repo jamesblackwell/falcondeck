@@ -10,7 +10,7 @@ use chrono::{DateTime, Datelike, Local, NaiveDate};
 use falcondeck_core::control::AUTOMATION_MESSAGE_PREFIX;
 use falcondeck_core::{
     AnalyticsAgent, AnalyticsAgentMessage, AnalyticsAgentPair, AnalyticsAutomation, AnalyticsBot,
-    AnalyticsClearTarget, AnalyticsDay, AnalyticsFile, AnalyticsProject, AnalyticsPrompt,
+    AnalyticsCacheReport, AnalyticsClearTarget, AnalyticsDay, AnalyticsFile, AnalyticsProject, AnalyticsPrompt,
     AnalyticsProvider, AnalyticsSettings, AnalyticsStatus, AnalyticsSummary, AnalyticsUsage,
     AnalyticsUsageReport, AnalyticsUsageRow, AnalyticsUsageThread, AnalyticsUsageTotals,
     AnalyticsThreadActivity, AnalyticsThreadDispatch, AnalyticsThreadMessage, AnalyticsTotals,
@@ -24,6 +24,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use tokio::sync::{mpsc, oneshot};
 
 use crate::claude::ClaudeModelUsage;
+
+mod cache;
 
 const QUEUE: usize = 4096;
 const EXCERPT_CHARS: usize = 160;
@@ -84,6 +86,11 @@ enum Record {
         t: DateTime<Utc>,
         th: String,
         tok: u64,
+    },
+    /// A provider compacted a thread's context.
+    Compact {
+        t: DateTime<Utc>,
+        th: String,
     },
     /// An approval or question waited on the user; `k` is `approval` or `question`.
     Wait {
@@ -177,6 +184,19 @@ struct UsageRecord {
     /// unconfirmed and the conversion may need correcting.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     cost_ticks: Option<u64>,
+    /// Cache read of the turn's first main-chain call (Claude only). Totals
+    /// include sub-agents, so only this can prove the turn missed the cache.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    fcr: Option<u64>,
+    /// Cache write of that same call.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    fcw: Option<u64>,
+}
+
+impl UsageRecord {
+    fn first_call(&self) -> Option<(u64, u64)> {
+        Some((self.fcr?, self.fcw?))
+    }
 }
 
 /// Wrapper giving usage lines the same `"e"` tag as activity records, so one
@@ -211,6 +231,8 @@ pub(super) struct TurnUsage<'a> {
     pub tier: Option<String>,
     pub effort: Option<String>,
     pub cost_ticks: Option<u64>,
+    /// First main-chain call's `(cache read, cache write)`, when known.
+    pub first_call: Option<(u64, u64)>,
     /// Record id, unique per turn and model, e.g. `grok:<prompt_id>`.
     pub id: String,
     pub turn_key: String,
@@ -234,6 +256,7 @@ struct OwnedTurnUsage {
     tier: Option<String>,
     effort: Option<String>,
     cost_ticks: Option<u64>,
+    first_call: Option<(u64, u64)>,
     id: String,
 }
 
@@ -256,6 +279,7 @@ impl TurnUsage<'_> {
             tier: self.tier.clone(),
             effort: self.effort.clone(),
             cost_ticks: self.cost_ticks,
+            first_call: self.first_call,
             id: self.id.clone(),
         }
     }
@@ -1200,6 +1224,7 @@ fn record_time(record: &Record) -> DateTime<Utc> {
         | Record::Turn { t, .. }
         | Record::File { t, .. }
         | Record::Context { t, .. }
+        | Record::Compact { t, .. }
         | Record::Wait { t, .. }
         | Record::Commit { t, .. }
         | Record::Route { t, .. } => *t,
@@ -1720,6 +1745,7 @@ fn summarize(records: Vec<Record>, labels: &Labels, days: u32) -> AnalyticsSumma
                     stats.context_turns += 1;
                 }
             }
+            Record::Compact { .. } => {}
             Record::Wait { ms, .. } => request_waits.push(ms),
             Record::Commit { ws, th, .. } => {
                 totals.commits += 1;
@@ -2180,6 +2206,12 @@ impl AppState {
         item: &ConversationItem,
     ) {
         match item {
+            ConversationItem::ContextCompaction { .. } => {
+                self.analytics().record(Record::Compact {
+                    t: Utc::now(),
+                    th: thread.summary.id.clone(),
+                });
+            }
             ConversationItem::UserMessage { id, text, .. } => {
                 // Resumes and automatic retries are not new messages.
                 if id.starts_with("user-resume-")
@@ -2398,6 +2430,8 @@ impl AppState {
                     tier: capture.tier,
                     effort: capture.effort.or(attribution.effort),
                     cost_ticks: capture.cost_ticks,
+                    fcr: capture.first_call.map(|call| call.0),
+                    fcw: capture.first_call.map(|call| call.1),
                 },
                 capture.turn_key,
             );
@@ -2417,6 +2451,7 @@ impl AppState {
         cumulative: bool,
         tier: Option<String>,
         calls: Option<u64>,
+        first_call: Option<(u64, u64)>,
     ) -> Option<(u64, u64)> {
         let deltas = {
             let mut baselines = self
@@ -2448,6 +2483,7 @@ impl AppState {
                 output: delta[3],
                 reasoning: delta[4],
                 calls: (Some(index) == carrier).then_some(calls).flatten(),
+                first_call: (Some(index) == carrier).then_some(first_call).flatten(),
                 cost: *cost,
                 cost_source: if cost.is_some() {
                     "provider"
@@ -2556,6 +2592,7 @@ impl AppState {
             tier: None,
             effort: None,
             cost_ticks: None,
+                first_call: None,
             id: format!("codex:{thread_id}:{turn}"),
             turn_key: turn.to_string(),
         });
@@ -2896,6 +2933,33 @@ impl AppState {
         .map_err(|e| DaemonError::Process(e.to_string()))
     }
 
+    /// Cache health and waste for the period. Usage is read from further back
+    /// so the period's first turns are compared with what came before them.
+    pub async fn analytics_cache(&self, days: u32) -> Result<AnalyticsCacheReport, DaemonError> {
+        let days = days.clamp(1, 366);
+        let automations = self.analytics_summary(days).await?.automations;
+        let labels = self.analytics_labels().await;
+        let dir = self.analytics().dir.clone();
+        let since = self.analytics_period_start(days).await;
+        let runs = self.control().runs_since(since).await;
+        tokio::task::spawn_blocking(move || {
+            let from = since - chrono::Duration::days(cache::LOOKBACK_DAYS);
+            let usage = read_usage_records(&dir, from);
+            let records = read_records(&dir, from);
+            cache::build_report(&cache::CacheInput {
+                days,
+                since,
+                usage: &usage,
+                records: &records,
+                runs: &runs,
+                automations: &automations,
+                labels: &labels,
+            })
+        })
+        .await
+        .map_err(|e| DaemonError::Process(e.to_string()))
+    }
+
     /// Start of the summary window: local midnight of the first charted day,
     /// so totals and daily buckets cover the same calendar days.
     async fn analytics_period_start(&self, days: u32) -> DateTime<Utc> {
@@ -3032,6 +3096,8 @@ mod tests {
             tier: None,
             effort: None,
             cost_ticks: None,
+            fcr: None,
+            fcw: None,
         }
     }
 

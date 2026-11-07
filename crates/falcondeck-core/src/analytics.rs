@@ -518,3 +518,252 @@ pub enum AnalyticsClearTarget {
     /// All of them.
     All,
 }
+
+/// Cache health and waste for a period, built from usage and activity records.
+/// Costs are estimates at list prices; every new field stays optional on read.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct AnalyticsCacheReport {
+    /// Period length in days.
+    pub days: u32,
+    /// Estimated cost of all priced usage in the period.
+    #[serde(default)]
+    pub period_cost_usd: f64,
+    /// Ranked offenders, most serious first.
+    #[serde(default)]
+    pub waste: Vec<AnalyticsWasteItem>,
+    /// Every waste rule with its thresholds, so a flag can be explained.
+    #[serde(default)]
+    pub rules: Vec<AnalyticsWasteRule>,
+    /// Signals the records cannot give, named rather than guessed.
+    #[serde(default)]
+    pub limits: Vec<String>,
+    /// Hit rate by provider, model and bot.
+    #[serde(default)]
+    pub hit_rates: Vec<AnalyticsCacheHitRate>,
+    /// Rebuilds grouped by cause.
+    #[serde(default)]
+    pub rebuilds_by_cause: Vec<AnalyticsRebuildCause>,
+    /// Rebuilds grouped by bot.
+    #[serde(default)]
+    pub rebuilds_by_bot: Vec<AnalyticsRebuildGroup>,
+    /// Rebuilds grouped by thread.
+    #[serde(default)]
+    pub rebuilds_by_thread: Vec<AnalyticsRebuildGroup>,
+    /// Input cost split per provider.
+    #[serde(default)]
+    pub cost_mix: Vec<AnalyticsCostMix>,
+    /// Bot home threads.
+    #[serde(default)]
+    pub home_threads: Vec<AnalyticsHomeThreadCache>,
+    /// Injected context per bot.
+    #[serde(default)]
+    pub overhead: Vec<AnalyticsBotOverhead>,
+    /// Prices behind the estimates.
+    #[serde(default)]
+    pub prices: Vec<AnalyticsPrice>,
+}
+
+/// One flagged offender for the selected period.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct AnalyticsWasteItem {
+    /// Id of the rule that flagged it.
+    pub rule: String,
+    /// `cache`, `result` or `bloat`.
+    pub group: String,
+    /// `high` for something FalconDeck broke, otherwise `normal`.
+    #[serde(default)]
+    pub severity: String,
+    /// `proven` from first-call records, otherwise `estimate` or `possible`.
+    #[serde(default)]
+    pub certainty: String,
+    /// Display name.
+    pub label: String,
+    /// One-line reason, in plain words.
+    pub reason: String,
+    /// Estimated cost attributed to the flag, in USD.
+    pub estimated_usd: f64,
+    /// Occurrences behind the flag.
+    #[serde(default)]
+    pub occurrences: u64,
+    /// Thread id, when one applies.
+    #[serde(default)]
+    pub thread: Option<String>,
+    /// Workspace of the thread.
+    #[serde(default)]
+    pub workspace: Option<String>,
+    /// Automation id, when one caused it.
+    #[serde(default)]
+    pub automation: Option<String>,
+    /// Bot name.
+    #[serde(default)]
+    pub bot: Option<String>,
+    /// Existing automation review flags that fed this item.
+    #[serde(default)]
+    pub flags: Vec<String>,
+}
+
+/// A rule as shown in the panel, with how much it flagged.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct AnalyticsWasteRule {
+    /// Stable rule id.
+    pub id: String,
+    /// `cache`, `result` or `bloat`.
+    pub group: String,
+    /// Display name.
+    pub label: String,
+    /// The rule and its thresholds, in plain words.
+    pub definition: String,
+    /// Items flagged in the period.
+    #[serde(default)]
+    pub flagged: u64,
+    /// Estimated cost, in USD.
+    #[serde(default)]
+    pub estimated_usd: f64,
+}
+
+/// Read share of prompt tokens; never the whole story on its own.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct AnalyticsCacheHitRate {
+    /// `provider`, `model` or `bot`.
+    pub dimension: String,
+    /// Group value.
+    pub key: String,
+    /// Harness id.
+    #[serde(default)]
+    pub provider: Option<String>,
+    /// Uncached input tokens.
+    pub fresh_tokens: u64,
+    /// Tokens read from cache.
+    pub read_tokens: u64,
+    /// Tokens written to cache.
+    pub write_tokens: u64,
+    /// Reads over fresh plus reads plus writes, from 0 to 1.
+    pub hit_rate: f64,
+}
+
+/// Rebuilds of one cause: `idle_gap`, `first_turn`, `model_switch`,
+/// `effort_switch`, `compaction`, `prefix_change`, `possible_prefix_change`,
+/// `unclear` or `input_after_gap`.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct AnalyticsRebuildCause {
+    /// Cause id.
+    pub cause: String,
+    /// Rebuilds counted.
+    pub count: u64,
+    /// Tokens written.
+    pub tokens: u64,
+    /// Estimated cost, in USD.
+    pub estimated_usd: f64,
+}
+
+/// Rebuilds rolled up by bot or thread.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct AnalyticsRebuildGroup {
+    /// Group value.
+    pub key: String,
+    /// Display name.
+    pub label: String,
+    /// Workspace of the thread.
+    #[serde(default)]
+    pub workspace: Option<String>,
+    /// Bot name.
+    #[serde(default)]
+    pub bot: Option<String>,
+    /// Rebuilds counted.
+    pub count: u64,
+    /// Tokens written.
+    pub tokens: u64,
+    /// Estimated cost, in USD.
+    pub estimated_usd: f64,
+    /// Cause with the most tokens in this group.
+    #[serde(default)]
+    pub top_cause: String,
+}
+
+/// Estimated input cost split by where the tokens went.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct AnalyticsCostMix {
+    /// Harness id.
+    pub provider: String,
+    /// Estimated cost of fresh input.
+    pub fresh_usd: f64,
+    /// Estimated cost of cache writes.
+    pub write_usd: f64,
+    /// Estimated cost of cache reads.
+    pub read_usd: f64,
+    /// Prompt tokens on models with no known price, left out of the dollars.
+    #[serde(default)]
+    pub unpriced_tokens: u64,
+    /// `reported` when the provider gives cache writes, else `reported_zero`.
+    #[serde(default)]
+    pub write_reporting: String,
+    /// The provider's own cost figure, for comparison, where it gives one.
+    #[serde(default)]
+    pub recorded_usd: f64,
+}
+
+/// Context and idle pattern of one bot home thread.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct AnalyticsHomeThreadCache {
+    /// Thread id, when one applies.
+    pub thread: String,
+    /// Bot name.
+    pub bot: String,
+    /// Workspace of the thread.
+    #[serde(default)]
+    pub workspace: Option<String>,
+    /// Turns in the period.
+    pub turns: u64,
+    /// Mean prompt size per model call.
+    pub context_per_call: u64,
+    /// Largest context in the period.
+    pub peak_context: u64,
+    /// Median minutes idle between turns.
+    #[serde(default)]
+    pub median_gap_minutes: Option<f64>,
+    /// Gaps under five minutes.
+    pub gaps_under_5: u64,
+    /// Gaps from five to sixty minutes.
+    pub gaps_5_to_60: u64,
+    /// Gaps of sixty minutes or more.
+    pub gaps_over_60: u64,
+    /// Tokens written by rebuilds.
+    pub rebuild_tokens: u64,
+    /// Estimated cost of those rebuilds.
+    pub rebuild_usd: f64,
+}
+
+/// What FalconDeck adds to each bot turn.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct AnalyticsBotOverhead {
+    /// Bot name.
+    pub bot: String,
+    /// Turns in the period.
+    pub turns: u64,
+    /// Mean injected context per turn, in estimated tokens.
+    pub avg_tokens: u64,
+    /// Mean peak context of the same bot's turns.
+    pub avg_context: u64,
+    /// Injected share of that context, from 0 to 1.
+    pub share: f64,
+}
+
+/// List price per million tokens, as used for the estimates.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct AnalyticsPrice {
+    /// Harness id.
+    pub provider: String,
+    /// Model id or prefix.
+    pub model: String,
+    /// Fresh input price.
+    pub input: f64,
+    /// Cache read price.
+    pub cache_read: f64,
+    /// Absent where the provider reports no cache writes.
+    #[serde(default)]
+    pub cache_write: Option<f64>,
+    /// Output price.
+    pub output: f64,
+    /// Where the price came from.
+    pub source: String,
+}

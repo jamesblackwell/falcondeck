@@ -1675,6 +1675,8 @@ impl AppState {
         let mut parked_between_turns = false;
         let mut saw_cancelled_result = false;
         let mut last_live_usage: Option<claude::ClaudeLiveContextUsage> = None;
+        // This turn's first main-chain call, as `(cache read, cache write)`.
+        let mut first_main_call: Option<(u64, u64)> = None;
         let mut model_context_window: Option<u64> = None;
         if let Some(stdout) = stdout {
             let (line_tx, mut line_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
@@ -1891,6 +1893,7 @@ impl AppState {
                                             cumulative,
                                             tier,
                                             calls,
+                                            first_main_call.take(),
                                         ) {
                                             self.control()
                                                 .record_claude_run_usage(
@@ -1922,9 +1925,19 @@ impl AppState {
                                         )
                                         .await;
                                 }
+                                first_main_call = None;
                             }
                             if let Some(usage) = live_context_usage(&value) {
                                 last_live_usage = Some(usage);
+                                if first_main_call.is_none()
+                                    && claude_parent_tool_use_id(&value).is_none()
+                                    && usage.context_used_tokens() > 0
+                                {
+                                    first_main_call = Some((
+                                        usage.cache_read_input_tokens,
+                                        usage.cache_creation_input_tokens,
+                                    ));
+                                }
                                 self.record_claude_live_usage(
                                     &workspace_id,
                                     &thread_id,

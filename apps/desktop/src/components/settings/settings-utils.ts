@@ -274,9 +274,18 @@ export const SETTINGS_GROUPS: SettingsNavGroup[] = [
       {
         id: "analytics",
         label: "Analytics",
-        description: "Tokens, scheduled tasks, agent activity and your messages",
+        description: "Waste, cache health, tokens, scheduled tasks and agent activity",
         icon: ChartColumn,
         settings: [
+          "Waste",
+          "Ranked offenders",
+          "How flags are decided",
+          "Cache",
+          "Cache hit rate",
+          "Where input cost goes",
+          "Cache rebuilds",
+          "Home threads",
+          "Added to each bot turn",
           "Overview",
           "Token usage",
           "Turns by bot",
@@ -295,7 +304,7 @@ export const SETTINGS_GROUPS: SettingsNavGroup[] = [
           "Keep activity for",
           "Storage",
         ],
-        keywords: ["stats", "metrics", "prompts", "history", "log", "chatter", "tokens", "files", "models", "usage"],
+        keywords: ["stats", "metrics", "prompts", "history", "log", "chatter", "tokens", "files", "models", "usage", "cost", "spend", "rebuild", "ttl", "prefix", "compaction"],
       },
       {
         id: "backup",

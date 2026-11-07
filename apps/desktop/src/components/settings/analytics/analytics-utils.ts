@@ -2,14 +2,18 @@ import {
   defaultProviderLabel,
   type AnalyticsAgent,
   type AnalyticsAutomation,
+  type AnalyticsRebuildCause,
+  type AnalyticsWasteItem,
   type AnalyticsUsage,
   type AnalyticsUsageRow,
   type AnalyticsUsageTotals,
 } from '@falcondeck/client-core'
 
-export type AnalyticsTab = 'overview' | 'tokens' | 'threads' | 'scheduled' | 'activity' | 'messages' | 'recording'
+export type AnalyticsTab = 'waste' | 'cache' | 'overview' | 'tokens' | 'threads' | 'scheduled' | 'activity' | 'messages' | 'recording'
 
 export const ANALYTICS_TABS: Array<{ value: AnalyticsTab; label: string }> = [
+  { value: 'waste', label: 'Waste' },
+  { value: 'cache', label: 'Cache' },
   { value: 'overview', label: 'Overview' },
   { value: 'tokens', label: 'Tokens' },
   { value: 'threads', label: 'Threads' },
@@ -22,6 +26,15 @@ export const ANALYTICS_TABS: Array<{ value: AnalyticsTab; label: string }> = [
 /** Deep-link targets, by the on-page title Settings search jumps to. Every
  * analytics title in settings-utils must be listed so its tab can open first. */
 export const ANALYTICS_SETTING_TABS: Record<string, AnalyticsTab> = {
+  Waste: 'waste',
+  'Ranked offenders': 'waste',
+  'How flags are decided': 'waste',
+  Cache: 'cache',
+  'Cache hit rate': 'cache',
+  'Where input cost goes': 'cache',
+  'Cache rebuilds': 'cache',
+  'Home threads': 'cache',
+  'Added to each bot turn': 'cache',
   Overview: 'overview',
   Tokens: 'tokens',
   'Token usage': 'tokens',
@@ -50,9 +63,9 @@ const TAB_STORAGE_KEY = 'falcondeck.settings.analytics.tab'
 export function readStoredTab(): AnalyticsTab {
   try {
     const stored = window.localStorage.getItem(TAB_STORAGE_KEY)
-    return ANALYTICS_TABS.find((tab) => tab.value === stored)?.value ?? 'overview'
+    return ANALYTICS_TABS.find((tab) => tab.value === stored)?.value ?? 'waste'
   } catch {
-    return 'overview'
+    return 'waste'
   }
 }
 
@@ -316,4 +329,63 @@ export function scheduledOutcome(automations: AnalyticsAutomation[]) {
     }),
     { started: 0, noAction: 0 },
   )
+}
+
+/** Estimated dollars: always marked, so nobody reads them as a bill. */
+export function estimate(value: number) {
+  if (!value) return '—'
+  return `≈$${value >= 100 ? Math.round(value).toLocaleString() : value.toFixed(2)}`
+}
+
+export const WASTE_GROUPS = [
+  { value: 'all', label: 'All' },
+  { value: 'cache', label: 'Cache breaks' },
+  { value: 'result', label: 'Little result' },
+  { value: 'bloat', label: 'Bloat' },
+] as const
+
+export type WasteGroup = (typeof WASTE_GROUPS)[number]['value']
+
+export function filterWaste(items: AnalyticsWasteItem[], group: WasteGroup) {
+  return group === 'all' ? items : items.filter((item) => item.group === group)
+}
+
+/** Items that mean something FalconDeck did, or may have done, broke the cache. */
+export const isPrefixItem = (item: AnalyticsWasteItem) =>
+  item.rule === 'prefix_change' || item.rule === 'possible_prefix_change'
+
+export function wasteTotal(items: AnalyticsWasteItem[]) {
+  return items.reduce((sum, item) => sum + item.estimated_usd, 0)
+}
+
+export const CAUSES: Record<string, { label: string; detail: string }> = {
+  idle_gap: { label: 'Idle past the TTL', detail: 'Over 60 minutes since the last turn, so the cache had expired.' },
+  first_turn: { label: 'First turn', detail: 'A new thread has nothing to read yet. The price of starting.' },
+  model_switch: { label: 'Model switch', detail: 'Caches belong to one model.' },
+  effort_switch: { label: 'Effort switch', detail: 'Changing effort invalidates the message cache.' },
+  compaction: { label: 'Compaction', detail: 'Recorded from this build on.' },
+  prefix_change: { label: 'Prefix change', detail: 'The first call missed a warm cache. Something changed the prompt.' },
+  possible_prefix_change: {
+    label: 'Possible prefix change',
+    detail: 'Whole context rewritten while warm. Older records cannot prove it; compaction looks the same.',
+  },
+  unclear: { label: "Can't tell", detail: 'A large write sub-agents or a compaction could equally explain.' },
+  input_after_gap: {
+    label: 'New input after a gap',
+    detail: 'This provider reports no writes, so a rebuild and new input look the same.',
+  },
+}
+
+export function causeLabel(cause: string) {
+  return CAUSES[cause]?.label ?? cause
+}
+
+/** Costliest first, with first turns last: they are not a fault. */
+export function rankCauses(rows: AnalyticsRebuildCause[]) {
+  return [...rows].sort((a, b) => Number(a.cause === 'first_turn') - Number(b.cause === 'first_turn') || b.estimated_usd - a.estimated_usd)
+}
+
+export function gapLabel(minutes?: number | null) {
+  if (minutes === null || minutes === undefined) return '—'
+  return minutes >= 60 ? `${(minutes / 60).toFixed(1)} h` : `${Math.round(minutes)} min`
 }
