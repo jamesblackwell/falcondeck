@@ -28,7 +28,10 @@ For resumed sessions, FalconDeck also carries changed configuration in a one-off
   64 KB each, with a prompt to read the rest. Truncated-file tail edits are detected
   using size/modification metadata as well as the bounded contents.
 - Receipts advance only after a successful Claude turn. Failed starts, failures
-  and cancellation do not consume an update. A crash or receipt write failure can
+  and cancellation do not consume an update. Interrupt admission and successful
+  result acceptance share one runtime boundary: an interrupt accepted first blocks
+  acknowledgement; a stop after success retires the parked CLI without cancelling
+  the completed turn. A crash or receipt write failure can
   cause a safe repeat on retry; it cannot acknowledge undelivered changes.
 - Unchanged successful turns carry no repeated configuration and do not rewrite
   the receipt. Upkeep, new delegation reports, handoffs and sparse hints still

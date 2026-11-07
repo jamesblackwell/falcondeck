@@ -2463,23 +2463,35 @@ async fn claude_bot_edits_arrive_once_in_user_input_without_compacting() {
 #[cfg(unix)]
 #[tokio::test]
 async fn fresh_claude_bot_uses_native_instructions_without_an_initial_duplicate() {
-    let (app, _temp) = context_dispatch_fixture(AgentProvider::CLAUDE).await;
+    let (app, temp) = context_dispatch_fixture(AgentProvider::CLAUDE).await;
     app.inner
         .preferences
         .lock()
         .await
         .bot_system_context_enabled = true;
+    let file = temp.path().join("FRESH.md");
+    std::fs::write(&file, "Fresh attachment policy").unwrap();
+    app.inner.preferences.lock().await.bots[0].context_files = vec![file.to_string_lossy().into()];
     let plan = app
         .agent_context_plan("thread-1", &AgentProvider::CLAUDE)
         .await;
-    assert!(plan.context_update.is_none());
+    let update = plan.context_update.unwrap();
+    assert!(update.contains("Fresh attachment policy"));
+    assert!(!update.contains("Current standing instructions"));
     send_context_turn_and_wait(&app).await;
-    assert!(
-        app.agent_context_plan("thread-1", &AgentProvider::CLAUDE)
-            .await
-            .context_update
-            .is_none()
-    );
+    let wire = std::fs::read_to_string(temp.path().join("context-wire.jsonl")).unwrap();
+    let input: Value = wire
+        .lines()
+        .map(|line| serde_json::from_str::<Value>(line).unwrap())
+        .find_map(|row| row.get("input").cloned())
+        .unwrap();
+    assert!(input.to_string().contains("Fresh attachment policy"));
+    assert!(!input.to_string().contains("Current standing instructions"));
+    assert!(app
+        .agent_context_plan("thread-1", &AgentProvider::CLAUDE)
+        .await
+        .context_update
+        .is_none());
     app.shutdown().await.unwrap();
 }
 
@@ -2537,4 +2549,88 @@ async fn claude_bot_provider_failure_does_not_acknowledge_the_update() {
         assert!(retry.delivery_receipt.is_some());
         app.shutdown().await.unwrap();
     }
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn claude_bot_accepted_interrupt_wins_over_buffered_success() {
+    let (app, temp) = context_dispatch_fixture(AgentProvider::CLAUDE).await;
+    let code = r#"#!/usr/bin/env python3
+import json, pathlib, signal, sys, time
+root = pathlib.Path(__ROOT__)
+signal.signal(signal.SIGTERM, lambda *_: (root / 'interrupt-accepted').touch())
+for line in sys.stdin:
+    print(json.dumps({'type':'assistant','message':{'id':'buffered','role':'assistant','content':[{'type':'text','text':'done'}]}}), flush=True)
+    (root / 'result-ready').touch()
+    while not (root / 'release-result').exists(): time.sleep(0.005)
+    print(json.dumps({'type':'result','result':'done','is_error':False}), flush=True)
+    break
+"#
+    .replace("__ROOT__", &serde_json::to_string(temp.path().to_str().unwrap()).unwrap());
+    std::fs::write(temp.path().join("context-provider"), code).unwrap();
+    app.inner
+        .preferences
+        .lock()
+        .await
+        .bot_system_context_enabled = true;
+    app.with_thread_mut("workspace-1", "thread-1", |thread| {
+        thread.native_session_id = Some("existing-native".into())
+    })
+    .await
+    .unwrap();
+    app.push_conversation_item(
+        "workspace-1",
+        "thread-1",
+        user("prior", "Earlier turn"),
+        true,
+    )
+    .await
+    .unwrap();
+    app.send_turn(context_dispatch_request()).await.unwrap();
+    let wait_for = |name: &'static str| {
+        let path = temp.path().join(name);
+        async move {
+            tokio::time::timeout(std::time::Duration::from_secs(5), async {
+                while !path.exists() {
+                    tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+                }
+            })
+            .await
+            .unwrap();
+        }
+    };
+    wait_for("result-ready").await;
+    let interrupt_app = app.clone();
+    let interrupt = tokio::spawn(async move {
+        interrupt_app
+            .interrupt_turn("workspace-1".into(), "thread-1".into())
+            .await
+    });
+    // The stub observes SIGTERM only after the runtime accepted the interrupt.
+    wait_for("interrupt-accepted").await;
+    std::fs::write(temp.path().join("release-result"), "").unwrap();
+    interrupt.await.unwrap().unwrap();
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        loop {
+            let settled = {
+                let workspaces = app.inner.workspaces.lock().await;
+                let thread = &workspaces["workspace-1"].threads["thread-1"];
+                thread.summary.status != falcondeck_core::ThreadStatus::Running
+                    && thread.pending_bot_context_delivery.is_none()
+            };
+            if settled {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .unwrap();
+    assert!(!temp.path().join("bot-context-delivery").exists());
+    let retry = app
+        .agent_context_plan("thread-1", &AgentProvider::CLAUDE)
+        .await;
+    assert!(retry.context_update.is_some());
+    assert!(retry.delivery_receipt.is_some());
+    app.shutdown().await.unwrap();
 }

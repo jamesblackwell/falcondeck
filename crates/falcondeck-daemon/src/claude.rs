@@ -174,6 +174,8 @@ struct ActiveTurn {
     /// True after a successful `result` while stdin is still open, so the
     /// next turn can write another user line instead of spawning `--resume`.
     awaiting_next_turn: bool,
+    /// Prevent reuse once a stop has been accepted, including after success.
+    stop_requested: bool,
     parked_at: Option<tokio::time::Instant>,
     /// Kept after `Child::wait` reaps the leader so MCP helpers still stop.
     process_group_id: Option<u32>,
@@ -352,7 +354,11 @@ impl ClaudeRuntime {
         let previous = self.active_turns.lock().await.remove(thread_id);
         if let Some(mut turn) = previous {
             let still_alive = turn.child.try_wait().ok().flatten().is_none();
-            if still_alive && turn.awaiting_next_turn && turn.construction == construction {
+            if still_alive
+                && turn.awaiting_next_turn
+                && !turn.stop_requested
+                && turn.construction == construction
+            {
                 turn.awaiting_next_turn = false;
                 turn.parked_at = None;
                 let generation = turn.generation;
@@ -508,6 +514,7 @@ impl ClaudeRuntime {
                 input,
                 construction,
                 awaiting_next_turn: false,
+                stop_requested: false,
                 parked_at: None,
                 process_group_id,
                 _mcp_config: mcp_config,
@@ -571,7 +578,7 @@ impl ClaudeRuntime {
             let turn = active.get(thread_id).ok_or_else(|| {
                 DaemonError::BadRequest("no active claude turn to steer".to_string())
             })?;
-            if turn.awaiting_next_turn {
+            if turn.awaiting_next_turn || turn.stop_requested {
                 return Err(DaemonError::BadRequest(
                     "no active claude turn to steer".to_string(),
                 ));
@@ -601,11 +608,18 @@ impl ClaudeRuntime {
     }
 
     /// Keeps the CLI process after a successful `result` so the next turn can
-    /// write another stdin line. Returns false when this generation is gone.
+    /// write another stdin line. Success and interrupt admission share the active
+    /// lock: whichever wins determines whether delivery can be acknowledged.
+    /// Returns false for a stopped or superseded generation.
     pub async fn park_turn(&self, thread_id: &str, generation: u64) -> bool {
         let mut active = self.active_turns.lock().await;
+        let interrupted = self.interrupted_turns.lock().await;
         match active.get_mut(thread_id) {
-            Some(turn) if turn.generation == generation => {
+            Some(turn)
+                if turn.generation == generation
+                    && !turn.stop_requested
+                    && !interrupted.contains(thread_id) =>
+            {
                 turn.awaiting_next_turn = true;
                 turn.parked_at = Some(tokio::time::Instant::now());
                 true
@@ -631,6 +645,7 @@ impl ClaudeRuntime {
         if let Some(turn) = active.get_mut(thread_id)
             && turn.generation == generation
             && turn.awaiting_next_turn
+            && !turn.stop_requested
         {
             turn.awaiting_next_turn = false;
             turn.parked_at = None;
@@ -708,9 +723,9 @@ impl ClaudeRuntime {
     /// the CLI exits, and reaps the process off-task so a slow shutdown cannot
     /// stall the thread's return to idle.
     pub async fn complete_turn(&self, thread_id: &str, generation: u64) -> ClaudeTurnFinish {
-        let turn = {
+        let (turn, interrupted) = {
             let mut active = self.active_turns.lock().await;
-            match active.get(thread_id) {
+            let turn = match active.get(thread_id) {
                 Some(turn) if turn.generation == generation => active.remove(thread_id),
                 // Missing or newer entry: this turn was superseded (or the
                 // runtime shut down); the caller must not touch thread state.
@@ -722,9 +737,11 @@ impl ClaudeRuntime {
                         stale: true,
                     };
                 }
-            }
+            };
+            let interrupted = self.interrupted_turns.lock().await.remove(thread_id);
+            (turn, interrupted)
         };
-        let interrupted = self.interrupted_turns.lock().await.remove(thread_id);
+        let parked = turn.as_ref().is_some_and(|turn| turn.awaiting_next_turn);
         if let Some(turn) = turn {
             // Closed before the reaper is spawned so a steer racing this
             // completion fails fast instead of writing into a dying process.
@@ -733,7 +750,7 @@ impl ClaudeRuntime {
         ClaudeTurnFinish {
             status: None,
             interrupted,
-            parked: false,
+            parked,
             stale: false,
         }
     }
@@ -743,19 +760,22 @@ impl ClaudeRuntime {
             let mut active = self.active_turns.lock().await;
             match active.get_mut(thread_id) {
                 Some(turn) => {
-                    // Flag before signalling, while still holding the
-                    // active-turns lock: `finish_turn` must never observe the
-                    // SIGTERM exit ahead of the interrupted flag.
-                    self.interrupted_turns
-                        .lock()
-                        .await
-                        .insert(thread_id.to_string());
+                    // A successful result that already parked the process won
+                    // this boundary. Stop its CLI without cancelling that turn.
+                    let was_stopping = turn.stop_requested;
+                    turn.stop_requested = true;
+                    let mut interrupted = self.interrupted_turns.lock().await;
+                    let inserted =
+                        !turn.awaiting_next_turn && interrupted.insert(thread_id.to_string());
                     match request_graceful_stop(&mut turn.child) {
                         Ok(signalled) => (signalled, turn.generation),
                         Err(error) => {
                             // Nothing was signalled; do not misreport the
                             // turn's eventual natural exit as an interrupt.
-                            self.interrupted_turns.lock().await.remove(thread_id);
+                            turn.stop_requested = was_stopping;
+                            if inserted {
+                                interrupted.remove(thread_id);
+                            }
                             return Err(DaemonError::Process(format!(
                                 "failed to interrupt claude turn: {error}"
                             )));
@@ -817,9 +837,9 @@ impl ClaudeRuntime {
         thread_id: &str,
         generation: u64,
     ) -> Result<ClaudeTurnFinish, DaemonError> {
-        let turn = {
+        let (turn, interrupted) = {
             let mut active = self.active_turns.lock().await;
-            match active.get(thread_id) {
+            let turn = match active.get(thread_id) {
                 Some(turn) if turn.generation == generation => active.remove(thread_id),
                 // Missing or newer entry: this turn was superseded (or the
                 // runtime shut down); the caller must not touch thread state.
@@ -831,9 +851,10 @@ impl ClaudeRuntime {
                         stale: true,
                     });
                 }
-            }
+            };
+            let interrupted = self.interrupted_turns.lock().await.remove(thread_id);
+            (turn, interrupted)
         };
-        let interrupted = self.interrupted_turns.lock().await.remove(thread_id);
         if let Some(mut turn) = turn {
             let parked = turn.awaiting_next_turn;
             // Reached when the stream ended without a terminal `result` event
@@ -3985,6 +4006,7 @@ for line in sys.stdin:
                     autocompact_tokens: Some(200_000),
                 },
                 awaiting_next_turn: true,
+                stop_requested: false,
                 parked_at: Some(tokio::time::Instant::now() - WARM_IDLE_GRACE),
                 process_group_id: Some(pid),
                 _mcp_config: None,
@@ -4006,6 +4028,23 @@ for line in sys.stdin:
         })
         .await
         .expect("fixture process must be reaped");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn stop_after_success_retires_parked_process_without_cancelling_turn() {
+        let runtime = ClaudeRuntime::for_test("/tmp/project".to_string(), "claude".to_string());
+        let pid = parked_fixture(&runtime, "cat >/dev/null").await;
+        assert!(runtime.wake_parked_turn("thread-1", 1).await);
+        assert!(runtime.park_turn("thread-1", 1).await);
+        runtime.interrupt_turn("thread-1").await.unwrap();
+        assert!(!runtime.wake_parked_turn("thread-1", 1).await);
+        assert!(!runtime.park_turn("thread-1", 1).await);
+        let finished = runtime.finish_turn("thread-1", 1).await.unwrap();
+        assert!(finished.parked);
+        assert!(!finished.interrupted);
+        assert!(!finished.stale);
+        fixture_process_exits(pid).await;
     }
 
     #[cfg(unix)]
