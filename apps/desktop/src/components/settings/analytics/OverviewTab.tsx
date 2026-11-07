@@ -69,12 +69,14 @@ export function OverviewTab({
   summary,
   usageTotals,
   waste,
+  flagged,
   onOpenWaste,
   ...links
 }: {
   summary: AnalyticsSummary
   usageTotals: AnalyticsUsageTotals | null
   waste: AnalyticsWasteItem[]
+  flagged: number
   onOpenWaste: () => void
 } & WasteLinks) {
   const [metric, setMetric] = useState<DailyMetric>('user_messages')
@@ -113,7 +115,7 @@ export function OverviewTab({
           description="The top items from Waste, as estimates."
           actions={
             <Button variant="ghost" size="sm" onClick={onOpenWaste}>
-              See all {count(waste.length)}
+              See all {count(flagged)}
             </Button>
           }
         >

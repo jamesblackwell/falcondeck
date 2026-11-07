@@ -191,6 +191,9 @@ struct UsageRecord {
     /// Cache write of that same call.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     fcw: Option<u64>,
+    /// Model of that same call. A turn's aggregate model can be a sub-agent's.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    fcm: Option<String>,
 }
 
 impl UsageRecord {
@@ -231,11 +234,19 @@ pub(super) struct TurnUsage<'a> {
     pub tier: Option<String>,
     pub effort: Option<String>,
     pub cost_ticks: Option<u64>,
-    /// First main-chain call's `(cache read, cache write)`, when known.
-    pub first_call: Option<(u64, u64)>,
+    /// First main-chain call, when known.
+    pub first_call: Option<FirstCall>,
     /// Record id, unique per turn and model, e.g. `grok:<prompt_id>`.
     pub id: String,
     pub turn_key: String,
+}
+
+/// What a turn's first main-chain API call read from and wrote to the cache.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct FirstCall {
+    pub cache_read: u64,
+    pub cache_write: u64,
+    pub model: Option<String>,
 }
 
 /// Owned copy of [`TurnUsage`] moved into the recording task.
@@ -256,7 +267,7 @@ struct OwnedTurnUsage {
     tier: Option<String>,
     effort: Option<String>,
     cost_ticks: Option<u64>,
-    first_call: Option<(u64, u64)>,
+    first_call: Option<FirstCall>,
     id: String,
 }
 
@@ -279,7 +290,7 @@ impl TurnUsage<'_> {
             tier: self.tier.clone(),
             effort: self.effort.clone(),
             cost_ticks: self.cost_ticks,
-            first_call: self.first_call,
+            first_call: self.first_call.clone(),
             id: self.id.clone(),
         }
     }
@@ -2430,8 +2441,9 @@ impl AppState {
                     tier: capture.tier,
                     effort: capture.effort.or(attribution.effort),
                     cost_ticks: capture.cost_ticks,
-                    fcr: capture.first_call.map(|call| call.0),
-                    fcw: capture.first_call.map(|call| call.1),
+                    fcr: capture.first_call.as_ref().map(|call| call.cache_read),
+                    fcw: capture.first_call.as_ref().map(|call| call.cache_write),
+                    fcm: capture.first_call.and_then(|call| call.model),
                 },
                 capture.turn_key,
             );
@@ -2451,7 +2463,7 @@ impl AppState {
         cumulative: bool,
         tier: Option<String>,
         calls: Option<u64>,
-        first_call: Option<(u64, u64)>,
+        first_call: Option<FirstCall>,
     ) -> Option<(u64, u64)> {
         let deltas = {
             let mut baselines = self
@@ -2483,7 +2495,7 @@ impl AppState {
                 output: delta[3],
                 reasoning: delta[4],
                 calls: (Some(index) == carrier).then_some(calls).flatten(),
-                first_call: (Some(index) == carrier).then_some(first_call).flatten(),
+                first_call: (Some(index) == carrier).then(|| first_call.clone()).flatten(),
                 cost: *cost,
                 cost_source: if cost.is_some() {
                     "provider"
@@ -2851,13 +2863,7 @@ impl AppState {
         let since = self.analytics_period_start(days).await;
         let runs = self.control().runs_since(since).await;
         let definitions = self.control().automations_snapshot().await;
-        let bot_home_ids = self
-            .preferences()
-            .await
-            .bots
-            .into_iter()
-            .map(|bot| bot.thread_id)
-            .collect();
+        let bot_home_ids = self.analytics_bot_homes().await;
         let thread_models: HashMap<String, String> = self
             .inner
             .workspaces
@@ -2874,20 +2880,7 @@ impl AppState {
                     .map(|model| (thread.summary.id.clone(), model))
             })
             .collect();
-        let thread_owners = self
-            .inner
-            .workspaces
-            .lock()
-            .await
-            .values()
-            .flat_map(|workspace| workspace.threads.values())
-            .filter_map(|thread| match &thread.summary.origin {
-                Some(falcondeck_core::ThreadOrigin::Automation { automation_id, .. }) => {
-                    Some((thread.summary.id.clone(), automation_id.clone()))
-                }
-                _ => None,
-            })
-            .collect();
+        let thread_owners = self.analytics_thread_owners().await;
         let summary = tokio::task::spawn_blocking(move || {
             let mut summary = summarize(read_records(&dir, since), &labels, days);
             let usage = read_usage_records(&dir, since);
@@ -2937,12 +2930,22 @@ impl AppState {
     /// so the period's first turns are compared with what came before them.
     pub async fn analytics_cache(&self, days: u32) -> Result<AnalyticsCacheReport, DaemonError> {
         let days = days.clamp(1, 366);
-        let automations = self.analytics_summary(days).await?.automations;
+        self.analytics().flush().await;
         let labels = self.analytics_labels().await;
         let dir = self.analytics().dir.clone();
         let since = self.analytics_period_start(days).await;
         let runs = self.control().runs_since(since).await;
+        let definitions = self.control().automations_snapshot().await;
+        let bot_home_ids = self.analytics_bot_homes().await;
+        let thread_owners = self.analytics_thread_owners().await;
         tokio::task::spawn_blocking(move || {
+            let automations = summarize_automations(
+                runs.clone(),
+                &definitions,
+                days,
+                &bot_home_ids,
+                &thread_owners,
+            );
             let from = since - chrono::Duration::days(cache::LOOKBACK_DAYS);
             let usage = read_usage_records(&dir, from);
             let records = read_records(&dir, from);
@@ -2958,6 +2961,32 @@ impl AppState {
         })
         .await
         .map_err(|e| DaemonError::Process(e.to_string()))
+    }
+
+    async fn analytics_bot_homes(&self) -> HashSet<String> {
+        self.preferences()
+            .await
+            .bots
+            .into_iter()
+            .map(|bot| bot.thread_id)
+            .collect()
+    }
+
+    /// Automation threads and the automation that owns each.
+    async fn analytics_thread_owners(&self) -> HashMap<String, String> {
+        self.inner
+            .workspaces
+            .lock()
+            .await
+            .values()
+            .flat_map(|workspace| workspace.threads.values())
+            .filter_map(|thread| match &thread.summary.origin {
+                Some(falcondeck_core::ThreadOrigin::Automation { automation_id, .. }) => {
+                    Some((thread.summary.id.clone(), automation_id.clone()))
+                }
+                _ => None,
+            })
+            .collect()
     }
 
     /// Start of the summary window: local midnight of the first charted day,
@@ -3098,6 +3127,7 @@ mod tests {
             cost_ticks: None,
             fcr: None,
             fcw: None,
+            fcm: None,
         }
     }
 

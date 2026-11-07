@@ -10,7 +10,7 @@ use falcondeck_core::{
     AnalyticsWasteItem, AnalyticsWasteRule,
 };
 
-/// Records written up to this far apart belong to one turn.
+/// Records with no turn identity join only when this close and on another model.
 const SAME_TURN_SECONDS: f64 = 2.0;
 /// How far a `turn` event may sit from the usage record it belongs to.
 const TURN_EVENT_SECONDS: f64 = 20.0;
@@ -58,6 +58,10 @@ const COMPACTED_DROP: f64 = 0.7;
 pub(super) const LOOKBACK_DAYS: i64 = 30;
 
 const REBUILD_ROWS: usize = 200;
+/// Report lists are capped; rule counts and totals still cover everything.
+const WASTE_ROWS: usize = 200;
+const HIT_RATE_ROWS: usize = 50;
+const BOT_ROWS: usize = 50;
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub(super) struct Price {
@@ -202,6 +206,8 @@ pub(super) struct Turn {
     pub ok: bool,
     /// Main chain's first call `(cache read, cache write)`, when captured.
     pub first_call: Option<(u64, u64)>,
+    /// Model of that call. `model` can be a sub-agent's; this cannot.
+    pub first_model: Option<String>,
     pub usd: Dollars,
     /// False when a model in the turn has no known price.
     pub priced: bool,
@@ -239,9 +245,12 @@ fn prompt(record: &UsageRecord) -> u64 {
     record.uncached_input + record.cr + record.cw
 }
 
+/// One `turn` event: end time, duration, peak context, finished cleanly.
+type TurnEvent = (f64, u64, u64, bool);
+
 /// Peak context and timing per thread from `turn` events, oldest first.
-fn turn_events(records: &[Record]) -> HashMap<&str, Vec<(f64, u64, u64, bool)>> {
-    let mut events: HashMap<&str, Vec<(f64, u64, u64, bool)>> = HashMap::new();
+fn turn_events(records: &[Record]) -> HashMap<&str, Vec<TurnEvent>> {
+    let mut events: HashMap<&str, Vec<TurnEvent>> = HashMap::new();
     for record in records {
         if let Record::Turn {
             t, th, ok, ms, ctx, ..
@@ -259,7 +268,55 @@ fn turn_events(records: &[Record]) -> HashMap<&str, Vec<(f64, u64, u64, bool)>> 
     events
 }
 
-/// Groups usage into turns: Claude writes one record per model per turn.
+/// The turn a record belongs to, stable across arrival order. Claude ids end
+/// in a stamp shared by a turn's models; other providers append the model to
+/// a per-turn id. `None` when an id has neither shape.
+fn turn_key(record: &UsageRecord) -> Option<String> {
+    let turn = if record.prov == "claude" {
+        let (_, stamp) = record.id.rsplit_once(':')?;
+        (!stamp.is_empty() && stamp.bytes().all(|byte| byte.is_ascii_digit())).then_some(stamp)?
+    } else {
+        record
+            .id
+            .strip_suffix(&format!(":{}", record.model))
+            .unwrap_or(&record.id)
+    };
+    Some(format!("{}:{turn}", record.prov))
+}
+
+/// Without a key, only another model of the same provider moments later can
+/// be the same turn: one model never writes two records for one turn.
+fn joins_unkeyed(group: &[&UsageRecord], record: &UsageRecord) -> bool {
+    let last = group[group.len() - 1];
+    last.prov == record.prov
+        && seconds(record.t) - seconds(last.t) < SAME_TURN_SECONDS
+        && group.iter().all(|other| other.model != record.model)
+}
+
+/// Splits one thread's records, oldest first, into turns.
+fn group_turns<'a>(records: &[&'a UsageRecord]) -> Vec<Vec<&'a UsageRecord>> {
+    let mut groups: Vec<Vec<&UsageRecord>> = Vec::new();
+    let mut keyed: HashMap<String, usize> = HashMap::new();
+    for record in records.iter().copied() {
+        let Some(key) = turn_key(record) else {
+            match groups.last_mut() {
+                Some(group) if turn_key(group[0]).is_none() && joins_unkeyed(group, record) => {
+                    group.push(record);
+                }
+                _ => groups.push(vec![record]),
+            }
+            continue;
+        };
+        let at = *keyed.entry(key).or_insert_with(|| {
+            groups.push(Vec::new());
+            groups.len() - 1
+        });
+        groups[at].push(record);
+    }
+    groups
+}
+
+/// Groups usage into turns, each thread oldest first.
 pub(super) fn build_turns(usage: &[UsageRecord], records: &[Record]) -> Vec<Vec<Turn>> {
     let events = turn_events(records);
     let mut by_thread: BTreeMap<&str, Vec<&UsageRecord>> = BTreeMap::new();
@@ -269,39 +326,39 @@ pub(super) fn build_turns(usage: &[UsageRecord], records: &[Record]) -> Vec<Vec<
     let mut threads = Vec::with_capacity(by_thread.len());
     for (thread, mut list) in by_thread {
         list.sort_by_key(|record| record.t);
-        let mut groups: Vec<Vec<&UsageRecord>> = Vec::new();
-        for record in list {
-            match groups.last_mut() {
-                Some(group)
-                    if seconds(record.t) - seconds(group[group.len() - 1].t)
-                        < SAME_TURN_SECONDS =>
-                {
-                    group.push(record);
-                }
-                _ => groups.push(vec![record]),
-            }
-        }
         let thread_events = events.get(thread).map_or(&[][..], Vec::as_slice);
-        threads.push(
-            groups
-                .iter()
-                .map(|group| build_turn(group, thread_events))
-                .collect(),
-        );
+        let mut used = vec![false; thread_events.len()];
+        let mut turns: Vec<Turn> = group_turns(&list)
+            .iter()
+            .map(|group| build_turn(group, thread_events, &mut used))
+            .collect();
+        turns.sort_by(|a, b| a.end.total_cmp(&b.end));
+        threads.push(turns);
     }
     threads
 }
 
-fn build_turn(group: &[&UsageRecord], events: &[(f64, u64, u64, bool)]) -> Turn {
+/// Claims the closest unclaimed event near `end`, so one event cannot lend its
+/// context or failure to two turns. Sorted events keep this to the window.
+fn claim_event(events: &[TurnEvent], used: &mut [bool], end: f64) -> Option<TurnEvent> {
+    let from = events.partition_point(|event| event.0 <= end - TURN_EVENT_SECONDS);
+    let to = events.partition_point(|event| event.0 < end + TURN_EVENT_SECONDS);
+    let at = (from..to).filter(|at| !used[*at]).min_by(|a, b| {
+        (events[*a].0 - end)
+            .abs()
+            .total_cmp(&(events[*b].0 - end).abs())
+    })?;
+    used[at] = true;
+    Some(events[at])
+}
+
+fn build_turn(group: &[&UsageRecord], events: &[TurnEvent], used: &mut [bool]) -> Turn {
     let primary = group
         .iter()
         .max_by_key(|record| prompt(record))
         .expect("a turn has at least one record");
     let end = seconds(group[group.len() - 1].t);
-    let event = events
-        .iter()
-        .filter(|event| (event.0 - end).abs() < TURN_EVENT_SECONDS)
-        .min_by(|a, b| (a.0 - end).abs().total_cmp(&(b.0 - end).abs()));
+    let event = claim_event(events, used, end);
     let calls = group
         .iter()
         .filter_map(|record| record.calls)
@@ -325,6 +382,7 @@ fn build_turn(group: &[&UsageRecord], events: &[(f64, u64, u64, bool)]) -> Turn 
             .unwrap_or(mean_prompt),
         ok: event.is_none_or(|event| event.3),
         first_call: group.iter().find_map(|record| record.first_call()),
+        first_model: group.iter().find_map(|record| record.fcm.clone()),
         priced: true,
         ..Turn::default()
     };
@@ -364,9 +422,10 @@ pub(super) enum Cause {
     ModelSwitch,
     EffortSwitch,
     Compaction,
-    /// A warm first call missed with no other explanation: proven.
+    /// A warm first call missed, same main model and effort on record, no
+    /// compaction. The miss is proven; who or what caused it is not.
     PrefixChange,
-    /// Looks like a prefix change, on records that cannot prove it.
+    /// Looks like a prefix change, on records that cannot rule the rest out.
     PossiblePrefixChange,
     /// Large write that sub-agents or compaction could equally explain.
     Unclear,
@@ -401,13 +460,23 @@ fn first_call_missed(turn: &Turn) -> Option<bool> {
 /// Why a turn rewrote the cache, or `None` when it did not. The write is
 /// compared with the thread's previous context, not a fixed size: only what
 /// exceeds normal growth counts. `compacted` is a recorded compaction.
+///
+/// A captured first-call hit outranks every cause: the cache was warm, so
+/// whatever wrote those tokens did not break it on the way in. That sends a
+/// compaction partway through a turn to `Unclear` too, which errs towards a
+/// missed flag over a false one.
 pub(super) fn classify(turn: &Turn, previous: Option<&Turn>, compacted: bool) -> Option<Cause> {
     let written = turn.written();
     if written < MIN_REBUILD_WRITE {
         return None;
     }
+    let missed = first_call_missed(turn);
     let Some(previous) = previous else {
-        return Some(Cause::FirstTurn);
+        return Some(if missed == Some(false) {
+            Cause::Unclear
+        } else {
+            Cause::FirstTurn
+        });
     };
     let growth = turn.context.saturating_sub(previous.context);
     if ((written.saturating_sub(growth)) as f64) < REBUILD_SHARE * previous.context as f64 {
@@ -418,29 +487,41 @@ pub(super) fn classify(turn: &Turn, previous: Option<&Turn>, compacted: bool) ->
         // New input and a rebuild look the same here, so no cause is claimed.
         return (gap >= QUIET_GAP_MINUTES).then_some(Cause::InputAfterGap);
     }
+    if missed == Some(false) {
+        return Some(Cause::Unclear);
+    }
     if gap >= TTL_MINUTES {
         return Some(Cause::IdleGap);
     }
     if compacted {
         return Some(Cause::Compaction);
     }
-    let missed = first_call_missed(turn);
     let ratio = written as f64 / turn.context.max(1) as f64;
-    let whole_context = (REBUILD_BAND.0..=REBUILD_BAND.1).contains(&ratio);
-    if missed == Some(false) || (missed.is_none() && !whole_context) {
+    if missed.is_none() && !(REBUILD_BAND.0..=REBUILD_BAND.1).contains(&ratio) {
         return Some(Cause::Unclear);
     }
-    if !turn.models.contains(&previous.model) {
+    // Main-chain models when both are captured: the aggregate `model` can be
+    // a sub-agent's and hide a real switch, or invent one.
+    let main_models = turn.first_model.as_ref().zip(previous.first_model.as_ref());
+    let switched = match main_models {
+        Some((now, before)) => now != before,
+        None => !turn.models.contains(&previous.model),
+    };
+    if switched {
         return Some(Cause::ModelSwitch);
     }
-    if turn.effort.is_some() && previous.effort.is_some() && turn.effort != previous.effort {
+    let efforts = turn.effort.as_ref().zip(previous.effort.as_ref());
+    if efforts.is_some_and(|(now, before)| now != before) {
         return Some(Cause::EffortSwitch);
     }
-    Some(if missed == Some(true) {
-        Cause::PrefixChange
-    } else {
-        Cause::PossiblePrefixChange
-    })
+    // Proven only when the same model and effort are on record for both turns.
+    Some(
+        if missed == Some(true) && main_models.is_some() && efforts.is_some() {
+            Cause::PrefixChange
+        } else {
+            Cause::PossiblePrefixChange
+        },
+    )
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -472,7 +553,20 @@ fn compactions(records: &[Record]) -> HashMap<&str, Vec<f64>> {
             found.entry(th).or_default().push(seconds(*t));
         }
     }
+    sort_times(&mut found);
     found
+}
+
+/// Whether sorted `times` holds a moment in `from..=to`.
+fn any_within(times: &[f64], from: f64, to: f64) -> bool {
+    let at = times.partition_point(|time| *time < from);
+    times.get(at).is_some_and(|time| *time <= to)
+}
+
+fn sort_times(times: &mut HashMap<&str, Vec<f64>>) {
+    for list in times.values_mut() {
+        list.sort_by(f64::total_cmp);
+    }
 }
 
 fn run_window(run: &AutomationRun) -> Option<(f64, f64)> {
@@ -530,9 +624,7 @@ pub(super) fn find_rebuilds(threads: &[Vec<Turn>], input: &CacheInput<'_>) -> Ve
             }
             let previous = index.checked_sub(1).map(|at| &turns[at]);
             let from = previous.map_or(turn.start, |previous| previous.end) - WINDOW_SECONDS;
-            let was_compacted = marks
-                .iter()
-                .any(|at| *at >= from && *at <= turn.end + WINDOW_SECONDS);
+            let was_compacted = any_within(marks, from, turn.end + WINDOW_SECONDS);
             let Some(cause) = classify(turn, previous, was_compacted) else {
                 continue;
             };
@@ -586,6 +678,12 @@ fn hit_rates(usage: &[&UsageRecord], labels: &Labels) -> Vec<AnalyticsCacheHitRa
             (b.fresh_tokens + b.read_tokens + b.write_tokens)
                 .cmp(&(a.fresh_tokens + a.read_tokens + a.write_tokens)),
         )
+    });
+    let mut shown: HashMap<String, usize> = HashMap::new();
+    rows.retain(|row| {
+        let seen = shown.entry(row.dimension.clone()).or_default();
+        *seen += 1;
+        *seen <= HIT_RATE_ROWS
     });
     rows
 }
@@ -720,6 +818,12 @@ fn home_threads(
     since: f64,
     labels: &Labels,
 ) -> Vec<AnalyticsHomeThreadCache> {
+    let mut rebuilt: HashMap<&str, (u64, f64)> = HashMap::new();
+    for rebuild in rebuilds {
+        let row = rebuilt.entry(&rebuild.turn.thread).or_default();
+        row.0 += rebuild.turn.written();
+        row.1 += rebuild.turn.written_usd();
+    }
     let mut rows = Vec::new();
     for turns in threads {
         let Some(first) = turns.first() else { continue };
@@ -757,16 +861,14 @@ fn home_threads(
         }
         row.context_per_call = prompts / calls.max(1);
         row.median_gap_minutes = median(&mut gaps);
-        for rebuild in rebuilds
-            .iter()
-            .filter(|rebuild| rebuild.turn.thread == row.thread)
-        {
-            row.rebuild_tokens += rebuild.turn.written();
-            row.rebuild_usd += rebuild.turn.written_usd();
+        if let Some((tokens, usd)) = rebuilt.get(row.thread.as_str()) {
+            row.rebuild_tokens = *tokens;
+            row.rebuild_usd = *usd;
         }
         rows.push(row);
     }
     rows.sort_by(|a, b| b.rebuild_usd.total_cmp(&a.rebuild_usd));
+    rows.truncate(BOT_ROWS);
     rows
 }
 
@@ -818,6 +920,7 @@ fn overhead(
         })
         .collect();
     rows.sort_by(|a, b| b.avg_tokens.cmp(&a.avg_tokens));
+    rows.truncate(BOT_ROWS);
     rows
 }
 
@@ -904,7 +1007,7 @@ fn automation_flags(input: &CacheInput<'_>, id: Option<&String>, wanted: &[&str]
 fn cache_waste(rebuilds: &[Rebuild], input: &CacheInput<'_>) -> Vec<AnalyticsWasteItem> {
     let labels = input.labels;
     let mut items = Vec::new();
-    let mut repeated: Vec<&Rebuild> = Vec::new();
+    let mut repeated: HashSet<*const Rebuild> = HashSet::new();
     for group in offenders(
         rebuilds
             .iter()
@@ -917,7 +1020,7 @@ fn cache_waste(rebuilds: &[Rebuild], input: &CacheInput<'_>) -> Vec<AnalyticsWas
         if count < REPEAT_REBUILDS || usd < REPEAT_REBUILD_USD {
             continue;
         }
-        repeated.extend(group.iter().copied());
+        repeated.extend(group.iter().map(|rebuild| std::ptr::from_ref(*rebuild)));
         let mut gaps: Vec<f64> = group
             .iter()
             .filter_map(|rebuild| rebuild.gap_minutes)
@@ -948,7 +1051,7 @@ fn cache_waste(rebuilds: &[Rebuild], input: &CacheInput<'_>) -> Vec<AnalyticsWas
     }
     for rebuild in rebuilds {
         let usd = rebuild.turn.written_usd();
-        let in_repeat = repeated.iter().any(|seen| std::ptr::eq(*seen, rebuild));
+        let in_repeat = repeated.contains(&std::ptr::from_ref(rebuild));
         if rebuild.cause == Cause::IdleGap && !in_repeat && usd >= BIG_REBUILD_USD {
             let mut flagged = item("big_rebuild", "cache", "estimate");
             point_at(
@@ -998,7 +1101,7 @@ fn cache_waste(rebuilds: &[Rebuild], input: &CacheInput<'_>) -> Vec<AnalyticsWas
         point_at(&mut flagged, &last.turn, last.automation.as_ref(), labels);
         let tokens: u64 = group.iter().map(|rebuild| rebuild.turn.write).sum();
         flagged.reason = format!(
-            "First call missed a warm cache {}: same model and effort, no compaction, {} rewritten. Something changed the prompt prefix",
+            "First call missed a warm cache {}: same main model and effort, no compaction recorded, {} rewritten. The records don't show what changed",
             plural(group.len() as u64, "time"),
             tokens_label(tokens),
         );
@@ -1016,7 +1119,7 @@ fn cache_waste(rebuilds: &[Rebuild], input: &CacheInput<'_>) -> Vec<AnalyticsWas
         point_at(&mut flagged, &last.turn, last.automation.as_ref(), labels);
         let tokens: u64 = group.iter().map(|rebuild| rebuild.turn.write).sum();
         flagged.reason = format!(
-            "Rewrote about the whole context ({}) with a warm cache. Possibly a prefix change; an uncaptured compaction looks the same",
+            "Rewrote {} while the cache should have been warm. Possibly a prefix change; a compaction or a provider cache drop looks the same",
             tokens_label(tokens),
         );
         flagged.estimated_usd = group.iter().map(|rebuild| rebuild.turn.written_usd()).sum();
@@ -1058,9 +1161,10 @@ fn result_waste(threads: &[Vec<Turn>], input: &CacheInput<'_>) -> Vec<AnalyticsW
             return 0.0;
         };
         turns_of.get(thread).map_or(0.0, |turns| {
-            turns
+            let from = turns.partition_point(|turn| turn.end < start);
+            turns[from..]
                 .iter()
-                .filter(|turn| turn.end >= start && turn.end <= end)
+                .take_while(|turn| turn.end <= end)
                 .map(|turn| turn.usd.total())
                 .sum()
         })
@@ -1158,6 +1262,7 @@ fn acted(records: &[Record]) -> HashMap<&str, Vec<f64>> {
         };
         found.entry(thread).or_default().push(seconds(*at));
     }
+    sort_times(&mut found);
     found
 }
 
@@ -1165,9 +1270,11 @@ fn acted(records: &[Record]) -> HashMap<&str, Vec<f64>> {
 fn is_quiet(turn: &Turn, actions: &[f64]) -> bool {
     turn.output <= QUIET_MAX_OUTPUT
         && turn.calls <= QUIET_MAX_CALLS
-        && !actions
-            .iter()
-            .any(|at| *at >= turn.start - WINDOW_SECONDS && *at <= turn.end + WINDOW_SECONDS)
+        && !any_within(
+            actions,
+            turn.start - WINDOW_SECONDS,
+            turn.end + WINDOW_SECONDS,
+        )
 }
 
 fn quiet_turns(threads: &[Vec<Turn>], input: &CacheInput<'_>) -> Vec<AnalyticsWasteItem> {
@@ -1303,7 +1410,7 @@ fn rules(items: &[AnalyticsWasteItem]) -> Vec<AnalyticsWasteRule> {
             "cache",
             "Prefix change",
             format!(
-                "A warm Claude turn whose first main-chain call missed the cache, same model and effort, no compaction. Proven; needs records from this build on."
+                "A warm Claude turn whose first main-chain call missed the cache, with the same main model and effort on record for both turns and no recorded compaction. The miss is proven, its cause is not. Needs records from this build on."
             ),
         ),
         (
@@ -1311,7 +1418,7 @@ fn rules(items: &[AnalyticsWasteItem]) -> Vec<AnalyticsWasteRule> {
             "cache",
             "Possible prefix change",
             format!(
-                "On older records: a warm Claude turn that rewrote about the whole context, at least {} tokens. Not proven; an uncaptured compaction looks the same.",
+                "A warm Claude turn that rewrote at least {} tokens, on records too thin to rule out a model switch or an uncaptured compaction. Not proven.",
                 tokens_label(POSSIBLE_PREFIX_WRITE),
             ),
         ),
@@ -1470,6 +1577,7 @@ pub(super) fn build_report(input: &CacheInput<'_>) -> AnalyticsCacheReport {
             .then(b.estimated_usd.total_cmp(&a.estimated_usd))
     });
     report.rules = rules(&waste);
+    waste.truncate(WASTE_ROWS);
     report.waste = waste;
     report
 }
@@ -1664,23 +1772,59 @@ mod tests {
     }
 
     #[test]
-    fn only_a_first_call_miss_proves_a_prefix_change() {
-        let previous = turn(200_000, 5000, 0.0, 0.0);
+    fn only_a_comparable_first_call_miss_proves_a_prefix_change() {
+        let mut previous = turn(200_000, 5000, 0.0, 0.0);
+        previous.first_model = Some("claude-opus-5-5".into());
         let mut warm = turn(200_000, 200_000, 60.0, 90.0);
         assert_eq!(
             classify(&warm, Some(&previous), false),
             Some(Cause::PossiblePrefixChange)
         );
         warm.first_call = Some((0, 200_000));
+        // A miss alone: nothing on record says the main model stayed the same.
+        assert_eq!(
+            classify(&warm, Some(&previous), false),
+            Some(Cause::PossiblePrefixChange)
+        );
+        warm.first_model = Some("claude-opus-5-5".into());
         assert_eq!(
             classify(&warm, Some(&previous), false),
             Some(Cause::PrefixChange)
+        );
+        // Either effort missing means sameness is unknown, not proven.
+        let mut no_effort = warm.clone();
+        no_effort.effort = None;
+        assert_eq!(
+            classify(&no_effort, Some(&previous), false),
+            Some(Cause::PossiblePrefixChange)
         );
         // The first call hit, so sub-agents or a mid-turn event did the writing.
         warm.first_call = Some((199_000, 500));
         assert_eq!(
             classify(&warm, Some(&previous), false),
             Some(Cause::Unclear)
+        );
+    }
+
+    #[test]
+    fn a_sub_agent_cannot_hide_or_invent_a_main_model_switch() {
+        let mut previous = turn(200_000, 5000, 0.0, 0.0);
+        previous.first_model = Some("claude-opus-5-5".into());
+        let mut next = turn(200_000, 200_000, 60.0, 90.0);
+        next.first_call = Some((0, 200_000));
+        // Aggregate models still list opus, through a sub-agent; main moved on.
+        next.models = vec!["claude-opus-5-5".into(), "claude-sonnet-5-5".into()];
+        next.first_model = Some("claude-sonnet-5-5".into());
+        assert_eq!(
+            classify(&next, Some(&previous), false),
+            Some(Cause::ModelSwitch)
+        );
+        // Aggregate model moved to a busy sub-agent; main stayed.
+        next.models = vec!["claude-sonnet-5-5".into()];
+        next.first_model = Some("claude-opus-5-5".into());
+        assert_eq!(
+            classify(&next, Some(&previous), false),
+            Some(Cause::PrefixChange)
         );
     }
 
@@ -1693,6 +1837,36 @@ mod tests {
         assert_eq!(
             classify(&next, Some(&previous), false),
             Some(Cause::Unclear)
+        );
+    }
+
+    #[test]
+    fn a_first_call_hit_outranks_idle_compaction_and_first_turn() {
+        let previous = turn(200_000, 5000, 0.0, 0.0);
+        // Warm main chain, 500k of sub-agent writes, a 61-minute gap.
+        let mut idle = turn(200_000, 500_000, 61.0 * 60.0, 62.0 * 60.0);
+        idle.first_call = Some((199_000, 500));
+        assert_eq!(
+            classify(&idle, Some(&previous), false),
+            Some(Cause::Unclear)
+        );
+        let mut compacted = turn(200_000, 200_000, 60.0, 90.0);
+        compacted.first_call = Some((199_000, 500));
+        assert_eq!(
+            classify(&compacted, Some(&previous), true),
+            Some(Cause::Unclear)
+        );
+        assert_eq!(classify(&compacted, None, false), Some(Cause::Unclear));
+        // A miss keeps the cause it had.
+        idle.first_call = Some((0, 200_000));
+        assert_eq!(
+            classify(&idle, Some(&previous), false),
+            Some(Cause::IdleGap)
+        );
+        compacted.first_call = Some((0, 200_000));
+        assert_eq!(
+            classify(&compacted, Some(&previous), true),
+            Some(Cause::Compaction)
         );
     }
 
@@ -1744,6 +1918,7 @@ mod tests {
             cost_ticks: None,
             fcr: None,
             fcw: None,
+            fcm: None,
         }
     }
 
@@ -1793,12 +1968,174 @@ mod tests {
         let parsed: UsageRecord = serde_json::from_str(line).unwrap();
         assert_eq!(parsed.first_call(), None);
         let written = serde_json::to_string(&parsed).unwrap();
-        assert!(!written.contains("fcr"));
+        assert!(!written.contains("fcr") && !written.contains("fcm"));
+        // Rollback: fields and events from a newer build must not stop a read.
+        let newer = line.replace("\"in\":1", "\"in\":1,\"fcm\":\"m\",\"unknown\":1");
+        assert!(serde_json::from_str::<UsageRecord>(&newer).is_ok());
         let compact = r#"{"e":"compact","t":"2026-11-01T00:00:00Z","th":"t"}"#;
         assert!(matches!(
             serde_json::from_str::<Record>(compact).unwrap(),
             Record::Compact { .. }
         ));
+    }
+
+    fn turn_of(usage: &[UsageRecord]) -> Vec<Vec<Turn>> {
+        build_turns(usage, &[])
+    }
+
+    #[test]
+    fn quick_turns_stay_apart_by_their_stable_key() {
+        let opus = "claude-opus-5-5";
+        let mut first = record(
+            "claude:t:claude-opus-5-5:1000",
+            "t",
+            1000,
+            opus,
+            (1, 9, 9, 9),
+        );
+        first.fcr = Some(0);
+        first.fcw = Some(9);
+        let second = record(
+            "claude:t:claude-opus-5-5:1001",
+            "t",
+            1001,
+            opus,
+            (1, 9, 9, 9),
+        );
+        // A sub-agent model on the first turn's stamp, arriving after the second.
+        let sub = record(
+            "claude:t:claude-haiku-5-5:1000",
+            "t",
+            1001,
+            "claude-haiku-5-5",
+            (1, 1, 1, 1),
+        );
+        let turns = turn_of(&[first, second, sub]);
+        assert_eq!(turns[0].len(), 2);
+        assert_eq!(turns[0][0].models.len(), 2);
+        // A follow-up cannot inherit the first turn's evidence.
+        assert!(turns[0][0].first_call.is_some() && turns[0][1].first_call.is_none());
+    }
+
+    #[test]
+    fn a_quick_provider_switch_never_shares_a_turn() {
+        let claude = record("claude:t:m:1000", "t", 1000, "m", (1, 9, 9, 9));
+        let mut codex = record("codex:t:turn-1", "t", 1000, "gpt", (1, 9, 0, 9));
+        codex.prov = "codex".into();
+        let mut old_a = record("a", "u", 1000, "m", (1, 9, 9, 9));
+        let mut old_b = record("b", "u", 1000, "n", (1, 9, 9, 9));
+        old_a.prov = "grok".into();
+        old_b.prov = "codex".into();
+        let turns = turn_of(&[claude, codex, old_a, old_b]);
+        assert_eq!((turns[0].len(), turns[1].len()), (2, 2));
+    }
+
+    #[test]
+    fn other_providers_join_models_on_their_per_turn_id() {
+        let mut a = record("opencode:s:msg-1:m", "t", 1000, "m", (1, 9, 0, 9));
+        let mut b = record("opencode:s:msg-1:n", "t", 1040, "n", (1, 9, 0, 9));
+        let mut c = record("opencode:s:msg-2:m", "t", 1001, "m", (1, 9, 0, 9));
+        for item in [&mut a, &mut b, &mut c] {
+            item.prov = "opencode".into();
+        }
+        assert_eq!(turn_of(&[a, b, c])[0].len(), 2);
+    }
+
+    #[test]
+    fn records_without_a_key_only_join_another_model_moments_later() {
+        let turns = turn_of(&[
+            record("a", "t", 1000, "m", (1, 9, 9, 9)),
+            record("b", "t", 1001, "n", (1, 9, 9, 9)),
+            record("c", "t", 1002, "n", (1, 9, 9, 9)),
+            record("d", "t", 1010, "x", (1, 9, 9, 9)),
+        ]);
+        assert_eq!(turns[0].len(), 3);
+    }
+
+    fn failed_turn(thread: &str, at: i64) -> Record {
+        Record::Turn {
+            t: Utc.timestamp_opt(at, 0).unwrap(),
+            th: thread.into(),
+            ok: false,
+            ms: 5,
+            i: 0,
+            out: 0,
+            ctx: 7,
+        }
+    }
+
+    #[test]
+    fn one_turn_event_cannot_fail_two_quick_turns() {
+        let usage = [
+            record("claude:t:m:1000", "t", 1000, "m", (1, 9, 9, 9)),
+            record("claude:t:m:1001", "t", 1001, "m", (1, 9, 9, 9)),
+        ];
+        let turns = build_turns(&usage, &[failed_turn("t", 1000)]);
+        assert_eq!(turns[0].iter().filter(|turn| !turn.ok).count(), 1);
+    }
+
+    #[test]
+    fn claim_event_takes_the_closest_unclaimed_event_in_the_window() {
+        let events = [(100.0, 1, 10, true), (130.0, 2, 20, false)];
+        let mut used = [false, false];
+        assert_eq!(claim_event(&events, &mut used, 128.0).unwrap().1, 2);
+        assert_eq!(claim_event(&events, &mut used, 129.0), None);
+        assert_eq!(claim_event(&events, &mut used, 105.0).unwrap().1, 1);
+        assert_eq!(claim_event(&events, &mut used, 105.0), None);
+    }
+
+    #[test]
+    fn any_within_includes_both_ends() {
+        let times = [1.0, 5.0, 9.0];
+        assert!(any_within(&times, 5.0, 5.0));
+        assert!(any_within(&times, 2.0, 5.0));
+        assert!(!any_within(&times, 2.0, 4.0));
+        assert!(!any_within(&times, 10.0, 20.0));
+    }
+
+    #[test]
+    fn report_lists_are_capped_but_rules_count_everything() {
+        let since = Utc.timestamp_opt(0, 0).unwrap();
+        let count = WASTE_ROWS + 20;
+        let mut usage = Vec::new();
+        let mut records = Vec::new();
+        for index in 0..count {
+            let thread = format!("t{index}");
+            let id = format!("claude:{thread}:claude-opus-5-5:1000");
+            let mut big = record(
+                &id,
+                &thread,
+                1000,
+                "claude-opus-5-5",
+                (0, 0, 2_000_000, 100),
+            );
+            big.bot = Some(format!("bot-{index}"));
+            usage.push(big);
+            records.push(failed_turn(&thread, 1000));
+        }
+        let labels = labels();
+        let report = build_report(&input(since, &usage, &records, &[], &[], &labels));
+        let failed = report
+            .rules
+            .iter()
+            .find(|rule| rule.id == "failed_spend")
+            .unwrap();
+        assert_eq!(failed.flagged, count as u64);
+        assert_eq!(report.waste.len(), WASTE_ROWS);
+        assert!(
+            failed.estimated_usd
+                > report
+                    .waste
+                    .iter()
+                    .map(|item| item.estimated_usd)
+                    .sum::<f64>()
+        );
+        let bots = report
+            .hit_rates
+            .iter()
+            .filter(|row| row.dimension == "bot")
+            .count();
+        assert_eq!(bots, HIT_RATE_ROWS);
     }
 
     fn input<'a>(
@@ -1884,15 +2221,14 @@ mod tests {
     #[test]
     fn a_proven_prefix_change_outranks_a_costlier_flag() {
         let labels = labels();
-        let mut usage = vec![record(
-            "seed",
-            "t",
-            1000,
-            "claude-opus-5-5",
-            (1, 100_000, 0, 10),
-        )];
+        let mut seed = record("seed", "t", 1000, "claude-opus-5-5", (1, 100_000, 0, 10));
+        seed.fcm = Some("claude-opus-5-5".into());
+        seed.effort = Some("high".into());
+        let mut usage = vec![seed];
         let mut broken = record("broke", "t", 1060, "claude-opus-5-5", (1, 0, 100_000, 10));
+        broken.effort = Some("high".into());
         broken.fcr = Some(0);
+        broken.fcm = Some("claude-opus-5-5".into());
         broken.fcw = Some(100_000);
         usage.push(broken);
         usage.push(record(

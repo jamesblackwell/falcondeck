@@ -4,6 +4,7 @@ import {
   type AnalyticsAutomation,
   type AnalyticsRebuildCause,
   type AnalyticsWasteItem,
+  type AnalyticsWasteRule,
   type AnalyticsUsage,
   type AnalyticsUsageRow,
   type AnalyticsUsageTotals,
@@ -350,12 +351,14 @@ export function filterWaste(items: AnalyticsWasteItem[], group: WasteGroup) {
   return group === 'all' ? items : items.filter((item) => item.group === group)
 }
 
-/** Items that mean something FalconDeck did, or may have done, broke the cache. */
-export const isPrefixItem = (item: AnalyticsWasteItem) =>
-  item.rule === 'prefix_change' || item.rule === 'possible_prefix_change'
-
-export function wasteTotal(items: AnalyticsWasteItem[]) {
-  return items.reduce((sum, item) => sum + item.estimated_usd, 0)
+/** Totals from the rules, which cover everything `report.waste` is capped to. */
+export function ruleTotals(rules: AnalyticsWasteRule[], group: WasteGroup = 'all') {
+  return rules
+    .filter((rule) => group === 'all' || rule.group === group)
+    .reduce(
+      (sum, rule) => ({ flagged: sum.flagged + (rule.flagged ?? 0), usd: sum.usd + (rule.estimated_usd ?? 0) }),
+      { flagged: 0, usd: 0 },
+    )
 }
 
 export const CAUSES: Record<string, { label: string; detail: string }> = {
@@ -364,10 +367,10 @@ export const CAUSES: Record<string, { label: string; detail: string }> = {
   model_switch: { label: 'Model switch', detail: 'Caches belong to one model.' },
   effort_switch: { label: 'Effort switch', detail: 'Changing effort invalidates the message cache.' },
   compaction: { label: 'Compaction', detail: 'Recorded from this build on.' },
-  prefix_change: { label: 'Prefix change', detail: 'The first call missed a warm cache. Something changed the prompt.' },
+  prefix_change: { label: 'Prefix change', detail: 'The first call missed a warm cache on the same model and effort. The cause is not on record.' },
   possible_prefix_change: {
     label: 'Possible prefix change',
-    detail: 'Whole context rewritten while warm. Older records cannot prove it; compaction looks the same.',
+    detail: 'A large rewrite while warm. The records cannot rule out a switch or a compaction.',
   },
   unclear: { label: "Can't tell", detail: 'A large write sub-agents or a compaction could equally explain.' },
   input_after_gap: {

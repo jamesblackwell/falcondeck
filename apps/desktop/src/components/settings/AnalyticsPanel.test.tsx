@@ -163,7 +163,9 @@ const cacheReport = {
     { rule: 'no_action', group: 'result', label: 'Disk guard', reason: 'Last 32 runs found nothing to do', estimated_usd: 2 },
   ],
   rules: [
+    { id: 'prefix_change', group: 'cache', label: 'Prefix change', definition: 'A warm first call missed', flagged: 1, estimated_usd: 4 },
     { id: 'repeat_idle_gap', group: 'cache', label: 'Repeat idle rebuilds', definition: '3 or more rebuilds', flagged: 1, estimated_usd: 9 },
+    { id: 'no_action', group: 'result', label: 'Runs with nothing to do', definition: 'An enabled automation', flagged: 1, estimated_usd: 2 },
   ],
   limits: ['Failed turns and turns you interrupted cannot be told apart.'],
   hit_rates: [
@@ -337,13 +339,21 @@ describe('AnalyticsPanel', () => {
     expect(await screen.findByText('Total tokens')).toBeInTheDocument()
   })
 
+  it('totals the rules when the waste list is capped', async () => {
+    const rules = [{ id: 'failed_spend', group: 'result', label: 'Spent, then failed', definition: 'A turn', flagged: 340, estimated_usd: 900 }]
+    stubDaemon(threadUsage, { ...cacheReport, rules })
+    render(<AnalyticsPanel baseUrl="http://daemon" onToast={vi.fn()} />)
+    expect(await screen.findByText('Showing the top 3 of 340. The totals above cover all of them.')).toBeInTheDocument()
+    expect(screen.getAllByText('340')).toHaveLength(2)
+  })
+
   it('leads with ranked waste and makes a proven prefix change stand out', async () => {
     stubDaemon()
     const onOpenThread = vi.fn()
     const onOpenAutomation = vi.fn()
     render(<AnalyticsPanel baseUrl="http://daemon" onToast={vi.fn()} onOpenThread={onOpenThread} onOpenAutomation={onOpenAutomation} />)
     expect(screen.getAllByRole('tab')[0]).toHaveAttribute('aria-selected', 'true')
-    expect(await screen.findByRole('alert')).toHaveTextContent('changed a prompt prefix')
+    expect(await screen.findByRole('alert')).toHaveTextContent('warm cache was missed')
     expect(screen.getByText('Last 32 runs found nothing to do')).toBeInTheDocument()
     expect(screen.getByText('3 or more rebuilds')).toBeInTheDocument()
     expect(screen.getByText('Failed turns and turns you interrupted cannot be told apart.')).toBeInTheDocument()

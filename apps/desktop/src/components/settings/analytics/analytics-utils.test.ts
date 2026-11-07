@@ -16,14 +16,13 @@ import {
   filterWaste,
   gapLabel,
   groupTokens,
-  isPrefixItem,
   modelLabel,
   rankCauses,
   readStoredTab,
   scheduledOutcome,
   topBot,
   topModel,
-  wasteTotal,
+  ruleTotals,
 } from './analytics-utils'
 
 const totals = (tokens: number) => ({
@@ -187,17 +186,18 @@ describe('waste helpers', () => {
     expect(estimate(2411.3)).toBe('≈$2,411')
   })
 
-  it('filters offenders by group and totals them', () => {
+  it('filters offenders by group', () => {
     const items = [item('repeat_idle_gap', 'cache', 4), item('no_action', 'result', 2)]
     expect(filterWaste(items, 'all')).toHaveLength(2)
     expect(filterWaste(items, 'result').map((row) => row.rule)).toEqual(['no_action'])
-    expect(wasteTotal(items)).toBe(6)
   })
 
-  it('treats proven and possible prefix changes as prefix items only', () => {
-    expect(isPrefixItem(item('prefix_change', 'cache', 1))).toBe(true)
-    expect(isPrefixItem(item('possible_prefix_change', 'cache', 1))).toBe(true)
-    expect(isPrefixItem(item('repeat_idle_gap', 'cache', 1))).toBe(false)
+  it('totals rules, which outlast the capped list', () => {
+    const rule = (id: string, group: string, flagged: number, estimated_usd: number) =>
+      ({ id, group, label: id, definition: '', flagged, estimated_usd })
+    const rules = [rule('a', 'cache', 300, 40), rule('b', 'result', 2, 5)]
+    expect(ruleTotals(rules)).toEqual({ flagged: 302, usd: 45 })
+    expect(ruleTotals(rules, 'cache')).toEqual({ flagged: 300, usd: 40 })
   })
 
   it('ranks causes by cost with first turns last', () => {

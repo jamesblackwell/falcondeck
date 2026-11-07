@@ -20,6 +20,7 @@ use uuid::Uuid;
 use super::{
     AppState, ManagedThread, ManagedWorkspace, PendingServerRequest,
     SHUTDOWN_INTERRUPTED_TURN_ERROR,
+    analytics::FirstCall,
     agent_helpers::{
         ClaudeSubagentActivity, ClaudeToolInputs, append_claude_text_delta,
         claude_parent_tool_use_id, claude_stream_message_id, claude_tool_exit_code,
@@ -1675,8 +1676,7 @@ impl AppState {
         let mut parked_between_turns = false;
         let mut saw_cancelled_result = false;
         let mut last_live_usage: Option<claude::ClaudeLiveContextUsage> = None;
-        // This turn's first main-chain call, as `(cache read, cache write)`.
-        let mut first_main_call: Option<(u64, u64)> = None;
+        let mut first_main_call: Option<FirstCall> = None;
         let mut model_context_window: Option<u64> = None;
         if let Some(stdout) = stdout {
             let (line_tx, mut line_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
@@ -1933,10 +1933,11 @@ impl AppState {
                                     && claude_parent_tool_use_id(&value).is_none()
                                     && usage.context_used_tokens() > 0
                                 {
-                                    first_main_call = Some((
-                                        usage.cache_read_input_tokens,
-                                        usage.cache_creation_input_tokens,
-                                    ));
+                                    first_main_call = Some(FirstCall {
+                                        cache_read: usage.cache_read_input_tokens,
+                                        cache_write: usage.cache_creation_input_tokens,
+                                        model: claude::message_model(&value).map(str::to_string),
+                                    });
                                 }
                                 self.record_claude_live_usage(
                                     &workspace_id,

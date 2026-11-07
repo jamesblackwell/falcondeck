@@ -175,6 +175,11 @@ const cache: AnalyticsCacheReport =
   fixtureState === "prefix"
     ? {
         ...cacheReport,
+        rules: cacheReport.rules.map((rule) =>
+          rule.id === "prefix_change"
+            ? { ...rule, flagged: 1, estimated_usd: 3.3 }
+            : rule,
+        ),
         waste: [
           {
             rule: "prefix_change",
@@ -183,7 +188,7 @@ const cache: AnalyticsCacheReport =
             certainty: "proven",
             label: "Juno - CPO",
             reason:
-              "First call missed a warm cache 2 times: same model and effort, no compaction, 412k rewritten. Something changed the prompt prefix",
+              "First call missed a warm cache 2 times: same main model and effort, no compaction recorded, 412k rewritten. The records don't show what changed",
             estimated_usd: 3.3,
             occurrences: 2,
             thread: "thread-home",

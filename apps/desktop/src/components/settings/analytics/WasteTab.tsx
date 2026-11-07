@@ -8,9 +8,8 @@ import {
   count,
   estimate,
   filterWaste,
-  isPrefixItem,
   percent,
-  wasteTotal,
+  ruleTotals,
   type WasteGroup,
 } from './analytics-utils'
 
@@ -84,32 +83,33 @@ export function WasteTab({ report, ...links }: { report: AnalyticsCacheReport | 
 
   const rules = report.rules ?? []
   const ruleLabel = (id: string) => rules.find((rule) => rule.id === id)?.label
-  const total = wasteTotal(waste)
-  const prefix = waste.filter(isPrefixItem)
-  const proven = prefix.filter((item) => item.rule === 'prefix_change')
-  const cache = wasteTotal(filterWaste(waste, 'cache'))
+  const all = ruleTotals(rules)
+  const cache = ruleTotals(rules, 'cache')
+  const flaggedBy = (id: string) => rules.find((rule) => rule.id === id)?.flagged ?? 0
+  const possible = flaggedBy('possible_prefix_change')
+  const proven = waste.filter((item) => item.rule === 'prefix_change')
 
   return (
     <>
       <div className={TILES}>
         <Stat
           label="Flagged, estimated"
-          value={estimate(total)}
-          detail={report.period_cost_usd ? `${percent(total, report.period_cost_usd)} of ${estimate(report.period_cost_usd)} at list price` : undefined}
+          value={estimate(all.usd)}
+          detail={report.period_cost_usd ? `${percent(all.usd, report.period_cost_usd)} of ${estimate(report.period_cost_usd)} at list price` : undefined}
         />
-        <Stat label="Items flagged" value={count(waste.length)} detail={waste.length ? 'Ranked below' : undefined} />
-        <Stat label="Cache breaks" value={estimate(cache)} detail={`${count(filterWaste(waste, 'cache').length)} flagged`} />
+        <Stat label="Items flagged" value={count(all.flagged)} detail={all.flagged ? 'Ranked below' : undefined} />
+        <Stat label="Cache breaks" value={estimate(cache.usd)} detail={`${count(cache.flagged)} flagged`} />
         <Stat
           label="Prefix changes"
-          value={count(proven.length)}
-          detail={prefix.length > proven.length ? `+ ${count(prefix.length - proven.length)} possible` : 'Something we did broke the cache'}
+          value={count(flaggedBy('prefix_change'))}
+          detail={possible ? `+ ${count(possible)} possible` : 'Warm cache missed, cause unknown'}
         />
       </div>
 
       {proven.length ? (
         <div role="alert" className="space-y-2 rounded-[var(--fd-radius-lg)] border border-danger/25 bg-danger-muted px-3.5 py-3">
           <p className="text-[length:var(--fd-text-sm)] font-medium text-danger">
-            FalconDeck or a harness changed a prompt prefix and broke the cache
+            A warm cache was missed and the records don't show why
           </p>
           <ul className="divide-y divide-border-subtle">
             {proven.map((item) => (
@@ -142,6 +142,9 @@ export function WasteTab({ report, ...links }: { report: AnalyticsCacheReport | 
             ) : (
               <p className={NOTE}>Nothing flagged here in this period.</p>
             )}
+            {all.flagged > waste.length ? (
+              <p className={NOTE}>Showing the top {count(waste.length)} of {count(all.flagged)}. The totals above cover all of them.</p>
+            ) : null}
           </>
         ) : (
           <p className={NOTE}>Nothing crossed a threshold in this period.</p>

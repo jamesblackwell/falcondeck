@@ -21,6 +21,7 @@ import {
   NO_SCHEDULED_FILTERS,
   NO_THREAD_FILTERS,
   readStoredTab,
+  ruleTotals,
   storeTab,
   type AnalyticsTab,
 } from './analytics/analytics-utils'
@@ -250,6 +251,7 @@ export function AnalyticsPanel({ baseUrl, onToast, onOpenThread, onOpenAutomatio
             summary={summary}
             usageTotals={threadUsage?.totals ?? null}
             waste={cache?.waste ?? []}
+            flagged={ruleTotals(cache?.rules ?? []).flagged}
             onOpenWaste={() => selectTab('waste')}
             onOpenThread={onOpenThread}
             onOpenAutomation={onOpenAutomation}
