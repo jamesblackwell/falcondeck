@@ -20,6 +20,7 @@ fn eligible(
         && !thread.is_archived
         && thread.native_session_id.is_some()
         && thread.queued_turns.is_empty()
+        && thread.attention.background_task_count == 0
         && now.signed_duration_since(thread.updated_at).num_seconds() >= IDLE_MINUTES * 60
         && context.is_some_and(|tokens| tokens >= MIN_CONTEXT)
         && last_call.is_some_and(|at| {
@@ -60,6 +61,21 @@ impl AppState {
         }
     }
 
+    /// Caller holds the admission gate also used by background parent wakes.
+    /// Consume the activity generation before dispatch, including failed attempts.
+    pub(in crate::app) async fn claim_idle_bot_compaction(
+        &self,
+        workspace: &str,
+        thread: &str,
+    ) -> bool {
+        if !self.idle_bot_compaction_due(workspace, thread).await {
+            return false;
+        }
+        self.with_managed_thread_mut(workspace, thread, |t| t.maintenance_compacted = true)
+            .await
+            .is_ok()
+    }
+
     /// Re-evaluated inside the same variant/admission gate as a user send.
     pub(in crate::app) async fn idle_bot_compaction_due(
         &self,
@@ -83,7 +99,11 @@ impl AppState {
         else {
             return false;
         };
-        if !managed.queued_requests.is_empty() || managed.dispatching_request.is_some() {
+        if managed.claude_outstanding_tasks
+            || managed.maintenance_compacted
+            || !managed.queued_requests.is_empty()
+            || managed.dispatching_request.is_some()
+        {
             return false;
         }
         let last_call = self
@@ -123,6 +143,9 @@ mod tests {
         let mut thread = home(now);
         let call = Some(now - Duration::minutes(50));
         assert!(eligible(&thread, Some(150_000), call, now));
+        thread.attention.background_task_count = 1;
+        assert!(!eligible(&thread, Some(150_000), call, now));
+        thread.attention.background_task_count = 0;
         assert!(!eligible(&thread, Some(149_999), call, now));
         assert!(!eligible(&thread, None, call, now));
         assert!(!eligible(&thread, Some(150_000), None, now));

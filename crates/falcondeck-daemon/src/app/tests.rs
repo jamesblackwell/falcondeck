@@ -10304,11 +10304,67 @@ async fn idle_bot_compaction_rechecks_preferences_and_queue_under_admission_gate
     });
     assert!(app.idle_bot_compaction_due(&workspace, thread).await);
     app.with_managed_thread_mut(&workspace, thread, |managed| {
-        managed.summary.queued_turns.push(falcondeck_core::QueuedTurnSummary {
-            id: "queued".into(), preview: "pending".into(), text: "pending".into(),
-            attachment_count: 0, queued_at: Utc::now(), held_reason: None,
-        });
-    }).await.unwrap();
+        managed.summary.attention.background_task_count = 1;
+    })
+    .await
+    .unwrap();
+    assert!(!app.idle_bot_compaction_due(&workspace, thread).await);
+    app.with_managed_thread_mut(&workspace, thread, |managed| {
+        managed.summary.attention.background_task_count = 0;
+        managed.claude_outstanding_tasks = true; // UI count aged out; CLI still owns work.
+    })
+    .await
+    .unwrap();
+    assert!(!app.idle_bot_compaction_due(&workspace, thread).await);
+    app.with_managed_thread_mut(&workspace, thread, |managed| {
+        managed.claude_outstanding_tasks = false
+    })
+    .await
+    .unwrap();
+    {
+        let gate = app.variant_gate(&workspace, thread).await;
+        let _guard = gate.lock().await;
+        assert!(app.claim_idle_bot_compaction(&workspace, thread).await);
+        // A successful maintenance turn can publish another high context and
+        // settle Idle. Neither usage nor completion admits ordinary activity.
+        app.with_managed_thread_mut(&workspace, thread, |managed| {
+            managed.summary.status = ThreadStatus::Idle;
+            managed.summary.updated_at = Utc::now() - Duration::minutes(50);
+        })
+        .await
+        .unwrap();
+        {
+            let mut counters = app.inner.thread_token_usage.lock().unwrap();
+            let usage = counters.get_mut(thread).unwrap();
+            usage.total.input_tokens = 200_000;
+            usage.total.cached_input_tokens = 0;
+            usage.updated_at = Some(Utc::now() - Duration::minutes(50));
+        }
+        assert!(!app.claim_idle_bot_compaction(&workspace, thread).await);
+        assert!(!app.claim_idle_bot_compaction(&workspace, thread).await);
+        app.with_managed_thread_mut(&workspace, thread, |managed| {
+            managed.record_ordinary_turn_admission();
+        })
+        .await
+        .unwrap();
+        assert!(app.idle_bot_compaction_due(&workspace, thread).await);
+    }
+
+    app.with_managed_thread_mut(&workspace, thread, |managed| {
+        managed
+            .summary
+            .queued_turns
+            .push(falcondeck_core::QueuedTurnSummary {
+                id: "queued".into(),
+                preview: "pending".into(),
+                text: "pending".into(),
+                attachment_count: 0,
+                queued_at: Utc::now(),
+                held_reason: None,
+            });
+    })
+    .await
+    .unwrap();
     assert!(!app.idle_bot_compaction_due(&workspace, thread).await);
     app.with_managed_thread_mut(&workspace, thread, |managed| managed.summary.queued_turns.clear()).await.unwrap();
     app.inner.preferences.lock().await.bot_idle_compaction_enabled = false;

@@ -1658,6 +1658,16 @@ impl AppState {
         // agent is not finished with the thread: its notification wakes the
         // parent for another turn. The thread reports the count so the UI can
         // say "idle, but work is still in flight" instead of "done".
+        let _ = self
+            .with_managed_thread_mut(&workspace_id, &thread_id, |t| {
+                if t.claude_task_generation
+                    .is_none_or(|old| old <= turn_generation)
+                {
+                    t.claude_task_generation = Some(turn_generation);
+                    t.claude_outstanding_tasks = false;
+                }
+            })
+            .await;
         let mut outstanding_tasks = OutstandingTasks::default();
         // What the thread summary last advertised, so the per-iteration sync
         // below only takes the thread lock when the visible count moves.
@@ -1895,6 +1905,8 @@ impl AppState {
                             // response arrives. Clear idle state now: the expired
                             // timer could otherwise reap it on the next loop.
                             if parked_between_turns && claude_parent_work_resumed(&value) {
+                                let gate = self.variant_gate(&workspace_id, &thread_id).await;
+                                let _admission = gate.lock().await;
                                 if let Ok(runtime) = self.claude_runtime_for(&workspace_id).await
                                     && runtime.wake_parked_turn(&thread_id, turn_generation).await
                                 {
@@ -2003,13 +2015,30 @@ impl AppState {
                             }
                             if let Some(tasks) = claude_background_tasks(&value) {
                                 background_tasks = tasks.blocking;
+                                let gate = self.variant_gate(&workspace_id, &thread_id).await;
+                                let _admission = gate.lock().await;
                                 outstanding_tasks.replace(tasks.all);
+                                let _ = self
+                                    .with_managed_thread_mut(&workspace_id, &thread_id, |t| {
+                                        t.set_claude_task_ownership(
+                                            turn_generation,
+                                            !outstanding_tasks.is_empty() || parked_between_turns,
+                                        )
+                                    })
+                                    .await;
                             }
                             if let Some(task) = claude_task_started(&value) {
                                 if task.holds_turn_open {
                                     background_tasks.insert(task.task_id.clone());
                                 }
+                                let gate = self.variant_gate(&workspace_id, &thread_id).await;
+                                let _admission = gate.lock().await;
                                 outstanding_tasks.insert(task.task_id.clone());
+                                let _ = self
+                                    .with_managed_thread_mut(&workspace_id, &thread_id, |t| {
+                                        t.set_claude_task_ownership(turn_generation, true)
+                                    })
+                                    .await;
                                 // Recorded for every task, blocking or not: a
                                 // backgrounded command still needs its spawning
                                 // tool card settled when it eventually reports.
@@ -2017,7 +2046,20 @@ impl AppState {
                             }
                             if let Some(task) = claude_task_finished(&value) {
                                 background_tasks.remove(&task.task_id);
-                                outstanding_tasks.remove(&task.task_id);
+                                {
+                                    let gate = self.variant_gate(&workspace_id, &thread_id).await;
+                                    let _admission = gate.lock().await;
+                                    outstanding_tasks.remove(&task.task_id);
+                                    let _ = self
+                                        .with_managed_thread_mut(&workspace_id, &thread_id, |t| {
+                                            t.set_claude_task_ownership(
+                                                turn_generation,
+                                                !outstanding_tasks.is_empty()
+                                                    || parked_between_turns,
+                                            )
+                                        })
+                                        .await;
+                                }
                                 let tool_id = task
                                     .tool_use_id
                                     .or_else(|| background_task_tools.remove(&task.task_id));
@@ -2448,6 +2490,13 @@ impl AppState {
                     return;
                 }
                 Ok(finish) if finish.parked && !finish.interrupted => {
+                    let gate = self.variant_gate(&workspace_id, &thread_id).await;
+                    let _admission = gate.lock().await;
+                    let _ = self
+                        .with_managed_thread_mut(&workspace_id, &thread_id, |t| {
+                            t.set_claude_task_ownership(turn_generation, false)
+                        })
+                        .await;
                     // A parked process can exit after its result was already
                     // finalized. A reused process is no longer parked, even
                     // when it exits before emitting its next output.
@@ -2562,6 +2611,11 @@ impl AppState {
                 && !was_interrupted && saw_agent_output,
         )
         .await;
+        let _ = self
+            .with_managed_thread_mut(&workspace_id, &thread_id, |t| {
+                t.set_claude_task_ownership(turn_generation, false)
+            })
+            .await;
         let final_error = turn_error.clone();
         // One monitor follows a parked process across multiple prompts;
         // its original receipt belongs to the first of those turns.
@@ -3330,6 +3384,18 @@ impl AppState {
 }
 
 impl ManagedThread {
+    fn set_claude_task_ownership(&mut self, generation: u64, outstanding: bool) {
+        if self.claude_task_generation == Some(generation) {
+            self.claude_outstanding_tasks = outstanding;
+        }
+    }
+
+    /// Only a provider-accepted ordinary prompt opens another maintenance generation.
+    pub(super) fn record_ordinary_turn_admission(&mut self) {
+        self.has_admitted_turn = true;
+        self.maintenance_compacted = false;
+    }
+
     /// The newest card with this id: a provider's ids can repeat in one thread.
     fn interactive_request_created_at(&self, request_id: &str) -> Option<DateTime<Utc>> {
         self.items.iter().rev().find_map(|item| match item {
@@ -3354,6 +3420,9 @@ impl ManagedThread {
         Self {
             summary,
             has_admitted_turn: false,
+            claude_outstanding_tasks: false,
+            claude_task_generation: None,
+            maintenance_compacted: false,
             variant_reap: None,
             claude_history: None,
             items: Vec::new(),
@@ -4346,6 +4415,20 @@ printf '%s\n' '{{"event":"result","result":{{"status":"SUCCESS","response":"fixt
         );
         app.shutdown().await.unwrap();
     }
+    #[test]
+    fn stale_claude_monitor_cannot_release_a_new_generations_background_tasks() {
+        let summary = serde_json::from_value(json!({"id":"home", "workspace_id":"w",
+            "title":"Home", "provider":"claude", "status":"idle", "updated_at":Utc::now()}))
+        .unwrap();
+        let mut thread = ManagedThread::new(summary);
+        thread.claude_task_generation = Some(2);
+        thread.claude_outstanding_tasks = true;
+        thread.set_claude_task_ownership(1, false);
+        assert!(thread.claude_outstanding_tasks);
+        thread.set_claude_task_ownership(2, false);
+        assert!(!thread.claude_outstanding_tasks);
+    }
+
     #[test]
     fn releases_only_idle_codex_subagents() {
         let read = |parent: Value, status: &str| {

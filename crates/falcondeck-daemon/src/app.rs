@@ -508,6 +508,11 @@ struct ManagedThread {
     /// Provider-neutral admission receipt; ACP may never publish a turn id.
     /// Persisted so a completed empty turn does not look like an unused child.
     has_admitted_turn: bool,
+    /// Raw CLI task ownership, including tasks whose UI count aged out.
+    claude_outstanding_tasks: bool,
+    claude_task_generation: Option<u64>,
+    /// Cleared only when ordinary work is admitted, never by maintenance usage.
+    maintenance_compacted: bool,
     variant_reap: Option<variant_lifecycle::Eligibility>,
     /// Native Claude history is read only on opening or admitting a turn.
     /// The same state owns the gate used by readers and turn admission.
