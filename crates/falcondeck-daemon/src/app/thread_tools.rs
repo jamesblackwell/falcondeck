@@ -2493,6 +2493,108 @@ pub(in crate::app) mod tests {
     }
 
     #[tokio::test]
+    async fn legacy_acp_empty_cancelled_and_fresh_children_restore_capacity_correctly() {
+        for (case, transport, session, legacy, finished) in [
+            ("empty", "acp", Some("empty-session"), true, true),
+            ("cancelled", "acp", Some("cancelled-session"), true, true),
+            ("fresh", "acp", None, true, false),
+            ("explicit-false", "acp", Some("session"), false, false),
+            (
+                "native-opencode-fresh",
+                "native",
+                Some("session"),
+                true,
+                false,
+            ),
+        ] {
+            let (app, temp) = fixture().await;
+            let result = app
+                .invoke_extension_tool(call(CREATE, json!({})))
+                .await
+                .unwrap();
+            let id = created_id(&result);
+            app.with_thread_mut("workspace-1", &id, |thread| {
+                thread.provider = AgentProvider::from("opencode");
+                thread.provider_transport = Some(transport.into());
+                thread.native_session_id = session.map(str::to_owned);
+            })
+            .await
+            .unwrap();
+            if finished {
+                // A pre-upgrade empty/cancelled ACP turn has user history and
+                // possibly a Service warning, but no agent activity or turn id.
+                app.replay_conversation_item("workspace-1", &id, user("prompt", "do work"), false)
+                    .await
+                    .unwrap();
+                app.replay_conversation_item(
+                    "workspace-1",
+                    &id,
+                    ConversationItem::Service {
+                        id: "empty-or-cancelled".into(),
+                        level: ServiceLevel::Warning,
+                        message: case.into(),
+                        created_at: Utc::now(),
+                    },
+                    false,
+                )
+                .await
+                .unwrap();
+            }
+            app.persist_local_state().await.unwrap();
+            let state_path = temp.path().join("daemon-state.json");
+            let mut raw: Value =
+                serde_json::from_slice(&std::fs::read(&state_path).unwrap()).unwrap();
+            if legacy {
+                // A real pre-upgrade record has no admission field, rather
+                // than the explicitly false value written for new drafts.
+                for workspace in raw["workspaces"].as_array_mut().unwrap() {
+                    for thread in workspace["thread_states"].as_array_mut().unwrap() {
+                        thread.as_object_mut().unwrap().remove("has_admitted_turn");
+                    }
+                }
+            }
+            std::fs::write(&state_path, serde_json::to_vec(&raw).unwrap()).unwrap();
+            let saved = load_persisted_app_state(&state_path).await.unwrap();
+            let restored = AppState::new_with_state_path(
+                "test".into(),
+                HashMap::new(),
+                temp.path().join("restored-state.json"),
+            );
+            restored
+                .restore_workspace_placeholder(&saved.workspaces[0], WorkspaceStatus::Ready, None)
+                .await
+                .unwrap();
+            restored.inner.preferences.lock().await.max_agent_children = 1;
+            let summary = restored.thread_summary("workspace-1", &id).await.unwrap();
+            assert_eq!(summary.attention.last_agent_activity_seq, 0, "{case}");
+            assert!(summary.latest_turn_id.is_none(), "{case}");
+            // Admission works before any provider history is hydrated.
+            assert!(
+                restored.inner.workspaces.lock().await["workspace-1"].threads[&id]
+                    .items
+                    .is_empty()
+            );
+            let admitted = restored
+                .invoke_extension_tool(call(CREATE, json!({})))
+                .await;
+            assert_eq!(admitted.is_ok(), finished, "{case}: {admitted:?}");
+            restored.persist_local_state().await.unwrap();
+            let migrated = load_persisted_app_state(&temp.path().join("restored-state.json"))
+                .await
+                .unwrap();
+            assert_eq!(
+                migrated.workspaces[0]
+                    .thread_states
+                    .iter()
+                    .find(|thread| thread.thread_id == id)
+                    .unwrap()
+                    .has_admitted_turn,
+                Some(finished),
+                "{case}"
+            );
+        }
+    }
+    #[tokio::test]
     async fn cloud_children_use_job_lifecycle_without_native_turn_ids() {
         use falcondeck_core::{CloudJobStatus, CloudThreadMetadata};
         let (app, _temp) = fixture().await;
@@ -2714,7 +2816,7 @@ printf '%s\n' '{{"type":"result","subtype":"success","result":"done","session_id
         let saved = load_persisted_app_state(&temp.path().join("daemon-state.json"))
             .await.unwrap();
         assert!(saved.workspaces.iter().flat_map(|ws| &ws.thread_states)
-            .find(|thread| thread.thread_id == child_id).unwrap().has_admitted_turn);
+            .find(|thread| thread.thread_id == child_id).unwrap().has_admitted_turn == Some(true));
         runtime.shutdown().await.unwrap();
     }
     #[tokio::test]

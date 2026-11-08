@@ -690,7 +690,7 @@ pub(super) async fn connect_workspace_internal(
                     managed.title_is_provider_preview = true;
                 }
                 if let Some(state) = persisted_thread_states.get(&managed.summary.id) {
-                    managed.has_admitted_turn = state.has_admitted_turn;
+                    managed.has_admitted_turn = state.admitted_turn();
                     restore_persisted_title_state(
                         &mut managed,
                         state,
@@ -7031,7 +7031,7 @@ mod tests {
             updated_at: Some(Utc::now()),
             provider: Some(AgentProvider::CLAUDE),
             native_session_id: session_id.map(ToOwned::to_owned),
-            has_admitted_turn: false,
+            has_admitted_turn: Some(false),
             provider_transport: None,
             handoff_from: None,
             handoff_context: None,
