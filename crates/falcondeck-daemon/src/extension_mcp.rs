@@ -60,6 +60,15 @@ struct PublishedTool {
 }
 
 impl BridgeContext {
+    fn recovery_headers(&self) -> reqwest::header::HeaderMap {
+        let mut headers = reqwest::header::HeaderMap::new();
+        if let Some(cap) = &self.bridge_capability {
+            if let Ok(value) = cap.parse() {
+                headers.insert("x-falcondeck-extension-capability", value);
+            }
+        }
+        headers
+    }
     fn from_env() -> Self {
         Self {
             daemon_url: std::env::var(ENV_DAEMON_URL)
@@ -191,6 +200,11 @@ async fn handle_line(
                         .get("name")
                         .and_then(Value::as_str)
                         .unwrap_or("unknown"),
+                    context.recovery_headers(),
+                    params
+                        .get("arguments")
+                        .cloned()
+                        .unwrap_or_else(|| json!({})),
                 )
                 .await,
             )
@@ -290,7 +304,14 @@ async fn handle_tool_call(
         );
     }
     if name == crate::tool_output::READ_TOOL {
-        return crate::tool_output::read_response(client, &context.daemon_url, id, arguments).await;
+        return crate::tool_output::read_response(
+            client,
+            &context.daemon_url,
+            id,
+            arguments,
+            context.recovery_headers(),
+        )
+        .await;
     }
     let body = json!({
         "name": name,

@@ -20,6 +20,11 @@ primitives plus an output-recovery tool:
 | `falcondeck_execute` | Execute one registered operation with validated arguments. |
 | `falcondeck_read_tool_output` | Read a retained full MCP result in bounded byte ranges without repeating the original call. |
 
+Recovery handles are scoped to the daemon-resolved calling thread and bot.
+Both insertion and reading require the bridge's existing MCP context; model
+arguments cannot select an owner. Unknown and not-owned handles share one
+error. Workspace-wide bridges resolve the in-flight calling thread.
+
 The catalogue is fixed; new capabilities grow the registry behind
 `falcondeck_search` rather than the tool list. Unsupported operations cannot
 be executed by guessing internal paths — only registered operation ids are

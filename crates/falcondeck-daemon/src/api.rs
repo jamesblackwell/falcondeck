@@ -2584,13 +2584,47 @@ async fn stage_recovery(State(state): State<AppState>, Json(archive): Json<falco
     Ok(Json(serde_json::json!({"restart_required": true})))
 }
 
-// Local daemon/stdio-bridge helpers only; deliberately absent from relay RPC.
+// Local bridge helpers only; owner context is resolved by the daemon.
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct RetainOutputRequest {
+    result: serde_json::Value,
+    tool: String,
+    arguments: serde_json::Value,
+}
+async fn output_owner(
+    state: &AppState,
+    headers: &HeaderMap,
+    tool: &str,
+    arguments: &serde_json::Value,
+) -> Option<crate::tool_output::OutputOwner> {
+    let context =
+        control_context_from_headers(headers, falcondeck_core::control::ControlOrigin::DesktopUi)
+            .ok()?;
+    let capability = match headers.get("x-falcondeck-extension-capability") {
+        Some(v) => Some(v.to_str().ok()?),
+        None => None,
+    };
+    state
+        .tool_output_owner(context, capability, tool, arguments)
+        .await
+}
+fn output_denied() -> (StatusCode, Json<serde_json::Value>) {
+    (
+        StatusCode::BAD_REQUEST,
+        Json(serde_json::json!({"error":crate::tool_output::UNKNOWN_OUTPUT})),
+    )
+}
 pub(crate) async fn retain_tool_output(
     State(state): State<AppState>,
-    Json(result): Json<serde_json::Value>,
+    headers: HeaderMap,
+    Json(request): Json<RetainOutputRequest>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
+    let owner = output_owner(&state, &headers, &request.tool, &request.arguments)
+        .await
+        .ok_or_else(output_denied)?;
     state
-        .retain_tool_output(result)
+        .retain_tool_output(owner, request.result)
         .map(|handle| Json(serde_json::json!({"handle":handle})))
         .map_err(|message| {
             (
@@ -2601,10 +2635,16 @@ pub(crate) async fn retain_tool_output(
 }
 pub(crate) async fn read_tool_output(
     State(state): State<AppState>,
-    Json(request): Json<crate::tool_output::ReadRequest>,
+    headers: HeaderMap,
+    Json(arguments): Json<serde_json::Value>,
 ) -> Result<Json<crate::tool_output::OutputRange>, (StatusCode, Json<serde_json::Value>)> {
+    let request = serde_json::from_value::<crate::tool_output::ReadRequest>(arguments.clone())
+        .map_err(|_| output_denied())?;
+    let owner = output_owner(&state, &headers, crate::tool_output::READ_TOOL, &arguments)
+        .await
+        .ok_or_else(output_denied)?;
     state
-        .read_tool_output(request)
+        .read_tool_output(&owner, request)
         .map(Json)
         .map_err(|message| {
             (

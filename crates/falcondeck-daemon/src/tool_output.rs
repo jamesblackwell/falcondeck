@@ -13,7 +13,17 @@ const RETENTION: Duration = Duration::from_secs(24 * 60 * 60);
 const RANGE_BYTES: usize = (MAX_OUTPUT_BYTES - 1024) / 6;
 pub(crate) const READ_TOOL: &str = "falcondeck_read_tool_output";
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct OutputOwner {
+    pub thread: String,
+    pub bot: Option<String>,
+    pub capability: Option<String>,
+}
+
+pub(crate) const UNKNOWN_OUTPUT: &str = "Unknown or expired tool-output handle";
+
 struct Entry {
+    owner: OutputOwner,
     handle: String,
     at: Instant,
     text: String,
@@ -24,7 +34,7 @@ pub(crate) struct OutputStore {
     bytes: usize,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct ReadRequest {
     pub handle: String,
@@ -51,10 +61,15 @@ impl OutputStore {
             .retain(|entry| now.saturating_duration_since(entry.at) < RETENTION);
         self.bytes = self.entries.iter().map(|entry| entry.text.len()).sum();
     }
-    pub(crate) fn insert(&mut self, result: Value) -> Result<String, String> {
-        self.insert_at(result, Instant::now())
+    pub(crate) fn insert(&mut self, owner: OutputOwner, result: Value) -> Result<String, String> {
+        self.insert_at(owner, result, Instant::now())
     }
-    fn insert_at(&mut self, result: Value, now: Instant) -> Result<String, String> {
+    fn insert_at(
+        &mut self,
+        owner: OutputOwner,
+        result: Value,
+        now: Instant,
+    ) -> Result<String, String> {
         self.prune(now);
         let text = result.to_string();
         if text.len() > MAX_STORE_BYTES {
@@ -68,19 +83,32 @@ impl OutputStore {
         self.bytes += text.len();
         let handle = uuid::Uuid::new_v4().to_string();
         self.entries.push_back(Entry {
+            owner,
             handle: handle.clone(),
             at: now,
             text,
         });
         Ok(handle)
     }
-    pub(crate) fn read(&mut self, request: ReadRequest) -> Result<OutputRange, String> {
-        self.read_at(request, Instant::now())
+    pub(crate) fn read(
+        &mut self,
+        owner: &OutputOwner,
+        request: ReadRequest,
+    ) -> Result<OutputRange, String> {
+        self.read_at(owner, request, Instant::now())
     }
-    fn read_at(&mut self, request: ReadRequest, now: Instant) -> Result<OutputRange, String> {
+    fn read_at(
+        &mut self,
+        owner: &OutputOwner,
+        request: ReadRequest,
+        now: Instant,
+    ) -> Result<OutputRange, String> {
         self.prune(now);
-        let entry = self.entries.iter().find(|entry| entry.handle == request.handle)
-            .ok_or("Unknown or expired tool-output handle; results expire after 24 hours or 32 newer outputs")?;
+        let entry = self
+            .entries
+            .iter()
+            .find(|entry| entry.handle == request.handle && &entry.owner == owner)
+            .ok_or(UNKNOWN_OUTPUT)?;
         let offset = request.offset;
         if offset > entry.text.len() || !entry.text.is_char_boundary(offset) {
             return Err("offset must be a UTF-8 byte boundary within the stored output".into());
@@ -176,6 +204,8 @@ pub(crate) async fn retain_response(
     base: &str,
     mut response: Value,
     tool: &str,
+    headers: reqwest::header::HeaderMap,
+    arguments: Value,
 ) -> Value {
     let Some(result) = response.get("result") else {
         return response;
@@ -185,7 +215,8 @@ pub(crate) async fn retain_response(
     }
     let handle = client
         .post(format!("{base}/api/tool-outputs"))
-        .json(result)
+        .headers(headers)
+        .json(&json!({"result":result,"tool":tool,"arguments":arguments}))
         .send()
         .await;
     let handle = match handle {
@@ -213,9 +244,11 @@ pub(crate) async fn read_response(
     base: &str,
     id: Value,
     arguments: Value,
+    headers: reqwest::header::HeaderMap,
 ) -> Value {
     let reply = client
         .post(format!("{base}/api/tool-outputs/read"))
+        .headers(headers)
         .json(&arguments)
         .send()
         .await;
@@ -246,6 +279,7 @@ pub(crate) mod tests {
 
     pub(crate) struct Server {
         pub base: String,
+        pub app: crate::app::AppState,
         pub calls: std::sync::Arc<std::sync::atomic::AtomicUsize>,
         task: tokio::task::JoinHandle<()>,
         _temp: tempfile::TempDir,
@@ -271,6 +305,7 @@ pub(crate) mod tests {
             Default::default(),
             temp.path().join("state.json"),
         );
+        app.seed_output_owner_tests().await;
         let calls = Arc::new(AtomicUsize::new(0));
         let counter = calls.clone();
         let router = Router::new()
@@ -291,17 +326,26 @@ pub(crate) mod tests {
             )
             .route("/api/tool-outputs", post(crate::api::retain_tool_output))
             .route("/api/tool-outputs/read", post(crate::api::read_tool_output))
-            .with_state(app);
+            .with_state(app.clone());
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let base = format!("http://{}", listener.local_addr().unwrap());
         let task = tokio::spawn(async move {
             axum::serve(listener, router).await.unwrap();
         });
         Server {
+            app,
             base,
             calls,
             task,
             _temp: temp,
+        }
+    }
+
+    fn owner() -> OutputOwner {
+        OutputOwner {
+            thread: "thread-1".into(),
+            bot: None,
+            capability: None,
         }
     }
 
@@ -310,11 +354,14 @@ pub(crate) mod tests {
         let mut complete = String::new();
         loop {
             let part = store
-                .read(ReadRequest {
-                    handle: handle.into(),
-                    offset,
-                    limit: usize::MAX,
-                })
+                .read(
+                    &owner(),
+                    ReadRequest {
+                        handle: handle.into(),
+                        offset,
+                        limit: usize::MAX,
+                    },
+                )
                 .unwrap();
             assert!(serde_json::to_string(&part).unwrap().len() < MAX_OUTPUT_BYTES);
             complete.push_str(&part.text);
@@ -337,7 +384,7 @@ pub(crate) mod tests {
         let value = json!({"ok":true,"data":{"body":body}});
         let original = json!({"content":[{"type":"text","text":value.to_string()}], "structuredContent":value,"isError":false});
         let mut store = OutputStore::default();
-        let handle = store.insert(original.clone()).unwrap();
+        let handle = store.insert(owner(), original.clone()).unwrap();
         let preview = inline_preview(&original, &handle, "fixture_tool");
         let text = preview["content"][0]["text"].as_str().unwrap();
         assert!(text.len() <= MAX_OUTPUT_BYTES);
@@ -360,7 +407,7 @@ pub(crate) mod tests {
             "structuredContent":{"ok":true,"result":text},"isError":false,
             "_meta":{"falcondeck/extensionTool":{"extensionId":"test","toolId":"no_paging"}}});
         let mut store = OutputStore::default();
-        let handle = store.insert(original.clone()).unwrap();
+        let handle = store.insert(owner(), original.clone()).unwrap();
         let preview = inline_preview(&original, &handle, "fixture_tool");
         assert_eq!(preview["_meta"], original["_meta"]);
         assert!(preview["content"][0]["text"].as_str().unwrap().len() <= MAX_OUTPUT_BYTES);
@@ -371,7 +418,9 @@ pub(crate) mod tests {
     fn expired_unknown_and_evicted_handles_are_explicit_errors() {
         let mut store = OutputStore::default();
         let now = Instant::now();
-        let expired = store.insert_at(json!({"secret":"old"}), now).unwrap();
+        let expired = store
+            .insert_at(owner(), json!({"secret":"old"}), now)
+            .unwrap();
         let request = |handle: String| ReadRequest {
             handle,
             offset: 0,
@@ -379,22 +428,184 @@ pub(crate) mod tests {
         };
         assert!(
             store
-                .read_at(request(expired), now + RETENTION)
+                .read_at(&owner(), request(expired), now + RETENTION)
                 .unwrap_err()
                 .contains("expired")
         );
         assert!(
             store
-                .read(request("unknown".into()))
+                .read(&owner(), request("unknown".into()))
                 .unwrap_err()
                 .contains("Unknown")
         );
-        let first = store.insert(json!({"n":0})).unwrap();
+        let first = store.insert(owner(), json!({"n":0})).unwrap();
         for n in 1..=MAX_ENTRIES {
-            store.insert(json!({"n":n})).unwrap();
+            store.insert(owner(), json!({"n":n})).unwrap();
         }
         assert_eq!(store.entries.len(), MAX_ENTRIES);
-        assert!(store.read(request(first)).is_err());
+        assert!(store.read(&owner(), request(first)).is_err());
+        assert!(store.bytes <= MAX_STORE_BYTES);
+    }
+    #[tokio::test]
+    async fn recovery_authorizes_threads_bots_capabilities_and_bridge_restarts() {
+        let server = server("/unused", json!({})).await;
+        let first_bridge = reqwest::Client::new();
+        let headers = |thread: &str| {
+            let mut h = reqwest::header::HeaderMap::new();
+            for (key, value) in [
+                ("x-falcondeck-control-origin", "mcp"),
+                ("x-falcondeck-control-provider", "codex"),
+                ("x-falcondeck-control-workspace", "/repo"),
+                ("x-falcondeck-control-thread", thread),
+            ] {
+                h.insert(key, value.parse().unwrap());
+            }
+            h
+        };
+        let cap_headers = |token: &str| {
+            let mut h = reqwest::header::HeaderMap::new();
+            h.insert("x-falcondeck-extension-capability", token.parse().unwrap());
+            h
+        };
+        let payload = json!({"result":{"structuredContent":{"secret":"private"}},"tool":"fixture","arguments":{}});
+        let retain = |h| {
+            first_bridge
+                .post(format!("{}/api/tool-outputs", server.base))
+                .headers(h)
+                .json(&payload)
+        };
+        let handle = retain(headers("thread-1"))
+            .send()
+            .await
+            .unwrap()
+            .json::<Value>()
+            .await
+            .unwrap()["handle"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let read = |client: &reqwest::Client, h, handle: &str| {
+            client
+                .post(format!("{}/api/tool-outputs/read", server.base))
+                .headers(h)
+                .json(&json!({"handle":handle}))
+        };
+        // These two real threads belong to different configured bots.
+        let denied = read(&first_bridge, headers("thread-2"), &handle)
+            .send()
+            .await
+            .unwrap()
+            .json::<Value>()
+            .await
+            .unwrap();
+        let unknown = read(&first_bridge, headers("thread-2"), "unknown")
+            .send()
+            .await
+            .unwrap()
+            .json::<Value>()
+            .await
+            .unwrap();
+        assert_eq!(denied, unknown);
+        assert_eq!(denied["error"], UNKNOWN_OUTPUT);
+        assert!(
+            retain(headers("missing-thread"))
+                .send()
+                .await
+                .unwrap()
+                .status()
+                .is_client_error()
+        );
+        let cap_handle = retain(cap_headers("capability-1"))
+            .send()
+            .await
+            .unwrap()
+            .json::<Value>()
+            .await
+            .unwrap()["handle"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        for token in ["capability-2", "capability-b", "unknown-capability"] {
+            let denied = read(&first_bridge, cap_headers(token), &cap_handle)
+                .send()
+                .await
+                .unwrap()
+                .json::<Value>()
+                .await
+                .unwrap();
+            assert_eq!(denied, unknown);
+        }
+        // A fresh process/client retains the daemon-issued identity, not a process-local cookie.
+        assert!(
+            retain(cap_headers("unknown-capability"))
+                .send()
+                .await
+                .unwrap()
+                .status()
+                .is_client_error()
+        );
+        let spoofed = first_bridge
+            .post(format!("{}/api/tool-outputs/read", server.base))
+            .headers(headers("thread-2"))
+            .json(&json!({"handle":handle,"owner":{"thread":"thread-1"}}))
+            .send()
+            .await
+            .unwrap();
+        assert!(spoofed.status().is_client_error());
+        drop(first_bridge);
+        let restarted_bridge = reqwest::Client::new();
+        for (h, handle) in [
+            (headers("thread-1"), &handle),
+            (cap_headers("capability-1"), &cap_handle),
+        ] {
+            let reply = read(&restarted_bridge, h, handle).send().await.unwrap();
+            assert!(reply.status().is_success());
+            assert!(
+                reply.json::<Value>().await.unwrap()["text"]
+                    .as_str()
+                    .unwrap()
+                    .contains("private")
+            );
+        }
+        server
+            .app
+            .revoke_output_test_capability("capability-1")
+            .await;
+        let revoked = read(&restarted_bridge, cap_headers("capability-1"), &cap_handle)
+            .send()
+            .await
+            .unwrap()
+            .json::<Value>()
+            .await
+            .unwrap();
+        assert_eq!(revoked, unknown);
+    }
+
+    #[test]
+    fn byte_pressure_evicts_oldest_results_and_bot_identity_is_part_of_owner() {
+        let mut store = OutputStore::default();
+        let mut a = owner();
+        a.bot = Some("a".into());
+        let mut b = a.clone();
+        b.bot = Some("b".into());
+        let first = store
+            .insert(a.clone(), json!("x".repeat(17 << 20)))
+            .unwrap();
+        let request = |handle| ReadRequest {
+            handle,
+            offset: 0,
+            limit: 4,
+        };
+        assert_eq!(
+            store.read(&b, request(first.clone())).unwrap_err(),
+            UNKNOWN_OUTPUT
+        );
+        assert!(store.read(&a, request(first.clone())).is_ok());
+        store
+            .insert(a.clone(), json!("y".repeat(17 << 20)))
+            .unwrap();
+        assert_eq!(store.read(&a, request(first)).unwrap_err(), UNKNOWN_OUTPUT);
+        assert_eq!(store.entries.len(), 1);
         assert!(store.bytes <= MAX_STORE_BYTES);
     }
 }

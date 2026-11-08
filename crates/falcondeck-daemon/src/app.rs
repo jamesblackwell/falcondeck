@@ -5710,21 +5710,146 @@ fn workspace_status_after_account_update(
 mod tests;
 
 impl AppState {
-    pub(crate) fn retain_tool_output(&self, result: serde_json::Value) -> Result<String, String> {
+    pub(crate) fn retain_tool_output(
+        &self,
+        owner: crate::tool_output::OutputOwner,
+        result: serde_json::Value,
+    ) -> Result<String, String> {
         self.inner
             .tool_outputs
             .lock()
             .unwrap_or_else(|p| p.into_inner())
-            .insert(result)
+            .insert(owner, result)
     }
     pub(crate) fn read_tool_output(
         &self,
+        owner: &crate::tool_output::OutputOwner,
         request: crate::tool_output::ReadRequest,
     ) -> Result<crate::tool_output::OutputRange, String> {
         self.inner
             .tool_outputs
             .lock()
             .unwrap_or_else(|p| p.into_inner())
-            .read(request)
+            .read(owner, request)
+    }
+}
+
+impl AppState {
+    /// Resolve bridge authority exactly as normal MCP calls do; never trust
+    /// thread/bot/owner fields supplied in tool arguments.
+    pub(crate) async fn tool_output_owner(
+        &self,
+        context: falcondeck_core::control::ControlRequestContext,
+        capability: Option<&str>,
+        tool: &str,
+        arguments: &Value,
+    ) -> Option<crate::tool_output::OutputOwner> {
+        let (provider, workspace, thread, server, capability) = if let Some(token) = capability {
+            let trusted = self.extension_bridge_context(Some(token)).await?;
+            (
+                trusted.provider,
+                trusted.workspace_path,
+                trusted.thread_id,
+                crate::connectors::BUILTIN_EXTENSIONS_CONNECTOR_NAME,
+                Some(token.to_owned()),
+            )
+        } else {
+            if context.origin != falcondeck_core::control::ControlOrigin::Mcp {
+                return None;
+            }
+            let provider = context.provider?;
+            self.control()
+                .ensure_mcp_enabled(&self.control().settings_snapshot().await, Some(&provider))
+                .ok()?;
+            (
+                provider,
+                context.workspace_path?,
+                context.thread_id,
+                crate::connectors::BUILTIN_CONNECTOR_NAME,
+                None,
+            )
+        };
+        let thread = match thread {
+            Some(thread) => thread,
+            None => {
+                self.resolve_workspace_bridge_thread(server, &workspace, &provider, tool, arguments)
+                    .await?
+            }
+        };
+        let (_, actual_provider) = self.control_thread_target(&workspace, &thread).await?;
+        if actual_provider != provider {
+            return None;
+        }
+        let bot = self.bot_for_thread(&thread).await.map(|bot| bot.id);
+        Some(crate::tool_output::OutputOwner {
+            thread,
+            bot,
+            capability,
+        })
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn seed_output_owner_tests(&self) {
+        let now = Utc::now();
+        let summary = serde_json::from_value(json!({"id":"test-workspace", "path":"/repo",
+            "status":"busy", "default_provider":"codex", "connected_at":now,"updated_at":now}))
+        .unwrap();
+        let mut threads = HashMap::new();
+        for id in ["thread-1", "thread-2"] {
+            let summary = serde_json::from_value(json!({"id":id,"workspace_id":"test-workspace",
+                "title":id,"provider":"codex","status":"running","updated_at":now}))
+            .unwrap();
+            threads.insert(id.to_owned(), ManagedThread::new(summary));
+        }
+        self.inner.workspaces.lock().await.insert(
+            "test-workspace".into(),
+            ManagedWorkspace {
+                summary,
+                codex_session: None,
+                claude_runtime: None,
+                agy_runtime: None,
+                opencode_runtime: None,
+                acp_runtimes: HashMap::new(),
+                threads,
+            },
+        );
+        for (id, thread) in [("bot-a", "thread-1"), ("bot-b", "thread-2")] {
+            self.inner.preferences.lock().await.bots.push(
+                serde_json::from_value(json!({
+                "id":id,"name":id,"workspace_id":"test-workspace","dedicated_workspace":false,
+                "thread_id":thread,"space_path":"/unused"}))
+                .unwrap(),
+            );
+        }
+        for (token, thread) in [
+            ("capability-1", "thread-1"),
+            ("capability-2", "thread-1"),
+            ("capability-b", "thread-2"),
+        ] {
+            self.inner
+                .extension_bridge_capabilities
+                .lock()
+                .await
+                .insert(
+                    token.into(),
+                    ExtensionBridgeCapability {
+                        provider: AgentProvider::CODEX,
+                        workspace_path: "/repo".into(),
+                        thread_id: Some(thread.into()),
+                        expires_at: now + EXTENSION_BRIDGE_CAPABILITY_TTL,
+                    },
+                );
+        }
+    }
+}
+
+#[cfg(test)]
+impl AppState {
+    pub(crate) async fn revoke_output_test_capability(&self, token: &str) {
+        self.inner
+            .extension_bridge_capabilities
+            .lock()
+            .await
+            .remove(token);
     }
 }

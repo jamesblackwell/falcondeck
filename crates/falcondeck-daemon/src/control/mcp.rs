@@ -222,6 +222,11 @@ async fn handle_line(
                         .get("name")
                         .and_then(Value::as_str)
                         .unwrap_or("unknown"),
+                    context.headers(),
+                    params
+                        .get("arguments")
+                        .cloned()
+                        .unwrap_or_else(|| json!({})),
                 )
                 .await,
             )
@@ -435,7 +440,14 @@ async fn handle_tool_call(
         Err(message) => return error_response(id, INVALID_PARAMS, message),
     };
     if name == crate::tool_output::READ_TOOL {
-        return crate::tool_output::read_response(client, &context.daemon_url, id, arguments).await;
+        return crate::tool_output::read_response(
+            client,
+            &context.daemon_url,
+            id,
+            arguments,
+            context.headers(),
+        )
+        .await;
     }
     let (route, body) = match name {
         "falcondeck_search" => ("/api/control/search", arguments),
@@ -594,7 +606,7 @@ mod tests {
             daemon_url: daemon_url.to_string(),
             provider: Some("codex".to_string()),
             workspace_path: Some("/repo".to_string()),
-            thread_id: None,
+            thread_id: Some("thread-1".into()),
         }
     }
 

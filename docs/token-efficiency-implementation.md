@@ -244,3 +244,39 @@ typecheck and TS-suite results above were not rerun.
 Repo-local `autoreview --mode local --no-web-search` was clean at its default
 P0 threshold. No merge, install, restart or live pairing/device/relay calls
 were made. Other agents' dirty main files were left alone.
+
+### Recovery ownership
+
+A handle alone grants no access. Insert and read resolve the bridge's existing
+spawn context in the daemon: control MCP requires an enabled MCP origin,
+provider and registered workspace/thread; extension MCP requires its valid
+daemon-issued bridge capability. Workspace-wide bridges use the same in-flight
+call or unambiguous running-thread resolver as ordinary calls. Ambiguous or
+missing identity fails closed. Original argument shapes are preserved for
+in-flight matching, including omitted defaults.
+
+Each retained result is bound to that thread, its resolved bot (if any), and
+its extension capability (if applicable). The model cannot supply an owner
+field. Reads revalidate current authority, including capability expiry or
+revocation. A missing handle and a handle owned by someone else return the
+same `Unknown or expired tool-output handle` error. A bridge process can
+restart and recover with the same daemon-issued identity; a newly issued
+extension capability does not inherit the old capability's outputs.
+
+Ownership correction validation (8 November): the full daemon command above
+passed **2,049 unit tests and 55 integration tests** (11 unit tests and one
+integration test ignored), including the new HTTP ownership/revocation and
+32 MiB pressure regressions. Existing control/extension bridge recovery round
+trips also passed with identity forwarding enabled. The ownership test uses
+two configured bots, rejects invalid insert identities and model-supplied owner
+fields, checks identical unknown/not-owned errors, and recovers with a fresh
+bridge client carrying the same issued identity. No TypeScript changed.
+Repo-local autoreview was clean at its default P0 threshold.
+
+Heavy checks ran at 15:49–15:56 London with nice 10, Cargo `-j 4`, real HOME,
+`FALCONDECK_TEST_NO_PROVIDERS=1`, failing provider/open stubs first on PATH, a
+private `/private/tmp` TMPDIR and a private target directory. The initial
+≥20 GiB check passed. After the full suite, disk guards blocked separate
+focused reruns; the regressions had all passed in the full suite. The private
+build artifacts were deleted. No merge, install, restart or live
+pairing/device/relay calls were made.
