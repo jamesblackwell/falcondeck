@@ -1,4 +1,5 @@
 import XCTest
+import UIKit
 @testable import FalconDeckNative
 
 /// A computer that serves in-memory files through the same two RPCs as the daemon.
@@ -72,6 +73,36 @@ final class FilePreviewTests: XCTestCase {
     }
     private func payload(_ size: Int) -> Data { Data((0..<size).map { UInt8(truncatingIfNeeded: $0 &* 31 &+ 7) }) }
     private func bytes(_ file: LoadedFile) throws -> Data { try Data(contentsOf: file.url) }
+
+    func testSymlinkedCacheRootKeepsDownloadedImagesAndEvictsOnlyOlderFiles() async throws {
+        let real = directory.appending(path: "real", directoryHint: .isDirectory)
+        let alias = directory.appending(path: "alias", directoryHint: .isDirectory)
+        try FileManager.default.createDirectory(at: real, withIntermediateDirectories: true)
+        try FileManager.default.createSymbolicLink(at: alias, withDestinationURL: real)
+        let image = UIGraphicsImageRenderer(size: CGSize(width: 4, height: 4)).image { context in
+            UIColor.red.setFill(); context.fill(CGRect(x: 0, y: 0, width: 4, height: 4))
+        }
+        let data = try XCTUnwrap(image.pngData())
+        let relay = FakeFileRelay([
+            "/tmp/first.png": .init(data: data, kind: "image", type: "image/png", name: "first.png"),
+            "/tmp/second.png": .init(data: data, kind: "image", type: "image/png", name: "second.png"),
+        ])
+        // The cache directory does not exist yet; only its parent is a symlink.
+        // A tiny budget exercises eviction's keep comparison as well as commit.
+        let cache = FileDiskCache(root: alias.appending(path: "cache", directoryHint: .isDirectory), budget: 1)
+        let store = RemoteFileStore(relay: relay, cache: cache)
+        let first = try await store.open(FileReference(path: "/tmp/first.png"), probe: .firstRange)
+        XCTAssertEqual(try bytes(first), data)
+        XCTAssertNotNil(FileImage.decode(first.url, maxPixel: 1400))
+        let again = try await store.open(FileReference(path: "/tmp/first.png"), probe: .firstRange)
+        XCTAssertTrue(again.fromCache)
+        let second = try await store.open(FileReference(path: "/tmp/second.png"), probe: .firstRange)
+        XCTAssertEqual(try bytes(second), data)
+        XCTAssertNotNil(FileImage.decode(second.url, maxPixel: 1400))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: first.url.path))
+        XCTAssertNotNil(cache.lookup(second.meta))
+        XCTAssertNotNil(cache.latest(path: second.meta.path))
+    }
 
     // MARK: Links
 

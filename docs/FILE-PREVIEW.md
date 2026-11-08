@@ -74,6 +74,26 @@ Not allowed on purpose: `$HOME` at large, `~/.cache`, `~/.claude`, `~/.config`,
 `FileReference` only, so a transcript link, a bot sheet or a future review inbox
 can open it. Remote web and Expo do not use these RPCs yet.
 
+## Native image cache paths
+
+Review thumbnails use `RemoteFileStore` and `file.read_range`, not the HTTP
+image downloader. The Mac preview uses `/api/files/read`, so a working Mac
+preview alone does not test the phone's transfer or cache.
+
+`FileDiskCache` must resolve both URLs before comparing locations. Directory
+enumeration resolves symlinks (for example `/var` to `/private/var` on a phone).
+Comparing an enumerated canonical URL against an unresolved version URL
+can make old-version cleanup delete the newly committed file; the gallery then
+shows its generic retry error even though the daemon sent valid image bytes.
+The same invariant protects the current file during budget eviction. Regression
+coverage uses a cache under a symlinked parent and checks both image decoding
+and eviction.
+
+When diagnosing the retry error, check `file.stat`/`file.read_range`, then whether
+the cache's path bucket contains a version folder and image. Empty buckets
+immediately after successful transfers point to local commit/cleanup. A clean
+simulator using a canonical temporary directory does not exercise this case.
+
 ## Follow-ups
 
 - `http://localhost:PORT` links show "the phone can't reach localhost" instead of

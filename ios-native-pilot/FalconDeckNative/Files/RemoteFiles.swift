@@ -182,7 +182,7 @@ final class FileDiskCache: @unchecked Sendable {
         try? JSONEncoder().encode(meta).write(to: directory.appending(path: "meta.json"))
         // An edited file's older copies are dead weight.
         let siblings = (try? manager.contentsOfDirectory(at: directory.deletingLastPathComponent(), includingPropertiesForKeys: nil)) ?? []
-        for sibling in siblings where sibling != directory { try? manager.removeItem(at: sibling) }
+        for sibling in siblings where !sameLocation(sibling, directory) { try? manager.removeItem(at: sibling) }
         evict(keeping: directory)
         return url
     }
@@ -190,6 +190,12 @@ final class FileDiskCache: @unchecked Sendable {
     func discard(_ part: URL) { try? manager.removeItem(at: part) }
 
     func removeAll() { try? manager.removeItem(at: root) }
+
+    // Enumeration resolves aliases such as /var -> /private/var. Compare both
+    // sides in the same form, so cleanup never removes the file just committed.
+    private func sameLocation(_ lhs: URL, _ rhs: URL) -> Bool {
+        lhs.resolvingSymlinksInPath().standardizedFileURL.path == rhs.resolvingSymlinksInPath().standardizedFileURL.path
+    }
 
     private func modified(_ url: URL) -> Date { (try? url.resourceValues(forKeys: [.contentModificationDateKey]))?.contentModificationDate ?? .distantPast }
     private func touch(_ url: URL) { try? manager.setAttributes([.modificationDate: Date.now], ofItemAtPath: url.path) }
@@ -207,7 +213,7 @@ final class FileDiskCache: @unchecked Sendable {
             }
         }
         var total = entries.reduce(0) { $0 + $1.size }
-        for entry in entries.sorted(by: { $0.date < $1.date }) where total > budget && entry.url != keep {
+        for entry in entries.sorted(by: { $0.date < $1.date }) where total > budget && !sameLocation(entry.url, keep) {
             try? manager.removeItem(at: entry.url)
             try? manager.removeItem(at: entry.url.deletingLastPathComponent()) // only succeeds when empty
             total -= entry.size
