@@ -505,6 +505,9 @@ struct ManagedWorkspace {
 
 struct ManagedThread {
     summary: ThreadSummary,
+    /// Provider-neutral admission receipt; ACP may never publish a turn id.
+    /// Persisted so a completed empty turn does not look like an unused child.
+    has_admitted_turn: bool,
     variant_reap: Option<variant_lifecycle::Eligibility>,
     /// Native Claude history is read only on opening or admitting a turn.
     /// The same state owns the gate used by readers and turn admission.
@@ -966,6 +969,9 @@ struct PersistedThreadState {
     provider: Option<AgentProvider>,
     #[serde(default)]
     native_session_id: Option<String>,
+    /// Absence identifies legacy records eligible for admission inference.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    has_admitted_turn: Option<bool>,
     #[serde(default)]
     provider_transport: Option<String>,
     #[serde(default)]
@@ -1007,6 +1013,19 @@ struct PersistedThreadState {
     /// demand; Claude has no goal record, so persistence is its only recall.
     #[serde(default)]
     goal: Option<falcondeck_core::ThreadGoal>,
+}
+
+impl PersistedThreadState {
+    fn admitted_turn(&self) -> bool {
+        self.has_admitted_turn.unwrap_or_else(|| {
+            // Legacy ACP children get a native session only when starting their
+            // first turn, never at thread creation. This survives outputless or
+            // cancelled turns without hydrating history or launching a provider.
+            // Native OpenCode creates sessions eagerly, so it is excluded.
+            self.provider_transport.as_deref() == Some("acp")
+                && self.native_session_id.is_some()
+        })
+    }
 }
 
 #[derive(Debug, Clone, serde::Deserialize)]
@@ -2133,6 +2152,7 @@ impl AppState {
                 variant: state.variant.clone(),
             };
             let mut thread = ManagedThread::new(summary);
+            thread.has_admitted_turn = state.admitted_turn();
             thread.queued_requests = state.queued_requests.clone();
             thread.variant_reap = state.variant_reap.clone();
             thread.pending_handoff_context = state.handoff_context.clone();
@@ -4786,6 +4806,7 @@ impl AppState {
                     updated_at: Some(thread.summary.updated_at),
                     provider: Some(thread.summary.provider.clone()),
                     native_session_id: thread.summary.native_session_id.clone(),
+                    has_admitted_turn: Some(thread.has_admitted_turn),
                     provider_transport: thread.summary.provider_transport.clone(),
                     handoff_from: thread.summary.handoff_from.clone(),
                     handoff_context: thread.pending_handoff_context.clone(),

@@ -690,6 +690,7 @@ pub(super) async fn connect_workspace_internal(
                     managed.title_is_provider_preview = true;
                 }
                 if let Some(state) = persisted_thread_states.get(&managed.summary.id) {
+                    managed.has_admitted_turn = state.admitted_turn();
                     restore_persisted_title_state(
                         &mut managed,
                         state,
@@ -904,6 +905,10 @@ fn carry_over_live_threads(
             // Native hydration cannot know this daemon-owned marker. Preserve
             // the latest value, including cancellation after connect began.
             rebuilt.variant_reap = thread.variant_reap.clone();
+            // Admission is monotonic, including a turn completed while the
+            // persisted snapshot used by this reconnect was being hydrated.
+            rebuilt.has_admitted_turn |= thread.has_admitted_turn;
+            thread.has_admitted_turn |= rebuilt.has_admitted_turn;
         }
         let keep_live = matches!(
             thread.summary.status,
@@ -3805,6 +3810,17 @@ async fn send_turn_with_startup_mode(
         }
         app.schedule_codex_thread_release_if_idle(&request.workspace_id, &request.thread_id);
         return Err(error);
+    }
+
+    let mut first_admission = false;
+    app.with_managed_thread_mut(&request.workspace_id, &request.thread_id, |thread| {
+        first_admission = !thread.has_admitted_turn;
+        thread.has_admitted_turn = true;
+    })
+    .await?;
+    // No transcript is stored here: only whether a provider accepted work.
+    if first_admission && let Err(error) = app.persist_local_state().await {
+        tracing::warn!(thread_id = %request.thread_id, "failed to persist turn admission: {error}");
     }
 
     app.accepted_delegation_context(&request.thread_id, &outcome_ids, request.user_item_id.as_deref().is_some_and(|id| id.starts_with("user-delegation-report-"))).await;
@@ -6884,6 +6900,25 @@ mod tests {
     }
 
     #[test]
+    fn reconnect_keeps_completed_empty_turn_admission() {
+        // The turn can finish after reconnect captured its saved snapshot;
+        // without a native turn id or output, only this marker proves use.
+        let mut hydrated = HashMap::from([("acp".to_string(), {
+            let mut thread = managed_thread("acp", ThreadStatus::Idle);
+            thread.items.clear();
+            thread
+        })]);
+        let previous = HashMap::from([("acp".to_string(), {
+            let mut thread = managed_thread("acp", ThreadStatus::Idle);
+            thread.items.clear();
+            thread.has_admitted_turn = true;
+            thread
+        })]);
+        carry_over_live_threads(&mut hydrated, previous);
+        assert!(hydrated["acp"].has_admitted_turn);
+    }
+
+    #[test]
     fn reconnecting_a_workspace_keeps_a_replayed_acp_transcript() {
         let mut hydrated = HashMap::from([("grok-thread".to_string(), {
             let mut restored = managed_thread("grok-thread", ThreadStatus::Idle);
@@ -6996,6 +7031,7 @@ mod tests {
             updated_at: Some(Utc::now()),
             provider: Some(AgentProvider::CLAUDE),
             native_session_id: session_id.map(ToOwned::to_owned),
+            has_admitted_turn: Some(false),
             provider_transport: None,
             handoff_from: None,
             handoff_context: None,

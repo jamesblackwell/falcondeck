@@ -252,14 +252,25 @@ fn response(markdown: String) -> ExtensionToolResponse {
         tool_id: None,
     }
 }
-fn child_is_active(thread: &ThreadSummary, parent: &str) -> bool {
+fn child_is_active(thread: &ThreadSummary, parent: &str, has_admitted_turn: bool) -> bool {
     matches!(&thread.origin, Some(ThreadOrigin::AgentSpawn { parent_thread_id, .. }) if parent_thread_id == parent)
         && (matches!(
             thread.status,
             ThreadStatus::Running | ThreadStatus::WaitingForInput
-        ) || !thread.queued_turns.is_empty()
+        ) || thread
+            .cloud
+            .as_ref()
+            .is_some_and(|cloud| cloud.status == falcondeck_core::CloudJobStatus::AwaitingInput)
+            || !thread.queued_turns.is_empty()
             || (!thread.is_archived
+                // Turn ids are session-local, and ACP need not supply one.
+                // Activity survives restart and mark-read, including old state.
+                && !has_admitted_turn
                 && thread.latest_turn_id.is_none()
+                && thread.attention.last_agent_activity_seq == 0
+                && thread.cloud.as_ref().is_none_or(|cloud| {
+                    cloud.status == falcondeck_core::CloudJobStatus::Provisioning
+                })
                 && thread.status == ThreadStatus::Idle))
 }
 
@@ -683,7 +694,7 @@ impl AppState {
                         "Cloud threads currently accept a self-contained prompt; context handoff is not supported. Include the needed context in prompt.".into(),
                     ));
                 }
-                // Serializes admission through dispatch; a simultaneous fourth call cannot race the count.
+                // Serializes admission through dispatch so simultaneous creations cannot race the count.
                 let _gate = self.inner.agent_spawn_gate.lock().await;
                 let max_children = self.preferences().await.max_agent_children as usize;
                 let retry = if a.execution_target == falcondeck_core::ThreadExecutionTarget::Cloud
@@ -709,11 +720,11 @@ impl AppState {
                         .values()
                         .flat_map(|ws| ws.threads.values())
                         .filter(|t| {
-                            child_is_active(&t.summary, coordinator)
+                            child_is_active(&t.summary, coordinator, t.has_admitted_turn)
                                 || bot.as_ref().is_some_and(|b| {
                                     b.previous_thread_ids
                                         .iter()
-                                        .any(|id| child_is_active(&t.summary, id))
+                                        .any(|id| child_is_active(&t.summary, id, t.has_admitted_turn))
                                 })
                         })
                         .count();
@@ -724,11 +735,11 @@ impl AppState {
                         .await?
                         .iter()
                         .filter(|t| {
-                            child_is_active(t, coordinator)
+                            child_is_active(t, coordinator, false)
                                 || bot.as_ref().is_some_and(|b| {
                                     b.previous_thread_ids
                                         .iter()
-                                        .any(|id| child_is_active(t, id))
+                                        .any(|id| child_is_active(t, id, false))
                                 })
                         })
                         .count();
@@ -2409,6 +2420,249 @@ pub(in crate::app) mod tests {
         );
     }
     #[tokio::test]
+    async fn completed_and_unused_children_are_distinguished_after_restart() {
+        let (app, temp) = fixture().await;
+        let mut children = Vec::new();
+        for _ in 0..5 {
+            let result = app
+                .invoke_extension_tool(call(CREATE, json!({})))
+                .await
+                .unwrap();
+            children.push(created_id(&result));
+        }
+        // Model pre-upgrade completed Claude/Codex/ACP children: their turn
+        // ids are absent from saved state, but their agent activity is durable.
+        for (id, provider) in children.iter().zip([
+            AgentProvider::CLAUDE,
+            AgentProvider::CODEX,
+            AgentProvider::from("test-acp"),
+        ]) {
+            app.push_conversation_item("workspace-1", id, assistant("reply", "done"), true)
+                .await
+                .unwrap();
+            app.with_thread_mut("workspace-1", id, |thread| {
+                thread.provider = provider;
+                thread.status = ThreadStatus::Idle;
+                thread.latest_turn_id = None;
+            })
+            .await
+            .unwrap();
+        }
+        // A completed turn without output must retain its receipt as well.
+        app.with_managed_thread_mut("workspace-1", &children[3], |thread| {
+            thread.has_admitted_turn = true;
+        })
+        .await
+        .unwrap();
+        app.persist_local_state().await.unwrap();
+        let saved = load_persisted_app_state(&temp.path().join("daemon-state.json"))
+            .await
+            .unwrap();
+        let restored = AppState::new_with_state_path(
+            "test".into(),
+            HashMap::new(),
+            temp.path().join("restored-state.json"),
+        );
+        // Exercise the real lazy startup path, before native history hydration.
+        restored
+            .restore_workspace_placeholder(&saved.workspaces[0], WorkspaceStatus::Ready, None)
+            .await
+            .unwrap();
+        for id in &children[..4] {
+            let thread = restored.thread_summary("workspace-1", id).await.unwrap();
+            let admitted =
+                restored.inner.workspaces.lock().await["workspace-1"].threads[id].has_admitted_turn;
+            assert!(
+                !child_is_active(&thread, "thread-1", admitted),
+                "{}",
+                thread.provider
+            );
+        }
+        let unused = restored
+            .thread_summary("workspace-1", &children[4])
+            .await
+            .unwrap();
+        assert!(unused.latest_turn_id.is_none());
+        assert!(child_is_active(&unused, "thread-1", false));
+        assert!(
+            restored
+                .invoke_extension_tool(call(CREATE, json!({})))
+                .await
+                .is_ok()
+        );
+    }
+
+    #[tokio::test]
+    async fn legacy_acp_empty_cancelled_and_fresh_children_restore_capacity_correctly() {
+        for (case, transport, session, legacy, finished) in [
+            ("empty", "acp", Some("empty-session"), true, true),
+            ("cancelled", "acp", Some("cancelled-session"), true, true),
+            ("fresh", "acp", None, true, false),
+            ("explicit-false", "acp", Some("session"), false, false),
+            (
+                "native-opencode-fresh",
+                "native",
+                Some("session"),
+                true,
+                false,
+            ),
+        ] {
+            let (app, temp) = fixture().await;
+            let result = app
+                .invoke_extension_tool(call(CREATE, json!({})))
+                .await
+                .unwrap();
+            let id = created_id(&result);
+            app.with_thread_mut("workspace-1", &id, |thread| {
+                thread.provider = AgentProvider::from("opencode");
+                thread.provider_transport = Some(transport.into());
+                thread.native_session_id = session.map(str::to_owned);
+            })
+            .await
+            .unwrap();
+            if finished {
+                // A pre-upgrade empty/cancelled ACP turn has user history and
+                // possibly a Service warning, but no agent activity or turn id.
+                app.replay_conversation_item("workspace-1", &id, user("prompt", "do work"), false)
+                    .await
+                    .unwrap();
+                app.replay_conversation_item(
+                    "workspace-1",
+                    &id,
+                    ConversationItem::Service {
+                        id: "empty-or-cancelled".into(),
+                        level: ServiceLevel::Warning,
+                        message: case.into(),
+                        created_at: Utc::now(),
+                    },
+                    false,
+                )
+                .await
+                .unwrap();
+            }
+            app.persist_local_state().await.unwrap();
+            let state_path = temp.path().join("daemon-state.json");
+            let mut raw: Value =
+                serde_json::from_slice(&std::fs::read(&state_path).unwrap()).unwrap();
+            if legacy {
+                // A real pre-upgrade record has no admission field, rather
+                // than the explicitly false value written for new drafts.
+                for workspace in raw["workspaces"].as_array_mut().unwrap() {
+                    for thread in workspace["thread_states"].as_array_mut().unwrap() {
+                        thread.as_object_mut().unwrap().remove("has_admitted_turn");
+                    }
+                }
+            }
+            std::fs::write(&state_path, serde_json::to_vec(&raw).unwrap()).unwrap();
+            let saved = load_persisted_app_state(&state_path).await.unwrap();
+            let restored = AppState::new_with_state_path(
+                "test".into(),
+                HashMap::new(),
+                temp.path().join("restored-state.json"),
+            );
+            restored
+                .restore_workspace_placeholder(&saved.workspaces[0], WorkspaceStatus::Ready, None)
+                .await
+                .unwrap();
+            restored.inner.preferences.lock().await.max_agent_children = 1;
+            let summary = restored.thread_summary("workspace-1", &id).await.unwrap();
+            assert_eq!(summary.attention.last_agent_activity_seq, 0, "{case}");
+            assert!(summary.latest_turn_id.is_none(), "{case}");
+            // Admission works before any provider history is hydrated.
+            assert!(
+                restored.inner.workspaces.lock().await["workspace-1"].threads[&id]
+                    .items
+                    .is_empty()
+            );
+            let admitted = restored
+                .invoke_extension_tool(call(CREATE, json!({})))
+                .await;
+            assert_eq!(admitted.is_ok(), finished, "{case}: {admitted:?}");
+            restored.persist_local_state().await.unwrap();
+            let migrated = load_persisted_app_state(&temp.path().join("restored-state.json"))
+                .await
+                .unwrap();
+            assert_eq!(
+                migrated.workspaces[0]
+                    .thread_states
+                    .iter()
+                    .find(|thread| thread.thread_id == id)
+                    .unwrap()
+                    .has_admitted_turn,
+                Some(finished),
+                "{case}"
+            );
+        }
+    }
+    #[tokio::test]
+    async fn cloud_children_use_job_lifecycle_without_native_turn_ids() {
+        use falcondeck_core::{CloudJobStatus, CloudThreadMetadata};
+        let (app, _temp) = fixture().await;
+        let mut thread = app.thread_summary("workspace-1", "thread-1").await.unwrap();
+        thread.origin = Some(ThreadOrigin::AgentSpawn {
+            parent_thread_id: "parent".into(),
+            dispatched_at: Some(Utc::now()),
+        });
+        for (status, active) in [
+            (CloudJobStatus::Provisioning, true),
+            (CloudJobStatus::Completed, false),
+            (CloudJobStatus::Stopped, false),
+            (CloudJobStatus::Expired, false),
+            (CloudJobStatus::AwaitingInput, true),
+        ] {
+            thread.cloud = Some(CloudThreadMetadata {
+                job_id: "job".into(),
+                status,
+                error: None,
+                has_result: false,
+            });
+            assert_eq!(child_is_active(&thread, "parent", false), active);
+        }
+    }
+
+    #[tokio::test]
+    async fn queued_completed_child_still_reserves_slot_even_when_archived() {
+        let (app, _temp) = fixture().await;
+        app.inner.preferences.lock().await.max_agent_children = 1;
+        let result = app
+            .invoke_extension_tool(call(CREATE, json!({})))
+            .await
+            .unwrap();
+        let id = created_id(&result);
+        app.with_thread_mut("workspace-1", &id, |thread| {
+            thread.attention.last_agent_activity_seq = 10;
+            thread.is_archived = true;
+            thread
+                .queued_turns
+                .push(falcondeck_core::QueuedTurnSummary {
+                    id: "queued".into(),
+                    preview: "next".into(),
+                    text: "next".into(),
+                    attachment_count: 0,
+                    queued_at: Utc::now(),
+                    held_reason: None,
+                });
+        })
+        .await
+        .unwrap();
+        let error = app
+            .invoke_extension_tool(call(CREATE, json!({})))
+            .await
+            .unwrap_err();
+        assert!(
+            error.to_string().contains("1 concurrent children"),
+            "{error}"
+        );
+        app.with_thread_mut("workspace-1", &id, |thread| thread.queued_turns.clear())
+            .await
+            .unwrap();
+        assert!(
+            app.invoke_extension_tool(call(CREATE, json!({})))
+                .await
+                .is_ok()
+        );
+    }
+    #[tokio::test]
     async fn concurrent_creation_admits_only_five_children_and_completion_releases_slot() {
         let (app, _temp) = fixture().await;
         let mut calls = tokio::task::JoinSet::new();
@@ -2556,7 +2810,13 @@ printf '%s\n' '{{"type":"result","subtype":"success","result":"done","session_id
         assert!(child.items.iter().any(
             |i| matches!(i,ConversationItem::UserMessage {text,..} if text == "do bounded work")
         ));
+        assert!(child.has_admitted_turn);
+        let child_id = child.summary.id.clone();
         drop(ws);
+        let saved = load_persisted_app_state(&temp.path().join("daemon-state.json"))
+            .await.unwrap();
+        assert!(saved.workspaces.iter().flat_map(|ws| &ws.thread_states)
+            .find(|thread| thread.thread_id == child_id).unwrap().has_admitted_turn == Some(true));
         runtime.shutdown().await.unwrap();
     }
     #[tokio::test]

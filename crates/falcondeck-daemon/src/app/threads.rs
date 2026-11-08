@@ -3353,6 +3353,7 @@ impl ManagedThread {
             && !is_provisional_thread_title(&summary.title);
         Self {
             summary,
+            has_admitted_turn: false,
             variant_reap: None,
             claude_history: None,
             items: Vec::new(),
