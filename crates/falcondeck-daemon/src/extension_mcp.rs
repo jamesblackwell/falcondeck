@@ -189,26 +189,7 @@ async fn handle_line(
         )),
         "ping" => Some(success_response(id, json!({}))),
         "tools/list" => Some(tools_list_response(id, client, context).await),
-        "tools/call" => {
-            let response = handle_tool_call(id, &params, client, context).await;
-            Some(
-                crate::tool_output::retain_response(
-                    client,
-                    &context.daemon_url,
-                    response,
-                    params
-                        .get("name")
-                        .and_then(Value::as_str)
-                        .unwrap_or("unknown"),
-                    context.recovery_headers(),
-                    params
-                        .get("arguments")
-                        .cloned()
-                        .unwrap_or_else(|| json!({})),
-                )
-                .await,
-            )
-        }
+        "tools/call" => Some(handle_tool_call(id, &params, client, context).await),
         other => Some(error_response(
             id,
             METHOD_NOT_FOUND,
@@ -322,7 +303,13 @@ async fn handle_tool_call(
         "bridge_capability": context.bridge_capability,
     });
     let url = format!("{}/api/extensions/tools/invoke", context.daemon_url);
-    let response = match client.post(&url).json(&body).send().await {
+    let response = match client
+        .post(&url)
+        .header("x-falcondeck-extension-mcp", "1")
+        .json(&body)
+        .send()
+        .await
+    {
         Ok(response) => response,
         Err(error) => {
             return tool_result(
@@ -343,6 +330,11 @@ async fn handle_tool_call(
             .unwrap_or_else(|| format!("daemon returned HTTP {status}"));
         return tool_result(id, json!({ "ok": false, "error": message }), true, None);
     }
+    success_response(id, payload)
+}
+
+/// Shared with the daemon so retention stores exactly the original MCP result.
+pub(crate) fn mcp_result(payload: Value) -> Value {
     let result = payload.get("result").cloned().unwrap_or(Value::Null);
     let metadata = match (
         payload.get("extension_id").and_then(Value::as_str),
@@ -356,7 +348,13 @@ async fn handle_tool_call(
         })),
         _ => None,
     };
-    tool_result(id, json!({ "ok": true, "result": result }), false, metadata)
+    tool_result(
+        Value::Null,
+        json!({ "ok": true, "result": result }),
+        false,
+        metadata,
+    )["result"]
+        .clone()
 }
 
 fn tool_result(id: Value, structured: Value, is_error: bool, metadata: Option<Value>) -> Value {

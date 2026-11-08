@@ -739,9 +739,18 @@ async fn extension_tools(
 
 async fn invoke_extension_tool(
     State(state): State<AppState>,
+    headers: HeaderMap,
     Json(request): Json<falcondeck_core::InvokeExtensionToolRequest>,
-) -> Result<Json<falcondeck_core::ExtensionToolResponse>, DaemonError> {
-    Ok(Json(state.invoke_extension_tool(request).await?))
+) -> Result<Json<serde_json::Value>, DaemonError> {
+    if headers
+        .get("x-falcondeck-extension-mcp")
+        .is_some_and(|v| v == "1")
+    {
+        return Ok(Json(state.invoke_extension_tool_for_mcp(request).await));
+    }
+    Ok(Json(serde_json::to_value(
+        state.invoke_extension_tool(request).await?,
+    )?))
 }
 
 async fn update_extension(
@@ -2589,14 +2598,14 @@ async fn stage_recovery(State(state): State<AppState>, Json(archive): Json<falco
 #[serde(deny_unknown_fields)]
 pub(crate) struct RetainOutputRequest {
     result: serde_json::Value,
-    tool: String,
-    arguments: serde_json::Value,
+    #[serde(rename = "tool")]
+    _tool: String,
+    #[serde(rename = "arguments")]
+    _arguments: serde_json::Value,
 }
 async fn output_owner(
     state: &AppState,
     headers: &HeaderMap,
-    tool: &str,
-    arguments: &serde_json::Value,
 ) -> Option<crate::tool_output::OutputOwner> {
     let context =
         control_context_from_headers(headers, falcondeck_core::control::ControlOrigin::DesktopUi)
@@ -2605,9 +2614,7 @@ async fn output_owner(
         Some(v) => Some(v.to_str().ok()?),
         None => None,
     };
-    state
-        .tool_output_owner(context, capability, tool, arguments)
-        .await
+    state.tool_output_owner(context, capability).await
 }
 fn output_denied() -> (StatusCode, Json<serde_json::Value>) {
     (
@@ -2620,7 +2627,10 @@ pub(crate) async fn retain_tool_output(
     headers: HeaderMap,
     Json(request): Json<RetainOutputRequest>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
-    let owner = output_owner(&state, &headers, &request.tool, &request.arguments)
+    if headers.contains_key("x-falcondeck-extension-capability") {
+        return Err(output_denied());
+    }
+    let owner = output_owner(&state, &headers)
         .await
         .ok_or_else(output_denied)?;
     state
@@ -2640,7 +2650,7 @@ pub(crate) async fn read_tool_output(
 ) -> Result<Json<crate::tool_output::OutputRange>, (StatusCode, Json<serde_json::Value>)> {
     let request = serde_json::from_value::<crate::tool_output::ReadRequest>(arguments.clone())
         .map_err(|_| output_denied())?;
-    let owner = output_owner(&state, &headers, crate::tool_output::READ_TOOL, &arguments)
+    let owner = output_owner(&state, &headers)
         .await
         .ok_or_else(output_denied)?;
     state

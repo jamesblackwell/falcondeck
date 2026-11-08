@@ -20,10 +20,10 @@ primitives plus an output-recovery tool:
 | `falcondeck_execute` | Execute one registered operation with validated arguments. |
 | `falcondeck_read_tool_output` | Read a retained full MCP result in bounded byte ranges without repeating the original call. |
 
-Recovery handles are scoped to the daemon-resolved calling thread and bot.
-Both insertion and reading require the bridge's existing MCP context; model
-arguments cannot select an owner. Unknown and not-owned handles share one
-error. Workspace-wide bridges resolve the in-flight calling thread.
+Control recovery uses the asserted thread as a mix-up guard, not an
+authentication boundary. Extension recovery belongs to the capability admitted
+for the original call and cannot be read through the control path. Unknown
+and not-owned handles share one error. See the security model below.
 
 The catalogue is fixed; new capabilities grow the registry behind
 `falcondeck_search` rather than the tool list. Unsupported operations cannot
@@ -203,6 +203,18 @@ only when a single automation is read explicitly, never in lists or audit
 summaries. Owner-scoped extension projections omit instructions, targets, and
 unrelated Automations. Automation-created tasks receive owner provenance from
 their daemon-recorded task origin, never from model-authored arguments.
+
+Control MCP callers already share one trust domain: existing transcript and
+summary tools can read every thread. Their internal context headers and
+spawn environment are forgeable assertions. Recovery's thread match only
+prevents accidental mix-ups. It does not add control-bridge authentication.
+Extension recovery has a separate boundary: the validated capability captured
+when the original call was admitted owns the saved result. A workspace-wide
+capability stays workspace-wide; recovery uses no thread heuristics. Forged
+control headers cannot read extension-owned handles.
+
+TODO: daemon-issued spawn tokens for control bridges belong in a follow-up
+security change. See [the recovery threat model](token-efficiency-implementation.md#recovery-threat-model-and-admission-ownership).
 
 ## Architecture notes
 

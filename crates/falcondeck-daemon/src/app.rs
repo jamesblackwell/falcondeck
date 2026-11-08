@@ -3397,6 +3397,38 @@ impl AppState {
         &self,
         request: falcondeck_core::InvokeExtensionToolRequest,
     ) -> Result<falcondeck_core::ExtensionToolResponse, DaemonError> {
+        let mut ignored_owner = None;
+        self.invoke_extension_tool_admitted(request, &mut ignored_owner, false)
+            .await
+    }
+
+    /// MCP output retention shares the exact capability lookup that admits
+    /// the original call. Ownership stays on this future, even if calls finish
+    /// out of order or the caller disconnects.
+    pub(crate) async fn invoke_extension_tool_for_mcp(
+        &self,
+        request: falcondeck_core::InvokeExtensionToolRequest,
+    ) -> Value {
+        let tool = request.name.clone();
+        let mut owner = None;
+        let response = self
+            .invoke_extension_tool_admitted(request, &mut owner, true)
+            .await;
+        let result = match response {
+            Ok(response) => crate::extension_mcp::mcp_result(
+                serde_json::to_value(response).unwrap_or(Value::Null),
+            ),
+            Err(error) => crate::tool_output::tool_error(&error.to_string()),
+        };
+        self.finish_extension_mcp_output(owner, result, &tool).await
+    }
+
+    async fn invoke_extension_tool_admitted(
+        &self,
+        request: falcondeck_core::InvokeExtensionToolRequest,
+        admitted_owner: &mut Option<crate::tool_output::OutputOwner>,
+        require_capability: bool,
+    ) -> Result<falcondeck_core::ExtensionToolResponse, DaemonError> {
         if serde_json::to_vec(&request.arguments)?.len() > extensions::MAX_TOOL_ARGUMENT_BYTES {
             return Err(DaemonError::BadRequest(format!(
                 "extension tool arguments exceed {} bytes",
@@ -3406,9 +3438,21 @@ impl AppState {
         // Ordinary tools retain the legacy spawn projection. Sensitive run
         // access is derived only from the opaque capability created by the
         // daemon at provider spawn, never from these request-body fields.
-        let trusted_bridge = self
-            .extension_bridge_context(request.bridge_capability.as_deref())
-            .await;
+        let (trusted_bridge, captured_owner) = match self
+            .extension_call_admission(request.bridge_capability.as_deref())
+            .await
+        {
+            Some((trusted, owner)) => (Some(trusted), Some(owner)),
+            None => (None, None),
+        };
+        *admitted_owner = captured_owner;
+        if require_capability && admitted_owner.is_none() {
+            return Err(DaemonError::BadRequest(
+                crate::tool_output::UNKNOWN_OUTPUT.into(),
+            ));
+        }
+        // These heuristics belong to ordinary tool targeting only. They never
+        // establish the owner of a retained MCP result.
         let inferred_bridge_thread = match trusted_bridge.as_ref() {
             Some(context) if context.thread_id.is_none() => {
                 self.resolve_workspace_bridge_thread(
@@ -5735,57 +5779,114 @@ impl AppState {
 }
 
 impl AppState {
-    /// Resolve bridge authority exactly as normal MCP calls do; never trust
-    /// thread/bot/owner fields supplied in tool arguments.
+    /// Control headers are an asserted mix-up guard, not authentication.
+    /// Control MCP is one trust domain; extension authority is kept separate.
     pub(crate) async fn tool_output_owner(
         &self,
         context: falcondeck_core::control::ControlRequestContext,
         capability: Option<&str>,
-        tool: &str,
-        arguments: &Value,
     ) -> Option<crate::tool_output::OutputOwner> {
-        let (provider, workspace, thread, server, capability) = if let Some(token) = capability {
+        if let Some(token) = capability {
             let trusted = self.extension_bridge_context(Some(token)).await?;
-            (
-                trusted.provider,
-                trusted.workspace_path,
-                trusted.thread_id,
-                crate::connectors::BUILTIN_EXTENSIONS_CONNECTOR_NAME,
-                Some(token.to_owned()),
-            )
-        } else {
-            if context.origin != falcondeck_core::control::ControlOrigin::Mcp {
-                return None;
-            }
-            let provider = context.provider?;
-            self.control()
-                .ensure_mcp_enabled(&self.control().settings_snapshot().await, Some(&provider))
-                .ok()?;
-            (
-                provider,
-                context.workspace_path?,
-                context.thread_id,
-                crate::connectors::BUILTIN_CONNECTOR_NAME,
-                None,
-            )
-        };
-        let thread = match thread {
-            Some(thread) => thread,
-            None => {
-                self.resolve_workspace_bridge_thread(server, &workspace, &provider, tool, arguments)
-                    .await?
-            }
-        };
-        let (_, actual_provider) = self.control_thread_target(&workspace, &thread).await?;
-        if actual_provider != provider {
+            return Some(crate::tool_output::OutputOwner {
+                thread: trusted.thread_id,
+                bot: None,
+                capability: Some(token.trim().to_owned()),
+            });
+        }
+        if context.origin != falcondeck_core::control::ControlOrigin::Mcp {
             return None;
         }
-        let bot = self.bot_for_thread(&thread).await.map(|bot| bot.id);
+        let provider = context.provider?;
+        self.control()
+            .ensure_mcp_enabled(&self.control().settings_snapshot().await, Some(&provider))
+            .ok()?;
+        let workspace = context.workspace_path?;
+        if let Some(thread) = &context.thread_id {
+            let (_, actual_provider) = self.control_thread_target(&workspace, thread).await?;
+            if actual_provider != provider {
+                return None;
+            }
+        }
+        let bot = match &context.thread_id {
+            Some(thread) => self.bot_for_thread(thread).await.map(|bot| bot.id),
+            None => None,
+        };
         Some(crate::tool_output::OutputOwner {
-            thread,
+            thread: context.thread_id,
             bot,
-            capability,
+            capability: None,
         })
+    }
+
+    fn extension_output_owner(
+        token: &str,
+        trusted: &ExtensionBridgeCapability,
+    ) -> crate::tool_output::OutputOwner {
+        crate::tool_output::OutputOwner {
+            thread: trusted.thread_id.clone(),
+            bot: None,
+            capability: Some(token.trim().to_owned()),
+        }
+    }
+
+    async fn extension_call_admission(
+        &self,
+        token: Option<&str>,
+    ) -> Option<(ExtensionBridgeCapability, crate::tool_output::OutputOwner)> {
+        let token = token?;
+        let trusted = self.extension_bridge_context(Some(token)).await?;
+        let owner = Self::extension_output_owner(token, &trusted);
+        Some((trusted, owner))
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn admit_output_test_capability(
+        &self,
+        token: &str,
+    ) -> Option<crate::tool_output::OutputOwner> {
+        Some(self.extension_call_admission(Some(token)).await?.1)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn retained_output_test_entries(
+        &self,
+    ) -> Vec<(crate::tool_output::OutputOwner, String)> {
+        self.inner.tool_outputs.lock().unwrap().test_entries()
+    }
+
+    pub(crate) async fn finish_extension_mcp_output(
+        &self,
+        owner: Option<crate::tool_output::OutputOwner>,
+        result: Value,
+        tool: &str,
+    ) -> Value {
+        if !crate::tool_output::oversized(&result) {
+            return result;
+        }
+        let failure = || {
+            crate::tool_output::tool_error(
+                "Original tool call completed, but full-output retention failed. Do not repeat a mutating call; inspect daemon state instead.",
+            )
+        };
+        let Some(owner) = owner else {
+            return failure();
+        };
+        let Some(token) = owner.capability.as_ref() else {
+            return failure();
+        };
+        // Recheck revocation only. Never re-resolve or replace the captured owner.
+        let capabilities = self.inner.extension_bridge_capabilities.lock().await;
+        if !capabilities
+            .get(token)
+            .is_some_and(|cap| cap.expires_at > Utc::now())
+        {
+            return failure();
+        }
+        match self.retain_tool_output(owner.clone(), result.clone()) {
+            Ok(handle) => crate::tool_output::inline_preview(&result, &handle, tool),
+            Err(_) => failure(),
+        }
     }
 
     #[cfg(test)]
@@ -5822,9 +5923,11 @@ impl AppState {
             );
         }
         for (token, thread) in [
-            ("capability-1", "thread-1"),
-            ("capability-2", "thread-1"),
-            ("capability-b", "thread-2"),
+            ("workspace-a", None),
+            ("workspace-b", None),
+            ("capability-1", Some("thread-1")),
+            ("capability-2", Some("thread-1")),
+            ("capability-b", Some("thread-2")),
         ] {
             self.inner
                 .extension_bridge_capabilities
@@ -5835,7 +5938,7 @@ impl AppState {
                     ExtensionBridgeCapability {
                         provider: AgentProvider::CODEX,
                         workspace_path: "/repo".into(),
-                        thread_id: Some(thread.into()),
+                        thread_id: thread.map(str::to_owned),
                         expires_at: now + EXTENSION_BRIDGE_CAPABILITY_TTL,
                     },
                 );

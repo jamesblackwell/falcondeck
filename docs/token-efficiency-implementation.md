@@ -245,23 +245,35 @@ Repo-local `autoreview --mode local --no-web-search` was clean at its default
 P0 threshold. No merge, install, restart or live pairing/device/relay calls
 were made. Other agents' dirty main files were left alone.
 
-### Recovery ownership
+### Recovery threat model and admission ownership
 
-A handle alone grants no access. Insert and read resolve the bridge's existing
-spawn context in the daemon: control MCP requires an enabled MCP origin,
-provider and registered workspace/thread; extension MCP requires its valid
-daemon-issued bridge capability. Workspace-wide bridges use the same in-flight
-call or unambiguous running-thread resolver as ordinary calls. Ambiguous or
-missing identity fails closed. Original argument shapes are preserved for
-in-flight matching, including omitted defaults.
+The authority that could perform the original call owns its saved result.
+Extension MCP ownership is captured at the original capability admission,
+before tool targeting or execution. A thread-bound capability carries its
+bound thread; a workspace-wide capability owns results as that capability,
+without guessing a thread. Any holder of the same currently valid capability
+may recover its outputs. Different, unknown, expired or revoked capabilities
+cannot. Model arguments never select an owner.
 
-Each retained result is bound to that thread, its resolved bot (if any), and
-its extension capability (if applicable). The model cannot supply an owner
-field. Reads revalidate current authority, including capability expiry or
-revocation. A missing handle and a handle owned by someone else return the
-same `Unknown or expired tool-output handle` error. A bridge process can
-restart and recover with the same daemon-issued identity; a newly issued
-extension capability does not inherit the old capability's outputs.
+Extension formatting and retention now happen inside that original daemon
+request, before its response reaches the bridge. There is no second extension
+retention call or identity lookup after execution. Delayed, out-of-order or
+cancelled callers cannot transfer ownership to another in-flight call. The
+existing thread heuristics used for ordinary tool targeting do not establish
+recovery ownership. Revocation is rechecked before retention and each read.
+
+Control MCP callers form one existing trust domain: their transcript and
+summary tools already read any thread. Their thread/provider/workspace
+headers and environment are assertions, not authentication. The asserted
+thread match remains a guard against mix-ups, not a security boundary. A
+workspace-wide control caller without a thread keeps an absent-thread guard;
+recovery never guesses a thread. Control handles cannot access extension-owned
+entries, even with forged headers matching an extension's thread. Unknown and
+not-owned handles share the same error. Restarting a bridge with the same
+issued extension capability preserves recovery while the daemon cache lives.
+
+TODO: follow up with daemon-issued spawn tokens for control bridges. That is
+a separate authentication project, outside this branch.
 
 Ownership correction validation (8 November): the full daemon command above
 passed **2,049 unit tests and 55 integration tests** (11 unit tests and one
@@ -280,3 +292,21 @@ private `/private/tmp` TMPDIR and a private target directory. The initial
 focused reruns; the regressions had all passed in the full suite. The private
 build artifacts were deleted. No merge, install, restart or live
 pairing/device/relay calls were made.
+
+Admission-ownership correction validation (8 November):
+`cargo test -p falcondeck-daemon -j 4 -- --test-threads=4` passed **2,051 unit
+tests and 55 integration tests** (11 unit tests and one integration test
+ignored; no doc tests). This includes workspace-wide concurrent calls of the
+same tool with different arguments, delayed and cancelled callers, denial to
+a different capability, forged-control-header denial, unknown-capability
+mutation admission, and the existing recovery/expiry/revocation regressions.
+The regression fixture uses the same capability-admission function and MCP
+formatting/retention implementation as the original daemon call.
+
+Checks ran at 16:31–16:38 London with nice 10, Cargo `-j 4`, real HOME,
+`FALCONDECK_TEST_NO_PROVIDERS=1`, failing provider/open stubs first on PATH and
+a private `/private/tmp` TMPDIR/target. The ≥20 GiB preflight passed after the
+owner freed disk space. The private target was deleted immediately after the
+suite. Repo-local autoreview was clean at its default P0 threshold. No
+TypeScript changed, so typecheck was not rerun. No merge, install, restart or
+live pairing/device/relay calls were made.

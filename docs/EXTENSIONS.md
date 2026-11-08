@@ -1242,9 +1242,12 @@ follow `next_offset` until `eof` and concatenate the JSON text. Unknown or
 expired handles are explicit errors. Restart discards this cache. It is not
 extension storage, conversation history, a snapshot field or a relay RPC.
 
-Retained-output handles are scoped to the resolved calling thread, bot and
-bridge capability. Both insertion and range reads use the daemon's ordinary
-capability/context resolution; model arguments cannot select an owner.
+Retained extension output belongs to the capability validated when the
+original call was admitted. Thread-bound capabilities carry their bound
+thread; workspace-wide capabilities require no inferred thread. Formatting
+and retention happen inside that original daemon request. Delays, cancellation
+and other concurrent calls never cause an owner to be looked up again.
 Expired/revoked capabilities fail closed, and missing/not-owned handles share
 one error. Restarting a bridge with the same issued capability preserves
-access while the daemon cache lives; a different capability cannot read it.
+access while the daemon cache lives; different capabilities and forged control
+headers cannot read it. Model arguments cannot select an owner.

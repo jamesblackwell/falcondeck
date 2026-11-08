@@ -15,7 +15,7 @@ pub(crate) const READ_TOOL: &str = "falcondeck_read_tool_output";
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct OutputOwner {
-    pub thread: String,
+    pub thread: Option<String>,
     pub bot: Option<String>,
     pub capability: Option<String>,
 }
@@ -56,6 +56,14 @@ pub(crate) struct OutputRange {
     text: String,
 }
 impl OutputStore {
+    #[cfg(test)]
+    pub(crate) fn test_entries(&self) -> Vec<(OutputOwner, String)> {
+        self.entries
+            .iter()
+            .map(|entry| (entry.owner.clone(), entry.text.clone()))
+            .collect()
+    }
+
     fn prune(&mut self, now: Instant) {
         self.entries
             .retain(|entry| now.saturating_duration_since(entry.at) < RETENTION);
@@ -154,7 +162,7 @@ fn head_tail(text: &str, budget: usize, marker: &str) -> String {
     format!("{}{marker}{}", &text[..head], &text[tail..])
 }
 
-fn oversized(result: &Value) -> bool {
+pub(crate) fn oversized(result: &Value) -> bool {
     result
         .get("structuredContent")
         .is_some_and(|v| v.to_string().len() > MAX_OUTPUT_BYTES)
@@ -170,7 +178,7 @@ fn oversized(result: &Value) -> bool {
                     > MAX_OUTPUT_BYTES
             })
 }
-fn inline_preview(result: &Value, handle: &str, tool: &str) -> Value {
+pub(crate) fn inline_preview(result: &Value, handle: &str, tool: &str) -> Value {
     let original = result
         .get("structuredContent")
         .unwrap_or(result)
@@ -194,7 +202,7 @@ fn inline_preview(result: &Value, handle: &str, tool: &str) -> Value {
         budget /= 2;
     }
 }
-fn tool_error(message: &str) -> Value {
+pub(crate) fn tool_error(message: &str) -> Value {
     json!({"content":[{"type":"text","text":message}],"isError":true})
 }
 
@@ -308,15 +316,45 @@ pub(crate) mod tests {
         app.seed_output_owner_tests().await;
         let calls = Arc::new(AtomicUsize::new(0));
         let counter = calls.clone();
+        let extension_call = owner_route == "/api/extensions/tools/invoke";
+        let admitting_app = app.clone();
         let router = Router::new()
             .route(
                 owner_route,
-                post(move || {
-                    let payload = payload.clone();
+                post(move |Json(request): Json<Value>| {
+                    let mut payload = payload.clone();
                     let counter = counter.clone();
+                    let app = admitting_app.clone();
                     async move {
+                        if !extension_call {
+                            counter.fetch_add(1, Ordering::SeqCst);
+                            return Json(payload);
+                        }
+                        let owner = match request["bridge_capability"].as_str() {
+                            Some(token) => app.admit_output_test_capability(token).await,
+                            None => None,
+                        };
                         counter.fetch_add(1, Ordering::SeqCst);
-                        Json(payload)
+                        if owner.is_none() {
+                            return Json(tool_error(UNKNOWN_OUTPUT));
+                        }
+                        if payload.get("echo_arguments") == Some(&Value::Bool(true)) {
+                            payload["result"] = json!(format!(
+                                "{}:{}",
+                                request["arguments"]["label"].as_str().unwrap(),
+                                "x".repeat(32_000)
+                            ));
+                        }
+                        let delay = request["arguments"]["delay_ms"].as_u64().unwrap_or(0);
+                        tokio::time::sleep(std::time::Duration::from_millis(delay)).await;
+                        Json(
+                            app.finish_extension_mcp_output(
+                                owner,
+                                crate::extension_mcp::mcp_result(payload),
+                                request["name"].as_str().unwrap(),
+                            )
+                            .await,
+                        )
                     }
                 }),
             )
@@ -343,7 +381,7 @@ pub(crate) mod tests {
 
     fn owner() -> OutputOwner {
         OutputOwner {
-            thread: "thread-1".into(),
+            thread: Some("thread-1".into()),
             bot: None,
             capability: None,
         }
@@ -515,16 +553,28 @@ pub(crate) mod tests {
                 .status()
                 .is_client_error()
         );
-        let cap_handle = retain(cap_headers("capability-1"))
+        let owner = server
+            .app
+            .admit_output_test_capability("capability-1")
+            .await;
+        let original = json!({"content":[{"type":"text","text":format!("private{}","x".repeat(32_000))}],"structuredContent":{"secret":"private"},"isError":false});
+        let inline = server
+            .app
+            .finish_extension_mcp_output(owner, original, "fixture")
+            .await;
+        let preview: Value =
+            serde_json::from_str(inline["content"][0]["text"].as_str().unwrap()).unwrap();
+        let cap_handle = preview["handle"].as_str().unwrap().to_owned();
+        // Forged control headers can match the exact thread but cannot turn a
+        // control caller into the extension capability that admitted this call.
+        let forged = read(&first_bridge, headers("thread-1"), &cap_handle)
             .send()
             .await
             .unwrap()
             .json::<Value>()
             .await
-            .unwrap()["handle"]
-            .as_str()
-            .unwrap()
-            .to_owned();
+            .unwrap();
+        assert_eq!(forged, unknown);
         for token in ["capability-2", "capability-b", "unknown-capability"] {
             let denied = read(&first_bridge, cap_headers(token), &cap_handle)
                 .send()
@@ -581,6 +631,32 @@ pub(crate) mod tests {
         assert_eq!(revoked, unknown);
     }
 
+    #[tokio::test]
+    async fn unknown_capability_cannot_admit_an_original_mcp_mutation() {
+        let server = server("/unused", json!({})).await;
+        let response = server
+            .app
+            .invoke_extension_tool_for_mcp(falcondeck_core::InvokeExtensionToolRequest {
+                name: "falcondeck_rename_thread".into(),
+                arguments: json!({"title":"must not change"}),
+                workspace_path: Some("/repo".into()),
+                thread_id: Some("thread-1".into()),
+                bridge_capability: Some("unknown-capability".into()),
+            })
+            .await;
+        assert_eq!(response["isError"], true);
+        assert_eq!(
+            server
+                .app
+                .thread_summary("test-workspace", "thread-1")
+                .await
+                .unwrap()
+                .title,
+            "thread-1"
+        );
+        assert!(server.app.retained_output_test_entries().is_empty());
+    }
+
     #[test]
     fn byte_pressure_evicts_oldest_results_and_bot_identity_is_part_of_owner() {
         let mut store = OutputStore::default();
@@ -607,5 +683,106 @@ pub(crate) mod tests {
         assert_eq!(store.read(&a, request(first)).unwrap_err(), UNKNOWN_OUTPUT);
         assert_eq!(store.entries.len(), 1);
         assert!(store.bytes <= MAX_STORE_BYTES);
+    }
+    #[tokio::test]
+    async fn workspace_capability_owns_concurrent_delayed_and_cancelled_calls() {
+        use std::sync::atomic::Ordering;
+        let server = server(
+            "/api/extensions/tools/invoke",
+            json!({"echo_arguments":true}),
+        )
+        .await;
+        let client = reqwest::Client::new();
+        let call = |token: &str, label: &str, delay: u64| {
+            client
+                .post(format!("{}/api/extensions/tools/invoke", server.base))
+                .header("x-falcondeck-extension-mcp", "1")
+                .json(
+                    &json!({"name":"same_tool", "arguments":{"label":label,"delay_ms":delay},
+                "bridge_capability":token,"thread_id":"forged-thread"}),
+                )
+        };
+        let delayed = tokio::spawn(call("workspace-a", "delayed-a", 80).send());
+        while server.calls.load(Ordering::SeqCst) < 1 {
+            tokio::task::yield_now().await;
+        }
+        let fast = call("workspace-b", "fast-b", 0)
+            .send()
+            .await
+            .unwrap()
+            .json::<Value>()
+            .await
+            .unwrap();
+        let cancelled = tokio::spawn(call("workspace-a", "cancelled-a", 50).send());
+        while server.calls.load(Ordering::SeqCst) < 3 {
+            tokio::task::yield_now().await;
+        }
+        cancelled.abort();
+        let late = delayed
+            .await
+            .unwrap()
+            .unwrap()
+            .json::<Value>()
+            .await
+            .unwrap();
+        let handle = |result: &Value| {
+            serde_json::from_str::<Value>(result["content"][0]["text"].as_str().unwrap()).unwrap()["handle"].as_str().unwrap().to_owned()
+        };
+        for (result, token, other, label) in [
+            (late, "workspace-a", "workspace-b", "delayed-a"),
+            (fast, "workspace-b", "workspace-a", "fast-b"),
+        ] {
+            let handle = handle(&result);
+            let read = |token: &str| {
+                client
+                    .post(format!("{}/api/tool-outputs/read", server.base))
+                    .header("x-falcondeck-extension-capability", token)
+                    .json(&json!({"handle":handle}))
+            };
+            let own = read(token)
+                .send()
+                .await
+                .unwrap()
+                .json::<Value>()
+                .await
+                .unwrap();
+            assert!(own["text"].as_str().unwrap().contains(label));
+            let denied = read(other)
+                .send()
+                .await
+                .unwrap()
+                .json::<Value>()
+                .await
+                .unwrap();
+            assert_eq!(denied["error"], UNKNOWN_OUTPUT);
+            let forged = client
+                .post(format!("{}/api/tool-outputs/read", server.base))
+                .header("x-falcondeck-control-origin", "mcp")
+                .header("x-falcondeck-control-provider", "codex")
+                .header("x-falcondeck-control-workspace", "/repo")
+                .json(&json!({"handle":handle}))
+                .send()
+                .await
+                .unwrap()
+                .json::<Value>()
+                .await
+                .unwrap();
+            assert_eq!(forged["error"], UNKNOWN_OUTPUT);
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(70)).await;
+        let entries = server.app.retained_output_test_entries();
+        assert!(entries.len() >= 2);
+        for (owner, text) in entries {
+            let expected = if text.contains("fast-b") {
+                "workspace-b"
+            } else {
+                "workspace-a"
+            };
+            assert_eq!(owner.capability.as_deref(), Some(expected));
+            assert!(
+                owner.thread.is_none(),
+                "workspace capabilities must never guess a thread"
+            );
+        }
     }
 }
