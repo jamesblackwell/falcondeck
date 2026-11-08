@@ -8,15 +8,17 @@ FalconDeck itself: inspect state, and create and manage **automations**
 This document covers user-facing behaviour and the implementation contract.
 The full product specification lives in `docs/agent-control-prd.md`.
 
-## The three tools
+## Control tools and output recovery
 
-Agents see exactly one FalconDeck MCP server (`falcondeck`) with three tools:
+The FalconDeck control MCP server (`falcondeck`) publishes three control
+primitives plus an output-recovery tool:
 
 | Tool | Purpose |
 | --- | --- |
 | `falcondeck_search` | Discover capabilities: operation ids, schemas, examples, constraints. |
 | `falcondeck_get` | Read settings, automations, run history and recent control changes. |
 | `falcondeck_execute` | Execute one registered operation with validated arguments. |
+| `falcondeck_read_tool_output` | Read a retained full MCP result in bounded byte ranges without repeating the original call. |
 
 The catalogue is fixed; new capabilities grow the registry behind
 `falcondeck_search` rather than the tool list. Unsupported operations cannot

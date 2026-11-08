@@ -303,7 +303,7 @@ async fn modern_flow_discover_list_and_call() {
             .is_some_and(|version| !version.is_empty())
     );
 
-    // Modern tools/list: fixed order, three tools, cacheable, with the
+    // Modern tools/list: fixed order, four tools, cacheable, with the
     // annotations and required fields an agent uses to call them.
     let list = mcp.request(2, "tools/list", json!({})).await;
     assert_jsonrpc_success(&list, 2);
@@ -311,7 +311,12 @@ async fn modern_flow_discover_list_and_call() {
     let names: Vec<&str> = tools.iter().map(|t| t["name"].as_str().unwrap()).collect();
     assert_eq!(
         names,
-        vec!["falcondeck_search", "falcondeck_get", "falcondeck_execute"]
+        vec![
+            "falcondeck_search",
+            "falcondeck_get",
+            "falcondeck_execute",
+            "falcondeck_read_tool_output"
+        ]
     );
     assert_eq!(list["result"]["ttlMs"], json!(3_600_000));
     assert_eq!(list["result"]["cacheScope"], json!("private"));
@@ -472,7 +477,12 @@ async fn legacy_initialize_flow_works() {
     let names: Vec<&str> = tools.iter().map(|t| t["name"].as_str().unwrap()).collect();
     assert_eq!(
         names,
-        vec!["falcondeck_search", "falcondeck_get", "falcondeck_execute"]
+        vec![
+            "falcondeck_search",
+            "falcondeck_get",
+            "falcondeck_execute",
+            "falcondeck_read_tool_output"
+        ]
     );
     assert!(list["result"].get("ttlMs").is_none());
     assert!(list["result"].get("cacheScope").is_none());

@@ -187,6 +187,8 @@ pub fn router(state: AppState) -> Router {
         .route("/api/notifications", get(notifications_list))
         .route("/api/notifications/read", post(notifications_mark_read))
         .route("/api/notifications/{id}", get(notification_read))
+        .route("/api/tool-outputs", post(retain_tool_output).layer(DefaultBodyLimit::max(32 << 20)))
+        .route("/api/tool-outputs/read", post(read_tool_output))
         .route("/api/control/search", post(control_search))
         .route("/api/control/get", post(control_get))
         .route("/api/control/execute", post(control_execute))
@@ -2580,4 +2582,34 @@ async fn export_recovery(State(state): State<AppState>) -> Result<impl IntoRespo
 async fn stage_recovery(State(state): State<AppState>, Json(archive): Json<falcondeck_core::RecoveryArchive>) -> Result<Json<serde_json::Value>, DaemonError> {
     state.stage_recovery(archive).await?;
     Ok(Json(serde_json::json!({"restart_required": true})))
+}
+
+// Local daemon/stdio-bridge helpers only; deliberately absent from relay RPC.
+pub(crate) async fn retain_tool_output(
+    State(state): State<AppState>,
+    Json(result): Json<serde_json::Value>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
+    state
+        .retain_tool_output(result)
+        .map(|handle| Json(serde_json::json!({"handle":handle})))
+        .map_err(|message| {
+            (
+                StatusCode::PAYLOAD_TOO_LARGE,
+                Json(serde_json::json!({"error":message})),
+            )
+        })
+}
+pub(crate) async fn read_tool_output(
+    State(state): State<AppState>,
+    Json(request): Json<crate::tool_output::ReadRequest>,
+) -> Result<Json<crate::tool_output::OutputRange>, (StatusCode, Json<serde_json::Value>)> {
+    state
+        .read_tool_output(request)
+        .map(Json)
+        .map_err(|message| {
+            (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({"error":message})),
+            )
+        })
 }

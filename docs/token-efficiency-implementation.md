@@ -17,9 +17,19 @@ existing analytics. No lifetime assumption is made for Codex or ACP. A home
 needs a native session, at least 150,000 context tokens from live counters,
 50 minutes without a thread update, and a last model-usage report aged
 50–55 minutes. Running, waiting, errored, archived, paused, queued and
-currently-dispatching threads are skipped. Former homes and bot-created tasks
-are excluded. Missing counters/timestamps (including after restart) are skipped.
-The eligibility check runs again under admission and after history preparation;
+currently-dispatching threads are skipped. Homes with a positive background
+count or raw CLI task ownership are also skipped, even after the visible
+count ages out. Background parent wakes and final maintenance admission share
+the thread admission gate. Raw ownership is scoped to the CLI generation,
+so an old monitor cannot clear a newer monitor's tasks. Former homes and
+bot-created tasks are excluded. Missing counters/timestamps (including after restart) are skipped.
+A maintenance attempt consumes one ordinary-activity generation before
+dispatch. Only admission of an ordinary prompt clears that marker; maintenance
+usage, completion and later scheduler intervals do not. Native-history
+rehydration preserves both maintenance and live-task ownership markers.
+The marker is runtime state, like the live context counters; restart alone cannot reconstruct an
+eligible context. The eligibility check runs again under admission and after
+history preparation;
 a wake after sleep never catches up on an expired cache. No user message,
 keep-warm ping or conversation store is added.
 
@@ -42,7 +52,8 @@ normalization, the UI switch, and a preference change before gated admission.
 FalconDeck's control and extension MCP bridges limit oversized JSON/text
 results to a **24,000-byte preview**, roughly 10k tokens at the review's measured
 2.43 characters/token. The preview retains both ends, explicitly marks the
-omitted middle, and requests a narrower range/filter. Small structured results
+omitted middle, and names the original tool, a retained-output handle and the
+`falcondeck_read_tool_output` tool. Small structured results
 retain their exact shape. Oversized results are marked `truncated` with their
 original byte count; the full value is not duplicated in `structuredContent`.
 UTF-8 boundaries and JSON escaping are accounted for. Single-operation control
@@ -60,6 +71,9 @@ The setting prevents a larger user setting from overriding the environment
 limit on newer CLI versions; the environment is the older-version fallback.
 Claude owns native Bash behavior: successful overflow gets its native file
 path/preview, and failed commands get its native head-and-tail excerpt.
+Both the head and tail come from Claude's **read-back window**. The actual end
+of a huge failing command's output is therefore not guaranteed to appear.
+The recovery store below covers MCP results, not native Bash output.
 FalconDeck does not rewrite shell commands or claim it controls Codex/ACP
 native shell output. See Claude's [output limits](https://code.claude.com/docs/en/tools-reference#output-limits)
 and [environment reference](https://code.claude.com/docs/en/env-vars).
@@ -76,9 +90,10 @@ saving. Token density varies; a byte cap is approximate, not a model tokenizer.
 Tests cover complete single-operation discovery and unchanged input rules,
 unchanged small/error payloads, oversized success/error results,
 head/tail retention, multibyte text, escaping and both Claude approval modes.
-Risks: an important diagnostic in the omitted middle needs a narrower command
-or a read of Claude's saved output; oversized MCP results lose their normal
-structured shape. Re-reading can offset savings.
+Risks: an important native Bash diagnostic in the omitted middle may need
+a read of Claude's saved output or a narrower command. Oversized MCP results
+use a preview inline and a retained original; never repeat a mutating tool
+just to recover its output. Recovery reads can offset savings.
 
 ## Startup context (5)
 
@@ -173,3 +188,59 @@ kept the real HOME, set `FALCONDECK_TEST_NO_PROVIDERS=1`, used a private TMPDIR
 under `/private/tmp`, and put failing agy/claude/codex/cursor-agent/opencode/open
 stubs first on PATH. No live pairing/device calls, merge, install or restart
 were performed. The protected dirty main files were unchanged.
+
+
+## Independent review corrections
+
+Both MCP servers publish `falcondeck_read_tool_output(handle, offset, limit)`.
+Before inline truncation, the bridge stores the complete original MCP result
+in daemon memory, including `content`, `structuredContent`, `isError` and
+extension metadata. Opaque handles survive bridge-process exit but not daemon
+restart. The cache retains at most 32 entries, expires handles after 24 hours,
+and uses a 32 MiB total budget; oldest entries are evicted first. Expired entries
+are removed lazily on cache operations. No output bodies are written to disk,
+put in snapshots, or registered as relay RPC.
+
+Ranges contain UTF-8 JSON text with byte offsets, `next_offset`, `total_bytes`
+and `eof`. Concatenate the ranges and parse the JSON to recover the original
+MCP result, including its structured content. Limits are clamped so every
+range remains under the inline cap, even after JSON escaping. Reads neither
+repeat the original call nor consume another cache entry. Unknown, expired,
+evicted or restart-lost handles return explicit tool errors. Results beyond
+the store's 32 MiB transport budget fail retention explicitly and tell the
+agent that the original call completed and must not be repeated blindly.
+
+Tests cover a 64k review.get body, an extension mutation with no owner-side
+paging, exact reconstruction including structured content and metadata,
+UTF-8 offsets, expiry/unknown/evicted handles, and an owner-call counter proving
+that range recovery does not rerun the mutation. Admission tests cover Idle
+with visible or aged-out live background work and repeated intervals after
+maintenance while counters remain high. A new ordinary admission opens the
+next maintenance generation.
+
+The recovery tool adds a small catalog cost on each MCP server. The earlier
+startup-trim estimate describes the original text reduction, not a newly
+measured net saving after these correctness fixes.
+
+### Correction validation
+
+On 8 November, `cargo test -p falcondeck-daemon -j 4 -- --test-threads=4`
+passed: **2,047 unit tests and 55 integration tests**, with 11 unit tests and
+one integration test ignored. Doc tests passed (none). Six focused reruns
+against the same compiled library-test binary also passed (11 tests total):
+`tool_output::tests`, `recovered`, `idle_bot_compaction`,
+`only_large_warm_idle_homes`, `stale_claude_monitor`, and
+`reconnect_keeps_idle_maintenance`. The recovery round trips assert that every
+read result stays under the cap and that the original owner is called once.
+
+These checks ran at 15:30–15:42 London time, with nice priority 10, Cargo
+`-j 4`, and a ≥20 GiB free-space check before each run. They used the real HOME,
+`FALCONDECK_TEST_NO_PROVIDERS=1`, failing provider/open stubs first on PATH,
+and a private TMPDIR under `/private/tmp`. The private target directory was
+removed after the full suite; focused reruns used its retained test binary.
+No TypeScript changed in the corrections, so the earlier passing workspace
+typecheck and TS-suite results above were not rerun.
+
+Repo-local `autoreview --mode local --no-web-search` was clean at its default
+P0 threshold. No merge, install, restart or live pairing/device/relay calls
+were made. Other agents' dirty main files were left alone.

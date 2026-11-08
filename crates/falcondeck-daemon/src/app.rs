@@ -292,6 +292,7 @@ struct ExtensionBridgeCapability {
 }
 
 struct InnerState {
+    tool_outputs: StdMutex<crate::tool_output::OutputStore>,
     daemon: DaemonInfo,
     /// Startup has two independent boundaries: persisted summaries become
     /// complete quickly, while provider session stores hydrate in the
@@ -1202,6 +1203,7 @@ impl AppState {
                 acp_hydration_gates: Mutex::new(HashMap::new()),
                 codex_runtime_gates: Mutex::new(HashMap::new()),
                 workspace_connect_gates: Mutex::new(HashMap::new()),
+                tool_outputs: StdMutex::new(crate::tool_output::OutputStore::default()),
                 saved_state_gate: StdMutex::new(SavedStateGate::Open),
                 lazy_workspaces: Mutex::new(HashSet::new()),
                 workspace_start_slots: Semaphore::new(
@@ -5706,3 +5708,23 @@ fn workspace_status_after_account_update(
 
 #[cfg(test)]
 mod tests;
+
+impl AppState {
+    pub(crate) fn retain_tool_output(&self, result: serde_json::Value) -> Result<String, String> {
+        self.inner
+            .tool_outputs
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .insert(result)
+    }
+    pub(crate) fn read_tool_output(
+        &self,
+        request: crate::tool_output::ReadRequest,
+    ) -> Result<crate::tool_output::OutputRange, String> {
+        self.inner
+            .tool_outputs
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .read(request)
+    }
+}

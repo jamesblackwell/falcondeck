@@ -2,7 +2,7 @@
 //!
 //! A stateless stdio JSON-RPC process that publishes the tools declared by
 //! enabled FalconDeck extensions as ordinary, namespaced MCP tools. It owns no
-//! state and knows no tool names ahead of time: `tools/list` asks the running
+//! state. Apart from the host-owned output recovery tool, `tools/list` asks the running
 //! daemon what is enabled and granted right now, and `tools/call` routes the
 //! arguments straight back to the daemon, which re-checks both before running
 //! extension code.
@@ -180,7 +180,21 @@ async fn handle_line(
         )),
         "ping" => Some(success_response(id, json!({}))),
         "tools/list" => Some(tools_list_response(id, client, context).await),
-        "tools/call" => Some(handle_tool_call(id, &params, client, context).await),
+        "tools/call" => {
+            let response = handle_tool_call(id, &params, client, context).await;
+            Some(
+                crate::tool_output::retain_response(
+                    client,
+                    &context.daemon_url,
+                    response,
+                    params
+                        .get("name")
+                        .and_then(Value::as_str)
+                        .unwrap_or("unknown"),
+                )
+                .await,
+            )
+        }
         other => Some(error_response(
             id,
             METHOD_NOT_FOUND,
@@ -206,7 +220,8 @@ fn handshake_response(id: Value, protocol_version: &str) -> Value {
 }
 
 /// Asks the daemon which tools are enabled and granted right now. A daemon
-/// that cannot answer publishes nothing rather than a stale guess.
+/// that cannot answer publishes no extension tools rather than a stale guess;
+/// the host-owned recovery tool remains available.
 async fn tools_list_response(
     id: Value,
     client: &reqwest::Client,
@@ -231,7 +246,7 @@ async fn tools_list_response(
             Vec::new()
         }
     };
-    let tools = tools
+    let mut tools = tools
         .into_iter()
         .map(|tool| {
             json!({
@@ -250,6 +265,7 @@ async fn tools_list_response(
             })
         })
         .collect::<Vec<_>>();
+    tools.push(crate::tool_output::read_tool_definition());
     success_response(id, json!({ "tools": tools }))
 }
 
@@ -272,6 +288,9 @@ async fn handle_tool_call(
             INVALID_PARAMS,
             "tools/call arguments must be a JSON object",
         );
+    }
+    if name == crate::tool_output::READ_TOOL {
+        return crate::tool_output::read_response(client, &context.daemon_url, id, arguments).await;
     }
     let body = json!({
         "name": name,
@@ -320,8 +339,6 @@ async fn handle_tool_call(
 }
 
 fn tool_result(id: Value, structured: Value, is_error: bool, metadata: Option<Value>) -> Value {
-    let truncated = structured.to_string().len() > crate::tool_output::MAX_OUTPUT_BYTES;
-    let structured = crate::tool_output::bounded_tool_value(structured);
     let text = structured
         .get("result")
         .and_then(Value::as_str)
@@ -335,9 +352,6 @@ fn tool_result(id: Value, structured: Value, is_error: bool, metadata: Option<Va
         "structuredContent": structured,
         "isError": is_error,
     });
-    if truncated {
-        result.as_object_mut().unwrap().remove("structuredContent");
-    }
     if let Some(metadata) = metadata {
         result["_meta"] = metadata;
     }
@@ -360,17 +374,68 @@ fn error_response(id: Value, code: i64, message: &str) -> Value {
 mod tests {
     use super::*;
 
-    #[test]
-    fn model_output_cap_covers_structured_content_too() {
-        let value = json!({"ok": true, "result": format!("HEAD{}TAIL", "x".repeat(60_000))});
-        let response = tool_result(json!(1), value, false, Some(json!({"owner": "kept"})));
-        let result = &response["result"];
-        assert!(result.get("structuredContent").is_none());
-        assert_eq!(result["isError"], false);
-        let text = result["content"][0]["text"].as_str().unwrap();
-        assert!(text.len() <= crate::tool_output::MAX_OUTPUT_BYTES);
-        assert!(text.contains("HEAD") && text.contains("TAIL"));
-        assert!(text.contains("middle omitted"));
+    #[tokio::test]
+    async fn oversized_extension_without_paging_is_recovered_without_repeating_mutation() {
+        let body = format!(
+            "HEAD{}IMPORTANT_MIDDLE{}TAIL",
+            "a".repeat(32_000),
+            "b".repeat(32_000)
+        );
+        let payload = json!({"result":body,"extension_id":"test","tool_id":"no_paging"});
+        let server =
+            crate::tool_output::tests::server("/api/extensions/tools/invoke", payload.clone())
+                .await;
+        let client = reqwest::Client::new();
+        let context = context(&server.base);
+        let request = json!({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"ext__mutating_no_paging","arguments":json!({})}}).to_string();
+        let response = handle_line(&request, &client, &context).await.unwrap();
+        assert_eq!(response["result"]["isError"], false);
+        let inline = response["result"]["content"][0]["text"].as_str().unwrap();
+        assert!(inline.len() <= crate::tool_output::MAX_OUTPUT_BYTES);
+        let preview: Value = serde_json::from_str(inline).unwrap();
+        let handle = preview["handle"].as_str().unwrap();
+        assert!(inline.contains(crate::tool_output::READ_TOOL));
+        let mut offset = 0;
+        let mut original = String::new();
+        loop {
+            let request = json!({"jsonrpc":"2.0","id":2,"method":"tools/call","params":{
+                "name":crate::tool_output::READ_TOOL,"arguments":{"handle":handle,"offset":offset,"limit":1_000_000}}}).to_string();
+            let response = handle_line(&request, &client, &context).await.unwrap();
+            assert_eq!(response["result"]["isError"], false);
+            let text = response["result"]["content"][0]["text"].as_str().unwrap();
+            assert!(text.len() < crate::tool_output::MAX_OUTPUT_BYTES);
+            assert!(response["result"].to_string().len() <= crate::tool_output::MAX_OUTPUT_BYTES);
+            let range: Value = serde_json::from_str(text).unwrap();
+            original.push_str(range["text"].as_str().unwrap());
+            if range["eof"] == true {
+                break;
+            }
+            let next = range["next_offset"].as_u64().unwrap();
+            assert!(next > offset);
+            offset = next;
+        }
+        let complete: Value = serde_json::from_str(&original).unwrap();
+        assert_eq!(complete["structuredContent"]["result"], body);
+        assert_eq!(
+            complete["_meta"]["falcondeck/extensionTool"]["toolId"],
+            "no_paging"
+        );
+        assert_eq!(
+            server.calls.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "must never repeat the owner call"
+        );
+        let request = json!({"jsonrpc":"2.0","id":3,"method":"tools/call","params":{
+            "name":crate::tool_output::READ_TOOL,"arguments":{"handle":"unknown"}}})
+        .to_string();
+        let error = handle_line(&request, &client, &context).await.unwrap();
+        assert_eq!(error["result"]["isError"], true);
+        assert!(
+            error["result"]["content"][0]["text"]
+                .as_str()
+                .unwrap()
+                .contains("expired")
+        );
     }
 
     #[test]
@@ -487,10 +552,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn an_unreachable_daemon_publishes_nothing_rather_than_a_stale_guess() {
+    async fn an_unreachable_daemon_publishes_only_the_known_host_recovery_tool() {
         let client = reqwest::Client::new();
         let response = tools_list_response(json!(1), &client, &context("http://127.0.0.1:1")).await;
-        assert_eq!(response["result"]["tools"], json!([]));
+        assert_eq!(response["result"]["tools"], json!([crate::tool_output::read_tool_definition()]));
     }
 
     #[tokio::test]
