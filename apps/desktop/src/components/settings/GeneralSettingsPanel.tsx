@@ -212,6 +212,12 @@ export function GeneralSettingsPanel({
               />
             }
           />
+          <SwitchRow
+            title="Compact idle bot homes"
+            description="Compact Claude bot homes over 150K tokens after 50 idle minutes, before their cache expires."
+            checked={current.bot_idle_compaction_enabled !== false}
+            onCheckedChange={(enabled) => onUpdatePreferences({ bot_idle_compaction_enabled: enabled })}
+          />
           <SettingRow
             title="Compact Claude conversations at"
             description="Smaller is cheaper on long threads; the 1M model options keep the full window."

@@ -45,7 +45,7 @@ describe("PromptInput saved prompts", () => {
       />,
     );
 
-    const textarea = screen.getByRole("textbox", { name: "Message composer" });
+    const textarea = screen.getByRole<HTMLTextAreaElement>("textbox", { name: "Message composer" });
     textarea.setSelectionRange(typed.length, typed.length);
     fireEvent.click(textarea);
 
@@ -71,7 +71,7 @@ describe("PromptInput saved prompts", () => {
       />,
     );
 
-    const textarea = screen.getByRole("textbox", { name: "Message composer" });
+    const textarea = screen.getByRole<HTMLTextAreaElement>("textbox", { name: "Message composer" });
     textarea.setSelectionRange(typed.length, typed.length);
     fireEvent.click(textarea);
     fireEvent.keyDown(textarea, { key: "Enter" });

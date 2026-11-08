@@ -111,6 +111,15 @@ values fall back to the default):
   the one that compacts. If `~/.codex/config.toml` sets its own limit, the
   FalconDeck setting overrides it only while a value is set.
 
+## Idle compaction and tool output
+
+[Token-efficiency fixes 3–5](token-efficiency-implementation.md) describe the
+new default-on idle compaction preference for large Claude bot homes and the
+24k-character native Claude Bash cap (about 10k tokens). The cap is passed in
+both launch settings and the legacy environment variable. Native shell output
+on Codex and ACP stays harness-owned; FalconDeck control/extension MCP output
+is bounded for every harness using those bridges.
+
 ## Subscription usage
 
 `GET /api/provider-usage` (and relay RPC `providers.usage`) returns live

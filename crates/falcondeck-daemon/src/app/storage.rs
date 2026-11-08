@@ -262,6 +262,9 @@ pub(super) fn merge_preferences_from_value(value: Value) -> FalconDeckPreference
     if let Some(tokens) = autocompact_tokens_from_value(value.get("claude_autocompact_tokens")) {
         preferences.claude_autocompact_tokens = tokens;
     }
+    if let Some(enabled) = value.get("bot_idle_compaction_enabled").and_then(Value::as_bool) {
+        preferences.bot_idle_compaction_enabled = enabled;
+    }
     preferences.codex_autocompact_tokens =
         autocompact_tokens_from_value(value.get("codex_autocompact_tokens"));
     if let Some(enabled) = value.get("review_inbox_enabled").and_then(Value::as_bool) {
@@ -537,6 +540,9 @@ pub(super) fn apply_preferences_patch(
     preferences: &mut FalconDeckPreferences,
     request: UpdatePreferencesRequest,
 ) {
+    if let Some(enabled) = request.bot_idle_compaction_enabled {
+        preferences.bot_idle_compaction_enabled = enabled;
+    }
     if let Some(enabled) = request.bot_system_context_enabled {
         preferences.bot_system_context_enabled = enabled;
     }
@@ -1442,6 +1448,22 @@ mod tests {
             UpdatePreferencesRequest { max_agent_children: Some(99), ..Default::default() },
         );
         assert_eq!(preferences.max_agent_children, 5);
+    }
+
+    #[tokio::test]
+    async fn idle_compaction_defaults_on_and_persists_off() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("preferences.json");
+        let mut prefs = load_preferences(&path).await.unwrap();
+        assert!(prefs.bot_idle_compaction_enabled);
+        assert!(merge_preferences_from_value(json!({})).bot_idle_compaction_enabled);
+        apply_preferences_patch(&mut prefs, UpdatePreferencesRequest {
+            bot_idle_compaction_enabled: Some(false), ..Default::default()
+        });
+        persist_preferences(&path, &prefs).await.unwrap();
+        assert!(!load_preferences(&path).await.unwrap().bot_idle_compaction_enabled);
+        apply_preferences_patch(&mut prefs, UpdatePreferencesRequest::default());
+        assert!(!prefs.bot_idle_compaction_enabled);
     }
 
     #[tokio::test]

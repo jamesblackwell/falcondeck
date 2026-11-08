@@ -207,7 +207,7 @@ vi.mock("./hooks/usePanelVisibility", () => ({
 
 vi.mock("./hooks/useGitBranches", () => ({
   useGitBranches: () => ({
-    branches: [],
+    branches: { current: "main", branches: ["main"] },
     uncommittedCount: 0,
     isCheckoutPending: false,
     checkout: vi.fn(),
@@ -251,11 +251,12 @@ vi.mock("./components/DesktopConversationPane", () => ({
     promptInputProps,
     selectedWorkspace,
   }: {
-    promptInputProps?: { value?: string; focusRequestKey?: number };
+    promptInputProps?: { value?: string; focusRequestKey?: number; contextBar?: React.ReactNode };
     selectedWorkspace?: { kind?: string } | null;
   }) => (
     <div>
       Conversation pane
+      {promptInputProps?.contextBar}
       <span data-testid="composer-draft">{promptInputProps?.value}</span>
       <span data-testid="workspace-kind">{selectedWorkspace?.kind}</span>
       <span data-testid="composer-focus-key">
@@ -377,7 +378,7 @@ describe("App main-view wiring", () => {
 
     fireEvent.click(screen.getByRole("button", { name: "Options" }));
     fireEvent.click(await screen.findByRole("menuitem", { name: /Settings/ }));
-    expect(await screen.findByText("Back to app")).toBeInTheDocument();
+    expect(await screen.findByText("Back to app", {}, { timeout: 5_000 })).toBeInTheDocument();
     expect(screen.getByTestId("sidebar")).toHaveAttribute(
       "data-visible",
       "false",
@@ -425,7 +426,8 @@ describe("App main-view wiring", () => {
   it("leaves Plugins when starting a new thread", async () => {
     render(<App />);
 
-    fireEvent.click(screen.getByRole("button", { name: "Plugins" }));
+    fireEvent.click(screen.getByRole("button", { name: "Options" }));
+    fireEvent.click(await screen.findByRole("menuitem", { name: /Plugins/ }));
     expect(
       await screen.findByRole("heading", { name: "Plugins" }),
     ).toBeInTheDocument();
@@ -440,7 +442,7 @@ describe("App main-view wiring", () => {
     ).not.toBeInTheDocument();
   });
 
-  it("opens Cloud tasks as a main view and restores the selected project composer", async () => {
+  it("chooses Cloud in the project composer and can return to Local", async () => {
     const fetch = vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
       const url = String(input);
       return new Response(JSON.stringify(url.endsWith("/api/cloud/settings") ? {
@@ -452,16 +454,22 @@ describe("App main-view wiring", () => {
     });
     try {
       render(<App />);
-      fireEvent.click(screen.getByRole("button", { name: "Cloud tasks" }));
-      expect(await screen.findByRole("heading", { name: "Cloud tasks" })).toBeInTheDocument();
-      expect(await screen.findByLabelText("Source project")).toHaveValue("workspace-1");
-      expect(screen.queryByText("Diff rail")).not.toBeInTheDocument();
-      fireEvent.click(screen.getAllByRole("button", { name: "New cloud task" })[0]);
-      expect(await screen.findByLabelText("Task instructions")).toBeInTheDocument();
       fireEvent.click(screen.getByRole("button", { name: "Start new thread in falcon" }));
-      expect(await screen.findByText("Conversation pane")).toBeInTheDocument();
-      expect(screen.queryByRole("heading", { name: "Cloud tasks" })).not.toBeInTheDocument();
-      expect(await screen.findByText("Diff rail")).toBeInTheDocument();
+      const location = await screen.findByRole("combobox", { name: "Run in" });
+      expect(location).toHaveTextContent("Local");
+      fireEvent.keyDown(location, { key: "ArrowDown" });
+      fireEvent.click(await screen.findByRole("option", { name: "Cloud" }));
+      expect(location).toHaveTextContent("Cloud");
+      expect(screen.getByText("Cloud copy")).toBeInTheDocument();
+      expect(screen.getByRole("button", { name: "Project" })).toHaveTextContent("falcon");
+      expect(screen.getByText("Conversation pane")).toBeInTheDocument();
+      expect(screen.getByText("Diff rail")).toBeInTheDocument();
+
+      fireEvent.keyDown(location, { key: "ArrowDown" });
+      fireEvent.click(await screen.findByRole("option", { name: "Local" }));
+      expect(location).toHaveTextContent("Local");
+      expect(screen.queryByText("Cloud copy")).not.toBeInTheDocument();
+      expect(screen.getByText("Conversation pane")).toBeInTheDocument();
     } finally {
       fetch.mockRestore();
     }

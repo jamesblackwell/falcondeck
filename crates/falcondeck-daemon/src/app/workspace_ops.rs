@@ -905,6 +905,11 @@ fn carry_over_live_threads(
             // Native hydration cannot know this daemon-owned marker. Preserve
             // the latest value, including cancellation after connect began.
             rebuilt.variant_reap = thread.variant_reap.clone();
+            // A native-history refresh is not ordinary activity. Keep both the
+            // maintenance generation and live CLI ownership across rebuilding.
+            rebuilt.maintenance_compacted = thread.maintenance_compacted;
+            rebuilt.claude_outstanding_tasks = thread.claude_outstanding_tasks;
+            rebuilt.claude_task_generation = thread.claude_task_generation;
             // Admission is monotonic, including a turn completed while the
             // persisted snapshot used by this reconnect was being hydrated.
             rebuilt.has_admitted_turn |= thread.has_admitted_turn;
@@ -3815,7 +3820,7 @@ async fn send_turn_with_startup_mode(
     let mut first_admission = false;
     app.with_managed_thread_mut(&request.workspace_id, &request.thread_id, |thread| {
         first_admission = !thread.has_admitted_turn;
-        thread.has_admitted_turn = true;
+        thread.record_ordinary_turn_admission();
     })
     .await?;
     // No transcript is stored here: only whether a provider accepted work.
@@ -4239,10 +4244,22 @@ pub(super) async fn interrupt_turn(
 
 pub(super) async fn compact_thread(
     app: &AppState,
+    request: CompactThreadRequest,
+) -> Result<CommandResponse, DaemonError> {
+    compact_thread_checked(app, request, false).await
+}
+
+/// Idle maintenance uses the same admission gate and provider route as HTTP.
+pub(super) async fn compact_thread_checked(
+    app: &AppState,
     mut request: CompactThreadRequest,
+    idle_only: bool,
 ) -> Result<CommandResponse, DaemonError> {
     let gate = app.variant_gate(&request.workspace_id, &request.thread_id).await;
     let _guard = gate.lock().await;
+    if idle_only && !app.idle_bot_compaction_due(&request.workspace_id, &request.thread_id).await {
+        return Ok(CommandResponse { ok: true, message: Some("idle compaction skipped".into()) });
+    }
     app.restore_variant_for_turn(&request.workspace_id, &request.thread_id).await?;
     request.instructions = request
         .instructions
@@ -4252,6 +4269,11 @@ pub(super) async fn compact_thread(
     let _claude_history_guard = app
         .claude_history_for_admission(&request.workspace_id, &request.thread_id)
         .await?;
+    // History admission may involve disk work. Do not cross the cache-expiry
+    // guard or ignore a preference change while preparing the native session.
+    if idle_only && !app.idle_bot_compaction_due(&request.workspace_id, &request.thread_id).await {
+        return Ok(CommandResponse { ok: true, message: Some("idle compaction skipped".into()) });
+    }
     let thread = app
         .thread_summary(&request.workspace_id, &request.thread_id)
         .await?;
@@ -4286,6 +4308,16 @@ pub(super) async fn compact_thread(
 
     app.with_managed_thread_mut(&request.workspace_id, &request.thread_id, |t| t.variant_reap = None).await?;
     app.persist_local_state().await?;
+    if idle_only
+        && !app
+            .claim_idle_bot_compaction(&request.workspace_id, &request.thread_id)
+            .await
+    {
+        return Ok(CommandResponse {
+            ok: true,
+            message: Some("idle compaction skipped".into()),
+        });
+    }
     let started = app
         .upsert_thread(&request.workspace_id, &request.thread_id, |summary| {
             summary.status = ThreadStatus::Running;
@@ -6897,6 +6929,27 @@ mod tests {
         // been opened while this workspace was still connecting.
         assert_eq!(hydrated["idle"].summary.status, ThreadStatus::Idle);
         assert!(hydrated.contains_key("opened"));
+    }
+
+    #[test]
+    fn reconnect_keeps_idle_maintenance_and_background_ownership_markers() {
+        let mut hydrated = HashMap::from([("home".to_string(), {
+            let mut t = managed_thread("home", ThreadStatus::Idle);
+            t.items.clear();
+            t
+        })]);
+        let previous = HashMap::from([("home".to_string(), {
+            let mut t = managed_thread("home", ThreadStatus::Idle);
+            t.items.clear();
+            t.maintenance_compacted = true;
+            t.claude_outstanding_tasks = true;
+            t.claude_task_generation = Some(9);
+            t
+        })]);
+        carry_over_live_threads(&mut hydrated, previous);
+        assert!(hydrated["home"].maintenance_compacted);
+        assert!(hydrated["home"].claude_outstanding_tasks);
+        assert_eq!(hydrated["home"].claude_task_generation, Some(9));
     }
 
     #[test]

@@ -642,7 +642,7 @@ it("switches an existing bot and opens its new home", async () => {
   render(<BotSidebar bots={[bot]} botApi={transport} groups={group([])} selectedThreadId={bot.thread_id} onSelectThread={onSelect} />);
   fireEvent.click(screen.getByRole("button", { name: `Edit ${bot.name}` }));
   fireEvent.change(screen.getByLabelText("Switch model"), { target: { value: "gpt-6.1-sol" } });
-  fireEvent.click(screen.getByRole("button", { name: "Switch", exact: true }));
+  fireEvent.click(screen.getByRole("button", { name: "Switch" }));
   await waitFor(() => expect(transport.mutateBot).toHaveBeenCalledWith({ action: "switch_conversation", id: bot.id, provider: "codex", model_id: "gpt-6.1-sol" }));
   expect(onSelect).toHaveBeenCalledWith(bot.workspace_id, "fresh-home");
   confirm.mockRestore();

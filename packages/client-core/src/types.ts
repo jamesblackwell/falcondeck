@@ -446,6 +446,7 @@ export type FalconDeckPreferences = {
   claude_autocompact_tokens?: number;
   /** Context size at which Codex conversations compact; null or absent uses Codex's own default. */
   codex_autocompact_tokens?: number | null;
+  bot_idle_compaction_enabled?: boolean;
   bot_system_context_enabled?: boolean;
   /** Review inbox switch. Older daemons omit it, which clients treat as unsupported. */
   review_inbox_enabled?: boolean;
@@ -927,6 +928,7 @@ export type UpdatePreferencesPayload = {
   claude_autocompact_tokens?: number;
   /** Integer 100000–1000000, or null to restore Codex's own default. */
   codex_autocompact_tokens?: number | null;
+  bot_idle_compaction_enabled?: boolean;
   bot_system_context_enabled?: boolean;
   review_inbox_enabled?: boolean;
   workspace_order?: string[] | null;

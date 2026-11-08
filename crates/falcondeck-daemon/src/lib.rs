@@ -41,6 +41,7 @@ mod prompts;
 mod ship;
 mod skill_library;
 mod skills;
+mod tool_output;
 mod ssh_config;
 mod state_lock;
 pub mod stdio_helper;

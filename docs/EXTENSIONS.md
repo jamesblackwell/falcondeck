@@ -1228,3 +1228,26 @@ alert per bot per rolling hour. Answered input requests no longer escalate. Fail
 spend no paid-turn budget. Full context details stop after three accepted
 presentations; acknowledgement removes the reports.
 See [BOTS.md](BOTS.md#durable-delegated-outcomes) for recovery and delivery rules.
+
+
+### Bounded MCP output recovery
+
+The host bridge also publishes `falcondeck_read_tool_output`. This host tool
+recovers the complete result of an oversized extension call without invoking
+the extension again; owner-side paging is not required. Inline previews name
+an opaque handle. The daemon retains the full MCP result, including structured
+content and extension metadata, in a private in-memory cache (32 entries,
+24-hour handle expiry, 32 MiB total). Ranges are clamped below the inline cap;
+follow `next_offset` until `eof` and concatenate the JSON text. Unknown or
+expired handles are explicit errors. Restart discards this cache. It is not
+extension storage, conversation history, a snapshot field or a relay RPC.
+
+Retained extension output belongs to the capability validated when the
+original call was admitted. Thread-bound capabilities carry their bound
+thread; workspace-wide capabilities require no inferred thread. Formatting
+and retention happen inside that original daemon request. Delays, cancellation
+and other concurrent calls never cause an owner to be looked up again.
+Expired/revoked capabilities fail closed, and missing/not-owned handles share
+one error. Restarting a bridge with the same issued capability preserves
+access while the daemon cache lives; different capabilities and forged control
+headers cannot read it. Model arguments cannot select an owner.

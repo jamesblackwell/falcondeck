@@ -187,6 +187,8 @@ pub fn router(state: AppState) -> Router {
         .route("/api/notifications", get(notifications_list))
         .route("/api/notifications/read", post(notifications_mark_read))
         .route("/api/notifications/{id}", get(notification_read))
+        .route("/api/tool-outputs", post(retain_tool_output).layer(DefaultBodyLimit::max(32 << 20)))
+        .route("/api/tool-outputs/read", post(read_tool_output))
         .route("/api/control/search", post(control_search))
         .route("/api/control/get", post(control_get))
         .route("/api/control/execute", post(control_execute))
@@ -737,9 +739,18 @@ async fn extension_tools(
 
 async fn invoke_extension_tool(
     State(state): State<AppState>,
+    headers: HeaderMap,
     Json(request): Json<falcondeck_core::InvokeExtensionToolRequest>,
-) -> Result<Json<falcondeck_core::ExtensionToolResponse>, DaemonError> {
-    Ok(Json(state.invoke_extension_tool(request).await?))
+) -> Result<Json<serde_json::Value>, DaemonError> {
+    if headers
+        .get("x-falcondeck-extension-mcp")
+        .is_some_and(|v| v == "1")
+    {
+        return Ok(Json(state.invoke_extension_tool_for_mcp(request).await));
+    }
+    Ok(Json(serde_json::to_value(
+        state.invoke_extension_tool(request).await?,
+    )?))
 }
 
 async fn update_extension(
@@ -2580,4 +2591,75 @@ async fn export_recovery(State(state): State<AppState>) -> Result<impl IntoRespo
 async fn stage_recovery(State(state): State<AppState>, Json(archive): Json<falcondeck_core::RecoveryArchive>) -> Result<Json<serde_json::Value>, DaemonError> {
     state.stage_recovery(archive).await?;
     Ok(Json(serde_json::json!({"restart_required": true})))
+}
+
+// Local bridge helpers only; owner context is resolved by the daemon.
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct RetainOutputRequest {
+    result: serde_json::Value,
+    #[serde(rename = "tool")]
+    _tool: String,
+    #[serde(rename = "arguments")]
+    _arguments: serde_json::Value,
+}
+async fn output_owner(
+    state: &AppState,
+    headers: &HeaderMap,
+) -> Option<crate::tool_output::OutputOwner> {
+    let context =
+        control_context_from_headers(headers, falcondeck_core::control::ControlOrigin::DesktopUi)
+            .ok()?;
+    let capability = match headers.get("x-falcondeck-extension-capability") {
+        Some(v) => Some(v.to_str().ok()?),
+        None => None,
+    };
+    state.tool_output_owner(context, capability).await
+}
+fn output_denied() -> (StatusCode, Json<serde_json::Value>) {
+    (
+        StatusCode::BAD_REQUEST,
+        Json(serde_json::json!({"error":crate::tool_output::UNKNOWN_OUTPUT})),
+    )
+}
+pub(crate) async fn retain_tool_output(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(request): Json<RetainOutputRequest>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
+    if headers.contains_key("x-falcondeck-extension-capability") {
+        return Err(output_denied());
+    }
+    let owner = output_owner(&state, &headers)
+        .await
+        .ok_or_else(output_denied)?;
+    state
+        .retain_tool_output(owner, request.result)
+        .map(|handle| Json(serde_json::json!({"handle":handle})))
+        .map_err(|message| {
+            (
+                StatusCode::PAYLOAD_TOO_LARGE,
+                Json(serde_json::json!({"error":message})),
+            )
+        })
+}
+pub(crate) async fn read_tool_output(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(arguments): Json<serde_json::Value>,
+) -> Result<Json<crate::tool_output::OutputRange>, (StatusCode, Json<serde_json::Value>)> {
+    let request = serde_json::from_value::<crate::tool_output::ReadRequest>(arguments.clone())
+        .map_err(|_| output_denied())?;
+    let owner = output_owner(&state, &headers)
+        .await
+        .ok_or_else(output_denied)?;
+    state
+        .read_tool_output(&owner, request)
+        .map(Json)
+        .map_err(|message| {
+            (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({"error":message})),
+            )
+        })
 }

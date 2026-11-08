@@ -58,6 +58,7 @@ async fn scheduler_loop(app: AppState) {
             tracing::warn!(%error, "failed to dispatch due automations");
         }
         spawn_queued_runs(&app, &in_flight).await;
+        app.compact_idle_bot_homes().await;
         let next_due = app.control().next_due_at().await;
         let wait = next_due
             .and_then(|next| (next - Utc::now()).to_std().ok())

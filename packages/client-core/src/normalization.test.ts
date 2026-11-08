@@ -1362,3 +1362,12 @@ describe("daemon-owned turn reply source", () => {
     expect(normalizeThreadSummary({ attention: { reply_to_user: false } }).attention.reply_to_user).toBe(false);
   });
 });
+
+
+describe("idle bot compaction preference", () => {
+  it("defaults on and preserves the explicit off switch", () => {
+    expect(normalizePreferences({}).bot_idle_compaction_enabled).toBe(true);
+    expect(normalizePreferences({ bot_idle_compaction_enabled: false }).bot_idle_compaction_enabled).toBe(false);
+    expect(normalizePreferences({ bot_idle_compaction_enabled: true }).bot_idle_compaction_enabled).toBe(true);
+  });
+});

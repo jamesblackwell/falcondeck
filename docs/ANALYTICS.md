@@ -382,3 +382,13 @@ Scoping notes live in [usage-tracking-scope.md](usage-tracking-scope.md). Lastin
 - Grok sends per-turn usage, per-model usage and `costUsdTicks` in
   `_x.ai/session/update` `turn_completed`. Generic ACP agents may return
   `usage` on the `session/prompt` response; `usage_update` is context fill only.
+
+
+## Token-efficiency changes
+
+[Fixes 3–5](token-efficiency-implementation.md) document the idle-home policy,
+model-facing output boundaries, startup-context reduction and weekly estimates.
+They reuse the existing usage and compact-event capture. Compare home idle-gap
+rebuild cost against increased compaction usage over a representative week;
+keep native Bash and MCP output savings separate, and distinguish the review's
+10k-character scenario from the implemented approximately 10k-token cap.
